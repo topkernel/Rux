@@ -1,0 +1,1213 @@
+//! System V Shared Memory
+//!
+//! Implements shmget, shmctl, shmat, shmdt following the Linux kernel design.
+
+use crate::arch::uaccess::{access_ok, clear_user, copy_to_user, put_user};
+use crate::arch::mm::map_user_page;
+use crate::arch::mm::memory_layout::{VirtAddr as MmVirtAddr, PhysAddr as MmPhysAddr};
+use crate::mm::page::{PAGE_SIZE, PAGE_MASK, VirtAddr};
+use crate::mm::page_alloc::{free_pages, get_zeroed_page};
+use crate::mm::zone::GfpFlags;
+use crate::mm::vma::{Vma, VmaFlags, VmaType};
+use crate::sync::spinlock::Spinlock;
+use crate::syscall::errno;
+use core::sync::atomic::{AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+
+use super::util::*;
+
+// Compile-time verification: IpcPermUapi mode field offset must be 20 bytes
+const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
+
+// ============================================================================
+// UAPI Structures
+// ============================================================================
+
+/// struct shmid64_ds — returned by IPC_STAT, IPC_SET
+/// Must match asm-generic/shmbuf.h for RV64. Total: 112 bytes.
+#[repr(C)]
+pub struct ShmidDsUapi {
+    pub shm_perm: IpcPermUapi,
+    pub shm_segsz: u64,
+    pub shm_atime: i64,
+    pub shm_dtime: i64,
+    pub shm_ctime: i64,
+    pub shm_cpid: u32,
+    pub shm_lpid: u32,
+    pub shm_nattch: u64,
+    pub __unused4: u64,
+    pub __unused5: u64,
+}
+
+// ============================================================================
+// Kernel Structures
+// ============================================================================
+
+/// Physical pages backing a shared memory segment.
+struct ShmPages {
+    /// Physical page addresses (page-aligned).
+    pages: alloc::vec::Vec<usize>,
+}
+
+impl ShmPages {
+    fn new(size: usize) -> Option<Self> {
+        let page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let mut pages = alloc::vec::Vec::with_capacity(page_count);
+        for _ in 0..page_count {
+            let phys = get_zeroed_page(GfpFlags::GFP_USER);
+            if phys == 0 {
+                for p in &pages {
+                    free_pages(*p, 0);
+                }
+                return None;
+            }
+            pages.push(phys);
+        }
+        Some(Self { pages })
+    }
+
+    fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    fn get_page(&self, idx: usize) -> Option<usize> {
+        self.pages.get(idx).copied()
+    }
+}
+
+impl Drop for ShmPages {
+    fn drop(&mut self) {
+        // Drop the owner's per-page reference. Attachments hold their own
+        // reference per mapping (taken in sys_shmdt's attach loop), so a
+        // page still mapped by any process survives until its last unmap's
+        // put_page frees it (review 2R.6 — raw free_pages here used to
+        // hand buddy pages that were still mapped).
+        for p in &self.pages {
+            let page = crate::mm::pfn_to_page_mut(
+                crate::mm::phys_to_pfn(*p),
+            );
+            let freed_by_us = if page.is_null() {
+                true
+            } else {
+                // SAFETY: descriptor exists for this in-RAM page.
+                unsafe { (*page).put_page() == 0 }
+            };
+            if freed_by_us {
+                free_pages(*p, 0);
+            }
+        }
+    }
+}
+
+/// Shared memory segment (the IPC object).
+pub struct ShmSegment {
+    pub perm: KernIpcPerm,
+    /// Segment size in bytes (requested by user).
+    segsz: u64,
+    /// Physical pages backing this segment.
+    pages: Spinlock<Option<ShmPages>>,
+    /// PID of creator.
+    cpid: AtomicU32,
+    /// PID of last shmat.
+    lpid: AtomicU32,
+    /// Time of last shmat.
+    shm_atime: AtomicI64,
+    /// Time of last shmdt.
+    shm_dtime: AtomicI64,
+    /// Time of last shmctl that changed the segment.
+    shm_ctime: AtomicI64,
+    /// Number of current attaches.
+    nattch: AtomicIsize,
+    /// Whether the segment has been marked for deletion.
+    marked_destroy: AtomicI32,
+}
+
+impl IpcObject for ShmSegment {
+    fn get_perm(&self) -> &KernIpcPerm {
+        &self.perm
+    }
+    fn get_perm_mut(&mut self) -> &mut KernIpcPerm {
+        &mut self.perm
+    }
+}
+
+impl ShmSegment {
+    fn new(key: i32, size: u64, mode: u16) -> Option<Self> {
+        let size = if size == 0 { PAGE_SIZE as u64 } else { size };
+        let pages = ShmPages::new(size as usize)?;
+        Some(Self {
+            perm: KernIpcPerm::new(key, mode),
+            segsz: size,
+            pages: Spinlock::new(Some(pages)),
+            cpid: AtomicU32::new(get_current_pid()),
+            lpid: AtomicU32::new(0),
+            shm_atime: AtomicI64::new(0),
+            shm_dtime: AtomicI64::new(0),
+            shm_ctime: AtomicI64::new(ipc_current_time()),
+            nattch: AtomicIsize::new(0),
+            marked_destroy: AtomicI32::new(0),
+        })
+    }
+}
+
+// ============================================================================
+// Global shared memory registry
+// ============================================================================
+
+static SHM_IDS: IpcIds<ShmSegment> = IpcIds::new();
+
+// ============================================================================
+// Writable /proc/sys/kernel limits (shmget/shmctl consult these live)
+// ============================================================================
+
+/// SHMMAX — max segment size in bytes. Writable via
+/// /proc/sys/kernel/shmmax (LTP shmget02 lowers it to 8192 and expects
+/// shmget sizes above it to fail EINVAL); shmctl(IPC_INFO) reports the
+/// same value (shmctl03 asserts equality with the sysctl file).
+pub static SHM_CTLMAX: AtomicU64 = AtomicU64::new(1 << 30);
+/// SHMMNI — max segments system-wide. The reference default is 4096;
+/// /proc/sys/kernel/shmmni reports this value (shmget03 creates exactly
+/// this many segments and expects ENOSPC after). Pinned explicitly now
+/// that IPC_IDS_MAX is 32768 — deriving it from the table size would
+/// report 32768 and make shmget03 fill the whole table.
+pub static SHM_CTLNI: AtomicU64 = AtomicU64::new(4096);
+/// SHMALL — max total shm pages system-wide (shmget returns ENOSPC past
+/// it). 1 GiB worth of pages: generous for the LTP workloads while still
+/// bounding runaway allocation.
+pub static SHM_CTLALL: AtomicU64 = AtomicU64::new(1 << 18);
+
+/// Linux SHMMIN: the smallest segment size shmget accepts.
+pub const SHMMIN: u64 = 1;
+
+pub fn shm_ctlmax() -> u64 {
+    SHM_CTLMAX.load(Ordering::Relaxed)
+}
+pub fn shm_ctlni() -> u64 {
+    SHM_CTLNI.load(Ordering::Relaxed)
+}
+pub fn shm_ctlall() -> u64 {
+    SHM_CTLALL.load(Ordering::Relaxed)
+}
+
+/// Total pages currently held by live segments (SHM_INFO/SHMALL accounting).
+fn shm_total_pages() -> u64 {
+    let mut total: u64 = 0;
+    let slots = SHM_IDS.slots.lock();
+    for entry in slots.iter() {
+        if let Some(ref e) = entry {
+            if !e.deleted {
+                total += (e.inner.segsz + 4095) / 4096;
+            }
+        }
+    }
+    total
+}
+
+/// Live (non-deleted, slot-occupying) segment count — the SHMMNI budget,
+/// counted in the CALLER'S IPC namespace (reference: ns->ids in_use).
+fn shm_live_ids() -> u64 {
+    let ns = super::util::caller_ipc_ns_inum();
+    let slots = SHM_IDS.slots.lock();
+    slots
+        .iter()
+        .filter(|e| matches!(e, Some(x) if !x.deleted && x.inner.get_perm().ns_inum == ns))
+        .count() as u64
+}
+
+/// Whether a shm id has been removed (IPC_RMID'd) or no longer exists.
+///
+/// Used by the remap_file_pages() emulation: Linux's post-4.0 emulation
+/// (mm/mmap.c) tears the mapping down and re-establishes it with
+/// do_mmap(); when the segment was IPC_RMID'd in the window, the last
+/// attachment reference dies with the unmap and the remap fails — which
+/// is exactly what LTP shmctl05's race loop expects (`EIDRM`/`EINVAL`).
+pub fn shm_id_removed(shmid: i32) -> bool {
+    match SHM_IDS.find(shmid) {
+        None => true,
+        Some(idx) => {
+            let slots = SHM_IDS.slots.lock();
+            slots[idx].as_ref().map(|e| e.deleted).unwrap_or(true)
+        }
+    }
+}
+
+fn get_current_pid() -> u32 {
+    crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0)
+}
+
+// (Kernel-chosen shmat placement now goes through AddressSpace::
+// find_free_area — the mmap syscall's gap scan. The old private downward
+// scan from mm->mmap_base placed attachments in the VMA-less brk heap
+// region, overwriting the caller's live heap; see sys_shmat.)
+
+// ============================================================================
+// Syscall Implementations
+// ============================================================================
+
+/// sys_shmget — Allocate or find a shared memory segment (NR 194)
+pub fn sys_shmget(args: [u64; 6]) -> i64 {
+    let key = args[0] as i32;
+    let size = args[1] as u64;
+    let shmflg = args[2] as i32;
+
+    // Existing-segment path (reference ipcget_public + shm_more_checks):
+    // IPC_EXCL → EEXIST first, then the "size larger than the segment"
+    // EINVAL. A found key ignores SHMMIN/ctlmax/capacity — semget's twin
+    // fix: the old unconditional checks made shmget(key, 0, 0) on an
+    // existing segment fail EINVAL and let a full table preempt the lookup
+    // with ENOSPC.
+    let mut found_existing = false;
+    if key != 0 {
+        if let Some(existing_idx) = SHM_IDS.find_by_key(key) {
+            if shmflg & IPC_EXCL != 0 {
+                return -(errno::EEXIST as i64);
+            }
+            let slots = SHM_IDS.slots.lock();
+            if let Some(ref entry) = slots[existing_idx] {
+                if size > entry.inner.segsz {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            found_existing = true;
+        } else if shmflg & IPC_CREAT == 0 {
+            // Bare lookup on a nonexistent key: ENOENT (alloc would also
+            // answer it, but only after the limit checks below run).
+            return -(errno::ENOENT as i64);
+        }
+    }
+
+    // Remaining checks apply only when a NEW segment is created
+    // (IPC_PRIVATE, or key not found with IPC_CREAT).
+    if !found_existing {
+        // New-segment limits (reference newseg()): SHMMIN <= size <=
+        // shm_ctlmax. The sysctl values are live (LTP shmget02 lowers
+        // shmmax to 8192 and expects sizes above it to fail EINVAL).
+        if size < SHMMIN || size > shm_ctlmax() {
+            return -(errno::EINVAL as i64);
+        }
+
+        // SHM_HUGETLB (0o4000) has no backing here — a kernel without hugetlb
+        // configured rejects the flag (LTP shmget02's final cases expect
+        // EINVAL when CONFIG_HUGETLBFS is off).
+        if shmflg & 0o4000 != 0 {
+            return -(errno::EINVAL as i64);
+        }
+
+        // Capacity: SHMMNI ids / SHMALL pages system-wide (ENOSPC past either;
+        // shmget03 fills to SHMMNI and expects ENOSPC on the next shmget).
+        // The id limit counts LIVE slots (Some && !deleted), not the cached
+        // count atomic: IPC_RMID'd-but-still-attached entries hold a slot
+        // (the reference kernel counts them against SHMMNI too), while the
+        // atomic can drift from teardown paths — a false ENOSPC at 255/256
+        // broke shmget03's setup loop after any earlier shm test ran in the
+        // same boot.
+        if shm_live_ids() >= shm_ctlni() {
+            return -(errno::ENOSPC as i64);
+        }
+        let new_pages = (size + 4095) / 4096;
+        if shm_total_pages() + new_pages > shm_ctlall() {
+            return -(errno::ENOSPC as i64);
+        }
+    }
+
+    // The segment keeps the REQUESTED size (IPC_STAT's shm_segsz must
+    // equal what shmget was called with — LTP shmat01 creates a 4-byte
+    // segment; page rounding happens inside the page allocator and at
+    // shmat/mmap time).
+
+    let segment = match ShmSegment::new(key, size, (shmflg & 0o777) as u16) {
+        Some(s) => s,
+        None => return -(errno::ENOMEM as i64),
+    };
+
+    match SHM_IDS.alloc(segment, key, shmflg) {
+        Ok((id, _)) => id as i64,
+        Err(e) => e as i64,
+    }
+}
+
+/// sys_shmctl — Shared memory control operations (NR 195)
+pub fn sys_shmctl(args: [u64; 6]) -> i64 {
+    let shmid = args[0] as i32;
+    let cmd = args[1] as i32;
+    let buf = args[2];
+
+    // Index-addressed / id-ignoring commands: IPC_INFO(3), SHM_STAT(13),
+    // SHM_INFO(14) and SHM_STAT_ANY(15) treat the first argument as a raw
+    // slot index or ignore it — they must bypass the id lookup (the old
+    // unconditional gate made shmctl(0, IPC_INFO) fail EINVAL before
+    // dispatch, LTP shmctl03).
+    match cmd {
+        IPC_INFO | 13 | 14 | 15 => {}
+        _ => {
+            let _ = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+        }
+    }
+
+    match cmd {
+        IPC_RMID => {
+            // Owner check (review IPC P2): uid OR cuid path, or CAP_SYS_ADMIN.
+            let idx = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    let cred = crate::sched::current().map(|t| t.cred());
+                    let allowed = match cred {
+                        Some(ref c) => {
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
+                        }
+                        None => false,
+                    };
+                    if !allowed {
+                        return -(errno::EPERM as i64);
+                    }
+                }
+            }
+            let mut slots = SHM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx] {
+                // IPC_RMID removes the key immediately: later shmget(key)/
+                // shmat must fail with EINVAL/EIDRM even while existing
+                // attachments keep their mappings (IPC-H9).
+                entry.deleted = true;
+                if entry.inner.nattch.load(Ordering::Relaxed) > 0 {
+                    entry.inner.marked_destroy.store(1, Ordering::Relaxed);
+                    return 0;
+                }
+                // Free decision taken under the same lock sys_shmdt's attach
+                // path uses for its deleted check + nattch reservation:
+                // without this, a concurrent shmat in the gap between our
+                // check and free_slot() could attach to a segment we are
+                // about to free (review IPC-C4 residual).
+            }
+            drop(slots);
+            let _ = SHM_IDS.remove(shmid);
+            SHM_IDS.free_slot(shmid);
+            0
+        }
+        IPC_STAT => {
+            // R32 (NEW-4 twin): Linux requires S_IRUGO for IPC_STAT — was
+            // missing (metadata leak to any caller).
+            let idx2 = match SHM_IDS.find_with_perms(shmid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
+            let buf_ptr = buf as *mut ShmidDsUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
+                return -(errno::EFAULT as i64);
+            }
+            let mut ds = ShmidDsUapi {
+                shm_perm: IpcPermUapi::default(),
+                shm_segsz: 0,
+                shm_atime: 0,
+                shm_dtime: 0,
+                shm_ctime: 0,
+                shm_cpid: 0,
+                shm_lpid: 0,
+                shm_nattch: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx2] {
+                    ds.shm_perm = entry.inner.perm.to_uapi();
+                    ds.shm_segsz = entry.inner.segsz;
+                    ds.shm_atime = entry.inner.shm_atime.load(Ordering::Relaxed);
+                    ds.shm_dtime = entry.inner.shm_dtime.load(Ordering::Relaxed);
+                    ds.shm_ctime = entry.inner.shm_ctime.load(Ordering::Relaxed);
+                    ds.shm_cpid = entry.inner.cpid.load(Ordering::Relaxed);
+                    ds.shm_lpid = entry.inner.lpid.load(Ordering::Relaxed);
+                    ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
+                }
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<ShmidDsUapi>() above;
+            // ds is a stack-local copy of the shared memory segment metadata.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const ShmidDsUapi as *const u8,
+                    core::mem::size_of::<ShmidDsUapi>(),
+                );
+            }
+            0
+        }
+        IPC_SET => {
+            let buf_ptr = buf as *const u8;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
+                return -(errno::EFAULT as i64);
+            }
+            let idx2 = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+            // Owner check (review IPC P2): euid == uid || cuid, or
+            // CAP_SYS_ADMIN. No mode-bit check for IPC_SET — a non-owner
+            // gets EPERM, never EACCES (LTP shmctl02 by nobody).
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx2] {
+                    let cred = crate::sched::current().map(|t| t.cred());
+                    let allowed = match cred {
+                        Some(ref c) => {
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
+                        }
+                        None => false,
+                    };
+                    if !allowed {
+                        return -(errno::EPERM as i64);
+                    }
+                }
+            }
+            // Struct copy through the exception-table path (review IPC M).
+            let mut ds = ShmidDsUapi {
+                shm_perm: IpcPermUapi::default(),
+                shm_segsz: 0,
+                shm_atime: 0,
+                shm_dtime: 0,
+                shm_ctime: 0,
+                shm_cpid: 0,
+                shm_lpid: 0,
+                shm_nattch: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            // SAFETY: buf_ptr was access_ok-validated above; ds is a
+            // stack-local repr(C) struct of exactly that size.
+            if unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    &mut ds as *mut ShmidDsUapi as *mut u8,
+                    buf_ptr,
+                    core::mem::size_of::<ShmidDsUapi>(),
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
+            let mut slots = SHM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx2] {
+                entry.inner.perm.update_from_set(
+                    ds.shm_perm.uid,
+                    ds.shm_perm.gid,
+                    ds.shm_perm.mode,
+                );
+                entry.inner.shm_ctime.store(ipc_current_time(), Ordering::Relaxed);
+            }
+            0
+        }
+        IPC_INFO => {
+            let buf_ptr = buf as *mut u8;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 48) {
+                return -(errno::EFAULT as i64);
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for 48 bytes above;
+            // clear_user/put_user are the exception-table copy paths (SUM=0 safe).
+            unsafe { clear_user(buf_ptr, 48) };
+            // Live limits — the same values /proc/sys/kernel/{shmmax,
+            // shmmni,shmall} reports (shmctl03 asserts the equality).
+            let _ = unsafe { put_user(buf_ptr as *mut u64, shm_ctlmax()) };
+            let _ = unsafe { put_user(buf_ptr.add(8) as *mut u64, 1u64) };
+            let _ = unsafe { put_user(buf_ptr.add(16) as *mut u64, shm_ctlni()) };
+            let _ = unsafe { put_user(buf_ptr.add(24) as *mut u64, 4096u64) };
+    let _ = unsafe { put_user(buf_ptr.add(32) as *mut u64, shm_ctlall()) };
+    // Return: highest used slot index (reference shmctl_ipc_info returns
+    // ipc_get_maxidx, clamped to >= 0 when the table is empty). The old
+    // count() return could undershoot maxidx after an RMID left holes,
+    // cutting a caller's index scan short of live segments.
+    shm_max_idx().max(0) as i64
+        }
+        11 => {
+            // SHM_LOCK — requires CAP_IPC_LOCK (per Linux). Sets the
+            // SHM_LOCKED bit (02000) in shm_perm.mode — IPC_STAT must
+            // report it (LTP shmctl07 checks the bit right after locking).
+            if !crate::security::capable(crate::security::CAP_IPC_LOCK) {
+                return -(errno::EPERM as i64);
+            }
+            let idx = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+            let mut slots = SHM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx] {
+                if entry.deleted {
+                    return -(errno::EIDRM as i64);
+                }
+                entry.inner.perm.mode |= 0o2000;
+            }
+            0
+        }
+        12 => {
+            // SHM_UNLOCK — requires CAP_IPC_LOCK (per Linux). Clears the
+            // SHM_LOCKED bit.
+            if !crate::security::capable(crate::security::CAP_IPC_LOCK) {
+                return -(errno::EPERM as i64);
+            }
+            let idx = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+            let mut slots = SHM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx] {
+                if entry.deleted {
+                    return -(errno::EIDRM as i64);
+                }
+                entry.inner.perm.mode &= !0o2000;
+            }
+            0
+        }
+        13 => {
+            // SHM_STAT — like IPC_STAT but uses raw kernel index, returns shmid
+            let raw_idx = shmid as usize;
+            let buf_ptr = buf as *mut ShmidDsUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= 256 {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = ShmidDsUapi {
+                shm_perm: IpcPermUapi::default(),
+                shm_segsz: 0,
+                shm_atime: 0,
+                shm_dtime: 0,
+                shm_ctime: 0,
+                shm_cpid: 0,
+                shm_lpid: 0,
+                shm_nattch: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            let result_id: i32;
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // R32 (NEW-4 twin): SHM_STAT also requires S_IRUGO in
+                    // Linux (it is IPC_STAT addressed by raw index).
+                    if !ipc_check_permissions(entry.inner.get_perm(), 0o4) {
+                        return -(errno::EACCES as i64);
+                    }
+                    ds.shm_perm = entry.inner.perm.to_uapi();
+                    ds.shm_segsz = entry.inner.segsz;
+                    ds.shm_atime = entry.inner.shm_atime.load(Ordering::Relaxed);
+                    ds.shm_dtime = entry.inner.shm_dtime.load(Ordering::Relaxed);
+                    ds.shm_ctime = entry.inner.shm_ctime.load(Ordering::Relaxed);
+                    ds.shm_cpid = entry.inner.cpid.load(Ordering::Relaxed);
+                    ds.shm_lpid = entry.inner.lpid.load(Ordering::Relaxed);
+                    ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
+                    result_id = super::util::ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<ShmidDsUapi>() above;
+            // ds is a stack-local copy of the shared memory segment metadata.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const ShmidDsUapi as *const u8,
+                    core::mem::size_of::<ShmidDsUapi>(),
+                );
+            }
+            result_id as i64
+        }
+        14 => {
+            // SHM_INFO — returns struct shm_info (current usage)
+            // struct shm_info: 8 fields × 8 bytes = 64 bytes on RV64
+            let buf_ptr = buf as *mut u8;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 64) {
+                return -(errno::EFAULT as i64);
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for 64 bytes above;
+            // clear_user/put_user are the exception-table copy paths (SUM=0 safe).
+            unsafe { clear_user(buf_ptr, 64) };
+            // used_ids (offset 0)
+            let _ = unsafe { put_user(buf_ptr as *mut u64, SHM_IDS.count() as u64) };
+            // shm_tot (offset 8) — total shared memory pages
+            let mut total_pages: u64 = 0;
+            {
+                let slots = SHM_IDS.slots.lock();
+                for entry in slots.iter() {
+                    if let Some(ref e) = entry {
+                        if !e.deleted {
+                            let pages = (e.inner.segsz + 4095) / 4096;
+                            total_pages += pages;
+                        }
+                    }
+                }
+            }
+            let _ = unsafe { put_user(buf_ptr.add(8) as *mut u64, total_pages) };
+            // shm_rss (offset 16), shm_swp (offset 24) — no swap support, 0
+            // swap_attempts (offset 32), swap_successes (offset 40) — 0
+            // shm_tot is already written; remaining fields stay 0
+            // Return: highest used slot index (Linux ipc_get_maxidx),
+            // -1 when empty — LTP shmctl01 scans 0..=max_idx with SHM_STAT.
+            shm_max_idx() as i64
+        }
+        15 => {
+            // SHM_STAT_ANY (uapi 15) — SHM_STAT addressed by raw index
+            // WITHOUT the S_IRUGO check and WITHOUT a capability check
+            // (reference shmctl_stat: STAT_ANY only audits; it mirrors
+            // /proc/sysvipc visibility for checkpoint/restore).
+            let raw_idx = shmid as usize;
+            let buf_ptr = buf as *mut ShmidDsUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= 256 {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = ShmidDsUapi {
+                shm_perm: IpcPermUapi::default(),
+                shm_segsz: 0,
+                shm_atime: 0,
+                shm_dtime: 0,
+                shm_ctime: 0,
+                shm_cpid: 0,
+                shm_lpid: 0,
+                shm_nattch: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            let result_id: i32;
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
+                    }
+                    ds.shm_perm = entry.inner.perm.to_uapi();
+                    ds.shm_segsz = entry.inner.segsz;
+                    ds.shm_atime = entry.inner.shm_atime.load(Ordering::Relaxed);
+                    ds.shm_dtime = entry.inner.shm_dtime.load(Ordering::Relaxed);
+                    ds.shm_ctime = entry.inner.shm_ctime.load(Ordering::Relaxed);
+                    ds.shm_cpid = entry.inner.cpid.load(Ordering::Relaxed);
+                    ds.shm_lpid = entry.inner.lpid.load(Ordering::Relaxed);
+                    ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
+                    result_id = super::util::ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for
+            // size_of::<ShmidDsUapi>() above; ds is a stack-local copy of the
+            // segment metadata.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const ShmidDsUapi as *const u8,
+                    core::mem::size_of::<ShmidDsUapi>(),
+                );
+            }
+            result_id as i64
+        }
+        _ => -(errno::EINVAL as i64),
+    }
+}
+
+/// /proc/sysvipc/shm contents — one line per segment (Linux ipc/util.c
+/// formatting). LTP's GET_USED_SEGMENTS() (shmget03) counts lines.
+pub fn proc_show() -> alloc::vec::Vec<u8> {
+    use alloc::fmt::Write;
+    let mut out = alloc::string::String::new();
+    let _ = writeln!(
+        out,
+        "       key      shmid perms       size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime       rss       swap"
+    );
+    let ns = super::util::caller_ipc_ns_inum();
+    let slots = SHM_IDS.slots.lock();
+    for (i, slot) in slots.iter().enumerate() {
+        if let Some(ref entry) = slot {
+            if entry.deleted || entry.inner.get_perm().ns_inum != ns {
+                continue;
+            }
+            let seg = &entry.inner;
+            let id = ipc_build_id(i, seg.perm.seq);
+            let _ = writeln!(
+                out,
+                "{:10} {:10} {:6o} {:10} {:6} {:6} {:6} {:6} {:6} {:6} {:6} {:11} {:11} {:11} {:9} {:9}",
+                seg.perm.key,
+                id,
+                seg.perm.mode & 0o7777,
+                seg.segsz,
+                seg.cpid.load(Ordering::Relaxed),
+                seg.lpid.load(Ordering::Relaxed),
+                seg.nattch.load(Ordering::Relaxed),
+                seg.perm.uid,
+                seg.perm.gid,
+                seg.perm.cuid,
+                seg.perm.cgid,
+                seg.shm_atime.load(Ordering::Relaxed),
+                seg.shm_dtime.load(Ordering::Relaxed),
+                seg.shm_ctime.load(Ordering::Relaxed),
+                0,
+                0,
+            );
+        }
+    }
+    out.into_bytes()
+}
+
+/// Highest allocated shm slot index, or -1 when empty (ipc_get_maxidx).
+fn shm_max_idx() -> i32 {
+    let slots = SHM_IDS.slots.lock();
+    for i in (0..IPC_IDS_MAX).rev() {
+        if slots[i].is_some() {
+            return i as i32;
+        }
+    }
+    -1
+}
+
+/// sys_shmat — Attach shared memory segment (NR 196)
+pub fn sys_shmat(args: [u64; 6]) -> i64 {
+    let shmid = args[0] as i32;
+    let shmaddr = args[1] as usize;
+    let shmflg = args[2] as i32;
+
+    let shm_readonly = (shmflg & 0o10000) != 0; // SHM_RDONLY
+    let shm_exec = (shmflg & 0o100000) != 0; // SHM_EXEC
+
+    // Reference do_shmat access modes: SHM_RDONLY → S_IRUGO, otherwise
+    // S_IRUGO|S_IWUGO, plus S_IXUGO when SHM_EXEC is set. The old check
+    // ignored SHM_EXEC entirely, letting exec-requested attaches succeed
+    // without the X permission bit.
+    let desired = if shm_readonly {
+        0o4
+    } else if shm_exec {
+        0o7
+    } else {
+        0o6
+    };
+    // Reference do_shmat uses shm_obtain_object_check: a freed id is
+    // EINVAL, but an IPC_RMID-marked segment that still lives in the ids
+    // table (nattch > 0, deferred destroy) is -EIDRM, NOT EINVAL. The old
+    // find_with_perms path returned EINVAL for both (its !deleted filter
+    // made the EIDRM check unreachable) — LTP shm_test's reader/writer
+    // threads, which straddle a concurrent IPC_RMID, saw "Invalid
+    // argument" where the reference reports "Identifier removed".
+    // Lookup, permission check, deleted check and the size read run under
+    // ONE slots lock: a second lock would open the slot-reuse window (an
+    // RMID + fresh shmget could swap the entry between the two critical
+    // sections, and the seq is not revalidated downstream).
+    let segsz;
+    let idx = super::util::ipc_id_to_index(shmid);
+    {
+        let ns = super::util::caller_ipc_ns_inum();
+        let expected_seq = super::util::ipc_id_seq(shmid);
+        if idx >= super::util::IPC_IDS_MAX {
+            return -(errno::EINVAL as i64);
+        }
+        let slots = SHM_IDS.slots.lock();
+        if let Some(ref entry) = slots[idx] {
+            let perm = entry.inner.get_perm();
+            if perm.seq != expected_seq || perm.ns_inum != ns {
+                // Freed and the slot reused by another segment (or a
+                // foreign-namespace id): stale id, reference EINVAL.
+                return -(errno::EINVAL as i64);
+            }
+            if !super::util::ipc_check_permissions(perm, desired) {
+                return -(errno::EACCES as i64);
+            }
+            if entry.deleted {
+                return -(errno::EIDRM as i64);
+            }
+            segsz = entry.inner.segsz;
+        } else {
+            return -(errno::EINVAL as i64);
+        }
+    }
+
+    let size_aligned = ((segsz as usize) + PAGE_SIZE - 1) & !PAGE_MASK;
+
+    // Determine attach address
+    // SHMTRAC (corruption hunt): shmat overwrote live ELF data pages in
+    // gnome-shell (PTE-OVERWRITE-LIVE ctx=1) — log every attach's inputs
+    // and chosen address to pin the bad placement source.
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    let addr_space = match current.address_space() {
+        Some(as_) => as_,
+        None => return -(errno::ENOMEM as i64),
+    };
+    static SHMTRAC_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    if SHMTRAC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+        crate::pr_info!(
+            "SHMTRAC: pid={} shmid={} shmaddr={:#x} shmflg={:#o} size={:#x}",
+            crate::process::current_pid(),
+            shmid,
+            shmaddr,
+            shmflg,
+            size_aligned
+        );
+    }
+    let attach_addr = if shmaddr != 0 {
+        let resolved = if shmaddr & PAGE_MASK != 0 {
+            if (shmflg & 0o20000) != 0 { // SHM_RND
+                shmaddr & !PAGE_MASK
+            } else {
+                return -(errno::EINVAL as i64);
+            }
+        } else {
+            shmaddr
+        };
+        if resolved == 0 {
+            // SHM_RND rounded the request down to the NULL page: treat it
+            // as the NULL case — the kernel picks an address instead of
+            // mapping page 0 (Linux ipc/shm.c; mapping the null page was
+            // LTP issue #319, shmat03). Same placement call as the
+            // shmaddr==0 arm below.
+            match addr_space.find_free_area(size_aligned) {
+                Ok(a) => a.as_usize(),
+                Err(_) => return -(errno::ENOMEM as i64),
+            }
+        } else {
+            resolved
+        }
+    } else {
+        // Reference do_shmat: SHM_REMAP is meaningless without a caller
+        // address — EINVAL, never a kernel-picked placement.
+        if shmflg & super::SHM_REMAP != 0 {
+            return -(errno::EINVAL as i64);
+        }
+        // Linux do_shmat: the kernel-chosen address comes from
+        // get_unmapped_area — the SAME placement the mmap syscall uses
+        // (a gap scan inside the mmap region). The old private downward
+        // scan from mm->mmap_base walked the LOW half, where the only
+        // "VMA-free" hole is the brk heap: brk maps pages WITHOUT adding
+        // a VMA, so the heap is invisible to every VMA-based placement
+        // scan and shmat landed ON the caller's live heap ( gdk's
+        // 0x4000 MIT-SHM segments mapped over gnome-shell's brk heap at
+        // 0x501000+ — the [pango] FcInit abort; PTE-OVERWRITE-LIVE
+        // ctx=1, data_DESTROYED).
+        match addr_space.find_free_area(size_aligned) {
+            Ok(a) => a.as_usize(),
+            Err(_) => return -(errno::ENOMEM as i64),
+        }
+    };
+
+    let root_ppn = addr_space.root_ppn();
+
+    // Overlap handling (review IPC M: SHM_REMAP 未实现+重叠先破坏后报错 —
+    // the old code checked nothing and overwrote live mappings BEFORE any
+    // error could surface). With SHM_REMAP the overlapping portions are
+    // unmapped first (Linux do_shmat behaviour); without it, any overlap
+    // is EINVAL. Checked BEFORE a single PTE is written.
+    let shm_remap = (shmflg & super::SHM_REMAP) != 0;
+    loop {
+        let overlap: Option<(usize, usize)> = {
+            let vma_mgr = addr_space.vma_read();
+            let mut found = None;
+            for vma in vma_mgr.iter() {
+                let vs = vma.start().as_usize();
+                let ve = vma.end().as_usize();
+                if vs < attach_addr + size_aligned && ve > attach_addr {
+                    found = Some((vs, ve));
+                    break;
+                }
+            }
+            found
+        };
+        match overlap {
+            None => break,
+            Some((vs, ve)) => {
+                if !shm_remap {
+                    return -(errno::EINVAL as i64);
+                }
+                let s = vs.max(attach_addr);
+                let e = ve.min(attach_addr + size_aligned);
+                if e <= s {
+                    break;
+                }
+                if addr_space.munmap(VirtAddr::new(s), e - s).is_err() {
+                    return -(errno::ENOMEM as i64);
+                }
+                // VMA list changed — rescan from the top.
+            }
+        }
+    }
+
+    // Reserve the attachment and snapshot the page list under ONE lock
+    // hold, then map OUTSIDE the lock: the old rollback paths re-locked
+    // SHM_IDS.slots while still holding it — an instant self-deadlock on
+    // any allocation failure (review IPC P2: shmat 回滚路径潜伏自死锁).
+    let phys_pages: alloc::vec::Vec<usize>;
+    {
+        let slots = SHM_IDS.slots.lock();
+        let entry = match slots[idx] {
+            Some(ref e) if !e.deleted => e,
+            Some(_) => return -(errno::EIDRM as i64),
+            None => return -(errno::EINVAL as i64),
+        };
+        // Reserve the attachment BEFORE mapping any page, in the same lock
+        // section IPC_RMID uses for its nattch==0 free decision (review
+        // IPC-C4 UAF). Failure paths below decrement symmetrically — under
+        // a FRESH lock hold.
+        entry.inner.nattch.fetch_add(1, Ordering::Relaxed);
+        let pages_lock = entry.inner.pages.lock();
+        match *pages_lock {
+            Some(ref shm_pages) => {
+                let mut v = alloc::vec::Vec::with_capacity(shm_pages.page_count());
+                for i in 0..shm_pages.page_count() {
+                    match shm_pages.get_page(i) {
+                        Some(p) => v.push(p),
+                        None => v.push(0), // hole marker handled below
+                    }
+                }
+                phys_pages = v;
+            }
+            None => {
+                drop(pages_lock);
+                drop(slots);
+                // pages already torn down: undo the reservation under a
+                // fresh lock (the old code deadlocked right here).
+                {
+                    let slots = SHM_IDS.slots.lock();
+                    if let Some(ref entry) = slots[idx] {
+                        entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+                return -(errno::EIDRM as i64);
+            }
+        }
+    }
+
+    // Build PTE flags
+    let mut pte_flags = crate::arch::mm::PageTableEntry::V
+        | crate::arch::mm::PageTableEntry::A
+        | crate::arch::mm::PageTableEntry::D
+        | crate::arch::mm::PageTableEntry::U
+        | crate::arch::mm::PageTableEntry::R;
+    if !shm_readonly {
+        pte_flags |= crate::arch::mm::PageTableEntry::W;
+    }
+
+    // ATOMIC RESERVE (b91 corruption fix): the old shape mapped every
+    // segment page first and added the VMA LAST — a same-mm mmap landing
+    // in the (read-lock-picked, long unmapped) window made add_vma fail,
+    // and the rollback munmapped the COLLIDING mapping after this loop's
+    // map_user_page had already overwritten its demand PTEs. Reserving
+    // the VMA before any PTE work makes the range exclusively ours; the
+    // map loop below can then only ever install into our own VMA, and
+    // the hole rollback munmaps exactly our own range.
+    let mut vma_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::SHARED);
+    if !shm_readonly {
+        vma_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::SHARED);
+    }
+
+    let mut vma = Vma::new(
+        VirtAddr::new(attach_addr),
+        VirtAddr::new(attach_addr + size_aligned),
+        vma_flags,
+    );
+    vma.set_type(VmaType::SharedMemory);
+    vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
+        crate::mm::vma::VmaOrigin::SHM,
+    ));
+    vma.set_file_fd(shmid);
+    vma.set_file_size(segsz);
+
+    if addr_space.add_vma(vma).is_err() {
+        // Concurrent mapper won the range (auto-pick race or fixed-address
+        // request raced): undo the reservation and fail — never unmap the
+        // winner's range.
+        {
+            let slots = SHM_IDS.slots.lock();
+            if let Some(ref entry) = slots[idx] {
+                entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        return -(errno::ENOMEM as i64);
+    }
+
+    // Map each page — OUTSIDE the SHM_IDS lock.
+    for (i, &phys) in phys_pages.iter().enumerate() {
+        if phys == 0 {
+            // Segment hole (snapshot raced a concurrent teardown of a
+            // sparse segment): treat as fatal and roll back.
+            let rollback_size = i * PAGE_SIZE;
+            if rollback_size > 0 {
+                let _ = addr_space.munmap(VirtAddr::new(attach_addr), rollback_size);
+            }
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            return -(errno::ENOMEM as i64);
+        }
+        // SAFETY: attach_addr + i*PAGE_SIZE is page-aligned and within the
+        // newly allocated VMA range; phys is a valid page from get_zeroed_page;
+        // root_ppn is the current process's page table root.
+        unsafe {
+            // R7-A5: map+refcount under the PTE lock (same discipline as
+            // the demand-fault paths).
+            crate::arch::mm::mm_ops::MM_CTX.store(1, core::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "x86_64")]
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+        #[cfg(not(feature = "x86_64"))]
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+            map_user_page(
+                root_ppn,
+                MmVirtAddr::new((attach_addr + i * PAGE_SIZE) as u64),
+                MmPhysAddr::new(phys as u64),
+                pte_flags,
+            );
+            // The new PTE references the segment page: take a
+            // per-attachment reference so shmdt/exit's put_page cannot free
+            // a page the segment still owns (review 2R.6). Segments free
+            // their pages only when every attachment is gone.
+            let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(phys));
+            if !page.is_null() {
+                (*page).get_page();
+            }
+            drop(_pte_guard);
+        }
+    }
+
+    // Flush TLB after modifying page table entries for the mapping.
+    crate::arch::mm::flush_tlb_all();
+
+    attach_addr as i64
+}
+
+/// sys_shmdt — Detach shared memory segment (NR 197)
+pub fn sys_shmdt(args: [u64; 6]) -> i64 {
+    let shmaddr = args[0] as usize;
+
+    if shmaddr == 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    let addr_space = match current.address_space() {
+        Some(as_) => as_,
+        None => return -(errno::EINVAL as i64),
+    };
+
+    // Find the VMA at shmaddr and get shm_id
+    let shm_id;
+    let vma_size;
+    {
+        let vma_mgr = addr_space.vma_read();
+        let vma = match vma_mgr.find(VirtAddr::new(shmaddr)) {
+            Some(v) => v,
+            None => return -(errno::EINVAL as i64),
+        };
+        if vma.vma_type() != VmaType::SharedMemory {
+            return -(errno::EINVAL as i64);
+        }
+        shm_id = vma.file_fd();
+        vma_size = vma.end().as_usize() - vma.start().as_usize();
+    }
+
+    // Decrement nattch and check for deferred destruction BEFORE munmap,
+    // so the count is accurate when munmap removes the VMA.  This closes
+    // the window where nattch was temporarily too high (F12-25) and the
+    // TOCTOU race between VMA unlock and IPC lock (F12-24).
+    let mut should_free = false;
+    // RMID'd segments are marked deleted immediately; the last detach must
+    // still find them to decrement nattch and perform the deferred free.
+    let idx = match SHM_IDS.find_including_deleted(shm_id) {
+        Some(i) => i,
+        None => {
+            // Segment already gone, just unmap
+            let _ = addr_space.munmap(VirtAddr::new(shmaddr), vma_size);
+            return 0;
+        }
+    };
+    {
+        let mut slots = SHM_IDS.slots.lock();
+        if let Some(ref mut entry) = slots[idx] {
+            let old_nattch = entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+            entry.inner.lpid.store(crate::process::current_pid(), Ordering::Relaxed);
+            entry.inner.shm_dtime.store(ipc_current_time(), Ordering::Relaxed);
+
+            // Free segment if marked for destruction and no more attaches.
+            // Mark deleted while still holding lock — prevents new attaches.
+            if old_nattch == 1 && entry.inner.marked_destroy.load(Ordering::Relaxed) != 0 {
+                entry.deleted = true;
+                SHM_IDS.count.fetch_sub(1, Ordering::Relaxed);
+                should_free = true;
+            }
+        }
+    }
+
+    // munmap handles both VMA removal and page table unmapping
+    let _ = addr_space.munmap(VirtAddr::new(shmaddr), vma_size);
+
+    // Free slot after munmap (slot lock already released)
+    if should_free {
+        SHM_IDS.free_slot(shm_id);
+    }
+
+    // Flush TLB after unmapping page table entries.
+    crate::arch::mm::flush_tlb_all();
+
+    0
+}
+
+/// Detach a shared memory segment (called from exit_mmap).
+/// Decrements nattch and frees the segment if marked_destroy && nattch == 0.
+///
+/// The nattch check and deletion marking are done under the same lock hold
+/// to prevent a race where another thread attaches between dropping the lock
+/// and calling remove/free_slot.
+pub fn shm_detach_vma(shmid: i32) {
+    // find_including_deleted: the segment may already be RMID-marked; the
+    // last detach must still find it to run the deferred free.
+    let idx = match SHM_IDS.find_including_deleted(shmid) {
+        Some(i) => i,
+        None => return,
+    };
+    let mut should_free = false;
+    {
+        let mut slots = SHM_IDS.slots.lock();
+        if let Some(ref mut entry) = slots[idx] {
+            let old_nattch = entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+            if old_nattch == 1 && entry.inner.marked_destroy.load(Ordering::Relaxed) != 0 {
+                // Mark deleted while still holding lock — prevents new attaches.
+                entry.deleted = true;
+                SHM_IDS.count.fetch_sub(1, Ordering::Relaxed);
+                should_free = true;
+            }
+        }
+    }
+    // Slot lock released. Safe to free the slot now — no new attaches possible.
+    if should_free {
+        SHM_IDS.free_slot(shmid);
+    }
+}
+
+/// Attach a shared memory segment (called from fork).
+/// Increments nattch for the inherited attachment.
+pub fn shm_attach_vma(shmid: i32) {
+    // find_including_deleted: a fork of a process holding an attachment to
+    // an RMID-marked segment must still bump nattch (the child's later
+    // detach will decrement it).
+    let idx = match SHM_IDS.find_including_deleted(shmid) {
+        Some(i) => i,
+        None => return,
+    };
+    let slots = SHM_IDS.slots.lock();
+    if let Some(ref entry) = slots[idx] {
+        entry.inner.nattch.fetch_add(1, Ordering::Relaxed);
+    }
+}

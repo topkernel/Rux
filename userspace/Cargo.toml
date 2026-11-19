@@ -1,0 +1,45 @@
+# Rux User Programs Workspace
+#
+# This workspace contains all user space program configurations
+#
+# Build command:
+#   cargo build --release --target riscv64gc-unknown-none-elf
+#
+# Output location:
+#   target/riscv64gc-unknown-none-elf/release/<program_name>
+
+[workspace]
+resolver = "2"
+members = [
+    # GUI library
+    # GUI applications -> /app/
+    # User space test cases -> /test/
+    # (tests/smoke_test removed with the test-infra move; smoke probes
+    # now build via scripts/test + userspace/probes/probes.tar.gz)
+]
+
+# Common user program configuration
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Fei Wang"]
+
+# Optimization config: reduce binary size
+[workspace.metadata.cargo-compilation]
+opt-level = "z"     # Optimize for size
+lto = true          # Link-time optimization
+codegen-units = 1   # Single compilation unit, better optimization
+
+# Disable standard library (no_std)
+[workspace.metadata.no-std]
+std = false
+
+# Release profile configuration
+[profile.release]
+panic = "abort"
+opt-level = 0
+lto = false
+
+# Debug profile configuration (for no_std programs)
+[profile.dev]
+panic = "abort"

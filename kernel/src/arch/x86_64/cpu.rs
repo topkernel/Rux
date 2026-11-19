@@ -1,0 +1,597 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! x86_64 CPU primitives: port I/O, control registers, MSRs,
+//! interrupt-state management.
+
+/// Read a byte from an I/O port
+#[inline]
+pub unsafe fn inb(port: u16) -> u8 {
+    let value: u8;
+    unsafe {
+        core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+    value
+}
+
+/// Write a byte to an I/O port
+#[inline]
+pub unsafe fn outb(port: u16, value: u8) {
+    unsafe {
+        core::arch::asm!("out dx, al", in("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Read a word (16-bit) from an I/O port
+#[inline]
+pub unsafe fn inw(port: u16) -> u16 {
+    let value: u16;
+    unsafe {
+        core::arch::asm!("in ax, dx", out("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+    value
+}
+
+/// Write a word (16-bit) to an I/O port
+#[inline]
+pub unsafe fn outw(port: u16, value: u16) {
+    unsafe {
+        core::arch::asm!("out dx, ax", in("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Read a dword (32-bit) from an I/O port
+#[inline]
+pub unsafe fn inl(port: u16) -> u32 {
+    let value: u32;
+    unsafe {
+        core::arch::asm!("in eax, dx", out("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+    value
+}
+
+/// Write a dword (32-bit) to an I/O port
+#[inline]
+pub unsafe fn outl(port: u16, value: u32) {
+    unsafe {
+        core::arch::asm!("out dx, eax", in("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// I/O wait (dummy port write to serialize slow legacy devices)
+#[inline]
+pub fn io_wait() {
+    // SAFETY: writing to port 0x80 (POST diagnostic port) is harmless.
+    unsafe { outb(0x80, 0) };
+}
+
+// ---------------------------------------------------------------------------
+// Control registers / MSRs
+// ---------------------------------------------------------------------------
+
+/// Read CR2 (page-fault address)
+#[inline]
+pub fn read_cr2() -> u64 {
+    let value: u64;
+    // SAFETY: CR2 is a read-only control register; reading is always safe.
+    unsafe { core::arch::asm!("mov {}, cr2", out(reg) value, options(nomem, nostack)) };
+    value
+}
+
+/// Read CR0.
+#[inline]
+pub fn read_cr0() -> u64 {
+    let value: u64;
+    // SAFETY: reading CR0 is always safe.
+    unsafe { core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack)) };
+    value
+}
+
+/// Write CR0.
+///
+/// # Safety
+/// The value must keep PE/PG/PAE as required by the current mode.
+pub unsafe fn write_cr0(value: u64) {
+    // SAFETY: caller keeps the mode-defining bits intact.
+    unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) };
+}
+
+/// CR0.TS (task switched) — set on every context switch-in; the first
+/// FP instruction of the incoming task takes #NM, which restores that
+/// task's image (lazy FPU). See context_switch / handle_device_not_available.
+pub const CR0_TS: u64 = 1 << 3;
+
+/// Is CR0.TS set (live FPU registers are NOT the current task's)?
+#[inline]
+pub fn ts_set() -> bool {
+    read_cr0() & CR0_TS != 0
+}
+
+/// Clear CR0.TS (claim the live FPU for the current task).
+#[inline]
+pub unsafe fn clts() {
+    // SAFETY: single-bit clear, mode bits preserved.
+    unsafe { core::arch::asm!("clts", options(nomem, nostack, preserves_flags)) };
+}
+
+/// Set CR0.TS (drop the live FPU; next FP instruction traps #NM).
+#[inline]
+pub unsafe fn stts() {
+    // SAFETY: single-bit set, mode bits preserved.
+    unsafe { write_cr0(read_cr0() | CR0_TS) };
+}
+
+/// Set CR0.WP (write protect, bit 16) on the CURRENT cpu, idempotent.
+///
+/// F1b root-cause fix (wildwrite-hunt): without WP, ring-0 stores IGNORE
+/// page-table RW bits, so every "read-only" supervisor mapping is
+/// decorative — supervisor uaccess writes pierce COW/share protections
+/// (read() into a post-fork COW page writes the SHARED page: parent/child
+/// divergence, cross-mapper bleed, zero kernel-side trace). Linux sets WP
+/// early in boot for exactly this discipline; we now do the same,
+/// permanently, on BSP and every AP. Safe here because the kernel image,
+/// linear map, and device windows are all mapped P|RW — WP only ever
+/// bites user-side COW/RO pages (the trap path resolves those: see
+/// mm/exception.rs kernel_data_fill CowPending) and deliberately-guarded
+/// kernel statics (rux:wildwatch (retired dfx=wildwatch)).
+pub fn enable_write_protect() {
+    // SAFETY: single-bit RMW; PE/PG/PAE and the rest of CR0 are preserved.
+    unsafe {
+        let cr0 = read_cr0();
+        write_cr0(cr0 | 0x1_0000);
+    }
+}
+
+pub fn read_cr3() -> u64 {
+    let value: u64;
+    // SAFETY: reading CR3 is always safe.
+    unsafe { core::arch::asm!("mov {}, cr3", out(reg) value, options(nomem, nostack)) };
+    value
+}
+
+/// Write CR3 (page-table root)
+///
+/// # Safety
+/// Caller must ensure value is a valid PML4 physical address.
+#[inline]
+pub unsafe fn write_cr3(value: u64) {
+    unsafe { core::arch::asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags)) };
+}
+
+/// Read an MSR
+///
+/// # Safety
+/// Caller must ensure the MSR index is valid for this CPU.
+#[inline]
+pub unsafe fn rdmsr(msr: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    unsafe {
+        core::arch::asm!("rdmsr", out("eax") lo, out("edx") hi, in("ecx") msr, options(nomem, nostack));
+    }
+    (lo as u64) | ((hi as u64) << 32)
+}
+
+/// Write an MSR
+///
+/// # Safety
+/// Caller must ensure the MSR index and value are valid for this CPU.
+#[inline]
+pub unsafe fn wrmsr(msr: u32, value: u64) {
+    let lo = value as u32;
+    let hi = (value >> 32) as u32;
+    unsafe {
+        core::arch::asm!("wrmsr", in("eax") lo, in("edx") hi, in("ecx") msr, options(nomem, nostack));
+    }
+}
+
+/// Invalidate a TLB entry
+///
+/// With CR4.PCIDE=1 this invalidates only the entry cached under the
+/// CURRENT PCID (callers flushing a non-current address space use
+/// `invpcid` with an explicit PCID — see mm/asid.rs).
+///
+/// # Safety
+/// Caller must ensure the address is canonical.
+#[inline]
+pub unsafe fn invlpg(addr: u64) {
+    unsafe { core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
+}
+
+/// Read CR4.
+#[inline]
+pub fn read_cr4() -> u64 {
+    let value: u64;
+    // SAFETY: reading CR4 is always safe.
+    unsafe { core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack)) };
+    value
+}
+
+/// Write CR4.
+///
+/// # Safety
+/// Caller must ensure the written value is architecturally valid
+/// (reserved bits 0; PCIDE only with paging on and CR3[11:0]=0).
+#[inline]
+pub unsafe fn write_cr4(value: u64) {
+    unsafe { core::arch::asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
+}
+
+/// INVPCID descriptor types.
+pub const INVPCID_ADDR: u64 = 0; // one linear address under one PCID
+pub const INVPCID_SINGLE_CTX: u64 = 1; // all entries under one PCID
+pub const INVPCID_ALL_INCL_GLOBAL: u64 = 2; // every PCID, global included
+pub const INVPCID_ALL_NON_GLOBAL: u64 = 3; // every PCID, global excluded
+
+/// Invalidate by PCID descriptor (`invpcid`). The 16-byte descriptor is
+/// [ PCID:u64 | linear-address:u64 ]; its content is ignored for types
+/// 2/3 but must be readable memory.
+///
+/// # Safety
+/// Caller must ensure INVPCID is present (CPUID.7.0:EBX[10]) and the type
+/// is <= 3; for types 0/1 with a nonzero PCID, CR4.PCIDE must be 1.
+#[inline]
+pub unsafe fn invpcid(kind: u64, pcid: u64, addr: u64) {
+    let desc: [u64; 2] = [pcid & 0xfff, addr];
+    // SAFETY: see fn doc; the descriptor is stack memory whose ADDRESS is
+    // an input (the instruction reads it, it does not write through it).
+    unsafe {
+        core::arch::asm!(
+            "invpcid {kind}, [{desc}]",
+            kind = in(reg) kind,
+            desc = in(reg) &desc as *const [u64; 2] as usize,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interface parity with riscv64::cpu
+// ---------------------------------------------------------------------------
+
+/// Get current core ID
+#[inline]
+pub fn get_core_id() -> u64 {
+    super::cpu_id()
+}
+
+/// Read ANOTHER CPU's current-task pointer slot (leakorigin v3).
+#[inline]
+pub fn get_thread_id_of(cpu: usize) -> u64 {
+    super::smp::current_task_ptr_of(cpu)
+}
+
+/// Get the current-task pointer slot value.
+///
+/// On riscv64 the equivalent reads `tp`; x86_64 keeps the current task
+/// in a per-CPU slot maintained by trap entry / __switch_to.
+#[inline]
+pub fn get_thread_id() -> u64 {
+    crate::arch::smp::current_task_ptr()
+}
+
+/// Set the current-task pointer slot.
+#[inline]
+pub fn set_thread_id(tid: u64) {
+    crate::arch::smp::set_current_task_ptr(tid);
+}
+
+/// Get counter frequency — the rate of [`read_counter`] in Hz, i.e. the
+/// raw TSC frequency (0 until the APIC driver calibrated it against the
+/// PIT; informational only — timekeeping uses [`read_time`]).
+#[inline]
+pub fn get_counter_freq() -> u64 {
+    crate::drivers::intc::apic::TSC_FREQ.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Read the TSC cycle counter
+#[inline]
+pub fn read_counter() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    // SAFETY: RDTSC is a pure counter read.
+    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)) };
+    (lo as u64) | ((hi as u64) << 32)
+}
+
+/// CR4.SMAP (bit 21): Supervisor-Mode Access Prevention. When set, the
+/// kernel can only touch user pages through the uaccess primitives
+/// (which bracket the copy with STAC/CLAC); any stray direct
+/// dereference of a user pointer faults into the exception table — the
+/// same default-deny the riscv64 port gets from leaving sstatus.SUM
+/// clear. Enables usercopy semantics like the reference kernel's;
+/// without it the low identity-mapped PML4[0] window let
+/// copy_from_user(VA 1) silently read physical page 1 instead of
+/// returning EFAULT (prlimit64 new_rlim test, 2026-10-31 review).
+#[allow(dead_code)] // pending the kernel-wide user-pointer audit (2026-10-31)
+/// Set by enable_smap(); read by the page-fault path to detect SMAP
+/// violations (kernel-mode access to a U=0 user page outside a STAC
+/// window must not be demand-filled — it must hit the exception table).
+pub static SMAP_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Whether CR4.SMAP is active on this boot.
+pub fn smap_enabled() -> bool {
+    SMAP_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether FSGSBASE (rdfsgsbase/wrfsbase/wrgsbase) is available and
+/// armed — set by enable_fsgsbase() once per boot (the feature is
+/// CPU-global), read on every context switch. With it armed the FS
+/// switch avoids the intercepted `wrmsr(MSR_FS_BASE)` (the GS shadow
+/// pair needs only native swapgs+wrgsbase), saving most of the MSR
+/// bracket's cost per switch (cctx: msr bracket 89 ns avg under load,
+/// gap-sched lane 2026-11-02).
+pub static FSGSBASE_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// True once `enable_fsgsbase` found CPUID.7.0:EBX[16].
+#[inline(always)]
+pub fn fsgsbase_enabled() -> bool {
+    FSGSBASE_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Arm FSGSBASE for the context-switch path (WRFSBASE/WRGSBASE take
+/// effect CPU-globally once CR4.FSGSBASE is set; the switch path gates
+/// on fsgsbase_enabled() so the instruction never executes without it).
+pub fn enable_fsgsbase() {
+    // CPUID leaf 7 subleaf 0, EBX bit 16 = FSGSBASE.
+    let (_, ebx, _, _) = cpuid(7, 0);
+    if ebx & (1 << 16) == 0 {
+        crate::println!("arch: FSGSBASE not available, switches keep wrmsr FS/GS");
+        return;
+    }
+    // SAFETY: CR4 update with the FSGSBASE bit only; CPUID gated and
+    // idempotent.
+    unsafe {
+        let cr4 = read_cr4();
+        write_cr4(cr4 | (1 << 16));
+    }
+    FSGSBASE_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
+    crate::println!("arch: CR4.FSGSBASE enabled");
+}
+
+/// CR4.SMEP (bit 20): Supervisor-Mode Execution Prevention. When set, a
+/// ring-0 instruction fetch of a U=1 page faults IMMEDIATELY at the
+/// fetch — the reference kernel arms it whenever CPUID offers it.
+/// R12 (oh-launch round 12, the rip=0x1 family): without SMEP the kernel
+/// happily EXECUTES user-mapped (and zero) pages, which is the
+/// amplifier half of the last scribbler face: a kernel rip that lands
+/// on a small-int garbage target (a return address or fn pointer
+/// overwritten with 1/0/3 — PICK_LIVE, a bool, an enum tag) does not
+/// fault at the fetch if the page happens to be mapped; it executes
+/// whatever bytes sit there (mostly zeros = `add [rax],al`-class ops)
+/// and the machine only faults later on a DATA access at a small
+/// address — the captured shape (rip=0x1 rsp=0x0 badaddr=0x3 and
+/// badaddr=-0x30, data faults while "executing" at 1). With SMEP on,
+/// the same jump faults AT THE TARGET: a clean #PF with badaddr=rip
+/// naming the hijack address, no zero-page execution cascade, no
+/// follow-on dumper re-entry. The kernel-EXEC-fault routing in
+/// mm/exception.rs already assumes these semantics ("SMEP blocks U=1
+/// fetches at CPL0 even when mapped" — kernel EXEC faults route to the
+/// exception table / KernelPanic instead of demand-filling); arming the
+/// bit is what makes that comment true.
+pub fn enable_smep() {
+    // CPUID leaf 7 subleaf 0, EBX bit 7 = SMEP.
+    let (_, ebx, _, _) = cpuid(7, 0);
+    if ebx & (1 << 7) == 0 {
+        crate::println!("arch: SMEP not available");
+        return;
+    }
+    // SAFETY: CR4 update with the SMEP bit only; CPUID gated and
+    // idempotent. Set on the BSP before SMP bring-up so every AP
+    // inherits CR4 via the boot trampoline.
+    unsafe {
+        let cr4 = read_cr4();
+        write_cr4(cr4 | (1 << 20));
+    }
+    crate::println!("arch: CR4.SMEP enabled (kernel EXEC of user pages faults at the fetch)");
+}
+
+/// WRFSBASE — set FS.base without an MSR write.
+///
+/// # Safety
+/// CR4.FSGSBASE must be set (see fsgsbase_enabled); value must be
+/// canonical.
+#[inline]
+pub unsafe fn wrfsbase(base: u64) {
+    unsafe { core::arch::asm!("wrfsbase {}", in(reg) base, options(nostack, preserves_flags)) };
+}
+
+/// WRGSBASE — set the CURRENT GS.base (NOT the IA32_KERNEL_GS_BASE
+/// swapgs shadow; the switch path pairs it with swapgs to reach the
+/// shadow).
+///
+/// # Safety
+/// CR4.FSGSBASE must be set; value must be canonical.
+#[inline]
+pub unsafe fn wrgsbase(base: u64) {
+    unsafe { core::arch::asm!("wrgsbase {}", in(reg) base, options(nostack, preserves_flags)) };
+}
+
+/// Boot-log assertion of the SMAP armed state, from LIVE reads (sec-r1,
+/// G1 follow-up).
+///
+/// Every boot must state the CPUID capability and the actual CR4 bit
+/// side by side, so a silently-off SMAP (the original G1 defect class)
+/// can never pass unnoticed again.
+///
+/// ARMING IS DELIBERATELY NOT ATTEMPTED (2026-11-02 finding, sec-r1):
+/// calling enable_smap() at any pre-IDT boot stage (arch_init and
+/// fpu_init were both tested) triple-faults the machine on the FIRST
+/// kernel data access after the CR4 store — on KVM and on TCG. The
+/// kernel dereferences at least one U/S-mapped page in early boot (prime
+/// suspect: a kernel stack or per-CPU structure mapped with the user
+/// bit). Because the old CPUID bug read EDX[20] (never set anywhere),
+/// the arm path had never executed before this round; exercising it is
+/// what exposed the latent fault. Root-causing it is its own lane
+/// (see run/sec-r1-notes.md); until then this report honestly states
+/// that user-mode access prevention is ABSENT.
+pub fn smap_report() {
+    let (_, ebx, _, _) = cpuid(7, 0);
+    let present = ebx & (1 << 20) != 0;
+    let cr4 = read_cr4();
+    let armed = cr4 & (1u64 << 21) != 0;
+    match (present, armed) {
+        (true, true) => crate::println!(
+            "arch: CR4.SMAP armed (CPUID.7.0:EBX[20]=1, live CR4={:#x}, bit 21 = 1)",
+            cr4
+        ),
+        (true, false) => crate::println!(
+            "arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4={:#x}); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)",
+            cr4
+        ),
+        (false, true) => crate::println!(
+            "arch: CR4.SMAP set by firmware though CPUID.7.0:EBX[20]=0 (live CR4={:#x})",
+            cr4
+        ),
+        (false, false) => crate::println!(
+            "arch: CR4.SMAP not armed (CPUID.7.0:EBX[20]=0, live CR4={:#x}); user-mode access prevention is ABSENT on this boot",
+            cr4
+        ),
+    }
+}
+
+/// Query CPUID. Returns (eax, ebx, ecx, edx) for (leaf, subleaf).
+///
+/// NOTE: `subleaf` is only meaningful for leaves that use ECX as a
+/// sub-leaf selector (4, 7, 0xb, 0xd, ...); pass 0 otherwise. rbx is
+/// reserved by LLVM, so save/restore it around the instruction.
+#[inline]
+pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let (a, b, c, d): (u32, u32, u32, u32);
+    // SAFETY: CPUID is a pure query. rbx is reserved by LLVM, so stash
+    // EBX in a scratch register around the push/pop (same discipline as
+    // cpu::isb, extended to recover the EBX result).
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {tmp:e}, ebx",
+            "pop rbx",
+            in("eax") leaf,
+            in("ecx") subleaf,
+            tmp = out(reg) b,
+            lateout("eax") a,
+            lateout("ecx") c,
+            lateout("edx") d,
+            options(nostack)
+        );
+    }
+    (a, b, c, d)
+}
+
+/// Enable interrupts (STI)
+#[inline]
+#[track_caller]
+pub fn enable_irq() {
+    // syscost probe: pre-sti edge (reads the flag BEFORE the asm so the
+    // close/heal decision sees the pre-sti state); no-op when off.
+    crate::dfx::syscost::irq_note_on();
+    // SAFETY: setting IF is safe at any point the caller wants IRQs on.
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+}
+
+/// Disable interrupts (CLI)
+#[inline]
+#[track_caller]
+pub fn disable_irq() {
+    // syscost probe: pre-cli edge; Location::caller() propagates
+    // through the #[track_caller] chain (save_and_disable_irq /
+    // irq_save / lock_irq*) to the critical-section owner.
+    crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
+    // SAFETY: clearing IF is always safe.
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+}
+
+/// Wait for interrupt (HLT)
+#[inline]
+pub fn wfi() {
+    // SAFETY: HLT halts until the next interrupt; interrupts must be
+    // enabled or the CPU hangs forever — the idle loop guarantees that.
+    unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+}
+
+/// Read time since boot in the nominal clock domain
+/// (`config::TIMER_CLOCK_FREQ_HZ`, 10 MHz) — the same contract as the
+/// riscv64 `rdtime` twin.
+///
+/// X86-TIMEBASE: the raw TSC does NOT tick at the nominal frequency (its
+/// rate is hypervisor/model specific — ~2.5 GHz under QEMU TCG), so this
+/// must go through the timer driver instead of dividing
+/// [`read_counter`] by the nominal frequency. Priority: HPET main
+/// counter (QEMU virtual clock — exact), calibrated TSC (no HPET),
+/// jiffies-derived PIT clock (0 until the first tick). Callers that need
+/// the RAW cycle counter (TSC-frequency
+/// calibration, busy delays) use [`read_counter`] + [`get_counter_freq`].
+#[inline]
+pub fn read_time() -> u64 {
+    crate::drivers::timer::read_time()
+}
+
+/// Instruction serialization barrier
+#[inline]
+pub fn isb() {
+    // SAFETY: CPUID serializes the pipeline. rbx is reserved by LLVM, so
+    // save/restore it around the instruction explicitly.
+    unsafe {
+        core::arch::asm!(
+            "xor eax, eax",
+            "push rbx",
+            "cpuid",
+            "pop rbx",
+            out("eax") _, out("ecx") _, out("edx") _,
+            options(nostack)
+        );
+    }
+}
+
+/// Data synchronization barrier
+#[inline]
+pub fn dsb() {
+    // SAFETY: MFENCE orders all memory operations; no side effects beyond ordering.
+    unsafe { core::arch::asm!("mfence", options(nomem, nostack, preserves_flags)) };
+}
+
+/// Data memory barrier
+#[inline]
+pub fn dmb() {
+    // SAFETY: LFENCE orders loads; no side effects beyond ordering.
+    unsafe { core::arch::asm!("lfence", options(nomem, nostack, preserves_flags)) };
+}
+
+/// Get interrupt mask state (true = interrupts enabled)
+#[inline]
+pub fn get_interrupts_state() -> bool {
+    let flags: u64;
+    // SAFETY: PUSHF/POPQ reads RFLAGS without modifying state.
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "pop {}",
+            out(reg) flags,
+            options(nostack)
+        );
+    }
+    (flags & (1 << 9)) != 0
+}
+
+/// Save interrupt state and disable interrupts
+#[inline]
+#[track_caller]
+pub fn save_and_disable_irq() -> bool {
+    let enabled = get_interrupts_state();
+    if enabled {
+        disable_irq();
+    }
+    enabled
+}
+
+/// Restore interrupt state
+#[inline]
+#[track_caller]
+pub fn restore_irq(state: bool) {
+    if state {
+        enable_irq();
+    }
+}

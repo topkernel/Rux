@@ -1,0 +1,227 @@
+# LLVM source: llvm-project 7196f931f212fc7c406066b2628a0ff4ea0ee344 (llvmorg-23.1.0-rc3)
+# Upstream directory: compiler-rt/lib/profile
+# Apply from that directory with: patch -p1 < llvm.diff
+
+--- a/InstrProfiling.c
++++ b/InstrProfiling.c
+@@ -9,9 +9,6 @@
+ // Note: This is linked into the Darwin kernel, and must remain compatible
+ // with freestanding compilation. See `darwin_add_builtin_libraries`.
+ 
+-#include <limits.h>
+-#include <string.h>
+-
+ #include "InstrProfiling.h"
+ #include "InstrProfilingInternal.h"
+ 
+--- a/InstrProfilingMerge.c
++++ b/InstrProfilingMerge.c
+@@ -16,7 +16,10 @@
+ #include "profile/InstrProfData.inc"
+ 
+ COMPILER_RT_VISIBILITY
+-void (*VPMergeHook)(ValueProfData *, __llvm_profile_data *);
++/* InstrProfilingFile.c normally installs this hook, but minicov omits that
++ * libc-dependent file. */
++void (*VPMergeHook)(ValueProfData *, __llvm_profile_data *) =
++    &lprofMergeValueProfData;
+ 
+ COMPILER_RT_VISIBILITY
+ uint64_t lprofGetLoadModuleSignature(void) {
+--- a/InstrProfilingPlatformLinux.c
++++ b/InstrProfilingPlatformLinux.c
+@@ -23,7 +23,8 @@
+ #if defined(__linux__) || defined(__FreeBSD__) || defined(__Fuchsia__) ||      \
+     (defined(__sun__) && defined(__svr4__)) || defined(__NetBSD__) ||          \
+     defined(_AIX) || defined(__wasm__) || defined(__HAIKU__) ||                \
+-    (defined(COMPILER_RT_PROFILE_BAREMETAL) && !defined(__NVPTX__))
++    (defined(COMPILER_RT_PROFILE_BAREMETAL) && !defined(__NVPTX__) &&          \
++     !defined(_WIN32))
+ 
+ #if !defined(_AIX) && !defined(__wasm__) &&                                    \
+     !defined(COMPILER_RT_PROFILE_BAREMETAL)
+@@ -249,6 +250,7 @@
+  * extensions NT_GNU_BUILD_ID and __ehdr_start.
+  */
+ COMPILER_RT_VISIBILITY int __llvm_write_binary_ids(ProfDataWriter *Writer) {
++  (void)Writer;
+   return 0;
+ }
+ #endif
+--- a/InstrProfilingPort.h
++++ b/InstrProfilingPort.h
+@@ -12,13 +12,16 @@
+ #ifndef PROFILE_INSTRPROFILING_PORT_H_
+ #define PROFILE_INSTRPROFILING_PORT_H_
+ 
++#include <stdalign.h>
++#include <stddef.h>
++#include <stdint.h>
++
+ #ifdef _MSC_VER
+ #define COMPILER_RT_ALIGNAS(x) __declspec(align(x))
+ #define COMPILER_RT_VISIBILITY
+ /* FIXME: selectany does not have the same semantics as weak. */
+ #define COMPILER_RT_WEAK __declspec(selectany)
+-/* Need to include <windows.h> */
+-#define COMPILER_RT_ALLOCA _alloca
++#define COMPILER_RT_ALLOCA __builtin_alloca
+ /* Need to include <stdio.h> and <io.h> */
+ #define COMPILER_RT_FTRUNCATE(f,l) _chsize(_fileno(f),l)
+ #define COMPILER_RT_ALWAYS_INLINE __forceinline
+@@ -61,32 +64,11 @@
+ #endif
+ 
+ #if COMPILER_RT_HAS_ATOMICS == 1
+-#ifdef _WIN32
+-#include <windows.h>
+-#if defined(_MSC_VER) && _MSC_VER < 1900
+-#define snprintf _snprintf
+-#endif
+-#if defined(_WIN64)
+-#define COMPILER_RT_BOOL_CMPXCHG(Ptr, OldV, NewV)                              \
+-  (InterlockedCompareExchange64((LONGLONG volatile *)Ptr, (LONGLONG)NewV,      \
+-                                (LONGLONG)OldV) == (LONGLONG)OldV)
+-#define COMPILER_RT_PTR_FETCH_ADD(DomType, PtrVar, PtrIncr)                    \
+-  (DomType *)InterlockedExchangeAdd64((LONGLONG volatile *)&PtrVar,            \
+-                                      (LONGLONG)sizeof(DomType) * PtrIncr)
+-#else /* !defined(_WIN64) */
+-#define COMPILER_RT_BOOL_CMPXCHG(Ptr, OldV, NewV)                              \
+-  (InterlockedCompareExchange((LONG volatile *)Ptr, (LONG)NewV, (LONG)OldV) == \
+-   (LONG)OldV)
+-#define COMPILER_RT_PTR_FETCH_ADD(DomType, PtrVar, PtrIncr)                    \
+-  (DomType *)InterlockedExchangeAdd((LONG volatile *)&PtrVar,                  \
+-                                    (LONG)sizeof(DomType) * PtrIncr)
+-#endif
+-#else /* !defined(_WIN32) */
+ #define COMPILER_RT_BOOL_CMPXCHG(Ptr, OldV, NewV)                              \
+   __sync_bool_compare_and_swap(Ptr, OldV, NewV)
+ #define COMPILER_RT_PTR_FETCH_ADD(DomType, PtrVar, PtrIncr)                    \
+-  (DomType *)__sync_fetch_and_add((long *)&PtrVar, sizeof(DomType) * PtrIncr)
+-#endif
++  (DomType *)__sync_fetch_and_add((intptr_t *)&PtrVar,                         \
++                                  sizeof(DomType) * PtrIncr)
+ #else /* COMPILER_RT_HAS_ATOMICS != 1 */
+ #include "InstrProfilingUtil.h"
+ #define COMPILER_RT_BOOL_CMPXCHG(Ptr, OldV, NewV)                              \
+@@ -109,18 +91,10 @@
+   (((ch) == DIR_SEPARATOR) || ((ch) == DIR_SEPARATOR_2))
+ #endif /* DIR_SEPARATOR_2 */
+ 
+-#if defined(_WIN32)
+-#include <windows.h>
+ static inline size_t getpagesize(void) {
+-  SYSTEM_INFO S;
+-  GetNativeSystemInfo(&S);
+-  return S.dwPageSize;
++  /* Minicov does not support continuous mode. */
++  return 1;
+ }
+-#else /* defined(_WIN32) */
+-#ifndef COMPILER_RT_PROFILE_BAREMETAL
+-#include <unistd.h>
+-#endif
+-#endif /* defined(_WIN32) */
+ 
+ #ifdef COMPILER_RT_PROFILE_BAREMETAL
+ // Baremetal doesn't support logging
+@@ -146,6 +120,13 @@
+ #define O_BINARY 0
+ #endif
+ 
+-#include <stdint.h>
++#define memcmp __builtin_memcmp
++#define memset __builtin_memset
++#define memcpy __builtin_memcpy
++#define memmove __builtin_memmove
++#define assert(...) ((void)0)
++
++void *minicov_alloc_zeroed(size_t Size, size_t Alignment);
++void minicov_dealloc(void *Ptr, size_t Size, size_t Alignment);
+ 
+ #endif /* PROFILE_INSTRPROFILING_PORT_H_ */
+--- a/InstrProfilingValue.c
++++ b/InstrProfilingValue.c
+@@ -6,15 +6,10 @@
+ |*
+ \*===----------------------------------------------------------------------===*/
+ 
+-#include <assert.h>
+ #include <limits.h>
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+ 
+ #include "InstrProfiling.h"
+ #include "InstrProfilingInternal.h"
+-#include "InstrProfilingUtil.h"
+ 
+ #define INSTR_PROF_VALUE_PROF_DATA
+ #define INSTR_PROF_COMMON_API_IMPL
+@@ -40,6 +35,7 @@
+     INSTR_PROF_DEFAULT_NUM_VAL_PER_SITE;
+ 
+ COMPILER_RT_VISIBILITY void lprofSetupValueProfiler(void) {
++#ifndef COMPILER_RT_PROFILE_BAREMETAL
+   const char *Str = 0;
+   Str = getenv("LLVM_VP_MAX_NUM_VALS_PER_SITE");
+   if (Str && Str[0]) {
+@@ -48,6 +44,7 @@
+   }
+   if (VPMaxNumValsPerSite > INSTR_PROF_MAX_NUM_VAL_PER_SITE)
+     VPMaxNumValsPerSite = INSTR_PROF_MAX_NUM_VAL_PER_SITE;
++#endif
+ }
+ 
+ COMPILER_RT_VISIBILITY void lprofSetMaxValsPerSite(uint32_t MaxVals) {
+@@ -109,12 +106,14 @@
+ 
+   // If NumVSites = 0, calloc is allowed to return a non-null pointer.
+   assert(NumVSites > 0 && "NumVSites can't be zero");
++  const size_t Size = NumVSites * sizeof(ValueProfNode *);
++  const size_t Alignment = alignof(ValueProfNode *);
+   ValueProfNode **Mem =
+-      (ValueProfNode **)calloc(NumVSites, sizeof(ValueProfNode *));
++      (ValueProfNode **)minicov_alloc_zeroed(Size, Alignment);
+   if (!Mem)
+     return 0;
+   if (!COMPILER_RT_BOOL_CMPXCHG(&Data->Values, 0, Mem)) {
+-    free(Mem);
++    minicov_dealloc(Mem, Size, Alignment);
+     return 0;
+   }
+   return 1;
+@@ -124,7 +123,8 @@
+   ValueProfNode *Node;
+ 
+   if (!hasStaticCounters)
+-    return (ValueProfNode *)calloc(1, sizeof(ValueProfNode));
++    return (ValueProfNode *)minicov_alloc_zeroed(sizeof(ValueProfNode),
++                                                  alignof(ValueProfNode));
+ 
+   /* Early check to avoid value wrapping around.  */
+   if (CurrentVNode + 1 > EndVNode) {
+@@ -233,7 +233,7 @@
+     Success = COMPILER_RT_BOOL_CMPXCHG(&(PrevVNode->Next), 0, CurVNode);
+ 
+   if (!Success && !hasStaticCounters) {
+-    free(CurVNode);
++    minicov_dealloc(CurVNode, sizeof(ValueProfNode), alignof(ValueProfNode));
+     return;
+   }
+ }
+--- a/InstrProfilingWriter.c
++++ b/InstrProfilingWriter.c
+@@ -9,12 +9,6 @@
+ // Note: This is linked into the Darwin kernel, and must remain compatible
+ // with freestanding compilation. See `darwin_add_builtin_libraries`.
+ 
+-#ifdef _MSC_VER
+-/* For _alloca */
+-#include <malloc.h>
+-#endif
+-#include <string.h>
+-
+ #include "InstrProfiling.h"
+ #include "InstrProfilingInternal.h"
+ #include "InstrProfilingPort.h"

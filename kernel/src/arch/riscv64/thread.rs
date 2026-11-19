@@ -1,0 +1,525 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+//! RISC-V thread structure (thread_struct)
+//!
+//! Stores architecture-specific thread state:
+//! - Callee-saved registers (ra, sp, s0-s11)
+//! - sstatus.SUM bit
+//! - FPU state
+//! - Vector extension state
+//! - Debug registers
+//! - Other architecture-specific state
+
+use core::arch::asm;
+use super::pt_regs::{PtRegs, SR_FS_DIRTY, SR_FS_CLEAN, SR_FS_INITIAL, SR_FS_OFF, SR_FS};
+
+/// FPU state size (32 64-bit registers)
+const FPU_STATE_SIZE: usize = 32;
+
+/// sstatus.SUM bit mask
+pub const SR_SUM: u64 = 1 << 18;
+
+/// Thread structure - stores architecture-specific thread state
+///
+/// Layout compatible for context switching
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct ThreadStruct {
+    // ==================== Context switch fields ====================
+
+    /// Callee-saved register - Return address (x1)
+    pub ra: u64,
+
+    /// Callee-saved register - Stack pointer (x2)
+    pub sp: u64,
+
+    /// Callee-saved registers - s0-s11 (x8, x9, x18-x27)
+    pub s: [u64; 12],
+
+    /// sstatus.SUM bit (user memory access enable)
+    ///
+    /// Saved/restored during context switch, allows kernel to access user memory
+    pub sum: u64,
+
+    // ==================== FPU/Vector state ====================
+
+    /// FPU state (f0-f31)
+    ///
+    /// RISC-V F extension: 32 floating-point registers
+    /// Each 64-bit (double precision)
+    pub fpu: [u64; FPU_STATE_SIZE],
+
+    /// FPU control status register (fcsr)
+    pub fcsr: u32,
+
+    /// Saved FPU status (sstatus.FS field)
+    ///
+    /// Saved before context switch, restored when task runs again
+    /// Values: SR_FS_OFF, SR_FS_INITIAL, SR_FS_CLEAN, SR_FS_DIRTY
+    pub fs: u32,
+
+    /// Vector extension state (V extension, RVV 1.0)
+    ///
+    /// Mirrors the FPU discipline (see arch/riscv64/vext.rs): VS stays
+    /// Off until the task's first vector instruction traps and is
+    /// lazily enabled; the state is saved on switch-out when the
+    /// hardware marks it Dirty and reloaded on switch-in.
+    pub vstate_valid: bool,
+
+    /// Saved sstatus.VS field (Off/Initial/Clean/Dirty)
+    pub vs: u32,
+
+    /// Saved vector CSRs: [vl, vtype, vstart, vcsr]
+    pub vcsrs: [u64; 4],
+
+    /// Saved vector registers v0..v31, VLEN/8 bytes each (VLEN=128)
+    pub vregs: [u8; super::vext::VREGS_BYTES],
+
+    // ==================== Other state ====================
+
+    /// Thread local storage (TLS) pointer
+    ///
+    /// Set by set_tid_address syscall
+    pub tp_value: u64,
+
+    /// Current exception frame pointer (for signal handling)
+    pub exception_sp: u64,
+
+    /// Debug flag
+    pub debug_flag: bool,
+}
+
+impl ThreadStruct {
+    /// Create new thread structure
+    pub const fn new() -> Self {
+        Self {
+            // Context switch fields
+            ra: 0,
+            sp: 0,
+            s: [0; 12],
+            sum: 0,
+
+            // FPU/Vector state
+            fpu: [0; FPU_STATE_SIZE],
+            fcsr: 0,
+            // INITIAL, not OFF: fresh tasks restore a zeroed FPU state on
+            // their first switch-in (review ARCH-H1) — OFF would leave
+            // their first FP instruction trapping as illegal.
+            fs: SR_FS_INITIAL as u32,
+            vstate_valid: false,
+            vs: super::vext::SR_VS_OFF as u32,
+            vcsrs: [0; 4],
+            vregs: [0; super::vext::VREGS_BYTES],
+
+            // Other state
+            tp_value: 0,
+            exception_sp: 0,
+            debug_flag: false,
+        }
+    }
+
+    /// Save FPU state
+    ///
+    /// Only saves if FPU state is dirty (has been modified since last save).
+    /// After saving, sets FS to CLEAN in sstatus CSR.
+    ///
+    /// # Safety
+    /// Must be called in correct context
+    #[inline]
+    pub unsafe fn save_fpu(&mut self) {
+        // SAFETY: reading sstatus CSR is safe; FPU access is valid because this is called
+        // from a context where FPU may be active (FS == DIRTY check follows).
+        let sstatus: u64;
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+
+        // Only save if FS == DIRTY (FPU has been used)
+        if (sstatus & SR_FS) == SR_FS_DIRTY {
+            self.__fstate_save();
+            // Set FS to CLEAN after saving
+            let new_sstatus = (sstatus & !SR_FS) | SR_FS_CLEAN;
+            asm!("csrw sstatus, {}", in(reg) new_sstatus);
+        }
+    }
+
+    /// Restore FPU state
+    ///
+    /// Only restores if task has FPU state (fs field != OFF).
+    /// After restoring, sets FS to CLEAN in sstatus CSR.
+    ///
+    /// # Safety
+    /// Must be called in correct context
+    #[inline]
+    pub unsafe fn restore_fpu(&mut self) {
+        // SAFETY: restoring FPU registers only when fs != OFF ensures the saved state
+        // was previously valid; writing sstatus.FS is safe to re-enable FPU access.
+        // Only restore if task has FPU state
+        if self.fs != SR_FS_OFF as u32 {
+            self.__fstate_restore();
+            // Set FS to CLEAN after restoring
+            let sstatus: u64;
+            asm!("csrr {}, sstatus", out(reg) sstatus);
+            let new_sstatus = (sstatus & !SR_FS) | SR_FS_CLEAN;
+            asm!("csrw sstatus, {}", in(reg) new_sstatus);
+        }
+    }
+
+    /// Save FPU state before context switch
+    ///
+    /// Saves current FPU state and records FS status in thread struct.
+    /// After this, FPU is disabled for this task.
+    ///
+    /// # Safety
+    /// Must be called in correct context
+    #[inline]
+    pub unsafe fn fpu_save_for_switch(&mut self) {
+        // SAFETY: must be called before context switch; reads/writes sstatus CSR and saves
+        // FPU registers to self.fpu. The pointer `self.fpu.as_mut_ptr()` is valid for
+        // 32 u64 values (256 bytes) as guaranteed by the array type.
+        // Read current sstatus
+        let sstatus: u64;
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+
+        let fs = sstatus & SR_FS;
+
+        // Save FS status for later restore
+        self.fs = fs as u32;
+
+        // Only save if FS == DIRTY (FPU has been used)
+        if fs == SR_FS_DIRTY {
+            self.__fstate_save();
+        }
+
+        // Disable FPU for this task
+        let new_sstatus = sstatus & !SR_FS;
+        asm!("csrw sstatus, {}", in(reg) new_sstatus);
+    }
+
+    /// Get saved FS status
+    #[inline]
+    pub fn get_fs(&self) -> u32 {
+        self.fs
+    }
+
+    // ==================== Vector extension (RVV) ====================
+    //
+    // Same discipline as the FPU methods above; see arch/riscv64/vext.rs
+    // for the rationale (sstatus.VS lazy enable + Dirty-gated saves).
+
+    /// Save the live vector state before a context switch.
+    ///
+    /// Records the live sstatus.VS field, saves the registers/CSRs only
+    /// when the hardware marks them Dirty, then drops VS to Off for the
+    /// outgoing task (its first vector use after switch-in will trap
+    /// and lazily re-enable — or its saved state is restored instead).
+    ///
+    /// # Safety
+    /// Must run on the task's own hart inside the (IRQs-disabled)
+    /// switch path, exactly like [`Self::fpu_save_for_switch`].
+    #[inline]
+    pub unsafe fn vstate_save_for_switch(&mut self) {
+        let sstatus: u64;
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+
+        let vs = sstatus & super::vext::SR_VS;
+        self.vs = vs as u32;
+
+        if vs == super::vext::SR_VS_DIRTY {
+            super::vext::vstate_save(
+                self.vcsrs.as_mut_ptr(),
+                self.vregs.as_mut_ptr(),
+            );
+        }
+
+        // Disable the vector unit for the outgoing task
+        let new_sstatus = sstatus & !super::vext::SR_VS;
+        asm!("csrw sstatus, {}", in(reg) new_sstatus);
+    }
+
+    /// Restore the task's vector state on switch-in.
+    ///
+    /// Tasks that never used vectors (vstate_valid == false) keep
+    /// VS=Off; their first vector instruction goes through the lazy
+    /// enable in the illegal-instruction handler. Tasks with a saved
+    /// image are reloaded and recorded Clean (live == buffer).
+    ///
+    /// # Safety
+    /// Must run on the incoming task's hart right after the register
+    /// switch, exactly like [`Self::restore_fpu`].
+    #[inline]
+    pub unsafe fn restore_vstate(&mut self) {
+        if self.vstate_valid {
+            super::vext::vstate_restore(
+                self.vcsrs.as_ptr(),
+                self.vregs.as_ptr(),
+            );
+            // Live state now equals the buffer: record Clean.
+            let sstatus: u64;
+            asm!("csrr {}, sstatus", out(reg) sstatus);
+            let new_sstatus =
+                (sstatus & !super::vext::SR_VS) | super::vext::SR_VS_CLEAN;
+            asm!("csrw sstatus, {}", in(reg) new_sstatus);
+        }
+    }
+
+    /// Save the live vector state WITHOUT disabling the unit (fork
+    /// path): the parent keeps running with its registers loaded; only
+    /// the Dirty flag drops to Clean. Mirrors [`Self::save_fpu`].
+    ///
+    /// # Safety
+    /// Must be called on the current task's hart.
+    #[inline]
+    pub unsafe fn save_vstate(&mut self) {
+        let sstatus: u64;
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+
+        if (sstatus & super::vext::SR_VS) == super::vext::SR_VS_DIRTY {
+            super::vext::vstate_save(
+                self.vcsrs.as_mut_ptr(),
+                self.vregs.as_mut_ptr(),
+            );
+            // vstate_save leaves live == buffer: record Clean.
+            let new_sstatus =
+                (sstatus & !super::vext::SR_VS) | super::vext::SR_VS_CLEAN;
+            asm!("csrw sstatus, {}", in(reg) new_sstatus);
+        }
+    }
+
+    /// First vector use on this task (illegal-instruction trap with
+    /// VS=Off): initialize the hart's vector state to a defined
+    /// initial image, mark the buffer valid, and report success so the
+    /// trap handler enables VS in the saved sstatus and retries.
+    ///
+    /// # Safety
+    /// Must be called from the current task's trap context.
+    #[inline]
+    pub unsafe fn vstate_first_use(&mut self) -> bool {
+        if super::vext::vstate_first_use_init() {
+            self.vstate_valid = true;
+            self.vs = super::vext::SR_VS_INITIAL as u32;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark the saved vector state Clean (post-fork inheritance).
+    #[inline]
+    pub fn mark_vstate_clean(&mut self) {
+        self.vs = super::vext::SR_VS_CLEAN as u32;
+    }
+
+    /// Internal FPU save implementation
+    ///
+    /// Saves f0-f31 and fcsr to thread structure.
+    /// Temporarily enables FPU during save.
+    #[inline]
+    // SAFETY: caller must have verified FPU is in dirty state; self.fpu is a [u64; 32]
+    // array so the pointer is valid for 32 double-precision register stores (256 bytes).
+    // FPU is temporarily enabled via csrs sstatus before the save.
+    unsafe fn __fstate_save(&mut self) {
+        // Enable FPU temporarily
+        asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack));
+
+        // Save floating-point registers f0-f31
+        asm!(
+            "fsd f0, 0*8({0})",
+            "fsd f1, 1*8({0})",
+            "fsd f2, 2*8({0})",
+            "fsd f3, 3*8({0})",
+            "fsd f4, 4*8({0})",
+            "fsd f5, 5*8({0})",
+            "fsd f6, 6*8({0})",
+            "fsd f7, 7*8({0})",
+            "fsd f8, 8*8({0})",
+            "fsd f9, 9*8({0})",
+            "fsd f10, 10*8({0})",
+            "fsd f11, 11*8({0})",
+            "fsd f12, 12*8({0})",
+            "fsd f13, 13*8({0})",
+            "fsd f14, 14*8({0})",
+            "fsd f15, 15*8({0})",
+            "fsd f16, 16*8({0})",
+            "fsd f17, 17*8({0})",
+            "fsd f18, 18*8({0})",
+            "fsd f19, 19*8({0})",
+            "fsd f20, 20*8({0})",
+            "fsd f21, 21*8({0})",
+            "fsd f22, 22*8({0})",
+            "fsd f23, 23*8({0})",
+            "fsd f24, 24*8({0})",
+            "fsd f25, 25*8({0})",
+            "fsd f26, 26*8({0})",
+            "fsd f27, 27*8({0})",
+            "fsd f28, 28*8({0})",
+            "fsd f29, 29*8({0})",
+            "fsd f30, 30*8({0})",
+            "fsd f31, 31*8({0})",
+            in(reg) self.fpu.as_mut_ptr(),
+            options(nostack)
+        );
+
+        // Save fcsr
+        asm!("frcsr {0}", out(reg) self.fcsr);
+
+        // Disable FPU
+        asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack));
+    }
+
+    /// Internal FPU restore implementation
+    ///
+    /// Restores f0-f31 and fcsr from thread structure.
+    /// Temporarily enables FPU during restore.
+    #[inline]
+    // SAFETY: caller must have verified fs != OFF so saved state is valid; self.fpu is a
+    // [u64; 32] array so the pointer is valid for 32 register loads (256 bytes).
+    // FPU is temporarily enabled via csrs sstatus before the restore.
+    unsafe fn __fstate_restore(&mut self) {
+        // Enable FPU temporarily
+        asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack));
+
+        // Restore fcsr first
+        asm!("fscsr {0}", in(reg) self.fcsr);
+
+        // Restore floating-point registers f0-f31
+        asm!(
+            "fld f0, 0*8({0})",
+            "fld f1, 1*8({0})",
+            "fld f2, 2*8({0})",
+            "fld f3, 3*8({0})",
+            "fld f4, 4*8({0})",
+            "fld f5, 5*8({0})",
+            "fld f6, 6*8({0})",
+            "fld f7, 7*8({0})",
+            "fld f8, 8*8({0})",
+            "fld f9, 9*8({0})",
+            "fld f10, 10*8({0})",
+            "fld f11, 11*8({0})",
+            "fld f12, 12*8({0})",
+            "fld f13, 13*8({0})",
+            "fld f14, 14*8({0})",
+            "fld f15, 15*8({0})",
+            "fld f16, 16*8({0})",
+            "fld f17, 17*8({0})",
+            "fld f18, 18*8({0})",
+            "fld f19, 19*8({0})",
+            "fld f20, 20*8({0})",
+            "fld f21, 21*8({0})",
+            "fld f22, 22*8({0})",
+            "fld f23, 23*8({0})",
+            "fld f24, 24*8({0})",
+            "fld f25, 25*8({0})",
+            "fld f26, 26*8({0})",
+            "fld f27, 27*8({0})",
+            "fld f28, 28*8({0})",
+            "fld f29, 29*8({0})",
+            "fld f30, 30*8({0})",
+            "fld f31, 31*8({0})",
+            in(reg) self.fpu.as_ptr(),
+            options(nostack)
+        );
+
+        // Disable FPU
+        asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack));
+    }
+
+    /// Get TLS pointer
+    #[inline]
+    pub fn tp(&self) -> u64 {
+        self.tp_value
+    }
+
+    /// Set TLS pointer
+    #[inline]
+    pub fn set_tp(&mut self, tp: u64) {
+        self.tp_value = tp;
+    }
+
+    /// Mark the saved FPU image as a clean, valid state (fork/exec
+    /// parity with the x86_64 backend).
+    #[inline]
+    pub fn mark_fpu_clean(&mut self) {
+        self.fs = SR_FS_CLEAN as u32;
+    }
+}
+
+impl Default for ThreadStruct {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Initialize FPU
+///
+/// Called when process first uses FPU
+#[inline]
+// SAFETY: must be called once per process before FPU use; writes sstatus.FS and zeros
+// all FP registers and fcsr. No precondition on current FP state needed.
+pub unsafe fn fpu_init() {
+    // Set sstatus.FS = Initial (01)
+    let mut sstatus: u64;
+    asm!("csrr {}, sstatus", out(reg) sstatus);
+    sstatus = (sstatus & !(0x3 << 13)) | (0x1 << 13);
+    asm!("csrw sstatus, {}", in(reg) sstatus);
+
+    // Zero all floating-point registers
+    asm!(
+        "fcvt.d.l f0, zero",
+        "fcvt.d.l f1, zero",
+        "fcvt.d.l f2, zero",
+        "fcvt.d.l f3, zero",
+        "fcvt.d.l f4, zero",
+        "fcvt.d.l f5, zero",
+        "fcvt.d.l f6, zero",
+        "fcvt.d.l f7, zero",
+        "fcvt.d.l f8, zero",
+        "fcvt.d.l f9, zero",
+        "fcvt.d.l f10, zero",
+        "fcvt.d.l f11, zero",
+        "fcvt.d.l f12, zero",
+        "fcvt.d.l f13, zero",
+        "fcvt.d.l f14, zero",
+        "fcvt.d.l f15, zero",
+        "fcvt.d.l f16, zero",
+        "fcvt.d.l f17, zero",
+        "fcvt.d.l f18, zero",
+        "fcvt.d.l f19, zero",
+        "fcvt.d.l f20, zero",
+        "fcvt.d.l f21, zero",
+        "fcvt.d.l f22, zero",
+        "fcvt.d.l f23, zero",
+        "fcvt.d.l f24, zero",
+        "fcvt.d.l f25, zero",
+        "fcvt.d.l f26, zero",
+        "fcvt.d.l f27, zero",
+        "fcvt.d.l f28, zero",
+        "fcvt.d.l f29, zero",
+        "fcvt.d.l f30, zero",
+        "fcvt.d.l f31, zero",
+        options(nostack)
+    );
+
+    // Zero fcsr
+    asm!("fscsr zero");
+}
+
+// ==================== Offset constants (for assembly use) ====================
+
+/// ThreadStruct field offsets
+#[allow(dead_code)]
+pub mod thread_offsets {
+    use super::*;
+
+    pub const THREAD_RA: usize = core::mem::offset_of!(ThreadStruct, ra);
+    pub const THREAD_SP: usize = core::mem::offset_of!(ThreadStruct, sp);
+    pub const THREAD_S0: usize = core::mem::offset_of!(ThreadStruct, s);
+    pub const THREAD_SUM: usize = core::mem::offset_of!(ThreadStruct, sum);
+    pub const THREAD_FPU: usize = core::mem::offset_of!(ThreadStruct, fpu);
+    pub const THREAD_FCSR: usize = core::mem::offset_of!(ThreadStruct, fcsr);
+    pub const THREAD_TP_VALUE: usize = core::mem::offset_of!(ThreadStruct, tp_value);
+}
+
+/// Export offset constants
+pub use thread_offsets::*;

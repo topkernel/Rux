@@ -1,0 +1,1224 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+//! RISC-V exception vector table
+//!
+//! ## Design Points
+//!
+//! 1. Use sscratch swap to detect trap source
+//!    - Kernel mode: sscratch = 0, tp = current task
+//!    - User mode: sscratch = current task, tp = user TLS
+//! 2. Support compatible detection during early boot phase
+//! 3. PtRegs structure layout is consistent
+//!
+//! ## sscratch/tp Protocol
+//!
+//! | State       | sscratch      | tp          |
+//! |-----------|---------------|-------------|
+//! | Kernel running | 0             | current     |
+//! | User running | current       | user TLS    |
+//!
+//! When trap occurs:
+//!   csrrw tp, sscratch, tp
+//!   - from kernel: tp becomes 0 (original sscratch value)
+//!   - from user: tp becomes current task (original sscratch value)
+//!
+//! ## PtRegs Layout (288 bytes)
+//!
+//! ```text
+//! Offset  Field       Description
+//! ------  -----       -----------
+//! 0x00    epc         Program counter (sepc)
+//! 0x08    ra          x1
+//! 0x10    sp          x2
+//! 0x18    gp          x3
+//! 0x20    tp          x4
+//! 0x28    t0          x5
+//! 0x30    t1          x6
+//! 0x38    t2          x7
+//! 0x40    s0/fp       x8
+//! 0x48    s1          x9
+//! 0x50    a0          x10
+//! ...     ...         ...
+//! 0x100   status      sstatus CSR
+//! 0x108   badaddr     stval CSR
+//! 0x110   cause       scause CSR
+//! 0x118   orig_a0     Original a0
+//! ```
+
+.section .text.trap
+.align 2
+.global trap_entry
+.extern trap_handler
+.extern asm_need_resched
+.extern asm_schedule
+
+// ============================================================================
+// Per-CPU interrupt stack helper
+// ============================================================================
+
+// GET_PER_CPU_INTR_STACK - Get current CPU's interrupt stack top
+//
+// Usage: GET_PER_CPU_INTR_STACK dest_reg
+//
+// Clobbers: t0, t1, t2
+//
+// Implementation:
+//   1. Check tp value to determine CPU ID source
+//   2. If tp < TASK_STRUCT_THRESHOLD: tp = hart_id (early boot)
+//   3. Otherwise: read cpu_id from task_struct.ti_cpu at offset 0x18
+//   4. Calculate stack address: base + cpu_id * INTR_STACK_SIZE + INTR_STACK_SIZE
+.macro GET_PER_CPU_INTR_STACK dest
+    // Check if tp is a small value (early boot phase)
+    li t0, TASK_STRUCT_THRESHOLD
+    bltu tp, t0, .Learly_boot_stack\@
+
+    // Validate tp is a plausible kernel virtual address (SV39).
+    // Valid kernel pointers have bits [63:47] all set (upper half).
+    // A corrupted tp (e.g., 0x8000000000000000) would cause a
+    // recursive page fault when dereferenced below.
+    srli t1, tp, 47
+    li t0, 0x1FFFF
+    bne t1, t0, .Learly_boot_stack\@
+
+    // Normal operation: tp points to task_struct
+    // Get CPU ID from task_struct.ti_cpu (offset 0x18)
+    // IMPORTANT: Must use lw (4-byte load), NOT ld!
+    // ti_cpu is AtomicI32 (4 bytes) at offset 0x18, followed by
+    // cpus_allowed (AtomicU32) at offset 0x1c. Using ld would load both
+    // fields, corrupting the CPU ID with the affinity mask when it is
+    // nonzero, producing a wrong interrupt stack address.
+    li t0, TASK_STRUCT_THRESHOLD
+    lw t1, {task_ti_cpu}(tp)
+    // Defensive: clamp invalid ti_cpu (negative or >= MAX_CPUS) to CPU 0.
+    // ti_cpu is i32 sign-extended by lw; -1 becomes 0xFFFFFFFF which
+    // causes index-out-of-bounds if used unclamped.
+    // {max_cpus} is injected from config (R86): the literal `4` here
+    // survived the MAX_CPUS 4->8 bump, so every hart 4..7 took CPU 0's
+    // interrupt stack (concurrent hardirqs on one 16 KiB stack) — the
+    // smp8 corruption producer. Derived constants cannot drift.
+    li   t0, {max_cpus}
+    bltu t1, t0, .Lcalc_stack\@
+    li   t1, 0            // Invalid → fall back to CPU 0
+    j .Lcalc_stack\@
+
+.Learly_boot_stack\@:
+    // Early boot / corrupted tp: tp = hart_id directly
+    // When tp is corrupted (e.g., 0x8000000000000000), clamp to 0
+    // as a safe fallback — uses CPU 0's interrupt stack.
+    li t0, {max_cpus}
+    bgeu tp, t0, .Lfallback_stack\@
+    mv t1, tp
+    j .Lcalc_stack\@
+
+.Lfallback_stack\@:
+    // Corrupted tp — fallback to CPU 0's stack
+    li t1, 0
+
+.Lcalc_stack\@:
+    // Calculate per-CPU interrupt stack top
+    // stack_top = __per_cpu_intr_stacks_base + cpu_id * INTR_STACK_SIZE + INTR_STACK_SIZE
+    la t0, __per_cpu_intr_stacks_base
+    ld t0, 0(t0)           // t0 = base address of stacks array
+
+    // t1 = cpu_id, calculate offset: cpu_id * INTR_STACK_SIZE
+    li t2, INTR_STACK_SIZE
+    mul t1, t1, t2          // t1 = cpu_id * INTR_STACK_SIZE
+
+    add t0, t0, t1          // t0 = base + offset
+    add \dest, t0, t2       // dest = stack_top = base + offset + size
+.endm
+
+// PtRegs offset constants (consistent with pt_regs.rs)
+.set PT_EPC,      0x00
+.set PT_RA,       0x08
+.set PT_SP,       0x10
+.set PT_GP,       0x18
+.set PT_TP,       0x20
+.set PT_T0,       0x28
+.set PT_T1,       0x30
+.set PT_T2,       0x38
+.set PT_S0,       0x40
+.set PT_S1,       0x48
+.set PT_A0,       0x50
+.set PT_A1,       0x58
+.set PT_A2,       0x60
+.set PT_A3,       0x68
+.set PT_A4,       0x70
+.set PT_A5,       0x78
+.set PT_A6,       0x80
+.set PT_A7,       0x88
+.set PT_S2,       0x90
+.set PT_S3,       0x98
+.set PT_S4,       0xa0
+.set PT_S5,       0xa8
+.set PT_S6,       0xb0
+.set PT_S7,       0xb8
+.set PT_S8,       0xc0
+.set PT_S9,       0xc8
+.set PT_S10,      0xd0
+.set PT_S11,      0xd8
+.set PT_T3,       0xe0
+.set PT_T4,       0xe8
+.set PT_T5,       0xf0
+.set PT_T6,       0xf8
+.set PT_STATUS,   0x100
+.set PT_BADADDR,  0x108
+.set PT_CAUSE,    0x110
+.set PT_ORIG_A0,  0x118
+.set PT_SIZE,     0x120
+
+// sstatus bits
+.set SR_SPP,      0x100
+
+
+// Task structure offsets: injected as global_asm! template constants from
+// task.rs task_offsets (offset_of!) by the global_asm! call in trap.rs.
+//
+// R57 (the ti_pick_state scribbler): these used to be hand-maintained
+// .set constants, and TASK_TI_A0 drifted by 8 when ti_pick_state (u32)
+// was inserted at offset 0x40 (ti_a0/a1/a2 moved to 0x48/0x50/0x58).
+// Every .Lfrom_user trap's scratch store sd-t0-to-TASK_TI_A0 then wrote
+// a live USER REGISTER over ti_pick_state plus its pad on EVERY syscall,
+// page fault, and user IRQ. The pick-state machine (publish PICKED,
+// affirm LIVE, revoke) then read user register values as its arbitration
+// word: the asm affirm gate aborted legitimate switches ("anything else
+// = garbage" branch to .Lswitch_abort), the harvester's revoke CAS won
+// on live tasks whenever the scribbled value happened to be 0, and the
+// whole GNOME wedge/SIGILL family traces back here. Derived constants
+// cannot drift.
+
+// Per-CPU interrupt stack constants
+.set INTR_STACK_SIZE,    16384   // 16KB per CPU
+.set TASK_STRUCT_THRESHOLD, 0x1000  // tp < this means early boot (tp = hart_id)
+
+// ============================================================================
+// trap_entry - Exception/interrupt entry point
+// ============================================================================
+//
+// sscratch detection:
+//   csrrw tp, sscratch, tp  # swap tp and sscratch
+//   tp == 0            -> from kernel mode
+//   tp has bit 63 set  -> from user mode (tp = current task pointer)
+//   anything else      -> early boot phase (sscratch not yet initialized)
+//
+// CRITICAL RULE: no general-purpose register may be clobbered (directly or
+// via macros) before the interrupted register state has been stored into the
+// PtRegs frame. Stack-selection and CSR bookkeeping only use temps AFTER the
+// frame is written. This mirrors Linux handle_exception, which saves all
+// GPRs before any stack bookkeeping. (The previous implementation computed
+// the target stack with t0-t2 first and silently corrupted those registers
+// on every trap — ARCH-C2.)
+//
+trap_entry:
+    // Step 1: Atomically swap tp and sscratch
+    // - From kernel: sscratch=0, tp=current -> tp becomes 0
+    // - From user: sscratch=current, tp=user_tls -> tp becomes current
+    csrrw tp, sscratch, tp
+
+    // Step 2: Detect source WITHOUT touching any temp register.
+    // beqz/bltz only read tp. Bit 63 set = kernel-space pointer = task
+    // struct; small positive values are early-boot hart ids or garbage.
+    beqz tp, .Lfrom_kernel
+    bltz tp, .Lfrom_user
+    j .Learly_boot
+
+// ============================================================================
+// Enter trap from kernel (normal or early boot)
+// ============================================================================
+//
+// tp = original kernel tp (current task, or hartid during early boot).
+//
+// The full register state is saved on the CURRENT stack before any temp
+// register is used. Kernel-mode sp always points into valid kernel memory
+// (task kernel stack, boot stack, or an already-nested interrupt-stack
+// frame), and frames nest downward, so no stack switch is needed — the same
+// approach Linux takes for traps from kernel mode. This also means nested
+// traps (e.g. a fault inside an interrupt handler) allocate successive
+// frames instead of overwriting the interrupt stack top.
+//
+.Lfrom_kernel:
+    // Restore tp = original value before the csrrw swap (from sscratch).
+    // In early boot this is the hart id; no temp register required.
+    csrr tp, sscratch
+
+    // R74 (bad-sp recovery — the boot-wedge / fault-loop family): a trap
+    // can arrive here with a USER sp in two ways: (a) user code ran with
+    // sscratch=0 (orphaned scratch: a nested kernel-mode trap return
+    // cleared it mid-restore), or (b) the trap landed in the
+    // .Lrestore_and_exit tail AFTER `ld x2, PT_SP(sp)` loaded the user
+    // sp but BEFORE the sret (SIE=1 via a scribbled PT_STATUS, or any
+    // future regression). Pushing the frame on the current sp then
+    // stores to a U-mode page (SUM=0) -> store access fault -> re-enter
+    // trap_entry -> unbounded silent loop with SIE=0 (r74b capture: CPU1
+    // spinning at `sd ra,8(sp)`, sp=runit's user stack, timer_irq frozen).
+    // Kernel VAs always have bit 63 set; validate before nesting.
+    bgez sp, .Lbadsp_route
+    j .Lsave_kernel_frame
+
+// Bad-sp routing: needs a live task pointer to recover. tp was just
+// re-loaded from sscratch (the pre-swap tp). A valid task pointer has
+// bit 63 set; tp==0 means the scratch was already consumed by a prior
+// loop iteration (or user genuinely ran with sscratch=0) — no recovery
+// context exists.
+.Lbadsp_route:
+    bgez tp, .Lbadsp_park
+    // ARCH-C2 discipline: t0 holds a live (possibly half-restored user)
+    // register value; stash it while using t0 as scratch, exactly like
+    // the .Lfrom_user SPP-check stash below.
+    sd t0, {task_ti_a0}(tp)
+.Lbadsp_recover:
+    // Nest BELOW the outermost user pt_regs (which occupies [top-PT_SIZE,
+    // top) while being restored): setting sp = top-PT_SIZE makes
+    // .Lsave_kernel_frame's own `addi sp,sp,-PT_SIZE` land at
+    // [top-2*PT_SIZE, top-PT_SIZE). The nested exit's PT_SP = top-PT_SIZE
+    // then resumes the outer restore tail, which re-executes ld x2 /
+    // csrw sscratch,tp / sret: the scratch is re-published and the return
+    // to user completes — closing the orphaned-sscratch chain itself.
+    ld t0, {task_ti_kernel_sp}(tp)
+    beqz t0, .Lbadsp_park
+    addi sp, t0, -PT_SIZE
+    ld t0, {task_ti_a0}(tp)      // unstash the live value for the save
+    j .Lsave_kernel_frame
+
+.Lbadsp_park:
+    // No task context: abandon this hart loudly (SBI console, no kernel
+    // locks). Print sepc/tp then wfi forever. Other CPUs keep running and
+    // the DFX taskdump names the frozen hart.
+    csrr t0, sepc
+    mv   t2, tp
+    la   t4, .Lbadsp_msg
+    li   t5, 10                 // nibble threshold for hex digits
+1:  lbu  a0, 0(t4)
+    beqz a0, 2f
+    li   a7, 1                  // SBI base putchar
+    ecall
+    addi t4, t4, 1
+    j 1b
+2:  mv   a1, t0                 // sepc
+3:  srli a0, a1, 60
+    bltu a0, t5, 4f
+    addi a0, a0, 39             // 'a'-10
+4:  addi a0, a0, 48             // '0'
+    li   a7, 1
+    ecall
+    slli a1, a1, 4
+    bnez a1, 3b
+    li   a0, ' '
+    li   a7, 1
+    ecall
+    mv   a1, t2                 // tp
+5:  srli a0, a1, 60
+    bltu a0, t5, 6f
+    addi a0, a0, 39
+6:  addi a0, a0, 48
+    li   a7, 1
+    ecall
+    slli a1, a1, 4
+    bnez a1, 5b
+    li   a0, '\n'
+    li   a7, 1
+    ecall
+7:  wfi
+    j 7b
+
+.Lsave_kernel_frame:
+    // R85 (frame-save sp gate): a kernel-origin trap while the live sp is
+    // garbage (bit63 clear) would push pt_regs at an unmapped address,
+    // fault again inside the save, and cascade forever with SIE off —
+    // the silent-hart-wedge shape. Repair to a fresh frame at the task's
+    // own stack top BEFORE any push; the wild-sp context then dies at its
+    // next stack touch with a clean, attributable frame. Clobbers
+    // t0/t1/a0-a3 on the repair path only (interrupted values for those
+    // registers are lost — the context is already garbage). The PT_SP
+    // recorded below then names the REPAIRED sp, so the unwind cannot
+    // re-enter the wild pointer.
+    bltz sp, 120f
+    li   t0, TASK_STRUCT_THRESHOLD
+    bltu tp, t0, 120f            // early boot (tp = hartid): no repair
+    mv   a4, sp                  // stash the wild sp for the report
+    li   t0, {task_kstack_bottom}
+    add  t0, tp, t0
+    ld   t0, 0(t0)
+    beqz t0, 120f
+    li   t1, {kernel_stack_size}
+    add  sp, t0, t1              // sp = kernel stack top (push below)
+    li   a0, 5
+    mv   a1, a4
+    mv   a2, tp
+    csrr a3, sepc
+    call r84_ksp_trap
+120:
+    // Allocate PtRegs on the current stack and save ALL registers first.
+    addi sp, sp, -PT_SIZE
+
+    sd x1,  PT_RA(sp)
+    sd x3,  PT_GP(sp)
+    sd x4,  PT_TP(sp)   // current task pointer (or hartid during early boot)
+    sd x5,  PT_T0(sp)
+    sd x6,  PT_T1(sp)
+    sd x7,  PT_T2(sp)
+    sd x8,  PT_S0(sp)
+    sd x9,  PT_S1(sp)
+    sd x10, PT_A0(sp)
+    sd x11, PT_A1(sp)
+    sd x12, PT_A2(sp)
+    sd x13, PT_A3(sp)
+    sd x14, PT_A4(sp)
+    sd x15, PT_A5(sp)
+    sd x16, PT_A6(sp)
+    sd x17, PT_A7(sp)
+    sd x18, PT_S2(sp)
+    sd x19, PT_S3(sp)
+    sd x20, PT_S4(sp)
+    sd x21, PT_S5(sp)
+    sd x22, PT_S6(sp)
+    sd x23, PT_S7(sp)
+    sd x24, PT_S8(sp)
+    sd x25, PT_S9(sp)
+    sd x26, PT_S10(sp)
+    sd x27, PT_S11(sp)
+    sd x28, PT_T3(sp)
+    sd x29, PT_T4(sp)
+    sd x30, PT_T5(sp)
+    sd x31, PT_T6(sp)
+
+    // NOW temps are free: record the interrupted sp (frame address + PT_SIZE)
+    addi t0, sp, PT_SIZE
+    sd t0, PT_SP(sp)
+
+    // Save CSRs
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
+
+    j .Lcall_handler
+
+// ============================================================================
+// Early boot phase (compatible mode)
+// ============================================================================
+//
+// Reached only when sscratch holds an unexpected value: a trap in the short
+// boot window before boot.S sets sscratch = 0. Interrupts are still disabled
+// there, so only synchronous exceptions can arrive, and the boot code has no
+// interruptible register state whose loss in PtRegs matters. The sstatus
+// read below clobbers t0 — acceptable only in this dead-defensive window.
+//
+.Learly_boot:
+    // Use sstatus.SPP to determine source
+    csrr t0, sstatus
+    andi t0, t0, SR_SPP
+    bnez t0, .Lsave_kernel_frame
+
+// ============================================================================
+// Enter trap from user space (early boot phase) — defensive dead path
+// ============================================================================
+//
+// There is no user mode before the scheduler starts, and sscratch is
+// initialized by then, so this path cannot be reached in practice. Kept as a
+// safety net with the original (temp-clobbering) behavior.
+//
+.Lfrom_user_early:
+    // In early boot phase, only CPU 0 is running
+    // Save user sp
+    mv t1, sp
+
+    // Get per-CPU interrupt stack (will use CPU 0 during early boot)
+    GET_PER_CPU_INTR_STACK sp
+
+    // Allocate PtRegs space
+    addi sp, sp, -PT_SIZE
+
+    // Save user sp
+    sd t1, PT_SP(sp)
+
+    // Save user tp (hart_id)
+    sd tp, PT_TP(sp)
+
+    // Save general purpose registers
+    sd x1,  PT_RA(sp)
+    sd x3,  PT_GP(sp)
+    // tp already saved
+    sd x5,  PT_T0(sp)
+    sd x6,  PT_T1(sp)
+    sd x7,  PT_T2(sp)
+    sd x8,  PT_S0(sp)
+    sd x9,  PT_S1(sp)
+    sd x10, PT_A0(sp)
+    sd x11, PT_A1(sp)
+    sd x12, PT_A2(sp)
+    sd x13, PT_A3(sp)
+    sd x14, PT_A4(sp)
+    sd x15, PT_A5(sp)
+    sd x16, PT_A6(sp)
+    sd x17, PT_A7(sp)
+    sd x18, PT_S2(sp)
+    sd x19, PT_S3(sp)
+    sd x20, PT_S4(sp)
+    sd x21, PT_S5(sp)
+    sd x22, PT_S6(sp)
+    sd x23, PT_S7(sp)
+    sd x24, PT_S8(sp)
+    sd x25, PT_S9(sp)
+    sd x26, PT_S10(sp)
+    sd x27, PT_S11(sp)
+    sd x28, PT_T3(sp)
+    sd x29, PT_T4(sp)
+    sd x30, PT_T5(sp)
+    sd x31, PT_T6(sp)
+
+    // NOW read CSR (after all registers are saved)
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
+
+    j .Lcall_handler
+
+// ============================================================================
+// Enter trap from user space (normal mode)
+// ============================================================================
+//
+// tp = current task (from sscratch swap; canonical kernel pointer, verified
+// by the bit-63 test in the dispatcher). User sp is live in sp; user tp is
+// in sscratch.
+//
+// The user sp is stashed in task.ti_user_sp so that the stack switch needs
+// no temp register; all GPRs are saved before any temp is used.
+//
+.Lfrom_user:
+    // R83 (R74 producer fix — the thread_info smear engine): the OLD
+    // sequence stashed sp into ti_user_sp HERE, unconditionally, BEFORE
+    // the sstatus.SPP origin check below.
+    //
+    // Background (ROUTING FIX, retained): the sscratch-swap dispatcher
+    // test assumes "sscratch = task pointer" implies a user-origin trap.
+    // That is FALSE in the return-to-user window (csrw sscratch, tp runs
+    // several instructions before the final sret) and for any corrupted
+    // frame that made an sret land in S-mode while sscratch still held
+    // the task pointer. sstatus.SPP is the authoritative origin
+    // indicator; SPP=1 traps are treated like .Lfrom_kernel (frame
+    // nested below the live kernel sp instead of reloading sp from
+    // ti_kernel_sp and overwriting the outermost pt_regs — the
+    // photographed "KERNPANIC pfault badaddr=0 epc=0 ra=0" engine).
+    //
+    // The R83 defect: such a kernel-origin trap FIRST executed the
+    // unconditional `sd sp, ti_user_sp(tp)` and wrote its KERNEL sp
+    // into ti_user_sp; the SPP branch then left the garbage behind —
+    // photographed live by the R83b waiter self-watch (r74hunt-r3,
+    // jiffies=48248: parked pid 412's ti_user_sp changed
+    // 0x3fffffe400 -> 0xffffffff803c9740, an address inside the kernel
+    // TEXT, while the task slept in the ext4 biglock wait). Corrupted
+    // sp words are the seeds the double-run partner's exit stores smear
+    // into ti_kernel_sp (ksp = sp + PT_SIZE with a wild sp — the
+    // R74-SLOTLESS-TP / PREEMPT-UNDERFLOW family).
+    //
+    // Fix: stash t0 FIRST (it was already stashed one instruction later
+    // in the old sequence), read SPP, and only a GENUINE user trap
+    // (SPP=0) — where sp IS the user sp — stores ti_user_sp. Kernel-
+    // origin traps branch with t0 stashed exactly as the old code did;
+    // ti_user_sp keeps the last REAL user sp (its only readers are this
+    // path and exec).
+    sd t0, {task_ti_a0}(tp)
+    csrr t0, sstatus
+    andi t0, t0, SR_SPP
+    bnez t0, .Lfrom_user_kernel_origin
+    sd sp, {task_ti_user_sp}(tp)
+    ld t0, {task_ti_a0}(tp)
+
+    // Switch to the task kernel stack (safe: sp's user value is stashed)
+    ld sp, {task_ti_kernel_sp}(tp)
+    // No kernel stack (idle task during bringup) — defensive fallback
+    beqz sp, .Luse_trap_stack_user
+    // R85 (entry ksp gate): a user-half ksp here pushes the frame at an
+    // unmapped address and fault-cascades with SIE off (silent hart
+    // wedge). Repair to a fresh frame at the task's own stack top; the
+    // wild context dies at its next stack touch instead. t0/t1 clobber:
+    // acceptable on this death path (user t1/t2 lose their stash).
+    bltz sp, 110f
+    li   a0, 6
+    mv   a1, sp
+    mv   a2, tp
+    csrr a3, sepc
+    li   t0, {task_kstack_bottom}
+    add  t0, tp, t0
+    ld   t0, 0(t0)
+    beqz t0, 110f               // no stack record: keep old behavior
+    li   t1, {kernel_stack_size}
+    add  sp, t0, t1
+    call r84_ksp_trap
+110:
+
+.Lfrom_user_frame:
+    // Allocate PtRegs space
+    addi sp, sp, -PT_SIZE
+
+    // Save ALL general purpose registers FIRST (t0-t2 hold user values)
+    sd x1,  PT_RA(sp)
+    sd x3,  PT_GP(sp)
+    // tp will be saved below from sscratch
+    sd x5,  PT_T0(sp)
+    sd x6,  PT_T1(sp)
+    sd x7,  PT_T2(sp)
+    sd x8,  PT_S0(sp)
+    sd x9,  PT_S1(sp)
+    sd x10, PT_A0(sp)
+    sd x11, PT_A1(sp)
+    sd x12, PT_A2(sp)
+    sd x13, PT_A3(sp)
+    sd x14, PT_A4(sp)
+    sd x15, PT_A5(sp)
+    sd x16, PT_A6(sp)
+    sd x17, PT_A7(sp)
+    sd x18, PT_S2(sp)
+    sd x19, PT_S3(sp)
+    sd x20, PT_S4(sp)
+    sd x21, PT_S5(sp)
+    sd x22, PT_S6(sp)
+    sd x23, PT_S7(sp)
+    sd x24, PT_S8(sp)
+    sd x25, PT_S9(sp)
+    sd x26, PT_S10(sp)
+    sd x27, PT_S11(sp)
+    sd x28, PT_T3(sp)
+    sd x29, PT_T4(sp)
+    sd x30, PT_T5(sp)
+    sd x31, PT_T6(sp)
+
+    // NOW it's safe to use temp registers
+    // Restore the stashed user sp into PtRegs
+    ld t0, {task_ti_user_sp}(tp)
+    sd t0, PT_SP(sp)
+
+    // Save user tp (held in sscratch since the entry swap)
+    csrr t0, sscratch
+    sd t0, PT_TP(sp)
+
+    // Save CSRs
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
+
+    // tp still has current task pointer, no need to restore
+
+    // Clear sscratch to indicate we're now in kernel mode
+    // This ensures future interrupts from kernel mode are correctly detected
+    csrw sscratch, zero
+
+    j .Lcall_handler
+
+.Luse_trap_stack_user:
+    // ti_kernel_sp == 0: no task kernel stack. Only tasks that never execute
+    // user code (idle tasks during bringup) can reach a "user-mode" trap in
+    // this state — fork/exec always allocate a kernel stack — so the t0-t2
+    // values clobbered by GET_PER_CPU_INTR_STACK (before they can be saved)
+    // are never observable.
+    GET_PER_CPU_INTR_STACK sp
+    j .Lfrom_user_frame
+
+// Kernel-origin trap that arrived through the sscratch=tp window (see the
+// ROUTING FIX comment above). tp already holds the task pointer (correct
+// kernel tp) and the live sp SHOULD be a KERNEL sp: save the frame nested
+// BELOW it, reusing the .Lfrom_kernel save sequence. The in-flight outer
+// pt_regs at the top of the kernel stack stays untouched.
+//
+// R74: the exception is the .Lrestore_and_exit tail AFTER `ld x2,
+// PT_SP(sp)`: the live sp is the USER sp (registers half-restored). The
+// old code pushed the frame on it -> store fault on a U page -> infinite
+// trap loop (see .Lbadsp_route). Route through the same recovery.
+.Lfrom_user_kernel_origin:
+    ld t0, {task_ti_a0}(tp)
+    // Restore the kernel-mode sscratch protocol: this entry swapped the
+    // task pointer into tp, leaving sscratch = old tp (also the task
+    // pointer). .Lfrom_kernel expects sscratch=0 while in the kernel.
+    csrw sscratch, zero
+    bgez sp, .Lbadsp_recover
+    j .Lsave_kernel_frame
+
+// ============================================================================
+// Call Rust trap handler
+// ============================================================================
+.Lcall_handler:
+    // Set orig_a0 = a0 (for system call rollback)
+    ld t0, PT_A0(sp)
+    sd t0, PT_ORIG_A0(sp)
+
+    // Determine CPU ID from tp and pass as second argument (a1)
+    // tp is the task_struct pointer (.Lfrom_kernel/.Lfrom_user) or a small
+    // hart id value (early-boot paths)
+    li t0, TASK_STRUCT_THRESHOLD
+    bltu tp, t0, .Lcpu_id_from_tp_early
+    // Normal path: tp is task_struct pointer, read ti_cpu
+    lw a1, {task_ti_cpu}(tp)
+    // Defensive: clamp invalid ti_cpu to CPU 0.
+    // {max_cpus} from config (R86): the stale literal 4 made every trap
+    // on harts 4..7 call trap_handler with cpu_id=0 — timer IRQs from
+    // five harts ran scheduler_tick(0) concurrently on CPU 0's percpu
+    // state (the smp8 R74/R83 storm and ksp smears). Derived constants
+    // cannot drift.
+    li   t0, {max_cpus}
+    bltu a1, t0, .Ldo_call_handler
+    li   a1, 0
+    j .Ldo_call_handler
+
+.Lcpu_id_from_tp_early:
+    // Early boot: tp = hart_id directly
+    mv a1, tp
+
+.Ldo_call_handler:
+    // Call Rust trap_handler
+    // Argument: a0 = PtRegs pointer, a1 = CPU ID
+    mv a0, sp
+    call trap_handler
+
+// ============================================================================
+// Return from trap / Return from exception
+// ============================================================================
+//
+// ret_from_exception entry point.
+// Both ret_from_exception and trap_exit point to the same code.
+//
+.global ret_from_exception
+ret_from_exception:
+trap_exit:
+    // Disable interrupts
+    csrci sstatus, 2
+
+    // Clear LR/SC reservation (Load Reservation)
+    //
+    // RISC-V LR/SC (Load-Reserved/Store-Conditional) atomic operations
+    // set a reservation on the hart. If a context switch occurs between
+    // LR and SC, this reservation may affect atomic operations of the new task.
+    //
+    // Solution: Execute a guaranteed-to-fail SC before returning to new context to clear reservation.
+    // This is safe because RISC-V allows clearing reservation at any time.
+    //
+    addi t2, sp, PT_SIZE      // Calculate address: sp + PT_EPC
+    sc.d x0, t2, (t2)           // Execute SC (guaranteed to fail, but clears reservation)
+
+    // Check if returning to user space (SPP=0)
+    // Note: Must check before restoring registers, as signal handling may need to modify PtRegs
+    ld t0, PT_STATUS(sp)
+    andi t0, t0, SR_SPP
+    beqz t0, .Lreturn_user
+
+    // Return to kernel, skip signal check
+    j .Lrestore_kernel_and_exit
+
+.Lreturn_user:
+    // *** CRITICAL: Save unwound kernel stack pointer to thread_info FIRST ***
+    // This must be done BEFORE any code that might trigger schedule(), such as
+    // signal handling.
+    //
+    // After context switch, sp is restored from thread.sp, which points to pt_regs.
+    // We save ti_kernel_sp = sp + PT_SIZE so we can reload sp = ti_kernel_sp - PT_SIZE
+    // after schedule() returns.
+
+    addi t0, sp, PT_SIZE      // t0 = sp + PT_SIZE (unwound kernel stack pointer)
+    // R85 (ksp store gate — producer #2 containment): this store is the
+    // ONLY writer that can put a wild sp into ti_kernel_sp (the R74
+    // captures: ksp = 0x199999xx_xxxxxxxx, a bit63-CLEAR value no legal
+    // writer produces). Every later ksp consumer (the .Lfrom_user entry
+    // stack switch and both post-schedule reloads) then jumps the hart to
+    // an unmapped frame — the smear engine. A user-half value here means
+    // the live sp is garbage: anchor ksp at the task's OWN kernel-stack
+    // top instead (the next trap frames fresh at top-PT_SIZE) and let the
+    // wild-sp context die at its next stack touch instead of smearing.
+    // R84b report stays: one-shot per site, names the interrupted sepc.
+    bltz t0, 100f
+    li   a0, 1
+    mv   a1, t0
+    mv   a2, tp
+    csrr a3, sepc
+    call r84_ksp_trap
+    li   t1, {task_kstack_bottom}
+    add  t1, tp, t1
+    ld   t0, 0(t1)
+    beqz t0, 100f               // no stack record: fall back to raw store
+    li   t1, {kernel_stack_size}
+    add  t0, t0, t1             // t0 = kernel stack top
+100:
+    sd t0, {task_ti_kernel_sp}(tp)  // Save to task_struct.ti_kernel_sp
+
+    // Check signals and need_resched in a loop
+    //
+    // IMPORTANT: Unlike previous implementation, we DO NOT reload sp from ti_kernel_sp
+    // after schedule() returns.
+    // After schedule() returns (context switch back to this task), sp is already correct
+    // because __switch_to restores it from thread.sp, which points to pt_regs.
+.Lcheck_signals_and_resched:
+    // Check pending signals (before restoring registers)
+    //
+    // Important: Must call before restoring registers, as signal handling may modify PtRegs.
+    mv a0, sp
+    call check_and_deliver_signals
+
+    // NOTE: Do NOT reload sp here! After check_and_deliver_signals returns,
+    // sp is already correct. Reloading from ti_kernel_sp would use a stale value.
+
+    // Check need_resched flag
+    // If need_resched is set, call schedule() and loop back
+    call asm_need_resched
+    beqz a0, .Lrestore_and_exit
+
+    // need_resched - call schedule()
+
+    // Check preempt_count — only preempt if preemptible (preempt_count == 0).
+    //
+    // USER-path gate ONLY (SPP=0 below us): a task returning to user mode
+    // holds no kernel spinlock, so preempt_count==0 is the only condition
+    // for a sound switch — this is Linux's PREEMPT_NONE discipline, where
+    // irq-exit -> user always honors need_resched. Restoring it fixed the
+    // sendmsg02 stall-quiet wedge: the test's 16 client children spin in
+    // user mode (socket/sendmsg/close/semctl, never blocking), and with
+    // this gate closed a woken task could never beat a spinner — 2
+    // spinners monopolized both CPUs for 44+s (vruntime 44e9 vs 1.04e9
+    // for 31 enqueued tasks) while the parent's sleep(15) expiry, the
+    // semctl(SETVAL 0) reaper and the console taskdump all starved.
+    //
+    // The load width is load-bearing history: ti_preempt_count is an i32
+    // at offset 4, and the old `ld` (8 bytes) straddled into
+    // ti_kernel_sp's low half — the or'd-in stack address bits made the
+    // bnez almost always taken, silently disabling user preemption
+    // machine-wide (the kernel is otherwise cooperative-only: __schedule
+    // is reached solely from blocking paths). The KERNEL-path twin at
+    // .Lcheck_resched_kernel deliberately keeps the wide load: switching
+    // a task out of a kernel-mode trap exit is CONFIG_PREEMPT territory
+    // and previously crashed boot (pid 1 SIGSEGV at a kernel epc in user
+    // mode); kernel preemption stays opt-in via explicit schedule()s.
+    lw t0, {task_ti_preempt}(tp)
+    bnez t0, .Lrestore_and_exit
+
+    // Need resched - call schedule()
+    // After schedule() returns (when this task is scheduled back in),
+    // sp is restored from thread.sp by __switch_to, which points to pt_regs.
+    call asm_schedule
+
+    // R53 (form-B residual — the SIE=1 user-return loop): __schedule
+    // unconditionally returns with interrupts ENABLED (restore_irq(true)
+    // at its tail — required for syscall-context callers). The kernel
+    // return path re-disables SIE right after its asm_schedule call (see
+    // the csrci below); this user path did NOT — so after ONE preemption,
+    // every further iteration of the .Lcheck_signals_and_resched loop
+    // (check_and_deliver_signals + the asm_need_resched load at
+    // sched.rs:461) executed with SIE=1. A timer/IPI landing at that load
+    // then nests a KERNEL-mode trap exit whose ti_kernel_sp save (in
+    // .Lrestore_kernel_and_exit) orphans this task's outer user pt_regs:
+    // .Lrestore_and_exit afterwards restores the nested KERNEL frame
+    // through the user ritual (sscratch=tp while sret-ing to kernel
+    // mode), the next kernel trap mis-enters .Lfrom_user (stack jump via
+    // the clobbered ti_kernel_sp, ti_user_sp corruption), and the
+    // recycled-frame race between the restore and the nested frame reuse
+    // produces half-written register restores — the out-of-protocol
+    // write engine behind the smash families. The sched.rs:461 load is
+    // interruptible at exactly ONE call site in the kernel — this one
+    // (both .Lcheck_resched_kernel entries are SIE=0 by construction).
+    // Mirror the kernel path: re-disable interrupts for the rest of the
+    // trap return. The final sret restores the user's SIE from PT_STATUS.
+    csrci sstatus, 2
+
+    // CRITICAL FIX: After schedule() returns, we MUST reload sp from ti_kernel_sp.
+    // For preempted tasks, thread.sp points to the kernel sp at preemption time,
+    // NOT to pt_regs. We need to restore sp = ti_kernel_sp - PT_SIZE to access pt_regs.
+    //
+    // For newly forked children, thread.sp = pt_regs (set in copy_thread), but
+    // __switch_to restores it to that value anyway. Reloading from ti_kernel_sp
+    // is still correct because ti_kernel_sp = pt_regs + PT_SIZE.
+    ld t0, {task_ti_kernel_sp}(tp)
+    // R85 (ksp reload gate): never load a user-half ksp into sp — the
+    // reload would point this hart at an unmapped frame and fault-
+    // cascade. Anchor at the task's own stack top (residue frame; the
+    // r74d epc==0 gate catches zeroed frames). R84b report first.
+    bltz t0, 101f
+    li   a0, 3
+    mv   a1, t0
+    mv   a2, tp
+    csrr a3, sepc
+    call r84_ksp_trap
+    li   t1, {task_kstack_bottom}
+    add  t1, tp, t1
+    ld   t0, 0(t1)
+    beqz t0, 101f
+    li   t1, {kernel_stack_size}
+    add  t0, t0, t1
+101:
+    addi sp, t0, -PT_SIZE
+
+    j .Lcheck_signals_and_resched
+
+.Lrestore_and_exit:
+    // R74 (garbage-frame gate): a zeroed or stale pt_regs must not reach
+    // the sret (r74d capture: epc=0 ra=0 sp=0xf — executing it jumps to
+    // 0 with a junk stack). epc==0 is never legal for a user task (page
+    // zero is unmapped) and a sub-0x1000 sp is never a valid user stack.
+    // Route to the Rust killer instead of restoring the garbage.
+    ld t0, PT_EPC(sp)
+    bnez t0, 8f
+    j .Lbad_user_frame
+8:  ld t0, PT_SP(sp)
+    li  t1, 0x1000
+    bltu t0, t1, .Lbad_user_frame
+
+    // NOTE: sp is ALREADY at the pt_regs slot on every entry path:
+    //   - direct from .Lcheck_signals_and_resched (no resched): sp == pt_regs
+    //   - post-schedule: reloaded right after asm_schedule above
+    //   - from .Lrestore_kernel_and_exit's SPP re-check: reloaded there
+    // The old unconditional `ld sp = ti_kernel_sp - PT_SIZE` here reloaded a
+    // STALE-DEEP ksp left behind by a nested kernel-mode trap exit
+    // (.Lrestore_kernel_and_exit stores its own frame position before a
+    // schedule-out and nothing restores the outer value on unwind) — the
+    // user sret then restored a FORK-ERA frame from deep stack residue:
+    // rep2-context registers on a /bin/sleep mm (the long-standing
+    // concurrent fork+exec crash fingerprint).
+
+    // Restore CSR (restore sstatus first to check SPP)
+    // NOTE: sstatus is restored verbatim, including SUM. Masking SUM here
+    // would corrupt preempted uaccess copy windows (a trap nested inside
+    // __copy_user's SUM=1 region must resume with SUM=1 or the copy
+    // spuriously faults). Outside those bracketed windows SUM is always 0
+    // after the burn-in sites were fixed (SUM convergence, review SEC).
+    ld t0, PT_STATUS(sp)
+    ld t1, PT_EPC(sp)
+    csrw sstatus, t0
+    csrw sepc, t1
+
+    // Restore general purpose registers
+    ld x1,  PT_RA(sp)
+    ld x3,  PT_GP(sp)
+    ld x5,  PT_T0(sp)
+    ld x6,  PT_T1(sp)
+    ld x7,  PT_T2(sp)
+    ld x8,  PT_S0(sp)
+    ld x9,  PT_S1(sp)
+    ld x10, PT_A0(sp)
+    ld x11, PT_A1(sp)
+    ld x12, PT_A2(sp)
+    ld x13, PT_A3(sp)
+    ld x14, PT_A4(sp)
+    ld x15, PT_A5(sp)
+    ld x16, PT_A6(sp)
+    ld x17, PT_A7(sp)
+    ld x18, PT_S2(sp)
+    ld x19, PT_S3(sp)
+    ld x20, PT_S4(sp)
+    ld x21, PT_S5(sp)
+    ld x22, PT_S6(sp)
+    ld x23, PT_S7(sp)
+    ld x24, PT_S8(sp)
+    ld x25, PT_S9(sp)
+    ld x26, PT_S10(sp)
+    ld x27, PT_S11(sp)
+    ld x28, PT_T3(sp)
+    ld x29, PT_T4(sp)
+    ld x30, PT_T5(sp)
+    ld x31, PT_T6(sp)
+
+    // Re-restore t0
+    ld x5, PT_T0(sp)
+
+    // Save current task to sscratch — the NEXT trap entry finds the task.
+    // R74 correction: this MUST run BEFORE `ld x4, PT_TP(sp)` loads the
+    // user tp into the tp register. Publishing after that load stores the
+    // USER tp into sscratch — for tasks whose user tp is 0 (static
+    // binaries, runit) user mode then runs with sscratch=0 and every
+    // subsequent user trap mis-enters .Lfrom_kernel, pushing pt_regs on
+    // the user stack (r74b silent fault loop / r74c TRAP-BADSP-PARK).
+    // The adjacent-window concern (a trap between this csrw and the sret
+    // returning through .Lrestore_kernel_csrs, which leaves sscratch=0)
+    // is covered by .Lbadsp_recover: such a trap arrives with the live
+    // sp already user (past `ld x2`), is recovered below the outer user
+    // frame, and the resumed tail re-executes this csrw before sret.
+    csrw sscratch, tp
+
+    // Restore user tp (from PtRegs)
+    ld x4, PT_TP(sp)
+
+    // Memory barrier to ensure all register loads complete before sret
+    fence iorw, iorw
+
+    // Restore user sp (from PtRegs)
+    ld x2, PT_SP(sp)
+
+    sret
+
+.Lrestore_kernel_and_exit:
+    // CRITICAL: Clear sscratch to 0 before returning to kernel mode.
+    // Without this, the next kernel-mode trap will incorrectly enter
+    // .Lfrom_user (because csrrw tp,sscratch,tp will see tp != 0).
+    csrw sscratch, zero
+
+    // Check if tp is a valid task_struct pointer.
+    // During early boot on secondary CPUs, tp = hart_id (small value).
+    // Accessing TASK_TI_* fields through a non-pointer tp would fault.
+    // Skip the schedule/ti_kernel_sp logic and go straight to register restore.
+    li t0, TASK_STRUCT_THRESHOLD
+    bltu tp, t0, .Lrestore_kernel_csrs
+
+    // Check need_resched for kernel preemption.
+    // This is critical for idle tasks: when a timer interrupt wakes WFI,
+    // the timer handler cannot call schedule() (preemptible()=false in IRQ).
+    // Without this check, idle loops in WFI forever even though tasks are runnable.
+    //
+    // ti_kernel_sp is stored ONLY on the schedule() path. Storing it on
+    // EVERY kernel-mode trap exit left a STALE-DEEP value after the nested
+    // context unwound (nothing restores the outer position); the next
+    // user trap entry then pushed its frame at that deep slot — over
+    // live kernel frames — and user srets restored fork-era residue (the
+    // 0x1cbc0/.Lcopy_exception fingerprint family).
+.Lcheck_resched_kernel:
+    call asm_need_resched
+    beqz a0, .Lrestore_kernel_csrs
+
+    // Check preempt_count — only preempt if not in IRQ/softirq context
+    // NOTE: deliberately still `ld` (straddles ti_kernel_sp — see the
+    // user-path note above); kernel-mode trap-exit preemption stays
+    // disabled (CONFIG_PREEMPT territory; it crashed boot historically).
+    ld t0, {task_ti_preempt}(tp)
+    bnez t0, .Lrestore_kernel_csrs
+
+    // About to schedule(): save the pt_regs pointer so the post-schedule
+    // reload can find it (schedule() context-switches sp away).
+    addi t0, sp, PT_SIZE
+    // R85 (ksp store gate): kernel-path twin of the .Lreturn_user gate —
+    // a user-half value here means a wild sp; anchor at the task's own
+    // stack top. R84b report first (one-shot).
+    bltz t0, 102f
+    li   a0, 2
+    mv   a1, t0
+    mv   a2, tp
+    csrr a3, sepc
+    call r84_ksp_trap
+    li   t1, {task_kstack_bottom}
+    add  t1, tp, t1
+    ld   t0, 0(t1)
+    beqz t0, 102f
+    li   t1, {kernel_stack_size}
+    add  t0, t0, t1
+102:
+    sd   t0, {task_ti_kernel_sp}(tp)
+
+    // Need reschedule — call schedule().
+    //
+    // Re-enable interrupts before calling schedule(). The ret_from_exception
+    // path cleared SIE (csrci sstatus, 2). Without re-enabling, schedule()
+    // saves SIE=0 via lock_irqsave. After context_switch, the new task's
+    // __schedule() restores its own saved flags — which may be SIE=0 if the
+    // new task was in syscall context, leaving it with interrupts disabled
+    // until sret and preventing further timer interrupts.
+    //
+    // This matches Linux's preempt_schedule_irq() which explicitly enables
+    // interrupts before calling __schedule().
+    csrsi sstatus, 2
+
+    call asm_schedule
+
+    // Disable interrupts again for the rest of trap return
+    csrci sstatus, 2
+
+    // Reload sp from ti_kernel_sp (schedule() may have context-switched
+    // to a different task and back, so sp changed).
+    ld t0, {task_ti_kernel_sp}(tp)
+    // R85 (ksp reload gate): kernel-path twin of site 3 — never load a
+    // user-half ksp into sp; anchor at the task's own stack top.
+    bltz t0, 103f
+    li   a0, 4
+    mv   a1, t0
+    mv   a2, tp
+    csrr a3, sepc
+    call r84_ksp_trap
+    li   t1, {task_kstack_bottom}
+    add  t1, tp, t1
+    ld   t0, 0(t1)
+    beqz t0, 103f
+    li   t1, {kernel_stack_size}
+    add  t0, t0, t1
+103:
+    addi sp, t0, -PT_SIZE
+
+    // After context switch, the new task may have been interrupted from
+    // user space (SPP=0 in its pt_regs) even though we originally entered
+    // .Lrestore_kernel_and_exit because the *previous* task was in kernel
+    // mode (SPP=1).
+    //
+    // Returning a user-originated task through .Lrestore_kernel_csrs would
+    // leave sscratch=0 (cleared above), corrupting the next exception entry
+    // which would think it came from kernel mode (csrrw tp,sscratch,tp
+    // → tp=0 → wrong path).
+    //
+    // Match Linux's ret_from_exception: always check the CURRENT pt_regs'
+    // SPP to decide the return path. If SPP=0 (from user), go to
+    // .Lrestore_and_exit which properly sets sscratch=tp before sret.
+    ld t0, PT_STATUS(sp)
+    andi t0, t0, SR_SPP
+    bnez t0, .Lcheck_resched_kernel
+    j .Lrestore_and_exit
+
+.Lrestore_kernel_csrs:
+    // Restore CSR
+    // NOTE: sstatus is restored verbatim, including SUM — see the comment
+    // at .Lrestore_and_exit (preempted uaccess windows must resume SUM=1).
+    ld t0, PT_STATUS(sp)
+    ld t1, PT_EPC(sp)
+    csrw sstatus, t0
+    csrw sepc, t1
+
+    // Restore general purpose registers
+    ld x1,  PT_RA(sp)
+    ld x3,  PT_GP(sp)
+    ld x4,  PT_TP(sp)
+    ld x5,  PT_T0(sp)
+    ld x6,  PT_T1(sp)
+    ld x7,  PT_T2(sp)
+    // s0 and s1 restored last
+    ld x28, PT_T3(sp)
+    ld x29, PT_T4(sp)
+    ld x30, PT_T5(sp)
+    ld x31, PT_T6(sp)
+    ld x18, PT_S2(sp)
+    ld x19, PT_S3(sp)
+    ld x20, PT_S4(sp)
+    ld x21, PT_S5(sp)
+    ld x22, PT_S6(sp)
+    ld x23, PT_S7(sp)
+    ld x24, PT_S8(sp)
+    ld x25, PT_S9(sp)
+    ld x26, PT_S10(sp)
+    ld x27, PT_S11(sp)
+    ld x8,  PT_S0(sp)
+    ld x9,  PT_S1(sp)
+    ld x10, PT_A0(sp)
+    ld x11, PT_A1(sp)
+    ld x12, PT_A2(sp)
+    ld x13, PT_A3(sp)
+    ld x14, PT_A4(sp)
+    ld x15, PT_A5(sp)
+    ld x16, PT_A6(sp)
+    ld x17, PT_A7(sp)
+
+    // Restore original kernel stack pointer
+    ld x2, PT_SP(sp)
+
+    // Return from trap to kernel mode
+    sret
+
+.global trap_entry_end
+trap_entry_end:
+
+// R74 garbage-frame killer target (see .Lrestore_and_exit gate).
+.Lbad_user_frame:
+    mv a0, sp
+    call riscv_bad_user_frame
+    // never returns; park defensively if it ever does
+9:  wfi
+    j 9b
+
+// R74 bad-sp park message (SBI console output; no kernel locks touched).
+.section .rodata
+.Lbadsp_msg:
+    .asciz "\nTRAP-BADSP-PARK sepc="
+
+.section .text.trap
+
+// ============================================================================
+// ret_from_fork_user_asm - Fork child entry (user mode)
+// ============================================================================
+//
+// This is the entry point for newly forked user processes.
+// Called when child process is first scheduled in via context_switch.
+//
+// Register state at entry:
+//   a0 = prev task pointer (passed from __switch_to)
+//   tp = current task pointer (child)
+//   sp = pt_regs pointer (set by copy_thread)
+//
+//
+.extern schedule_tail
+.extern ret_from_fork_user
+.global ret_from_fork_user_asm
+ret_from_fork_user_asm:
+    // a0 = prev task pointer (from __switch_to)
+    // Save prev task pointer on stack
+    addi sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+
+    // Call schedule_tail with prev task pointer
+    // a0 already contains prev task pointer from __switch_to
+    call schedule_tail
+
+    // Restore ra
+    ld ra, 0(sp)
+    addi sp, sp, 32
+
+    // Pass pt_regs pointer to ret_from_fork_user
+    // Note: At this point, sp points to pt_regs (set by thread.sp)
+    mv a0, sp              // a0 = pt_regs pointer
+    call ret_from_fork_user
+
+    // Jump to common exception return path
+    j ret_from_exception
+
+.size ret_from_fork_user_asm, . - ret_from_fork_user_asm
+
+// ============================================================================
+// ret_from_fork_kernel_asm - Fork child entry (kernel thread)
+// ============================================================================
+//
+// Entry point for kernel threads created with kernel_thread().
+//
+// Register state at entry:
+//   a0 = prev task pointer
+//   tp = current task pointer
+//   sp = pt_regs pointer
+//   s0 = fn (kernel thread function)
+//   s1 = fn_arg (argument to fn)
+//
+//
+.extern ret_from_fork_kernel
+.global ret_from_fork_kernel_asm
+ret_from_fork_kernel_asm:
+    // Call schedule_tail(prev)
+    call schedule_tail
+
+    // Prepare arguments for ret_from_fork_kernel
+    mv a0, s1              // a0 = fn_arg
+    mv a1, s0              // a1 = fn
+    mv a2, sp              // a2 = pt_regs
+    call ret_from_fork_kernel
+
+    // Jump to common exception return path
+    j ret_from_exception
+
+.size ret_from_fork_kernel_asm, . - ret_from_fork_kernel_asm
+
+// ============================================================================
+// Legacy alias for compatibility
+// ============================================================================
+.global ret_from_fork
+ret_from_fork:
+    j ret_from_fork_user_asm
+
+// ============================================================================
+// Per-CPU interrupt stack pointer (defined in smp.rs)
+// ============================================================================
+.section .data
+.align 8
+.global __per_cpu_intr_stacks_base
+__per_cpu_intr_stacks_base:
+    .8byte 0  // Will be initialized by Rust code

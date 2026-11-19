@@ -1,0 +1,76 @@
+[package]
+name = "rux"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+log = { workspace = true }
+bitflags = { workspace = true }
+linked_list_allocator = "0.10"
+# LLVM profiling runtime for no_std (vendored, Apache-2.0/MIT): only built
+# with the cov-dump feature; provides capture_coverage() so a
+# -C instrument-coverage kernel can serialize a .profraw at test end.
+minicov = { path = "vendor/minicov", optional = true, default-features = false, features = ["alloc"] }
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+sbi-rt = { version = "0.0.2", features = ["legacy"] }
+riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
+
+[build-dependencies]
+toml = "0.8"
+chrono = "0.4"
+rustc_version = "0.4"
+
+[features]
+default = ["riscv64"]
+aarch64 = []
+x86_64 = []
+riscv64 = []
+unit-test = []  # Enable unit tests (only used during testing)
+# Coverage dump: builds in the minicov profile runtime and the
+# end-of-suite .profraw writer. Only meaningful together with
+# RUSTFLAGS="-C instrument-coverage -Zno-profiler-runtime" (make coverage).
+cov-dump = ["dep:minicov"]
+# DFX: spinlock holder tracking (two atomic stores per lock/unlock pair).
+# Zero-cost when off; enabled when hunting lock deadlocks
+# (see test/hunt-wedge.sh and docs/guides/debugging.md).
+dfx-lock-owner = []
+# DFX: per-task stack backtrace lines in taskdump (read_volatile scan).
+# Off by default: the extra code shifts layout and measurably widens the
+# heap-lock race window; enable only when a wedge is being hunted.
+dfx-taskdump-bt = []
+# DFX: futex protocol tracer (one serial line per futex op / wake / return).
+# Diagnostic builds only.
+dfx-futex-trace = []
+# DFX (aarch64 bring-up): boot-time uaccess fault-containment self-check.
+# Probes the exception-table path with a poisoned user pointer at dfx
+# init (before init exec): every access must return a short count /
+# -EFAULT with NO oops. Compile-time gated like dfx-lock-owner; the
+# aarch64 cmdline falls back to the default string (the DTB pointer is
+# clobbered by the EL2 trampoline), so a dfx= switch cannot be armed on
+# that board yet.
+dfx-aa64-uaccess-selftest = []
+# DFX (grq-lock-1st): the reproducible GRQ wedge injection — one cpu takes
+# the GRQ and spins inside the critical section forever, so the
+# holder-naming rig can be PROVED to name the holder (and its stack).
+# Compile-time gated: the shipping build carries none of it, while the
+# rig it verifies (the per-CPU GRQ site stamp + the crime-scene dump) is
+# always on.
+dfx-grq-wedge = []
+
+[[bin]]
+name = "rux"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+debug-assertions = true
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

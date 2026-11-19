@@ -1,0 +1,117 @@
+#!/bin/bash
+# run-oh.sh — boot an OpenHarmony x86_64_virt emulator image on the Rux kernel.
+#
+# Bring the six virtio disks, the initrd ramdisk, and the ohos.* cmdline
+# tokens up under our kernel on QEMU q35, mirroring the reference qemu_run
+# scripts in the OH tree (qemu_run_user.sh / qemu_run_bridge.sh). KVM is
+# the default (unified rig 2026-11-14: KVM SMP8 8G); ACCEL_BACKEND=tcg
+# only when KVM is unavailable or for deterministic debugging.
+#
+# Usage:
+#   ./test/run-oh.sh <oh-images-dir> [mode]
+#     <oh-images-dir>  directory containing the built OH images:
+#                      ramdisk.img, updater.img, system.img, vendor.img,
+#                      sys_prod.img, chip_prod.img, userdata.img
+#     mode             console (default) | gui | debug
+#
+# Environment:
+#   KERNEL  — path to the Rux bzImage (default: target/.../bzImage)
+#   EXTRA_APPEND — appended verbatim to the kernel cmdline
+#   MONITOR — QEMU monitor spec (default: none). Set e.g.
+#             MONITOR=unix:/tmp/oh-mon.sock,server,nowait to drive
+#             screendumps for the headless geometry check while console
+#             mode runs.
+#   ACCEL_ARGS — accelerator (default KVM; the OH rig standard is
+#             KVM + 8 CPUs). Override with "-accel tcg,thread=multi"
+#             only when KVM is unavailable.
+#   SMP — vCPU count (default 8, the OH rig standard).
+set -euo pipefail
+
+IMGDIR="${1:?usage: run-oh.sh <oh-images-dir> [console|gui|debug]}"
+ACCEL="${ACCEL:--accel}"
+ACCEL_BACKEND="${ACCEL_BACKEND:-kvm}"
+SMP="${SMP:-8}"
+[ -e /dev/kvm ] || { ACCEL_BACKEND="tcg,thread=multi"; echo "NOTE: /dev/kvm not found — TCG fallback" >&2; }
+MODE="${2:-console}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# Release build by default (user rule: make oh-run is the production
+# boot). Debug build: KERNEL=target/.../debug/bzImage
+if [ -f "$ROOT/target/x86_64-unknown-none/release/bzImage" ]; then
+    KERNEL="${KERNEL:-$ROOT/target/x86_64-unknown-none/release/bzImage}"
+else
+    KERNEL="${KERNEL:-$ROOT/target/x86_64-unknown-none/debug/bzImage}"
+fi
+
+for f in ramdisk.img system.img vendor.img; do
+    [ -f "$IMGDIR/$f" ] || { echo "missing $IMGDIR/$f" >&2; exit 1; }
+done
+# Optional disks: warn, keep going (updater/sys_prod/chip_prod/userdata).
+for f in updater.img sys_prod.img chip_prod.img userdata.img; do
+    [ -f "$IMGDIR/$f" ] || echo "note: $f absent (optional)" >&2
+done
+
+# Disk order matches the reference boot log's vdb..vdg mapping:
+#   vda updater  vdb system  vdc vendor  vdd sys_prod  vde chip_prod  vdf userdata
+qemu_drive() { # idx file
+    local idx=$1 file=$2
+    [ -f "$file" ] || return 0
+    printf ' -drive file=%s,if=none,id=ohd%d,format=raw,file.locking=off -device virtio-blk-pci,drive=ohd%d' "$file" "$idx" "$idx"
+}
+
+DISKS="$(qemu_drive 0 "$IMGDIR/updater.img")$(qemu_drive 1 "$IMGDIR/system.img")$(qemu_drive 2 "$IMGDIR/vendor.img")$(qemu_drive 3 "$IMGDIR/sys_prod.img")$(qemu_drive 4 "$IMGDIR/chip_prod.img")$(qemu_drive 5 "$IMGDIR/userdata.img")"
+
+# The reference cmdline, verbatim tokens the userspace init parses
+# (kernel only relays /proc/cmdline; it must not filter ohos.*).
+# ohos.required_mount.* IS the "fstab from command line" first-stage init
+# reads (init_mount.c "Cannot load fstab from command line" without them);
+# device names match the vda..vdf drive order above.
+APPEND="ip=dhcp loglevel=${LOGLEVEL:-4} console=ttyS0,115200"
+# printk.devkmsg: the console-echo policy for the guest's own /dev/kmsg
+# writes. The printk ring always records every line (hilog consumers see
+# the whole log); this only bounds how much of the guest's log volume
+# reaches the serial console. "ratelimit" keeps the first occurrences
+# and throttles the rest; "off" is silent; "on" is the reference default.
+APPEND="$APPEND printk.devkmsg=${KMSG_CONSOLE:-ratelimit}"
+APPEND="$APPEND init=${INIT:-init} root=/dev/ram0 rw"
+APPEND="$APPEND ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio"
+APPEND="$APPEND ohos.boot.sn=01234567890"
+APPEND="$APPEND ohos.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1@wait,required"
+APPEND="$APPEND ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required ohos.required_mount.data=/dev/block/vdf@/data@ext4@rw,barrier=1@wait,required"
+APPEND="$APPEND ${EXTRA_APPEND:-}"
+
+QEMU="${QEMU:-qemu-system-x86_64}"
+# Display geometry: the phone image targets a 720x1280 panel. QEMU seeds
+# the virtio-gpu display-info pmode[0] (and the synthetic EDID) from
+# xres/yres, and the kernel sizes its boot framebuffer from that pmode —
+# so the geometry only applies when the device is attached. It is added
+# in console/debug mode too (with -display none): without any display
+# device q35 falls back to its built-in VGA and screendumps come out at
+# the 720x400 text-mode default, never 720x1280.
+#
+# -vga none: q35 otherwise plants a default std-VGA alongside the
+# virtio-gpu (even when a user display device is given — verified on
+# QEMU 10.2). That VGA owns console 0, so a bare `screendump` captures
+# its 720x400 text surface instead of the guest's scanout. With the VGA
+# gone and the gpu named, `screendump oh.ppm ohgpu` captures the
+# virtio-gpu console: P6 720 1280 once the kernel sets the scanout.
+OH_GPU="-device virtio-gpu-pci,id=ohgpu,xres=720,yres=1280"
+case "$MODE" in
+    console) DISP="-display none $OH_GPU -vga none" ;;
+    gui)     DISP="-display gtk $OH_GPU -vga none" ;;
+    debug)   DISP="-display none -s -S $OH_GPU -vga none" ;;
+    *) echo "unknown mode: $MODE" >&2; exit 1 ;;
+esac
+
+# -snapshot: journal replay on an unclean image writes through bio —
+# writes must land in a throwaway overlay, never in the shared build-tree
+# image (repo discipline: shared images boot with -snapshot +
+# file.locking=off; locking is already off per-drive above).
+# shellcheck disable=SC2086
+exec "$QEMU" \
+    -M q35 ${ACCEL} ${ACCEL_BACKEND} -cpu max -m 8G -smp ${SMP} -snapshot \
+    $DISP -serial mon:stdio -monitor "${MONITOR:-none}" \
+    -kernel "$KERNEL" -initrd "$IMGDIR/ramdisk.img" \
+    -append "$APPEND" \
+    $DISKS \
+    -nic user,model=virtio-net-pci \
+    -device virtio-keyboard-pci -device virtio-tablet-pci

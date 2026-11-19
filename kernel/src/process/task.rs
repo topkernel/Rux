@@ -1,0 +1,7043 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+//! Task Control Block
+
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::ptr;
+use crate::sync::spinlock::Spinlock;
+use crate::mm::pagemap::AddressSpace;
+use crate::fs::FdTable;
+use crate::signal::{SignalStruct, SigPending};
+use crate::config::TIME_SLICE_TICKS as DEFAULT_TIME_SLICE;
+use alloc::boxed::Box;
+use alloc::alloc::{alloc, dealloc};
+use core::alloc::Layout;
+use core::mem::offset_of;
+use crate::list::ListHead;
+
+/// Kernel stack size - from config
+///
+/// RISC-V typically uses 16KB kernel stack, but we increase to 32KB
+/// because some operations (like FdTable creation) need larger stack space
+pub(crate) const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
+
+// ==================== Stack Cache Implementation ====================
+
+/// Global lock protecting the process tree (children/sibling lists, parent pointers).
+///
+/// Must be held when modifying or traversing the children list of any task.
+/// Do NOT hold across schedule() calls.
+pub static PROCESS_TREE_LOCK: Spinlock<()> = Spinlock::new(());
+
+/// Free stack entries (linked list)
+///
+/// Each entry is stack_bottom, we store next pointer at stack_bottom
+/// This works because stack_bottom is unused (stack grows down from top)
+struct FreeStackEntry {
+    next: *mut FreeStackEntry,
+}
+
+/// Stack cache structure
+struct StackCache {
+    /// Number of cached stacks
+    count: usize,
+    /// Head of free stack list
+    head: *mut FreeStackEntry,
+}
+
+impl StackCache {
+    const fn new() -> Self {
+        Self {
+            count: 0,
+            head: core::ptr::null_mut(),
+        }
+    }
+
+    /// Maximum number of cached stacks
+    const MAX_CACHED_STACKS: usize = 64;
+
+    /// Pop a stack from cache
+    fn pop(&mut self) -> Option<*mut u8> {
+        if self.head.is_null() {
+            return None;
+        }
+        // (canary written at the very bottom AFTER zeroing in stack_cache_alloc)
+        // SAFETY: head is non-null (checked above), entry points to a valid FreeStackEntry
+        // previously pushed via push(), and we hold STACK_CACHE_LOCK.
+        unsafe {
+            let entry = self.head;
+            self.head = (*entry).next;
+            self.count -= 1;
+            Some(entry as *mut u8)
+        }
+    }
+
+    /// Push a stack to cache
+    /// R18-2: stack-overflow canary — written below the usable stack at
+    /// cache-pop time, verified at push time. A smashed canary means some
+    /// task's kernel stack ran past its 32KB into the adjacent heap page
+    /// (the suspected zeroing writer).
+    const STACK_CANARY: u64 = 0xCAFE_F00D_DEAD_BEEF;
+
+    fn push(&mut self, stack_bottom: *mut u8) {
+        if self.count >= Self::MAX_CACHED_STACKS {
+            // Leg-17: on x86_64 route through the packed slab (slot map
+            // + empty-block reclaim); the plain GlobalAlloc dealloc is
+            // the non-slab path (every other arch) and the fallback for
+            // exhaustion-allocated stacks. We hold STACK_CACHE;
+            // KSTACK_BLOCKS nests BELOW it (leaf) and the buddy free
+            // inside runs outside KSTACK_BLOCKS — same STACK_CACHE ->
+            // BUDDY nesting the old dealloc had.
+            #[cfg(target_arch = "x86_64")]
+            {
+                if kstack_slab_free(stack_bottom) {
+                    return;
+                }
+            }
+            // SAFETY: stack_bottom was allocated by stack_cache_alloc() with the same
+            // layout (size=KERNEL_STACK_SIZE, align=16), and we hold STACK_CACHE_LOCK.
+            unsafe {
+                let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
+                    .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
+                dealloc(stack_bottom, layout);
+            }
+            return;
+        }
+        // SAFETY: stack_bottom is a valid pointer previously returned by alloc() and we
+        // hold STACK_CACHE_LOCK. Writing to unused stack bottom region for free list linkage.
+        unsafe {
+            let entry = stack_bottom as *mut FreeStackEntry;
+            (*entry).next = self.head;
+            self.head = entry;
+            self.count += 1;
+        }
+    }
+}
+
+// SAFETY: StackCache is only ever accessed behind STACK_CACHE, which serializes
+// all access. The raw pointer inside is managed under the lock.
+unsafe impl Send for StackCache {}
+
+/// Global stack cache instance (wrapped in Spinlock, no separate lock needed).
+static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
+
+// ===== Leg-17 packed kstack slab — x86_64 ONLY =====
+//
+// The buddy only serves power-of-two blocks, so a non-power-of-two
+// stack request consumes a whole larger block. KERNEL_STACK_SIZE on
+// x86_64 is 128KB (see Kernel.toml kernel_stack_size_x86_64): the
+// interim 80KB carve (3 x 80KB = 240KB per 256KB order-6 block, ~15KB
+// margin) held for OH boots but NOT under LTP — the depth-capped (40)
+// recursive symlink resolution in fs/vfs.rs costs ~2240B of stack per
+// nested hop ≈ 90KB for a maximal chain, past the 80KB bottom before
+// the depth counter can return ELOOP (nftw01 chunk@700 boot panic,
+// 4/4 deterministic, 2026-11-02; rsp 19KB below the bottom, frames
+// torn through a recycled adjacent slot, ret to rip=0). 128KB restores
+// the riscv64-parity floor this file's history already documents for
+// deep-nesting kernels.
+//
+// At 128KB the carver serves TWO slots per 256KB order-6 block with
+// zero tail waste, and the buddy fallback is one perfectly-packed
+// order-5 block (the slab is then pure bookkeeping; kept so exhausted
+// order-6 blocks still fall back cleanly).
+//
+// Slot state lives in a side table under KSTACK_BLOCKS — the stack
+// pages themselves stay pure (R18-2 canary still sits at each SLOT
+// bottom). Lock order: KSTACK_BLOCKS is a leaf; the buddy block
+// alloc/free runs OUTSIDE it (take the lock, pick/insert, drop, then
+// touch the buddy). Fully-empty blocks return to the buddy.
+#[cfg(target_arch = "x86_64")]
+const KSTACK_BLOCK: usize = 262144; // order-6, 64 pages
+#[cfg(target_arch = "x86_64")]
+const KSTACK_SLOTS: usize = 2;
+// The slot carve must fit the block (compile-time guard against a
+// future kernel_stack_size_x86_64 edit, e.g. 96KB would need 288KB).
+// compat-r3: 128KB stacks again (the 80KB/3-slot packing's margin was
+// an OH-load figure; the LTP class overflowed it — nftw01's wild-jump
+// boot panic + the nice=-120 corruption signature, see Kernel.toml).
+// Two 128KB slots per 256KB block: exact fit, zero carve waste.
+#[cfg(target_arch = "x86_64")]
+const _: () = assert!(KSTACK_SLOTS * KERNEL_STACK_SIZE <= KSTACK_BLOCK);
+
+#[cfg(target_arch = "x86_64")]
+struct KstackBlocks {
+    bases: alloc::vec::Vec<*mut u8>,
+    maps: alloc::vec::Vec<u8>,
+}
+
+// SAFETY: the raw block bases are only ever dereferenced as stack
+// storage handed out one slot at a time under the KSTACK_BLOCKS lock —
+// same contract as StackCache's raw pointers behind their lock.
+#[cfg(target_arch = "x86_64")]
+unsafe impl Send for KstackBlocks {}
+
+#[cfg(target_arch = "x86_64")]
+static KSTACK_BLOCKS: Spinlock<KstackBlocks> = Spinlock::new(KstackBlocks {
+    bases: alloc::vec::Vec::new(),
+    maps: alloc::vec::Vec::new(),
+});
+
+/// Carve one stack out of a packed block (or fall back to a whole
+/// order-5 buddy block when the slab cannot grow — keeps booting on
+/// heap exhaustion instead of dying).
+#[cfg(target_arch = "x86_64")]
+fn kstack_slab_alloc() -> *mut u8 {
+    // Fast path: existing block with a free slot.
+    {
+        let mut g = KSTACK_BLOCKS.lock();
+        for bi in 0..g.maps.len() {
+            if g.maps[bi] == 0b111 {
+                continue;
+            }
+            for s in 0..KSTACK_SLOTS {
+                if g.maps[bi] & (1 << s) == 0 {
+                    g.maps[bi] |= 1 << s;
+                    // SAFETY: block base is a live allocation of
+                    // KSTACK_BLOCK bytes; slot s fits (const assert above).
+                    return unsafe { g.bases[bi].add(s * KERNEL_STACK_SIZE) };
+                }
+            }
+        }
+    }
+    // Slow path: new order-6 block from the buddy (OUTSIDE the slab
+    // lock — no lock nesting with BUDDY).
+    // SAFETY: layout is a valid power-of-two-multiple of PAGE_SIZE.
+    let block = unsafe {
+        alloc(
+            Layout::from_size_align(KSTACK_BLOCK, 4096)
+                .unwrap_or(Layout::new::<[u8; KSTACK_BLOCK]>()),
+        )
+    };
+    if block.is_null() {
+        return core::ptr::null_mut();
+    }
+    {
+        let mut g = KSTACK_BLOCKS.lock();
+        g.bases.push(block);
+        g.maps.push(0b001); // slot 0 taken by this allocation
+    }
+    block
+}
+
+/// Return a slot to its block; a fully-empty block goes back to the
+/// buddy. Returns false when the address is not a slab slot (the
+/// fallback path allocated it as a plain order-5 block — caller frees
+/// it through the normal GlobalAlloc path).
+#[cfg(target_arch = "x86_64")]
+fn kstack_slab_free(bottom: *mut u8) -> bool {
+    let addr = bottom as usize;
+    let mut free_block: *mut u8 = core::ptr::null_mut();
+    {
+        let mut g = KSTACK_BLOCKS.lock();
+        let mut bi = 0usize;
+        let mut found = false;
+        while bi < g.bases.len() {
+            let base = g.bases[bi] as usize;
+            if addr >= base && addr < base + KSTACK_BLOCK {
+                found = true;
+                let off = addr - base;
+                if off % KERNEL_STACK_SIZE != 0 {
+                    return true; // foreign pointer inside a slab block:
+                    // consume it (do NOT touch the slot map)
+                }
+                let s = off / KERNEL_STACK_SIZE;
+                if s >= KSTACK_SLOTS || g.maps[bi] & (1 << s) == 0 {
+                    return true; // double free / not allocated: consume
+                }
+                g.maps[bi] &= !(1 << s);
+                if g.maps[bi] == 0 {
+                    free_block = g.bases[bi];
+                    g.bases.swap_remove(bi);
+                    g.maps.swap_remove(bi);
+                }
+                break;
+            }
+            bi += 1;
+        }
+        if !found {
+            return false; // not our memory: plain buddy allocation
+        }
+    }
+    if !free_block.is_null() {
+        // Buddy free OUTSIDE the slab lock.
+        // SAFETY: block was allocated by kstack_slab_alloc with the
+        // same layout and is now fully empty.
+        unsafe {
+            dealloc(
+                free_block,
+                Layout::from_size_align(KSTACK_BLOCK, 4096)
+                    .unwrap_or(Layout::new::<[u8; KSTACK_BLOCK]>()),
+            );
+        }
+    }
+    true
+}
+
+/// Packed-slab state for the SC-ANAT beat line (rux:schb (retired dfx=schb)):
+/// (blocks, live slots, fallback note). x86_64 only — every other arch
+/// keeps the plain power-of-two buddy allocation and reports zeros.
+#[cfg(target_arch = "x86_64")]
+pub fn kstack_slab_stats() -> (u64, u64, u64) {
+    let g = KSTACK_BLOCKS.lock();
+    let mut live: u64 = 0;
+    for bm in g.maps.iter() {
+        live += bm.count_ones() as u64;
+    }
+    (g.bases.len() as u64, live, 0)
+}
+
+/// Non-x86_64 shim: no packed slab — the beat line stays format-stable
+/// across arches (kb=0 ks=0 reads as "no slab", which is the truth).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn kstack_slab_stats() -> (u64, u64, u64) {
+    (0, 0, 0)
+}
+
+// Leg-16 kernel-heap anatomy (rux:schb (retired dfx=schb)): live kernel-stack count and the
+// boot-max stack high-water in bytes. The high-water probe ZEROES each
+// fresh stack at alloc (outside every lock) and scans for the first
+// nonzero word from the bottom at free time — the depth distribution is
+// the evidence for any KERNEL_STACK_SIZE reduction, which at pidmax ~4800
+// is 128KB x ~2860 live tasks = ~358MB of the ~900MB heap floor (the
+// single largest per-task item; see SC-SESSIONS leg-15 close-out).
+static KSTACK_LIVE: AtomicU64 = AtomicU64::new(0);
+static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
+
+/// Leg-16 anatomy: (live kernel-stack count, boot-max high-water bytes).
+/// Both stay 0 unless rux:schb (retired dfx=schb) armed the probe at alloc time.
+pub fn kstack_anat() -> (u64, u64) {
+    (KSTACK_LIVE.load(Ordering::Relaxed), KSTACK_HW.load(Ordering::Relaxed))
+}
+
+/// Plain buddy allocation of one kernel stack (the pre-slab path).
+/// On x86_64 this is only the packed-slab exhaustion fallback (the
+/// 128KB request is one perfectly-packed order-5 block); elsewhere it
+/// is THE allocation path.
+fn plain_kstack_alloc() -> *mut u8 {
+    // SAFETY: Layout is valid; null check follows.
+    unsafe {
+        let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
+            .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
+        alloc(layout)
+    }
+}
+
+/// Allocate a kernel stack (with caching)
+fn stack_cache_alloc() -> *mut u8 {
+    // Reuse is DISABLED: freed stacks re-enter the cache while the dying
+    // task can still be executing its final sret/exit path on that stack
+    // (reaper/sweep races), and a pop hands the SAME memory to a new task —
+    // merging two tasks' kernel contexts. Fingerprint (reproduced twice,
+    // incl. dash-parallel): user-mode SIGSEGV with epc/ra pointing into
+    // kernel uaccess code (__copy_to_user/__clear_user fixup stubs) — a
+    // user sret restored a pt_regs that was a KERNEL-mode fault frame
+    // written by the new owner of the reused stack. Cost of disabling:
+    // bounded memory (cache grows with peak task churn); cost of enabling
+    // with the early-free unfixed: cross-task context corruption.
+    //
+    // With reuse disabled the lock guards nothing on this path, so the
+    // heap allocation (BUDDY nest) and the leg-16 probe zeroing run
+    // OUTSIDE it — no 128KB memset under a spinlock.
+    {
+        let mut cache = STACK_CACHE.lock();
+        let _ = &mut cache;
+    }
+    // Leg-17: on x86_64 stacks come from the packed slab first (two
+    // 128KB slots per 256KB order-6 block — see the slab block comment);
+    // a whole order-5 buddy block is only the exhaustion fallback.
+    // Every other arch keeps the plain power-of-two allocation, where
+    // 128KB is already one perfectly-packed order-5 block.
+    #[cfg(target_arch = "x86_64")]
+    let bottom = {
+        let mut b = kstack_slab_alloc();
+        if b.is_null() {
+            b = plain_kstack_alloc();
+        }
+        b
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let bottom = plain_kstack_alloc();
+    if !bottom.is_null() {
+        // SCRIBBLE TRAP scan side (oh-launch round 9): if the scribble
+        // arm painted this stack at free time, any NON-poison word now
+        // was written AFTER the free — by the early-free dying task or
+        // by the recycled-frame writer. Report the first hits with the
+        // previous owner (the FREED_STACKS ring names it). The scan runs
+        // BEFORE the leg-16 zeroing and the canary write; armed boots
+        // only; cold allocation path.
+        let scribble_scan_known = crate::trace::EVENT_SCRIBBLE.armed()
+            && freed_stack_containing(bottom as usize + KERNEL_STACK_SIZE / 2).is_some();
+        if scribble_scan_known {
+            // Only slots the FREED_STACKS ring knows were painted — a
+            // fresh slab carve was never painted and its stale content
+            // is not evidence (fq1's 16 first-boot hits were all
+            // prev-owner-not-found false positives).
+            let base = bottom as usize;
+            let mut hits = 0u32;
+            let mut first_off = 0usize;
+            let mut first_val = 0u64;
+            // SAFETY: the whole stack is KERNEL_STACK_SIZE bytes of
+            // readable memory owned by this allocation. Word 0 is the
+            // canary slot — never painted (R87 paint skips it so
+            // stack_cache_free's check stays meaningful) and still
+            // holding the old canary at scan time — skip it.
+            unsafe {
+                let words = KERNEL_STACK_SIZE / 8;
+                for i in 1..words {
+                    let v = core::ptr::read_volatile((base + i * 8) as *const u64);
+                    if v != 0xA5A5_A5A5_A5A5_A5A5 {
+                        if hits == 0 {
+                            first_off = i * 8;
+                            first_val = v;
+                        }
+                        hits += 1;
+                        if hits >= 8 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if hits > 0 {
+                let prev = freed_stack_containing(base + KERNEL_STACK_SIZE / 2)
+                    .map(|(_, pid, age)| (pid, age))
+                    .unwrap_or((0, 0));
+                crate::pr_err!(
+                    "KSTACK-POSTFREE-WRITE bottom={:#x} first_off={:#x} val={:#x} hits={} prev_owner_pid={} freed_age={}j",
+                    base,
+                    first_off,
+                    first_val,
+                    hits,
+                    prev.0,
+                    prev.1
+                );
+            }
+        }
+        if crate::trace::EVENT_SCHB.armed()
+            && crate::trace::EVENT_KSPROBE.armed()
+        {
+            // Fresh stack is visible to nobody else yet: zero it so the
+            // free-side scan can measure the true high-water, and count it.
+            // ~3 spawns/s x 128KB of memset across the OH boot — negligible
+            // next to the fork itself.
+            unsafe { core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE) };
+            KSTACK_LIVE.fetch_add(1, Ordering::Relaxed);
+        }
+        // fresh alloc also gets a canary
+        unsafe { core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY) };
+    }
+    bottom
+}
+
+/// DFX (LTP chunk@700 hunt, 2026-11-02): ring of recently freed kernel
+/// stacks, so a kernel fault with rsp inside a freed-but-recycled stack
+/// names the freer. Diagnostic only; cold path.
+pub struct FreedStackRec {
+    pub bottom: usize,
+    pub top: usize,
+    pub pid: u32,
+    pub free_jiffies: u64,
+}
+static FREED_STACKS: Spinlock<([FreedStackRec; 32], usize)> =
+    Spinlock::new(([const { FreedStackRec { bottom: 0, top: 0, pid: 0, free_jiffies: 0 } }; 32], 0));
+
+/// Record a stack free (call before the memory is reusable).
+pub fn note_kstack_freed(bottom: usize, top: usize, pid: u32) {
+    let mut g = FREED_STACKS.lock();
+    let idx = g.1;
+    g.0[idx].bottom = bottom;
+    g.0[idx].top = top;
+    g.0[idx].pid = pid;
+    g.0[idx].free_jiffies = crate::drivers::timer::get_jiffies();
+    g.1 = (idx + 1) % 32;
+}
+
+/// Read-side lookup for fault diagnostics: the most recent record whose
+/// range contains `sp`, if any.
+pub fn freed_stack_containing(sp: usize) -> Option<(usize, u32, u64)> {
+    let g = FREED_STACKS.lock();
+    let now = crate::drivers::timer::get_jiffies();
+    let mut best: Option<(u64, usize, u32, u64)> = None;
+    for r in g.0.iter() {
+        if r.bottom != 0 && sp >= r.bottom && sp < r.top {
+            match best {
+                Some((j, ..)) if j >= r.free_jiffies => {}
+                _ => best = Some((r.free_jiffies, r.top, r.pid, now.wrapping_sub(r.free_jiffies))),
+            }
+        }
+    }
+    best.map(|(_, top, pid, age)| (top, pid, age))
+}
+
+/// Free a kernel stack (with caching)
+fn stack_cache_free(stack_bottom: *mut u8) {
+    // R18-2: verify the canary before returning the stack to the cache —
+    // a smashed value is direct proof the task ran past its stack into
+    // the adjacent heap page.
+    // SAFETY: stack_bottom is a valid stack base from alloc; reading the
+    // first 8 bytes is in bounds.
+    unsafe {
+        let v = core::ptr::read_volatile(stack_bottom as *const u64);
+        if v != StackCache::STACK_CANARY {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"STACK-OVERFLOW canary=0x";
+            for &b in MSG { putchar(b); }
+            let mut sh = 64;
+            while sh > 0 {
+                sh -= 4;
+                let nb = ((v >> sh) & 0xF) as u8;
+                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            }
+            const MB: &[u8] = b" bottom=0x";
+            for &b in MB { putchar(b); }
+            {
+                let a2 = stack_bottom as usize;
+                let mut sh3 = 64;
+                while sh3 > 0 { sh3 -= 4; let nb = ((a2 >> sh3) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+            }
+            const M2: &[u8] = b" pid=";
+            for &b in M2 { putchar(b); }
+            if let Some(t) = crate::sched::current() {
+                let pid = unsafe { (*t).pid() };
+                let mut vv = pid as usize;
+                if vv == 0 { putchar(b'0'); }
+                let mut dd = [0u8; 10]; let mut kk = 0;
+                while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                // frame walk naming the deepest live frames
+                crate::dfx::backtrace::walk_stack_trace(&mut |pc, _fp| {
+                    let _ = pc;
+                });
+            }
+            putchar(b'\n');
+            // Identify the overflower: dump the bottom 256 bytes of the
+            // stack above the canary — return addresses of the deepest
+            // frames survive there.
+            unsafe {
+                const M3: &[u8] = b" tail:";
+                for &b in M3 { putchar(b); }
+                let base = stack_bottom as usize;
+                for off in (8..256).step_by(8) {
+                    let ra = core::ptr::read_volatile((base + off) as *const u64);
+                    if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
+                        putchar(b' ');
+                        let mut sh2 = 64;
+                        while sh2 > 0 {
+                            sh2 -= 4;
+                            let nb = ((ra >> sh2) & 0xF) as u8;
+                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                        }
+                    }
+                }
+                putchar(b'\n');
+            }
+        }
+    }
+    // Leg-16 anatomy (rux:schb (retired dfx=schb),ksprobe): the high-water scan + record
+    // stash lives in free_kernel_stack (needs self for comm/pid); this
+    // side only keeps the live count honest for the SC-ANAT kN column.
+    if crate::trace::EVENT_SCHB.armed()
+        && crate::trace::EVENT_KSPROBE.armed()
+    {
+        KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
+    }
+    let mut cache = STACK_CACHE.lock();
+    // SAFETY: stack_bottom was allocated by stack_cache_alloc().
+    cache.push(stack_bottom);
+}
+
+/// Process state flags (bitmap form)
+///
+/// Bitmap representation for process states, allowing combined states
+/// e.g.: TASK_UNINTERRUPTIBLE | __TASK_STOPPED
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskState(u32);
+
+impl TaskState {
+    /// Runnable state (TASK_RUNNING)
+    /// Process is running on CPU or waiting in run queue
+    pub const RUNNING: u32 = 0x00000000;
+
+    /// Interruptible sleep (TASK_INTERRUPTIBLE)
+    /// Process is waiting for an event, can be woken by signal
+    pub const INTERRUPTIBLE: u32 = 0x00000001;
+
+    /// Uninterruptible sleep (TASK_UNINTERRUPTIBLE)
+    /// Process is waiting for an event, cannot be woken by signal
+    pub const UNINTERRUPTIBLE: u32 = 0x00000002;
+
+    /// Stopped state (__TASK_STOPPED)
+    /// Process stopped by signal (SIGSTOP, SIGTSTP, etc.)
+    pub const STOPPED: u32 = 0x00000004;
+
+    /// Traced state (__TASK_TRACED)
+    /// Process is being traced by ptrace
+    pub const TRACED: u32 = 0x00000008;
+
+    /// Exit zombie (EXIT_ZOMBIE)
+    /// Process has exited but parent hasn't waited yet
+    pub const ZOMBIE: u32 = 0x00000020;
+
+    /// Exit dead (EXIT_DEAD)
+    /// Process final state, will be reclaimed
+    pub const DEAD: u32 = 0x00000010;
+
+    /// Newly constructed, not yet on a run queue (Linux TASK_NEW)
+    ///
+    /// R52 (fork enqueue gap): `new_task_at` writes this INSTEAD of
+    /// RUNNING. Between construction and `enqueue_task` the task is
+    /// already visible in the pid hash with a valid pid — previously it
+    /// also carried state=RUNNING there, so ANY concurrent wake routed
+    /// through Task::wake_up / signal_wake_up_state reached the R46
+    /// "RUNNING-phantom" heal and LINKED THE HALF-BUILT CHILD (no
+    /// thread.sp/ra yet, no mm); a CPU then picked it and context
+    /// switched onto constructor values — the R33/R48 wedge family —
+    /// while do_clone's own enqueue was silently eaten by the class
+    /// on_rq guard (result ignored at fork.rs:449). TASK_NEW is refused
+    /// by every wake route (not sleeping, not STOPPED, not RUNNING),
+    /// matching Linux: a half-built task cannot be woken, killed, or
+    /// OOM-selected. The NEW→RUNNING transition happens only inside
+    /// `enqueue_task_locked`, atomically with the class insert under
+    /// the GRQ lock.
+    pub const TASK_NEW: u32 = 0x00000080;
+
+    /// Create new state
+    #[inline]
+    pub const fn new(bits: u32) -> Self {
+        TaskState(bits)
+    }
+
+    /// Get bit value
+    #[inline]
+    pub fn bits(&self) -> u32 {
+        self.0
+    }
+
+    /// Check if contains specified flag
+    #[inline]
+    pub fn contains(&self, flag: u32) -> bool {
+        (self.0 & flag) != 0
+    }
+
+    /// Check if running
+    #[inline]
+    pub fn is_running(&self) -> bool {
+        self.0 == Self::RUNNING
+    }
+
+    /// Check if sleeping (interruptible or uninterruptible)
+    #[inline]
+    pub fn is_sleeping(&self) -> bool {
+        self.contains(Self::INTERRUPTIBLE) || self.contains(Self::UNINTERRUPTIBLE)
+    }
+
+    /// Check if exited (zombie or dead)
+    #[inline]
+    pub fn is_dead(&self) -> bool {
+        self.contains(Self::ZOMBIE) || self.contains(Self::DEAD)
+    }
+
+    /// Check if can be woken by signal
+    #[inline]
+    pub fn is_interruptible(&self) -> bool {
+        self.contains(Self::INTERRUPTIBLE)
+    }
+}
+
+impl Default for TaskState {
+    fn default() -> Self {
+        TaskState::new(TaskState::RUNNING)
+    }
+}
+
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SchedPolicy {
+    /// Normal time-sharing scheduling (SCHED_NORMAL)
+    Normal = 0,
+
+    /// FIFO real-time scheduling (SCHED_FIFO)
+    Fifo = 1,
+
+    /// RR real-time scheduling (SCHED_RR)
+    Rr = 2,
+
+    /// Batch scheduling (SCHED_BATCH)
+    Batch = 3,
+
+    /// Idle scheduling (SCHED_IDLE)
+    Idle = 5,
+
+    /// Deadline scheduling (SCHED_DEADLINE)
+    Deadline = 6,
+}
+
+/// Task flags (task flags)
+///
+pub mod task_flags {
+    use bitflags::bitflags;
+
+    bitflags! {
+        pub struct TaskFlags: u32 {
+            const PF_KTHREAD     = 0x00200000; /* I am a kernel thread */
+            const PF_EXITING     = 0x00000004; /* Getting shut down */
+            const PF_VCPU        = 0x00000010; /* I'm a virtual CPU */
+            const PF_WQ_WORKER   = 0x00000020; /* I'm a workqueue worker */
+            /* Kernel-preemption recursion guard (sched::schedule sets it
+             * around __schedule; the IRQ-exit hook refuses to re-enter a
+             * task that is already inside its own schedule). A task-flag,
+             * deliberately NOT a preempt_count bit: leaked count bits
+             * block both preemption AND the __schedule switch-out
+             * discipline, while a leaked flag here only disables
+             * preemption for the task. */
+            const TIF_IN_SCHED   = 0x00400000;
+        }
+    }
+}
+
+/// Process identifier (PID type)
+///
+pub type Pid = u32;
+
+/// Process credentials.
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub struct Cred {
+    pub uid: u32,
+    pub gid: u32,
+    pub euid: u32,
+    pub egid: u32,
+    pub suid: u32,
+    pub sgid: u32,
+    pub fsuid: u32,
+    pub fsgid: u32,
+    /// Supplementary group IDs
+    pub groups: alloc::vec::Vec<u32>,
+    // Capability sets (POSIX.1e)
+    pub cap_inheritable: crate::security::capability::Cap,
+    pub cap_permitted:   crate::security::capability::Cap,
+    pub cap_effective:   crate::security::capability::Cap,
+    pub cap_bounding:    crate::security::capability::Cap,
+    pub cap_ambient:     crate::security::capability::Cap,
+    /// PR_SET_KEEPCAPS: keep capability sets across a uid transition away
+    /// from 0 (libcap-ng's capng_change_id() sets this before dropping to
+    /// the daemon user, then clears it).
+    pub keepcaps: bool,
+    /// PR_SET_SECUREBITS bitmask (SECBIT_*): tracked for prctl parity;
+    /// SECBIT_KEEP_CAPS mirrors `keepcaps`. OH's init sets
+    /// SECBIT_NO_SETUID_FIXUP(+_LOCKED) and SECBIT_KEEP_CAPS(+_LOCKED)
+    /// on every display service (composer_host, render_service,
+    /// bootanimation) before exec — EINVAL there aborted the service
+    /// with INIT_EKEEPCAP before it ever ran.
+    pub securebits: u32,
+    // Key-retention-service slots (ipc/keys.rs). Stored on the cred so
+    // fork inheritance is the cred clone (reference process_keys.c);
+    // exec clears the thread keyring (exec_keys()). Serial 0 is never
+    // a valid key, but Option keeps "never set" explicit for the
+    // session-lookup auto-install logic.
+    pub thread_keyring: Option<u32>,
+    pub process_keyring: Option<u32>,
+    pub session_keyring: Option<u32>,
+    /// KEYCTL_SET_REQKEY_KEYRING default (cred->jit_keyring in the
+    /// reference): which keyring a future request_key() links into when
+    /// the caller passes dest=0. KEY_REQKEY_DEFL_DEFAULT = 0.
+    pub reqkey_defl: i32,
+}
+
+/// SECBIT_KEEP_CAPS (bit 4) in the prctl securebits encoding.
+pub const SECBIT_KEEP_CAPS: u32 = 1 << 4;
+/// SECBIT_NO_SETUID_FIXUP (bit 2) and its lock (bit 3) in the prctl
+/// securebits encoding (linux/securebits.h: the prctl argument is
+/// issecure_mask(X) = 1 << X, with SECURE_NOROOT=0, SECURE_NO_SETUID_FIXUP=2,
+/// SECURE_KEEP_CAPS=4 — NOT the raw X values).
+pub const SECBIT_NO_SETUID_FIXUP: u32 = 1 << 2;
+pub const SECBIT_NO_SETUID_FIXUP_LOCKED: u32 = 1 << 3;
+
+impl Cred {
+    /// Create credential for init (PID 0) / kernel threads.
+    /// All capabilities are granted (root-equivalent).
+    pub fn new_init() -> Self {
+        Self {
+            uid: 0, gid: 0,
+            euid: 0, egid: 0,
+            suid: 0, sgid: 0,
+            fsuid: 0, fsgid: 0,
+            groups: alloc::vec::Vec::new(),
+            cap_inheritable: crate::security::capability::Cap::EMPTY,
+            cap_permitted:   crate::security::capability::Cap::FULL,
+            cap_effective:   crate::security::capability::Cap::FULL,
+            cap_bounding:    crate::security::capability::Cap::FULL,
+            cap_ambient:     crate::security::capability::Cap::EMPTY,
+            keepcaps: false,
+            securebits: 0,
+            thread_keyring: None,
+            process_keyring: None,
+            session_keyring: None,
+            reqkey_defl: 0,
+        }
+    }
+
+    /// True when the setuid-away-from-root capability fixup is suppressed —
+    /// any of PR_SET_KEEPCAPS, SECBIT_KEEP_CAPS (mirrored into `keepcaps`
+    /// by prctl), or SECBIT_NO_SETUID_FIXUP(+_LOCKED). Linux's
+    /// cap_emulate_setxuid skips the permitted/effective clearing when
+    /// issecure(SECURE_NO_SETUID_FIXUP); OH's init programs exactly that
+    /// bit (KeepCapability → prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP
+    /// | _LOCKED)) on every setuid service before dropping to the service
+    /// uid and then capset()ing the service's configured capability list
+    /// (installs.cfg: DAC_OVERRIDE/CHOWN/FOWNER/SYS_ADMIN). When only
+    /// PR_SET_KEEPCAPS is honored, setuid clears the sets and the capset
+    /// gets EPERM — init kills the child with "failed to set
+    /// capabilities" (exit 255), which crash-looped the `installs`
+    /// bundle-installer SA (SA 511) and left BMS with no installed
+    /// bundles (bm dump / aa start both fail downstream).
+    pub fn keeps_caps_on_setuid(&self) -> bool {
+        self.keepcaps
+            || (self.securebits
+                & (SECBIT_NO_SETUID_FIXUP | SECBIT_NO_SETUID_FIXUP_LOCKED))
+                != 0
+    }
+
+    /// Create credential with no capabilities (for user processes).
+    pub fn new_user(uid: u32, gid: u32) -> Self {
+        Self {
+            uid, gid,
+            euid: uid, egid: gid,
+            suid: uid, sgid: gid,
+            fsuid: uid, fsgid: gid,
+            groups: alloc::vec::Vec::new(),
+            cap_inheritable: crate::security::capability::Cap::EMPTY,
+            cap_permitted:   crate::security::capability::Cap::EMPTY,
+            cap_effective:   crate::security::capability::Cap::EMPTY,
+            cap_bounding:    crate::security::capability::Cap::FULL,
+            cap_ambient:     crate::security::capability::Cap::EMPTY,
+            keepcaps: false,
+            securebits: 0,
+            thread_keyring: None,
+            process_keyring: None,
+            session_keyring: None,
+            reqkey_defl: 0,
+        }
+    }
+
+    /// Check if a gid matches egid or any supplementary group
+    pub fn in_group(&self, gid: u32) -> bool {
+        if self.egid == gid {
+            return true;
+        }
+        self.groups.iter().any(|&g| g == gid)
+    }
+}
+
+// ==================== thread_info style flags ====================
+
+/// TIF_SIGPENDING - has pending signal
+pub const TIF_SIGPENDING: u32 = 0;
+/// TIF_NEED_RESCHED - needs rescheduling
+pub const TIF_NEED_RESCHED: u32 = 1;
+/// TIF_NOTIFY_RESUME - notify before returning to user mode
+pub const TIF_NOTIFY_RESUME: u32 = 2;
+/// TIF_UPROBE - uprobe pending
+pub const TIF_UPROBE: u32 = 3;
+/// TIF_MEMDIE - exiting (out of memory)
+pub const TIF_MEMDIE: u32 = 4;
+
+/// sc135 (Session Q): length of the per-task all-syscalls nr ring
+/// (Task::last_calls). Shared by the dispatch-side writer and the
+/// APP-PARK / thread-exit / APP-THR dump readers so the ring length
+/// lives in exactly one place.
+pub const LAST_CALLS_LEN: usize = 96;
+
+/// sc138 (Session Q): length of the per-task FILTERED init ring
+/// (Task::init_calls). The unfiltered last_calls ring drowns in the
+/// parked child's {clock_gettime, writev, connect} retry loop — 96 raw
+/// entries see only loop. init_calls SKIPS nr 113 (clock_gettime), 66
+/// (writev), 203 (connect) always, and 98 (futex) when a0 is a
+/// main-stack-top uaddr (the cond retry sites), so the ring retains the
+/// init sequence proper: loader mmaps, prctls, mprotects, dlopen
+/// openat/read/mmap cascades — the byte-diff substrate for working-vs-
+/// parked children. init_a0 keeps the first argument of each entry
+/// (prctl option / mmap addr / futex uaddr).
+pub const INIT_CALLS_LEN: usize = 512;
+
+/// sc143 (Session Q): one-shot latch of the task's FIRST 64 filtered
+/// calls (the birth window: fork-exit -> hooks -> first dlopens) that
+/// survives later loop-churn overwriting the deep ring.
+pub const BIRTH_CALLS_LEN: usize = 64;
+
+/// R56-heal pick-state machine values (Task::ti_pick_state).
+/// PICKED: published by mark_picked_on_cpu under the GRQ.
+/// LIVE: affirmed by __switch_to's CAS(0 -> 1) right before the register
+/// restore (or by the next == prev fast-path repick publish).
+/// REVOKED: the harvester's CAS(0 -> 2) — the picker's switch-in aborts.
+pub const PICK_PICKED: u32 = 0;
+pub const PICK_LIVE: u32 = 1;
+pub const PICK_REVOKED: u32 = 2;
+
+/// R56-heal: pin the layout facts the aligned ownership-qword stores
+/// (publish_pick_ownership / release_pick_ownership, and the switch asm)
+/// rely on, at compile time — ti_on_cpu is 8-byte aligned and
+/// running_on_cpu sits at +4 inside the same qword.
+const _: () = {
+    assert!(core::mem::offset_of!(Task, ti_on_cpu) % 8 == 0);
+    assert!(
+        core::mem::offset_of!(Task, running_on_cpu)
+            == core::mem::offset_of!(Task, ti_on_cpu) + 4
+    );
+    assert!(core::mem::offset_of!(Task, ti_pick_state) % 4 == 0);
+};
+
+/// Task Control Block
+///
+///
+/// Core field correspondence:
+/// - state: task_struct::state
+/// - pid: task_struct::pid
+/// - tgid: task_struct::tgid (thread group ID)
+/// - prio: task_struct::prio (dynamic priority)
+/// - static_prio: task_struct::static_prio (static priority)
+/// - normal_prio: task_struct::normal_prio
+/// - policy: task_struct::policy
+/// - context: cpu_context
+/// - mm: task_struct::mm (memory descriptor)
+/// - files: task_struct::files (file descriptor table)
+/// - signal: task_struct::signal (signal handling)
+///
+/// Compatibility design:
+/// - thread_info style fields at struct beginning
+/// - tp register points to Task struct
+/// - Kernel stack managed via kernel_sp field
+#[repr(C)]
+pub struct Task {
+    // ==================== thread_info style fields (offset 0) ====================
+    // These fields must be at struct beginning for fast access via tp
+
+    /// Process flags (thread_info.flags)
+    /// Bit definitions: TIF_SIGPENDING, TIF_NEED_RESCHED, etc.
+    ti_flags: AtomicU32,
+
+    /// Preemption count (thread_info.preempt_count)
+    /// > 0 means preemption disabled
+    ti_preempt_count: core::sync::atomic::AtomicI32,
+
+    /// Kernel stack pointer (thread_info.kernel_sp)
+    /// Points to top of kernel stack
+    ti_kernel_sp: core::sync::atomic::AtomicU64,
+
+    /// User stack pointer (thread_info.user_sp)
+    /// Saves user mode sp, used for trap return
+    ti_user_sp: core::sync::atomic::AtomicU64,
+
+    /// Which CPU running on (thread_info.cpu)
+    ti_cpu: core::sync::atomic::AtomicI32,
+
+    /// CPU affinity mask — bit i set = CPU i allowed
+    cpus_allowed: core::sync::atomic::AtomicU32,
+
+    /// jiffies of this task's most recent task-context base-count DRAIN
+    /// (the outermost guard's 1->0 release — a live lock pair completing).
+    /// phantom-bits (2026-11-01): the tick-side PREEMPT-HEAL's cumulative
+    /// observation bar false-fired on hot lock users (pb3: 887 heals/boot,
+    /// 96% on 4 lock-hot pids, oage_jif=0-1 — a fresh 0->1 acquire inside
+    /// the "2 s hold", i.e. the base drained between ticks and the 100 Hz
+    /// sampler never caught the gaps). Every false heal strips a LIVE
+    /// guard, marks need_resched, and preempts the holder MID-SECTION —
+    /// stranding its lock for every other CPU (the both-CPU
+    /// spin/deadlock amplifier). The heal now requires the base to have
+    /// been nonzero CONTIGUOUSLY: any real 1->0 release stamps this field
+    /// and re-arms the window. Direct zeroings (heal paths) do NOT stamp
+    /// (they bypass sub_preempt_count_at), so genuine phantoms — whose
+    /// +1 never drains — still heal after 2 s.
+    ti_pc_zero_jif: AtomicU64,
+
+    /// CONSECUTIVE-PRESENT observation run for the SOFTIRQ field
+    /// (stress-port r3, 2026-11-02): number of the task's own-CPU tick
+    /// observations, in a row, that saw this field PRESENT since the
+    /// last absence / legal drain / external zeroing. The tick-side
+    /// PREEMPT-HEAL gates on run >= 200. This replaces the
+    /// absence-stamp-age bar, which three producer families defeated:
+    /// (1) stamp-age accrued for FREE while a task was off-CPU (the
+    /// memory2/hunt2 strand: a task parked mid-section through a 100 s
+    /// pick-skip strand resumed "instantly stale" and its first
+    /// post-resume tick healed a LIVE guard — spinlock.rs underflow at
+    /// the page-allocator zone lock); (2) jiffies is timebase-DERIVED
+    /// (timer/x86_64.rs), so a >2 s host steal window inflates stamp
+    /// age by 200+ ticks with zero ticks delivered — steal-window
+    /// false-fires on live guards; (3) the pb3 release-side re-arm
+    /// stored the SUPERSEDED ti_pc_zero_jif field (see below), so the
+    /// per-field bar never actually re-armed on legal 1->0 drains and
+    /// the 100 Hz sampler's missing of microsecond absent-gaps between
+    /// guard pairs produced 200-present-sample streaks on lock-hot
+    /// tasks (memory-hunt2: a heal storm, oage_jif=1 on every line —
+    /// a fresh 0->1 acquire one jiffy before each "2 s hold" heal).
+    /// Observation counting is immune to all three by construction:
+    /// off-CPU and stolen CPUs deliver no ticks (run frozen), and the
+    /// release-side reset (sub_preempt_count_at, on the field this
+    /// gate reads) makes every legal drain re-arm regardless of
+    /// sampler luck. The parked-with-nonzero-count shape stays owned
+    /// by the parkwalk's 4 s PARKED-HEAL, which needs no tick.
+    ti_pc_sirq_present_run: AtomicU64,
+
+    /// Same run counter for the HARDIRQ nesting field (bumped only when
+    /// the extra-nesting predicate `>= 2 * HARDIRQ_OFFSET` holds at
+    /// tick, so the observer's own in-flight level never counts). A
+    /// phantom hardirq level with run >= 200 heals to exactly one kept
+    /// level (ti_preempt_count_keep_tick_nesting — the still-pending
+    /// irq_exit sub pairs against the kept level).
+    ti_pc_hirq_present_run: AtomicU64,
+
+    /// Same run counter for the base PREEMPT field. Reset by: tick
+    /// absent-sample, the legal outermost 1->0 release
+    /// (sub_preempt_count_at), every external zeroing
+    /// (ti_preempt_count_zero / clear_base / keep_tick_nesting), and
+    /// the underflow clamp. Heals only at run >= 200.
+    ti_pc_pirq_present_run: AtomicU64,
+
+    /// khungtaskd bookkeeping (review批次8): timestamp (ns) when this task
+    /// was FIRST seen in D-state in the current window; 0 = not in D-state.
+    /// Per-task storage replaces the old pid-indexed side table — real pids
+    /// exceed MAX_TASKS, so the table silently skipped every real task.
+    pub hung_task_since: core::sync::atomic::AtomicU64,
+
+    /// Live wait-queue registrations naming this task (R127 wake-drop
+    /// hunt): incremented by WaitQueueHead::add, decremented by every
+    /// removal path (remove_count and the R127 stale eviction). A task
+    /// exiting with this nonzero parked somewhere without unwinding —
+    /// the exit-leak class the evdev poller showed on the OH hunts
+    /// (thread gone, its poll entries still queued on /dev/input
+    /// nodes, later stripped by a recycled-page remove). Maintained
+    /// unconditionally (one atomic per park/unpark, against the
+    /// irqsave lock pair those paths already pay); the diagnostic
+    /// print at exit is hunt-gated.
+    pub wq_regs: core::sync::atomic::AtomicU32,
+
+    /// Timed-sleep shadow (ticktrap, r41v17): the deadline of the timed
+    /// wait this task is currently parked in, if any. Set by the wait
+    /// site at timer-arm time and cleared at scope exit (guard Drop);
+    /// the 1 Hz heartbeat reads it WITHOUT touching user memory (the
+    /// bwr_park_audit lesson: the heartbeat context cannot dereference
+    /// another task's user pointers) and names the loss branch for any
+    /// parked timed sleeper: deadline passed + no wheel entry = a lost
+    /// fire/wake; deadline far future = an intended-or-garbage long
+    /// sleep; entry present + not due = healthy.
+    /// 0 = not in a timed wait.
+    pub timed_sleep_deadline: core::sync::atomic::AtomicU64,
+    /// 0 = none, 1 = hres (nanosleep class, deadline in time-CSR ticks),
+    /// 2 = jiffy (futex/poll timeout class, deadline in jiffies).
+    pub timed_sleep_kind: core::sync::atomic::AtomicU32,
+    /// The wheel registration id of the armed wake timer (0 if arm
+    /// failed — the wait site then never parks waker-less).
+    pub timed_sleep_timer_id: core::sync::atomic::AtomicU64,
+    /// Jiffies stamp of the arm (age gate for the heartbeat print).
+    pub timed_sleep_armed_j: core::sync::atomic::AtomicU32,
+    /// Requested duration (ms, capped) — the adjudicator between a
+    /// garbage-huge userspace sleep and a short sleep whose wake was
+    /// lost.
+    pub timed_sleep_dur_ms: core::sync::atomic::AtomicU32,
+
+    /// R12-5: lookup pin count — pid_hash_lookup increments, task_put
+    /// decrements and frees at zero. Closes the lookup->use window that
+    /// fed freed Task pointers into enqueue.
+    pub task_refcnt: core::sync::atomic::AtomicU32,
+
+    /// Per-task journal handle (R8-M3): the ext4 write path used a GLOBAL
+    /// slot holding a pointer to a STACK-LOCAL handle — on SMP one CPU
+    /// clobbered another's pointer and dereferenced a dead stack frame
+    /// after the owner returned (Linux keeps this in task_struct).
+    pub journal_handle: core::cell::Cell<*mut crate::fs::jbd2::Handle>,
+
+    /// NEW2 root-cause fix (R8-1b): true from pick time until __switch_to
+    /// saves this task's context. A queued task with on_cpu set is not
+    /// pickable by OTHER CPUs — the old code let another CPU pick a
+    /// RUNNING task after __schedule unlocked the GRQ but before
+    /// context_switch saved its sp/ra, resuming it from a STALE stack
+    /// pointer (one task, two CPUs, one kernel stack — NEW2's double
+    /// frees, len-0 BufferHeads, saved-ra corruption, fdtable teardown).
+    /// The CPU switching the task out may still re-pick ITSELF (fast path).
+    pub ti_on_cpu: core::sync::atomic::AtomicBool,
+
+    /// RACE-FORENSICS (x86-smprace): CPU that currently owns the task's
+    /// RESUMED continuation (-1 = none). Claimed at __switch_to's publish
+    /// (right before the saved context is restored), released at the next
+    /// publish. Unlike ti_on_cpu, nothing but the switch path touches it —
+    /// a second claim while one is held is an unambiguous double-run.
+    pub running_on_cpu: core::sync::atomic::AtomicI32,
+
+    /// R56-heal pick-state machine (see PICK_PICKED/PICK_LIVE/PICK_REVOKED
+    /// above). Arbitrates the slot-capture steal against the picking CPU's
+    /// resume: the steal may only revoke a PICKED pick; a LIVE task is
+    /// never touched. This is what the m25/m26/m27 gnome-boot pfault
+    /// family (heal cpu=2 pid=311, Xorg) tripped over — a
+    /// TCG-starved-but-live vCPU resumed its pick right after the heal
+    /// re-enqueued it, running one task on two harts.
+    pub ti_pick_state: core::sync::atomic::AtomicU32,
+
+    /// R11 (oh-launch round 11, the terminal-release window): set ONLY
+    /// when this task's FINAL context switch-out has really completed —
+    /// written at the SWITCHING_OUT retire sites (sched.rs) in the
+    /// INCOMING task's context, never on the abort path (current ==
+    /// prev there). The terminal deschedule loop
+    /// (schedule_dead_never_returns) must release the ownership pair
+    /// BEFORE calling schedule() so the pick machinery can resolve
+    /// another task (the sc191 v2 fix) — but from that release until the
+    /// SWITCHING_OUT publish inside schedule(), the task reads
+    /// {on_cpu=false, no marker} and the free-side waits alone would let
+    /// the kernel stack be freed WHILE THE TASK IS STILL EXECUTING ITS
+    /// OWN SCHEDULE CHAIN ON IT (every abort/retry cycle of the terminal
+    /// loop re-opens the window — the rip=0x1/rip=heap/#GP-on-ret family
+    /// at exit-storm time). This flag is the positive knowledge the free
+    /// side requires: the real switch completed, the marker retired, the
+    /// stack is referenced by nothing.
+    pub terminal_switch_done: core::sync::atomic::AtomicBool,
+
+    /// Scratch registers for trap handling (thread_info.a0/a1/a2)
+    ti_a0: core::sync::atomic::AtomicU64,
+    ti_a1: core::sync::atomic::AtomicU64,
+    ti_a2: core::sync::atomic::AtomicU64,
+
+    /// LASTSYS (stall hunts): the syscall this task most recently
+    /// ENTERED (nr + first two args). For a task parked inside a
+    /// blocking syscall (epoll_wait, binder ioctl, futex, slow fd read)
+    /// this names the call it is sleeping in — the global 2048-entry
+    /// forensic ring overwrites a parked waiter's record within
+    /// milliseconds under system-wide traffic, so per-task storage is
+    /// the only form that survives. Written at dispatch entry (Relaxed
+    /// stores); read by the DFX taskdump.
+    pub last_syscall_nr: core::sync::atomic::AtomicU32,
+    pub last_syscall_a0: AtomicU64,
+    pub last_syscall_a1: AtomicU64,
+
+    /// sc125 (Session P): ring of the last 8 FAILING syscalls (nr packed
+    /// low-16, errno high-16) for this task. The park decode needs the
+    /// pre-park failure tail — musl pthread_create maps the thread stack
+    /// BEFORE clone, so a failed mmap (ENOMEM/EAGAIN) means NO clone ever
+    /// reaches the kernel census; this latch is the only per-task record
+    /// that survives the system-wide ring's millisecond overwrite window.
+    /// Stored at dispatch EXIT when 0 > ret > -4096.
+    pub last_fails: [AtomicU32; 8],
+    pub last_fails_cur: core::sync::atomic::AtomicUsize,
+    /// sc135 (Session Q): a0/a1 companions for the fail ring, same index.
+    /// The park decode named the pre-park tail as nr167=-22 (prctl EINVAL)
+    /// x1-2 per child, but nr+errno alone cannot say WHICH option — and
+    /// OH may exercise a prctl option this kernel rejects but Linux
+    /// accepts. a0 = the option, a1 = the sub-op/arg.
+    pub last_fails_a0: [AtomicU64; 8],
+    pub last_fails_a1: [AtomicU64; 8],
+
+    /// 50th (crash-storm hunt): ring of the last 16 address-space edits
+    /// (mmap/mprotect/munmap/brk/mremap) issued by THIS task. Two words
+    /// per event:
+    ///   w0 = op(bits 0..8: 1 mmap, 2 mprotect, 3 munmap, 4 brk,
+    ///         5 mremap) | rc(bits 8..16, 0 = ok else errno)
+    ///         | addr(bits 16..64)
+    ///   w1 = len(bits 0..48) | prot/arg2(bits 48..56)
+    /// The mallocng crash family stamps a freshly-allocated group
+    /// through a pointer whose page sits in a VMA HOLE with no covering
+    /// mapping. Printed at USEGV time, this ring answers — in one boot —
+    /// whether the kernel itself returned that address (mmap placement/
+    /// insertion bug), removed its covering VMA (munmap overreach), or
+    /// never saw the address at all (userspace stale chain from
+    /// corrupted allocator state). Same storage discipline as
+    /// last_fails: Relaxed stores at dispatch exit, read only by the
+    /// fault printer.
+    pub mm_ops: [AtomicU64; 32],
+    pub mm_ops_cur: core::sync::atomic::AtomicUsize,
+
+    /// 50th (crash-storm hunt): set the first time this task issues
+    /// execve/execveat. A process LEADER that exits without it is a
+    /// failed spawn (the OH 337->588->589 chain forked, never execve'd,
+    /// and exited 512/0); do_exit prints its birth syscall window so the
+    /// killing call names itself. Threads never exec by design and are
+    /// excluded at the print site.
+    pub did_exec: core::sync::atomic::AtomicBool,
+
+    /// sc128 (Session P): ring of the last syscalls (nr only) for this
+    /// task — the park decode needs the final SUCCESS sequence too (what
+    /// the child does between the failed dlopen cascade and the cond
+    /// park: more mmaps? clone attempts? closes?). Stored at every
+    /// dispatch exit. sc135 (Session Q): deepened 12 -> 96 — sc129's
+    /// 12-deep ring showed only the clock_gettime retry loop, masking
+    /// everything the child did between the dlopen cascade and the park;
+    /// 96 covers the full pre-park tail unless the retry loop spins
+    /// >96 calls before the eternal WAIT entry.
+    pub last_calls: [AtomicU32; LAST_CALLS_LEN],
+    pub last_calls_cur: core::sync::atomic::AtomicUsize,
+
+    /// sc138 (Session Q): FILTERED ring (see INIT_CALLS_LEN) — the retry
+    /// loop noise skipped so the init sequence survives to the dump.
+    pub init_calls: [AtomicU32; INIT_CALLS_LEN],
+    pub init_a0: [AtomicU64; INIT_CALLS_LEN],
+    pub init_calls_cur: core::sync::atomic::AtomicUsize,
+    /// sc143: birth-window latch (see BIRTH_CALLS_LEN).
+    pub birth_calls: [AtomicU32; BIRTH_CALLS_LEN],
+    pub birth_a0: [AtomicU64; BIRTH_CALLS_LEN],
+    pub birth_done: core::sync::atomic::AtomicBool,
+
+    // ==================== task_struct fields ====================
+
+    /// Process state (volatile, visible across cores)
+    state: AtomicU32,
+
+    /// Process ID
+    pid: Pid,
+
+    /// PID hash table chain link (singly-linked for RCU-safe traversal).
+    pub pid_hash_next: *mut Task,
+
+    /// Thread group ID (main process PID of thread)
+    /// Single-threaded process: tgid == pid
+    tgid: Pid,
+
+    /// Thread group leader (task_struct::group_leader).
+    ///
+    /// Self-pointer for a leader / single-threaded process; points at the
+    /// leader for CLONE_THREAD members. The ring `next_thread` below links
+    /// every live member (leader included) into a Linux-style circular
+    /// thread_group list. NULL only between construction and first fixup —
+    /// `group_leader_ptr()` heals it to self.
+    group_leader: *mut Task,
+
+    /// Next member of the thread group ring (task_struct::thread_group).
+    ///
+    /// The ring is: leader -> m_n -> ... -> m_1 -> leader (head insert in
+    /// thread_group_join). Members unlink themselves in exit. Guarded by
+    /// PROCESS_TREE_LOCK (Linux uses ->siglock / threadgroup_lock).
+    next_thread: *mut Task,
+
+    /// Live thread count in this group (task_struct::signal->nr_threads).
+    ///
+    /// AUTHORITATIVE ON THE LEADER ONLY. Initialized to 1 at construction;
+    /// thread_group_join/leave maintain it on the leader.
+    nr_threads: AtomicU32,
+
+    /// Exited group members awaiting deferred resource release
+    /// (Linux delay_put_task_struct analogue). Leader-only. A non-leader
+    /// thread cannot free its own kernel stack/Task slot while executing on
+    /// them and no one wait4()s threads, so the exiting member parks itself
+    /// here; the leader sweeps it once on_cpu clears (another member exit,
+    /// exec, or the leader's release_task).
+    pub dead_threads: Spinlock<alloc::vec::Vec<*mut Task>>,
+
+    /// Process credentials
+    cred: Cred,
+
+    /// OpenHarmony access token id (per-process, /dev/access_token_id).
+    /// Inherited by fork children.
+    pub access_token: AtomicU64,
+    /// OpenHarmony foreground token id. NOT inherited (fork clears it).
+    pub access_ftoken: AtomicU64,
+
+    /// sigsuspend contract: the pre-suspend mask to reinstate when the
+    /// waited-for signal is delivered (Linux TIF_RESTORE_SIGMASK
+    /// equivalent — restoring it at EINTR return made the delivery filter
+    /// by the old mask, so the handler never ran; review syscallb-H-06).
+    pub sigmask_restore: u64,
+    pub sigmask_restore_valid: bool,
+
+    /// Futex waiter residency flag (perf-mm lane, 2026-10-31): set while
+    /// this task's waiter entry is linked into a futex bucket chain,
+    /// cleared by every unlink/free path. do_exit's futex_cleanup scans
+    /// the 512-bucket hash ONLY when this is set — the common task (never
+    /// parked on a futex at its last schedule, or one whose sleeper-side
+    /// return already unlinked it) skips 512 irqsave lock pairs per exit.
+    pub futex_wait_enqueued: AtomicBool,
+
+    /// Scheduling policy
+    policy: SchedPolicy,
+
+    /// Dynamic priority (0-139, higher value means lower priority)
+    /// - 0-99: Real-time processes
+    /// - 100-139: Normal processes
+    prio: i32,
+
+    /// Static priority (120 is default for normal processes)
+    static_prio: i32,
+
+    /// normal_prio: priority calculated from static_prio and scheduling policy
+    normal_prio: i32,
+
+    /// Remaining time slice
+    time_slice: u32,
+
+    /// CFS scheduling entity
+    ///
+    /// Contains vruntime, weight and other CFS scheduling info.
+    /// pub(crate) so fair.rs can compute the entity-embedded timeline
+    /// node's container-of offset (grq-10ns intrusive rbtree).
+    pub(crate) sched_entity: crate::sched::fair::SchedEntity,
+
+    /// RT scheduling priority (0-99, lower value = higher priority)
+    ///
+    /// Only valid when policy is SCHED_FIFO or SCHED_RR
+    rt_priority: u32,
+
+    /// RT run list node (for linking into RT priority queues)
+    ///
+    /// Used by the RT scheduler to link tasks at the same priority level
+    pub rt_run_list: crate::list::ListHead,
+
+    /// RT scheduling entity
+    ///
+    /// Contains time slice and other RT-specific scheduling info
+    rt_entity: crate::sched::rt::SchedRtEntity,
+
+    /// Deadline scheduling entity
+    ///
+    /// Contains deadline, runtime, period and other DL-specific info
+    dl_entity: crate::sched::deadline::SchedDlEntity,
+
+    /// SCHED_RESET_ON_FORK request (set via sched_setscheduler/setattr):
+    /// forked children are reset to SCHED_OTHER/nice 0 and the request is
+    /// cleared in the child (Linux sched_reset_on_fork).
+    sched_reset_on_fork: core::sync::atomic::AtomicBool,
+
+    /// Kernel stack
+    /// TODO: Implement kernel stack allocation
+    kernel_stack: Option<*mut u8>,
+
+    /// Kernel stack bottom (for overflow detection)
+    kernel_stack_bottom: usize,
+
+    /// Fork child flag
+    /// If true, this is a child process created by fork, needs to restore from ret_from_fork
+    is_fork_child: core::sync::atomic::AtomicBool,
+
+    /// Fork child's PtRegs pointer
+    /// When is_fork_child is true, this pointer points to child's PtRegs
+    /// Scheduler will use this PtRegs to restore child state
+    fork_pt_regs: core::sync::atomic::AtomicU64,
+
+    /// mm-slot lock — serializes the `address_space` Option<Arc> swap in
+    /// set_address_space (exec / exit_mm / fork install) against foreign
+    /// readers cloning the Arc (address_space_arc: ptrace, OOM scan, rmap,
+    /// futex identity, taskdump). Without it a reader could load the Arc
+    /// pointer, the owner's exit drop the last reference (freeing the
+    /// MmStruct), and the reader's clone then resurrect freed memory with
+    /// a garbage refcount — the resurrected Arc's later drop runs
+    /// MmStruct::drop a SECOND time (the FUT-STALE / PTLEDGER
+    /// DOUBLE-FREE root-sharing family, fs-writestorm KVM round: pid 555
+    /// freed root 0x62961, pid 554 re-walked it and #GP'd in the VMA
+    /// btree). irqsave: trap/panic-context readers exist (riscv64 trap
+    /// printer). Leaf lock: never taken while holding other locks, and
+    /// the old Arc is dropped AFTER the unlock (its Drop may run the
+    /// whole page-table teardown).
+    mm_slot_lock: Spinlock<()>,
+
+    /// Address space (mm_struct)
+    /// None for kernel threads, Some for user processes
+    /// Use Arc for CLONE_VM sharing between threads
+    address_space: Option<alloc::sync::Arc<AddressSpace>>,
+
+    /// Active address space (active_mm)
+    ///
+    /// For user processes: active_mm == mm
+    /// For kernel threads: active_mm is borrowed address space (for accessing user memory)
+    active_mm: Option<*const AddressSpace>,
+
+    /// Architecture-specific thread state
+    ///
+    /// Stores FPU state, TLS pointer, etc.
+    pub thread: crate::arch::thread::ThreadStruct,
+
+    /// File descriptor table (files_struct)
+    /// Use Arc for CLONE_FILES sharing between threads
+    fdtable: Option<alloc::sync::Arc<FdTable>>,
+
+    /// Signal handling structure (signal_struct)
+    /// Use Arc for CLONE_SIGHAND sharing between threads
+    pub signal: Option<alloc::sync::Arc<SignalStruct>>,
+
+    /// Pending signals (pending)
+    pub pending: SigPending,
+
+    /// Deferred-release marker (69th, the 105-family root cause): set
+    /// on a reaped GROUP LEADER whose release_task could not drain its
+    /// dead_threads list within the bounded wait — a mid-exit member
+    /// stuck in the fdreap grace / a scheduler strand would otherwise
+    /// hot-spin the REAPER (init) inside wait4 forever, killing the
+    /// param service (every later ohos.ctl.start returns 105). The
+    /// reaper completes the reap SEMANTICS and returns; the storage
+    /// free is finished by the LAST dying member's
+    /// sweep_dead_threads. False on every normal task.
+    pub release_deferred: core::sync::atomic::AtomicBool,
+
+    /// Signal mask (blocked)
+    ///
+    /// Used for sigprocmask syscall
+    pub sigmask: u64,
+
+    /// Process execution domain (personality(2)).
+    ///
+    /// Store-and-readback semantics: personality(x) stores x and returns
+    /// the previous value; personality(0xffffffff) is the query sentinel
+    /// (returns the current value unchanged). Inherited across fork,
+    /// kept across execve (exec domains like setarch --addr-no-randomize
+    /// rely on the flag surviving exec). 0 = PER_LINUX.
+    pub personality: u32,
+
+    /// Signal stack (sigaltstack)
+    pub sigstack: crate::signal::SignalStack,
+
+    /// Signal frame address (in user space)
+    pub sigframe_addr: u64,
+
+    /// Signal frame (kernel space backup)
+    pub sigframe: Option<crate::signal::SignalFrame>,
+
+    /// Parent process
+    parent: Option<*const Task>,
+
+    /// Exit code (valid in Zombie state)
+    exit_code: i32,
+
+    /// Signal delivered to the parent at this task's exit (clone/
+    /// clone3 `exit_signal`; Linux stores it on the task and uses it
+    /// in do_notify_parent — SIGCHLD unless the clone asked otherwise,
+    /// LTP clone301 expects a clone3(SIGUSR2) child to SIGUSR2 its
+    /// parent). 0 = no signal.
+    exit_signal: u8,
+
+    /// Signal that stopped the process (valid in Stopped state)
+    stop_signal: i32,
+
+    /// Whether WUNTRACED stop has already been reported to parent
+    pub stop_reported: core::sync::atomic::AtomicBool,
+
+    /// Process name (comm), 16 bytes NUL-terminated
+    comm: [u8; 16],
+
+    /// Parent-death signal (0 = disabled)
+    pub pdeath_signal: u32,
+
+    /// SUID dumpable flag (0=SUID_DUMP_DISABLE, 1=SUID_DUMP_USER)
+    pub dumpable: u32,
+
+    /// Process group ID
+    pgid: u32,
+
+    /// Session ID
+    sid: u32,
+    /// Set at the first successful execve: once a process has exec'd, its
+    /// parent may no longer move it between process groups (Linux
+    /// sys_setpgid EACCES; LTP setpgid03).
+    execed: core::sync::atomic::AtomicBool,
+
+    /// Children list
+    ///
+    /// This is a list head, all children are linked here via their sibling field
+    pub children: ListHead,
+
+    /// Sibling process list node
+    ///
+    /// Used to link this process to parent's children list
+    pub sibling: ListHead,
+
+    /// Parent's children list head pointer (for next_sibling boundary check)
+    ///
+    /// When process is added to parent, saves address of parent's children
+    /// Used by next_sibling() to detect list end
+    parent_children_head: *mut ListHead,
+
+    /// User space address to clear child TID (set_tid_address)
+    ///
+    /// When process exits, kernel clears value at this address
+    /// Used for pthread thread synchronization
+    clear_child_tid: *mut i32,
+
+    /// Robust futex list head (set_robust_list)
+    ///
+    /// Used for robust mutex implementation
+    robust_list_head: *const u8,
+    robust_list_len: usize,
+
+    /// Wait queue for child process exit events
+    ///
+    /// Parent processes wait on this queue when calling wait4/waitpid
+    /// Child process exit wakes up parent via this queue
+    pub wait_chldexit: crate::process::wait::WaitQueueHead,
+
+    /// vfork parent task pointer
+    ///
+    /// When CLONE_VFORK is used, the child stores the parent's task pointer here.
+    /// The child wakes the parent when it calls execve() or _exit().
+    /// 0 = not a vfork child (or vfork already completed).
+    vfork_parent: core::sync::atomic::AtomicU64,
+
+    /// Process heap boundary (brk)
+    ///
+    /// Points to end address of process heap, managed by sys_brk
+    /// Initial value is 0, set to default on first brk call
+    brk: core::sync::atomic::AtomicU64,
+
+    /// OOM score adjustment [-1000, 1000]
+    ///
+    /// -1000 = immune from OOM kill (OOM_SCORE_ADJ_MIN)
+    /// 0 = default
+    /// 1000 = maximum priority to be killed (OOM_SCORE_ADJ_MAX)
+    /// Follows Linux's signal->oom_score_adj
+    oom_score_adj: core::sync::atomic::AtomicI32,
+
+    /// I/O scheduling priority (ioprio_set/ioprio_get, block/ioprio ABI):
+    /// (class << 13) | level; 0 = IOPRIO_CLASS_NONE level 0. Stored per
+    /// task and inherited across fork like the reference kernel's
+    /// task_struct::ioprio (not yet fed into I/O scheduling decisions).
+    ioprio: core::sync::atomic::AtomicI32,
+
+    /// Filesystem information (cwd, root, umask)
+    ///
+    /// Shared between threads when CLONE_FS is used
+    fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>,
+
+    /// Executable file path
+    ///
+    /// Stores process's executable file path
+    /// Used for /proc/self/exe etc.
+    exe_path: alloc::boxed::Box<[u8]>,
+    /// Per-process semaphore undo table.
+    /// Records SEM_UNDO adjustments to be reversed on process exit.
+    pub(crate) sem_undo: Spinlock<alloc::vec::Vec<crate::ipc::util::SemUndoEntry>>,
+
+    /// Interval timers (ITIMER_REAL=0, ITIMER_VIRTUAL=1, ITIMER_PROF=2).
+    /// Each stores the kernel timer ID (0 = disarmed).
+    pub itimer_ids: [core::sync::atomic::AtomicU64; 3],
+
+    /// ITIMER_VIRTUAL (SIGVTALRM) CPU-time state: (deadline_ns,
+    /// interval_ns) against the sched entity's sum_exec_runtime.
+    /// deadline==0 disarms. Atomics only — touched from scheduler_tick
+    /// (IRQ context). POSIX: not inherited across fork, cleared on exec.
+    pub itimer_virt: [AtomicU64; 2],
+    /// ITIMER_PROF (SIGPROF) CPU-time state: (deadline_ns, interval_ns).
+    pub itimer_prof: [AtomicU64; 2],
+    /// ITIMER_REAL (SIGALRM) wall-clock state: (deadline_ns against the
+    /// monotonic clock, interval_ns). deadline==0 disarms. Mirrored by
+    /// the timer-wheel entry in itimer_ids[0]; this copy exists so
+    /// getitimer/setitimer can report the REMAINING time (alarm(2)
+    /// return value via musl).
+    pub itimer_real: [AtomicU64; 2],
+
+    /// POSIX timers created via timer_create.
+    /// Stores (timer_id, clock_id, interval_jiffies, sigev_signo, sigev_notify, overrun_count).
+    pub posix_timers: Spinlock<alloc::vec::Vec<PosixTimerState>>,
+
+    /// Resource limits (RLIMIT_*): [(rlim_cur, rlim_max); 16].
+    /// Initialized to kernel defaults; getrlimit/setrlimit/prlimit64 read
+    /// and write here, and the enforcement points (alloc_fd, mmap/brk,
+    /// fork NPROC, scheduler_tick CPU) consult it.
+    pub rlimits: Spinlock<[(u64, u64); RLIM_NLIMITS]>,
+
+    /// Process CPU-time second at which SIGXCPU was last delivered
+    /// (RLIMIT_CPU soft limit: Linux re-sends SIGXCPU every further
+    /// second of CPU time; 0 = never sent). Atomics only — read from
+    /// scheduler_tick (IRQ context).
+    cpu_time_last_sigxcpu: AtomicU64,
+
+    /// CPU-time accounting (kernel ticks, HZ per second). utime/stime are
+    /// this task's own user/system time, sampled in the timer IRQ from the
+    /// interrupted privilege mode (Linux account_process_tick style);
+    /// cutime/cstime accumulate the same counters of reaped children at
+    /// their exit. Read by /proc/[pid]/stat, times(2) and getrusage(2).
+    pub utime_ticks: AtomicU64,
+    pub stime_ticks: AtomicU64,
+    pub cutime_ticks: AtomicU64,
+    pub cstime_ticks: AtomicU64,
+    /// Context-switch counters (Linux's task->nvcsw / task->nivcsw).
+    /// A voluntary switch is one where the task went to sleep; an
+    /// involuntary one is where the task was preempted while still
+    /// runnable. Counted in the scheduler's context_switch and read by
+    /// /proc/[pid]/status (voluntary_ctxt_switches /
+    /// nonvoluntary_ctxt_switches).
+    pub nvcsw: AtomicU64,
+    pub nivcsw: AtomicU64,
+    /// Per-task scheduler statistics (the /proc/[pid]/schedstat
+    /// triple — T7 perf-support slice). runtime_ns accumulates on-cpu
+    /// time at every switch-away, wait_ns the runqueue wait at every
+    /// pick, timeslices counts real picks (a same-task repick after a
+    /// tick is NOT a new timeslice — Linux counts switches-to). The
+    /// two stamps (wait_start, exec_start) are written only under the
+    /// GRQ lock; the three counters are readable lock-free.
+    pub schedstat_runtime_ns: AtomicU64,
+    pub schedstat_wait_ns: AtomicU64,
+    pub schedstat_timeslices: AtomicU64,
+    pub schedstat_wait_start: AtomicU64,
+    pub schedstat_exec_start: AtomicU64,
+    /// 63rd session (strand-wall hunt): persistent per-task pick/wake
+    /// evidence, kept ON the task so no address-keyed side table can
+    /// steal it mid-strand (the 61st's 256-slot SKIP_HIST collided).
+    /// All writes are gated behind sched::sched_hist_armed()
+    /// (rux:fuxstuck (retired dfx=fuxstuck)|schedtrace) and happen under the GRQ lock; the
+    /// census reads them lock-free. Ring entries pack
+    /// kind:4|why:8|jiffies:30|aux:22 (kind: 1=link 2=refuse 3=pick
+    /// 4=heal-claim 5=heal-oncpu; see sched::sched_hist_ring).
+    ///
+    /// The decisive pair is pick_n vs the exec clock: a strand victim
+    /// with pick_n == 0 and pick_visit_n == 0 was NEVER VISITED by a
+    /// pick (wall/stash class), while a growing pick_n over a frozen
+    /// exec clock is the picked-but-never-executes class (the R56d
+    /// lying-slot shape: next == prev fast-path repicks that never
+    /// restore the context).
+    pub pick_ring: [AtomicU64; 16],
+    /// Total events ever appended; the slot is (seq & 15).
+    pub pick_ring_seq: AtomicU64,
+    /// Pick-walk refusals of this task (a visit that ended in a skip).
+    pub pick_visit_n: AtomicU64,
+    /// Refusals per R76 reason code, indices 0..4 == why 1..5
+    /// (1 on_cpu, 2 foreign live claim, 3 affinity, 4 throttled,
+    /// 5 stale healed).
+    pub pick_refuse_why: [AtomicU64; 5],
+    /// Jiffies of the first refusal in the current strand episode
+    /// (0 = never refused since boot).
+    pub pick_first_refuse_jif: AtomicU64,
+    /// Times this task was picked (mark_picked_on_cpu), repicks
+    /// included.
+    pub pick_n: AtomicU64,
+    /// Jiffies of the last pick (0 = never picked).
+    pub pick_last_jif: AtomicU64,
+    /// Successful run-queue links (wake/fork/heal re-insert).
+    pub wake_n: AtomicU64,
+    /// Jiffies of the last link (0 = never linked since boot).
+    pub wake_last_jif: AtomicU64,
+    /// sched_clock() ns at the last link — the wait window opened at
+    /// enqueue and closed at pick (0 = closed/never opened).
+    pub wait_open_ns: AtomicU64,
+    /// Last link→pick wait, ns (diagnostic read).
+    pub wait_last_ns: AtomicU64,
+    /// Cumulative link→pick wait, ns (deltas between census bursts
+    /// give the per-phase wake-to-run cost the FFRT group pays).
+    pub wait_sum_ns: AtomicU64,
+    pub wait_max_ns: AtomicU64,
+    /// Page faults taken by this task in user mode (Linux's minflt).
+    /// Rux has no minor/major distinction — file-backed pages come
+    /// from the page cache, not from a fault-time disk read — so every
+    /// user fault is counted here and the major counter stays 0.
+    pub min_flt: AtomicU64,
+    /// Major page faults (Linux's majflt). Always 0 on Rux, see above.
+    pub maj_flt: AtomicU64,
+    /// The task's start time in jiffies since boot (Linux's starttime,
+    /// field 22 of /proc/[pid]/stat).
+    pub start_jiffies: AtomicU64,
+    /// RUSAGE_CHILDREN ru_maxrss (KB): max of reaped children's resident
+    /// set at exit (Linux signal->cmaxrss). LTP getrusage03 requires the
+    /// propagation (initial.children ~= 100MB after a 100MB consumer
+    /// grandchild is reaped).
+    pub cmaxrss_kb: AtomicU64,
+    /// Resident set (KB) captured at THIS task's exit, before its mm is
+    /// dropped — the value the parent folds into cmaxrss_kb.
+    pub exit_maxrss_kb: AtomicU64,
+
+    // ==================== ptrace state (P1) ====================
+
+    /// PID of the tracing process (0 = not traced). Deliberately a pid,
+    /// NOT a Task pointer: a tracer that exits must never leave a
+    /// dangling reference in the tracee — every use re-validates the pid.
+    pub tracer_pid: AtomicU32,
+
+    /// PTRACE_SETOPTIONS word (recorded; no option changes behavior yet).
+    pub ptrace_options: AtomicU64,
+
+    /// Signal number re-injected by PTRACE_CONT: do_signal() delivers it
+    /// WITHOUT re-intercepting it into another trace stop (0 = none).
+    ptrace_sigdeliver: AtomicU32,
+
+    /// siginfo of the signal that caused the last trace stop
+    /// (PTRACE_GETSIGINFO / SETSIGINFO). Cleared on CONT/DETACH.
+    pub ptrace_siginfo: Spinlock<Option<crate::signal::SigInfo>>,
+
+    /// Single-step state (PTRACE_SINGLESTEP): the instruction at ss_addr
+    /// is displaced by an EBREAK; ss_saved_insn holds the original word.
+    pub ss_addr: AtomicU64,
+    pub ss_active: core::sync::atomic::AtomicBool,
+    pub ss_saved_insn: AtomicU64,
+
+    /// WCOREDUMP bookkeeping: a core file was written for this task's
+    /// death (wait4 sets the 0x80 status bit when this is set).
+    pub core_dumped: core::sync::atomic::AtomicBool,
+
+    // ==================== namespaces (U1c) ====================
+
+    /// Mount namespace (None == initial namespace).
+    pub ns_mount: Option<alloc::sync::Arc<crate::process::ns::MountNamespace>>,
+    /// UTS namespace (None == initial namespace).
+    pub ns_uts: Option<alloc::sync::Arc<crate::process::ns::UtsNamespace>>,
+    /// IPC namespace (None == initial namespace; stub).
+    pub ns_ipc: Option<alloc::sync::Arc<crate::process::ns::IpcNamespace>>,
+    /// PID namespace (None == initial namespace).
+    pub ns_pid: Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+    /// PID namespace that future children are created in (unshare/setns
+    /// CLONE_NEWPID target; None == same as ns_pid).
+    pub ns_pid_for_children: Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+    /// Network namespace (None == initial namespace; stub).
+    pub ns_net: Option<alloc::sync::Arc<crate::process::ns::NetNamespace>>,
+    /// User namespace (None == initial namespace; stub).
+    pub ns_user: Option<alloc::sync::Arc<crate::process::ns::UserNamespace>>,
+    /// PID of this task inside its pid namespace (== pid for the initial
+    /// namespace; 1 for a CLONE_NEWPID namespace init).
+    pub ns_local_pid: u32,
+    /// Per-level pid numbers for every pid namespace STRICTLY between
+    /// this task's own ns and the init ns — the reference struct pid's
+    /// upid[] chain minus its two ends (own-ns pid is `ns_local_pid`;
+    /// the init-ns pid is the global `pid`). A depth-1 task (own ns's
+    /// parent is init) has an EMPTY chain; a depth-2 task carries the
+    /// number the intermediate ns assigned it. Built once in
+    /// copy_namespaces; immutable afterwards.
+    pub ns_upids: alloc::vec::Vec<(
+        alloc::sync::Arc<crate::process::ns::PidNamespace>,
+        u32,
+    )>,
+
+    // ==================== seccomp (U1c) ====================
+
+    /// Seccomp mode: 0 = SECCOMP_MODE_DISABLED, 1 = STRICT, 2 = FILTER.
+    pub seccomp_mode: AtomicU32,
+    /// Loaded classic-BPF filter program (single program; loading a new one
+    /// replaces it — Linux stacks filters, recorded divergence).
+    pub seccomp_filter: Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
+    /// no_new_privs attribute (PR_SET_NO_NEW_PRIVS, Linux task_struct::
+    /// no_new_privs): when set, execve ignores setuid/setgid bits (and
+    /// file capabilities) — the exec'd program runs with the same
+    /// credentials — and seccomp filter attach is legal without
+    /// CAP_SYS_ADMIN. ONE-WAY at the prctl ABI (arg2 must be exactly 1;
+    /// no clear exists); this setter is the kernel-internal API used by
+    /// prctl, fork inheritance, and tests. Inherited across fork and
+    /// exec (Linux semantics).
+    pub no_new_privs: AtomicBool,
+
+    // ==================== cgroup v2 (U1b) ====================
+
+    /// cgroup membership (Linux task_struct::cgroups analogue). NULL =
+    /// implicit root — kernel threads and early-boot tasks carry no
+    /// limits (Linux kthreads bypass cgroup limits too). The pointee is
+    /// a `CgroupNode` inside an Arc allocation that is NEVER freed
+    /// (rmdir only unlinks it), so the raw pointer needs no refcount.
+    cgroup_ptr: *mut crate::sched::cgroup::CgroupNode,
+
+    /// cgroup v2 memory controller: bytes this task has charged to its
+    /// cgroup chain via mmap(2). Charges and uncharges (munmap / exit /
+    /// cgroup.procs migration) all flow through this counter so the
+    /// cgroup's memory.current can never over-subtract: execve's
+    /// internal ELF mappings and brk never charge, so they never
+    /// uncharge either (documented RSS-approximation simplification).
+    cgroup_mem_charged: AtomicU64,
+}
+
+/// One classic BPF instruction (struct sock_filter): { code, jt, jf, k }.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SockFilter {
+    pub code: u16,
+    pub jt: u8,
+    pub jf: u8,
+    pub k: u32,
+}
+
+/// Number of RLIMIT_* resources (matches Linux RLIM_NLIMITS).
+pub const RLIM_NLIMITS: usize = 16;
+
+/// RLIMIT resource indices (asm-generic, same as Linux uapi).
+#[allow(dead_code)]
+pub mod rlimit_res {
+    pub const CPU: usize = 0;
+    pub const FSIZE: usize = 1;
+    pub const DATA: usize = 2;
+    pub const STACK: usize = 3;
+    pub const CORE: usize = 4;
+    pub const RSS: usize = 5;
+    pub const NPROC: usize = 6;
+    pub const NOFILE: usize = 7;
+    pub const MEMLOCK: usize = 8;
+    pub const AS: usize = 9;
+    pub const LOCKS: usize = 10;
+    pub const SIGPENDING: usize = 11;
+    pub const MSGQUEUE: usize = 12;
+    pub const NICE: usize = 13;
+    pub const RTPRIO: usize = 14;
+    pub const RLIMIT_RTTIME: usize = 15;
+}
+
+/// Kernel default limits (cur, max):
+/// - NOFILE 1024/4096 (soft default / table size, fs::file::MAX_FDS)
+/// - STACK 8MB soft / RLIM_INFINITY hard
+/// - CORE 0 (Ubuntu/systemd ship RLIMIT_CORE=0; an unbounded soft limit
+///   made every user crash stream a full core dump — under TCG the dump
+///   I/O wedged the machine on real workloads)
+/// - everything else RLIM_INFINITY (u64::MAX) like Linux's init_cred.
+pub fn default_rlimits() -> [(u64, u64); RLIM_NLIMITS] {
+    let mut t = [(u64::MAX, u64::MAX); RLIM_NLIMITS];
+    t[rlimit_res::NOFILE] = (1024, 4096);
+    t[rlimit_res::STACK] = (8 * 1024 * 1024, u64::MAX);
+    t[rlimit_res::CORE] = (0, u64::MAX);
+    t
+}
+
+/// Per-process POSIX timer state.
+pub struct PosixTimerState {
+    /// Kernel timer ID (0 = disarmed).
+    pub kernel_timer_id: u64,
+    /// Clock ID (CLOCK_REALTIME=0, CLOCK_MONOTONIC=1, and the CPU-time
+    /// clocks 2/3 whose expiry is checked in scheduler_tick).
+    pub clock_id: i32,
+    /// Interval in jiffies (0 = one-shot).
+    pub interval_jiffies: u64,
+    /// Signal number to deliver.
+    pub sigev_signo: i32,
+    /// sigev_notify (SIGEV_SIGNAL=0, SIGEV_NONE=1).
+    pub sigev_notify: i32,
+    /// Overrun count.
+    pub overrun_count: i32,
+    /// User-visible timer ID.
+    pub user_timer_id: i32,
+    /// CPU-time deadline (ns on sum_exec_runtime; 0 = none armed) for
+    /// CLOCK_PROCESS/THREAD_CPUTIME_ID timers. Atomics: scheduler_tick
+    /// reads/re-arms them from timer-IRQ context where taking the
+    /// posix_timers spinlock could deadlock against a syscall holder.
+    pub cputime_deadline_ns: core::sync::atomic::AtomicU64,
+    /// CPU-time re-arm interval (ns; 0 = one-shot).
+    pub cputime_interval_ns: core::sync::atomic::AtomicU64,
+    /// Wall-clock absolute expiry (time CSR ticks; 0 = none) — precise
+    /// it_value readback for wheel-armed timers.
+    pub wall_deadline_ticks: core::sync::atomic::AtomicU64,
+    /// Programmed interval in ns (precise it_interval readback).
+    pub interval_ns: u64,
+}
+
+impl Clone for PosixTimerState {
+    fn clone(&self) -> Self {
+        Self {
+            kernel_timer_id: self.kernel_timer_id,
+            clock_id: self.clock_id,
+            interval_jiffies: self.interval_jiffies,
+            sigev_signo: self.sigev_signo,
+            sigev_notify: self.sigev_notify,
+            overrun_count: self.overrun_count,
+            user_timer_id: self.user_timer_id,
+            cputime_deadline_ns: core::sync::atomic::AtomicU64::new(
+                self.cputime_deadline_ns.load(core::sync::atomic::Ordering::Relaxed),
+            ),
+            cputime_interval_ns: core::sync::atomic::AtomicU64::new(
+                self.cputime_interval_ns.load(core::sync::atomic::Ordering::Relaxed),
+            ),
+            wall_deadline_ticks: core::sync::atomic::AtomicU64::new(
+                self.wall_deadline_ticks.load(core::sync::atomic::Ordering::Relaxed),
+            ),
+            interval_ns: self.interval_ns,
+        }
+    }
+}
+
+impl Task {
+    /// Create new task
+    ///
+    pub fn new(pid: Pid, policy: SchedPolicy) -> Self {
+        // PRIO_TO_PRIO: static_prio 120 -> prio 120
+        let static_prio = 120; // DEFAULT_PRIO
+        let normal_prio = static_prio; // For SCHED_NORMAL, normal_prio == static_prio
+        let prio = normal_prio;
+
+        // Idle task doesn't need file descriptor table and signal handling
+        // Temporarily disable FdTable and Signal creation to avoid heap allocation issues
+        let (fdtable, signal) = (None, None);
+
+        let state = AtomicU32::new(TaskState::RUNNING);
+        let pending = SigPending::new();
+        let sigstack = crate::signal::SignalStack::new();
+
+        let mut task = Self {
+            // thread_info style fields
+            ti_flags: AtomicU32::new(0),
+            ti_preempt_count: core::sync::atomic::AtomicI32::new(0),
+            ti_pc_zero_jif: AtomicU64::new(0),
+            ti_pc_sirq_present_run: AtomicU64::new(0),
+            ti_pc_hirq_present_run: AtomicU64::new(0),
+            ti_pc_pirq_present_run: AtomicU64::new(0),
+            ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
+            ti_user_sp: core::sync::atomic::AtomicU64::new(0),
+            ti_cpu: core::sync::atomic::AtomicI32::new(-1),
+            cpus_allowed: core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
+            hung_task_since: core::sync::atomic::AtomicU64::new(0),
+            wq_regs: core::sync::atomic::AtomicU32::new(0),
+            timed_sleep_deadline: core::sync::atomic::AtomicU64::new(0),
+            timed_sleep_kind: core::sync::atomic::AtomicU32::new(0),
+            timed_sleep_timer_id: core::sync::atomic::AtomicU64::new(0),
+            timed_sleep_armed_j: core::sync::atomic::AtomicU32::new(0),
+            timed_sleep_dur_ms: core::sync::atomic::AtomicU32::new(0),
+            ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
+            running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
+            ti_pick_state: core::sync::atomic::AtomicU32::new(PICK_PICKED),
+            terminal_switch_done: core::sync::atomic::AtomicBool::new(false),
+            journal_handle: core::cell::Cell::new(core::ptr::null_mut()),
+            task_refcnt: core::sync::atomic::AtomicU32::new(1),
+            ti_a0: core::sync::atomic::AtomicU64::new(0),
+            ti_a1: core::sync::atomic::AtomicU64::new(0),
+            ti_a2: core::sync::atomic::AtomicU64::new(0),
+            last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
+            // Stack-depth fix (leg-16 KSTACK-HW: check_module_up 65.8KB,
+            // hiview 76KB — both the Task-construction frame): from_fn
+            // materialises these arrays through try_from_fn's wrapper
+            // copies (several x 4KB for init_a0 alone). The inline-const
+            // repeat writes each element in place — same values, and the
+            // per-fork stack depth drops by the copy multiplier (the
+            // measured gate for any KERNEL_STACK_SIZE reduction).
+            last_fails: [const { AtomicU32::new(0) }; 8],
+            last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
+            last_fails_a0: [const { AtomicU64::new(0) }; 8],
+            last_fails_a1: [const { AtomicU64::new(0) }; 8],
+            mm_ops: [const { AtomicU64::new(0) }; 32],
+            mm_ops_cur: core::sync::atomic::AtomicUsize::new(0),
+            did_exec: core::sync::atomic::AtomicBool::new(false),
+            last_calls: [const { AtomicU32::new(0) }; crate::process::task::LAST_CALLS_LEN],
+            last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
+            init_calls: [const { AtomicU32::new(0) }; crate::process::task::INIT_CALLS_LEN],
+            init_a0: [const { AtomicU64::new(0) }; crate::process::task::INIT_CALLS_LEN],
+            init_calls_cur: core::sync::atomic::AtomicUsize::new(0),
+            birth_calls: [const { AtomicU32::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
+            birth_a0: [const { AtomicU64::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
+            birth_done: core::sync::atomic::AtomicBool::new(false),
+            last_syscall_a0: AtomicU64::new(0),
+            last_syscall_a1: AtomicU64::new(0),
+
+            // task_struct fields
+            state,
+            pid,
+            sigmask_restore: 0,
+            sigmask_restore_valid: false,
+            futex_wait_enqueued: AtomicBool::new(false),
+            pid_hash_next: ptr::null_mut(),
+            tgid: pid, // Single-threaded process tgid == pid
+            group_leader: ptr::null_mut(), // fixed up by group_leader_ptr() / new_task_at
+            next_thread: ptr::null_mut(),  // fixed up by next_thread_ptr() / new_task_at
+            nr_threads: AtomicU32::new(1),
+            dead_threads: Spinlock::new(alloc::vec::Vec::new()),
+            cred: Cred::new_init(),
+            // OpenHarmony access-token bookkeeping (see
+            // drivers/access_tokenid.rs); fork inherits token and clears
+            // ftoken (process/fork.rs).
+            access_token: AtomicU64::new(0),
+            access_ftoken: AtomicU64::new(0),
+            policy,
+            prio,
+            static_prio,
+            normal_prio,
+            time_slice: DEFAULT_TIME_SLICE, // Default time slice (10 clock ticks = 100ms)
+            sched_entity: crate::sched::fair::SchedEntity::new(),
+            rt_priority: 0,
+            rt_run_list: ListHead::new(),
+            rt_entity: crate::sched::rt::SchedRtEntity::new(),
+            dl_entity: crate::sched::deadline::SchedDlEntity::new(),
+            sched_reset_on_fork: core::sync::atomic::AtomicBool::new(false),
+            kernel_stack: None,
+            kernel_stack_bottom: 0,
+            is_fork_child: core::sync::atomic::AtomicBool::new(false),
+            fork_pt_regs: core::sync::atomic::AtomicU64::new(0),
+            address_space: None,
+            mm_slot_lock: Spinlock::new(()),
+            active_mm: None,
+            thread: crate::arch::thread::ThreadStruct::new(),
+            fdtable,
+            signal,
+            pending,
+            release_deferred: core::sync::atomic::AtomicBool::new(false),
+            sigmask: 0,  // Initial signal mask is empty
+            personality: 0, // PER_LINUX
+            sigstack,
+            sigframe_addr: 0,
+            sigframe: None,
+            parent: None,
+            exit_code: 0,
+            exit_signal: 17, // SIGCHLD default (clone exit_signal)
+            stop_signal: 0,
+            stop_reported: core::sync::atomic::AtomicBool::new(false),
+            comm: [0u8; 16],
+            pdeath_signal: 0,
+            dumpable: 1, // SUID_DUMP_USER (Linux default)
+            pgid: pid,
+            sid: pid,
+            execed: core::sync::atomic::AtomicBool::new(false),
+            children: ListHead::new(),
+            sibling: ListHead::new(),
+            parent_children_head: ptr::null_mut(),
+            clear_child_tid: ptr::null_mut(),
+            robust_list_head: ptr::null(),
+            robust_list_len: 0,
+            wait_chldexit: crate::process::wait::WaitQueueHead::new(),
+            vfork_parent: core::sync::atomic::AtomicU64::new(0),
+            brk: core::sync::atomic::AtomicU64::new(0),
+            oom_score_adj: core::sync::atomic::AtomicI32::new(0),
+            ioprio: core::sync::atomic::AtomicI32::new(0),
+            fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
+            exe_path: Box::from(&b""[..]),
+            sem_undo: Spinlock::new(alloc::vec::Vec::new()),
+            itimer_ids: [
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+            ],
+            itimer_virt: [AtomicU64::new(0), AtomicU64::new(0)],
+            itimer_prof: [AtomicU64::new(0), AtomicU64::new(0)],
+            itimer_real: [AtomicU64::new(0), AtomicU64::new(0)],
+            posix_timers: Spinlock::new(alloc::vec::Vec::new()),
+            rlimits: Spinlock::new(default_rlimits()),
+            cpu_time_last_sigxcpu: AtomicU64::new(0),
+            utime_ticks: AtomicU64::new(0),
+            stime_ticks: AtomicU64::new(0),
+            cutime_ticks: AtomicU64::new(0),
+            cstime_ticks: AtomicU64::new(0),
+            nvcsw: AtomicU64::new(0),
+            nivcsw: AtomicU64::new(0),
+            min_flt: AtomicU64::new(0),
+            maj_flt: AtomicU64::new(0),
+            // Per-task scheduler statistics (T7 perf-support slice,
+            // /proc/[pid]/schedstat): on-cpu runtime ns, wait-on-rq ns,
+            // timeslices granted — plus the two GRQ-locked stamps the
+            // __schedule edges maintain (0 = window closed). All
+            // atomics: the file reads them without the GRQ lock.
+            schedstat_runtime_ns: AtomicU64::new(0),
+            schedstat_wait_ns: AtomicU64::new(0),
+            schedstat_timeslices: AtomicU64::new(0),
+            schedstat_wait_start: AtomicU64::new(0),
+            schedstat_exec_start: AtomicU64::new(0),
+            pick_ring: [const { AtomicU64::new(0) }; 16],
+            pick_ring_seq: AtomicU64::new(0),
+            pick_visit_n: AtomicU64::new(0),
+            pick_refuse_why: [const { AtomicU64::new(0) }; 5],
+            pick_first_refuse_jif: AtomicU64::new(0),
+            pick_n: AtomicU64::new(0),
+            pick_last_jif: AtomicU64::new(0),
+            wake_n: AtomicU64::new(0),
+            wake_last_jif: AtomicU64::new(0),
+            wait_open_ns: AtomicU64::new(0),
+            wait_last_ns: AtomicU64::new(0),
+            wait_sum_ns: AtomicU64::new(0),
+            wait_max_ns: AtomicU64::new(0),
+            start_jiffies: AtomicU64::new(crate::drivers::timer::get_jiffies()),
+            cmaxrss_kb: AtomicU64::new(0),
+            exit_maxrss_kb: AtomicU64::new(0),
+            tracer_pid: AtomicU32::new(0),
+            ptrace_options: AtomicU64::new(0),
+            ptrace_sigdeliver: AtomicU32::new(0),
+            ptrace_siginfo: Spinlock::new(None),
+            ss_addr: AtomicU64::new(0),
+            ss_active: core::sync::atomic::AtomicBool::new(false),
+            ss_saved_insn: AtomicU64::new(0),
+            core_dumped: core::sync::atomic::AtomicBool::new(false),
+            ns_mount: None,
+            ns_uts: None,
+            ns_ipc: None,
+            ns_pid: None,
+            ns_pid_for_children: None,
+            ns_net: None,
+            ns_user: None,
+            ns_local_pid: pid,
+            ns_upids: alloc::vec::Vec::new(),
+            seccomp_mode: AtomicU32::new(0),
+            seccomp_filter: Spinlock::new(None),
+            no_new_privs: AtomicBool::new(false),
+            cgroup_ptr: ptr::null_mut(),
+            cgroup_mem_charged: AtomicU64::new(0),
+        };
+
+        // Initialize children and sibling lists (must be after struct construction)
+        task.children.init();
+        task.sibling.init();
+        task.rt_run_list.init();
+        task.pid_hash_next = ptr::null_mut();
+
+        task
+    }
+
+    /// Construct idle task at specified memory location
+    ///
+    /// This function avoids creating large objects on stack, directly constructs Task at given address
+    ///
+    /// # Safety
+    ///
+    /// ptr must be aligned and point to a large enough memory block
+    // SAFETY: Caller must provide a valid, aligned pointer to memory large enough for Task.
+    pub unsafe fn new_idle_at(ptr: *mut Task) {
+        use core::ptr;
+        use core::mem::offset_of;
+
+        // Initialize thread_info style fields (must be at beginning)
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_flags)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_preempt_count)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_kernel_sp)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_user_sp)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cpus_allowed)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(!0u32),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, running_on_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pick_state)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(PICK_PICKED),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, terminal_switch_done)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
+            core::cell::Cell::new(core::ptr::null_mut()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, task_refcnt)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(1),
+        );
+        // R68a: hung_task_since was missing from this list — Task pages
+        // come from the non-zeroing buddy, so a fresh task could inherit
+        // a stale timestamp (or string residue) from the page's previous
+        // life. khungtaskd then computes a bogus elapsed on the first
+        // D-state sighting and prints a false "blocked for more than N
+        // seconds" report; the x86-scribble4 header canary also tripped
+        // on the residue (observed: freed IPI-selftest string bytes
+        // "e ticks" surviving inside live ksoftirqd/0).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        // R127 wake-drop hunt: same recycled-page class — a fresh task
+        // must not inherit the previous incarnation's wq_regs count.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, wq_regs)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        // ticktrap shadow (same R68a recycled-page class): a fresh task
+        // must not inherit a stale timed-sleep shadow.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_deadline)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_kind)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_timer_id)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_armed_j)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_dur_ms)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        // stress-port r1 (SP-1 follow-up, same R68a class): the four
+        // per-field preempt-count liveness stamps were also missing —
+        // a recycled Task page carried the PREVIOUS task's stamps, so a
+        // fork child holding a live guard at its first tick presented a
+        // minutes-old stamp and stale_200 adjudged it instantly stale:
+        // 4,114 false heals on fresh children in 100 s of fork churn
+        // (rs --fork 8), each heal stripping live guard bits mid-section
+        // (underflowed drops at spinlock.rs/rwlock.rs). Zeroed here, the
+        // arm-on-first-observation tick logic in sched.rs owns the rest.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_sirq_present_run)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_hirq_present_run)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_pirq_present_run)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
+        // Task pages come from the non-zeroing buddy allocator, so every
+        // fork inherited the previous occupant's bytes. The fatal one is
+        // wait_chldexit (a Spinlock<Vec<..>>): garbage {ptr,len,cap} made
+        // do_wait's first prepare_to_wait do a WILD 16-byte write through
+        // a stale pointer (the zeroed/broken children-list nodes), and a
+        // garbage nonzero lock word spins forever (DEADLOCK faces).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, wait_chldexit)) as *mut crate::process::wait::WaitQueueHead,
+            crate::process::wait::WaitQueueHead::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a0)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a1)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a2)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pdeath_signal)) as *mut i32, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dumpable)) as *mut u32, 1,
+        );
+        {
+            let comm_ptr = (ptr as usize + offset_of!(Task, comm)) as *mut u8;
+            for i in 0..16 {
+                core::ptr::write(comm_ptr.add(i), 0);
+            }
+        }
+
+        // Use ptr::write and offset_of to safely initialize each field
+        ptr::write(
+            (ptr as usize + offset_of!(Task, state)) as *mut AtomicU32,
+            AtomicU32::new(TaskState::RUNNING),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pid)) as *mut Pid,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, tgid)) as *mut Pid,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, group_leader)) as *mut *mut Task,
+            ptr,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, next_thread)) as *mut *mut Task,
+            ptr,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nr_threads)) as *mut AtomicU32,
+            AtomicU32::new(1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dead_threads)) as *mut Spinlock<alloc::vec::Vec<*mut Task>>,
+            Spinlock::new(alloc::vec::Vec::new()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cred)) as *mut Cred,
+            Cred::new_init(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, policy)) as *mut SchedPolicy,
+            SchedPolicy::Idle,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, prio)) as *mut i32,
+            120,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, static_prio)) as *mut i32,
+            120,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, normal_prio)) as *mut i32,
+            120,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, time_slice)) as *mut u32,
+            100,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::fair::SchedEntity,
+            crate::sched::fair::SchedEntity::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rt_priority)) as *mut u32,
+            0,
+        );
+        let rt_run_list_ptr = (ptr as usize + offset_of!(Task, rt_run_list)) as *mut ListHead;
+        (*rt_run_list_ptr).init();
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rt_entity)) as *mut crate::sched::rt::SchedRtEntity,
+            crate::sched::rt::SchedRtEntity::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dl_entity)) as *mut crate::sched::deadline::SchedDlEntity,
+            crate::sched::deadline::SchedDlEntity::new(),
+        );
+
+        // Initialize idle task thread struct
+        // Idle task uses thread.sp for its kernel stack
+        // Idle task entry point — runs schedule() loop with UART polling.
+        // Note: intentionally uses schedule()-based idle (not raw WFI loop)
+        // because WFI in QEMU TCG can starve the IO thread when stdin
+        // is a blocking pipe, preventing timer interrupt delivery.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
+            {
+                let mut thread = crate::arch::thread::ThreadStruct::new();
+                // Idle task: first switch-in enters the idle loop
+                crate::process::thread_set_entry(
+                    &mut thread,
+                    crate::sched::cpu_idle_loop as u64,
+                    0, // set when the kernel stack is allocated
+                );
+                thread
+            },
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, kernel_stack)) as *mut Option<*mut u8>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, is_fork_child)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fork_pt_regs)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<alloc::sync::Arc<AddressSpace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, mm_slot_lock)) as *mut Spinlock<()>,
+            Spinlock::new(()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, active_mm)) as *mut Option<*const AddressSpace>,
+            None,
+        );
+        // Teardown-race guard (mm/deferred_free.rs): procfs walkers borrow
+        // the TASK unpinned (find_task_by_pid); the reaper on another CPU
+        // can free it mid-read. free_task_slot poisons the page before
+        // dealloc, so a time-deferred free leaves late readers looking at
+        // poison values (checked by the is_plausible_task_ptr guard
+        // family) instead of heap-reuse garbage pointers (the walker #GP
+        // family).
+        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
+        // The walker path's other unpinned Arc borrows — fdtable
+        // (generate_maps resolves file paths per VMA) and the shared
+        // signal struct (generate_status reads ign/cgt masks) — get the
+        // same 250ms hold: sizes are the ArcInner block (2 refcount
+        // words) + the struct. Registered from here (types are pub,
+        // constructors live in fs//signal — outside the mm lane).
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::file::FdTable>(),
+        );
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::signal::SignalStruct>(),
+        );
+        // Note: thread field already initialized above with ra=cpu_idle_loop;
+        // do NOT reinitialize here or the entry point will be zeroed.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<alloc::sync::Arc<FdTable>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, signal)) as *mut Option<alloc::sync::Arc<SignalStruct>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pending)) as *mut SigPending,
+            SigPending::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, release_deferred))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask_restore)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask_restore_valid)) as *mut bool,
+            false,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigstack)) as *mut crate::signal::SignalStack,
+            crate::signal::SignalStack::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigframe_addr)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigframe)) as *mut Option<crate::signal::SignalFrame>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, parent)) as *mut Option<*mut Task>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exit_code)) as *mut i32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stop_signal)) as *mut i32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stop_reported)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pgid)) as *mut u32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sid)) as *mut u32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, parent_children_head)) as *mut *mut ListHead,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, clear_child_tid)) as *mut *mut i32,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, robust_list_head)) as *mut *const u8,
+            ptr::null(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, robust_list_len)) as *mut usize,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fs)) as *mut Option<alloc::sync::Arc<crate::fs::FsStruct>>,
+            Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, vfork_parent)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, brk)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, oom_score_adj)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(0),
+        );
+
+        // Initialize fields added after new_idle_at was first written.
+        // These have Drop implementations and must not be left as zeroed memory.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exe_path)) as *mut alloc::boxed::Box<[u8]>,
+            alloc::boxed::Box::from(&b""[..]),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sem_undo)) as *mut Spinlock<alloc::vec::Vec<crate::ipc::util::SemUndoEntry>>,
+            Spinlock::new(alloc::vec::Vec::new()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_ids)) as *mut [core::sync::atomic::AtomicU64; 3],
+            [
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+            ],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_virt)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_prof)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_real)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,
+            Spinlock::new(alloc::vec::Vec::new()),
+        );
+        // Rlimits + RLIMIT_CPU bookkeeping: Task pages come from the
+        // NON-ZEROING buddy allocator, so every field read by enforcement
+        // paths must be written here — a garbage Spinlock word in
+        // `rlimits` would wedge the first alloc_fd/mmap that touches it
+        // (same R9-1 engine that bit wait_chldexit).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rlimits)) as *mut Spinlock<[(u64, u64); RLIM_NLIMITS]>,
+            Spinlock::new(default_rlimits()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cpu_time_last_sigxcpu)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // CPU-time accounting (utime/stime/cutime/cstime ticks): the buddy
+        // allocator does not zero Task pages — explicit init required.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, utime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cutime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // RUSAGE_CHILDREN maxrss pair (getrusage03): the same non-zeroing
+        // discipline — a recycled page's stale words surfaced as
+        // garbage-children readings.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cmaxrss_kb)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exit_maxrss_kb)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing
+        // discipline — /proc/[pid]/status reads them, so they must be
+        // initialized here or they carry allocator garbage.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nvcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nivcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Fault counters + the start time: the buddy allocator does not
+        // zero Task pages, so /proc/[pid]/stat would otherwise read
+        // allocator garbage for fields 10/12/22.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, min_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, maj_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Per-task schedstat counters (the /proc/[pid]/schedstat triple,
+        // T7): same non-zeroing discipline — the file reads them
+        // lock-free, so a cloned Task must start from zero like a
+        // fresh one (children do not inherit CPU time).
+        for f in [
+            offset_of!(Task, schedstat_runtime_ns),
+            offset_of!(Task, schedstat_wait_ns),
+            offset_of!(Task, schedstat_timeslices),
+            offset_of!(Task, schedstat_wait_start),
+            offset_of!(Task, schedstat_exec_start),
+            offset_of!(Task, pick_ring_seq),
+            offset_of!(Task, pick_visit_n),
+            offset_of!(Task, pick_first_refuse_jif),
+            offset_of!(Task, pick_n),
+            offset_of!(Task, pick_last_jif),
+            offset_of!(Task, wake_n),
+            offset_of!(Task, wake_last_jif),
+            offset_of!(Task, wait_open_ns),
+            offset_of!(Task, wait_last_ns),
+            offset_of!(Task, wait_sum_ns),
+            offset_of!(Task, wait_max_ns),
+        ] {
+            ptr::write((ptr as usize + f) as *mut AtomicU64, AtomicU64::new(0));
+        }
+        // 63rd: the pick-history ring and the per-why refusal counters
+        // are arrays — zero them element-wise on task-page reuse (a
+        // recycled Task must not inherit the previous occupant's
+        // strand evidence).
+        for f in [
+            offset_of!(Task, pick_ring),
+            offset_of!(Task, pick_refuse_why),
+        ] {
+            let base = (ptr as usize + f) as *mut AtomicU64;
+            let cnt = if f == offset_of!(Task, pick_ring) { 16 } else { 5 };
+            for i in 0..cnt {
+                ptr::write(base.add(i), AtomicU64::new(0));
+            }
+        }
+        // The task's start time (Linux's starttime, field 22 of
+        // /proc/[pid]/stat): the jiffies at which the task was built.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, start_jiffies)) as *mut AtomicU64,
+            AtomicU64::new(crate::drivers::timer::get_jiffies()),
+        );
+        // Ptrace + coredump state (P1 wave 3): same R9-1 discipline — the
+        // buddy allocator does not zero Task pages, so every new field
+        // read by the signal/exit paths must be explicitly initialized
+        // (a garbage Spinlock in ptrace_siginfo would wedge GETSIGINFO).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, tracer_pid)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ptrace_options)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ptrace_sigdeliver)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ptrace_siginfo)) as *mut Spinlock<Option<crate::signal::SigInfo>>,
+            Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ss_addr)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ss_active)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ss_saved_insn)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, core_dumped)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+
+        // cgroup v2 (U1b): NULL = implicit root. The buddy allocator does
+        // not zero Task pages — a garbage pointer here would be
+        // dereferenced by every cgroup enforcement point.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cgroup_ptr)) as *mut *mut crate::sched::cgroup::CgroupNode,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cgroup_mem_charged)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+
+        // Namespaces + seccomp (U1c): None/0 defaults. The buddy allocator
+        // does not zero Task pages — garbage Option<Arc> words would be
+        // Arc-cloned by ns accessors and a garbage filter lock would
+        // deadlock the syscall-entry gate (R9-1 class).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_mount)) as *mut Option<alloc::sync::Arc<crate::process::ns::MountNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_uts)) as *mut Option<alloc::sync::Arc<crate::process::ns::UtsNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_ipc)) as *mut Option<alloc::sync::Arc<crate::process::ns::IpcNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_pid)) as *mut Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_pid_for_children)) as *mut Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_net)) as *mut Option<alloc::sync::Arc<crate::process::ns::NetNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_user)) as *mut Option<alloc::sync::Arc<crate::process::ns::UserNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, seccomp_mode)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, seccomp_filter)) as *mut Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
+            Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, no_new_privs)) as *mut AtomicBool,
+            AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_upids))
+                as *mut alloc::vec::Vec<(
+                    alloc::sync::Arc<crate::process::ns::PidNamespace>,
+                    u32,
+                )>,
+            alloc::vec::Vec::new(),
+        );
+
+        // Initialize children and sibling lists
+        let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
+        (*children_ptr).init();
+        let sibling_ptr = (ptr as usize + offset_of!(Task, sibling)) as *mut ListHead;
+        (*sibling_ptr).init();
+        let next_ptr = (ptr as usize + offset_of!(Task, pid_hash_next)) as *mut *mut Task;
+        (*next_ptr) = ptr::null_mut();
+    }
+
+    /// Construct normal task at specified memory location
+    ///
+    /// This function avoids creating large objects on stack, directly constructs Task at given address
+    ///
+    /// # Safety
+    ///
+    /// ptr must be aligned and point to a large enough memory block
+    // SAFETY: Caller must provide a valid, aligned pointer to memory large enough for Task.
+    /// Returns false when the kernel-stack allocation fails (R10-9) —
+    /// the task must then be discarded by the caller.
+    pub unsafe fn new_task_at(ptr: *mut Task, pid: Pid, policy: SchedPolicy) -> bool {
+        use crate::console::putchar;
+        use core::ptr;
+        use core::mem::offset_of;
+
+        let static_prio = 120; // DEFAULT_PRIO
+        let normal_prio = static_prio;
+        let prio = normal_prio;
+
+        // sc130 (Session P): the sc125/128 latch fields MUST also be
+        // initialized on the clone path (new_task_at) — the struct-init
+        // in Task::new covers only the first construction; a cloned
+        // thread's Task was reading uninitialized memory (first
+        // thread-exit forensics printed garbage nrs).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_fails)) as *mut [AtomicU32; 8],
+            [const { AtomicU32::new(0) }; 8],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_fails_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_fails_a0)) as *mut [AtomicU64; 8],
+            [const { AtomicU64::new(0) }; 8],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_fails_a1)) as *mut [AtomicU64; 8],
+            [const { AtomicU64::new(0) }; 8],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_calls)) as *mut [AtomicU32; LAST_CALLS_LEN],
+            [const { AtomicU32::new(0) }; LAST_CALLS_LEN],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_calls_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
+        // sc138 (Session Q): init ring likewise needs the clone-path init
+        // (see the sc130 fix above for why new_task_at must cover these).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, init_calls))
+                as *mut [AtomicU32; INIT_CALLS_LEN],
+            [const { AtomicU32::new(0) }; INIT_CALLS_LEN],
+        );
+        // Futex residency flag (perf-mm lane, sc130-pattern twin): without
+        // this init, a fork-allocated Task read the recycled heap page's
+        // stale bit — every exit then took futex_cleanup's full 512-bucket
+        // scan (measured: all 64/64 exits of a fork+exec loop flagged,
+        // diag4/diag5 counters; the -at-construction init in Task::new
+        // covers only first construction).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, futex_wait_enqueued))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, init_a0)) as *mut [AtomicU64; INIT_CALLS_LEN],
+            [const { AtomicU64::new(0) }; INIT_CALLS_LEN],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, init_calls_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, birth_calls))
+                as *mut [AtomicU32; BIRTH_CALLS_LEN],
+            [const { AtomicU32::new(0) }; BIRTH_CALLS_LEN],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, birth_a0))
+                as *mut [AtomicU64; BIRTH_CALLS_LEN],
+            [const { AtomicU64::new(0) }; BIRTH_CALLS_LEN],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, birth_done))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        // 50th (crash-storm hunt): mm-op ring + first-exec latch — same
+        // clone-path init requirement as the sc130/sc138 fields above
+        // (recycled task memory otherwise decodes as garbage events at
+        // USEGV time — seen live in ohc1).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, mm_ops)) as *mut [AtomicU64; 32],
+            [const { AtomicU64::new(0) }; 32],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, mm_ops_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, did_exec))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        // freed-task lane (2026-11-15, fork audit): three more Task::new-
+        // literal fields were missing from this clone-path list, so a
+        // fork-allocated Task read the recycled page's previous life:
+        //   - execed: has_execed() gates setpgid's post-exec EACCES
+        //     (syscall/process.rs) — residue `true` made a fresh child
+        //     that never exec'd already unmovable between groups
+        //     (LTP setpgid03 shape).
+        //   - last_syscall_nr/a0/a1: the hung-task / forensic latches
+        //     printed the previous tenant's syscall (the sc130 garbage-nr
+        //     family, third recurrence).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, execed))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_nr)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_a0)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_a1)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+
+        // Initialize thread_info style fields (must be at beginning)
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_flags)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_preempt_count)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_kernel_sp)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_user_sp)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cpus_allowed)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, running_on_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pick_state)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(PICK_PICKED),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, terminal_switch_done)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
+            core::cell::Cell::new(core::ptr::null_mut()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, task_refcnt)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(1),
+        );
+        // R68a: hung_task_since was missing from this list — Task pages
+        // come from the non-zeroing buddy, so a fresh task could inherit
+        // a stale timestamp (or string residue) from the page's previous
+        // life. khungtaskd then computes a bogus elapsed on the first
+        // D-state sighting and prints a false "blocked for more than N
+        // seconds" report; the x86-scribble4 header canary also tripped
+        // on the residue (observed: freed IPI-selftest string bytes
+        // "e ticks" surviving inside live ksoftirqd/0).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        // R127 wake-drop hunt: same recycled-page class — a fresh task
+        // must not inherit the previous incarnation's wq_regs count.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, wq_regs)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        // ticktrap shadow (same R68a recycled-page class): a fresh task
+        // must not inherit a stale timed-sleep shadow.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_deadline)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_kind)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_timer_id)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_armed_j)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_dur_ms)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        // stress-port r1 (SP-1 follow-up, same R68a class): the four
+        // per-field preempt-count liveness stamps were also missing —
+        // a recycled Task page carried the PREVIOUS task's stamps, so a
+        // fork child holding a live guard at its first tick presented a
+        // minutes-old stamp and stale_200 adjudged it instantly stale:
+        // 4,114 false heals on fresh children in 100 s of fork churn
+        // (rs --fork 8), each heal stripping live guard bits mid-section
+        // (underflowed drops at spinlock.rs/rwlock.rs). Zeroed here, the
+        // arm-on-first-observation tick logic in sched.rs owns the rest.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_sirq_present_run)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_hirq_present_run)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_pirq_present_run)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
+        // Task pages come from the non-zeroing buddy allocator, so every
+        // fork inherited the previous occupant's bytes. The fatal one is
+        // wait_chldexit (a Spinlock<Vec<..>>): garbage {ptr,len,cap} made
+        // do_wait's first prepare_to_wait do a WILD 16-byte write through
+        // a stale pointer (the zeroed/broken children-list nodes), and a
+        // garbage nonzero lock word spins forever (DEADLOCK faces).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, wait_chldexit)) as *mut crate::process::wait::WaitQueueHead,
+            crate::process::wait::WaitQueueHead::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a0)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a1)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a2)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pdeath_signal)) as *mut i32, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dumpable)) as *mut u32, 1,
+        );
+        {
+            let comm_ptr = (ptr as usize + offset_of!(Task, comm)) as *mut u8;
+            for i in 0..16 {
+                core::ptr::write(comm_ptr.add(i), 0);
+            }
+        }
+
+        // Write each field
+        // R52: TASK_NEW, not RUNNING — the task is hash-visible from
+        // pid_hash_insert until enqueue_task, and must be unwakeable in
+        // that window (see TaskState::TASK_NEW). enqueue_task_locked
+        // flips it to RUNNING atomically with the class insert.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, state)) as *mut AtomicU32,
+            AtomicU32::new(TaskState::TASK_NEW),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pid)) as *mut Pid,
+            pid,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, tgid)) as *mut Pid,
+            pid,
+        );
+        // Thread group: single-member ring pointing at itself until a
+        // CLONE_THREAD child joins via thread_group_join().
+        ptr::write(
+            (ptr as usize + offset_of!(Task, group_leader)) as *mut *mut Task,
+            ptr,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, next_thread)) as *mut *mut Task,
+            ptr,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nr_threads)) as *mut AtomicU32,
+            AtomicU32::new(1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dead_threads)) as *mut Spinlock<alloc::vec::Vec<*mut Task>>,
+            Spinlock::new(alloc::vec::Vec::new()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cred)) as *mut Cred,
+            Cred::new_init(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, policy)) as *mut SchedPolicy,
+            policy,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, prio)) as *mut i32,
+            prio,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, static_prio)) as *mut i32,
+            static_prio,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, normal_prio)) as *mut i32,
+            normal_prio,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, time_slice)) as *mut u32,
+            HZ,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::fair::SchedEntity,
+            crate::sched::fair::SchedEntity::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rt_priority)) as *mut u32,
+            0,
+        );
+        let rt_run_list_ptr = (ptr as usize + offset_of!(Task, rt_run_list)) as *mut ListHead;
+        (*rt_run_list_ptr).init();
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rt_entity)) as *mut crate::sched::rt::SchedRtEntity,
+            crate::sched::rt::SchedRtEntity::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dl_entity)) as *mut crate::sched::deadline::SchedDlEntity,
+            crate::sched::deadline::SchedDlEntity::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, kernel_stack)) as *mut Option<*mut u8>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, is_fork_child)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fork_pt_regs)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<alloc::sync::Arc<AddressSpace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, mm_slot_lock)) as *mut Spinlock<()>,
+            Spinlock::new(()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, active_mm)) as *mut Option<*const AddressSpace>,
+            None,
+        );
+        // Teardown-race guard (mm/deferred_free.rs): procfs walkers borrow
+        // the TASK unpinned (find_task_by_pid); the reaper on another CPU
+        // can free it mid-read. free_task_slot poisons the page before
+        // dealloc, so a time-deferred free leaves late readers looking at
+        // poison values (checked by the is_plausible_task_ptr guard
+        // family) instead of heap-reuse garbage pointers (the walker #GP
+        // family).
+        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
+        // The walker path's other unpinned Arc borrows — fdtable
+        // (generate_maps resolves file paths per VMA) and the shared
+        // signal struct (generate_status reads ign/cgt masks) — get the
+        // same 250ms hold: sizes are the ArcInner block (2 refcount
+        // words) + the struct. Registered from here (types are pub,
+        // constructors live in fs//signal — outside the mm lane).
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::file::FdTable>(),
+        );
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::signal::SignalStruct>(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
+            crate::arch::thread::ThreadStruct::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<alloc::sync::Arc<FdTable>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, signal)) as *mut Option<alloc::sync::Arc<SignalStruct>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pending)) as *mut SigPending,
+            SigPending::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, release_deferred))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask_restore)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask_restore_valid)) as *mut bool,
+            false,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigstack)) as *mut crate::signal::SignalStack,
+            crate::signal::SignalStack::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigframe_addr)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigframe)) as *mut Option<crate::signal::SignalFrame>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, parent)) as *mut Option<*mut Task>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exit_code)) as *mut i32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stop_signal)) as *mut i32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stop_reported)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pgid)) as *mut u32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sid)) as *mut u32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, parent_children_head)) as *mut *mut ListHead,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, clear_child_tid)) as *mut *mut i32,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, robust_list_head)) as *mut *const u8,
+            ptr::null(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, robust_list_len)) as *mut usize,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, vfork_parent)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, brk)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, oom_score_adj)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fs)) as *mut Option<alloc::sync::Arc<crate::fs::FsStruct>>,
+            Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
+        );
+
+        // Initialize exe_path and sem_undo
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exe_path)) as *mut alloc::boxed::Box<[u8]>,
+            Box::from(&b""[..]),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sem_undo)) as *mut Spinlock<alloc::vec::Vec<crate::ipc::util::SemUndoEntry>>,
+            Spinlock::new(alloc::vec::Vec::new()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_ids)) as *mut [core::sync::atomic::AtomicU64; 3],
+            [
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+            ],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_virt)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_prof)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_real)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,
+            Spinlock::new(alloc::vec::Vec::new()),
+        );
+        // Rlimits + RLIMIT_CPU bookkeeping: see new_idle_at — the buddy
+        // allocator does not zero Task pages, so enforcement-read fields
+        // must be explicitly initialized (init PID 1 and every fork child
+        // flow through here before the fork-side rlimits copy).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rlimits)) as *mut Spinlock<[(u64, u64); RLIM_NLIMITS]>,
+            Spinlock::new(default_rlimits()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cpu_time_last_sigxcpu)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // CPU-time accounting: non-zeroing buddy allocator — must be
+        // explicitly initialized (utime/stime/cutime/cstime ticks).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, utime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cutime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // RUSAGE_CHILDREN maxrss pair (getrusage03): recycled-page garbage
+        // surfaced as child.children readings (cmaxrss was missing here).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cmaxrss_kb)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exit_maxrss_kb)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing
+        // discipline — /proc/[pid]/status reads them, so they must be
+        // initialized here or they carry allocator garbage.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nvcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nivcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Fault counters + the start time: the buddy allocator does not
+        // zero Task pages, so /proc/[pid]/stat would otherwise read
+        // allocator garbage for fields 10/12/22.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, min_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, maj_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Per-task schedstat counters (the /proc/[pid]/schedstat triple,
+        // T7): same non-zeroing discipline — the file reads them
+        // lock-free, so a cloned Task must start from zero like a
+        // fresh one (children do not inherit CPU time).
+        for f in [
+            offset_of!(Task, schedstat_runtime_ns),
+            offset_of!(Task, schedstat_wait_ns),
+            offset_of!(Task, schedstat_timeslices),
+            offset_of!(Task, schedstat_wait_start),
+            offset_of!(Task, schedstat_exec_start),
+            offset_of!(Task, pick_ring_seq),
+            offset_of!(Task, pick_visit_n),
+            offset_of!(Task, pick_first_refuse_jif),
+            offset_of!(Task, pick_n),
+            offset_of!(Task, pick_last_jif),
+            offset_of!(Task, wake_n),
+            offset_of!(Task, wake_last_jif),
+            offset_of!(Task, wait_open_ns),
+            offset_of!(Task, wait_last_ns),
+            offset_of!(Task, wait_sum_ns),
+            offset_of!(Task, wait_max_ns),
+        ] {
+            ptr::write((ptr as usize + f) as *mut AtomicU64, AtomicU64::new(0));
+        }
+        // 63rd: the pick-history ring and the per-why refusal counters
+        // are arrays — zero them element-wise on task-page reuse (a
+        // recycled Task must not inherit the previous occupant's
+        // strand evidence).
+        for f in [
+            offset_of!(Task, pick_ring),
+            offset_of!(Task, pick_refuse_why),
+        ] {
+            let base = (ptr as usize + f) as *mut AtomicU64;
+            let cnt = if f == offset_of!(Task, pick_ring) { 16 } else { 5 };
+            for i in 0..cnt {
+                ptr::write(base.add(i), AtomicU64::new(0));
+            }
+        }
+        // The task's start time (Linux's starttime, field 22 of
+        // /proc/[pid]/stat): the jiffies at which the task was built.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, start_jiffies)) as *mut AtomicU64,
+            AtomicU64::new(crate::drivers::timer::get_jiffies()),
+        );
+        // Ptrace + coredump state (P1 wave 3): see new_idle_at — non-zeroing
+        // buddy allocator, init every enforcement-read field.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, tracer_pid)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ptrace_options)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ptrace_sigdeliver)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ptrace_siginfo)) as *mut Spinlock<Option<crate::signal::SigInfo>>,
+            Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ss_addr)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ss_active)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ss_saved_insn)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, core_dumped)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+
+        // cgroup v2 (U1b): NULL = implicit root. The buddy allocator does
+        // not zero Task pages — a garbage pointer here would be
+        // dereferenced by every cgroup enforcement point.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cgroup_ptr)) as *mut *mut crate::sched::cgroup::CgroupNode,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cgroup_mem_charged)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+
+        // Namespaces + seccomp (U1c): None/0 defaults. The buddy allocator
+        // does not zero Task pages — garbage Option<Arc> words would be
+        // Arc-cloned by ns accessors and a garbage filter lock would
+        // deadlock the syscall-entry gate (R9-1 class).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_mount)) as *mut Option<alloc::sync::Arc<crate::process::ns::MountNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_uts)) as *mut Option<alloc::sync::Arc<crate::process::ns::UtsNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_ipc)) as *mut Option<alloc::sync::Arc<crate::process::ns::IpcNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_pid)) as *mut Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_pid_for_children)) as *mut Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_net)) as *mut Option<alloc::sync::Arc<crate::process::ns::NetNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_user)) as *mut Option<alloc::sync::Arc<crate::process::ns::UserNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, seccomp_mode)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, seccomp_filter)) as *mut Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
+            Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, no_new_privs)) as *mut AtomicBool,
+            AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
+            pid,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_upids))
+                as *mut alloc::vec::Vec<(
+                    alloc::sync::Arc<crate::process::ns::PidNamespace>,
+                    u32,
+                )>,
+            alloc::vec::Vec::new(),
+        );
+
+        // Initialize children and sibling lists
+        let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
+        (*children_ptr).init();
+        let sibling_ptr = (ptr as usize + offset_of!(Task, sibling)) as *mut ListHead;
+        (*sibling_ptr).init();
+        let next_ptr = (ptr as usize + offset_of!(Task, pid_hash_next)) as *mut *mut Task;
+        (*next_ptr) = ptr::null_mut();
+
+        // Allocate kernel stack
+        let task_ref = &mut *ptr;
+        if task_ref.alloc_kernel_stack().is_none() {
+            // R10-9: do NOT continue — the task would context-switch to
+            // sp=0 and kernel_stack_bottom stays uninitialized. Propagate
+            // the failure so alloc_task_slot unwinds.
+            const MSG_ERR: &[u8] = b"Task::new_task_at: failed to allocate kernel stack\n";
+            for &b in MSG_ERR {
+                putchar(b);
+            }
+            return false;
+        }
+        // Scribble hunter (rux:scribble (retired dfx=scribble)): track this Task's scheduling
+        // fields from birth. No-op unless the runtime switch is on.
+        #[cfg(feature = "x86_64")]
+        crate::dfx::scribble::register(ptr);
+        return true;
+    }
+
+    /// Get process state
+    #[inline]
+    pub fn state(&self) -> TaskState {
+        TaskState::new(self.state.load(Ordering::Relaxed))
+    }
+
+    /// Set process state
+    #[inline]
+    pub fn set_state(&self, state: TaskState) {
+        self.state.store(state.bits(), Ordering::Release);
+    }
+
+    /// Check if process is in specified state
+    #[inline]
+    pub fn is_state(&self, flag: u32) -> bool {
+        self.state.load(Ordering::Relaxed) & flag != 0
+    }
+
+    /// Process sleep and wake mechanism
+
+    /// Put current process to sleep
+    ///
+    /// After calling this function, process enters sleep state and triggers scheduling
+    ///
+    /// # WARNING — raw protocol, lost-wakeup prone (R33)
+    /// `wake_up` drops every wake that arrives while the target is not yet
+    /// `is_sleeping()`. A condition checked BEFORE this call has a window
+    /// (check → set_state) in which the one-shot waker fires and is
+    /// discarded — the sleeper then blocks forever. In-kernel callers must
+    /// use the state-first + re-check discipline (set_state, RE-CHECK the
+    /// condition, then schedule — see `sys_rt_sigtimedwait` /
+    /// `nanosleep_impl`) or a wait queue (`WaitQueueHead::prepare_to_wait`).
+    /// This function performs no re-check and must not be called with an
+    /// only-once waker armed.
+    ///
+    /// # Arguments
+    /// - `state`: Sleep state (TaskState::INTERRUPTIBLE or TaskState::UNINTERRUPTIBLE)
+    ///
+    /// # Safety
+    /// After calling this function, current process will be scheduled out until woken
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rux::process::task::TaskState;
+    /// // Interruptible sleep (can be woken by signal)
+    /// Task::sleep(TaskState::new(TaskState::INTERRUPTIBLE));
+    ///
+    /// // Uninterruptible sleep
+    /// Task::sleep(TaskState::new(TaskState::UNINTERRUPTIBLE));
+    /// ```
+    #[inline(never)]
+    pub fn sleep(state: TaskState) {
+        // Set current process to sleep state
+        if let Some(current) = crate::sched::current() {
+            // SAFETY: current() returns the currently running task's pointer, which is
+            // guaranteed valid for the calling task.
+            unsafe {
+                (*current).set_state(state);
+            }
+        }
+
+        // Trigger scheduling, select other process to run
+        // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
+        crate::arch::cpu::restore_irq(true);
+        crate::sched::schedule();
+    }
+
+    /// Wake up process
+    ///
+    ///
+    /// Wake process from sleep state, making it schedulable again
+    ///
+    /// # Arguments
+    /// - `task`: Process to wake
+    ///
+    /// # Returns
+    /// - true: Successfully woken
+    /// - false: Process not in sleep state
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rux::sched;
+    /// if let Some(child) = sched::find_task_by_pid(2) {
+    ///     sched::wake_up_process(child);
+    /// }
+    /// ```
+    /// E8-REPAR: plausibility screen for a raw Task* harvested from a
+    /// parent chain or children list (GNOME final8 KERNPANIC at
+    /// guest+3286s: reparent_children_to_init's subreaper walk
+    /// dereferenced `(*pp).signal` on a freed ancestor and faulted at
+    /// 0xb5d66 — epc=atomic_load<u8> exit.rs:954). Two screens, in the
+    /// spirit of the WP2/R15-6 guards in wake_up but tightened to the
+    /// kernel linear map: (1) address window — every Task is
+    /// heap-allocated inside [PAGE_OFFSET, PAGE_OFFSET+RAM), so integer
+    /// sentinels are rejected on both sides AND anything that passes is
+    /// mapped memory; (2) the TASK_POISON canary free_task_slot writes
+    /// at the compile-time state/pid offsets (catches
+    /// freed-not-yet-reused pages). A page freed AND recycled into
+    /// non-Task data can still pass — the durable fix is that nothing
+    /// writes a stale pointer into a parent field anymore (pinning +
+    /// atomic move in reparent_children_to_init); this screen degrades
+    /// any residual into a bail-to-init instead of a panic.
+    pub fn is_plausible_task_ptr(task: *const Task) -> bool {
+        // WINDOW = kernel linear map ∪ the boot init task's static
+        // storage. Every Task is heap-allocated inside [PAGE_OFFSET,
+        // PAGE_OFFSET+RAM) except init's MaybeUninit<Task> in .bss
+        // (init.rs — its exact address is exported, so no generous
+        // image-window guess that could admit unmapped holes).
+        // Restricting to these means integer sentinels are rejected on
+        // BOTH sides (u32::MAX zero-extended sits below the linear map;
+        // 0xFFFFFFFFFFFFFFFF — which passes wake_up's looser low bound
+        // and wraps the poison probe into badaddr=0x57, caught by the
+        // unit test — sits above it), and every pointer that DOES pass
+        // is inside mapped memory, so the poison reads below cannot
+        // fault. 64GiB linear span: generous against RAM growth.
+        const MAP_BASE: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
+        const MAP_SPAN: usize = 0x10_0000_0000; // 64 GiB
+        let a = task as usize;
+        if task.is_null()
+            || ((a < MAP_BASE || a >= MAP_BASE + MAP_SPAN)
+                && a != crate::init::init_task_storage_addr())
+        {
+            return false;
+        }
+        let slot = task as *const u8;
+        // SAFETY: reads at compile-time Task offsets; the range screen
+        // above already proved the address is inside the kernel linear
+        // map, so the loads cannot take a user-range page fault.
+        let state = unsafe {
+            core::ptr::read_volatile(slot.add(task_offsets::TASK_STATE) as *const u32)
+        };
+        let pid = unsafe {
+            core::ptr::read_volatile(slot.add(task_offsets::TASK_PID) as *const u32)
+        };
+        state != crate::sched::sched::TASK_POISON && pid != crate::sched::sched::TASK_POISON
+    }
+
+    #[inline(never)]
+    pub fn wake_up(task: *mut Task) -> bool {
+        Self::wake_up_impl(task, None, false)
+    }
+
+    /// WF_SYNC wake (reference try_to_wake_up with WF_SYNC, used by
+    /// binder's wake_up_interruptible_sync sites): identical state
+    /// transition and enqueue; only the DISPATCH differs — see the
+    /// sync leg in wake_up_impl's dispatch (66th session).
+    pub fn wake_up_sync(task: *mut Task) -> bool {
+        Self::wake_up_impl(task, None, true)
+    }
+
+    /// INV-LOCK-5 load-bearing twin of [`wake_up`]: wake a task while a
+    /// futex bucket lock is held (futex_wake's R12-2 section). The
+    /// proof — minted by the bucket guard — is required all the way
+    /// down to the GRQ acquire (`wake_up_enqueue_nested` ->
+    /// `lock_irqsave_nested`), so the bucket->GRQ nesting is a compile
+    /// fact, not a review comment. Same body as `wake_up` (shared
+    /// `wake_up_impl`); the proof argument is zero-sized.
+    #[inline(never)]
+    pub fn wake_up_in_futex_bucket<'a>(
+        task: *mut Task,
+        proof: &'a crate::sync::lockkey::NestProof<'a, crate::sync::lockkey::FutexBucketKey>,
+    ) -> bool {
+        Self::wake_up_impl(task, Some(proof), false)
+    }
+
+    /// Shared wake body (`wake_up` / `wake_up_in_futex_bucket`). The
+    /// `bucket` proof, when present, routes the GRQ acquire through the
+    /// compile-checked nested variant (one predictable branch; the
+    /// proof is zero-sized).
+    #[inline(never)]
+    fn wake_up_impl(
+        task: *mut Task,
+        bucket: Option<&crate::sync::lockkey::NestProof<'_, crate::sync::lockkey::FutexBucketKey>>,
+        sync: bool,
+    ) -> bool {
+        if task.is_null() {
+            // WAKE-REFUSE-PT1 (runq-strand hunt) — RETIRED (probe-retire):
+            // behind rux:schedtrace (retired dfx=schedtrace) like the rest of the refusal-point
+            // family; also fixes a latent null-deref in the print itself.
+            if crate::trace::EVENT_SCHEDTRACE.armed() {
+                static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let rn = RF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if rn < 12 { crate::pr_warn!("WAKE-REFUSE-PT1 tid=0"); }
+            }
+            return false;
+        }
+
+        // WP2 (wild-pointer guard): a wake entered here with task ==
+        // 0x00000000FFFFFFFF (u32::MAX zero-extended — GNOME panic at
+        // guest+452s, epc=Task::pid offset 92, ra=Task::wake_up). Every
+        // legitimate Task lives in the kernel linear map or the kernel
+        // image; anything below the arch's floor is user range or an
+        // integer sentinel misread as a pointer. Dropping the wake loses
+        // one wakeup at worst; dereferencing panicked the kernel.
+        // (Per-arch floor: 0xFFFFFFC000000000 is the riscv64 layout — on
+        // x86_64 every legitimate linear-map Task sits at 0xFFFF8880...,
+        // below that constant, so the riscv floor dropped them all and
+        // stranded fork children forever. The aarch64 linear map starts at
+        // 0xFFFF_C000_0000_0000 — even further below the riscv floor; with
+        // the shared not(x86_64) branch every heap Task's wake was dropped
+        // as "wild" and heap tasks slept forever: PID 1's shell sat parked
+        // with input waiting in the ring. Each arch now uses its own
+        // PAGE_OFFSET.)
+        #[cfg(any(feature = "x86_64", feature = "aarch64"))]
+        const WAKE_PTR_FLOOR: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
+        #[cfg(feature = "riscv64")]
+        const WAKE_PTR_FLOOR: usize = 0xFFFF_FFC0_0000_0000;
+        if (task as usize) < WAKE_PTR_FLOOR {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"WAKE-WILD-PTR dropped ptr=0x";
+            for &b in MSG { unsafe { putchar(b); } }
+            let mut v = task as usize;
+            for _ in 0..16 {
+                let n = (v >> 60) as u8;
+                unsafe {
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+                v <<= 4;
+            }
+            unsafe { putchar(b'\n'); }
+            // WAKE-REFUSE-PT2 — RETIRED (probe-retire): rux:schedtrace (retired dfx=schedtrace)
+            // gates the refusal-point family; the wild-pointer DROP itself
+            // stays unconditional (crash-class guard above).
+            if crate::trace::EVENT_SCHEDTRACE.armed() {
+                static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let rn = RF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if rn < 12 { crate::pr_warn!("WAKE-REFUSE-PT2 tid=0x{:x}", task as usize); }
+            }
+            return false;
+        }
+
+        // R15-6 (S-R resurrection guard): refuse to touch a FREED Task.
+        // free_task_slot poisons pid with 0xDEADBEEF; without this check a
+        // stale wake (unreliable RCU grace period) would first WRITE
+        // set_state/set_ti_cpu into the freed (possibly reused) page, then
+        // enqueue the dead pointer — the pick then context-switches onto
+        // foreign data (__switch_to rets through a reused thread.ra: the
+        // linear-map illegal-instruction signature). See also the guard in
+        // enqueue_task_locked.
+        {
+            let pid = unsafe { (*task).pid() };
+            if pid == crate::sched::sched::TASK_POISON {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"WAKE-POISONED-TASK dropped\n";
+                for &b in MSG { unsafe { putchar(b); } }
+                // WAKE-REFUSE-PT3 — RETIRED (probe-retire): rux:schedtrace (retired dfx=schedtrace)
+                // gates the refusal-point family; the poison DROP stays.
+                if crate::trace::EVENT_SCHEDTRACE.armed() {
+                    static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                    let rn = RF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if rn < 12 { crate::pr_warn!("WAKE-REFUSE-PT3 tid={} (poison)", pid); }
+                }
+                return false;
+            }
+        }
+
+        // SAFETY: Caller guarantees task points to a valid Task that is not currently
+        // running on another CPU (or the scheduler lock prevents concurrent access).
+        unsafe {
+            let old_state = (*task).state();
+            let pid = (*task).pid();
+
+            // timer-gap lane: name the wake decision for pinned-FIFO
+            // targets (rt2xdbg=1, 64-line budget) — the pi_min wedge
+            // needs the state-gate verdict and the enqueue outcome.
+            // cpu0-pinned only (mask==1): the driver thread's 50 us
+            // nanosleep polls otherwise eat the whole budget.
+            if matches!(
+                (*task).policy(),
+                crate::process::task::SchedPolicy::Fifo
+                    | crate::process::task::SchedPolicy::Rr
+            ) && (*task).cpus_allowed() == 1
+                && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
+            {
+                static WUG: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if WUG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+                    use crate::dfx::taskdump::putc_brief as putchar;
+                    fn ph(mut v: u64) {
+                        for _ in 0..16 {
+                            let n = (v >> 60) as u8;
+                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                            v <<= 4;
+                        }
+                    }
+                    for &b in b"WUG pid=0x" { putchar(b); }
+                    ph(pid as u64);
+                    for &b in b" st=0x" { putchar(b); }
+                    ph(old_state.bits() as u64);
+                    for &b in b" jif=" { putchar(b); }
+                    ph(crate::drivers::timer::get_jiffies());
+                    putchar(b'\n');
+                }
+            }
+
+            // Wake if sleeping OR stopped (R7-3): stopped tasks were
+            // dequeued when they scheduled away; SIGCONT/SIGKILL reach them
+            // through here — filtering only is_sleeping() made them
+            // permanently unkillable.
+            if old_state.is_sleeping() || old_state.contains(TaskState::STOPPED) {
+                // forkprof (cmdline forkprof=1): waker-side body cost and
+                // the stamp consumed at the wakee's switch-in.
+                let fp = crate::dfx::forkprof::on();
+                let fp_t_wake = if fp { crate::dfx::forkprof::now() } else { 0 };
+                // cctx probe (closegap lane): select / enqueue / dispatch
+                // phase sums for the sleeping-target wake path.
+                let cc = crate::dfx::cctx::on();
+                let cc_t_sel = if cc { crate::dfx::cctx::now() } else { 0 };
+                crate::dfx::cctx::bump(&crate::dfx::cctx::WK_N);
+                // Select best CPU for this task (wake-affine / least-loaded)
+                let sched_class = crate::sched::class::task_sched_class(&*task);
+                let prev_cpu = (*task).ti_cpu();
+                let target_cpu = sched_class.select_task_rq(task, prev_cpu, 0);
+                crate::dfx::cctx::add(&crate::dfx::cctx::WK_SEL_NS, cc_t_sel);
+                let cc_t_enq = crate::dfx::cctx::now();
+
+                // Update task's CPU if it changed.
+                // R13-5: never steer a task that is still executing (on_cpu
+                // set from pick until __switch_to saves its context) — see
+                // the deferred-notify steering fix.
+                // R49 (on_cpu clear-protocol gap — the seed): the old
+                // UNLOCKED `!on_cpu()` check-then-write raced the pick
+                // path: this CPU passes the gate, another CPU's racing
+                // wake links the task, a third picks it
+                // (mark_picked_on_cpu + context_switch's ti_cpu stamp),
+                // and THIS CPU's delayed steer store still lands while
+                // the task executes — tp->ti_cpu then no longer names the
+                // hardware CPU, cpu_id()/this_cpu() resolve the WRONG
+                // PER_CPU slot on that CPU, and __schedule switches
+                // context against a task running elsewhere (the R13-1
+                // engine; the round-49 permanent on_cpu=1 phantom family).
+                // The on_cpu re-check now runs under the GRQ lock, which
+                // excludes every concurrent pick.
+                if target_cpu != prev_cpu {
+                    crate::sched::steer_task_cpu(task, target_cpu);
+                }
+
+                // The sched:sched_waking / sched:sched_wakeup tracepoints
+                // (the reference emits waking before the enqueue attempt
+                // and wakeup only after it succeeded). One `armed()`
+                // check each when off; the comm copy sits behind the
+                // gate, so the disabled wake path marshals nothing.
+                if crate::trace::EVENT_SCHED_WAKING.armed() {
+                    let words = crate::trace::comm_to_words(&*(*task).comm());
+                    crate::trace::record(
+                        &crate::trace::EVENT_SCHED_WAKING,
+                        [
+                            words[0],
+                            words[1],
+                            pid as u64,
+                            (*task).prio() as u64,
+                            target_cpu as u64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        ],
+                    );
+                }
+
+                // R33 (A-family wedge — dead-task resurrection): transition to
+                // RUNNING + enqueue ATOMICICALLY under the GRQ lock
+                // (sched::wake_up_enqueue). The old unlocked sequence raced
+                // do_exit: this wake's filter above read INTERRUPTIBLE; another
+                // CPU then woke the task, it ran and exited (ZOMBIE + dequeue +
+                // final schedule + parent reap freed its kernel stack), and our
+                // stale set_state(RUNNING) + enqueue re-queued the dead task
+                // anyway. A third CPU picking it context-switched onto the freed
+                // stack (__switch_to loads thread.sp into sp) — the observed
+                // trap-with-sp-on-heap-address full-system wedge. The locked
+                // re-check refuses ZOMBIE/DEAD/RUNNING.
+                if !crate::sched::wake_up_enqueue_opt(task, bucket) {
+                    // W2 (sc78): a SLEEPING target's enqueue+heal both
+                    // refused — per the R39/R41/R42 design this is
+                    // unreachable, yet the binder ring proves replies sit
+                    // unconsumed on parked readers' todos for minutes.
+                    // Rate-limited branch report so the refusing guard
+                    // names itself live.
+                    // r24 extension (kill10 wedge): capture the refusing
+                    // guard's own discriminators under the lock — class
+                    // linkage, owning busy/idle slots, exec clock, quantum —
+                    // so "linked but starved" vs "orphaned live pick mark"
+                    // vs "lying busy slot" are told apart on the line.
+                    // FWK (futex-lostwake): a target that is no longer
+                    // SLEEPING at the recheck is the benign redundant
+                    // re-wake class — an earlier wake (or signal) already
+                    // made it runnable (state RUNNING, executing or
+                    // enqueued), so this wake's information is delivered;
+                    // skip the report so the hunt line stays strand-only.
+                    // (on_cpu alone was not enough: a just-enqueued task
+                    // is RUNNING-but-not-yet-executing and flips on_cpu
+                    // between the gate and the marshal.)
+                    if (*task).state().is_sleeping() {
+                        // wake-fastrepro gate tightening: a target that is
+                        // MID-PICK (on_cpu set and a live busy slot backs
+                        // the claim) is about to be switched to — the
+                        // in-flight pick delivers this wake's information
+                        // by resuming the task. The refusal here is the
+                        // enqueue's double-insert guard doing its job, not
+                        // a lost wake; printing it floods the census with
+                        // boot-settle races (gate-r1: pid 314 at jif 11,
+                        // leg otherwise clean, max_gap 1 ms over 6060
+                        // parks). Pre-check the two census discriminators
+                        // before the budgeted report.
+                        let mid_pick = (*task).on_cpu() && {
+                            let mut backed = false;
+                            for c in 0..crate::config::MAX_CPUS {
+                                if crate::sched::sched::cpu_state(c).current
+                                    == task
+                                {
+                                    backed = true;
+                                    break;
+                                }
+                            }
+                            backed
+                        };
+                        // 121st (user-GUI storm): the first refusal raced
+                        // a TRANSIENT of the double-insert guard's window —
+                        // the census WW-PROBE has proven that a re-issued
+                        // wake in exactly this state links 0->1 instantly.
+                        // Retry ONCE, bounded, before reporting: on link,
+                        // the wake is delivered (nudge its last CPU like
+                        // the requeue path at wake_up_enqueue_opt's call
+                        // below); only a refused retry is a real W2.
+                        if !mid_pick {
+                            let retry_n =
+                                crate::sched::wake_up_enqueue_opt(task, bucket);
+                            if retry_n {
+                                crate::sched::resched_cpu((*task).ti_cpu() as usize);
+                                crate::pr_debug!(
+                                    "W2-RETRY-LINKED pid={} (transient guard window)",
+                                    pid
+                                );
+                                return true;
+                            }
+                        }
+                        static W2_N: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        // W2 print + monopolist capture — RETIRED
+                        // (probe-retire): the wake-refusal census COUNTERS
+                        // stay always-on (merge-gate band); the per-event
+                        // serial lines move behind rux:schedtrace (retired dfx=schedtrace).
+                        if crate::trace::EVENT_SCHEDTRACE.armed()
+                            && !mid_pick
+                            && W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
+                        {
+                            let w2 = crate::sched::w2_refusal_census(task);
+                            // 118th: name the target (the pk=1 monopolist
+                            // census lines were anonymous).
+                            let cb = (*task).comm();
+                            let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                            let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
+                            crate::pr_warn!(
+                                "W2-WAKE-REFUSED-SLEEPING pid={} ({}) state={:#x} on_cpu={} pk={} cpu={} {}",
+                                pid,
+                                comm,
+                                (*task).state().bits(),
+                                (*task).on_cpu(),
+                                (*task).pick_state(),
+                                (*task).ti_cpu(),
+                                w2
+                            );
+                            // dfx-migrate: the refusal also records into
+                            // the unified framework (rux:schedtrace
+                            // kind=WAKE_REFUSED — the event is also the
+                            // family's arm switch).
+                            crate::trace::trace_schedtrace(
+                                1,
+                                pid as u32,
+                                (*task).state().bits() as u64,
+                                (*task).ti_cpu() as u64,
+                            );
+                                // 118th monopolist capture: a RUNNING+on_cpu refusal
+                                // target with preempt_count>=2 is a REAL leaked-base
+                                // incumbent (the sysevent_source shape — userspace
+                                // last rip, honest busy slot, every blocking syscall
+                                // degenerating into the park-refusal poll). One-shot
+                                // per boot: IPI its CPU for the interrupted RIP +
+                                // live stack — that names the kernel loop the leak
+                                // rides in.
+                                #[cfg(feature = "x86_64")]
+                                {
+                                    static MONO_DONE: core::sync::atomic::AtomicBool =
+                                        core::sync::atomic::AtomicBool::new(false);
+                                    let pc = (*task).preempt_count();
+                                    if pc >= 2
+                                        && (*task).on_cpu()
+                                        && !MONO_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
+                                    {
+                                        let cpu = (*task).ti_cpu().max(0) as usize;
+                                        crate::pr_warn!(
+                                            "MONOPOLIST-CAPTURE pid={} ({}) preempt={} cpu={} — remote bt follows",
+                                            pid,
+                                            comm,
+                                            pc,
+                                            cpu
+                                        );
+                                        let _ = crate::arch::ipi::remote_backtrace(cpu, "monopolist-w2");
+                                    }
+                                }
+                            }
+                        }
+                    // WAKE-REFUSE-PT4 — RETIRED (probe-retire):
+                    // rux:schedtrace (retired dfx=schedtrace) gates the refusal-point family.
+                    if crate::trace::EVENT_SCHEDTRACE.armed() {
+                        static RF4: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let rn = RF4.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if rn < 12 {
+                            crate::pr_warn!("WAKE-REFUSE-PT4 tid={} state={:#x}", unsafe { (*task).pid() }, unsafe { (*task).state().bits() });
+                        }
+                    }
+                    return false;
+                }
+
+                // Dispatch the woken task: prefer an idle CPU within the
+                // wakee's affinity (the reference's select_idle_sibling +
+                // remote-enqueue shape); only when none is idle, set
+                // need_resched on the wakee's previous CPU.
+                //
+                // Why this matters for IPC throughput (perf-ipc lane,
+                // ipcdisc2 timeline evidence): the old unconditional
+                // resched of the previous CPU pokes the WAKER's own (busy)
+                // CPU, which preempts the sender at trap-exit and
+                // serializes sender and receiver into a preempt ping-pong
+                // on one CPU while the other CPU stays parked — a
+                // 74-byte unix-stream record cost ~275 us of dance
+                // (wake 19us + preempt-switch 56us + receiver cycle
+                // 131us + sender cycle 86us) against the reference's
+                // ~2.5 us with the receiver drained concurrently on the
+                // idle CPU. Dispatching the wakee to the idle CPU lets
+                // the sender run unmolested (its trap-exit preempt never
+                // fires — no NEED_RESCHED on its CPU) and the receiver
+                // runs in parallel. The GLOBAL run queue keeps the IPI
+                // advisory: whichever CPU schedules first picks the task,
+                // so a sender that blocks immediately after the wake
+                // (pipe echo, futex handoff) still gets the in-place
+                // handoff from its own schedule().
+                let allowed = (*task).cpus_allowed();
+                crate::dfx::cctx::add(&crate::dfx::cctx::WK_ENQ_NS, cc_t_enq);
+                let cc_t_disp = crate::dfx::cctx::now();
+                // 105th wake-dispatch census (see sched::WAKE_DISP): the
+                // dispatch outcome + idle mask at wake entry, read back by
+                // the binder QPICK hunt. Relaxed stores; diagnostic only.
+                crate::sched::WAKE_IDLE_MASK.store(
+                    crate::sched::grq_idle_mask(),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                // R3 (rt-r3 lane): RT/DL wakes steer the idle claim to the
+                // wakee's PLACEMENT cpu (the reference's select_task_rq_rt
+                // + check_preempt_curr both operate on the placement rq; a
+                // timer hardirq fires on the sleeper's own cpu, so the
+                // placement claim makes the dispatch a self-poke consumed
+                // at the IRQ exit instead of a rotated idle cpu that needs
+                // an IPI + halt-exit). Fair classes keep the rotating
+                // claim unchanged — the D-14 divergence stands for CFS.
+                let rt_prefer = match (*task).policy() {
+                    crate::process::task::SchedPolicy::Fifo
+                    | crate::process::task::SchedPolicy::Rr
+                    | crate::process::task::SchedPolicy::Deadline => (*task).ti_cpu(),
+                    _ => -1,
+                };
+                match crate::sched::claim_idle_cpu_for_prefer(allowed, rt_prefer) {
+                    Some(idle_cpu) => {
+                        crate::sched::WAKE_DISP.store(1, core::sync::atomic::Ordering::Relaxed);
+                        crate::sched::resched_cpu(idle_cpu);
+                    }
+                    None => {
+                        // No idle CPU: poke a busy CPU only when the wakee
+                        // wins the wakeup-preemption comparison (see
+                        // preempt_check_wake) — the old unconditional
+                        // resched of the previous CPU forced a preempt
+                        // dance per record on same-CPU sender/receiver
+                        // pairs.
+                        //
+                        // 66th (WF_SYNC parity): a SYNC wake stacks the
+                        // wakee with the WAKER instead — the reference's
+                        // wake_affine(sync) places it on this CPU (2-cpu
+                        // both-busy: nr_running==1 → this_cpu; weight-tie
+                        // bias → this_cpu), so the pair runs in strict
+                        // handoff order: the waker finishes its BWR and
+                        // parks, THEN the wakee runs. Poking the wakee's
+                        // previous CPU here would run the wakee in
+                        // parallel with the still-running waker — a
+                        // third thread barges exactly the reentrancy
+                        // windows (FFRT mutex unlock→waiter-recheck) the
+                        // reference keeps closed for sync handoffs.
+                        if sync {
+                            crate::sched::WAKE_DISP
+                                .store(2, core::sync::atomic::Ordering::Relaxed);
+                            crate::sched::preempt_check_wake_sync(task);
+                        } else {
+                            crate::sched::WAKE_DISP
+                                .store(3, core::sync::atomic::Ordering::Relaxed);
+                            crate::sched::preempt_check_wake(task);
+                        }
+                    }
+                }
+                crate::dfx::cctx::add(&crate::dfx::cctx::WK_DISP_NS, cc_t_disp);
+
+                // sched:sched_wakeup — the enqueue succeeded, the task is
+                // runnable on target_cpu (the reference's post-enqueue
+                // record; see the sched_waking note above for the gating).
+                if crate::trace::EVENT_SCHED_WAKEUP.armed() {
+                    let words = crate::trace::comm_to_words(&*(*task).comm());
+                    crate::trace::record(
+                        &crate::trace::EVENT_SCHED_WAKEUP,
+                        [
+                            words[0],
+                            words[1],
+                            pid as u64,
+                            (*task).prio() as u64,
+                            target_cpu as u64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        ],
+                    );
+                }
+
+                if fp {
+                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WAKE_BODY, fp_t_wake);
+                    crate::dfx::forkprof::stamp_wake(pid as u32);
+                }
+                true
+            } else {
+                // R46 (B-form phantom — refused-wake mirror of R41/R42):
+                // RUNNING is legitimate only while the task is on a CPU
+                // (on_cpu == 1 from pick until __switch_to saves the
+                // outgoing context) or linked on a class queue. This
+                // branch refused EVERY wake of a task whose state reads
+                // RUNNING, so a RUNNING task that is on NO CPU (a write
+                // into the state word from outside the scheduler — note
+                // RUNNING == 0 — or a future regression; the scheduler's
+                // own transitions cannot produce it) stayed unschedulable
+                // forever: no queue holds it, no wake reaches it. The
+                // on_cpu read here is an unlocked HINT only; route the
+                // suspect into wake_up_enqueue, whose GRQ-locked re-check
+                // verifies actual linkage and heals only the genuine
+                // divergence (a queued or on-CPU RUNNING task is still
+                // refused there, unchanged).
+                // R49: the hint no longer requires on_cpu == 0 — an
+                // ORPHANED pick mark (RUNNING, unlinked, owned by no
+                // CPU's current slot — the 344/345/356 morphology) reads
+                // on_cpu == 1 but is exactly as unwakeable, and only the
+                // locked re-check can tell an orphaned mark from one that
+                // a CPU genuinely owns mid-pick. The hint routes both;
+                // wake_up_enqueue's authoritative current-slot scan sorts
+                // them apart.
+                if old_state == TaskState::new(TaskState::RUNNING) {
+                    // r11 (reference wake contract): try_to_wake_up
+                    // returns 1 only when it transitioned a non-RUNNING
+                    // task to running — the reference's entry filter
+                    // (`p->__state & state`) refuses a RUNNING target
+                    // outright and returns 0. Keep the R46/R49 phantom
+                    // RELINK (RUNNING ∧ unlinked ∧ unowned is a
+                    // divergence shape this tree's phantom families can
+                    // produce; relinking restores the reference invariant
+                    // that a RUNNING task is queued or on a CPU) and its
+                    // resched nudge, but report the reference's answer:
+                    // nobody "woke" a task that was already RUNNING. The
+                    // old true-return was an API divergence — the
+                    // sleep_wakeup suite hit it deterministically once
+                    // the first wake's enqueue had been picked+dequeued
+                    // elsewhere, leaving the heal as the only arm.
+                    if crate::sched::wake_up_enqueue_opt(task, bucket) {
+                        // Linked again — nudge its last CPU so it is
+                        // picked promptly instead of waiting for the
+                        // next idle tick.
+                        crate::sched::resched_cpu((*task).ti_cpu() as usize);
+                    }
+                    // WAKE-REFUSE-PT5 — RETIRED (probe-retire): this is
+                    // the loudest refusal-point arm (a benign scheduler
+                    // race outcome, ~12 lines every ordinary boot); behind
+                    // rux:schedtrace (retired dfx=schedtrace). The heal + resched logic is unchanged.
+                    if crate::trace::EVENT_SCHEDTRACE.armed() {
+                        static RF5: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let rn = RF5.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if rn < 12 {
+                            crate::pr_warn!("WAKE-REFUSE-PT5 tid={} state={:#x}", unsafe { (*task).pid() }, unsafe { (*task).state().bits() });
+                        }
+                    }
+                    return false;
+                }
+                false
+            }
+        }
+    }
+
+    /// Get PID
+    #[inline]
+    pub fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    /// Get a snapshot of one resource limit `(rlim_cur, rlim_max)`.
+    ///
+    /// Convenience wrapper over the rlimits table for the enforcement
+    /// points (alloc_fd / mmap / brk / fork / scheduler_tick). Uses
+    /// lock_irqsave: scheduler_tick reads it from IRQ context, so every
+    /// task-context acquisition of the same lock must be irqsave as well
+    /// (an interrupted plain-lock holder would wedge the tick).
+    pub fn rlimit(&self, resource: usize) -> (u64, u64) {
+        if resource >= RLIM_NLIMITS {
+            return (u64::MAX, u64::MAX); // RLIM_INFINITY for unknown ids
+        }
+        self.rlimits.lock_irqsave()[resource]
+    }
+
+    /// Last CPU-time second at which SIGXCPU was sent (RLIMIT_CPU).
+    pub fn cpu_time_last_sigxcpu(&self) -> u64 {
+        self.cpu_time_last_sigxcpu.load(Ordering::Acquire)
+    }
+
+    /// Record the CPU-time second of the latest SIGXCPU delivery.
+    pub fn set_cpu_time_last_sigxcpu(&self, secs: u64) {
+        self.cpu_time_last_sigxcpu.store(secs, Ordering::Release);
+    }
+
+    /// Preemptive scheduling support
+
+    /// Decrement time slice
+    ///
+    ///
+    /// # Returns
+    /// - true: Time slice remaining
+    /// - false: Time slice exhausted
+    #[inline]
+    pub fn tick_time_slice(&mut self) -> bool {
+        if self.time_slice > 0 {
+            self.time_slice -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reset time slice
+    ///
+    /// Called when process is rescheduled to CPU
+    #[inline]
+    pub fn reset_time_slice(&mut self) {
+        self.time_slice = DEFAULT_TIME_SLICE;
+    }
+
+    /// Check if time slice exhausted
+    #[inline]
+    pub fn time_slice_expired(&self) -> bool {
+        self.time_slice == 0
+    }
+
+    /// Get remaining time slice
+    #[inline]
+    pub fn get_time_slice(&self) -> u32 {
+        self.time_slice
+    }
+
+    /// Set time slice
+    #[inline]
+    pub fn set_time_slice(&mut self, slice: u32) {
+        self.time_slice = slice;
+    }
+
+    /// End of preemptive scheduling support
+
+    // ==================== CFS scheduling support ====================
+
+    /// Get CFS scheduling entity
+    #[inline]
+    pub fn sched_entity(&self) -> &crate::sched::fair::SchedEntity {
+        &self.sched_entity
+    }
+
+    /// Get CFS scheduling entity (mutable reference)
+    #[inline]
+    pub fn sched_entity_mut(&mut self) -> &mut crate::sched::fair::SchedEntity {
+        &mut self.sched_entity
+    }
+
+    /// Get scheduling policy
+    #[inline]
+    pub fn policy(&self) -> SchedPolicy {
+        self.policy
+    }
+
+    /// Set scheduling policy
+    #[inline]
+    pub fn set_policy(&mut self, policy: SchedPolicy) {
+        self.policy = policy;
+    }
+
+    /// Get static priority
+    #[inline]
+    pub fn static_prio(&self) -> i32 {
+        self.static_prio
+    }
+
+    /// Get dynamic priority
+    #[inline]
+    pub fn prio(&self) -> i32 {
+        self.prio
+    }
+
+    /// Set dynamic priority
+    #[inline]
+    pub fn set_prio(&mut self, prio: i32) {
+        self.prio = prio;
+    }
+
+    /// Get RT priority (0-99, lower value = higher priority)
+    #[inline]
+    pub fn rt_priority(&self) -> u32 {
+        self.rt_priority
+    }
+
+    /// Set RT priority
+    #[inline]
+    pub fn set_rt_priority(&mut self, prio: u32) {
+        self.rt_priority = prio.min(99);
+    }
+
+    /// Get RT scheduling entity
+    #[inline]
+    pub fn rt_entity(&self) -> &crate::sched::rt::SchedRtEntity {
+        &self.rt_entity
+    }
+
+    /// Get RT scheduling entity (mutable reference)
+    #[inline]
+    pub fn rt_entity_mut(&mut self) -> &mut crate::sched::rt::SchedRtEntity {
+        &mut self.rt_entity
+    }
+
+    /// Get Deadline scheduling entity
+    #[inline]
+    pub fn dl_entity(&self) -> &crate::sched::deadline::SchedDlEntity {
+        &self.dl_entity
+    }
+
+    /// Get Deadline scheduling entity (mutable reference)
+    #[inline]
+    pub fn dl_entity_mut(&mut self) -> &mut crate::sched::deadline::SchedDlEntity {
+        &mut self.dl_entity
+    }
+
+    /// SCHED_RESET_ON_FORK request state.
+    #[inline]
+    pub fn sched_reset_on_fork(&self) -> bool {
+        self.sched_reset_on_fork.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Set/clear the SCHED_RESET_ON_FORK request (atomic — called from
+    /// sched_setscheduler/sched_setattr without exclusive task access).
+    #[inline]
+    pub fn set_sched_reset_on_fork(&self, on: bool) {
+        self.sched_reset_on_fork.store(on, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Get nice value
+    ///
+    /// Nice value range: -20 to +19
+    /// Calculated from static_prio: nice = static_prio - 120
+    #[inline]
+    pub fn nice(&self) -> i32 {
+        self.static_prio - 120
+    }
+
+    /// Set nice value
+    ///
+    /// Also updates static_prio and scheduling entity weight
+    pub fn set_nice(&mut self, nice: i32) {
+        // Nice value range: -20 to +19
+        let nice = nice.clamp(-20, 19);
+
+        // Update static_prio
+        self.static_prio = nice + 120;
+        self.normal_prio = self.static_prio;
+        self.prio = self.normal_prio;
+
+        // Update scheduling entity weight
+        self.sched_entity.set_nice(nice);
+    }
+
+    // ==================== Process tree management ====================
+
+    /// Get parent process PID (PPID)
+    #[inline]
+    pub fn ppid(&self) -> Pid {
+        match self.parent {
+            Some(parent_ptr) => {
+                // E8-REPAR: a thread's parent field is an unlinked
+                // snapshot (thread_group_join copies leader.parent) that
+                // can name a reaped-and-freed ancestor; a non-leader
+                // caller should use the leader's ppid, and everyone else
+                // gets 0 rather than a dereference of freed memory.
+                if !Self::is_plausible_task_ptr(parent_ptr) {
+                    return 0;
+                }
+                // SAFETY: parent_ptr passed the plausibility screen; for
+                // leaders it was set by add_child() and remains valid
+                // while the child is alive.
+                unsafe { (*parent_ptr).pid }
+            }
+            None => 0, // No parent process, return 0
+        }
+    }
+
+    /// Check if fork child process
+    #[inline]
+    pub fn is_fork_child(&self) -> bool {
+        self.is_fork_child.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set as fork child process
+    #[inline]
+    pub fn set_fork_child(&self, pt_regs_ptr: *const crate::arch::pt_regs::PtRegs) {
+        self.is_fork_child.store(true, core::sync::atomic::Ordering::Relaxed);
+        self.fork_pt_regs.store(pt_regs_ptr as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Get fork child's PtRegs pointer
+    #[inline]
+    pub fn fork_pt_regs(&self) -> *const crate::arch::pt_regs::PtRegs {
+        self.fork_pt_regs.load(core::sync::atomic::Ordering::Relaxed) as *const crate::arch::pt_regs::PtRegs
+    }
+
+    /// Clear fork child flag (called after child is first scheduled).
+    /// Does NOT clear fork_pt_regs — the heap-allocated PtRegs is freed
+    /// later in release_task().
+    #[inline]
+    pub fn clear_fork_child(&self) {
+        self.is_fork_child.store(false, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Get TGID
+    #[inline]
+    pub fn tgid(&self) -> Pid {
+        self.tgid
+    }
+
+    /// Set TGID (for CLONE_THREAD)
+    #[inline]
+    pub fn set_tgid(&mut self, tgid: Pid) {
+        self.tgid = tgid;
+    }
+
+    // ==================== Thread group (task_struct::thread_group) ====================
+
+    /// Thread group leader pointer; heals a NULL (pre-fixup) value to self.
+    #[inline]
+    pub fn group_leader_ptr(&self) -> *mut Task {
+        if self.group_leader.is_null() {
+            self as *const Task as *mut Task
+        } else {
+            self.group_leader
+        }
+    }
+
+    /// Raw parent-children-list head pointer (rux:treehunt (retired dfx=treehunt) reads it to
+    /// distinguish linked leaders from unlinked snapshot members; null
+    /// for members by design). Diagnostic use only.
+    #[inline]
+    pub fn parent_children_head_ptr(&self) -> *mut core::ffi::c_void {
+        self.parent_children_head as *mut core::ffi::c_void
+    }
+
+    /// Raw group_leader field (no healing) — for re-init during teardown.
+    #[inline]
+    pub fn group_leader_raw(&self) -> *mut Task {
+        self.group_leader
+    }
+
+    /// Set group leader (fork.rs, when joining an existing group).
+    #[inline]
+    pub fn set_group_leader(&mut self, leader: *mut Task) {
+        self.group_leader = leader;
+    }
+
+    /// Next member in the thread group ring; heals NULL to self.
+    #[inline]
+    pub fn next_thread_ptr(&self) -> *mut Task {
+        if self.next_thread.is_null() {
+            self as *const Task as *mut Task
+        } else {
+            self.next_thread
+        }
+    }
+
+    /// Live thread count. Authoritative on the leader.
+    #[inline]
+    pub fn nr_threads(&self) -> u32 {
+        self.nr_threads.load(Ordering::Acquire)
+    }
+
+    /// Is this task its own group leader (or single-threaded)?
+    #[inline]
+    pub fn is_thread_group_leader(&self) -> bool {
+        let l = self.group_leader;
+        l.is_null() || l as *const Task == self as *const Task
+    }
+
+    /// Join `member` into this task's thread group (CLONE_THREAD).
+    ///
+    /// Head-insert into the leader's ring: leader -> member -> old_first.
+    /// nr_threads is bumped on the leader. PROCESS_TREE_LOCK serializes
+    /// concurrent join/leave/walk (the process-tree lock doubles as the
+    /// thread-group lock; both guard task_struct linkage fields).
+    ///
+    /// Contract: `self` is a valid leader (its ring is well-formed),
+    /// `member` is a fully-constructed task not yet in any ring, and
+    /// neither is being torn down concurrently.
+    pub fn thread_group_join(&mut self, member: *mut Task) {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let leader = self as *mut Task;
+        // SAFETY: caller contract above — member is a fully-constructed
+        // task; the tree/ring lock is held for the whole link.
+        let m = unsafe { &mut *member };
+        m.set_group_leader(leader);
+        m.set_tgid(self.tgid);
+        // member.parent mirrors the leader's parent (threads share the real
+        // parent) — but the member is NOT linked into the parent's children
+        // list (wait4 only ever sees process products).
+        m.parent = self.parent;
+        m.parent_children_head = ptr::null_mut();
+        m.next_thread = self.next_thread;
+        self.next_thread = member;
+        self.nr_threads.fetch_add(1, Ordering::Release);
+    }
+
+    /// Remove `member` from its thread group ring and return the leader.
+    ///
+    /// Returns NULL when the member is its own leader (nothing to leave).
+    /// The caller must NOT be `member` itself already scheduled out.
+    ///
+    /// Contract: `member` is a live ring member of a well-formed ring.
+    pub fn thread_group_leave(member: *mut Task) -> *mut Task {
+        // SAFETY: caller contract above — member is a live ring member.
+        let m = unsafe { &mut *member };
+        let leader = m.group_leader;
+        if leader.is_null() || leader as *const Task == member as *const Task {
+            return ptr::null_mut();
+        }
+        let _lock = PROCESS_TREE_LOCK.lock();
+        // Find member's predecessor, walking from the leader (ring, no tail).
+        // SAFETY: ring nodes stay linked under PROCESS_TREE_LOCK.
+        let mut prev = leader;
+        let mut guard = 0u32;
+        unsafe {
+            while guard < 65536 {
+                let next = (*prev).next_thread;
+                if next == member || next == leader {
+                    break;
+                }
+                prev = next;
+                guard += 1;
+            }
+            if (*prev).next_thread == member {
+                (*prev).next_thread = m.next_thread;
+            }
+        }
+        // Re-init to a self-ring so later accidental walks stay bounded.
+        m.next_thread = member;
+        m.group_leader = member;
+        // SAFETY: leader is a live ring member (validated above).
+        unsafe { (*leader).nr_threads.fetch_sub(1, Ordering::Release) };
+        // timer-gap lane: the leader may be PARKED in
+        // wait_for_thread_group_death (exit_group/de_thread) waiting for
+        // exactly this decrement — wake it so it re-checks nr_threads.
+        // Outside PROCESS_TREE_LOCK (wake_up takes the GRQ); a no-op when
+        // the leader is running or not waiting.
+        let leader_ptr = leader as *mut Task;
+        drop(_lock);
+        if leader_ptr != member {
+            let _ = Task::wake_up(leader_ptr);
+        }
+        leader_ptr
+    }
+
+    /// Iterate every live member of this leader's group (leader included).
+    ///
+    /// Collect under the ring lock what you need and act outside it: signal
+    /// delivery takes pid-hash pins and the GRQ, which must not nest under
+    /// PROCESS_TREE_LOCK in the reverse order anywhere.
+    ///
+    /// Contract: `self` is a valid task whose ring is well-formed; each
+    /// `&Task` handed to `f` is valid only for the closure body (the
+    /// ring lock keeps members linked for the walk — do not store).
+    pub fn for_each_group_member<F>(&self, mut f: F)
+    where
+        F: FnMut(&Task),
+    {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let leader = self as *const Task as *mut Task;
+        // SAFETY: leader is self (valid by contract); ring members stay
+        // linked while PROCESS_TREE_LOCK is held.
+        unsafe {
+            f(&*leader);
+            let mut t = (*leader).next_thread;
+            let mut guard = 0u32;
+            while !t.is_null() && t != leader && guard < 65536 {
+                f(&*t);
+                t = (*t).next_thread;
+                guard += 1;
+            }
+        }
+    }
+
+    /// Get process credentials
+    #[inline]
+    pub fn cred(&self) -> &Cred {
+        &self.cred
+    }
+
+    /// Get mutable process credentials
+    #[inline]
+    pub fn cred_mut(&mut self) -> &mut Cred {
+        &mut self.cred
+    }
+
+    /// OH access token id (/dev/access_token_id).
+    #[inline]
+    pub fn access_token(&self) -> u64 {
+        self.access_token.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_access_token(&self, token: u64) {
+        self.access_token.store(token, Ordering::Release);
+    }
+
+    /// OH foreground token id (/dev/access_token_id).
+    #[inline]
+    pub fn access_ftoken(&self) -> u64 {
+        self.access_ftoken.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_access_ftoken(&self, token: u64) {
+        self.access_ftoken.store(token, Ordering::Release);
+    }
+
+    /// Get mutable reference to address space
+    /// Note: AddressSpace has interior mutability, so &self is sufficient
+    pub fn address_space_mut(&mut self) -> Option<&AddressSpace> {
+        self.address_space.as_ref().map(|arc| arc.as_ref())
+    }
+
+    /// Get reference to address space.
+    ///
+    /// CURRENT-task use only: the running task holds its own Arc, and only
+    /// its own exit/exec (same context) can drop it. For a FOREIGN task
+    /// the borrow is unaccounted — the target's exit_mm can free the
+    /// MmStruct (and its VMA btree) mid-walk (the /proc maps #GP family).
+    /// Foreign readers must use [`Task::address_space_arc`] (refcounted
+    /// pin) or [`Task::mm_ptr_peek`] (identity compare only).
+    pub fn address_space(&self) -> Option<&AddressSpace> {
+        self.address_space.as_ref().map(|arc| arc.as_ref())
+    }
+
+    /// Set address space.
+    ///
+    /// The slot swap runs under `mm_slot_lock` so a concurrent
+    /// `address_space_arc()` on another CPU either clones the OLD Arc
+    /// before our swap (it then holds a real reference — our drop of the
+    /// old Arc cannot free the mm) or observes the new value. The old
+    /// Arc is dropped AFTER releasing the lock: its Drop may run the
+    /// full page-table teardown (synchronize_rcu + free_user_page_tables)
+    /// and must never run under this (irqsave) spinlock.
+    pub fn set_address_space(&mut self, addr_space: Option<alloc::sync::Arc<AddressSpace>>) {
+        let old = {
+            let _g = self.mm_slot_lock.lock_irqsave();
+            // Update active_mm pointer (raw borrow mirror of the slot)
+            // inside the same critical section.
+            self.active_mm = addr_space.as_ref().map(|a| a.as_ref() as *const AddressSpace);
+            // Teardown-context attribution (FUT-STALE family): the task
+            // installing this mm is its owner; MmStruct::drop compares it
+            // against the dropping context to witness deferred teardowns.
+            if let Some(ref a) = addr_space {
+                a.set_owner_pid(self.pid() as i32);
+            }
+            core::mem::replace(&mut self.address_space, addr_space)
+        };
+        // Refcount drop (possible last-reference teardown) outside the lock.
+        drop(old);
+    }
+
+    /// Get Arc reference to address space (for CLONE_VM / foreign-task mm
+    /// pinning).
+    ///
+    /// The clone runs under `mm_slot_lock`, making it race-free against a
+    /// concurrent `set_address_space` on the owner CPU: an Arc clone can
+    /// no longer land on a slot whose last reference was just dropped
+    /// (the resurrected-Arc double-teardown engine). While the returned
+    /// Arc is held, the MmStruct, its VMA tree and its page tables cannot
+    /// be freed.
+    ///
+    /// NOTE: the returned Arc's DROP must not happen while holding a
+    /// spinlock — if it is the last reference, MmStruct::drop runs the
+    /// page-table teardown, which may schedule (grace-period wait).
+    pub fn address_space_arc(&self) -> Option<alloc::sync::Arc<AddressSpace>> {
+        let _g = self.mm_slot_lock.lock_irqsave();
+        self.address_space.clone()
+    }
+
+    /// Peek the mm Arc's address WITHOUT taking a reference (identity
+    /// comparison only — never dereference the result).
+    ///
+    /// For pid-hash bucket-locked scans (OOM sibling search) where an Arc
+    /// clone would be dropped under the bucket spinlock: a last-reference
+    /// drop there would run the mm teardown under a lock. Comparing raw
+    /// Arc addresses is ABA-safe when the other side of the comparison is
+    /// a live, refcount-pinned Arc.
+    pub fn mm_ptr_peek(&self) -> Option<*const AddressSpace> {
+        let _g = self.mm_slot_lock.lock_irqsave();
+        self.address_space.as_ref().map(|a| a.as_ref() as *const AddressSpace)
+    }
+
+    /// Get active address space (for kernel threads, this is borrowed address space)
+    pub fn active_mm(&self) -> Option<&AddressSpace> {
+        if let Some(ref aspace) = self.address_space {
+            Some(aspace.as_ref())
+        } else if let Some(mm_ptr) = self.active_mm {
+            // SAFETY: active_mm points to a borrowed AddressSpace that outlives this task.
+            unsafe { Some(&*mm_ptr) }
+        } else {
+            None
+        }
+    }
+
+    /// Clear active_mm (used by exit_mm during process exit)
+    pub fn clear_active_mm(&mut self) {
+        self.active_mm = None;
+    }
+
+    /// Set vfork parent task pointer (called in do_clone when CLONE_VFORK)
+    pub fn set_vfork_parent(&self, parent: *mut Task) {
+        self.vfork_parent.store(parent as u64, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Clear vfork parent (called after parent is woken)
+    pub fn clear_vfork_parent(&self) {
+        self.vfork_parent.store(0, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Get vfork parent task pointer, if any
+    pub fn vfork_parent_ptr(&self) -> Option<*mut Task> {
+        let val = self.vfork_parent.load(core::sync::atomic::Ordering::Acquire);
+        if val != 0 { Some(val as *mut Task) } else { None }
+    }
+}
+
+/// Wake the vfork parent (if any) of the given task.
+///
+/// Called from execve (after replacing address space) and do_exit (before ZOMBIE).
+/// This completes the vfork contract: parent resumes execution.
+///
+/// # Safety
+/// Caller must ensure `task` is a valid Task pointer and the task's
+/// vfork_parent (if set) points to a valid, still-alive Task.
+/// Contract: `task` is a valid task pointer (its vfork linkage fields
+/// are read and cleared).
+pub fn vfork_wake_parent(task: *mut Task) {
+    // SAFETY: caller contract above.
+    let t = unsafe { &mut *task };
+    if let Some(parent) = t.vfork_parent_ptr() {
+        t.clear_vfork_parent();
+        crate::sched::wake_up_process(parent);
+    }
+}
+
+/// Rate gate for the preempt_count underflow tripwire: one report per
+/// second of jiffies. Raw console only (putchar_no_lock) — the tripwire
+/// can fire from any context, including inside printk's own lock guards,
+/// so the report path must itself be lock-free and non-recursive.
+fn preempt_underflow_report(
+    pid: u32,
+    prev: i32,
+    sub: i32,
+    loc: &'static core::panic::Location<'static>,
+    site: usize,
+) {
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(core::sync::atomic::Ordering::Acquire);
+    if now.wrapping_sub(last) < crate::config::KERNEL_HZ as u64 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn ph(v: u32) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..8).rev() {
+            let n = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+    }
+    const MSG: &[u8] = b"\nPREEMPT-UNDERFLOW pid=";
+    for &b in MSG {
+        putchar(b);
+    }
+    ph(pid);
+    const MSG2: &[u8] = b" count_was=";
+    for &b in MSG2 {
+        putchar(b);
+    }
+    ph(prev as u32);
+    const MSG3: &[u8] = b" sub=";
+    for &b in MSG3 {
+        putchar(b);
+    }
+    ph(sub as u32);
+    const MSG4: &[u8] = b" (unpaired decrement clamped to 0) at ";
+    for &b in MSG4 {
+        putchar(b);
+    }
+    // Drop site: file:line of the guard whose decrement underflowed.
+    for &b in loc.file().as_bytes() {
+        putchar(b);
+    }
+    const COLON: &[u8] = b":";
+    for &b in COLON {
+        putchar(b);
+    }
+    ph(loc.line());
+    if site != 0 {
+        const M5: &[u8] = b" lock=0x";
+        for &b in M5 {
+            putchar(b);
+        }
+        // 16-hex lock instance address (ph is 8-hex only; print two
+        // halves).
+        ph((site >> 32) as u32);
+        ph(site as u32);
+    }
+    putchar(b'\n');
+    // preempt-hunt (2026-11-01): the outermost-acquire record for this
+    // task names the acquire whose 1->0 release this clamp adjudicates —
+    // for a post-heal underflow that is the REAL guard the heal zeroed
+    // (a guard held across a scheduler point); for a booking split it is
+    // the phantom's home site. Rate-gate already passed above.
+    if crate::trace::EVENT_LEAKHUNT.armed() {
+        if let Some(task) = crate::sched::current() {
+            crate::dfx::leakorigin::report_outermost(
+                b"UNDERFLOW-ORIGIN",
+                task as *mut Task,
+            );
+        }
+    }
+}
+
+impl Task {
+    /// Get architecture-specific thread state
+    pub fn thread(&self) -> &crate::arch::thread::ThreadStruct {
+        &self.thread
+    }
+
+    /// Get mutable reference to architecture-specific thread state
+    pub fn thread_mut(&mut self) -> &mut crate::arch::thread::ThreadStruct {
+        &mut self.thread
+    }
+
+    // ==================== thread_info style accessors ====================
+
+    /// Get thread_info flags
+    #[inline]
+    pub fn ti_flags(&self) -> u32 {
+        self.ti_flags.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set thread_info flags
+    #[inline]
+    pub fn set_ti_flags(&self, flags: u32) {
+        self.ti_flags.store(flags, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Test thread_info flag bit
+    #[inline]
+    pub fn test_ti_flag(&self, flag: u32) -> bool {
+        (self.ti_flags.load(core::sync::atomic::Ordering::Relaxed) & flag) != 0
+    }
+
+    /// Set thread_info flag bit
+    #[inline]
+    pub fn set_ti_flag(&self, flag: u32) {
+        self.ti_flags.fetch_or(flag, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Clear thread_info flag bit
+    #[inline]
+    pub fn clear_ti_flag(&self, flag: u32) {
+        self.ti_flags.fetch_and(!flag, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Check if needs rescheduling
+    #[inline]
+    pub fn need_resched(&self) -> bool {
+        self.test_ti_flag(TIF_NEED_RESCHED)
+    }
+
+    /// Set need rescheduling flag
+    #[inline]
+    pub fn set_need_resched_flag(&self) {
+        self.set_ti_flag(TIF_NEED_RESCHED);
+    }
+
+    /// Clear need rescheduling flag
+    #[inline]
+    pub fn clear_need_resched_flag(&self) {
+        self.clear_ti_flag(TIF_NEED_RESCHED);
+    }
+
+    /// Check if has pending signal
+    #[inline]
+    pub fn has_pending_signal(&self) -> bool {
+        self.test_ti_flag(TIF_SIGPENDING)
+    }
+
+    /// Set pending signal flag
+    #[inline]
+    pub fn set_pending_signal_flag(&self) {
+        self.set_ti_flag(TIF_SIGPENDING);
+    }
+
+    /// Get preempt count (raw value)
+    #[inline]
+    pub fn preempt_count(&self) -> i32 {
+        self.ti_preempt_count.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Increment preempt count (preemption disable)
+    #[inline]
+    pub fn inc_preempt_count(&self) {
+        self.add_preempt_count(crate::interrupt::preempt::PREEMPT_OFFSET);
+    }
+
+    /// Decrement preempt count (preemption enable)
+    #[inline]
+    pub fn dec_preempt_count(&self) {
+        self.sub_preempt_count(crate::interrupt::preempt::PREEMPT_OFFSET);
+    }
+
+    /// Check if preemptible
+    #[inline]
+    pub fn preemptible(&self) -> bool {
+        self.preempt_count() == 0
+    }
+
+    /// Add value to preempt_count (atomic fetch-add)
+    #[inline]
+    pub fn add_preempt_count(&self, val: i32) {
+        self.ti_preempt_count.fetch_add(val, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Subtract value from preempt_count (atomic fetch-sub).
+    ///
+    /// Underflow tripwire (kernel-preemption re-landing, 2026-10-20): a
+    /// preempt_count below zero is never legal — every field is a nesting
+    /// counter — but a value of, say, -1 sets EVERY mask bit
+    /// (`count & (HARDIRQ|SOFTIRQ|NMI)`), so `in_interrupt()` reads true
+    /// for a task running in USER mode: the next user page fault is
+    /// routed to no_context → KERNPANIC and parks the CPU (the sc60
+    /// shape under the reverted 2cf4bdc9, where an unpaired guard drop
+    /// poisoned pid 327 to -1). Instead of letting the poison persist,
+    /// clamp to zero at the violating sub and report the event raw
+    /// (this can fire from any context, including inside printk's own
+    /// guards — no locks, direct console, rate-gated to 1/s so a
+    /// storm cannot flood the UART).
+    #[inline]
+    pub fn sub_preempt_count(&self, val: i32) {
+        self.sub_preempt_count_at(val, core::panic::Location::caller());
+    }
+
+    /// Sub with the drop site's source location for the underflow report
+    /// (leak-hunt round 3b: name WHICH guard family double-drops).
+    #[inline]
+    pub fn sub_preempt_count_at(
+        &self,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+    ) {
+        let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        // Outermost base release (base field 1->0): clear the
+        // leakorigin outermost-acquire record (preempt-hunt tap). One
+        // relaxed load + compare when the probe is off.
+        if val == crate::interrupt::preempt::PREEMPT_OFFSET
+            && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
+        {
+            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            // phantom-bits / stress-port r3: a LIVE outermost pair just
+            // completed — re-arm the run counter the tick-side heal
+            // actually gates on. (The pb3 re-arm stored the superseded
+            // ti_pc_zero_jif field, which nothing reads, so the
+            // per-field bar never re-armed here and hot lock users
+            // accumulated stale bars between absent tick samples.)
+            self.ti_pc_pirq_present_run.store(
+                0,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        // phantom-bits: softirq field drained to zero — the +0x100
+        // acquire paired; drop the shadow so a later orphan report names
+        // only still-unpaired bookings, and re-arm the sirq run counter
+        // (the drain is the field's own liveness proof).
+        if val == crate::interrupt::preempt::SOFTIRQ_OFFSET
+            && (prev & crate::interrupt::preempt::SOFTIRQ_MASK) == crate::interrupt::preempt::SOFTIRQ_OFFSET
+        {
+            crate::dfx::leakorigin::note_softirq_release(self as *const Task as *mut Task);
+            self.ti_pc_sirq_present_run.store(
+                0,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        let after = prev.wrapping_sub(val);
+        if after < 0 {
+            self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+            // Post-clamp presence is new presence — re-arm all bars so
+            // the corrupted section's successor guards are not adjudged
+            // against the pre-clamp run.
+            self.ti_pc_present_runs_reset_all();
+            preempt_underflow_report(self.pid(), prev, val, loc, 0);
+        }
+    }
+
+    /// Read the pid of a task pointer WITHOUT dereferencing it in the
+    /// caller's context (the 119th IRQ-bracket release names the
+    /// booked task; the pointer may be a freed page, so the read is
+    /// guarded by the refcount check inside the release helper).
+    pub fn task_pid_of(task: *mut Task) -> u32 {
+        if task.is_null() {
+            return 0;
+        }
+        // SAFETY: the pointer came from the current task at irq_enter;
+        // the read is a single u32 load and the value is only a
+        // diagnostic label.
+        unsafe { (*task).pid() }
+    }
+
+    /// Release a hardirq base booked on `task` from a context where the
+    /// current task is a different one (the 119th epoll-pwait
+    /// conviction: a guard's release must act on the task that took
+    /// it). Returns false when the task page is already freed (the
+    /// write is then skipped — a freed task's count is meaningless).
+    pub fn release_hardirq_base_on(
+        task: *mut Task,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+    ) -> bool {
+        if task.is_null() {
+            return false;
+        }
+        // SAFETY: the pointer was a live task at irq_enter; the
+        // refcount check inside the method rejects a freed page.
+        unsafe { (*task).release_hardirq_base_remote(val, loc) }
+    }
+
+    /// Release a HARDIRQ base that was booked on THIS task by
+    /// `irq_enter`, from a context where the current task is a DIFFERENT
+    /// one (the bracket spanned a context switch — the 119th
+    /// epoll-pwait conviction: the release used to land on whatever
+    /// task was current at irq_exit, stranding the 0x10000 base on the
+    /// interrupted task forever and underflowing the incoming one).
+    ///
+    /// SAFE: the liveness check rejects a freed page (the refcount is
+    /// zero once the task was freed) — the count of a freed task is
+    /// meaningless, so skipping it is correct.
+    pub fn release_hardirq_base_remote(
+        &self,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+    ) -> bool {
+        if self.task_refcnt.load(core::sync::atomic::Ordering::Acquire) == 0 {
+            return false;
+        }
+        self.sub_preempt_count_at(val, loc);
+        true
+    }
+
+    /// As `sub_preempt_count_at` with the guard's lock instance for the
+    /// underflow report (0 = caller had no lock to name).
+    #[inline]
+    pub fn sub_preempt_count2_at(
+        &self,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+        site: usize,
+    ) {
+        let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        if val == crate::interrupt::preempt::PREEMPT_OFFSET
+            && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
+        {
+            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            // phantom-bits / stress-port r3: live pair completed — re-arm
+            // the run counter the heal gates on (see sub_preempt_count_at;
+            // the old store hit the superseded ti_pc_zero_jif field).
+            self.ti_pc_pirq_present_run.store(
+                0,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        let after = prev.wrapping_sub(val);
+        if after < 0 {
+            self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+            self.ti_pc_present_runs_reset_all();
+            preempt_underflow_report(self.pid(), prev, val, loc, site);
+        }
+    }
+
+    /// R74: zero a corrupted (negative) preempt_count — the self-heal for
+    /// the double-run engine's unpaired-decrement fingerprint. A plain
+    /// store (not fetch) is intended: whatever the count was, it was
+    /// garbage.
+    #[inline]
+    pub fn ti_preempt_count_zero(&self) {
+        self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+        // stress-port r3: every external zeroing re-arms the heal bars —
+        // presence observed after the zero is new presence (otherwise
+        // the stale bar re-heals each live guard: the held_jiffies=0
+        // post-heal storm family).
+        self.ti_pc_present_runs_reset_all();
+    }
+
+    /// Stress-fleet session 3 (2026-10-25): clear ONLY the task-context
+    /// base bits (PREEMPT + SOFTIRQ), preserving HARDIRQ and NMI nesting.
+    ///
+    /// The tick-side PREEMPT-HEAL runs inside the timer IRQ bracket, so
+    /// the observed task's count ALWAYS carries the tick's own in-flight
+    /// HARDIRQ_OFFSET at heal time. The old whole-word zero deleted that
+    /// bit too, and the irq_exit sub a few frames up then landed on a
+    /// zeroed count — one guaranteed PREEMPT-UNDERFLOW (sub=0x10000,
+    /// count_was=0) per heal firing. Fleet correlation (ltp-a r18-r20 +
+    /// memstorm r9/r10): pid-1 HEAL 31x against UNDERFLOW 40x, with the
+    /// underflow report landing at preempt.rs's irq_exit sub. Keeping the
+    /// interrupt-nesting bits lets the still-pending irq_exit/nmi_exit
+    /// subs pair exactly; only the phantom guard bits the heal adjudicated
+    /// (base != 0 held 10 s) are dropped.
+    #[inline]
+    pub fn ti_preempt_count_clear_base(&self) {
+        use core::sync::atomic::Ordering;
+        self.ti_preempt_count.fetch_and(
+            crate::interrupt::preempt::HARDIRQ_MASK
+                | crate::interrupt::preempt::NMI_MASK,
+            Ordering::Release,
+        );
+        // stress-port r3: the fields this heal clears get fresh bars.
+        self.ti_pc_present_runs_reset_base();
+    }
+
+    /// Tick-side PREEMPT-HEAL, unified form: keep exactly ONE
+    /// HARDIRQ_OFFSET (the observer's own in-flight timer IRQ level,
+    /// so the still-pending irq_exit sub pairs) plus NMI nesting, and
+    /// drop everything else — phantom base bits AND phantom extra
+    /// hardirq nesting (leg-19 round-3e pure-hardirq phantom,
+    /// base == 0 with hardirq extra held 10 s). When there is no
+    /// extra hardirq nesting the result is bit-identical to
+    /// `ti_preempt_count_clear_base`.
+    #[inline]
+    pub fn ti_preempt_count_keep_tick_nesting(&self) {
+        use core::sync::atomic::Ordering;
+        self.ti_preempt_count.fetch_and(
+            crate::interrupt::preempt::HARDIRQ_OFFSET
+                | crate::interrupt::preempt::NMI_MASK,
+            Ordering::Release,
+        );
+        // stress-port r3: this form clears base AND extra hardirq
+        // levels — all three fields get fresh bars (the kept single
+        // level is the observer tick's own, whose pending irq_exit sub
+        // is not judged by these runs anyway).
+        self.ti_pc_present_runs_reset_all();
+    }
+
+    /// Get kernel stack pointer (thread_info.kernel_sp)
+    #[inline]
+    pub fn ti_kernel_sp(&self) -> u64 {
+        self.ti_kernel_sp.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set kernel stack pointer (thread_info.kernel_sp)
+    #[inline]
+    pub fn set_ti_kernel_sp(&self, sp: u64) {
+        self.ti_kernel_sp.store(sp, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Get user stack pointer (thread_info.user_sp)
+    #[inline]
+    pub fn ti_user_sp(&self) -> u64 {
+        self.ti_user_sp.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set user stack pointer (thread_info.user_sp)
+    #[inline]
+    pub fn set_ti_user_sp(&self, sp: u64) {
+        self.ti_user_sp.store(sp, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Get running CPU (thread_info.cpu)
+    #[inline]
+    pub fn ti_cpu(&self) -> i32 {
+        self.ti_cpu.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// LEGACY (superseded 2026-11-02, stress-port r3): the single-field
+    /// drain stamp. The pb3 release-side re-arm stored THIS field while
+    /// the heal gated on the per-field stamps — the re-arm never armed
+    /// the bar that mattered (see ti_pc_*_present_run docs). Kept for
+    /// layout stability; stores removed; no readers.
+    #[inline]
+    pub fn ti_pc_zero_jif(&self) -> u64 {
+        self.ti_pc_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Current consecutive-present run for the SOFTIRQ field (see the
+    /// field docs; read by scheduler_tick's heal gate).
+    #[inline]
+    pub fn ti_pc_sirq_present_run(&self) -> u64 {
+        self.ti_pc_sirq_present_run.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Current consecutive-present run for the HARDIRQ field.
+    #[inline]
+    pub fn ti_pc_hirq_present_run(&self) -> u64 {
+        self.ti_pc_hirq_present_run.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Current consecutive-present run for the base PREEMPT field.
+    #[inline]
+    pub fn ti_pc_pirq_present_run(&self) -> u64 {
+        self.ti_pc_pirq_present_run.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// One tick-side observation of all three fields (caller:
+    /// scheduler_tick on the task's own CPU — the only bump writer).
+    /// Present fields extend their run; absent fields re-arm to 0.
+    /// `h_extra` is the extra-hardirq-nesting predicate (>= 2 levels),
+    /// so the observer tick's own in-flight level never counts.
+    #[inline]
+    pub fn ti_pc_present_runs_tick(&self, p_set: bool, s_set: bool, h_extra: bool) {
+        use core::sync::atomic::Ordering;
+        if p_set {
+            self.ti_pc_pirq_present_run.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.ti_pc_pirq_present_run.store(0, Ordering::Relaxed);
+        }
+        if s_set {
+            self.ti_pc_sirq_present_run.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.ti_pc_sirq_present_run.store(0, Ordering::Relaxed);
+        }
+        if h_extra {
+            self.ti_pc_hirq_present_run.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.ti_pc_hirq_present_run.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Re-arm the PREEMPT + SOFTIRQ run counters (called by the count
+    /// zeroing/heal methods that clear exactly those fields). Presence
+    /// observed AFTER an external zeroing is new presence and deserves
+    /// a fresh 200-observation window — the stress-port r2 boots showed
+    /// the opposite: the first (correct) heal of a parked phantom left
+    /// the stale bar in place, and every later tick that sampled the
+    /// task inside ANY live guard re-healed instantly (held_jiffies=0
+    /// storm, 17-30 fires per episode), each fire stripping a live
+    /// guard's bit (the spinlock.rs:0x1b8 underflow family at the
+    /// page-allocator zone lock).
+    #[inline]
+    fn ti_pc_present_runs_reset_base(&self) {
+        use core::sync::atomic::Ordering;
+        self.ti_pc_pirq_present_run.store(0, Ordering::Relaxed);
+        self.ti_pc_sirq_present_run.store(0, Ordering::Relaxed);
+    }
+
+    /// Re-arm all three run counters (called by whole-word zeroings —
+    /// parked-heal, exit-path clears, underflow clamps).
+    #[inline]
+    fn ti_pc_present_runs_reset_all(&self) {
+        use core::sync::atomic::Ordering;
+        self.ti_pc_pirq_present_run.store(0, Ordering::Relaxed);
+        self.ti_pc_sirq_present_run.store(0, Ordering::Relaxed);
+        self.ti_pc_hirq_present_run.store(0, Ordering::Relaxed);
+    }
+
+    /// Set running CPU (thread_info.cpu)
+    #[inline]
+    pub fn set_ti_cpu(&self, cpu: i32) {
+        self.ti_cpu.store(cpu, core::sync::atomic::Ordering::Release);
+    }
+
+    /// CPU affinity mask (thread_info.cpus_allowed).
+    /// Bit N set means CPU N is allowed.  All bits set = all CPUs allowed.
+    #[inline]
+    pub fn cpus_allowed(&self) -> u32 {
+        self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Default affinity for a NEWLY-CREATED task: the mask of CPUs that are
+    /// ONLINE at creation time (Linux: a fresh task inherits the parent's
+    /// cpus_mask, and the boot-time default is the platform's possible set —
+    /// which on a real machine equals the -smp CPU count, never the
+    /// compile-time MAX_CPUS ceiling). Initializing with !0 reported CPUs
+    /// that can never come online (MAX_CPUS=4 on a -smp 2 boot): LTP
+    /// getcpu01/nice05 take the highest bit from sched_getaffinity and pass
+    /// it back to sched_setaffinity, which correctly rejects never-online
+    /// CPUs with EINVAL — the kernel's own view was self-inconsistent.
+    /// Tasks created before SMP bring-up keep the boot-CPU mask (Linux
+    /// early kthreads behave the same way); every userspace task is created
+    /// after start_secondaries() and gets the full online set.
+    pub fn default_cpus_allowed() -> u32 {
+        let online = crate::arch::smp::num_started_cpus().max(1);
+        if online >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << online) - 1
+        }
+    }
+
+    /// Widen the masks of tasks created before SMP bring-up to the now-known
+    /// online set (the Linux sched_cpu_activate/cpuset refresh analogue).
+    /// Called from start_secondaries() once the secondaries are online: at
+    /// that point only kernel-boot tasks and the boot init task exist, none
+    /// of them carrying a USER-requested affinity, so overwriting the
+    /// boot-default masks ({CPU0} from the pre-SMP default, or !0 from the
+    /// idle-task initializer) with the online mask cannot clobber an
+    /// explicit sched_setaffinity. Without this, the boot init task (pid 1,
+    /// created before start_secondaries) kept a CPU0-only mask on every
+    /// -smp>1 boot and every userspace process inherited it.
+    pub fn refresh_default_affinity_to_online() {
+        let online = Self::default_cpus_allowed();
+        let mut visited = 0usize;
+        let mut widened = 0usize;
+        crate::sched::for_each_task(|t| {
+            // SAFETY: for_each_task yields live task pointers.
+            let task = unsafe { &*t };
+            let cur = task.cpus_allowed.load(core::sync::atomic::Ordering::Relaxed);
+            if cur == 1 || cur == u32::MAX {
+                task.cpus_allowed
+                    .store(online, core::sync::atomic::Ordering::Release);
+                widened += 1;
+            }
+            visited += 1;
+        });
+        crate::pr_info!(
+            "affinity: {} of {} task(s) default mask -> {:#x}",
+            widened,
+            visited,
+            online
+        );
+    }
+
+    /// R12-5: drop a lookup pin; the LAST put frees the slot.
+    #[inline]
+    pub fn task_put(task: *mut Task) {
+        if task.is_null() { return; }
+        let prev = unsafe { (*task).task_refcnt.fetch_sub(1, core::sync::atomic::Ordering::AcqRel) };
+        if prev == 1 {
+            crate::sched::free_task_slot(task);
+        }
+    }
+
+    /// R56-heal (lifecycle pin): try to acquire a reference on a task that
+    /// the caller holds VALID ONLY UNDER THE PID-HASH BUCKET LOCK. The
+    /// harvest scan dereferences (and its heals WRITE) task pages far
+    /// beyond the bucket-lock section — an exiting task can complete
+    /// pid_hash_remove + synchronize_rcu + task_put in that window and the
+    /// page returns to the (non-zeroing) allocator, where fork's
+    /// new_task_at immediately reinitializes it: the m25 adjudication
+    /// capture (pb_7) caught exactly that — the steal's pre-revoke read
+    /// saw PICK_LIVE and microseconds later its CAS(PICKED → REVOKED)
+    /// won because fork had rewritten ti_pick_state on the recycled page;
+    /// the heal then linked the half-built child (queue corruption,
+    /// epc=0x0 double panic). A taken pin (same discipline as
+    /// collect_children_pinned / E8-REPAR) defers free_task_slot until
+    /// the healer's own task_put, and the heals' state re-checks refuse a
+    /// task that exited under the pin. Returns false when the page is at
+    /// (or past) its last reference — treat as not healable.
+    pub fn try_pin(task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+        unsafe {
+            let prev = (*task)
+                .task_refcnt
+                .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            if prev == 0 {
+                // Freed (or hash-contract-broken) page: undo our own
+                // increment so a recycled owner is not left with a
+                // permanent extra reference, and refuse the pin.
+                (*task)
+                    .task_refcnt
+                    .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+                return false;
+            }
+            true
+        }
+    }
+
+    /// R8-1b: on-CPU flag — set at pick time, cleared by __switch_to after
+    /// this task's context is saved. Other CPUs' picks skip on-CPU tasks;
+    /// the CPU switching the task out may re-pick itself (no restore).
+    #[inline]
+    pub fn on_cpu(&self) -> bool {
+        self.ti_on_cpu.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_on_cpu(&self, v: bool) {
+        self.ti_on_cpu.store(v, core::sync::atomic::Ordering::Release)
+    }
+
+    /// R56-heal (pick ownership publish): write the FULL ownership qword
+    /// {ti_on_cpu = true, running_on_cpu = cpu} with one aligned 8-byte
+    /// store — the exact reverse of __switch_to's switch-out release
+    /// (0xFFFFFFFF_00000000) — and reset ti_pick_state for the new pick.
+    /// The claim previously appeared only at switch-in (the Rust wrapper /
+    /// x86 publish), leaving the whole pick → __switch_to window
+    /// claim-less: the slot-capture harvester could revoke a pick that a
+    /// TCG-starved (but perfectly live) vCPU was still about to resume,
+    /// and nothing at the resume point could detect the revocation.
+    /// Publishing the claim at pick time (under the GRQ lock, where no
+    /// other picker can observe the task) gives the switch-in a
+    /// validation point. The authoritative arbitration, however, is
+    /// ti_pick_state: `live` distinguishes a fresh pick (PICKED — the
+    /// resume path must CAS it LIVE before restoring registers) from the
+    /// next == prev fast-path repick (the task never stopped running —
+    /// publish LIVE directly).
+    #[inline]
+    pub fn publish_pick_ownership(&self, cpu: i32, live: bool) {
+        // SAFETY: ti_on_cpu is 8-byte aligned and running_on_cpu sits at
+        // +4 inside the same qword (asserted above); the overlaying
+        // AtomicU64 store keeps the pair consistent for the non-atomic
+        // pick-side readers.
+        let qword = (&self.ti_on_cpu as *const _ as usize)
+            as *const core::sync::atomic::AtomicU64;
+        unsafe {
+            (*qword).store(
+                ((cpu as u32 as u64) << 32) | 1,
+                core::sync::atomic::Ordering::Release,
+            );
+        }
+        self.ti_pick_state.store(
+            if live { PICK_LIVE } else { PICK_PICKED },
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// R56-heal: release both ownership bits with the single aligned
+    /// store the switch-out asm uses ({on_cpu = false, claim = -1}).
+    /// Healer-side twin of publish_pick_ownership.
+    #[inline]
+    pub fn release_pick_ownership(&self) {
+        let qword = (&self.ti_on_cpu as *const _ as usize)
+            as *const core::sync::atomic::AtomicU64;
+        unsafe {
+            (*qword).store(
+                0xFFFF_FFFF_0000_0000,
+                core::sync::atomic::Ordering::Release,
+            );
+        }
+    }
+
+    /// R56-heal (resume-side affirm): atomically PICKED → LIVE. Called by
+    /// the switch-in (__switch_to / x86_switch_publish) as the LAST step
+    /// before the task's registers are restored — winning this CAS is the
+    /// exclusive right to resume the pick. Ok(()) = affirmed (resume);
+    /// Err(observed) = PICK_REVOKED (the harvester stole the pick —
+    /// abort the resume) or a protocol breach (report and abort).
+    #[inline]
+    pub fn try_affirm_pick(&self) -> Result<(), u32> {
+        match self.ti_pick_state.compare_exchange(
+            PICK_PICKED,
+            PICK_LIVE,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                crate::sched::sched::pick_trace(self as *const Task as *mut Task, 6);
+                // Wakewatch (rux:schedtrace (retired dfx=schedtrace)): the switch-in affirm — the
+                // pick materialized into a register restore.
+                crate::sched::sched::ww_record(
+                    self as *const Task as *mut Task,
+                    crate::sched::sched::WW_EV_AFFIRM,
+                );
+                // pick→switch ledger (wake-fastrepro): the pick
+                // terminated — consume its publication record.
+                crate::sched::sched::psledger_consume(
+                    self as *const Task as *mut Task,
+                );
+                Ok(())
+            }
+            Err(observed) => {
+                crate::sched::sched::pick_trace(self as *const Task as *mut Task, 7);
+                Err(observed)
+            }
+        }
+    }
+
+    /// R56-heal (pick state read) — for the wrapper's early check and the
+    /// harvester's pre-filter.
+    #[inline]
+    pub fn pick_state(&self) -> u32 {
+        self.ti_pick_state.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// R56-heal (healer-side revocation): atomically PICKED → REVOKED.
+    /// Called by the harvester under the GRQ. Returns false when the pick
+    /// must NOT be healed: PICK_LIVE (the task genuinely runs on its
+    /// picking CPU — the m25 lesson: tick staleness under MTTCG proves
+    /// nothing) or an already-consumed REVOKED marker.
+    #[inline]
+    pub fn revoke_pending_pick(&self) -> bool {
+        matches!(
+            self.ti_pick_state.compare_exchange(
+                PICK_PICKED,
+                PICK_REVOKED,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ),
+            Ok(_)
+        )
+    }
+
+    /// R65-pick (probe-slow): dual-bit ownership test for the class picks,
+    /// read from the ownership qword in ONE naturally-aligned load.
+    ///
+    /// `ti_on_cpu` (1 byte) and `running_on_cpu` (i32 at +4) share one
+    /// 8-byte word (layout pinned by the asserts in
+    /// arch/riscv64/context.rs). The switch-out release writes the whole
+    /// word in a single `sd`; the pick-time mark and the switch-in claim
+    /// write the halves separately. A single volatile u64 load observes a
+    /// same-instant snapshot of both halves — a strict SUBSET of the
+    /// (earlier-byte, later-claim) combinations the old byte-load +
+    /// Acquire-atomic-load pair could observe, so every state the old
+    /// predicate handled correctly is handled identically, with one load
+    /// and no acquire fence per candidate instead of two loads. The
+    /// semantics are exactly e87a8b40's: pickable only when
+    /// on_cpu == false AND claim == -1 (or the picker's own claim).
+    #[inline]
+    pub fn ownership_pickable(&self, picker: usize) -> bool {
+        const _: () = {
+            assert!(core::mem::offset_of!(Task, ti_on_cpu) % 8 == 0);
+            assert!(
+                core::mem::offset_of!(Task, running_on_cpu)
+                    == core::mem::offset_of!(Task, ti_on_cpu) + 4
+            );
+        };
+        // Little-endian decode: byte at +0 is the low byte, i32 at +4 the
+        // high half. Both supported arches (riscv64, x86_64) are LE; the
+        // cfg gate keeps a BE port from silently misdecoding.
+        #[cfg(not(target_endian = "little"))]
+        compile_error!("ownership_pickable assumes little-endian qword decode");
+
+        let word = unsafe {
+            core::ptr::read_volatile(
+                core::ptr::addr_of!(self.ti_on_cpu) as *const u64
+            )
+        };
+        let oncpu = (word & 0xFF) != 0;
+        let claim = (word >> 32) as i32;
+        !oncpu && (claim == -1 || claim as usize == picker)
+    }
+
+    /// Set CPU affinity mask.
+    #[inline]
+    pub fn set_cpus_allowed(&self, mask: u32) {
+        self.cpus_allowed.store(mask, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Check if a specific CPU is allowed for this task.
+    #[inline]
+    pub fn cpu_allowed(&self, cpu: usize) -> bool {
+        let mask = if cpu < 32 { 1u32 << cpu } else { 0u32 };
+        self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire) & mask != 0
+    }
+
+    /// Preferred wake CPU for this task (wake-affine hint).
+    /// Returns -1 when no hint is set.
+    #[inline]
+    pub fn wake_cpu(&self) -> i32 {
+        self.ti_cpu.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    // ==================== Kernel stack management ====================
+
+    /// Allocate kernel stack
+    ///
+    ///
+    /// Allocates a kernel stack for current task, size is KERNEL_STACK_SIZE (16KB)
+    ///
+    /// # Returns
+    /// Some(stack top address) on success, None on failure
+    pub fn alloc_kernel_stack(&mut self) -> Option<*mut u8> {
+        // Use stack cache for allocation
+        let stack_ptr = stack_cache_alloc();
+
+        if !stack_ptr.is_null() {
+            // Set stack top address (stack grows downward)
+            // SAFETY: stack_ptr was returned by stack_cache_alloc() with exactly
+            // KERNEL_STACK_SIZE bytes allocated; adding KERNEL_STACK_SIZE stays in-bounds.
+            let stack_top = unsafe { stack_ptr.add(KERNEL_STACK_SIZE) };
+            self.kernel_stack = Some(stack_top);
+
+            // Save stack bottom for overflow detection
+            self.kernel_stack_bottom = stack_ptr as usize;
+
+            // Also set ti_kernel_sp
+            self.set_ti_kernel_sp(stack_top as u64);
+
+            Some(stack_top)
+        } else {
+            None
+        }
+    }
+
+    /// Free kernel stack
+    ///
+    ///
+    /// Free current task's kernel stack (returns to cache)
+    pub fn free_kernel_stack(&mut self) {
+        if let Some(stack_top) = self.kernel_stack {
+            // Calculate stack bottom address (stack top - stack size)
+            // SAFETY: kernel_stack was set by alloc_kernel_stack() as bottom + KERNEL_STACK_SIZE,
+            // so subtracting KERNEL_STACK_SIZE yields the original allocation base.
+            let stack_bottom = unsafe { stack_top.sub(KERNEL_STACK_SIZE) };
+
+            // R13-6: the pop path ZEROES 32KB — a corrupted kernel_stack
+            // field would wipe arbitrary heap pages (linked Task pages
+            // read as pid=0/state=0 afterwards; the zeroed-children-node
+            // family). Validate alignment and heap bounds before pushing;
+            // a bogus value is reported and dropped (leak beats wipe).
+            {
+                use crate::console::putchar;
+                let addr = stack_bottom as usize;
+                let (hs, he) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+                let bogus = addr & 0xF != 0
+                    || addr + KERNEL_STACK_SIZE > he
+                    || addr < hs;
+                if bogus {
+                    const MSG: &[u8] = b"stackfree: BOGUS bottom=0x";
+                    for &b in MSG { putchar(b); }
+                    let mut sh = 64;
+                    while sh > 0 {
+                        sh -= 4;
+                        let nb = ((addr >> sh) & 0xF) as u8;
+                        putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                    }
+                    putchar(b'\n');
+                    self.kernel_stack = None;
+                    return;
+                }
+            }
+
+            // Leg-16 anatomy (rux:schb (retired dfx=schb),ksprobe): high-water scan + record
+            // stash. The stack is dead (on_cpu cleared + RCU waited
+            // upstream), no locks held — safe to walk. Records stash the
+            // surviving return addresses for the next schbd beat (the
+            // in-context print was eaten by early-boot UART storms twice).
+            if crate::trace::EVENT_SCHB.armed()
+                && crate::trace::EVENT_KSPROBE.armed()
+            {
+                let base = stack_bottom as usize;
+                let mut off = 8usize; // skip the canary slot
+                while off < KERNEL_STACK_SIZE {
+                    // SAFETY: bounds validated above (base..base+SIZE).
+                    let v = unsafe { core::ptr::read_volatile((base + off) as *const u64) };
+                    if v != 0 {
+                        let hw = (KERNEL_STACK_SIZE - off) as u64;
+                        let old = KSTACK_HW.load(Ordering::Relaxed);
+                        if hw > old {
+                            KSTACK_HW.store(hw, Ordering::Relaxed);
+                            if hw > 40 * 1024 {
+                                use crate::console::putchar;
+                                const MSG: &[u8] = b"KSTACK-HW depth=";
+                                for &b in MSG { putchar(b); }
+                                let mut vv = hw;
+                                if vv == 0 { putchar(b'0'); }
+                                let mut dd = [0u8; 20]; let mut kk = 0;
+                                while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                                while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                                const P: &[u8] = b" pid=";
+                                for &b in P { putchar(b); }
+                                let mut pv = self.pid() as usize;
+                                if pv == 0 { putchar(b'0'); }
+                                let mut pd = [0u8; 10]; let mut pk = 0;
+                                while pv > 0 { pd[pk] = b'0' + (pv % 10) as u8; pk += 1; pv /= 10; }
+                                while pk > 0 { pk -= 1; putchar(pd[pk]); }
+                                const C: &[u8] = b" comm='";
+                                for &b in C { putchar(b); }
+                                for &cb in self.comm() { if cb != 0 { putchar(cb); } }
+                                // sc218 lesson: the region BELOW the first
+                                // nonzero word is a zeroed span (a memset'd
+                                // local or zero-initialised frames) — by
+                                // construction it carries no return
+                                // addresses. The surviving frames of the
+                                // deep chain sit just ABOVE `off`; walk
+                                // upward and print the first kernel-range
+                                // words (deepest surviving return
+                                // addresses, symbolisable with addr2line).
+                                const T: &[u8] = b"' tail:";
+                                for &b in T { putchar(b); }
+                                let mut shown = 0;
+                                let mut o2 = off;
+                                let o_end = off + 4096;
+                                while o2 < o_end && o2 < KERNEL_STACK_SIZE && shown < 40 {
+                                    // SAFETY: in-bounds per loop guard.
+                                    let ra = unsafe { core::ptr::read_volatile((base + o2) as *const u64) };
+                                    if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
+                                        putchar(b' ');
+                                        let mut sh2 = 64;
+                                        while sh2 > 0 {
+                                            sh2 -= 4;
+                                            let nb = ((ra >> sh2) & 0xF) as u8;
+                                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                                        }
+                                        shown += 1;
+                                    }
+                                    o2 += 8;
+                                }
+                                putchar(b'\n');
+                            }
+                        }
+                        break;
+                    }
+                    off += 8;
+                }
+            }
+
+            // DFX (LTP chunk@700 panic hunt, 2026-11-02) + R87 CLOSURE
+            // (oh-launch round 10): if any CPU's live TSS.rsp0 still
+            // points at THIS stack's top, every later user-origin trap
+            // entry on that CPU pushes its frame into freed-and-recycled
+            // memory — the stale-rsp0 engine behind the deterministic
+            // rip=0 "Kernel stack overflow" panics (frames observed ~7KB
+            // deep inside an unowned kstack slot), and the LIVE producer
+            // of the recycled-stack foreign-content writes: fr3 caught it
+            // in the act (STACKFREE-LIVE-RSP0 cpu=3, an aborted switch
+            // leaves the dying task's top installed, the stack freed and
+            // recycled, the next trap frame / re-carve tearing the new
+            // owner — user-range pt_regs values in kernel frames, the
+            // #GP-on-ret family at 1.2-1.5 s on every armed boot).
+            // x86_update_rsp0 has TWO silent keep-the-old-value legs
+            // (top==0, out-of-heap-bound — the idle task's static boot
+            // stack fails the bound), and the abort path skips the rsp0
+            // install entirely — so the free side must be the closure:
+            // NEVER hand the stack to the cache while a live rsp0 names
+            // it. Bounded wait (the next switch-in on that CPU installs
+            // its own top, microseconds normally); past the budget the
+            // stack is WITHHELD — leaked from the cache forever (a trap
+            // frame pushed at a leaked stack writes into memory nobody
+            // will ever own) — never recycled under a live rsp0. The old
+            // detector here was pr_debug (the campaign's fifth blind
+            // printer — invisible at LOGLEVEL=4); it now reports through
+            // the raw-uart taskdump channel, bounded, on the withhold
+            // only.
+            #[cfg(feature = "x86_64")]
+            let recycle_ok = {
+                const SFR_RSP0_WAIT_JIFFIES: u64 = 3;
+                let sfr_armed_at = crate::drivers::timer::get_jiffies();
+                loop {
+                    let mut stale_cpu: usize = usize::MAX;
+                    for c in 0..crate::config::MAX_CPUS {
+                        let rsp0 = crate::arch::x86_64::smp::PER_CPU[c]
+                            .tss_rsp0
+                            .load(core::sync::atomic::Ordering::Acquire);
+                        if rsp0 == stack_top as u64 {
+                            stale_cpu = c;
+                            break;
+                        }
+                    }
+                    if stale_cpu == usize::MAX {
+                        break true;
+                    }
+                    if crate::drivers::timer::get_jiffies()
+                        .wrapping_sub(sfr_armed_at)
+                        >= SFR_RSP0_WAIT_JIFFIES
+                    {
+                        static RSP0_SEEN: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = RSP0_SEEN
+                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 64 {
+                            crate::dfx::taskdump::taskdump_raw_line(
+                                b"STACKFREE-LIVE-RSP0 cpu=",
+                            );
+                            crate::dfx::taskdump::taskdump_dec(stale_cpu as u64);
+                            crate::dfx::taskdump::taskdump_raw_line(b" top=0x");
+                            let mut v = stack_top as u64;
+                            let mut sh: i32 = 64;
+                            while sh > 0 {
+                                sh -= 4;
+                                let nb = ((v >> sh) & 0xF) as u8;
+                                crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 {
+                                    b'0' + nb
+                                } else {
+                                    b'a' + nb - 10
+                                })]);
+                            }
+                            crate::dfx::taskdump::taskdump_raw_line(b" freeing_pid=");
+                            crate::dfx::taskdump::taskdump_dec(self.pid() as u64);
+                            crate::dfx::taskdump::taskdump_raw_line(
+                                b" (recycle WITHHELD - leaked, never re-carved)\n",
+                            );
+                        }
+                        break false;
+                    }
+                    core::hint::spin_loop();
+                }
+            };
+            #[cfg(not(feature = "x86_64"))]
+            let recycle_ok = true;
+
+            // DFX: record for the freed-stack execution detector.
+            note_kstack_freed(
+                stack_bottom as usize,
+                stack_top as usize,
+                self.pid(),
+            );
+
+            // SCRIBBLE TRAP (oh-launch round 9): paint the whole freed
+            // stack with the poison byte — the slab still recycles freed
+            // stacks, and the early-free race (the dying task executing
+            // its final frames while the slot is already handed onward —
+            // the disabled-cache-reuse comment's own fingerprint: a user
+            // sret restoring a pt_regs written by the NEW owner) predicts
+            // writes into freed stacks. The alloc-side scan names any
+            // non-poison word WITH its previous owner. Armed boots only
+            // (rux:scribble); the paint is the same cost class as the
+            // leg-16 zeroing.
+            // R87 (instrument correction): skip the canary qword at the
+            // bottom — the round-9 paint covered it, so EVERY armed-boot
+            // free tripped stack_cache_free's canary check below and
+            // printed a false STACK-OVERFLOW (fr1: canary read back as
+            // the paint value 0xa5a5...), burying the real overflow
+            // signal under one artifact line per free.
+            // R87 (rsp0 closure): a withheld stack (live rsp0 naming it)
+            // is never recycled — no paint, no cache return.
+            if recycle_ok {
+                if crate::trace::EVENT_SCRIBBLE.armed() {
+                    unsafe {
+                        core::ptr::write_bytes(
+                            stack_bottom.add(8),
+                            0xA5,
+                            KERNEL_STACK_SIZE - 8,
+                        );
+                    }
+                }
+
+                // Return to cache instead of deallocating
+                stack_cache_free(stack_bottom);
+            }
+
+            // Clear reference
+            self.kernel_stack = None;
+            self.kernel_stack_bottom = 0;
+            // Clear ti_kernel_sp
+            self.set_ti_kernel_sp(0);
+        }
+    }
+
+    /// Get kernel stack top address
+    ///
+    /// Used to set SP register during context switch
+    pub fn get_kernel_stack(&self) -> Option<*mut u8> {
+        self.kernel_stack
+    }
+
+    /// Get kernel stack bottom address (for overflow detection)
+    #[inline]
+    pub fn kernel_stack_bottom(&self) -> usize {
+        self.kernel_stack_bottom
+    }
+
+    /// Get kernel stack top address (highest address + 1)
+    #[inline]
+    pub fn kernel_stack_top(&self) -> usize {
+        self.kernel_stack_bottom + KERNEL_STACK_SIZE
+    }
+
+    /// sc261 (leg-23): a thread's kernel stack is returned to the
+    /// stack cache and kernel_stack_bottom zeroed at exit time (see
+    /// free_kernel_stack), while the Task struct itself survives until
+    /// its last pin drops — kernel_stack_top() then reports
+    /// KERNEL_STACK_SIZE and every entry-frame reader computes a small
+    /// bogus address. sc261: kill_dump_tgid dereferenced 0x13fd0
+    /// (= 0x14000 - PT_REGS_SIZE + offsetof(PtRegs, orig_rax)) on an
+    /// exited-but-pinned thread and took the boot down with an
+    /// unfixable kernel fault inside the SIGKILL teardown
+    /// (rip = <u64 as LowerHex>::fmt entry, load of the format value,
+    /// pid 1421). Foreign-task entry-frame diagnostics MUST check this
+    /// first; false means the thread has exited and its pt_regs frame
+    /// is gone. (A task's own current thread always passes.)
+    #[inline]
+    pub fn owns_kernel_stack(&self) -> bool {
+        self.kernel_stack_bottom != 0
+    }
+
+    /// Diagnostic-safe kernel stack top (KILLDUMP census family).
+    ///
+    /// free_kernel_stack() clears kernel_stack_bottom to 0, but the Task
+    /// itself stays alive (pinned / unreaped) and the KILLDUMP and wedge
+    /// censuses walk FOREIGN tasks that may have exited CONCURRENTLY:
+    /// their thread-list snapshot can contain a task whose stack is
+    /// already freed. kernel_stack_top() then "returns" 0 + KERNEL_STACK
+    /// _SIZE (0x14000 on x86_64) and the census's entry-frame read
+    /// faults at top-PT_REGS_SIZE+off (badaddr 0x13ff0/0x13ff8, monkey-b
+    /// r38 + monkey-a r32 — identical on v9 and v10, deterministic),
+    /// taking the whole boot down from inside a PRINTER. Same shape for
+    /// a task collected between Task creation and alloc_kernel_stack.
+    ///
+    /// Every diagnostic reader of a FOREIGN task's stack must use this
+    /// and skip on None. The scheduler/context-switch paths keep the raw
+    /// kernel_stack_top(): they only ever run on tasks that own a live
+    /// stack.
+    #[inline]
+    pub fn kernel_stack_top_checked(&self) -> Option<usize> {
+        if self.kernel_stack_bottom == 0 {
+            return None;
+        }
+        Some(self.kernel_stack_bottom + KERNEL_STACK_SIZE)
+    }
+
+    /// Check if address is within kernel stack range (for overflow detection)
+    ///
+    /// # Arguments
+    /// - `addr`: Address to check
+    ///
+    /// # Returns
+    /// true if address is within kernel stack range
+    #[inline]
+    pub fn is_in_kernel_stack(&self, addr: usize) -> bool {
+        if self.kernel_stack_bottom == 0{
+            return false;
+        }
+        let stack_top = self.kernel_stack_bottom + KERNEL_STACK_SIZE;
+        addr >= self.kernel_stack_bottom && addr < stack_top
+    }
+
+    /// Check if stack pointer indicates potential overflow
+    ///
+    /// # Arguments
+    /// - `sp`: Stack pointer value to check
+    ///
+    /// # Returns
+    /// true if SP is below stack bottom (overflow detected)
+    #[inline]
+    pub fn is_stack_overflow(&self, sp: usize) -> bool {
+        if self.kernel_stack_bottom == 0 {
+            return false;  // No stack allocated yet
+        }
+        sp < self.kernel_stack_bottom
+    }
+
+    /// Get pt_regs pointer at top of kernel stack
+    ///
+    /// pt_regs = (kernel_stack_top - sizeof(PtRegs))
+    ///
+    /// In Rux, kernel_stack stores the stack top address, so:
+    /// pt_regs = kernel_stack - sizeof(PtRegs)
+    ///
+    /// # Returns
+    /// Pointer to pt_regs structure at top of kernel stack, or null if no stack
+    #[inline]
+    pub fn pt_regs(&self) -> *mut super::super::arch::pt_regs::PtRegs {
+        if let Some(stack_top) = self.kernel_stack {
+            let pt_regs_addr = stack_top as usize - core::mem::size_of::<super::super::arch::pt_regs::PtRegs>();
+            pt_regs_addr as *mut super::super::arch::pt_regs::PtRegs
+        } else {
+            core::ptr::null_mut()
+        }
+    }
+
+    /// Typed view of the task's trap frame: the PtRegs-sized window at
+    /// the top of its own kernel stack.
+    ///
+    /// Single audited edge for the fork/copy_thread family (round 3b):
+    /// when `kernel_stack` is Some, the window `stack_top -
+    /// size_of::<PtRegs>()` is this task's own trap frame (the stack is
+    /// allocated with the task slot and the frame lives at its fixed
+    /// top offset — the same layout contract the raw `pt_regs()`
+    /// exposes); the returned reference is exclusive while the task is
+    /// not yet enqueued (fork builds the child before `enqueue_task`
+    /// transfers ownership).
+    #[inline]
+    pub fn pt_regs_mut(
+        &mut self,
+    ) -> Option<&'static mut super::super::arch::pt_regs::PtRegs> {
+        if self.kernel_stack.is_some() {
+            let p = self.pt_regs();
+            // SAFETY: kernel_stack is Some, so pt_regs() is non-null and
+            // points into this task's own kernel-stack window; the slot
+            // discipline (boxed once, freed only via free_task_slot)
+            // keeps the frame alive for the slot's 'static lifetime.
+            Some(unsafe { &mut *p })
+        } else {
+            None
+        }
+    }
+
+    /// Has address space (user process)
+    #[inline]
+    pub fn has_address_space(&self) -> bool {
+        self.address_space.is_some()
+    }
+
+    /// Get OOM score adjustment
+    #[inline]
+    pub fn oom_score_adj(&self) -> i32 {
+        self.oom_score_adj.load(Ordering::Acquire)
+    }
+
+    /// Set OOM score adjustment, clamped to [-1000, 1000]
+    #[inline]
+    pub fn set_oom_score_adj(&self, adj: i32) {
+        self.oom_score_adj.store(adj.clamp(-1000, 1000), Ordering::Release);
+    }
+
+    /// Get the stored I/O scheduling priority
+    /// ((class << 13) | level; 0 = NONE/0)
+    #[inline]
+    pub fn ioprio(&self) -> i32 {
+        self.ioprio.load(Ordering::Acquire)
+    }
+
+    /// Set the stored I/O scheduling priority (ioprio_set).
+    #[inline]
+    pub fn set_ioprio(&self, v: i32) {
+        self.ioprio.store(v, Ordering::Release);
+    }
+
+    /// Check if has file descriptor table
+    #[inline]
+    pub fn has_fdtable(&self) -> bool {
+        self.fdtable.is_some()
+    }
+
+    /// Get file descriptor table (Option version)
+    #[inline]
+    pub fn try_fdtable(&self) -> Option<&FdTable> {
+        self.fdtable.as_ref().map(|arc| arc.as_ref())
+    }
+
+    /// True when this task's fdtable Arc has no other owner (no
+    /// CLONE_FILES sharers) — the gate for the reference's fdget
+    /// no-refcount fast path (files_lookup_fd_raw + FDPUT): unshared
+    /// means no other thread can close/dup concurrently, so a syscall
+    /// may borrow the File straight from the slot.
+    #[inline]
+    pub fn fdtable_unshared(&self) -> bool {
+        self.fdtable
+            .as_ref()
+            .map(|a| alloc::sync::Arc::strong_count(a) == 1)
+            .unwrap_or(false)
+    }
+
+    /// task_ppid(me) shape: the leader's parent Task pointer behind the
+    /// same plausibility screen ppid() uses (a non-leader thread's
+    /// parent field can be an unlinked snapshot naming freed memory).
+    #[inline]
+    pub fn parent_task_ptr(&self) -> *const Task {
+        match self.parent {
+            Some(parent_ptr) => {
+                if !Self::is_plausible_task_ptr(parent_ptr) {
+                    return core::ptr::null();
+                }
+                parent_ptr
+            }
+            None => core::ptr::null(),
+        }
+    }
+
+    /// Get file descriptor table
+    #[inline]
+    pub fn fdtable(&self) -> &FdTable {
+        self.fdtable.as_ref().expect("FdTable not initialized")
+    }
+
+    /// Get mutable reference to file descriptor table (Option version)
+    /// Note: FdTable has interior mutability, &self is sufficient
+    #[inline]
+    pub fn try_fdtable_mut(&self) -> Option<&FdTable> {
+        self.fdtable.as_ref().map(|arc| arc.as_ref())
+    }
+
+    /// Get mutable reference to file descriptor table
+    /// Note: FdTable has interior mutability, so &FdTable is sufficient for mutation
+    #[inline]
+    pub fn fdtable_mut(&self) -> &FdTable {
+        self.fdtable.as_ref().expect("FdTable not initialized")
+    }
+
+    /// Set file descriptor table
+    #[inline]
+    pub fn set_fdtable(&mut self, fdtable: Option<alloc::sync::Arc<FdTable>>) {
+        self.fdtable = fdtable;
+    }
+
+    /// Get Arc reference to fdtable (for CLONE_FILES)
+    pub fn fdtable_arc(&self) -> Option<alloc::sync::Arc<FdTable>> {
+        self.fdtable.clone()
+    }
+
+    /// Get Arc reference to signal struct (for CLONE_SIGHAND)
+    pub fn signal_arc(&self) -> Option<alloc::sync::Arc<SignalStruct>> {
+        self.signal.clone()
+    }
+
+    /// Set signal struct
+    pub fn set_signal(&mut self, signal: Option<alloc::sync::Arc<SignalStruct>>) {
+        self.signal = signal;
+    }
+
+    /// Set parent process
+    pub fn set_parent(&mut self, parent: *const Task) {
+        if parent.is_null() {
+            self.parent = None;
+        } else {
+            self.parent = Some(parent);
+        }
+    }
+
+    /// Get parent process pointer
+    #[inline]
+    pub fn parent_ptr(&self) -> Option<*const Task> {
+        self.parent
+    }
+
+    /// Get exit code
+    #[inline]
+    /// Signal the parent receives at this task's exit (clone exit_signal).
+    pub fn get_exit_signal(&self) -> u8 {
+        self.exit_signal
+    }
+
+    /// Set the exit signal (clone/clone3; only meaningful before the
+    /// task first runs).
+    pub fn set_exit_signal(&mut self, sig: u8) {
+        self.exit_signal = sig;
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+
+    /// Set exit code
+    #[inline]
+    pub fn set_exit_code(&mut self, code: i32) {
+        self.exit_code = code;
+    }
+
+    /// Get stop signal
+    #[inline]
+    pub fn stop_signal(&self) -> i32 {
+        self.stop_signal
+    }
+
+    /// Set stop signal
+    #[inline]
+    pub fn set_stop_signal(&mut self, sig: i32) {
+        self.stop_signal = sig;
+    }
+
+    // ==================== ptrace / coredump accessors (P1) ====================
+
+    /// PID of the tracing process (0 = not traced).
+    #[inline]
+    pub fn tracer_pid(&self) -> u32 {
+        self.tracer_pid.load(Ordering::Acquire)
+    }
+
+    /// Set the tracing process PID.
+    #[inline]
+    pub fn set_tracer_pid(&self, pid: u32) {
+        self.tracer_pid.store(pid, Ordering::Release);
+    }
+
+    /// Set PTRACE_SETOPTIONS word.
+    #[inline]
+    pub fn set_ptrace_options(&self, opts: u64) {
+        self.ptrace_options.store(opts, Ordering::Release);
+    }
+
+    /// Mark a signal as re-injected by PTRACE_CONT (deliver without
+    /// another trace stop).
+    #[inline]
+    pub fn set_ptrace_sigdeliver(&self, sig: u32) {
+        self.ptrace_sigdeliver.store(sig, Ordering::Release);
+    }
+
+    /// Consume the re-inject mark; returns the signal number (0 = none).
+    #[inline]
+    pub fn take_ptrace_sigdeliver(&self) -> u32 {
+        self.ptrace_sigdeliver.swap(0, Ordering::AcqRel)
+    }
+
+    /// Peek the re-inject mark without consuming it.
+    #[inline]
+    pub fn ptrace_sigdeliver_peek(&self) -> u32 {
+        self.ptrace_sigdeliver.load(Ordering::Acquire)
+    }
+
+    /// Stash the siginfo of the signal that caused the current trace stop.
+    pub fn set_ptrace_siginfo(&self, info: crate::signal::SigInfo) {
+        *self.ptrace_siginfo.lock() = Some(info);
+    }
+
+    /// Read the stashed trace-stop siginfo (PTRACE_GETSIGINFO).
+    pub fn ptrace_siginfo(&self) -> Option<crate::signal::SigInfo> {
+        *self.ptrace_siginfo.lock()
+    }
+
+    /// Clear the stashed trace-stop siginfo (CONT/DETACH).
+    pub fn clear_ptrace_siginfo(&self) {
+        *self.ptrace_siginfo.lock() = None;
+    }
+
+    /// Arm a software single step: the instruction at `addr` is displaced
+    /// by EBREAK; `insn` is the original word to restore on the trap.
+    #[inline]
+    pub fn arm_single_step(&self, addr: u64, insn: u64) {
+        self.ss_addr.store(addr, Ordering::Release);
+        self.ss_saved_insn.store(insn, Ordering::Release);
+        self.ss_active.store(true, Ordering::Release);
+    }
+
+    /// Disarm the software single step (restore already happened).
+    #[inline]
+    pub fn clear_single_step(&self) {
+        self.ss_active.store(false, Ordering::Release);
+    }
+
+    /// Is a software single step pending?
+    #[inline]
+    pub fn single_step_active(&self) -> bool {
+        self.ss_active.load(Ordering::Acquire)
+    }
+
+    /// Address of the displaced (EBREAK) instruction.
+    #[inline]
+    pub fn single_step_addr(&self) -> u64 {
+        self.ss_addr.load(Ordering::Acquire)
+    }
+
+    /// Original word of the displaced instruction.
+    #[inline]
+    pub fn single_step_saved_insn(&self) -> u64 {
+        self.ss_saved_insn.load(Ordering::Acquire)
+    }
+
+    /// Accessor for the stop-reported flag (ptrace stop notification).
+    #[inline]
+    pub fn stop_reported(&self) -> &core::sync::atomic::AtomicBool {
+        &self.stop_reported
+    }
+
+    /// Mark that a core file was written for this task's death.
+    #[inline]
+    pub fn set_core_dumped(&self) {
+        self.core_dumped.store(true, Ordering::Release);
+    }
+
+    /// Was a core file written for this task's death? (WCOREDUMP bit)
+    #[inline]
+    pub fn core_dumped(&self) -> bool {
+        self.core_dumped.load(Ordering::Acquire)
+    }
+
+    /// Get process name (comm)
+    #[inline]
+    pub fn comm(&self) -> &[u8; 16] {
+        &self.comm
+    }
+
+    /// Print-safe comm as a str: NUL-terminated slice, lossy-decoded.
+    ///
+    /// A comm holds ARBITRARY bytes (prctl PR_SET_NAME copies raw, and a
+    /// >15-byte UTF-8 thread name truncates MID-CHARACTER), so the old
+    /// `from_utf8_unchecked(comm).trim_end_matches('\0')` sites handed
+    /// char-aware formatting (Debug escaping, truncation) an invalid &str
+    /// and panicked the kernel ("start byte index N is not a char
+    /// boundary", lb120 @672s in a KOT-KILL vnames Debug print).
+    /// Zero-copy when the bytes are valid UTF-8.
+    pub fn comm_str(&self) -> alloc::borrow::Cow<'_, str> {
+        let raw: &[u8] = self.comm();
+        let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        alloc::string::String::from_utf8_lossy(&raw[..len])
+    }
+
+    /// Set process name (comm), max 15 chars + NUL
+    #[inline]
+    pub fn set_comm(&mut self, name: &[u8]) {
+        let len = name.len().min(15);
+        self.comm[..len].copy_from_slice(&name[..len]);
+        self.comm[len] = 0;
+    }
+
+    /// Get process group ID
+    #[inline]
+    pub fn pgid(&self) -> u32 {
+        self.pgid
+    }
+
+    /// Set process group ID
+    #[inline]
+    pub fn set_pgid(&mut self, pgid: u32) {
+        self.pgid = pgid;
+    }
+
+    /// Get session ID
+    #[inline]
+    pub fn sid(&self) -> u32 {
+        self.sid
+    }
+
+    /// Set session ID
+    #[inline]
+    pub fn set_sid(&mut self, sid: u32) {
+        self.sid = sid;
+    }
+
+    /// Has this task exec'd at least once? (setpgid EACCES rule)
+    #[inline]
+    pub fn has_execed(&self) -> bool {
+        self.execed.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Mark this task as having exec'd (first successful execve).
+    #[inline]
+    pub fn mark_execed(&self) {
+        self.execed.store(true, core::sync::atomic::Ordering::Release);
+    }
+
+    // ==================== Process Tree Management ====================
+
+    /// Recover the Task that owns a `sibling` list node (container_of).
+    ///
+    /// Pure pointer arithmetic — no dereference — so the result is only
+    /// as valid as the node it came from: callers keep their existing
+    /// PROCESS_TREE_LOCK / pin / liveness contracts for any use.
+    #[inline]
+    pub fn from_sibling_node(node: *mut ListHead) -> *mut Task {
+        (node as usize - offset_of!(Task, sibling)) as *mut Task
+    }
+
+    /// Get first child
+    ///
+    ///
+    /// # Returns
+    /// Some(child pointer) if has children, None otherwise
+    pub fn first_child(&self) -> Option<*mut Task> {
+        // children list may be empty
+        if self.children.is_empty() {
+            return None;
+        }
+        // Get first sibling node from children list head, then recover
+        // the Task containing it (container_of; no dereference here).
+        Some(Task::from_sibling_node(self.children.next))
+    }
+
+    /// Get next sibling
+    ///
+    /// Contract: caller must hold PROCESS_TREE_LOCK (or guarantee no
+    /// concurrent list modification) before dereferencing the result.
+    ///
+    /// # Returns
+    /// Some(pointer) if has next sibling, None otherwise
+    pub fn next_sibling(&self) -> Option<*mut Task> {
+        // If parent's children list head not saved, not in any parent's children list
+        if self.parent_children_head.is_null() {
+            return None;
+        }
+
+        let next_sibling = self.sibling.next;
+
+        // If next points to parent's children list head, reached list end
+        if next_sibling == self.parent_children_head {
+            return None;
+        }
+
+        // Task struct pointer containing that sibling (no dereference)
+        Some(Task::from_sibling_node(next_sibling))
+    }
+
+    /// Check if has children
+    ///
+    /// # Returns
+    /// true if has children, false otherwise
+    pub fn has_children(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    /// Add child to process tree
+    ///
+    /// Contract: `self` is a valid parent, `child` is a valid,
+    /// fully-constructed task not yet in any process tree.
+    ///
+    /// # Arguments
+    /// - `child`: Child process pointer to add
+    pub fn add_child(&self, child: *mut Task) {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        // SAFETY: caller contract above — child is a valid task pointer;
+        // PROCESS_TREE_LOCK is held for the whole link operation.
+        let c = unsafe { &mut *child };
+
+        // R9 tripwire: linking an ALREADY-LINKED child double-links it —
+        // one unlink leaves the other parent's list dangling, and the
+        // freed/reused (zeroed) node shows up as the NULL children-walk
+        // fault. Photograph the culprit before it strikes.
+        if let Some(old) = c.parent {
+            if old as *const Task != self as *const Task {
+                let msg = b"TREE: DOUBLE add_child old=0x";
+                for &b in msg { crate::console::putchar_no_lock(b); }
+                let mut sh = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((old as usize >> sh) & 0xF) as u8;
+                    crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                }
+                for &b in b" new=0x" { crate::console::putchar_no_lock(b); }
+                sh = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((self as *const Task as usize >> sh) & 0xF) as u8;
+                    crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                }
+                crate::console::putchar_no_lock(b'\n');
+            }
+        }
+
+        // Set child's parent
+        c.parent = Some(self as *const _ as *mut Task);
+
+        // Save parent's children list head pointer (for next_sibling boundary check)
+        c.parent_children_head = &self.children as *const _ as *mut ListHead;
+
+        // Link child's sibling to parent's children list
+        // Use add_tail to add to list end
+        // SAFETY: the sibling node is initialized (child not yet linked)
+        // and the head is self's live children list; tree lock held.
+        unsafe { c.sibling.add_tail(&self.children as *const _ as *mut ListHead) };
+    }
+
+    /// Remove child from process tree
+    ///
+    /// Contract: `child` is a valid task pointer currently linked in
+    /// this parent's children list.
+    ///
+    /// # Arguments
+    /// - `child`: Child process pointer to remove
+    pub fn remove_child(&self, child: *mut Task) {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        // SAFETY: caller contract above — child is valid and linked
+        // here; PROCESS_TREE_LOCK is held for the whole unlink.
+        let c = unsafe { &mut *child };
+
+        // Remove child's sibling from parent's children list
+        // SAFETY: the node is linked (contract); tree lock held.
+        unsafe { c.sibling.del() };
+
+        // Reinitialize sibling list (prevent dangling pointer)
+        c.sibling.init();
+
+        // Clear parent pointer
+        c.parent = None;
+
+        // Clear parent children list head pointer
+        c.parent_children_head = ptr::null_mut();
+    }
+
+    /// E8-REPAR: collect `self`'s children into `out`, PINNING each one
+    /// (task_refcnt) inside the same PROCESS_TREE_LOCK critical section
+    /// that walks the list.
+    ///
+    /// The reparent path used for_each_child, which returns bare
+    /// pointers the instant the tree lock drops — while the reaper of
+    /// those children (a sibling thread of the dying task's group, in
+    /// its own wait4 via for_each_group_child) could concurrently
+    /// release_task() them: unlink, free_pid, task_put, page back to
+    /// the heap. The reparent loop then wrote through the freed node's
+    /// sibling pointers (ListHead::del's `(*next).prev = prev` —
+    /// arbitrary kernel-memory writes) and linked the freed node into
+    /// the new parent's children list, leaving every later walk reading
+    /// garbage task pointers. A pin taken under the same lock hold makes
+    /// the free impossible until the mover task_put()s: release_task's
+    /// final task_put finds refcnt > 1 and defers free_task_slot.
+    ///
+    /// Contract: `self` is a valid task; callers must Task::task_put
+    /// every returned pointer exactly once.
+    pub fn collect_children_pinned(&self, out: &mut alloc::vec::Vec<*mut Task>) {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let head = &self.children as *const _ as *mut ListHead;
+        // SAFETY: head is self's live children list; the walk holds
+        // PROCESS_TREE_LOCK, so every node stays linked for the walk.
+        unsafe {
+            ListHead::for_each(head, |node| {
+                let task_ptr = Task::from_sibling_node(node);
+                // SAFETY: task_ptr owns this sibling node, which the tree
+                // lock keeps linked — the task page cannot be freed from
+                // under this shared reference mid-walk.
+                (*task_ptr)
+                    .task_refcnt
+                    .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                out.push(task_ptr);
+            });
+        }
+    }
+
+    /// E8-REPAR: atomically move `child` from `self`'s children list to
+    /// `dest`'s — validate + unlink + relink in ONE PROCESS_TREE_LOCK
+    /// critical section.
+    ///
+    /// The old reparent code ran remove_child() and add_child() as two
+    /// separately-locked sections with signal sends in between: a
+    /// concurrent reaper unlinking the child in the gap left the second
+    /// half writing into freed memory, and a `dest` chosen earlier (a
+    /// surviving thread-group member) could itself complete do_exit and
+    /// be swept before add_child — planting a permanently dangling
+    /// parent pointer into the moved child (the exact ancestor the
+    /// final8 subreaper walk panicked on). Validation (child still ours:
+    /// parent AND parent_children_head) makes the vanishing-child case a
+    /// clean "skip"; callers must pin `dest` for the duration.
+    ///
+    /// Returns true when the move happened; false means the child was
+    /// concurrently unlinked (reaped / already moved) — do not touch it
+    /// further beyond the caller's own task_put.
+    ///
+    /// Contract: `self`, `child` and `dest` are valid Task pointers;
+    /// `child` is pinned by the caller; `dest` is pinned by the caller.
+    pub fn move_child(&self, child: *mut Task, dest: *mut Task) -> bool {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        // SAFETY: caller contract above — child and dest are valid,
+        // pinned tasks; PROCESS_TREE_LOCK is held for the whole move.
+        let (c, d) = unsafe { (&mut *child, &mut *dest) };
+        let still_ours = c.parent == Some(self as *const Task)
+            && c.parent_children_head == &self.children as *const _ as *mut ListHead;
+        if !still_ours {
+            return false;
+        }
+        // Unlink — the same mutations remove_child performs.
+        // SAFETY: node is linked here (validated above); tree lock held.
+        unsafe { c.sibling.del() };
+        c.sibling.init();
+        // Relink — the same mutations add_child performs.
+        c.parent = Some(dest as *const Task);
+        c.parent_children_head = &d.children as *const _ as *mut ListHead;
+        // SAFETY: c.sibling was just re-initialized; d's children head is
+        // live (dest pinned); tree lock held.
+        unsafe { c.sibling.add_tail(&d.children as *const _ as *mut ListHead) };
+        // E8-REPAR root cause (leg-29A): the moved child's thread-group
+        // MEMBERS carry parent SNAPSHOTS (thread_group_join copies the
+        // leader's parent verbatim; nothing maintained them), so a
+        // reparented group left every member naming the OLD parent —
+        // memory that gets reaped and recycled while the members live.
+        // The member's own exit then walks release_task's
+        // parent_ptr()/remove_child through freed memory (the sc304
+        // signal-Arc Oops family; reproduced by rux:treehunt (retired dfx=treehunt) +
+        // test/subreap_churn.c as TREE-SNAP-STALE). Refresh every
+        // member's snapshot to the new dest under this same lock hold —
+        // the ring walk is the same bounded pattern the reparent member
+        // scan uses, and members can't join/leave concurrently (both
+        // take PROCESS_TREE_LOCK).
+        let mut m = c.next_thread_ptr();
+        let mut guard = 0u32;
+        while (m as *const Task) != (child as *const Task)
+            && !m.is_null()
+            && guard < 65536
+        {
+            // SAFETY: ring members stay linked while PROCESS_TREE_LOCK is
+            // held (join/leave both take it); the walk is bounded.
+            unsafe {
+                if (*m).group_leader == child {
+                    (*m).parent = Some(dest as *const Task);
+                    (*m).parent_children_head = ptr::null_mut();
+                }
+                m = (*m).next_thread_ptr();
+            }
+            guard += 1;
+        }
+        true
+    }
+
+    /// E8-REPAR: claim a zombie child for reaping — unlink it from
+    /// whichever parent's children list it is on right now.
+    ///
+    /// do_wait() selected the zombie under the tree lock but released it
+    /// before calling release_task(); two group members woken by the
+    /// same SIGCHLD (glib reaper + main thread) could BOTH select the
+    /// same zombie and double-release it: the second release_task()
+    /// then locks/unlinks/frees through the already-freed Task. Claiming
+    /// (unlink + parent=None) inside the selection critical section
+    /// makes the second scanner simply not find the child anymore; the
+    /// first reap proceeds (release_task skips its own unlink when
+    /// parent is already None).
+    ///
+    /// Returns true when this caller won the claim.
+    ///
+    /// Contract: CALLER MUST HOLD PROCESS_TREE_LOCK (invoked from inside
+    /// for_each_group_child's critical section); `child` is a valid,
+    /// pinned-or-otherwise-still-linked Task.
+    pub fn claim_child_locked(child: *mut Task) -> bool {
+        // SAFETY: caller holds PROCESS_TREE_LOCK and vouches for `child`.
+        let c = unsafe { &mut *child };
+        if c.parent.is_none() {
+            return false; // already claimed / never linked
+        }
+        // Unlink from the CURRENT list — the child's own sibling pointers
+        // are the ground truth for which list the node is on, so del()
+        // heals the owner's list without naming it.
+        // SAFETY: node is linked (parent was Some); tree lock held.
+        unsafe { c.sibling.del() };
+        c.sibling.init();
+        c.parent = None;
+        c.parent_children_head = ptr::null_mut();
+        true
+    }
+
+    /// Iterate over all children
+    ///
+    ///
+    /// # Arguments
+    /// - `f`: Closure to call for each child
+    ///
+    /// Contract: `self` is a valid task; PROCESS_TREE_LOCK is acquired
+    /// internally, so the tree cannot change during iteration.
+    pub fn for_each_child<F>(&self, mut f: F)
+    where
+        F: FnMut(&Task),
+    {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let head = &self.children as *const _ as *mut ListHead;
+        // SAFETY: head is self's live children list; the tree lock is
+        // held, so every node stays linked for the whole walk.
+        unsafe {
+            ListHead::for_each(head, |node| {
+                let task_ptr = Task::from_sibling_node(node);
+                // SAFETY: the node owns this Task and the tree lock keeps
+                // it linked (its parent cannot release it mid-walk).
+                f(&*task_ptr);
+            });
+        }
+    }
+
+    /// Iterate the children of EVERY member of the caller's thread group.
+    ///
+    /// Linux do_wait(): any thread of a process can wait for a child
+    /// forked by ANY member of its thread group (kernel/exit.c walks
+    /// `while_each_thread(tsk)` unless __WNOTHREAD). glib's "gmain"
+    /// worker thread reaps children the main thread spawned
+    /// (GChildWatchSource / GSubprocess), so a per-thread children scan
+    /// makes those waitpid()s fail with ECHILD before the child is
+    /// reaped. Only process products (fork / clone without
+    /// CLONE_THREAD) are ever linked, so each child sits on exactly one
+    /// member's list and no child is visited twice.
+    ///
+    /// Contract: caller must ensure self is valid. PROCESS_TREE_LOCK is
+    /// acquired internally; it serializes ring joins/leaves and
+    /// children-list mutations, so every member we walk is still linked
+    /// (members unhook from the ring before their task memory is
+    /// released).
+    pub fn for_each_group_child<F>(&self, mut f: F)
+    where
+        F: FnMut(*mut Task),
+    {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let start = self as *const Task as *mut Task;
+        let mut member = start;
+        let mut guard = 0u32;
+        loop {
+            // SAFETY: ring members stay linked under PROCESS_TREE_LOCK.
+            let head = unsafe { &(*member).children as *const _ as *mut ListHead };
+            // SAFETY: head is that member's live children list; tree lock
+            // held for the whole walk.
+            unsafe {
+                ListHead::for_each(head, |node| {
+                    f(Task::from_sibling_node(node));
+                });
+            }
+            // Ring walk (next_thread_ptr heals a NULL to self — a
+            // single-threaded task terminates on the first step).
+            // SAFETY: same ring-liveness contract as above.
+            member = unsafe { (*member).next_thread_ptr() };
+            if member == start || member.is_null() {
+                break;
+            }
+            guard += 1;
+            if guard > 65536 {
+                break;
+            }
+        }
+    }
+
+    /// Find child by PID
+    ///
+    /// # Arguments
+    /// - `pid`: Process ID to find child by PID
+    ///
+    /// # Returns
+    /// Some(child pointer) if found, None otherwise
+    ///
+    /// Contract: `self` is a valid task; PROCESS_TREE_LOCK is acquired
+    /// internally. The returned pointer is valid only under the caller's
+    /// own liveness discipline (pin or tree lock).
+    pub fn find_child_by_pid(&self, pid: Pid) -> Option<*mut Task> {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let head = &self.children as *const _ as *mut ListHead;
+        let mut result = None;
+        // SAFETY: head is self's live children list; tree lock held.
+        unsafe {
+            ListHead::for_each(head, |node| {
+                let task_ptr = Task::from_sibling_node(node);
+                // SAFETY: node owns this Task; tree lock keeps it linked.
+                if (*task_ptr).pid == pid {
+                    result = Some(task_ptr);
+                }
+            });
+        }
+        result
+    }
+
+    /// Get child count
+    ///
+    /// # Returns
+    /// Number of children
+    pub fn count_children(&self) -> usize {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let head = &self.children as *const _ as *mut ListHead;
+        let mut count = 0;
+        // SAFETY: head is self's live children list; tree lock held.
+        unsafe {
+            ListHead::for_each(head, |_| {
+                count += 1;
+            });
+        }
+        count
+    }
+
+
+    /// Get reference to pending signal queue
+    #[inline]
+    pub fn pending(&self) -> &crate::signal::SigPending {
+        &self.pending
+    }
+
+    // ==================== musl libc support (set_tid_address, set_robust_list) ====================
+
+    /// Set clear_child_tid address
+    ///
+    /// When process exits, kernel clears value at this address
+    #[inline]
+    pub fn set_clear_child_tid(&mut self, tidptr: *mut i32) {
+        self.clear_child_tid = tidptr;
+    }
+
+    /// Get clear_child_tid address
+    #[inline]
+    pub fn clear_child_tid(&self) -> *mut i32 {
+        self.clear_child_tid
+    }
+
+    /// Set robust list
+    ///
+    /// Used for robust mutex implementation
+    #[inline]
+    pub fn set_robust_list(&mut self, head: *const u8, len: usize) {
+        self.robust_list_head = head;
+        self.robust_list_len = len;
+    }
+
+    /// Get robust list head pointer
+    #[inline]
+    pub fn robust_list_head(&self) -> *const u8 {
+        self.robust_list_head
+    }
+
+    /// Get robust list length
+    #[inline]
+    pub fn robust_list_len(&self) -> usize {
+        self.robust_list_len
+    }
+
+    /// Get current brk value
+    #[inline]
+    pub fn get_brk(&self) -> u64 {
+        self.brk.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Set brk value
+    #[inline]
+    pub fn set_brk(&self, value: u64) {
+        self.brk.store(value, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Get current working directory
+    pub fn get_cwd(&self) -> alloc::boxed::Box<[u8]> {
+        if let Some(ref fs) = self.fs {
+            fs.cwd_slice()
+        } else {
+            alloc::boxed::Box::from(&b"/"[..])
+        }
+    }
+
+    /// Set current working directory
+    pub fn set_cwd(&self, path: &[u8]) {
+        if let Some(ref fs) = self.fs {
+            fs.set_cwd(path);
+        }
+    }
+
+    /// Get root directory (real-namespace normalized path; "/" when not
+    /// chrooted). P1 chroot: path_lookup prefixes absolute paths with it.
+    pub fn get_root(&self) -> alloc::boxed::Box<[u8]> {
+        if let Some(ref fs) = self.fs {
+            fs.get_root().into_boxed_slice()
+        } else {
+            alloc::boxed::Box::from(&b"/"[..])
+        }
+    }
+
+    /// Set root directory (chroot). `path` must be a normalized
+    /// real-namespace absolute path.
+    pub fn set_root(&self, path: &[u8]) {
+        if let Some(ref fs) = self.fs {
+            fs.set_root(path);
+        }
+    }
+
+    /// Get Arc reference to fs_struct (for CLONE_FS)
+    pub fn fs_arc(&self) -> Option<alloc::sync::Arc<crate::fs::FsStruct>> {
+        self.fs.clone()
+    }
+
+    /// (perf-path lane) Chroot probe WITHOUT cloning the fs Arc — the
+    /// fs_arc() clone (an atomic refcount pair) ran once per path walk
+    /// and several times per open's shortcut gates.
+    pub fn process_rooted_cheap(&self) -> bool {
+        match self.fs.as_ref() {
+            Some(fs) => !fs.root_is_slash(),
+            None => false,
+        }
+    }
+
+    /// Set fs_struct
+    pub fn set_fs(&mut self, fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>) {
+        self.fs = fs;
+    }
+
+    /// Get umask
+    pub fn get_umask(&self) -> u32 {
+        if let Some(ref fs) = self.fs {
+            fs.get_umask()
+        } else {
+            0o022
+        }
+    }
+
+    /// Set umask and return old value
+    pub fn set_umask(&self, mask: u32) -> u32 {
+        if let Some(ref fs) = self.fs {
+            fs.set_umask(mask)
+        } else {
+            0o022
+        }
+    }
+
+    // ==================== namespaces / seccomp (U1c) ====================
+
+    /// Seccomp mode (0 disabled / 1 strict / 2 filter).
+    pub fn seccomp_mode(&self) -> u32 {
+        self.seccomp_mode.load(Ordering::Acquire)
+    }
+
+    /// Set seccomp mode.
+    pub fn set_seccomp_mode(&self, mode: u32) {
+        self.seccomp_mode.store(mode, Ordering::Release);
+    }
+
+    /// no_new_privs attribute (PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS).
+    pub fn no_new_privs(&self) -> bool {
+        self.no_new_privs.load(Ordering::Acquire)
+    }
+
+    pub fn set_no_new_privs(&self, v: bool) {
+        self.no_new_privs.store(v, Ordering::Release);
+    }
+
+    /// Seccomp kill helper (signal.rs): force-queue SIGKILL to this task
+    /// bypassing disposition/mask checks. Used by the STRICT mode gate and
+    /// SECCOMP_RET_KILL — the default action of SIGKILL terminates the task
+    /// on return to user mode.
+    pub fn seccomp_kill(&self) {
+        // Reference kernel semantics (kernel/seccomp.c do_seccomp /
+        // seccomp_log + force_sig): a seccomp kill terminates the task
+        // with SIGSYS (si_code SYS_SECCOMP) — NOT SIGKILL. LTP prctl04
+        // pins the shape: the parent expects WTERMSIG == SIGSYS for both
+        // STRICT and FILTER violations. force_sig also bypasses the
+        // target's blocked mask and any caught handler: unblock SIGSYS
+        // and reset its action to default before queueing, so the normal
+        // delivery scan picks it up no matter what the target did.
+        const SIGSYS: i32 = 31;
+        // SAFETY: seccomp_kill is invoked on the CURRENT task from the
+        // syscall gate (or on a fork-fresh child before it is shared);
+        // the raw-pointer write mirrors how other &self helpers on Task
+        // mutate plain fields under &self (the Task is never const).
+        let task = self as *const Task as *mut Task;
+        unsafe {
+            (*task).sigmask &= !(1u64 << (SIGSYS - 1));
+        }
+        if let Some(sig_struct) = self.signal.as_ref() {
+            let _ = sig_struct.set_action(SIGSYS, crate::signal::SigAction::new());
+        }
+        self.pending.add(SIGSYS);
+        self.set_ti_flag(TIF_SIGPENDING);
+        // SAFETY: signal_wake_up takes a valid task pointer; this method is
+        // called with &self of a live task.
+        unsafe {
+            crate::signal::signal_wake_up(self as *const Task as *mut Task);
+        }
+    }
+
+    /// This task's pid inside its own pid namespace (gettid view).
+    pub fn ns_pid_local(&self) -> u32 {
+        self.ns_local_pid
+    }
+
+    /// cgroup v2: membership pointer (NULL = implicit root, no limits).
+    #[inline]
+    pub fn cgroup_ptr(&self) -> *mut crate::sched::cgroup::CgroupNode {
+        self.cgroup_ptr
+    }
+
+    /// cgroup v2: set membership pointer (fork inherit / cgroup.procs
+    /// migration). The pointee must come from a never-freed
+    /// `Arc<CgroupNode>` allocation.
+    #[inline]
+    pub fn set_cgroup_ptr(&mut self, ptr: *mut crate::sched::cgroup::CgroupNode) {
+        self.cgroup_ptr = ptr;
+    }
+
+    /// cgroup v2 memory controller: bytes currently charged on behalf of
+    /// this task (see field docs).
+    #[inline]
+    pub fn cgroup_mem_charged(&self) -> u64 {
+        self.cgroup_mem_charged.load(Ordering::Acquire)
+    }
+
+    /// cgroup v2 memory controller: add to the task's charge ledger.
+    #[inline]
+    pub fn add_cgroup_mem_charged(&self, bytes: u64) {
+        self.cgroup_mem_charged.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    /// cgroup v2 memory controller: subtract from the task's charge
+    /// ledger, saturating at zero.
+    #[inline]
+    pub fn sub_cgroup_mem_charged(&self, bytes: u64) {
+        let mut current = self.cgroup_mem_charged.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_sub(bytes);
+            match self.cgroup_mem_charged.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Get executable file path
+    pub fn get_exe_path(&self) -> &[u8] {
+        &self.exe_path
+    }
+
+    /// Set user stack pointer
+    pub fn set_user_sp(&self, sp: u64) {
+        self.ti_user_sp.store(sp, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Set executable file path
+    pub fn set_exe_path(&mut self, path: &[u8]) {
+        self.exe_path = Box::from(path);
+    }
+}
+
+///
+/// Optional: 100, 250, 300, 1000
+const HZ: u32 = 100;
+
+// ==================== Offset constants (for assembly use) ====================
+
+/// Task struct thread_info field offsets
+#[allow(dead_code)]
+pub mod task_offsets {
+    use super::*;
+
+    pub const TI_FLAGS: usize = core::mem::offset_of!(Task, ti_flags);
+    pub const TI_PREEMPT_COUNT: usize = core::mem::offset_of!(Task, ti_preempt_count);
+    pub const TI_KERNEL_SP: usize = core::mem::offset_of!(Task, ti_kernel_sp);
+    pub const TI_USER_SP: usize = core::mem::offset_of!(Task, ti_user_sp);
+    pub const TI_CPU: usize = core::mem::offset_of!(Task, ti_cpu);
+    pub const TI_A0: usize = core::mem::offset_of!(Task, ti_a0);
+    pub const TI_A1: usize = core::mem::offset_of!(Task, ti_a1);
+    pub const TI_A2: usize = core::mem::offset_of!(Task, ti_a2);
+    /// R56-heal: __switch_to's affirm gate CASes this word (PICKED → LIVE).
+    pub const TI_PICK_STATE: usize = core::mem::offset_of!(Task, ti_pick_state);
+    /// R57-scribble: the thread_info neighborhood map — the pk= garbage
+    /// captures prove a foreign store lands near ti_pick_state; these
+    /// offsets let the dump identify which 8-byte field's halves overlap
+    /// the pick-state word.
+    pub const TI_CPUS_ALLOWED: usize = core::mem::offset_of!(Task, cpus_allowed);
+    pub const TI_ON_CPU: usize = core::mem::offset_of!(Task, ti_on_cpu);
+    pub const TI_RUNNING_ON_CPU: usize = core::mem::offset_of!(Task, running_on_cpu);
+    pub const TI_HUNG_TASK_SINCE: usize = core::mem::offset_of!(Task, hung_task_since);
+    pub const TI_TASK_REFCNT: usize = core::mem::offset_of!(Task, task_refcnt);
+    pub const TI_JOURNAL_HANDLE: usize = core::mem::offset_of!(Task, journal_handle);
+
+    // Other common field offsets
+    pub const TASK_STATE: usize = core::mem::offset_of!(Task, state);
+    pub const TASK_PID: usize = core::mem::offset_of!(Task, pid);
+    pub const TASK_THREAD: usize = core::mem::offset_of!(Task, thread);
+    pub const TASK_KERNEL_STACK_BOTTOM: usize = core::mem::offset_of!(Task, kernel_stack_bottom);
+    // R20: KERNPANIC children-walk previously hardcoded 0x48/0x4c/0x758/0x768 —
+    // all four drifted by 8 when journal_handle/ti_on_cpu/task_refcnt were
+    // inserted before `state`. Derive them here so the walk can never go
+    // stale again.
+    pub const TASK_CHILDREN: usize = core::mem::offset_of!(Task, children);
+    pub const TASK_SIBLING: usize = core::mem::offset_of!(Task, sibling);
+
+    // oh-crash 98th (SPINLOCK-STUCK holder hunt): the DEADLOCK face's
+    // wedge locks sit at page-aligned bases + 0x6dc/0xadc/0xedc inside
+    // direct-buddy allocations — Task-shaped. These offsets let a serial
+    // log's lock address be matched to its Task field OFFLINE (no boot
+    // needed). Keep the raw static in .data (#[used]) — read it from the
+    // ELF with nm + objdump. Offsets are of the FIELD; the Spinlock word
+    // inside Spinlock<T> is at +0 of the field (locked is first).
+    #[used]
+    pub static TASK_LOCK_OFFSETS: [usize; 8] = [
+        core::mem::size_of::<Task>(),
+        core::mem::offset_of!(Task, dead_threads),
+        core::mem::offset_of!(Task, mm_slot_lock),
+        core::mem::offset_of!(Task, pending),
+        core::mem::offset_of!(Task, wait_chldexit),
+        core::mem::offset_of!(Task, sem_undo),
+        core::mem::offset_of!(Task, posix_timers),
+        core::mem::offset_of!(Task, rlimits),
+    ];
+}
+
+/// Export offset constants
+pub use task_offsets::*;
+
+/// Get current process's file descriptor table
+///
+/// Returns None if no current task is set or task has no fdtable.
+pub fn get_current_fdtable() -> Option<&'static crate::fs::FdTable> {
+    match crate::sched::current() {
+        Some(c) => c.try_fdtable(),
+        None => None,
+    }
+}

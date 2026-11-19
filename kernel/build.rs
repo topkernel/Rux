@@ -1,0 +1,1142 @@
+//! Rux kernel build script
+//!
+//! This script runs before compilation and is responsible for:
+//! 1. Parsing Kernel.toml configuration file
+//! 2. Generating configuration code
+//! 3. Setting conditional compilation options
+
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+use std::collections::HashMap;
+
+/// Parse build/.config file (simple key=value format)
+fn parse_dot_config(content: &str) -> toml::Value {
+    // Store configuration for each section
+    let mut sections: HashMap<String, HashMap<String, toml::Value>> = HashMap::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // Skip comments and empty lines
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Parse section_key=value format
+        if let Some(eq_pos) = line.find('=') {
+            let key = &line[..eq_pos];
+            let value = &line[eq_pos + 1..];
+            let value = value.trim();
+
+            // Split section_key (using first underscore as delimiter)
+            if let Some(underscore_pos) = key.find('_') {
+                let section = &key[..underscore_pos];
+                let config_key = &key[underscore_pos + 1..];
+
+                // Convert value type
+                let parsed_value = if value == "true" {
+                    toml::Value::Boolean(true)
+                } else if value == "false" {
+                    toml::Value::Boolean(false)
+                } else if let Ok(int_val) = value.parse::<i64>() {
+                    toml::Value::Integer(int_val)
+                } else {
+                    toml::Value::String(value.to_string())
+                };
+
+                sections.entry(section.to_string())
+                    .or_insert_with(HashMap::new)
+                    .insert(config_key.to_string(), parsed_value);
+            }
+        }
+    }
+
+    // Build TOML Value
+    let mut root_map = toml::map::Map::new();
+
+    // general section
+    let mut general = toml::map::Map::new();
+    general.insert("name".to_string(), toml::Value::String("Rux".to_string()));
+    general.insert("version".to_string(), toml::Value::String("0.1.0".to_string()));
+    root_map.insert("general".to_string(), toml::Value::Table(general));
+
+    // platform section
+    let mut platform = toml::map::Map::new();
+    platform.insert("target".to_string(), toml::Value::String("riscv64".to_string()));
+    root_map.insert("platform".to_string(), toml::Value::Table(platform));
+
+    // Other sections - convert HashMap to toml::map::Map
+    for (section_name, section_data) in sections {
+        let mut toml_map = toml::map::Map::new();
+        for (k, v) in section_data {
+            toml_map.insert(k, v);
+        }
+        root_map.insert(section_name, toml::Value::Table(toml_map));
+    }
+
+    toml::Value::Table(root_map)
+}
+
+/// Parse a configuration source (Kernel.toml or build/.config).
+///
+/// Format is auto-detected: TOML if it contains `[section]` headers,
+/// otherwise the menuconfig `section_key=value` format.
+fn parse_config(content: &str) -> toml::Value {
+    let is_toml = content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with('[') && trimmed.ends_with(']')
+    });
+
+    if is_toml {
+        toml::from_str(content).expect("Configuration file parsing failed")
+    } else {
+        parse_dot_config(content)
+    }
+}
+
+/// Deep-merge `overlay` into `base`: overlay keys win, missing keys keep
+/// the base (Kernel.toml) value. Only table values are merged recursively.
+fn merge_config(base: &mut toml::Value, overlay: toml::Value) {
+    let overlay_table = match overlay {
+        toml::Value::Table(t) => t,
+        _ => return,
+    };
+    let base_table = match base {
+        toml::Value::Table(t) => t,
+        _ => return,
+    };
+    for (section, ovals) in overlay_table {
+        match (base_table.remove(&section), ovals) {
+            // Both tables: merge section keys one level deep (configs are
+            // section -> scalar; no deeper nesting exists).
+            (Some(toml::Value::Table(mut bvals)), toml::Value::Table(ovals)) => {
+                for (k, v) in ovals {
+                    bvals.insert(k, v);
+                }
+                base_table.insert(section, toml::Value::Table(bvals));
+            }
+            // Overlay value wins in every other case.
+            (_, v) => {
+                base_table.insert(section, v);
+            }
+        }
+    }
+}
+
+/// Run `git <args>` in the source tree and return its stdout on success.
+fn git_output(args: &[&str]) -> Option<String> {
+    let manifest = env::var("CARGO_MANIFEST_DIR").ok()?;
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(&manifest)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Short commit id of the tree this binary is built from ("unknown" when
+/// the tree is not a git checkout).
+///
+/// A booted kernel that does not name its source tree is how a STALE
+/// binary gets mistaken for a fresh one: the boot then shows the old
+/// behaviour while the tree already carries the fix. The ttydev lane
+/// hit exactly that (a pre-merge x86 bzImage booted with a post-merge
+/// tree checked out), so the identity is baked in and printed at boot.
+fn git_commit() -> String {
+    git_output(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Absolute path of the git directory holding this checkout's HEAD.
+///
+/// A worktree's `.git` is a FILE that points at the real git dir, so the
+/// path cannot be assumed — `git rev-parse --absolute-git-dir` resolves
+/// it (the plain checkout's `.git`, the worktree's per-worktree dir).
+fn git_dir() -> Option<PathBuf> {
+    git_output(&["rev-parse", "--absolute-git-dir"]).map(PathBuf::from)
+}
+
+fn main() {
+    println!("cargo:rerun-if-changed=../Kernel.toml");
+    println!("cargo:rerun-if-changed=../build/.config");
+
+    // Set build time and rustc version
+    let build_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+    println!("cargo:rustc-env=BUILD_TIME={}", build_time);
+
+    // Get rustc version
+    let rustc_version = rustc_version::version()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=RUSTC_VERSION={}", rustc_version);
+
+    // Build identity: the commit this binary was cut from and the profile
+    // it was compiled with. Printed in the boot banner and in
+    // /proc/version, so a running kernel can always be matched against a
+    // commit (see git_commit()).
+    println!("cargo:rustc-env=RUX_GIT_COMMIT={}", git_commit());
+    println!(
+        "cargo:rustc-env=RUX_BUILD_PROFILE={}",
+        env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string())
+    );
+    // Re-run the build script when the branch moves, so the identity above
+    // tracks HEAD instead of the last source edit.
+    if let Some(dir) = git_dir() {
+        for entry in ["HEAD", "packed-refs", "refs"] {
+            println!("cargo:rerun-if-changed={}", dir.join(entry).display());
+        }
+    }
+
+    // Kernel.toml is the base configuration. build/.config (generated by
+    // menuconfig or by platform switching) is an OVERLAY on top of it:
+    // every key it defines wins, every key it omits inherits the
+    // Kernel.toml value.
+    //
+    // Replacing Kernel.toml wholesale with .config used to be a footgun:
+    // a platform-only .config ("platform_default_platform=x86_64" — all
+    // the platform switch writes) silently dropped the whole [memory]
+    // section, and the kernel was built with hard-coded fallbacks
+    // (16MB heap / 32KB kernel stacks instead of 128MB / 128KB), which
+    // killed userspace bring-up on the Ubuntu image (udesk died on
+    // launch and init respawned it forever).
+    let base_content = fs::read_to_string("../Kernel.toml")
+        .expect("Unable to read Kernel.toml");
+    let mut config = parse_config(&base_content);
+
+    if let Ok(overlay_content) = fs::read_to_string("../build/.config") {
+        println!("cargo:warning=Overlaying build/.config on Kernel.toml");
+        let overlay = parse_config(&overlay_content);
+        merge_config(&mut config, overlay);
+    }
+
+    // Print configuration info
+    if let Some(general) = config.get("general") {
+        if let Some(name) = general["name"].as_str() {
+            println!("cargo:rustc-env=CARGO_KERNEL_NAME={}", name);
+        }
+        if let Some(version) = general["version"].as_str() {
+            println!("cargo:rustc-env=CARGO_KERNEL_VERSION={}", version);
+        }
+    }
+
+    // Get target platform: the active cargo feature wins over Kernel.toml
+    // (x86_64/aarch64 builds pass --no-default-features --features <arch>)
+    let platform = if env::var_os("CARGO_FEATURE_X86_64").is_some() {
+        "x86_64"
+    } else if env::var_os("CARGO_FEATURE_AARCH64").is_some() {
+        "aarch64"
+    } else {
+        config.get("platform")
+            .and_then(|p| p["target"].as_str().or_else(|| p["default_platform"].as_str()))
+            .unwrap_or("riscv64")
+    };
+
+    // Consistency guard: a stale build/.config selecting a platform whose
+    // cargo feature is NOT enabled silently bakes mismatched constants into
+    // the kernel (observed: x86_64 config + riscv64 build = boot panic).
+    {
+        let feat_x86 = env::var_os("CARGO_FEATURE_X86_64").is_some();
+        let feat_rv = env::var_os("CARGO_FEATURE_RISCV64").is_some();
+        let feat_aa = env::var_os("CARGO_FEATURE_AARCH64").is_some();
+        if platform == "x86_64" && !feat_x86 {
+            panic!("config platform x86_64 but cargo feature not enabled — stale build/.config? run make menuconfig");
+        }
+        if platform == "riscv64" && feat_x86 && !feat_rv {
+            panic!("config platform riscv64 but x86_64-only feature build running");
+        }
+        if platform == "riscv64" && feat_aa && !feat_rv {
+            panic!("config platform riscv64 but aarch64-only feature build running");
+        }
+        if platform == "aarch64" && !feat_aa {
+            panic!("config platform aarch64 but cargo feature not enabled — stale build/.config? run make menuconfig");
+        }
+    }
+
+    println!("cargo:rustc-env=RUX_TARGET_PLATFORM={}", platform);
+
+    // Note: [performance] settings in Kernel.toml (opt_level, lto, codegen_units)
+    // are informational only — actual build optimization is controlled by
+    // Cargo.toml [profile.dev] and [profile.release] sections.
+
+    // Set feature flags
+    if let Some(platform) = config.get("platform") {
+        let enable_aarch64 = platform.get("enable_aarch64")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let enable_x86_64 = platform.get("enable_x86_64")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let enable_riscv64 = platform.get("enable_riscv64")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Output enabled platforms
+        let enabled_platforms = [
+            if enable_aarch64 { "aarch64" } else { "" },
+            if enable_x86_64 { "x86_64" } else { "" },
+            if enable_riscv64 { "riscv64" } else { "" },
+        ];
+        println!("cargo:rustc-env=RUX_ENABLED_PLATFORMS={}", enabled_platforms.join(","));
+    }
+
+    // Set debug options
+    if let Some(debug) = config.get("debug") {
+        if let Some(log_level) = debug.get("log_level").and_then(|v| v.as_str()) {
+            println!("cargo:rustc-env=RUX_LOG_LEVEL={}", log_level);
+        }
+
+        if debug.get("debug_output").and_then(|v| v.as_bool()).unwrap_or(false) {
+            println!("cargo:rustc-env=RUX_DEBUG={}", "true");
+        }
+
+        if debug.get("profiling").and_then(|v| v.as_bool()).unwrap_or(false) {
+            println!("cargo:rustc-env=RUX_PROFILING={}", "true");
+        }
+    }
+
+    // Generate configuration code
+    generate_config_code(&config);
+
+    // Apply the arch linker script(s) exactly once (see the comment on
+    // emit_linker_scripts for why this must not live in .cargo/config.toml)
+    emit_linker_scripts();
+
+    // Compile boot.S separately (Linux-style: first object = entry point)
+    compile_boot_asm();
+
+    println!("cargo:warning=Rux configuration loaded successfully");
+}
+
+fn generate_config_code(config: &toml::Value) {
+    let _out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+
+    // Get basic information
+    let kernel_name = config.get("general")
+        .and_then(|g| g["name"].as_str())
+        .unwrap_or("Rux");
+
+    let kernel_version = config.get("general")
+        .and_then(|g| g["version"].as_str())
+        .unwrap_or("0.1.0");
+
+    // Feature-aware platform (same precedence as main() at line ~175): the
+    // active cargo feature wins over Kernel.toml's default_platform.
+    // Without this, an x86_64 feature build inherits the config-file
+    // platform (riscv64) and the riscv64-only 128 MiB heap clamp silently
+    // bakes into the x86 kernel - sc46 died with init "failed to fork"
+    // because of exactly that (config.rs TARGET_PLATFORM=riscv64,
+    // KERNEL_HEAP_SIZE=128MiB, booted on q35).
+    let config_platform = config.get("platform")
+        .and_then(|p| p["target"].as_str().or_else(|| p["default_platform"].as_str()))
+        .unwrap_or("riscv64");
+    let target_platform = if env::var_os("CARGO_FEATURE_X86_64").is_some() {
+        "x86_64"
+    } else if env::var_os("CARGO_FEATURE_AARCH64").is_some() {
+        "aarch64"
+    } else if env::var_os("CARGO_FEATURE_RISCV64").is_some() && config_platform != "x86_64" {
+        "riscv64"
+    } else {
+        config_platform
+    };
+
+    // Helper functions to get config values with defaults
+    let get_usize = |section: &str, key: &str, default: i64| -> usize {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(default) as usize
+    };
+
+    let get_u32 = |section: &str, key: &str, default: i64| -> u32 {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(default) as u32
+    };
+
+    let get_u64 = |section: &str, key: &str, default: i64| -> u64 {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(default) as u64
+    };
+
+    let get_u8 = |section: &str, key: &str, default: i64| -> u8 {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(default) as u8
+    };
+
+    let get_bool = |section: &str, key: &str, default: bool| -> bool {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default)
+    };
+
+    let get_str = |section: &str, key: &str, default: &str| -> String {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or(default)
+            .to_string()
+    };
+
+    // Generate configuration code
+    let config_header = format!(
+        r#"//! Rux kernel configuration (auto-generated)
+//!
+//! This file is auto-generated by build.rs from Kernel.toml, do not edit manually
+
+// ============================================================
+// Basic Information
+// ============================================================
+
+/// Kernel name
+pub const KERNEL_NAME: &str = "{}";
+
+/// Kernel version
+pub const KERNEL_VERSION: &str = "{}";
+
+/// Target platform
+pub const TARGET_PLATFORM: &str = "{}";
+
+// ============================================================
+// Memory Configuration
+// ============================================================
+
+/// Kernel heap size (bytes)
+pub const KERNEL_HEAP_SIZE: usize = {};
+
+/// Physical memory size (bytes)
+pub const PHYS_MEMORY_SIZE: usize = {};
+
+/// Page size
+pub const PAGE_SIZE: usize = {};
+
+/// Page size shift
+pub const PAGE_SHIFT: usize = {};
+
+/// User stack size (bytes)
+pub const USER_STACK_SIZE: usize = {};
+
+/// User stack max size (bytes)
+pub const USER_STACK_MAX_SIZE: usize = {};
+
+/// User heap max size (bytes)
+pub const USER_HEAP_MAX_SIZE: usize = {};
+
+/// Kernel stack size (bytes)
+pub const KERNEL_STACK_SIZE: usize = {};
+
+/// User stack top address
+pub const USER_STACK_TOP: u64 = 0x0000_003f_ffff_f000;
+
+/// Maximum number of page tables
+pub const MAX_PAGE_TABLES: usize = {};
+
+/// Buddy allocator max order
+pub const BUDDY_MAX_ORDER: usize = {};
+
+/// Slab cache count
+pub const SLAB_NUM_CACHES: usize = {};
+
+/// Per-CPU page cache high watermark
+pub const PCP_HIGH: usize = {};
+
+/// Per-CPU page cache low watermark
+pub const PCP_LOW: usize = {};
+
+/// Per-CPU page cache batch size
+pub const PCP_BATCH: usize = {};
+
+/// Enable swap support
+pub const ENABLE_SWAP: bool = {};
+
+/// Swap size (MB)
+pub const SWAP_SIZE_MB: usize = {};
+
+// ============================================================
+// Driver Configuration
+// ============================================================
+
+/// Enable UART driver
+pub const ENABLE_UART: bool = {};
+
+/// Enable timer driver
+pub const ENABLE_TIMER: bool = {};
+
+/// Enable GIC interrupt controller
+pub const ENABLE_GIC: bool = {};
+
+/// Enable VirtIO network device probing
+pub const ENABLE_VIRTIO_NET_PROBE: bool = {};
+
+/// Maximum VirtIO devices
+pub const VIRTIO_MAX_DEVICES: usize = {};
+
+/// VirtIO queue wait timeout (microseconds)
+pub const VIRTIO_QUEUE_TIMEOUT_US: u64 = {};
+
+/// VirtIO device reset timeout (ticks)
+pub const VIRTIO_RESET_TIMEOUT_TICKS: usize = {};
+
+/// VirtIO PCI max capabilities
+pub const VIRTIO_PCI_MAX_CAPABILITIES: usize = {};
+
+/// Maximum PLIC interrupts
+pub const PLIC_MAX_INTERRUPTS: usize = {};
+
+/// Event device queue size
+pub const EVDEV_EVENT_QUEUE_SIZE: usize = {};
+
+/// Timer clock frequency (Hz)
+pub const TIMER_CLOCK_FREQ_HZ: u64 = {};
+
+// ============================================================
+// SMP Configuration
+// ============================================================
+
+/// Enable SMP multi-core support
+pub const ENABLE_SMP: bool = {};
+
+/// Maximum number of CPUs
+pub const MAX_CPUS: usize = {};
+
+/// SMP boot stack size (bytes)
+pub const SMP_BOOT_STACK_SIZE: usize = {};
+
+// ============================================================
+// Scheduler Configuration
+// ============================================================
+
+/// Enable scheduler
+pub const ENABLE_SCHEDULER: bool = {};
+
+/// Default time slice (milliseconds)
+pub const DEFAULT_TIME_SLICE_MS: u32 = {};
+
+/// Time slice ticks
+pub const TIME_SLICE_TICKS: u32 = {};
+
+/// Maximum number of tasks
+pub const MAX_TASKS: usize = {};
+
+/// Task pool size for per-CPU allocation
+pub const TASK_POOL_SIZE: usize = {};
+
+/// Load imbalance threshold for SMP balancing
+pub const LOAD_IMBALANCE_THRESH: usize = {};
+
+/// CFS minimum granularity (nanoseconds)
+pub const CFS_MIN_GRANULARITY_NS: u64 = {};
+
+/// CFS scheduling latency (nanoseconds)
+pub const CFS_LATENCY_NS: u64 = {};
+
+/// Kernel HZ (timer interrupts per second)
+pub const KERNEL_HZ: u32 = {};
+
+// ============================================================
+// Network Configuration
+// ============================================================
+
+/// Enable network stack
+pub const ENABLE_NETWORK: bool = {};
+
+/// Ethernet MTU
+pub const ETH_MTU: usize = {};
+
+/// TCP socket table size
+pub const TCP_SOCKET_TABLE_SIZE: usize = {};
+
+/// UDP socket table size
+pub const UDP_SOCKET_TABLE_SIZE: usize = {};
+
+/// ARP cache size
+pub const ARP_CACHE_SIZE: usize = {};
+
+/// Route table size
+pub const ROUTE_TABLE_SIZE: usize = {};
+
+/// IPv4 default TTL
+pub const IP_DEFAULT_TTL: u8 = {};
+
+/// TCP minimum RTO (microseconds)
+pub const TCP_RTO_MIN_US: u64 = {};
+
+/// TCP maximum RTO (microseconds)
+pub const TCP_RTO_MAX_US: u64 = {};
+
+/// TCP default RTO (microseconds)
+pub const TCP_RTO_DEFAULT_US: u64 = {};
+
+/// TCP maximum retransmit count
+pub const TCP_MAX_RETRIES: u32 = {};
+
+/// TCP delayed ACK timeout (microseconds)
+pub const TCP_DELACK_TIMEOUT_US: u64 = {};
+
+/// TCP TIME_WAIT timeout (microseconds)
+pub const TCP_TIMEWAIT_TIMEOUT_US: u64 = {};
+
+// ============================================================
+// Feature Flags
+// ============================================================
+
+/// Enable TCP protocol
+pub const ENABLE_TCP: bool = {};
+
+/// Enable UDP protocol
+pub const ENABLE_UDP: bool = {};
+
+/// Enable ARP protocol
+pub const ENABLE_ARP: bool = {};
+
+/// Enable IPv4 protocol
+pub const ENABLE_IPV4: bool = {};
+
+/// Enable Ethernet
+pub const ENABLE_ETHERNET: bool = {};
+
+/// Enable signal handling
+pub const ENABLE_SIGNAL: bool = {};
+
+/// Enable virtual memory
+pub const ENABLE_VM: bool = {};
+
+/// Enable VFS
+pub const ENABLE_VFS: bool = {};
+
+/// Enable pipe
+pub const ENABLE_PIPE: bool = {};
+
+// ============================================================
+// Mount Configuration
+// ============================================================
+
+/// ext4 disk mount point
+pub const EXT4_MOUNT_POINT: &str = "{}";
+
+/// Enable ext4 auto-mount
+pub const AUTO_MOUNT_EXT4: bool = {};
+
+/// Enable procfs auto-mount
+pub const AUTO_MOUNT_PROCFS: bool = {};
+
+// ============================================================
+// Filesystem Configuration
+// ============================================================
+
+/// Pipe buffer size (bytes)
+pub const PIPE_BUFFER_SIZE: usize = {};
+
+/// Inode cache size
+pub const ICACHE_SIZE: usize = {};
+
+/// Directory entry cache size
+pub const DCACHE_SIZE: usize = {};
+
+/// Rootfs path cache size
+pub const ROOTFS_PATH_CACHE_SIZE: usize = {};
+
+/// Maximum symlink follow depth
+pub const MAX_SYMLINKS: usize = {};
+
+/// Maximum symlink depth in ext4
+pub const EXT4_MAX_SYMLINK_DEPTH: usize = {};
+
+// ============================================================
+// Process Configuration
+// ============================================================
+
+/// Maximum PID value
+pub const PID_MAX_LIMIT: usize = {};
+
+/// Default maximum PID value (bitmap allocator range)
+pub const PID_MAX_DEFAULT: usize = {};
+
+/// Reserved PIDs: 0..RESERVED_PIDS are never allocated
+pub const RESERVED_PIDS: usize = {};
+
+/// Maximum command line length
+pub const MAX_CMDLINE_LEN: usize = {};
+
+/// File descriptor set size for select
+pub const FD_SETSIZE: usize = {};
+
+// ============================================================
+// Synchronization Configuration
+// ============================================================
+
+/// Futex waiter pool size
+pub const FUTEX_WAITER_POOL_SIZE: usize = {};
+
+/// Futex hash table size
+pub const FUTEX_HASH_SIZE: usize = {};
+
+// ============================================================
+// Graphics Configuration
+// ============================================================
+
+/// Default framebuffer width
+pub const FB_DEFAULT_WIDTH: usize = {};
+
+/// Default framebuffer height
+pub const FB_DEFAULT_HEIGHT: usize = {};
+
+// ============================================================
+// Printk Configuration
+// ============================================================
+
+/// Ring buffer size (bytes)
+pub const PRINTK_RING_BUFFER_SIZE: usize = {};
+"#,
+        kernel_name,
+        kernel_version,
+        target_platform,
+        // Memory
+        // kernel_heap_size is clamped per arch: the OH x86_64 lane runs with
+        // 1024 MiB, but on riscv64 (-m 1G/2G QEMU targets) a heap region that
+        // large overruns the memory map and kills the boot before the console
+        // comes up (merge gate 2026-10-19: Kernel.toml 1024 broke every
+        // riscv64 minimal-rootfs smoke silently). Keeping one shared value in
+        // Kernel.toml is fine — riscv64 can never see more than 128 MiB of
+        // it. aarch64 (unmeasured arch, -m 1G/2G QEMU targets, same early
+        // carveout-before-console hazard) joins the clamp until measured.
+        {
+            let heap_mb = get_usize("memory", "kernel_heap_size", 16);
+            let heap_mb = if target_platform.contains("riscv") || target_platform.contains("aarch") {
+                heap_mb.min(128)
+            } else {
+                heap_mb
+            };
+            heap_mb * 1024 * 1024
+        },
+        get_usize("memory", "physical_memory", 2048) * 1024 * 1024,
+        get_usize("memory", "page_size", 4096),
+        get_usize("memory", "page_size", 4096).trailing_zeros() as usize,
+        get_usize("memory", "user_stack_size", 8) * 1024 * 1024,
+        get_usize("memory", "user_stack_max_size", 8388608),
+        get_usize("memory", "user_heap_max_size", 134217728),
+        // kernel_stack_size is per-arch (leg-17 re-land, fee7774f lesson):
+        // the base value (128KB) is what riscv64 and any unmeasured arch
+        // get — the riscv64 kernel nests deeper in kernel mode and an
+        // 80KB slot corrupted adjacent data under the LTP test kernel.
+        // x86_64 (where the 62.5KB max depth was measured, canary-clean)
+        // overrides to 80KB served by the cfg(x86_64)-only packed slab
+        // in process/task.rs.
+        {
+            let kstack_base = get_usize("memory", "kernel_stack_size", 131072);
+            if target_platform == "x86_64" {
+                get_usize("memory", "kernel_stack_size_x86_64", kstack_base as i64)
+            } else {
+                kstack_base
+            }
+        },
+        get_usize("memory", "max_page_tables", 1024),
+        get_usize("memory", "buddy_max_order", 20),
+        get_usize("memory", "slab_num_caches", 10),
+        get_usize("memory", "pcp_high", 64),
+        get_usize("memory", "pcp_low", 16),
+        get_usize("memory", "pcp_batch", 16),
+        get_bool("memory", "enable_swap", true),
+        get_usize("memory", "swap_size_mb", 256),
+        // Drivers
+        get_bool("drivers", "enable_uart", true),
+        get_bool("drivers", "enable_timer", true),
+        get_bool("drivers", "enable_gic", false),
+        get_bool("drivers", "enable_virtio_net_probe", true),
+        get_usize("drivers", "virtio_max_devices", 8),
+        get_u64("drivers", "virtio_queue_timeout_us", 10000000),
+        get_usize("drivers", "virtio_reset_timeout_ticks", 100000),
+        get_usize("drivers", "virtio_pci_max_capabilities", 48),
+        get_usize("drivers", "plic_max_interrupts", 128),
+        get_usize("drivers", "evdev_event_queue_size", 64),
+        get_u64("drivers", "timer_clock_freq_hz", 10000000),
+        // SMP
+        get_bool("smp", "enable_smp", true),
+        get_usize("smp", "max_cpus", 4),
+        get_usize("smp", "boot_stack_size", 65536),
+        // Scheduler
+        get_bool("scheduler", "enable_scheduler", true),
+        get_u32("scheduler", "default_time_slice_ms", 100),
+        get_u32("scheduler", "time_slice_ticks", 10),
+        get_usize("scheduler", "max_tasks", 256),
+        get_usize("scheduler", "task_pool_size", 16),
+        get_usize("scheduler", "load_imbalance_thresh", 2),
+        get_u64("scheduler", "cfs_min_granularity_ns", 700000),
+        get_u64("scheduler", "cfs_latency_ns", 6000000),
+        get_u32("scheduler", "kernel_hz", 100),
+        // Network
+        get_bool("network", "enable_network", true),
+        get_usize("network", "eth_mtu", 1500),
+        get_usize("network", "tcp_socket_table_size", 64),
+        get_usize("network", "udp_socket_table_size", 64),
+        get_usize("network", "arp_cache_size", 64),
+        get_usize("network", "route_table_size", 64),
+        get_u8("network", "ip_default_ttl", 64),
+        get_u64("network", "tcp_rto_min_us", 200000),
+        get_u64("network", "tcp_rto_max_us", 120000000),
+        get_u64("network", "tcp_rto_default_us", 1000000),
+        get_u32("network", "tcp_max_retries", 15),
+        get_u64("network", "tcp_delack_timeout_us", 40000),
+        get_u64("network", "tcp_timewait_timeout_us", 60000000),
+        // Features
+        get_bool("features", "enable_tcp", true),
+        get_bool("features", "enable_udp", true),
+        get_bool("features", "enable_arp", true),
+        get_bool("features", "enable_ipv4", true),
+        get_bool("features", "enable_ethernet", true),
+        get_bool("features", "enable_signal", true),
+        get_bool("features", "enable_vm", true),
+        get_bool("features", "enable_vfs", true),
+        get_bool("features", "enable_pipe", true),
+        // Mount
+        get_str("mount", "ext4_mount_point", "/").as_str(),
+        get_bool("mount", "auto_mount_ext4", true),
+        get_bool("mount", "auto_mount_procfs", true),
+        // Filesystem
+        get_usize("filesystem", "pipe_buffer_size", 16384),
+        get_usize("filesystem", "icache_size", 256),
+        get_usize("filesystem", "dcache_size", 256),
+        get_usize("filesystem", "rootfs_path_cache_size", 64),
+        get_usize("filesystem", "max_symlinks", 40),
+        get_usize("filesystem", "ext4_max_symlink_depth", 8),
+        // Process
+        get_usize("process", "pid_max_limit", 4194304),
+        get_usize("process", "pid_max_default", 32768),
+        get_usize("process", "reserved_pids", 300),
+        get_usize("process", "max_cmdline_len", 2048),
+        get_usize("process", "fd_setsize", 1024),
+        // Sync
+        get_usize("sync", "futex_waiter_pool_size", 256),
+        get_usize("sync", "futex_hash_size", 64),
+        // Graphics
+        get_usize("graphics", "fb_default_width", 1024),
+        get_usize("graphics", "fb_default_height", 768),
+        // Printk
+        get_usize("printk", "ring_buffer_size", 1048576),
+    );
+
+    let src_dir = manifest_dir.join("src");
+    let config_file = src_dir.join("config.rs");
+
+    // Only write when content changes, to avoid updating file timestamp on every build
+    let existing_content = fs::read_to_string(&config_file).unwrap_or_default();
+    if existing_content != config_header {
+        fs::write(&config_file, &config_header)
+            .expect("Failed to write configuration file");
+    }
+
+    // The symbol table (kernel/src/dfx/ksyms_generated.rs) is written by
+    // build/gen-ksyms.py after the link step. A placeholder is written
+    // here when it is missing so that a plain `cargo build` — which has
+    // no symbol pass — still compiles; the table is simply empty then
+    // and the runtime symbolization stays disabled.
+    let ksyms_file = src_dir.join("dfx").join("ksyms_generated.rs");
+    let ksyms_bin = src_dir.join("dfx").join("ksyms.bin");
+    if !ksyms_file.exists() || !ksyms_bin.exists() {
+        fs::create_dir_all(ksyms_file.parent().unwrap()).expect("Failed to create dfx dir");
+        if !ksyms_file.exists() {
+            fs::write(&ksyms_file, KSYMS_STUB)
+                .expect("Failed to write the symbol table placeholder");
+        }
+        if !ksyms_bin.exists() {
+            fs::write(&ksyms_bin, b"").expect("Failed to write the symbol names placeholder");
+        }
+    }
+}
+
+/// The placeholder symbol table written when the build's symbol pass has
+/// not run yet (a plain `cargo build` has no link step to read symbols
+/// from). The real table is produced by build/gen-ksyms.py.
+const KSYMS_STUB: &str = r#"//! Generated by build/gen-ksyms.py — do not edit.
+//!
+//! Placeholder written by build.rs: the real table is produced by the
+//! build's symbol pass (build/Makefile).
+
+/// The target triple this table was generated for.
+pub const TARGET: &str = "none";
+
+/// (name offset into NAMES, address, size, ELF type) per symbol.
+pub static INDEX: &[(u32, u64, u64, u8)] = &[];
+"#;
+
+/// Apply the arch linker script(s) to this bin's link, exactly once.
+///
+/// The -T link-args used to live in .cargo/config.toml. That is not
+/// idempotent under cargo's config discovery: cargo CONCATENATES
+/// [target.<triple>] rustflags arrays across every ancestor
+/// .cargo/config.toml, and every Rux worktree carries that tracked file —
+/// so a build run from a checkout nested inside another worktree (the lane
+/// `run/<base>/` pattern) applied each script TWICE. A twice-applied
+/// x86_64 linker.ld resets `. = BOOT_BASE` (0x100000) and merges a second
+/// .boot_stack allocation over the first pass's real .boot contents:
+/// rust-lld: "section .boot virtual address range overlaps with .boot_stack"
+/// (reproduced deterministically at 912995089 and at main 0c343b043; the
+/// old scripts only *happened* to tolerate it on riscv64/aarch64).
+///
+/// Emitting from here is single-sourced: a build script runs once per
+/// build no matter how many ancestor configs cargo merged. For the
+/// mixed-version nesting case (a fixed checkout inside an OLDER worktree
+/// whose config still carries -T), the effective rustflags are inspected
+/// via CARGO_ENCODED_RUSTFLAGS (cargo passes build scripts the merged
+/// flag list) and this script defers to the already-applied -T.
+fn emit_linker_scripts() {
+    let target = env::var("TARGET").unwrap_or_default();
+
+    // (repo-relative script path) per kernel target triple, in -T order.
+    let scripts: &[&str] = if target.contains("x86_64-unknown-none") {
+        &[
+            "kernel/src/arch/x86_64/linker.ld",
+            "kernel/src/arch/x86_64/linker-extra.ld",
+        ]
+    } else if target.contains("riscv64gc-unknown-none-elf") {
+        &["kernel/src/arch/riscv64/linker.ld"]
+    } else if target.contains("aarch64-unknown-none") {
+        &["kernel/src/arch/aarch64/linker.ld"]
+    } else {
+        return; // host/verify targets: no kernel link
+    };
+
+    // Repo root (workspace root) is the parent of kernel/ (CARGO_MANIFEST_DIR).
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let root = manifest_dir
+        .parent()
+        .expect("kernel/ manifest dir has no parent")
+        .to_path_buf();
+
+    for script in scripts {
+        let abs = root.join(script);
+        assert!(
+            abs.is_file(),
+            "linker script missing: {} (target {})",
+            abs.display(),
+            target
+        );
+        match rustflags_script_count(script) {
+            0 => println!("cargo:rustc-link-arg=-T{}", abs.display()),
+            // An ancestor config (older worktree) already applies this
+            // exact script; a second application re-breaks the layout.
+            1 => {}
+            // Two pre-fix configs merged (e.g. a shared ancestor plus an
+            // older wrapping worktree): the doubled -T is already on the
+            // rustc command line and cannot be removed from here. Say so
+            // instead of failing with a bare rust-lld overlap error.
+            n => println!(
+                "cargo:warning=-T {} applied {}x by merged .cargo configs \
+                 (x86_64 will fail to link: .boot/.boot_stack overlap). \
+                 Build from a checkout whose .cargo/config.toml carries no \
+                 link-arg=-T (post link-fix), or unset the extra config.",
+                script, n
+            ),
+        }
+    }
+}
+
+/// How many times the effective rustflags apply a `link-arg=-T` for
+/// `script` (repo-relative, forward slashes). Understands both token
+/// shapes cargo produces: "-C" + "link-arg=-T<path>" (config arrays,
+/// \x1f-separated in CARGO_ENCODED_RUSTFLAGS) and the joined
+/// "-Clink-arg=-T<path>" form of a hand-set RUSTFLAGS variable.
+fn rustflags_script_count(script: &str) -> usize {
+    let flags = env::var("CARGO_ENCODED_RUSTFLAGS")
+        .or_else(|_| env::var("RUSTFLAGS"))
+        .unwrap_or_default();
+    let sep = if flags.contains('\u{1f}') { '\u{1f}' } else { ' ' };
+    flags.split(sep)
+        .filter(|tok| {
+            let tok = tok.trim().trim_start_matches("-C");
+            match tok.strip_prefix("link-arg=-T") {
+                Some(path) => path.replace('\\', "/").ends_with(script),
+                None => false,
+            }
+        })
+        .count()
+}
+
+/// Compile boot.S assembly file separately and link it as the first object.
+/// This ensures _start is at the kernel's load address (physical address).
+/// We cannot use global_asm! because it renames sections, preventing
+/// proper placement in the linker script (Linux-style VMA/LMA boot).
+fn compile_boot_asm() {
+    let target = env::var("TARGET").unwrap_or_default();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    if target.contains("x86_64") {
+        // x86_64 boot stub: multiboot1 entry assembled with the host
+        // assembler. The object must be elf64 to link into the kernel
+        // image; the file itself starts in .code32 and switches to
+        // .code64, so only the output format is selected here.
+        let boot_asm = PathBuf::from(&manifest_dir).join("src/arch/x86_64/boot.S");
+        if !boot_asm.exists() {
+            return;
+        }
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let boot_obj = out_dir.join("boot_x86_64.o");
+        if boot_obj.exists() {
+            let asm_time = fs::metadata(&boot_asm).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let obj_time = fs::metadata(&boot_obj).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if asm_time <= obj_time {
+                println!("cargo:rustc-link-arg={}", boot_obj.display());
+                return;
+            }
+        }
+        let status = std::process::Command::new("as")
+            .arg("--64")
+            .arg("-o").arg(&boot_obj)
+            .arg(&boot_asm)
+            .status()
+            .expect("failed to run assembler for x86 boot.S");
+        assert!(status.success(), "failed to assemble x86 boot.S");
+        println!("cargo:rustc-link-arg={}", boot_obj.display());
+        println!("cargo:rerun-if-changed={}", boot_asm.display());
+        return;
+    }
+
+    if target.contains("aarch64") {
+        // aarch64 boot: assembled with the cross toolchain like the riscv
+        // branch (the object must be elf64 and land first in the link so
+        // _start sits at the image head / physical load address).
+        let boot_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/boot/boot.S");
+        if !boot_asm.exists() {
+            return;
+        }
+        println!("cargo:rerun-if-changed={}", boot_asm.display());
+
+        // Embed the QEMU virt DTB (firmware-independent: QEMU's ELF -kernel
+        // boot loads no DTB and zeroes the argument registers). Runs on
+        // EVERY invocation so a stale boot object can never skip it.
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let dtb_src = PathBuf::from(&manifest_dir).join("src/arch/aarch64/virt.dtb");
+        // Fresh-clone support: the blob is a build input git does not
+        // carry (*.dtb is ignored). Regenerate from the installed QEMU —
+        // the dump flags must mirror the boot driver's machine config
+        // (memory@ sizes track -m; the fixed MMIO bases are stable).
+        if !dtb_src.exists() {
+            let dump_arg = format!("dumpdtb={}", dtb_src.display());
+            let ok = std::process::Command::new("qemu-system-aarch64")
+                .args(["-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-m", "1G", "-smp", "2"])
+                .arg("-machine").arg(&dump_arg)
+                .status().map(|s| s.success()).unwrap_or(false);
+            assert!(
+                ok && dtb_src.exists(),
+                "kernel/src/arch/aarch64/virt.dtb missing and could not be dumped: \
+                 install qemu-system-aarch64 or place the blob there"
+            );
+            println!("cargo:warning=generated aarch64 virt.dtb from the installed QEMU");
+        }
+        // The blob is .incbin'd, so a regenerated/edited virt.dtb must
+        // rerun the build script — otherwise the embedded DTB goes stale
+        // with zero diagnostics.
+        if dtb_src.exists() {
+            println!("cargo:rerun-if-changed={}", dtb_src.display());
+        }
+        let dtb_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/dtb_blob.S");
+        fs::write(&dtb_asm, format!(
+            ".section .rodata\n.balign 8\n.globl aarch64_virt_dtb\naarch64_virt_dtb:\n.incbin \"{}\"\n.globl aarch64_virt_dtb_end\naarch64_virt_dtb_end:\n",
+            dtb_src.display())).expect("write dtb_blob.S");
+        let dtb_obj = out_dir.join("dtb_aarch64.o");
+        let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+            .arg("-c").arg(&dtb_asm).arg("-o").arg(&dtb_obj).status()
+            .expect("run assembler for dtb_blob.S");
+        assert!(status.success(), "failed to assemble dtb_blob.S");
+        println!("cargo:rustc-link-arg={}", dtb_obj.display());
+
+        let boot_obj = out_dir.join("boot_aarch64.o");
+
+        if boot_obj.exists() {
+            let asm_time = fs::metadata(&boot_asm).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let obj_time = fs::metadata(&boot_obj).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if asm_time <= obj_time {
+                println!("cargo:rustc-link-arg={}", boot_obj.display());
+                return;
+            }
+        }
+
+        let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+            .arg("-c")
+            .arg("-g")
+            .arg(&boot_asm)
+            .arg("-o")
+            .arg(&boot_obj)
+            .status()
+            .expect("failed to run assembler for aarch64 boot.S (is gcc-aarch64-linux-gnu installed?)");
+        assert!(status.success(), "failed to assemble aarch64 boot.S");
+        println!("cargo:rustc-link-arg={}", boot_obj.display());
+        return;
+    }
+
+    if !target.contains("riscv64") {
+        return;
+    }
+
+    let boot_asm = PathBuf::from(&manifest_dir)
+        .join("src/arch/riscv64/boot.S");
+
+    if !boot_asm.exists() {
+        return;
+    }
+
+    // Without this, cargo never reruns the build script for a riscv
+    // boot.S-only edit (the x86 branch below declares its own): boot.o
+    // stays stale while rust code relinks around it, and the mismatched
+    // early page tables boot-panic past the old image window (LAYOUT-4:
+    // pfault at the 18MB boundary with 20MB layout constants, batchA6).
+    println!("cargo:rerun-if-changed={}", boot_asm.display());
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let boot_obj = out_dir.join("boot.o");
+
+    // Only recompile if boot.S is newer than boot.o
+    if boot_obj.exists() {
+        let asm_time = fs::metadata(&boot_asm)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let obj_time = fs::metadata(&boot_obj)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if asm_time <= obj_time {
+            // Already up to date
+            println!("cargo:rustc-link-arg={}", boot_obj.display());
+            return;
+        }
+    }
+
+    // Compile boot.S to boot.o using the system assembler
+    // -c: compile only, -g: generate debug info
+    let status = std::process::Command::new("riscv64-linux-gnu-gcc")
+        .arg("-c")
+        .arg("-g")
+        .arg(&boot_asm)
+        .arg("-o")
+        .arg(&boot_obj)
+        .status()
+        .expect("Failed to execute assembler");
+
+    if !status.success() {
+        panic!("Failed to compile boot.S");
+    }
+
+    // Tell cargo to link boot.o (will be placed before Rust objects)
+    println!("cargo:rustc-link-arg={}", boot_obj.display());
+    // Rerun if boot.S changes
+    println!("cargo:rerun-if-changed={}", boot_asm.display());
+}

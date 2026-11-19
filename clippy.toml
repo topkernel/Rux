@@ -1,0 +1,20 @@
+# Clippy configuration for the Rux kernel.
+#
+# F6 groundwork (docs/development/rust-kernel-best-practices.md §2.3, §9):
+# `unwrap`/`expect` are implicit invariant assertions and are not allowed on
+# runtime paths. This list applies to NEW CODE from now on (§0.1); the
+# existing tree has a large backlog that is retired opportunistically as
+# modules are touched (§0.2) — do NOT mass-fix existing violations, and do
+# not promote this lint to an enforced deny until the backlog is drained.
+#
+# Backlog when this file landed (cargo clippy --target
+# riscv64gc-unknown-none-elf): 164 disallowed-method violations — 73
+# Result::unwrap, 62 Option::unwrap, 20 Option::expect, 9 Result::expect.
+# (§2.3: unwrap/expect stay allowed in #[cfg(test)] and boot-only code,
+# which keep a justifying allow attribute once F6 is enforced.)
+disallowed-methods = [
+    "core::option::Option::unwrap",
+    "core::option::Option::expect",
+    "core::result::Result::unwrap",
+    "core::result::Result::expect",
+]

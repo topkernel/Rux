@@ -1,0 +1,961 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+//! Kernel command line argument parsing module
+//!
+//!
+//! OpenSBI passes boot arguments through the bootargs property of the /chosen node in device tree
+//! QEMU can pass arguments using `-append "root=/dev/vda ..."`
+//!
+//! This module also provides device tree (FDT) parsing for:
+//! - bootargs from /chosen node
+//! - memory regions from /memory nodes (for memblock initialization)
+
+use crate::println;
+use core::sync::atomic::{AtomicPtr, Ordering};
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use alloc::vec;
+
+/// Global command line argument storage
+/// Uses AtomicPtr and length storage to ensure memory visibility in multi-core environment
+pub(crate) static CMDLINE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+pub(crate) static CMDLINE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Maximum command line argument length - from config
+const MAX_CMDLINE_LEN: usize = crate::config::MAX_CMDLINE_LEN;
+
+/// Default command line arguments (U2: init defaults to /sbin/init for
+/// systemd-style userspace; boot loaders that pass init= override it).
+const DEFAULT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 init=/sbin/init";
+
+/// Device tree header structure
+#[repr(C)]
+struct FdtHeader {
+    magic: u32,           // 0xd00dfeed
+    totalsize: u32,
+    off_dt_struct: u32,
+    off_dt_strings: u32,
+    off_mem_rsvmap: u32,
+    version: u32,
+    last_comp_version: u32,
+    boot_cpuid_phys: u32,
+    size_dt_strings: u32,
+    size_dt_struct: u32,
+}
+
+/// Device tree property structure
+#[repr(C)]
+struct FdtProp {
+    len: u32,
+    nameoff: u32,
+}
+
+/// Memory region descriptor (from device tree)
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryRegion {
+    /// Physical start address
+    pub base: usize,
+    /// Region size in bytes
+    pub size: usize,
+}
+
+const FDT_BEGIN_NODE: u32 = 0x1;
+const FDT_END_NODE: u32 = 0x2;
+const FDT_PROP: u32 = 0x3;
+const FDT_END: u32 = 0x9;
+
+/// Parse bootargs from device tree
+///
+/// # Arguments
+/// - `dtb_ptr`: Device tree flattened data pointer (virtual address)
+///
+/// # Returns
+/// - `Some(bootargs)`: Found bootargs string
+/// - `None`: Not found
+unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
+    let fdt = dtb_ptr as *const u8;
+
+    // Helper function: read u32 (big endian)
+    let read_u32 = |offset: usize| -> u32 {
+        let b0 = *fdt.offset(offset as isize) as u32;
+        let b1 = *fdt.offset(offset as isize + 1) as u32;
+        let b2 = *fdt.offset(offset as isize + 2) as u32;
+        let b3 = *fdt.offset(offset as isize + 3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    // Read magic number
+    let magic = read_u32(0);
+    if magic != 0xd00dfeed {
+        return None;
+    }
+
+    // Read header info
+    // FDT header layout (offset -> meaning):
+    // 0x00: magic
+    // 0x04: totalsize
+    // 0x08: off_dt_struct
+    // 0x0C: off_dt_strings
+    // 0x10: off_mem_rsvmap
+    // 0x14: version
+    // 0x18: last_comp_version
+    // 0x1C: boot_cpuid_phys
+    // 0x20: size_dt_strings
+    // 0x24: size_dt_struct
+    let _totalsize = read_u32(0x04) as usize;
+    let off_dt_struct = read_u32(0x08) as usize;
+    let off_dt_strings = read_u32(0x0C) as usize;
+    let _off_mem_rsvmap = read_u32(0x10) as usize;
+    let version = read_u32(0x14) as usize;
+    let _last_comp_version = read_u32(0x18) as usize;
+    let _boot_cpuid_phys = read_u32(0x1C) as usize;
+    let size_dt_strings = read_u32(0x20) as usize;
+    let size_dt_struct = read_u32(0x24) as usize;
+
+    let mut ptr = fdt.offset(off_dt_struct as isize);
+    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt.offset(off_dt_strings as isize);
+
+    // Helper function: read u32 from pointer position (big endian)
+    let read_u32_at = |p: *const u8| -> u32 {
+        let b0 = unsafe { *p as u32 };
+        let b1 = unsafe { *p.offset(1) as u32 };
+        let b2 = unsafe { *p.offset(2) as u32 };
+        let b3 = unsafe { *p.offset(3) as u32 };
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    let mut depth = 0;
+    let mut in_chosen = false;
+
+    while ptr < end {
+        let token = read_u32_at(ptr);
+        ptr = ptr.offset(4);
+
+        match token {
+            FDT_BEGIN_NODE => {
+                // Read node name
+                let mut nodename = [0u8; 64];
+                let mut i = 0;
+                while *ptr != 0 && i < 64 {
+                    nodename[i] = *ptr;
+                    ptr = ptr.offset(1);
+                    i += 1;
+                }
+                ptr = ptr.offset(1);
+                // Align to 4 bytes
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+
+                let name = core::str::from_utf8(&nodename[..i]).ok()?;
+                if name == "chosen" || name.starts_with("chosen@") {
+                    in_chosen = true;
+                }
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                if in_chosen && depth == 1 {
+                    in_chosen = false;
+                }
+                depth -= 1;
+            }
+            FDT_PROP => {
+                let len = read_u32_at(ptr) as usize;
+                let nameoff = read_u32_at(ptr.offset(4)) as usize;
+                ptr = ptr.offset(8);
+
+                // Read property name
+                let mut name_ptr = strings.offset(nameoff as isize);
+                let mut prop_name = [0u8; 32];
+                let mut i = 0;
+                while *name_ptr != 0 && i < 32 {
+                    prop_name[i] = *name_ptr;
+                    name_ptr = name_ptr.offset(1);
+                    i += 1;
+                }
+                let name = core::str::from_utf8(&prop_name[..i]).ok().unwrap_or("???");
+
+                if in_chosen && name == "bootargs" {
+                    // Read bootargs string
+                    let mut bootargs = vec![0u8; len];
+                    for j in 0..len {
+                        bootargs[j] = *ptr.offset(j as isize);
+                    }
+                    if let Ok(bootargs_str) = core::str::from_utf8(&bootargs) {
+                        // Remove trailing null character
+                        let trimmed = bootargs_str.trim_end_matches('\0');
+                        return Some(String::from(trimmed));
+                    }
+                }
+
+                ptr = ptr.offset(len as isize);
+                // Align to 4 bytes
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+            }
+            FDT_END => {
+                break;
+            }
+            _ => {
+                // Unknown token, ignore
+                break;
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse memory regions from device tree
+///
+/// This function parses /memory nodes from the device tree to discover
+/// available physical memory regions. This follows the approach of
+/// using device tree for memory discovery.
+///
+/// # Arguments
+/// - `dtb_ptr`: Device tree flattened data pointer (virtual address)
+///
+/// # Returns
+/// - `Vec<MemoryRegion>`: Vector of discovered memory regions
+///
+/// # Device Tree Format
+/// Memory nodes have the format:
+/// ```dts
+/// memory@80000000 {
+///     device_type = "memory";
+///     reg = <0x00 0x80000000 0x00 0x8000000>;  // <address-high address-low size-high size-low>
+/// };
+/// ```
+/// Maximum number of memory regions we track (stack-allocated, no heap needed)
+const MAX_MEMORY_REGIONS: usize = 8;
+
+pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_REGIONS] {
+    let mut regions: [MemoryRegion; MAX_MEMORY_REGIONS] = core::mem::zeroed();
+    let mut count = 0usize;
+    let fdt = dtb_ptr as *const u8;
+
+    // Helper function: read u32 (big endian)
+    let read_u32 = |offset: usize| -> u32 {
+        let b0 = *fdt.offset(offset as isize) as u32;
+        let b1 = *fdt.offset(offset as isize + 1) as u32;
+        let b2 = *fdt.offset(offset as isize + 2) as u32;
+        let b3 = *fdt.offset(offset as isize + 3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    // Read magic number
+    let magic = read_u32(0);
+    if magic != 0xd00dfeed {
+        return regions;
+    }
+
+    // Read header info
+    let _totalsize = read_u32(0x04) as usize;
+    let off_dt_struct = read_u32(0x08) as usize;
+    let off_dt_strings = read_u32(0x0C) as usize;
+    let size_dt_strings = read_u32(0x20) as usize;
+    let size_dt_struct = read_u32(0x24) as usize;
+
+    let mut ptr = fdt.offset(off_dt_struct as isize);
+    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt.offset(off_dt_strings as isize);
+
+    // Helper function: read u32 from pointer position (big endian)
+    let read_u32_at = |p: *const u8| -> u32 {
+        let b0 = unsafe { *p as u32 };
+        let b1 = unsafe { *p.offset(1) as u32 };
+        let b2 = unsafe { *p.offset(2) as u32 };
+        let b3 = unsafe { *p.offset(3) as u32 };
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    let mut depth = 0;
+    let mut in_memory = false;
+    let mut has_device_type_memory = false;
+    // QEMU's aarch64 DTB emits `reg` BEFORE `device_type` inside
+    // /memory@... — buffer the reg cells and commit at node exit so the
+    // parse no longer depends on property order.
+    let mut pending_reg: Option<(u64, u64)> = None;
+
+    while ptr < end {
+        let token = read_u32_at(ptr);
+        ptr = ptr.offset(4);
+
+        match token {
+            FDT_BEGIN_NODE => {
+                // Read node name
+                let mut nodename = [0u8; 64];
+                let mut i = 0;
+                while *ptr != 0 && i < 64 {
+                    nodename[i] = *ptr;
+                    ptr = ptr.offset(1);
+                    i += 1;
+                }
+                ptr = ptr.offset(1);
+                // Align to 4 bytes
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+
+                let name = core::str::from_utf8(&nodename[..i]).unwrap_or("");
+                // Memory nodes are named "memory" or "memory@<address>"
+                in_memory = name == "memory" || name.starts_with("memory@");
+                has_device_type_memory = false;
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                if in_memory && has_device_type_memory {
+                    if let Some((base, size)) = pending_reg.take() {
+                        if size > 0 && count < MAX_MEMORY_REGIONS {
+                            regions[count] = MemoryRegion {
+                                base: base as usize,
+                                size: size as usize,
+                            };
+                            count += 1;
+                        }
+                    }
+                }
+                in_memory = false;
+                has_device_type_memory = false;
+                pending_reg = None;
+                depth -= 1;
+            }
+            FDT_PROP => {
+                let len = read_u32_at(ptr) as usize;
+                let nameoff = read_u32_at(ptr.offset(4)) as usize;
+                ptr = ptr.offset(8);
+
+                // Read property name
+                let mut name_ptr = strings.offset(nameoff as isize);
+                let mut prop_name = [0u8; 32];
+                let mut i = 0;
+                while *name_ptr != 0 && i < 32 {
+                    prop_name[i] = *name_ptr;
+                    name_ptr = name_ptr.offset(1);
+                    i += 1;
+                }
+                let name = core::str::from_utf8(&prop_name[..i]).unwrap_or("???");
+
+                // Check for device_type = "memory"
+                if in_memory && name == "device_type" {
+                    let mut value = [0u8; 16];
+                    for j in 0..len.min(16) {
+                        value[j] = *ptr.offset(j as isize);
+                    }
+                    if let Ok(value_str) = core::str::from_utf8(&value[..len.min(16)]) {
+                        has_device_type_memory = value_str.trim_end_matches('\0') == "memory";
+                    }
+                }
+
+                // Parse "reg" property for memory regions
+                // Format: <address-high address-low size-high size-low> (for 64-bit addresses)
+                // or <address size> (for 32-bit addresses)
+                if in_memory && name == "reg" && len >= 16 {
+                    // Read 64-bit address and size (each is 2 cells of 32 bits)
+                    let addr_high = read_u32_at(ptr) as u64;
+                    let addr_low = read_u32_at(ptr.offset(4)) as u64;
+                    let size_high = read_u32_at(ptr.offset(8)) as u64;
+                    let size_low = read_u32_at(ptr.offset(12)) as u64;
+
+                    let base = (addr_high << 32) | addr_low;
+                    let size = (size_high << 32) | size_low;
+
+                    if size > 0 {
+                        pending_reg = Some((base, size));
+                    }
+                }
+
+                ptr = ptr.offset(len as isize);
+                // Align to 4 bytes
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+            }
+            FDT_END => {
+                break;
+            }
+            _ => {
+                // Unknown token, ignore
+                break;
+            }
+        }
+    }
+
+    regions
+}
+
+/// Parse the initrd location from /chosen (QEMU `-initrd` sets these).
+///
+/// Returns `(start, end)` physical addresses from `linux,initrd-start` /
+/// `linux,initrd-end`. Both properties are 1 or 2 big-endian u32 cells
+/// (address-cells dependent); QEMU's generated DTB uses single u32 cells
+/// on 32-bit RAM layouts and u64 (2 cells) otherwise — accept both.
+///
+/// Like `parse_memory_regions`, this is called on the EARLY identity
+/// mapping, so `dtb_ptr` is a physical address here.
+///
+/// OH Phase 1: the OpenHarmony ramdisk (`-initrd ramdisk.img`, cmdline
+/// `root=/dev/ram0`) lands through this path.
+/// True when the first /cpus/cpu@* node's "riscv,isa" property lists
+/// the V extension. The ISA string looks like "rv64imafdcvh" (with
+/// optional _multi_letter names after): the base prefix "rv" + width
+/// digits is skipped, then any single-letter extension 'v' counts.
+/// Used to prime the V-extension capability cache at boot (vext.rs).
+pub unsafe fn parse_cpu_isa_has_v(dtb_ptr: u64) -> bool {
+    let fdt = dtb_ptr as *const u8;
+
+    // SAFETY: mirrors parse_memory_regions — the bootloader-provided
+    // DTB is mapped at its physical address by boot.S's early tables.
+    unsafe fn read_u32(p: *const u8) -> u32 {
+        let b0 = *p as u32;
+        let b1 = *p.offset(1) as u32;
+        let b2 = *p.offset(2) as u32;
+        let b3 = *p.offset(3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    }
+
+    if unsafe { read_u32(fdt) } != 0xd00dfeed {
+        return false;
+    }
+    let off_dt_struct = unsafe { read_u32(fdt.offset(0x08)) } as usize;
+    let off_dt_strings = unsafe { read_u32(fdt.offset(0x0C)) } as usize;
+    let size_dt_struct = unsafe { read_u32(fdt.offset(0x24)) } as usize;
+
+    let mut ptr = fdt.offset(off_dt_struct as isize);
+    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt.offset(off_dt_strings as isize);
+
+    let mut in_cpu = false;
+    while ptr < end {
+        let token = unsafe { read_u32(ptr) };
+        ptr = ptr.offset(4);
+        match token {
+            FDT_BEGIN_NODE => {
+                let mut name = [0u8; 32];
+                let mut i = 0;
+                while unsafe { *ptr } != 0 && i < 32 {
+                    name[i] = unsafe { *ptr };
+                    ptr = ptr.offset(1);
+                    i += 1;
+                }
+                while unsafe { *ptr } != 0 {
+                    ptr = ptr.offset(1);
+                }
+                ptr = ptr.offset(1); // NUL
+                // Align to 4
+                let pad = (4 - (ptr as usize & 3)) & 3;
+                ptr = ptr.offset(pad as isize);
+                let n = &name[..i];
+                in_cpu = n.starts_with(b"cpu@") || n == b"cpu";
+            }
+            FDT_PROP => {
+                let len = unsafe { read_u32(ptr) } as usize;
+                let nameoff = unsafe { read_u32(ptr.offset(4)) } as usize;
+                ptr = ptr.offset(8);
+                let val = ptr;
+                // Property block is 4-aligned already (len padded).
+                let mut name = [0u8; 32];
+                let mut i = 0;
+                while i < 32 {
+                    let c = unsafe { *strings.offset((nameoff + i) as isize) };
+                    if c == 0 {
+                        break;
+                    }
+                    name[i] = c;
+                    i += 1;
+                }
+                let pname = &name[..i];
+                if in_cpu && (pname == b"riscv,isa" || pname == b"isa") && len > 0 {
+                    // Parse "rv{32,64}<letters>[_name...]"
+                    let mut j = 0usize;
+                    let v = val as *const u8;
+                    // skip base "rv"
+                    if j + 1 < len && unsafe { *v.add(j) } == b'r' && unsafe { *v.add(j + 1) } == b'v' {
+                        j += 2;
+                        // skip width digits
+                        while j < len && unsafe { *v.add(j) }.is_ascii_digit() {
+                            j += 1;
+                        }
+                        // single-letter extensions until separator
+                        while j < len {
+                            let c = unsafe { *v.add(j) };
+                            if c == 0 || c == b'_' {
+                                break;
+                            }
+                            if c == b'v' {
+                                return true;
+                            }
+                            j += 1;
+                        }
+                    }
+                }
+                let pad = (4 - (len & 3)) & 3;
+                ptr = ptr.offset((len + pad) as isize);
+            }
+            FDT_END_NODE => {
+                in_cpu = false;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+pub unsafe fn parse_initrd_region(dtb_ptr: u64) -> Option<(usize, usize)> {
+    let (start, end) = parse_chosen_u64_pair(dtb_ptr, "linux,initrd-start", "linux,initrd-end")?;
+    if end > start && start != 0 {
+        Some((start as usize, end as usize))
+    } else {
+        None
+    }
+}
+
+/// Read a pair of /chosen integer properties (used for the initrd range).
+unsafe fn parse_chosen_u64_pair(
+    dtb_ptr: u64,
+    name_a: &str,
+    name_b: &str,
+) -> Option<(u64, u64)> {
+    let a = parse_chosen_prop(dtb_ptr, name_a)?;
+    let b = parse_chosen_prop(dtb_ptr, name_b)?;
+    Some((a, b))
+}
+
+/// Read one /chosen integer property (1 or 2 big-endian u32 cells).
+unsafe fn parse_chosen_prop(dtb_ptr: u64, name: &str) -> Option<u64> {
+    let fdt = dtb_ptr as *const u8;
+
+    let read_u32 = |offset: usize| -> u32 {
+        let b0 = *fdt.offset(offset as isize) as u32;
+        let b1 = *fdt.offset(offset as isize + 1) as u32;
+        let b2 = *fdt.offset(offset as isize + 2) as u32;
+        let b3 = *fdt.offset(offset as isize + 3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    if read_u32(0) != 0xd00dfeed {
+        return None;
+    }
+    let off_dt_struct = read_u32(0x08) as usize;
+    let off_dt_strings = read_u32(0x0C) as usize;
+    let size_dt_struct = read_u32(0x24) as usize;
+
+    let mut ptr = fdt.offset(off_dt_struct as isize);
+    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt.offset(off_dt_strings as isize);
+
+    let read_u32_at = |p: *const u8| -> u32 {
+        let b0 = *p as u32;
+        let b1 = *p.offset(1) as u32;
+        let b2 = *p.offset(2) as u32;
+        let b3 = *p.offset(3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    let mut depth = 0;
+    let mut in_chosen = false;
+
+    while ptr < end {
+        let token = read_u32_at(ptr);
+        ptr = ptr.offset(4);
+
+        match token {
+            FDT_BEGIN_NODE => {
+                let mut nodename = [0u8; 64];
+                let mut i = 0;
+                while *ptr != 0 && i < 64 {
+                    nodename[i] = *ptr;
+                    ptr = ptr.offset(1);
+                    i += 1;
+                }
+                ptr = ptr.offset(1);
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+
+                let node_name = core::str::from_utf8(&nodename[..i]).ok()?;
+                if node_name == "chosen" || node_name.starts_with("chosen@") {
+                    in_chosen = true;
+                }
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                if in_chosen && depth == 1 {
+                    in_chosen = false;
+                }
+                depth -= 1;
+            }
+            FDT_PROP => {
+                let len = read_u32_at(ptr) as usize;
+                let nameoff = read_u32_at(ptr.offset(4)) as usize;
+                ptr = ptr.offset(8);
+
+                let mut name_ptr = strings.offset(nameoff as isize);
+                let mut prop_name = [0u8; 32];
+                let mut i = 0;
+                while *name_ptr != 0 && i < 32 {
+                    prop_name[i] = *name_ptr;
+                    name_ptr = name_ptr.offset(1);
+                    i += 1;
+                }
+                let pname = core::str::from_utf8(&prop_name[..i]).ok()?;
+
+                let mut result = None;
+                if in_chosen && pname == name {
+                    result = match len {
+                        4 => Some(read_u32_at(ptr) as u64),
+                        8 => Some(
+                            ((read_u32_at(ptr) as u64) << 32)
+                                | read_u32_at(ptr.offset(4)) as u64,
+                        ),
+                        _ => None,
+                    };
+                }
+
+                ptr = ptr.offset(len as isize);
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+
+                if let Some(v) = result {
+                    return Some(v);
+                }
+            }
+            FDT_END => break,
+            _ => break,
+        }
+    }
+    None
+}
+
+/// Initialize command line arguments
+///
+/// # Arguments
+/// - `dtb_ptr`: Device tree pointer (passed by OpenSBI through a1)
+///
+/// # Features
+/// 1. If dtb_ptr is not 0, parse /chosen/bootargs from device tree
+/// 2. If dtb_ptr is 0, try reading from QEMU virt's default DTB address
+/// 3. If no device tree or no bootargs, use default value
+/// 4. Store parsed result to global variable
+pub fn init(dtb_ptr: u64) {
+    // QEMU virt machine's DTB is usually at this address (used by OpenSBI)
+    const QEMU_DTB_ADDR: u64 = 0xbfe00000;
+
+    // If dtb_ptr is 0, try reading from known QEMU DTB address
+    let dtb_phys = if dtb_ptr != 0 {
+        dtb_ptr
+    } else {
+        QEMU_DTB_ADDR
+    };
+
+    // Convert physical address to kernel virtual address using linear mapping
+    let dtb_virt = crate::arch::mm::phys_to_virt(
+        crate::arch::mm::PhysAddr::new(dtb_phys)
+    ).bits();
+
+    let cmdline: &'static str = unsafe {
+        match parse_bootargs(dtb_virt) {
+            Some(bootargs) => {
+                // Convert String to &'static str (via Box::leak)
+                let boxed = alloc::boxed::Box::new(bootargs);
+                alloc::boxed::Box::leak(boxed)
+            }
+            None => {
+                DEFAULT_CMDLINE
+            }
+        }
+    };
+
+    install(cmdline);
+}
+
+/// Initialize from a bootloader-provided command line (x86_64 multiboot
+/// path — no device tree). `cmdline` may be empty, in which case the
+/// default command line applies.
+#[cfg(feature = "x86_64")]
+pub fn init_from(cmdline: &str) {
+    let cmdline: &'static str = if cmdline.is_empty() {
+        DEFAULT_CMDLINE
+    } else {
+        // Leak a heap copy so the global has 'static lifetime.
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            alloc::string::String::from(cmdline),
+        ))
+    };
+    install(cmdline);
+}
+
+/// Publish the active command line and apply early printk loglevel
+/// parameters (`quiet`, `loglevel=`).
+fn install(cmdline: &'static str) {
+    // Store command line arguments (use atomic operations to ensure multi-core visibility)
+    let len = cmdline.len();
+    let ptr = cmdline.as_ptr() as *mut u8;
+    CMDLINE_LEN.store(len, Ordering::Release);
+    CMDLINE_PTR.store(ptr, Ordering::Release);
+
+    // U2 console loglevel boot parameters (quiet / loglevel=N), applied
+    // to printk immediately so early-boot noise matches the operator's
+    // wish. `quiet` lowers the console to KERN_WARNING (4) like Linux;
+    // an explicit `loglevel=` (1-8, clamped) overrides it.
+    if let Some(level_str) = get_param("loglevel") {
+        if let Ok(level) = level_str.parse::<u8>() {
+            let clamped = level.clamp(1, 8);
+            crate::printk::set_console_loglevel(clamped);
+        }
+    } else if has_param("quiet") {
+        crate::printk::set_console_loglevel(crate::printk::loglevel::KERN_WARNING);
+    }
+
+    // `quietcon` (sc-series launcher race): divert /dev/console output
+    // from the UART into the printk ring. hilogd's console stream is the
+    // dominant serial burn in the launcher-race decision window; see
+    // fs/tty.rs `console_output` for the rationale.
+    if has_param("quietcon") {
+        crate::fs::tty::set_console_sink_quiet(true);
+    }
+
+    // `printk.devkmsg=<on|ratelimit|off>` — the console-echo policy for
+    // userspace writes to /dev/kmsg (the reference exposes the same
+    // choice as its printk_devkmsg knob). The printk RING always records
+    // every line, so hilog consumers see the whole log either way; this
+    // only decides how much of it reaches the serial console. Default is
+    // the reference behavior (`on`).
+    if let Some(mode) = get_param("printk.devkmsg") {
+        if let Some(m) = crate::printk::kmsg_console_mode_from_str(mode.as_str()) {
+            crate::printk::set_kmsg_console_mode(m);
+        }
+    }
+}
+
+/// Get command line argument string (returns static reference to avoid allocation)
+pub fn get_cmdline() -> Option<&'static str> {
+    let ptr = CMDLINE_PTR.load(Ordering::Acquire);
+    let len = CMDLINE_LEN.load(Ordering::Acquire);
+
+    if ptr.is_null() || len == 0 {
+        return None;
+    }
+
+    unsafe {
+        let slice = core::slice::from_raw_parts(ptr, len);
+        core::str::from_utf8(slice).ok()
+    }
+}
+
+/// Parse command line arguments, get value for specified key
+///
+/// # Arguments
+/// - `key`: Parameter name to find (e.g. "root", "init")
+///
+/// # Returns
+/// - `Some(value)`: Found parameter value
+/// - `None`: Parameter not found
+///
+/// # Examples
+/// ```
+/// let root = cmdline::get_param("root");  // "root=/dev/ram0" -> Some("/dev/ram0")
+/// let init = cmdline::get_param("init");  // "init=/hello_world" -> Some("/hello_world")
+/// ```
+pub fn get_param(key: &str) -> Option<String> {
+    let cmdline = get_cmdline()?;
+
+    // Find parameter in key= format
+    for token in cmdline.split_whitespace() {
+        if let Some(idx) = token.find('=') {
+            let token_key = &token[..idx];
+            if token_key == key {
+                let value = &token[idx + 1..];
+                return Some(String::from(value));
+            }
+        }
+    }
+
+    None
+}
+
+/// P2: parse a dotted-decimal IPv4 address ("a.b.c.d") into host byte
+/// order. Returns None on malformed input (wrong octet count, non-digit,
+/// or an octet above 255).
+pub fn parse_ipv4_addr(s: &str) -> Option<u32> {
+    let mut ip: u32 = 0;
+    let mut octets = 0;
+    for part in s.split('.') {
+        octets += 1;
+        if octets > 4 {
+            return None;
+        }
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let v: u32 = part.parse().ok()?;
+        if v > 255 {
+            return None;
+        }
+        ip = (ip << 8) | v;
+    }
+    if octets != 4 {
+        return None;
+    }
+    Some(ip)
+}
+
+/// Check if parameter exists (boolean flag)
+///
+/// # Arguments
+/// - `key`: Parameter name to check (e.g. "debug", "quiet")
+///
+/// # Returns
+/// - `true`: Parameter exists
+/// - `false`: Parameter does not exist
+pub fn has_param(key: &str) -> bool {
+    let cmdline = match get_cmdline() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    for token in cmdline.split_whitespace() {
+        if token == key {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Get list of all parameters
+///
+/// # Returns
+/// - Vector containing all key=value pairs
+pub fn get_all_params() -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let cmdline = match get_cmdline() {
+        Some(c) => c,
+        None => return result,
+    };
+
+    for token in cmdline.split_whitespace() {
+        if let Some(idx) = token.find('=') {
+            let key = String::from(&token[..idx]);
+            let value = String::from(&token[idx + 1..]);
+            result.push((key, value));
+        }
+    }
+
+    result
+}
+
+/// Get root filesystem device
+///
+///
+/// # Returns
+/// - Root device name (e.g. "/dev/ram0", "/dev/vda")
+pub fn get_root_device() -> String {
+    get_param("root").unwrap_or_else(|| {
+        String::from("/dev/ram0")
+    })
+}
+
+/// Get init program path
+///
+/// # Returns
+/// - Init program path (e.g. "/sbin/init", "/bin/sh")
+///
+/// U2: the default is /sbin/init (systemd) per the Ubuntu boot
+/// convention; a bare `init=` on the command line still wins.
+pub fn get_init_program() -> String {
+    get_param("init").unwrap_or_else(|| String::from("/sbin/init"))
+}
+
+/// Absolutize a (possibly relative) init/rdinit path.
+///
+/// OH's cmdline carries `init=init` (a bare name); Linux execs it via
+/// kernel_execve against PID 1's cwd "/", i.e. "/init". Normalize the same
+/// way so the loader can find it on the rootfs.
+pub fn absolutize_init_path(p: &str) -> String {
+    let trimmed = p.trim();
+    if trimmed.starts_with('/') {
+        String::from(trimmed)
+    } else if trimmed.is_empty() {
+        String::from("/init")
+    } else {
+        format!("/{}", trimmed)
+    }
+}
+
+/// `rdinit=` (initramfs init override), absolutized. None when absent.
+pub fn get_rdinit_program() -> Option<String> {
+    get_param("rdinit").map(|p| absolutize_init_path(&p))
+}
+
+/// Get the root filesystem type (U2 boot-parameter parsing).
+///
+/// `rootfstype=ext4` → "ext4". Default "ext4" (the only root fs Rux
+/// mounts today).
+pub fn get_root_fs_type() -> String {
+    get_param("rootfstype").unwrap_or_else(|| String::from("ext4"))
+}
+
+/// Get the root mount options (U2 boot-parameter parsing).
+///
+/// `rootflags=<opts>` wins; otherwise "rw" unless the bare `ro` token
+/// is present ("rw" token → "rw").
+pub fn get_root_flags() -> String {
+    if let Some(flags) = get_param("rootflags") {
+        return flags;
+    }
+    if is_root_readonly() {
+        String::from("ro")
+    } else {
+        String::from("rw")
+    }
+}
+
+/// Check if root filesystem is read-only
+pub fn is_root_readonly() -> bool {
+    // Default is read-write, unless ro is specified
+    has_param("ro")
+}
+
+/// Check if in debug mode
+pub fn is_debug_mode() -> bool {
+    has_param("debug")
+}
+
+/// Get console device
+///
+/// Returns the PRIMARY console device name with any `,speed` suffix
+/// stripped (`console=ttyS0,115200` → `ttyS0`). Per Linux semantics the
+/// LAST `console=` token names the device behind /dev/console; earlier
+/// tokens are additional output consoles.
+pub fn get_console_device() -> String {
+    get_console_devices()
+        .last()
+        .cloned()
+        .unwrap_or_else(|| String::from("ttyS0"))
+}
+
+/// All console devices named on the command line, in order.
+///
+/// Each `console=` token may name one device plus options
+/// (`console=ttyS0,115200n8`); multiple `console=` tokens accumulate.
+/// Unknown devices are returned as named — the caller decides what it can
+/// provide (riscv64 virt has exactly one UART: ttyS0).
+pub fn get_console_devices() -> Vec<String> {
+    let cmdline = match get_cmdline() {
+        Some(c) => c,
+        None => return alloc::vec![String::from("ttyS0")],
+    };
+    let mut devices = Vec::new();
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix("console=") {
+            // First comma-separated field is the device name; the rest is
+            // options (speed, parity, ...).
+            if let Some(dev) = value.split(',').next() {
+                if !dev.is_empty() {
+                    devices.push(String::from(dev));
+                }
+            }
+        }
+    }
+    if devices.is_empty() {
+        devices.push(String::from("ttyS0"));
+    }
+    devices
+}
+

@@ -1,0 +1,306 @@
+# Rux Kernel Configuration File
+#
+# This file defines kernel compilation options and feature settings
+# Run `cargo build` to recompile kernel after modifications
+
+[general]
+# Kernel name
+name = "Rux"
+# Version number
+version = "0.1.0"
+# Developer info
+authors = ["Fei Wang"]
+
+[platform]
+# Target platform: "aarch64", "x86_64", "riscv64"
+target = "riscv64"
+# Enabled platforms
+enable_aarch64 = false
+enable_x86_64 = false
+enable_riscv64 = true
+
+[memory]
+# Kernel heap size (MB) - must be power of 2 (16, 32, 64...)
+# 1024 for the OpenHarmony lane: a full OH boot (79 services, ~500
+# tasks, per-process page tables, pipe/socket buffers) sat the 512 MiB
+# window at ~513/524 MiB, the clone heap-reserve gate (<8 MiB free)
+# tripped, and every pthread_create came back EAGAIN — foundation (and
+# every FFRT-using service) aborted on the first std::thread spawn
+# failure and the boot looped on the critical-service reboot. On Linux
+# none of this is kernel-heap backed (slab is page-backed and
+# reclaimable); the window here is a static carveout, so it must be
+# sized for the real working set. Whether usage also LEAKS past this
+# is Agent C's memwatch hunt — this only buys the launcher a chance.
+kernel_heap_size = 1024
+# Physical memory size (MB)
+physical_memory = 2048
+# Page size
+page_size = 4096
+# User stack size (MB)
+user_stack_size = 8
+# Max page tables (fork needs to copy entire page table)
+max_page_tables = 1024
+# User stack max size (bytes) - 8MB
+user_stack_max_size = 8388608
+# User heap max size (bytes) - 128MB
+user_heap_max_size = 134217728
+# Enable swap support
+enable_swap = true
+# Swap size (MB) — carved from end of block device
+swap_size_mb = 256
+# Kernel stack size (bytes) - 128KB base, 80KB on x86_64.
+#
+# ARCH-GATED since leg-17 (fee7774f lesson): the 80KB packed-slab slot
+# of leg-16 was measured safe on x86_64 OH loads only (max depth
+# 62,512B post-from_fn-trilogy, canary-clean) — the riscv64 TEST kernel
+# nests deeper in kernel mode, the ~15KB margin did not hold there
+# (make test: getpriority PRIO_PGRP read a corrupted nice=-120 → 140;
+# diagnostic revert restored 1096/1096). riscv64 (and any unmeasured
+# arch) therefore KEEPS the 128KB base: a power-of-two request is
+# already perfectly packed in one order-5 buddy block, and the packed
+# slab in process/task.rs is cfg(x86_64)-only. kernel_stack_size_x86_64
+# overrides the base for x86_64 builds (81920 = 80KB; served as three
+# slots per order-6 block, per-stack footprint 85.3KB).
+#
+# History (why 128KB is the floor for unmeasured arches): the
+# open("/dev/ptmx") chain (sys_openat → file_open → devfs_open →
+# ptmx_open → alloc_pty → PtyPair::new → TtyDevice::new) moves the
+# ~12KB PtyPair through by-value construction frames and ran ~71KB deep
+# in the debug build — spilling frames ~2 pages PAST the stack bottom
+# into the adjacent buddy-heap page. The spill zeroed whatever object
+# lived there (reproduced deterministically with virtio-gpu: PID 1's
+# FsStruct.root Vec buffer sat one page below the stack; after the
+# zeroing every path lookup was prefixed with a garbage root byte
+# ("\0/dev/pts/0") and all /dev opens failed ENOENT — the "pty
+# create/destroy race"; other heap draws zeroed File/PtyPair objects
+# instead: stale TIOCGPTN index, ENXIO slave opens, wild-jump panics).
+# A GDB hardware-watchpoint on the victim page caught the writer: the
+# Spinlock<TtyInput>::new memcpy executing at sp 0x1CC0 BELOW the stack
+# bottom. 128KB restores ~57KB of headroom; the pty layer additionally
+# boxes its 8KB master_rx buffer (see fs/pty.rs) so pair construction
+# no longer shuffles 8KB through every frame.
+kernel_stack_size = 131072
+# x86_64 arch override (see above): 128KB — SAME floor as the base.
+# The interim 80KB packed-slab carve (3 slots per 256KB block) held for
+# OH boots but NOT for deep kernel recursion under LTP: the (reviewed,
+# depth-capped-at-40) recursive symlink resolution in fs/vfs.rs costs
+# ~2240 bytes of stack PER nested hop (measured on the nftw01 boot
+# panic, chunk@700, 2026-11-02: 4/4 deterministic "Kernel stack
+# overflow" with rsp 19KB past the 80KB bottom, ret-through-zeroed-slot
+# to rip=0). 40 hops ≈ 90KB of chain alone — over the 80KB stack before
+# the depth counter can return ELOOP. At 128KB the packed slab serves
+# two slots per 256KB order-6 block with ZERO tail waste (and the buddy
+# fallback is one perfectly-packed order-5 block, like riscv64).
+kernel_stack_size_x86_64 = 131072
+# Buddy allocator max order
+buddy_max_order = 20
+# Slab cache count
+slab_num_caches = 10
+# Per-CPU page cache high watermark
+pcp_high = 64
+# Per-CPU page cache low watermark
+pcp_low = 16
+# Per-CPU page cache batch size
+pcp_batch = 16
+
+[smp]
+# Enable multi-core support (SMP)
+enable_smp = true
+# Maximum CPU count
+max_cpus = 8
+# SMP boot stack size (bytes) - 64KB
+boot_stack_size = 65536
+
+[scheduler]
+# Enable scheduler
+enable_scheduler = true
+# Default time slice (milliseconds)
+default_time_slice_ms = 100
+# Time slice ticks
+time_slice_ticks = 10
+# Maximum number of tasks
+max_tasks = 256
+# Load imbalance threshold for SMP balancing
+load_imbalance_thresh = 2
+# CFS minimum granularity (nanoseconds) - 0.7ms
+cfs_min_granularity_ns = 700000
+# CFS scheduling latency (nanoseconds) - 6ms
+cfs_latency_ns = 6000000
+# Kernel HZ (timer interrupts per second)
+kernel_hz = 100
+
+[network]
+# Enable network stack
+enable_network = true
+# Ethernet MTU
+eth_mtu = 1500
+# TCP socket table size
+# 512 (was 64): the table must hold every concurrent connection (client
+# slots, spawned children, plus the reclamation-eligible dead ends the
+# timer sweep and the under-pressure eviction recycle). lmbench
+# lat_connect's benchmp warmup holds 60+ ESTABLISHED loopback connections
+# at once; a 64-slot table made socket() fail EMFILE and the SYN spawn
+# drop the SYN (the connect then hung until the 1 s retransmit).
+# ~384 B/slot -> ~197 KB.
+tcp_socket_table_size = 512
+# UDP socket table size
+udp_socket_table_size = 64
+# ARP cache size
+arp_cache_size = 64
+# Route table size
+route_table_size = 64
+# IPv4 default TTL
+ip_default_ttl = 64
+# TCP minimum RTO (microseconds) - 200ms
+tcp_rto_min_us = 200000
+# TCP maximum RTO (microseconds) - 120s
+tcp_rto_max_us = 120000000
+# TCP default RTO (microseconds) - 1s
+tcp_rto_default_us = 1000000
+# TCP maximum retransmit count
+tcp_max_retries = 15
+# TCP delayed ACK timeout (microseconds) - 40ms
+tcp_delack_timeout_us = 40000
+# TCP TIME_WAIT timeout (microseconds) - 60s
+tcp_timewait_timeout_us = 60000000
+
+[boot]
+# Enable graphics output
+graphics = false
+# Enable early debug output
+early_debug = true
+# Enable self-test
+self_test = false
+
+# Mount configuration
+[mount]
+# ext4 disk mount point (default is root directory)
+# ext4 disk is automatically mounted to this path at boot
+ext4_mount_point = "/"
+# Enable ext4 auto-mount
+auto_mount_ext4 = true
+# Enable procfs auto-mount
+auto_mount_procfs = true
+
+[drivers]
+# Driver support
+enable_uart = true
+enable_timer = true
+enable_gic = false
+enable_virtio = false
+enable_pci = false
+# VirtIO network device probing
+enable_virtio_net_probe = true
+# Maximum VirtIO devices
+virtio_max_devices = 8
+# VirtIO queue wait timeout (microseconds) - 10s
+virtio_queue_timeout_us = 10000000
+# VirtIO device reset timeout (ticks)
+virtio_reset_timeout_ticks = 100000
+# VirtIO PCI max capabilities
+virtio_pci_max_capabilities = 48
+# Maximum PLIC interrupts
+plic_max_interrupts = 128
+# Event device queue size
+evdev_event_queue_size = 64
+# Timer clock frequency (Hz) - 10 MHz
+timer_clock_freq_hz = 10000000
+
+# Feature enables
+[features]
+# Network stack sub-features
+enable_tcp = true
+enable_udp = true
+enable_arp = true
+enable_ipv4 = true
+enable_ethernet = true
+# System features
+enable_signal = true
+enable_vm = true
+# Filesystem features
+enable_vfs = true
+enable_pipe = true
+
+[filesystem]
+# Pipe buffer size (bytes) - 16KB
+pipe_buffer_size = 16384
+# Inode cache size
+icache_size = 256
+# Directory entry cache size
+dcache_size = 256
+# Rootfs path cache size
+rootfs_path_cache_size = 64
+# Maximum symlink follow depth
+max_symlinks = 40
+# Maximum symlink depth in ext4
+ext4_max_symlink_depth = 8
+
+[process]
+# Maximum PID value (4M)
+pid_max_limit = 4194304
+# Default maximum PID value (bitmap allocator range)
+pid_max_default = 32768
+# Reserved PIDs: 0..reserved_pids are never allocated
+reserved_pids = 300
+# Maximum command line length
+max_cmdline_len = 2048
+# File descriptor set size for select
+fd_setsize = 1024
+
+[sync]
+# Futex waiter pool size. 256 was catastrophic on a full OpenHarmony boot:
+# once the pool filled (FFRT worker parks, glibc condvars, binder thread
+# waits — the image runs 1200+ tasks), every new waiter fell into the
+# pool-full backoff loop, re-checking the value once per jiffy: FUTEX_WAKE
+# legitimately returned 0 (nothing was queued), synchronization decayed to
+# polling, and chains of jiffy-rate polls stacked into multi-minute
+# binder stalls (hdf_devmgr 'woken=false' waiters) and 60s AbilityManager
+# timeouts. 8192 slots (~0.5 MB static) cover the observed concurrent
+# waiter population with headroom.
+futex_waiter_pool_size = 8192
+# Futex hash table size (buckets; >= pool/16 to keep chains short)
+futex_hash_size = 512
+
+[graphics]
+# Default framebuffer width
+fb_default_width = 1024
+# Default framebuffer height
+fb_default_height = 768
+
+# Debug options
+[debug]
+# Enable debug output
+debug_output = true
+
+# Printk configuration
+[printk]
+# Ring buffer size (bytes) - default 1MB
+ring_buffer_size = 1048576
+# Enable profiling
+profiling = false
+# Enable memory tracing
+memory_trace = false
+# Enable IRQ tracing
+irq_trace = false
+# Log level: "error", "warn", "info", "debug", "trace"
+log_level = "info"
+
+# Performance tuning
+[performance]
+# Optimization level: 0-3
+opt_level = 3
+# Enable LTO (link-time optimization)
+lto = true
+# Codegen units (1 = better optimization, larger binary)
+codegen_units = 1
+# Strip local symbols
+strip = true
+
+# Security options
+[security]
+# Enable stack protector
+stack_protector = false
+# Enable bounds checking
+bounds_check = true
+# Enable overflow checking
+overflow_check = true

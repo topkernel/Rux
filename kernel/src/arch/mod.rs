@@ -1,0 +1,73 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Architecture-specific code
+//!
+//! # Architecture interface layer
+//!
+//! Code outside `arch/` must depend only on `crate::arch::<item>` — never on
+//! a concrete backend (`crate::arch::...`). The backend is selected
+//! by cargo feature; this module re-exports the backend's module tree so the
+//! interface is a path-compatible set of items:
+//!
+//! - `arch::{uaccess, mm, cpu, pt_regs, smp, thread, trap, boot, ipi,
+//!   context, process}` — per-arch implementations of the same surface
+//! - `arch::{arch_init, init, enable_interrupts, cpu_id, context_switch}` —
+//!   top-level entry points
+//!
+//! A new backend implements the same module tree with matching signatures;
+//! adding a symbol to the interface requires both backends to provide it.
+
+// ---------------------------------------------------------------------------
+// Backends
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "riscv64")]
+pub mod riscv64;
+
+#[cfg(feature = "x86_64")]
+pub mod x86_64;
+
+// aarch64 backend: under bring-up — see docs/development/aarch64-port-plan.md
+// (the living spine of the port; stage gates and the interface contract).
+#[cfg(feature = "aarch64")]
+pub mod aarch64;
+
+// ---------------------------------------------------------------------------
+// Interface: re-export the active backend's surface
+// ---------------------------------------------------------------------------
+
+/// Safe typed user-memory entries over the active backend's uaccess
+/// mechanics (see `uaccess_safe.rs`): the only user-copy surface the
+/// `#![forbid(unsafe_code)]` service files are allowed to call.
+pub mod uaccess_safe;
+
+#[cfg(feature = "riscv64")]
+pub use riscv64::{
+    arch_init, cpu_id, enable_interrupts, init, boot, context, cpu, ipi, mm, process, pt_regs,
+    smp, thread, trap, uaccess,
+};
+
+#[cfg(feature = "x86_64")]
+pub use x86_64::{
+    arch_init, cpu_id, enable_interrupts, init, boot, context, cpu, ipi, mm, process, pt_regs,
+    smp, thread, trap, uaccess,
+};
+
+#[cfg(feature = "aarch64")]
+pub use aarch64::{
+    arch_init, cpu_id, enable_interrupts, init, boot, context, cpu, ipi, mm, process, pt_regs,
+    smp, thread, trap, uaccess,
+};
+
+/// Direct switch of context (see backend `context` module for the exact
+/// semantics; both backends expose `context_switch` with the same signature).
+#[cfg(feature = "riscv64")]
+pub use riscv64::context::context_switch;
+
+#[cfg(feature = "x86_64")]
+pub use x86_64::context::context_switch;
+
+#[cfg(feature = "aarch64")]
+pub use aarch64::context::context_switch;

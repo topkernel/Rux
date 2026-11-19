@@ -1,0 +1,205 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! x86_64 process/thread arch hooks: exec entry state, thread flush.
+//! (fork/copy_thread is generic — process/fork.rs writes the child's
+//! frame at `Task::pt_regs()` = stack_top - 168 and sets
+//! thread.callee.ret_addr = ret_from_fork, thread.sp = frame address.)
+
+use crate::arch::pt_regs::PtRegs;
+
+/// Initial register state for a new user program (execve).
+///
+/// - rip = entry point, rsp = user stack top
+/// - argument registers cleared (argc/argv/envp arrive on the stack,
+///   per the x86-64 SysV ABI initial-process layout)
+/// - cs/ss = user selectors (0x33 / 0x2b) so iretq returns to CPL 3
+/// - rflags = 0x202: reserved bit 1 (must be 1) + IF (user runs with
+///   interrupts enabled)
+#[inline]
+pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
+    regs.rip = pc;
+    regs.rsp = sp;
+
+    regs.rax = 0;
+    regs.rdi = 0;
+    regs.rsi = 0;
+    regs.rdx = 0;
+    regs.rcx = 0;
+    regs.r10 = 0;
+    regs.r8 = 0;
+    regs.r9 = 0;
+    regs.r11 = 0;
+    regs.rbx = 0;
+    regs.rbp = 0;
+    regs.r12 = 0;
+    regs.r13 = 0;
+    regs.r14 = 0;
+    regs.r15 = 0;
+
+    regs.cs = super::trap::USER_CS;
+    regs.ss = super::trap::USER_DS;
+    regs.rflags = 0x202;
+
+    // No pending syscall rollback on a fresh image.
+    regs.orig_rax = 0;
+}
+
+/// Reset the FPU and TLS state on exec (the twin's flush_thread):
+/// zeroed fxsave image marked valid (fresh tasks restore deterministic
+/// FP state — ARCH-H1 parity) and fs/gs bases cleared.
+pub fn flush_thread() {
+    if let Some(current) = crate::sched::current() {
+        // SAFETY: current() returns the running task; we are the only
+        // context that can touch our own thread state here.
+        unsafe {
+            let thread = (*current).thread_mut();
+            thread.mark_fpu_clean();
+            thread.fs_base = 0;
+            thread.gs_base = 0;
+
+            // Drop the LIVE FS base too: without this the next
+            // context-switch-out would resurrect the old image's TLS
+            // pointer from the MSR (the twin's live-FS=Off discipline,
+            // x86 form: the exec'ing image has no TLS until
+            // set_thread_area/arch_prctl installs one).
+            //
+            // GS discipline note: the ACTIVE GS base (0xC0000101) is the
+            // CPU's per-CPU pointer (smp.rs) and must NEVER be cleared
+            // from task context.  The task's user GS base lives in the
+            // SWAPGS shadow (0xC0000102) — that is what "no TLS on a
+            // fresh image" clears here.
+            super::cpu::wrmsr(0xC000_0100, 0); // MSR_FS_BASE
+            super::cpu::wrmsr(0xC000_0102, 0); // MSR_KERNEL_GS_BASE (user shadow)
+
+            // LAZY FPU: the live registers still hold the OLD image's
+            // state. Mark them stale (CR0.TS) so the first FP use of the
+            // new image traps into the clean restore above.
+            // SAFETY: single CR0 bit set.
+            super::cpu::stts();
+        }
+        // Scribble hunter: absorb this legitimate in-run write.
+        crate::dfx::scribble::note_thread_write(current);
+    }
+}
+
+// ============================================================================
+// arch_prctl(2) — x86_64-only syscall (nr 158)
+// ============================================================================
+
+// Codes per asm/prctl.h (verified against the host header).
+const ARCH_SET_GS: u64 = 0x1001;
+const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_GET_GS: u64 = 0x1004;
+const MSR_FS_BASE: u32 = 0xC000_0100;
+const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
+
+/// arch_prctl(code, addr) — TLS base management. glibc/musl startup calls
+/// ARCH_SET_FS before anything else; without it every TLS access faults
+/// (the static-toybox SIGSEGV-at-startup shape).
+///
+/// FS is the kernel-managed TLS pointer (thread.fs_base, live MSR, both
+/// kept in sync — context_switch restores from thread.fs_base). GS is
+/// stored per-task only: nothing switches the live GS MSR on x86, so
+/// installing a user GS base there would leak into every other task.
+pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
+    let code = args[0];
+    let addr = args[1];
+
+    let Some(current) = crate::sched::current() else {
+        return -crate::errno::constants::ESRCH as i64;
+    };
+
+    match code {
+        ARCH_SET_FS => {
+            if addr >= 1 << 47 {
+                return -crate::errno::constants::EFAULT as i64;
+            }
+            // SAFETY: current is the running task; we are the only context
+            // that may touch our own thread state.
+            unsafe {
+                let thread = (*current).thread_mut();
+                thread.fs_base = addr;
+                thread.set_tp(addr);
+                super::cpu::wrmsr(MSR_FS_BASE, addr);
+            }
+            // Scribble hunter: absorb this legitimate in-run write.
+            crate::dfx::scribble::note_thread_write(current);
+            0
+        }
+        ARCH_GET_FS => {
+            // SAFETY: read-only access to the current task's thread state.
+            let fs = unsafe { (*current).thread().fs_base };
+            // SAFETY: writes one userspace word at a validated pointer.
+            let ok = unsafe {
+                crate::arch::uaccess::put_user(addr as *mut u64, fs)
+            };
+            if ok { 0 } else { -crate::errno::constants::EFAULT as i64 }
+        }
+        ARCH_SET_GS => {
+            // SAFETY: see ARCH_SET_FS.
+            unsafe {
+                (*current).thread_mut().gs_base = addr;
+                // closegap/cache-parity: program the SWAPGS shadow too, so
+                // the live MSR matches thread.gs_base immediately (the
+                // context switch no longer re-reads the MSR to refresh the
+                // cache — a stale shadow here would otherwise be saved
+                // nowhere and visible to userspace until the next switch).
+                // The ACTIVE GS base (percpu) is untouched, as before.
+                super::cpu::wrmsr(MSR_KERNEL_GS_BASE, addr);
+            }
+            // Scribble hunter: absorb this legitimate in-run write.
+            crate::dfx::scribble::note_thread_write(current);
+            0
+        }
+        ARCH_GET_GS => {
+            // SAFETY: read-only access to the current task's thread state.
+            let gs = unsafe { (*current).thread().gs_base };
+            // SAFETY: writes one userspace word at a validated pointer.
+            let ok = unsafe {
+                crate::arch::uaccess::put_user(addr as *mut u64, gs)
+            };
+            if ok { 0 } else { -crate::errno::constants::EFAULT as i64 }
+        }
+        _ => -crate::errno::constants::EINVAL as i64,
+    }
+}
+
+/// ioperm(2) — x86_64 native nr 173. The reference maintains a per-task
+/// I/O permission bitmap consulted by user-mode port instructions. Rux
+/// runs user mode without port-I/O facilities, so the bitmap has nothing
+/// to gate; the syscall CONTRACT surface is what callers probe (LTP
+/// ioperm01, legacy hw tools): CAP_SYS_RAWIO for permission, EINVAL when
+/// [from, from+num) leaves the 0..0x10000 port space, 0 otherwise.
+/// History: implemented in 4081cf356, lost in a later dispatch refactor;
+/// the fallthrough era answered via generic getppid (positive pid read
+/// as success by LTP's `rc != -1` check — a fake PASS), and the
+/// native-table sweep (a1dce23b7) closed the fallthrough with ENOSYS,
+/// which exposed the loss as ioperm01 FAIL. This restores the contract.
+pub fn sys_ioperm(args: crate::syscall::SyscallArgs) -> i64 {
+    let from = args[0];
+    let num = args[1];
+    if !crate::security::capable(crate::security::CAP_SYS_RAWIO) {
+        return -crate::errno::constants::EPERM as i64;
+    }
+    if (from + num) > 0x10000 || (from + num) < from {
+        return -crate::errno::constants::EINVAL as i64;
+    }
+    0
+}
+
+/// iopl(2) — x86_64 native nr 172. Same contract surface: levels 0..=3
+/// accepted (0 = normal, 3 = all ports), anything else EINVAL; requires
+/// CAP_SYS_RAWIO. No EFLAGS.IOPL switch exists to perform.
+pub fn sys_iopl(args: crate::syscall::SyscallArgs) -> i64 {
+    let level = args[0] as i32;
+    if !crate::security::capable(crate::security::CAP_SYS_RAWIO) {
+        return -crate::errno::constants::EPERM as i64;
+    }
+    if !(0..=3).contains(&level) {
+        return -crate::errno::constants::EINVAL as i64;
+    }
+    0
+}

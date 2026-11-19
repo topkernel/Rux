@@ -1,0 +1,12 @@
+# Binary files - prevent git from trying to convert line endings
+*.tar.gz binary
+*.tar.xz binary
+*.gz binary
+*.xz binary
+*.zip binary
+*.img binary
+*.bin binary
+
+# Vendored third-party trees: excluded from language statistics
+toolchain/** linguist-vendored
+run/a64-userspace/** linguist-vendored

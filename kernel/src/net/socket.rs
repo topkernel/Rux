@@ -1,0 +1,2413 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Socket Abstraction Layer
+
+use alloc::sync::Arc;
+use alloc::collections::VecDeque;
+use crate::sync::spinlock::Spinlock;
+use crate::process::wait::WaitQueueHead;
+use core::cell::UnsafeCell;
+
+use crate::fs::file::{File, FileFlags, FileOps, FdTable};
+
+// ============================================================================
+// Socket Type Definitions
+// ============================================================================
+
+/// Address family
+pub const AF_INET: i32 = 2;
+/// Address family: IPv6 (P1)
+pub const AF_INET6: i32 = 10;
+
+/// Socket types
+pub const SOCK_STREAM: i32 = 1;  // TCP
+pub const SOCK_DGRAM: i32 = 2;   // UDP
+
+/// Protocols
+pub const IPPROTO_TCP: i32 = 6;
+pub const IPPROTO_UDP: i32 = 17;
+
+// W3 (ABI): Linux type-flag bits carried in the socket()/accept4() type
+// argument. musl passes them through raw, so `SOCK_STREAM | SOCK_NONBLOCK`
+// used to fail the exact-match below with ESOCKTNOSUPPORT.
+pub const SOCK_TYPE_MASK: i32 = 0xF;
+pub const SOCK_NONBLOCK_FLAG: i32 = 0o4000;    // 0x800
+pub const SOCK_CLOEXEC_FLAG: i32 = 0o2000000;  // 0x80000
+
+/// Stored socket options (W3): setsockopt values that take effect or are
+/// reported back by getsockopt. `error` is the socket-level pending error
+/// (positive errno) recorded e.g. by a failed connect().
+#[derive(Debug, Clone, Copy)]
+pub struct SocketOptions {
+    /// SO_RCVTIMEO in microseconds (0 = block indefinitely)
+    pub rcvtimeo_us: u64,
+    /// SO_SNDTIMEO in microseconds (0 = block indefinitely)
+    pub sndtimeo_us: u64,
+    /// SO_REUSEADDR (checked at bind, Linux wildcard/exact semantics)
+    pub reuseaddr: bool,
+    /// SO_REUSEPORT
+    pub reuseport: bool,
+    /// SO_SNDBUF (bytes)
+    pub sndbuf: u32,
+    /// SO_RCVBUF (bytes)
+    pub rcvbuf: u32,
+    /// Pending socket error (positive errno, cleared by SO_ERROR read)
+    pub error: i32,
+    /// SO_KEEPALIVE (P2 fake-success cleanup): stored and mirrored into the
+    /// TCP protocol slot — the timer tick arms a 2h-idle probe cycle for
+    /// ESTABLISHED connections.
+    pub keepalive: bool,
+    /// TCP_KEEPIDLE seconds (default 7200 = 2h).
+    pub keepidle_s: u32,
+    /// TCP_KEEPINTVL seconds (default 75).
+    pub keepintvl_s: u32,
+    /// TCP_KEEPCNT probes before ETIMEDOUT (default 9).
+    pub keepcnt: u32,
+    /// SO_BROADCAST (P2): stored and enforced — a UDP sendto a broadcast
+    /// address without it fails with EACCES.
+    pub broadcast: bool,
+    /// IP_TTL (P2): 0 = system default (64); 1..=255 stored and pushed into
+    /// the IPv4 header on transmit.
+    pub ttl: u32,
+    /// SO_LINGER (P2): l_onoff.
+    pub linger_on: bool,
+    /// SO_LINGER: l_linger seconds.
+    pub linger_secs: u32,
+    /// MCAST_JOIN_GROUP / MCAST_LEAVE_GROUP (SOL_IP, RFC 3678 group_req):
+    /// joined multicast group addresses in NETWORK byte order. Kept on the
+    /// Socket (not the UDP slot) so a TCP socket can hold memberships too,
+    /// and accepted children start empty (LTP accept02: the clone of a
+    /// listener must NOT inherit memberships — MCAST_LEAVE_GROUP fails
+    /// EADDRNOTAVAIL on it). Fixed-size storage keeps SocketOptions Copy.
+    pub mcast_groups: [u32; 4],
+    /// Number of valid entries in mcast_groups.
+    pub mcast_group_count: u8,
+    /// SO_PASSCRED: deliver an SCM_CREDENTIALS cmsg with every received
+    /// message (OH Phase 1: ueventd sets it and DROPS any uevent whose
+    /// recvmsg carries no credentials cmsg — Linux netlinkRecvmsg attaches
+    /// {0,0,0} creds for kernel-originated messages when the option is on).
+    pub passcred: bool,
+}
+
+impl SocketOptions {
+    pub const fn new() -> Self {
+        Self {
+            rcvtimeo_us: 0,
+            sndtimeo_us: 0,
+            reuseaddr: false,
+            reuseport: false,
+            sndbuf: 212992,  // Linux default wmem
+            rcvbuf: 212992,  // Linux default rmem
+            error: 0,
+            keepalive: false,
+            keepidle_s: 7200,
+            keepintvl_s: 75,
+            keepcnt: 9,
+            broadcast: false,
+            ttl: 0,
+            linger_on: false,
+            linger_secs: 0,
+            mcast_groups: [0u32; 4],
+            mcast_group_count: 0,
+            passcred: false,
+        }
+    }
+}
+
+impl Default for SocketOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Socket Structures
+// ============================================================================
+
+/// Socket type enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketType {
+    Tcp,
+    Udp,
+}
+
+/// Socket address
+#[repr(C)]
+pub struct SockAddrIn {
+    pub sin_family: u16,
+    pub sin_port: u16,
+    pub sin_addr: u32,
+    pub sin_zero: [u8; 8],
+}
+
+impl SockAddrIn {
+    /// Parse from raw bytes
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+        if data.len() < 16 {
+            return None;
+        }
+        // SAFETY: data is at least 16 bytes (size_of::<SockAddrIn>), and the
+        // pointer is valid for that duration since it comes from a slice reference.
+        unsafe {
+            Some(&*(data.as_ptr() as *const SockAddrIn))
+        }
+    }
+
+    /// Get port number (host byte order)
+    pub fn port(&self) -> u16 {
+        u16::from_be(self.sin_port)
+    }
+
+    /// Get IP address (host byte order)
+    pub fn addr(&self) -> u32 {
+        u32::from_be(self.sin_addr)
+    }
+}
+
+/// P1 IPv6: sockaddr_in6 (28 bytes — family, port, flowinfo, 16-byte
+/// address, scope_id). Parsed at the syscall boundary; pure-v6 contents
+/// are handed to the protocol layers as [u8;16], v4-mapped contents are
+/// normalized to the v4 fast path.
+#[repr(C)]
+pub struct SockAddrIn6 {
+    pub sin6_family: u16,
+    pub sin6_port: u16,
+    pub sin6_flowinfo: u32,
+    pub sin6_addr: [u8; 16],
+    pub sin6_scope_id: u32,
+}
+
+/// P1 IPv6: sockaddr_in6 length
+pub const SOCKADDR_IN6_LEN: usize = 28;
+
+impl SockAddrIn6 {
+    /// Parse from raw bytes (at least 28 bytes)
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+        if data.len() < SOCKADDR_IN6_LEN {
+            return None;
+        }
+        // SAFETY: length checked above; natural alignment of the repr(C)
+        // fields (u16/u32) is satisfied by the copy-based caller path.
+        unsafe {
+            Some(&*(data.as_ptr() as *const SockAddrIn6))
+        }
+    }
+
+    /// Port (host byte order)
+    pub fn port(&self) -> u16 {
+        u16::from_be(self.sin6_port)
+    }
+
+    /// Address (network byte order)
+    pub fn addr(&self) -> [u8; 16] {
+        self.sin6_addr
+    }
+}
+
+/// Receive buffer packet
+#[derive(Clone)]
+pub struct RecvPacket {
+    /// Data
+    pub data: alloc::vec::Vec<u8>,
+    /// Source address (P1: family-aware — v4 datagrams carry V4)
+    pub src_addr: crate::net::ipv6::IpAddr,
+    /// Source port
+    pub src_port: u16,
+}
+
+/// Socket states
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketState {
+    /// Not connected
+    Unconnected,
+    /// Connecting
+    Connecting,
+    /// Connected
+    Connected,
+    /// Listening
+    Listening,
+    /// Closing
+    Closing,
+}
+
+/// Unified Socket structure
+pub struct Socket {
+    /// Socket type
+    pub sock_type: SocketType,
+    /// P1 IPv6: creation family (AF_INET or AF_INET6). Immutable after
+    /// create — drives the sockaddr shape reported to userspace.
+    pub family: i32,
+    /// Socket state
+    pub state: Spinlock<SocketState>,
+    /// Local port
+    pub local_port: Spinlock<u16>,
+    /// Local IP
+    pub local_addr: Spinlock<u32>,
+    /// P1 IPv6: local address for pure-v6 sockets
+    pub local_addr6: Spinlock<crate::net::ipv6::Ipv6Addr>,
+    /// Remote port
+    pub remote_port: Spinlock<u16>,
+    /// Remote IP
+    pub remote_addr: Spinlock<u32>,
+    /// P1 IPv6: remote address for pure-v6 sockets
+    pub remote_addr6: Spinlock<crate::net::ipv6::Ipv6Addr>,
+    /// Receive buffer
+    pub recv_queue: Spinlock<VecDeque<RecvPacket>>,
+    /// Whether bound
+    pub bound: Spinlock<bool>,
+    /// TCP index (for TCP socket table lookup)
+    /// Protocol slot number (-1 = none). Atomic: wake hooks read it under
+    /// SOCKET_TABLE (irqsave) and must not take a second (non-irqsave) lock
+    /// there — the fd side held tcp_fd across paths that take SOCKET_TABLE
+    /// (close/accept), an ABBA the multi-thread gate caught (3 CPUs stuck).
+    pub tcp_fd: core::sync::atomic::AtomicI32,
+    /// UDP index (for UDP socket table lookup)
+    /// UDP slot number (-1 = none). Same atomic discipline as tcp_fd.
+    pub udp_fd: core::sync::atomic::AtomicI32,
+    /// Slot index in SOCKET_TABLE (for cleanup on close)
+    table_slot: Spinlock<Option<usize>>,
+    /// W3: wait queue for blocking recv/send/accept. RX-path hooks
+    /// (tcp_rcv / udp_rcv / tcp_v4_err / the TCP timer tick) wake it after
+    /// data lands, a connection establishes/aborts, or an error is recorded.
+    pub wait_queue: WaitQueueHead,
+    /// W3: stored socket options (SO_RCVTIMEO/SO_ERROR/SO_REUSEADDR/...)
+    pub options: Spinlock<SocketOptions>,
+    /// MSG_MORE coalescing (send02): send/sendto/sendmsg with MSG_MORE
+    /// appends the payload here WITHOUT delivering it; the next flagless
+    /// send (or write) prepends the held bytes to its own payload and
+    /// delivers the concatenation. Linux calls this corking (UDP) /
+    /// TCP_CORK-equivalent tail holding; a UDP datagram therefore grows
+    /// until the flush, which is what send02 asserts — recv on the peer
+    /// must see EAGAIN while data is held, then one datagram of
+    /// held+flush bytes. Best-effort flushed on close.
+    pub more_stage: Spinlock<alloc::vec::Vec<u8>>,
+    /// shutdown(SHUT_RD / SHUT_RDWR) ran on this socket (Linux
+    /// sk_shutdown & RCV_SHUTDOWN). poll(2)-level: a poll/epoll asking
+    /// for POLLRDHUP/EPOLLRDHUP must see it (LTP epoll_wait05 shuts the
+    /// read side and expects the RDHUP event).
+    pub shut_rd: core::sync::atomic::AtomicBool,
+    /// Identity of this socket's open file description (File.file_id;
+    /// 0 until the fd pairing). The RX-path rise hooks
+    /// (wake_tcp_matches / wake_udp_matches) notify the epoll registry
+    /// with it: without that notify, a readiness rise landing while NO
+    /// task sleeps on the wait queue never re-arms edge-triggered
+    /// interests — the ET entry's last_reported mask stayed set and
+    /// every later epoll_wait suppressed the ready fd (the EPOLLET
+    /// lost-edge family; probe: TCP/UDP after-gap 1/60 reported, Linux
+    /// 60/60).
+    pub file_id: core::sync::atomic::AtomicU64,
+}
+
+// SAFETY: Socket uses Spinlocks for all mutable shared state.
+unsafe impl Sync for Socket {}
+
+impl Socket {
+    /// Create a new Socket
+    pub fn new(sock_type: SocketType) -> Self {
+        Self::new_family(sock_type, AF_INET)
+    }
+
+    /// P1 IPv6: create a Socket for a given address family.
+    pub fn new_family(sock_type: SocketType, family: i32) -> Self {
+        Self {
+            sock_type,
+            family,
+            state: Spinlock::new(SocketState::Unconnected),
+            local_port: Spinlock::new(0),
+            local_addr: Spinlock::new(0),
+            local_addr6: Spinlock::new(crate::net::ipv6::IPV6_ADDR_UNSPECIFIED),
+            remote_port: Spinlock::new(0),
+            remote_addr: Spinlock::new(0),
+            remote_addr6: Spinlock::new(crate::net::ipv6::IPV6_ADDR_UNSPECIFIED),
+            recv_queue: Spinlock::new(VecDeque::new()),
+            bound: Spinlock::new(false),
+            tcp_fd: core::sync::atomic::AtomicI32::new(-1),
+            udp_fd: core::sync::atomic::AtomicI32::new(-1),
+            table_slot: Spinlock::new(None),
+            wait_queue: WaitQueueHead::new(),
+            options: Spinlock::new(SocketOptions::new()),
+            more_stage: Spinlock::new(alloc::vec::Vec::new()),
+            shut_rd: core::sync::atomic::AtomicBool::new(false),
+            file_id: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// MSG_MORE: append `data` to the cork staging, returning the total
+    /// held (the send syscall reports its own payload length, like Linux).
+    pub fn more_append(&self, data: &[u8]) -> usize {
+        let mut st = self.more_stage.lock();
+        st.extend_from_slice(data);
+        st.len()
+    }
+
+    /// MSG_MORE: take the held bytes (empty Vec when nothing staged).
+    pub fn more_take(&self) -> alloc::vec::Vec<u8> {
+        core::mem::take(&mut *self.more_stage.lock())
+    }
+
+    /// P1 IPv6: is this an AF_INET6 socket?
+    pub fn is_ipv6(&self) -> bool {
+        self.family == AF_INET6
+    }
+
+    /// W3: SO_RCVTIMEO as an absolute jiffies deadline (None = infinite).
+    pub fn rcvtimeo_deadline(&self) -> Option<u64> {
+        timeout_to_deadline(self.options.lock().rcvtimeo_us)
+    }
+
+    /// W3: SO_SNDTIMEO as an absolute jiffies deadline (None = infinite).
+    pub fn sndtimeo_deadline(&self) -> Option<u64> {
+        timeout_to_deadline(self.options.lock().sndtimeo_us)
+    }
+
+    /// Bind to address
+    pub fn bind(&self, addr: u32, port: u16) -> Result<(), i32> {
+        // R32-N9: propagate the protocol-layer return code — both tcp_bind
+        // and udp_bind now return EADDRINUSE on port conflicts and the old
+        // code swallowed it, reporting success for a bind that never took.
+        //
+        // W3: bind(0) assigns an ephemeral port IMMEDIATELY in the protocol
+        // layer (Linux semantics) — read the assigned port back so
+        // getsockname reports it right away instead of 0.
+        match self.sock_type {
+            SocketType::Tcp => {
+                // SAFETY: tcp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
+                let ret = crate::net::tcp::tcp_bind(tcp_fd, port);
+                if ret != 0 {
+                    return Err(ret);
+                }
+                if port == 0 {
+                    *self.local_port.lock() = crate::net::tcp::tcp_local_port(tcp_fd);
+                }
+            }
+            SocketType::Udp => {
+                // SAFETY: udp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
+                let ret = crate::net::udp::udp_bind(udp_fd, addr, port);
+                if ret != 0 {
+                    return Err(ret);
+                }
+                if port == 0 {
+                    *self.local_port.lock() = crate::net::udp::udp_local_port(udp_fd);
+                }
+            }
+        }
+
+        *self.local_addr.lock() = addr;
+        if port != 0 {
+            *self.local_port.lock() = port;
+        }
+        *self.bound.lock() = true;
+        Ok(())
+    }
+
+    /// P1 IPv6: bind to a pure v6 address/port (same semantics as bind()).
+    pub fn bind6(&self, addr: crate::net::ipv6::Ipv6Addr, port: u16) -> Result<(), i32> {
+        match self.sock_type {
+            SocketType::Tcp => {
+                // TCP bind ignores the local address in this stack — but a
+                // v6 listener must mark its slot so inbound v6 SYNs match.
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 {
+                    return Err(-9);
+                }
+                let ret = crate::net::tcp::tcp_bind(tcp_fd, port);
+                if ret != 0 {
+                    return Err(ret);
+                }
+                crate::net::tcp::tcp_set_v6_local(tcp_fd, addr);
+                if port == 0 {
+                    *self.local_port.lock() = crate::net::tcp::tcp_local_port(tcp_fd);
+                }
+            }
+            SocketType::Udp => {
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 {
+                    return Err(-9);
+                }
+                let ret = crate::net::udp::udp_bind6(udp_fd, addr, port);
+                if ret != 0 {
+                    return Err(ret);
+                }
+                if port == 0 {
+                    *self.local_port.lock() = crate::net::udp::udp_local_port(udp_fd);
+                }
+            }
+        }
+
+        *self.local_addr6.lock() = addr;
+        if port != 0 {
+            *self.local_port.lock() = port;
+        }
+        *self.bound.lock() = true;
+        Ok(())
+    }
+
+    /// Listen for connections
+    pub fn listen(&self, backlog: i32) -> Result<(), i32> {
+        if self.sock_type != SocketType::Tcp {
+            return Err(-95); // EOPNOTSUPP
+        }
+
+        let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
+        let ret = crate::net::tcp::tcp_listen(tcp_fd, backlog as u32);
+        if ret == 0 {
+            *self.state.lock() = SocketState::Listening;
+            Ok(())
+        } else {
+            Err(ret)
+        }
+    }
+
+    /// Connect to remote address
+    ///
+    /// `nonblock`: the fd's O_NONBLOCK — a handshake that has not resolved
+    /// yet returns EINPROGRESS instead of blocking (Linux).
+    pub fn connect(&self, addr: u32, port: u16, nonblock: bool) -> Result<(), i32> {
+        // Linux route lookup classifies 0.0.0.0 as a LOCAL address (it
+        // sits in the local routing table), so connect(INADDR_ANY) goes
+        // to loopback. Normalizing here keeps the whole stack consistent
+        // (source selection, loopback TX short-circuit, RST routing);
+        // without it the SYN went to ARP for 0.0.0.0, was never resolved,
+        // and the connect stayed in SYN_SENT forever (LTP connect01
+        // "connection refused" never saw its RST).
+        let addr = if addr == 0 { 0x7F00_0001 } else { addr };
+        // Linux tcp_v4_connect: connecting an already-connected (or
+        // mid-connect) stream socket fails before anything is sent —
+        // EISCONN when established, EALREADY while the first connect is
+        // still in flight (LTP connect01 "already connected").
+        if self.sock_type == SocketType::Tcp {
+            match *self.state.lock() {
+                SocketState::Connected => return Err(-106), // EISCONN
+                SocketState::Connecting => return Err(-114), // EALREADY
+                _ => {}
+            }
+        }
+        *self.remote_addr.lock() = addr;
+        *self.remote_port.lock() = port;
+
+        match self.sock_type {
+            SocketType::Tcp => {
+                // SAFETY: tcp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
+                *self.state.lock() = SocketState::Connecting;
+                let ret = crate::net::tcp::tcp_connect(tcp_fd, addr, port);
+                if ret == 0 {
+                    // Loopback handshake driver (LTP accept02 hang): the SYN
+                    // sits in the loopback backlog until SOMEBODY drains it.
+                    // The listener's accept() polls before waiting, but when
+                    // the SYN lands after that poll nothing else does — the
+                    // client returned from connect(), everyone else blocked,
+                    // and the accept slept forever. Drain from HERE (syscall
+                    // context, same discipline as the accept-side poll) until
+                    // the protocol slot is ESTABLISHED. Harmless for real
+                    // virtio-net peers (poll is a no-op without queued RX).
+                    let mut established = false;
+                    let mut refused = 0u32;
+                    for _ in 0..8 {
+                        // Review finding 7: state/errno are mutated under
+                        // TCP_TABLE_LOCK on other CPUs — read them through
+                        // the locked snapshot, not the unlocked handle.
+                        let done = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                            .map(|(st, err)| {
+                                if st == crate::net::tcp::TcpState::TCP_CLOSE {
+                                    // RST in SYN_SENT (no listener on the
+                                    // loopback target) records ECONNREFUSED —
+                                    // surface it, connect() must not report
+                                    // success for a refused connection (LTP
+                                    // connect01 "connection refused").
+                                    refused = err as u32;
+                                }
+                                st == crate::net::tcp::TcpState::TCP_ESTABLISHED
+                                    || st == crate::net::tcp::TcpState::TCP_CLOSE
+                            })
+                            .unwrap_or(true);
+                        if done {
+                            established = true;
+                            break;
+                        }
+                        crate::net::ethernet::ethernet_poll();
+                    }
+                    if refused != 0 {
+                        // The peer refused (RST in SYN_SENT): the connect
+                        // failed — report the errno (LTP connect01 case 6)
+                        // and mirror it into SO_ERROR.
+                        *self.state.lock() = SocketState::Unconnected;
+                        self.options.lock().error = refused as i32;
+                        return Err(-(refused as i32));
+                    }
+                    if !established && !nonblock {
+                        // Blocking connect, handshake still in flight (the
+                        // adaptive drain above only covers the immediate
+                        // loopback case). Linux blocks until ESTABLISHED,
+                        // RST (ECONNREFUSED) or SYN-retry exhaustion
+                        // (ETIMEDOUT — tcp_timer flips SYN_SENT to CLOSE
+                        // with pending_error and wakes the socket). The
+                        // old code fell through here and reported SUCCESS
+                        // from SYN_SENT — connect01 "connection refused"
+                        // returned 0 for a connect that never completed.
+                        loop {
+                            match socket_wait_round(self, WaitKind::Connect, None) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    // EINTR: the socket stays Connecting
+                                    // (the handshake continues async).
+                                    self.options.lock().error = -e;
+                                    return Err(e);
+                                }
+                            }
+                            // Drain the loopback backlog ourselves: with
+                            // this task asleep nothing else polls.
+                            crate::net::ethernet::ethernet_poll();
+                            let resolved = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                                .map(|(st, _)| match st {
+                                    crate::net::tcp::TcpState::TCP_ESTABLISHED => {
+                                        Some(true)
+                                    }
+                                    // Established-then-closing states: the
+                                    // handshake COMPLETED and the peer has
+                                    // since closed (e.g. a server that
+                                    // accept()s and close()s immediately —
+                                    // the lat_connect pattern). connect()
+                                    // must report SUCCESS per the reference:
+                                    // the connection lived; the peer's FIN
+                                    // is a subsequent event (read() = 0).
+                                    // The old shape treated CLOSE_WAIT as
+                                    // failure and FABRICATED ETIMEDOUT when
+                                    // pending_error was 0 — a working
+                                    // connection reported as timeout (the
+                                    // fdprobe hunt: connect() ETIMEDOUT
+                                    // while a retry on the same socket
+                                    // returned 0).
+                                    crate::net::tcp::TcpState::TCP_CLOSE_WAIT
+                                    | crate::net::tcp::TcpState::TCP_FIN_WAIT1
+                                    | crate::net::tcp::TcpState::TCP_FIN_WAIT2
+                                    | crate::net::tcp::TcpState::TCP_CLOSING
+                                    | crate::net::tcp::TcpState::TCP_LAST_ACK
+                                    | crate::net::tcp::TcpState::TCP_TIME_WAIT => {
+                                        Some(true)
+                                    }
+                                    crate::net::tcp::TcpState::TCP_SYN_SENT
+                                    | crate::net::tcp::TcpState::TCP_SYN_RECV => None,
+                                    _ => Some(false),
+                                })
+                                .unwrap_or(Some(true));
+                            match resolved {
+                                Some(true) => {
+                                    established = true;
+                                    break;
+                                }
+                                Some(false) => {
+                                    // CLOSED: refused (111) or SYN-retry
+                                    // exhaustion (ETIMEDOUT 110) — take the
+                                    // protocol's errno.
+                                    let err = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                                        .map(|(_, err)| err)
+                                        .filter(|e| *e != 0)
+                                        .unwrap_or(110) as i32;
+                                    *self.state.lock() = SocketState::Unconnected;
+                                    self.options.lock().error = err;
+                                    return Err(-err);
+                                }
+                                None => {} // still handshaking — wait again
+                            }
+                        }
+                    } else if !established {
+                        // O_NONBLOCK and unresolved: EINPROGRESS, exactly
+                        // Linux; completion arrives via poll/SO_ERROR.
+                        self.options.lock().error = 0;
+                        return Err(-115); // EINPROGRESS
+                    }
+                    // The client flips ESTABLISHED when it EMITS the final
+                    // ACK — the peer still has to receive it. Two extra
+                    // drains flush that residual so an immediately
+                    // following accept()/write() on the peer side does not
+                    // see a half-open child (LTP bind04 write EIO).
+                    if established {
+                        crate::net::ethernet::ethernet_poll();
+                        crate::net::ethernet::ethernet_poll();
+                    }
+                    *self.state.lock() = SocketState::Connected;
+                    Ok(())
+                } else {
+                    *self.state.lock() = SocketState::Unconnected;
+                    // W3: record the real error for SO_ERROR — non-blocking
+                    // connect() probes read it via getsockopt(SO_ERROR).
+                    self.options.lock().error = -ret;
+                    Err(ret)
+                }
+            }
+            SocketType::Udp => {
+                // SAFETY: udp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
+                // R24 (HIGH-6): go through the locked entry point — the raw
+                // udp_socket_get() &mut raced the NetRx softirq's udp_rcv.
+                let _ = crate::net::udp::udp_connect(udp_fd, addr, port);
+                *self.state.lock() = SocketState::Connected;
+                Ok(())
+            }
+        }
+    }
+
+    /// P1 IPv6: connect to a pure v6 remote (same semantics as connect()).
+    pub fn connect6(&self, addr: crate::net::ipv6::Ipv6Addr, port: u16) -> Result<(), i32> {
+        // Same stream-socket guards as connect() (EISCONN / EALREADY).
+        if self.sock_type == SocketType::Tcp {
+            match *self.state.lock() {
+                SocketState::Connected => return Err(-106), // EISCONN
+                SocketState::Connecting => return Err(-114), // EALREADY
+                _ => {}
+            }
+        }
+        *self.remote_addr6.lock() = addr;
+        *self.remote_port.lock() = port;
+
+        match self.sock_type {
+            SocketType::Tcp => {
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
+                *self.state.lock() = SocketState::Connecting;
+                let ret = crate::net::tcp::tcp_connect6(tcp_fd, &addr, port);
+                if ret == 0 {
+                    // Mirror the effective local v6 address back for
+                    // getsockname (tcp_connect6 filled the slot's source).
+                    let (local6, lport) = crate::net::tcp::tcp_local_endpoint6(tcp_fd);
+                    if !crate::net::ipv6::is_unspecified(&local6) {
+                        *self.local_addr6.lock() = local6;
+                    }
+                    if lport != 0 {
+                        *self.local_port.lock() = lport;
+                    }
+                    *self.state.lock() = SocketState::Connected;
+                    Ok(())
+                } else {
+                    *self.state.lock() = SocketState::Unconnected;
+                    self.options.lock().error = -ret;
+                    Err(ret)
+                }
+            }
+            SocketType::Udp => {
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
+                let _ = crate::net::udp::udp_connect6(udp_fd, addr, port);
+                *self.state.lock() = SocketState::Connected;
+                Ok(())
+            }
+        }
+    }
+
+    /// Send data
+    pub fn send(
+        &self,
+        buf: &[u8],
+        dest_addr: Option<(crate::net::ipv6::IpAddr, u16)>,
+    ) -> Result<usize, i32> {
+        match self.sock_type {
+            SocketType::Tcp => {
+                // A nonblocking connect() returned EINPROGRESS and NOTHING
+                // promotes the VFS state when the handshake later completes
+                // (the protocol slot goes ESTABLISHED on its own). `Connecting`
+                // must therefore fall through and let the protocol layer
+                // decide — an ESTABLISHED slot sends, a SYN_SENT slot maps to
+                // EAGAIN (reference tcp_sendmsg: sk_stream_wait_connect).
+                // EPIPE stays reserved for the never-connected / shut-down
+                // socket, where it is correct.
+                let state = *self.state.lock();
+                if state != SocketState::Connected && state != SocketState::Connecting {
+                    return Err(-32); // EPIPE
+                }
+                // SAFETY: tcp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
+                // R23-3 (send-only, leaf-scoped): the table lock protects
+                // the send_buffer/retrans_queue mutation against the RX
+                // softirq's process_ack on the same socket. NOT taken at
+                // fn entry — recv's TCP branch re-enters tcp_rcv which
+                // already holds it (the R23 gate deadlock).
+                //
+                // R35 (chain-2 fix): tx_packets used to emit every
+                // mss-sized segment INLINE under TCP_TABLE_LOCK (up to 180
+                // virtio completion spins — 10M+50M iterations each — for
+                // one 256KB write). The deferred TcpTxBatch is reserved
+                // HERE, outside the lock (try_reserve: OOM is a clean
+                // ENOMEM, not the under-lock alloc_error_handler panic of
+                // the R34 wedge class), and emitted after the lock drops.
+                //
+                // Sizing: tx_packets drains the send buffer up to the
+                // usable window, which may hold MORE than this call's
+                // accepted prefix (leftovers from earlier sends while the
+                // window was closed) — so stage accept + one full window
+                // (TCP_MAX_WINDOW = 64KB) of payload. With the sys_write
+                // chunking (RW_CHUNK = 64KB) the typical reservation is
+                // ~128KB, freed at the end of the syscall.
+                let accept = core::cmp::min(buf.len(), crate::net::tcp::TcpSocket::TCP_SEND_MAX_CHUNK);
+                let window_slack = crate::net::tcp::TCP_MAX_WINDOW as usize;
+                let stage_bytes = accept + window_slack;
+                let mut tx = crate::net::tcp::TcpTxBatch::new();
+                // P2 IP_TTL: stamp the per-socket TTL into every segment
+                // this batch records (0 = system default at the IP layer).
+                tx.set_ttl(self.options.lock().ttl as u8);
+                if !tx.reserve(
+                    stage_bytes / crate::net::tcp::TCP_DEFAULT_MSS as usize + 2,
+                    stage_bytes,
+                ) {
+                    return Err(-12); // ENOMEM — lock never taken
+                }
+                let ret = {
+                    let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+                    match crate::net::tcp::tcp_socket_get(tcp_fd) {
+                        Some(socket) => {
+                            // Nonblocking-connect completion: promote the
+                            // VFS state once the protocol slot is established
+                            // (idempotent; nothing else transitions out of
+                            // Connecting). Makes a repeated connect() report
+                            // EISCONN and lets SO_ERROR views settle, like the
+                            // reference whose sk_state lives in the protocol.
+                            if socket.state == crate::net::tcp::TcpState::TCP_ESTABLISHED {
+                                *self.state.lock() = SocketState::Connected;
+                            }
+                            match socket.send(buf, &mut tx) {
+                                Ok(len) => Ok(len),
+                                Err(()) => {
+                                    // W3 error mapping: surface the protocol's
+                                    // pending error (RST/ICMP abort, retransmit
+                                    // exhaustion), and EAGAIN while the
+                                    // handshake is still in flight so blocking
+                                    // writers wait for establishment instead of
+                                    // losing the data to a bogus EIO.
+                                    if socket.pending_error != 0 {
+                                        Err(-socket.pending_error)
+                                    } else if socket.state
+                                        == crate::net::tcp::TcpState::TCP_SYN_SENT
+                                        || socket.state
+                                            == crate::net::tcp::TcpState::TCP_SYN_RECV
+                                    {
+                                        Err(-11) // EAGAIN — connect() in progress
+                                    } else {
+                                        Err(-5) // EIO
+                                    }
+                                }
+                            }
+                        }
+                        None => Err(-9), // EBADF
+                    }
+                };
+                tx.emit_all();
+                ret
+            }
+            SocketType::Udp => {
+                // SAFETY: udp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
+
+                if let Some((dest, port)) = dest_addr {
+                    // Explicit destination: use the family-aware sendto.
+                    // P1 IPv6: pure v6 destinations take the v6 wire path;
+                    // v4 (incl. v4-mapped, normalized at the syscall
+                    // boundary) takes the v4 path.
+                    // R24 (HIGH-6): udp_sendto already returns EBADF.
+                    let ret = match dest {
+                        crate::net::ipv6::IpAddr::V4(addr) => {
+                            crate::net::udp::udp_sendto(udp_fd, buf, addr, port)
+                        }
+                        crate::net::ipv6::IpAddr::V6(addr6) => {
+                            crate::net::udp::udp_sendto6(udp_fd, buf, addr6, port)
+                        }
+                    };
+                    if ret >= 0 {
+                        Ok(ret as usize)
+                    } else {
+                        Err(ret as i32)
+                    }
+                } else {
+                    let ret = crate::net::udp::udp_send(udp_fd, buf);
+                    if ret >= 0 {
+                        Ok(ret as usize)
+                    } else {
+                        Err(ret as i32)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Receive data
+    pub fn recv(
+        &self,
+        buf: &mut [u8],
+        peek: bool,
+    ) -> Result<(usize, Option<(crate::net::ipv6::IpAddr, u16)>), i32> {
+        match self.sock_type {
+            SocketType::Tcp => {
+                let state = *self.state.lock();
+                // R32-N28: only an UNCONNECTED socket is ENOTCONN. `Closing`
+                // (set by shutdown(SHUT_WR/SHUT_RDWR)) must keep the read
+                // half alive — the old `!= Connected` gate made recv() fail
+                // with ENOTCONN right after shutdown(SHUT_WR), losing all
+                // still-in-flight peer data; the buffered data (or EOF once
+                // drained) is delivered by the TcpSocket::recv paths below.
+                //
+                // W3: a LISTENING socket is also ENOTCONN — without this a
+                // blocking read on a listener would sleep forever (the
+                // wait condition never becomes true and no wake arrives).
+                if state == SocketState::Unconnected || state == SocketState::Listening {
+                    return Err(-107); // ENOTCONN
+                }
+                // SAFETY: tcp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
+
+                // R34: irqsave — this plain lock is also taken by
+                // enqueue_packet() from the NetRx softirq; a timer IRQ at
+                // irq_exit on THIS CPU while a syscall holds the plain lock
+                // would make the softirq spin on it forever (the holder is
+                // the interrupted syscall below it — same-CPU permanent
+                // wedge).
+                let mut queue = self.recv_queue.lock_irqsave();
+                if let Some(packet) = queue.pop_front() {
+                    let len = packet.data.len().min(buf.len());
+                    buf[..len].copy_from_slice(&packet.data[..len]);
+                    return Ok((len, Some((packet.src_addr, packet.src_port))));
+                }
+
+                // R24 (R23-3 completion): recv MUTATES the protocol socket
+                // (recv_buffer pop_front + windowed ACK) and was the last
+                // unlocked writer — it raced tcp_rcv's enqueue_data push on
+                // the same VecDeque. Leaf-scoped like send: nothing below
+                // re-enters tcp_rcv (ethernet_poll runs before Socket::recv
+                // in every syscall caller; TcpSocket::recv's ACK goes to
+                // loopback-queue/virtio-xmit only).
+                //
+                // R35 (chain-2 fix): the window-update ACK is recorded
+                // into a deferred TcpTxBatch reserved outside the lock and
+                // emitted after it drops — the ACK used to run the virtio
+                // completion spin under TCP_TABLE_LOCK.
+                let mut tx = crate::net::tcp::TcpTxBatch::new();
+                let _ = tx.reserve(1, 0);
+                let result = {
+                    let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+                    match crate::net::tcp::tcp_socket_get(tcp_fd) {
+                        Some(socket) => {
+                            // W3: a recorded protocol error (RST/ICMP/
+                            // timeout) beats the would-block fallthrough —
+                            // SO_ERROR stays observable through recv too.
+                            if socket.pending_error != 0 {
+                                Some(Err(-socket.pending_error))
+                            } else {
+                                match socket.recv(buf, buf.len(), &mut tx, peek) {
+                                    Ok(len) if len > 0 => {
+                                        let src = if socket.is_v6 {
+                                            crate::net::ipv6::IpAddr::V6(socket.remote_ip6)
+                                        } else {
+                                            crate::net::ipv6::IpAddr::V4(socket.remote_ip)
+                                        };
+                                        Some(Ok((len, Some((src, socket.remote_port)))))
+                                    }
+                                    // R22-4: zero-length read on a
+                                    // closed/half-closed connection is EOF.
+                                    // But an ESTABLISHED (or handshake/
+                                    // half-close) socket with an empty
+                                    // buffer is "no data yet": reporting
+                                    // EOF made blocking readers return 0
+                                    // spuriously whenever the peer's data
+                                    // had not landed yet (LTP bind04 TCP
+                                    // variants, tight fork loops 12/12).
+                                    // Fall through to EAGAIN so the
+                                    // blocking engine waits; only these
+                                    // states are true read-half EOF:
+                                    // CLOSE_WAIT (peer FIN), LAST_ACK,
+                                    // TIME_WAIT, CLOSING, CLOSE.
+                                    Ok(0) => {
+                                        match socket.state {
+                                            crate::net::tcp::TcpState::TCP_CLOSE_WAIT
+                                            | crate::net::tcp::TcpState::TCP_LAST_ACK
+                                            | crate::net::tcp::TcpState::TCP_TIME_WAIT
+                                            | crate::net::tcp::TcpState::TCP_CLOSING
+                                            | crate::net::tcp::TcpState::TCP_CLOSE => {
+                                                Some(Ok((0, None)))
+                                            }
+                                            _ => None, // would-block → EAGAIN
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            }
+                        }
+                        None => None,
+                    }
+                };
+                tx.emit_all();
+                if let Some(r) = result {
+                    return r;
+                }
+
+                Err(-11) // EAGAIN
+            }
+            SocketType::Udp => {
+                // R34: irqsave — pairs with enqueue_packet() from the NetRx
+                // softirq (same-CPU plain-lock reentrancy wedge; see the TCP
+                // branch comment above).
+                // review F7: peek clones the head packet and leaves it
+                // queued; the consuming arm clones too and pops after (a
+                // plain pop_front borrows the guard mutably across the
+                // copy — same effect, one shape).
+                let mut queue = self.recv_queue.lock_irqsave();
+                if let Some(packet) = queue.front().cloned() {
+                    let len = packet.data.len().min(buf.len());
+                    buf[..len].copy_from_slice(&packet.data[..len]);
+                    if !peek {
+                        queue.pop_front();
+                    }
+                    return Ok((len, Some((packet.src_addr, packet.src_port))));
+                }
+                drop(queue);
+
+                // SAFETY: udp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
+                // W3: take the source address too — recvfrom()/recvmsg() on a
+                // UDP socket used to always get None (no msg_name written).
+                // P1 IPv6: family-aware source reporting (v6 sockets see the
+                // datagram's v6 address; v4 sockets see the u32).
+                match crate::net::udp::udp_recvfrom_ext(udp_fd, buf, peek) {
+                    Ok((len, src_addr, src_port)) => {
+                        // review F8: a REAL zero-length datagram (already
+                        // consumed above!) reports 0 with its source — the
+                        // old `len > 0` gate turned it into EAGAIN while
+                        // the datagram was gone (recvmmsg batches of
+                        // 0-length messages then lost the whole batch).
+                        // "No data yet" is the None arm's Err(-11) above.
+                        Ok((len as usize, Some((src_addr, src_port))))
+                    }
+                    Err(e) => Err(e as i32),
+                }
+            }
+        }
+    }
+
+    /// Accept connection (TCP only)
+    pub fn accept(&self) -> Result<Arc<Socket>, i32> {
+        if self.sock_type != SocketType::Tcp {
+            return Err(-95); // EOPNOTSUPP
+        }
+
+        let state = *self.state.lock();
+        if state != SocketState::Listening {
+            return Err(-22); // EINVAL
+        }
+
+        let _tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+
+        Err(-11) // EAGAIN
+    }
+
+    /// Enqueue packet to receive buffer
+    pub fn enqueue_packet(&self, packet: RecvPacket) {
+        // R34: irqsave — runs from the NetRx softirq; the syscall-side
+        // reader (Socket::recv) holds this lock across its empty-check, and
+        // a plain lock here would same-CPU deadlock against it at irq_exit.
+        self.recv_queue.lock_irqsave().push_back(packet);
+    }
+
+    /// Close socket
+    pub fn close(&self) -> i32 {
+        match self.sock_type {
+            SocketType::Tcp => {
+                let tcp_fd_v = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd_v >= 0 { let tcp_fd = tcp_fd_v;
+                    // R24 (R23-3 completion): close() mutates the protocol
+                    // state machine (send_fin changes state and pushes the
+                    // retrans_queue) — serialize against tcp_rcv/timer_tick
+                    // like every other writer. Same shape as tcp_rcv's own
+                    // send-under-lock. tcp_socket_free takes the lock itself,
+                    // so the actual free happens after we drop ours.
+                    //
+                    // R35 (chain-2 fix): the FIN is recorded into a deferred
+                    // TcpTxBatch reserved outside the lock and emitted after
+                    // it drops — send_fin used to run the virtio completion
+                    // spin under TCP_TABLE_LOCK.
+                    let mut free_now = false;
+                    let mut tx = crate::net::tcp::TcpTxBatch::new();
+                    tx.set_ttl(self.options.lock().ttl as u8); // P2 IP_TTL
+                    let _ = tx.reserve(1, 0);
+                    {
+                        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+                        if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+                            // P2 SO_LINGER, l_onoff && l_linger == 0:
+                            // ABORTIVE close — drop unsent/unacked data and
+                            // emit an RST instead of the orderly FIN (Linux
+                            // tcp_close SO_LINGER-zero path). The peer sees
+                            // the reset instead of a silent timeout.
+                            let (linger_on, linger_secs) = {
+                                let o = self.options.lock();
+                                (o.linger_on, o.linger_secs)
+                            };
+                            if linger_on && linger_secs == 0 {
+                                // P1 IPv6: abortive RST honors the slot's
+                                // family (v6 slots carry v6 endpoints).
+                                if socket.is_v6 {
+                                    let _ = tx.push_ctl6(
+                                        &socket.local_ip6,
+                                        &socket.remote_ip6,
+                                        socket.local_port,
+                                        socket.remote_port,
+                                        socket.snd_nxt,
+                                        socket.rcv_nxt,
+                                        0x0014, // RST + ACK
+                                        0,
+                                    );
+                                } else {
+                                    let _ = tx.push_ctl(
+                                        socket.local_ip,
+                                        socket.remote_ip,
+                                        socket.local_port,
+                                        socket.remote_port,
+                                        socket.snd_nxt,
+                                        socket.rcv_nxt,
+                                        0x0014, // RST + ACK
+                                        0,
+                                    );
+                                }
+                                socket.send_buffer.clear();
+                                socket.retrans_queue.clear();
+                                socket.ooo_queue.clear();
+                                socket.state = crate::net::tcp::TcpState::TCP_CLOSE;
+                                socket.timers.stop_retransmit();
+                            } else {
+                                socket.close(&mut tx);
+                            }
+                            // Only free immediately if connection is fully closed.
+                            if socket.state == crate::net::tcp::TcpState::TCP_CLOSE {
+                                // R21-N4: drop our pin; free only when the
+                                // timer side already reaped to CLOSE and no
+                                // other fd holds a reference.
+                                let prev = socket
+                                    .user_refs
+                                    .swap(0, core::sync::atomic::Ordering::AcqRel);
+                                free_now = prev <= 1;
+                            } else {
+                                // R32-B7: still closing (FIN_WAIT1/LAST_ACK/
+                                // ...). NEVER free now — the FIN may be lost
+                                // and needs the retransmit machinery, and the
+                                // peer needs TIME_WAIT-side time. The timer
+                                // tick's orphan paths (FIN_WAIT timeout,
+                                // retrans exhaustion, B8 CLOSE_WAIT timeout)
+                                // transition the slot to CLOSE, and the tick
+                                // sweep frees it once user_refs hits 0.
+                                if socket.user_refs.load(core::sync::atomic::Ordering::Acquire)
+                                    > 0
+                                {
+                                    // Unpin the accepted-socket reference
+                                    // (never wraps: pinned slots hold >= 1).
+                                    socket.user_refs.fetch_sub(
+                                        1,
+                                        core::sync::atomic::Ordering::AcqRel,
+                                    );
+                                }
+                                // Client/listener slots have no parent_fd;
+                                // mark them so the R24 sweep reaps the CLOSE
+                                // corpse instead of mistaking it for a fresh
+                                // pre-connect slot (which it must keep).
+                                socket.orphaned = true;
+                            }
+                        }
+                    }
+                    tx.emit_all();
+                    // P2 SO_LINGER, l_onoff && l_linger > 0: block until the
+                    // unsent/unACKed data drains (peer ACKs land through the
+                    // RX softirq and wake the socket wait queue) or the
+                    // linger timeout elapses (Linux tcp_close linger wait).
+                    let (linger_on, linger_secs) = {
+                        let o = self.options.lock();
+                        (o.linger_on, o.linger_secs)
+                    };
+                    if linger_on && linger_secs > 0 {
+                        linger_drain_wait(tcp_fd, linger_secs);
+                    }
+                    if free_now {
+                        crate::net::tcp::tcp_socket_free(tcp_fd);
+                    }
+                }
+            }
+            SocketType::Udp => {
+                let udp_fd_v = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd_v >= 0 { let udp_fd = udp_fd_v;
+                    crate::net::udp::udp_socket_free(udp_fd);
+                }
+            }
+        }
+        0
+    }
+}
+
+// ============================================================================
+// W3: Blocking semantics — wait-queue engine
+// ============================================================================
+
+/// Convert a microsecond timeout (0 = infinite) to an absolute jiffies
+/// deadline (1 jiffy = 10ms).
+fn timeout_to_deadline(us: u64) -> Option<u64> {
+    if us == 0 {
+        return None;
+    }
+    Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1))
+}
+
+/// Which condition the wait loop re-checks after registering.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitKind {
+    /// recv(): data / EOF / error available
+    Recv,
+    /// send(): connection established with send room
+    Send,
+    /// accept(): an established child is pending
+    Accept,
+    /// connect(): the handshake left SYN_SENT (established, refused or
+    /// timed out)
+    Connect,
+}
+
+/// W3: would recv() return data, EOF or an error (i.e. anything but
+/// EAGAIN)? Mirrors the would-block decision in Socket::recv.
+pub fn socket_recv_ready(socket: &Socket) -> bool {
+    if !socket.recv_queue.lock_irqsave().is_empty() {
+        return true;
+    }
+    match socket.sock_type {
+        SocketType::Tcp => {
+            let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if fd >= 0 { crate::net::tcp::tcp_readable(fd) } else { true }
+        }
+        SocketType::Udp => {
+            let fd = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if fd >= 0 {
+                crate::net::udp::udp_poll_readable(fd) || crate::net::udp::udp_has_error(fd)
+            } else { true }
+        }
+    }
+}
+
+/// W3: can send() accept more bytes now (established, window room, or a
+/// terminal state whose error returns immediately)?
+fn socket_send_ready(socket: &Socket) -> bool {
+    match socket.sock_type {
+        SocketType::Tcp => {
+            let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if fd >= 0 { crate::net::tcp::tcp_send_ready(fd) } else { true }
+        }
+        // UDP send never blocks (datagram accepted, or EMSGSIZE).
+        SocketType::Udp => true,
+    }
+}
+
+/// W3: does this listener have an established, not-yet-accepted child?
+fn socket_accept_ready(socket: &Socket) -> bool {
+    let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if fd >= 0 { crate::net::tcp::tcp_accept_pending(fd) } else { true }
+}
+
+/// Has a connecting (client) TCP socket left SYN_SENT — established,
+/// refused or timed out? Anything but SYN_SENT/SYN_RECV resolves a
+/// blocking connect().
+fn socket_connect_ready(socket: &Socket) -> bool {
+    let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if fd < 0 { return true; }
+    crate::net::tcp::tcp_connect_snapshot(fd)
+        .map(|(st, _)| !matches!(
+            st,
+            crate::net::tcp::TcpState::TCP_SYN_SENT
+                | crate::net::tcp::TcpState::TCP_SYN_RECV))
+        .unwrap_or(true)
+}
+
+/// One blocking wait round (pipe discipline: prepare → re-check → sleep →
+/// finish). Returns Ok(()) when the caller should re-check its condition,
+/// Err(errno) to abort the syscall (EINTR, SO_RCVTIMEO/SO_SNDTIMEO expiry
+/// as EAGAIN, timer-pool exhaustion as ENOMEM).
+fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> Result<(), i32> {
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return Err(-11), // no task context — behave non-blocking
+    };
+
+    // net:sock_wait (r13 lat_udp strand hunt) — the trace ids of this
+    // round: pid, the protocol slot, kind/stage. Stage 0 fires at the
+    // post-register re-check with its verdict; stage 1 when schedule()
+    // returns. A strand boot's victim ends at stage=0 ready=0 and never
+    // records stage 1.
+    let tkind = match kind {
+        WaitKind::Recv => 0u8,
+        WaitKind::Send => 1u8,
+        WaitKind::Accept => 2u8,
+        WaitKind::Connect => 3u8,
+    };
+    let tfd = match socket.sock_type {
+        SocketType::Udp => socket.udp_fd.load(core::sync::atomic::Ordering::Acquire),
+        SocketType::Tcp => socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire),
+    };
+    let tpid = unsafe { (*current).pid() } as i32;
+
+    // Atomically set INTERRUPTIBLE and add to the queue under the same
+    // lock — prevents the lost-wakeup race (prepare_to_wait contract).
+    socket.wait_queue.prepare_to_wait(current, false, true);
+
+    // Re-check AFTER registering: if the condition was met between our
+    // check and prepare_to_wait, the waker found an empty queue — don't sleep.
+    let ready = match kind {
+        WaitKind::Recv => socket_recv_ready(socket),
+        WaitKind::Send => socket_send_ready(socket),
+        WaitKind::Accept => socket_accept_ready(socket),
+        WaitKind::Connect => socket_connect_ready(socket),
+    };
+    crate::trace::trace_net_sock_wait(tpid, tfd, tkind, 0, ready as u8);
+    if ready {
+        socket.wait_queue.finish_wait(current);
+        // R36-B2: take ourselves back off the GRQ — we never slept, but a
+        // concurrent wake may have enqueued us.
+        crate::sched::dequeue_task(&*current);
+        return Ok(());
+    }
+
+    // A signal that arrived while still RUNNING generated no wakeup;
+    // without this recheck we would sleep on a pending SIGKILL.
+    if crate::signal::signal_pending() {
+        socket.wait_queue.finish_wait(current);
+        crate::sched::dequeue_task(&*current);
+        return Err(-4); // EINTR
+    }
+
+    // Timed wait: the one-shot timer wakes this task at the deadline.
+    let timer_id = deadline
+        .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
+        .unwrap_or(0);
+    if deadline.is_some() && timer_id == 0 {
+        // Timer pool exhausted — a timed wait would sleep forever.
+        socket.wait_queue.finish_wait(current);
+        crate::sched::dequeue_task(&*current);
+        return Err(-12); // ENOMEM
+    }
+
+    // R54: schedule() restores the caller's SIE state; re-arm IRQs so
+    // ticks/IPIs reach this CPU across the wait.
+    crate::arch::cpu::restore_irq(true);
+    crate::sched::schedule();
+    crate::trace::trace_net_sock_wait(tpid, tfd, tkind, 1, 1);
+
+    if timer_id != 0 {
+        crate::timer::del_timer(timer_id);
+    }
+    socket.wait_queue.finish_wait(current);
+
+    if crate::signal::signal_pending() {
+        return Err(-4); // EINTR
+    }
+    if let Some(dl) = deadline {
+        if crate::drivers::timer::get_jiffies() >= dl {
+            // Linux SO_RCVTIMEO/SO_SNDTIMEO expiry surfaces as EAGAIN.
+            return Err(-11);
+        }
+    }
+    Ok(())
+}
+
+/// W3: shared recv engine — try recv(), on would-block either return
+/// EAGAIN (non-blocking) or wait on the socket's wait queue and retry.
+/// `deadline` is an absolute jiffies deadline (SO_RCVTIMEO).
+/// `peek` (review F7): MSG_PEEK — serve the data without consuming it;
+/// blocking still waits for the first byte, repeated peeks re-read.
+pub fn socket_recv_ctl(
+    socket: &Socket,
+    buf: &mut [u8],
+    nonblock: bool,
+    deadline: Option<u64>,
+    peek: bool,
+) -> Result<(usize, Option<(crate::net::ipv6::IpAddr, u16)>), i32> {
+    loop {
+        // Loopback TX only queues; drain so in-machine peers' data lands
+        // before the would-block decision (same rationale as sys_accept).
+        crate::net::ethernet::ethernet_poll();
+        match socket.recv(buf, peek) {
+            Ok(r) => return Ok(r),
+            Err(e) if e != -11 => return Err(e),
+            Err(_) => {}
+        }
+        if nonblock {
+            return Err(-11);
+        }
+        socket_wait_round(socket, WaitKind::Recv, deadline)?;
+    }
+}
+
+/// review F10: inet_shutdown's ENOTCONN discipline for TCP sockets —
+/// the reference rejects shutdown() with ENOTCONN when the socket's
+/// protocol state is TCP_CLOSE (never connected — the check runs before
+/// the how dispatch, so it covers SHUT_RD too), and for a LISTENING
+/// socket every how that includes SEND_SHUTDOWN (SHUT_WR / SHUT_RDWR);
+/// only a pure SHUT_RD on a listener is a no-op success. The old path
+/// returned 0 for all of these and additionally flipped a listener's
+/// protocol slot to TCP_CLOSE (tcp_sock.close() default arm), killing
+/// the listener for its other waiters.
+pub fn socket_shutdown_check(socket: &Socket, how: i32) -> Result<(), i32> {
+    if socket.sock_type == SocketType::Tcp {
+        match *socket.state.lock() {
+            SocketState::Unconnected => return Err(-107), // ENOTCONN
+            SocketState::Listening if how == 1 || how == 2 => {
+                return Err(-107) // ENOTCONN
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// W3: one wait round for a blocking accept — sleeps on the listener's
+/// wait queue (woken by the RX path when a child establishes) until a
+/// connection is pending, the deadline expires, or a signal arrives.
+/// The caller re-checks tcp_accept() after every Ok(()).
+pub fn socket_accept_wait_round(socket: &Socket, deadline: Option<u64>) -> Result<(), i32> {
+    socket_wait_round(socket, WaitKind::Accept, deadline)
+}
+
+// ============================================================================
+// Socket File Operations
+// ============================================================================
+
+/// Safe-typed socket introspection for the syscall capsule layer
+/// (kernel): the socket type carried by an INET socket file.
+/// `None` for non-INET files (ops identity gate) and for files whose
+/// private_data was never installed.
+pub fn inet_socket_type(file: &File) -> Option<SocketType> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(
+        ops as *const _,
+        &SOCKET_OPS as *const _,
+    ) {
+        return None;
+    }
+    // SOCKET_OPS files carry an Arc<Socket> in private_data, installed
+    // at socket creation (socket_borrow's invariant).
+    socket_borrow(file, "inet_type").map(|s| s.sock_type)
+}
+
+/// r-p0 chase (bw_tcp stack-corruption hunt, 2026-11-19): validate the
+/// File's private_data before the raw Arc deref. The captured crash had
+/// socket == 0xffff8880fffffffe (heap_base - 2, a forged pointer) reach
+/// socket_wait_round's accept arm (mov 0x13c(%rbx) = tcp_fd read) —
+/// either a non-socket File dispatched through SOCKET_OPS, or
+/// private_data overwritten. A hit names the raw value, caller pid/comm,
+/// and file id; budgeted. Returns the validated pointer.
+/// Contract: returns a validated kernel-heap pointer naming the file's
+/// private_data Arc (or None, refused loudly on a forged value).
+fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
+    // SAFETY: private_data cell read; set at socket creation, cleared
+    // only by close (serialized with the ops dispatch by the fd table).
+    let raw = match unsafe { *file.private_data.get() } {
+        Some(p) => p as usize,
+        None => return None,
+    };
+    let (lo, _) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    // Valid kernel-heap pointer: at/after the buddy heap start, within
+    // the slab packing window (small_alloc::is_slab_ptr answers for
+    // slab objects; anything else must at least lie inside the buddy's
+    // own heap_end). The buddy's heap_end alone is too tight — Socket
+    // Arcs live on slab pages above it.
+    let (_, buddy_hi) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    let in_buddy = lo != 0 && raw >= lo && raw < buddy_hi;
+    let in_slab = lo != 0 && raw >= lo && crate::mm::small_alloc::is_slab_ptr(raw, lo);
+    if in_buddy || in_slab {
+        return Some(raw);
+    }
+    // Region-unclassified (e.g. magazine-owned slab pages live outside
+    // both bookkeeping windows): adjudicate by the Arc strong count at
+    // the allocation head — a live Arc<Socket> carries a small positive
+    // count; a forged pointer reads 0/huge/garbage.
+    if raw > 0x1000 {
+        // Arc layout: [strong:u64, weak:u64, data...] — into_raw hands
+        // out &data, so the counts live at raw-16/raw-8 (the first c3
+        // run read *raw = the Socket's first field, not the count).
+        // SAFETY: diagnostic reads of two u64s in the same allocation.
+        let strong = unsafe { core::ptr::read_volatile((raw - 16) as *const u64) };
+        let weak = unsafe { core::ptr::read_volatile((raw - 8) as *const u64) };
+        if (1..=(1 << 20)).contains(&strong) {
+            // Plausible live Arc — classify as valid, forensics only.
+            static MAG_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if MAG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
+                crate::pr_warn!(
+                    "SOCK-UNCLASS-PTR site={} raw={:#x} strong={} (magazine-class)",
+                    site,
+                    raw,
+                    strong,
+                );
+            }
+            return Some(raw);
+        }
+        // Forged/garbage: print with the evidence and REFUSE.
+        static BAD_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if BAD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+            let cur = crate::sched::current();
+            let (pid, comm) = match cur {
+                // current() returns the running task; comm reads its own
+                // fixed comm buffer (no unsafe deref needed).
+                Some(t) => {
+                    let cb = t.comm();
+                    let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                    (t.pid(), core::str::from_utf8(&cb[..cl]).unwrap_or("?"))
+                }
+                None => (0, "?"),
+            };
+            crate::pr_err!(
+                "SOCK-BAD-PTR site={} raw={:#x} strong={:#x} weak={:#x} heap=[{:#x},{:#x}) pid={} comm={} file_id={}",
+                site,
+                raw,
+                strong,
+                weak,
+                lo,
+                buddy_hi,
+                pid,
+                comm,
+                file.file_id,
+            );
+        }
+        return None;
+    }
+    None
+}
+
+/// Borrow the Socket behind a SOCKET_OPS file's private_data (the
+/// r-p0 validated deref). Contract: the cell holds an Arc<Socket> raw
+/// pointer installed at socket creation; the file's strong reference
+/// keeps it alive for the borrow; close() clears the cell under the fd
+/// table's dispatch serialization.
+fn socket_borrow(file: &File, site: &'static str) -> Option<&'static Socket> {
+    let ptr = checked_socket_ptr(file, site)?;
+    // SAFETY: validated in-kernel-heap pointer naming a live Arc<Socket>
+    // (strong ref held by private_data for the file's lifetime).
+    Some(unsafe { &*(ptr as *const Socket) })
+}
+
+fn socket_read(file: &File, buf: &mut [u8]) -> isize {
+    // r-p0 chase: validated deref (see socket_borrow).
+    let socket = match socket_borrow(file, "read") {
+        Some(s) => s,
+        None => return -9, // EBADF / forged pointer refused
+    };
+
+    // W3: O_NONBLOCK (fcntl F_SETFL / SOCK_NONBLOCK) differentiates EAGAIN
+    // from blocking; SO_RCVTIMEO bounds the wait. The socket used to be
+    // permanently non-blocking, so musl programs without retry loops
+    // read() EAGAIN forever.
+    let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
+    let deadline = socket.rcvtimeo_deadline();
+    match socket_recv_ctl(socket, buf, nonblock, deadline, false) {
+        Ok((len, _)) => len as isize,
+        Err(e) => e as isize,
+    }
+}
+
+/// W3: shared send engine — accepts as much as the window allows per call
+/// and (blocking mode) retries the remainder until the whole buffer is
+/// written, bounded by SO_SNDTIMEO. Returns bytes accepted.
+///
+/// MSG_MORE (`more == true`, send02): the payload is staged on the socket
+/// and NOT delivered — the call reports success for its own bytes while
+/// the peer sees nothing (recv EAGAIN). A later flagless call drains the
+/// staging, prefixes it to its own payload, delivers the concatenation
+/// as one datagram (UDP) / stream segment run (TCP), and still reports
+/// only its OWN byte count — the held bytes were already reported when
+/// they were staged (Linux cork accounting). Divergence, documented:
+/// Linux validates that a second sendto while corked names the SAME
+/// destination (ip_append_data cork check) — here the flush call's dest
+/// wins; nothing in the LTP list exercises a mixed-dest cork.
+pub fn socket_send_ctl(
+    socket: &Socket,
+    buf: &[u8],
+    dest: Option<(crate::net::ipv6::IpAddr, u16)>,
+    nonblock: bool,
+    deadline: Option<u64>,
+    more: bool,
+) -> Result<usize, i32> {
+    if more {
+        socket.more_append(buf);
+        return Ok(buf.len());
+    }
+    let held = socket.more_take();
+    if held.is_empty() {
+        return socket_send_flush(socket, buf, dest, nonblock, deadline);
+    }
+    let held_len = held.len();
+    let mut joined = held;
+    joined.extend_from_slice(buf);
+    match socket_send_flush(socket, &joined, dest, nonblock, deadline) {
+        // The whole concatenation went out; report only THIS call's
+        // bytes (the held prefix was reported at its own send()).
+        Ok(n) => Ok(n.saturating_sub(held_len)),
+        // A partial delivery of the joined buffer maps back the same way.
+        Err(e) => Err(e),
+    }
+}
+
+/// The pre-MSG_MORE engine body: window-bounded send loop with blocking
+/// retry (SO_SNDTIMEO) — byte counts here are of the buffer passed in.
+fn socket_send_flush(
+    socket: &Socket,
+    buf: &[u8],
+    dest: Option<(crate::net::ipv6::IpAddr, u16)>,
+    nonblock: bool,
+    deadline: Option<u64>,
+) -> Result<usize, i32> {
+    let mut sent = 0usize;
+    loop {
+        match socket.send(&buf[sent..], dest) {
+            Ok(n) => {
+                sent += n;
+                if sent >= buf.len() {
+                    return Ok(sent);
+                }
+                if nonblock {
+                    return Ok(sent); // partial write is POSIX-legal
+                }
+            }
+            Err(e) => {
+                // POSIX: an error after a partial write reports the partial count.
+                if sent > 0 {
+                    return Ok(sent);
+                }
+                if e != -11 {
+                    return Err(e);
+                }
+                // EAGAIN: connect() still in flight.
+                if nonblock {
+                    return Err(-11);
+                }
+            }
+        }
+        if let Err(e) = socket_wait_round(socket, WaitKind::Send, deadline) {
+            if sent > 0 {
+                return Ok(sent);
+            }
+            return Err(e);
+        }
+    }
+}
+
+fn socket_write(file: &File, buf: &[u8]) -> isize {
+    // r-p0 chase: validated deref (see socket_borrow).
+    let socket = match socket_borrow(file, "send") {
+        Some(s) => s,
+        None => return -9, // EBADF / forged pointer refused
+    };
+
+    // W3: blocking writes complete the whole buffer (retrying while the
+    // window limits each send() to a prefix), bounded by SO_SNDTIMEO /
+    // cut short by O_NONBLOCK (partial write is POSIX-legal).
+    let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
+    let deadline = socket.sndtimeo_deadline();
+    match socket_send_ctl(socket, buf, None, nonblock, deadline, false) {
+        Ok(n) => n as isize,
+        Err(e) => e as isize,
+    }
+}
+
+fn socket_close(file: &File) -> i32 {
+    // SAFETY: private_data was set during socket creation from Arc::into_raw.
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    // Reconstruct the Arc that was leaked via into_raw so it can be properly
+    // dropped.  This consumes the raw pointer, so we must clear private_data
+    // first to prevent a second reconstruction.
+    // SAFETY: ptr was created by Arc::into_raw(Arc::clone(&socket)) in
+    // sys_socket_create, so it is a valid Arc with a +1 strong count.
+    unsafe { *file.private_data.get() = None; }
+    let socket_arc = unsafe { Arc::from_raw(ptr as *const Socket) };
+
+    // MSG_MORE cork release (Linux inet_release/ip_cork_release): data
+    // held by send(MSG_MORE) is flushed, best-effort and nonblocking,
+    // before the teardown — dropping it silently would lose bytes the
+    // caller was told were accepted.
+    let held = socket_arc.more_take();
+    if !held.is_empty() {
+        let _ = socket_send_ctl(&socket_arc, &held, None, true, None, false);
+    }
+
+    socket_arc.close();
+
+    // Free from SOCKET_TABLE to drop the table's Arc.
+    // SAFETY: table_slot was set during sys_socket_create; SOCKET_TABLE is
+    // protected by Spinlock.
+    if let Some(idx) = *socket_arc.table_slot.lock() {
+        socket_table_lock().free(idx);
+    }
+
+    // socket_arc drops here, releasing the private_data reference.
+    0
+}
+
+fn socket_file_poll(file: &File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut ready = 0u16;
+
+    let socket = match socket_borrow(file, "poll") {
+        Some(s) => s,
+        None => return POLLERR,
+    };
+
+    if events & POLLIN != 0 {
+        // R34: irqsave — same recv_queue reentrancy discipline as recv()
+        // (enqueue_packet runs from the NetRx softirq).
+        let mut readable = !socket.recv_queue.lock_irqsave().is_empty();
+        // R42: a TCP LISTENER is readable when a child connection is
+        // established and not yet accepted — the handshake-complete wake
+        // already targets the parent's wait queue (tcp_write_out wakes
+        // w.parent), but the readiness re-check never asked the listener
+        // question, so a select()/poll() waiter on a listening socket
+        // (LTP recv01's server child) slept through pending connections.
+        if !readable && *socket.state.lock() == SocketState::Listening {
+            let tfd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if tfd >= 0 {
+                readable = crate::net::tcp::tcp_accept_pending(tfd);
+            }
+        }
+        // R22-4: TCP data lands in the protocol table's recv_buffer, not
+        // recv_queue — poll never reported readable and clients spun.
+        // R32-N6: take the table lock while peeking at the protocol slot —
+        // the NetRx softirq and the timer tick mutate recv_buffer/state
+        // under it, and this read raced both (leaf-scoped, nothing below
+        // re-enters tcp_rcv, same shape as Socket::send).
+        if !readable {
+            let tfd_v = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if tfd_v >= 0 { let tcp_fd = tfd_v;
+                let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+                // r-bwslow: a wrapper whose protocol slot is GONE (freed
+                // under it — the orphan timer's CLOSE_WAIT reap, a peer
+                // reset path) polls dead: POLLERR|POLLHUP plus readable,
+                // the reference's sk_err/dead-socket shape. Without this
+                // the freed-slot wake re-polls not-ready and the select
+                // sleeper loops forever (the bw_tcp client's face).
+                if crate::net::tcp::tcp_socket_get(tcp_fd).is_none() {
+                    ready |= 0x0001 /* POLLIN */ | 0x0008 /* POLLERR */
+                        | 0x0010 /* POLLHUP */;
+                    readable = true;
+                }
+                if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+                    readable = !ts.recv_buffer.is_empty();
+                    // LISTEN sockets are readable when a child connection
+                    // finished the handshake and waits for accept()
+                    // (Linux tcp_poll: POLLIN iff accept queue non-empty).
+                    // Without this, libuv (hdcd) polled its listener,
+                    // never saw it readable, never accept()ed — the host
+                    // hdc tconn handshake data sat in the child socket
+                    // until hdc timed out ("Connect failed"), though the
+                    // TCP handshake and data delivery both worked.
+                    // Inlined (not tcp_accept_pending): that helper takes
+                    // this very lock — nesting would deadlock.
+                    if !readable && ts.state == crate::net::tcp::TcpState::TCP_LISTEN {
+                        readable = crate::net::tcp::tcp_listen_has_pending_child(tcp_fd);
+                    }
+                    if !readable
+                        && (ts.state == crate::net::tcp::TcpState::TCP_CLOSE_WAIT
+                            || ts.state == crate::net::tcp::TcpState::TCP_CLOSE)
+                    {
+                        // peer finished: readable-as-EOF + HUP
+                        ready |= 0x0010 /* POLLHUP */;
+                        readable = true;
+                    }
+                }
+            }
+        }
+        // R24: R22-4's fix never covered UDP — datagrams also land in the
+        // protocol table (UdpSocket.recv_buffer), so UDP poll was always
+        // not-ready and poll-based readers spun or slept forever.
+        if !readable {
+            let ufd = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if ufd >= 0 {
+                readable = crate::net::udp::udp_poll_readable(ufd);
+            }
+        }
+        if readable {
+            ready |= POLLIN | POLLRDNORM;
+        }
+    }
+
+    if events & POLLOUT != 0 {
+        match socket.sock_type {
+            // UDP: always writable — reference datagram_poll reports
+            // POLLOUT unconditionally (a datagram send never blocks; a
+            // too-large one is an immediate EMSGSIZE). The old VFS-state
+            // gate never reported POLLOUT for an UNCONNECTED
+            // (sendto-style) UDP socket.
+            SocketType::Udp => ready |= POLLOUT | POLLWRNORM,
+            // TCP: ask the protocol slot, not the VFS state — a
+            // nonblocking connect's completion never transitions the VFS
+            // state out of Connecting (see Socket::send), so a socket
+            // whose slot is ESTABLISHED must already report writable.
+            // Terminal states stay writable so the pending error returns
+            // immediately instead of the poller sleeping forever.
+            SocketType::Tcp => {
+                let tfd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tfd < 0 || crate::net::tcp::tcp_send_ready(tfd) {
+                    ready |= POLLOUT | POLLWRNORM;
+                }
+            }
+        }
+    }
+
+    // shutdown(SHUT_RD/SHUT_RDWR) read-hangup (Linux sk_shutdown &
+    // RCV_SHUTDOWN → tcp_poll's EPOLLRDHUP). Maskable: reported only when
+    // the poll asked for POLLRDHUP (LTP epoll_wait05).
+    if events & POLLRDHUP != 0
+        && socket
+            .shut_rd
+            .load(core::sync::atomic::Ordering::Acquire)
+    {
+        ready |= POLLRDHUP;
+    }
+
+    ready
+}
+
+/// Socket file operations
+pub static SOCKET_OPS: FileOps = FileOps::builder()
+    .read(socket_read)
+    .write(socket_write)
+    .close(socket_close)
+    .poll(socket_file_poll)
+    .build();
+
+/// Pseudo-device id for sockfs-style stat identities (the pipe analog:
+/// PIPE_STAT_DEV). Sockets created by socket(2)/accept(2) have no VFS
+/// inode, so fstat(2) needs the anonymous-file branch of
+/// fs::vfs::file_stat to answer for them — Linux stats sockets on
+/// sockfs with mode S_IFSOCK|0777 and a distinct st_ino.
+pub const SOCK_STAT_DEV: u64 = 0x736f_636b_7300_0001;
+
+/// fstat(2) on an anonymous socket File: report S_IFSOCK.
+///
+/// Every socket family installs its File without an inode (unix,
+/// netlink, raw, and the AF_INET SOCKET_OPS here), so file_stat's
+/// no-inode branch dispatches here. Returning None lets non-socket
+/// Files fall through to the next helper.
+///
+/// Without this, fstat(socketfd) failed with EBADF — and sd-bus's
+/// sd_is_socket() probe (fstat + S_ISSOCK + SO_DOMAIN) then returned
+/// <= 0, so bus_socket_start_auth() cleared accept_fd BEFORE the auth
+/// write: the client never sent NEGOTIATE_UNIX_FD, the daemon never
+/// answered AGREE_UNIX_FD, can_fds stayed false, and EVERY fd-carrying
+/// sd-bus send returned -EOPNOTSUPP. On this image that killed gdm at
+/// the last seam: logind's CreateSession reply (session fifo fd) was
+/// refused silently from the JobRemoved match callback — pam timed
+/// out ("Connection timed out"), the fifo's only writer closed, and
+/// logind logged "Session c1 logged out" milliseconds after the
+/// create (gdmr64-r71, session-21 hunt).
+pub fn socket_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
+    let ops = file.get_ops()?;
+    let is_socket = core::ptr::eq(ops as *const _, &SOCKET_OPS as *const _)
+        || core::ptr::eq(
+            ops as *const _,
+            &crate::net::unix::UNIX_SOCKET_OPS as *const _,
+        )
+        || core::ptr::eq(
+            ops as *const _,
+            &crate::net::netlink::NETLINK_OPS as *const _,
+        )
+        || core::ptr::eq(ops as *const _, &crate::net::raw::RAW_OPS as *const _);
+    if !is_socket {
+        return None;
+    }
+    stat.st_dev = SOCK_STAT_DEV;
+    // Distinct identity per file description (Linux: one sockfs inode
+    // per socket); file_id is the kernel's unique description id.
+    stat.st_ino = file.file_id;
+    stat.st_nlink = 1;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = 0;
+    stat.st_size = 0;
+    stat.st_blocks = 0;
+    stat.st_blksize = 4096;
+    stat.set_socket();
+    stat.st_mode |= 0o777;
+    Some(0)
+}
+
+// ============================================================================
+// Poll-wait registration (P3: event-driven poll/select)
+// ============================================================================
+
+/// Recover the Arc<Socket> behind an AF_INET socket File.
+fn socket_of_file(file: &File) -> Option<Arc<Socket>> {
+    // SAFETY: the dispatcher identity-checked the File against SOCKET_OPS;
+    // private_data was installed by socket creation as Arc::into_raw and
+    // stays valid while the File exists. Clone without consuming.
+    let ptr = unsafe { *file.private_data.get() }?;
+    let arc = unsafe { Arc::from_raw(ptr as *const Socket) };
+    let cloned = Arc::clone(&arc);
+    core::mem::forget(arc);
+    Some(cloned)
+}
+
+/// Register `task` on the socket's wait queue. RX landing (wake_tcp_matches
+/// / wake_udp_matches / recv_queue enqueue) wakes this queue, so a poll/
+/// select waiter registered here is woken by packet arrival.
+pub fn socket_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+    match socket_of_file(file) {
+        Some(socket) => {
+            socket
+                .wait_queue
+                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Remove a registration added by socket_poll_wait.
+pub fn socket_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+    if let Some(socket) = socket_of_file(file) {
+        socket.wait_queue.remove(task);
+    }
+}
+
+// ============================================================================
+// Socket Creation and Management
+// ============================================================================
+
+/// Global socket table
+struct SocketTable {
+    sockets: alloc::vec::Vec<Option<Arc<Socket>>>,
+}
+
+impl SocketTable {
+    const fn new() -> Self {
+        Self {
+            sockets: alloc::vec::Vec::new(),
+        }
+    }
+
+    fn alloc(&mut self, socket: Arc<Socket>) -> Result<usize, ()> {
+        for (i, slot) in self.sockets.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(socket);
+                return Ok(i);
+            }
+        }
+
+        let fd = self.sockets.len();
+        self.sockets.push(Some(socket));
+        Ok(fd)
+    }
+
+    fn get(&self, fd: usize) -> Option<Arc<Socket>> {
+        self.sockets.get(fd)?.clone()
+    }
+
+    fn free(&mut self, fd: usize) {
+        if fd < self.sockets.len() {
+            self.sockets[fd] = None;
+        }
+    }
+
+    /// W3: wake every VFS socket wrapping the given TCP protocol slot
+    /// (data landed / connection established or aborted).
+    fn wake_tcp_matches(&self, tcp_fd: i32) {
+        for slot in self.sockets.iter() {
+            if let Some(s) = slot {
+                if s.tcp_fd.load(core::sync::atomic::Ordering::Acquire) == tcp_fd {
+                    s.wait_queue.wake_up_all();
+                    // EPOLLET lost-edge fix: the rise must also re-arm
+                    // edge-triggered epoll interests and wake epoll
+                    // sleepers (reference: ep_poll_callback rides every
+                    // sk wake). See the file_id field note.
+                    let fid = s.file_id.load(core::sync::atomic::Ordering::Acquire);
+                    if fid != 0 {
+                        crate::syscall::misc::epoll_notify_file(fid);
+                    }
+                }
+            }
+        }
+    }
+
+    /// W3: wake every VFS socket wrapping the given UDP protocol slot.
+    fn wake_udp_matches(&self, udp_fd: i32) {
+        let mut matched = 0u32;
+        for slot in self.sockets.iter() {
+            if let Some(s) = slot {
+                if s.udp_fd.load(core::sync::atomic::Ordering::Acquire) == udp_fd {
+                    matched += 1;
+                    // net:udp_wake (r13 lat_udp strand hunt): matched =
+                    // how many VFS sockets wrap this protocol slot (0 =
+                    // the wake call found no queue to touch); sleepers =
+                    // the queue's lock-free waiters counter read just
+                    // before the walk (0 = the empty fast path returns
+                    // without waking anything); woken = wake_up_all's
+                    // own count of tasks it transitioned.
+                    let sleepers =
+                        s.wait_queue.has_sleepers() as u32;
+                    let woken = s.wait_queue.wake_up_all();
+                    let fid = s.file_id.load(core::sync::atomic::Ordering::Acquire);
+                    if fid != 0 {
+                        crate::syscall::misc::epoll_notify_file(fid);
+                    }
+                    crate::trace::trace_net_udp_wake(
+                        udp_fd,
+                        matched,
+                        sleepers,
+                        woken as u32,
+                    );
+                }
+            }
+        }
+    }
+
+    /// W3: wake all TCP-socket waiters (coarse — used by the timer tick,
+    /// whose state transitions span arbitrary slots; waiters re-check).
+    fn wake_all_tcp(&self) {
+        for slot in self.sockets.iter() {
+            if let Some(s) = slot {
+                if s.sock_type == SocketType::Tcp {
+                    s.wait_queue.wake_up_all();
+                }
+            }
+        }
+    }
+}
+
+static mut SOCKET_TABLE: Spinlock<SocketTable> = Spinlock::new(SocketTable::new());
+
+/// Allocate a slot in the global socket table (one consolidated
+/// static-mut access; the Spinlock serializes all users, irqsave for
+/// the NetRx softirq's wake hooks).
+fn socket_table_alloc(socket: Arc<Socket>) -> Result<usize, ()> {
+    // SAFETY: static-mut access under the table Spinlock.
+    unsafe { SOCKET_TABLE.lock_irqsave().alloc(socket) }
+}
+
+/// Lock the global socket table for a caller-provided critical section.
+pub fn socket_table_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, SocketTable> {
+    // SAFETY: static-mut access; the Spinlock serializes all users.
+    unsafe { SOCKET_TABLE.lock_irqsave() }
+}
+
+// W3 wake hooks — called by the protocol layers (tcp_rcv / udp_rcv /
+// tcp_v4_err / the TCP timer tick) AFTER releasing their table locks.
+// irqsave: the NetRx softirq invokes these at irq_exit (R34 discipline).
+
+/// Wake the wait queue of every VFS socket bound to TCP protocol slot `tcp_fd`.
+pub fn wake_tcp_socket(tcp_fd: i32) {
+    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
+    unsafe { SOCKET_TABLE.lock_irqsave().wake_tcp_matches(tcp_fd) }
+}
+
+/// Wake the wait queue of every VFS socket bound to UDP protocol slot `udp_fd`.
+pub fn wake_udp_socket(udp_fd: i32) {
+    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
+    unsafe { SOCKET_TABLE.lock_irqsave().wake_udp_matches(udp_fd) }
+}
+
+/// Wake every TCP socket's wait queue (timer-tick state transitions).
+pub fn wake_all_tcp_sockets() {
+    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
+    unsafe { SOCKET_TABLE.lock_irqsave().wake_all_tcp() }
+}
+
+/// Create socket and return file descriptor
+pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize, i32> {
+    // P0-1/P0-2: AF_UNIX and AF_NETLINK live in their own modules with
+    // their own file ops (identity-checked in *_socket_from_fd).
+    if domain == crate::net::unix::AF_UNIX {
+        return crate::net::unix::unix_socket_create(type_, protocol);
+    }
+    if domain == crate::net::netlink::AF_NETLINK {
+        return crate::net::netlink::netlink_socket_create(type_, protocol);
+    }
+    // P0-2: AF_PACKET (cooked packet sockets — busybox udhcpc) and
+    // AF_INET SOCK_RAW (ICMP ping / ioctl carrier).
+    if domain == crate::net::raw::AF_PACKET {
+        return crate::net::raw::packet_socket_create(type_, protocol);
+    }
+    if domain == AF_INET && type_ & SOCK_TYPE_MASK == crate::net::raw::SOCK_RAW {
+        return crate::net::raw::raw_socket_create(type_, protocol);
+    }
+    // P1 IPv6: AF_INET6 sockets share the TCP/UDP protocol tables; the
+    // family only shapes the sockaddr conversions at this layer (a
+    // v4-mapped peer address normalizes to the v4 fast path).
+    if domain != AF_INET && domain != AF_INET6 {
+        return Err(-97); // EAFNOSUPPORT
+    }
+
+    // W3 (ABI): Linux masks the type with SOCK_TYPE_MASK (0xF) and treats
+    // SOCK_NONBLOCK (0x800) / SOCK_CLOEXEC (0x80000) as flag bits. musl
+    // passes them through raw, so the old exact match rejected
+    // `SOCK_STREAM | SOCK_NONBLOCK` with ESOCKTNOSUPPORT.
+    const KNOWN_TYPE_FLAGS: i32 = SOCK_NONBLOCK_FLAG | SOCK_CLOEXEC_FLAG;
+    if type_ & !(SOCK_TYPE_MASK | KNOWN_TYPE_FLAGS) != 0 {
+        return Err(-22); // EINVAL — unknown type bits
+    }
+    let nonblock = (type_ & SOCK_NONBLOCK_FLAG) != 0;
+    let cloexec = (type_ & SOCK_CLOEXEC_FLAG) != 0;
+
+    // Linux inet_create: protocol outside [0, IPPROTO_MAX) is EINVAL; a
+    // valid number that does not match the socket TYPE is EPROTONOSUPPORT
+    // (LTP socket01: SOCK_STREAM+IPPROTO_UDP, SOCK_DGRAM+IPPROTO_TCP,
+    // SOCK_STREAM+IPPROTO_ICMP all expect EPROTONOSUPPORT, not EINVAL).
+    if protocol < 0 || protocol >= 256 {
+        return Err(-22); // EINVAL — protocol number out of range
+    }
+    let sock_type = match type_ & SOCK_TYPE_MASK {
+        SOCK_STREAM => {
+            if protocol != 0 && protocol != IPPROTO_TCP {
+                return Err(-93); // EPROTONOSUPPORT
+            }
+            SocketType::Tcp
+        }
+        SOCK_DGRAM => {
+            if protocol != 0 && protocol != IPPROTO_UDP {
+                return Err(-93); // EPROTONOSUPPORT
+            }
+            SocketType::Udp
+        }
+        _ => return Err(-94), // ESOCKTNOSUPPORT
+    };
+
+    let proto_fd = match sock_type {
+        SocketType::Tcp => crate::net::tcp::tcp_socket_alloc()?,
+        SocketType::Udp => crate::net::udp::udp_socket_alloc()?,
+    };
+
+    let socket = Arc::new(Socket::new_family(sock_type, domain));
+    match sock_type {
+        SocketType::Tcp => socket.tcp_fd.store(proto_fd, core::sync::atomic::Ordering::Release),
+        SocketType::Udp => socket.udp_fd.store(proto_fd, core::sync::atomic::Ordering::Release),
+    }
+
+    // W3: SOCK_NONBLOCK becomes the file's O_NONBLOCK (fcntl F_SETFL and
+    // the read/write paths observe it).
+    let flags = FileFlags::O_RDWR | if nonblock { FileFlags::O_NONBLOCK } else { 0 };
+    let file = Arc::new(File::new(FileFlags::new(flags)));
+    file.set_ops(&SOCKET_OPS);
+    // Clone Arc and convert to raw pointer to keep the Socket alive
+    // independently of the socket table entry.
+    file.set_private_data(Arc::into_raw(Arc::clone(&socket)) as *mut u8);
+    // Bind the File's generation id for the RX-rise epoll notify (the
+    // EPOLLET lost-edge family — see the file_id field note).
+    socket
+        .file_id
+        .store(file.file_id, core::sync::atomic::Ordering::Release);
+
+    // R14-14 (MED-10): unwind the proto slot and the raw Arc reference on
+    // fdtable failures — each error exit used to leak BOTH permanently.
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(t) => t,
+        None => {
+            unwind_socket_creation(&file, sock_type, proto_fd);
+            return Err(-9); // EBADF
+        }
+    };
+    let fd = match fdtable.alloc_fd() {
+        Some(f) => f,
+        None => {
+            unwind_socket_creation(&file, sock_type, proto_fd);
+            return Err(-24); // EMFILE
+        }
+    };
+    if fdtable.install_fd(fd, file.clone()).is_err() {
+        unwind_socket_creation(&file, sock_type, proto_fd);
+        return Err(-24);
+    }
+
+    // W3: SOCK_CLOEXEC → FD_CLOEXEC on the descriptor.
+    if cloexec {
+        fdtable.set_fd_cloexec(fd, true);
+    }
+
+    // SOCKET_TABLE is a global protected by Spinlock (irqsave: mutated
+    // paths also run from the NetRx softirq's wake hooks).
+    let slot = socket_table_alloc(socket.clone());
+    if let Ok(idx) = slot {
+        *socket.table_slot.lock() = Some(idx);
+    }
+
+    Ok(fd)
+}
+
+/// R14-14: unwind a failed socket creation — free the protocol slot and
+/// the raw Arc<Socket> reference stashed in the (soon-dropped) File.
+fn unwind_socket_creation(file: &Arc<File>, sock_type: SocketType, proto_fd: i32) {
+    match sock_type {
+        SocketType::Tcp => crate::net::tcp::tcp_socket_free(proto_fd),
+        SocketType::Udp => crate::net::udp::udp_socket_free(proto_fd),
+    }
+    // SAFETY: the Option<*mut u8> in private_data came from Arc::into_raw
+    // above; we are the sole owner (the File is about to drop, no ops ran).
+    let ptr = unsafe { *file.private_data.get() };
+    if let Some(ptr) = ptr {
+        unsafe { drop(Arc::from_raw(ptr as *const Socket)); }
+    }
+}
+
+/// Get socket from file descriptor
+pub fn get_socket(fd: usize) -> Option<Arc<Socket>> {
+    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
+    // irqsave: shared with the NetRx-softirq wake hooks (R34 discipline).
+    unsafe { SOCKET_TABLE.lock_irqsave().get(fd) }
+}
+
+/// Create a process fd for an accepted TCP connection.
+///
+/// `tcp_fd` is the protocol-table index returned by tcp_accept(); the
+/// connection already lives in that slot — this only wraps it into a
+/// Socket + File + process fd (review NET-C4: the old path returned a
+/// protocol index to userspace as if it were an fd).
+///
+/// W3: `flags` carries accept4()'s SOCK_CLOEXEC / SOCK_NONBLOCK.
+pub fn socket_create_accepted(tcp_fd: i32, flags: i32) -> Result<usize, i32> {
+    // P1 IPv6: family mirrors the protocol slot (children spawned by a v6
+    // listener carry is_v6).
+    let mut family = AF_INET;
+    {
+        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+        if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+            if ts.is_v6 {
+                family = AF_INET6;
+            }
+        }
+    }
+
+    let socket = Arc::new(Socket::new_family(SocketType::Tcp, family));
+    socket.tcp_fd.store(tcp_fd, core::sync::atomic::Ordering::Release);
+    // R21-N4: pin the protocol slot against timer-side reaping, and copy
+    // the endpoint fields — R24: both under TCP_TABLE_LOCK and revalidated,
+    // closing the window where tcp_accept returned an index, the peer then
+    // RST'd, and the timer freed the slot (user_refs still 0) before we
+    // pinned it — the fd would wrap a freed/reused protocol slot.
+    {
+        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+        match crate::net::tcp::tcp_socket_get(tcp_fd) {
+            Some(ts) if ts.state != crate::net::tcp::TcpState::TCP_CLOSE => {
+                ts.user_refs.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                // Copy the connection's local/remote endpoints for
+                // getsockname/peername (P1: both families).
+                *socket.local_port.lock() = ts.local_port;
+                *socket.local_addr.lock() = ts.local_ip;
+                *socket.local_addr6.lock() = ts.local_ip6;
+                *socket.remote_port.lock() = ts.remote_port;
+                *socket.remote_addr.lock() = ts.remote_ip;
+                *socket.remote_addr6.lock() = ts.remote_ip6;
+            }
+            // Connection died (RST / timeout) between accept and pinning —
+            // abort instead of wrapping a doomed/freed slot.
+            _ => return Err(-103), // ECONNABORTED
+        }
+    }
+    *socket.state.lock() = SocketState::Connected;
+
+    // W3: accept4 flags — SOCK_NONBLOCK → file O_NONBLOCK,
+    // SOCK_CLOEXEC → per-fd FD_CLOEXEC.
+    let nonblock = (flags & SOCK_NONBLOCK_FLAG) != 0;
+    let cloexec = (flags & SOCK_CLOEXEC_FLAG) != 0;
+    let flags_bits = FileFlags::O_RDWR | if nonblock { FileFlags::O_NONBLOCK } else { 0 };
+    let file = Arc::new(File::new(FileFlags::new(flags_bits)));
+    file.set_ops(&SOCKET_OPS);
+    file.set_private_data(Arc::into_raw(Arc::clone(&socket)) as *mut u8);
+    // Bind the File's generation id for the RX-rise epoll notify (the
+    // EPOLLET lost-edge family — see the file_id field note).
+    socket
+        .file_id
+        .store(file.file_id, core::sync::atomic::Ordering::Release);
+
+    // R22-5: unwind on fdtable failures — the raw Arc + the protocol-
+    // slot pin (R21-N4) leak on every error exit otherwise.
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(t) => t,
+        None => {
+            unwind_accepted(&file, tcp_fd);
+            return Err(-9);
+        }
+    };
+    let fd = match fdtable.alloc_fd() {
+        Some(f) => f,
+        None => {
+            unwind_accepted(&file, tcp_fd);
+            return Err(-24);
+        }
+    };
+    if fdtable.install_fd(fd, file.clone()).is_err() {
+        unwind_accepted(&file, tcp_fd);
+        return Err(-24);
+    }
+    if cloexec {
+        fdtable.set_fd_cloexec(fd, true);
+    }
+
+    // SOCKET_TABLE is a global protected by Spinlock (irqsave: mutated
+    // paths also run from the NetRx softirq's wake hooks).
+    let slot = socket_table_alloc(socket.clone());
+    if let Ok(idx) = slot {
+        *socket.table_slot.lock() = Some(idx);
+    }
+
+    Ok(fd)
+}
+
+/// R22-5: release the raw Arc<Socket> reference and drop the protocol
+/// slot's user pin on a failed accepted-socket fd install.
+fn unwind_accepted(file: &Arc<File>, tcp_fd: i32) {
+    // R32-N6: serialize against the timer sweep / tcp_rcv (same discipline
+    // as Socket::close — leaf-scoped, no RX re-entry below).
+    // tcp_socket_free takes the lock itself, so the free happens after the
+    // guard drops (same shape as Socket::close).
+    let free_now = {
+        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+        match crate::net::tcp::tcp_socket_get(tcp_fd) {
+            Some(ts) => {
+                let prev = ts.user_refs.swap(0, core::sync::atomic::Ordering::AcqRel);
+                prev <= 1
+            }
+            None => false,
+        }
+    };
+    if free_now {
+        crate::net::tcp::tcp_socket_free(tcp_fd);
+    }
+    let ptr = unsafe { *file.private_data.get() };
+    if let Some(ptr) = ptr {
+        unsafe { drop(Arc::from_raw(ptr as *const Socket)); }
+    }
+}
+
+/// Get socket from file descriptor (via File private_data)
+pub fn get_socket_from_fd(fd: usize) -> Option<Arc<Socket>> {
+    let fdtable = crate::sched::get_current_fdtable()?;
+    let file = fdtable.get_file(fd)?;
+    socket_of_arc(&file)
+}
+
+/// Leg-52 lever A: fd resolved once by the classification ladder head;
+/// see unix_file_of_file for the amplification note.
+pub fn socket_of_arc(file: &Arc<File>) -> Option<Arc<Socket>> {
+    // W3: verify the file actually IS a socket. private_data holds
+    // arbitrary per-file-type pointers (pipes, devices, ...), and the old
+    // code blindly cast them to Socket — type confusion for every network
+    // syscall invoked with a non-socket fd (getsockname then reported
+    // fake success on e.g. a pipe; getpeername accidentally returned
+    // ENOTSOCK only because of its state check).
+    {
+        // get_ops is the typed ops-cell read (fs::file).
+        match file.get_ops() {
+            Some(ops) if core::ptr::eq(ops, &SOCKET_OPS) => {}
+            _ => return None,
+        }
+    }
+
+    // SAFETY: private_data was set during socket creation from
+    // Arc::as_ptr(&socket). The Arc is owned by SOCKET_TABLE (one strong
+    // count). We increment the strong count so the returned Arc is an independent
+    // reference.
+    let ptr = unsafe { *file.private_data.get() }?;
+    let socket_ptr = ptr as *const Socket;
+    unsafe {
+        Arc::increment_strong_count(socket_ptr);
+        Some(Arc::from_raw(socket_ptr))
+    }
+}
+
+/// Resolve a process fd to its TCP protocol-table index.
+/// The syscall layer must NEVER pass a process fd directly to
+/// tcp_socket_get()/udp_socket_get() — those index global protocol tables
+/// whose slots have no relation to per-process fd numbers (review NET-C3).
+pub fn tcp_proto_fd(fd: usize) -> Option<i32> {
+    let socket = get_socket_from_fd(fd)?;
+    if socket.sock_type != SocketType::Tcp {
+        return None;
+    }
+    let proto = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if proto >= 0 { Some(proto) } else { None }
+}
+
+/// Resolve a process fd to its UDP protocol-table index.
+pub fn udp_proto_fd(fd: usize) -> Option<i32> {
+    let socket = get_socket_from_fd(fd)?;
+    if socket.sock_type != SocketType::Udp {
+        return None;
+    }
+    let proto = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if proto >= 0 { Some(proto) } else { None }
+}
+
+/// P2 SO_LINGER: block until the TCP slot's send path drains (send_buffer +
+/// retrans_queue empty, or the connection died) or `secs` elapse. Uses the
+/// nanosleep timer-wakeup discipline (one-shot timer + INTERRUPTIBLE sleep
+/// + re-check) so the deadline is guaranteed even without peer ACKs.
+fn linger_drain_wait(tcp_fd: i32, secs: u32) {
+    use crate::drivers::timer;
+
+    fn drained(tcp_fd: i32) -> bool {
+        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+        match crate::net::tcp::tcp_socket_get(tcp_fd) {
+            Some(s) => {
+                // All OUR data flushed and ACKed (retrans queue empty), or
+                // the connection is dead — FIN_WAIT2 with empty queues
+                // counts: the peer just hasn't double-FINed yet.
+                (s.send_buffer.is_empty() && s.retrans_queue.is_empty())
+                    || s.state == crate::net::tcp::TcpState::TCP_CLOSE
+            }
+            None => true, // slot gone — nothing to wait for
+        }
+    }
+
+    let target = timer::get_jiffies() + timer::msecs_to_jiffies(secs as u64 * 1000);
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut crate::process::task::Task,
+        None => return, // no task context: cannot sleep
+    };
+    // SAFETY: current is the running task's pointer (we are it).
+    let pid = unsafe { (*current).pid() };
+    let timer_id = crate::timer::add_timer_wakeup(target, pid);
+
+    loop {
+        if drained(tcp_fd) || timer::get_jiffies() >= target {
+            crate::timer::del_timer(timer_id);
+            return;
+        }
+        // SAFETY: current is the running task's pointer (see above).
+        unsafe {
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE,
+            ));
+        }
+        if drained(tcp_fd) || timer::get_jiffies() >= target {
+            // SAFETY: see above.
+            unsafe { crate::sched::dequeue_task(&*current); }
+            crate::timer::del_timer(timer_id);
+            return;
+        }
+        // R54: re-arm IRQs so the timer tick reaches this CPU.
+        crate::arch::cpu::restore_irq(true);
+        crate::sched::schedule();
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+

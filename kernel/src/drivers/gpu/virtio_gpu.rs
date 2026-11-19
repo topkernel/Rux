@@ -1,0 +1,963 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! VirtIO-GPU device driver
+//!
+//! Implements VirtIO-GPU PCI device initialization and framebuffer management
+
+use crate::println;
+use crate::drivers::pci::{self, virtio_device};
+use crate::drivers::virtio::virtio_pci::{VirtIOPCI, status};
+use crate::drivers::virtio::queue::VirtQueue;
+use crate::drivers::virtio::offset;
+use super::framebuffer::{FrameBuffer, FrameBufferInfo};
+use super::virtio_cmd::cmd;
+use alloc::alloc::{alloc, alloc_zeroed, dealloc, Layout};
+use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{fence, Ordering};
+
+/// VirtIO-GPU vendor ID (Red Hat)
+const VIRTIO_GPU_PCI_VENDOR: u16 = 0x1AF4;
+
+/// VirtIO queue indices
+const CTRL_QUEUE: u16 = 0;   // Control queue
+const CURSOR_QUEUE: u16 = 1; // Cursor queue
+
+/// VirtIO-GPU device
+pub struct VirtioGpuDevice {
+    /// VirtIO PCI device
+    pci: VirtIOPCI,
+    /// Control queue
+    ctrl_queue: Option<VirtQueue>,
+    /// Serializes control-queue descriptor/ring mutation.
+    ///
+    /// send_command hardcodes descriptors 0/1 and bumps the avail index
+    /// in place, so two concurrent submissions would overwrite each
+    /// other's descriptors mid-flight. Today the only externally reachable
+    /// path (flush_framebuffer) happens to serialize through the
+    /// GPU_DEVICE spinlock, but that invariant lives in another module —
+    /// this lock makes it local and future-proof (review RACE:
+    /// "virtio-gpu desc 无锁").
+    cmd_lock: crate::sync::spinlock::Spinlock<()>,
+    /// Framebuffer information
+    fb_info: Option<FrameBufferInfo>,
+    /// Framebuffer pointer
+    fb_ptr: *mut u8,
+    /// Framebuffer layout
+    fb_layout: Option<Layout>,
+    /// Resource ID
+    resource_id: u32,
+    /// Display rectangle
+    display_rect: Rect,
+}
+
+/// VirtIO-GPU command header (24 bytes)
+#[repr(C)]
+struct GpuCtrlHeader {
+    hdr_type: u32,
+    flags: u32,
+    fence_id: u64,
+    ctx_id: u32,
+    padding: u32,
+}
+
+/// Rectangle structure (16 bytes)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct Rect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+/// Single display output configuration (24 bytes)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct DisplayPmode {
+    rect: Rect,
+    enabled: u32,
+    flags: u32,
+}
+
+/// GET_DISPLAY_INFO response
+/// VirtIO 1.0 specification: header + 16 pmode entries (no num_scanouts)
+#[repr(C)]
+struct RespDisplayInfo {
+    header: GpuCtrlHeader,
+    pmodes: [DisplayPmode; 16],
+}
+
+/// RESOURCE_CREATE_2D command (32 bytes)
+#[repr(C)]
+struct CmdResourceCreate2d {
+    header: GpuCtrlHeader,
+    resource_id: u32,
+    format: u32,
+    width: u32,
+    height: u32,
+}
+
+/// SET_SCANOUT command (48 bytes)
+/// VirtIO 1.2 specification: header(24) + rect(16) + scanout_id(4) + resource_id(4)
+#[repr(C)]
+struct CmdSetScanout {
+    header: GpuCtrlHeader,
+    rect: Rect,
+    scanout_id: u32,
+    resource_id: u32,
+}
+
+/// Memory entry (16 bytes)
+#[repr(C)]
+struct MemEntry {
+    addr: u64,
+    length: u32,
+    padding: u32,
+}
+
+/// RESOURCE_ATTACH_BACKING command (48 bytes)
+#[repr(C)]
+struct CmdResourceAttachBacking {
+    header: GpuCtrlHeader,
+    resource_id: u32,
+    nr_entries: u32,
+    entry: MemEntry,
+}
+
+/// RESOURCE_FLUSH command (48 bytes)
+#[repr(C)]
+struct CmdResourceFlush {
+    header: GpuCtrlHeader,
+    rect: Rect,           // rect BEFORE resource_id!
+    resource_id: u32,
+    padding: u32,
+}
+
+/// TRANSFER_TO_HOST_2D command (56 bytes)
+/// VirtIO 1.2 specification: header(24) + rect(16) + offset(8) + resource_id(4) + padding(4)
+#[repr(C)]
+struct CmdTransferToHost2d {
+    header: GpuCtrlHeader,
+    rect: Rect,
+    offset: u64,
+    resource_id: u32,
+    padding: u32,
+}
+
+/// Generic response (24 bytes)
+#[repr(C)]
+struct RespNoData {
+    header: GpuCtrlHeader,
+}
+
+unsafe impl Send for VirtioGpuDevice {}
+unsafe impl Sync for VirtioGpuDevice {}
+
+impl VirtioGpuDevice {
+    /// Create a new VirtIO-GPU device
+    pub fn new(pci: VirtIOPCI) -> Option<Self> {
+        let mut device = Self {
+            pci,
+            ctrl_queue: None,
+            cmd_lock: crate::sync::spinlock::Spinlock::new(()),
+            fb_info: None,
+            fb_ptr: core::ptr::null_mut(),
+            fb_layout: None,
+            resource_id: 1,
+            display_rect: Rect::default(),
+        };
+
+        // Initialize VirtIO device
+        device.init_virtio()?;
+
+        Some(device)
+    }
+
+    /// Initialize VirtIO device
+    fn init_virtio(&mut self) -> Option<()> {
+        let common_cfg = self.pci.common_cfg_bar + self.pci.common_cfg_offset as u64;
+        let isr_base = self.pci.isr_cfg_bar + self.pci.isr_cfg_offset as u64;
+
+        // Step 1: Reset device
+        unsafe {
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, 0);
+        }
+        fence(Ordering::SeqCst);
+
+        // Step 2: Set ACKNOWLEDGE
+        unsafe {
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, status::ACKNOWLEDGE as u8);
+        }
+        fence(Ordering::SeqCst);
+
+        // Step 3: Set DRIVER
+        unsafe {
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
+                (status::ACKNOWLEDGE | status::DRIVER) as u8);
+        }
+        fence(Ordering::SeqCst);
+
+        // Step 4: Read device features
+        let device_features_low = unsafe {
+            write_volatile((common_cfg + offset::DEVICE_FEATURE_SELECT as u64) as *mut u32, 0);
+            fence(Ordering::SeqCst);
+            read_volatile((common_cfg + offset::DEVICE_FEATURES as u64) as *const u32)
+        };
+        let device_features_high = unsafe {
+            write_volatile((common_cfg + offset::DEVICE_FEATURE_SELECT as u64) as *mut u32, 1);
+            fence(Ordering::SeqCst);
+            read_volatile((common_cfg + offset::DEVICE_FEATURES as u64) as *const u32)
+        };
+        let _ = (device_features_low, device_features_high); // suppress unused warning
+
+        // Step 5: Write driver features
+        // VIRTIO_F_VERSION_1 (bit 32) must be negotiated, but it's in the second feature word
+        // First word (feature_select = 0): no special features needed
+        // Second word (feature_select = 1): VIRTIO_F_VERSION_1 = bit 0
+
+        // Write first feature word (no GPU special features needed)
+        unsafe {
+            write_volatile((common_cfg + offset::DRIVER_FEATURE_SELECT as u64) as *mut u32, 0);
+            fence(Ordering::SeqCst);
+            write_volatile((common_cfg + offset::DRIVER_FEATURES as u64) as *mut u32, 0);
+        }
+        fence(Ordering::SeqCst);
+
+        // Write second feature word (VIRTIO_F_VERSION_1 = bit 0 of word 1)
+        unsafe {
+            write_volatile((common_cfg + offset::DRIVER_FEATURE_SELECT as u64) as *mut u32, 1);
+            fence(Ordering::SeqCst);
+            write_volatile((common_cfg + offset::DRIVER_FEATURES as u64) as *mut u32, 1); // bit 0 = VIRTIO_F_VERSION_1
+        }
+        fence(Ordering::SeqCst);
+
+        // Step 6: Set FEATURES_OK
+        unsafe {
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
+                (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK) as u8);
+        }
+        fence(Ordering::SeqCst);
+
+        // Step 7: Verify FEATURES_OK
+        let status_val = unsafe { read_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *const u8) };
+        if (status_val & status::FEATURES_OK as u8) == 0 {
+            return None;
+        }
+
+        // The device's queue count tells us whether an INPUT (events)
+        // queue exists at all — the virtio-gpu spec puts absolute pointer
+        // events on queue 2, and a driver that never services that queue
+        // silently drops every gesture.
+        unsafe {
+            let qnum = read_volatile(
+                (common_cfg + offset::COMMON_CFG_QUEUE_NUM as u64) as *const u16
+            );
+            crate::pr_debug!("virtio-gpu: device queue count = {}", qnum);
+        }
+
+        // Step 8: Initialize control queue
+        unsafe {
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16, CTRL_QUEUE);
+        }
+        fence(Ordering::SeqCst);
+
+        let queue_size = unsafe { read_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16) };
+
+        if queue_size == 0 {
+            return None;
+        }
+
+        // Notify address per VirtIO 1.0 spec 4.1.4.4:
+        //   notify_cap.bar_base + notify_cap.offset
+        //                 + queue_notify_off * notify_off_multiplier
+        // read through get_notify_addr (it selects the queue and reads the
+        // queue's own queue_notify_off register). The old inline
+        // `queue_index * multiplier * 2` used the queue INDEX instead of
+        // queue_notify_off AND scaled the multiplier — which is already in
+        // bytes — a second time (the same "notify ×2" review BUG fixed in
+        // VirtIOPCI::get_notify_addr). It only worked because QEMU sets
+        // multiplier = 0; any device with a real multiplier hit the wrong
+        // doorbell.
+        let queue = VirtQueue::new(
+            queue_size,
+            CTRL_QUEUE,
+            self.pci.get_notify_addr(CTRL_QUEUE),
+            isr_base,
+            isr_base + 4,
+        )?;
+
+        // Convert virtual addresses to physical addresses (typed
+        // getters; no raw field access anymore).
+        let desc_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(queue.get_desc_addr())
+        ).0;
+        let avail_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(queue.get_avail_addr())
+        ).0;
+        let used_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(queue.get_used_addr())
+        ).0;
+
+        unsafe {
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32, desc_phys as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32, (desc_phys >> 32) as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_LO as u64) as *mut u32, avail_phys as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32, (avail_phys >> 32) as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_LO as u64) as *mut u32, used_phys as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32, (used_phys >> 32) as u32);
+        }
+        fence(Ordering::SeqCst);
+
+        unsafe {
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_ENABLE as u64) as *mut u16, 1);
+        }
+        fence(Ordering::SeqCst);
+
+        self.ctrl_queue = Some(queue);
+
+        // Step 9: Set DRIVER_OK
+        unsafe {
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
+                (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK) as u8);
+        }
+        fence(Ordering::SeqCst);
+
+        Some(())
+    }
+
+    /// Initialize framebuffer and send GPU commands
+    pub fn init_framebuffer(&mut self) -> Option<&FrameBufferInfo> {
+        // Step 1: Get display info
+        let display_info = self.get_display_info()?;
+
+        // Use first pmode (scanout 0)
+        let pmode0 = &display_info.pmodes[0];
+
+        // Even if enabled is 0, try to use this display configuration
+        // Some QEMU versions may return enabled=0 but still support scanout
+        self.display_rect = pmode0.rect;
+
+        let width = pmode0.rect.width;
+        let height = pmode0.rect.height;
+
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        let stride = width * 4;
+        let fb_size = (stride * height) as usize;
+
+        // Step 2: Allocate framebuffer
+        let layout = Layout::from_size_align(fb_size, 4096).ok()?;
+        let fb_ptr = unsafe { alloc_zeroed(layout) };
+
+        if fb_ptr.is_null() {
+            return None;
+        }
+
+        self.fb_ptr = fb_ptr;
+        self.fb_layout = Some(layout);
+
+        // Step 3: Create 2D resource
+        self.create_resource_2d(width, height)?;
+
+        // Step 4: Attach backing storage (use physical address)
+        let fb_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(fb_ptr as u64)
+        ).0;
+
+        self.attach_backing(fb_phys, fb_size as u32)?;
+
+        // Define full rectangle
+        let full_rect = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+
+        // Step 5: Set scanout first (important: must be before transferring data)
+        self.set_scanout(0, self.resource_id, &full_rect)?;
+
+        // Step 6: Transfer framebuffer to device
+        let _ = self.transfer_to_host_2d(self.resource_id, 0, &full_rect);
+
+        // Step 7: Flush resource to display
+        let _ = self.resource_flush(self.resource_id, &full_rect);
+
+        // Save framebuffer information
+        self.fb_info = Some(FrameBufferInfo {
+            // PHYSICAL address — userspace mmap maps these frames; the
+            // old VA here built PTEs pointing outside RAM and every
+            // store faulted in an unbreakable handled-fault loop.
+            addr: fb_phys,
+            size: fb_size as u32,
+            width,
+            height,
+            stride,
+            format: 1,
+        });
+
+        self.fb_info.as_ref()
+    }
+
+    /// Get display info
+    fn get_display_info(&self) -> Option<RespDisplayInfo> {
+        let cmd = GpuCtrlHeader {
+            hdr_type: cmd::GET_DISPLAY_INFO,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 0,
+            padding: 0,
+        };
+
+        let mut resp = RespDisplayInfo {
+            header: GpuCtrlHeader {
+                hdr_type: 0,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            pmodes: [DisplayPmode::default(); 16],
+        };
+
+        self.send_command(&cmd, core::mem::size_of::<GpuCtrlHeader>(),
+                         &mut resp, core::mem::size_of::<RespDisplayInfo>())?;
+
+        if resp.header.hdr_type != cmd::RESP_OK_DISPLAY_INFO {
+            return None;
+        }
+
+        Some(resp)
+    }
+
+    /// Create 2D resource
+    fn create_resource_2d(&self, width: u32, height: u32) -> Option<()> {
+        self.create_resource_2d_id(self.resource_id, width, height, 2)
+    }
+
+    /// Create a 2D resource with an explicit resource id and pixel
+    /// format (DRM/KMS path: one virtio resource per GEM dumb buffer,
+    /// format matching the DRM fourcc's memory byte order).
+    pub fn create_resource_2d_id(&self, resource_id: u32, width: u32, height: u32, format: u32) -> Option<()> {
+        let cmd = CmdResourceCreate2d {
+            header: GpuCtrlHeader {
+                hdr_type: cmd::RESOURCE_CREATE_2D,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            resource_id,
+            // The fbdev boot framebuffer keeps format 2 =
+            // VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, which QEMU maps
+            // to PIXMAN_BE_b8g8r8x8: memory bytes B,G,R,X — i.e. the
+            // standard X TrueColor byte layout (screen R from V[23:16],
+            // G from V[15:8], B from V[7:0], V[31:24] ignored). This is
+            // the same format the Linux virtio-gpu DRM driver picks for
+            // DRM_FORMAT_XRGB8888, and it makes every pixel producer
+            // agree: Xorg's fbdev layer (which packs per the
+            // FBIOGET_VSCREENINFO bitfields), Mesa's GLX swrast (which
+            // ALWAYS packs the standard X layout and drops its alpha
+            // byte into V[31:24]), and native apps packing R<<16|G<<8|B.
+            // The old format 3 (PIXMAN_BE_a8r8g8b8: R=V[15:8],
+            // G=V[23:16], B=V[31:24]) forced a rotated bitfield
+            // advertisement to keep bitfield-honoring clients correct,
+            // while GLX swrast output (mutter/llvmpipe) rendered with
+            // blue pinned at the alpha byte's value — a full-screen
+            // color rotation measured via QEMU screendump on x86_64
+            // (2026-10-14, agent-paint calibration run).
+            format,
+            width,
+            height,
+        };
+
+        let mut resp = RespNoData {
+            header: GpuCtrlHeader {
+                hdr_type: 0,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+        };
+
+        self.send_command(&cmd, core::mem::size_of::<CmdResourceCreate2d>(),
+                         &mut resp, core::mem::size_of::<RespNoData>())?;
+
+        if resp.header.hdr_type != cmd::RESP_OK_NODATA {
+            return None;
+        }
+
+        Some(())
+    }
+
+    /// Attach backing storage
+    fn attach_backing(&self, addr: u64, size: u32) -> Option<()> {
+        self.attach_backing_id(self.resource_id, addr, size)
+    }
+
+    /// Attach backing storage to an explicit resource id.
+    pub fn attach_backing_id(&self, resource_id: u32, addr: u64, size: u32) -> Option<()> {
+        let cmd = CmdResourceAttachBacking {
+            header: GpuCtrlHeader {
+                hdr_type: cmd::RESOURCE_ATTACH_BACKING,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            resource_id,
+            nr_entries: 1,
+            entry: MemEntry {
+                addr,
+                length: size,
+                padding: 0,
+            },
+        };
+
+        let mut resp = RespNoData {
+            header: GpuCtrlHeader {
+                hdr_type: 0,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+        };
+
+        self.send_command(&cmd, core::mem::size_of::<CmdResourceAttachBacking>(),
+                         &mut resp, core::mem::size_of::<RespNoData>())?;
+
+        if resp.header.hdr_type != cmd::RESP_OK_NODATA {
+            return None;
+        }
+
+        Some(())
+    }
+
+    /// Set scanout
+    fn set_scanout(&self, scanout_id: u32, resource_id: u32, rect: &Rect) -> Option<()> {
+        let cmd = CmdSetScanout {
+            header: GpuCtrlHeader {
+                hdr_type: cmd::SET_SCANOUT,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            rect: *rect,
+            scanout_id,
+            resource_id,
+        };
+
+        let mut resp = RespNoData {
+            header: GpuCtrlHeader {
+                hdr_type: 0,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+        };
+
+        self.send_command(&cmd, core::mem::size_of::<CmdSetScanout>(),
+                         &mut resp, core::mem::size_of::<RespNoData>())?;
+
+        if resp.header.hdr_type != cmd::RESP_OK_NODATA {
+            return None;
+        }
+
+        Some(())
+    }
+
+    /// Bind a resource to scanout 0 covering (0,0,w,h) — DRM flip path.
+    pub fn set_scanout_id(&self, scanout_id: u32, resource_id: u32, width: u32, height: u32) -> bool {
+        let rect = Rect { x: 0, y: 0, width, height };
+        self.set_scanout(scanout_id, resource_id, &rect).is_some()
+    }
+
+    /// Bind a resource to scanout 0 showing the (0,0,w,h) subrect of a
+    /// resource that is `res_w` pixels wide (pitch-aligned GEMs: the
+    /// scanout rect crops by the resource stride, so the left `w`
+    /// columns display unsheared).
+    pub fn set_scanout_rect(
+        &self,
+        scanout_id: u32,
+        resource_id: u32,
+        width: u32,
+        height: u32,
+        res_w: u32,
+    ) -> bool {
+        debug_assert!(width <= res_w);
+        let rect = Rect { x: 0, y: 0, width, height };
+        let _ = res_w; // stride comes from the resource itself on the host
+        self.set_scanout(scanout_id, resource_id, &rect).is_some()
+    }
+
+    /// Release a host-side resource (DRM GEM teardown).
+    pub fn unref_resource(&self, resource_id: u32) -> bool {
+        // RESOURCE_UNREF: header(24) + resource_id(4) + padding(4) = 32.
+        #[repr(C)]
+        struct CmdResourceUnref {
+            header: GpuCtrlHeader,
+            resource_id: u32,
+            padding: u32,
+        }
+        let cmd = CmdResourceUnref {
+            header: GpuCtrlHeader {
+                hdr_type: cmd::RESOURCE_UNREF,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            resource_id,
+            padding: 0,
+        };
+
+        let mut resp = RespNoData {
+            header: GpuCtrlHeader {
+                hdr_type: 0,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+        };
+
+        self.send_command(&cmd, core::mem::size_of::<CmdResourceUnref>(),
+                         &mut resp, core::mem::size_of::<RespNoData>())
+            .is_some()
+    }
+
+    /// Transfer data to host
+    fn transfer_to_host_2d(&self, resource_id: u32, offset: u64, rect: &Rect) -> Option<()> {
+        let cmd = CmdTransferToHost2d {
+            header: GpuCtrlHeader {
+                hdr_type: cmd::TRANSFER_TO_HOST_2D,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            rect: *rect,
+            offset,
+            resource_id,
+            padding: 0,
+        };
+
+        let mut resp = RespNoData {
+            header: GpuCtrlHeader {
+                hdr_type: 0,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+        };
+
+        self.send_command(&cmd, core::mem::size_of::<CmdTransferToHost2d>(),
+                         &mut resp, core::mem::size_of::<RespNoData>())?;
+
+        if resp.header.hdr_type != cmd::RESP_OK_NODATA {
+            return None;
+        }
+
+        Some(())
+    }
+
+    /// Flush resource to display
+    fn resource_flush(&self, resource_id: u32, rect: &Rect) -> Option<()> {
+        let cmd = CmdResourceFlush {
+            header: GpuCtrlHeader {
+                hdr_type: cmd::RESOURCE_FLUSH,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            rect: *rect,          // rect comes BEFORE resource_id!
+            resource_id,
+            padding: 0,
+        };
+
+        let mut resp = RespNoData {
+            header: GpuCtrlHeader {
+                hdr_type: 0,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+        };
+
+        self.send_command(&cmd, core::mem::size_of::<CmdResourceFlush>(),
+                         &mut resp, core::mem::size_of::<RespNoData>())?;
+
+        if resp.header.hdr_type != cmd::RESP_OK_NODATA {
+            // RESOURCE_FLUSH may return error, but doesn't affect display
+            // Some implementations only need TRANSFER_TO_HOST_2D
+        }
+
+        Some(())
+    }
+
+    /// Transfer an explicit resource's full (0,0,w,h) rect to host
+    /// memory — DRM flip path.
+    pub fn transfer_to_host_2d_id(&self, resource_id: u32, offset: u64, width: u32, height: u32) -> bool {
+        let rect = Rect { x: 0, y: 0, width, height };
+        self.transfer_to_host_2d(resource_id, offset, &rect).is_some()
+    }
+
+    /// Present an explicit resource's full (0,0,w,h) rect — DRM flip
+    /// path.
+    pub fn resource_flush_id(&self, resource_id: u32, width: u32, height: u32) -> bool {
+        let rect = Rect { x: 0, y: 0, width, height };
+        self.resource_flush(resource_id, &rect).is_some()
+    }
+
+    /// Send command to VirtIO-GPU
+    fn send_command<CMD, RESP>(&self,
+                               cmd: &CMD,
+                               cmd_size: usize,
+                               resp: &mut RESP,
+                               resp_size: usize) -> Option<()> {
+        let queue = self.ctrl_queue.as_ref()?;
+
+        // Serialize the hardcoded-desc submission (see cmd_lock field).
+        // The guard spans the whole submit-and-wait: releasing earlier
+        // would let a second CPU overwrite descriptors 0/1 before the
+        // device reads them.
+        let _cmd_guard = self.cmd_lock.lock();
+
+        // DMA staging from the linear-mapped kernel heap, NOT from the
+        // caller's stack storage: on x86_64 the boot-time kernel stack
+        // lives at low identity VAs where virt_to_phys's linear-map
+        // VA-PA subtraction underflows (riscv64 kernel stacks satisfy
+        // the offset, which is why passing &cmd worked there). Same
+        // single-block discipline as the virtio-blk io_buf (R17-C).
+        let io_layout = Layout::from_size_align(cmd_size + resp_size, 16).ok()?;
+        // SAFETY: Layout is non-zero-sized (both parts are >= 24 bytes);
+        // null check follows immediately.
+        let io_buf = unsafe { alloc(io_layout) };
+        if io_buf.is_null() {
+            return None;
+        }
+        let cmd_ptr = io_buf as *const u8;
+        // SAFETY: io_buf is cmd_size + resp_size bytes; +cmd_size is in
+        // bounds and resp_size bytes remain after it.
+        let resp_ptr = unsafe { io_buf.add(cmd_size) } as *mut u8;
+        // SAFETY: cmd references at least cmd_size initialized bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(cmd as *const CMD as *const u8, io_buf, cmd_size);
+        }
+
+        // Set by the polling loop below; read after the block is released.
+        let mut completed = false;
+
+        // Convert virtual addresses to physical addresses
+        let cmd_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(cmd_ptr as u64)
+        ).0;
+        let resp_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64)
+        ).0;
+
+        // Use first descriptor to send command, second descriptor to receive response
+        // LIMITATION: Hardcodes descriptors 0 and 1, so only one GPU command can
+        // be in-flight at a time. Proper fix would use the descriptor allocator
+        // (queue.alloc_desc()) for concurrent command support.
+        {
+            // INV-DMA-2: typed bounds-checked ring views replace the raw
+            // desc/avail pointer programming.
+            // Set command descriptor
+            let desc0 = queue.desc_mut(0).unwrap();
+            desc0.addr = cmd_phys;
+            desc0.len = cmd_size as u32;
+            desc0.flags = 0x01; // VIRTQ_DESC_F_NEXT
+            desc0.next = 1;
+
+            // Set response descriptor
+            {
+                let desc1 = queue.desc_mut(1).unwrap();
+                desc1.addr = resp_phys;
+                desc1.len = resp_size as u32;
+                desc1.flags = 0x02; // VIRTQ_DESC_F_WRITE
+                desc1.next = 0;
+            }
+
+            // Update available ring
+            // AvailRing structure: flags (u16) + idx (u16) + ring[] (u16 array)
+            // ring array starts at offset 4
+            let idx = queue.avail_idx() as usize;
+            let ring_idx = idx % queue.queue_size as usize;
+
+            // ring array immediately follows AvailRing struct
+            queue.write_avail_ring_slot(ring_idx, 0); // Descriptor index 0
+
+            // Ensure all writes are visible to device (memory barrier)
+            fence(Ordering::SeqCst);
+
+            // RISC-V needs to flush CPU cache to memory
+            #[cfg(feature = "riscv64")]
+            // SAFETY: bare cache/memory fence instruction, no operands.
+            unsafe {
+                core::arch::asm!("fence");
+            }
+
+            queue.write_avail_idx(((idx as u16).wrapping_add(1)));
+            fence(Ordering::SeqCst);
+
+            // Notify device
+            queue.notify();
+            fence(Ordering::SeqCst);
+
+            // Wait for response (simple polling), under two bounds:
+            //
+            // (a) WALL-CLOCK: 10 s of jiffies (checked every ~1M
+            //     iterations). At runtime the polling CPU has irqs
+            //     enabled, so its timer tick keeps jiffies advancing even
+            //     while spinning. 10 s keeps a 5x margin over the
+            //     documented worst case (host display-backend window
+            //     realization answering GET_DISPLAY_INFO can take seconds
+            //     under load) while bounding the flush latency other
+            //     CPUs can tolerate. A time bound is REQUIRED, not an
+            //     iteration count: under TCG MTTCG with BQL contention
+            //     every polled iteration (SeqCst fence + used-ring read)
+            //     stretches, so iteration caps do not bound wall time —
+            //     soak-r1 (smp4 + I/O churn) measured a >500 ms lock
+            //     hold (spinlock DEADLOCK warning) from exactly this
+            //     loop's iteration budget.
+            // (b) ITERATIONS: 100M — the fallback during early boot,
+            //     when the probe runs before the scheduler/timer start
+            //     and jiffies are frozen; same bound as before the
+            //     wall-clock deadline existed.
+            // The fast path returns as soon as used.idx advances, so
+            // these bounds only cost time on a genuinely dead device.
+            let jiffy_deadline = crate::drivers::timer::get_jiffies()
+                + 10 * crate::config::KERNEL_HZ as u64;
+            let mut spins: u32 = 0;
+            loop {
+                fence(Ordering::SeqCst);
+                // INV-DMA-3: device-written used index via the typed
+                // volatile getter.
+                let used_idx_now = queue.get_used();
+                // Wrap-safe completion check: vring indices are free-running
+                // u16 counters. Entry state is used.idx == idx (the cmd_lock
+                // spans the previous command's wait, so everything submitted
+                // before us has completed), so "advanced past our snapshot"
+                // is exactly `used.idx != idx`. The old `>= idx + 1`
+                // comparison broke at the 65536th command: idx = 0xFFFF can
+                // never satisfy `used.idx >= 0x10000`, so EVERY command from
+                // the wrap on timed out after 10 s — a long GUI session
+                // (2-3 commands per flip) reaches the wrap in hours.
+                if used_idx_now != idx as u16 {
+                    completed = true;
+                    break;
+                }
+                spins = spins.wrapping_add(1);
+                if spins >= 100_000_000 {
+                    break;
+                }
+                if spins & 0xF_FFFF == 0
+                    && crate::drivers::timer::get_jiffies() >= jiffy_deadline
+                {
+                    break;
+                }
+            }
+
+            if completed {
+                // Copy the device's response out of the staging block into
+                // the caller's buffer before the block is freed.
+                // SAFETY: the device wrote resp_size bytes at resp_ptr
+                // (desc1 was the device-writable half of the chain).
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        resp_ptr,
+                        resp as *mut RESP as *mut u8,
+                        resp_size,
+                    );
+                }
+            }
+        }
+
+        // R21-N2 discipline (the virtio-blk timeout rule): on completion the
+        // staging block is freed; on TIMEOUT it is deliberately LEAKED — the
+        // chain is still submitted and the device may DMA its response into
+        // the block arbitrarily late. Freeing a still-DMA-targeted heap block
+        // hands a late device write to whatever reallocates it (the wandering
+        // corruption class). The leak is one 32-224 byte block per dead-
+        // device timeout, and the next command's poll consumes the late
+        // used-ring entry with a zeroed response, which callers reject.
+        if completed {
+            // SAFETY: io_buf was allocated above with io_layout; the chain is
+            // complete, so the device no longer accesses the block.
+            unsafe { dealloc(io_buf, io_layout) };
+        }
+
+        if completed {
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    /// Flush display
+    /// Raw ECAM address of this function's PCI config space (for the
+    /// sysfs BDF derivation in drm::init_drm).
+    pub fn pci_ecam_addr(&self) -> u64 {
+        self.pci.pci_config.base_addr
+    }
+
+    pub fn flush(&self) {        let rect = self.display_rect;
+
+        // 1. Transfer framebuffer data to device
+        let _ = self.transfer_to_host_2d(self.resource_id, 0, &rect);
+
+        // 2. Flush resource to display
+        let _ = self.resource_flush(self.resource_id, &rect);
+    }
+
+    /// Get framebuffer
+    pub fn get_framebuffer(&self) -> Option<FrameBuffer> {
+        let info = self.fb_info.as_ref()?;
+        unsafe {
+            Some(FrameBuffer::new(info.addr, FrameBufferInfo {
+                addr: info.addr,
+                size: info.size,
+                width: info.width,
+                height: info.height,
+                stride: info.stride,
+                format: info.format,
+            }))
+        }
+    }
+}
+
+impl Drop for VirtioGpuDevice {
+    fn drop(&mut self) {
+        if !self.fb_ptr.is_null() {
+            if let Some(layout) = self.fb_layout {
+                unsafe {
+                    dealloc(self.fb_ptr, layout);
+                }
+            }
+        }
+    }
+}
+
+/// Probe VirtIO-GPU device
+pub fn probe_virtio_gpu() -> Option<VirtioGpuDevice> {
+    // Shared ECAM walker: 0x8000 stride per slot + all 8 functions (the
+    // old 0x1000 stride hid every slot >= 4 — review BUG).
+    for ecam_addr in pci::find_ecam_devices(VIRTIO_GPU_PCI_VENDOR, &[virtio_device::VIRTIO_GPU]) {
+        let virtio_pci = VirtIOPCI::new(ecam_addr).ok()?;
+        return VirtioGpuDevice::new(virtio_pci);
+    }
+
+    None
+}

@@ -1,0 +1,422 @@
+
+// Kernel layer policy (docs/architecture/kernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+// Capability-matrix shape tests (rust-design-headroom §1, divergence
+// D-6). Pin which ops each builder-converted file type carries: the
+// point of the capability declaration is that a type's matrix is a
+// STATED fact, so an edit that adds or removes a slot (e.g. giving
+// epoll a read op, which once manifested as the wrong-errno spin
+// incident) fails here before it can drift into the tree.
+use super::{test_fail, test_group_start, test_pass};
+use crate::fs::file::FileOps;
+use alloc::format;
+
+/// Which slots a table must carry (true) or must NOT carry (false).
+struct Expect {
+    read: bool,
+    write: bool,
+    lseek: bool,
+    close: bool,
+    poll: bool,
+    read_at: bool,
+}
+
+fn check(name: &str, ops: &FileOps, e: Expect) {
+    let rows: [(&str, bool, bool); 6] = [
+        ("read", ops.read.is_some(), e.read),
+        ("write", ops.write.is_some(), e.write),
+        ("lseek", ops.lseek.is_some(), e.lseek),
+        ("close", ops.close.is_some(), e.close),
+        ("poll", ops.poll.is_some(), e.poll),
+        ("read_at", ops.read_at.is_some(), e.read_at),
+    ];
+    let mut ok = true;
+    for (slot, have, want) in rows {
+        if have != want {
+            test_fail(
+                name,
+                &format!("slot {} is {}, capability matrix says {}", slot, have, want),
+            );
+            ok = false;
+        }
+    }
+    if ok {
+        test_pass(name);
+    }
+}
+
+/// Central missing-op errno mapping (the ONE place the ABI decision
+/// lives). The pinned pairs are the documented incident classes:
+/// read on an op-less fd (epoll) must be EINVAL — an EBADF here once
+/// made an OH event loop spin 155,991 times; lseek on a stream
+/// (pipe) must be ESPIPE; pread on a stream ESPIPE, on an op-less
+/// fd EINVAL.
+fn check_errno_matrix() {
+    use crate::fs::file::{File, FileFlags, FileOpKind};
+
+    let mk = |ops: Option<&'static FileOps>| -> File {
+        let mut f = File::new(FileFlags::new(0));
+        if let Some(o) = ops {
+            f.set_ops(o);
+        }
+        f
+    };
+
+    // Op-less type: epoll table (close only).
+    let epoll_file = mk(Some(&crate::syscall::misc::EPOLL_OPS));
+    if epoll_file.missing_op_errno(FileOpKind::Read) != -22 {
+        test_fail("errno-matrix", "epoll read: want EINVAL (-22)");
+        return;
+    }
+    if epoll_file.missing_op_errno(FileOpKind::LSeek) != -29 {
+        test_fail("errno-matrix", "epoll lseek: want ESPIPE (-29)");
+        return;
+    }
+    if epoll_file.missing_op_errno(FileOpKind::ReadAt) != -22 {
+        test_fail("errno-matrix", "epoll pread: want EINVAL (-22)");
+        return;
+    }
+
+    // Stream type: pipe table (read/write/poll/close, no seek state).
+    let pipe_file = mk(Some(&crate::fs::pipe::PIPE_OPS));
+    if pipe_file.missing_op_errno(FileOpKind::ReadAt) != -29 {
+        test_fail("errno-matrix", "pipe pread: want ESPIPE (-29)");
+        return;
+    }
+
+    // poll_dispatch fallback: no poll capability -> always-ready mask
+    // (regular-file semantics). Specimen: a poll-less table (watchdog —
+    // read/write, no poll slot). Epoll LOST this specimen to the
+    // hilog-flood fix: its poll now reports real readiness (0 on an
+    // empty epoll), NOT the fallback mask.
+    let watchdog_file = mk(Some(&crate::drivers::watchdog::WATCHDOG_OPS));
+    let r = watchdog_file.poll_dispatch(0x0001 | 0x0004); // POLLIN|POLLOUT
+    if r != (0x0001 | 0x0040 | 0x0004 | 0x0100) {
+        test_fail("errno-matrix", "poll fallback: want POLLIN|POLLRDNORM|POLLOUT|POLLWRNORM");
+        return;
+    }
+    // ...and epoll's own poll verdict on an EMPTY interest set is 0
+    // (ep_poll parity), never the fallback mask.
+    let r2 = epoll_file.poll_dispatch(0x0001); // POLLIN
+    if r2 != 0 {
+        test_fail("errno-matrix", "epoll poll: want 0 on empty epoll (ep_poll parity)");
+        return;
+    }
+
+    test_pass("errno-matrix");
+}
+
+pub fn test_fileops_caps() {
+    test_group_start("fileops-caps");
+
+    // The §1 incident family: epoll carries close + poll (hilog-flood
+    // fix c1d9ff6c9: poll is the reference's ep_poll — POLLIN iff a
+    // wait would deliver now; the old no-poll shape made every epoll fd
+    // permanently readable through the always-ready fallback and spun
+    // every nested-epoll waiter). read/write/lseek/pread stay absent —
+    // read() takes the central EINVAL path.
+    check(
+        "epoll caps",
+        &crate::syscall::misc::EPOLL_OPS,
+        Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+
+    check(
+        "eventfd caps",
+        &crate::syscall::misc::EVENTFD_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+
+    check(
+        "timerfd caps",
+        &crate::syscall::misc::TIMERFD_OPS,
+        Expect { read: true, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+
+    check(
+        "signalfd caps",
+        &crate::syscall::misc::SIGNALFD_OPS,
+        Expect { read: true, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+
+    // The canonical STREAM set: read/write/poll/close, never seek.
+    check(
+        "pipe caps",
+        &crate::fs::pipe::PIPE_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+
+    check(
+        "inotify caps",
+        &crate::fs::inotify::INOTIFY_OPS,
+        Expect { read: true, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+
+    // D-6 follow-on conversions (leg-39): the two hot-path regular-file
+    // tables. ext4 and tmpfs carry the full positional file set minus
+    // poll — poll on a regular file goes through the always-ready
+    // fallback (a regular file is always readable/writable per the
+    // reference behavior), pinned here so adding a poll slot to either
+    // table is a deliberate act that fails this shape first.
+    // ext4 lost its close slot deliberately (oc-rc, 2026-11-17): the op
+    // existed only to free the boxed read-ahead state from
+    // private_data; the state is now embedded in File.ra and dies with
+    // the description itself — no per-close work remains for ext4 to
+    // do (the reference's ext4 file_operations carries no release
+    // either; generic_file_close does not exist).
+    check(
+        "ext4 file caps",
+        &crate::fs::ext4::file::EXT4_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: false, poll: false, read_at: true },
+    );
+    check(
+        "tmpfs file caps",
+        &crate::fs::tmpfs::TMPFS_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: true },
+    );
+
+    // Generic VFS tables (file.rs, D-6 follow-on slice 2). The
+    // read-write regular-file table and the read-only twin differ ONLY
+    // in write; the directory table carries read (the Eisdir stub) and
+    // lseek/close but no write and no read_at (getdents64 is the
+    // directory read path).
+    check(
+        "reg file caps",
+        &crate::fs::file::REG_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "reg ro-file caps",
+        &crate::fs::file::REG_RO_FILE_OPS,
+        Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "dir file caps",
+        &crate::fs::file::DIR_FILE_OPS,
+        Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
+    );
+
+    // D-6 refactor-lane slice 3: the pseudo-filesystem cluster. The char
+    // devices (null/zero/full/random, console, uart) carry the
+    // stream-with-poll set; the synthetic filesystems (proc/sys/debug/
+    // cgroup/root/memfd) carry the positional set; loop and devfs-reg
+    // are the block-backed positional set with read_at; selinuxfs is
+    // positional WITHOUT lseek (its read_at is the native entry); the
+    // vfs mem-file is read-only positional.
+    check(
+        "nulldev caps",
+        &crate::fs::devfs::NULLDEV_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "zerodev caps",
+        &crate::fs::devfs::ZERODEV_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "fulldev caps",
+        &crate::fs::devfs::FULLDEV_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "randdev caps",
+        &crate::fs::devfs::RANDDEV_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "condev caps",
+        &crate::fs::devfs::CONDEV_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "loop file caps",
+        &crate::fs::devfs::LOOP_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: false, poll: false, read_at: false },
+    );
+    check(
+        "devfs reg file caps",
+        &crate::fs::devfs::DEVFS_REG_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: false, poll: false, read_at: true },
+    );
+    check(
+        "ptmx caps",
+        &crate::fs::pty::PTMX_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "pty slave caps",
+        &crate::fs::pty::PTY_SLAVE_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "fifo caps",
+        &crate::fs::fifo::FIFO_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "uart caps",
+        &crate::fs::char_dev::UART_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "procfs file caps",
+        &crate::fs::procfs::PROCFS_FILE_OPS,
+        // poll: true since the ub2404 finish-line chase (2026-11-16) —
+        // reference seq_file answers the default poll mask (seq_poll);
+        // systemd's mount-table watch epoll-adds /proc/self/mountinfo
+        // (EPOLLIN|EPOLLET) and epoll_ctl EPERMs poll-less files, so
+        // the monitor's kernel source never armed.
+        Expect { read: true, write: true, lseek: true, close: true, poll: true, read_at: false },
+    );
+    check(
+        "sysfs file caps",
+        &crate::fs::sysfs::SYSFS_FILE_OPS,
+        // poll: true since the gdm bring-up (91ad754b) — reference-kernel
+        // kernfs attrs are pollable (kernfs_fop_poll: POLLPRI on content
+        // change), and udev/gdm poll sysfs attributes; without the slot
+        // epoll_ctl(ADD) EPERMs and the poller falls back to spinning.
+        Expect { read: true, write: true, lseek: true, close: true, poll: true, read_at: false },
+    );
+    check(
+        "debugfs file caps",
+        &crate::fs::debugfs::DEBUGFS_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "cgroup file caps",
+        &crate::fs::cgroup::CGROUP_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "rootfs file caps",
+        &crate::fs::rootfs::ROOTFS_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "memfd file caps",
+        &crate::fs::memfd::MEMFD_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "selinuxfs file caps",
+        &crate::fs::selinuxfs::SELINUXFS_FILE_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: true },
+    );
+    check(
+        "vfs mem-file caps",
+        &crate::fs::vfs::MEM_FILE_OPS,
+        // poll: true since the ub-gfx bring-up (ff8cd7a08) — MEM_FILE_OPS
+        // gained mem_file_poll (seq_poll parity / DEFAULT_POLLMASK) so the
+        // procfs read_file-shortcut fds are epollable; systemd 255's mount
+        // monitor and swap watch epoll exactly these.
+        Expect { read: true, write: false, lseek: true, close: true, poll: true, read_at: false },
+    );
+
+    // D-6 refactor-lane slice 4: the printk streams, the char-device
+    // stragglers and the nsfile. kmsg/procmmsg carry lseek+poll (the
+    // record-ring consumers position and wait); evdev is the stream
+    // set with close; watchdog and fb are write-only-control shaped
+    // (read exists but no poll — always-ready fallback); the nsfile
+    // is ioctl-only (read/close, no write/seek/poll).
+    check(
+        "kmsg caps",
+        &crate::printk::KMSG_OPS,
+        Expect { read: true, write: true, lseek: true, close: false, poll: true, read_at: false },
+    );
+    check(
+        "proc-kmsg caps",
+        &crate::printk::PROC_KMSG_OPS,
+        Expect { read: true, write: false, lseek: true, close: true, poll: true, read_at: false },
+    );
+    check(
+        "watchdog caps",
+        &crate::drivers::watchdog::WATCHDOG_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
+    );
+    check(
+        "evdev caps",
+        &crate::drivers::input::evdev::EVDEV_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "fb caps",
+        &crate::drivers::gpu::fbdev::FB_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
+    );
+    check(
+        "nsfile caps",
+        &crate::process::ns::NS_FILE_OPS,
+        Expect { read: true, write: false, lseek: false, close: true, poll: false, read_at: false },
+    );
+
+    // D-6 refactor-lane slice 5: the socket family and the ipc/device
+    // stragglers. Every socket flavor (inet/unix/raw/netlink) carries
+    // the stream set; the ioctl-only devices (access_token, io_uring,
+    // binder) carry ONLY close+poll — the epoll-family shape (read on
+    // them must take the central EINVAL path); ashmem is positional
+    // without write; tokenid is a plain write-control pair.
+    check(
+        "socket caps",
+        &crate::net::socket::SOCKET_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "unix socket caps",
+        &crate::net::unix::UNIX_SOCKET_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "raw socket caps",
+        &crate::net::raw::RAW_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "netlink socket caps",
+        &crate::net::netlink::NETLINK_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "access_token caps",
+        &crate::ipc::access_token::ACCESS_TOKEN_OPS,
+        Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "tokenid caps",
+        &crate::drivers::access_tokenid::TOKENID_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
+    );
+    check(
+        "ashmem caps",
+        &crate::drivers::ashmem::ASHMEM_OPS,
+        Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "io_uring caps",
+        &crate::io_uring::IO_URING_OPS,
+        Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "binder caps",
+        &crate::ipc::binder::BINDER_OPS,
+        Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+
+    // D-6 final slice (GNOME-lane signed off): the DRM pair. The card
+    // node is the stream-control set (Xorg and the greeter open
+    // /dev/dri/card0; EOF reads until the event stream exists); the
+    // prime fd is dma-buf shaped — seekable to the buffer size, close
+    // drops the exported GEM.
+    check(
+        "drm caps",
+        &crate::drivers::drm::DRM_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
+    );
+    check(
+        "prime caps",
+        &crate::drivers::drm::PRIME_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+
+    check_errno_matrix();
+}

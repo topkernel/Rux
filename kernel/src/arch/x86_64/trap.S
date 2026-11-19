@@ -1,0 +1,693 @@
+/* MIT License
+ *
+ * Copyright (c) 2026 Fei Wang
+ *
+ * x86_64 trap entry/exit + syscall entry (IDT stubs).
+ *
+ * ## Frame layout (uniform 168 bytes == sizeof(PtRegs))
+ *
+ * In 64-bit mode the CPU pushes SS:RSP on EVERY interrupt/exception
+ * entry (even same-CPL; Intel SDM Vol 3A 6.14) and IRETQ always pops all
+ * five hardware words.  So every stub only has to:
+ *
+ *   1. push a dummy 0 for vectors WITHOUT a hardware error code (vectors
+ *      8,10,11,12,13,14,17,21 push the real code) — the slot overlays
+ *      pt_regs.orig_rax at 0x78;
+ *   2. push the 15 GPRs so the struct overlays the stack 1:1:
+ *
+ *   offset  field      pushed by
+ *   ------  -----      -------------------------------
+ *   0x00    r15        stub (last)
+ *   ...     ...        stub
+ *   0x70    rdi        stub (first)
+ *   0x78    orig_rax   stub dummy / hw error code / syscall nr
+ *   0x80    rip        CPU (stub for the SYSCALL path)
+ *   0x88    cs         CPU (stub)
+ *   0x90    rflags     CPU (stub)
+ *   0x98    rsp        CPU (stub)
+ *   0xa0    ss         CPU (stub)
+ *
+ * User-mode entries: the CPU loaded TSS.rsp0 before pushing, so the
+ * frame lands exactly at stack_top - 168 — the same contract the riscv64
+ * twin keeps and `Task::pt_regs()` computes.  Kernel-mode entries push
+ * on the current stack (nested frames, like Linux).
+ *
+ * ## C ABI alignment
+ *
+ * Kernel-mode interrupts arrive with arbitrary RSP alignment (the
+ * interrupted code is mid-function), so the stub parks the frame
+ * pointer in RBP and aligns RSP down to 16 before calling Rust.  RBP is
+ * safe to reuse: its interrupted value is already stored in the frame.
+ * The rustc target x86_64-unknown-none disables the red zone, so the
+ * CPU-pushed frame cannot clobber live stack slots below the
+ * interrupted RSP.
+ *
+ * ## GS / swapgs pairing (SMP)
+ *
+ * Kernel GS base = &PerCpu[cpu]; user GS base = 0 (glibc TLS lives on
+ * FS, so a NULL user GS is the correct ABI state).  User-origin entries
+ * (CS & 3 != 0) SWAPGS on entry and the user-return path SWAPGS pairs
+ * it back before IRETQ; kernel-origin entries never touch GS.  The
+ * SYSCALL entry SWAPGS first thing (hardware does not switch GS).
+ * SYSCALL therefore also cannot recover the user stack from GS; it
+ * stashes RSP in a per-CPU scratch slot instead (the Linux
+ * entry_SYSCALL_64 trick).
+ */
+
+/* ## GS / per-CPU (SMP)
+ *
+ * Kernel GS base = &PerCpu[cpu] (established at CPU bring-up); user GS
+ * base = 0 (glibc TLS lives on FS).  Entries from user mode SWAPGS
+ * first (a user-origin frame has CPL3 in CS), the return-to-user path
+ * pairs it back before IRETQ; kernel-origin entries never touch GS.
+ * The stubs read the CPU number from %gs:PC_CPU_NUMBER for
+ * trap_handler's per-CPU pt_regs slot.
+ */
+
+.section .text.trap
+.align 8
+
+/* pt_regs offsets — cross-checked by the static asserts in trap.rs */
+.set PT_R15,      0x00
+.set PT_R14,      0x08
+.set PT_R13,      0x10
+.set PT_R12,      0x18
+.set PT_RBP,      0x20
+.set PT_RBX,      0x28
+.set PT_R11,      0x30
+.set PT_R10,      0x38
+.set PT_R9,       0x40
+.set PT_R8,       0x48
+.set PT_RAX,      0x50
+.set PT_RCX,      0x58
+.set PT_RDX,      0x60
+.set PT_RSI,      0x68
+.set PT_RDI,      0x70
+.set PT_ORIG_RAX, 0x78
+.set PT_RIP,      0x80
+.set PT_CS,       0x88
+.set PT_RFLAGS,   0x90
+.set PT_RSP,      0x98
+.set PT_SS,       0xa0
+.set PT_SIZE,     0xa8
+
+/* PerCpu offsets (pinned by the asserts in smp.rs) */
+.set PC_CPU_NUMBER,      0x00
+.set PC_TSS_RSP0,        0x08
+.set PC_SYSCALL_SCRATCH, 0x10
+.set PC_MAGIC_HI,        0x34             /* high dword of the magic  */
+.set PC_MAGIC_PATTERN,   0x52585258
+
+/* selector values (GDT indices pinned in trap.rs) */
+.set __KERNEL_CS, 0x08
+.set __USER_CS,   0x33
+.set __USER_DS,   0x2b
+
+.set SYSCALL_VECTOR, 0x80
+
+/* TSS field offsets (see Tss in trap.rs) */
+.set TSS_RSP0, 0x04
+.set TSS_SP2,  0x14
+
+.extern trap_handler
+.extern trap_exit
+.extern x86_double_fault_dump
+
+/* ============================================================================
+ * Exception/IRQ stub macro
+ *
+ * \vec: vector number (also passed to trap_handler in RDX)
+ * \ec:  1 when the CPU pushed an error code (8,10,11,12,13,14,17,21)
+ * ============================================================================
+ */
+.macro TRAP_STUB vec, ec=0
+.global stub_\vec
+.hidden stub_\vec
+stub_\vec:
+    /* R70 (direction-flag discipline, Linux entry-cld): user code may
+     * leave EFLAGS.DF set when an exception/IRQ arrives — interrupt-gate
+     * entry clears IF/TF but NOTHING clears DF (only SYSCALL masks it,
+     * via IA32_FMASK TF|IF|DF, see trap.rs). The kernel's compiled code
+     * and its rep movsb memcpy cores rely on the SysV ABI invariant
+     * DF=0; with DF=1 every kernel memcpy lands len-1 bytes BELOW its
+     * destination, smashing saved registers and return addresses with
+     * the copied bytes. That was the x86 "scribble engine": kernel-mode
+     * jumps to small integers / user addresses (#UD rip=0x4c, 0x1bf,
+     * 0x6776; #PF rip=user-text), ASCII comm bytes inside Task headers
+     * and callee-saved slots, byte-flipped stack pointers, locks stuck
+     * on garbage words, and the recursive panic-then-jump-to-garbage
+     * loop — with the ownership graph and allocator provably clean (the
+     * R69 audit stays silent; the corruption is a legitimate copy with
+     * a poisoned direction). Clear DF before anything else; iretq
+     * restores the user's own flags on return to user. */
+    cld
+    .if \ec == 0
+    pushq $0                     /* dummy error code -> orig_rax slot */
+    .endif
+    /* GPRs in reverse struct order: rdi ends highest (0x70), r15 lowest */
+    pushq %rdi
+    pushq %rsi
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    /* frame complete; RBP is dead (saved above) — park frame ptr in it */
+    movq %rsp, %rbp
+    andq $-16, %rsp              /* SysV: RSP 16-aligned at call sites */
+    testb $3, PT_CS(%rbp)
+    jz 8f
+    swapgs                       /* came from user: GS -> percpu       */
+    jmp 9f
+8:  /* Kernel-origin.  Bad-iret repair (SCRIBBLE2, Linux error_entry
+     * discipline): trap_exit's user return runs `cli; pops; swapgs;
+     * iretq` — an iretq that faults (#GP on a non-canonical user rip,
+     * #SS/#PF on the user stack words) pushes THIS frame with CS=0x08
+     * even though the exit path already swapgs'ed to the USER base.
+     * Running the handler on the user GS base is the scribble engine:
+     * with the segv-test habit of mapping page 0, every %gs-relative
+     * read then goes through mapped user bytes (a zero page yields
+     * "cpu 0") and the handler silently operates on the WRONG CPU's
+     * slots — foreign rsp0 installs, cross-stack frames, torn return
+     * addresses.  Repair: SWAPGS back to the kernel base and overlay
+     * the pending user words onto the frame so the handler classifies
+     * the fault as user-origin (SIGSEGV routing) and the exit path's
+     * pairing stays balanced. */
+    cmpq $user_iret_label, PT_RIP(%rbp)
+    jne 9f
+    swapgs
+    movq PT_RIP+0x28(%rbp), %rax /* pending user rip  (frame + 0xa8)  */
+    movq %rax, PT_RIP(%rbp)
+    movq PT_CS+0x28(%rbp), %rax
+    movq %rax, PT_CS(%rbp)
+    movq PT_RFLAGS+0x28(%rbp), %rax
+    movq %rax, PT_RFLAGS(%rbp)
+    movq PT_RSP+0x28(%rbp), %rax
+    movq %rax, PT_RSP(%rbp)
+    movq PT_SS+0x28(%rbp), %rax
+    movq %rax, PT_SS(%rbp)
+    incl scribble_badiret_fixups(%rip)
+9:  /* GS-base authenticity check (SCRIBBLE2): the magic's HIGH dword is
+     * a fixed pattern present only inside a real PerCpu slot.  A wrong
+     * base (user GS 0 — the residue the repair above plus NMI-style
+     * windows can leave — or a garbage base) reads user/BIOS bytes and
+     * cannot match.  The old "cpu number < 64" heuristic was blind to
+     * a zero-mapped page 0 and silently ran whole handlers on the
+     * wrong CPU's slots. */
+    movl %gs:PC_MAGIC_HI, %esi
+    cmpl $PC_MAGIC_PATTERN, %esi
+    je 7f
+    swapgs
+    incl scribble_gs_fixups(%rip)
+7:  movl %gs:PC_CPU_NUMBER, %esi /* arg1: cpu id                      */
+    movq $\vec, %rdx             /* arg2: vector                      */
+    movq %rbp, %rdi              /* arg0: regs                        */
+    call trap_handler
+    movq %rbp, %rsp              /* unwind to the exact frame */
+    jmp trap_exit
+.endm
+
+/* ---- CPU exceptions 0..31 (error-code vectors: 8,10-14,17,21) ---- */
+TRAP_STUB 0
+TRAP_STUB 1
+TRAP_STUB 2
+TRAP_STUB 3
+TRAP_STUB 4
+TRAP_STUB 5
+TRAP_STUB 6
+TRAP_STUB 7
+/* vector 8 (double fault) has its own IST stub below */
+TRAP_STUB 9
+TRAP_STUB 10, 1
+TRAP_STUB 11, 1
+TRAP_STUB 12, 1
+TRAP_STUB 13, 1
+TRAP_STUB 14, 1
+TRAP_STUB 15
+TRAP_STUB 16
+TRAP_STUB 17, 1
+TRAP_STUB 18
+TRAP_STUB 19
+TRAP_STUB 20
+TRAP_STUB 21, 1
+TRAP_STUB 22
+TRAP_STUB 23
+TRAP_STUB 24
+TRAP_STUB 25
+TRAP_STUB 26
+TRAP_STUB 27
+TRAP_STUB 28
+TRAP_STUB 29
+TRAP_STUB 30
+TRAP_STUB 31
+
+/* ---- PIC IRQ vectors 32..47 ---- */
+TRAP_STUB 32
+TRAP_STUB 33
+TRAP_STUB 34
+TRAP_STUB 35
+TRAP_STUB 36
+TRAP_STUB 37
+TRAP_STUB 38
+TRAP_STUB 39
+TRAP_STUB 40
+TRAP_STUB 41
+TRAP_STUB 42
+TRAP_STUB 43
+TRAP_STUB 44
+TRAP_STUB 45
+TRAP_STUB 46
+TRAP_STUB 47
+
+/* ---- vectors 48..255: shared catch-all (unexpected IRQ/exception) ----
+ * Passed as vector 255; trap_handler routes it through the conservative
+ * external-IRQ EOI path (early-Linux style). */
+.global stub_spurious
+.hidden stub_spurious
+stub_spurious:
+    pushq $0
+    pushq %rdi
+    pushq %rsi
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, %rbp
+    andq $-16, %rsp
+    testb $3, PT_CS(%rbp)
+    jz 8f
+    swapgs
+    jmp 9f
+8:  cmpq $user_iret_label, PT_RIP(%rbp)
+    jne 9f
+    swapgs
+    movq PT_RIP+0x28(%rbp), %rax
+    movq %rax, PT_RIP(%rbp)
+    movq PT_CS+0x28(%rbp), %rax
+    movq %rax, PT_CS(%rbp)
+    movq PT_RFLAGS+0x28(%rbp), %rax
+    movq %rax, PT_RFLAGS(%rbp)
+    movq PT_RSP+0x28(%rbp), %rax
+    movq %rax, PT_RSP(%rbp)
+    movq PT_SS+0x28(%rbp), %rax
+    movq %rax, PT_SS(%rbp)
+    incl scribble_badiret_fixups(%rip)
+9:  movl %gs:PC_MAGIC_HI, %esi
+    /* GS-base authenticity check (see TRAP_STUB) */
+    cmpl $PC_MAGIC_PATTERN, %esi
+    je 7f
+    swapgs
+    incl scribble_gs_fixups(%rip)
+7:  movl %gs:PC_CPU_NUMBER, %esi
+    movq %rbp, %rdi
+    movq $255, %rdx
+    call trap_handler
+    movq %rbp, %rsp
+    jmp trap_exit
+
+/* ---- vectors 224..229: LAPIC timer + IPIs (see arch/x86_64/ipi.rs) ---- */
+TRAP_STUB 224
+TRAP_STUB 225
+TRAP_STUB 226
+TRAP_STUB 227
+TRAP_STUB 228
+TRAP_STUB 229
+
+/* ---- vector 129 (0x81): virtio-blk MSI-X completion (DIO-CONC) ---- */
+TRAP_STUB 129
+
+/* ============================================================================
+ * Double fault (#DF, vector 8) — IST1
+ *
+ * The kernel is unrecoverable here: no pt_regs, no unwinding, no locks.
+ * The IST switch gave us a fresh 16K stack; just raw-print and halt.
+ * x86_double_fault_dump must not take locks or allocate (it uses the
+ * same raw serial path as the dfx taskdump helpers).
+ * ============================================================================
+ */
+.global stub_8
+.hidden stub_8
+stub_8:
+    cld                          /* R70: same DF discipline as TRAP_STUB */
+    call x86_double_fault_dump
+1:  cli
+    hlt
+    jmp 1b
+
+/* ============================================================================
+ * SYSCALL entry (LSTAR target)
+ *
+ * On entry: RCX = user rip, R11 = user rflags, RSP = user rsp,
+ * CS/SS loaded from STAR (0x08 / 0x10), RFLAGS &= ~FMASK (IF cleared).
+ *
+ * The CPU pushed NOTHING, switched NO stack and did NOT swap GS — the
+ * stub does all three itself: SWAPGS first (GS: user NULL -> percpu),
+ * then builds the whole frame on this CPU's kernel stack top, which it
+ * reads through %gs (PerCpu.tss_rsp0 — the same value trap.rs keeps in
+ * TSS.rsp0 for interrupt entries).  rcx/r11 are ABI-clobbered by the
+ * syscall itself (hardware), so their pt_regs slots carry the user
+ * rip/rflags — same as Linux.
+ *
+ * The user RSP is stashed in a per-CPU scratch slot because the stack
+ * switch happens before it can be pushed and no register is free to
+ * hold it.
+ * ============================================================================
+ */
+.global syscall_entry
+.hidden syscall_entry
+syscall_entry:
+    /* R70: SYSCALL already masks DF via IA32_FMASK (TF|IF|DF, trap.rs),
+     * but defense-in-depth costs one byte — never run kernel code with a
+     * user-controlled direction flag. */
+    cld
+    swapgs
+    /* GS-base authenticity check (SCRIBBLE2): compare the magic pattern
+     * IN MEMORY (rcx/r10/r11 all carry live ABI values here).  A CPU
+     * that was already on the KERNEL base (mis-paired residue) just got
+     * flipped to the USER base by the swapgs above — every following
+     * %gs-relative access would then go through near-null addresses
+     * (with page 0 user-mapped, through USER BYTES: a zero page made
+     * the old cpu-number heuristic read "cpu 0" and silently build the
+     * whole syscall frame on the wrong per-CPU slots — the foreign-rsp0
+     * scribble).  The pattern check is content-independent: swap back
+     * unless the real PerCpu magic answers. */
+    cmpl $PC_MAGIC_PATTERN, %gs:PC_MAGIC_HI
+    je 1f
+    swapgs
+    incl scribble_gs_fixups(%rip)
+1:  movq %rsp, %gs:PC_SYSCALL_SCRATCH  /* stash user rsp                */
+    movq %gs:PC_TSS_RSP0, %rsp         /* kernel stack top (this CPU)  */
+    pushq $__USER_DS                   /* 0xa0 ss                       */
+    pushq %gs:PC_SYSCALL_SCRATCH       /* 0x98 rsp (user)               */
+    pushq %r11                         /* 0x90 rflags (user)            */
+    pushq $__USER_CS                   /* 0x88 cs                       */
+    pushq %rcx                         /* 0x80 rip (user)               */
+    pushq %rax                         /* 0x78 orig_rax = syscall nr    */
+    pushq %rdi
+    pushq %rsi
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    /* frame at rsp0 - 168 == Task::pt_regs(), same as IRQ entries */
+    movq %rsp, %rbp
+    andq $-16, %rsp
+    movl %gs:PC_CPU_NUMBER, %esi
+    movq %rbp, %rdi
+    movq $SYSCALL_VECTOR, %rdx
+    call trap_handler
+    movq %rbp, %rsp
+    jmp trap_exit_syscall
+
+/* ============================================================================
+ * trap_exit_syscall — trap_exit for SYSCALL frames (gap-net / syscall
+ * floor): same signal/resched check loop, then an OPPORTUNISTIC SYSRET
+ * tail.  The entry stub parked the hardware rcx/r11 (user rip/rflags)
+ * in PT_RCX/PT_R11; on the untouched fast path they still mirror
+ * PT_RIP/PT_EFLAGS and SYSRET can return with them — cheaper than the
+ * full iretq state machine (the Linux syscall_return_via_sysret
+ * discipline).  ANY frame rewrite (signal delivery, ptrace, sigreturn,
+ * execve) breaks the mirror and falls into the common iret tail.
+ *
+ * The mirror checks double as the canonical-rip guard for the SYSRET
+ * #GP class: a non-canonical PT_RIP cannot pass the (sar/inc/ja) range
+ * test below, and a rewritten PT_RIP without a matching PT_RCX fails
+ * the mirror compare.
+ * ============================================================================
+ */
+.global trap_exit_syscall
+.hidden trap_exit_syscall
+trap_exit_syscall:
+    movq %rsp, %rbp
+    andq $-16, %rsp
+    /* A syscall frame is always user-origin (cs & 3 == 3 by construction);
+     * the kernel-tail branch exists only for frame-tearing paranoia —
+     * borrow trap_exit's kernel-tail path (same file scope). */
+    testb $3, PT_CS(%rbp)
+    jz .Lrestore_kernel
+    movq %rbp, %rdi
+    call check_and_deliver_signals
+.Lcheck_resched_sc:
+    call asm_need_resched
+    testq %rax, %rax
+    jz .Lrestore_all_sc
+    call x86_preemptible
+    testq %rax, %rax
+    jz .Lrestore_all_sc
+    call asm_schedule
+    /* After the switch back, RSP/RBP are restored from thread.sp /
+     * thread.callee.rbp saved at switch-out — both still point at this
+     * frame (same contract as trap_exit's loop). */
+    jmp .Lcheck_resched_sc
+
+.Lrestore_all_sc:
+    movq %rbp, %rsp
+    testb $3, PT_CS(%rsp)
+    jz .Lrestore_kernel_tail
+    cmpq $__USER_CS, PT_CS(%rsp)
+    jne .Lbad_frame
+    cmpq $__USER_DS, PT_SS(%rsp)
+    jne .Lbad_frame
+    /* Opportunistic SYSRET eligibility:
+     * 1) PT_RCX still mirrors PT_RIP (entry parked user rip in rcx; any
+     *    kernel rewrite of the frame's rip breaks it),
+     * 2) PT_R11 still mirrors PT_EFLAGS,
+     * 3) PT_RIP is canonical (sar/inc/ja: 0 -> 1 or -1 -> 0, anything
+     *    else is non-canonical). */
+    movq PT_RIP(%rbp), %rax
+    cmpq %rax, PT_RCX(%rbp)
+    jne 2f
+    movq PT_RFLAGS(%rbp), %rax
+    cmpq %rax, PT_R11(%rbp)
+    jne 2f
+    /* Reference parity (entry_64.S syscall_return_via_sysret): fall
+     * back to the iret tail when the user rflags carries TF or RF.
+     * SYSRET cannot restore RF properly, and returning with TF set
+     * single-steps the first user instruction immediately after the
+     * sysret — the shape the reference avoids so a #DB can never land
+     * in the sysret window (e.g. single-stepping code that points RCX
+     * at itself loops). */
+    testq $(0x100 | 0x10000), PT_RFLAGS(%rbp) /* TF | RF */
+    jnz 2f
+    movq PT_RIP(%rbp), %rax
+    sarq $47, %rax
+    incq %rax
+    cmpq $1, %rax
+    ja 2f
+    /* SYSRET path.  IF is cleared here and SYSRET re-enables it from
+     * the restored r11 (user rflags) — the same contract iretq gives.
+     * Pops keep the KERNEL GS active (the SMP pairing rule); rsp only
+     * becomes the user stack at the final pop, the Linux
+     * popq-rsp/swapgs/sysretq shape. */
+    cli
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    popq %r11                 /* = user rflags (mirror check passed) */
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rax
+    popq %rcx                 /* = user rip (mirror check passed) */
+    popq %rdx
+    popq %rsi
+    popq %rdi
+    addq $8, %rsp             /* skip orig_rax */
+    addq $8, %rsp             /* skip PT_RIP — returns via RCX */
+    addq $8, %rsp             /* skip PT_CS — SYSRET loads 0x33 */
+    popq %r11                 /* user rflags (frame slot, same value) */
+    popq %rsp                 /* user rsp; ss slot abandoned */
+    swapgs
+    sysretq
+2:  /* Mirror broken or rip non-canonical — the full iret tail. */
+    jmp .Lrestore_all
+
+/* ============================================================================
+ * trap_exit — common return path (rsp -> pt_regs)
+ *
+ * Mirror of the riscv64 ret_from_exception: user-origin returns check
+ * pending signals (may rewrite the frame) and need_resched in a loop;
+ * kernel-origin returns go straight to the register restore.  IF is
+ * never touched here — iretq restores it from the saved rflags.
+ *
+ * Kernel-exit preemption is deliberately absent (the riscv64 twin keeps
+ * it effectively disabled too): the idle loop calls schedule() itself,
+ * and preempting mid-kernel-frame is CONFIG_PREEMPT territory.
+ * ============================================================================
+ */
+.global trap_exit
+.hidden trap_exit
+trap_exit:
+    movq %rsp, %rbp              /* frame pointer; RBP is callee-saved */
+    andq $-16, %rsp              /* across the C calls below          */
+    testb $3, PT_CS(%rbp)
+    jz .Lrestore_kernel
+
+.Lreturn_user:
+    movq %rbp, %rdi
+    call check_and_deliver_signals
+.Lcheck_resched:
+    call asm_need_resched
+    testq %rax, %rax
+    jz .Lrestore_all
+    call x86_preemptible
+    testq %rax, %rax
+    jz .Lrestore_all
+    call asm_schedule
+    /* After the switch back, RSP/RBP are restored from thread.sp /
+     * thread.callee.rbp saved at switch-out — both still point at this
+     * frame, so just re-run the signal/resched checks. */
+    jmp .Lcheck_resched
+
+.Lrestore_kernel:
+    /* no signal delivery on kernel-origin returns */
+
+.Lrestore_all:
+    movq %rbp, %rsp
+    testb $3, PT_CS(%rsp)       /* pairing rule: swap GS only on the  */
+    jz .Lrestore_kernel_tail    /* user-return path (mirror of the    */
+    /* R67 (scribbled-frame guard, user tail): the selectors are kernel
+     * policy, never data. A parked frame torn by a wild writer can carry
+     * half-kernel half-user control words (the observed cs=0x33-with-
+     * garbage-ss shapes); iretq would #GP inside the exit path at best
+     * and execute through a mixed frame at worst. Strict selectors or
+     * the task dies (Linux fixup_bad_iret discipline). */
+    cmpq $__USER_CS, PT_CS(%rsp)
+    jne .Lbad_frame
+    cmpq $__USER_DS, PT_SS(%rsp)
+    jne .Lbad_frame
+    /* SMP GS-pairing fix (x86-smprace), second phase (x86-scribble):
+     * the original order ran `cli; swapgs` BEFORE the sixteen register
+     * pops, so any exception landing in that ~20-instruction window
+     * (an iretq-frame #GP, a faulting pop, an NMI — IF does not mask
+     * those) entered as kernel-origin, correctly performed no swapgs,
+     * and ran the WHOLE handler on the USER GS base: every %gs-relative
+     * access then read/wrote through a wild base (garbage cpu ids,
+     * PER_CPU/CURRENT_PT_REGS miswrites, foreign rsp0 → frames pushed
+     * onto other tasks' stacks — the byte-level scribble family).
+     * Popping FIRST keeps the kernel GS active through the pops, and
+     * swapgs becomes the immediately-preceding instruction of iretq.
+     * The residual bad window is the iretq itself (frame still bad);
+     * the stub-side GS self-heal (see TRAP_STUB) covers that entry. */
+    cli
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rsi
+    popq %rdi
+    addq $8, %rsp                /* skip orig_rax/error-code slot */
+    swapgs
+    /* user_iret_label: the iretq exception stubs compare PT_RIP against
+     * (bad-iret repair, see TRAP_STUB).  Keep it directly ON the iretq. */
+.global user_iret_label
+.hidden user_iret_label
+user_iret_label:
+    iretq                        /* pops rip,cs,rflags,rsp,ss */
+
+.Lrestore_kernel_tail:
+    /* no signal delivery on kernel-origin returns */
+    /* R67 (scribbled-frame guard, kernel tail): a kernel-origin frame's
+     * rip is ALWAYS inside the kernel text [__stext, __etext) — the
+     * kernel has no modules, and .rodata/.data are non-executable, so
+     * no legit kernel rip exists outside text. The residual x86
+     * wild-jump family (scribble3/4 hunts: rip=0x4c with cs=8 and
+     * rflags=0xc13, rip=user-code with cs=8, torn rip=0x30ff03f8_80434c81,
+     * rip=stack-address) is exactly this check's complement: a parked
+     * frame whose control tail was overwritten by a wild writer, then
+     * loaded by this iretq — the kernel executed user page-0 bytes and
+     * cascaded. Refuse the frame: report forensics and kill the task
+     * (the frame's owner is doomed; the SYSTEM survives — the Linux
+     * fixup_bad_iret discipline for the bad-frame class).
+     * Bounds derive from the LINKER SYMBOLS (the R57 lesson: hand-set
+     * constants drift) — the old hardcoded [0xffffffff80000000,
+     * 0xffffffff81000000) 16MB window already only cleared the image by
+     * the image's own growth (bzImage kernel ~16.6MB, text ending at
+     * 0xffffffff80805000) and would misfire the moment .text outgrew
+     * the window. kernel_text_window() reads the same symbols. */
+    movq PT_RIP(%rbp), %rax
+    leaq __stext(%rip), %rdx
+    cmpq %rdx, %rax
+    jb .Lbad_frame
+    leaq __etext(%rip), %rdx
+    cmpq %rdx, %rax
+    jae .Lbad_frame
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rsi
+    popq %rdi
+    addq $8, %rsp                /* skip orig_rax/error-code slot */
+    iretq                        /* pops rip,cs,rflags,rsp,ss */
+
+.Lbad_frame:
+    /* Frame failed the exit validation. RBP still holds the frame; hand
+     * it to the Rust validator which dumps forensics and do_exit()s the
+     * task (never returns). RSP is 16-aligned from .Lrestore_all's
+     * movq %rbp,%rsp path... it is whatever the frame gave us; align for
+     * the call. */
+    movq %rbp, %rdi
+    andq $-16, %rsp
+    call x86_bad_frame_exit
+1:  cli
+    hlt
+    jmp 1b
+
+/* ============================================================================
+ * ret_from_fork / ret_from_fork_kernel now live in trap.rs as Rust naked
+ * fns (leg-31): their addresses are taken from Rust code, and any LTO
+ * setting instantiated this include_str!'d global_asm! unit more than
+ * once, double-defining the address-taken symbols and failing the
+ * release-profile link. Contracts unchanged — see the naked fns' block
+ * comment for the fork/kthread entry protocol (frame layout, callee
+ * registers, the schedule_tail-then-trap_exit sequence).
+ * ============================================================================
+ */

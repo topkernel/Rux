@@ -1,0 +1,295 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! RCU-protected PID hash table for O(1) task lookup by PID.
+//!
+//! Read path (lookup) uses RCU — no locks, just preempt_disable/enable.
+//! Write path (insert/remove) uses per-bucket spinlock.
+//!
+//! Uses a singly-linked list per bucket (Task.pid_hash_next) so that
+//! removal only writes the removed node's next pointer, not a neighbour's,
+//! making concurrent RCU traversal safe on SMP.
+
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::ptr;
+use crate::process::task::Task;
+use crate::sync::rcu;
+
+/// Number of hash buckets.
+const PID_HASH_BUCKETS: usize = 256;
+
+/// Per-bucket spinlock (simple TAS).
+static BUCKET_LOCK: [AtomicBool; PID_HASH_BUCKETS] = [const { AtomicBool::new(false) }; PID_HASH_BUCKETS];
+
+/// Per-bucket chain head.  AtomicPtr would be ideal but we only have
+/// core::sync::atomic in no_std, so use a Spinlock-protected array.
+/// Actually, we do have AtomicPtr in core.  Let's use it.
+use core::sync::atomic::AtomicPtr;
+
+/// Per-bucket chain head (first task pointer, or null).
+static BUCKET_HEAD: [AtomicPtr<Task>; PID_HASH_BUCKETS] = [const { AtomicPtr::new(ptr::null_mut()) }; PID_HASH_BUCKETS];
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn bucket_index(pid: u32) -> usize {
+    (pid as usize) % PID_HASH_BUCKETS
+}
+
+/// 64th: the bucket lock is taken with IRQs DISABLED and the saved flag is
+/// returned for the paired unlock (restore). sc207 found the freeze class
+/// (a timer-softirq for_each_task spinning on the very bucket an
+/// interrupted task-context walker held — self-deadlock, both vCPUs 100%,
+/// serial cut mid-line); the deferred-print mitigation narrowed but did
+/// not close the window: ANY holder interruptible while holding (insert,
+/// remove, or a walker's callback) freezes the machine the same way once
+/// an IRQ-context walk lands in the gap (ohw40: both CPUs in
+/// pid_hash::lock_bucket from binder::sleep_snapshot, BUCKET_LOCK[27]
+/// held by an interrupted walker, hard freeze at t=40s). With the hold
+/// IRQ-atomic a holder can never be interrupted out of its section, so
+/// every spinner waits a bounded callback duration instead of forever.
+#[inline]
+fn lock_bucket(idx: usize) -> bool {
+    let flags = crate::arch::cpu::save_and_disable_irq();
+    while BUCKET_LOCK[idx]
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    flags
+}
+
+/// Try-lock a bucket. Returns false if it is currently held.
+///
+/// For wedge-diagnostic paths (dfx taskdump): the code that most needs the
+/// snapshot runs precisely when some CPU is stuck — possibly while holding
+/// a bucket lock (sys_kill broadcast / send_signal_to_pgid / oom_kill call
+/// send_signal → wake_up → runqueue lock INSIDE the for_each callback).
+/// Blocking there would wedge the diagnostic itself.
+/// 64th: IRQ-atomic twin of lock_bucket for the diagnostic try-path —
+/// returns the saved IRQ flag on acquire (Some) so the paired
+/// unlock_bucket can restore it; None (with IRQs restored) on refusal.
+#[inline]
+fn try_lock_bucket(idx: usize) -> Option<bool> {
+    let flags = crate::arch::cpu::save_and_disable_irq();
+    if BUCKET_LOCK[idx]
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        Some(flags)
+    } else {
+        crate::arch::cpu::restore_irq(flags);
+        None
+    }
+}
+
+#[inline]
+fn unlock_bucket(idx: usize, flags: bool) {
+    BUCKET_LOCK[idx].store(false, Ordering::Release);
+    crate::arch::cpu::restore_irq(flags);
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+/// Initialize the PID hash table (call once during boot).
+pub fn init() {
+    // AtomicPtr is already initialized to null via const, nothing extra needed.
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Insert a task into the PID hash table.
+///
+/// Called from `alloc_task_slot()` / idle init after task construction.
+pub fn pid_hash_insert(task: *mut Task) {
+    // SAFETY: task is a valid pointer to a Task that was just constructed and is not
+    /// yet visible to other CPUs (called before enqueue_task).
+    let pid = unsafe { (*task).pid() };
+    let idx = bucket_index(pid);
+
+    let flags = lock_bucket(idx);
+    // Prepend to chain (LIFO — O(1) insert).
+    // SAFETY: We hold the bucket lock, and task is valid and not yet in any chain.
+    unsafe {
+        let old_head = BUCKET_HEAD[idx].load(Ordering::Relaxed);
+        (*task).pid_hash_next = old_head;
+        BUCKET_HEAD[idx].store(task, Ordering::Release);
+    }
+    unlock_bucket(idx, flags);
+}
+
+/// Remove a task from the PID hash table by PID.
+///
+/// Called from `release_task()`. After this returns, the task may still be
+/// visible to RCU readers until a grace period elapses.
+pub fn pid_hash_remove(pid: u32) {
+    let idx = bucket_index(pid);
+
+    let flags = lock_bucket(idx);
+    // SAFETY: We hold the bucket lock. The chain traversal uses Release/Acquire ordering
+    // so no concurrent modifications can occur. Only the removed node's next pointer is
+    // written, which is safe for concurrent RCU readers.
+    unsafe {
+        let mut prev: *mut *mut Task = &BUCKET_HEAD[idx] as *const AtomicPtr<Task> as *mut *mut Task;
+        let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
+        while !curr.is_null() {
+            if (*curr).pid() == pid {
+                // sc82 forensics: record the unlink (thread OR leader) in
+                // the global exit ring — the rwlock-freeze dump replays a
+                // frozen tgid's deaths. No behavior change.
+                crate::sync::futex::note_task_unlink(pid, (*curr).tgid() as u32);
+                // Unlink: write *prev = curr->next.  This only touches the
+                // _previous_ node's next pointer (or the bucket head), not
+                // the removed node itself — safe for concurrent RCU readers
+                // who may already be at `curr`.
+                *prev = (*curr).pid_hash_next;
+                break;
+            }
+            prev = &mut (*curr).pid_hash_next;
+            curr = (*curr).pid_hash_next;
+        }
+    }
+    unlock_bucket(idx, flags);
+}
+
+/// Look up a task by PID (RCU read-side).
+///
+/// Returns a raw pointer to the Task, or null if not found.
+/// The caller must NOT free the returned task while in the RCU read-side
+/// critical section.
+/// R12-5: pinned lookup for cross-CPU wake/notify paths — the returned
+/// pointer is guaranteed alive until `Task::task_put`. Ordinary
+/// `pid_hash_lookup` stays unpinned: its callers are syscall-context
+/// short reads where the reaper (the task's parent) cannot run on THIS
+/// cpu mid-read, and retrofitting 56 call sites with puts would leak
+/// slots on every missed one.
+pub fn pid_hash_lookup_pinned(pid: u32) -> *mut Task {
+    let t = pid_hash_lookup(pid);
+    if !t.is_null() {
+        unsafe { (*t).task_refcnt.fetch_add(1, Ordering::AcqRel); }
+    }
+    t
+}
+
+pub fn pid_hash_lookup(pid: u32) -> *mut Task {
+    rcu::rcu_read_lock();
+
+    let idx = bucket_index(pid);
+    // SAFETY: We are in an RCU read-side critical section. The bucket head is loaded
+    // with Acquire ordering. Any task found remains valid until after rcu_read_unlock()
+    // plus a grace period (caller must not free it during the RCU read side).
+    let result = unsafe {
+        let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
+        let mut found: *mut Task = ptr::null_mut();
+        while !curr.is_null() {
+            if (*curr).pid() == pid {
+                found = curr;
+                break;
+            }
+            curr = (*curr).pid_hash_next;
+        }
+        found
+    };
+
+    rcu::rcu_read_unlock();
+
+    result
+}
+
+/// Iterate all tasks in the PID hash table.
+///
+/// Takes per-bucket locks sequentially. Used by the OOM killer.
+pub fn pid_hash_for_each_task<F>(mut f: F)
+where
+    F: FnMut(&Task),
+{
+    for i in 0..PID_HASH_BUCKETS {
+        let flags = lock_bucket(i);
+        // SAFETY: We hold the bucket lock so no concurrent insert/remove
+        // can modify the chain; every chained node is a live, fully
+        // constructed Task (insert happens after construction), so a
+        // shared reference for the callback's duration is sound. The
+        // callback must not yield the CPU (the bucket lock is
+        /// irq-save spin) nor retain the reference past its return.
+        unsafe {
+            let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
+            while !curr.is_null() {
+                f(&*curr);
+                curr = (*curr).pid_hash_next;
+            }
+        }
+        unlock_bucket(i, flags);
+    }
+}
+
+/// Non-blocking variant of `pid_hash_for_each_task` for wedge diagnostics.
+///
+/// Buckets whose lock is held are SKIPPED (the snapshot is partial), never
+/// waited for. Returns the number of skipped buckets so the caller can
+/// report that the dump is incomplete.
+pub fn pid_hash_for_each_task_try<F>(mut f: F) -> usize
+where
+    F: FnMut(&Task),
+{
+    let mut skipped = 0;
+    for i in 0..PID_HASH_BUCKETS {
+        let Some(irq) = try_lock_bucket(i) else {
+            skipped += 1;
+            continue;
+        };
+        // SAFETY: We hold the bucket lock so no concurrent insert/remove can
+        // modify the chain; tasks unlinked by a stalled holder are simply
+        // missed by this snapshot; nodes are live, fully constructed
+        // Tasks (same contract as pid_hash_for_each_task).
+        unsafe {
+            let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
+            while !curr.is_null() {
+                f(&*curr);
+                curr = (*curr).pid_hash_next;
+            }
+        }
+        unlock_bucket(i, irq);
+    }
+    skipped
+}
+
+/// Collect EVERY task pid currently in the hash table.
+///
+/// History: this returned a fixed `[u32; 64]` snapshot — a
+/// no-allocation shortcut that silently TRUNCATED the task list at 64
+/// entries. /proc root readdir is built on it, so on task-dense
+/// systems (the OH image: hundreds of live tasks by 14s) every pid
+/// past the 64-slot window was invisible to userspace: `ps`, `ls
+/// /proc` and every process-finder missed services wholesale (the mmi
+/// syscall-diff probe polled /proc for 300s and never saw
+/// `multimodalinput`, although the kernel's own watchdog walked the
+/// same hash and found the task). The reference kernel has no such
+/// cap — procfs lists the whole pid table. The walk now collects into
+/// a Vec (the same shape as the /proc/[pid]/task branch: raw pushes
+/// under the per-bucket locks, formatting after the walk).
+pub fn pid_hash_collect_all() -> alloc::vec::Vec<u32> {
+    let mut pids = alloc::vec::Vec::new();
+
+    for i in 0..PID_HASH_BUCKETS {
+        let flags = lock_bucket(i);
+        // SAFETY: We hold the bucket lock so the chain cannot be modified concurrently.
+        unsafe {
+            let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
+            while !curr.is_null() {
+                pids.push((*curr).pid());
+                curr = (*curr).pid_hash_next;
+            }
+        }
+        unlock_bucket(i, flags);
+    }
+
+    pids
+}

@@ -1,0 +1,138 @@
+/* MIT License
+ *
+ * Copyright (c) 2026 Fei Wang
+ *
+ * x86_64 kernel linker script.
+ *
+ * Two load regions:
+ *   - .boot  : 32-bit multiboot entry stub + early page tables, VMA=LMA=0x100000
+ *              (QEMU -kernel ELF enters here with paging off, 32-bit protected mode)
+ *   - kernel : higher-half VMA 0xffffffff80200000, LMA 0x200000
+ *              VMA - LMA == 0xffffffff80000000 (constant, like __START_KERNEL_map
+ *              on x86 Linux; the early 2MB pages map phys i*2MB -> VMA base + i*2MB)
+ */
+
+OUTPUT_FORMAT(elf64-x86-64)
+OUTPUT_ARCH(i386:x86-64)
+ENTRY(_start)
+
+KERNEL_VMA = 0xffffffff80000000;
+BOOT_BASE = 0x100000;
+KERNEL_LMA = 0x200000;
+
+SECTIONS
+{
+    /* ---- 32-bit boot stub (identity-mapped, page-aligned) ---- */
+    . = BOOT_BASE;
+
+    .boot : ALIGN(4096)
+    {
+        KEEP(*(.multiboot_header))
+        *(.boot.text)
+        *(.boot.data)
+        . = ALIGN(4096);
+        __boot_page_tables_start = .;
+        *(.boot.pt)
+        . = ALIGN(4096);
+        __boot_page_tables_end = .;
+    }
+
+    /* Boot stack: pure symbol assignments (NO output section), fixed
+     * low identity address. The link applies this script twice on the
+     * current cargo nightly (target rustflags/link args are duplicated
+     * into the link command); the second pass resets `.` to BOOT_BASE
+     * and a location-relative .boot_stack section re-lands at 0x100000,
+     * overlapping the first pass's .boot (24K early page tables since
+     * SMP8) — every clean x86_64 link failed on it (masked before by
+     * stale boot_x86_64.o artifacts). Symbols re-assigned to the same
+     * value are a no-op in the second pass.
+     *
+     * 0x80000 (in the e820-low usable segment, below the kernel image)
+     * is used only between multiboot entry and the 64-bit entry — by
+     * the time the page allocator runs, the stack is abandoned, so the
+     * buddy may freely hand the region out later. */
+    __boot_stack_bottom = 0x80000;
+    __boot_stack_top = 0x84000;
+
+    . = ALIGN(4096);
+    __boot_end = .;
+
+    /* ---- 64-bit higher-half kernel ---- */
+    . = KERNEL_VMA + KERNEL_LMA;
+
+    __kernel_start = .;
+    __kernel_lma_start = KERNEL_LMA;
+
+    /* Single AT() on .text fixes the VMA-LMA delta for the whole image
+     * (0xffffffff80000000); every later section inherits it. Per-section
+     * AT(LOADADDR(prev)+SIZEOF(prev)) broke the delta by alignment slop,
+     * which misaligned absolute-addressed data (jump tables) by a few
+     * bytes while rip-relative code kept working. */
+    .text : AT(KERNEL_LMA)
+    {
+        __stext = .;
+        KEEP(*(.text.boot64))          /* first instructions in the high map */
+        *(.text .text.*)
+        KEEP(*(.trampoline))           /* AP SMP trampoline (copied to 0x8000) */
+        . = ALIGN(4096);
+        __etext = .;
+    }
+
+    .rodata :
+    {
+        __srodata = .;
+        *(.rodata .rodata.*)
+        *(.srodata .srodata.*)
+        . = ALIGN(4096);
+        __ex_table_start = .;
+        KEEP(*(__ex_table))
+        __ex_table_end = .;
+        . = ALIGN(4096);
+        __end_rodata = .;
+    }
+
+    .data :
+    {
+        __sdata = .;
+        *(.data .data.*)
+        *(.sdata .sdata.*)
+        /* .got is an orphan otherwise: ld parks it AFTER __kernel_end, past
+         * the image mapping, and any GOT-indirect call (debug builds emit
+         * them across CGUs) page-faults on an unmapped address. Absorb it
+         * (and .got.plt, were it ever emitted) inside the loaded image. */
+        *(.got .got.plt)
+        . = ALIGN(4096);
+        *(.bss.stack)                    /* per-CPU IRQ stacks etc. */
+        __edata = .;
+    }
+
+    .bss (NOLOAD) :
+    {
+        __sbss = .;
+        *(.bss .bss.*)
+        *(.sbss .sbss.*)
+        *(COMMON)
+        . = ALIGN(4096);
+        __ebss = .;
+    }
+
+    . = ALIGN(4096);
+    __kernel_end = .;
+    __kernel_lma_end = KERNEL_LMA + (__kernel_end - (KERNEL_VMA + KERNEL_LMA));
+
+    /DISCARD/ :
+    {
+        *(.eh_frame .eh_frame_hdr)
+        *(.note .note.*)
+        *(.comment)
+    }
+}
+
+/* Layout-hunt 2026-11-10: the image grew past the static KERNEL_RESERVE_SIZE
+ * window (main.rs) with no build-time guard — riscv64/aarch64 ASSERT their
+ * windows, x86_64 silently corrupted boots (the unreserved live .bss tail
+ * was seeded into the buddy). The next outgrowth must fail HERE: grow
+ * KERNEL_RESERVE_SIZE (main.rs) and this bound together. 0x28000000 = 40MB,
+ * 2MB-aligned like kernel_image_phys_end()'s rounding. */
+ASSERT(__kernel_lma_end <= 0x28000000,
+       "x86_64 kernel image outgrew the 40MB static window: grow KERNEL_RESERVE_SIZE (main.rs) and this ASSERT together")

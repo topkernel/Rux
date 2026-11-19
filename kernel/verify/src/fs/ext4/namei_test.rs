@@ -1,0 +1,476 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! ext4 directory entry helpers invariant tests.
+//!
+//! Functions copied from: kernel/src/fs/ext4/namei.rs
+
+use proptest::prelude::*;
+
+// ============================================================================
+// Copied functions from kernel/src/fs/ext4/namei.rs
+// ============================================================================
+
+/// EXT4 file type for directories (copied from kernel/src/fs/ext4/dir.rs)
+pub const EXT4_FT_DIR: u8 = 2;
+
+
+// Local mirror of the kernel's errno path used by the functions above;
+// keeps the mirrored bodies byte-identical to the kernel source.
+mod errno {
+    pub struct Errno;
+    impl Errno {
+        pub const NoSpaceLeftOnDevice: Errno = Errno;
+        pub fn as_neg_i32(&self) -> i32 {
+            -28 // ENOSPC
+        }
+    }
+}
+
+// Mirror of kernel/src/fs/ext4/namei.rs find_entry_space (sync-checked).
+fn find_entry_space(
+    block_data: &[u8],
+    name_len: usize,
+    block_size: usize,
+    tail_reserve: usize,
+) -> Option<usize> {
+    let mut offset = 0usize;
+    let required_len = ((8 + name_len + 3) & !3) as u16; // Align to 4 bytes
+
+    while offset + 8 <= block_size {
+        let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
+
+        if rec_len == 0 || rec_len < 8 {
+            break;
+        }
+        // Corrupt/oversized record: an entry may never claim space past
+        // the block end. Treat as no-space (the caller falls through to
+        // allocating a fresh block) instead of splitting past 4096 and
+        // panicking the kernel.
+        if offset + rec_len as usize > block_size {
+            break;
+        }
+
+        // Check if this is a deleted/unused entry (inode == 0)
+        let ino = u32::from_le_bytes([
+            block_data[offset],
+            block_data[offset + 1],
+            block_data[offset + 2],
+            block_data[offset + 3],
+        ]);
+
+        if ino == 0 {
+            // Deleted entry — can reuse if large enough
+            if rec_len >= required_len {
+                // metadata_csum dir blocks reserve the final 12 bytes for
+                // the checksum tail (struct ext4_dir_entry_tail), covered
+                // by the last entry's rec_len. A deleted slot whose span
+                // reaches the block end can only host the new entry when
+                // the entry's own span stays short of the tail — and the
+                // tail is re-derived by dir_block_seal after the write.
+                // (The old 8-byte reserve let a short entry land with its
+                // name bytes inside the 12-byte tail region.)
+                if offset + required_len as usize <= block_size - tail_reserve {
+                    return Some(offset);
+                }
+                return None;
+            }
+        } else {
+            let name_len_entry = block_data[offset + 6] as usize;
+            let used_len = ((8 + name_len_entry + 3) & !3) as u16;
+
+            // Check if there's space in this entry
+            if rec_len >= used_len + required_len {
+                return Some(offset);
+            }
+        }
+
+        offset += rec_len as usize;
+    }
+
+    None
+}
+
+// Mirror of kernel/src/fs/ext4/namei.rs add_entry_to_block (sync-checked).
+fn add_entry_to_block(
+    block_data: &mut [u8],
+    offset: usize,
+    name: &[u8],
+    ino: u32,
+    file_type: u8,
+    block_size: usize,
+    tail_reserve: usize,
+) -> Result<(), i32> {
+    // Entries may never place bytes inside the reserved tail region
+    // (metadata_csum: last 12 bytes; 0 otherwise). Slots selected by
+    // find_entry_space already respect this; the bound here also covers
+    // legacy-geometry blocks whose last entry spans into the region.
+    let usable_end = block_size - tail_reserve;
+    let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]) as usize;
+    let slot_ino = u32::from_le_bytes([
+        block_data[offset],
+        block_data[offset + 1],
+        block_data[offset + 2],
+        block_data[offset + 3],
+    ]);
+
+    // Space the new entry itself needs (4-byte aligned, min 8).
+    let required_len = (8 + name.len() + 3) & !3;
+    if required_len > block_size || offset + required_len > usable_end {
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+    }
+
+    let (new_offset, new_rec_len) = if slot_ino == 0 {
+        // Deleted entry: the WHOLE rec_len is free. Replace in place.
+        (offset, rec_len)
+    } else {
+        // Live entry: split off its slack.
+        let existing_name_len = block_data[offset + 6] as usize;
+        let used_len = (8 + existing_name_len + 3) & !3;
+        if rec_len <= used_len || rec_len - used_len < required_len {
+            // find_entry_space should never select such a slot for a live
+            // entry; if it does, report no-space instead of a silent no-op.
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+        // Shrink the existing entry to its used length.
+        let used_bytes = (used_len as u16).to_le_bytes();
+        block_data[offset + 4] = used_bytes[0];
+        block_data[offset + 5] = used_bytes[1];
+        (offset + used_len, rec_len - used_len)
+    };
+
+    if new_offset + new_rec_len > usable_end {
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+    }
+
+    // If the slack after the new entry can host another header, leave it
+    // as a free (inode-0) tail entry like ext4 does; otherwise fold the
+    // remainder into the new entry's rec_len. The 12-byte minimum follows
+    // the kernel (0160a8f0c): slack < 12 folds into the entry, because an
+    // 8-byte inode-0 hole reads as a corruption marker in cooked ext4
+    // images.
+    let write_rec_len = if new_rec_len - required_len >= 12 {
+        required_len
+    } else {
+        new_rec_len
+    };
+
+    // Write inode number
+    let ino_bytes = ino.to_le_bytes();
+    block_data[new_offset..new_offset + 4].copy_from_slice(&ino_bytes);
+
+    // Write record length
+    let rec_bytes = (write_rec_len as u16).to_le_bytes();
+    block_data[new_offset + 4] = rec_bytes[0];
+    block_data[new_offset + 5] = rec_bytes[1];
+
+    // Write name length
+    block_data[new_offset + 6] = name.len() as u8;
+
+    // Write file type
+    block_data[new_offset + 7] = file_type;
+
+    // Write name
+    block_data[new_offset + 8..new_offset + 8 + name.len()].copy_from_slice(name);
+
+    // Free tail entry for the remainder, if any.
+    let tail_offset = new_offset + write_rec_len;
+    if new_rec_len > write_rec_len {
+        let tail_rec = (new_rec_len - write_rec_len) as u16;
+        let tail_bytes = tail_rec.to_le_bytes();
+        block_data[tail_offset..tail_offset + 4].copy_from_slice(&0u32.to_le_bytes());
+        block_data[tail_offset + 4] = tail_bytes[0];
+        block_data[tail_offset + 5] = tail_bytes[1];
+        block_data[tail_offset + 6] = 0;
+        block_data[tail_offset + 7] = 0;
+    }
+
+    Ok(())
+}
+
+/// Create initial entry in empty block
+fn create_initial_entry(
+    block_data: &mut [u8],
+    name: &[u8],
+    ino: u32,
+    file_type: u8,
+    block_size: usize,
+) {
+    let rec_len = block_size as u16;
+
+    let ino_bytes = ino.to_le_bytes();
+    block_data[0..4].copy_from_slice(&ino_bytes);
+
+    let rec_bytes = rec_len.to_le_bytes();
+    block_data[4] = rec_bytes[0];
+    block_data[5] = rec_bytes[1];
+
+    block_data[6] = name.len() as u8;
+    block_data[7] = file_type;
+
+    block_data[8..8 + name.len()].copy_from_slice(name);
+}
+
+/// Create "." entry
+fn create_dot_entry(ino: u32, rec_len: u16) -> [u8; 8] {
+    let mut entry = [0u8; 8];
+    entry[0..4].copy_from_slice(&ino.to_le_bytes());
+    entry[4..6].copy_from_slice(&rec_len.to_le_bytes());
+    entry[6] = 1;
+    entry[7] = EXT4_FT_DIR;
+    entry
+}
+
+/// Create ".." entry
+fn create_dotdot_entry(ino: u32, rec_len: u16) -> [u8; 8] {
+    let mut entry = [0u8; 8];
+    entry[0..4].copy_from_slice(&ino.to_le_bytes());
+    entry[4..6].copy_from_slice(&rec_len.to_le_bytes());
+    entry[6] = 2;
+    entry[7] = EXT4_FT_DIR;
+    entry
+}
+
+/// Find previous entry in directory block
+fn find_prev_entry(block_data: &[u8], target_offset: usize, block_size: usize) -> usize {
+    let mut offset = 0;
+
+    while offset + 8 <= block_size {
+        let rec_len = u16::from_le_bytes([
+            block_data[offset + 4],
+            block_data[offset + 5],
+        ]) as usize;
+
+        if rec_len == 0 {
+            break;
+        }
+
+        if offset + rec_len == target_offset {
+            return offset;
+        }
+
+        offset += rec_len;
+    }
+
+    target_offset
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+proptest! {
+    /// INV-NAMEI-1: find_entry_space in empty block finds offset 0
+    #[test]
+    fn test_find_space_empty_block(
+        name_len in 1usize..20usize,
+        block_size in 64usize..4096usize,
+    ) {
+        let block = vec![0u8; block_size];
+        let result = find_entry_space(&block, name_len, block_size, 0);
+        // Empty block: rec_len is 0 at offset 0 (all zeros), so breaks immediately → None
+        // Actually, block is all zeros, rec_len = 0 at first entry → break → None
+        prop_assert!(result.is_none());
+    }
+
+    /// INV-NAMEI-2: find_entry_space in block with single large entry finds space
+    #[test]
+    fn test_find_space_single_entry(
+        name_len in 1usize..12usize,
+        block_size in 64usize..4096usize,
+    ) {
+        let mut block = vec![0u8; block_size];
+        // Create an initial entry with rec_len = block_size
+        create_initial_entry(&mut block, b"test", 42, 1, block_size);
+        let result = find_entry_space(&block, name_len, block_size, 0);
+        prop_assert!(result.is_some());
+        prop_assert_eq!(result.unwrap(), 0);
+    }
+
+    /// INV-NAMEI-3: find_entry_space with no space returns None
+    #[test]
+    fn test_find_space_no_room(
+        block_size in 32usize..256usize,
+    ) {
+        let mut block = vec![0u8; block_size];
+        // Create an entry whose name fills the entire block (block_size - 8 header bytes)
+        let name_len = (block_size - 8) as u8;
+        let name = vec![b'x'; name_len as usize];
+        create_initial_entry(&mut block, &name, 42, 1, block_size);
+        // Try to find space for a 12-byte name — no room should remain
+        let result = find_entry_space(&block, 12, block_size, 0);
+        prop_assert!(result.is_none());
+    }
+
+    /// INV-NAMEI-4: create_dot_entry has correct structure
+    #[test]
+    fn test_dot_entry(ino in 1u32..1000u32, rec_len in 12u16..512u16) {
+        let entry = create_dot_entry(ino, rec_len);
+        let read_ino = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+        let read_rec_len = u16::from_le_bytes([entry[4], entry[5]]);
+        prop_assert_eq!(read_ino, ino);
+        prop_assert_eq!(read_rec_len, rec_len);
+        prop_assert_eq!(entry[6], 1); // name_len = 1 for "."
+        prop_assert_eq!(entry[7], EXT4_FT_DIR);
+    }
+
+    /// INV-NAMEI-5: create_dotdot_entry has correct structure
+    #[test]
+    fn test_dotdot_entry(ino in 1u32..1000u32, rec_len in 12u16..512u16) {
+        let entry = create_dotdot_entry(ino, rec_len);
+        let read_ino = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+        let read_rec_len = u16::from_le_bytes([entry[4], entry[5]]);
+        prop_assert_eq!(read_ino, ino);
+        prop_assert_eq!(read_rec_len, rec_len);
+        prop_assert_eq!(entry[6], 2); // name_len = 2 for ".."
+        prop_assert_eq!(entry[7], EXT4_FT_DIR);
+    }
+
+    /// INV-NAMEI-6: dot and dotdot have different name_len
+    #[test]
+    fn test_dot_dotdot_different(_v in 0u8..1u8) {
+        let dot = create_dot_entry(1, 12);
+        let dotdot = create_dotdot_entry(1, 12);
+        prop_assert_ne!(dot[6], dotdot[6]);
+        prop_assert_eq!(dot[6], 1);
+        prop_assert_eq!(dotdot[6], 2);
+    }
+
+    /// INV-NAMEI-7: create_initial_entry writes correct fields
+    #[test]
+    fn test_create_initial_entry(
+        ino in 1u32..10000u32,
+        block_size in 64usize..4096usize,
+    ) {
+        let mut block = vec![0u8; block_size];
+        let name = b"hello";
+        create_initial_entry(&mut block, name, ino, 1, block_size);
+
+        let read_ino = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
+        let read_rec_len = u16::from_le_bytes([block[4], block[5]]);
+        prop_assert_eq!(read_ino, ino);
+        prop_assert_eq!(read_rec_len, block_size as u16);
+        prop_assert_eq!(block[6], name.len() as u8);
+        prop_assert_eq!(block[7], 1);
+        prop_assert_eq!(&block[8..8 + name.len()], name);
+    }
+
+    /// INV-NAMEI-8: add_entry_to_block splits existing entry
+    #[test]
+    fn test_add_entry_split(
+        ino1 in 1u32..1000u32,
+        ino2 in 1u32..1000u32,
+        block_size in 64usize..4096usize,
+    ) {
+        let mut block = vec![0u8; block_size];
+        create_initial_entry(&mut block, b"first", ino1, 1, block_size);
+        add_entry_to_block(&mut block, 0, b"second", ino2, 2, block_size, 0)
+            .expect("fits in legacy geometry");
+
+        // First entry's rec_len should be trimmed to actual size
+        let first_rec = u16::from_le_bytes([block[4], block[5]]);
+        let first_used = ((8 + 5 + 3) & !3) as u16; // "first" = 5 chars
+        prop_assert_eq!(first_rec, first_used);
+
+        // Second entry at offset = first_used
+        let second_offset = first_used as usize;
+        let second_ino = u32::from_le_bytes([
+            block[second_offset],
+            block[second_offset + 1],
+            block[second_offset + 2],
+            block[second_offset + 3],
+        ]);
+        prop_assert_eq!(second_ino, ino2);
+        prop_assert_eq!(block[second_offset + 6], 6); // "second" = 6 chars
+        prop_assert_eq!(&block[second_offset + 8..second_offset + 14], b"second");
+    }
+
+    /// INV-NAMEI-9: find_prev_entry returns previous offset
+    #[test]
+    fn test_find_prev_entry(
+        block_size in 128usize..4096usize,
+    ) {
+        let mut block = vec![0u8; block_size];
+        create_initial_entry(&mut block, b"first", 1, 1, block_size);
+        add_entry_to_block(&mut block, 0, b"second", 2, 2, block_size, 0)
+            .expect("fits in legacy geometry");
+
+        let first_rec = u16::from_le_bytes([block[4], block[5]]) as usize;
+        let second_offset = first_rec;
+
+        let prev = find_prev_entry(&block, second_offset, block_size);
+        prop_assert_eq!(prev, 0);
+    }
+
+    /// INV-NAMEI-10: find_prev_entry for first entry returns target_offset (no prev)
+    #[test]
+    fn test_find_prev_entry_first(
+        block_size in 64usize..4096usize,
+    ) {
+        let mut block = vec![0u8; block_size];
+        create_initial_entry(&mut block, b"only", 1, 1, block_size);
+
+        let prev = find_prev_entry(&block, 0, block_size);
+        prop_assert_eq!(prev, 0);
+    }
+
+    /// INV-NAMEI-11: entry length alignment is 4-byte aligned
+    #[test]
+    fn test_entry_alignment(name_len in 0usize..20usize) {
+        let used_len = (8 + name_len + 3) & !3;
+        prop_assert_eq!(used_len % 4, 0, "entry length {} not 4-aligned for name_len {}", used_len, name_len);
+    }
+
+    /// INV-NAMEI-12: find_prev_entry for nonexistent target returns target
+    #[test]
+    fn test_find_prev_nonexistent(
+        block_size in 64usize..4096usize,
+        target in 50usize..100usize,
+    ) {
+        let mut block = vec![0u8; block_size];
+        create_initial_entry(&mut block, b"first", 1, 1, block_size);
+
+        let target = target.min(block_size - 1); // ensure target < block_size
+        let result = find_prev_entry(&block, target, block_size);
+        // Target is within first entry but not at the start → no exact offset match
+        // However, if target == first entry's rec_len (block_size), offset+rec_len matches
+        // So we ensure target < block_size to avoid this edge case
+        prop_assert_eq!(result, target);
+    }
+
+    /// INV-NAMEI-13: rec_len sum of all entries equals block_size after split
+    #[test]
+    fn test_rec_len_sum(
+        block_size in 128usize..4096usize,
+    ) {
+        let mut block = vec![0u8; block_size];
+        create_initial_entry(&mut block, b"first", 1, 1, block_size);
+        add_entry_to_block(&mut block, 0, b"second", 2, 2, block_size, 0)
+            .expect("fits in legacy geometry");
+
+        // New-kernel semantics: the second entry carries only its
+        // required length when the slack can host another header, and
+        // the remainder becomes an inode-0 free tail entry. The
+        // invariant that survives both geometries: walking the rec_len
+        // chain from offset 0 covers the whole block exactly.
+        let mut offset = 0usize;
+        let mut sum = 0usize;
+        while offset < block_size {
+            let rec = u16::from_le_bytes([block[offset + 4], block[offset + 5]]) as usize;
+            prop_assert!(rec >= 8, "chain entry at {} has rec_len {}", offset, rec);
+            sum += rec;
+            offset += rec;
+        }
+        prop_assert_eq!(sum, block_size);
+    }
+
+    /// INV-NAMEI-14: create_dot/dotdot entries are exactly 8 bytes
+    #[test]
+    fn test_dot_entries_size(_v in 0u8..1u8) {
+        let dot = create_dot_entry(1, 12);
+        let dotdot = create_dotdot_entry(2, 12);
+        prop_assert_eq!(dot.len(), 8);
+        prop_assert_eq!(dotdot.len(), 8);
+    }
+}

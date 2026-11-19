@@ -1,0 +1,3944 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Process/thread exit and wait implementation
+//!
+//! - do_exit: termination with thread-group semantics
+//!   - non-leader thread: ring detach + deferred release (no ZOMBIE —
+//!     threads are never wait4()ed; Linux delay_put analogue)
+//!   - leader (or single-threaded): force SIGKILL remaining members,
+//!     wait for the group to drain, then the classic ZOMBIE flow
+//! - do_exit_group / de_thread: group teardown entry points (syscall 94,
+//!   execve, fatal default signals)
+//! - release_task: Reap zombie child resources (incl. exited group members)
+//! - do_wait / do_wait_nonblock / do_waitid: wait for child state change
+
+use crate::errno;
+use crate::process::task::{Pid, Task, TaskState};
+
+// ============================================================================
+// Robust list / clear_child_tid exit processing (must run while the mm lives)
+// ============================================================================
+
+/// FUTEX_OWNER_DIED bit (Linux include/uapi/linux/futex.h).
+const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+/// TID mask of a futex word (low 30 bits hold the owner TID).
+const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
+/// FUTEX_WAITERS bit (bit 31) — preserved by the death mark.
+const FUTEX_WAITERS: u32 = 0x8000_0000;
+/// Max entries walked per robust list (defensive bound, Linux uses
+/// ROBUST_LIST_LIMIT=2048 per chain).
+const ROBUST_LIST_LIMIT: u32 = 2048;
+/// sizeof(struct robust_list_head) on 64-bit (list.ptr + futex_offset +
+/// pending ptr).
+const ROBUST_LIST_HEAD_SIZE: usize = 24;
+
+/// Process the dying task's robust futex list (Linux exit_robust_list).
+///
+/// For every list entry whose futex word still carries our TID as owner,
+/// set FUTEX_OWNER_DIED and wake one waiter. Must run BEFORE the task's
+/// mm reference is dropped (the words live in user memory).
+///
+/// Optimistic walk: any unreadable pointer terminates that chain (Linux
+/// skips broken entries too); the head itself must be the registered
+/// 24-byte layout.
+///
+/// Contract: `task` is the exiting task (valid; its mm still lives).
+fn exit_robust_list(task: *mut Task) {
+    use crate::arch::uaccess_safe as ua;
+
+    // SAFETY: the caller (do_exit) passes the running task about to
+    // exit; the mm is dropped strictly after this runs.
+    let t = unsafe { &mut *task };
+    let head = t.robust_list_head() as usize;
+    if head == 0 || t.robust_list_len() != ROBUST_LIST_HEAD_SIZE {
+        return; // not registered / legacy len — nothing to do
+    }
+    #[cfg(feature = "dfx-futex-trace")]
+    {
+        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        taskdump_raw_line(b"FTX ROBUST-EXIT pid=");
+        taskdump_dec(t.pid() as u64);
+        taskdump_raw_line(b" head=");
+        taskdump_dec(head as u64);
+        taskdump_raw_line(b"\n");
+    }
+    let my_tid = t.pid();
+    let mm_id = crate::sync::futex::task_futex_mm_id(task);
+
+    // futex_offset (signed long) at head+8: uaddr = entry + futex_offset.
+    let futex_offset: i64 = match ua::read_user::<i64>(head + 8) {
+        Some(v) => v,
+        None => return,
+    };
+
+    // Process one entry: mark OWNER_DIED if we still own it, wake waiters.
+    // Reference parity (kernel/futex/core.c handle_futex_death 695-720):
+    // the death mark is `(uval & FUTEX_WAITERS) | FUTEX_OWNER_DIED` — the
+    // dying TID is CLEARED so an inheriting waiter (PI lock_pi take-over
+    // or plain re-check) sees an unowned word, exactly like the
+    // reference. The old `v | FUTEX_OWNER_DIED` kept the dead tid in the
+    // word and left every PI waiter looping on an owner that could never
+    // release.
+    // All user accesses go through the exception-table typed family.
+    fn handle_robust_entry(entry: usize, futex_offset: i64, tid: u32, mm_id: usize) {
+        use crate::arch::uaccess_safe as ua;
+        let uaddr = (entry as i64).wrapping_add(futex_offset) as u64;
+        if uaddr & 0x3 != 0 {
+            return; // misaligned futex word — skip
+        }
+        let v: u32 = match ua::read_user::<u32>(uaddr as usize) {
+            Some(v) => v,
+            None => return, // bad pointer — skip entry
+        };
+        if v & FUTEX_TID_MASK == tid {
+            let _ = ua::write_user::<u32>(uaddr as usize, (v & FUTEX_WAITERS) | FUTEX_OWNER_DIED);
+            crate::sync::futex::futex_wake_in_mm(
+                uaddr as usize,
+                mm_id,
+                0, // private futex semantics
+                1,
+                u32::MAX,
+            );
+        }
+    }
+
+    // The list_op_pending entry with an already-released word (owner==0):
+    // the dying thread was killed between the userspace unlock and the
+    // FUTEX_WAKE syscall — reference handle_futex_death's pending_op case
+    // (700-703) wakes one waiter WITHOUT touching the word.
+    // Exception-table user reads (the typed family).
+    fn handle_pending_entry(pending: usize, futex_offset: i64, tid: u32, mm_id: usize) {
+        use crate::arch::uaccess_safe as ua;
+        let uaddr = (pending as i64).wrapping_add(futex_offset) as u64;
+        if uaddr & 0x3 != 0 {
+            return;
+        }
+        let v: u32 = match ua::read_user::<u32>(uaddr as usize) {
+            Some(v) => v,
+            None => return,
+        };
+        if v & FUTEX_TID_MASK == 0 {
+            crate::sync::futex::futex_wake_in_mm(uaddr as usize, mm_id, 0, 1, u32::MAX);
+        }
+    }
+
+    // Walk a robust_list chain starting at `start` (an entry address);
+    // the chain ends when next == head (circular) or is unreadable.
+    // Bounded walk, exception-table user reads (the typed family).
+    fn walk_robust_chain(start: usize, head: usize, futex_offset: i64, tid: u32, mm_id: usize) {
+        use crate::arch::uaccess_safe as ua;
+        let mut entry = start;
+        let mut count = 0u32;
+        while entry != 0 && entry != head && count < ROBUST_LIST_LIMIT {
+            handle_robust_entry(entry, futex_offset, tid, mm_id);
+            entry = match ua::read_user::<u64>(entry) {
+                Some(next) => next as usize,
+                None => break,
+            };
+            count += 1;
+        }
+    }
+
+    // Main list: first entry hangs off head+0. Bounded, exception-table
+    // reads (the typed family).
+    {
+        if let Some(first) = ua::read_user::<u64>(head) {
+            walk_robust_chain(first as usize, head, futex_offset, my_tid, mm_id);
+        }
+        // Pending list (held-when-killed locks): pointer at head+16; the
+        // pointed-to node is itself an entry. Its word may already be
+        // released (the unlock-syscall race) — handle it with the
+        // reference's pending_op semantics instead of the list walk.
+        if let Some(pending) = ua::read_user::<u64>(head + 16) {
+            if pending as usize != 0 {
+                handle_pending_entry(pending as usize, futex_offset, my_tid, mm_id);
+            }
+        }
+    }
+}
+
+/// CLONE_CHILD_CLEARTID exit hook (Linux mm_release): write 0 to the
+/// registered tid word and futex-wake one waiter — this is what makes
+/// pthread_join return.
+///
+/// Must run BEFORE the exiting task drops its mm reference, and the wake
+/// key must be the EXITING task's mm identity (all CLONE_VM threads share
+/// it, so the joiner's wait key matches).
+///
+/// Contract: `task` is the exiting task; its mm still lives.
+fn exit_clear_child_tid(task: *mut Task) {
+    // SAFETY: the caller (do_exit) passes the exiting task; the mm is
+    // dropped strictly after this runs.
+    let t = unsafe { &mut *task };
+    let tid_ptr = t.clear_child_tid();
+    if tid_ptr.is_null() {
+        return;
+    }
+    let mm_id = crate::sync::futex::task_futex_mm_id(task);
+    #[cfg(feature = "dfx-futex-trace")]
+    {
+        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        taskdump_raw_line(b"FTX CLEARTID-EXIT pid=");
+        taskdump_dec(t.pid() as u64);
+        taskdump_raw_line(b" u=");
+        taskdump_dec(tid_ptr as usize as u64);
+        taskdump_raw_line(b"\n");
+    }
+
+    // Write 0 to the tid pointer in user memory (the typed
+    // exception-table copy path).
+    let _ = crate::arch::uaccess_safe::write_user::<i32>(tid_ptr as usize, 0);
+    // Wake any thread waiting on this futex (FUTEX_WAKE, 1 waiter).
+    // Private semantics + the exiting task's mm as the key identity.
+    // musl pthread_exit holds __thread_list_lock across SYS_exit and
+    // passes &__thread_list_lock as the clone ctid — THIS wake is what
+    // "unlocks" it for every later exiter/joiner (see futex_hash: the
+    // wake must reach waiters that parked with shared semantics too).
+    crate::sync::futex::futex_wake_in_mm(
+        tid_ptr as usize,
+        mm_id,
+        0, // private futex
+        1,
+        u32::MAX,
+    );
+    t.set_clear_child_tid(core::ptr::null_mut());
+}
+
+// ============================================================================
+// Thread group teardown
+// ============================================================================
+
+/// Force SIGKILL every OTHER live member of the caller's thread group.
+/// Idempotent; the caller then waits via wait_for_thread_group_death.
+pub fn kill_other_threads(current: *mut Task) {
+    // Collect member pids under the ring lock; deliver outside it.
+    let mut victims: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
+    // current is a valid, running task; its ring is well-formed (the
+    // walker's contract — it takes the ring lock itself).
+    // SAFETY: one consolidated deref of the caller's running task.
+    let cur = unsafe { &mut *current };
+    cur.for_each_group_member(|m| {
+            let m_raw = m as *const Task as *mut Task;
+            if m_raw != current {
+                let st = m.state();
+                if !st.is_dead() {
+                    victims.push(m.pid());
+                }
+            }
+            // nanosleep-loss conviction (wwcensus-gated): every member's
+            // terminal anatomy at exit-group time — last pick phase,
+            // ownership qword, linkage, timed-sleep shadow, pending
+            // signals, and the saved kernel resume address (names the
+            // park site).
+            if crate::trace::EVENT_WWCENSUS.armed() && m_raw != current {
+                use crate::dfx::taskdump::putc_brief as putchar;
+                fn pd(mut v: u64) {
+                    use crate::dfx::taskdump::putc_brief as p;
+                    let mut buf = [0u8; 20];
+                    let mut n = 0;
+                    if v == 0 { p(b'0'); return; }
+                    while v > 0 && n < buf.len() {
+                        buf[n] = b'0' + (v % 10) as u8; v /= 10; n += 1;
+                    }
+                    for k in (0..n).rev() { p(buf[k]); }
+                }
+                static XG_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if XG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                    // SAFETY: diagnostic volatile read of a linked ring
+                    // member's field (bounded, read-only).
+                    let q = unsafe {
+                        core::ptr::read_volatile(
+                            core::ptr::addr_of!(m.ti_on_cpu) as *const u64,
+                        )
+                    };
+                    let (ph, ph_ago) =
+                        crate::sched::sched::pick_trace_peek(m_raw).unwrap_or((0, 0));
+                    let tid = m
+                        .timed_sleep_timer_id
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    let kind = m
+                        .timed_sleep_kind
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    let tdl = m
+                        .timed_sleep_deadline
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    let nowt = crate::drivers::timer::read_time();
+                    let linked = match m.policy() {
+                        crate::process::task::SchedPolicy::Fifo
+                        | crate::process::task::SchedPolicy::Rr => false,
+                        _ => m.sched_entity().timeline_key().is_some(),
+                    };
+                    #[cfg(feature = "x86_64")]
+                    let ra = m.thread.callee.ret_addr as u64;
+                    #[cfg(not(feature = "x86_64"))]
+                    let ra = m.thread.ra as u64;
+                    for &b in b"\nXGM pid=" { putchar(b); }
+                    pd(m.pid() as u64);
+                    for &b in b" ph=" { putchar(b); }
+                    pd(ph as u64);
+                    for &b in b"/" { putchar(b); }
+                    pd(ph_ago);
+                    for &b in b" q=0x" { putchar(b); }
+                    pd(q);
+                    for &b in b" pk=" { putchar(b); }
+                    pd(m.pick_state() as u64);
+                    for &b in b" lnk=" { putchar(b); }
+                    pd(linked as u64);
+                    for &b in b" st=0x" { putchar(b); }
+                    pd(m.state().bits() as u64);
+                    for &b in b" ts=" { putchar(b); }
+                    pd(kind as u64);
+                    for &b in b"/tid=" { putchar(b); }
+                    pd(tid);
+                    for &b in b"/dl-" { putchar(b); }
+                    if tdl > nowt {
+                        pd((tdl - nowt) / 10000);
+                    } else {
+                        putchar(b'-');
+                        pd((nowt - tdl) / 10000);
+                    }
+                    for &b in b"ms pend=0x" { putchar(b); }
+                    pd(m.pending.get_all());
+                    for &b in b" ra=0x" { putchar(b); }
+                    pd(ra);
+                    // per-pid LAST fire (collision-free FWT table)
+                    for k in 0..32 {
+                        if crate::timer::FWT_PID[k].load(
+                            core::sync::atomic::Ordering::Relaxed,
+                        ) == m.pid()
+                        {
+                            for &b in b" fw(ok" { putchar(b); }
+                            pd(crate::timer::FWT_OK[k].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) as u64);
+                            for &b in b",rq" { putchar(b); }
+                            pd(crate::timer::FWT_ONRQ[k].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) as u64);
+                            for &b in b",key" { putchar(b); }
+                            pd(crate::timer::FWT_KEY[k].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) as u64);
+                            for &b in b",st" { putchar(b); }
+                            pd(crate::timer::FWT_ST[k].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) as u64);
+                            for &b in b")j-ago=" { putchar(b); }
+                            pd(crate::drivers::timer::get_jiffies().saturating_sub(
+                                crate::timer::FWT_JIF[k].load(
+                                    core::sync::atomic::Ordering::Relaxed,
+                                ),
+                            ));
+                            break;
+                        }
+                    }
+                    if tid != 0 {
+                        for &b in b" del=" { putchar(b); }
+                        match crate::timer::del_lookup(tid) {
+                            Some((line, ago)) => {
+                                for &b in b"L" { putchar(b); }
+                                pd(line);
+                                for &b in b"/" { putchar(b); }
+                                pd(ago);
+                            }
+                            None => {
+                                for &b in b"none" { putchar(b); }
+                            }
+                        }
+                        for &b in b" tp=" { putchar(b); }
+                        pd(crate::timer::timer_pending(tid) as u64);
+                        // fire-side: did this entry ever fire?
+                        {
+                            let d = tid as usize & 0x3FFF;
+                            if crate::timer::FWHOW_ID[d].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) == tid
+                            {
+                                for &b in b" FIRED ok=" { putchar(b); }
+                                pd(crate::timer::FWHOW_OK[d].load(
+                                    core::sync::atomic::Ordering::Relaxed,
+                                ) as u64);
+                                for &b in b"/" { putchar(b); }
+                                pd(crate::drivers::timer::get_jiffies().saturating_sub(
+                                    crate::timer::FWHOW_JIF[d].load(
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    ),
+                                ));
+                                for &b in b"j-ago" { putchar(b); }
+                            } else {
+                                for &b in b" NOFIRE" { putchar(b); }
+                            }
+                        }
+                    }
+                    putchar(b'\n');
+                }
+            }
+        });
+        // gdm bring-up r9-r11: a silent mass SIGKILL took out the whole
+        // daemon set with no print at any loglevel; every other kernel
+        // SIGKILL fan-out path is either printed or was excluded by
+        // instrumentation. If this fires with victims OUTSIDE the caller's
+        // thread group, the thread ring is corrupt — this print names the
+        // caller and victims directly.
+        // OH boot lane 2026-11-12: dfx-gated (sigtrace) — the hunt is
+        // closed (the 100th decoded the KOT-KILL lists as unnamed worker
+        // THREADS sharing the parent comm, not cross-process kills), and
+        // the OH churn runs kill_other_threads on every FFRT group
+        // teardown: the victim-name walk + pr_err rode that hot path
+        // (873 samples through acquire_emit_lock in the 100th's record).
+    if !victims.is_empty()
+        && crate::trace::EVENT_SIGTRACE.armed()
+    {
+        // SAFETY: current is a valid, running task.
+        let ccomm = unsafe { (*current).comm_str() };
+        let mut vnames: alloc::vec::Vec<alloc::string::String> =
+            alloc::vec::Vec::new();
+        for v in victims.iter().take(20) {
+            let t = unsafe { crate::sched::find_task_by_pid(*v) };
+            if !t.is_null() {
+                unsafe {
+                    vnames.push(alloc::string::String::from(
+                        (*t).comm_str(),
+                    ));
+                }
+            }
+        }
+        crate::pr_debug!(
+                            "KOT-KILL: pid={} comm='{}' kills {} group members: {:?}",
+            unsafe { (*current).pid() },
+            ccomm,
+            victims.len(),
+            vnames
+        );
+    }
+    for pid in victims {
+        // Reuse the KILL path of send_signal: unignorable, wakes sleepers.
+        let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGKILL as i32);
+    }
+}
+
+/// Spin-yield until every other member of the group has exited
+/// (nr_threads converges to 1).
+///
+/// SIGKILL'd members reach do_exit, drop their mm refs, and leave the
+/// ring — the decrement happens BEFORE their final schedule, so once
+/// nr_threads == 1 all their mm Arc references are already released.
+/// A member stuck in UNINTERRUPTIBLE kernel sleep will wedge us here
+/// (same trade-off as Linux's exit_group on D-state threads is NOT
+/// taken there — documented as a known risk).
+///
+/// `killable` gates the fatal-signal escape: the EXEC (de_thread)
+/// caller passes true — its own pending SIGKILL aborts the drain
+/// (returns false, drain incomplete) so the exec can unwind with EINTR
+/// before anything is installed; the do_exit caller passes false — an
+/// exiting leader CANNOT unwind, and the shared-mm-dependent teardown
+/// below it requires the drain, so the wait parks regardless of its
+/// own pending signals (the pre-existing contract).
+pub fn wait_for_thread_group_death(current: *mut Task, killable: bool) -> bool {
+    crate::arch::cpu::restore_irq(true);
+    // timer-gap lane (pi_stress -g 2 shutdown wedge): the wait must PARK,
+    // not spin. A RUNNING leader's schedule() requeues and re-picks it
+    // every pass — at FIFO priority above the SIGKILL'd members it
+    // starves the very threads it is waiting for (observed: leader
+    // pinned cpu0 looping here for 6983 jiffies while three
+    // ownership-free, SIGKILL-pending members never ran once; RT
+    // throttling rescued CFS but never the lower-RT members). Park
+    // INTERRUPTIBLE: the pick skips a sleeping leader, the members run
+    // their fatal-signal exits, and thread_group_leave's decrement-side
+    // wake (see task.rs) brings us back to re-check nr_threads.
+    //
+    // FATAL-SIGNAL ESCAPE, killable arm only (oh-launch round 3): a
+    // member that cannot exit (stuck in an unkillable in-kernel wait —
+    // the round-2 foundation wedge: one open() parked forever blocked
+    // the group drain, which parked the exec'ing thread's execveat
+    // forever and silenced the whole service) used to park THIS wait
+    // forever too. The exec'ing task's own pending SIGKILL aborts the
+    // drain and unwinds the exec with EINTR — safe there because
+    // de_thread runs BEFORE any state is installed (no new mm, no
+    // fdtable switch); the already-SIGKILLed members keep dying on
+    // their own, and the abandoning thread returns to userspace where
+    // its SIGKILL is delivered and it exits normally.
+    // SAFETY: current stays valid (it is the running task).
+    while unsafe { (*current).nr_threads() } > 1 {
+        if killable && crate::signal::fatal_signal_pending() {
+            return false;
+        }
+        unsafe {
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE,
+            ));
+        }
+        crate::sched::schedule();
+        unsafe {
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::RUNNING,
+            ));
+        }
+    }
+    true
+}
+
+/// de_thread — exec-time group teardown (Linux de_thread):
+/// kill every other thread and wait for the group to drain before the
+/// new image is installed. Called from the execve path AFTER all
+/// fail-able preparation (a failed exec leaves the process single-
+/// threaded, matching Linux's point-of-no-return behavior).
+/// Returns false when the drain was aborted by the exec'ing task's
+/// own fatal signal (the caller unwinds the exec with EINTR — see
+/// wait_for_thread_group_death).
+pub fn de_thread(current: *mut Task) -> bool {
+    // SAFETY: caller (execve path) passes the running task.
+    unsafe {
+        if (*current).nr_threads() > 1 {
+            kill_other_threads(current);
+            return wait_for_thread_group_death(current, true);
+        }
+    }
+    true
+}
+
+/// Free one exited group member whose context switch-out has completed.
+///
+/// Mirrors release_task's tail for a member: the member already removed
+/// itself from the pid hash, freed its PID, and dropped its mm/fdtable
+/// Arcs at exit time — here we only wait out on_cpu, drop remaining Arcs
+/// (signal/fs), free the kernel stack, and put the Task slot.
+///
+/// R87 (oh-launch round 10, the scribbler producer): returns FALSE —
+/// freeing NOTHING — when the bounded wait's deadline adjudication could
+/// not confirm with positive knowledge that no owner remains (a slot or
+/// a SWITCHING_OUT marker of any age still names the member; see
+/// member_release_stale_ownership). The caller must then RE-PARK the
+/// member on the leader's dead_threads list for the next sweep. The old
+/// shape had exactly two failure modes, both fatal somewhere: spin
+/// forever (r16type/r20type — one CPU lost per wedged member), or
+/// force-release marks an aged-but-live switch still depends on and free
+/// the stack the switching CPU was still executing on (the recycled-
+/// frame scribbler behind the string-byte hijacks and the 0xb9 PTE
+/// face). Deferral is the recovery-path shape: skip, never corrupt —
+/// the sweeper returns immediately, the member frees on a later sweep
+/// when its switch-out truly completes, and a genuinely lost release
+/// leaks the stack loudly (FDM-DEFER, bounded) instead of corrupting.
+///
+/// Contract: `member` is a DEAD task parked on a leader's dead_threads
+/// list (callers guarantee the DEAD state — see sweep_dead_threads /
+/// release_task).
+fn free_dead_member(member: *mut Task) -> bool {
+    // SAFETY: the caller parked `member` DEAD on the dead list; nothing
+    // else can reach it while we hold the list's discipline.
+    let m = unsafe { &mut *member };
+    // The member's final context switch-out may still be in flight —
+    // on_cpu is cleared exactly when __switch_to has saved its context
+    // (see release_task R9 for the full rationale).
+    crate::arch::cpu::restore_irq(true);
+    // DFX (4-thread hang hunt): report a stuck wait loudly instead of
+    // spinning silently — a member whose on_cpu never clears wedges every
+    // later exiter (and their CPUs) here.
+    //
+    // R86 (GNOME no-light wedge): the wait is now BOUNDED. A legitimate
+    // final switch-out clears on_cpu in micro-to-milliseconds even under
+    // TCG storms; 300 jiffies (3 s) is ~1000x that margin. Past the
+    // deadline the ownership is adjudicated against scheduler truth
+    // (member_release_stale_ownership): a DEAD, unlinked member named by
+    // no CPU slot and no in-flight switch-out is in the R85 lost-release
+    // terminal state — nothing will ever clear on_cpu, and the old
+    // forever-spin here cost this CPU for the rest of the boot (r16type/
+    // r20type: both SMP2 CPUs lost mid shell-init, screen dark 2700 s,
+    // PREEMPT-HEAL 255/466 firings, kernel otherwise healthy).
+    //
+    // R87: the adjudication is now POSITIVE-KNOWLEDGE and ONE-SHOT. The
+    // heal fires only on the pure lost-release face (named by no slot
+    // and no SWITCHING_OUT marker of ANY age); every other shape — an
+    // aged-but-possibly-live switch-out window included — returns false
+    // and this call DEFERS the free to the next sweep (returns false;
+    // the caller re-parks the member). No re-arm, no forever-spin: the
+    // sweeper is back on the runqueue within the one deadline window.
+    const FDM_STALE_RELEASE_JIFFIES: u64 = 300;
+    let mut deferred = false;
+    {
+        // LTP-open lane (cve-2017-17052 wedge, 2026-11-14): the wait used
+        // to be a pure spin_loop. on_cpu clears on the MEMBER's OWN CPU
+        // when its exit tail reaches the final context switch — nothing
+        // this CPU does advances that — and under a fork/exit storm the
+        // exit tails queue behind allocator and lock contention for
+        // SECONDS. Every sweeper then burned a whole CPU spinning
+        // (wakewatch: the runner's wake→pick strands 1-3s behind these
+        // monopolist windows; FDM-WAIT churn with climbing member pids is
+        // the wedge face). Bounded spin batches keep the µs-latency fast
+        // path (a legitimate final switch-out clears in micro-to-ms); a
+        // schedule() between batches returns the CPU to the runqueue so
+        // the very exit tails we are waiting ON can make progress.
+        // Same discipline as wait_for_thread_group_death (a schedule()
+        // loop in the same exit context); IRQs are already enabled here.
+        const FDM_SPIN_BATCH: u32 = 100_000;
+        let mut spins: u32 = 0;
+        let mut armed_at = crate::drivers::timer::get_jiffies();
+        // R87 (tail window): the wait must ALSO cover the SWITCHING_OUT
+        // marker. on_cpu (the asm release store) clears BEFORE the
+        // register restore — the switching CPU still executes its final
+        // loads, push and ret ON THE MEMBER'S STACK with on_cpu already
+        // false, and under KVM a host deschedule right there lets the
+        // freeing CPU win the race (RCU poll completes, stack freed,
+        // recycled) before the switcher's ret lands. The marker clears
+        // only in the incoming frame's post-switch tail, after prev's
+        // stack is abandoned for good.
+        // R11 (terminal-release window): neither condition covers the
+        // gap BEFORE the marker publish: the terminal deschedule loop
+        // releases the ownership pair BEFORE calling schedule() (the
+        // sc191 v2 fix), leaving {on_cpu=false, no marker} while the
+        // task still executes its own schedule chain on its stack —
+        // every abort/retry cycle of that loop re-opens the window.
+        // terminal_switch_done is the positive knowledge: set only at
+        // the real-switch retire sites, re-armed false by the loop each
+        // round — {flag set AND on_cpu false AND no marker} is the full
+        // no-references condition.
+        while m.on_cpu()
+            || crate::sched::sched::switching_out_names(member)
+            || !m
+                .terminal_switch_done
+                .load(core::sync::atomic::Ordering::Acquire)
+        {
+            if spins == 0 {
+                let cur_pid = crate::sched::current().map(|c| c.pid()).unwrap_or(0);
+                crate::dfx::taskdump::taskdump_raw_line(b"FDM-WAIT sweeper=");
+                crate::dfx::taskdump::taskdump_dec(cur_pid as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b" member=");
+                crate::dfx::taskdump::taskdump_dec(m.pid() as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b" state=0x");
+                let st = m.state().bits() as u64;
+                let mut sh: i32 = 32;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((st >> sh) & 0xF) as u8;
+                    crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+                }
+                crate::dfx::taskdump::taskdump_raw_line(b"\n");
+            }
+            if crate::drivers::timer::get_jiffies()
+                .wrapping_sub(armed_at)
+                >= FDM_STALE_RELEASE_JIFFIES
+            {
+                // R86/R87: past the deadline — ONE adjudication per call.
+                // A true heal (pure lost-release, marks released) makes
+                // on_cpu false and exits the loop; anything else is a
+                // live or ambiguous owner — DEFER to the next sweep,
+                // never free what a live owner claims.
+                if !crate::sched::sched::member_release_stale_ownership(member) {
+                    deferred = true;
+                    break;
+                }
+                armed_at = crate::drivers::timer::get_jiffies();
+            }
+            spins = spins.wrapping_add(1);
+            if spins % FDM_SPIN_BATCH == 0 {
+                crate::sched::schedule();
+            } else {
+                core::hint::spin_loop();
+            }
+        }
+    }
+    if deferred {
+        // Bounded, cold-path report on the raw-uart channel (same as
+        // FDM-WAIT): the free was DEFERRED, the member stays parked.
+        static FDM_DEFER_SEEN: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = FDM_DEFER_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 64 {
+            let claim = m
+                .running_on_cpu
+                .load(core::sync::atomic::Ordering::Acquire);
+            crate::dfx::taskdump::taskdump_raw_line(b"FDM-DEFER #");
+            crate::dfx::taskdump::taskdump_dec((n + 1) as u64);
+            crate::dfx::taskdump::taskdump_raw_line(b" member=");
+            crate::dfx::taskdump::taskdump_dec(m.pid() as u64);
+            crate::dfx::taskdump::taskdump_raw_line(b" claim=");
+            crate::dfx::taskdump::taskdump_dec(claim as u64);
+            crate::dfx::taskdump::taskdump_raw_line(b" (owner live/ambiguous; free deferred to next sweep)\n");
+        }
+        return false;
+    }
+    // BOUNDED (lb125 decode): monopolist windows stalled this wait for
+    // tens of seconds, freezing the exit — and every parent behind it.
+    crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "thread-stack-free");
+
+    m.free_kernel_stack();
+
+    // Heap PtRegs from the legacy fork path (unused by the live path).
+    let pt_regs_ptr = m.fork_pt_regs();
+    if !pt_regs_ptr.is_null() {
+        use alloc::alloc::{dealloc, Layout};
+        let layout = Layout::from_size_align(
+            core::mem::size_of::<crate::arch::pt_regs::PtRegs>(), 16
+        ).unwrap();
+        // SAFETY: the pointer came from the fork path's alloc with this
+        // exact layout; freed exactly once (slot ownership).
+        unsafe { dealloc(pt_regs_ptr as *mut u8, layout) };
+    }
+
+    // Drop remaining Arc references (mm/fdtable were dropped at exit).
+    m.set_address_space(None);
+    m.set_fdtable(None);
+    m.signal = None;
+    m.set_fs(None);
+
+    crate::process::task::Task::task_put(member);
+    true
+}
+
+/// Opportunistic sweep of a leader's dead-members list: free everyone
+/// whose context switch-out completed. The just-pushed member typically
+/// still shows on_cpu and stays parked; older entries are reclaimed,
+/// bounding the list across create/join churn.
+///
+/// 4-thread-hang root cause (fixed): this used to compute `pending` as
+/// `mem::replace(&mut *dl, still_running)` — the replace returns the ENTIRE
+/// old list, so every "kept" (still on_cpu) member was ALSO handed to
+/// free_dead_member. An exiting worker sweeping its own fresh entry then
+/// spun in free_dead_member's `while member.on_cpu()` on ITSELF — a
+/// permanent self-deadlock that pinned one CPU per exiting thread (4
+/// workers = all 4 CPUs; the linked-but-runnable main went permanently
+/// unpicked). Members that did not spin were freed while still linked on
+/// the dead list — the freed-while-referenced / double-free engine behind
+/// the phantom-running and double-execution morphologies. The partition is
+/// now exact: each member is either kept (stays on the list) or pending
+/// (freed exactly once, removed from the list), never both.
+///
+/// Liveness predicate: free only members whose state is DEAD (their do_exit
+/// passed the terminal store — a member parked but preempted mid-exit is
+/// still RUNNING and must NEVER be freed here; on_cpu alone was a broken
+/// proxy for that, since a preempted parked exiter sits queued with
+/// on_cpu==false while fully alive) AND whose final context switch-out
+/// completed (on_cpu==false — the window between `set_state(DEAD)` and
+/// __switch_to's clear).
+pub fn sweep_dead_threads(leader: *mut Task) {
+    let pending: alloc::vec::Vec<*mut Task> = {
+        // SAFETY: leader is a valid task; dead_threads is lock-guarded.
+        let mut dl = unsafe { (*leader).dead_threads.lock() };
+        let old = core::mem::replace(&mut *dl, alloc::vec::Vec::new());
+        let mut still_running: alloc::vec::Vec<*mut Task> =
+            alloc::vec::Vec::with_capacity(old.len());
+        let mut reclaimable: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+        for m in old {
+            // SAFETY: m is a parked member pointer (pushed by its own do_exit
+            // while holding the task alive via the dead-list reference).
+            // R11: terminal_switch_done is REQUIRED — the terminal loop's
+            // pre-schedule ownership release makes {DEAD, !on_cpu} true
+            // while the member still runs its own schedule chain.
+            let dead_and_off_cpu = unsafe {
+                (*m).state().is_dead()
+                    && !(*m).on_cpu()
+                    && (*m)
+                        .terminal_switch_done
+                        .load(core::sync::atomic::Ordering::Acquire)
+            };
+            if dead_and_off_cpu {
+                reclaimable.push(m);
+            } else {
+                still_running.push(m);
+            }
+        }
+        // Put the survivors back; `reclaimable` is the exact complement —
+        // every member is in exactly one of the two vectors.
+        *dl = still_running;
+        reclaimable
+    };
+    for m in pending {
+        // SAFETY: m came from the leader's dead list (DEAD, hash-removed,
+        // final switch-out completed).
+        let freed = free_dead_member(m);
+        if !freed {
+            // R87: heal-fail defers the free — re-park for the next
+            // sweep. Lifetime: this sweep's only caller is a member's own
+            // do_exit BEFORE its terminal DEAD store, so the leader's
+            // group-death wait is still blocked on us and the leader
+            // cannot have been reaped or freed mid-sweep.
+            let mut dl = unsafe { (*leader).dead_threads.lock() };
+            dl.push(m);
+        }
+        // Perf gate (2026-10-20): the sweep frees stacks, PtRegs and Arc
+        // references per member under the OH thread-churn load; without
+        // a yield point a long sweep monopolizes this CPU (steady
+        // WAKE-STRANDED family). Safe point: no locks held here.
+        crate::sched::cond_resched();
+    }
+    // 69th (105-family fix) — deferred-release finisher. When this
+    // group's leader was reaped while a member (possibly the caller
+    // itself) was still mid-exit, release_task marked it
+    // release_deferred and returned without freeing its storage. The
+    // LAST dying member finishes that free here, in its own context:
+    // once the parked list holds only the caller, nobody else can ever
+    // touch the leader again (the caller itself does not touch it after
+    // its terminal schedule). The lock- guarded len==1 check makes the
+    // "last" decision exactly-once even with concurrent exiters.
+    if unsafe {
+        (*leader)
+            .release_deferred
+            .load(core::sync::atomic::Ordering::Acquire)
+    } {
+        if let Some(cur) = crate::sched::current() {
+            let cur = cur as *mut Task;
+            // SAFETY: leader is a valid task (its storage free is
+            // exactly what this finisher arbitrates); cur is the
+            // running task.
+            let last = unsafe {
+                let mut dl = (*leader).dead_threads.lock();
+                let last = dl.len() == 1 && dl[0] == cur;
+                if last {
+                    dl.clear();
+                }
+                last
+            };
+            if last {
+                static FINISH_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = FINISH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 64 {
+                    crate::pr_warn!(
+                        "RELEASE-FINISH #{} leader={} freed by last member {}",
+                        n,
+                        unsafe { (*leader).pid() },
+                        unsafe { (*cur).pid() }
+                    );
+                }
+                // SAFETY: the leader is dead, tree/pid-hash detached,
+                // its dead_threads list empty, and no other member can
+                // reach it (the caller was the last and is about to
+                // leave it forever).
+                unsafe { release_task_storage(leader) };
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Reaping
+// ============================================================================
+
+/// Budget for release_task's dead-members drain (69th, the 105-family
+/// fix): 300 jiffies (3 s at HZ=100), the same margin free_dead_member's
+/// R86 bounded on_cpu wait uses. Past the budget the storage free is
+/// deferred to the last dying member instead of blocking the reaper.
+const RELEASE_DRAIN_JIFFIES: u64 = 300;
+
+/// Release task resources when being reaped by parent
+///
+/// This function is called by do_wait() when reaping a zombie child.
+/// It frees all resources associated with the task:
+/// - Kernel stack
+/// - Address space (Arc reference)
+/// - File descriptor table (Arc reference)
+/// - Signal struct (Arc reference)
+/// - Filesystem info (Arc reference)
+/// - PID
+///
+/// # Safety
+/// Caller must ensure task is in ZOMBIE state and not currently running
+// Contract: caller guarantees task is a zombie and no CPU is running it.
+// The RCU grace period in synchronize_rcu() ensures no readers hold stale
+// references.
+pub(crate) fn release_task(task: *mut Task) {
+    // SAFETY: zombie per the contract above; the reaper owns the release.
+    let t = unsafe { &mut *task };
+    // A reaped leader first drains its dead-members list — every exited
+    // group member is fully released before the leader's own storage
+    // goes away (their group_leader pointers name `task`).
+    //
+    // A member still mid-exit (parked but preempted before its terminal
+    // DEAD store — RUNNING/queued, fully alive) must NOT be freed. The
+    // leader's ZOMBIE flow (wait_for_thread_group_death) normally
+    // guarantees every member is DEAD by now, but apply the same exact
+    // partition as sweep_dead_threads anyway: only genuinely DEAD members
+    // are freed; live stragglers stay parked on the list and are retried.
+    //
+    // 69th (the 105-family root cause, ohw79/ohw80): this drain used to
+    // be an UNBOUNDED hot spin. A member whose exit tail wedges (fdreap
+    // grace stall, scheduler strand) never reaches DEAD, and the reaping
+    // parent — init itself, inside its SIGCHLD handler's
+    // `while (waitpid(-1, &st, WNOHANG) > 0);` loop — hot-spun here
+    // forever at 100% CPU: the LoopEvent died, every later
+    // ohos.ctl.start SET timed out with PARAM_CODE_TIMEOUT (105), and
+    // the whole on-demand ladder stalled. Reference release_task NEVER
+    // waits on another thread's exit context. The drain is now a
+    // BOUNDED SLEEPING wait (3 s, the R86 free_dead_member budget): if
+    // members remain, the reap completes its SEMANTICS (pid removal,
+    // reparenting, PID free), the storage free is DEFERRED to the last
+    // dying member's sweep_dead_threads (see the finisher there), and
+    // the reaper RETURNS. A wedged member then leaks its group (loudly
+    // printed) instead of wedging pid 1.
+    let deadline = crate::drivers::timer::get_jiffies() + RELEASE_DRAIN_JIFFIES;
+    let mut deferred = false;
+    loop {
+        // One try_lock'd pass: free the DEAD members in place, leaving
+        // stragglers parked. try_lock (not lock) so a WEDGED
+        // dead_threads lock (the ohw80 DEADLOCK variant) cannot park
+        // the reaper inside the acquisition itself.
+        let drained = match t.dead_threads.try_lock() {
+            Some(mut dl) => {
+                let mut reclaim: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+                dl.retain(|m| {
+                    // SAFETY: m is a parked member pointer owned by this list.
+                    // R87: require the final switch-out to have completed
+                    // (!on_cpu) — the same exact partition as
+                    // sweep_dead_threads — so a re-parked deferral (whose
+                    // on_cpu is the ambiguous live mark) is never re-fed
+                    // to free_dead_member's bounded wait on every drain
+                    // round; the loop below then defers the reap at ITS
+                    // deadline instead.
+                    // R11: terminal_switch_done required for the same
+                    // reason as the sweep's predicate.
+                    unsafe {
+                        if (**m).state().is_dead()
+                            && !(**m).on_cpu()
+                            && (**m)
+                                .terminal_switch_done
+                                .load(core::sync::atomic::Ordering::Acquire)
+                        {
+                            reclaim.push(*m);
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                });
+                let empty = dl.is_empty();
+                drop(dl);
+                let mut deferred_any = false;
+                for m in reclaim {
+                    // SAFETY: m was parked DEAD with its final switch-out
+                    // complete; the list no longer references it.
+                    if free_dead_member(m) {
+                        continue;
+                    }
+                    // R87: heal-fail defers the free — re-park on this
+                    // leader (alive in the reaper's own context) so a
+                    // later sweep retries once the switch-out truly
+                    // completes. `empty && !deferred_any` keeps the reap
+                    // from completing while a deferral is parked.
+                    deferred_any = true;
+                    let mut dl = t.dead_threads.lock();
+                    dl.push(m);
+                }
+                empty && !deferred_any
+            }
+            None => {
+                // Lock contention (a member's park/sweep holds it):
+                // fall through to the yield/deadline check below.
+                false
+            }
+        };
+        if drained {
+            break;
+        }
+        if crate::drivers::timer::get_jiffies() >= deadline {
+            // Budget spent: DEFER the storage free. The members stay
+            // parked on this task's dead_threads list; the finisher is
+            // the last dying member's sweep (and if a member never
+            // dies, the group leaks — printed — but the reaper lives).
+            deferred = true;
+            t.release_deferred.store(true, core::sync::atomic::Ordering::Release);
+            {
+                static DEFER_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = DEFER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 64 {
+                    let mut line: alloc::string::String = alloc::format!(
+                        "RELEASE-DEFER #{} leader={} reaper_pid={} parked:",
+                        n,
+                        t.pid(),
+                        crate::process::current_pid()
+                    );
+                    // SAFETY: read-only diagnostics of parked member tasks.
+                    if let Some(dl) = t.dead_threads.try_lock() {
+                        for m in dl.iter().take(6) {
+                            // SAFETY: read-only diagnostic field reads.
+                            unsafe {
+                                line.push_str(&alloc::format!(
+                                    " [{}:{} st={:#x} on_cpu={}]",
+                                    (**m).pid(),
+                                    (**m).tgid(),
+                                    (**m).state().bits(),
+                                    (**m).on_cpu() as u8
+                                ));
+                            }
+                        }
+                    }
+                    crate::pr_warn!("{}", line);
+                }
+            }
+            break;
+        }
+        // Sleeping yield (wait_for_thread_group_death's pattern), NOT a
+        // hot spin: the stragglers need CPU to finish dying, and the
+        // reaper's CPU must stay available to the rest of the system.
+        crate::arch::cpu::restore_irq(true);
+        crate::sched::schedule();
+    }
+
+    // ===== RUSAGE_CHILDREN fold at reap (reference wait_task_zombie) =====
+    // The reaped child's own tick totals PLUS the totals it accumulated
+    // from ITS reaped children roll into the real parent's cutime/cstime;
+    // ru_maxrss takes the max over (child's own exit rss, child's own
+    // children-hiwater). Runs before any child state is torn down.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let u = t.utime_ticks.load(Relaxed);
+        let s = t.stime_ticks.load(Relaxed);
+        let cu = t.cutime_ticks.load(Relaxed);
+        let cs = t.cstime_ticks.load(Relaxed);
+        let rss = t.exit_maxrss_kb.load(Relaxed);
+        let crss = t.cmaxrss_kb.load(Relaxed);
+        // release_task only ever runs in the REAPING parent's wait
+        // context (do_wait/do_waitid, including init reaping orphans);
+        // the child's own parent pointer is already None here (the
+        // E8-REPAR claim), so the fold targets the caller.
+        if let Some(parent) = crate::sched::current() {
+            (*parent).cutime_ticks.fetch_add(u + cu, Relaxed);
+            (*parent).cstime_ticks.fetch_add(s + cs, Relaxed);
+            let _ = (*parent).cmaxrss_kb.fetch_max(rss.max(crss), Relaxed);
+        }
+    }
+
+    // Remove from PID hash table before freeing resources
+    crate::process::pid_hash::pid_hash_remove(t.pid());
+
+    // Detach from parent's children list (must happen before freeing task memory)
+    // E8-REPAR: screen the parent pointer first — do_wait claimed the
+    // child under the tree lock (parent forced None), so a Some here is
+    // either the normal pre-claim path or a stale pointer planted by
+    // older corruption; never dereference an implausible one.
+    let parent_ptr = t.parent_ptr();
+    if let Some(parent) = parent_ptr {
+        if Task::is_plausible_task_ptr(parent) {
+            // SAFETY: screened plausible above; remove_child takes the
+            // tree lock itself.
+            unsafe { (*parent).remove_child(task) };
+        }
+    }
+
+    // Leg-29A release-time heal: every child still linked on this dying
+    // task's children list at release was missed by every earlier
+    // reparent (the PF_EXITING-dest race's residue, or any future hole).
+    // Its Task page is about to be poisoned and reused — move the
+    // survivors to init NOW or their parent pointers dangle into freed
+    // memory forever (the TREE-PARENT-DEAD / sc304 chain class). Should
+    // stay empty on a fixed kernel; a TREE-RELEASE-HEAL line is the
+    // always-on detector that a hole reopened.
+    {
+        let mut stranded: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+        t.collect_children_pinned(&mut stranded);
+        if !stranded.is_empty() {
+            let init = crate::sched::find_task_by_pid(1);
+            if !init.is_null() {
+                static HEAL_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if HEAL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+                    crate::pr_info!(
+                        "TREE-RELEASE-HEAL: pid {} released with {} children still linked; moved to init",
+                        t.pid(),
+                        stranded.len()
+                    );
+                }
+                for child in stranded {
+                    let ok = t.move_child(child, init);
+                    if !ok {
+                        Task::task_put(child);
+                        continue;
+                    }
+                    // A healed ZOMBIE child must be signalled so init
+                    // reaps it (same contract as the reparent mover:
+                    // full child_exit siginfo, child's exit_signal).
+                    // SAFETY: `child` is pinned (collect_children_pinned)
+                    // and still linked; read-only field reads.
+                    let c = unsafe { &*child };
+                    if c.state()
+                        == crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::ZOMBIE,
+                        )
+                    {
+                        let mut info = crate::signal::SigInfo::child_exit(
+                            c.pid(),
+                            c.cred().uid,
+                            c.exit_code(),
+                            c.core_dumped(),
+                        );
+                        let orphan_sig = c.get_exit_signal();
+                        if orphan_sig != 0 {
+                            if orphan_sig != crate::signal::Signal::SIGCHLD as u8 {
+                                info.si_signo = orphan_sig as i32;
+                            }
+                            let _ = crate::signal::send_signal_with_info(1, info);
+                        }
+                    }
+                    Task::task_put(child);
+                }
+            }
+        }
+    }
+
+    // Free PID — belongs to the reap SEMANTICS (the number returns to
+    // the pool even when the storage free is deferred).
+    crate::process::pid::free_pid(t.pid());
+
+    if deferred {
+        // 69th: the storage free (RCU grace + stack/Arc/Task free) is
+        // finished by the LAST dying member's sweep_dead_threads; if a
+        // member never dies the group leaks (named in RELEASE-DEFER)
+        // but the reaper — init and its param service — lives.
+        return;
+    }
+    release_task_storage(task);
+}
+
+/// The storage half of release_task: everything that actually returns
+/// memory (RCU grace for pid_hash readers, on_cpu wait, kernel stack,
+/// fork PtRegs, Arc references, Task slot). Runs in the reaper's
+/// context on the normal path, and in the LAST dying member's context
+/// for a deferred-release leader (see sweep_dead_threads's finisher).
+///
+/// # Safety
+/// Caller must ensure `task` is a dead/zombie task no longer reachable
+/// through the pid hash or the process tree, that no other task still
+/// references it (the deferred path's dead_threads list must be empty),
+/// and that no CPU is running it.
+fn release_task_storage(task: *mut Task) {
+    // SAFETY: unreachable through the pid hash / process tree (the
+    // release contract); this call owns the storage.
+    let t = unsafe { &mut *task };
+    // Wait for any RCU readers that may still be traversing this task's
+    // pid_hash_links node to finish before we free the task memory.
+    // BOUNDED (lb125 decode): pid_hash read sections are preempt-disable
+    // and microseconds long; an unbounded wait here parked init's reaping
+    // behind monopolist windows. 1.5 s is ~1000x any real reader.
+    crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "release-task");
+
+    // R9 (NEW2 engine #2): do_exit sets ZOMBIE BEFORE its final schedule(),
+    // so a reaping parent could scan the early ZOMBIE and free this task's
+    // kernel stack and Task while it is STILL EXECUTING its exit tail on
+    // another CPU. The stack/Task would be reused (and zeroed) by the next
+    // fork, and the dying task's remaining stores — including __switch_to's
+    // context save — would land in live objects (the corrupted wait4
+    // statuses, EBADF, zeroed children-list nodes). on_cpu is cleared by
+    // __switch_to exactly when this task's context is saved: wait for that
+    // before freeing.
+    // R9-16 (actually landed, round 10): spin with interrupts enabled —
+    // this CPU must keep reporting RCU quiescent states and taking ticks
+    // while waiting (the round-9 commit claimed this but never landed).
+    //
+    // R87 (tail window, oh-launch round 10): on_cpu is NOT sufficient —
+    // the asm release store precedes the register restore, so the dying
+    // task's CPU still executes its final loads, push and ret ON THIS
+    // STACK with on_cpu already false; a KVM host deschedule of the
+    // switcher right there let the reaper win the race to the free (the
+    // recycled-frame scribbler's early-strike face at 1.2-1.3 s on the
+    // armed battery boots). ALSO wait out the SWITCHING_OUT marker (it
+    // clears only in the incoming frame's tail, after this stack is
+    // abandoned for good — switching_out_names), and BOUND the wait
+    // (same 300-jiffy budget class as FDM/FTS): past the deadline the
+    // stack is WITHHELD (leaked, printed) — never a spinning reaper
+    // (this loop's unbounded shape was the leader-path face of the
+    // r16type wedge class) and never a freed live stack (FTS's
+    // leak-don't-dangle discipline applied to the stack).
+    // R11 (terminal-release window): the leader's terminal deschedule
+    // runs the same schedule_dead_never_returns loop (the sc191 pre-
+    // schedule ownership release), so {on_cpu=false, no marker} is also
+    // reachable HERE while the leader still executes its own schedule
+    // chain — terminal_switch_done (set only at the real-switch retire
+    // sites, re-armed by the loop each round) is the required positive
+    // knowledge.
+    crate::arch::cpu::restore_irq(true);
+    const RTS_SWITCH_WAIT_JIFFIES: u64 = 300;
+    let rts_armed_at = crate::drivers::timer::get_jiffies();
+    let mut stack_free_ok = true;
+    while t.on_cpu()
+        || crate::sched::sched::switching_out_names(task)
+        || !t
+            .terminal_switch_done
+            .load(core::sync::atomic::Ordering::Acquire)
+    {
+        if crate::drivers::timer::get_jiffies()
+            .wrapping_sub(rts_armed_at)
+            >= RTS_SWITCH_WAIT_JIFFIES
+        {
+            stack_free_ok = false;
+            // Raw-uart bounded report (cold path): one 16K stack leaked
+            // per wedged switch; the alternative is a spinning reaper or
+            // pages freed under a running owner.
+            static RTS_LEAK_SEEN: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = RTS_LEAK_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 64 {
+                crate::dfx::taskdump::taskdump_raw_line(b"RTS-STACK-LEAK (stack withheld) pid=");
+                crate::dfx::taskdump::taskdump_dec(t.pid() as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b"\n");
+            }
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    // Free kernel stack
+    if stack_free_ok {
+        t.free_kernel_stack();
+    }
+
+    // Free heap-allocated PtRegs from fork.
+    // copy_thread() allocates PtRegs on the heap for the child's first
+    // context switch; clear_fork_child() keeps the pointer so we can free it here.
+    let pt_regs_ptr = t.fork_pt_regs();
+    if !pt_regs_ptr.is_null() {
+        use alloc::alloc::{dealloc, Layout};
+        let layout = Layout::from_size_align(
+            core::mem::size_of::<crate::arch::pt_regs::PtRegs>(), 16
+        ).unwrap();
+        // SAFETY: the pointer came from the fork path's alloc with this
+        // exact layout; freed exactly once (storage ownership).
+        unsafe { dealloc(pt_regs_ptr as *mut u8, layout) };
+    }
+
+    // Clear Arc references (this will decrement reference counts)
+    t.set_address_space(None);
+    t.set_fdtable(None);
+    t.signal = None;
+    t.set_fs(None);
+
+    // Free Task struct back to kernel heap — via task_put (R12-5): any
+    // outstanding lookup pins delay the actual free to their own put.
+    crate::process::task::Task::task_put(task);
+}
+
+/// Process exit
+///
+/// Called when a process terminates (sys_exit, fatal signal, etc.).
+/// This function never returns.
+///
+/// Thread-group semantics:
+/// - NON-LEADER thread: robust list + clear_child_tid + per-thread resource
+///   drops, ring detach, then deferred release (DEAD state, parked on the
+///   leader's dead_threads list). No ZOMBIE — threads are never waited on.
+/// - LEADER (or single-threaded): first force SIGKILL any remaining group
+///   members and wait for the group to drain, then the classic ZOMBIE flow
+///   (parent wait4 reaps via release_task).
+pub fn do_exit(exit_code: i32) -> ! {
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => {
+            loop {
+                // SAFETY: `wfi` is a plain hint instruction with no side effects.
+                crate::arch::cpu::wfi();
+            }
+        }
+    };
+
+    // Leg-52 item 0 (fleet s19/s24-r30, stress-lane A/B verdict):
+    // release the direct-reclaim gate if THIS task dies while still
+    // holding it. The gate's CAS (mm/page_alloc.rs) has exits only at
+    // the reclaim block's own returns; a task killed mid-block funnels
+    // here without unwinding them, which used to leave IN_DIRECT_RECLAIM
+    // stuck at 1 forever — every later allocation then took the
+    // no-drain skip path (the fake-OOM family). One CAS on our own pid:
+    // a gate already released or held by another task is untouched.
+    // SAFETY: current is the raw pointer to the calling task, valid
+    // because we are it and do_exit never returns.
+    let dying_pid = unsafe { (*current).pid() };
+    crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
+
+    // ub-gfx (greeter-chain forensics): name the death of every gdm
+    // ladder / accounts-daemon / Xorg process with its exit code, so the
+    // serial alone answers "what killed the greeter". Budgeted 120.
+    {
+        static XIT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = XIT_N.load(core::sync::atomic::Ordering::Relaxed);
+        if n < 120 {
+            // SAFETY: current is valid (we are it); comm() reads the
+            // task's own fixed comm buffer.
+            let comm = unsafe { (*current).comm() };
+            let name: &[u8] = &comm[..comm.iter().position(|&b| b == 0).unwrap_or(comm.len())];
+            let interesting = name.starts_with(b"gdm")
+                || name.starts_with(b"Xorg")
+                || name.starts_with(b"gnome")
+                || name.starts_with(b"accounts")
+                || name.starts_with(b"(s-")  // systemd's pre-exec helpers
+                || name.starts_with(b"avahi-d");
+            if interesting {
+                if XIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                    crate::pr_info!(
+                        "GFXEXIT #{} pid={} comm={:?} code={} ({:#x})",
+                        XIT_N.load(core::sync::atomic::Ordering::Relaxed),
+                        dying_pid,
+                        core::str::from_utf8(name).unwrap_or("?"),
+                        exit_code,
+                        exit_code
+                    );
+                }
+            }
+        }
+    }
+
+    // R127 wake-drop hunt: the exit-leak detector. A nonzero wq_regs at
+    // exit means this task is going away with wait-queue entries still
+    // naming it — the park was never unwound (no remove/finish_wait
+    // ran). Those entries go stale the moment the Task page is freed
+    // and become the pointer-recycling theft / wrong-task-wake class
+    // the R127 screen in wait.rs evicts. Gated by the hunt's tracepoint
+    // (input:evdev_wake armed via trace_event=); raw-console, budgeted.
+    {
+        let regs = unsafe { (*current).wq_regs.load(core::sync::atomic::Ordering::Relaxed) };
+        if regs != 0 && crate::trace::EVENT_EVDEV_WAKE.armed() {
+            use core::sync::atomic::{AtomicU32, Ordering as Rel};
+            static WQL_N: AtomicU32 = AtomicU32::new(0);
+            let n = WQL_N.fetch_add(1, Rel::Relaxed);
+            if n < 64 {
+                let comm = unsafe { (*current).comm_str() };
+                let line: alloc::string::String =
+                    alloc::format!("WQLEAK[{}] pid={} regs={} comm='{}'\n", n, dying_pid, regs, comm);
+                // Raw UART, one write per line: readable at any loglevel.
+                // Routed through the taskdump funnel (obs-hygiene): the
+                // line stages and flushes atomically instead of per-byte
+                // uart_putc_raw, which the OH kmsg flood spliced mid-line
+                // on SMP8.
+                crate::dfx::taskdump::taskdump_raw_line(line.as_bytes());
+            }
+        }
+    }
+
+    // perf EXIT sideband (hiperf process tracking; no-op unless a perf
+    // event is armed).
+    crate::perf::hook_exit(unsafe { (*current).tgid() }, dying_pid);
+
+    // huks-wedge lane (hw2): death-while-holding decode. The wedge's
+    // recurring shape ends with a lock-holder thread that VANISHES from
+    // every later taskdump while the frozen word keeps its locked value
+    // (hw1w1: distributeddata tid 1068 acquired 0x7ff0005f7d94 at
+    // 66.8 s and was gone by ~88 s; hw4w1: huks_service tid 477 took a
+    // handled stack-boundary SEGV at 9.0 s and was gone by 34 s while
+    // two musl __lock words sat at 0x2 forever). The EXIT CAUSE decides
+    // the verdict — decode it per holder-class thread:
+    //   exit_code < 0            -> death by signal (-exit_code); the
+    //                              queued siginfo names the SENDER.
+    //   group_exiting && code>=0 -> exit_group(n) (n = code>>8), the
+    //                              leader or a fatal group kill.
+    //   !leader && !group_exiting-> a single worker/thread exit
+    //                              (SYS_exit, status code>>8) — the
+    //                              "clean exit that skipped the unlock"
+    //                              face, incl. post-SEGV handler unwind
+    //                              (see the segv_age field).
+    // Fires for: the fuxwatch acquire-latched owner, threads of the
+    // park-latched tgid, threads of a tgid with a standing frozen word,
+    // and any thread with a delivered-SIGSEGV history. FuxStuck-gated,
+    // 96/boot.
+    {
+        use core::sync::atomic::Ordering::Relaxed as Relaxed2;
+        static HWEXIT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if crate::trace::EVENT_FUXSTUCK.armed()
+            && HWEXIT_N.fetch_add(1, Relaxed2) < 96
+        {
+            let owner_tid = crate::sync::futex::FUXWATCH_OWNER_TID.load(Relaxed2);
+            let park_tgid = crate::sync::futex::FUXPARK_TGID.load(Relaxed2);
+            let my_tgid = unsafe { (*current).tgid() } as u32;
+            let is_leader = dying_pid == my_tgid;
+            let frozen = crate::sync::futex::rwfrz_tgid_frozen(my_tgid);
+            #[cfg(feature = "x86_64")]
+            let segv = crate::arch::x86_64::trap::segv_hist_age(dying_pid);
+            #[cfg(not(feature = "x86_64"))]
+            let segv: Option<(u64, u64)> = None;
+            // Edge B (114th): the txnhunt LIVE OWING arm — a thread (or
+            // any thread of a tgid) the audit last saw owing a sync
+            // binder reply. The frozen-word arm below is blind for the
+            // first 60 s of a wedge; this arm catches the silent
+            // deaths the 113rd could not see. Snapshot read is
+            // lock-free (see binder::txn_owing_of).
+            let (owing_n, owing_txn, owing_stid) =
+                crate::ipc::binder::txn_owing_of(my_tgid, dying_pid);
+            let hit = (owner_tid != 0 && dying_pid == owner_tid)
+                || (park_tgid != 0 && my_tgid == park_tgid)
+                || (!is_leader && frozen)
+                || segv.is_some()
+                || owing_n > 0;
+            if hit {
+                let comm_b = unsafe { (*current).comm() };
+                let comm = core::str::from_utf8(comm_b.as_slice())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let lastsys = unsafe { (*current).last_syscall_nr.load(Relaxed2) };
+                let pending = unsafe { (*current).pending.signal.load(Relaxed2) };
+                // Group-exit state: distinguishes exit_group/fatal-group
+                // (do_exit_group publishes it) from a single thread exit.
+                let (group_exiting, _group_code) = unsafe { (*current).signal_arc() }
+                    .map(|ss| {
+                        (
+                            ss.group_exiting.load(Relaxed2),
+                            ss.group_exit_code.load(Relaxed2),
+                        )
+                    })
+                    .unwrap_or((false, 0));
+                let cause = if exit_code < 0 {
+                    "signal"
+                } else if group_exiting {
+                    "exit_group"
+                } else if !is_leader {
+                    "thread-exit"
+                } else {
+                    "exit"
+                };
+                // Sender forensics for signal deaths (kill/tgkill carry
+                // si_pid; kernel-originated faults print si_code).
+                let (sender, sicode) = if exit_code < 0 {
+                    unsafe { (*current).pending.peek_info(-exit_code) }
+                        .map(|si| (si.si_pid, si.si_code))
+                        .unwrap_or((0, 0))
+                } else {
+                    (0, 0)
+                };
+                crate::pr_warn!(
+                    "HW-EXIT-OF-HOLDER tid={} comm='{}' tgid={} code={:#x} cause={} sig={} sender={} sicode={:#x} leader={} grpexit={} lastsys={} pend={:#x} segv_age_j={} segv_cr2lo={:#x} ownerlatch={} parklatch={} owing_n={} owing_txn={} owing_stid={}",
+                    dying_pid,
+                    comm,
+                    my_tgid,
+                    exit_code,
+                    cause,
+                    if exit_code < 0 { -exit_code } else { 0 },
+                    sender,
+                    sicode,
+                    is_leader,
+                    group_exiting,
+                    lastsys as i64,
+                    pending,
+                    segv.map(|s| s.0).unwrap_or(0),
+                    segv.map(|s| s.1).unwrap_or(0),
+                    owner_tid,
+                    park_tgid,
+                    owing_n,
+                    owing_txn,
+                    owing_stid
+                );
+            }
+        }
+    }
+
+    // mmi-endgame (116th): the UIEXIT comm arm — clean-death decode for
+    // the UI-phase process family. The 115th's boots ended with a
+    // system-wide death event at ~136-190 s (hw10w1: ueventd,
+    // watchdog_servic, storage_daemon, hdf_devmgr, every *_host,
+    // ui_service, render_service, allocator/composer_host,
+    // uinput_inject, multimodalinput, bootanimation, then a second wave
+    // ending with hilogd) with NO fault rows, NO SIGCHLD kmsg and no
+    // reaping — every victim was PARKED (futex/BWR/poll/epoll), so they
+    // were killed, not voluntarily exited — and the holder print's
+    // owing/frozen/segv arms matched none of them (and its 96-row
+    // window is consumed by ALL exits, so it goes blind mid-boot).
+    // This arm fires for ANY thread exit whose comm — or whose tgid
+    // LEADER's comm — names the UI-phase family, with its OWN budget,
+    // and decodes the death: exit code + cause (signal: si_pid names
+    // the SENDER; exit_group; thread-exit), the exit CALLER's user
+    // return address (pt_regs at do_exit: the instruction after the
+    // exit/exit_group syscall site in libc, or the interruption point
+    // of a killed thread), the last-syscall latch with args, the parent
+    // (pid+comm) that will or will not reap, and the txnhunt owing
+    // snapshot. FuxStuck-gated like the holder block above.
+    {
+        use core::sync::atomic::Ordering::Relaxed as Rel;
+        static UIEXIT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        // early30 lane (120th): + samgr, huks_service — the early-30s
+        // intermittent death window's two observed faces (hw10w3 huks
+        // SIGABRT 32-34 s; mew3 samgr SIGSEGV 35.26 s) had NO comm arm,
+        // so the SIGABRT leader death printed nothing kernel-side (no
+        // SEGV history, no owing latch). Same budget, same gating.
+        const UIEXIT_COMMS: [&str; 20] = [
+            "multimodalinput",
+            "uinput_inject",
+            "mmi_service",
+            "mmi",
+            "bootanimation",
+            "render_service",
+            "composer_host",
+            "allocator_host",
+            "ui_service",
+            "foundation",
+            "input_user_host",
+            "inputmethod_ser",
+            "hdf_devmgr",
+            "storage_daemon",
+            "ueventd",
+            "watchdog_servic",
+            "hilogd",
+            "sensors",
+            "samgr",
+            "huks_service",
+        ];
+        if crate::trace::EVENT_FUXSTUCK.armed()
+            && UIEXIT_N.load(Rel) < 96
+        {
+            let comm_matches = |raw: &[u8; 16]| -> bool {
+                let name = core::str::from_utf8(raw).unwrap_or("").trim_end_matches('\0');
+                UIEXIT_COMMS.iter().any(|&w| name == w)
+            };
+            // SAFETY: current is the running (exiting) task; the leader
+            // pointer is fixed up by group_leader_ptr() and stays valid
+            // until the group is reaped — later than this point.
+            let my_comm = unsafe { (*current).comm() };
+            let leader = unsafe { (*current).group_leader_ptr() };
+            let leader_comm: &[u8; 16] = if leader.is_null() {
+                my_comm
+            } else {
+                unsafe { (*leader).comm() }
+            };
+            let my_named = comm_matches(my_comm);
+            if my_named || comm_matches(leader_comm) {
+                // Churn filter (first matrix's lesson): the UI processes
+                // shed dozens of FFRT worker threads during startup —
+                // clean single-thread exit_group(0)-free exits that
+                // burned the whole budget in the first 10 s. A thread
+                // whose OWN comm is on the list (mmi_service-style
+                // named threads) always prints; a match via the LEADER
+                // comm alone prints only for non-benign deaths (signal,
+                // group exit, leader death, nonzero code).
+                let my_tgid_early = unsafe { (*current).tgid() } as u32;
+                let is_leader_early = dying_pid == my_tgid_early;
+                let grp_early = unsafe { (*current).signal_arc() }
+                    .map(|ss| ss.group_exiting.load(Rel))
+                    .unwrap_or(false);
+                let benign_churn =
+                    !my_named && exit_code == 0 && !grp_early && !is_leader_early;
+                if !benign_churn {
+                let n = UIEXIT_N.fetch_add(1, Rel);
+                if n < 96 {
+                    let comm = core::str::from_utf8(my_comm)
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let leader_name = core::str::from_utf8(leader_comm)
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let my_tgid = unsafe { (*current).tgid() } as u32;
+                    let is_leader = dying_pid == my_tgid;
+                    // Parent at death time (pid + comm for the reaping
+                    // question). None/implausible = racing reaper or an
+                    // already-freed parent pointer.
+                    let (ppid, pcomm) = match unsafe { (*current).parent_ptr() } {
+                        Some(pp) if Task::is_plausible_task_ptr(pp) => unsafe {
+                            (
+                                (*pp).pid(),
+                                alloc::string::String::from(
+                                    core::str::from_utf8((*pp).comm())
+                                        .unwrap_or("")
+                                        .trim_end_matches('\0'),
+                                ),
+                            )
+                        },
+                        _ => (0, alloc::string::String::from("?")),
+                    };
+                    let lastsys = unsafe { (*current).last_syscall_nr.load(Rel) } as i64;
+                    let la0 = unsafe { (*current).last_syscall_a0.load(Rel) };
+                    let la1 = unsafe { (*current).last_syscall_a1.load(Rel) };
+                    let (group_exiting, _group_code) = unsafe { (*current).signal_arc() }
+                        .map(|ss| {
+                            (ss.group_exiting.load(Rel), ss.group_exit_code.load(Rel))
+                        })
+                        .unwrap_or((false, 0));
+                    let cause = if exit_code < 0 {
+                        "signal"
+                    } else if group_exiting {
+                        "exit_group"
+                    } else if !is_leader {
+                        "thread-exit"
+                    } else {
+                        "exit"
+                    };
+                    // Sender forensics for signal deaths (kill/tgkill
+                    // carry si_pid; kernel-forced kills print si_code).
+                    let (sender, sicode) = if exit_code < 0 {
+                        unsafe { (*current).pending.peek_info(-exit_code) }
+                            .map(|si| (si.si_pid, si.si_code))
+                            .unwrap_or((0, 0))
+                    } else {
+                        (0, 0)
+                    };
+                    // The exit caller's user return address (see the
+                    // RWFRZ-THREADEXIT precedent above for the cfg split).
+                    let exrip = {
+                        let pr = unsafe { (*current).pt_regs() };
+                        if pr.is_null() {
+                            0u64
+                        } else {
+                            #[cfg(feature = "x86_64")]
+                            {
+                                unsafe { (*pr).rip }
+                            }
+                            #[cfg(feature = "riscv64")]
+                            {
+                                unsafe { (*pr).epc }
+                            }
+                            #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+                            {
+                                0u64
+                            }
+                        }
+                    };
+                    let (owing_n, owing_txn, owing_stid) =
+                        crate::ipc::binder::txn_owing_of(my_tgid, dying_pid);
+                    // wrl-class lane: owing_txn without owing_stid conflates
+                    // the thread's OWN debt with the tgid-wide fallback —
+                    // txn_owing_of returns the first txn owed by ANY thread
+                    // of the tgid when this tid has no exact match (f2's
+                    // tid-1523 exit printed owing txn4570, which its live
+                    // sibling 975 owed; the neverword lane read that as
+                    // "handler exits mid-transaction"). own=1 marks the
+                    // exact-tid match; own=0 means a sibling owes it.
+                    let owing_own = owing_stid != 0 && owing_stid == dying_pid;
+                    // HOTPATH-PRINT: rux:fuxstuck (retired dfx=fuxstuck)-gated UI-family exits.
+                    crate::pr_warn!(
+                        "UIEXIT[{}] tid={} comm='{}' tgid={} leader='{}' ppid={}('{}') code={:#x} cause={} sig={} sender={} sicode={:#x} grpexit={} leader={} lastsys={}({:#x},{:#x}) exrip={:#x} owing_n={} owing_txn={} owing_stid={} own={}",
+                        n,
+                        dying_pid,
+                        comm,
+                        my_tgid,
+                        leader_name,
+                        ppid,
+                        pcomm,
+                        exit_code,
+                        cause,
+                        if exit_code < 0 { -exit_code } else { 0 },
+                        sender,
+                        sicode,
+                        group_exiting,
+                        is_leader,
+                        lastsys,
+                        la0,
+                        la1,
+                        exrip,
+                        owing_n,
+                        owing_txn,
+                        owing_stid,
+                        if owing_own { 1 } else { 0 }
+                    );
+                }
+                }
+            }
+        }
+    }
+
+    // sc57 (57th session): thread-exit forensics for the OH wedge —
+    // an FFRT/binder worker that exits while holding a userspace
+    // ffrt::mutex leaves every later locker parked forever with no
+    // kernel-visible holder (the mutex has no owner field in the
+    // image's libffrt). rux:txnhunt (retired dfx=txnhunt) prints every NON-LEADER exit in
+    // the registered samgr pid, bounded to 64/boot.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        static THEXIT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let tgid = unsafe { (*current).tgid() };
+        let is_leader = dying_pid == tgid;
+        if !is_leader
+            && crate::trace::EVENT_TXNHANG.armed()
+            && tgid != 0
+            && tgid == crate::ipc::binder::binder_sareg_samgr_pid()
+            && THEXIT_N.fetch_add(1, Relaxed) < 64
+        {
+            let comm = core::str::from_utf8(unsafe { (*current).comm() })
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            // HOTPATH-PRINT: rux:txnhunt (retired dfx=txnhunt)-gated samgr thread exit line.
+            crate::pr_warn!(
+                "SAMGR-THREADEXIT tid={} comm='{}' code={}",
+                dying_pid,
+                comm,
+                exit_code
+            );
+        }
+        // rwlock-livelock: thread-exit forensics — the ub2404 wedge's
+        // frozen word is GLib's GAsyncQueue mutex (pool-spawner parked
+        // in g_cond_wait's relock at word=2) and the mutex holder
+        // matches NO live task. If a thread EXITS while holding the
+        // queue mutex (glibc normal mutexes are not robust; GLib's
+        // spawn protocol has no ownership recovery), the wedge is a
+        // userspace death-while-holding. Gate on the tgid of the FIRST
+        // process that parks a waiter on a word the census later flags
+        // (learned dynamically — comm-gating missed GLib's
+        // "pool-udisksd" worker comms in boot J). NON-LEADER exits only
+        // (thread exits; whole-process death is not this shape).
+        {
+            use core::sync::atomic::Ordering::Relaxed;
+            static UDEXIT_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let watch_tgid = crate::sync::futex::rwfz_exit_watch_tgid();
+            let is_leader = dying_pid == tgid;
+            if !is_leader
+                && watch_tgid != 0
+                && tgid == watch_tgid
+                && UDEXIT_N.fetch_add(1, Relaxed) < 128
+            {
+                let comm_b = unsafe { (*current).comm() };
+                let comm = core::str::from_utf8(comm_b.as_slice())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let lastsys = unsafe { (*current).last_syscall_nr.load(Relaxed) };
+                let urip = {
+                    let pr = unsafe { (*current).pt_regs() };
+                    if pr.is_null() {
+                        0u64
+                    } else {
+                        #[cfg(feature = "x86_64")]
+                        {
+                            unsafe { (*pr).rip }
+                        }
+                        #[cfg(feature = "riscv64")]
+                        {
+                            unsafe { (*pr).epc }
+                        }
+                        #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+                        {
+                            0u64
+                        }
+                    }
+                };
+                // HOTPATH-PRINT: thread exits of the watched tgid.
+                crate::pr_warn!(
+                    "RWFRZ-THREADEXIT tid={} comm='{}' code={} lastsys={} unrip={:#x}",
+                    dying_pid,
+                    comm,
+                    exit_code,
+                    lastsys as i64,
+                    urip
+                );
+                // rwlock-livelock: the dying thread's USER return chain —
+                // the exit rip is always libc's exit syscall site and
+                // cannot say WHERE the thread came from; the live frames
+                // below it name the GLib path (worker-proxy retirement vs
+                // a requester dying between g_async_queue_lock and
+                // g_cond_wait — the death-while-holding window).
+                if UDEXIT_N.load(Relaxed) <= 8 {
+                    // SAFETY: current is the calling task; read-only walk
+                    // of its own user stack (the frames are intact at
+                    // do_exit time).
+                    unsafe { crate::sync::futex::apppark_rets_public(current) };
+                }
+            }
+        }
+    }
+    // 50th (crash-storm hunt): failed-spawn forensics — a process LEADER
+    // that exits without ever having execve'd forked and died pre-exec
+    // (the OH 337->588->589 chain: 588 exits 512/code 2, 589 exits 0,
+    // zero execve attempts anywhere in their rings). The birth window
+    // (first 64 syscalls of the task's life, latched at dispatch) names
+    // the killing call. Threads are skipped (they never exec); prints
+    // are bounded to 8 per boot — kernel-thread exits and subshell-style
+    // fork-and-exit children burn at most the budget, never the serial.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        static NOSPWN_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let is_leader = unsafe { (*current).pid() == (*current).tgid() };
+        let execd = unsafe { (*current).did_exec.load(Relaxed) };
+        if is_leader && !execd && NOSPWN_N.fetch_add(1, Relaxed) < 8 {
+            let comm = core::str::from_utf8(unsafe { (*current).comm() })
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let mut line = alloc::string::String::from("NOSPAWN-EXIT pid=");
+            use core::fmt::Write;
+            let _ = write!(
+                line,
+                "{} comm='{}' code={} birth:",
+                dying_pid, comm, exit_code
+            );
+            for i in 0..crate::process::task::BIRTH_CALLS_LEN {
+                let nr = unsafe { (*current).birth_calls[i].load(Relaxed) };
+                if nr == 0 {
+                    break; // ring not filled past here
+                }
+                let a0 = unsafe { (*current).birth_a0[i].load(Relaxed) };
+                let _ = write!(line, " {}:{:#x}", nr & 0xffff, a0);
+            }
+            crate::pr_debug!("{}", line);
+        }
+    }
+
+    // forkprof (cmdline forkprof=1): leader-arm phase timings. The probe
+    // rig's children are single-threaded, so the leader arm is the exit
+    // cost lmbench attributes to fork+exit.
+    let fp = crate::dfx::forkprof::on() && dying_pid == unsafe { (*current).tgid() };
+    let fp_t0 = if fp { crate::dfx::forkprof::now() } else { 0 };
+    if fp {
+        crate::dfx::forkprof::trace(crate::dfx::forkprof::T_EXIT_ENTRY, dying_pid);
+    }
+
+    // The sched:sched_process_exit tracepoint, recorded at do_exit entry
+    // (the reference's record point). group_dead: this exit takes the
+    // thread group to its last live thread — nr_threads has not been
+    // decremented yet, so 1 means this is it. Gated behind armed().
+    if crate::trace::EVENT_SCHED_PROCESS_EXIT.armed() {
+        // SAFETY: current is the exiting task, pinned by being the
+        // running context.
+        unsafe {
+            let words = crate::trace::comm_to_words(&*(*current).comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SCHED_PROCESS_EXIT,
+                [
+                    words[0],
+                    words[1],
+                    (*current).pid() as u64,
+                    (*current).prio() as u64,
+                    ((*current).nr_threads() <= 1) as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+    }
+
+    // current is the raw pointer to the calling task, guaranteed valid
+    // since we are the currently executing task and will never return
+    // from this function. One consolidated reference.
+    // SAFETY: we are `current`; do_exit never returns.
+    let cur = unsafe { &mut *current };
+    {
+        // sc129 (Session P): the OH app children's FFRT worker threads are
+        // CREATED (clone CLONE_THREAD succeeds, census pid logged) and then
+        // exit instantly and CLEANLY (process survives) — the worker's own
+        // fail-latch dies with it. Print the exiting THREAD's fail tail
+        // here (leader exits excluded — those are whole-process exits with
+        // their own forensics). Budget 12.
+        //
+        // Serial-clean (perf-fork lane, 2026-11): the whole block — two
+        // ring-dump Strings plus a ~500-char pr_warn line — cost ~6 ms of
+        // polled-16550 UART time per thread exit and ran for the first 80
+        // thread exits of every boot; pthread create/exit loops (and any
+        // thread-heavy bring-up) paid it directly. The dumps belong to
+        // the syscall-trace hunt that added them: default off behind
+        // rux:syscalltrace (retired dfx=syscalltrace) (sc129/sc131/sc135 hunts re-arm with the flag).
+        if !(cur.pid() == cur.tgid())
+            && crate::trace::EVENT_SYSCALLTRACE.armed()
+        {
+            use core::fmt::Write;
+            let mut s = alloc::string::String::new();
+            {
+                let cur8 =
+                    cur.last_fails_cur.load(core::sync::atomic::Ordering::Relaxed);
+                for k in 0..8 {
+                    let i = (cur8 + 8 - 1 - k) % 8; // newest first
+                    let v = cur.last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
+                    if v != 0 {
+                        // sc135 (Session Q): a0/a1 name the failing call's
+                        // leading args (prctl option et al).
+                        let a0 = cur.last_fails_a0[i]
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        let a1 = cur.last_fails_a1[i]
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        let _ = write!(
+                            s,
+                            " nr{}=-{} a0={:#x} a1={:#x}",
+                            v & 0xffff,
+                            v >> 16,
+                            a0,
+                            a1
+                        );
+                    }
+                }
+            }
+            // sc131 (Session P): the FFRT worker batch exits CLEANLY with
+            // ZERO failing syscalls — the fails-only print was silent for
+            // exactly the threads we hunt. Always print (threads only),
+            // now with the ALL-calls ring (96 since sc135, newest first)
+            // so the worker's whole short life is visible.
+            let mut c = alloc::string::String::new();
+            {
+                const RL: usize = crate::process::task::LAST_CALLS_LEN;
+                let cur12 =
+                    cur.last_calls_cur.load(core::sync::atomic::Ordering::Relaxed);
+                for k in 0..RL {
+                    let i = (cur12 + RL - 1 - k) % RL; // newest first
+                    let v = cur.last_calls[i].load(core::sync::atomic::Ordering::Relaxed);
+                    if v != 0 {
+                        let _ = write!(c, " {}", v);
+                    }
+                }
+            }
+            static NW: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                let nc = core::str::from_utf8(cur.comm())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                // SAFETY: the leader is a live ring member (group not
+                // yet torn down at this point of do_exit).
+                let lc = core::str::from_utf8(unsafe { &*cur.group_leader_ptr() }.comm())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "thead-exit: tid {} comm='{}' leader='{}' code={} calls:{} fails:{}",
+                    cur.pid(),
+                    nc,
+                    lc,
+                    exit_code,
+                    c,
+                    s
+                );
+            }
+        }
+        // Linux discipline: PF_EXITING is do_exit's FIRST store, so every
+        // other subsystem (the scheduler's R56/R57 harvest-steal machinery
+        // in particular) can refuse to "rescue" a task whose kernel stack
+        // is live in the exit path — re-enqueueing it hands that stack to
+        // a second hart (the n1-organic double-run panic).
+        cur.set_ti_flags(
+            cur.ti_flags()
+                | crate::process::task::task_flags::TaskFlags::PF_EXITING.bits(),
+        );
+        let current_pid = cur.pid();
+        let leader = cur.group_leader_ptr();
+        let is_leader = leader == current;
+        let parent_pid = if is_leader {
+            cur.ppid()
+        } else {
+            // Threads share the leader's real parent.
+            // SAFETY: leader resolved from the ring above; still live.
+            unsafe { (*leader).ppid() }
+        };
+
+        // ===== Journal handle unwind =====
+        // A task killed mid-syscall (SIGKILL/SIGSEGV between
+        // set_current_handle and clear_current_handle — LTP abort01 sends
+        // SIGABRT into its children) dies owning a jbd2 handle: its
+        // transaction's t_updates stays elevated forever, and EVERY later
+        // jbd2_journal_stop spins out its 1,000,000-lap "wait for other
+        // handles" loop (seconds under TCG — the capset01/03 soft-lockup
+        // family; multiplied per write it became a whole-chunk wedge).
+        // Unwind the reference now: the handle lives on this task's dying
+        // stack and can never reach ext4_journal_stop itself. The
+        // registered dirty buffers stay in the transaction for the next
+        // stopper to commit; nothing else in the handle needs release.
+        // SAFETY: the current-task handle owns this journalling slot;
+        // the calls document their per-task exclusivity.
+        unsafe {
+            if let Some(handle_ptr) = crate::fs::ext4::namei::get_current_handle() {
+                let txn = (*handle_ptr).h_transaction.clone();
+                if let Some(txn) = txn {
+                    txn.t_updates.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+                }
+                crate::fs::ext4::namei::clear_current_handle();
+            }
+        }
+
+        // ===== Ext4 big lock force-release =====
+        // Same leak family as the journal handle above: do_exit does not
+        // unwind Rust guards, so a task killed inside an ext4 critical
+        // section would strand EXT4_BIG_LOCK on a dead owner forever
+        // (GNOME r72-fire2: every CPU then spun or slept against the
+        // dead owner's pid — even a recycled one — while gs-b/Xorg
+        // starved). The dying task can make no forward progress in its
+        // section; drop the lock and wake all waiters so the filesystem
+        // survives the kill.
+        crate::fs::ext4::EXT4_BIG_LOCK.release_if_owner(current_pid);
+
+        // ===== VFS mutation lock force-release =====
+        // Same leak family: do_exit does not unwind Rust guards, so a
+        // task killed inside a lookup+mutate window would strand
+        // VFS_MUTATION_LOCK (a SleepMutex since the sync-realign lane)
+        // on a dead owner forever.
+        crate::fs::vfs::VFS_MUTATION_LOCK.release_if_owner(current_pid);
+
+        // ===== Ptrace tracer death: auto-detach tracees =====
+        // Linux forgets the tracing relationship when the tracer exits
+        // (ptrace_exit → every tracee is detached and resumed). Without
+        // this, a tracer that dies between PTRACE_ATTACH and DETACH (the
+        // LTP runner 30s-kills a wedged test) leaves its tracee STOPPED
+        // forever — when the tracee is init (ptrace11 attaches PID 1) the
+        // whole guest wedges.
+        {
+            crate::process::pid_hash::pid_hash_for_each_task(|t| {
+                if (*t).tracer_pid() != current_pid || (*t).pid() == current_pid {
+                    return;
+                }
+                // SAFETY: task is alive for the duration of the hash walk
+                // (same discipline as send_signal_to_pgid's in-walk use).
+                t.set_tracer_pid(0);
+                t.set_ptrace_options(0);
+                t.clear_single_step();
+                if t.state().contains(TaskState::STOPPED) {
+                    crate::signal::signal_wake_up(t as *const Task as *mut Task);
+                }
+            });
+        }
+
+        // ===== Core dump (P1) =====
+        // A negative exit code encodes death by signal; the core-dumping
+        // signals get a core file written BEFORE any resource is torn
+        // ===== Binder pool reaping =====
+        // Threads killed by a signal never reach BINDER_THREAD_EXIT;
+        // without this their pool entries live forever, the spawner's
+        // threads.len() gate counts corpses and never replenishes, and
+        // the process's clients stall (b92: samgr proc todo depth 13,
+        // hdf_devhost waiters parked 162s). Cleanly-exiting IPC threads
+        // also route through the same reaper via the ioctl.
+        crate::ipc::binder::binder_task_died(
+            current_pid,
+            cur.tgid(),
+            cur.ns_pid_local(),
+        );
+
+        // ===== Core dump (P1) =====
+        // down. Runs in the dying task's context (its cwd/fdtable/mm are
+        // still intact). This is the single funnel for both the signal
+        // default-action path (handle_default_signal -> do_exit_group)
+        // and the direct trap paths (SIGSEGV/SIGILL/... -> do_exit).
+        if exit_code < 0 && crate::process::coredump::signal_makes_core(-exit_code) {
+            // SAFETY: current is the exiting task (do_coredump's
+            // contract; it never runs twice for one task).
+            unsafe { crate::process::coredump::do_coredump(current, -exit_code) };
+        }
+
+        crate::pr_debug!("exit: pid={}, tgid={}, exit_code={}, ppid={} ({})",
+            current_pid, cur.tgid(), exit_code, parent_pid,
+            if is_leader { "leader" } else { "thread" });
+
+        // DFX (dbus-death hunt): every death-by-signal gets a KERN_INFO
+        // line on the console — the default loglevel hides pr_debug, and
+        // the only external symptom of the dbus-daemon kill was
+        // ECONNREFUSED with the socket file left behind. `kill -0`-style
+        // exits (normal, code>=0) are not printed: the fork/exec storm
+        // would bury the signal deaths in noise.
+        //
+        // RETIRED (probe-retire): the line was unconditional (18 lines
+        // per ub2404 boot — every service that died of a signal). It now
+        // lives behind the existing signal-family switch (rux:sigtrace (retired dfx=sigtrace)).
+        if exit_code < 0
+            && crate::trace::EVENT_SIGTRACE.armed()
+        {
+            let comm_raw = cur.comm();
+            let comm_len = comm_raw.iter().position(|&b| b == 0).unwrap_or(comm_raw.len());
+            // Sender forensics: SI_USER deaths (kill/tgkill) carry the
+            // sender's pid in the queued siginfo — print it so "who killed
+            // X" is answerable from the console (kernel-originated signals
+            // have no sender and print si_code instead).
+            let sender = cur.pending
+                .peek_info(-exit_code)
+                .map(|si| (si.si_pid, si.si_code))
+                .unwrap_or((0, 0));
+            crate::pr_info!(
+                "SIGDEATH: pid={} tgid={} comm={:?} sig={} ppid={}{} si_pid={} si_code={:#x}",
+                current_pid,
+                cur.tgid(),
+                core::str::from_utf8(&comm_raw[..comm_len]),
+                -exit_code,
+                parent_pid,
+                if is_leader { "" } else { " (thread)" },
+                sender.0,
+                sender.1,
+            );
+        }
+
+        #[cfg(feature = "dfx-futex-trace")]
+        {
+            use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+            taskdump_raw_line(b"FTX EXIT pid=");
+            taskdump_dec(current_pid as u64);
+            taskdump_raw_line(b" code=");
+            taskdump_dec(exit_code as i64 as u64);
+            taskdump_raw_line(b" threads=");
+            taskdump_dec(cur.nr_threads() as u64);
+            taskdump_raw_line(b"\n");
+        }
+
+        // Set exit code
+        cur.set_exit_code(exit_code);
+
+        // ===== CPU-time accounting fold =====
+        // Linux semantics: a dying thread's user/system ticks fold into the
+        // thread-group leader (so /proc/[pid]/stat, times() and
+        // getrusage(RUSAGE_SELF) report group totals), and the leader's
+        // accumulated totals fold into the PARENT's cutime/cstime (what
+        // times()/getrusage(RUSAGE_CHILDREN) report after wait()). Lost
+        // silently when the parent already exited (orphan), matching the
+        // fact that nobody can wait for them anymore.
+        {
+            use core::sync::atomic::Ordering::Relaxed;
+            let u = cur.utime_ticks.load(Relaxed);
+            let s = cur.stime_ticks.load(Relaxed);
+            // ru_maxrss propagation (Linux signal->cmaxrss): the child's
+            // resident set at exit (captured below while the mm is still
+            // alive) folds into the parent's RUSAGE_CHILDREN hiwater.
+            let rss_kb = {
+                let mm_rss = cur.address_space()
+                    .map(|mm| mm.rss())
+                    .unwrap_or(0);
+                mm_rss * (crate::mm::page::PAGE_SIZE / 1024) as u64
+            };
+            cur.exit_maxrss_kb.store(rss_kb, Relaxed);
+            if is_leader {
+                // RUSAGE_CHILDREN folds at REAP time, not exit time
+                // (reference wait_task_zombie accumulates into the
+                // parent's signal struct only when the zombie is
+                // waited): a parent reading RUSAGE_CHILDREN while the
+                // child is still a ZOMBIE must NOT see its contribution
+                // (LTP getrusage03's pre_wait assertion). The fold lives
+                // in release_task; exit only captures exit_maxrss_kb.
+            } else {
+                // SAFETY: the leader is alive (we are its member; the
+                // ring decrement happens below).
+                unsafe {
+                    (*leader).utime_ticks.fetch_add(u, Relaxed);
+                    (*leader).stime_ticks.fetch_add(s, Relaxed);
+                }
+            }
+        }
+
+        // Drop any in-progress signal frame: a handler that longjmp'd out
+        // left sigframe set, which blocks all further delivery including
+        // SIGKILL (review H15) — clear it so the dying task stays killable.
+        cur.sigframe = None;
+        cur.sigframe_addr = 0;
+
+        // ===== Robust list + clear_child_tid: BEFORE the mm ref drops =====
+        // Both write into user memory and futex-wake with THIS task's mm
+        // as the key identity; once set_address_space(None) runs the key
+        // is unobtainable and the user words unreachable.
+        exit_robust_list(current);
+        exit_clear_child_tid(current);
+
+        // ===== cgroup v2 (U1b): leave the cgroup + settle memory =====
+        // Drops cgroup membership (pids.current / cgroup.procs) and
+        // uncharges the task's mmap(2) memory ledger — see
+        // sched::cgroup::cgroup_exit for why the ledger, not total_vm,
+        // is the uncharge unit.
+        crate::sched::cgroup::cgroup_exit(current);
+
+        // ===== exit_mm: drop THIS task's mm reference =====
+        // Linux exit_mm discipline:
+        // - shm detach (nattch) runs inside MmStruct::drop now — exactly
+        //   once per mm, when the LAST Arc reference goes away. The old
+        //   pre-drop `Arc::strong_count == 1` check here was racy against
+        //   walker-held clones (ptrace/OOM/rmap) and against concurrent
+        //   sibling exits (double detach / missed detach).
+        // - satp switch to the kernel root page table: EVERY dying task on
+        //   a user page table, last or not. After clear_child_tid/robust
+        //   list nothing touches user memory, and a dying group member
+        //   holding the last reference FREES the page tables while this
+        //   task may still be spinning in wait_for_thread_group_death on
+        //   another CPU — running on a freed root is the ARCH-H4 fault.
+        // - set_address_space(None) swaps the slot under the mm-slot lock
+        //   and drops our Arc after it; if it is the last reference the
+        //   teardown (grace wait + PT free + VMA release) runs in THIS
+        //   context, after the satp switch. SysV shm detach (nattch) runs
+        //   inside MmStruct::drop — exactly once per mm, which subsumes
+        //   the old strong_count==1 pre-check here (LTP shmat01 family).
+        if cur.address_space_arc().is_some() {
+            // SAFETY: reads the boot-time root table constant.
+            let kernel_ppn = unsafe { crate::arch::mm::mmu_init::root_page_table_ppn() };
+            let current_ppn = crate::arch::mm::read_satp() as u64 & 0xF_FFFF_FFFF_FFFF;
+            if current_ppn != kernel_ppn {
+                // SAFETY: switching to the kernel root page table; the
+                // kernel linear mapping is present in every address space's
+                // kernel portion and in ROOT_PAGE_TABLE itself.
+                unsafe {
+                    crate::mm::switch_address_space(kernel_ppn, 0);
+                }
+            }
+        }
+        let fp_t_mmdrop = if fp { crate::dfx::forkprof::now() } else { 0 };
+        cur.set_address_space(None);
+        cur.clear_active_mm();
+        // (fork-frag lane) exit is the other natural table-churn point:
+        // drain defer-freed leaf tables so the frames return before the
+        // next fork's child-table allocs look for them (no-op on arches
+        // without the protocol).
+        crate::arch::mm::pt_pending_drain();
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_MMDROP, fp_t_mmdrop);
+            crate::dfx::forkprof::trace(crate::dfx::forkprof::T_MMDROP_DONE, dying_pid);
+        }
+
+        // Wake vfork parent (if any) — child has dropped the shared address
+        // space, so the parent can safely resume.  This must happen before
+        // ZOMBIE state so that the parent sees the child is still valid.
+        crate::process::task::vfork_wake_parent(current);
+
+        // ===== exit_files: Release file descriptor table reference =====
+        cur.set_fdtable(None);
+
+        // ===== Clean up futex waiters =====
+        crate::sync::futex::futex_cleanup(current);
+        // PI futexes: release held locks (owner-died handoff to the top
+        // waiter) and leave every PI wait queue.
+        crate::sync::futex_pi::futex_pi_exit_cleanup(current);
+
+        // ===== Clean up POSIX MQ fd entries =====
+        crate::ipc::posix_mq::mq_fds_cleanup(current);
+
+        // ===== Disarm interval timers (ITIMER_REAL/VIRTUAL/PROF) =====
+        for i in 0..3 {
+            let old_id = cur.itimer_ids[i].swap(0, core::sync::atomic::Ordering::AcqRel);
+            if old_id != 0 {
+                crate::timer::del_timer(old_id);
+            }
+        }
+
+        // ===== Disarm POSIX timers =====
+        {
+            let mut timers = cur.posix_timers.lock();
+            for pt in timers.drain(..) {
+                if pt.kernel_timer_id != 0 {
+                    crate::timer::del_timer(pt.kernel_timer_id);
+                }
+            }
+        }
+
+        // ===== Reverse SEM_UNDO adjustments =====
+        crate::ipc::sysv_sem::sem_undo_exit(current);
+
+        // ===== Orphan reparenting (review PROC-P03) =====
+        // Children of a dying task must be re-attached (a surviving
+        // thread-group member first, else the subreaper/init (PID 1)),
+        // otherwise their parent pointers dangle after our Task slot is
+        // freed (ppid()/for_each_child UAF) and orphaned ZOMBIEs are
+        // never reaped — the PID space leaks monotonically.
+        // Applies to threads too: a thread may have fork()ed children.
+        // SAFETY: process-tree mutations take PROCESS_TREE_LOCK inside.
+        let fp_t_rep = if fp { crate::dfx::forkprof::now() } else { 0 };
+        unsafe {
+            reparent_children_to_init(current);
+        }
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_REPARENT, fp_t_rep);
+        }
+
+        // ===== Thread-group split =====
+        if !is_leader {
+            // ---- Non-leader thread: deferred release, never a ZOMBIE ----
+            // Our mm Arc reference is already dropped above; other members
+            // keep the address space alive.
+            cur.signal = None; // shared with the leader; drop our ref
+            cur.set_fs(None); // CLONE_FS-shared; drop our ref
+
+            // Park on the leader's dead list BEFORE leaving the ring.
+            // Ordering matters: nr_threads hits 1 in thread_group_leave,
+            // which unblocks a dying leader (and the parent's reap of it).
+            // If the push came after the leave, the leader could be fully
+            // released in that window and we would push onto freed memory.
+            // Parking first is safe: free_dead_member spins on on_cpu,
+            // which stays set until our final schedule below — so the
+            // leader's release cannot pass our entry while we still touch
+            // leader fields.
+            // SAFETY: leader comes from group_leader_ptr() while we are
+            // still linked in its ring — it cannot be mid-release (its
+            // release_task waits for ring members to be DEAD first).
+            if !leader.is_null() {
+                // SAFETY: the leader is alive; the list is lock-guarded.
+                unsafe { (*leader).dead_threads.lock().push(current) };
+            }
+
+            // Leave the ring (decrements the leader's nr_threads) — AFTER
+            // the mm drop and the dead-list park.
+            let leader = Task::thread_group_leave(current);
+
+            // r16 (mechanism B, re-landed on the RELEASE-DEFER drain): the
+            // sweep below can SLEEP — free_dead_member ->
+            // synchronize_rcu_bounded_pollfirst/_sleepy arms a PID-keyed
+            // one-shot timer wake for every 1-jiffy poll round (and the
+            // deferred-release finisher at the sweep's tail parks the same
+            // way). Freeing our pid BEFORE the sweep made each such wake
+            // unresolvable: the expiry hit a freed (possibly reused) pid,
+            // WAKE-PID-MISS dropped the token, and the waiter parked past
+            // its own deadline — the bound is only re-checked on wake, so
+            // the "bounded" wait became a permanent mid-exit sleep (the GB
+            // worker wedges; the OH SIGKILL storms reproduce the class).
+            // The hash remove + free now run AFTER the sweep: the tid
+            // lingers only across the sweep, the task never returns to
+            // userspace, and a tgkill/gettid racing this window observes a
+            // PF_EXITING task — the reference's own pre-reap shape.
+            // rcu.rs keeps an independent guard (RCU-SLEEPY-PID-FREE) for
+            // any future pid-then-sleep order.
+
+            // Opportunistically reclaim older dead members (frees stacks of
+            // previously-joined threads; `current` is skipped — on_cpu).
+            if !leader.is_null() {
+                sweep_dead_threads(leader);
+            }
+
+            // PID + hash bookkeeping: the tid disappears now (gettid/tgkill
+            // on it → ESRCH, no zombie window).
+            crate::process::pid_hash::pid_hash_remove(current_pid);
+            crate::process::pid::free_pid(current_pid);
+
+            // R9-3 discipline: no preempt window between DEAD and the
+            // final schedule.
+            crate::interrupt::preempt::preempt_count_add(1);
+            // Final state: DEAD (not ZOMBIE — wait4 never sees threads).
+            cur.set_state(TaskState::new(TaskState::DEAD));
+            crate::sched::dequeue_task(cur);
+            crate::interrupt::preempt::preempt_count_sub(1);
+
+            // ===== do_task_dead: Final schedule, never returns =====
+            // sc186/sc189 (session R eighth leg): the plain schedule()
+            // could be repicked/refused (a racing wake/heal re-links the
+            // exiting task; __schedule's same-task repick fast path then
+            // returns without switching) — the wfi park loop below would
+            // strand this CPU forever with the slot still naming the dead
+            // task and its leaked preempt bits uncleared (PREEMPT-LEAK
+            // pc=0x10000 rip=wfi+5, 10+ min, twice reproduced).
+            // schedule_dead_never_returns() re-asserts DEAD + unlinks +
+            // clears leaked preempt bits until a real context switch.
+            crate::sched::schedule_dead_never_returns();
+
+            loop {
+                // SAFETY: `wfi` is a plain hint instruction with no side effects.
+                crate::arch::cpu::wfi();
+            }
+        }
+
+        // ---- Leader (or single-threaded process): classic ZOMBIE flow ----
+        // If group members are still alive (exit() from the leader, or
+        // exit_group), kill them and wait for the drain before tearing
+        // down the shared-mm-dependent state any further.
+        if cur.nr_threads() > 1 {
+            kill_other_threads(current);
+            // NOT killable: an exiting leader cannot unwind, and the
+            // shared-mm teardown below requires the drain (see the
+            // wait_for_thread_group_death doc).
+            wait_for_thread_group_death(current, false);
+        }
+
+        // ===== pid-namespace init exit: tear the namespace down =====
+        // zap_pid_ns_processes parity: when a container's init dies, every
+        // task left in that namespace — and in DESCENDANT namespaces (they
+        // hold pids in it too) — receives a kernel-forced SIGKILL. Without
+        // the cascade the survivors lingered under an unreachable pid-1
+        // (LTP pidns05: the whole nested chain must die with the outer
+        // init). Kernel-origin SIGKILL pierces the unkillable-init rule in
+        // do_signal (the SEND_SIG_PRIV force exception), so nested
+        // container inits die too.
+        if cur.ns_pid.is_some() && cur.ns_local_pid == 1 {
+            let dying_ns = cur.ns_pid.clone();
+            // gdm bring-up r9/r10: a silent mass SIGKILL took out the
+            // whole daemon set (dbus, upowerd, accounts, tailer, sink,
+            // polkitd, gdm3) with ZERO prints at any loglevel and no
+            // SIGKILL-SEND trace — this loop is the only silent kernel
+            // SIGKILL fan-out. Name the namespace init and every victim
+            // until this is root-caused.
+            // SAFETY: current is the raw pointer to the calling task,
+            // valid because we are it.
+            let ccomm = unsafe { alloc::string::String::from(cur.comm_str()) };
+            let ns_addr = dying_ns
+                .as_ref()
+                .map(|d| alloc::sync::Arc::as_ref(d) as *const _ as usize)
+                .unwrap_or(0);
+            let mut victims: alloc::vec::Vec<(u32, alloc::string::String)> =
+                alloc::vec::Vec::new();
+            crate::process::pid_hash::pid_hash_for_each_task(|task| {
+                let t = &*task;
+                if t.pid() == current_pid {
+                    return;
+                }
+                let hit = dying_ns.as_ref().map(|d| {
+                    // Same namespace or any descendant: walk the target's
+                    // parent chain looking for the dying namespace.
+                    let mut ns = t.ns_pid.clone();
+                    while let Some(n) = ns {
+                        if alloc::sync::Arc::ptr_eq(&n, d) {
+                            return true;
+                        }
+                        ns = n.parent.clone();
+                    }
+                    false
+                }).unwrap_or(false);
+                if hit {
+                    victims.push((
+                        t.pid(),
+                        alloc::string::String::from(
+                            t.comm_str(),
+                        ),
+                    ));
+                }
+            });
+            crate::pr_err!(
+                "PIDNS-KILL: ns-init pid={} comm='{}' ns=0x{:x} victims={}",
+                current_pid,
+                ccomm,
+                ns_addr,
+                victims.len()
+            );
+            for (vp, vc) in victims.iter().take(20) {
+                crate::pr_err!("PIDNS-KILL victim pid={} comm='{}'", vp, vc);
+            }
+            for (vp, _) in victims.iter() {
+                let _ = crate::signal::send_signal(
+                    *vp,
+                    crate::signal::Signal::SIGKILL as i32,
+                );
+            }
+        }
+
+        // ===== PID 1 exit: power the machine down =====
+        // No orphan is ever reaped or respawned without init — the
+        // shutdown(8) init-signal path lands here (init kills every user
+        // process, including shutdown(8) itself, then exits). Runs the
+        // reboot(2) cascade (never returns) unless one is already in
+        // flight — that caller is waiting for exactly this exit.
+        if current_pid == 1 {
+            crate::syscall::process::init_exited_fallback_cascade();
+        }
+
+        // R9-3: close the preempt window between ZOMBIE and the deferred
+        // notify — a timer IRQ landing here would schedule() us out with
+        // state != RUNNING, and lines below (the notify arm) would never
+        // run: the parent's only wake source lost.
+        let fp_t_notify = if fp { crate::dfx::forkprof::now() } else { 0 };
+        crate::interrupt::preempt::preempt_count_add(1);
+        // Set process state to Zombie
+        cur.set_state(TaskState::new(TaskState::ZOMBIE));
+
+        // Dequeue from global run queue
+        crate::sched::dequeue_task(cur);
+
+        // pidfd exit notification: every pidfd poller targeting this
+        // thread group must observe EPOLLIN now (the reference wakes the
+        // pid's waitqueue here). The woken tasks re-check their own
+        // target's state, so the global queue's spurious wakes are
+        // harmless; this CPU holds preempt_count, so they run after the
+        // terminal schedule below.
+        crate::fs::pidfd::exit_notify_all_waiters();
+
+        // ===== exit_notify: Defer parent notification =====
+        // CRITICAL: Do NOT wake the parent here.  If the parent runs on
+        // another CPU it can reap (free_task_slot) this task before
+        // schedule() switches us away, causing a use-after-free that
+        // corrupts ti_cpu (initialised to -1 in Task::new).
+        // Instead, store the parent PID in a per-CPU deferred slot;
+        // __schedule processes it AFTER the context switch, when this
+        // task is no longer running on any CPU.
+        //
+        // 99th (orphan-during-exit parity, §87.8 hunt): the reference's
+        // do_notify_parent resolves task->real_parent AT NOTIFY TIME.
+        // `parent_pid` above was captured at do_exit ENTRY — if the real
+        // parent died while this task ran its exit tail, the child was
+        // reparented (reparent_children_to_init) to a subreaper/init
+        // AFTER the capture but BEFORE our ZOMBIE store, and the
+        // reparent's own zombie-notify arm (which fires only for
+        // children ALREADY ZOMBIE at move time) never fired for us. The
+        // packed pid would then name a dead task: the delivery's
+        // pid_hash lookup fails, no SIGCHLD, no wait_chldexit wake — and
+        // if the new parent (init) is parked in wait4, the zombie
+        // strands with its waiter forever. Resolve the CURRENT parent
+        // here, inside the same preempt-guarded section: None = a racing
+        // reaper already claimed us (it is inside release_task; the
+        // notify would be noise) — skip; Some(p) = notify p (whether or
+        // not it differs from the captured pid — same pid is the
+        // identity case).
+        let notify_parent: u32 = match cur.parent_ptr() {
+            Some(pp) if Task::is_plausible_task_ptr(pp) => unsafe { (*pp).pid() },
+            _ => 0,
+        };
+        if notify_parent != 0 {
+            crate::sched::defer_exit_notify(notify_parent, current_pid);
+        }
+        crate::interrupt::preempt::preempt_count_sub(1);
+        // 125th waitid leg: reaper forensics — record + print every
+        // leader ZOMBIE (exit time, decoded status, parent, SPAWN age,
+        // last-syscall latch) so the REAP4/REAPW arms can time the reap
+        // and ZLINGER can catch the never-reaped case. rux:schedtrace (retired dfx=schedtrace)-
+        // gated (dfx/reaper.rs). Non-leaders never reach ZOMBIE (the
+        // deferred-release tail above), so this fires per process.
+        if crate::dfx::reaper::on() {
+            crate::dfx::reaper::on_zombie(
+                current_pid,
+                exit_code,
+                notify_parent,
+                cur.comm(),
+                cur.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed),
+                cur.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed),
+            );
+        }
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_NOTIFY, fp_t_notify);
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_TOTAL, fp_t0);
+            crate::dfx::forkprof::trace(crate::dfx::forkprof::T_NOTIFY_DONE, dying_pid);
+        }
+
+        // ===== do_task_dead: Final schedule, never returns =====
+        // sc186/sc189: see the non-leader tail above — the terminal
+        // deschedule re-asserts ZOMBIE/DEAD + unlink + preempt-bit clear
+        // until a real context switch happens (the plain schedule() could
+        // be repicked/refused and strand this CPU in the wfi loop).
+        crate::sched::schedule_dead_never_returns();
+
+        loop {
+            // SAFETY: `wfi` is a plain hint instruction with no side effects.
+            crate::arch::cpu::wfi();
+        }
+    }
+}
+
+/// exit_group — terminate the WHOLE thread group (Linux do_group_exit).
+///
+/// Force SIGKILL every other member (leader included, whoever calls it),
+/// then run the caller's do_exit. Called from:
+/// - sys_exit_group (NR 94)
+/// - fatal default signal actions (Linux do_group_exit semantics: a fatal
+///   signal in ANY thread kills the process)
+pub fn do_exit_group(exit_code: i32) -> ! {
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => do_exit(exit_code),
+    };
+    // gdm bring-up r9-r14: every daemon storm-death funnels through here
+    // (fatal signals do_group_exit, plus explicit exit_group). Name the
+    // caller, the code, and the pending-signal set that drove it — the
+    // storm's first domino and the TERM->st=9 status overwrite both
+    // decode from this one print.
+    //
+    // Serial-clean discipline (perf-fork lane, 2026-11): pr_err printed
+    // on EVERY exit_group — one ~60-char line through the polled 16550
+    // costs ~650 us under KVM, which was ~85% of the whole fork+exit
+    // round trip (lmbench lat_proc,fork sat ~20x over the reference
+    // column on this print alone; forkprof/ftrace attribution, ledger
+    // perf-fork round 1). The storm hunts are done; the line moves to
+    // pr_debug (hidden by the default loglevel, raisable for the next
+    // hunt) so the exit path stays off the console.
+    {
+        // SAFETY: current is the raw pointer to the calling task.
+        let ccomm = unsafe { (*current).comm_str() };
+        let pend = unsafe { (*current).pending.signal.load(core::sync::atomic::Ordering::Relaxed) };
+        crate::pr_debug!(
+            "EXITGRP: pid={} comm='{}' code={} pending=0x{:x}",
+            unsafe { (*current).pid() },
+            ccomm,
+            exit_code,
+            pend
+        );
+    }
+    // Publish the group exit status BEFORE stopping the siblings: the
+    // SIGKILL below makes each member's fatal-signal path re-enter
+    // do_exit_group with THIS code, so the whole group — the leader
+    // included — reports the clean status instead of "killed by
+    // signal 9" (reference signal_group_exit; LTP mq_notify03 exit(0)
+    // from the mq callback thread).
+    // SAFETY: current is the running task (matched above), non-null.
+    let signal_arc = unsafe { (*current).signal_arc() };
+    if let Some(ss) = signal_arc {
+        ss.group_exit_code
+            .store(exit_code, core::sync::atomic::Ordering::Release);
+        ss.group_exiting
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
+    kill_other_threads(current);
+    do_exit(exit_code)
+}
+
+/// Move every child of `dying` to a new parent (Linux
+/// forget_original_parent): the nearest PR_SET_CHILD_SUBREAPER ancestor if
+/// one exists, else init (PID 1). Zombie children get a SIGCHLD to the new
+/// parent so the shell's reaper loop can collect them; live children
+/// simply change parent. Any child with a parent-death signal
+/// (PR_SET_PDEATHSIG) registered receives it now. Runs before `dying`
+/// transitions to ZOMBIE and under the process-tree lock, so no child can
+/// observe a dangling parent.
+///
+/// # Safety
+/// `dying` is the currently running task; child pointers come from its
+/// children list and are protected by PROCESS_TREE_LOCK.
+unsafe fn reparent_children_to_init(dying: *mut Task) {
+    use crate::process::task::TaskState;
+
+    // init task (PID 1); falls back to no-op when absent (early boot).
+    // SAFETY: pid 1's Task lives until system shutdown.
+    let init = crate::sched::find_task_by_pid(1);
+    if init.is_null() {
+        return;
+    }
+
+    // PR_SET_CHILD_SUBREAPER: prefer the nearest ancestor marked as a
+    // subreaper over init (prctl stores the flag on the shared
+    // SignalStruct). Bounded walk to stay safe against parent loops.
+    let mut dest = init;
+    // E8-REPAR: a non-init dest (group member or subreaper ancestor) can
+    // die and be freed between its selection here and the moves below —
+    // pin it (task_refcnt) so its Task outlives every add_child; the
+    // final8 kernel panic walked a parent pointer that had been written
+    // into exactly such a freed dest.
+    let mut dest_pin: *mut Task = core::ptr::null_mut();
+    // A dying THREAD's children go to a surviving member of its own
+    // thread group first (Linux find_new_reaper): the group's remaining
+    // threads keep group-wide wait visibility, so wait4/waitid callers
+    // in this process can still reap them. Only when no sibling
+    // survives do we fall through to the subreaper/init walk.
+    {
+        let _lock = crate::process::task::PROCESS_TREE_LOCK.lock();
+        let mut member = (*dying).next_thread_ptr();
+        let mut guard = 0u32;
+        while (member as *const Task) != (dying as *const Task)
+            && !member.is_null()
+            && guard < 65536
+        {
+            // Skip members that are already gone from the scheduler's
+            // view; anything still linked in the ring is pre-leave and
+            // therefore valid memory. ALSO skip PF_EXITING members
+            // (leg-29A root cause): do_exit sets PF_EXITING FIRST but
+            // runs reparent_children_to_init mid-exit — a member past
+            // its own reparent, still pre-ZOMBIE, accepted children
+            // moved here that its already-run reparent would never move
+            // again. The freed-then-reaped dest left every moved child
+            // (and its thread-group members) naming freed memory — the
+            // TREE-PARENT-DEAD draws of rux:treehunt (retired dfx=treehunt) +
+            // test/subreap_churn.c, and the ancestor sc304's subreaper
+            // walk faulted into.
+            let st = (*member).state();
+            let member_exiting = (*member).ti_flags()
+                & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
+                != 0;
+            if !member_exiting
+                && !st.is_dead()
+                && !st.contains(crate::process::task::TaskState::ZOMBIE)
+            {
+                // Pin INSIDE the lock hold: the member cannot leave the
+                // ring (thread_group_leave takes this lock) and a pinned
+                // member cannot be freed after leaving, so this fetch_add
+                // can never land in freed memory.
+                (*member)
+                    .task_refcnt
+                    .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                dest = member;
+                dest_pin = member;
+                break;
+            }
+            member = (*member).next_thread_ptr();
+            guard += 1;
+        }
+    }
+    if dest as *const Task == init as *const Task {
+        // E8-REPAR: a non-leader thread's `parent` field is an UNLINKED
+        // snapshot copied from the leader at thread_group_join time — the
+        // leader gets reparented later, the copy does not, so it can name
+        // an ancestor that was reaped and freed long ago. Walk from the
+        // LEADER's parent field instead (the maintained one; a zombie
+        // leader's memory stays until reaped, and a leader cannot be
+        // released while any member — us — is still alive).
+        let leader = (*dying).group_leader_ptr();
+        let chain_root = if leader.is_null()
+            || leader as *const Task == dying as *const Task
+        {
+            dying
+        } else {
+            leader as *mut Task
+        };
+        let mut p = (*chain_root).parent_ptr();
+        let mut hops = 0;
+        // The whole walk under the tree lock: every release_task of a
+        // chain member has to pass remove_child under this lock first,
+        // so no hop can be freed mid-walk.
+        let _lock = crate::process::task::PROCESS_TREE_LOCK.lock();
+        while let Some(pp) = p {
+            let pp = pp as *mut Task;
+            // E8-REPAR: validate EVERY hop before dereferencing it
+            // (kernel-range + TASK_POISON, the wake_up guard family).
+            // The final8 panic died on `(*pp).signal` of a freed
+            // ancestor at exit.rs:954; a stale hop now bails to init
+            // instead of faulting.
+            if !Task::is_plausible_task_ptr(pp) {
+                break;
+            }
+            if pp == dying as *const Task as *mut Task || pp == init || hops > 64 {
+                break;
+            }
+            let is_reaper = (*pp)
+                .signal
+                .as_ref()
+                .and_then(|s| {
+                    // E8-REPAR follow-up (sc304 Oops): a recycled
+                    // ancestor's Task passed is_plausible_task_ptr but
+                    // its `signal` Arc slot held a USER-range garbage
+                    // pointer — AtomicBool::load faulted at
+                    // 0x7ff08b80f820 under this lock and the Oops-killed
+                    // task wedged the boot holding PROCESS_TREE_LOCK.
+                    // Validate the SignalStruct pointer's RANGE (same
+                    // linear-map window as the task check; SignalStruct
+                    // is heap-allocated inside it) before the atomic
+                    // load; garbage => treat the hop as non-reaper and
+                    // stop the walk here (dest stays init).
+                    const MAP_BASE: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
+                    const MAP_SPAN: usize = 0x10_0000_0000; // 64 GiB
+                    let raw = alloc::sync::Arc::as_ptr(s) as usize;
+                    if raw < MAP_BASE || raw >= MAP_BASE + MAP_SPAN {
+                        return None;
+                    }
+                    Some(s.is_child_subreaper.load(core::sync::atomic::Ordering::Acquire))
+                })
+                .unwrap_or(false);
+            let pp_exiting = (*pp).ti_flags()
+                & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
+                != 0;
+            if is_reaper && !pp_exiting {
+                dest = pp;
+                // Pin the subreaper dest under the same lock hold (same
+                // argument as the member pin above).
+                (*pp)
+                    .task_refcnt
+                    .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                dest_pin = pp;
+                break;
+            }
+            p = (*pp).parent_ptr();
+            hops += 1;
+        }
+    }
+    if dest as *const Task == dying as *const Task {
+        // dest == dying happens only when dying IS init (the member walk
+        // skips dying; the subreaper walk breaks on it) — release the pin
+        // before bailing.
+        if !dest_pin.is_null() {
+            Task::task_put(dest_pin);
+        }
+        return; // dying IS init / the only candidate — nothing to do
+    }
+
+    // Collect children PINNED (same lock hold as the list walk): a
+    // sibling thread of dying's group may be in wait4 reaping these very
+    // children (for_each_group_child scans every member's list); without
+    // the pin, release_task could free a collected child before the move
+    // loop links it — writing through freed sibling pointers and
+    // planting freed nodes into dest's children list.
+    let mut moved: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+    (*dying).collect_children_pinned(&mut moved);
+
+    for child in moved {
+        // E8-REPAR: atomic validate+unlink+relink. move_child skips a
+        // child that a concurrent reaper already unlinked (claimed or
+        // released) — after a false return the child may be freed memory
+        // we must not touch beyond our own task_put.
+        let ok = (*dying).move_child(child, dest);
+        if !ok {
+            Task::task_put(child);
+            continue;
+        }
+
+        // PR_SET_PDEATHSIG: the old parent just died — deliver the signal
+        // the child asked for (Linux: it fires on reparenting, before the
+        // child could observe the orphaning).
+        let pdeath = (*child).pdeath_signal;
+        if pdeath != 0 {
+            // OH bring-up forensics: the *_host services all die of a
+            // kernel-origin SIGHUP; this print names pdeathsig as the
+            // source (or rules it out) directly on the console.
+            static PDEATH_TRACE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PDEATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+                crate::pr_info!(
+                    "pdeath: pid {} tgid {} gets sig {} (parent pid {} tgid {} dying)",
+                    (*child).pid(), (*child).tgid(), pdeath,
+                    (*dying).pid(), (*dying).tgid()
+                );
+            }
+            let _ = crate::signal::send_signal((*child).pid(), pdeath as i32);
+        }
+
+        // If the orphan is already a zombie, the new parent must be
+        // notified so it reaps it — otherwise it would sit unreapable
+        // forever.
+        if (*child).state() == TaskState::new(TaskState::ZOMBIE) {
+            let dest_pid = (*dest).pid();
+            // Full do_notify_parent siginfo: the new parent's SA_SIGINFO
+            // handlers decode the orphan zombie's outcome from
+            // si_code/si_status.
+            let mut info = crate::signal::SigInfo::child_exit(
+                (*child).pid(),
+                (*child).cred().uid,
+                (*child).exit_code(),
+                (*child).core_dumped(),
+            );
+            // do_notify_parent delivers the child's clone exit_signal.
+            let orphan_sig = (*child).get_exit_signal();
+            if orphan_sig != 0 {
+                if orphan_sig != crate::signal::Signal::SIGCHLD as u8 {
+                    info.si_signo = orphan_sig as i32;
+                }
+                let _ = crate::signal::send_signal_with_info(dest_pid, info);
+            }
+            // init's default SIGCHLD disposition is SIG_IGN, so the signal
+            // path neither pends nor wakes anything. Wake the new parent's
+            // child-exit wait queue directly (same queue the deferred
+            // exit-notify path uses) or a blocked wait4 there never
+            // re-checks its children and the orphaned zombie leaks.
+            // Group-wide: any member of dest's group may hold the
+            // blocking wait (Linux wait_chldexit is group-shared).
+            let dest_pinned = crate::process::pid_hash::pid_hash_lookup_pinned(dest_pid);
+            if !dest_pinned.is_null() {
+                // SAFETY: dest_pinned is pinned (refcount held).
+                wake_group_chldexit(dest_pinned);
+                crate::process::task::Task::task_put(dest_pinned);
+            }
+        }
+        // Drop the collector's pin now that the move completed.
+        Task::task_put(child);
+    }
+    // Drop the dest pin (init was never pinned — it outlives shutdown).
+    if !dest_pin.is_null() {
+        Task::task_put(dest_pin);
+    }
+}
+
+// ============================================================================
+// wait4 / waitpid / waitid
+// ============================================================================
+
+/// Linux's internal syscall-restart sentinel. Interrupted blocking waits
+/// return this instead of -EINTR; the signal-delivery path converts it —
+/// `setup_frame` restarts the ecall when the handler has SA_RESTART, and
+/// `restart_syscall_no_handler` restarts it on the no-handler path, so
+/// userspace only ever sees EINTR when the disposition really wants it.
+/// wait4/waitid carry no timeout, so the rewind-and-reexecute restart is
+/// always correct (glib's SIGCHLD handler is installed SA_RESTART; a bare
+/// EINTR here broke g_spawn_sync-style waitpid loops).
+const ERESTARTSYS: i32 = -512;
+
+/// Wake every thread of `task`'s group on a child exit.
+///
+/// Linux hangs wait4/waitid off `signal->wait_chldexit`, a wait queue
+/// SHARED by the whole thread group — any member blocked in a wait must
+/// be woken when a child (of any member) exits. Our wait_chldexit queue
+/// is per-Task, so the exit-notify paths must walk the ring and wake
+/// each member's queue. The tree lock serializes ring joins/leaves, so
+/// every member we touch is still linked (and hence not yet freed).
+///
+/// # Safety
+/// `task` is a valid, pinned Task.
+pub(crate) unsafe fn wake_group_chldexit(task: *mut Task) {
+    use crate::process::task::PROCESS_TREE_LOCK;
+
+    let _lock = PROCESS_TREE_LOCK.lock();
+    let start = task;
+    let mut member = task;
+    let mut guard = 0u32;
+    loop {
+        let _ = (*member).wait_chldexit.wake_up_all();
+        member = (*member).next_thread_ptr();
+        if member == start || member.is_null() {
+            break;
+        }
+        guard += 1;
+        if guard > 65536 {
+            break;
+        }
+    }
+}
+
+// ============================================================================
+// wait4-park census (99th, §87.8 wait4/SIGCHLD wakeup-loss hunt)
+// ============================================================================
+
+/// Per-arch wait-class entry syscall numbers (NATIVE numbering, same
+/// decode contract as the r41v17 TIMEDSLEEP ticktrap's NS_SYS).
+#[cfg(feature = "x86_64")]
+const WAIT_SYS: [u64; 2] = [61, 247]; // wait4, waitid
+#[cfg(feature = "riscv64")]
+const WAIT_SYS: [u64; 2] = [260, 95]; // wait4, waitid
+#[cfg(feature = "aarch64")]
+const WAIT_SYS: [u64; 2] = [260, 95]; // wait4, waitid
+
+/// Park-age tracking ring: (pid, first-seen-parked jiffy, last-reported
+/// jiffy). A row lives while its pid is observed parked under a wait
+/// syscall; one absent beat clears it (normal wait4 parks are
+/// milliseconds and never survive two 1 Hz beats).
+struct WlRow {
+    pid: core::sync::atomic::AtomicU32,
+    since: core::sync::atomic::AtomicU32,
+    reported: core::sync::atomic::AtomicU32,
+}
+const WL_RING: usize = 8;
+static WL_SEEN: [WlRow; WL_RING] = [const {
+    WlRow {
+        pid: core::sync::atomic::AtomicU32::new(0),
+        since: core::sync::atomic::AtomicU32::new(0),
+        reported: core::sync::atomic::AtomicU32::new(0),
+    }
+}; WL_RING];
+
+/// Read a parked task's kernel-entry syscall frame (nr + first arg),
+/// mirroring the TIMEDSLEEP ghost hunt's entry_sys contract. Returns
+/// (0, 0) when the stack is not mapped/sane.
+/// SAFETY: `p` is a live task pinned by the caller's pid-hash walk.
+unsafe fn wl_entry_syscall(p: *mut Task) -> (u64, u64) {
+    let tk = &*p;
+    let top = match tk.kernel_stack_top_checked() {
+        Some(t) => t,
+        None => return (0, 0),
+    };
+    #[cfg(feature = "x86_64")]
+    {
+        let regs = (top.wrapping_sub(
+            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+        ((*regs).orig_rax as u64, (*regs).rdi as u64)
+    }
+    #[cfg(feature = "riscv64")]
+    {
+        let regs = (top.wrapping_sub(
+            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+        ((*regs).a7 as u64, (*regs).a0 as u64)
+    }
+    #[cfg(feature = "aarch64")]
+    {
+        let regs = (top.wrapping_sub(
+            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+        ((*regs).regs[8] as u64, (*regs).regs[0] as u64)
+    }
+}
+
+/// wait4-park census — the §87.8 verdict instrument. Anomaly-gated,
+/// self-rated to 1 Hz, pid-deduped 30 s, max 2 lines/beat: zero serial
+/// on healthy boots (a normal fork+wait park is milliseconds and never
+/// survives two beats).
+///
+/// A task INTERRUPTIBLE-parked under a wait4/waitid entry frame for
+/// >= 2 s gets ONE verdict line naming every hop of the child-exit wake
+/// chain, so a capture decodes the loss site in a single read:
+///
+///   ch=[pid:st ...] nz=N ns=M  children census (ZOMBIE=0x20 bit). A
+///                             parked waiter WITH nz>0 = the condition
+///                             is true and the wake never landed.
+///   q=(entries,woken)         the waiter's wait_chldexit queue; an
+///                             entry whose woken flag is set while the
+///                             task sleeps = the one-shot token was
+///                             consumed without a running task (the
+///                             W1/sc100 sticky-token family).
+///   pend=0x.. blk=0x..        pending/blocked signal masks (bit 16 =
+///                             SIGCHLD; pend set + still parked = the
+///                             signal wake was eaten or never came).
+///   slots=cN:parent/child     nonempty DEFERRED_EXIT_NOTIFY slots; one
+///                             naming this waiter = the child's exit
+///                             notify was stored and never delivered.
+pub fn wait4_park_audit() {
+    use core::sync::atomic::Ordering as O;
+    use crate::process::task::TaskState;
+
+    // 1 Hz self-gate (one relaxed load per tick when quiet).
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(O::Relaxed);
+    if now.wrapping_sub(last) < 100 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, O::AcqRel, O::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    // Pass 1: find wait-class sleepers, refresh the age ring.
+    // (pid, ptr, age_jiffies, since_row_index)
+    let mut waiters: [(u32, *mut Task, u64); 2] = [(0, core::ptr::null_mut(), 0); 2];
+    let mut nwait = 0usize;
+    let mut observed = [false; WL_RING];
+    crate::sched::for_each_task_try(|t| {
+        if nwait == 2 {
+            return;
+        }
+        // Diagnostic reads of a task pinned by the try-walk (typed).
+        let (sleeping, pid) = (t.state().is_sleeping(), t.pid());
+        if !sleeping || pid == 0 {
+            return;
+        }
+        let t = t as *const Task as *mut Task;
+        let (nr, _a0) = unsafe { wl_entry_syscall(t) };
+        if !WAIT_SYS.contains(&nr) {
+            return;
+        }
+        // Track park age in the ring.
+        let mut row = WL_RING;
+        for (i, r) in WL_SEEN.iter().enumerate() {
+            if r.pid.load(O::Acquire) == pid {
+                row = i;
+                observed[i] = true;
+                break;
+            }
+        }
+        if row == WL_RING {
+            for (i, r) in WL_SEEN.iter().enumerate() {
+                if r.pid.load(O::Acquire) == 0 {
+                    r.pid.store(pid, O::Release);
+                    r.since.store(now as u32, O::Release);
+                    r.reported.store(0, O::Release);
+                    row = i;
+                    observed[i] = true;
+                    break;
+                }
+            }
+        }
+        if row == WL_RING {
+            return; // ring full of other parked waiters
+        }
+        let since = WL_SEEN[row].since.load(O::Acquire) as u64;
+        let age = now.saturating_sub(since);
+        if age >= 200 {
+            waiters[nwait] = (pid, t, age);
+            nwait += 1;
+        }
+    });
+    // Clear rows whose pid was not observed parked this beat.
+    for (i, r) in WL_SEEN.iter().enumerate() {
+        if !observed[i] && r.pid.load(O::Acquire) != 0 {
+            r.pid.store(0, O::Release);
+            r.since.store(0, O::Release);
+        }
+    }
+    if nwait == 0 {
+        return;
+    }
+
+    // Pass 2 (under the process-tree try-lock so parent links are
+    // stable): classify every task whose parent is one of the waiters,
+    // and collect the waiter-side verdict fields. Skips the beat when
+    // the tree lock is contended (the next 1 Hz beat retries).
+    let tree = match crate::process::task::PROCESS_TREE_LOCK.try_lock() {
+        Some(g) => g,
+        None => return,
+    };
+    // per-waiter accumulators
+    let mut nz = [0u32; 2];
+    let mut nch = [0u32; 2];
+    let mut shown: [alloc::vec::Vec<(u32, u32)>; 2] =
+        [alloc::vec::Vec::new(), alloc::vec::Vec::new()];
+    let mut qz = [(0usize, 0usize); 2];
+    let mut found = [false; 2];
+    let mut pend = [0u64; 2];
+    let mut blk = [0u64; 2];
+    let mut st_bits = [0u32; 2];
+    let mut nr_arg = [0u64; 2];
+    crate::sched::for_each_task_try(|t| {
+        // Reads under the tree lock (release_task's tree detach also
+        // holds it), each task pinned by the try-walk. wl_entry_syscall
+        // still takes the raw pointer.
+        let t = t as *const Task as *mut Task;
+        unsafe {
+            for w in 0..nwait {
+                if (*t).pid() == waiters[w].0 {
+                    found[w] = true;
+                    st_bits[w] = (*t).state().bits();
+                    let (nr, a0) = wl_entry_syscall(t);
+                    nr_arg[w] = (a0 << 32) | nr;
+                    pend[w] = (*t).pending.get_all();
+                    blk[w] = (*t).sigmask;
+                    if let Some((total, woken)) = (*t).wait_chldexit.vw_queue_census_try() {
+                        qz[w] = (total, woken);
+                    }
+                    continue;
+                }
+                if let Some(pp) = (*t).parent_ptr() {
+                    if Task::is_plausible_task_ptr(pp) && (*pp).pid() == waiters[w].0 {
+                        nch[w] += 1;
+                        let st = (*t).state().bits();
+                        if st & TaskState::ZOMBIE != 0 {
+                            nz[w] += 1;
+                        }
+                        if shown[w].len() < 6 {
+                            shown[w].push(((*t).pid(), st));
+                        }
+                    }
+                }
+            }
+        }
+    });
+    drop(tree);
+
+    // Print the verdict: only when the anomaly is real — a reapable
+    // zombie under a parked waiter (the loss, any age) or a long park
+    // (>= 10 s; the child-never-exited face). 30 s re-report dedup,
+    // 2-line budget.
+    for w in 0..nwait {
+        if !found[w] {
+            continue;
+        }
+        let idx = WL_SEEN.iter().position(|r| r.pid.load(O::Acquire) == waiters[w].0);
+        let rep = idx.map(|i| WL_SEEN[i].reported.load(O::Acquire) as u64).unwrap_or(0);
+        let anomaly = nz[w] > 0 || waiters[w].2 >= 1000;
+        if !anomaly || (rep != 0 && now.saturating_sub(rep) < 3000) {
+            continue;
+        }
+        if let Some(i) = idx {
+            WL_SEEN[i].reported.store(now as u32, O::Release);
+        }
+        let mut slots = [0i64; crate::config::MAX_CPUS];
+        crate::sched::deferred_exit_notify_slots(&mut slots);
+        let mut line: alloc::string::String = alloc::format!(
+            "WAIT4-PARK pid={} age_s={} sys={} a0={:#x} st={:#x} ch=[",
+            waiters[w].0,
+            waiters[w].2 / 100,
+            nr_arg[w] & 0xFFFF_FFFF,
+            nr_arg[w] >> 32,
+            st_bits[w],
+        );
+        for (k, (cp, cst)) in shown[w].iter().enumerate() {
+            if k > 0 {
+                line.push(' ');
+            }
+            use core::fmt::Write;
+            let _ = write!(line, "{}:{:#x}", cp, cst);
+        }
+        use core::fmt::Write;
+        let _ = write!(
+            line,
+            "] nch={} nz={} q=({},{}) pend={:#x} blk={:#x} slots=",
+            nch[w], nz[w], qz[w].0, qz[w].1, pend[w], blk[w]
+        );
+        let mut any_slot = false;
+        for (c, s) in slots.iter().enumerate() {
+            if *s != 0 {
+                if any_slot {
+                    line.push(' ');
+                }
+                any_slot = true;
+                let parent = ((*s as u64) >> 32) as u32;
+                let child = (*s as u64 & 0xFFFF_FFFF) as u32;
+                let _ = write!(line, "c{}:{}/{}", c, parent, child);
+            }
+        }
+        if !any_slot {
+            line.push('-');
+        }
+        crate::pr_warn!("{}", line);
+    }
+}
+
+/// wait4 pid-selector semantics (Linux wait_tasktype):
+/// - pid > 0 : that exact child
+/// - pid == 0: any child in the CALLER's process group
+/// - pid == -1: any child
+/// - pid < -1: any child whose pgid == -pid
+#[inline]
+fn wait_pid_matches(child: &Task, pid: i32, caller_pgid: u32) -> bool {
+    if pid > 0 {
+        child.pid() == pid as u32
+    } else if pid == 0 {
+        child.pgid() == caller_pgid
+    } else if pid == -1 {
+        true
+    } else {
+        child.pgid() == (-pid) as u32
+    }
+}
+
+/// Blocking wait for child process state change
+///
+/// # Arguments
+/// * `pid` - PID to wait for (-1 = any child, >0 = specific PID,
+///           0 = caller's process group, <-1 = process group -pid)
+/// * `status_ptr` - User pointer to store exit status
+/// * `options` - Wait options (WUNTRACED, etc.)
+///
+/// # Returns
+/// * `Ok(child_pid)` - Child PID that changed state
+/// * `Err(-ECHILD)` - No children
+/// * `Err(-EINTR)` - Interrupted by signal
+/// * `Err(-EFAULT)` - status_ptr unwritable
+pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32> {
+
+    // The sched:sched_process_wait tracepoint — the reference records
+    // it at do_wait entry with the WAITER's comm/prio and the REQUESTED
+    // pid argument (pid_nr of the wait_opts pid; -1 = any child).
+    if crate::trace::EVENT_SCHED_PROCESS_WAIT.armed() {
+        if let Some(cur) = crate::sched::current() {
+            // SAFETY: current is the calling task, pinned by being the
+            // running context.
+            unsafe {
+                let words = crate::trace::comm_to_words(&*(*cur).comm());
+                crate::trace::record(
+                    &crate::trace::EVENT_SCHED_PROCESS_WAIT,
+                    [
+                        words[0],
+                        words[1],
+                        pid as u64,
+                        (*cur).prio() as u64,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
+                );
+            }
+        }
+    }
+
+    // current is the calling task, valid throughout the wait loop (the
+    // task sleeps via schedule() in INTERRUPTIBLE state so it won't be
+    // freed). One consolidated reference; raw uses re-derive the pointer.
+    let cur = match crate::sched::current() {
+        Some(c) => c,
+        None => return Err(errno::Errno::NoChild.as_neg_i32()),
+    };
+    let current: *mut Task = cur;
+
+    let current_pid = cur.pid();
+
+    // If current is idle task (PID 0), no real process is running
+    if current_pid == 0 {
+        return Err(errno::Errno::NoChild.as_neg_i32());
+    }
+
+    let caller_pgid = cur.pgid();
+
+        loop {
+            let mut found_child = false;
+            let mut zombie_child: Option<*mut Task> = None;
+            let mut stopped_child: Option<*mut Task> = None;
+
+            const WUNTRACED: i32 = 0x00000002;
+
+            // Iterate over the children of EVERY thread-group member
+            // (Linux do_wait walks while_each_thread — any thread can
+            // wait for any member's child; glib's gmain worker thread
+            // reaps children the main thread spawned). Threads are never
+            // on these lists — only fork()/clone-without-CLONE_THREAD
+            // products are.
+            cur.for_each_group_child(|child_ptr| {
+                // SAFETY: the walker hands out children linked under the
+                // tree lock (valid for the closure body).
+                let child = unsafe { &*child_ptr };
+
+                if !wait_pid_matches(child, pid, caller_pgid) {
+                    return;
+                }
+
+                found_child = true;
+
+                // Check if it's in Zombie state
+                if child.state() == TaskState::new(TaskState::ZOMBIE) {
+                    // E8-REPAR: CLAIM the zombie here, inside the same
+                    // tree-lock critical section that selected it
+                    // (unlink + parent=None). Two group members woken by
+                    // the same SIGCHLD (glib reaper thread + main) could
+                    // both select this zombie and double-release_task it
+                    // — the second release would lock/unlink/free through
+                    // the already-freed Task. Losers simply fail the
+                    // claim and re-scan. Claim only the first winner:
+                    // every claimed zombie must be reaped by this call or
+                    // it becomes unreapable (no list links it anymore).
+                    if zombie_child.is_none() && Task::claim_child_locked(child_ptr) {
+                        zombie_child = Some(child_ptr);
+                    }
+                } else if child.state() == TaskState::new(TaskState::STOPPED)
+                    && !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                    && (options & WUNTRACED != 0 || child.tracer_pid() == current_pid)
+                    && stopped_child.is_none()
+                {
+                    // Linux wait_task_stopped(): "Traditionally we see
+                    // ptrace'd stopped children regardless of options" —
+                    // WUNTRACED gates job-control stops only; a stop of a
+                    // task WE trace is always reported (LTP ptrace01/05
+                    // use plain waitpid on a TRACEME'd child). First
+                    // match wins, like the zombie selection above.
+                    stopped_child = Some(child_ptr);
+                }
+            });
+
+            // If found zombie child, reap it
+            if let Some(child_ptr) = zombie_child {
+                // SAFETY: claimed under the tree lock (claim_child_locked)
+                // — this caller owns the reap.
+                let child = unsafe { &*child_ptr };
+                let child_pid = child.pid();
+                let raw_exit = child.exit_code();
+
+                // Encode exit status per waitpid ABI:
+                // - Normal exit: exit_code IS the wait status already —
+                //   sys_exit/sys_exit_group store `(code & 0xff) << 8`
+                //   (Linux pre-shifts at the syscall boundary), so the
+                //   value is passed through with no second shift.
+                // - Killed by signal: status = |signal_number|      (WIFSIGNALED, WTERMSIG)
+                //   plus WCOREDUMP (0x80) when a core file was written.
+                let status: i32 = if raw_exit >= 0 {
+                    (raw_exit as u32 & 0xFFFF) as i32
+                } else {
+                    let mut s = (-(raw_exit as i32) as u32 & 0x7F) as i32;
+                    if child.core_dumped() {
+                        s |= 0x80; // WCOREDUMP
+                    }
+                    s
+                };
+
+                // Write exit status through the typed exception-table path.
+                if !status_ptr.is_null() {
+                    let _uncopied = crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status);
+                }
+
+                // Release task resources (kernel stack, Arc refs, PID)
+                // Note: remove_child is done inside release_task()
+                let fp_t_reap =
+                    if crate::dfx::forkprof::on() { crate::dfx::forkprof::now() } else { 0 };
+                release_task(child_ptr);
+                if fp_t_reap != 0 {
+                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_REAP, fp_t_reap);
+                    crate::dfx::forkprof::trace(crate::dfx::forkprof::T_REAP_DONE, child_pid);
+                }
+
+                return Ok(child_pid);
+            }
+
+            // If found stopped child (WUNTRACED), report it
+            if let Some(child_ptr) = stopped_child {
+                // SAFETY: selected under the tree lock; still linked.
+                let child = unsafe { &*child_ptr };
+                let child_pid = child.pid();
+                let stop_sig = child.stop_signal();
+
+                // Encode stopped status: (stop_signal << 8) | 0x7F
+                let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
+
+                // Write status safely using copy_to_user
+                if !status_ptr.is_null() {
+                    let _uncopied =
+                        crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status);
+                }
+
+                // Mark this stop event as reported (only report once)
+                child.stop_reported.store(true, core::sync::atomic::Ordering::Release);
+
+                // Note: stopped child is NOT reaped, it stays in children list
+                return Ok(child_pid);
+            }
+
+            // Linux do_wait() also walks the caller's TRACEE list
+            // (ptrace_do_wait): a task attached with PTRACE_ATTACH that is
+            // not a real child (LTP ptrace11 attaches init and
+            // waitpid(1,...)s) is still waitable for its stops. A tracee
+            // that has not stopped yet also keeps the wait blocking (it
+            // plays the role of a child for ECHILD purposes).
+            let mut found_tracee = false;
+            {
+                let mut tracee_stop: Option<*mut Task> = None;
+                crate::process::pid_hash::pid_hash_for_each_task(|t| {
+                    if tracee_stop.is_some() {
+                        return;
+                    }
+                    if (*t).tracer_pid() != current_pid || (*t).pid() == current_pid {
+                        return;
+                    }
+                    if !wait_pid_matches(&*t, pid, caller_pgid) {
+                        return;
+                    }
+                    found_tracee = true;
+                    if t.state() == TaskState::new(TaskState::STOPPED)
+                        && !t.stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                    {
+                        tracee_stop = Some(t as *const Task as *mut Task);
+                    }
+                });
+                if let Some(t) = tracee_stop {
+                    // SAFETY: `t` was found by the pid-hash walk under the
+                    // same scan discipline (a tracee of ours, pinned by
+                    // the hash's RCU section).
+                    let ts = unsafe { &*t };
+                    let child_pid = ts.pid();
+                    let stop_sig = ts.stop_signal();
+                    let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
+                    if !status_ptr.is_null() {
+                        let _uncopied =
+                            crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status);
+                    }
+                    ts.stop_reported.store(true, core::sync::atomic::Ordering::Release);
+                    return Ok(child_pid);
+                }
+            }
+
+            // No zombie or stopped child found
+            if found_child || found_tracee {
+                // Atomically add to waitqueue AND set INTERRUPTIBLE.
+                // Prevents lost-wakeup race where child exits between
+                // add() and set_state(), marking the entry woken but
+                // wake_up_process skips the actual wake (task still RUNNING).
+                cur.wait_chldexit.prepare_to_wait(current, false, true);
+
+                // Recheck after prepare_to_wait (waker may have fired
+                // between the initial scan and prepare_to_wait — a wake of
+                // a still-RUNNING waiter is refused, so the state change
+                // can only be caught here). If a child is already zombie or
+                // freshly STOPPED (ptrace stop / group stop landing in that
+                // window), finish_wait restores RUNNING state and we loop
+                // to report it — no schedule() needed. Without the stopped
+                // recheck, a stop that raced the arm was only visible via
+                // the (discarded-for-SIG_IGN-SIGCHLD) signal path and the
+                // wait slept forever (LTP ptrace05 wedge family).
+                {
+                    let mut need_rescan = false;
+                    cur.for_each_group_child(|child_ptr| {
+                        if need_rescan {
+                            return;
+                        }
+                        // SAFETY: tree-locked child from the walker.
+                        let c = unsafe { &*child_ptr };
+                        if !wait_pid_matches(c, pid, caller_pgid) {
+                            return;
+                        }
+                        let st = c.state();
+                        if st == TaskState::new(TaskState::ZOMBIE) {
+                            need_rescan = true;
+                        } else if st == TaskState::new(TaskState::STOPPED)
+                            && !c.stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                            && (options & WUNTRACED != 0 || c.tracer_pid() == current_pid)
+                        {
+                            need_rescan = true;
+                        }
+                    });
+                    if !need_rescan {
+                        crate::process::pid_hash::pid_hash_for_each_task(|t| {
+                            if need_rescan {
+                                return;
+                            }
+                            if (*t).tracer_pid() != current_pid || (*t).pid() == current_pid {
+                                return;
+                            }
+                            if !wait_pid_matches(&*t, pid, caller_pgid) {
+                                return;
+                            }
+                            if (*t).state() == TaskState::new(TaskState::STOPPED)
+                                && !(*t).stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                            {
+                                need_rescan = true;
+                            }
+                        });
+                    }
+                    if need_rescan {
+                        cur.wait_chldexit.finish_wait(current);
+                        // The child's wake_up() may have raced our
+                        // prepare_to_wait and enqueued us; we are going to
+                        // keep running on this CPU — take ourselves back
+                        // off the queue (review NEW-C2).
+                        crate::sched::dequeue_if_enqueued(cur);
+                        continue; // re-enter loop to report/reap
+                    }
+                }
+
+                // Check for pending signals before sleeping
+                use crate::signal;
+                if signal::signal_pending() {
+                    cur.wait_chldexit.finish_wait(current);
+                    crate::sched::dequeue_if_enqueued(cur);
+                    // ERESTARTSYS, not EINTR: the signal-delivery path
+                    // restarts the wait when the handler is SA_RESTART
+                    // (Linux semantics — glib's SIGCHLD handler is).
+                    return Err(ERESTARTSYS);
+                }
+
+                // Enable interrupts before schedule(). We're in syscall context
+                // (SIE=0). Without this, timer IRQ can't fire and the task
+                // can never be rescheduled.
+                crate::arch::cpu::restore_irq(true);
+
+                // Schedule other processes
+                // forkprof: this schedule() returns only after the child
+                // ran + exited + woke us — it IS the fork->exit handoff.
+                let fp_t_ws =
+                    if crate::dfx::forkprof::on() { crate::dfx::forkprof::now() } else { 0 };
+                if fp_t_ws != 0 {
+                    crate::dfx::forkprof::trace(crate::dfx::forkprof::T_SCHED_SLEEP, current_pid);
+                }
+                crate::sched::schedule();
+                if fp_t_ws != 0 {
+                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_SCHED, fp_t_ws);
+                    crate::dfx::forkprof::trace(crate::dfx::forkprof::T_SCHED_WAKE, current_pid);
+                }
+
+                // After wakeup: state is RUNNING (set by wake_up_process).
+                // Clean up waitqueue entry before next iteration.
+                cur.wait_chldexit.finish_wait(current);
+            } else {
+                // No child processes at all
+                return Err(errno::Errno::NoChild.as_neg_i32());
+            }
+        }
+}
+
+/// Non-blocking wait for child process
+///
+/// # Arguments
+/// * `pid` - PID to wait for (-1 = any, >0 = specific, 0 = caller's pgid,
+///           <-1 = pgid == -pid)
+/// * `status_ptr` - User pointer to store exit status
+/// * `options` - WUNTRACED (report stopped children too)
+///
+/// # Returns
+/// * `Ok(child_pid)` - Child PID that has exited / was reported stopped
+/// * `Err(-ECHILD)` - No children
+/// * `Err(-EAGAIN)` - Children exist but none reported (sys_wait4 → 0)
+pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32> {
+    const WUNTRACED: i32 = 0x00000002;
+
+    // current is the calling task, valid throughout this call; one
+    // consolidated reference (raw uses re-derive the pointer).
+    let cur = match crate::sched::current() {
+        Some(c) => c,
+        None => return Err(errno::Errno::NoChild.as_neg_i32()),
+    };
+    let current: *mut Task = cur;
+
+    let current_pid = cur.pid();
+
+    // If current is idle task (PID 0), no real process is running
+    if current_pid == 0 {
+        return Err(errno::Errno::NoChild.as_neg_i32());
+    }
+
+    let caller_pgid = cur.pgid();
+
+        // W4SPIN entry heartbeat (69th): if a single wait4 call hangs
+        // inside the group-child walk (tree-lock spin / corrupt list),
+        // the reap-side print below never fires while pid 1 burns CPU
+        // in this syscall — this heartbeat separates "stuck in the
+        // walk" (heartbeat silent) from "reaping an endless stream"
+        // (heartbeat + reap prints every second).
+        if current_pid == 1
+            && crate::trace::EVENT_PID1SPIN.armed()
+        {
+            use core::sync::atomic::{AtomicU64, Ordering as O2};
+            static LAST_EJ: AtomicU64 = AtomicU64::new(0);
+            let j = crate::drivers::timer::get_jiffies() as u64;
+            let last = LAST_EJ.load(O2::Relaxed);
+            if j.saturating_sub(last) >= 100
+                && LAST_EJ
+                    .compare_exchange(last, j, O2::AcqRel, O2::Relaxed)
+                    .is_ok()
+            {
+                crate::pr_warn!("W4SPIN entry pid=1 wait_pid={} opts={:#x}", pid, options);
+            }
+        }
+
+        let mut found_child = false;
+        let mut zombie_ptr: Option<*mut Task> = None;
+        let mut stopped_ptr: Option<*mut Task> = None;
+
+        // Scan the children of every thread-group member to find a
+        // zombie / WUNTRACED stop — do NOT modify the list during
+        // iteration. (Group-wide: glib's gmain worker thread polls
+        // waitpid(WNOHANG) for children the main thread spawned.)
+        cur.for_each_group_child(|child_ptr| {
+            // SAFETY: selected/claimed under the tree lock; still linked.
+            let child = unsafe { &*child_ptr };
+
+            if !wait_pid_matches(child, pid, caller_pgid) {
+                return;
+            }
+
+            found_child = true;
+
+            // E8-REPAR discipline (same as do_wait): CLAIM the zombie
+            // here, inside the walk's tree-lock critical section. Two
+            // group members polling WNOHANG concurrently (glib reaper
+            // thread + main) could both select the same zombie and
+            // double-release_task it — the second release would
+            // lock/unlink/free through the already-freed Task. A failed
+            // claim means another waiter is reaping it; keep scanning.
+            if child.state() == TaskState::new(TaskState::ZOMBIE)
+                && zombie_ptr.is_none()
+                && Task::claim_child_locked(child_ptr)
+            {
+                zombie_ptr = Some(child_ptr);
+            } else if child.state() == TaskState::new(TaskState::STOPPED)
+                && !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                && (options & WUNTRACED != 0 || child.tracer_pid() == current_pid)
+                && stopped_ptr.is_none()
+            {
+                // ptrace'd stops are reported regardless of WUNTRACED
+                // (reference wait_task_stopped); see do_wait for the rationale.
+                stopped_ptr = Some(child_ptr);
+            }
+        });
+
+        if let Some(child_ptr) = zombie_ptr {
+            // SAFETY: selected/claimed under the tree lock; still linked.
+            let child = unsafe { &*child_ptr };
+            let child_pid = child.pid();
+            // W4SPIN (69th, rux:pid1spin (retired dfx=pid1spin)): init's SIGCHLD handler loops
+            // `while (waitpid(-1, &st, WNOHANG) > 0);` — a positive return
+            // stream that never ends wedges pid 1 at 100% CPU and kills
+            // the param service (the 105-family root). Once per second,
+            // name the reaped child AND dump init's remaining children
+            // census: the same pid repeating (claim/release bug) vs an
+            // endless zombie stream (exit-path bug) is a one-look call.
+            if current_pid == 1
+                && crate::trace::EVENT_PID1SPIN.armed()
+            {
+                use core::sync::atomic::{AtomicU64, Ordering as O2};
+                static LAST_J: AtomicU64 = AtomicU64::new(0);
+                static CALLS: AtomicU64 = AtomicU64::new(0);
+                let calls = CALLS.fetch_add(1, O2::Relaxed);
+                let j = crate::drivers::timer::get_jiffies() as u64;
+                let last = LAST_J.load(O2::Relaxed);
+                if j.saturating_sub(last) >= 100
+                    && LAST_J
+                        .compare_exchange(last, j, O2::AcqRel, O2::Relaxed)
+                        .is_ok()
+                {
+                    let mut line: alloc::string::String = alloc::format!(
+                        "W4SPIN reaped pid={} tgid={} calls={} children:",
+                        child_pid,
+                        child.tgid(),
+                        calls
+                    );
+                    // SAFETY: read-only census walk of the caller's own
+                    // group children under the tree lock (the walk in
+                    // this function just ran under the same lock).
+                    unsafe {
+                        cur.for_each_group_child(|cp| {
+                            let c = &*cp;
+                            let st = c.state().bits();
+                            if line.len() < 700 {
+                                line.push_str(&alloc::format!(
+                                    " [{}:{}:{:#x}{}]",
+                                    c.pid(),
+                                    c.tgid(),
+                                    st,
+                                    if c.pid() == c.tgid() { "" } else { "!thr" }
+                                ));
+                            }
+                        });
+                    }
+                    crate::pr_warn!("{}", line);
+                }
+            }
+            let raw_exit = child.exit_code();
+
+            let status: i32 = if raw_exit >= 0 {
+                // Pre-shifted at sys_exit (Linux ABI) — pass through.
+                (raw_exit as u32 & 0xFFFF) as i32
+            } else {
+                let mut s = (-(raw_exit as i32) as u32 & 0x7F) as i32;
+                if child.core_dumped() {
+                    s |= 0x80; // WCOREDUMP
+                }
+                s
+            };
+
+            if !status_ptr.is_null() {
+                if crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status) != 0 {
+                    // EFAULT: the caller passed an unwritable status
+                    // pointer. The zombie is already CLAIMED (unlinked),
+                    // so it cannot be left for a later wait — release it
+                    // here and still report the fault (divergence from
+                    // the reference's unreaped-EFAULT, forced by the
+                    // claim's unlinked-implies-reaped invariant).
+                    release_task(child_ptr);
+                    return Err(crate::errno::Errno::BadAddress.as_neg_i32());
+                }
+            }
+
+            release_task(child_ptr);
+            return Ok(child_pid);
+        }
+
+        if let Some(child_ptr) = stopped_ptr {
+            // SAFETY: selected/claimed under the tree lock; still linked.
+            let child = unsafe { &*child_ptr };
+            let child_pid = child.pid();
+            let stop_sig = child.stop_signal();
+            let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
+            if !status_ptr.is_null() {
+                if crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status) != 0 {
+                    return Err(crate::errno::Errno::BadAddress.as_neg_i32());
+                }
+            }
+            child.stop_reported.store(true, core::sync::atomic::Ordering::Release);
+            return Ok(child_pid);
+        }
+
+        if found_child {
+            Err(errno::Errno::TryAgain.as_neg_i32())
+        } else {
+            Err(errno::Errno::NoChild.as_neg_i32())
+        }
+}
+
+/// waitid options (match Linux wait.h)
+const WNOHANG: i32     = 0x00000001;
+const WUNTRACED: i32   = 0x00000002;
+const WSTOPPED: i32    = WUNTRACED;
+const WEXITED: i32     = 0x00000004;
+const WCONTINUED: i32  = 0x00000008;
+const WNOWAIT: i32     = 0x01000000;
+
+/// waitid idtype
+const P_ALL: i32  = 0;
+const P_PID: i32  = 1;
+const P_PGID: i32 = 2;
+
+/// CLD_* si_code values for siginfo_t
+const CLD_EXITED: i32    = 1;
+const CLD_KILLED: i32    = 2;
+const CLD_DUMPED: i32    = 3;
+const CLD_STOPPED: i32   = 5;
+const CLD_CONTINUED: i32 = 6;
+
+/// Write waitid siginfo_t fields to user memory.
+///
+/// Only writes the fields used by waitid (si_signo, si_errno, si_code,
+/// si_pid, si_uid, si_status), leaving the rest of the 128-byte
+/// siginfo_t untouched.
+// SAFETY: Caller must ensure infop points to a valid, writable user buffer of at
+// least 128 bytes. copy_to_user handles user-space access safely.
+fn write_siginfo(
+    infop: *mut u8,
+    si_code: i32,
+    si_pid: u32,
+    si_uid: u32,
+    si_status: i32,
+) {
+    // Every field goes through the typed exception-table family.
+    use crate::arch::uaccess_safe as ua;
+    let base = infop as usize;
+
+    let _ = ua::write_user::<i32>(base, 17); // SIGCHLD
+    let _ = ua::write_user::<i32>(base + 4, 0);
+    let _ = ua::write_user::<i32>(base + 8, si_code);
+    // offset 12: padding
+    let _ = ua::write_user::<u32>(base + 16, si_pid);
+    let _ = ua::write_user::<u32>(base + 20, si_uid);
+    let _ = ua::write_user::<i32>(base + 24, si_status);
+}
+
+/// Blocking waitid: wait for child process state change
+///
+/// # Arguments
+/// * `idtype` - P_ALL (0), P_PID (1), or P_PGID (2)
+/// * `id` - PID or PGID to wait for (ignored if P_ALL)
+/// * `infop` - User pointer to siginfo_t
+/// * `options` - WNOHANG | WEXITED | WSTOPPED | WCONTINUED | WNOWAIT
+///
+/// # Returns
+/// * `Ok(true)` - Event found (child info written to infop)
+/// * `Ok(false)` - WNOHANG and no event yet: return 0 to userspace and
+///   leave infop UNTOUCHED (Linux/POSIX behavior — the old -EAGAIN broke
+///   every WNOHANG poll loop).
+/// * `Err(-ECHILD)` - No children
+/// * `Err(-EINTR)` - Interrupted by signal
+pub fn do_waitid(
+    idtype: i32,
+    id: i32,
+    infop: *mut u8,
+    options: i32,
+) -> Result<bool, i32> {
+
+    // Must specify at least one of WEXITED/WSTOPPED/WCONTINUED
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // current is the calling task, valid throughout the wait loop; one
+    // consolidated reference (raw uses re-derive the pointer).
+    let cur = match crate::sched::current() {
+        Some(c) => c,
+        None => return Err(errno::Errno::NoChild.as_neg_i32()),
+    };
+    let current: *mut Task = cur;
+
+    if cur.pid() == 0 {
+        return Err(errno::Errno::NoChild.as_neg_i32());
+    }
+
+        loop {
+            let mut found_child = false;
+            let mut result_child: Option<*mut Task> = None;
+            let mut result_code: i32 = 0;
+            let mut result_kind: i32 = 0; // 0=zombie, 1=stopped, 2=continued
+
+            // Group-wide scan (same as do_wait): any thread of the
+            // process may waitid for any member's child.
+            cur.for_each_group_child(|child_ptr| {
+                // SAFETY: the walker hands out tree-locked children.
+                let child = unsafe { &*child_ptr };
+
+                // idtype filter
+                if idtype == P_PID && child.pid() != id as u32 {
+                    return;
+                }
+                if idtype == P_PGID && child.pgid() != id as u32 {
+                    return;
+                }
+                // P_ALL: match any child
+
+                found_child = true;
+
+                // First event wins (the reference's wait_consider_task
+                // stops the walk at the first child that yields an
+                // event) — the is_none() guards keep a later match from
+                // overwriting an earlier selection, which would strand
+                // a CLAIMED zombie below.
+                // Check for zombie (exited) — only if WEXITED
+                if options & WEXITED != 0
+                    && child.state() == TaskState::new(TaskState::ZOMBIE)
+                {
+                    // E8-REPAR discipline (see do_wait): CLAIM the
+                    // zombie inside the walk's tree-lock critical
+                    // section when this call will reap it — two group
+                    // members blocked in waitid could otherwise both
+                    // select it and double-release_task (free the Task
+                    // twice). WNOWAIT never reaps, so it must NOT claim
+                    // (leaves the zombie reapable by a later wait).
+                    if result_child.is_none()
+                        && (options & WNOWAIT != 0
+                            || Task::claim_child_locked(child_ptr))
+                    {
+                        result_child = Some(child_ptr);
+                        let raw_exit = child.exit_code();
+                        let mut was_killed = false;
+                        if raw_exit >= 0 {
+                            // si_status is the raw 0-255 exit code
+                            // (WEXITSTATUS semantics); sys_exit
+                            // pre-shifted it into bits 8-15, shift back
+                            // down here.
+                            result_code = ((raw_exit as u32) >> 8) as i32;
+                        } else {
+                            result_code = (-raw_exit) as i32;
+                            was_killed = true;
+                        }
+                        result_kind = if was_killed { 3 } else { 0 };
+                    }
+                }
+                // Check for stopped — only if WSTOPPED. Unified with
+                // wait4's one-shot semantics: stop_reported, not a
+                // separate stop_signal()!=0 test (the two mechanisms
+                // racing double-reported one stop event — review 3.3).
+                else if options & WSTOPPED != 0
+                    && result_child.is_none()
+                    && child.state() == TaskState::new(TaskState::STOPPED)
+                {
+                    if !child.stop_reported.load(core::sync::atomic::Ordering::Acquire) {
+                        result_child = Some(child_ptr);
+                        result_code = child.stop_signal();
+                        result_kind = 1; // stopped
+                    }
+                }
+                // Check for continued — only if WCONTINUED (reference
+                // wait_task_continued). SIGCONT's default action marks
+                // the resume on the child: stop_signal sentinel
+                // -SIGCONT with stop_reported re-armed. Report once.
+                else if options & WCONTINUED != 0 && result_child.is_none() {
+                    if !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                        && child.stop_signal() == -(crate::signal::Signal::SIGCONT as i32)
+                    {
+                        result_child = Some(child_ptr);
+                        result_code = crate::signal::Signal::SIGCONT as i32;
+                        result_kind = 2; // continued
+                    }
+                }
+            });
+
+            if let Some(child_ptr) = result_child {
+                // SAFETY: selected (and zombie cases claimed) under the
+                // tree lock; this caller owns the report.
+                let child = unsafe { &*child_ptr };
+                let child_pid = child.pid();
+                let child_uid = child.cred().uid;
+
+                // Encode si_code and si_status
+                let (si_code, si_status) = if result_kind == 1 {
+                    // Stopped
+                    (CLD_STOPPED, result_code)
+                } else if result_kind == 2 {
+                    // Continued: si_status is SIGCONT (reference
+                    // do_notify_parent_cldstop's CLD_CONTINUED payload)
+                    (CLD_CONTINUED, result_code)
+                } else if result_kind == 3 {
+                    // Killed by signal (CLD_DUMPED when a core was written)
+                    if child.core_dumped() {
+                        (CLD_DUMPED, result_code)
+                    } else {
+                        (CLD_KILLED, result_code)
+                    }
+                } else {
+                    // Normal exit
+                    (CLD_EXITED, result_code)
+                };
+
+                // Write siginfo to user. si_pid is reported in the
+                // CALLER's pid namespace (U1c parity with wait4's
+                // report_wait_pid); the child is still hash-resident at
+                // this point — release_task runs after the write.
+                let report_pid = crate::process::ns::wait_vpid(child_pid);
+                write_siginfo(infop, si_code, report_pid, child_uid, si_status);
+
+                // Reap zombie unless WNOWAIT
+                if (result_kind == 0 || result_kind == 3) && options & WNOWAIT == 0 {
+                    release_task(child_ptr);
+                }
+
+                // Mark the stop/continue event reported (one-shot,
+                // wait4-consistent)
+                if (result_kind == 1 || result_kind == 2) && options & WNOWAIT == 0 {
+                    child.stop_reported.store(true, core::sync::atomic::Ordering::Release);
+                }
+
+                return Ok(true);
+            }
+
+            // No matching child found
+            if found_child {
+                // Children exist but none in target state
+                if options & WNOHANG != 0 {
+                    return Ok(false);
+                }
+
+                // Atomically add to waitqueue AND set INTERRUPTIBLE.
+                cur.wait_chldexit.prepare_to_wait(current, false, true);
+
+                // R9-10: re-check for a zombie AFTER registration (do_wait
+                // has this; the child's deferred notify may have fired
+                // while we were still RUNNING, consuming the only wake).
+                // R20-4: the recheck MUST apply the same idtype/id filter
+                // as the main scan — without it, a zombie sibling that the
+                // filter excludes (e.g. waitid(P_PID, X) while Y is zombie)
+                // keeps setting found_zombie, and the loop takes the
+                // `continue` path forever without ever sleeping: a
+                // kernel-space busy hang.
+                {
+                    let mut found_zombie = false;
+                    cur.for_each_group_child(|child_ptr| {
+                        // SAFETY: tree-locked child from the walker.
+                        let c = unsafe { &*child_ptr };
+                        if idtype == P_PID && c.pid() != id as u32 {
+                            return;
+                        }
+                        if idtype == P_PGID && c.pgid() != id as u32 {
+                            return;
+                        }
+                        if c.state() == TaskState::new(TaskState::ZOMBIE) {
+                            found_zombie = true;
+                        }
+                    });
+                    if found_zombie {
+                        cur.wait_chldexit.finish_wait(current);
+                        crate::sched::dequeue_if_enqueued(cur);
+                        continue;
+                    }
+                }
+
+                if crate::signal::signal_pending() {
+                    cur.wait_chldexit.finish_wait(current);
+                    // R8-5 (NEW-C2): undo the signal's concurrent enqueue.
+                    crate::sched::dequeue_task(cur);
+                    // ERESTARTSYS, not EINTR: the signal-delivery path
+                    // restarts the wait when the handler is SA_RESTART.
+                    return Err(ERESTARTSYS);
+                }
+
+                // Enable interrupts before schedule() — we're in syscall
+                // context (SIE=0). Without this, timer IRQ can't fire and
+                // the task can never be rescheduled.
+                crate::arch::cpu::restore_irq(true);
+
+                crate::sched::schedule();
+
+                // After wakeup: state is RUNNING (set by wake_up_process).
+                cur.wait_chldexit.finish_wait(current);
+            } else {
+                return Err(errno::Errno::NoChild.as_neg_i32());
+            }
+        }
+}

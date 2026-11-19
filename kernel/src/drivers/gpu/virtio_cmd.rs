@@ -1,0 +1,56 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! VirtIO-GPU command constants
+
+// Kernel layer policy (docs/architecture/kernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
+/// 2D command types
+pub mod cmd {
+    // Control queue commands
+    pub const GET_DISPLAY_INFO: u32 = 0x0100;
+    pub const RESOURCE_CREATE_2D: u32 = 0x0101;
+    pub const RESOURCE_UNREF: u32 = 0x0102;
+    pub const SET_SCANOUT: u32 = 0x0103;
+    pub const RESOURCE_FLUSH: u32 = 0x0104;
+    pub const TRANSFER_TO_HOST_2D: u32 = 0x0105;
+    pub const RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+    pub const RESOURCE_DETACH_BACKING: u32 = 0x0107;
+    pub const GET_CAPSET_INFO: u32 = 0x0108;
+    pub const GET_CAPSET: u32 = 0x0109;
+
+    // Cursor queue commands
+    pub const UPDATE_CURSOR: u32 = 0x0200;
+    pub const MOVE_CURSOR: u32 = 0x0201;
+
+    // Response types
+    pub const RESP_OK_NODATA: u32 = 0x1100;
+    pub const RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+    pub const RESP_OK_CAPSET_INFO: u32 = 0x1102;
+    pub const RESP_OK_CAPSET: u32 = 0x1103;
+    pub const RESP_ERR_UNSPEC: u32 = 0x1200;
+    pub const RESP_ERR_OUT_OF_MEMORY: u32 = 0x1201;
+    pub const RESP_ERR_INVALID_SCANOUT_ID: u32 = 0x1202;
+    pub const RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
+    pub const RESP_ERR_INVALID_CONTEXT_ID: u32 = 0x1204;
+    pub const RESP_ERR_INVALID_PARAMETER: u32 = 0x1205;
+}
+
+/// Format constants — virtio-gpu 1.2 spec enum virtio_gpu_formats.
+/// The 3/4 vs 67/68 columns were previously SWAPPED (R8G8B8X8 sent as 4
+/// = X8R8G8B8 to the device), which QEMU happily accepted while
+/// scrambling the DRM XBGR8888 scanout channels (measured via
+/// drm_probe + screendump: red channel read the X byte).
+pub mod format {
+    pub const B8G8R8A8_UNORM: u32 = 1;
+    pub const B8G8R8X8_UNORM: u32 = 2;
+    pub const A8R8G8B8_UNORM: u32 = 3;
+    pub const X8R8G8B8_UNORM: u32 = 4;
+    pub const R8G8B8A8_UNORM: u32 = 67;
+    pub const R8G8B8X8_UNORM: u32 = 68;
+    pub const A8B8G8R8_UNORM: u32 = 121;
+    pub const X8B8G8R8_UNORM: u32 = 122;
+}

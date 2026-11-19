@@ -1,0 +1,190 @@
+# RT kernel plan — Rux-native real-time, staged
+
+User directive 2026-11-17: build a real-time kernel (the PREEMPT_RT class of
+behavior) on Rux's own structures. This plan is the working order; each stage
+names the mechanism, the code surface, the acceptance anchor, and the measured
+starting point. Benchmarks below are the 2026-11-17 pair battery
+(docs/test/pair-battery-2026-11-17.md): same-image same-binary, Rux main
+debug vs the reference kernel, q35/KVM smp2.
+
+## Starting point (measured 2026-11-17)
+
+| Metric | Rux | Reference | Gap |
+|---|---|---|---|
+| cyclictest SCHED_OTHER avg | 107 µs | 63 µs | 1.7× |
+| cyclictest SCHED_FIFO p98 avg | 104 µs | 12 µs | 8.7× |
+| The tell | FIFO ≈ OTHER (104 vs 107) | RT works (63 → 12) | priority not delivered |
+| cyclictest FIFO max (isolated host, r3) | 396 µs | 887 µs (loaded win) | tail is environmental |
+| max closed IF=0 segment (gate band) | 6–9 ms | — | delays the timer fire itself |
+| pi_stress | no data (PI-mutex UAPI chain fails) | >4.8M inversions | glibc robust+PI chain |
+
+Structural facts the plan builds on:
+- Kernel preemption defaults OFF; the irq-exit preemption hook exists behind
+  `kpreempt=` (kernel/src/arch/*/trap.rs; sched.rs). Explicit `cond_resched()`
+  points exist on long paths.
+- Timer expiry delivery is pinned to softirq context (D-19's SoftirqCtx
+  delivery guard, kernel/src/timer/wheel.rs + oneshot.rs) — the reference's
+  hrtimer delivers in hardirq.
+- The D-14 measured-wait wakeup gate applies to all classes today; the
+  reference preempts unconditionally for RT classes.
+- SCHED_FIFO/RR + DL (EDF+CBS) exist; the GRQ is one global queue (D-1) — a
+  single priority-ordered pick, no cross-CPU balancing to fight.
+- PI is a nice-floor (kernel/src/sync/futex_pi.rs), not rt_mutex chains.
+- IRQ actions run in hardirq context (no threaded IRQs).
+
+## What we do NOT import from PREEMPT_RT
+
+Full-tree spinlock→rt_mutex conversion. Rux's measured critical sections are
+small (GRQ actual hold ~102 ns; switch machinery ~620 ns) and nesting is a
+compile fact (D-11 typed lock keys). We shrink and bound critical sections
+instead of making them sleep, and convert only the locks that need PI
+semantics. This is the Rust-native divergence; record it in
+design-divergences.md when stage R6 lands.
+
+## Stages (in order; R1–R3 are the latency win, R4 bounds the tail,
+## R5–R6 are structural completeness, R7 makes it permanent)
+
+### R1 — Preemption on by default
+- Mechanism: flip `kpreempt` default to armed (irq-exit preemption hook);
+  audit the preempt-count census (phantom-bits family already at MISS=0) for
+  real brackets.
+- Surface: arch trap irq-exit hooks, sched.rs preempt_count paths.
+- Acceptance: cyclictest OTHER avg 107 → the 63–70 µs class; make test +
+  LTP sched family green; Tier-1 census bands hold.
+
+### R2 — RESCOPED 2026-11-17 after the RT-2X discovery
+- Discovery: the plan's premise was wrong for x86_64 — the RT-2X split
+  already delivers wake actions in hardirq context (expire_hres_inline runs
+  run_wheel_sweep, whose tail is deliver_fired; the softirq raise is gated
+  and dedupe fast-outs). R2 as originally written is a no-op there.
+- Measured after R1+R3: cyclictest FIFO avg 71 µs (min 32, max 2738, 6
+  >400 µs overflows clustering at host-QEMU interference windows); khog
+  futex wake→run median 150 µs vs main 28,135 µs (187×). The quiet-FIFO
+  avg gap to the reference (71 vs 12 µs) is NOT delivery context — the
+  remaining components: timer fire lateness (~16 µs, p7 overshoot class),
+  the wake ladder through idle exit, and distribution tails.
+- Revised R2 scope: (a) hres deadline arm precision (the LAPIC one-shot
+  deadline vs the actual fire time — p7 overshoot decomposition); (b) the
+  idle-exit wake ladder length (WFI exit → pick → resume); (c) cyclictest
+  -h histogram as the standing distribution instrument.
+- Acceptance: FIFO avg decomposition accounted (71 = fire lateness + ladder
+  + tail, each measured); then attack the largest component.
+
+### R3 — RT wake preempts unconditionally
+- Mechanism: the D-14 measured-wait gate is a fair-class policy; for
+  SCHED_FIFO/RR/DL wakes, set need_resched at the wake point (reference
+  semantics — check_preempt_curr for RT compares priorities, no latency
+  window). With R1+R2 in, the woken RT task starts immediately.
+- Surface: kernel/src/process/task.rs dispatch ladder, sched.rs
+  preempt_check_wake.
+- Acceptance: the FIFO/OTHER gap opens (FIFO avg ≤ 1/3 of OTHER); hackbench
+  forms improve (they stress wake round trips); LTP sched/rt family green.
+
+### R4 — Bound the IF=0 tail
+- Mechanism: continue the phantom-bits direction (defer softirq out of
+  irq-exit windows) and take the syscost REST-site table's top holders down
+  below 1 ms (audit the 6–9 ms class segments individually).
+- Surface: whatever the REST table names; gate band tightens after each.
+- Acceptance: max closed cli ≤ 1 ms on standard boots (gate band update);
+  cyclictest max (quiet host) 396 µs holds, loaded max < 5 ms.
+
+### R5 — Threaded IRQs
+- Mechanism: forced threading in the reference's shape — irq actions run in
+  per-IRQ SCHED_FIFO kthreads; the raw hardirq top-half stays only for the
+  timer/clock source. irq_desc's action chain already funnels everything,
+  so this is a dispatch-context change at one seam.
+- Surface: kernel/src/interrupt/ (irq_desc dispatch), ksoftirqd pattern
+  reused for per-IRQ threads; virtio IRQ becomes preemptible.
+- Acceptance: cyclictest FIFO under fio load stays within band (the pair
+  battery becomes the RT-under-load gate); no throughput regression past the
+  fs/IPC gate rows.
+
+### R6 — rt_mutex and real PI chains
+- Mechanism: SleepMutex gains rt_mutex semantics (priority chains, death
+  notification); the PI futex moves from nice-floor to numeric priority
+  propagation along the chain; wire the glibc PTHREAD_PRIO_INHERIT UAPI
+  chain (robust registration) so pi_stress runs.
+- Surface: kernel/src/sync/mutex.rs (+ the loom/Kani models extend with the
+  new invariant table — the S-1 harness is standing), futex_pi.rs, robust
+  list handling in exit.
+- Acceptance: pi_stress completes inversions (dual-column row gets numbers);
+  LTP rt-mutex/futex-pi families green; the mutex loom model still passes
+  INV-M1..M6.
+
+### R7 — Gate and register
+- Mechanism: add the RT domain to the perf gate — cyclictest dual-column
+  bands (FIFO avg/max, OTHER avg), p7 overshoot band; the pair battery
+  script becomes the standing RT measurement. Record the R6 divergence
+  (no full spinlock conversion — bounded sections + typed keys instead)
+  in design-divergences.md with numbers.
+- Acceptance: perf-gate-baseline.md carries the RT rows; rust-native
+  register entry with the same-rig A/B.
+
+## Sequencing note
+
+R1–R3 together are the 12 µs-class path for the wake latency (days of work,
+not weeks — each is a small, measured change on existing seams). R4 runs in
+parallel whenever the REST table names a holder. R5–R6 are the structural
+completeness stages and can proceed independently once R2's delivery split
+is stable. The pair battery rig (same image, same binaries, both kernels) is
+the acceptance instrument throughout.
+
+## Status deltas (2026-11-17 night merges, main@286fe62a3+)
+
+The starting-point table above predates the evening merges; current state:
+- R2: PARTIALLY LANDED — rt-2x landed hardirq hres expiry; timer-gap
+  landed the RT slack exemption → cyclictest FIFO avg is now **46 µs**
+  (was 104; acceptance target ≤30 µs — the residual 16 µs needs
+  attribution: fire-late to 1066 µs tail says hrtimer re-arm
+  granularity while the CPU is halted is still in the path).
+- R3: the four lost-dispatch bugs (self-migration poke, RUNNING
+  self-weakening, idle-slot blind spot, exit_group park) are FIXED
+  (timer-gap merge) — pi_stress -g 2 clean. The unconditional-RT-wake
+  policy itself (D-14 gate bypass for RT classes) is STILL OPEN.
+- R6: LANDED (rt-r6 lane, 2026-11-18): numeric priority propagation
+  along the chain (adjust_prio_chain walk re-implemented pool-native,
+  D-27), rt semantics on the sleepable locks RT tasks block on
+  (D-26), the glibc robust+PI UAPI chain CLOSED (LOCK_PI returns 0
+  with OWNER_DIED in the word — the reference contract; the old
+  -EOWNERDEAD return aborted glibc), owner-side cycle detection
+  fixed, INV-C1..C5 chain model added. pi_chain 3-deep 1000/1000;
+  pi_glibc 3/3; pi_stress -g 2 273k-383k sustained; LTP futex family
+  green; INV-M1..M6 still pass. Residual: multi-lock-PI-owner
+  chain-restore (never wrong-low), sticky downgrade boost (both
+  documented, run/RT-R6.md §5).
+- R5: LANDED (rt-r5 lane, 2026-11-18): forced threading extended to
+  the x86_64 fast paths (the MSI-X blk vector gate + the PIC INTx
+  line table — the landed irqdesc infrastructure was x86_64-dead) via
+  the ThreadedIrq primitive (SCHED_FIFO 50, W3 park discipline,
+  spawns deferred past sched::init); timer/IPI stay raw hardirq;
+  also fixed the first cut's early-return that left threaded PLIC
+  registrations unmasked. SHIPPING SHAPE: `irqthread=1` threads
+  everything EXCEPT the IRQF_NO_THREAD opt-outs — the virtio-blk
+  completion queue opts out (measured: threading it costs 28% of 4k
+  randwrite direct, 31.8 vs 44.3 MiB/s interleaved medians, and RAISES
+  per-completion hardirq IF=0 8.4-9.2 → 13.1 µs/write because the
+  wake machinery from the top half costs more IF=0 than the lean
+  DIO-CONC walker it replaces); `irqthread=all` overrides the opt-outs
+  as the standing measurement arm. Cyclictest FIFO under fio load:
+  threaded shape same class as unthreaded (no cost), three-stat dual
+  column banked. Gates: make test green, dual-arch builds, riscv
+  regression boot clean, Tier-2 fs rows in band/improved (p2 the
+  documented load-hostage row), census quiet boot clean. Full data:
+  run/RT-R5.md (rt-r5 worktree).
+- R1, R4, R7: unchanged (open).
+- Known blocker for clean-window measurement: a release-profile
+  CLOCK_MONOTONIC poison under host load ≥6 (both kernels, suspect the
+  vDSO TSC-track path) — hunt queued; use debug-class windows or quiet
+  windows for interim numbers.
+
+## Acceptance bar (user directive, 2026-11-18)
+
+cyclictest SCHED_FIFO must beat Linux by ≥50% on ALL THREE statistics
+— min AND avg AND max (ours ≤ 0.5× Linux's), same-rig interleaved
+measurement, dual-column. Current standing: max 263 vs 887 µs
+(~70% better, different boots — confirm same-rig); avg 46 vs 12 µs
+(the big gap; R1–R4 are the levers); min 29 vs unmeasured (bank
+Linux's same-rig). If a shared KVM virtualization floor (the
+timer-fire exit/entry cost both kernels pay) blocks the avg target,
+the two-sided segment table decides it — same method as the GRQ
+KVM-tax verdict; present the decomposition, don't fake the number.

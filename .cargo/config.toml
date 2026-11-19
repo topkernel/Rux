@@ -1,0 +1,58 @@
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+# NOTE: -T linker scripts are deliberately NOT set here. Cargo CONCATENATES
+# [target.*] rustflags arrays across every ancestor .cargo/config.toml, and
+# every Rux worktree carries this tracked file — so any build run from a
+# checkout nested inside another worktree (the lane `run/<base>/` pattern)
+# would apply each -T script twice. A twice-applied x86_64 linker.ld resets
+# `. = BOOT_BASE` and merges a second .boot_stack over the real .boot
+# (rust-lld: "section .boot virtual address range overlaps with
+# .boot_stack"). kernel/build.rs emits the -T link-args exactly once (and
+# defers if the effective rustflags already carry the same script, e.g. an
+# older ancestor config). All flags kept below are idempotent when doubled.
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    "-C", "force-frame-pointers=yes",
+    "-C", "code-model=medium",
+    "-C", "link-arg=--no-gc-sections",
+    "-Z", "ub-checks=no",
+]
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "force-frame-pointers=yes",
+    # twin parity (riscv64/x86_64): rustc's default embedded link runs
+    # --gc-sections; unreferenced-but-load-bearing sections (.ex_table)
+    # must survive it
+    "-C", "link-arg=--no-gc-sections",
+]
+
+# Userspace programs with musl libc (std support)
+[target.riscv64gc-unknown-linux-musl]
+linker = "riscv64-linux-gnu-gcc"
+rustflags = [
+    "-C", "target-feature=+crt-static",
+]
+
+# x86_64 kernel target (QEMU q35, multiboot1 ELF via -kernel)
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "force-frame-pointers=yes",
+    "-C", "code-model=kernel",
+    "-C", "link-arg=--no-gc-sections",
+    # the 32-bit multiboot stub uses absolute R_X86_64_32 relocations —
+    # a PIE link cannot relax them
+    "-C", "link-arg=-no-pie",
+    # static relocs: no .got generation (the kernel linker script does not
+    # place one); strip debug sections (it does not place .debug* either)
+    "-C", "relocation-model=static",
+    "-C", "link-arg=--strip-debug",
+    "-Z", "ub-checks=no",
+]

@@ -1,0 +1,579 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! RISC-V Sv39 Memory Layout Constants and Address Types
+//!
+//! This module contains:
+//! - Memory layout constants (PAGE_OFFSET, VA_BITS, etc.)
+//! - Kernel mapping structure
+//! - Virtual and physical address types
+//! - mmap constants and user space address definitions
+
+use core::arch::asm;
+
+// ==================== Page Size Constants ====================
+
+pub const PAGE_SIZE: u64 = 4096;
+pub const PAGE_SHIFT: u64 = 12;
+pub const PAGE_OFFSET_MASK: u64 = (1 << PAGE_SHIFT) - 1;
+pub const VA_BITS: u64 = 39;
+pub const VA_MASK: u64 = (1 << VA_BITS) - 1;
+
+// ==================== Sv39 Page Table Constants ====================
+
+/// Number of entries per page table level
+pub const PTRS_PER_PTE: u64 = 512;
+pub const PTRS_PER_PMD: u64 = 512;
+pub const PTRS_PER_PUD: u64 = 512;
+pub const PTRS_PER_PGD: u64 = 512;
+
+/// Size of each page table level mapping
+pub const PGDIR_SHIFT: u64 = 30;  // PGD maps 1GB
+pub const PUD_SHIFT: u64 = 30;    // PUD maps 1GB (same as PGD for 3-level)
+pub const PMD_SHIFT: u64 = 21;    // PMD maps 2MB
+
+pub const PGDIR_SIZE: u64 = 1 << PGDIR_SHIFT;  // 1GB
+pub const PMD_SIZE: u64 = 1 << PMD_SHIFT;      // 2MB
+
+/// TASK_SIZE - Maximum user space address
+/// PGDIR_SIZE * PTRS_PER_PGD / 2 = 1GB * 512 / 2 = 256GB
+pub const TASK_SIZE: usize = (PGDIR_SIZE * PTRS_PER_PGD / 2) as usize;
+
+/// USER_PTRS_PER_PGD - Number of PGD entries for user space
+/// USER_PTRS_PER_PGD = TASK_SIZE / PGDIR_SIZE = 256GB / 1GB = 256
+/// User space: VPN2 0-255
+pub const USER_PTRS_PER_PGD: usize = TASK_SIZE / (PGDIR_SIZE as usize);
+
+/// KERNEL_PGD_START - First PGD entry index for kernel space
+/// Kernel entries start at USER_PTRS_PER_PGD
+/// Kernel space: VPN2 256-511
+pub const KERNEL_PGD_START: usize = USER_PTRS_PER_PGD;
+
+// ==================== Sv39 Virtual Memory Layout ====================
+//
+// Sv39 uses 39-bit virtual addresses:
+// - User space:   0x00000000_00000000 - 0x0000003f_ffffffff (256GB)
+// - Kernel space: 0xffffffc0_00000000 - 0xffffffff_ffffffff (256GB)
+//
+// Kernel virtual address layout:
+// - KERN_VIRT_SIZE = (PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2 = 128GB
+// - VMALLOC_SIZE = KERN_VIRT_SIZE / 2 = 64GB
+// - VMEMMAP_SIZE = BIT(VA_BITS - PAGE_SHIFT - 1 + STRUCT_PAGE_SHIFT) = 4GB
+
+/// PAGE_OFFSET - Start of kernel linear mapping region
+/// Sv39: 0xffffffd600000000
+pub const PAGE_OFFSET: usize = 0xffffffd600000000;
+
+/// KERN_VIRT_SIZE - Half of kernel address space for direct mapping
+/// (PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2 = (256 * 1GB) / 2 = 128GB
+pub const KERN_VIRT_SIZE: usize = ((PTRS_PER_PGD / 2) as usize * (PGDIR_SIZE as usize)) / 2;
+
+/// VMALLOC region size (half of KERN_VIRT_SIZE)
+/// KERN_VIRT_SIZE >> 1 = 64GB
+pub const VMALLOC_SIZE: usize = KERN_VIRT_SIZE / 2;
+pub const VMALLOC_END: usize = PAGE_OFFSET;
+pub const VMALLOC_START: usize = PAGE_OFFSET - VMALLOC_SIZE;
+
+/// vmemmap region size
+/// BIT(VA_BITS - PAGE_SHIFT - 1 + STRUCT_PAGE_MAX_SHIFT)
+/// For Sv39: BIT(39 - 12 - 1 + 6) = BIT(32) = 4GB
+pub const VMEMMAP_SIZE: usize = 4 * 1024 * 1024 * 1024;  // 4GB
+pub const VMEMMAP_END: usize = VMALLOC_START;
+pub const VMEMMAP_START: usize = VMALLOC_START - VMEMMAP_SIZE;
+
+/// Kernel image mapping region (high address for Sv39)
+/// ADDRESS_SPACE_END - 2GB + 1 = 0xffffffff_80000000
+pub const KERNEL_LINK_ADDR: usize = 0xffffffff80000000;
+
+// ==================== Physical <-> Virtual Address Conversion ====================
+//
+// Linear mapping for physical memory access:
+// - va_pa_offset = PAGE_OFFSET - phys_ram_base
+// - phys_to_virt(phys) = phys + va_pa_offset
+// - virt_to_phys(virt) = virt - va_pa_offset
+
+/// Physical memory base address (QEMU virt platform)
+pub const PHYS_MEMORY_BASE: usize = 0x80000000;
+
+/// VA-PA offset for linear mapping
+/// kernel_map.va_pa_offset = PAGE_OFFSET - phys_ram_base
+pub const VA_PA_OFFSET: usize = PAGE_OFFSET - PHYS_MEMORY_BASE;
+
+/// Check if address is in linear mapping region
+/// is_linear_mapping(x) = (x >= PAGE_OFFSET && x < PAGE_OFFSET + KERN_VIRT_SIZE)
+#[inline]
+pub const fn is_linear_mapping(virt: usize) -> bool {
+    virt >= PAGE_OFFSET && virt < PAGE_OFFSET + KERN_VIRT_SIZE
+}
+
+// ==================== Physical Memory Layout (QEMU virt platform) ====================
+
+/// Kernel entry point (after OpenSBI)
+pub const KERNEL_ENTRY: u64 = 0x80200000;
+
+/// Kernel image mapping budget (entry 0x80200000 + 12MB). The debug image
+/// (text+rodata+bss+boot stack) outgrew 8MB, and the unit-test build
+/// (feature "unit-test": the whole boot-time test suite compiled in)
+/// later outgrew 10MB — its boot-stack top page faulted at
+/// 0xffffffff80a00000 during the first trap (see boot.S PMD[5]).
+///
+/// The heap now starts at the window end (0x81200000, HEAP_START below)
+/// with the RAM-base reservation extended to meet it. The earlier note
+/// that "moving the heap one PMD past the window breaks the vmemmap
+/// backing search" described a move that left [0x80C00000,0x80E00000)
+/// FREE between the unchanged 12MB reservation and the moved heap — the
+/// vmemmap backing search grabbed the gap and Page::init_free then walked
+/// descriptors over live heap pages. With reservation-end == heap-start
+/// (no gap anywhere between image, heap and slab) the topology is
+/// monotone and the search behaves exactly as it did below 0x80C00000.
+///
+/// RUX-RISCV-LAYOUT-2: the unit-test build later outgrew the 12MB window
+/// too (boot stack top on the first unmapped page again, main@298b69fe);
+/// window, heap, reservation and this entry all moved 12MB->14MB
+/// together. The riscv64 linker.ld ASSERTs _end against the window so the
+/// next outgrowth is a build error.
+///
+/// RUX-RISCV-LAYOUT-3 (dfx): the kernel symbol table (ksyms — the backing
+/// store for /proc/kallsyms and symbolized backtraces) moved into the
+/// default image: the full table is ~3.1MB of .rodata (2.4MB of names +
+/// 0.7MB of index at ~22.6k text symbols), and only 1.45MB remained under
+/// the 14MB window. A 1MiB name cap made the table worse than useless —
+/// it covered only the first ~1.7MB of .text, so every sched/trap/syscall
+/// hot-path frame symbolized to '?'. Window, heap, reservation and this
+/// entry all moved 14MB->18MB together (same rule as LAYOUT-2). (An
+/// intermediate branch-local bump 14MB->16MB for the static buddy
+/// BlockMeta/free-bitmap arrays in .data was subsumed by this move.)
+/// RUX-RISCV-LAYOUT-4: the LTP lane's syscall-contract batch (tee,
+/// process_vm, socket entry validation) outgrew 18MB; the same set
+/// moved 18MB->20MB.
+/// RUX-RISCV-LAYOUT-5: the LTP r27 session (pidfd subsystem, ext4 file
+/// handles, portable mincore walk) outgrew 20MB; the same set moved
+/// 20MB->24MB.
+pub const KERNEL_SIZE: u64 = 0x2000000; // 32MB (RUX-RISCV-LAYOUT-8, cov campaign: the instrumented build (coverage counters + names + data + the 221-test suite) outgrew 28MB; heap+reserve move together)
+
+/// Heap start address (after kernel)
+/// RUX-RISCV-LAYOUT: must stay at/above the boot.S image-window end
+/// (entry 0x80200000 + KERNEL_SIZE 28MB = 0x81e00000) and must match
+/// KERNEL_RESERVE_SIZE/KERNEL_HEAP_PHYS in main.rs and buddy_allocator.rs.
+/// When it sat at 0x80C00000 (2MB inside the window) the grown kernel
+/// image overlapped the first heap pages — see main.rs
+/// RUX-RISCV-LAYOUT for the corruption family that produced.
+/// RUX-RISCV-LAYOUT-7 GAP FIX (94th session): the 89th set 0x81c00000
+/// (2MB INSIDE the 28MB window) and left main.rs's riscv64
+/// KERNEL_RESERVE_SIZE at 26MB — a 2MB free gap between reservation
+/// end and heap start, exactly the "vmemmap backing search grabs the
+/// gap" family documented above. Moved to the window end 0x81e00000
+/// with the reserve (30MB), the coordinator's proven layout-hunt
+/// pattern: no gap, heap at the window end.
+/// RUX-RISCV-LAYOUT-8 (cov campaign): window 28MB -> 32MB (both boot.S
+/// PMD tables grew PMD[14]/PMD[15]); heap at the new window end
+/// 0x80200000 + 32MB = 0x82200000, reserve 34MB, no gap.
+pub const HEAP_START: u64 = 0x82200000;
+
+/// Slab start address (after heap)
+/// Note: Actual address depends on KERNEL_HEAP_SIZE config
+pub const SLAB_START_DEFAULT: u64 = HEAP_START + (32 * 1024 * 1024);  // 32MB after heap start
+
+// ==================== Device Addresses (QEMU virt platform) ====================
+
+/// UART base address
+pub const UART_BASE: u64 = 0x10000000;
+
+/// VirtIO MMIO base address
+pub const VIRTIO_MMIO_BASE: u64 = 0x10001000;
+
+/// PLIC base address
+pub const PLIC_BASE: u64 = 0x0c000000;
+
+/// CLINT base address
+pub const CLINT_BASE: u64 = 0x02000000;
+
+/// DTB area address
+pub const DTB_BASE: u64 = 0xbfe00000;
+
+/// PCIe ECAM base address
+pub const PCIE_ECAM_BASE: u64 = 0x30000000;
+
+/// PCI MMIO base address
+pub const PCI_MMIO_BASE: u64 = 0x40000000;
+
+// ==================== Kernel-half MMIO alias ====================
+//
+// The kernel used to dereference the identity (va == phys) low device
+// windows — PLIC at 0x0c000000, ECAM at 0x30000000, the PCI MMIO BAR
+// window at 0x40000000 — which copy_kernel_mappings clones into every
+// USER address space root. A user MAP_FIXED mapping over one of those
+// low VAs (gjs/mozjs reserves its heap cage at exactly 0x0c000000) now
+// legitimately REPLACES the cloned device translation in its own root
+// (Linux semantics, map_page's megapage demote), and the next kernel
+// access from that context — e.g. the PLIC claim read in IRQ entry —
+// takes a page fault in S-mode: KERNPANIC.
+//
+// The alias re-maps the entire low device/PCI physical window at a
+// KERNEL-half VA range the user can never reach (TASK_SIZE caps user
+// space far below). All runtime MMIO accessors translate their low
+// identity addresses through `mmio_alias()`; the low windows stay
+// mapped for boot-time and compat access, but no runtime path depends
+// on them surviving in a user root.
+
+/// Base of the kernel-half alias of the low device/PCI window: the
+/// (currently unused) vmalloc region's floor — canonical Sv39 kernel
+/// half, far from every user VA.
+pub const MMIO_ALIAS_BASE: usize = VMALLOC_START;
+
+/// Size of the alias window: covers phys [0, 2 GiB) — PLIC, CLINT,
+/// ECAM, the 256 MiB PCI MMIO BAR window, UART and virtio-mmio slots.
+/// Phys RAM starts at 0x80000000, so the alias never double-maps RAM.
+pub const MMIO_ALIAS_SIZE: usize = 0x8000_0000;
+
+/// Compile-time placement guards: the alias must stay inside the
+/// vmalloc band (canonical kernel half) and below the linear map.
+const _: () = assert!(MMIO_ALIAS_BASE >= 0xffff_ffc0_0000_0000_usize);
+const _: () = assert!(MMIO_ALIAS_BASE + MMIO_ALIAS_SIZE <= PAGE_OFFSET);
+
+/// Translate a low identity device/PCI address (va == phys, below
+/// MMIO_ALIAS_SIZE) to its permanent kernel-half alias.
+#[inline]
+pub const fn mmio_alias(low: u64) -> u64 {
+    MMIO_ALIAS_BASE as u64 + low
+}
+
+// ==================== Kernel Mapping ====================
+
+/// Runtime kernel mapping information
+///
+/// This structure is populated at boot time based on actual memory layout.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct KernelMapping {
+    /// Kernel virtual address (linked address)
+    /// kernel_map.virt_addr = KERNEL_LINK_ADDR
+    pub virt_addr: usize,
+
+    /// KASLR offset (0 if KASLR disabled)
+    /// kernel_map.virt_offset
+    pub virt_offset: usize,
+
+    /// Kernel physical load address
+    /// kernel_map.phys_addr = &_start
+    pub phys_addr: usize,
+
+    /// Kernel image size
+    /// kernel_map.size = &_end - &_start
+    pub size: usize,
+
+    /// VA-PA offset for linear mapping
+    /// kernel_map.va_pa_offset = PAGE_OFFSET - phys_ram_base
+    /// Used for phys_to_virt/virt_to_phys conversions
+    pub va_pa_offset: usize,
+
+    /// VA-PA offset for kernel mapping
+    /// kernel_map.va_kernel_pa_offset = virt_addr - phys_addr
+    /// Used for kernel text/data address conversion
+    pub va_kernel_pa_offset: usize,
+
+    /// PAGE_OFFSET value (runtime determined for Sv39/Sv48/Sv57)
+    /// kernel_map.page_offset
+    pub page_offset: usize,
+}
+
+/// Global kernel mapping structure
+/// Defined in boot.S, initialized before rust_main is called
+extern "C" {
+    pub static mut KERNEL_MAP: KernelMapping;
+}
+
+/// Physical RAM base address (runtime determined from device tree)
+/// phys_ram_base
+#[used]
+#[link_section = ".data"]
+pub static mut PHYS_RAM_BASE: usize = PHYS_MEMORY_BASE;
+
+// ==================== mmap Constant definitions ====================
+
+/// mmap protection flags (prot)
+pub mod prot {
+    /// Page readable
+    pub const PROT_READ: u32 = 0x1;
+    /// Page writable
+    pub const PROT_WRITE: u32 = 0x2;
+    /// Page executable
+    pub const PROT_EXEC: u32 = 0x4;
+    /// Page not accessible
+    pub const PROT_NONE: u32 = 0x0;
+    /// Protection flags mask
+    pub const PROT_MASK: u32 = 0x7;
+}
+
+/// mmap mapping flags (flags)
+pub mod map {
+    /// Shared mapping
+    pub const MAP_SHARED: u32 = 0x01;
+    /// Private copy-on-write mapping
+    pub const MAP_PRIVATE: u32 = 0x02;
+    /// Mapping type mask
+    pub const MAP_TYPE_MASK: u32 = 0x0f;
+    /// Fixed address mapping
+    pub const MAP_FIXED: u32 = 0x10;
+    /// Anonymous mapping (not file-based)
+    pub const MAP_ANONYMOUS: u32 = 0x20;
+    /// Stack mapping (grows down)
+    pub const MAP_STACK: u32 = 0x20000;
+    /// Fixed but allows relocation
+    pub const MAP_FIXED_NOREPLACE: u32 = 0x100000;
+    /// Fill with huge pages
+    pub const MAP_HUGETLB: u32 = 0x40000;
+    /// Lock pages
+    pub const MAP_LOCKED: u32 = 0x2000;
+    /// No swap space reservation
+    pub const MAP_NORESERVE: u32 = 0x4000;
+    /// Fill (align)
+    pub const MAP_POPULATE: u32 = 0x8000;
+    /// No core dump
+    pub const MAP_NODUMP: u32 = 0x10000;
+}
+
+/// mmap error codes
+pub mod mmap_error {
+    /// Invalid parameter
+    pub const EINVAL: i64 = -22;
+    /// Out of memory
+    pub const ENOMEM: i64 = -12;
+    /// Permission denied
+    pub const EACCES: i64 = -13;
+    /// Address not mapped
+    pub const EFAULT: i64 = -14;
+    /// Device has no space
+    pub const ENOSPC: i64 = -28;
+    /// Unsupported operation
+    pub const ENODEV: i64 = -19;
+    /// Bad file descriptor
+    pub const EBADF: i64 = -9;
+    /// Operation not supported (MAP_SHARED_VALIDATE with an unknown flag)
+    pub const EOPNOTSUPP: i64 = -95;
+    /// File exists (MAP_FIXED_NOREPLACE over an existing mapping)
+    pub const EEXIST: i64 = -17;
+}
+
+/// User space address range (Sv39 compatible)
+///
+/// Sv39 Address Space Layout:
+/// - User space: 0x0000000000000000 ~ 0x0000003FFFFFFFFF (256GB)
+/// - Kernel space: 0xFFFFFFD600000000 ~ 0xFFFFFFFFFFFFFFFF (high canonical)
+pub mod user_addr {
+    /// User space start address (first page unmapped)
+    pub const USER_START: usize = 0x0000_0000;
+
+    /// User space end address = TASK_SIZE = 256GB for Sv39
+    pub const USER_END: usize = super::TASK_SIZE;
+
+    /// TASK_SIZE - maximum user address (256GB)
+    pub const TASK_SIZE: usize = super::TASK_SIZE;
+
+    /// TASK_UNMAPPED_BASE - mmap area start (TASK_SIZE / 3)
+    /// For Sv39: 256GB / 3 ≈ 85GB = 0x1555555555
+    pub const TASK_UNMAPPED_BASE: usize = super::TASK_SIZE / 3;
+
+    /// mmap legacy base (for legacy mmap layout, bottom-up)
+    pub const MMAP_LEGACY_BASE: usize = super::TASK_SIZE / 3;
+
+    /// mmap area start address (top-down from TASK_SIZE)
+    /// Top-down mmap by default
+    pub const MMAP_START: usize = super::TASK_SIZE - (64 * 1024 * 1024 * 1024); // 64GB below TASK_SIZE
+
+    /// mmap area end address
+    pub const MMAP_END: usize = super::TASK_SIZE;
+
+    /// brk default start address
+    /// We use a higher address to avoid conflict with UART (0x10000000)
+    pub const BRK_DEFAULT: usize = 0x2000_0000;  // 512MB
+
+    /// brk maximum address (end of heap area)
+    pub const BRK_MAX: usize = TASK_UNMAPPED_BASE;
+
+    /// Stack base (grows down from TASK_SIZE - PAGE_SIZE)
+    pub const STACK_TOP: usize = super::TASK_SIZE - (super::PAGE_SIZE as usize);
+
+    /// Stack maximum size (default: 8MB)
+    pub const STACK_MAX_SIZE: usize = 8 * 1024 * 1024;  // 8MB
+
+    /// Stack minimum size (1MB)
+    pub const STACK_MIN_SIZE: usize = 1 * 1024 * 1024;  // 1MB
+
+    /// Heap start address (for compatibility, same as BRK_DEFAULT)
+    pub const HEAP_START: usize = BRK_DEFAULT;
+
+    /// Heap maximum size
+    pub const HEAP_MAX_SIZE: usize = BRK_MAX - BRK_DEFAULT;
+
+    /// First page size (null pointer guard)
+    pub const PAGE_ZERO_SIZE: usize = 4 * 1024;  // 4KB null page
+
+    /// Minimum address for user mappings (skip null page)
+    pub const MIN_MAP_ADDR: usize = PAGE_ZERO_SIZE;
+}
+
+// ==================== Address Types ====================
+
+/// Virtual address type with Sv39 sign extension
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct VirtAddr(pub u64);
+
+impl VirtAddr {
+    /// Create virtual address with proper Sv39 sign extension
+    ///
+    /// Sv39 uses 39-bit virtual addresses with sign extension:
+    /// - If bit 38 = 0: bits 63-39 must be 0 (user space)
+    /// - If bit 38 = 1: bits 63-39 must be 1 (kernel space)
+    #[inline]
+    pub const fn new(addr: u64) -> Self {
+        let bit38 = (addr >> 38) & 1;
+        if bit38 == 1 {
+            // Kernel address: sign extend bit 38 to bits 63-39
+            Self(addr | 0xFFFFFFC0_00000000)
+        } else {
+            // User address: clear bits 63-39
+            Self(addr & 0x0000007F_FFFFFFFF)
+        }
+    }
+
+    /// Get raw value
+    #[inline]
+    pub const fn bits(&self) -> u64 {
+        self.0
+    }
+
+    /// Page alignment check
+    #[inline]
+    pub fn is_aligned(&self) -> bool {
+        self.0 & PAGE_OFFSET_MASK == 0
+    }
+
+    /// Page floor
+    #[inline]
+    pub fn floor(&self) -> Self {
+        Self(self.0 & !PAGE_OFFSET_MASK)
+    }
+
+    /// Page ceiling
+    #[inline]
+    pub fn ceil(&self) -> Self {
+        Self((self.0 + PAGE_SIZE - 1) & !PAGE_OFFSET_MASK)
+    }
+
+    /// Page offset
+    #[inline]
+    pub fn page_offset(&self) -> u64 {
+        self.0 & PAGE_OFFSET_MASK
+    }
+
+    /// Calculate virtual page number for given level
+    #[inline]
+    pub fn vpn(&self, level: u8) -> u64 {
+        (self.0 >> (PAGE_SHIFT + 9 * level as u64)) & 0x1FF
+    }
+
+    /// Get u64 value
+    #[inline]
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    /// Get usize value
+    #[inline]
+    pub fn as_usize(&self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Physical address type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct PhysAddr(pub u64);
+
+impl PhysAddr {
+    /// Create physical address
+    #[inline]
+    pub const fn new(addr: u64) -> Self {
+        Self(addr)
+    }
+
+    /// Get raw value
+    #[inline]
+    pub const fn bits(&self) -> u64 {
+        self.0
+    }
+
+    /// Page alignment check
+    #[inline]
+    pub fn is_aligned(&self) -> bool {
+        self.0 & PAGE_OFFSET_MASK == 0
+    }
+
+    /// Page floor
+    #[inline]
+    pub fn floor(&self) -> Self {
+        Self(self.0 & !PAGE_OFFSET_MASK)
+    }
+
+    /// Page ceiling
+    #[inline]
+    pub fn ceil(&self) -> Self {
+        Self((self.0 + PAGE_SIZE - 1) & !PAGE_OFFSET_MASK)
+    }
+
+    /// Calculate physical page number (PPN)
+    #[inline]
+    pub fn ppn(&self) -> u64 {
+        self.0 >> PAGE_SHIFT
+    }
+}
+
+/// Convert physical address to kernel virtual address (PAGE_OFFSET mapping)
+///
+/// virt = phys + va_pa_offset, where va_pa_offset = PAGE_OFFSET - phys_ram_base
+#[inline]
+pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
+    // SAFETY: KERNEL_MAP is a static extern initialized by boot.S before rust_main.
+    // va_pa_offset is set once at boot and never modified afterwards.
+    let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
+    VirtAddr::new(phys.0.wrapping_add(va_pa_offset as u64))
+}
+
+/// Convert kernel virtual address to physical address (PAGE_OFFSET mapping)
+///
+/// phys = virt - va_pa_offset, where va_pa_offset = PAGE_OFFSET - phys_ram_base
+#[inline]
+pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
+    let addr = virt.0;
+
+    // Check if this is a linear mapping address (PAGE_OFFSET region)
+    if is_linear_mapping(addr as usize) {
+        // SAFETY: KERNEL_MAP is a static extern initialized by boot.S before rust_main.
+        // va_pa_offset is immutable after boot.
+        let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
+        PhysAddr::new(addr - va_pa_offset as u64)
+    } else if addr >= 0xffff_ffff_8000_0000 && addr < 0xffff_ffff_8100_0000 {
+        // Kernel image mapping: the kernel is linked at VA
+        // 0xffffffff80000000 and loaded at PHYS KERNEL_ENTRY. Static
+        // driver buffers (virtio queues in .bss) translate through here —
+        // feeding the raw VA to a device DMA never completes.
+        PhysAddr::new(addr - 0xffff_ffff_8000_0000 + KERNEL_ENTRY)
+    } else if addr >= KERNEL_ENTRY && addr < 0x90000000 {
+        // Legacy identity mapping (for transition period)
+        PhysAddr::new(addr)
+    } else {
+        // Not a linear-map or identity address: passing e.g. a kernel-image
+        // (0xffffffff80000000-region) or arbitrary pointer here is a bug in
+        // the caller — the returned "physical" address would silently feed
+        // a device DMA (review RISK). Warn once per offending site; the
+        // raw value is still returned to preserve the historical behavior.
+        crate::pr_warn!(
+            "virt_to_phys: address {:#x} is outside the linear mapping",
+            addr
+        );
+        PhysAddr::new(addr)
+    }
+}

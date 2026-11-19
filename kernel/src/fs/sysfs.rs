@@ -1,0 +1,2503 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! SysFS - device model filesystem + uevent hotplug notification
+//!
+//! ## Overview
+//!
+//! SysFS exports the kernel device model (a tree of `KObject`s) to
+//! userspace. It is mounted at /sys and is a hard dependency of
+//! systemd/udev (device enumeration, coldboot triggering via uevent
+//! files, network/block device introspection).
+//!
+//! ## Device model
+//!
+//! ```text
+//! KObject {
+//!     name, parent (Weak), ktype,
+//!     children:   BTreeMap<String, Arc<KObject>>,   // directories / symlinks
+//!     attributes: BTreeMap<String, Arc<Attribute>>, // regular files
+//! }
+//! ```
+//!
+//! Attribute values are generated on demand by a boxed closure reading
+//! LIVE state (netdev registry, GenDisk capacity, started-CPU mask) —
+//! nothing is cached across reads.
+//!
+//! ## Hierarchy (Ubuntu userspace expectations)
+//!
+//! ```text
+//! /sys/
+//! ├── block/vda -> ../../class/block/vda
+//! ├── class/{net/{lo,eth0}, block/vda, tty/{console,pts}}
+//! ├── devices/system/cpu/cpu{0..3}/ + cpu{online,present,possible,offline}
+//! ├── devices/virtual -> ../../class
+//! ├── dev/block/254:0, dev/char/5:1   (device-number mappings)
+//! ├── kernel/{uevent, uevent_seqnum, uevent_helper}
+//! ├── module/<built-in>/{initstate}
+//! ├── power/state                       (writable)
+//! ├── fs/, firmware/, hypervisor/       (empty placeholders)
+//! ```
+//!
+//! ## uevent (hotplug)
+//!
+//! `uevent_send()` broadcasts `action@devpath\0ACTION=..\0DEVPATH=..\0
+//! SUBSYSTEM=..\0[MAJOR=..\0MINOR=..\0]SEQNUM=..\0` to every socket bound
+//! to the NETLINK_KOBJECT_UEVENT (15) protocol. The payload carries NO
+//! nlmsghdr — matching Linux `kobject_uevent_net_broadcast()` exactly, so
+//! libudev's `udev_monitor_receive_device()` parses it unmodified.
+//! Writing "add"/"remove"/"change" to any device's `uevent` attribute (or
+//! to /sys/kernel/uevent) synthesizes a manual event — the path udevadm
+//! trigger uses for coldboot.
+
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::{Arc, Weak};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+use crate::errno;
+use crate::fs::superblock::{FileSystemType, SuperBlock};
+use crate::fs::inode::{file_type, Ino, Inode, InodeMode, INodeOps, VfsDirEntry};
+use crate::fs::mount::{MntFlags, VfsMount};
+use crate::sync::spinlock::Spinlock;
+
+/// SysFS magic number (STATFS_SYSFS_MAGIC).
+const SYSFS_MAGIC: u32 = 0x62656572;
+
+/// icache identity tag for sysfs inodes (VFS-H8: (ino, fs_id) must never
+/// collide across filesystems; rootfs/procfs/devfs take 0001-0003).
+pub const FS_ID_SYSFS: u64 = 0x5359_5353_0004;
+
+// ============================================================================
+// Device model: KObject
+// ============================================================================
+
+/// kobject type — drives the uevent SUBSYSTEM= value and stat metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KType {
+    /// mount root
+    System,
+    /// /sys/class
+    Class,
+    /// /sys/devices
+    Devices,
+    /// network class devices
+    Net,
+    /// block class devices
+    Block,
+    /// input class devices (evdev event nodes)
+    Input,
+    /// tty class devices
+    Tty,
+    /// DRM class devices (card0/renderD128 under /sys/class/drm)
+    Drm,
+    /// /sys/devices/system/cpu
+    Cpu,
+    /// /sys/module
+    Module,
+    /// /sys/kernel
+    Kernel,
+    /// /sys/power
+    Power,
+    /// /sys/fs
+    Fs,
+    /// /sys/dev
+    Dev,
+    /// /sys/firmware
+    Firmware,
+    /// /sys/hypervisor
+    Hypervisor,
+    /// unclassified
+    Generic,
+}
+
+impl KType {
+    /// uevent SUBSYSTEM= value (None → not a device-carrying node).
+    pub fn subsystem(self) -> Option<&'static str> {
+        match self {
+            KType::Net => Some("net"),
+            KType::Block => Some("block"),
+            KType::Input => Some("input"),
+            KType::Tty => Some("tty"),
+            KType::Drm => Some("drm"),
+            KType::Cpu => Some("cpu"),
+            KType::Module => Some("module"),
+            KType::Kernel => Some("kernel"),
+            _ => None,
+        }
+    }
+}
+
+/// Node variant: a plain directory or a symbolic link into the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeKind {
+    /// directory (children + attributes)
+    Directory,
+    /// symlink (target path, relative like "../../class/net/lo")
+    Link(String),
+}
+
+/// A sysfs attribute (regular file). The read side is a boxed generator
+/// returning live state; the optional write side executes the store.
+pub struct Attribute {
+    /// inode number (fs-unique, from the global counter)
+    pub ino: u64,
+    /// permission bits (0o444 read-only, 0o644 root-writable)
+    pub mode: u32,
+    /// content generator — called with NO sysfs locks held
+    pub show: Option<Box<dyn Fn() -> Vec<u8> + Send + Sync>>,
+    /// write handler — returns 0 or negative errno
+    pub store: Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>,
+    /// cached content length (updated on open; stat reports 4096 like Linux)
+    pub cached_size: AtomicU64,
+}
+
+/// Kernel object — one node of the /sys tree.
+pub struct KObject {
+    /// entry name ("" for the root)
+    pub name: String,
+    /// parent link (Weak: the tree must not form Arc cycles)
+    pub parent: Spinlock<Option<Weak<KObject>>>,
+    /// object type
+    pub ktype: KType,
+    /// directory or symlink
+    pub kind: NodeKind,
+    /// device number for block/char devices (MAJOR=/MINOR= uevent vars)
+    pub devno: Spinlock<Option<(u32, u32)>>,
+    /// device-node path relative to /dev (DEVNAME= uevent var); defaults
+    /// to the kobject name when a devno is present but no override was set
+    /// (input event nodes need "input/event0", not "event0").
+    pub devname: Spinlock<Option<String>>,
+    /// fs-unique inode number
+    pub ino: u64,
+    /// child objects (BTreeMap → readdir order is deterministic)
+    pub children: Spinlock<BTreeMap<String, Arc<KObject>>>,
+    /// attribute files
+    pub attributes: Spinlock<BTreeMap<String, Arc<Attribute>>>,
+}
+
+// SAFETY: all mutable state (children/attributes/parent) sits behind
+// Spinlocks; closures are required to be Send + Sync at construction.
+unsafe impl Send for KObject {}
+unsafe impl Sync for KObject {}
+
+impl KObject {
+    /// Create a root object (ino 1).
+    pub fn new_root() -> Arc<Self> {
+        Arc::new(Self {
+            name: String::new(),
+            parent: Spinlock::new(None),
+            ktype: KType::System,
+            kind: NodeKind::Directory,
+            devno: Spinlock::new(None),
+            devname: Spinlock::new(None),
+            ino: 1,
+            children: Spinlock::new(BTreeMap::new()),
+            attributes: Spinlock::new(BTreeMap::new()),
+        })
+    }
+
+    /// Create a child object with the next inode number.
+    pub fn new(name: &str, ktype: KType, kind: NodeKind) -> Arc<Self> {
+        Arc::new(Self {
+            name: String::from(name),
+            parent: Spinlock::new(None),
+            ktype,
+            kind,
+            devno: Spinlock::new(None),
+            devname: Spinlock::new(None),
+            ino: alloc_ino(),
+            children: Spinlock::new(BTreeMap::new()),
+            attributes: Spinlock::new(BTreeMap::new()),
+        })
+    }
+
+    /// Attach a child (sets its parent backlink). Replaces an existing
+    /// child of the same name.
+    pub fn add_child(self: &Arc<Self>, child: Arc<KObject>) {
+        // The backlink must point at the PARENT (this object) — a Weak to
+        // `child` here made every kobject its own parent, corrupting
+        // KObject::path() into "/name/name/name..." (U4: DEVPATH bug).
+        *child.parent.lock() = Some(Arc::downgrade(self));
+        self.children.lock().insert(child.name.clone(), child);
+    }
+
+    /// Remove (and drop) a child by name. Stale dentries in the VFS layer
+    /// simply start returning ENOENT on re-lookup.
+    pub fn remove_child(&self, name: &str) -> Option<Arc<KObject>> {
+        self.children.lock().remove(name)
+    }
+
+    /// Find a child by name.
+    pub fn find_child(&self, name: &[u8]) -> Option<Arc<KObject>> {
+        let name = core::str::from_utf8(name).ok()?;
+        self.children.lock().get(name).cloned()
+    }
+
+    /// Register an attribute on this object.
+    pub fn set_attr(
+        &self,
+        name: &str,
+        mode: u32,
+        show: Option<Box<dyn Fn() -> Vec<u8> + Send + Sync>>,
+        store: Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>,
+    ) {
+        let attr = Arc::new(Attribute {
+            ino: alloc_ino(),
+            mode,
+            show,
+            store,
+            cached_size: AtomicU64::new(0),
+        });
+        self.attributes.lock().insert(String::from(name), attr);
+    }
+
+    /// Look up an attribute by name.
+    pub fn find_attr(&self, name: &[u8]) -> Option<Arc<Attribute>> {
+        let name = core::str::from_utf8(name).ok()?;
+        self.attributes.lock().get(name).cloned()
+    }
+
+    /// Generate an attribute's content. The attributes lock is released
+    /// BEFORE the generator runs — generators read device state and must
+    /// never run under a sysfs lock.
+    pub fn attr_content(&self, name: &[u8]) -> Option<Vec<u8>> {
+        let attr = self.find_attr(name)?;
+        let content = match attr.show.as_ref() {
+            Some(show) => show(),
+            None => Vec::new(),
+        };
+        attr.cached_size.store(content.len() as u64, Ordering::Relaxed);
+        Some(content)
+    }
+
+    /// Full path inside the sysfs namespace (DEVPATH form: "/class/net/lo").
+    pub fn path(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(self.name.clone());
+        let mut cur = self.parent.lock().as_ref().and_then(Weak::upgrade);
+        let mut depth = 0;
+        while let Some(p) = cur {
+            if depth > 32 {
+                break; // defensive: no cycles expected
+            }
+            parts.push(p.name.clone());
+            cur = p.parent.lock().as_ref().and_then(Weak::upgrade);
+            depth += 1;
+        }
+        parts.reverse();
+        let mut path = String::new();
+        for p in parts.iter() {
+            if p.is_empty() {
+                continue; // skip the root's empty name
+            }
+            path.push('/');
+            path.push_str(p);
+        }
+        if path.is_empty() {
+            path.push('/');
+        }
+        path
+    }
+}
+
+/// Global inode allocator (1 = root).
+static NEXT_INO: AtomicU64 = AtomicU64::new(2);
+
+pub(crate) fn alloc_ino() -> u64 {
+    NEXT_INO.fetch_add(1, Ordering::Relaxed)
+}
+
+// ============================================================================
+// Global tree
+// ============================================================================
+
+static SYSFS_ROOT: Spinlock<Option<Arc<KObject>>> = Spinlock::new(None);
+
+/// The global sysfs KObject tree root (None before init_sysfs()).
+pub fn sysfs_root() -> Option<Arc<KObject>> {
+    SYSFS_ROOT.lock().clone()
+}
+
+/// Per-listener COLDBOOT REPLAY: push "add" uevents for every
+/// registered device kobject into a monitor socket that has JUST bound
+/// its kernel-event group — each such listener gets the coldboot set
+/// exactly once (per-socket one-shot).
+///
+/// Rux synthesizes the entire device tree at kernel-boot (there is no
+/// later hotplug arrival), so the registration-time kobject_uevent()
+/// calls all land before any listener exists. Userspace's coldplug —
+/// systemd-udev-trigger writing "add" into every
+/// /sys/class/<bus>/<dev>/uevent — is only ordered After= the udev
+/// SOCKETS (Ubuntu 24.04's unit), not After=systemd-udevd.service, so
+/// the trigger can finish while the daemon is still starting: on the
+/// ub2404 boot the trigger finished ~2k console lines before "Started
+/// systemd-udevd.service", every synthesized "add" was broadcast into
+/// the void, and dev-ttyS0.device waited out its 90 s timeout with the
+/// getty dead ("Timed out waiting for device" → "Dependency failed for
+/// serial-getty@ttyS0.service", 2026-11-15). The contract restored here
+/// — a monitor that binds sees the devices that exist — must hold for
+/// EVERY monitor (pid1 binds its own before udevd's; a global one-shot
+/// replay fed only the first binder and udevd still starved), so the
+/// replay is per-socket: duplicate adds re-run idempotent rules, fresh
+/// SEQNUMs, same DEVPATHs the trigger would have produced.
+pub fn coldboot_uevent_replay_into(sock: &alloc::sync::Arc<crate::net::netlink::NetlinkSocket>) {
+    let Some(root) = sysfs_root() else { return };
+    // Iterative DFS over the kobject tree; build "add" payloads for
+    // every node carrying a device number (ttyS0, block devices, drm
+    // cards, input nodes, fb — exactly the set the boot-time
+    // registration uevents covered; parents without devnos contribute
+    // only DEVPATH prefixes, which need no uevent of their own).
+    let mut stack: alloc::vec::Vec<alloc::sync::Arc<KObject>> =
+        alloc::vec![root];
+    let mut fired = 0u32;
+    while let Some(node) = stack.pop() {
+        if node.devno.lock().is_some() {
+            let (payload, _) = device_add_payload(&node);
+            crate::net::netlink::uevent_push_direct(sock, &payload);
+            fired += 1;
+        }
+        for child in node.children.lock().values() {
+            stack.push(child.clone());
+        }
+    }
+    crate::pr_info!(
+        "uevent: coldboot replay pushed {} device adds to new listener",
+        fired
+    );
+}
+
+/// Build one device's "add" payload (kobject_uevent's message shape).
+fn device_add_payload(kobj: &KObject) -> (Vec<u8>, u64) {
+    let devpath = kobj.path();
+    let subsystem = kobj.ktype.subsystem().unwrap_or("kernel");
+    if let Some((major, minor)) = *kobj.devno.lock() {
+        let maj = format!("{}", major);
+        let min = format!("{}", minor);
+        let dn = kobj.devname.lock().clone();
+        let mut extra: Vec<(&str, &str)> = vec![("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+        if let Some(name) = dn.as_deref() {
+            extra.push(("DEVNAME", name));
+        }
+        if kobj.ktype == KType::Block {
+            extra.push(("DEVTYPE", "disk"));
+        }
+        uevent_payload_for(&devpath, "add", subsystem, &extra)
+    } else {
+        uevent_payload_for(&devpath, "add", subsystem, &[])
+    }
+}
+
+/// Look up a path like "class/net/lo" from the root (for internal use).
+pub fn lookup_path(path: &str) -> Option<Arc<KObject>> {
+    let mut cur = sysfs_root()?;
+    for comp in path.split('/').filter(|s| !s.is_empty()) {
+        cur = cur.find_child(comp.as_bytes())?;
+    }
+    Some(cur)
+}
+
+// ============================================================================
+// Tree builders
+// ============================================================================
+
+/// Create + attach a directory kobject.
+fn mk_dir(parent: &Arc<KObject>, name: &str, ktype: KType) -> Arc<KObject> {
+    let child = KObject::new(name, ktype, NodeKind::Directory);
+    parent.add_child(child.clone());
+    child
+}
+
+/// Create + attach a symlink kobject.
+fn mk_link(parent: &Arc<KObject>, name: &str, target: &str) -> Arc<KObject> {
+    let child = KObject::new(name, KType::Generic, NodeKind::Link(String::from(target)));
+    parent.add_child(child.clone());
+    child
+}
+
+/// Read-only attribute.
+fn attr_ro<F>(parent: &Arc<KObject>, name: &str, show: F)
+where
+    F: Fn() -> Vec<u8> + Send + Sync + 'static,
+{
+    parent.set_attr(name, 0o444, Some(Box::new(show)), None);
+}
+
+/// Read-write attribute (root-writable, 0644 like /sys/power/state).
+fn attr_rw<F, G>(parent: &Arc<KObject>, name: &str, show: F, store: G)
+where
+    F: Fn() -> Vec<u8> + Send + Sync + 'static,
+    G: Fn(&[u8]) -> i32 + Send + Sync + 'static,
+{
+    parent.set_attr(name, 0o644, Some(Box::new(show)), Some(Box::new(store)));
+}
+
+/// The "uevent" attribute present on every device kobject. READ returns
+/// the current environment block ("MAJOR=..\nMINOR=..\nDEVNAME=..\n" —
+/// Linux kobject uevent attr parity; busybox mdev parses "\nDEVNAME="
+/// out of exactly this file when $DEVNAME is absent). WRITE of
+/// "add"/"remove"/"change" synthesizes a userspace-triggered uevent
+/// (udevadm trigger coldboot path).
+fn add_uevent_attr(dev: &Arc<KObject>) {
+    // Copy everything the closures need — they must be 'static.
+    let devpath = dev.path();
+    let subsystem = String::from(dev.ktype.subsystem().unwrap_or("kernel"));
+    let subsystem_show = subsystem.clone();
+    let devno = *dev.devno.lock();
+    let devname = dev.devname.lock().clone();
+    let devname_show = devname.clone();
+    attr_rw(
+        dev,
+        "uevent",
+        move || {
+            // Show side: the static env keys (newline-separated).
+            // SUBSYSTEM= since the gdm bring-up: sd-device accepts it
+            // from the uevent file as one of its subsystem resolution
+            // paths (alongside the `subsystem` readlink), and the
+            // empty-udev-db hunt showed both paths must carry it.
+            let mut out = String::new();
+            out.push_str("SUBSYSTEM=");
+            out.push_str(&subsystem_show);
+            out.push('\n');
+            if let Some((major, minor)) = devno {
+                use core::fmt::Write as _;
+                let _ = write!(out, "MAJOR={}\nMINOR={}", major, minor);
+                if let Some(ref dn) = devname_show {
+                    let _ = write!(out, "\nDEVNAME={}", dn);
+                }
+                out.push('\n');
+            }
+            out.into_bytes()
+        },
+        move |buf| {
+            let action = match parse_uevent_action(buf) {
+                Some(a) => a,
+                None => return errno::Errno::InvalidArgument.as_neg_i32(),
+            };
+            // uevent hunt (serial-getty chain): every userspace-triggered
+            // uevent write (udevadm trigger writes "add" to every device's
+            // uevent file). Budgeted.
+            {
+                static UES_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if UES_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                    crate::pr_info!(
+                        "UESTORE[{}] pid={} dev={} action='{}'",
+                        UES_N.load(core::sync::atomic::Ordering::Relaxed),
+                        crate::process::current_pid(),
+                        devpath,
+                        action
+                    );
+                }
+            }
+            if let Some((major, minor)) = devno {
+                let maj = format!("{}", major);
+                let min = format!("{}", minor);
+                let mut extra: Vec<(&str, &str)> =
+                    vec![("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+                if let Some(ref dn) = devname {
+                    // DEVNAME: node path relative to /dev (Linux dev_uevent).
+                    extra.push(("DEVNAME", dn.as_str()));
+                }
+                uevent_send_full(&devpath, action, &subsystem, &extra);
+            } else {
+                uevent_send_full(&devpath, action, &subsystem, &[]);
+            }
+            0
+        },
+    );
+}
+
+/// Parse a uevent action string ("add\n" → "add").
+fn parse_uevent_action(buf: &[u8]) -> Option<&'static str> {
+    let s = core::str::from_utf8(buf).ok()?;
+    let token = s.trim_matches(|c| c == '\n' || c == '\r' || c == ' ' || c == '\0');
+    match token {
+        "add" => Some("add"),
+        "remove" => Some("remove"),
+        "change" => Some("change"),
+        "online" => Some("online"),
+        "offline" => Some("offline"),
+        "bind" => Some("bind"),
+        "unbind" => Some("unbind"),
+        _ => None,
+    }
+}
+
+// ============================================================================
+// Live-state sources
+// ============================================================================
+
+/// Live netdev accessor type (both loopback and virtio-net match).
+type NetDevGetter = fn() -> Option<&'static mut crate::drivers::net::space::NetDevice>;
+
+/// "0-3"-style CPU range for /sys/devices/system/cpu/{online,present,...}.
+fn cpu_range_str(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => String::from("0"),
+        n => format!("0-{}", n - 1),
+    }
+}
+
+/// Number of possible CPUs (SMP target).
+fn possible_cpus() -> usize {
+    crate::config::MAX_CPUS
+}
+
+/// Build a network device directory under /sys/class/net with live attrs.
+fn add_net_device(
+    class_net: &Arc<KObject>,
+    name: &str,
+    ifindex: u32,
+    getter: NetDevGetter,
+    default_mac: [u8; 6],
+    default_mtu: u32,
+    default_flags: u32,
+    arphrd: u32,
+) {
+    let dev = mk_dir(class_net, name, KType::Net);
+
+    attr_ro(&dev, "ifindex", move || {
+        format!("{}\n", ifindex).into_bytes()
+    });
+    attr_ro(&dev, "type", move || format!("{}\n", arphrd).into_bytes());
+    attr_ro(&dev, "address", move || {
+        let mac = getter()
+            .map(|d| {
+                let mut m = [0u8; 6];
+                m.copy_from_slice(&d.addr[..6]);
+                m
+            })
+            .unwrap_or(default_mac);
+        format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        )
+        .into_bytes()
+    });
+    attr_ro(&dev, "flags", move || {
+        let flags = getter().map(|d| d.flags).unwrap_or(default_flags);
+        format!("0x{:04x}\n", flags).into_bytes()
+    });
+    attr_ro(&dev, "mtu", move || {
+        let mtu = getter().map(|d| d.mtu).unwrap_or(default_mtu);
+        format!("{}\n", mtu).into_bytes()
+    });
+    attr_ro(&dev, "operstate", move || {
+        let flags = getter().map(|d| d.flags).unwrap_or(default_flags);
+        let state = if flags & 0x1 != 0 { "up" } else { "down" };
+        format!("{}\n", state).into_bytes()
+    });
+
+    // statistics/ subdirectory — live from the NetDevice stats block.
+    let stats_dir = mk_dir(&dev, "statistics", KType::Net);
+    let fields: &[(&str, fn(&crate::drivers::net::space::DeviceStats) -> u64)] = &[
+        ("rx_packets", |s| s.rx_packets),
+        ("tx_packets", |s| s.tx_packets),
+        ("rx_bytes", |s| s.rx_bytes),
+        ("tx_bytes", |s| s.tx_bytes),
+        ("rx_errors", |s| s.rx_errors),
+        ("tx_errors", |s| s.tx_errors),
+        ("rx_dropped", |s| s.rx_dropped),
+        ("tx_dropped", |s| s.tx_dropped),
+        ("multicast", |s| s.multicast),
+    ];
+    for (stat_name, get) in fields.iter() {
+        let get = *get;
+        attr_ro(&stats_dir, stat_name, move || {
+            let v = getter().map(|d| get(&d.get_stats())).unwrap_or(0);
+            format!("{}\n", v).into_bytes()
+        });
+    }
+
+    add_uevent_attr(&dev);
+}
+
+// ============================================================================
+// Dynamic device registration (driver probe paths) — U3
+// ============================================================================
+
+/// Relative target for a `subsystem` symlink on a device directory at
+/// sysfs-internal path `dir` (e.g. "/devices/platform/30000000.pci")
+/// pointing at the bus hub "/bus/<bus>". Guest realpath() resolves the
+/// chain upward to the sysfs root and back down into bus/.
+fn subsystem_link_target(dir_components: usize, bus: &str) -> String {
+    let mut t = String::new();
+    for _ in 0..dir_components {
+        t.push_str("../");
+    }
+    t.push_str("bus/");
+    t.push_str(bus);
+    t
+}
+
+/// Walk (creating idempotently) the /devices hierarchy `chain` and return
+/// the final device directory. Each entry is (directory name, bus); every
+/// level gets a `subsystem` symlink into its bus hub so ueventd's
+/// GetBlockDeviceSymbolLinks ancestor walk (readlink
+/// /sys<devpath>/../subsystem, compare against /sys/bus/platform) works,
+/// exactly like the Linux device model.
+fn ensure_devices_chain(chain: &[(&str, &str)]) -> Option<Arc<KObject>> {
+    let mut cur = lookup_path("devices")?;
+    for (i, (dir, bus)) in chain.iter().enumerate() {
+        let child = match cur.find_child(dir.as_bytes()) {
+            Some(c) => c,
+            None => mk_dir(&cur, dir, KType::Generic),
+        };
+        // Attach/refresh the subsystem link (idempotent: add_child
+        // replaces an existing same-name child). The child sits at
+        // /devices/<chain[0..=i]> → (1 + i + 1) path components.
+        let target = subsystem_link_target(1 + i + 1, bus);
+        mk_link(&child, "subsystem", &target);
+        cur = child;
+    }
+    Some(cur)
+}
+
+/// Register a block disk in the Linux device-model shape (OH Phase 1b
+/// gap 3): the disk kobject lives under
+/// `/sys/devices/<chain>/virtio<N>/block/<name>` and
+///   - /sys/class/block/<name> → symlink into the /devices path,
+///   - /sys/block/<name> and /sys/dev/block/<maj:min> → symlinks,
+///   - DEVPATH in the "add" uevent is the /devices path
+///     ("/devices/platform/.../block/<name>").
+///
+/// OH ueventd requires exactly this: HandleBlockDeviceEvent only builds
+/// /dev/block/by-name symlinks for uevents whose DEVPATH starts with
+/// "/devices" (GetBlockDeviceSymbolLinks), and the walk upward from
+/// /sys<DEVPATH> finds the platform ancestor through its `subsystem`
+/// readlink. The old /class/block/<name> DEVPATH shape failed the
+/// STARTSWITH("/devices") gate and no by-name link was ever created.
+///
+/// `chain` is the device hierarchy below /sys/devices, innermost LAST:
+///   virtio-blk PCI (riscv64):
+///     [("platform", "platform"), ("30000000.pci", "platform"),
+///      ("pci0000:00", "pci"), ("0000:00:04.0", "pci")]
+///   virtio-blk PCI (x86_64/q35 — no platform root):
+///     [("pci0000:00", "pci"), ("0000:00:04.0", "pci")]
+///   virtio-blk MMIO:
+///     [("platform", "platform"), ("10008000.virtio_mmio", "platform")]
+/// The "virtio<N>" device level is assigned from a global counter and the
+/// disk is created under its "block" subdirectory (Linux gendisk layout:
+/// .../virtio1/block/vdb).
+///
+/// Called by the virtio-blk probe at device discovery: the tree entry and
+/// the uevent are created at registration time (Linux add_disk() parity).
+/// `capacity_sectors` is captured once — virtio-blk capacity is fixed
+/// after device reset. Idempotent per name: a re-registration only
+/// returns 0 (no second uevent, matching Linux which fires "add" once
+/// per kobject birth).
+///
+/// Returns the uevent SEQNUM, or 0 when sysfs is not up / already present.
+pub fn register_block_disk_at(
+    name: &str,
+    major: u32,
+    minor: u32,
+    capacity_sectors: u64,
+    chain: &[(&str, &str)],
+) -> u64 {
+    if sysfs_root().is_none() {
+        return 0;
+    }
+
+    // /sys/class/block and /sys/block must exist (build_tree skeleton).
+    if lookup_path("class/block").is_none() || lookup_path("block").is_none() {
+        return 0;
+    }
+
+    // Device hierarchy: .../virtio<N>/block/<name>.
+    let parent_dev = match ensure_devices_chain(chain) {
+        Some(d) => d,
+        None => return 0,
+    };
+    let virtio_idx = VIRTIO_DEV_INDEX.fetch_add(1, Ordering::Relaxed);
+    let virtio_dir_name = alloc::format!("virtio{}", virtio_idx);
+    let virtio_dev = match parent_dev.find_child(virtio_dir_name.as_bytes()) {
+        Some(d) => d,
+        None => {
+            let d = mk_dir(&parent_dev, &virtio_dir_name, KType::Generic);
+            // subsystem depth: /devices/<chain...>/<virtioN>
+            let depth = 1 + chain.len() + 1;
+            mk_link(
+                &d,
+                "subsystem",
+                &subsystem_link_target(depth, "virtio"),
+            );
+            d
+        }
+    };
+    let block_dir = match virtio_dev.find_child(b"block") {
+        Some(d) => d,
+        None => mk_dir(&virtio_dev, "block", KType::Block),
+    };
+    if block_dir.find_child(name.as_bytes()).is_some() {
+        return 0; // already registered
+    }
+
+    let dev = mk_dir(&block_dir, name, KType::Block);
+    *dev.devno.lock() = Some((major, minor));
+    *dev.devname.lock() = Some(String::from(name));
+
+    attr_ro(&dev, "size", move || {
+        format!("{}\n", capacity_sectors).into_bytes()
+    });
+    attr_ro(&dev, "dev", move || format!("{}:{}\n", major, minor).into_bytes());
+    attr_ro(&dev, "ro", move || b"0\n".to_vec());
+    // Removable media flag (GD_WIN: mdev/udev read it to pick node mode).
+    attr_ro(&dev, "removable", move || b"0\n".to_vec());
+    // struct block_device_stats — 17 u64 fields (reads/merges/sectors/ms,
+    // writes/..., in-flight, io-time, weighted, discards x4, flushes x2).
+    attr_ro(&dev, "stat", move || {
+        format!("{}\n", "0 ".repeat(16) + "0").into_bytes()
+    });
+    add_uevent_attr(&dev);
+    // The disk's own subsystem link: .../block/<name>/subsystem → bus/block.
+    let depth = 1 + chain.len() + 1 + 2; // /devices/<chain>/<virtioN>/block/<name>
+    mk_link(&dev, "subsystem", &subsystem_link_target(depth, "block"));
+
+    // /sys/class/block/<name> → ../../devices/<chain>/<virtioN>/block/<name>
+    let devpath = dev.path(); // "/devices/<chain>/virtioN/block/<name>"
+    let devices_target = &devpath["/devices".len()..]; // "/<chain>/..."
+    if let Some(class_block) = lookup_path("class/block") {
+        mk_link(&class_block, name, &format!("../..{}", devpath));
+    }
+    // /sys/block/<name> → ../devices/<chain>/virtioN/block/<name>
+    // (relative from /sys/block: ".." is /sys, then devices/... — the
+    // old "..{devices_target}" resolved to /sys/<chain> which does not
+    // exist, so every stat/open THROUGH the link ENOENT'd. OH-lite
+    // forensics: readlink ok, stat("/sys/block/vdb") ENOENT.)
+    if let Some(sys_block) = lookup_path("block") {
+        mk_link(&sys_block, name, &format!("..{}", devpath));
+    }
+    // /sys/dev/block/<maj:min> → ../../devices/<chain>/virtioN/block/<name>
+    if let Some(dev_block) = lookup_path("dev/block") {
+        mk_link(
+            &dev_block,
+            &format!("{}:{}", major, minor),
+            &format!("../..{}", devpath),
+        );
+    }
+
+    let maj = format!("{}", major);
+    let min = format!("{}", minor);
+    // Field set/order matches Linux dev_uevent() + disk_type for a whole
+    // disk: MAJOR, MINOR, DEVNAME, DEVTYPE=disk (partitions would add
+    // DEVTYPE=partition + PARTN=N; no partition support yet). OH Phase 1
+    // (R7): ueventd consumes SUBSYSTEM/DEVNAME/MAJOR/MINOR to mknod
+    // /dev/block/<name>; DEVTYPE is Linux parity, ignored by ueventd.
+    let extra: [(&str, &str); 4] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", name),
+        ("DEVTYPE", "disk"),
+    ];
+    uevent_send_full(&devpath, "add", "block", &extra)
+}
+
+/// Global virtio device index — Linux assigns "virtio<N>" names from a
+/// global ida in probe order across transports (register_block_disk_at).
+static VIRTIO_DEV_INDEX: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Unregister a block disk: drop the class/sys-block/dev links, remove
+/// the disk from its /devices parent, and broadcast "remove". (No
+/// virtio-blk removal path exists yet — kept for device_del bring-up.)
+#[allow(dead_code)]
+pub fn unregister_block_disk(name: &str, major: u32, minor: u32) -> u64 {
+    let mut devpath = None;
+    // The class entry is a symlink into /devices; find the real disk
+    // kobject so the uevent DEVPATH matches the "add" that was sent.
+    // (Fall back to the pre-1b /class path when the link is gone.)
+    if let Some(class_block) = lookup_path("class/block") {
+        class_block.remove_child(name);
+    }
+    if let Some(sys_block) = lookup_path("block") {
+        sys_block.remove_child(name);
+    }
+    if let Some(dev_block) = lookup_path("dev/block") {
+        dev_block.remove_child(&format!("{}:{}", major, minor));
+    }
+    // Depth-bounded scan of /sys/devices for the disk kobject by name
+    // (trees are small; unregister is a rare path).
+    fn find_disk(cur: &Arc<KObject>, name: &str, depth: usize) -> Option<(Arc<KObject>, String)> {
+        if depth > 8 {
+            return None;
+        }
+        let children = cur.children.lock().clone();
+        for (cname, child) in children.iter() {
+            if cname == name && child.devno.lock().is_some() {
+                let p = cur.path();
+                return Some((child.clone(), alloc::format!("{}/{}", p, name)));
+            }
+            if let Some(hit) = find_disk(child, name, depth + 1) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+    if let Some(devices) = lookup_path("devices") {
+        if let Some((disk, path)) = find_disk(&devices, name, 0) {
+            let parent = disk.parent.lock().as_ref().and_then(|w| w.upgrade());
+            if let Some(p) = parent {
+                p.children.lock().remove(name);
+            }
+            devpath = Some(path);
+        }
+    }
+    let devpath = devpath.unwrap_or_else(|| format!("/class/block/{}", name));
+    let maj = format!("{}", major);
+    let min = format!("{}", minor);
+    let extra: [(&str, &str); 4] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", name),
+        ("DEVTYPE", "disk"),
+    ];
+    uevent_send_full(&devpath, "remove", "block", &extra)
+}
+
+/// Registration data for one evdev event node and its input_dev parent —
+/// the two-kobject layout every Linux input device has:
+///
+/// ```text
+/// /sys/class/input/inputN                (input_dev: uevent carries
+///                                         PRODUCT/NAME/PROP/EV/KEY/...)
+/// /sys/class/input/inputN/eventM         (char node: uevent carries
+///                                         MAJOR/MINOR/DEVNAME)
+/// /sys/class/input/eventM       -> link  ../../devices/virtual/input/inputN/eventM
+/// /sys/dev/char/<maj:min>      -> link  ../../devices/virtual/input/inputN/eventM
+/// ```
+///
+/// The canonical DEVPATH spelling is `/devices/virtual/input/inputN/...`
+/// (Linux parity); it resolves through the `/sys/devices/virtual ->
+/// ../../class` compat link onto the real kobject dirs. Both spellings
+/// must work because consumers mix them: OH's libudev shim resolves
+/// `/sys/dev/char/<maj:min>` readlink and then stats
+/// `<resolved>/uevent`, while udevd/mdev walk `/sys/class/input`.
+///
+/// The capability bitmap strings MUST come from the same bitmaps the
+/// driver serves through EVIOCGBIT — libinput computes ID_INPUT_KEYBOARD
+/// / ID_INPUT_MOUSE / ID_INPUT_TOUCHSCREEN tags from these uevent lines
+/// (via OH's libudev shim) and cross-checks them against the ioctl caps.
+#[derive(Debug, Clone)]
+pub struct InputEventReg {
+    /// input_dev kobject name ("input0")
+    pub input_name: String,
+    /// event node name ("event0")
+    pub event_name: String,
+    pub major: u32,
+    pub minor: u32,
+    /// input device name ("VirtIO Keyboard") — NAME= env + name attr
+    pub dev_name: String,
+    pub bustype: u32,
+    pub vendor: u32,
+    pub product: u32,
+    pub version: u32,
+    /// EV= bitmap string (Linux input_print_bitmap format: space-separated
+    /// lowercase-hex 64-bit words, most-significant first)
+    pub ev: String,
+    /// KEY= bitmap string, empty → line omitted (type not supported)
+    pub key: String,
+    /// REL= bitmap string, empty → omitted
+    pub rel: String,
+    /// ABS= bitmap string, empty → omitted
+    pub abs: String,
+}
+
+impl InputEventReg {
+    /// The Linux `input_dev_uevent()` environment block for the input_dev
+    /// kobject (PRODUCT/NAME/PROP/EV/KEY/REL/ABS in kernel emit order).
+    fn dev_env(&self) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = Vec::new();
+        env.push((
+            String::from("PRODUCT"),
+            format!("{:x}/{:x}/{:x}/{:x}", self.bustype, self.vendor, self.product, self.version),
+        ));
+        // Linux quotes NAME in the uevent environment (NAME="%s").
+        env.push((String::from("NAME"), format!("\"{}\"", self.dev_name)));
+        env.push((String::from("PROP"), String::from("0")));
+        env.push((String::from("EV"), self.ev.clone()));
+        if !self.key.is_empty() {
+            env.push((String::from("KEY"), self.key.clone()));
+        }
+        if !self.rel.is_empty() {
+            env.push((String::from("REL"), self.rel.clone()));
+        }
+        if !self.abs.is_empty() {
+            env.push((String::from("ABS"), self.abs.clone()));
+        }
+        env
+    }
+}
+
+/// A uevent attribute whose environment is a fixed key=value set (the
+/// input_dev kobject: PRODUCT/NAME/PROP/EV/...; also the PCI function
+/// kobject: DRIVER/PCI_SLOT_NAME/MODALIAS). Same read/write contract
+/// as `add_uevent_attr` — read returns the env block (SUBSYSTEM=
+/// prepended since the gdm bring-up: sd-device resolves subsystem from
+/// the uevent file as well as the `subsystem` readlink), write of
+/// add/remove/change re-broadcasts it on the netlink socket.
+fn add_env_uevent_attr(
+    dev: &Arc<KObject>,
+    devpath: &str,
+    subsystem: &str,
+    env: Vec<(String, String)>,
+) {
+    let env_show = env.clone();
+    let devpath = String::from(devpath);
+    let subsystem = String::from(subsystem);
+    let subsystem_show = subsystem.clone();
+    attr_rw(
+        dev,
+        "uevent",
+        move || {
+            let mut out = String::new();
+            out.push_str("SUBSYSTEM=");
+            out.push_str(&subsystem_show);
+            out.push('\n');
+            for (k, v) in env_show.iter() {
+                out.push_str(k);
+                out.push('=');
+                out.push_str(v);
+                out.push('\n');
+            }
+            out.into_bytes()
+        },
+        move |buf| {
+            let action = match parse_uevent_action(buf) {
+                Some(a) => a,
+                None => return errno::Errno::InvalidArgument.as_neg_i32(),
+            };
+            let extra: Vec<(&str, &str)> =
+                env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            uevent_send_full(&devpath, action, &subsystem, &extra);
+            0
+        },
+    );
+}
+
+/// Register an input_dev + event node pair (see `InputEventReg`) and
+/// broadcast both "add" uevents — the input_dev registration event (with
+/// PRODUCT/NAME/EV/KEY/... like Linux `input_register_device()`) followed
+/// by the event node event (MAJOR/MINOR/DEVNAME like Linux `device_add()`
+/// on the evdev cdev).
+///
+/// Returns the uevent SEQNUM of the event-node "add" (0 when sysfs is not
+/// up or the pair is already registered).
+pub fn register_input_event(reg: &InputEventReg) -> u64 {
+    if sysfs_root().is_none() {
+        return 0;
+    }
+    let class_input = match lookup_path("class/input") {
+        Some(d) => d,
+        None => match lookup_path("class") {
+            Some(class) => mk_dir(&class, "input", KType::Input),
+            None => return 0,
+        },
+    };
+    if class_input.find_child(reg.event_name.as_bytes()).is_some() {
+        return 0; // already registered
+    }
+
+    // ---- input_dev kobject (/sys/class/input/inputN) ----
+    let input_dev = mk_dir(&class_input, &reg.input_name, KType::Input);
+
+    let dev_name = reg.dev_name.clone();
+    attr_ro(&input_dev, "name", move || {
+        let mut v = dev_name.as_bytes().to_vec();
+        v.push(b'\n');
+        v
+    });
+
+    // id/{bustype,vendor,product,version} — %04x like Linux input_dev attrs.
+    let id = mk_dir(&input_dev, "id", KType::Generic);
+    for (nm, val) in [
+        ("bustype", reg.bustype),
+        ("vendor", reg.vendor),
+        ("product", reg.product),
+        ("version", reg.version),
+    ] {
+        let v = val;
+        attr_ro(&id, nm, move || format!("{:04x}\n", v).into_bytes());
+    }
+
+    // capabilities/{ev,key,rel,abs} — same bitmap strings as the uevent env.
+    let caps = mk_dir(&input_dev, "capabilities", KType::Generic);
+    for (nm, s) in [
+        ("ev", &reg.ev),
+        ("key", &reg.key),
+        ("rel", &reg.rel),
+        ("abs", &reg.abs),
+    ] {
+        let val = s.clone();
+        attr_ro(&caps, nm, move || {
+            if val.is_empty() {
+                Vec::new()
+            } else {
+                let mut v = val.as_bytes().to_vec();
+                v.push(b'\n');
+                v
+            }
+        });
+    }
+
+    // subsystem link: resolves to /sys/bus/input (Linux-exact bus hub;
+    // basename "input" is the value GetSubsystem()-style consumers take
+    // after the last '/').
+    mk_link(&input_dev, "subsystem", "../../../bus/input");
+
+    let devpath_dev = format!("/devices/virtual/input/{}", reg.input_name);
+    let dev_env = reg.dev_env();
+    add_env_uevent_attr(&input_dev, &devpath_dev, "input", dev_env.clone());
+
+    // ---- event node kobject (/sys/class/input/inputN/eventM) ----
+    let evnode = mk_dir(&input_dev, &reg.event_name, KType::Input);
+    *evnode.devno.lock() = Some((reg.major, reg.minor));
+    *evnode.devname.lock() = Some(format!("input/{}", reg.event_name));
+
+    let ev_major = reg.major;
+    let ev_minor = reg.minor;
+    attr_ro(&evnode, "dev", move || format!("{}:{}\n", ev_major, ev_minor).into_bytes());
+    add_uevent_attr(&evnode);
+    mk_link(&evnode, "subsystem", "../../../../bus/input");
+
+    // ---- links: /sys/class/input/eventM and /sys/dev/char/<maj:min> ----
+    let target = format!("../../devices/virtual/input/{}/{}", reg.input_name, reg.event_name);
+    mk_link(&class_input, &reg.event_name, &target);
+    if let Some(dev_char) = lookup_path("dev/char") {
+        mk_link(
+            &dev_char,
+            &format!("{}:{}", reg.major, reg.minor),
+            &format!("../../devices/virtual/input/{}/{}", reg.input_name, reg.event_name),
+        );
+    }
+
+    // ---- "add" uevents: input_dev first, event node second ----
+    let extra_env: Vec<(&str, &str)> =
+        dev_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    uevent_send_full(&devpath_dev, "add", "input", &extra_env);
+
+    let devpath_ev = format!("{}/{}", devpath_dev, reg.event_name);
+    let maj = format!("{}", reg.major);
+    let min = format!("{}", reg.minor);
+    let devname = format!("input/{}", reg.event_name);
+    let extra: [(&str, &str); 3] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", devname.as_str()),
+    ];
+    uevent_send_full(&devpath_ev, "add", "input", &extra)
+}
+
+/// Unregister an input event node pair (drop tree entries, broadcast
+/// "remove"). (No evdev removal path exists yet — kept for device_del
+/// bring-up.)
+#[allow(dead_code)]
+pub fn unregister_input_event(reg: &InputEventReg) -> u64 {
+    if let Some(class_input) = lookup_path("class/input") {
+        class_input.remove_child(&reg.event_name);
+        class_input.remove_child(&reg.input_name);
+    }
+    if let Some(dev_char) = lookup_path("dev/char") {
+        dev_char.remove_child(&format!("{}:{}", reg.major, reg.minor));
+    }
+    let devpath_ev = format!("/devices/virtual/input/{}/{}", reg.input_name, reg.event_name);
+    let devname = format!("input/{}", reg.event_name);
+    let maj = format!("{}", reg.major);
+    let min = format!("{}", reg.minor);
+    let extra: [(&str, &str); 3] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", devname.as_str()),
+    ];
+    uevent_send_full(&devpath_ev, "remove", "input", &extra)
+}
+
+/// Register the virtio-gpu DRM class entries for the PCI function at
+/// `slot_name` (Linux PCI_SLOT_NAME spelling, e.g. "0000:00:04.0").
+///
+/// Everything here exists for libdrm + the Mesa gbm/EGL loader in the OH
+/// image (verified against the string tables of the image's
+/// /vendor/lib64/chipsetsdk/{libgbm.so,libEGL.so} and
+/// /system/lib64/chipset-sdk/libdrm.so):
+///
+/// ```text
+/// /sys/devices/pci0000:00/<slot>/vendor             "0x1af4\n"
+/// /sys/devices/pci0000:00/<slot>/device             "0x1050\n"
+/// /sys/devices/pci0000:00/<slot>/subsystem_vendor   "0x1af4\n"
+/// /sys/devices/pci0000:00/<slot>/subsystem_device   "0x1100\n"
+/// /sys/devices/pci0000:00/<slot>/subsystem          -> ../../../bus/pci
+/// /sys/devices/pci0000:00/<slot>/drm/card0          (uevent MAJOR=226 MINOR=0 DEVNAME=dri/card0)
+/// /sys/devices/pci0000:00/<slot>/drm/renderD128     (uevent MAJOR=226 MINOR=128 ...)
+/// /sys/class/drm/card0                -> ../../devices/pci0000:00/<slot>/drm/card0
+/// /sys/class/drm/renderD128           -> ../../devices/pci0000:00/<slot>/drm/renderD128
+/// /sys/dev/char/226:0                 -> ../../devices/pci0000:00/<slot>/drm/card0
+/// /sys/dev/char/226:128               -> ../../devices/pci0000:00/<slot>/drm/renderD128
+/// /sys/bus/pci/devices/<slot>         -> ../../../devices/pci0000:00/<slot>
+/// ```
+///
+/// drmGetDevice(fd) readlinks /sys/dev/char/226:<minor>, strips the
+/// trailing node component to find the PCI function, reads its
+/// subsystem/vendor/device ids, and enumerates <function>/drm/ for the
+/// sibling node names. gbm_create_device() then maps the kernel driver
+/// name (DRM_IOCTL_VERSION — "virtio_gpu" on the reference kernel) onto
+/// virtio_gpu_dri.so with a kms_swrast fallback. Without this tree the
+/// whole chain dies at the first readlink and no DRM ioctl beyond
+/// VERSION is ever issued — exactly the u1/b155 behavior (one card0
+/// open, then silence).
+pub fn register_drm_device(slot_name: &str) {
+    if sysfs_root().is_none() {
+        return;
+    }
+    // Idempotence: a second init pass must not duplicate the nodes.
+    if lookup_path(&format!("class/drm/card0")).is_some() {
+        return;
+    }
+
+    let devices = match lookup_path("devices") {
+        Some(d) => d,
+        None => return,
+    };
+
+    // ---- PCI root + function directory ----
+    let pci_root = match lookup_path("devices/pci0000:00") {
+        Some(d) => d,
+        None => mk_dir(&devices, "pci0000:00", KType::Generic),
+    };
+    let func = mk_dir(&pci_root, slot_name, KType::Generic);
+    for (nm, v) in [
+        ("vendor", "0x1af4\n"),            // Red Hat/virtio vendor id
+        ("device", "0x1050\n"),            // virtio-gpu modern device id
+        ("subsystem_vendor", "0x1af4\n"),  // QEMU default subsystem vendor
+        ("subsystem_device", "0x1100\n"),  // QEMU generic subsystem device
+        ("class", "0x030000\n"),           // PCI_CLASS_DISPLAY_VGA
+        ("revision", "0x00\n"),
+        // boot_vga=1: this function IS the boot display (the kernel's
+        // fb0/console scanout lives on it). Reference kernels export
+        // boot_vga on the firmware-selected display's PCI function and
+        // gdm's seat0 settle check (gdm-local-display-factory
+        // udev_is_settled) reads exactly this sysattr on the DRM card's
+        // PCI parent: without it the adapter looks "secondary" and gdm
+        // idles in its 10 s retry loop until the graphics-check timeout
+        // fires (~60 s per boot on this machine).
+        ("boot_vga", "1\n"),
+    ] {
+        let val = String::from(v);
+        attr_ro(&func, nm, move || val.as_bytes().to_vec());
+    }
+    // /sys/devices/pci0000:00/<slot>/subsystem -> ../../../bus/pci
+    mk_link(&func, "subsystem", "../../../bus/pci");
+    // Static PCI uevent (device_add on a PCI function).
+    add_env_uevent_attr(
+        &func,
+        &format!("/devices/pci0000:00/{}", slot_name),
+        "pci",
+        vec![
+            (String::from("DRIVER"), String::from("virtio-pci")),
+            (String::from("PCI_SLOT_NAME"), String::from(slot_name)),
+            (String::from("PCI_CLASS"), String::from("30000")),
+            (
+                String::from("MODALIAS"),
+                format!("pci:v00001AF4d00001050sv00001AF4sd00001100bc03sc00i00"),
+            ),
+        ],
+    );
+
+    // ---- drm/ minor nodes on the function ----
+    let drm_dir = mk_dir(&func, "drm", KType::Drm);
+    for (name, minor, devname) in [
+        ("card0", 0u32, "dri/card0"),
+        ("renderD128", 128u32, "dri/renderD128"),
+    ] {
+        let node = mk_dir(&drm_dir, name, KType::Drm);
+        *node.devno.lock() = Some((crate::drivers::drm::DRM_MAJOR_NUM, minor));
+        *node.devname.lock() = Some(String::from(devname));
+        let (maj, min) = (crate::drivers::drm::DRM_MAJOR_NUM, minor);
+        attr_ro(&node, "dev", move || format!("{}:{}\n", maj, min).into_bytes());
+        // <node>/device -> the PCI function (libdrm's legacy
+        // "<node-path>/device" walk).
+        mk_link(&node, "device", "../..");
+        // <node>/subsystem -> the drm BUS hub (Linux-exact: bus/drm,
+        // not class/drm — sd-device resolves subsystem here).
+        mk_link(&node, "subsystem", "../../../../../bus/drm");
+        add_uevent_attr(&node);
+    }
+
+    // ---- class + dev/char + bus links ----
+    let class_drm = match lookup_path("class/drm") {
+        Some(d) => d,
+        None => return,
+    };
+    mk_link(&class_drm, "card0", &format!("../../devices/pci0000:00/{}/drm/card0", slot_name));
+    mk_link(&class_drm, "renderD128", &format!("../../devices/pci0000:00/{}/drm/renderD128", slot_name));
+
+    if let Some(dev_char) = lookup_path("dev/char") {
+        mk_link(&dev_char, "226:0", &format!("../../devices/pci0000:00/{}/drm/card0", slot_name));
+        mk_link(
+            &dev_char,
+            "226:128",
+            &format!("../../devices/pci0000:00/{}/drm/renderD128", slot_name),
+        );
+    }
+    if let Some(pci_devices) = lookup_path("bus/pci/devices") {
+        mk_link(&pci_devices, slot_name, &format!("../../../devices/pci0000:00/{}", slot_name));
+    }
+    // /sys/bus/drm/devices/<node> -> ../../../devices/pci0000:00/<slot>/drm/<node>
+    // (sd-device-enumerator also scans /sys/bus/<sub>/devices; Linux
+    // bus_register shape, added for the gdm/udev bring-up).
+    if let Some(drm_bus_devices) = lookup_path("bus/drm/devices") {
+        for node_name in ["card0", "renderD128"] {
+            mk_link(
+                &drm_bus_devices,
+                node_name,
+                &format!("../../../devices/pci0000:00/{}/drm/{}", slot_name, node_name),
+            );
+        }
+    }
+
+    // Broadcast the node "add" uevents (coldboot parity; the events are
+    // informational for this boot since the nodes predate userland).
+    for (minor, devname) in [(0u32, "dri/card0"), (128u32, "dri/renderD128")] {
+        let maj = format!("{}", crate::drivers::drm::DRM_MAJOR_NUM);
+        let min = format!("{}", minor);
+        let dn = String::from(devname);
+        let extra: [(&str, &str); 3] = [
+            ("MAJOR", maj.as_str()),
+            ("MINOR", min.as_str()),
+            ("DEVNAME", dn.as_str()),
+        ];
+        uevent_send_full(
+            &format!("/devices/pci0000:00/{}/drm/{}", slot_name, devname),
+            "add",
+            "drm",
+            &extra,
+        );
+    }
+}
+
+/// Build a /sys/class/tty device directory.
+fn add_tty_device(class_tty: &Arc<KObject>, name: &str, major: u32, minor: u32) {
+    let dev = mk_dir(class_tty, name, KType::Tty);
+    *dev.devno.lock() = Some((major, minor));
+    *dev.devname.lock() = Some(String::from(name));
+    attr_ro(&dev, "dev", move || format!("{}:{}\n", major, minor).into_bytes());
+    attr_ro(&dev, "active", move || Vec::new());
+    add_uevent_attr(&dev);
+}
+
+/// Built-in "modules" listed under /sys/module (subsystems compiled into
+/// this kernel image).
+const BUILTIN_MODULES: &[&str] = &[
+    "ext4",
+    "jbd2",
+    "virtio",
+    "virtio_blk",
+    "virtio_mmio",
+    "virtio_net",
+    "virtio_pci",
+    "proc",
+    "sysfs",
+    "tmpfs",
+    "devpts",
+    "unix",
+    "netlink",
+    "ipv6",
+];
+
+/// Build the whole default hierarchy. Idempotent at the caller (guarded
+/// by SYSFS_ROOT being None).
+fn build_tree() -> Arc<KObject> {
+    let root = KObject::new_root();
+
+    // ---------------- /sys/class ----------------
+    let class = mk_dir(&root, "class", KType::Class);
+
+    let net = mk_dir(&class, "net", KType::Net);
+    add_net_device(
+        &net,
+        "lo",
+        1,
+        crate::drivers::net::get_loopback_device,
+        [0, 0, 0, 0, 0, 0],
+        65536,
+        0x1 | 0x40 | 0x8 | 0x1000, // UP|RUNNING|LOOPBACK|MULTICAST
+        772,                        // ARPHRD_LOOPBACK
+    );
+    add_net_device(
+        &net,
+        "eth0",
+        2,
+        crate::drivers::net::get_virtio_net_device_net,
+        [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+        1500,
+        0x1 | 0x40 | 0x2, // UP|RUNNING|BROADCAST
+        1,                 // ARPHRD_ETHER
+    );
+
+    // /sys/class/block — skeleton only; disks register dynamically at
+    // probe time via register_block_disk() (vda from the boot probe, vdX
+    // from PCI rescan hotplug). virtio-blk conventionally uses major 254.
+    let _block = mk_dir(&class, "block", KType::Block);
+
+    // /sys/class/input — skeleton; the inputN/eventN pairs register via
+    // register_input_event() when evdev initializes.
+    let _input = mk_dir(&class, "input", KType::Input);
+
+    // /sys/class/drm — skeleton (version file is static); the
+    // card0/renderD128 entries register via register_drm_device() when
+    // the virtio-gpu DRM nodes come up.
+    let drm_class = mk_dir(&class, "drm", KType::Drm);
+    attr_ro(&drm_class, "version", move || b"drm 1.1.0 20060810\n".to_vec());
+
+    let tty = mk_dir(&class, "tty", KType::Tty);
+    add_tty_device(&tty, "console", 5, 1);
+    add_tty_device(&tty, "pts", 136, 0);
+    // /sys/class/tty/tty0 — the VT master's class node (udev db entry,
+    // dev/uevent attrs) plus the "active" attribute with the CURRENT
+    // VT (Linux shape: "ttyN\n" of the foreground console).
+    //
+    // History: the attribute was deliberately absent from gdmr26 to
+    // gdmr51 — back then the kernel had NO VT layer and logind's
+    // VT-controller startup (console-active watch + SIGRTMIN
+    // VT-switch source + seat_preallocate_vts) wedged before its bus
+    // Hello. With fs/vt.rs now implementing the VT ioctl set the
+    // kernel side is real, and pam_systemd's CreateSession is REJECTED
+    // without this attribute: logind's seat_has_vts() (v249) is
+    // exactly `seat_is_seat0() && console_active_fd >= 0`, and
+    // console_active_fd is the open("/sys/class/tty/tty0/active") fd
+    // from manager_connect_console — absent attr => fd<0 => "Seat has
+    // no VTs but VT number not 0" => no greeter session => gdm-x-
+    // session RegisterDisplay fails ("No display available") and the
+    // greeter exit-loops (gdmr52). Content is live from the VT layer
+    // (fs::vt::active_vt()), which starts at VT 1 (gdm's
+    // GDM_INITIAL_VT).
+    {
+        let dev = mk_dir(&tty, "tty0", KType::Tty);
+        *dev.devno.lock() = Some((4, 0));
+        *dev.devname.lock() = Some(String::from("tty0"));
+        attr_ro(&dev, "dev", || b"4:0\n".to_vec());
+        attr_ro(&dev, "active", || {
+            format!("tty{}\n", crate::fs::vt::active_vt()).into_bytes()
+        });
+        add_uevent_attr(&dev);
+    }
+
+    // ---------------- /sys/devices ----------------
+    let devices = mk_dir(&root, "devices", KType::Devices);
+
+    let system = mk_dir(&devices, "system", KType::System);
+    let cpu = mk_dir(&system, "cpu", KType::Cpu);
+    attr_ro(&cpu, "online", move || {
+        format!("{}\n", cpu_range_str(started_cpus())).into_bytes()
+    });
+    attr_ro(&cpu, "possible", move || {
+        format!("{}\n", cpu_range_str(possible_cpus())).into_bytes()
+    });
+    attr_ro(&cpu, "present", move || {
+        format!("{}\n", cpu_range_str(started_cpus())).into_bytes()
+    });
+    attr_ro(&cpu, "offline", move || b"\n".to_vec());
+
+    for cpu_id in 0..possible_cpus() {
+        let dev = mk_dir(&cpu, &format!("cpu{}", cpu_id), KType::Cpu);
+        attr_ro(&dev, "online", move || {
+            if cpu_id < started_cpus() {
+                b"1\n".to_vec()
+            } else {
+                b"0\n".to_vec()
+            }
+        });
+        attr_ro(&dev, "cpuinfo", move || {
+            // RISC-V /sys cpuinfo format (tab-separated key/value).
+            b"isa\t\trv64imafdc\nmmu\t\tsv39\nmvendorid\t0\nmarchid\t\t0\nmimpid\t\t0\n".to_vec()
+        });
+    }
+
+    // /sys/devices/virtual → ../../class (class entries live under
+    // /sys/class; this symlink keeps DEVPATH-style walks working).
+    mk_link(&devices, "virtual", "../../class");
+
+    // /sys/devices/platform — the platform-bus device parents (PCI host
+    // controller, virtio-mmio functions). Block disks attach below a
+    // platform device in the Linux device model, and OH ueventd's
+    // /dev/block/by-name walk needs a platform ancestor whose
+    // `subsystem` symlink resolves to /sys/bus/platform (see
+    // register_block_disk_at).
+    let platform = mk_dir(&devices, "platform", KType::Generic);
+    // /sys/devices/platform (2 components) → 2 ups to the sysfs root.
+    mk_link(&platform, "subsystem", "../../bus/platform");
+
+    // /sys/class/graphics/fb0 → ../../devices/graphics/fb0 — Xorg's
+    // fbdevhw fbdev_open() readlinks /sys/class/graphics/fb0 and
+    // SILENTLY refuses the framebuffer when the readlink fails (no
+    // sysfs entry) or the target contains "devices/pci" (a PCI fbdev,
+    // owned by the PCI probe path). A virtual (non-PCI) class entry
+    // with a real backing dir under /sys/devices satisfies the check.
+    let graphics = mk_dir(&class, "graphics", KType::Generic);
+    let dev_graphics = mk_dir(&devices, "graphics", KType::Generic);
+    let fb0 = mk_dir(&dev_graphics, "fb0", KType::Generic);
+    // FB major 29, minor 0 (matches fs::dev_t::DEV_FB0).
+    *fb0.devno.lock() = Some((29, 0));
+    *fb0.devname.lock() = Some(String::from("fb0"));
+    attr_ro(&fb0, "dev", move || b"29:0\n".to_vec());
+    attr_ro(&fb0, "name", move || b"virtio-gpu\n".to_vec());
+    attr_ro(&fb0, "modes", move || {
+        #[cfg(feature = "riscv64")]
+        {
+            match crate::drivers::gpu::get_framebuffer_info() {
+                Some(info) => {
+                    format!("U:{}x{}p-0\n", info.width, info.height).into_bytes()
+                }
+                None => Vec::new(),
+            }
+        }
+        #[cfg(not(feature = "riscv64"))]
+        {
+            Vec::new()
+        }
+    });
+    mk_link(&graphics, "fb0", "../../devices/graphics/fb0");
+
+    // ---------------- /sys/kernel ----------------
+    let kernel = mk_dir(&root, "kernel", KType::Kernel);
+    // /sys/kernel/debug is the debugfs mount point (Linux: sysfs owns
+    // the directory, debugfs is mounted over it).
+    mk_dir(&kernel, "debug", KType::Kernel);
+    // /sys/kernel/tracing is the tracefs mount point — the reference's
+    // canonical tracefs location (sysfs owns the directory, tracefs is
+    // mounted over it).
+    mk_dir(&kernel, "tracing", KType::Kernel);
+    attr_ro(&kernel, "uevent_seqnum", move || {
+        format!("{}\n", UEVENT_SEQNUM.load(Ordering::Relaxed)).into_bytes()
+    });
+    attr_ro(&kernel, "uevent_helper", move || b"\n".to_vec());
+    // Manual trigger: echo add > /sys/kernel/uevent
+    attr_rw(&kernel, "uevent", Vec::new, |buf| {
+        match parse_uevent_action(buf) {
+            Some(action) => {
+                uevent_send_full("/kernel", action, "kernel", &[]);
+                0
+            }
+            None => errno::Errno::InvalidArgument.as_neg_i32(),
+        }
+    });
+
+    // ---------------- /sys/module ----------------
+    let module = mk_dir(&root, "module", KType::Module);
+    for m in BUILTIN_MODULES.iter() {
+        let mdir = mk_dir(&module, m, KType::Module);
+        attr_ro(&mdir, "initstate", move || b"built-in\n".to_vec());
+    }
+
+    // ---------------- /sys/fs, /sys/firmware, /sys/hypervisor ----------
+    // /sys/fs needs the standard mountpoint skeleton (selinux, bpf,
+    // cgroup, pstore). On Linux with SELinux built in the kernel itself
+    // creates and mounts /sys/fs/selinux at boot (init_selinux_fs), so
+    // OH first-stage init's mount("selinuxfs", "/sys/fs/selinux") never
+    // sees ENOENT; without the dir our mount answer is ENOENT and the
+    // whole selinuxfs path (samgr's SA-permission gate) stays dead.
+    // Same story for init.virt.cfg's bpf/cgroup/pstore mounts (they
+    // warn-only, but quiet is better).
+    let sys_fs = mk_dir(&root, "fs", KType::Fs);
+    mk_dir(&sys_fs, "selinux", KType::Fs);
+    mk_dir(&sys_fs, "bpf", KType::Fs);
+    mk_dir(&sys_fs, "cgroup", KType::Fs);
+    let pstore_fs = mk_dir(&sys_fs, "pstore", KType::Fs);
+
+    // pstore-lite: when this boot found the previous boot's record
+    // in the reserved RAM region, publish it exactly like the
+    // reference's ramoops backends: one file named
+    // <type>-<backend>-<id> — console-ramoops-0 for the panic record,
+    // dmesg-ramoops-0 for the oops record (the reference's two
+    // flavors) — mode 0444 (pstore_mkfile's S_IFREG | 0444), one
+    // record deep: the next capture overwrites the region and the
+    // boot after that sees the new record. No record, no file (the
+    // reference's directory is empty after a clean boot).
+    if crate::dfx::pstore::has_record() {
+        attr_ro(
+            &pstore_fs,
+            crate::dfx::pstore::record_name(),
+            crate::dfx::pstore::read_record,
+        );
+    }
+
+    mk_dir(&root, "firmware", KType::Firmware);
+    mk_dir(&root, "hypervisor", KType::Hypervisor);
+
+    // ---------------- /sys/power ----------------
+    let power = mk_dir(&root, "power", KType::Power);
+    attr_rw(
+        &power,
+        "state",
+        || {
+            let cur = POWER_STATE.lock();
+            match cur.as_deref() {
+                Some(s) => format!("{}\n", s).into_bytes(),
+                None => b"freeze mem disk\n".to_vec(),
+            }
+        },
+        |buf| {
+            let s = match core::str::from_utf8(buf) {
+                Ok(s) => s,
+                Err(_) => return errno::Errno::InvalidArgument.as_neg_i32(),
+            };
+            let token = s.trim_matches(|c| c == '\n' || c == '\r' || c == ' ');
+            match token {
+                "freeze" | "standby" | "mem" | "disk" | "on" | "shutdown" | "" => {
+                    *POWER_STATE.lock() = Some(String::from(token));
+                    0
+                }
+                _ => errno::Errno::InvalidArgument.as_neg_i32(),
+            }
+        },
+    );
+
+    // /sys/power/wakeup_count (why-slow): Linux exposes the pending
+    // wakeup-event counter; OH init chowns/chmods it at boot (the missing
+    // node was an ours-only error row in the boot error-stream diff).
+    // Read returns 0 pending events (no wakeup sources on this platform);
+    // a write consumes the counter (success — Linux's no-pending store).
+    attr_rw(
+        &power,
+        "wakeup_count",
+        || b"0\n".to_vec(),
+        |_buf| 0,
+    );
+
+    // /sys/power/resume and /sys/power/resume_offset (launcher-errno
+    // lane): the hibernation resume-device files. OH init chmods/chowns
+    // both at boot; the reference has them (chmod succeeds), ours was
+    // ENOENT. No resume device is configured: resume reads "0:0\n" and
+    // resume_offset reads "0\n" (Linux's unconfigured values); writes
+    // of 0 are accepted no-ops, anything else has nothing to resume
+    // from and fails ENODEV, the reference's answer in that case.
+    attr_rw(
+        &power,
+        "resume",
+        || b"0:0\n".to_vec(),
+        |buf| {
+            let s = core::str::from_utf8(buf).unwrap_or("").trim();
+            if s.is_empty() || s == "0:0" || s == "0" {
+                0
+            } else {
+                errno::Errno::NoSuchDevice.as_neg_i32()
+            }
+        },
+    );
+    attr_rw(
+        &power,
+        "resume_offset",
+        || b"0\n".to_vec(),
+        |buf| {
+            let s = core::str::from_utf8(buf).unwrap_or("").trim();
+            if s.is_empty() || s == "0" {
+                0
+            } else {
+                errno::Errno::InvalidArgument.as_neg_i32()
+            }
+        },
+    );
+
+    // /sys/hibernate/resume (launcher-errno lane): OH's hibernate
+    // control dir carries the same resume node; init chmods it. Same
+    // semantics as /sys/power/resume.
+    let hibernate = mk_dir(&root, "hibernate", KType::Power);
+    attr_rw(
+        &hibernate,
+        "resume",
+        || b"0:0\n".to_vec(),
+        |_buf| 0,
+    );
+
+    // ---------------- /sys/dev + /sys/block ----------------
+    // /sys/dev/{block,char} and /sys/block entries are created dynamically
+    // by register_block_disk()/register_input_event(); only the tty char
+    // links (static devices) are wired here.
+    let dev_tree = mk_dir(&root, "dev", KType::Dev);
+    let _dev_block = mk_dir(&dev_tree, "block", KType::Block);
+    let dev_char = mk_dir(&dev_tree, "char", KType::Tty);
+    mk_link(&dev_char, "5:1", "../../../class/tty/console");
+    mk_link(&dev_char, "4:0", "../../../class/tty/tty0");
+
+    let _sys_block = mk_dir(&root, "block", KType::Block);
+
+    // ---------------- /sys/bus/pci ----------------
+    // Hotplug entry point: `echo 1 > /sys/bus/pci/rescan` re-enumerates
+    // the PCIe ECAM space for virtio functions added after boot (QEMU
+    // monitor `device_add`). The riscv/virt platform has no ACPI/PCIe
+    // hotplug interrupt, so userland drives the rescan like it does on
+    // interrupt-less x86 hosts.
+    let bus = mk_dir(&root, "bus", KType::Generic);
+    let pci_bus = mk_dir(&bus, "pci", KType::Generic);
+    attr_rw(
+        &pci_bus,
+        "rescan",
+        || b"\n".to_vec(),
+        |_buf| {
+            crate::drivers::probe::pci_rescan_block_hotplug();
+            0
+        },
+    );
+    // Bus hubs the device-model `subsystem` symlinks resolve into
+    // (ueventd readlinks <devpath-parent>/subsystem and compares against
+    // /sys/bus/platform — the bus dirs must exist for realpath()).
+    mk_dir(&bus, "platform", KType::Generic);
+    let _virtio_bus = mk_dir(&bus, "virtio", KType::Generic);
+    let _block_bus = mk_dir(&bus, "block", KType::Block);
+    // drm/input bus hubs with devices/ subdirs — Linux bus_register
+    // shape; udev's sd-device resolves a device's subsystem through the
+    // `subsystem` readlink, and the canonical Linux target is the BUS
+    // hub (class dirs are userspace convenience). The DRM nodes'
+    // subsystem links point here since the gdm bring-up.
+    let drm_bus = mk_dir(&bus, "drm", KType::Drm);
+    let _drm_bus_devices = mk_dir(&drm_bus, "devices", KType::Generic);
+    let input_bus = mk_dir(&bus, "input", KType::Input);
+    let _input_bus_devices = mk_dir(&input_bus, "devices", KType::Generic);
+    // /sys/bus/tty — the tty bus hub. Linux registers the "tty" bus_type
+    // at init (bus_register creates bus/tty/{devices,drivers}); every tty
+    // device's `subsystem` readlink resolves here, and udev's sd-device
+    // takes the subsystem from exactly that readlink.
+    let tty_bus = mk_dir(&bus, "tty", KType::Tty);
+    let tty_bus_devices = mk_dir(&tty_bus, "devices", KType::Generic);
+    let tty_bus_drivers = mk_dir(&tty_bus, "drivers", KType::Generic);
+
+    // ---------------- serial console device: ttyS0 ----------------
+    // The 8250/ns16550 serial console as a real device-model object —
+    // the dev-ttyS0.device activation chain:
+    //
+    //   serial-getty@ttyS0.service binds to dev-ttyS0.device BOTH
+    //   explicitly (template BindsTo=dev-%i.device) and implicitly
+    //   (TTYPath=/dev/%I makes systemd add automatic Requires=/After=
+    //   dependencies on the device unit — a drop-in that clears BindsTo
+    //   cannot escape it). The unit only activates when udevd processes
+    //   an "add" uevent for a /sys device whose devnode is ttyS0
+    //   (99-systemd.rules: SUBSYSTEM=="tty" KERNEL=="tty[a-z0-9]*" →
+    //   TAG+="systemd"; PID1 then creates dev-<escaped-syspath>.device
+    //   with the dev-ttyS0.device alias from DEVNAME). udevd's coldboot
+    //   (systemd-udev-trigger) walks /sys/class/tty/* writing "add" into
+    //   each uevent attr — the uevent attr's store side below IS that
+    //   delivery path (a kernel-time broadcast lands before any netlink
+    //   listener exists).
+    //
+    // Linux device-model shape (x86 serial8250 driver):
+    //   /sys/devices/platform/serial8250            platform device (uevent)
+    //   /sys/devices/platform/serial8250/tty/ttyS0  dev/uevent/subsystem
+    //   /sys/class/tty/ttyS0 -> ../../devices/platform/serial8250/tty/ttyS0
+    //   /sys/dev/char/4:64    -> ../../devices/platform/serial8250/tty/ttyS0
+    //   /sys/bus/tty/devices/ttyS0 -> ../../../devices/platform/serial8250/tty/ttyS0
+    //   /sys/bus/tty/drivers/serial8250/ttyS0 -> ../../../../../devices/...
+    //
+    // 4:64 mirrors the static devtmpfs node /dev/ttyS0 devfs creates on
+    // every arch (CONDEV_OPS UART console); the parent name "serial8250"
+    // is the generic 8250 driver device (riscv64's ns16550 MMIO node has
+    // a different address name on Linux, but nothing in the activation
+    // chain keys on the parent). Without this entry the device unit waits
+    // out its 90 s job timeout and the getty dies: "Timed out waiting
+    // for device dev-ttyS0.device" → "Dependency failed for
+    // serial-getty@ttyS0.service" (ub2404 baseline, 2026-11-15).
+    {
+        let serial8250 = mk_dir(&platform, "serial8250", KType::Generic);
+        mk_link(&serial8250, "subsystem", "../../../bus/platform");
+        // platform uevent (input_dev pattern: SUBSYSTEM=platform,
+        // MODALIAS=platform:serial8250).
+        add_env_uevent_attr(
+            &serial8250,
+            "/devices/platform/serial8250",
+            "platform",
+            vec![(
+                String::from("MODALIAS"),
+                String::from("platform:serial8250"),
+            )],
+        );
+
+        let tty_dir = mk_dir(&serial8250, "tty", KType::Generic);
+        let ttys0 = mk_dir(&tty_dir, "ttyS0", KType::Tty);
+        *ttys0.devno.lock() = Some((crate::fs::dev_t::TTY_MAJOR, 64));
+        *ttys0.devname.lock() = Some(String::from("ttyS0"));
+        // 4:64 == (TTY_MAJOR, 64)
+        attr_ro(&ttys0, "dev", || b"4:64\n".to_vec());
+        add_uevent_attr(&ttys0);
+        // 5 components below /sys (devices/platform/serial8250/tty/ttyS0)
+        mk_link(&ttys0, "subsystem", "../../../../../bus/tty");
+
+        mk_link(&tty, "ttyS0", "../../devices/platform/serial8250/tty/ttyS0");
+        mk_link(&dev_char, "4:64", "../../devices/platform/serial8250/tty/ttyS0");
+        mk_link(
+            &tty_bus_devices,
+            "ttyS0",
+            "../../../devices/platform/serial8250/tty/ttyS0",
+        );
+        let serial_drv = mk_dir(&tty_bus_drivers, "serial8250", KType::Generic);
+        mk_link(
+            &serial_drv,
+            "ttyS0",
+            "../../../../devices/platform/serial8250/tty/ttyS0",
+        );
+
+        // Boot-time "add" (Linux parity: serial8250 registers its ports
+        // at init). In practice udevd only sees the coldboot trigger's
+        // uevent-attr write; this fires for parity with the
+        // input/drm/block registration paths.
+        kobject_uevent(&ttys0, "add");
+    }
+    // /sys/bus/pci/devices — the per-function symlinks libdrm's
+    // drmGetDevice falls back to when /sys/dev/char is not usable
+    // ("/sys/bus/pci/devices/%04x:%02x:%02x.%d" is in the image's
+    // libdrm.so string table).
+    let _pci_bus_devices = mk_dir(&pci_bus, "devices", KType::Generic);
+
+    // ---------------- /sys/bus/usb ----------------
+    // Rux has no USB host-controller driver, but Linux's usb core
+    // registers the "usb" bus type unconditionally at init
+    // (bus_register creates bus/<name>/{devices,drivers} for every
+    // bus), so /sys/bus/usb/devices exists — EMPTY — even on hosts
+    // with zero USB controllers. OH's usb DDK PnP manager depends on
+    // that shape: DdkDevMgrInit -> DdkDevMgrScanSysfs opendir()s
+    // SYSFS_DEVICES_DIR ("/sys/bus/usb/devices") and treats ENOENT as
+    // HDF_FAILURE, which aborts UsbPnpManagerInit BEFORE
+    // DdkListenerMgrInit runs; the listener list head then stays
+    // NULL-zeroed and the next DdkListenerMgrAdd (usb_manager
+    // registering its event listener) walks NULL -> SIGSEGV ->
+    // devhost_usb crash loop (sc87: rip libusb_pnp_manager+0x15bac,
+    // 'mov rax,[rbx]' with rbx=0). An empty dir is exact parity for
+    // a controller-less host: the scan skips 'usb1' (non-digit
+    // prefix) and '1-0:1.0' (':' entries), so Linux also enumerates
+    // zero devices and init succeeds.
+    let usb_bus = mk_dir(&bus, "usb", KType::Generic);
+    let _usb_bus_devices = mk_dir(&usb_bus, "devices", KType::Generic);
+    let _usb_bus_drivers = mk_dir(&usb_bus, "drivers", KType::Generic);
+
+    root
+}
+
+/// Live started-CPU count.
+fn started_cpus() -> usize {
+    crate::arch::smp::num_started_cpus()
+}
+
+/// Last value written to /sys/power/state.
+static POWER_STATE: Spinlock<Option<String>> = Spinlock::new(None);
+
+// ============================================================================
+// uevent — KOBJ_NETLINK broadcast
+// ============================================================================
+
+/// NETLINK_KOBJECT_UEVENT protocol number (see netlink.rs for the socket
+/// side; constant repeated here for self-containment).
+pub const NETLINK_KOBJECT_UEVENT: i32 = 15;
+
+/// Global uevent sequence counter (starts at 1 like Linux).
+static UEVENT_SEQNUM: AtomicU64 = AtomicU64::new(1);
+
+/// Append "KEY=VALUE\0" to the message buffer.
+fn push_env(msg: &mut Vec<u8>, key: &str, value: &str) {
+    msg.extend_from_slice(key.as_bytes());
+    msg.push(b'=');
+    msg.extend_from_slice(value.as_bytes());
+    msg.push(0);
+}
+
+/// Broadcast a uevent for a kobject path.
+///
+/// Wire format (identical to Linux kobject_uevent_net_broadcast — no
+/// nlmsghdr, NUL-separated strings):
+///
+/// ```text
+/// "add@/class/net/lo\0ACTION=add\0DEVPATH=/class/net/lo\0SUBSYSTEM=net\0SEQNUM=42\0"
+/// ```
+///
+/// Returns the assigned SEQNUM.
+pub fn uevent_send_full(
+    devpath: &str,
+    action: &str,
+    subsystem: &str,
+    extra_env: &[(&str, &str)],
+) -> u64 {
+    let (msg, seq) = uevent_payload_for(devpath, action, subsystem, extra_env);
+    crate::net::netlink::uevent_broadcast(&msg);
+    seq
+}
+
+/// Build one kernel uevent payload (and allocate its SEQNUM) without
+/// delivering it — the coldboot replay pushes the same bytes into the
+/// just-bound monitor socket directly (per-listener replay; see
+/// coldboot_uevent_replay).
+fn uevent_payload_for(
+    devpath: &str,
+    action: &str,
+    subsystem: &str,
+    extra_env: &[(&str, &str)],
+) -> (Vec<u8>, u64) {
+    let seq = UEVENT_SEQNUM.fetch_add(1, Ordering::Relaxed);
+
+    let mut msg: Vec<u8> = Vec::new();
+    msg.extend_from_slice(action.as_bytes());
+    msg.push(b'@');
+    msg.extend_from_slice(devpath.as_bytes());
+    msg.push(0);
+    push_env(&mut msg, "ACTION", action);
+    push_env(&mut msg, "DEVPATH", devpath);
+    push_env(&mut msg, "SUBSYSTEM", subsystem);
+    for (k, v) in extra_env.iter() {
+        push_env(&mut msg, k, v);
+    }
+    push_env(&mut msg, "SEQNUM", &format!("{}", seq));
+    (msg, seq)
+}
+
+/// Infer SUBSYSTEM from a DEVPATH ("/class/net/lo" → "net").
+fn subsystem_from_devpath(devpath: &str) -> &'static str {
+    let rest = devpath.strip_prefix("/class/").unwrap_or(devpath);
+    let first = rest.split('/').next().unwrap_or("");
+    match first {
+        "net" => "net",
+        "block" => "block",
+        "tty" => "tty",
+        "" => "kernel",
+        other => {
+            let _ = other;
+            "kernel"
+        }
+    }
+}
+
+/// uevent_send(devpath, action) — subsystem inferred from the path.
+pub fn uevent_send(devpath: &str, action: &str) -> u64 {
+    let subsystem = subsystem_from_devpath(devpath);
+    uevent_send_full(devpath, action, subsystem, &[])
+}
+
+/// Fire a uevent for a KObject (adds MAJOR=/MINOR=/DEVNAME= for devices
+/// carrying a device number).
+pub fn kobject_uevent(kobj: &KObject, action: &str) -> u64 {
+    let devpath = kobj.path();
+    let subsystem = kobj.ktype.subsystem().unwrap_or("kernel");
+        if let Some((major, minor)) = *kobj.devno.lock() {
+        let maj = format!("{}", major);
+        let min = format!("{}", minor);
+        let dn = kobj.devname.lock().clone();
+        let mut extra: Vec<(&str, &str)> = vec![("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+        if let Some(name) = dn.as_deref() {
+            extra.push(("DEVNAME", name));
+        }
+        // Whole-disk block kobjects report DEVTYPE=disk (Linux dev_uevent
+        // emits the device_type name — disk_type for a gendisk).
+        if kobj.ktype == KType::Block {
+            extra.push(("DEVTYPE", "disk"));
+        }
+        uevent_send_full(&devpath, action, subsystem, &extra)
+    } else {
+        uevent_send_full(&devpath, action, subsystem, &[])
+    }
+}
+
+/// Network device state change (up/down/add/remove) — call on IFF_UP
+/// transitions and netdev registration. Carries INTERFACE=<name> like
+/// Linux's netdev_uevent().
+pub fn netdev_uevent(name: &str, action: &str) -> u64 {
+    let devpath = format!("/class/net/{}", name);
+    let extra: [(&str, &str); 1] = [("INTERFACE", name)];
+    uevent_send_full(&devpath, action, "net", &extra)
+}
+
+/// Current uevent SEQNUM (for /sys/kernel/uevent_seqnum).
+pub fn uevent_seqnum() -> u64 {
+    UEVENT_SEQNUM.load(Ordering::Relaxed)
+}
+
+// ============================================================================
+// Filesystem type / superblock / mount
+// ============================================================================
+
+/// SysFS filesystem type (registry entry).
+pub static SYSFS_FS_TYPE: FileSystemType = FileSystemType::new(
+    "sysfs",
+    Some(sysfs_mount_cb),
+    Some(sysfs_kill_sb),
+    0,
+);
+
+/// SysFS superblock wrapper.
+pub struct SysfsSuperBlock {
+    /// base
+    pub sb: SuperBlock,
+    /// tree root
+    pub root: Arc<KObject>,
+}
+
+static GLOBAL_SYSFS_SB: core::sync::atomic::AtomicPtr<SysfsSuperBlock> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+static GLOBAL_SYSFS_MOUNT: core::sync::atomic::AtomicPtr<VfsMount> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+// SAFETY: FsContext is a valid VFS mount callback argument.
+unsafe extern "C" fn sysfs_mount_cb(
+    _fs_context: &crate::fs::superblock::FsContext<'_>,
+) -> Result<*mut SuperBlock, i32> {
+    let root = sysfs_root().ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+    let sb = Box::new(SysfsSuperBlock {
+        sb: SuperBlock::new(4096, SYSFS_MAGIC),
+        root,
+    });
+    Ok(Box::into_raw(sb) as *mut SuperBlock)
+}
+
+// SAFETY: sb came from sysfs_mount_cb's Box::into_raw.
+unsafe extern "C" fn sysfs_kill_sb(sb: *mut SuperBlock) {
+    if !sb.is_null() {
+        drop(Box::from_raw(sb as *mut SysfsSuperBlock));
+    }
+}
+
+/// Get the sysfs superblock (if initialized).
+pub fn get_sysfs_sb() -> Option<&'static SysfsSuperBlock> {
+    let ptr = GLOBAL_SYSFS_SB.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &*ptr })
+    }
+}
+
+/// Initialize sysfs: register the filesystem type and build the KObject
+/// tree. Idempotent — safe to call from do_mount and boot paths.
+pub fn init_sysfs() -> Result<(), i32> {
+    use crate::fs::superblock::register_filesystem;
+
+    // Register fs type (ignore "already registered" duplicates — the
+    // registry has no lookup-by-name dedup error, so tolerate the push).
+    let _ = register_filesystem(&SYSFS_FS_TYPE);
+
+    // Build the tree once.
+    {
+        let guard = SYSFS_ROOT.lock();
+        if guard.is_some() {
+            return Ok(());
+        }
+    }
+    let root = build_tree();
+
+    let sb = Box::new(SysfsSuperBlock {
+        sb: SuperBlock::new(4096, SYSFS_MAGIC),
+        root: root.clone(),
+    });
+    GLOBAL_SYSFS_SB.store(Box::into_raw(sb), Ordering::Release);
+    *SYSFS_ROOT.lock() = Some(root);
+    Ok(())
+}
+
+/// Prepare the /sys mountpoint (mirrors mount_procfs): create /sys in the
+/// rootfs and record a VfsMount.
+pub fn mount_sysfs() -> Result<(), i32> {
+    // Create /sys directory in rootfs (ignore error if it exists).
+    if let Some(rootfs_sb) = crate::fs::rootfs::get_rootfs_sb() {
+        // SAFETY: pointer comes from the global rootfs instance.
+        unsafe {
+            let _ = (*rootfs_sb).create_dir("/sys", 0o755);
+        }
+    }
+
+    if get_sysfs_sb().is_none() {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    let sb_ptr = GLOBAL_SYSFS_SB.load(Ordering::Acquire);
+    let mount = Box::new(VfsMount::new(
+        b"/sys".to_vec(),
+        b"/sys".to_vec(),
+        MntFlags::new(0),
+        Some(sb_ptr as *mut u8),
+    ));
+    GLOBAL_SYSFS_MOUNT.store(Box::into_raw(mount) as *mut VfsMount, Ordering::Release);
+    Ok(())
+}
+
+/// Is sysfs mounted?
+pub fn is_mounted() -> bool {
+    !GLOBAL_SYSFS_MOUNT.load(Ordering::Acquire).is_null()
+}
+
+/// Create the sysfs root directory VFS inode (mount-time).
+pub fn create_root_inode() -> Arc<Inode> {
+    let root = match sysfs_root() {
+        Some(r) => r,
+        None => {
+            // Fallback minimal directory inode.
+            let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+            inode.fs_id = FS_ID_SYSFS;
+            inode.ops = Some(&SYSFS_INODE_OPS);
+            return Arc::new(inode);
+        }
+    };
+    let entry = Box::new(SysfsEntryData {
+        kobj: root.clone(),
+        attr: None,
+        link: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
+    });
+    let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+    inode.fs_id = FS_ID_SYSFS;
+    inode.ops = Some(&SYSFS_INODE_OPS);
+    inode.private_data = Some(Box::into_raw(entry) as *mut u8);
+    Arc::new(inode)
+}
+
+// ============================================================================
+// SysFS inode operations
+// ============================================================================
+
+/// Per-inode sysfs data (Box leaked into Inode::private_data, reclaimed
+/// by sysfs_destroy_inode).
+pub struct SysfsEntryData {
+    /// owning kobject
+    pub kobj: Arc<KObject>,
+    /// attribute (regular-file inodes)
+    pub attr: Option<Arc<Attribute>>,
+    /// symlink target (link inodes)
+    pub link: Option<String>,
+    /// setattr overrides (kernfs iattr parity): chmod/chown by root
+    /// SUCCEEDS on Linux sysfs (kernfs_iop_setattr stores iattr) — OH
+    /// init chmods/chowns /sys/power/* and cgroup roots during boot and
+    /// the old EPERM made every one of those rows an error (the boot
+    /// error-stream diff vs the reference showed them ours-only).
+    /// 0 = no override (getattr falls back to the built-in mode/uid 0).
+    pub mode_ovr: AtomicU32,
+    pub uid: AtomicU32,
+    pub gid: AtomicU32,
+}
+
+/// Recover the entry data from an inode.
+/// SAFETY: private_data must have come from sysfs_iget/create_root_inode.
+unsafe fn entry_of(inode: &Inode) -> Option<&'static SysfsEntryData> {
+    inode
+        .private_data
+        .map(|p| &*(p as *const SysfsEntryData))
+}
+
+/// Resolve a child of `dir` to (kobj, attr, link) for lookup/iget.
+///
+/// The child kobject travels WITH the result: directory children must
+/// carry their OWN kobj into the new inode. The old signature returned
+/// only the ino, so `sysfs_iget` cloned the PARENT's kobj for directory
+/// children — /sys/class then behaved like /sys itself and every
+/// second-level lookup (/sys/class/net, /sys/class/graphics/...) failed
+/// with ENOENT (sysfs had never been exercised by userland below level 1).
+fn resolve_child(
+    dir: &SysfsEntryData,
+    name: &[u8],
+) -> Option<(Arc<KObject>, Option<Arc<Attribute>>, Option<String>)> {
+    if dir.kobj.kind != NodeKind::Directory {
+        return None;
+    }
+    // child kobject first (dirs and links share the kobject ino space)
+    if let Some(child) = dir.kobj.find_child(name) {
+        let link = if let NodeKind::Link(ref t) = child.kind {
+            Some(t.clone())
+        } else {
+            None
+        };
+        return Some((child.clone(), None, link));
+    }
+    // then attributes (attribute files belong to the parent kobject)
+    if let Some(attr) = dir.kobj.find_attr(name) {
+        return Some((dir.kobj.clone(), Some(attr), None));
+    }
+    None
+}
+
+/// sysfs lookup: child kobject ino, attribute ino, or ENOENT.
+/// SAFETY: VFS callback contract.
+unsafe fn sysfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+    let entry = entry_of(dir).ok_or(errno::Errno::NotADirectory)?;
+    match resolve_child(entry, name) {
+        Some((kobj, _, _)) => Ok(kobj.ino),
+        None => Err(errno::Errno::NoSuchFileOrDirectory),
+    }
+}
+
+/// sysfs iget: instantiate the VFS Inode for a resolved child.
+/// SAFETY: VFS callback contract.
+unsafe fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+    let parent_entry = entry_of(parent).ok_or(errno::Errno::NotADirectory)?;
+    let (kobj, attr, link) = resolve_child(parent_entry, name)
+        .ok_or(errno::Errno::NoSuchFileOrDirectory)?;
+
+    let (mode, node_ino) = if let Some(attr) = attr.as_ref() {
+        (InodeMode::new(InodeMode::S_IFREG | attr.mode), attr.ino)
+    } else if link.is_some() {
+        (InodeMode::new(InodeMode::S_IFLNK | 0o777), ino)
+    } else {
+        (InodeMode::new(InodeMode::S_IFDIR | 0o755), ino)
+    };
+
+    let entry = Box::new(SysfsEntryData {
+        kobj,
+        attr,
+        link,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
+    });
+
+    let mut inode = Inode::new(node_ino, mode);
+    inode.fs_id = FS_ID_SYSFS;
+    inode.ops = Some(&SYSFS_INODE_OPS);
+    inode.private_data = Some(Box::into_raw(entry) as *mut u8);
+    Ok(Arc::new(inode))
+}
+
+/// sysfs getattr.
+/// SAFETY: VFS callback contract.
+unsafe fn sysfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+    let entry = match entry_of(inode) {
+        Some(e) => e,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+
+    stat.st_ino = inode.ino;
+    // setattr overrides first (kernfs iattr): a chmod/chown by root
+    // replaces the built-in permission word / owner ids.
+    let mode_ovr = entry.mode_ovr.load(Ordering::Relaxed);
+    if let Some(attr) = entry.attr.as_ref() {
+        stat.st_mode = InodeMode::S_IFREG
+            | if mode_ovr != 0 { mode_ovr & 0o7777 } else { attr.mode };
+        // Linux sysfs stats attribute files as 4096 regardless of content.
+        stat.st_size = 4096;
+        stat.st_nlink = 1;
+    } else if let Some(ref target) = entry.link {
+        stat.st_mode = InodeMode::S_IFLNK | 0o777;
+        stat.st_size = target.len() as i64;
+        stat.st_nlink = 1;
+    } else {
+        stat.st_mode = InodeMode::S_IFDIR | if mode_ovr != 0 { mode_ovr & 0o7777 } else { 0o755 };
+        stat.st_size = 4096;
+        stat.st_nlink = 2;
+    }
+    stat.st_uid = entry.uid.load(Ordering::Relaxed) as u32;
+    stat.st_gid = entry.gid.load(Ordering::Relaxed) as u32;
+    stat.st_rdev = 0;
+    stat.st_blksize = 4096;
+    stat.st_blocks = (stat.st_size + 511) / 512;
+    stat.st_atime = 0;
+    stat.st_atime_nsec = 0;
+    stat.st_mtime = 0;
+    stat.st_mtime_nsec = 0;
+    stat.st_ctime = 0;
+    stat.st_ctime_nsec = 0;
+    0
+}
+
+/// sysfs setattr: ATTR_SIZE is a no-op (O_TRUNC on `echo x > file` must
+/// not fail). ATTR_MODE/ATTR_UID/ATTR_GID/ATTR_UID_GID apply to the
+/// entry's override fields and return 0 — Linux kernfs (kernfs_iop_
+/// setattr) stores these for root callers, and OH init's boot-time
+/// chmod/chown of /sys/power/* and the cgroup roots must not see EPERM
+/// (the why-slow error-stream diff: those rows were ours-only). The
+/// tree CONTENT stays kernel-owned; only the metadata words move.
+/// SAFETY: VFS callback contract.
+unsafe fn sysfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+    use crate::fs::inode::setattr_attr;
+    if attr == setattr_attr::ATTR_SIZE {
+        return 0;
+    }
+    let entry = match entry_of(inode) {
+        Some(e) => e,
+        None => return errno::Errno::OperationNotPermitted.as_neg_i32(),
+    };
+    match attr {
+        setattr_attr::ATTR_MODE => {
+            entry.mode_ovr.store((arg1 as u32) & 0o7777, Ordering::Relaxed);
+            // Preserve the cached file TYPE (dirs must stay dirs for the
+            // lock-free type checks); only the permission bits move.
+            let keep_type = inode.mode.bits() & InodeMode::S_IFMT;
+            inode.update_cached_mode(InodeMode::new(
+                keep_type | ((arg1 as u32) & 0o7777),
+            ));
+            0
+        }
+        setattr_attr::ATTR_UID => {
+            entry.uid.store(arg1 as u32, Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_GID => {
+            entry.gid.store(arg1 as u32, Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_UID_GID => {
+            entry.uid.store(arg1 as u32, Ordering::Relaxed);
+            entry.gid.store(arg2 as u32, Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_ATIME | setattr_attr::ATTR_MTIME => 0,
+        _ => errno::Errno::OperationNotPermitted.as_neg_i32(),
+    }
+}
+
+/// sysfs readlink.
+/// SAFETY: VFS callback contract.
+unsafe fn sysfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+    let entry = match entry_of(inode) {
+        Some(e) => e,
+        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    };
+    let target = match entry.link.as_ref() {
+        Some(t) => t,
+        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    };
+    let len = target.len().min(buf.len());
+    buf[..len].copy_from_slice(&target.as_bytes()[..len]);
+    len as isize
+}
+
+/// sysfs readdir: children (dirs + links) then attributes.
+/// SAFETY: VFS callback contract.
+unsafe fn sysfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
+    let entry = entry_of(inode)?;
+    if entry.kobj.kind != NodeKind::Directory {
+        return None;
+    }
+    let mut out = Vec::new();
+
+    let children = entry.kobj.children.lock();
+    for (name, child) in children.iter() {
+        let dt = match child.kind {
+            NodeKind::Directory => file_type::DT_DIR,
+            NodeKind::Link(_) => file_type::DT_LNK,
+        };
+        out.push(VfsDirEntry {
+            ino: child.ino,
+            name: name.as_bytes().to_vec(),
+            file_type: dt,
+        });
+    }
+    drop(children);
+
+    let attributes = entry.kobj.attributes.lock();
+    for (name, attr) in attributes.iter() {
+        out.push(VfsDirEntry {
+            ino: attr.ino,
+            name: name.as_bytes().to_vec(),
+            file_type: file_type::DT_REG,
+        });
+    }
+
+    Some(out)
+}
+
+/// sysfs open: snapshot the attribute content into file-private storage
+/// (same discipline as procfs — read side never re-enters the tree).
+/// SAFETY: VFS callback contract.
+unsafe fn sysfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
+    if !inode.mode.is_regular_file() {
+        return 0;
+    }
+    let entry = match entry_of(inode) {
+        Some(e) => e,
+        None => return 0,
+    };
+    let attr = match entry.attr.as_ref() {
+        Some(a) => a,
+        None => return 0,
+    };
+    let content = match attr.show.as_ref() {
+        Some(show) => show(),
+        None => Vec::new(),
+    };
+    attr.cached_size.store(content.len() as u64, Ordering::Relaxed);
+    let snapshot = Box::new(SysfsFileContent { data: content });
+    file.set_private_data(Box::into_raw(snapshot) as *mut u8);
+    0
+}
+
+/// sysfs get_file_ops.
+/// SAFETY: VFS callback contract.
+unsafe fn sysfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+    if inode.mode.is_regular_file() {
+        Some(&SYSFS_FILE_OPS)
+    } else if inode.mode.is_directory() {
+        Some(&crate::fs::file::DIR_FILE_OPS)
+    } else {
+        None
+    }
+}
+
+/// sysfs destroy_inode: reclaim the leaked Box<SysfsEntryData>.
+/// SAFETY: VFS callback contract; Drop-time hook.
+unsafe fn sysfs_destroy_inode(inode: &mut Inode) {
+    if let Some(ptr) = inode.private_data.take() {
+        drop(Box::from_raw(ptr as *mut SysfsEntryData));
+    }
+}
+
+/// SysFS inode operations table.
+
+/// sysfs mkdir: delegate to tmpfs for dynamic subtrees (cgroup hierarchies).
+/// Linux sysfs is technically read-only, but systemd needs to create
+/// /sys/fs/cgroup/{systemd,unified,...} subdirs after mounting cgroup2.
+/// The reference kernel handles this by having cgroupfs own that subtree;
+/// we route sysfs mkdir through the tmpfs layer.
+unsafe fn sysfs_mkdir(
+    _parent: &Inode,
+    name: &[u8],
+    mode: crate::fs::inode::InodeMode,
+) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
+    // systemd needs mkdir to succeed on /sys/fs/cgroup/{systemd,unified,...}
+    // so it can mount cgroup2 there. The mount that follows replaces the
+    // subtree entirely, so a phantom directory node is sufficient.
+    let mut inode = Inode::new(
+        crate::fs::sysfs::alloc_ino(),
+        crate::fs::inode::InodeMode::new(
+            crate::fs::inode::InodeMode::S_IFDIR | (mode.bits() & 0o7777),
+        ),
+    );
+    inode.ops = Some(&SYSFS_INODE_OPS);
+    let _ = name;
+    Ok(alloc::sync::Arc::new(inode))
+}
+
+pub static SYSFS_INODE_OPS: INodeOps = INodeOps {
+    lookup: Some(sysfs_lookup),
+    create: None,      // sysfs is kernel-owned
+    link: None,
+    unlink: None,
+    symlink: None,
+    mkdir: Some(sysfs_mkdir),
+    rmdir: None,
+    mknod: None,
+    rename: None,
+    readlink: Some(sysfs_readlink),
+    get_file_ops: Some(sysfs_get_file_ops),
+    readdir: Some(sysfs_readdir),
+    readdir_fill: None,
+    readdir_cacheable: false,
+    open: Some(sysfs_open),
+    permission: None, // default DAC path
+    getattr: Some(sysfs_getattr),
+    setattr: Some(sysfs_setattr),
+    iget: Some(sysfs_iget),
+    destroy_inode: Some(sysfs_destroy_inode),
+};
+
+// ============================================================================
+// SysFS file operations (attribute read/write)
+// ============================================================================
+
+/// Attribute content snapshot (File::private_data while open).
+pub struct SysfsFileContent {
+    /// generated content
+    pub data: Vec<u8>,
+}
+
+/// read: serve from the open-time snapshot at the file position.
+fn sysfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    // SAFETY: private_data was installed by sysfs_open under this File.
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+    };
+    // SAFETY: pointer provenance is Box::into_raw in sysfs_open.
+    let content = unsafe { &*(ptr as *const SysfsFileContent) };
+    let offset = file.get_pos() as usize;
+    let available = content.data.len().saturating_sub(offset);
+    let to_read = buf.len().min(available);
+    if to_read > 0 {
+        buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
+        file.set_pos((offset + to_read) as u64);
+        to_read as isize
+    } else {
+        0
+    }
+}
+
+/// write: dispatch to the attribute store handler.
+fn sysfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
+    // SAFETY: inode pointer set at open; read-only access here.
+    let inode = match unsafe { (*file.inode.get()).clone() } {
+        Some(i) => i,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+    };
+    // SAFETY: inode provenance is the sysfs iget path.
+    let entry = match unsafe { entry_of(&inode) } {
+        Some(e) => e,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+    };
+    let attr = match entry.attr.as_ref() {
+        Some(a) => a,
+        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    };
+    match attr.store.as_ref() {
+        Some(store) => {
+            let ret = store(buf);
+            if ret != 0 {
+                ret as isize
+            } else {
+                buf.len() as isize
+            }
+        }
+        None => errno::Errno::InvalidArgument.as_neg_i32() as isize, // read-only node
+    }
+}
+
+/// lseek within the snapshot.
+fn sysfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
+    // SAFETY: see sysfs_file_read.
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+    };
+    // SAFETY: pointer provenance is Box::into_raw in sysfs_open.
+    let content = unsafe { &*(ptr as *const SysfsFileContent) };
+    let file_size = content.data.len() as isize;
+    let new_offset = match whence {
+        0 => offset,
+        1 => file.get_pos() as isize + offset,
+        2 => file_size + offset,
+        _ => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    };
+    if new_offset < 0 || new_offset > file_size {
+        return errno::Errno::InvalidArgument.as_neg_i32() as isize;
+    }
+    file.set_pos(new_offset as u64);
+    new_offset
+}
+
+/// close: free the content snapshot.
+fn sysfs_file_close(file: &crate::fs::File) -> i32 {
+    // SAFETY: see sysfs_file_read; null-out first to close the race window.
+    let ptr = unsafe { (*file.private_data.get()).take() };
+    if let Some(ptr) = ptr {
+        // SAFETY: provenance is Box::into_raw in sysfs_open.
+        drop(unsafe { Box::from_raw(ptr as *mut SysfsFileContent) });
+    }
+    0
+}
+
+/// poll on a sysfs attribute: Linux kernfs attrs are pollable (POLLPRI
+/// on change; EPOLLERR|EPOLLHUP always) — sd-event registers VT-console
+/// watches (/sys/class/tty/tty0/active, logind manager_connect_console)
+/// and epoll_ctl(ADD) EPERMs when the target has no poll op, which
+/// killed logind at startup ("Failed to watch foreground console:
+/// Operation not permitted"). Change notification is not implemented:
+/// the resting state is simply never-ready (0 events), which is also
+/// what an unchanged attribute reports on Linux.
+fn sysfs_file_poll(_file: &crate::fs::File, _events: u16) -> u16 {
+    0
+}
+
+/// SysFS attribute file operations.
+pub static SYSFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(sysfs_file_read)
+    .write(sysfs_file_write)
+    .lseek(sysfs_file_lseek)
+    .poll(sysfs_file_poll)
+    .close(sysfs_file_close)
+    .build();

@@ -1,0 +1,6 @@
+diag/
+gate-runs/
+timer/
+run/serial-*.log
+run/ser-*.sock
+run/qemu-*.pid

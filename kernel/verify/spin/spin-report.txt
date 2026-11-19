@@ -1,0 +1,202 @@
+=== Rux Kernel SPIN Model Checking Report ===
+Date: Thu Apr  9 12:21:03 CST 2026
+Models: 4 files
+
+--- futex_wait_wake.pml ---
+ltl NoLostWakeup: [] ((! (((waiter_state==1)) && (waiter_in_chain))) || (<> (waiter_woken)))
+ltl NoPermanentSleep: [] ((! ((waiter_state==1))) || (<> ((! (waiter_in_chain)) || (waiter_woken))))
+  the model contains 2 never claims: NoPermanentSleep, NoLostWakeup
+  only one claim is used in a verification run
+  choose which one with ./pan -a -N name (defaults to -N NoLostWakeup)
+  or use e.g.: spin -search -ltl NoLostWakeup futex_wait_wake.pml
+pan: ltl formula NoLostWakeup
+error: max search depth too small
+Depth=    9999 States=    1e+06 Transitions= 1.61e+06 Memory=   174.433	t=     0.33 R=   3e+06
+Depth=    9999 States=    2e+06 Transitions= 3.22e+06 Memory=   220.136	t=     0.69 R=   3e+06
+Depth=    9999 States=    3e+06 Transitions= 4.83e+06 Memory=   265.937	t=     1.09 R=   3e+06
+
+(Spin Version 6.5.2 -- 6 December 2019)
+	+ Partial Order Reduction
+
+Full statespace search for:
+	never claim         	+ (NoLostWakeup)
+	assertion violations	+ (if within scope of claim)
+	acceptance   cycles 	+ (fairness disabled)
+	invalid end states	- (disabled by never claim)
+
+State-vector 44 byte, depth reached 9999, errors: 0
+  3220543 states, stored (3.2231e+06 visited)
+  1972417 states, matched
+  5195520 transitions (= visited+matched)
+        1 atomic steps
+hash conflicts:    114781 (resolved)
+
+Stats on memory usage (in Megabytes):
+  221.137	equivalent memory usage for states (stored*(State-vector + overhead))
+  147.671	actual memory usage for states (compression: 66.78%)
+         	state-vector as stored = 20 byte + 28 byte overhead
+  128.000	memory used for hash table (-w24)
+    0.534	memory used for DFS stack (-m10000)
+  276.093	total actual memory usage
+
+
+unreached in proctype Waiter
+	(0 of 23 states)
+unreached in proctype Waker
+	(0 of 21 states)
+unreached in init
+	(0 of 4 states)
+unreached in claim NoLostWakeup
+	_spin_nvr.tmp:10, state 13, "-end-"
+	(1 of 13 states)
+unreached in claim NoPermanentSleep
+	_spin_nvr.tmp:19, state 10, "(!((!(waiter_in_chain)||waiter_woken)))"
+	_spin_nvr.tmp:21, state 13, "-end-"
+	(2 of 13 states)
+
+pan: elapsed time 1.19 seconds
+pan: rate 2708489.9 states/second
+
+PASS: futex_wait_wake.pml
+--- interrupt_preempt.pml ---
+ltl HardirqBounded: [] (((hardirq_depth>=0)) && ((hardirq_depth<=3)))
+ltl PreemptNoUnderflow: [] ((preempt_depth>=0))
+  the model contains 2 never claims: PreemptNoUnderflow, HardirqBounded
+  only one claim is used in a verification run
+  choose which one with ./pan -a -N name (defaults to -N HardirqBounded)
+  or use e.g.: spin -search -ltl HardirqBounded interrupt_preempt.pml
+pan: ltl formula HardirqBounded
+
+(Spin Version 6.5.2 -- 6 December 2019)
+	+ Partial Order Reduction
+
+Full statespace search for:
+	never claim         	+ (HardirqBounded)
+	assertion violations	+ (if within scope of claim)
+	acceptance   cycles 	+ (fairness disabled)
+	invalid end states	- (disabled by never claim)
+
+State-vector 44 byte, depth reached 62, errors: 0
+      181 states, stored
+       82 states, matched
+      263 transitions (= stored+matched)
+        1 atomic steps
+hash conflicts:         0 (resolved)
+
+Stats on memory usage (in Megabytes):
+    0.012	equivalent memory usage for states (stored*(State-vector + overhead))
+    0.287	actual memory usage for states
+  128.000	memory used for hash table (-w24)
+    0.534	memory used for DFS stack (-m10000)
+  128.730	total actual memory usage
+
+
+unreached in proctype TaskWithLock
+	(0 of 13 states)
+unreached in proctype HardIrqHandler
+	(0 of 15 states)
+unreached in init
+	(0 of 4 states)
+unreached in claim HardirqBounded
+	_spin_nvr.tmp:8, state 10, "-end-"
+	(1 of 10 states)
+unreached in claim PreemptNoUnderflow
+	_spin_nvr.tmp:17, state 10, "-end-"
+	(1 of 10 states)
+
+pan: elapsed time 0 seconds
+
+PASS: interrupt_preempt.pml
+--- lock_ordering.pml ---
+warning: no accept labels are defined, so option -a has no effect (ignored)
+
+(Spin Version 6.5.2 -- 6 December 2019)
+	+ Partial Order Reduction
+
+Full statespace search for:
+	never claim         	- (none specified)
+	assertion violations	+
+	acceptance   cycles 	- (not selected)
+	invalid end states	+
+
+State-vector 52 byte, depth reached 48, errors: 0
+      313 states, stored
+       17 states, matched
+      330 transitions (= stored+matched)
+        3 atomic steps
+hash conflicts:         0 (resolved)
+
+Stats on memory usage (in Megabytes):
+    0.024	equivalent memory usage for states (stored*(State-vector + overhead))
+    0.286	actual memory usage for states
+  128.000	memory used for hash table (-w24)
+    0.534	memory used for DFS stack (-m10000)
+  128.730	total actual memory usage
+
+
+unreached in proctype Scheduler
+	(0 of 12 states)
+unreached in proctype FutexWake
+	(0 of 21 states)
+unreached in proctype FutexWait
+	(0 of 22 states)
+unreached in proctype MmAlloc
+	(0 of 12 states)
+unreached in init
+	(0 of 6 states)
+
+pan: elapsed time 0 seconds
+
+PASS: lock_ordering.pml
+--- sched_enqueue_dequeue.pml ---
+ltl NrRunningValid: [] (((nr_running>=0)) && ((nr_running<=4)))
+ltl NoPermanentStarvation: [] ((! ((nr_running>0))) || ((334<4)))
+  the model contains 2 never claims: NoPermanentStarvation, NrRunningValid
+  only one claim is used in a verification run
+  choose which one with ./pan -a -N name (defaults to -N NrRunningValid)
+  or use e.g.: spin -search -ltl NrRunningValid sched_enqueue_dequeue.pml
+pan: ltl formula NrRunningValid
+
+(Spin Version 6.5.2 -- 6 December 2019)
+	+ Partial Order Reduction
+
+Full statespace search for:
+	never claim         	+ (NrRunningValid)
+	assertion violations	+ (if within scope of claim)
+	acceptance   cycles 	+ (fairness disabled)
+	invalid end states	- (disabled by never claim)
+
+State-vector 60 byte, depth reached 1046, errors: 0
+     4815 states, stored
+     5395 states, matched
+    10210 transitions (= stored+matched)
+        3 atomic steps
+hash conflicts:         3 (resolved)
+
+Stats on memory usage (in Megabytes):
+    0.404	equivalent memory usage for states (stored*(State-vector + overhead))
+    0.481	actual memory usage for states
+  128.000	memory used for hash table (-w24)
+    0.534	memory used for DFS stack (-m10000)
+  128.925	total actual memory usage
+
+
+unreached in proctype TaskCycle
+	(0 of 29 states)
+unreached in proctype Scheduler
+	(0 of 12 states)
+unreached in init
+	(0 of 7 states)
+unreached in claim NrRunningValid
+	_spin_nvr.tmp:8, state 10, "-end-"
+	(1 of 10 states)
+unreached in claim NoPermanentStarvation
+	_spin_nvr.tmp:17, state 10, "-end-"
+	(1 of 10 states)
+
+pan: elapsed time 0 seconds
+
+PASS: sched_enqueue_dequeue.pml
+
+=== Summary ===
+PASS: 4  FAIL: 0  ERROR: 0

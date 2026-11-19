@@ -1,0 +1,628 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! The tracefs FILES — the filesystem side of the tracing subsystem.
+//!
+//! The standard tracefs carries the tracing control surface. The file set
+//! below is the subset Rux implements, each file with the standard name,
+//! mode and byte format (captured from this host's live
+//! /sys/kernel/tracing on this host):
+//!
+//! ```text
+//! /sys/kernel/tracing/           (the canonical mount; the same tracefs
+//!                                 instance is also mounted at
+//!                                 /sys/kernel/debug/tracing, the way the
+//!                                 reference automounts it under debugfs)
+//! ├── tracing_on          0640  the master switch ("1\n"/"0\n")
+//! ├── trace               0640  the buffered records (write clears)
+//! ├── trace_pipe          0440  the records, consumed on read, no header
+//! ├── available_tracers   0440  "nop\n"
+//! ├── current_tracer      0640  "nop\n" (writing anything else: EINVAL)
+//! ├── available_events    0440  "group:name\n" per event
+//! ├── set_event           0640  the enabled events; write to (dis)arm
+//! ├── buffer_size_kb      0640  the per-CPU ring size in KiB
+//! ├── snapshot            0644  the saved-away buffer ("1" saves and
+//! │                              restarts the live buffer, "0" clears
+//! │                              the saved copy, read shows it like
+//! │                              `trace`)
+//! ├── options/            0755  one boolean file per trace option
+//! │   └── <option>        0644  "1\n"/"0\n"; write toggles
+//! └── events/
+//!     ├── enable          0640  all events (1/0/X, X = mixed)
+//!     └── <group>/
+//!         ├── enable      0640  the group's events (1/0/X)
+//!         ├── filter     0640  the global-filter note (the standard text)
+//!         └── <event>/
+//!             ├── enable  0640  1/0
+//!             ├── filter  0640  "none" (no filter engine)
+//!             ├── id      0440  the numeric event id
+//!             └── format  0440  the TRACE_EVENT field description
+//! ```
+//!
+//! The X convention is the standard one: a group (or the whole tree) reads
+//! "1" when every event is enabled, "0" when none is, "X" when the
+//! set is mixed.
+
+// Kernel layer policy (docs/architecture/kernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use crate::fs::tracefs;
+use crate::trace;
+
+/// The directory the tracing files live in: the tracefs ROOT (tracefs
+/// is mounted at /sys/kernel/tracing and, the same instance, at
+/// /sys/kernel/debug/tracing).
+const TRACING_DIR: &str = "";
+
+/// The group-level filter file text (standard wording) (events/<group>/filter).
+const GROUP_FILTER_TEXT: &str = "### global filter ###\n# Use this to set filters for multiple events.\n# Only events with the given fields will be affected.\n# If no events are modified, an error message will be displayed here\n";
+
+/// Parse a boolean knob the standard way: any number is accepted,
+/// zero is off, everything else is on.
+///
+/// A whitespace-only buffer is a NO-OP success: the guest shell sends
+/// the value and the trailing newline as separate write() calls, and
+/// the newline-only write must not fail the shell's redirection.
+fn parse_bool(buf: &[u8]) -> Option<Option<bool>> {
+    let text = core::str::from_utf8(buf).ok()?.trim();
+    if text.is_empty() {
+        return Some(None);
+    }
+    match text.parse::<u64>() {
+        Ok(v) => Some(Some(v != 0)),
+        Err(_) => None,
+    }
+}
+
+/// A boolean write handler body: `None` from parse_bool is a syntax
+/// error (EINVAL); `Some(None)` is the no-op newline write.
+fn bool_write(buf: &[u8], apply: impl Fn(bool)) -> i32 {
+    match parse_bool(buf) {
+        Some(Some(on)) => {
+            apply(on);
+            0
+        }
+        Some(None) => 0,
+        None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
+    }
+}
+
+/// The 1/0/X reading of a set of enable switches.
+fn set_state(on: usize, total: usize) -> char {
+    if total == 0 || on == 0 {
+        '0'
+    } else if on == total {
+        '1'
+    } else {
+        'X'
+    }
+}
+
+/// The distinct groups, in name order.
+fn groups() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = trace::EVENTS.iter().map(|e| e.group).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Publish the tracing files.
+pub fn register() {
+    if !tracefs::create_dir(TRACING_DIR) {
+        return;
+    }
+
+    // --- the master switch ------------------------------------------
+    tracefs::create_file(
+        &format!("{}/tracing_on", TRACING_DIR),
+        0o640,
+        || {
+            let mut out = alloc::vec![b'0'];
+            if trace::tracing_on() {
+                out[0] = b'1';
+            }
+            out.push(b'\n');
+            out
+        },
+        Some(|buf: &[u8]| bool_write(buf, |on| trace::set_tracing_on(on))),
+    );
+
+    // --- the event pid filter ---------------------------------------
+    // set_event_pid (the reference's file of the same name): a list of
+    // pids; when non-empty, only those tasks' events are recorded.
+    // Write: comma/space/newline-separated pids; an empty/whitespace
+    // write CLEARS the filter (the reference's semantics for clearing).
+    // Divergence (documented at trace::event_pid_passes): a listed pid
+    // matches the task's tid OR tgid, so writing one service tgid
+    // captures its whole process tree.
+    tracefs::create_file(
+        &format!("{}/set_event_pid", TRACING_DIR),
+        0o644,
+        || {
+            let mut out = alloc::vec::Vec::new();
+            for pid in trace::event_pids() {
+                out.extend_from_slice(alloc::format!("{}\n", pid).as_bytes());
+            }
+            out
+        },
+        Some(|buf: &[u8]| {
+            let text = core::str::from_utf8(buf).unwrap_or("");
+            let mut pids = alloc::vec::Vec::new();
+            for tok in text.split(|c: char| c == ',' || c.is_whitespace()) {
+                if tok.is_empty() {
+                    continue;
+                }
+                match tok.parse::<u32>() {
+                    Ok(pid) if pid != 0 => {
+                        if pids.len() >= 16 {
+                            return -22; // EINVAL: table full (16 slots)
+                        }
+                        pids.push(pid);
+                    }
+                    _ => return -22, // EINVAL: unparsable token
+                }
+            }
+            trace::set_event_pids(&pids);
+            0
+        }),
+    );
+
+    // --- the collected records ---------------------------------------
+    tracefs::create_file(
+        &format!("{}/trace", TRACING_DIR),
+        0o640,
+        || trace::render_trace().into_bytes(),
+        // Writing to the trace file clears the buffer (standard behavior).
+        Some(|_buf: &[u8]| {
+            trace::clear();
+            0
+        }),
+    );
+
+    // --- the consuming reader ----------------------------------------
+    // Streaming shape: every read() on a held fd drains the rings —
+    // the snapshot-once shape returned EOF forever and userspace
+    // stream consumers saw nothing.
+    tracefs::create_stream_file(
+        &format!("{}/trace_pipe", TRACING_DIR),
+        0o440,
+        || trace::render_pipe().into_bytes(),
+    );
+
+    // --- the tracers --------------------------------------------------
+    // Rux has no tracer of its own: the events are the whole facility,
+    // which is what the "nop" tracer means — it records nothing by
+    // itself, the tracepoints do.
+    tracefs::create_file(
+        &format!("{}/available_tracers", TRACING_DIR),
+        0o440,
+        || b"nop\n".to_vec(),
+        None::<fn(&[u8]) -> i32>,
+    );
+    tracefs::create_file(
+        &format!("{}/current_tracer", TRACING_DIR),
+        0o640,
+        || b"nop\n".to_vec(),
+        Some(|buf: &[u8]| {
+            let text = core::str::from_utf8(buf).unwrap_or("").trim();
+            if text.is_empty() {
+                // The shell's split trailing-newline write: no-op.
+                0
+            } else if text == "nop" {
+                0
+            } else {
+                // An unknown tracer is refused (EINVAL).
+                crate::errno::Errno::InvalidArgument.as_neg_i32()
+            }
+        }),
+    );
+
+    // --- the event catalog --------------------------------------------
+    tracefs::create_file(
+        &format!("{}/available_events", TRACING_DIR),
+        0o440,
+        || {
+            let mut names: Vec<String> = trace::EVENTS
+                .iter()
+                .map(|e| format!("{}:{}", e.group, e.name))
+                .collect();
+            names.sort();
+            let mut out = String::new();
+            for name in names {
+                out.push_str(&name);
+                out.push('\n');
+            }
+            out.into_bytes()
+        },
+        None::<fn(&[u8]) -> i32>,
+    );
+    // set_event: read lists the armed events; write (dis)arms by name.
+    tracefs::create_file(
+        &format!("{}/set_event", TRACING_DIR),
+        0o640,
+        || {
+            let mut out = String::new();
+            let mut names: Vec<String> = trace::EVENTS
+                .iter()
+                .filter(|e| {
+                    e.enabled
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                })
+                .map(|e| format!("{}:{}", e.group, e.name))
+                .collect();
+            names.sort();
+            for name in names {
+                out.push_str(&name);
+                out.push('\n');
+            }
+            out.into_bytes()
+        },
+        Some(|buf: &[u8]| set_event_write(buf)),
+    );
+
+    // --- the ring size -------------------------------------------------
+    tracefs::create_file(
+        &format!("{}/buffer_size_kb", TRACING_DIR),
+        0o640,
+        || {
+            let kb =
+                trace::RING_CAPACITY * core::mem::size_of::<trace::TraceRecord>() / 1024;
+            alloc::format!("{}\n", kb).into_bytes()
+        },
+        // The rings are statically allocated; there is nothing to
+        // resize, so every write is refused.
+        Some(|_buf: &[u8]| crate::errno::Errno::InvalidArgument.as_neg_i32()),
+    );
+
+    // --- the options directory ----------------------------------------
+    // One boolean file per trace option ("1\n"/"0\n", write toggles) —
+    // the reference's options/ directory. Only the options the
+    // renderer and ring consume exist here; tracer-specific options
+    // with no counterpart are omitted, not faked.
+    let options_dir = format!("{}/options", TRACING_DIR);
+    for option_ref in trace::OPTIONS.iter() {
+        // A 'static reference, so the closures below can own it.
+        let option: &'static trace::TraceOption = option_ref;
+        tracefs::create_file(
+            &format!("{}/{}", options_dir, option.name),
+            0o644,
+            || {
+                let mut out = alloc::vec![b'0'];
+                if trace::option_enabled(option) {
+                    out[0] = b'1';
+                }
+                out.push(b'\n');
+                out
+            },
+            Some(move |buf: &[u8]| {
+                bool_write(buf, |on| {
+                    option
+                        .set
+                        .store(on, core::sync::atomic::Ordering::Relaxed)
+                })
+            }),
+        );
+    }
+
+    // --- the event tree ------------------------------------------------
+    let events_dir = format!("{}/events", TRACING_DIR);
+    for group in groups() {
+        let group_dir = format!("{}/{}", events_dir, group);
+        for event_ref in trace::EVENTS.iter().filter(|e| e.group == group) {
+            // A 'static reference, so the closures below can own it.
+            let event: &'static trace::TraceEvent = event_ref;
+            let event_dir = format!("{}/{}", group_dir, event.name);
+
+            // The per-event switch.
+            tracefs::create_file(
+                &format!("{}/enable", event_dir),
+                0o640,
+                || {
+                    let mut out = alloc::vec![b'0'];
+                    if event
+                        .enabled
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                    {
+                        out[0] = b'1';
+                    }
+                    out.push(b'\n');
+                    out
+                },
+                Some(move |buf: &[u8]| {
+                    bool_write(buf, |on| {
+                        event
+                            .enabled
+                            .store(on, core::sync::atomic::Ordering::Relaxed)
+                    })
+                }),
+            );
+
+            // The event id.
+            tracefs::create_file(
+                &format!("{}/id", event_dir),
+                0o440,
+                || alloc::format!("{}\n", event.id).into_bytes(),
+                None::<fn(&[u8]) -> i32>,
+            );
+
+            // The format description.
+            tracefs::create_file(
+                &format!("{}/format", event_dir),
+                0o440,
+                || event.format_file().into_bytes(),
+                None::<fn(&[u8]) -> i32>,
+            );
+
+            // The event filter — no filter engine, so like a standard
+            // event with no filter set: reads "none", accepts nothing.
+            tracefs::create_file(
+                &format!("{}/filter", event_dir),
+                0o640,
+                || b"none\n".to_vec(),
+                Some(|_buf: &[u8]| crate::errno::Errno::InvalidArgument.as_neg_i32()),
+            );
+        }
+
+        // The group switch: all the events of the group (1/0/X). The
+        // closures capture only the 'static group name and re-filter
+        // the event table.
+        tracefs::create_file(
+            &format!("{}/enable", group_dir),
+            0o640,
+            move || {
+                let on = trace::EVENTS
+                    .iter()
+                    .filter(|e| {
+                        e.group == group
+                            && e.enabled
+                                .load(core::sync::atomic::Ordering::Relaxed)
+                    })
+                    .count();
+                let total = trace::EVENTS.iter().filter(|e| e.group == group).count();
+                let mut out = alloc::vec![set_state(on, total) as u8];
+                out.push(b'\n');
+                out
+            },
+            Some(move |buf: &[u8]| {
+                bool_write(buf, |on| {
+                    for e in trace::EVENTS.iter().filter(|e| e.group == group) {
+                        e.enabled
+                            .store(on, core::sync::atomic::Ordering::Relaxed);
+                    }
+                })
+            }),
+        );
+
+        // The group filter — the standard global-filter note.
+        tracefs::create_file(
+            &format!("{}/filter", group_dir),
+            0o640,
+            || GROUP_FILTER_TEXT.as_bytes().to_vec(),
+            Some(|_buf: &[u8]| crate::errno::Errno::InvalidArgument.as_neg_i32()),
+        );
+    }
+
+    // The whole-tree switch (events/enable): 1/0/X across every event.
+    tracefs::create_file(
+        &format!("{}/enable", events_dir),
+        0o640,
+        || {
+            let on = trace::EVENTS
+                .iter()
+                .filter(|e| {
+                    e.enabled
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                })
+                .count();
+            let mut out = alloc::vec![set_state(on, trace::EVENTS.len()) as u8];
+            out.push(b'\n');
+            out
+        },
+        Some(|buf: &[u8]| {
+            bool_write(buf, |on| {
+                for e in trace::EVENTS.iter() {
+                    e.enabled
+                        .store(on, core::sync::atomic::Ordering::Relaxed);
+                }
+            })
+        }),
+    );
+
+    // --- trace_marker: the write-only marker file ----------------------
+    // Mode 0220 and write-only, exactly the reference file. Markers are
+    // gated by tracing_on alone (no event switch); the write body
+    // records the text as a tracing_mark_write event. The read closure
+    // never runs through the mode gate — the reference answers a read
+    // of the write-only file with EINVAL; the mode refusal here is the
+    // same refusal at a different errno.
+    tracefs::create_file(
+        &format!("{}/trace_marker", TRACING_DIR),
+        0o220,
+        || Vec::new(),
+        Some(|buf: &[u8]| {
+            trace::record_marker(buf);
+            0
+        }),
+    );
+
+    // --- the snapshot buffer -------------------------------------------
+    // The reference's snapshot file: a second (max) buffer swapped in
+    // by writing 1, cleared by writing 0, rendered like `trace` on
+    // read. The swap here is a copy-out + live restart (the spare ring
+    // set is documented in trace::save_snapshot).
+    tracefs::create_file(
+        &format!("{}/snapshot", TRACING_DIR),
+        0o644,
+        || trace::render_snapshot().into_bytes(),
+        Some(|buf: &[u8]| {
+            bool_write(buf, |on| {
+                if on {
+                    trace::save_snapshot();
+                } else {
+                    trace::clear_snapshot();
+                }
+            })
+        }),
+    );
+
+    // --- the per-CPU views ---------------------------------------------
+    // per_cpu/cpuN/{trace,trace_pipe,stats,buffer_size_kb}: the
+    // reference dir also carries the snapshot and raw views; those
+    // need a second buffer / a binary record format this ring does not
+    // have, so they are omitted rather than faked (the plan doc's
+    // do-not-invent rule).
+    for cpu in 0..crate::config::MAX_CPUS {
+        let cpu_dir = format!("{}/per_cpu/cpu{}", TRACING_DIR, cpu);
+        tracefs::create_file(
+            &format!("{}/trace", cpu_dir),
+            0o640,
+            move || trace::render_trace_cpu(cpu).into_bytes(),
+            Some(move |_buf: &[u8]| {
+                // Writing the per-CPU trace file clears that CPU's
+                // ring, the global file's convention.
+                trace::clear_cpu(cpu);
+                0
+            }),
+        );
+        tracefs::create_stream_file(
+            &format!("{}/trace_pipe", cpu_dir),
+            0o440,
+            move || trace::render_pipe_cpu(cpu).into_bytes(),
+        );
+        tracefs::create_file(
+            &format!("{}/stats", cpu_dir),
+            0o440,
+            move || trace::cpu_stats(cpu).into_bytes(),
+            None::<fn(&[u8]) -> i32>,
+        );
+        tracefs::create_file(
+            &format!("{}/buffer_size_kb", cpu_dir),
+            0o640,
+            || {
+                let kb = trace::RING_CAPACITY
+                    * core::mem::size_of::<trace::TraceRecord>()
+                    / 1024;
+                alloc::format!("{}\n", kb).into_bytes()
+            },
+            None::<fn(&[u8]) -> i32>,
+        );
+    }
+}
+
+/// Apply ONE set_event token (the reference's ftrace_set_clr_event):
+/// arm (or, with a leading '!', disarm) every event the token matches.
+/// Returns how many event switches were set — 0 means the token
+/// matched no event.
+///
+/// The token forms, per ftrace_set_clr_event:
+///
+/// - `system:event` — that one event;
+/// - `*:event` / `:event` — every event of that name, any system;
+/// - `system:*` / `system:` — every event of that system;
+/// - `name` (no colon) — every event whose SYSTEM or NAME is `name`.
+pub(crate) fn apply_event_token(token: &str) -> usize {
+    let (disarm, spec) = match token.strip_prefix('!') {
+        Some(rest) => (true, rest),
+        None => (false, token),
+    };
+    let matches: Vec<&trace::TraceEvent> = trace::EVENTS
+        .iter()
+        .filter(|e| match spec.split_once(':') {
+            Some((sub, event)) => {
+                let sub_ok = sub.is_empty() || sub == "*" || e.group == sub;
+                let event_ok = event.is_empty() || event == "*" || e.name == event;
+                sub_ok && event_ok
+            }
+            None => e.group == spec || e.name == spec,
+        })
+        .copied()
+        .collect();
+    for e in matches.iter() {
+        e.enabled
+            .store(!disarm, core::sync::atomic::Ordering::Relaxed);
+    }
+    matches.len()
+}
+
+/// The `trace_event=` boot parameter — the reference's
+/// `__setup("trace_event=", ...)` in kernel/trace/trace_events.c:
+/// comma-separated set_event tokens applied at boot, before the first
+/// userspace instruction. A token that matches no event is warned
+/// about and skipped (the reference's "Failed to enable trace event").
+///
+/// One Rux-side addition over just arming the switches: the boot
+/// parameter also turns `tracing_on` on. The reference's tracing_on
+/// is on by default, so boot-armed events record from the first tick;
+/// Rux's tracing_on starts off (its events-off default), so the boot
+/// parameter flips it to reach the same net effect.
+pub fn init_from_cmdline() {
+    let Some(spec) = crate::cmdline::get_param("trace_event") else {
+        return;
+    };
+    let mut armed = 0usize;
+    for token in spec.split(',') {
+        if token.is_empty() {
+            continue;
+        }
+        let n = apply_event_token(token);
+        if n == 0 {
+            crate::println!(
+                "[trace] trace_event=: no such event '{}' (skipped)",
+                token
+            );
+        }
+        armed += n;
+    }
+    if armed > 0 {
+        trace::set_tracing_on(true);
+    }
+}
+
+/// The set_event write handler — the reference grammar exactly.
+///
+/// The reference applies ONE whitespace-delimited token per write
+/// (trace_get_user consumes a single token and the rest of the buffer
+/// with it; a whitespace-only write is a no-op). A leading '!' disarms
+/// instead of arming. There are no "all"/"none" words in the
+/// reference's set_event — the events/enable file is the all-events
+/// switch.
+fn set_event_write(buf: &[u8]) -> i32 {
+    let text = match core::str::from_utf8(buf) {
+        Ok(t) => t,
+        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
+    };
+    let token = match text.split_whitespace().next() {
+        Some(t) => t,
+        // Only whitespace (the shell's split trailing-newline write):
+        // consumed, nothing applied.
+        None => return 0,
+    };
+    if apply_event_token(token) == 0 {
+        // A token that matches no event is EINVAL (the reference's
+        // __ftrace_set_clr_event_nolock leaves the error set).
+        return crate::errno::Errno::InvalidArgument.as_neg_i32();
+    }
+    0
+}
+
+/// The tracing files, as a listing (diagnostics).
+pub fn describe() -> String {
+    let mut out = String::new();
+    out.push_str("tracing:\n");
+    for event in trace::EVENTS.iter() {
+        out.push_str(&format!(
+            "  {}:{} id={} enabled={}\n",
+            event.group,
+            event.name,
+            event.id,
+            event.enabled.load(core::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    out
+}

@@ -1,0 +1,40 @@
+name: SPIN Concurrency Verification
+
+on:
+  schedule:
+    - cron: "0 3 * * *"  # nightly, off the per-push path
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  spin:
+    name: SPIN (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SPIN
+        run: sudo apt-get install -y spin
+
+      - name: Run SPIN verification
+        run: |
+          set -o pipefail
+          cd kernel/verify/spin
+          make 2>&1 | tee spin-output.txt
+          # Fail if any model has errors (also covered by make exit code)
+          if grep -q "FAIL:" spin-output.txt || grep -q "COMPILE ERROR" spin-output.txt; then
+            echo "::error::SPIN detected failing model"
+            exit 1
+          fi
+
+      - name: Upload SPIN output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spin-output
+          path: |
+            kernel/verify/spin/spin-output.txt
+            kernel/verify/spin/spin-report.txt

@@ -1,0 +1,1989 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+//! File Object and File Descriptor Management
+//!
+//!
+//! Core concepts:
+//! - `struct file`: Opened file object
+//! - `fdtable`: File descriptor table
+//! - `struct file_operations`: File operation function pointers
+
+use crate::errno;
+use crate::fs::inode::Inode;
+use crate::fs::dentry::Dentry;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use crate::sync::spinlock::Spinlock;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct FileFlags(u32);
+
+impl FileFlags {
+    pub const O_RDONLY: u32 = 0o00000000;
+    pub const O_WRONLY: u32 = 0o00000001;
+    pub const O_RDWR: u32 = 0o00000002;
+    pub const O_ACCMODE: u32 = 0o00000003;
+    pub const O_CREAT: u32 = 0o00000100;
+    pub const O_EXCL: u32 = 0o00000200;
+    pub const O_NOCTTY: u32 = 0o00000400;
+    pub const O_TRUNC: u32 = 0o00001000;
+    pub const O_APPEND: u32 = 0o00002000;
+    pub const O_NONBLOCK: u32 = 0o00004000;
+    pub const O_DSYNC: u32 = 0o00010000;
+    // O_DIRECT/O_LARGEFILE/O_DIRECTORY/O_NOFOLLOW are arch-dependent:
+    // x86_64 and the plain asm-generic table (riscv64) share one set,
+    // but the arm64 uapi/asm/fcntl.h overrides all four with the
+    // AArch32-compat bit positions (O_DIRECTORY 040000, O_NOFOLLOW
+    // 0100000, O_DIRECT 0200000, O_LARGEFILE 0400000). With the x86
+    // values on aarch64, O_DIRECT and O_DIRECTORY are effectively
+    // SWAPPED — LTP read02's open(O_RDWR|O_DIRECT)=0x10002 hit the
+    // O_DIRECTORY bit and returned ENOTDIR on a regular file.
+    #[cfg(feature = "aarch64")]
+    pub const O_DIRECT: u32 = 0o00200000;
+    #[cfg(not(feature = "aarch64"))]
+    pub const O_DIRECT: u32 = 0o00040000;
+    #[cfg(feature = "aarch64")]
+    pub const O_LARGEFILE: u32 = 0o00400000;
+    #[cfg(not(feature = "aarch64"))]
+    pub const O_LARGEFILE: u32 = 0o00100000;
+    #[cfg(feature = "aarch64")]
+    pub const O_DIRECTORY: u32 = 0o00040000;
+    #[cfg(not(feature = "aarch64"))]
+    pub const O_DIRECTORY: u32 = 0o00200000;
+    #[cfg(feature = "aarch64")]
+    pub const O_NOFOLLOW: u32 = 0o00100000;
+    #[cfg(not(feature = "aarch64"))]
+    pub const O_NOFOLLOW: u32 = 0o00400000;
+    pub const O_NOATIME: u32 = 0o01000000;
+    pub const O_CLOEXEC: u32 = 0o02000000;
+    pub const O_SYNC: u32 = 0o04000000;
+    pub const O_PATH: u32 = 0o10000000;
+    /// O_ASYNC / FASYNC (asm-generic 020000): signal the f_owner on I/O
+    /// readiness (F_SETFL settable; drives pipe SIGIO, fcntl31).
+    pub const O_ASYNC: u32 = 0o20000;
+
+    pub fn new(flags: u32) -> Self {
+        Self(flags)
+    }
+
+    pub fn is_readonly(&self) -> bool {
+        (self.0 & Self::O_ACCMODE) == Self::O_RDONLY
+    }
+
+    pub fn is_writeonly(&self) -> bool {
+        (self.0 & Self::O_ACCMODE) == Self::O_WRONLY
+    }
+
+    pub fn is_rdwr(&self) -> bool {
+        (self.0 & Self::O_ACCMODE) == Self::O_RDWR
+    }
+
+    pub fn bits(&self) -> u32 {
+        self.0
+    }
+
+    /// Set flags (for F_SETFL)
+    pub fn set_bits(&mut self, flags: u32) {
+        self.0 = flags;
+    }
+
+    /// Add flags (bitwise OR)
+    pub fn add_flags(&mut self, flags: u32) {
+        self.0 |= flags;
+    }
+}
+
+#[repr(C)]
+pub struct FileOps {
+    /// Read file
+    pub read: Option<fn(&File, &mut [u8]) -> isize>,
+    /// Write file
+    pub write: Option<fn(&File, &[u8]) -> isize>,
+    /// Seek file position
+    pub lseek: Option<fn(&File, isize, i32) -> isize>,
+    /// Close file
+    pub close: Option<fn(&File) -> i32>,
+    /// Poll for readiness (takes requested events mask, returns ready events mask)
+    pub poll: Option<fn(&File, u16) -> u16>,
+    /// file_operations.flush: invoked when an fd is closed (and at
+    /// fork/inherit checks) — the file's chance to interrupt waiters
+    /// before the description goes away (reference binder_flush wakes
+    /// every waiting looper with looper_need_return; plain files have
+    /// no flush). Distinct from `close` (last-reference release).
+    pub flush: Option<fn(&File)>,
+    /// Positional read at an explicit offset, never touching the shared
+    /// file position (R71 demand-fault race: the generic read_at fallback
+    /// swings the file position through set_pos/read/restore — two
+    /// threads sharing this open file description (CLONE_VM peers: one
+    /// demand-faulting an mmap page, one in plain read()) interleaved the
+    /// sequence and the faulting page got filled from the OTHER thread's
+    /// offset; a libc .text page served .rodata bytes and multithreaded
+    /// loaders crashed on their own libraries). File ops used for mmap or
+    /// pread at scale (ext4, tmpfs) provide a native entry; the generic
+    /// fallback in File::read_at covers the rest.
+    pub read_at: Option<fn(&File, u64, &mut [u8]) -> isize>,
+}
+
+/// Capability-checked FileOps construction (rust-design-headroom §1,
+/// divergence D-6). A file TYPE declares exactly the capabilities it
+/// carries; each builder method installs one op slot and refuses a
+/// duplicate install — in a `static` initializer the duplicate is a
+/// COMPILE error (const evaluation of the panic), so a table cannot
+/// claim a capability twice, and an absent slot is a declared absence,
+/// not an omission the reader must infer from a wall of `None` fields.
+///
+/// Migration is opportunistic (D-4 procfile precedent): struct-literal
+/// tables still compile; converted types carry a capability-matrix
+/// shape test (tests group `fileops-caps`) pinning which slots exist.
+impl FileOps {
+    pub const fn builder() -> FileOpsBuilder {
+        FileOpsBuilder {
+            ops: FileOps {
+                read: None,
+                write: None,
+                lseek: None,
+                close: None,
+                poll: None,
+                flush: None,
+                read_at: None,
+            },
+        }
+    }
+}
+
+pub struct FileOpsBuilder {
+    ops: FileOps,
+}
+
+impl FileOpsBuilder {
+    pub const fn read(mut self, f: fn(&File, &mut [u8]) -> isize) -> Self {
+        assert!(self.ops.read.is_none(), "FileOps: duplicate read capability");
+        self.ops.read = Some(f);
+        self
+    }
+    pub const fn write(mut self, f: fn(&File, &[u8]) -> isize) -> Self {
+        assert!(self.ops.write.is_none(), "FileOps: duplicate write capability");
+        self.ops.write = Some(f);
+        self
+    }
+    pub const fn lseek(mut self, f: fn(&File, isize, i32) -> isize) -> Self {
+        assert!(self.ops.lseek.is_none(), "FileOps: duplicate lseek capability");
+        self.ops.lseek = Some(f);
+        self
+    }
+    pub const fn close(mut self, f: fn(&File) -> i32) -> Self {
+        assert!(self.ops.close.is_none(), "FileOps: duplicate close capability");
+        self.ops.close = Some(f);
+        self
+    }
+    /// Install the flush capability (file_operations.flush parity —
+    /// called on fd close; see the field doc).
+    pub const fn flush(mut self, f: fn(&File)) -> Self {
+        assert!(self.ops.flush.is_none(), "FileOps: duplicate flush capability");
+        self.ops.flush = Some(f);
+        self
+    }
+    pub const fn poll(mut self, f: fn(&File, u16) -> u16) -> Self {
+        assert!(self.ops.poll.is_none(), "FileOps: duplicate poll capability");
+        self.ops.poll = Some(f);
+        self
+    }
+    pub const fn read_at(mut self, f: fn(&File, u64, &mut [u8]) -> isize) -> Self {
+        assert!(self.ops.read_at.is_none(), "FileOps: duplicate read_at capability");
+        self.ops.read_at = Some(f);
+        self
+    }
+    pub const fn build(self) -> FileOps {
+        self.ops
+    }
+}
+
+/// The operation kinds the File dispatchers route. The errno a caller
+/// observes when a file type lacks the capability is decided in ONE
+/// place — `File::missing_op_errno` below — with the ABI reasoning
+/// attached; dispatch sites stop re-deriving per-callsite conventions.
+/// (The §1 paid incident: read() on a valid epoll fd once returned EBADF
+/// because the read slot was NULL — an OH event loop treated it as
+/// "fd closed" and spun 155,991 times instead of taking its EINVAL
+/// error path.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileOpKind {
+    Read,
+    Write,
+    LSeek,
+    /// Explicit-position read (pread(2)). The errno depends on WHY the
+    /// object is not positional (stream type vs op-less type), so the
+    /// decision consults the ops table, not just the one slot.
+    ReadAt,
+    /// Poll has no errno on the syscall path — the missing-poll
+    /// fallback is the always-ready mask (`File::poll_dispatch`). The
+    /// kind exists so the capability matrix is nameable per op.
+    Poll,
+}
+
+/// R36-B1: monotonically increasing open-file-description generation.
+/// Epoll registrations record this instead of the Arc's heap address: the
+/// slab allocator hands a freed File's address back to the NEXT same-size
+/// allocation with near certainty, and fd numbers recycle the same way, so
+/// the old address-as-identity scheme let a stale entry silently match a
+/// NEW file after close(fd)+reopen (and made the legitimate re-ADD return
+/// EEXIST). A never-repeating generation keeps the identity stable for the
+/// description's lifetime without pinning the Arc.
+///
+/// (sysmm-2x lane) The id is now PER-CPU: (cpu << 56) | local counter.
+/// A single global fetch_add made every File::new a cross-CPU
+/// cacheline RMW under the open/close storm (SMP-8: one line bounced
+/// across every vCPU opening files); the per-CPU prefix keeps global
+/// uniqueness (cpu < 64 ⇒ the top byte names the origin CPU) while the
+/// counter rides a per-CPU line. Uniqueness is all the registries
+/// (flock/ofd/lease/oasync) need — they compare for equality, never
+/// order. No irq bracket is needed (unlike CpuLocal::with): a racing
+/// fetch_add from an interrupt handler on the same CPU still yields a
+/// DISTINCT id, which is the whole contract.
+static FILE_ID_GENERATION_CPU: [core::sync::atomic::AtomicU64; 64] =
+    [const { core::sync::atomic::AtomicU64::new(1) }; 64];
+
+/// Allocate the next open-file-description id for THIS CPU.
+#[inline]
+fn next_file_id() -> u64 {
+    let cpu = (crate::arch::cpu_id() as usize) & 63;
+    let c = FILE_ID_GENERATION_CPU[cpu].fetch_add(1, Ordering::Relaxed);
+    ((cpu as u64) << 56) | (c & 0x00ff_ffff_ffff_ffff)
+}
+
+/// Conditional strong-count acquisition on a published File — the
+/// reference's `get_file_rcu` / `atomic_long_inc_not_zero` shape
+/// (oc-rc close-path rework; replaces the unconditional increment that
+/// forced every close(2) to wait out an RCU grace period before
+/// dropping the removed Arc).
+///
+/// Returns None when the strong count has reached zero — the fd was
+/// closed concurrently; callers treat it exactly like an empty slot
+/// (EBADF), which is the reference fget race outcome.
+///
+/// SAFETY: `p` must have been published by a writer from an owned Arc
+/// (install/dup/fork displacement-free publication), and the ArcInner
+/// allocation must be pinned across this call (a slot reference or a
+/// fdreap-parked Weak) — the CAS itself must never act on freed memory.
+#[inline]
+unsafe fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
+    // std Arc layout on our 64-bit targets: ArcInner { strong:
+    // AtomicUsize, weak: AtomicUsize, value: T }, and into_raw/as_ptr
+    // point at `value` — the strong word sits two usize words back.
+    // The assumption is pinned at boot by verify_arc_inner_layout().
+    let strong = (p as *const core::sync::atomic::AtomicUsize).sub(2);
+    // SAFETY: caller pins the allocation (see doc); the atomic protocol
+    // below either wins a nonzero count or fails cleanly.
+    let mut cur = unsafe { (*strong).load(Ordering::Relaxed) };
+    loop {
+        if cur == 0 {
+            return None;
+        }
+        match unsafe {
+            (*strong).compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+        } {
+            Ok(_) => return Some(unsafe { Arc::from_raw(p) }),
+            Err(c) => cur = c,
+        }
+    }
+}
+
+/// Boot-time pin of the ArcInner strong-word offset assumption used by
+/// `file_arc_try_clone` (called from fs::fdreap::init). If a future
+/// toolchain moved the refcount word, every lock-free fd lookup would
+/// CAS the wrong memory — fail loudly at boot instead.
+pub(crate) fn verify_arc_inner_layout() {
+    crate::pr_info!(
+        "fs: File={}B (open/close hot path size gate)",
+        core::mem::size_of::<File>()
+    );
+    let probe = Arc::new(File::new(FileFlags::new(0)));
+    // SAFETY: read-only probe of the live Arc the function constructed.
+    let strong = unsafe {
+        (Arc::as_ptr(&probe) as *const core::sync::atomic::AtomicUsize).sub(2)
+    };
+    // SAFETY: probe is a live Arc; the word read is the refcount itself
+    // under verification.
+    assert_eq!(
+        unsafe { (*strong).load(Ordering::Relaxed) },
+        1,
+        "ArcInner strong-word offset assumption broken"
+    );
+    let clone = Arc::clone(&probe);
+    assert_eq!(unsafe { (*strong).load(Ordering::Relaxed) }, 2);
+    drop(clone);
+    assert_eq!(unsafe { (*strong).load(Ordering::Relaxed) }, 1);
+    // Weak interplay: a downgrade must keep the ArcInner alive at
+    // strong-count zero (the fdreap parking depends on it).
+    let weak = Arc::downgrade(&probe);
+    drop(probe);
+    assert!(weak.upgrade().is_none(), "strong count must be zero");
+    drop(weak);
+}
+
+/// F4 route-4: one getdents64 listing cached per open file description.
+/// `file_getdents64` used to re-materialize the WHOLE directory on every
+/// call (ext4 list_dir: read every block + clone every entry; 27.6K full
+/// re-scans per boot, getdents avg 407 us — the f4 route map's route 4).
+/// A cacheable filesystem (INodeOps::readdir_cacheable) stores its
+/// listing here keyed by (inode identity, VFS_DIR_EPOCH); any successful
+/// directory mutation bumps the epoch, so the next call re-materializes.
+/// The entries include the synthesized "." and ".." (the synthesis runs
+/// once at materialization instead of per call). `epoch` is the epoch
+/// observed BEFORE materialization; the store additionally verifies the
+/// epoch did not move DURING materialization (a mutation racing the scan
+/// means the listing is a torn mix — serve it for this call as the old
+/// path did, but do not pin it in the cache).
+pub struct DirentCacheSnapshot {
+    /// Identity of the listed inode (Arc target address; the File's
+    /// inode slot is written once at open — if it ever changes, this
+    /// mismatch forces a re-materialization).
+    pub inode_id: usize,
+    /// VFS_DIR_EPOCH when materialization started.
+    pub epoch: u64,
+    /// Full ordered listing WITH the dot entries synthesized.
+    pub entries: alloc::vec::Vec<crate::fs::inode::VfsDirEntry>,
+}
+
+
+#[repr(C, align(16))]
+pub struct File {
+    /// R31-B3: set by close_fd when the slot was removed but an in-flight
+    /// syscall still holds a clone — the final dropper runs the close op.
+    pub close_pending: core::sync::atomic::AtomicBool,
+    /// File flags stored as AtomicU32 for lock-free concurrent access
+    /// (fcntl F_SETFL vs read/write data race fix).
+    pub flags: AtomicU32,
+    /// File position
+    pub pos: Spinlock<u64>,
+    /// Associated inode
+    pub inode: UnsafeCell<Option<Arc<Inode>>>,
+    /// Associated dentry
+    pub dentry: UnsafeCell<Option<Arc<Dentry>>>,
+    /// File operation functions
+    pub ops: UnsafeCell<Option<&'static FileOps>>,
+    /// Private data (for device-specific data)
+    pub private_data: UnsafeCell<Option<*mut u8>>,
+    /// close-on-exec flag (FD_CLOEXEC)
+    pub cloexec: Spinlock<bool>,
+    /// R36-B1: unique open-file-description id (see
+    /// FILE_ID_GENERATION_CPU). Written once in File::new before the
+    /// value is shared; readers only need a plain u64 load (the Arc
+    /// publication orders it).
+    pub file_id: u64,
+    /// Serializes the whole read/write position sequence (get_pos →
+    /// data op → set_pos) so concurrent readers/writers sharing this open
+    /// file description cannot interleave and lose offset updates
+    /// (LTP fork07: 100 forked children each read 1 byte; two CPUs both
+    /// observing pos=K and both storing K+1 left one byte unconsumed and
+    /// the parent's final read() returned 1 instead of 0). Sleeping
+    /// mutex, not a spinlock: the critical section spans inode read/write
+    /// which may sleep in block I/O (a Spinlock guard would pin
+    /// preempt_count across that window — the exact hazard b31ccab fixed
+    /// for VFS_MUTATION_LOCK). This is Linux's f_pos_lock role.
+    pub io_lock: crate::sync::semaphore::Mutex,
+    /// O_ASYNC signal destination (F_SETOWN / F_SETOWN_EX). kind 0 none,
+    /// 1 process, 2 process group, 3 thread (F_OWNER_TID).
+    pub f_owner: Spinlock<FileOwner>,
+    /// O_ASYNC signal signal number (F_SETSIG); 0 = default SIGIO.
+    pub f_signum: core::sync::atomic::AtomicI32,
+    /// F4 route-4: cached getdents64 listing (see DirentCacheSnapshot).
+    /// Arc so the hit path is one refcount bump — cloning the Vec per
+    /// call would reintroduce the per-call allocation the cache removes.
+    /// Materialization (readdir) may sleep in block I/O and runs OUTSIDE
+    /// this lock; only the slot swap is under it.
+    pub dirent_cache: Spinlock<Option<alloc::sync::Arc<DirentCacheSnapshot>>>,
+    /// Embedded readahead state (the reference's struct file carries
+    /// file_ra_state inline — oc-rc: the Box-in-private_data form paid a
+    /// slab alloc + free per open-then-read cycle, which every
+    /// read-cached workload performs per sample). Lazily initialized in
+    /// place at the first read by the filesystem that owns the
+    /// description (ext4 today); mutated only under io_lock (the same
+    /// serialization the Box form had).
+    pub ra: UnsafeCell<Option<crate::fs::readahead::ReadAheadState>>,
+}
+
+/// fasync owner set via F_SETOWN/F_SETOWN_EX (kept on the open file
+/// description, like Linux's f_owner).
+#[derive(Clone, Copy)]
+pub struct FileOwner {
+    pub kind: u8,
+    pub id: i32,
+}
+
+impl FileOwner {
+    pub const fn none() -> Self {
+        Self { kind: 0, id: 0 }
+    }
+}
+
+// SAFETY: File is only shared across threads when referenced through Arc,
+// and all mutable access goes through Spinlock or UnsafeCell fields that
+// are synchronized with IRQ-safe locking.
+unsafe impl Sync for File {}
+unsafe impl Send for File {}
+
+// Compile-time checks for File structure alignment
+const _: () = assert!(core::mem::align_of::<File>() >= 16);
+const _: () = {
+    let offset = core::mem::offset_of!(File, inode);
+    assert!(offset % 8 == 0, "inode field is not 8-byte aligned!");
+};
+
+
+impl File {
+    /// Create new file object
+    pub fn new(flags: FileFlags) -> Self {
+        Self {
+            flags: AtomicU32::new(flags.bits()),
+            pos: Spinlock::new(0),
+            inode: UnsafeCell::new(None),
+            dentry: UnsafeCell::new(None),
+            ops: UnsafeCell::new(None),
+            private_data: UnsafeCell::new(None),
+            close_pending: core::sync::atomic::AtomicBool::new(false),
+            cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
+            file_id: next_file_id(),
+            io_lock: crate::sync::semaphore::Mutex::new(),
+            f_owner: Spinlock::new(FileOwner::none()),
+            f_signum: core::sync::atomic::AtomicI32::new(0),
+            dirent_cache: Spinlock::new(None),
+            ra: UnsafeCell::new(None),
+        }
+    }
+
+    /// Read file flags (returns a copy, lock-free via AtomicU32).
+    pub fn flags(&self) -> FileFlags {
+        FileFlags::new(self.flags.load(Ordering::Acquire))
+    }
+
+    /// Set file flags atomically (for F_SETFL).
+    pub fn set_flags(&self, flags: FileFlags) {
+        self.flags.store(flags.bits(), Ordering::Release);
+    }
+
+    /// Load flags bits atomically (convenience for callers that only need the u32).
+    pub fn flags_bits(&self) -> u32 {
+        self.flags.load(Ordering::Acquire)
+    }
+
+    /// Set inode
+    pub fn set_inode(&self, inode: Arc<Inode>) {
+        // Lease/open bookkeeping: every File that gains an inode is an
+        // open file description on that inode (the F_SETLEASE grant
+        // checks and lease-break blocking consult these counts).
+        // File::drop unregisters. O_ACCMODE=3: O_WRONLY(1)/O_RDWR(2)
+        // carry write access.
+        crate::fs::locks::inode_open_register(&inode, self.flags_bits() & 0o3 != 0);
+        unsafe { *self.inode.get() = Some(inode); }
+    }
+
+    /// Set dentry
+    pub fn set_dentry(&self, dentry: Arc<Dentry>) {
+        unsafe { *self.dentry.get() = Some(dentry); }
+    }
+
+    /// Get the backing dentry of this open file description, if it has one.
+    ///
+    /// Same cell discipline as [`Self::get_inode`]: the dentry cell is
+    /// written at open/creation time before the File is published to an
+    /// fd table and is not mutated afterwards, so a shared read through
+    /// a shared `&self` borrow is race-free.
+    pub fn get_dentry(&self) -> Option<&Arc<Dentry>> {
+        // SAFETY: no write to the cell after publication (see doc).
+        unsafe { &*self.dentry.get() }.as_ref()
+    }
+
+    /// Set file operations
+    pub fn set_ops(&self, ops: &'static FileOps) {
+        unsafe { *self.ops.get() = Some(ops); }
+    }
+
+    /// Get file operations
+    pub fn get_ops(&self) -> Option<&'static FileOps> {
+        // SAFETY: write-once cell (see get_inode doc); no write after
+        // the File is published to an fd table.
+        unsafe { *self.ops.get() }
+    }
+
+    /// Get the backing inode of this open file description, if it has one.
+    ///
+    /// Same cell discipline as get_ops: the inode cell is written at
+    /// open/creation time before the File is published to an fd table and
+    /// is not mutated afterwards.
+    pub fn get_inode(&self) -> Option<&Arc<Inode>> {
+        // SAFETY: no write to the cell after publication (see doc), so a
+        // shared read through the shared &self borrow is race-free.
+        unsafe { &*self.inode.get() }.as_ref()
+    }
+
+    /// Set private data
+    pub fn set_private_data(&self, data: *mut u8) {
+        unsafe { *self.private_data.get() = Some(data); }
+    }
+
+    /// Get close-on-exec flag
+    pub fn get_cloexec(&self) -> bool {
+        *self.cloexec.lock()
+    }
+
+    /// Set close-on-exec flag
+    pub fn set_cloexec(&self, cloexec: bool) {
+        *self.cloexec.lock() = cloexec;
+    }
+
+    /// The single missing-capability errno table (§1 / D-6). Direction
+    /// and O_PATH checks (EBADF) are ABI f_mode rules and stay at the
+    /// top of each dispatcher; THIS function owns the "valid fd, right
+    /// direction, but the type carries no such op" decision, with the
+    /// reasoning written once:
+    ///
+    /// - Read/Write: EINVAL. The reference kernel's vfs_read/vfs_write
+    ///   return EINVAL for a NULL op — NOT EBADF. Returning EBADF made
+    ///   an OH event loop reading its own epoll fd (pa38: launcher fd
+    ///   32, 155,991 iterations) see "fd closed" and spin instead of
+    ///   taking its EINVAL error path.
+    /// - LSeek: ESPIPE. POSIX for unseekable objects (pipe, socket,
+    ///   fifo) — review SYSA-M11; EBADF here was the old bug.
+    /// - ReadAt: EINVAL when the type carries no read capability at all
+    ///   (op-less fds: epoll/binder/access_token/io_uring — the same
+    ///   EINVAL read() returns for them), ESPIPE for stream types that
+    ///   DO read but have no seek state (pipes/sockets/fifos — Linux
+    ///   rw_verify_area's FMODE_STREAM rejection; LTP preadv202:
+    ///   ESPIPE even on an O_WRONLY pipe write end).
+    pub fn missing_op_errno(&self, op: FileOpKind) -> isize {
+        match op {
+            FileOpKind::Read | FileOpKind::Write => -22, // EINVAL
+            FileOpKind::LSeek => -29,                    // ESPIPE
+            FileOpKind::ReadAt => {
+                let ops = self.get_ops();
+                match ops {
+                    Some(o) if o.read.is_none() && o.read_at.is_none() => -22, // EINVAL (op-less type)
+                    _ => -29, // ESPIPE (stream type)
+                }
+            }
+            // poll_dispatch's fallback is the always-ready mask, not an
+            // errno; included so every FileOpKind has exactly one
+            // documented disposition in one place.
+            FileOpKind::Poll => 0,
+        }
+    }
+
+    /// Central poll dispatch (§1 / D-6): the per-file-type poll callback
+    /// when the type declared the capability, else the always-ready
+    /// fallback (regular-file semantics: requested readable -> POLLIN |
+    /// POLLRDNORM, writable -> POLLOUT | POLLWRNORM). This fallback was
+    /// previously re-derived at four call sites with two different
+    /// shapes; consumers reduce both to the same event bits, but the
+    /// convention now lives here once.
+    pub fn poll_dispatch(&self, events: u16) -> u16 {
+        use crate::syscall::misc::poll_events::*;
+        let ops = self.get_ops();
+        match ops.and_then(|o| o.poll) {
+            Some(poll_fn) => poll_fn(self, events),
+            None => {
+                let mut r = 0u16;
+                if events & POLLIN != 0 {
+                    r |= POLLIN | POLLRDNORM;
+                }
+                if events & POLLOUT != 0 {
+                    r |= POLLOUT | POLLWRNORM;
+                }
+                r
+            }
+        }
+    }
+
+    /// Read file
+    pub unsafe fn read(&self, buf: *mut u8, count: usize) -> isize {
+        // f_mode enforcement: read on an O_WRONLY fd is EBADF (Linux)
+        if self.flags().is_writeonly() {
+            return -9;  // EBADF
+        }
+        // O_PATH descriptors permit no I/O at all (LTP open13).
+        if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+            return -9; // EBADF
+        }
+        if let Some(ops) = *self.ops.get() {
+            if let Some(read_fn) = ops.read {
+                let slice = core::slice::from_raw_parts_mut(buf, count);
+                let result = read_fn(self, slice);
+                if result > 0 {
+                    // inotify IN_ACCESS (P0-4): one atomic load when no
+                    // watches exist.
+                    crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_ACCESS);
+                }
+                return result;
+            }
+        }
+        // Valid fd, readable mode, but the type carries no read op
+        // (epoll, binder, access_token, io_uring) — see
+        // missing_op_errno(FileOpKind::Read) for why EINVAL, not EBADF.
+        self.missing_op_errno(FileOpKind::Read)
+    }
+
+    /// Write file
+    pub unsafe fn write(&self, buf: *const u8, count: usize) -> isize {
+        // f_mode enforcement: write on an O_RDONLY fd is EBADF (Linux)
+        if self.flags().is_readonly() {
+            return -9;  // EBADF
+        }
+        // O_PATH descriptors permit no I/O at all (LTP open13).
+        if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+            return -9; // EBADF
+        }
+        if let Some(ops) = *self.ops.get() {
+            if let Some(write_fn) = ops.write {
+                let slice = core::slice::from_raw_parts(buf, count);
+                let result = write_fn(self, slice);
+                if result > 0 {
+                    // inotify IN_MODIFY (P0-4): sqlite/editors/build tools.
+                    crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_MODIFY);
+                }
+                return result;
+            }
+        }
+        // Valid fd, writable mode, but the type carries no write op —
+        // see missing_op_errno(FileOpKind::Write) (EINVAL, matching the
+        // reference kernel's vfs_write).
+        self.missing_op_errno(FileOpKind::Write)
+    }
+
+    /// Seek file position
+    pub unsafe fn lseek(&self, offset: isize, whence: i32) -> isize {
+        if let Some(ops) = *self.ops.get() {
+            if let Some(lseek_fn) = ops.lseek {
+                return lseek_fn(self, offset, whence);
+            }
+        }
+        // No seek op = unseekable object (pipe, socket, fifo) — see
+        // missing_op_errno(FileOpKind::LSeek) for the POSIX reasoning.
+        self.missing_op_errno(FileOpKind::LSeek)
+    }
+
+    /// Position-invariant read at an explicit offset (pread(2) backing).
+    ///
+    /// Prefers the op's native read_at entry (R71): those never touch the
+    /// shared file position at all. The fd-backed fallback below still
+    /// swings the position — it is inherently not atomic against a
+    /// concurrent plain read() on the same description, which is exactly
+    /// why ops that userspace preads or demand-fault-maps at scale
+    /// (ext4/tmpfs) must carry ops.read_at.
+    ///
+    /// Returns -ESPIPE for non-seekable objects (pipes/sockets — Linux
+    /// pread on them fails with ESPIPE).
+    pub unsafe fn read_at(&self, offset: u64, buf: *mut u8, count: usize) -> isize {
+        // Unseekable objects first (pipes/sockets/fifos: no lseek op, no
+        // inode): explicit-position reads fail ESPIPE BEFORE the f_mode
+        // check — Linux rw_verify_area's FMODE_STREAM rejection (LTP
+        // preadv202 expects ESPIPE on a pipe read end, and pread on an
+        // O_WRONLY pipe write end is also ESPIPE, not EBADF).
+        let inode_opt = &*self.inode.get();
+        if !self.positional_capable() {
+            // Two non-seekable classes must be told apart — the decision
+            // and its ABI reasoning live in missing_op_errno(ReadAt):
+            // stream types (pipes/sockets/fifos) get ESPIPE, op-less fd
+            // types (epoll/binder/access_token/io_uring) get EINVAL.
+            return self.missing_op_errno(FileOpKind::ReadAt);
+        }
+        // f_mode enforcement, same as read().
+        if self.flags().is_writeonly() {
+            return -9; // EBADF
+        }
+        if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+            return -9; // EBADF
+        }
+        // Native positional op: no shared-position access at all.
+        if let Some(ops) = *self.ops.get() {
+            if let Some(read_at_fn) = ops.read_at {
+                let slice = core::slice::from_raw_parts_mut(buf, count);
+                let n = read_at_fn(self, offset, slice);
+                if n > 0 {
+                    crate::fs::inotify::notify_file(
+                        self,
+                        crate::fs::inotify::inotify_events::IN_ACCESS,
+                    );
+                }
+                return n;
+            }
+        }
+
+        // Disk-backed files (ext4) serve reads through their file ops;
+        // inode.read_data only holds the in-memory FileBuffer of mem
+        // files and returns 0 for on-disk inodes — pread on any ext4
+        // file used to return 0 bytes (glibc's regcomp mmap'd locale
+        // tables fine but every pread-based reader saw zeros).
+        if let Some(ops) = *self.ops.get() {
+            // lseek presence marks the file seekable (pipes/sockets have
+            // none); pread on them must stay ESPIPE.
+            if ops.read.is_some() && ops.lseek.is_some() {
+                let saved = self.get_pos();
+                self.set_pos(offset);
+                let n = self.read(buf, count);
+                self.set_pos(saved);
+                return n;
+            }
+        }
+
+        let slice = core::slice::from_raw_parts_mut(buf, count);
+        // Only seekable (inode-backed) files support offset reads.
+        match inode_opt.as_ref() {
+            Some(inode) if inode.ops.is_some() => {
+                let n = inode.read_data(offset as usize, slice);
+                if n > 0 {
+                    // inotify IN_ACCESS on the pread(2) path (P0-4).
+                    crate::fs::inotify::notify_file(
+                        self,
+                        crate::fs::inotify::inotify_events::IN_ACCESS,
+                    );
+                }
+                n as isize
+            }
+            _ => -29, // ESPIPE
+        }
+    }
+
+    /// Can this file serve explicit-position (pread/pwrite) IO? Native
+    /// read_at op, an lseek op (position-swing fallback), or an inode with
+    /// data ops all qualify; pipes/sockets/fifos do not (ESPIPE).
+    fn positional_capable(&self) -> bool {
+        if let Some(ops) = self.get_ops() {
+            if ops.read_at.is_some() || ops.lseek.is_some() {
+                return true;
+            }
+        }
+        if let Some(inode) = unsafe { &*self.inode.get() }.as_ref() {
+            return inode.ops.is_some();
+        }
+        false
+    }
+
+    /// Position-invariant write at an explicit offset (pwrite(2) backing).
+    ///
+    /// POSIX leaves the offset/O_APPEND interaction unspecified; this ABI
+    /// resolves it the documented pwrite(2) way: on a descriptor opened
+    /// with O_APPEND the data is APPENDED regardless of the offset (LTP
+    /// pwrite04/pwrite04_64: the second pwrite at offset 0 must extend
+    /// the file from 2048 to 3072, not overwrite byte 0).
+    pub unsafe fn write_at(&self, offset: u64, buf: *const u8, count: usize) -> isize {
+        // Unseekable first, before the f_mode check: pwrite on a pipe
+        // (even its O_RDONLY read end) fails ESPIPE, not EBADF — Linux
+        // rw_verify_area's FMODE_STREAM rejection (LTP pwritev202).
+        let inode_opt = &*self.inode.get();
+        if !self.positional_capable() {
+            return -29; // ESPIPE
+        }
+        // f_mode enforcement, same as write().
+        if self.flags().is_readonly() {
+            return -9; // EBADF
+        }
+        if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+            return -9; // EBADF
+        }
+        // O_APPEND wins over the explicit offset: resolve the write
+        // position to the CURRENT end of file (the ext4 backend
+        // re-resolves u64::MAX under its own lock; the value here covers
+        // the set_pos/write/restore fallback and memfs paths).
+        let offset = if self.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+            match inode_opt.as_ref() {
+                Some(inode) => inode.size.load(core::sync::atomic::Ordering::Acquire) as u64,
+                None => offset,
+            }
+        } else {
+            offset
+        };
+
+        // Disk-backed files (ext4) must write through their file ops;
+        // inode.write_data targets the in-memory FileBuffer and would
+        // desynchronize disk-backed files (pwrite silently lost).
+        if let Some(ops) = *self.ops.get() {
+            // ext4 (session 25): native position-invariant write — the
+            // set_pos/write/restore dance below raced concurrent plain
+            // write()/read() on the same open file description (the write
+            // twin of the R71 read_at race), and its trailing whole-inode
+            // page-cache invalidate broke shared-mapping coherence.
+            if core::ptr::eq(
+                ops as *const _,
+                &crate::fs::ext4::file::EXT4_FILE_OPS as *const _,
+            ) {
+                let n = crate::fs::ext4::file::ext4_file_write_at_vfs(self, offset, buf, count);
+                if n > 0 {
+                    // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
+                    // sqlite's journal/WAL writes all go through pwrite.
+                    crate::fs::inotify::notify_file(
+                        self,
+                        crate::fs::inotify::inotify_events::IN_MODIFY,
+                    );
+                }
+                return n;
+            }
+            if ops.write.is_some() && ops.lseek.is_some() {
+                let saved = self.get_pos();
+                self.set_pos(offset);
+                let n = self.write(buf, count);
+                self.set_pos(saved);
+                return n;
+            }
+        }
+
+        let slice = core::slice::from_raw_parts(buf, count);
+        match inode_opt.as_ref() {
+            Some(inode) if inode.ops.is_some() => {
+                // Serialize concurrent explicit-offset writers like
+                // reg_file_write does (O_APPEND/pos race class, review 5.2).
+                let _write_guard = self.io_lock.guard();
+                let n = inode.write_data(offset as usize, slice);
+                if n > 0 {
+                    // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
+                    // sqlite's journal/WAL writes all go through pwrite.
+                    crate::fs::inotify::notify_file(
+                        self,
+                        crate::fs::inotify::inotify_events::IN_MODIFY,
+                    );
+                }
+                n as isize
+            }
+            _ => -29, // ESPIPE
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Slice-typed I/O entries (kernel capsule boundary)
+    //
+    // Identical dispatch to the raw-pointer read/write/read_at/write_at
+    // above; the only difference is that the buffer bounds ride the type
+    // system, so `#![forbid(unsafe_code)]` syscall files can call them.
+    // -------------------------------------------------------------------------
+
+    /// Slice-typed read(2) dispatch (see read()).
+    pub fn read_slice(&self, buf: &mut [u8]) -> isize {
+        // SAFETY: the mutable slice guarantees buf.len() writable bytes —
+        // exactly the (buf, count) contract read() requires.
+        unsafe { self.read(buf.as_mut_ptr(), buf.len()) }
+    }
+
+    /// Slice-typed write(2) dispatch (see write()).
+    pub fn write_slice(&self, buf: &[u8]) -> isize {
+        // SAFETY: the shared slice guarantees buf.len() readable bytes —
+        // exactly the (buf, count) contract write() requires.
+        unsafe { self.write(buf.as_ptr(), buf.len()) }
+    }
+
+    /// Slice-typed pread(2) dispatch (see read_at()).
+    pub fn read_at_slice(&self, offset: u64, buf: &mut [u8]) -> isize {
+        // SAFETY: the mutable slice guarantees buf.len() writable bytes.
+        unsafe { self.read_at(offset, buf.as_mut_ptr(), buf.len()) }
+    }
+
+    /// Slice-typed pwrite(2) dispatch (see write_at()).
+    pub fn write_at_slice(&self, offset: u64, buf: &[u8]) -> isize {
+        // SAFETY: the shared slice guarantees buf.len() readable bytes.
+        unsafe { self.write_at(offset, buf.as_ptr(), buf.len()) }
+    }
+
+    /// Close file
+    pub unsafe fn close(&mut self) -> i32 {
+        if let Some(ops) = *self.ops.get() {
+            if let Some(close_fn) = ops.close {
+                return close_fn(self);
+            }
+        }
+        0
+    }
+
+    /// Get current position
+    pub fn get_pos(&self) -> u64 {
+        *self.pos.lock()
+    }
+
+    /// Set file position
+    pub fn set_pos(&self, new_pos: u64) {
+        *self.pos.lock() = new_pos;
+    }
+
+    /// Recover the filesystem path of this file from its dentry.
+    ///
+    /// Returns "anon_inode:[<id>]" style names for dentry-less files
+    /// (pipes, sockets, epoll instances, ...).
+    pub fn path(&self) -> alloc::string::String {
+        // SAFETY: dentry is written once at open time and never mutated
+        // afterwards; read-only access here.
+        let dentry_opt = unsafe { (*self.dentry.get()).clone() };
+        match dentry_opt {
+            Some(dentry) => dentry.build_path(),
+            None => {
+                // SAFETY: inode is written once at open; read-only access.
+                let inode_opt = unsafe { (*self.inode.get()).clone() };
+                match inode_opt {
+                    Some(inode) => alloc::format!("anon_inode:[{}]", inode.ino),
+                    None => alloc::string::String::from("anon_inode"),
+                }
+            }
+        }
+    }
+}
+
+// R31-B3 (v2, oc-rc rework): the close op of a DISPLACED description
+// runs HERE, in the final dropper's context, gated by close_pending.
+// The flag is armed by every fd-table displacement (close(2), dup2
+// target eviction, exec cloexec, table teardown — fs::fdreap::
+// retire_complete) and consumed exactly once: there is exactly one
+// drop-to-zero of the strong count, so the op cannot run twice (the
+// old count==1-observation form needed a grace period to make the
+// observation quiescent; the refcount transition itself now decides).
+// Files that never occupied a slot (failed opens, kernel-internal
+// open_file_arc_nofd Files) keep close_pending == false and run no op.
+// The final dropper is the closer itself for the common single-fd
+// close — decisions complete before close(2) returns (r26) — or the
+// racing holder whose reference legitimately outlived the close
+// (reference fput-holder semantics); either way it is a task context
+// (syscall exit / register / ring close), never IRQ context, so
+// ext4/jbd2 side effects of the close stay out of arbitrary contexts.
+impl Drop for File {
+    fn drop(&mut self) {
+        // P0-5 flock(2): the open file description is dying — its flock
+        // (if any) is released. File::drop is the single moment that
+        // covers close(2), dup2(2) displacement, fdtable teardown and the
+        // deferred close_pending path alike, across fork's shared
+        // descriptions.
+        crate::fs::locks::flock_release_file(self.file_id);
+        // F_OFD_SETLK record locks likewise die with the description.
+        crate::fs::locks::ofd_release_file(self.file_id);
+        // Lease bookkeeping: drop the inode open count and release any
+        // lease this description holds (wakes blocked lease breakers).
+        crate::fs::locks::inode_open_unregister(self);
+        // O_ASYNC registry entry (pipes), if any.
+        crate::fs::pipe::oasync_unregister_file(self.file_id);
+        // P0-4 inotify: IN_CLOSE_WRITE / IN_CLOSE_NOWRITE fires when the
+        // last reference to the description goes away (Linux fires it
+        // from fput, i.e. dup'd fds defer it — same discipline).
+        crate::fs::inotify::notify_file_close(self);
+        if self.close_pending.load(Ordering::Acquire) {
+            // SAFETY: we own the File exclusively (refcount reached 0) and
+            // close_fd already committed this close; ops.close was installed
+            // at open time and never mutated afterwards.
+            unsafe { self.close(); }
+        }
+    }
+}
+
+// ============================================================================
+// FdTable - Using Box allocation
+// ============================================================================
+
+/// Maximum number of file descriptors per table (P1 rlimits, 2026-09).
+/// Raised 1024 → 4096 to match the default RLIMIT_NOFILE hard ceiling;
+/// per-process enforcement against task.rlimits happens in
+/// alloc_fd_from, so unprivileged tasks still get the 1024 soft default
+/// and only see more after raising it.
+pub const MAX_FDS: usize = 1024;
+// TODO(rlimits-dynamic-fds): raising this to 4096 overflows the 64KB
+// kernel stack during FdTable::new() — Box::new constructs the ~33KB
+// FdTableEntry on the STACK before moving it to the heap. A dynamic
+// Vec-backed table (or heap-then-write construction) is needed to
+// honor RLIMIT_NOFILE > 1024; until then the hard cap stays 1024
+// (the NOFILE soft default, matching the pre-rlimits behavior).
+
+/// FdTable entry stored on the heap
+struct FdTableEntry {
+    /// Per-descriptor close-on-exec bits. FD_CLOEXEC belongs to the
+    /// DESCRIPTOR in POSIX, not the underlying description: a file opened
+    /// O_CLOEXEC at fd N and dup2'd to fd M must leave M WITHOUT the flag.
+    /// The old per-File flag leaked O_CLOEXEC through dup2 — musl-based
+    /// shells open redirections O_CLOEXEC, dup2 to stdio, exec, and lost
+    /// their stdio fds (found via musl __init_libc's deliberate NULL-crash
+    /// on POLLNVAL + missing /dev/null).
+    ///
+    /// (Leg-52 lever B: the `fds` array moved OUT of the entry into
+    /// FdTable::slots — a lock-free AtomicPtr array the read path never
+    /// takes the entry lock for. This struct now holds only metadata.)
+    cloexec_bits: [u64; MAX_FDS / 64],
+    /// Occupancy bitmap (perf-gaps G2, 2026-11): one bit per slot,
+    /// maintained inside the SAME entry-lock sections that publish or
+    /// clear the slot itself (install_fd / close_fd / dup2_fd / fork_from)
+    /// — never read outside the entry lock, where it is exact by
+    /// construction. Full-table walkers (`for_each_file`, the close-time
+    /// epoll purge) iterate these 16 words instead of polling 1024
+    /// lock-free slots: epoll_purge_closed_fd's scan was measured at
+    /// ~8.9 us per close under KVM — nearly the whole p6_openclose gap —
+    /// and it runs on the last-reference close of EVERY file.
+    open_bits: [u64; MAX_FDS / 64],
+    next_fd: usize,
+    count: usize,
+}
+
+/// One lock-free fd slot: the Arc<File> as a raw pointer, null = empty.
+/// Single-word aligned stores, so a lock-free load can never observe a
+/// torn value.
+struct FdSlot(core::sync::atomic::AtomicPtr<File>);
+
+pub struct FdTable {
+    /// Lock-free slot array (leg-52 lever B, perf-report 8.10.22):
+    /// get_file ran 132-144M times/boot through entry.lock_irqsave —
+    /// an irq_save + preempt_count pair + a contended per-TABLE TTAS RMW
+    /// per lookup. Readers are now RCU readers (see get_file): an
+    /// Acquire slot load + strong-count increment inside a read-side
+    /// critical section, no lock and no bank claim. Writers mutate
+    /// slots with single-word stores under the entry lock and park any
+    /// removed occupant in the global retire queue (fs::fdreap), which
+    /// drops it after a full RCU grace period.
+    slots: alloc::boxed::Box<[FdSlot; MAX_FDS]>,
+    /// Writer serialization + descriptor metadata (cloexec bits,
+    /// allocation hint, count).
+    entry: crate::sync::spinlock::Spinlock<Box<FdTableEntry>>,
+}
+
+impl FdTable {
+    /// Create new file descriptor table
+    pub fn new() -> Self {
+        Self {
+            slots: Box::new(
+                [const {
+                    FdSlot(core::sync::atomic::AtomicPtr::new(
+                        core::ptr::null_mut(),
+                    ))
+                }; MAX_FDS],
+            ),
+            entry: crate::sync::spinlock::Spinlock::new(Box::new(
+                FdTableEntry {
+                    cloexec_bits: [0; MAX_FDS / 64],
+                    open_bits: [0; MAX_FDS / 64],
+                    next_fd: 0,
+                    count: 0,
+                },
+            )),
+        }
+    }
+
+    /// Fork-time deep copy of a parent table: every installed descriptor
+    /// (Arc clone) and its FD_CLOEXEC bit, taken in ONE entry-lock pass.
+    /// The old loop called get_file() + get_fd_cloexec() + install_fd()
+    /// per slot — three lock round-trips over all MAX_FDS slots, ~10ms
+    /// per fork under TCG (measured: FORKPROF fd-copy ~100K CLINT cycles),
+    /// which is a third of every fork-heavy workload's budget.
+    pub fn fork_from(parent: &FdTable) -> Self {
+        // Allocate the child BEFORE taking the parent's entry lock (the
+        // deepest fork contexts do not need the allocation under it).
+        let mut child = Self::new();
+        let g = parent.entry.lock_irqsave();
+        // Parent slots are immutable for the duration of its entry lock
+        // (every writer serializes there), so the child copies raw
+        // pointers and takes its own reference per occupied slot in one
+        // pass — element-wise, nothing larger than one slot moves (the
+        // leg-16 stack-depth discipline). Concurrent lock-free READERS
+        // only bump strong counts; no interference with the copy.
+        for i in 0..MAX_FDS {
+            let p = parent.slots[i].0.load(core::sync::atomic::Ordering::Acquire);
+            if !p.is_null() {
+                // SAFETY: p was published by a writer (install/dup/fork)
+                // and the parent table holds its reference for as long
+                // as the entry lock we hold blocks removal.
+                unsafe { Arc::increment_strong_count(p) };
+                child.slots[i].0.store(p, core::sync::atomic::Ordering::Release);
+            }
+        }
+        {
+            let mut ce = child.entry.lock_irqsave();
+            ce.cloexec_bits = g.cloexec_bits;
+            ce.open_bits = g.open_bits;
+            ce.count = g.count;
+            ce.next_fd = g.next_fd;
+        }
+        drop(g);
+        child
+    }
+
+    /// RLIMIT_NOFILE ceiling for the calling task: the table size, or the
+    /// task's soft limit when lower (RLIM_INFINITY = u64::MAX is masked by
+    /// the min). Tasks without a Task context (early boot) are unlimited.
+    fn nofile_ceiling() -> usize {
+        let rlim = crate::sched::current()
+            .map(|t| t.rlimit(crate::process::task::rlimit_res::NOFILE).0)
+            .unwrap_or(u64::MAX);
+        MAX_FDS.min(rlim as usize)
+    }
+
+    /// Allocate file descriptor
+    pub fn alloc_fd(&self) -> Option<usize> {
+        self.alloc_fd_from(0)
+    }
+
+    /// (perf-path lane) alloc + install in ONE entry-lock section. The
+    /// old get_file_fd_install sequence (alloc_fd then install_fd) took
+    /// the irqsave entry lock twice per open — two cli/sti pairs on the
+    /// open hot path. Same semantics: lowest free fd, emptiness-gated
+    /// install, RLIMIT honored.
+    pub fn install_lowest_fd(&self, file: Arc<File>) -> Option<usize> {
+        let ceiling = Self::nofile_ceiling();
+        let mut entry = self.entry.lock_irqsave();
+        let start = entry.next_fd.min(ceiling);
+
+        // Lowest free fd at/above next_fd (alloc_fd_from discipline).
+        let mut fd = None;
+        for i in start..ceiling {
+            if self.slots[i].0.load(Ordering::Relaxed).is_null() {
+                fd = Some(i);
+                break;
+            }
+        }
+        if fd.is_none() && start > 0 {
+            // Wrap to [0, start): dead code under the close_fd pullback
+            // invariant, kept for the same belt-and-braces reason as
+            // alloc_fd_from.
+            for i in 0..start {
+                if self.slots[i].0.load(Ordering::Relaxed).is_null() {
+                    fd = Some(i);
+                    break;
+                }
+            }
+        }
+        let fd = fd?;
+        entry.next_fd = (fd + 1) % MAX_FDS;
+        // The slot now owns one reference (published with Release so the
+        // File's fields are visible to lock-free readers' Acquire loads).
+        self.slots[fd]
+            .0
+            .store(Arc::into_raw(file) as *mut File, Ordering::Release);
+        entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
+        entry.open_bits[fd / 64] |= 1u64 << (fd % 64);
+        entry.count += 1;
+        Some(fd)
+    }
+
+    /// Allocate file descriptor >= min_fd
+    ///
+    /// Honors RLIMIT_NOFILE: returns None for the first free fd at or
+    /// above the soft limit, so callers translate it to EMFILE exactly
+    /// like a full table (Linux alloc_fd).
+    ///
+    /// POSIX dup/open return the LOWEST unused fd. close_fd pulls next_fd
+    /// back down when a slot below it is freed (put_unused_fd discipline),
+    /// so every fd < next_fd is busy and starting the scan there is both
+    /// correct and O(free run).
+    pub fn alloc_fd_from(&self, min_fd: usize) -> Option<usize> {
+        let ceiling = Self::nofile_ceiling();
+        let mut entry = self.entry.lock_irqsave();
+        let start = if min_fd > entry.next_fd { min_fd } else { entry.next_fd };
+
+        // Search from start up to the RLIMIT_NOFILE/table ceiling
+        for fd in start..ceiling {
+            if self.slots[fd].0.load(Ordering::Relaxed).is_null() {
+                entry.next_fd = (fd + 1) % MAX_FDS;
+                return Some(fd);
+            }
+        }
+        // Wrap around: search from min_fd to start (if start > min_fd due
+        // to next_fd). Belt-and-braces: with the close_fd pullback the
+        // invariant makes this dead code, but it keeps alloc correct even
+        // if a future path frees a slot without adjusting next_fd.
+        if start > min_fd {
+            for fd in min_fd..start.min(ceiling) {
+                if self.slots[fd].0.load(Ordering::Relaxed).is_null() {
+                    entry.next_fd = (fd + 1) % MAX_FDS;
+                    return Some(fd);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Install file to file descriptor table
+    pub fn install_fd(&self, fd: usize, file: Arc<File>) -> Result<(), ()> {
+        if fd >= MAX_FDS {
+            return Err(());
+        }
+
+        let mut entry = self.entry.lock_irqsave();
+        // The entry lock serializes writers, so this emptiness check is
+        // stable against concurrent installs.
+        if !self.slots[fd].0.load(Ordering::Relaxed).is_null() {
+            return Err(());
+        }
+        // The slot now owns one reference (published with Release so the
+        // File's fields are visible to lock-free readers' Acquire loads).
+        self.slots[fd].0.store(Arc::into_raw(file) as *mut File, Ordering::Release);
+        // Clear any stale CLOEXEC bit from a previous occupant of this fd
+        // number (regression round 5, MED: closed CLOEXEC fds leaked the
+        // bit to the next file that reused the number).
+        entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
+        entry.open_bits[fd / 64] |= 1u64 << (fd % 64);
+        entry.count += 1;
+        Ok(())
+    }
+
+    /// Get file object for file descriptor.
+    ///
+    /// RCU fast path (the reference fget shape; replaced the leg-52
+    /// lever B per-CPU reader banks, whose SeqCst claim/release pair
+    /// cost two extra locked RMWs per lookup on a path that runs 130M+
+    /// times/boot): NO entry lock, NO bank claim — an Acquire slot load
+    /// (pairs the installer's Release store so the File's fields are
+    /// visible through the reconstructed Arc) plus a CONDITIONAL
+    /// strong-count acquisition (`file_arc_try_clone`), inside a
+    /// read-side critical section.
+    ///
+    /// SAFETY of the acquisition: a slot's Arc is owned by the table
+    /// while published; any writer that removes it (close / dup2
+    /// displacement) runs the close decisions at the refcount-driven
+    /// drop and parks a WEAK in the deferred-free queue (fs::fdreap),
+    /// which releases it only after a full RCU grace period. A reader
+    /// therefore either acquires a provably-live count (the slot or a
+    /// racing holder still holds a strong reference), or its CAS fails
+    /// on a zero count and the fd is reported closed — and the CAS
+    /// itself can never touch freed memory, because the parked Weak
+    /// pins the ArcInner until a grace period this reader's irqs-off
+    /// window cannot let pass (protocol written up in fs/fdreap.rs).
+    /// __fdget's unshared fast path (the reference's files_lookup_fd_raw
+    /// + FDPUT: when the table is NOT CLONE_FILES-shared, no other
+    /// thread can close/dup concurrently, so the File is borrowed
+    /// WITHOUT a reference — one Acquire slot load, no irq bracket, no
+    /// rcu section, no refcount RMW. Callers must gate on
+    /// Arc::strong_count(&table) == 1 (the shared case falls back to
+    /// get_file, the reference's fget). Safe across blocking reads:
+    /// unshared means this thread is the table's only user, so the
+    /// slot's occupant cannot be retired while we hold the borrow.
+    pub fn get_file_borrow(&self, fd: usize) -> Option<&File> {
+        if fd >= MAX_FDS {
+            return None;
+        }
+        let p = self.slots[fd].0.load(Ordering::Acquire);
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: gated to unshared tables by the caller — the Arc in
+        // the slot stays alive (and the slot immutable) for the whole
+        // syscall; reconstruction is only needed to touch the refcount,
+        // which this path never does.
+        Some(unsafe { &*(p as *const File) })
+    }
+
+    pub fn get_file(&self, fd: usize) -> Option<Arc<File>> {
+        if fd >= MAX_FDS {
+            return None;
+        }
+        // The load→CAS window must not admit ANY quiescent-state report
+        // of this CPU. preempt_count alone is not enough here: this
+        // kernel tolerates in-handler schedule() and IRQ-return
+        // reschedules that do not honor a nonzero preempt count (the
+        // SCHED-IRQOFF family), and a context switch from inside the
+        // window would report a QS, let the grace pass, and free the
+        // ArcInner under this CAS. IRQs OFF across the window closes
+        // every report site (user-return, __schedule, idle) for its
+        // duration; rcu_read_lock stays as the formal read-side marker.
+        let irq = crate::arch::cpu::save_and_disable_irq();
+        crate::sync::rcu::rcu_read_lock();
+        // SAFETY: p was stored by a writer from an owned Arc
+        // (install/dup/fork). Acquisition is CONDITIONAL (the
+        // get_file_rcu shape): a CAS from a nonzero strong count. The
+        // ArcInner allocation cannot be freed under the CAS because a
+        // parked Weak (fs::fdreap) pins it until a grace period passes,
+        // and no grace period can pass while this irqs-off read-side
+        // window is open. A failed CAS means the fd was closed
+        // concurrently — the reference fget race outcome (EBADF).
+        let p = self.slots[fd].0.load(Ordering::Acquire);
+        let out = if !p.is_null() {
+            unsafe { file_arc_try_clone(p) }
+        } else {
+            None
+        };
+        crate::sync::rcu::rcu_read_unlock();
+        crate::arch::cpu::restore_irq(irq);
+        out
+    }
+
+    /// Visit every open descriptor (fd, File) under one entry-lock hold.
+    /// The callback runs with IRQs off — it must be quick, allocation-free
+    /// where possible, and must NOT call back into FdTable mutators.
+    pub fn for_each_file(&self, mut f: impl FnMut(usize, &Arc<File>)) {
+        let entry = self.entry.lock_irqsave();
+        // Occupancy bitmap walk (perf-gaps G2): open_bits is exact under
+        // the entry lock (every publisher/clearer updates it inside the
+        // same critical section), so iterate its 16 words and visit only
+        // present slots — the old 1024-slot poll was ~9 us under KVM and
+        // sat on the close path of every last-reference file (the epoll
+        // purge scan).
+        for (word_idx, &bits) in entry.open_bits.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let fd = word_idx * 64 + bits.trailing_zeros() as usize;
+                bits &= !(1u64 << (fd % 64));
+                // Slots are stable under the entry lock (every writer
+                // serializes there), so the pointer still has its table
+                // reference; present it through a temporary owning clone.
+                let p = self.slots[fd].0.load(Ordering::Acquire);
+                if !p.is_null() {
+                    // SAFETY: published by a writer; the table's reference
+                    // is held by the slot for the duration of our lock.
+                    unsafe {
+                        Arc::increment_strong_count(p);
+                        let file = Arc::from_raw(p);
+                        f(fd, &file);
+                        drop(file);
+                    }
+                }
+            }
+        }
+        drop(entry);
+    }
+
+    /// Close file descriptor
+    pub fn close_fd(&self, fd: usize) -> Result<(), ()> {
+        if fd >= MAX_FDS {
+            return Err(());
+        }
+
+        // R13-4/R14-5 (lock-free slots update): the removal — slot null
+        // store + metadata — runs under the entry lock exactly as before;
+        // the removed Arc's close decisions run at the refcount-driven
+        // drop OUTSIDE the lock (lock-free readers do not pass through
+        // the entry lock, so the old "decision under the lock" argument
+        // never held against them — under conditional reader acquisition
+        // the refcount transition itself is the decision, no grace
+        // observation needed). The close op still never executes with
+        // IRQs off under the entry lock (R14-5). REFERENCE PARITY (r26):
+        // retire_complete completes the decisions before close(2)
+        // returns on the common last-reference path — the reference runs
+        // the final fput in task work at return-to-userspace, and
+        // userspace must never observe a closed fd whose side effects
+        // (EPIPE on the pipe, lock release, IN_CLOSE_*) have not run
+        // (LTP pipe08/writev01/fcntl15/inotify01/execve03 family) —
+        // while close(2) itself never blocks on a grace period (the
+        // reference never does; the allocation's grace runs
+        // asynchronously in fdreapd).
+        let removed: Option<Arc<File>> = {
+            let mut entry = self.entry.lock_irqsave();
+            // SAFETY: the swap atomically takes the slot's reference; the
+            // null return means the fd was not open.
+            let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Release);
+            if p.is_null() {
+                return Err(());
+            }
+            entry.count -= 1;
+            // Linux put_unused_fd semantics: freeing a slot BELOW next_fd
+            // pulls the search hint back down, preserving the invariant
+            // "every fd < next_fd is busy". Without this, alloc_fd_from
+            // (which starts at next_fd) handed out high numbers while low
+            // slots sat free — `close(0); dup(m)` returned some fd > 0
+            // instead of 0 (POSIX: dup returns the LOWEST unused fd).
+            // xterm's child does exactly close(0..2)+dup(slave) to wire its
+            // stdio to the pty; the dups landed on 12/13/14, dash started
+            // with closed stdin (EBADF) and exited instantly.
+            if fd < entry.next_fd {
+                entry.next_fd = fd;
+            }
+            entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
+            Some(unsafe { Arc::from_raw(p) })
+        };
+        if let Some(file) = removed {
+            // Complete the close decisions and park the allocation for
+            // the post-grace free (the fput/task_work/call_rcu split —
+            // see fs/fdreap.rs): the slot-null store precedes the park,
+            // the last-reference drop runs the decisions HERE before
+            // userspace resumes, and the ArcInner's grace runs
+            // asynchronously.
+            crate::fs::fdreap::retire_complete(file);
+        }
+        Ok(())
+    }
+
+    /// close_fd that reports the removed description's identity to the
+    /// syscall layer (oc-rc close-path cut): sys_close(2) previously did
+    /// its OWN get_file(fd) (a full irq-bracketed RCU lookup + Arc
+    /// acquire + Weak downgrade) before close_fd, only to learn the
+    /// file_id and a Weak for the epoll-release check — this variant
+    /// derives both from the Arc the removal already holds, so the
+    /// common close(2) runs exactly ONE fd resolution. The Weak is taken
+    /// BEFORE retire_complete drops the strong reference; its
+    /// strong_count() read afterwards has the same semantics the
+    /// sys_close-local Weak always had (0 = this close ended the
+    /// description; >0 = a racing holder legitimately outlives it).
+    pub fn close_fd_report(
+        &self,
+        fd: usize,
+    ) -> Result<(u64, alloc::sync::Weak<File>), ()> {
+        if fd >= MAX_FDS {
+            return Err(());
+        }
+        let removed: Option<Arc<File>> = {
+            let mut entry = self.entry.lock_irqsave();
+            // SAFETY: the swap atomically takes the slot's reference; the
+            // null return means the fd was not open.
+            let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Release);
+            if p.is_null() {
+                return Err(());
+            }
+            entry.count -= 1;
+            if fd < entry.next_fd {
+                entry.next_fd = fd;
+            }
+            entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
+            Some(unsafe { Arc::from_raw(p) })
+        };
+        match removed {
+            Some(file) => {
+                let id = file.file_id;
+                let weak = Arc::downgrade(&file);
+                crate::fs::fdreap::retire_complete(file);
+                Ok((id, weak))
+            }
+            None => Err(()),
+        }
+    }
+
+    /// Park a removed slot occupant for the post-grace ALLOCATION free,
+    /// with the close decisions completed before returning (reference
+    /// task_work timing). Writers call this AFTER releasing the entry
+    /// lock (R14-5: nothing here may spin or run close ops under it).
+    fn park_and_drain(&self, file: Arc<File>) {
+        crate::fs::fdreap::retire_complete(file);
+    }
+
+    /// Duplicate file descriptor
+    pub fn dup_fd(&self, oldfd: usize) -> Option<usize> {
+        if oldfd >= MAX_FDS {
+            return None;
+        }
+
+        let file = self.get_file(oldfd)?;
+        let newfd = self.alloc_fd()?;
+        self.install_fd(newfd, file).ok()?;
+        Some(newfd)
+    }
+
+    /// Duplicate file descriptor keeping the errno distinction: EBADF for
+    /// an invalid `oldfd`, EMFILE when the descriptor is fine but the
+    /// table / RLIMIT_NOFILE has no free number (Linux dup semantics —
+    /// LTP dup03 requires EMFILE, not EBADF, at the limit).
+    pub fn dup_fd_strict(&self, oldfd: usize) -> Result<usize, i32> {
+        const EBADF: i32 = 9;
+        const EMFILE: i32 = 24;
+        if oldfd >= MAX_FDS {
+            return Err(-EBADF);
+        }
+        let file = match self.get_file(oldfd) {
+            Some(f) => f,
+            None => return Err(-EBADF),
+        };
+        match self.alloc_fd() {
+            Some(newfd) => match self.install_fd(newfd, file) {
+                Ok(()) => Ok(newfd),
+                Err(()) => Err(-EBADF),
+            },
+            None => Err(-EMFILE),
+        }
+    }
+
+    /// Duplicate file descriptor to specific number (dup2)
+    /// Validates oldfd is open before any operation.
+    ///
+    /// Atomicity (review 5.2): the close of any previous occupant of
+    /// `newfd` and the installation of the duplicated file happen under ONE
+    /// entry-lock hold — the old close-then-install sequence let a
+    /// concurrent get_file(newfd) observe an empty slot mid-dup2. The close
+    /// op of the displaced file runs after the lock is released (R14-5
+    /// discipline: never run close ops with IRQs off under the entry lock).
+    pub fn dup2_fd(&self, oldfd: usize, newfd: usize) -> Option<usize> {
+        if oldfd >= MAX_FDS || newfd >= MAX_FDS {
+            return None;
+        }
+
+        if oldfd == newfd {
+            // dup2(f, f) must return f if f is valid open fd, else EBADF
+            self.get_file(oldfd)?;
+            return Some(newfd);
+        }
+
+        // Atomically validate oldfd, evict any previous occupant of newfd,
+        // and install the duplicated file — all under the entry lock.
+        let displaced: Option<Arc<File>> = {
+            let mut entry = self.entry.lock_irqsave();
+            let src = self.slots[oldfd].0.load(Ordering::Acquire);
+            if src.is_null() {
+                return None;
+            }
+            // SAFETY: src is published and the entry lock blocks removal,
+            // so the table's reference keeps it alive through our own
+            // clone (the dup'd descriptor's reference).
+            unsafe { Arc::increment_strong_count(src) };
+            let dup_arc = unsafe { Arc::from_raw(src) };
+            // SAFETY: the swap takes the previous occupant's reference out
+            // atomically (single-word, no torn window for readers).
+            let prev = self.slots[newfd].0.swap(Arc::into_raw(dup_arc) as *mut File, Ordering::Release);
+            // dup2 clears FD_CLOEXEC on the new descriptor (POSIX);
+            // install_fd already cleared the stale bit only when the slot
+            // was empty, so clear it here unconditionally.
+            entry.cloexec_bits[newfd / 64] &= !(1u64 << (newfd % 64));
+            entry.open_bits[newfd / 64] |= 1u64 << (newfd % 64);
+            entry.count = entry.count.saturating_sub(if prev.is_null() { 0 } else { 1 });
+            entry.count += 1;
+            if prev.is_null() { None } else { Some(unsafe { Arc::from_raw(prev) }) }
+        };
+
+        // Run the displaced file's close decision in the retire reaper, outside
+        // the entry lock — the same quiescent last-reference discipline
+        // as close_fd (P0-5 lock release + R10-2/R31-B3 decision).
+        if let Some(file) = displaced {
+            self.park_and_drain(file);
+        }
+
+        Some(newfd)
+    }
+
+    /// Per-descriptor close-on-exec flag (FD_CLOEXEC).
+    pub fn set_fd_cloexec(&self, fd: usize, on: bool) {
+        if fd >= MAX_FDS { return; }
+        let mut entry = self.entry.lock_irqsave();
+        if on {
+            entry.cloexec_bits[fd / 64] |= 1u64 << (fd % 64);
+        } else {
+            entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
+        }
+    }
+
+    pub fn get_fd_cloexec(&self, fd: usize) -> bool {
+        if fd >= MAX_FDS { return false; }
+        let entry = self.entry.lock_irqsave();
+        entry.cloexec_bits[fd / 64] & (1u64 << (fd % 64)) != 0
+    }
+
+    /// Close all file descriptors with close-on-exec flag set
+    pub fn close_cloexec_fds(&self) {
+        // Heap-leak fix (soak: pure-exec loop, double-reproduced OOM): the
+        // previous implementation collected the cloexec fds into a heap
+        // Vec<usize> on EVERY execve. The collect's growth chain (1, 2, ...
+        // 8 KiB worth of allocs and reallocs, ~16 KiB total for a large
+        // table) was never fully returned to the allocator, so each exec
+        // bled ~16 KiB of heap and a 128 MiB heap died in ~64 minutes of
+        // exec load. cloexec_bits is a fixed [u64; MAX_FDS/64] — 128 bytes
+        // for MAX_FDS=1024 — so snapshot it on the STACK under the lock,
+        // then close outside the lock with zero heap traffic.
+        let mut snapshot: [u64; MAX_FDS / 64] = [0; MAX_FDS / 64];
+        {
+            let entry = self.entry.lock_irqsave();
+            snapshot.copy_from_slice(&entry.cloexec_bits);
+        }
+        for (word_idx, &word) in snapshot.iter().enumerate() {
+            let mut word = word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= !(1u64 << bit);
+                let _ = self.close_fd(word_idx * 64 + bit);
+            }
+        }
+    }
+}
+
+impl Drop for FdTable {
+    fn drop(&mut self) {
+        // R20-FS3 (R14-5 for Drop): the close DECISIONS run after the
+        // entry lock is released — the old Drop ran ops.close (socket
+        // close = multi-second virtio spin) with IRQs off while holding
+        // the entry lock, wedging every fd operation of every
+        // CLONE_FILES thread, exactly the hazard R14-5 fixed in close_fd
+        // but never applied here.
+        //
+        // Lock-free slots note: at drop no &self borrowers can exist, so
+        // no RCU reader can be mid-CAS against THIS table. Each occupant
+        // still goes through retire_complete (the shared discipline:
+        // P0-5 record-lock release, close_pending arming, Weak park for
+        // the allocation's grace, then the drop), so a description ALSO
+        // referenced from outside this table keeps the same protocol.
+        let mut to_close: alloc::vec::Vec<Arc<File>> = alloc::vec::Vec::new();
+        {
+            let mut entry = self.entry.lock_irqsave();
+            for fd in 0..MAX_FDS {
+                // SAFETY: the swap takes the slot's reference; null = the
+                // descriptor was not open.
+                let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Relaxed);
+                if !p.is_null() {
+                    entry.count = entry.count.saturating_sub(1);
+                    to_close.push(unsafe { Arc::from_raw(p) });
+                }
+            }
+        }
+        // Run the shared displacement discipline for every remaining
+        // occupant (consumes the Arcs; the last-reference File::drop may
+        // run close ops here — sleepable task context, outside the entry
+        // lock).
+        for file in to_close {
+            crate::fs::fdreap::retire_complete(file);
+        }
+    }
+}
+
+
+/// Set the per-descriptor FD_CLOEXEC flag (POSIX: the flag belongs to the
+/// descriptor, never the underlying file description).
+pub fn set_cloexec_fd(fd: usize, on: bool) {
+    if let Some(ft) = crate::sched::get_current_fdtable() {
+        ft.set_fd_cloexec(fd, on);
+    }
+}
+
+/// Allocate an UNINITIALIZED staging buffer for read/write chunking (the
+/// syscall capsule layer's bounded transfer staging, SYSA-C1).
+///
+/// The buffer is always fully overwritten before it is read (file layers
+/// fill exactly the bytes they return; the user copy-in fills before
+/// write dispatch), so the previous `vec![0u8; n]` paid a useless memset
+/// per syscall — 4KB+ of zeroing on every read(2)/write(2) hot path
+/// (file, pipe, tty) that showed up directly in throughput under TCG
+/// (review SYSA-C1 fix in Wave 2R).
+pub fn alloc_staging_buf(n: usize) -> alloc::vec::Vec<u8> {
+    let mut v = alloc::vec::Vec::with_capacity(n);
+    // SAFETY: capacity is exactly n, so set_len is in bounds. The buffer
+    // is filled by the caller before any read of its contents (see doc).
+    unsafe { v.set_len(n); }
+    v
+}
+
+/// Append `len` bytes from user address `src_user` to `dst`, one copy,
+/// no zero-fill of the appended window (perf-ipc: the writev gather used
+/// to resize(+0) — a memset of every iovec — before copy_in overwrote
+/// it). Returns false on a faulting user range or a failed reservation
+/// with NOTHING appended (the uncopied tail is discarded unexposed).
+pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: usize) -> bool {
+    let start = dst.len();
+    if dst.try_reserve_exact(len).is_err() {
+        return false;
+    }
+    // SAFETY: capacity covers start..start+len; copy_from_user fills all
+    // of it or we return without exposing the bytes (set_len runs only
+    // on the fully-copied path).
+    unsafe {
+        let copied_ok = crate::arch::uaccess::copy_from_user(
+            dst.as_mut_ptr().add(start),
+            src_user as *const u8,
+            len,
+        ) == 0;
+        if !copied_ok {
+            return false;
+        }
+        dst.set_len(start + len);
+    }
+    true
+}
+
+pub fn get_file_fd(fd: usize) -> Option<Arc<File>> {
+    use crate::sched;
+    sched::get_current_fdtable()?.get_file(fd)
+}
+
+/// fdget's two outcomes (the reference's struct fd): a no-refcount
+/// borrow on an unshared table (FDPUT clear) or a full Arc reference
+/// (fget) when CLONE_FILES sharers exist.
+pub enum FastFd {
+    Borrowed(&'static File),
+    Owned(Arc<File>),
+}
+
+impl FastFd {
+    #[inline]
+    pub fn file(&self) -> &File {
+        match self {
+            FastFd::Borrowed(f) => f,
+            FastFd::Owned(a) => a,
+        }
+    }
+}
+
+/// The fdget fast path for read/write-style syscalls: unshared fdtable
+/// ⇒ borrow (one Acquire slot load, no irq/rcu bracket, no refcount
+/// RMW); shared ⇒ get_file (fget). Safe wrapper — the raw current-task
+/// deref lives here, not in forbid(unsafe) callers.
+pub fn get_file_fd_fast(fd: usize) -> Option<FastFd> {
+    let cur = crate::sched::current()?;
+    // SAFETY: current() yields a live task pointer.
+    unsafe {
+        if !(*cur).fdtable_unshared() {
+            return (*cur).try_fdtable().and_then(|t| t.get_file(fd)).map(FastFd::Owned);
+        }
+        // The unshared table outlives the syscall (owned by this task);
+        // extend the borrow to 'static through the raw pointer.
+        let tbl: &'static FdTable = (*cur).try_fdtable()?;
+        tbl.get_file_borrow(fd).map(|f| {
+            // SAFETY: the slot's Arc is owned by the unshared table and
+            // cannot be retired for the duration of this syscall.
+            unsafe { core::mem::transmute::<&File, &'static File>(f) }
+        }).map(FastFd::Borrowed)
+    }
+}
+
+/// Safe-typed fd lookup for the kernel capsule boundary: identical
+/// to get_file_fd. That fn's `unsafe` marker is historical — its body is
+/// two safe calls (get_current_fdtable + FdTable::get_file) — so the
+/// syscall layer takes this entry instead; raw callers migrate here as
+/// their files convert to `#![forbid(unsafe_code)]`.
+pub fn get_file_fd_safe(fd: usize) -> Option<Arc<File>> {
+    // SAFETY: vacuous contract — get_file_fd's body calls only safe
+    // functions (see doc).
+    unsafe { get_file_fd(fd) }
+}
+
+/// (unsafe-slim r3) un-signed: parameters are safe (Arc<File>) and the
+/// body runs only safe operations — the `unsafe` was vestigial.
+pub fn get_file_fd_install(file: Arc<File>) -> Option<usize> {
+    use crate::sched;
+    // (perf-path lane) single entry-lock alloc+install — see
+    // install_lowest_fd.
+    sched::get_current_fdtable()?.install_lowest_fd(file)
+}
+
+pub fn close_file_fd(fd: usize) -> Result<(), i32> {
+    use crate::sched;
+    match sched::get_current_fdtable() {
+        Some(fdtable) => fdtable.close_fd(fd).map_err(|_| errno::Errno::BadFileNumber.as_neg_i32()),
+        None => Err(errno::Errno::BadFileNumber.as_neg_i32()),
+    }
+}
+
+/// close_file_fd that reports the removed description's identity
+/// (see FdTable::close_fd_report — the oc-rc single-resolution close).
+pub fn close_file_fd_report(
+    fd: usize,
+) -> Result<(u64, alloc::sync::Weak<File>), i32> {
+    use crate::sched;
+    match sched::get_current_fdtable() {
+        Some(fdtable) => fdtable
+            .close_fd_report(fd)
+            .map_err(|_| errno::Errno::BadFileNumber.as_neg_i32()),
+        None => Err(errno::Errno::BadFileNumber.as_neg_i32()),
+    }
+}
+
+// ============================================================================
+// Kernel thread standard input/output
+// ============================================================================
+
+pub fn get_stdin() -> Option<Arc<File>> {
+    get_file_fd(0)
+}
+
+pub fn get_stdout() -> Option<Arc<File>> {
+    get_file_fd(1)
+}
+
+pub unsafe fn get_stderr() -> Option<Arc<File>> {
+    get_file_fd(2)
+}
+
+// ============================================================================
+// Default operations for regular files
+// ============================================================================
+
+fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
+    if let Some(ref inode) = unsafe { &*file.inode.get() } {
+        // Serialize the whole get_pos → read_data → set_pos sequence with
+        // writers and other readers sharing this open file description:
+        // without the lock, two CPUs fork-inheriting the same fd could
+        // both read at the old pos and both store pos+1 — a lost update
+        // that left bytes unconsumed (LTP fork07, read() returned 1 at
+        // EOF). reg_file_write has always held the lock for the write
+        // side; this is the matching read side (Linux f_pos_lock).
+        let _io_guard = file.io_lock.guard();
+
+        // Get current file position
+        let offset = file.get_pos() as usize;
+
+        // Read data from inode (buf.length handles automatically)
+        let bytes_read = inode.read_data(offset, buf);
+
+        // Update file position
+        file.set_pos((offset + bytes_read) as u64);
+
+        bytes_read as isize
+    } else {
+        -9  // EBADF
+    }
+}
+
+/// Public re-export of `reg_file_read` for file-op wrappers that delegate
+/// to the generic regular-file behavior after their own checks (memfd's
+/// seal-aware ops).
+pub(crate) fn reg_file_read_pub(file: &File, buf: &mut [u8]) -> isize {
+    reg_file_read(file, buf)
+}
+
+/// Public re-export of `reg_file_write` (see reg_file_read_pub).
+pub(crate) fn reg_file_write_pub(file: &File, buf: &[u8]) -> isize {
+    reg_file_write(file, buf)
+}
+
+/// Public re-export of `reg_file_lseek` (see reg_file_read_pub).
+pub(crate) fn reg_file_lseek_pub(file: &File, offset: isize, whence: i32) -> isize {
+    reg_file_lseek(file, offset, whence)
+}
+
+/// Public re-export of `reg_file_close` (see reg_file_read_pub).
+pub(crate) fn reg_file_close_pub(file: &File) -> i32 {
+    reg_file_close(file)
+}
+
+fn reg_file_write(file: &File, buf: &[u8]) -> isize {
+    if let Some(ref inode) = unsafe { &*file.inode.get() } {
+        // Serialize the whole read-offset → write → update-pos sequence so
+        // that two O_APPEND writers on SMP cannot interleave (their writes
+        // would each position at the "old" end). Also protects plain
+        // read/write pos racing. Review 5.2 (O_APPEND 与 pos 更新无锁).
+        // (Also against reg_file_read now — see the io_lock field note.)
+        let _write_guard = file.io_lock.guard();
+
+        // RLIMIT_FSIZE (Linux generic_write_checks): a write whose start
+        // position is at/after the soft limit fails EFBIG with SIGXFSZ; a
+        // write that would CROSS the limit is silently truncated to the
+        // boundary (no signal) — LTP setrlimit01 case 2 sets the limit to
+        // 10, writes 26 bytes and requires write() to return exactly 10.
+        // For O_APPEND the effective start is the file size (the position
+        // append_data takes under the inode data lock). Regular files
+        // only: pipes/sockets never enter reg_file_write, matching Linux
+        // (only regular-file write paths check).
+        let mut buf = buf;
+        if let Some(task) = crate::sched::current() {
+            let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+            if fsz_cur != u64::MAX {
+                let start = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
+                    inode.get_size()
+                } else {
+                    file.get_pos()
+                };
+                if start >= fsz_cur {
+                    let _ = crate::signal::send_signal(
+                        task.pid() as u32,
+                        crate::signal::Signal::SIGXFSZ as i32,
+                    );
+                    return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
+                }
+                let allowed = (fsz_cur - start) as usize;
+                if buf.len() > allowed {
+                    buf = &buf[..allowed];
+                }
+            }
+        }
+
+        // O_APPEND: the offset is taken under the inode's data lock, so
+        // that two appenders on different open descriptions cannot pick the
+        // same offset (Linux: generic_write_checks takes the position
+        // under the inode lock). The ext4 path does the same under the
+        // filesystem lock; this is the in-memory-file twin.
+        let bytes_written = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
+            let (end, written) = inode.append_data(buf);
+            file.set_pos(end + written as u64);
+            written
+        } else {
+            let offset = file.get_pos() as usize;
+
+            // Write data to inode (buf.length handles automatically)
+            let written = inode.write_data(offset, buf);
+
+            // Update file position
+            file.set_pos((offset + written) as u64);
+            written
+        };
+
+        bytes_written as isize
+    } else {
+        -9  // EBADF
+    }
+}
+
+fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+    // SEEK_SET = 0, SEEK_CUR = 1, SEEK_END = 2
+    let current_pos = file.get_pos() as i64;
+
+    // Get file size
+    let file_size = if let Some(ref inode) = unsafe { &*file.inode.get() } {
+        inode.get_size() as i64
+    } else {
+        return -9  // EBADF
+    };
+
+    let new_pos = match whence {
+        0 => offset as i64,                                           // SEEK_SET
+        1 => match current_pos.checked_add(offset as i64) {           // SEEK_CUR
+            Some(v) => v,
+            None => return -22,  // EOVERFLOW
+        },
+        2 => match file_size.checked_add(offset as i64) {             // SEEK_END
+            Some(v) => v,
+            None => return -22,  // EOVERFLOW
+        },
+        _ => return -22,           // EINVAL - invalid whence
+    };
+
+    if new_pos < 0 {
+        return -22;  // EINVAL - negative position invalid
+    }
+
+    file.set_pos(new_pos as u64);
+    new_pos as isize
+}
+
+fn reg_file_close(_file: &File) -> i32 {
+    // Currently no special handling needed
+    // File destructor will handle resource cleanup automatically
+    0
+}
+
+pub static REG_FILE_OPS: FileOps = FileOps::builder()
+    .read(reg_file_read)
+    .write(reg_file_write)
+    .lseek(reg_file_lseek)
+    .close(reg_file_close)
+    .build();
+
+pub static REG_RO_FILE_OPS: FileOps = FileOps::builder()
+    .read(reg_file_read)
+    .lseek(reg_file_lseek)
+    .close(reg_file_close)
+    .build();
+
+/// Directory file operations (shared by all FS types).
+/// Directories are read via getdents64, not via read().
+pub(crate) fn dir_read_eisdir(_file: &File, _buf: &mut [u8]) -> isize {
+    -21  // EISDIR
+}
+
+fn dir_close(_file: &File) -> i32 {
+    0
+}
+
+/// Directory lseek — simple entry-index implementation (review 5.1:
+/// directories had no lseek op, so lseek(fd,0,SEEK_SET) returned ESPIPE and
+/// telldir/seekdir-style rewinds failed). The file position is the index of
+/// the next VfsDirEntry to be returned by getdents64 (which is also the
+/// d_off-1 value it reports), so SEEK_SET to a previous d_off value works.
+pub(crate) fn dir_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+    let current = file.get_pos() as i64;
+    let new_pos = match whence {
+        0 => offset as i64,               // SEEK_SET: absolute entry index
+        1 => current + offset as i64,     // SEEK_CUR
+        _ => {
+            // SEEK_END on a directory is not supported (entry count is not
+            // tracked per open); ESPIPE-like EINVAL, not silence.
+            return -22;  // EINVAL
+        }
+    };
+    if new_pos < 0 {
+        return -22;  // EINVAL
+    }
+    file.set_pos(new_pos as u64);
+    new_pos as isize
+}
+
+pub static DIR_FILE_OPS: FileOps = FileOps::builder()
+    .read(dir_read_eisdir)
+    .lseek(dir_file_lseek)
+    .close(dir_close)
+    .build();

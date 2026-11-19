@@ -1,0 +1,204 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Per-CPU ksoftirqd kernel thread
+//!
+//! When `__do_softirq()` exceeds its iteration budget, it wakes ksoftirqd
+//! to drain remaining softirqs at normal scheduling priority.
+
+use core::sync::atomic::{AtomicBool, Ordering};
+use crate::config::MAX_CPUS;
+
+// ============================================================================
+// Per-CPU ksoftirqd state
+// ============================================================================
+
+/// Per-CPU ksoftirqd task pointers. Set once during init; read-only thereafter.
+static mut KSOFTIRQD_TASK: [*mut crate::process::task::Task; MAX_CPUS] =
+    [core::ptr::null_mut(); MAX_CPUS];
+
+/// Per-CPU wake flag. Set by `wakeup_ksoftirqd()`, checked by ksoftirqd loop.
+static KSOFTIRQD_WAKE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
+// ============================================================================
+// ksoftirqd thread function
+// ============================================================================
+
+/// Main loop for ksoftirqd (one per CPU).
+///
+/// Runs `__do_softirq()` in a loop until no more pending softirqs,
+/// then sleeps. Woken by `wakeup_ksoftirqd()` or when a softirq is
+/// raised from process context.
+extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
+    let cpu = arg as usize;
+
+
+    loop {
+        // Check if we should stop
+        if crate::process::kthread::kthread_should_stop() {
+            break;
+        }
+
+        // Clear wake flag before draining
+        KSOFTIRQD_WAKE[cpu].store(false, Ordering::Release);
+
+        // Drain softirqs
+        while crate::interrupt::softirq::has_pending_softirqs() {
+            crate::interrupt::softirq::__do_softirq();
+            // phantom-bits fairness: between windows our preempt_count
+            // is 0, so yielding here is legal. Without it a feedback-
+            // heavy backlog (loopback request/response conversations)
+            // keeps this kthread monopolizing its CPU through thousands
+            // of 2 ms windows — the same starvation the inline windows
+            // caused, just in schedulable context. Pending stays armed;
+            // we remain RUNNING, so the scheduler re-picks us in turn.
+            if crate::sched::need_resched() {
+                crate::sched::schedule();
+            }
+        }
+
+        // Nothing more to do — sleep.
+        // Set INTERRUPTIBLE, then RE-CHECK pending softirqs before actually
+        // scheduling: a raise_softirq() in the window between the drain loop
+        // above and set_state found us RUNNING, so Task::wake_up was a no-op
+        // and the wakeup would be lost — softirqs would then sit pending
+        // until the next unrelated interrupt (Linux run_ksoftirqd pattern).
+        if let Some(current) = crate::sched::current() {
+            // SAFETY: current is a valid task pointer from sched::current(); setting state
+            // before schedule() is safe in this kthread context.
+            unsafe {
+                (*current).set_state(
+                    crate::process::task::TaskState::new(
+                        crate::process::task::TaskState::INTERRUPTIBLE
+                    )
+                );
+            }
+        }
+
+        if crate::interrupt::softirq::has_pending_softirqs() {
+            // Race with wakeup — clear state and drain instead of sleeping
+            if let Some(current) = crate::sched::current() {
+                // SAFETY: same current task as above.
+                unsafe {
+                    (*current).set_state(
+                        crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::RUNNING
+                        )
+                    );
+                }
+                // R33 (NEW-C2 discipline): the racing wakeup_ksoftirqd saw
+                // us INTERRUPTIBLE and may have set RUNNING + enqueued us
+                // while we are in fact still executing on this CPU. Without
+                // taking ourselves back off, a second CPU could pick and
+                // run this very kthread concurrently (double-drain, stack
+                // corruption). No-op when nothing enqueued us.
+                crate::sched::dequeue_task(&*current);
+            }
+            continue;
+        }
+
+        crate::sched::schedule();
+
+        // Woken up — loop back to check pending softirqs
+    }
+
+    0
+}
+
+// ============================================================================
+// Wakeup (called from softirq.rs)
+// ============================================================================
+
+/// Wake the ksoftirqd thread for the current CPU.
+///
+/// Called by `raise_softirq()` (from process context) or `invoke_softirq()`
+/// (on overflow). Idempotent — multiple calls before ksoftirqd runs
+/// are collapsed by the AtomicBool flag.
+pub fn wakeup_ksoftirqd() {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= MAX_CPUS {
+        return;
+    }
+
+    // Avoid redundant wakeups
+    if KSOFTIRQD_WAKE[cpu].swap(true, Ordering::AcqRel) {
+        return; // already flagged
+    }
+
+    // SAFETY: KSOFTIRQD_TASK[cpu] was set during init; null check guards wake_up.
+    unsafe {
+        let task_ptr = KSOFTIRQD_TASK[cpu];
+        if !task_ptr.is_null() {
+            crate::process::task::Task::wake_up(task_ptr);
+        }
+    }
+}
+
+// ============================================================================
+// Initialization
+// ============================================================================
+
+/// Create ksoftirqd kernel threads for all online CPUs.
+///
+/// Must be called after `sched::init()` since it uses `kthread_run()`.
+/// Should be called before interrupts are enabled.
+///
+/// SMP fix: only CPUs that actually came online get a thread. The old loop
+/// created one per compile-time MAX_CPUS and kthread_bind()d it to that CPU —
+/// with -smp 2 (MAX_CPUS=4) the threads for harts 2/3 were bound to CPUs
+/// that do not exist. They were enqueued with state RUNNING and an affinity
+/// mask naming no online CPU, so they sat on the CFS queue FOREVER:
+///   - grq.nr_running never dropped to 0, defeating __schedule's idle
+///     fast path — every idle-CPU schedule() then took the GRQ irqsave
+///     lock, multiplying global lock contention (the "spinlock stuck
+///     ra=GlobalRunQueue::lock_irqsave" DEADLOCK warnings under load);
+///   - every pick_next_cpu scan walked them;
+///   - enqueue_task's find_idle_cpu/IPI machinery targeted dead harts
+///     (sbi send_ipi error=-3 spam).
+pub fn init() {
+    for cpu in 0..MAX_CPUS {
+        if !crate::arch::smp::cpu_started(cpu) {
+            continue;
+        }
+        let name = match cpu {
+            0 => "ksoftirqd/0",
+            1 => "ksoftirqd/1",
+            2 => "ksoftirqd/2",
+            3 => "ksoftirqd/3",
+            _ => "ksoftirqd/?",
+        };
+
+        // R86 (smp8 panic): the old form ran kthread_run (which enqueues,
+        // making the task pickable) and THEN dequeued / kthread_bind /
+        // re-enqueued it here, on the assumption that "timer interrupts
+        // are not yet enabled, no concurrency" — false since
+        // start_secondaries(): every secondary enables its timer in
+        // secondary_cpu_entry() and is already scheduling by this point.
+        // A secondary could pick the kthread in the enqueue->dequeue
+        // window, mark/claim it, and then fight this CPU's bind +
+        // re-enqueue — the R74 SLOTLESS-TP storm, R83 ti_kernel_sp
+        // smears and PER_CPU slot corruption that killed smp>=5 boots
+        // (and even raced smp2, healed there). kthread_run_on_cpu binds
+        // BEFORE the first enqueue, so the task only ever becomes
+        // visible with its final CPU identity. Linux parity:
+        // kthread_create + kthread_bind + wake_up_process.
+        let task = crate::process::kthread::kthread_run_on_cpu(
+            ksoftirqd_fn,
+            cpu as *mut core::ffi::c_void,
+            name,
+            cpu,
+        );
+
+        if let Some(t) = task {
+            let t_ptr = t as *mut _;
+            // SAFETY: single-threaded BSP boot context; KSOFTIRQD_TASK[cpu]
+            // has no other accessor until this loop publishes it.
+            unsafe {
+                KSOFTIRQD_TASK[cpu] = t_ptr;
+            }
+        } else {
+            crate::pr_err!("ksoftirqd: failed to create thread for cpu {}", cpu);
+        }
+    }
+}

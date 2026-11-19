@@ -1,0 +1,271 @@
+# Rux Kernel Project Makefile
+# Provides quick access from project root directory
+
+.PHONY: all build clean run test debug help smp user rootfs gui verify miri kani
+.PHONY: toybox mrsh sdk ltp ubuntu-image ubuntu-run
+
+# ---- Ubuntu native desktop (udesk) ----
+# Image and kernel artifacts
+# 2026-11-16 (user directive): make ubuntu-run boots the FULL Ubuntu
+# 24.04 desktop image (debootstrap-noble + ubuntu-desktop, systemd 255)
+# from the image store — serial login root/rux. The runit-assembled GNOME
+# chain stays available as the override:
+#   UBUNTU_IMG=work/gnome-x86.img UBUNTU_INIT=/sbin/runit make ubuntu-run
+UBUNTU_IMG ?= /home/william/rux-images/ubuntu/ub2404.img
+UBUNTU_INIT ?= /sbin/init
+# Which x86_64 kernel profile `make ubuntu-run` builds and boots.
+# RELEASE by default — that is the shape the user boots, and the shape
+# the release perf gates measure. Override with UBUNTU_PROFILE=debug
+# for the debug build.
+UBUNTU_PROFILE ?= release
+KERNEL_BIN ?= target/riscv64gc-unknown-none-elf/debug/rux
+# The distro QEMU build has the SDL display backend; the custom 10.2.2 in
+# /usr/local/bin is compiled without display backends (none/dbus only).
+UBUNTU_QEMU ?= /usr/bin/qemu-system-riscv64
+# CPU count for the legacy riscv64 GUI flow (make gui); the x86 flows
+# carry their own unified-rig defaults in scripts/test/run-x86-ub.sh
+# (KVM SMP8 8G since 2026-11-14) and no longer read this variable.
+SMP ?= 4
+# TCG threading: multi = MTTCG (2.1x faster, verified 23/23 on both QEMU
+# builds with zero regressions); THREAD=single restores the deterministic
+# single-host-thread mode for debugging/stepping.
+THREAD ?= multi
+
+# Default target: forward to build/Makefile
+all:
+	@$(MAKE) -C build all
+
+# Build kernel
+build:
+	@$(MAKE) -C build build
+
+# Build x86_64 kernel (QEMU q35)
+build-x86:
+	@$(MAKE) -C build build-x86
+
+build-x86-release:
+	@$(MAKE) -C build build-x86-release
+
+# Boot x86_64 kernel in QEMU (q35, serial console)
+run-x86: build-x86
+	@echo "Starting QEMU (x86_64 q35)..."
+	@./scripts/test/run-x86.sh console
+
+# Clean
+clean:
+	@$(MAKE) -C build clean
+
+# Configuration
+config:
+	@$(MAKE) -C build config
+
+menuconfig:
+	@$(MAKE) -C build menuconfig
+
+# Build toybox (200+ Linux command line tools) - requires sdk
+toybox: sdk
+	@echo "Building toybox with musl libc..."
+	@cd userspace/toybox && ./build-toybox.sh
+
+# Build mrsh (minimal POSIX shell) - requires sdk
+mrsh: sdk
+	@echo "Building mrsh with musl libc..."
+	@cd userspace/mrsh && ./build-mrsh.sh
+
+# Build musl libc SDK (toolchain for cross-compilation)
+sdk:
+	@echo "Building musl libc SDK..."
+	@cd toolchain && ./build-musl.sh
+
+# Build LTP test suite (requires sdk)
+ltp: sdk
+	@echo "Building LTP test suite..."
+	@cd userspace/linux-ltp && ./build.sh
+
+# Restore C probe sources / x86_64 toolchain sysroot from tarballs
+# (C sources are not git-tracked; see scripts/extract-probes.sh)
+probes:
+	@./scripts/extract-probes.sh
+
+# Build user programs (Rust std + musl) - requires sdk first
+user: sdk probes
+	@echo "Building user programs (debug)..."
+	@./userspace/build debug
+	@echo "Building user programs (release)..."
+	@./userspace/build release
+
+# Create rootfs image (containing mrsh and toybox)
+rootfs: user toybox mrsh
+	@echo "Building rootfs image with mrsh and toybox..."
+	@./scripts/test/mkrootfs.sh
+
+# Run kernel (QEMU) - default to mrsh
+run:
+	@echo "Starting QEMU (mrsh)..."
+	@./scripts/test/run.sh console /bin/sh
+
+# ---- Ubuntu native desktop (udesk on Ubuntu 22.04 rootfs) ----
+# Build (or rebuild) the Ubuntu GNOME desktop image: work/gnome-x86.img
+# (x86_64 GNOME chain — Xorg-fbdev + dbus + gnome-session under a static
+# runit; native amd64 chroot-style assembly, no qemu-user). The udesk
+# variant stays available at scripts/test/ubuntu-gui/ (user directive
+# 2026-11-05: make ubuntu-run boots GNOME, not udesk).
+ubuntu-image:
+	@bash scripts/test/gnome-x86/build-img.sh
+
+# Boot the Ubuntu GNOME desktop (x86_64, KVM by default — ACCEL=tcg
+# to override). Native SDL window (WSLg); keyboard works in the window
+# AND in this terminal (serial). Login: root / rux.
+#
+# The x86_64 kernel is BUILT here (build-x86-$(UBUNTU_PROFILE)) and its
+# path is passed in explicitly: the target used to depend on the
+# riscv64 `build` and boot whatever x86 bzImage happened to sit in
+# target/, so a stale binary could be booted with a fresh tree checked
+# out (the 2026-11-16 dev-ttyS0.device timeout: an x86 bzImage built
+# before the uevent/netlink merge, booted from a post-merge tree).
+ubuntu-run: build-x86-$(UBUNTU_PROFILE) $(UBUNTU_IMG)
+	@echo "Starting full Ubuntu 24.04 (x86_64, KVM, SDL window; serial login root/rux)..."
+	@ROOTFS=$(UBUNTU_IMG) INIT=$(UBUNTU_INIT) NOBUILD=1 \
+	 PROFILE=$(UBUNTU_PROFILE) \
+	 KERNEL_ELF=$(CURDIR)/target/x86_64-unknown-none/$(UBUNTU_PROFILE)/rux \
+	 BZIMAGE=$(CURDIR)/target/x86_64-unknown-none/$(UBUNTU_PROFILE)/bzImage \
+	 bash scripts/test/run-x86-ub.sh gui
+
+# Image rule: built on demand by ubuntu-run, refreshed by `make ubuntu-image`.
+$(UBUNTU_IMG):
+	@bash scripts/test/gnome-x86/build-img.sh
+
+# ---- OpenHarmony x86_64_virt emulator image ----
+# The OH images live OUTSIDE git in the standing store (repo policy:
+# real image bytes never enter a worktree); this rule only wires
+# symlinks (OH_IMAGES overrides the store location). The boot itself
+# is the tracked scripts/test/run-oh.sh — same shape as the Ubuntu
+# flow: make oh-image && make oh-run.
+OH_IMAGES ?= images/oh
+OH_IMGDIR ?= run/oh-img
+
+.PHONY: oh-image oh-run
+oh-image:
+	@bash scripts/test/oh-link.sh "$(OH_IMAGES)" "$(OH_IMGDIR)"
+
+# Boot OpenHarmony (x86_64, TCG, GTK window; serial console on this
+# terminal). The stock image boots 135+ services to the launcher.
+oh-run: build-x86-release oh-image
+	@echo "Starting OpenHarmony (x86_64, TCG, GTK window)..."
+	@bash scripts/test/run-oh.sh "$(OH_IMGDIR)" gui
+
+# Run kernel test script (PLATFORM=riscv64 default; PLATFORM=aarch64 /
+# x86_64 run the suite under that arch's QEMU; see test/run.sh)
+test: probes
+	@PLATFORM=$(PLATFORM) ./scripts/test/run.sh test
+
+# Run formal verification (sync check + unsafe gate + proptest)
+verify:
+	@echo "=== Step 1/3: Sync check ==="
+	@python3 scripts/verify_sync_check.py
+	@echo ""
+	@echo "=== Step 2/3: Unsafe verification gate ==="
+	@python3 scripts/unsafe_gate.py --check
+	@echo ""
+	@echo "=== Step 3/3: Run verification tests ==="
+	@cd kernel/verify && cargo test --target x86_64-unknown-linux-gnu
+	@echo ""
+	@echo "=== All verify steps passed ==="
+
+# Whole-kernel coverage report over the in-kernel test suite: boots an
+# instrumented kernel (COV=1 make test), extracts the profile from the
+# rootfs, and prints a per-subsystem table including 0% files.
+# scripts/coverage-report.sh --record refreshes
+# docs/development/coverage-latest.txt.
+coverage:
+	@bash scripts/coverage-report.sh
+
+# Miri UB detection on verify crate
+miri:
+	@echo "=== Step 1/2: Sync check ==="
+	@python3 scripts/verify_sync_check.py
+	@echo ""
+	@echo "=== Step 2/2: Run Miri UB detection ==="
+	@cd kernel/verify && MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-permissive-provenance" cargo +nightly miri test
+	@echo ""
+	@echo "=== All Miri checks passed (no UB found) ==="
+
+# Run Kani symbolic verification on verify crate
+kani:
+	@echo "=== Step 1/2: Sync check ==="
+	@python3 scripts/verify_sync_check.py
+	@echo ""
+	@if [ ! -x "$(HOME)/.kani/kani-0.68.0/bin/kani-compiler" ]; then \
+		echo "PROBE-RESULT: SKIP kani release bundle not installed"; \
+		echo "  (cargo install kani-verifier is present, but 'cargo kani setup'"; \
+		echo "   downloads the CBMC bundle from github.com releases, which this"; \
+		echo "   host cannot reach - the download hangs)"; \
+	else \
+		echo "=== Step 2/2: Run Kani verification ==="; \
+		cd kernel/verify && cargo kani; \
+		echo ""; \
+		echo "=== All Kani proofs passed ==="; \
+	fi
+
+# Run SPIN concurrency model checking
+spin:
+	@echo "=== SPIN Concurrency Model Checking ==="
+	@cd kernel/verify/spin && $(MAKE)
+	@echo ""
+	@echo "=== SPIN checks complete — see kernel/verify/spin/spin-report.txt ==="
+
+# SMP test
+smp: build
+	@echo "SMP test removed, please use test.sh for unit tests"
+
+# Debug
+debug: build
+	@$(MAKE) -C build debug
+
+# Generate binary
+bin:
+	@$(MAKE) -C build bin
+
+# Project info
+info:
+	@$(MAKE) -C build info
+
+# Dependency check
+deps:
+	@$(MAKE) -C build deps
+
+# Help
+help:
+	@echo "Rux Kernel Project"
+	@echo ""
+	@echo "Quick commands (from project root):"
+	@echo "  make build           - Build kernel"
+	@echo "  make clean           - Clean build"
+	@echo "  make run             - Run kernel (mrsh)"
+	@echo "  make gui             - Run GUI mode (desktop)"
+	@echo "  make ubuntu-run      - Run Ubuntu desktop in an SDL window (root/rux)"
+	@echo "  make ubuntu-image    - (Re)build the Ubuntu GUI disk image"
+	@echo "  make test            - Run tests"
+	@echo "  make verify          - Run formal verification (sync check + proptest)"
+	@echo "  make miri            - Run Miri UB detection on verify crate"
+	@echo "  make kani            - Run Kani symbolic verification"
+	@echo "  make rootfs          - Create rootfs image"
+	@echo "  make debug           - Debug kernel"
+	@echo "  make menuconfig      - Configure kernel"
+	@echo ""
+	@echo "Build user programs:"
+	@echo "  make user            - Build all user programs (desktop, etc.)"
+	@echo "  make toybox          - Build toybox (200+ command line tools)"
+	@echo "  make mrsh            - Build mrsh (POSIX shell)"
+	@echo ""
+	@echo "Build toolchain & tests:"
+	@echo "  make sdk             - Build musl libc SDK (cross-compile toolchain)"
+	@echo "  make ltp             - Build LTP test suite (1826 test binaries)"
+	@echo ""
+	@echo "Directory structure:"
+	@echo "  kernel/    - Kernel source code"
+	@echo "  userspace/ - User programs"
+	@echo "  build/     - Build and configuration tools"
+	@echo "  scripts/    - Host-side scripts"
+	@echo "  docs/      - Documentation"
+

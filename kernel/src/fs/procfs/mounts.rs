@@ -1,0 +1,261 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! /proc/mounts - Mounted filesystems
+//!
+//! Also provides /proc/filesystems and /proc/self/mountinfo content.
+//!
+//! U2: mountinfo is what systemd actually parses (mount_setup /
+//! mount_table), so the boot layout is synthesized here rather than
+//! depending on register_mount() having been called for every boot-time
+//! mount — procfs, sysfs and devtmpfs are linked with vfs_mount()
+//! directly during boot and would otherwise be missing from the
+//! namespace view until a sys_mount re-registered them.
+
+// Kernel layer policy (docs/architecture/kernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::format;
+
+/// One canonical mount entry for the synthesized boot layout.
+struct BootMount {
+    mount_id: u32,
+    parent_id: u32,
+    dev: &'static str,
+    mount_point: &'static str,
+    fs_type: &'static str,
+    source: &'static str,
+}
+
+/// The boot layout systemd expects to find (U2).
+///
+/// - `/`      : ext4 on /dev/vda once the root disk is mounted, else rootfs
+/// - `/dev`   : devtmpfs (dynamic device nodes)
+/// - `/dev/pts`: devpts (pty slaves — dynamic since P0)
+/// - `/proc`  : proc
+/// - `/sys`   : sysfs
+/// - `/run`   : tmpfs (systemd runtime state, mounted by main.rs)
+///
+/// `/dev/shm` and `/sys/fs/cgroup` come in through the live namespace
+/// table (they are mounted via do_mount, which registers them).
+fn boot_mounts() -> Vec<BootMount> {
+    let root_is_ext4 = crate::fs::ext4::is_mounted();
+    let mut out = Vec::new();
+    out.push(BootMount {
+        mount_id: 1,
+        parent_id: 0,
+        dev: if root_is_ext4 { "254:0" } else { "0:1" },
+        mount_point: "/",
+        fs_type: if root_is_ext4 { "ext4" } else { "rootfs" },
+        source: if root_is_ext4 { "/dev/vda" } else { "rootfs" },
+    });
+    out.push(BootMount {
+        mount_id: 2,
+        parent_id: 1,
+        dev: "0:5",
+        mount_point: "/dev",
+        fs_type: "devtmpfs",
+        source: "devtmpfs",
+    });
+    out.push(BootMount {
+        mount_id: 3,
+        parent_id: 2,
+        dev: "0:4",
+        mount_point: "/dev/pts",
+        fs_type: "devpts",
+        source: "devpts",
+    });
+    out.push(BootMount {
+        mount_id: 4,
+        parent_id: 1,
+        dev: "0:3",
+        mount_point: "/proc",
+        fs_type: "proc",
+        source: "proc",
+    });
+    out.push(BootMount {
+        mount_id: 5,
+        parent_id: 1,
+        dev: "0:6",
+        mount_point: "/sys",
+        fs_type: "sysfs",
+        source: "sysfs",
+    });
+    out.push(BootMount {
+        mount_id: 6,
+        parent_id: 1,
+        dev: "0:20",
+        mount_point: "/run",
+        fs_type: "tmpfs",
+        source: "tmpfs",
+    });
+    out
+}
+
+/// Generate /proc/mounts content
+///
+/// Format: <device> <mount_point> <fs_type> <options> 0 0
+pub fn generate() -> Vec<u8> {
+    let mut content = String::new();
+
+    // Synthesized boot layout first (stable order), then any
+    // namespace-registered mounts not already covered.
+    let boot = boot_mounts();
+    let seen: Vec<&str> = boot.iter().map(|m| m.mount_point).collect();
+    for m in boot.iter() {
+        content.push_str(&format!(
+            "{} {} {} rw,relatime 0 0\n",
+            m.source, m.mount_point, m.fs_type
+        ));
+    }
+
+    for (device, mount_point, fs_type, options) in crate::fs::mount::get_mounts() {
+        if mount_point == "/" || seen.iter().any(|s| *s == mount_point) {
+            continue; // "/" and boot-layout entries already emitted
+        }
+        content.push_str(&format!(
+            "{} {} {} {} 0 0\n",
+            device, mount_point, fs_type, options
+        ));
+    }
+
+    content.into_bytes()
+}
+
+/// The registered filesystem types, in the order /proc/filesystems lists
+/// them — sysfs(2) indexes into THIS list (reference sys_sysfs walks the
+/// file_systems registration list; this stable table is our stand-in).
+pub const FS_TABLE: [(&str, bool); 8] = [
+    ("rootfs", true),
+    ("proc", true),
+    ("devtmpfs", true),
+    ("devpts", true),
+    ("ext4", false),
+    ("sysfs", true),
+    ("cgroup2", true),
+    ("tmpfs", true),
+];
+
+/// Generate /proc/filesystems content
+///
+/// Lists all supported filesystem types.
+pub fn generate_filesystems() -> Vec<u8> {
+    let mut content = String::new();
+
+    for (name, nodev) in FS_TABLE.iter() {
+        if *nodev {
+            content.push_str("nodev\t");
+        } else {
+            content.push('\t');
+        }
+        content.push_str(name);
+        content.push('\n');
+    }
+
+    content.into_bytes()
+}
+
+/// Is `mp` a component-aligned path prefix of `path` ("/" always is;
+/// "/dev" matches "/dev/pts" but not "/devx")?
+fn mount_point_prefix(mp: &str, path: &str) -> bool {
+    if mp == "/" {
+        return true;
+    }
+    path == mp || (path.len() > mp.len() && path.starts_with(mp) && path.as_bytes()[mp.len()] == b'/')
+}
+
+/// The mount ID statx(STATX_MNT_ID) reports for a path: the row (boot
+/// layout or the live namespace table) whose mount_point is the LONGEST
+/// component-aligned prefix of the path — the same id
+/// generate_mountinfo() prints in the first column, so a caller that
+/// reads mountinfo and statx's the same path sees one id per mount.
+/// This is the shared helper both views answer through (systemd 255's
+/// mount detection: path_is_mount_point compares a path's stx_mnt_id
+/// with its parent's; sd-device matches device nodes against
+/// mountinfo rows by mnt_id). Anything unmatched sits on the root
+/// mount (id 1).
+pub fn mount_id_for(path: &str) -> u32 {
+    let mut best: u32 = 1;
+    let mut best_len: usize = 1; // "/" — matches every path
+    // Boot rows first, and strict > on prefix length: a registry row
+    // for the SAME mountpoint (re-registered /, /sys, /run ...) must
+    // NOT displace the boot row's id — generate_mountinfo() skips
+    // those rows in its `seen` pass, and the two views must agree.
+    let mut consider = |mp: &str, id: u32| {
+        if mount_point_prefix(mp, path) && mp.len() > best_len {
+            best_len = mp.len();
+            best = id;
+        }
+    };
+    for m in boot_mounts().iter() {
+        consider(m.mount_point, m.mount_id);
+    }
+    for e in crate::fs::mount::get_mount_entries() {
+        consider(&e.mount_point, e.mount_id);
+    }
+    best
+}
+
+/// Generate /proc/self/mountinfo content (detailed mount info)
+///
+/// Format (systemd's parser, proc-mounts(5)):
+/// `mount_id parent_id major:minor root mount_point mount_options
+///  [optional_fields...] - fs_type mount_source super_options`
+///
+/// U2: the boot layout (/ /proc /sys /dev /dev/pts /run) is synthesized
+/// so systemd always sees a complete hierarchy, merged with the live
+/// namespace-registered mounts (/dev/shm, /sys/fs/cgroup, ...).
+pub fn generate_mountinfo() -> Vec<u8> {
+    let mut content = String::new();
+
+    let boot = boot_mounts();
+    let seen: Vec<&str> = boot.iter().map(|m| m.mount_point).collect();
+    for m in boot.iter() {
+        content.push_str(&format!(
+            "{} {} {} / {} rw,relatime - {} {} rw\n",
+            m.mount_id, m.parent_id, m.dev, m.mount_point, m.fs_type, m.source
+        ));
+    }
+
+    for entry in crate::fs::mount::get_mount_entries() {
+        let (device, mount_point, fs_type, options) =
+            (&entry.device, &entry.mount_point, &entry.fs_type, &entry.flags);
+        if mount_point == "/" || seen.iter().any(|s| *s == mount_point) {
+            continue;
+        }
+        // Linux mountinfo: the row's FIRST field is the mount's own
+        // PERMANENT mnt_id (struct mount.mnt_id), not a position in the
+        // output. Numbering positionally over the namespace Vec made any
+        // registry churn re-pair ids with different mounts between reads
+        // — systemd's monitor diffed phantom changes and failed healthy
+        // mount units (sys-kernel-tracing "no mount" class).
+        let mount_id = entry.mount_id;
+        // Parent of anything not under /dev/pts is the root mount (1);
+        // nested mounts (e.g. /sys/fs/cgroup under /sys) keep their
+        // textual path — systemd only needs a consistent DAG.
+        let parent_id = 1u32;
+        // The per-mount VFS options column carries the mount's ACTUAL
+        // ro/rw state, like Linux's mountinfo (a ro bind remount shows
+        // "ro,relatime" here; the superblock options stay in the last
+        // field). systemd's sandbox remount loop reads THIS column to
+        // verify a MS_RDONLY re-flag took effect (bind_remount_recursive
+        // → mnt_optstr_get_flags); a hardcoded "rw" made every ro
+        // remount look like it never applied (ub2404 226/NAMESPACE
+        // hunt, 2026-11-15).
+        let vfs_opts = if options.contains("ro") {
+            "ro,relatime"
+        } else {
+            "rw,relatime"
+        };
+        content.push_str(&format!(
+            "{} {} 0:23 / {} {} - {} {} {}\n",
+            mount_id, parent_id, mount_point, vfs_opts, fs_type, device, options
+        ));
+    }
+
+    content.into_bytes()
+}

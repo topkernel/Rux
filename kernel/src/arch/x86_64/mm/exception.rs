@@ -1,0 +1,682 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! x86_64 fault entry: do_page_fault + exception (fixup) table.
+//!
+//! The `__ex_table` section is emitted by the uaccess asm: entries
+//! (fault_rip, fixup_rip); a kernel #PF landing inside a bracketed uaccess
+//! window jumps to the fixup instead of panicking — this is how
+//! copy_to_user returns EFAULT.
+//!
+//! Ported from arch/riscv64/mm/exception.rs: fault address comes from CR2
+//! (not the trap frame), RIP replaces EPC, and the riscv-specific
+//! NOVMA-EXEC forensic replay is reduced to a one-line witness (the x86
+//! port has no uaccess probe plumbing yet).
+
+use super::page_fault::FaultFlags;
+use crate::arch::pt_regs::PtRegs;
+use crate::arch::mm::{VirtAddr, MmFaultResult, handle_cow_fault, handle_mm_fault};
+use crate::println;
+
+/// Exception table entry (16 bytes, sorted by fault_rip at link time ideally)
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ExceptionTableEntry {
+    pub fault_rip: u64,
+    pub fixup_rip: u64,
+}
+
+extern "C" {
+    static __ex_table_start: ExceptionTableEntry;
+    static __ex_table_end: ExceptionTableEntry;
+}
+
+/// If `addr` is inside a uaccess exception window, return the fixup target.
+pub fn fixup_exception(addr: u64) -> Option<u64> {
+    // SAFETY: linker symbols bound the table; only addresses are read.
+    unsafe {
+        let start = &raw const __ex_table_start as *const ExceptionTableEntry;
+        let end = &raw const __ex_table_end as *const ExceptionTableEntry;
+        let mut p = start;
+        while p < end {
+            let e = &*p;
+            if e.fault_rip == addr {
+                return Some(e.fixup_rip);
+            }
+            p = p.add(1);
+        }
+    }
+    None
+}
+
+pub fn exception_table_empty() -> bool {
+    // Linker symbols only; address-of is safe.
+    &raw const __ex_table_start as usize == &raw const __ex_table_end as usize
+}
+
+pub fn exception_table_count() -> usize {
+    // Linker symbols only; address arithmetic is safe.
+    (&raw const __ex_table_end as usize - &raw const __ex_table_start as usize)
+        / core::mem::size_of::<ExceptionTableEntry>()
+}
+
+/// Send signal to current process
+///
+/// # Arguments
+/// - `sig`: Signal number
+/// - `code`: Signal code (SI_XXX)
+/// - `addr`: Address that triggered exception
+/// - `rip`: Instruction address where exception occurred
+/// - `regs`: PtRegs pointer, used to get the current task
+fn send_signal(sig: i32, _code: i32, _addr: u64, _rip: u64, _regs: &PtRegs) {
+    // Send signal using the real signal mechanism
+    if let Some(current) = crate::sched::current() {
+        let pid = current.pid();
+        crate::signal::send_signal(pid, sig).ok();
+
+        // Wake up process to handle signal (if it's sleeping)
+        crate::signal::signal_wake_up(current as *mut _);
+    }
+}
+
+/// Check if in interrupt context
+#[inline]
+fn in_interrupt() -> bool {
+    crate::interrupt::preempt::in_interrupt()
+}
+
+/// Page fault handling - bad_area path
+///
+/// Called when address is not in a valid VMA
+fn bad_area(regs: &mut PtRegs, _access_type: u32, fault_addr: VirtAddr) -> MmFaultResult {
+    // User mode accessing invalid address
+    if regs.user_mode() {
+        send_signal(11, 1, fault_addr.bits(), regs.rip, regs);  // SIGSEGV, SEGV_MAPERR = 1
+        return MmFaultResult::Segfault;
+    }
+
+    // Kernel mode accessing invalid address
+    // Check exception table
+    if let Some(fixup) = fixup_exception(regs.rip) {
+        regs.rip = fixup;
+        return MmFaultResult::Handled;
+    }
+
+    // Cannot fix, kernel panic
+    MmFaultResult::KernelPanic
+}
+
+/// Page fault handling - no_context path
+///
+/// Called when valid process context cannot be obtained
+fn no_context(regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
+    // Check exception table
+    if let Some(fixup) = fixup_exception(regs.rip) {
+        regs.rip = fixup;
+        return MmFaultResult::Handled;
+    }
+
+    // SMAP audit beacon (perf review 2026-10-31): a no_context fault with
+    // CR4.SMAP on, AC clear and a user-range fault address is a RAW
+    // user-pointer dereference. Name the instruction BEFORE the oops
+    // machinery mangles the context — the audit loop is: run the tests,
+    // read this line, convert the site to uaccess, repeat.
+    {
+        static SHOWN: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if SHOWN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::println!(
+                "PF-NOCTX rip={:#x} addr={:#x} ac={} cr4smap={}",
+                regs.rip,
+                _fault_addr.bits(),
+                (regs.rflags >> 18) & 1,
+                crate::arch::cpu::smap_enabled() as u8
+            );
+        }
+    }
+
+    // Cannot handle
+    MmFaultResult::KernelPanic
+}
+
+/// do_page_fault - page fault handling main function (#PF, vector 14).
+///
+/// # Arguments
+/// - `regs`: Trap frame/register state
+/// - `access_type`: Access type (FaultFlags bitset decoded from the error
+///   code by the trap entry: bit0 P (0 = not-present, 1 = protection),
+///   bit1 W/R, bit2 U/S, bit4 I/D)
+///
+/// # Returns
+/// Handling result
+pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
+    // /proc/vmstat pgfault, and the per-task counter behind
+    // /proc/[pid]/stat field 10 (minflt). Linux counts only faults
+    // taken in user mode.
+    crate::mm::vmstat::note_fault();
+    if regs.user_mode() {
+        if let Some(task) = crate::sched::current() {
+            // SAFETY: current() returned a live task pointer; this
+            // only touches a per-task atomic counter.
+            unsafe {
+                (*task).min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    let cr2 = crate::arch::cpu::read_cr2();
+    let fault_addr = VirtAddr::new(cr2);
+
+    // Per-fault line gated behind rux:steptrace (retired dfx=steptrace): a full OH boot takes
+    // millions of user faults (demand paging every .so page); left on,
+    // these three lines per fault dominated the serial log and slowed
+    // TCG enough to change service-start races.
+    if crate::trace::EVENT_STEPTRACE.armed() {
+        crate::pr_debug!(
+            "do_page_fault: addr={:#x}, rip={:#x}, type={:#x}, mode={}",
+            fault_addr.bits(), regs.rip, access_type,
+            if regs.kernel_mode() { "kernel" } else { "user" }
+        );
+    }
+
+    // X3 fix: do NOT fixup uaccess-window kernel faults here. The early
+    // check below intercepted EVERY kernel #PF inside copy_to/from_user
+    // and routed it to the fixup (EFAULT) BEFORE the kernel_data_fill
+    // branch lower down could demand-fill a VMA-covered user page — so
+    // the FIRST kernel touch of any not-yet-faulted anonymous page
+    // (malloc'd sigaltstack, fresh stdio buffers) reported EFAULT
+    // instead of faulting the page in (sigaltstack01: sigframe
+    // copy_to_user onto the never-touched altstack → forced SIGSEGV).
+    // The fixup still applies at the tail of the kernel path, after
+    // demand-fill had its chance.
+
+    // Get current process's address space
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => {
+            // No current process, might be early boot stage
+            return no_context(regs, fault_addr);
+        }
+    };
+
+    let addr_space = match current.address_space() {
+        Some(aspace) => aspace,
+        None => {
+            // Kernel thread has no address space
+            return no_context(regs, fault_addr);
+        }
+    };
+
+    // Check if in interrupt context
+    if in_interrupt() {
+        // Cannot sleep in interrupt context
+        return no_context(regs, fault_addr);
+    }
+
+    // Kernel mode access
+    if regs.kernel_mode() {
+        // Kernel-mode access to a USER address whose VMA covers it: demand-
+        // fill the page and RETRY the instruction (Linux semantics — the
+        // kernel's copy_from_user on a not-yet-faulted user page must fault
+        // the page in, not EFAULT through the exception table — that
+        // starved every stdio buffer allocation in dynamically linked
+        // binaries on riscv64).
+        //
+        // EXEC faults are EXCLUDED: a ring-0 instruction fetch is never
+        // satisfied by a user page (SMEP blocks U=1 fetches at CPL0 even
+        // when mapped), so "fixing" the VMA and retrying just refaults
+        // forever — a jump through a garbage function pointer in kernel
+        // context then wedges the CPU in an unbounded fault/retry loop.
+        // Route kernel EXEC faults straight to the exception table /
+        // KernelPanic so the bug is loud and the CPU halts instead of
+        // looping.
+        // SMAP violation check (perf review 2026-10-31): with CR4.SMAP
+        // on, a kernel-mode fault on a user-range address whose EFLAGS.AC
+        // is CLEAR is a RAW user-pointer dereference (a STAC window would
+        // have AC set, and hardware would not have faulted on present
+        // U=0 pages at all). Demand-filling those used to loop forever —
+        // fill "succeeds", the instruction re-executes, SMAP faults
+        // again — until the watchdog fired the binder stall report into
+        // a panic. Route them to the exception table instead: uaccess
+        // sites get their EFAULT fixup, raw dereferences get a precise
+        // oops. STAC-window fills (AC=1) keep the normal path.
+        let smap_violation = crate::arch::cpu::smap_enabled()
+            && (regs.rflags & (1u64 << 18)) == 0; // EFLAGS.AC
+        let kernel_data_fill = fault_addr.bits()
+            < crate::arch::mm::user_addr::USER_END as u64
+            && (access_type & FaultFlags::EXEC) == 0
+            && !smap_violation;
+        if kernel_data_fill {
+            let covered = addr_space
+                .vma_read()
+                .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                .is_some();
+            // 84th (installs SIGABRT, ohw156 t=161.5): an UNCOVERED
+            // kernel uaccess fault must still reach handle_mm_fault —
+            // its VMA-miss arm grows a GROWSDOWN stack (try_expand_stack,
+            // Linux expand_downwards semantics for faults from kernel
+            // context, which copy_to_user relies on for out-params in
+            // never-touched below-floor stack pages). The old
+            // covered-only gate returned EFAULT for exactly those: the
+            // installs daemon's deferred-completion callback ran deeper
+            // on the main stack than ever before, steady_clock::now()'s
+            // timespec local sat in an ungrown page, clock_gettime's
+            // put_user faulted uncovered, libc++ threw
+            // system_error(EFAULT) and the daemon SIGABRT'd — killing
+            // the install stream. Uncovered non-stack addresses still
+            // fail: find_stack_vma returns None → Segfault → the
+            // exception-table fixup below, unchanged.
+            let stack_growable = addr_space
+                .vma_read()
+                .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                .is_some();
+            if covered || stack_growable {
+                let result = handle_mm_fault(
+                    &addr_space,
+                    fault_addr,
+                    access_type | FaultFlags::USER,
+                );
+                match result {
+                    MmFaultResult::Handled | MmFaultResult::Fixed => {
+                        // Re-execute the faulting kernel load/store.
+                        return MmFaultResult::Handled;
+                    }
+                    MmFaultResult::CowPending => {
+                        // Kernel WRITE uaccess onto a COW page: resolve it
+                        // like the user-mode path below (retry counts as
+                        // progress — the re-executed store either succeeds
+                        // or re-faults into the right path). Mirrors the
+                        // riscv64 twin (R82 block). Without this, CR0.WP
+                        // (now permanently set — F1b fix) turns every
+                        // read()/write() into a post-fork COW buffer into
+                        // an EFAULT short-copy: the trap falls through to
+                        // the exception-table fixup, init's param reads
+                        // all fail, and the boot collapses into the
+                        // LoopEvent spin (the ww-long2/long3 F4 collapse).
+                        // Leg-15 pace: j0 captured at entry, counter ticked
+                        // after return (no lock held — handle_cow_fault's
+                        // pte_lock is released by then).
+                        let cow_j0 = crate::drivers::timer::get_jiffies();
+                        let cow_res = unsafe {
+                            handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
+                        };
+                        crate::dfx::schb::note_cow(cow_j0);
+                        match cow_res {
+                            crate::arch::mm::CowFaultResult::Resolved
+                            | crate::arch::mm::CowFaultResult::Retry => {
+                                return MmFaultResult::Handled;
+                            }
+                            crate::arch::mm::CowFaultResult::OutOfMemory => {}
+                        }
+                    }
+                    // Unresolvable (bad perms etc.): fall through to the
+                    // exception-table fixup so the copy reports a short copy.
+                    _ => {
+                        // 84th EFAULT hunt (installs/telecom SIGABRT):
+                        // name the refusal input — result code + the
+                        // VMA state at the fault address — for every
+                        // kernel uaccess fault the fill declined.
+                        // Budget 60, direct console.
+                        static KF_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if KF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                            use crate::console::putchar_no_lock as putchar;
+                            let mut s = alloc::string::String::new();
+                            use core::fmt::Write;
+                            let _ = write!(
+                                s,
+                                "KUFILL-REFUSED pid={} addr={:#x} res={:?} ",
+                                current.pid(),
+                                fault_addr.bits(),
+                                result
+                            );
+                            let vr = addr_space.vma_read();
+                            let va = crate::mm::page::VirtAddr::new(fault_addr.as_usize());
+                            match vr.find(va) {
+                                Some(v) => {
+                                    let _ = write!(
+                                        s,
+                                        "vma={:#x}-{:#x} flags={:?}",
+                                        v.start().as_usize(),
+                                        v.end().as_usize(),
+                                        v.flags()
+                                    );
+                                }
+                                None => {
+                                    let _ = write!(s, "vma=NONE");
+                                }
+                            }
+                            for &c in s.as_bytes() {
+                                putchar(c);
+                            }
+                            putchar(b'\n');
+                        }
+                    }
+                }
+            } else {
+                // 84th EFAULT hunt, miss arm: covered=false AND no
+                // GROWSDOWN candidate — the raw refusal input for
+                // uaccess EFAULTs whose address no VMA claims.
+                static KFM_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if KFM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                    use crate::console::putchar_no_lock as putchar;
+                    let mut s = alloc::string::String::new();
+                    use core::fmt::Write;
+                    let _ = write!(
+                        s,
+                        "KUFILL-MISS pid={} addr={:#x} — no VMA, no growable stack\n",
+                        current.pid(),
+                        fault_addr.bits()
+                    );
+                    for &c in s.as_bytes() {
+                        putchar(c);
+                    }
+                }
+            }
+        }
+
+        // R78 twin parity (riscv64): the exception-table fixup runs BEFORE
+        // the stack-overflow panic. A faulting rip that has a fixup entry
+        // is BY CONSTRUCTION inside a copy_to_user/copy_from_user window —
+        // the right recovery is the fixup (short copy -> EFAULT), letting
+        // the syscall unwind normally (dropping any locks its frames
+        // hold). With panic-first, a uaccess fault at a wild address that
+        // happens to land in this task's kernel-stack range (or a
+        // cross-stack rsp) killed the whole machine and carried every
+        // held lock into the grave — the exact family the riscv64 twin
+        // convicted on three full-session terminal captures. Genuine
+        // kernel corruption (no fixup entry) still reaches the loud
+        // stack-overflow panic below unchanged. Wild addresses are not
+        // VMA-covered, so the demand-fill above already declined them.
+        if let Some(fixup) = fixup_exception(regs.rip) {
+            regs.rip = fixup;
+            return MmFaultResult::Handled;
+        }
+
+        // Check for kernel stack overflow
+        // If fault address is near current task's kernel stack, it's likely
+        // a stack overflow
+        let fault_addr_usize = fault_addr.bits() as usize;
+
+        if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.rsp as usize) {
+            // DFX (LTP chunk@700 panic hunt): the classification can be a
+            // false positive when `current` is stale (lying-slot family) or
+            // when the fault is an unrelated NULL deref on a foreign rsp —
+            // carry rip + both stack bounds so the dump names the faulting
+            // instruction and adjudicates the classification offline.
+            let kb = current.kernel_stack_bottom();
+            let kt = current.kernel_stack_top();
+            // One-shot census (allocation-free, raw UART): every CPU slot
+            // and every task's stack ownership vs the faulting rsp, so a
+            // lying slot / stale-kstack task / freed-stack resume is
+            // adjudicated directly from the dump.
+            {
+                use crate::console::putchar_no_lock as putchar;
+                fn phex(mut v: u64) {
+                    use crate::console::putchar_no_lock as putchar;
+                    for sh in (0..16).rev() {
+                        let n = ((v >> (sh * 4)) & 0xF) as u8;
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    }
+                }
+                fn ptag(m: &[u8]) {
+                    use crate::console::putchar_no_lock as putchar;
+                    for &b in m {
+                        putchar(b);
+                    }
+                }
+                ptag(b"\nKSO-CENSUS cpu=");
+                phex(crate::arch::cpu_id() as u64);
+                for c in 0..crate::config::MAX_CPUS {
+                    let cur = crate::sched::sched::cpu_state(c).current as usize as u64;
+                    if cur != 0 {
+                        ptag(b" slot");
+                        phex(c as u64);
+                        ptag(b"=pid:");
+                        // SAFETY: header reads only.
+                        unsafe {
+                            phex((*(cur as *mut crate::process::Task)).pid() as u64);
+                        }
+                    }
+                }
+                ptag(b"\n");
+                // DFX: adjudicate the freed-stack execution engine — is
+                // the faulting rsp inside a recently FREED stack?
+                if let Some((top, fpid, age)) =
+                    crate::process::task::freed_stack_containing(regs.rsp as usize)
+                {
+                    ptag(b"KSO-FREED-STACK rsp in freed kstack top=");
+                    phex(top as u64);
+                    ptag(b" freed_by_pid=");
+                    phex(fpid as u64);
+                    ptag(b" age_jiffies=");
+                    phex(age);
+                    ptag(b"\n");
+                }
+                // DFX: live TSS.rsp0 per CPU — a kernel-mode fault whose
+                // rsp sits just below a CPU's rsp0 inside non-stack memory
+                // is the trap-entry-on-stale/scribbled-rsp0 engine.
+                for c in 0..crate::config::MAX_CPUS {
+                    let r0 = crate::arch::x86_64::smp::PER_CPU[c]
+                        .tss_rsp0
+                        .load(core::sync::atomic::Ordering::Acquire);
+                    if r0 != 0 {
+                        ptag(b"KSO-RSP0 cpu");
+                        phex(c as u64);
+                        ptag(b"=");
+                        phex(r0);
+                        ptag(b"\n");
+                    }
+                }
+                // DFX: dump surviving kernel-text return addresses from the
+                // fault rsp up through the overflow zone into the legal
+                // stack (the deep recursion's frame chain names itself).
+                {
+                    let mut a = regs.rsp as usize & !7;
+                    let end = (kb + 0x400).min(kt);
+                    let mut shown = 0u32;
+                    while a < end && shown < 200 {
+                        // SAFETY: best-effort diagnostic read inside the
+                        // direct map; faults here are impossible (linear
+                        // map is fully mapped) — raw read.
+                        let v = unsafe { core::ptr::read_volatile(a as *const u64) };
+                        if v >= 0xffff_ffff_8000_0000u64 && v <= 0xffff_ffff_ffff_f000u64 {
+                            ptag(b"KSO-F +");
+                            phex((a - (regs.rsp as usize & !7)) as u64);
+                            ptag(b" ra=");
+                            phex(v);
+                            ptag(b"\n");
+                            shown += 1;
+                        }
+                        a += 8;
+                    }
+                }
+                // SAFETY: read-only header walk via the pid hash.
+                unsafe {
+                    crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+                        let bottom = (*task).kernel_stack_bottom() as u64;
+                        let top = (*task).kernel_stack_top() as u64;
+                        let sp = (*task).thread().sp;
+                        let rsp = regs.rsp;
+                        let hit = rsp >= bottom && rsp < top;
+                        let dead = (*task).state().is_dead();
+                        // Only print tasks whose stack is near the fault
+                        // (±4MB) or dead-with-stack — keeps the dump short.
+                        if hit
+                            || dead
+                            || (rsp + 0x400000 > bottom && rsp < bottom + 0x400000)
+                        {
+                            ptag(b"KSO-T pid=");
+                            phex((*task).pid() as u64);
+                            ptag(b" dead=");
+                            ptag(if dead { b"Y" } else { b"N" });
+                            ptag(b" kstack=[");
+                            phex(bottom);
+                            ptag(b", ");
+                            phex(top);
+                            ptag(b"] sp=");
+                            phex(sp as u64);
+                            ptag(if hit { b" <RSP-IN-THIS-STACK" } else { b"" });
+                            ptag(b"\n");
+                        }
+                        // keep walking
+                    });
+                }
+            }
+            panic!(
+                "Kernel stack overflow in task {} (fault_addr={:#x}, rsp={:#x}, rip={:#x}, kstack=[{:#x},{:#x}])",
+                current.pid(),
+                fault_addr_usize,
+                regs.rsp,
+                regs.rip,
+                kb,
+                kt
+            );
+        }
+
+        // Kernel accessed invalid address (possibly a bug)
+        println!(
+            "pagefault: kernel fault addr={:#x} rip={:#x} pid={} (no fixup)",
+            fault_addr.bits(),
+            regs.rip,
+            crate::sched::get_current_pid()
+        );
+        // rux:wildwatch (retired dfx=wildwatch) (wildwrite-hunt): a write fault inside a guarded
+        // region IS the wild writer caught in the act — banner it so the
+        // serial line is unmissable, then let the normal printer below
+        // carry rip + the rbp walk into the KERNPANIC dump.
+        #[cfg(feature = "x86_64")]
+        if (access_type & FaultFlags::WRITE) != 0
+            && crate::dfx::wildwatch::is_armed(fault_addr.bits() as usize)
+        {
+            println!(
+                "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
+                fault_addr.bits(),
+                regs.rip,
+                crate::sched::get_current_pid()
+            );
+        }
+        // OH bring-up forensics: walk the frame-pointer chain so the
+        // faulting CALLER is visible (write_volatile-style leaf frames
+        // otherwise hide the driver that computed the bad address).
+        // SAFETY: best-effort kernel-stack reads; a bad frame just stops
+        // the walk (bounds + canonicality checked per hop).
+        unsafe {
+            let mut rbp = regs.rbp as *const u64;
+            let stack_top = (regs.rsp | 0x3FFF) + 1; // within this 16K kernel stack
+            for _ in 0..12 {
+                if (rbp as u64) & 7 != 0 || (rbp as u64) + 16 >= stack_top {
+                    break;
+                }
+                let ret = *rbp.offset(1);
+                let next = *rbp;
+                if ret < 0xffff_8000_0000_0000 || next <= rbp as u64 || next >= stack_top {
+                    break;
+                }
+                crate::println!("  pfault-frame: {:#x}", ret);
+                rbp = next as *const u64;
+            }
+        }
+        return MmFaultResult::KernelPanic;
+    }
+
+    // User mode page fault handling
+
+    // Non-canonical or kernel-half address: hardware faults BEFORE any
+    // page-table walk, but the kernel's own walkers MASK the index to 48
+    // bits — a page mapped at the truncated position would make every
+    // fault resolve as "already mapped, perms OK", retrying the same
+    // non-canonical fetch forever (the riscv64 trap-loop lesson). User
+    // VAs must have bits 63:47 all clear.
+    if (fault_addr.bits() >> 47) != 0 {
+        return bad_area(regs, access_type, fault_addr);
+    }
+
+    // 1. Call handle_mm_fault to handle
+    let result = handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
+
+    match result {
+        MmFaultResult::Handled | MmFaultResult::Fixed => {
+            // Page mapped, can re-execute instruction
+            MmFaultResult::Handled
+        }
+        MmFaultResult::CowPending => {
+            // COW page, try copy-on-write
+            // Leg-15 pace: j0 at entry, tick after return (pte_lock released).
+            let cow_j0 = crate::drivers::timer::get_jiffies();
+            let cow_res =
+                unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
+            crate::dfx::schb::note_cow(cow_j0);
+            match cow_res {
+                crate::arch::mm::CowFaultResult::Resolved => {
+                    MmFaultResult::Handled
+                }
+                crate::arch::mm::CowFaultResult::Retry => {
+                    // The PTE changed between handle_mm_fault's lock-free
+                    // is_cow_page() check and the locked re-walk — a
+                    // sibling thread sharing this mm broke the COW first.
+                    // Re-execute the instruction; if the store still
+                    // faults, the next entry sees the new PTE state and
+                    // takes the proper path (never a kill for the race
+                    // loser — the riscv64 "fake OOM layer 2" lesson).
+                    MmFaultResult::Handled
+                }
+                crate::arch::mm::CowFaultResult::OutOfMemory => {
+                    // Allocating the private copy genuinely failed
+                    MmFaultResult::OutOfMemory
+                }
+            }
+        }
+        MmFaultResult::AlreadyMapped => {
+            // Mapped but permission issue
+            // Possibly writing to read-only page etc.
+            send_signal(11, 2, fault_addr.bits(), regs.rip, regs);  // SIGSEGV, SEGV_ACCERR = 2
+            MmFaultResult::PermissionDenied
+        }
+        MmFaultResult::Segfault => {
+            // Address not in any VMA — one-line witness (the riscv64 twin
+            // replays rings/uaccess here; x86 bring-up has no such
+            // plumbing yet).
+            if access_type & FaultFlags::EXEC != 0 {
+                // satp_to_ppn masks the PCID/NOFLUSH bits a live CR3
+                // carries with PCID on.
+                let cr3_ppn = crate::arch::mm::asid::satp_to_ppn(crate::arch::cpu::read_cr3());
+                let exe = crate::sched::current()
+                    .map(|t| t.get_exe_path())
+                    .unwrap_or(&[]);
+                let exe_str = core::str::from_utf8(exe).unwrap_or("?");
+                crate::pr_err!(
+                    "NOVMA-EXEC: addr={:#x} pid={} exe={} pgd={:#x} cr3_ppn={:#x}{} rip={:#x}",
+                    fault_addr.bits(),
+                    crate::sched::get_current_pid(),
+                    exe_str,
+                    addr_space.pgd() as u64,
+                    cr3_ppn,
+                    if cr3_ppn == addr_space.pgd() as u64 { "" } else { " MISMATCH" },
+                    regs.rip
+                );
+            }
+            bad_area(regs, access_type, fault_addr)
+        }
+        MmFaultResult::PermissionDenied => {
+            // Insufficient permissions
+            send_signal(11, 2, fault_addr.bits(), regs.rip, regs);  // SIGSEGV, SEGV_ACCERR = 2
+            MmFaultResult::PermissionDenied
+        }
+        MmFaultResult::OutOfMemory => {
+            // Out of memory, send SIGKILL
+            send_signal(9, 0, fault_addr.bits(), regs.rip, regs);  // SIGKILL
+            MmFaultResult::OutOfMemory
+        }
+        MmFaultResult::BusError => {
+            // File-backed fault past EOF: SIGBUS with si_code BUS_ADRERR (2)
+            send_signal(7, 2, fault_addr.bits(), regs.rip, regs);
+            MmFaultResult::BusError
+        }
+        // KernelPanic is not produced by handle_mm_fault
+        MmFaultResult::KernelPanic => {
+            bad_area(regs, access_type, fault_addr)
+        }
+    }
+}

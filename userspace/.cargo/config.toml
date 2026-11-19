@@ -1,0 +1,14 @@
+# Rux 用户程序构建配置
+#
+# 使用 RISC-V 64 + musl 目标（静态链接）
+
+[build]
+target = "riscv64gc-unknown-linux-musl"
+
+[target.riscv64gc-unknown-linux-musl]
+linker = "riscv64-linux-gnu-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+# 禁用根目录的内核配置
+CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUSTFLAGS = ""
