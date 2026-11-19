@@ -13,6 +13,7 @@
 //! switches.rs); also available on demand through the UART trigger when
 //! `taskdump` is on.
 
+use crate::safety::frame::KernelStackWindow;
 use core::sync::atomic::Ordering;
 
 // ============================================================================
@@ -990,9 +991,9 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
             // Upward scan of the interrupted task's own stack through the
             // bounds-checked window (INV-WINDOW-*); the stack stays mapped
             // while the task monopolizes the CPU.
-            let win = KernelStackWindow::new(rsp, rsp + 64 * 8);
+            let win = KernelStackWindow::new(rsp as usize, (rsp + 64 * 8) as usize);
             for k in 0..64 {
-                let v = match win.and_then(|w| w.read_u64(rsp + k * 8)) {
+                let v = match win.and_then(|w| w.read_u64((rsp + k * 8) as usize)) {
                     Some(v) => v,
                     None => continue,
                 };

@@ -1670,7 +1670,7 @@ fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
             return;
         }
         let mut insn = [0u8; 2];
-        let bad = crate::arch::uaccess_safe::copy_in(&mut insn, regs.rip - 2);
+        let bad = crate::arch::uaccess_safe::copy_in(&mut insn, (regs.rip - 2) as usize);
         if bad != 0 || insn != [0x0f, 0x05] {
             return;
         }
