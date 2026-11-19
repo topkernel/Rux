@@ -130,7 +130,7 @@ pub fn test_move_child() {
         let mut dest_count = 0usize;
         (*dest).for_each_child(|c| {
             dest_count += 1;
-            if c == child { on_dest = true; }
+            if core::ptr::eq(c, child as *const Task) { on_dest = true; }
         });
         if on_dest && dest_count == 1 {
             test_pass("child linked into dest list exactly once");

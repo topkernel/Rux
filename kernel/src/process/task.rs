@@ -4485,23 +4485,25 @@ impl Task {
     /// concurrent join/leave/walk (the process-tree lock doubles as the
     /// thread-group lock; both guard task_struct linkage fields).
     ///
-    /// # Safety
-    /// `self` is a valid leader (its ring is well-formed), `member` is a
-    /// fully-constructed task not yet in any ring, and neither is being
-    /// torn down concurrently.
-    pub unsafe fn thread_group_join(&self, member: *mut Task) {
+    /// Contract: `self` is a valid leader (its ring is well-formed),
+    /// `member` is a fully-constructed task not yet in any ring, and
+    /// neither is being torn down concurrently.
+    pub fn thread_group_join(&mut self, member: *mut Task) {
         let _lock = PROCESS_TREE_LOCK.lock();
-        let leader = self as *const Task as *mut Task;
-        (*member).set_group_leader(leader);
-        (*member).set_tgid(self.tgid);
+        let leader = self as *mut Task;
+        // SAFETY: caller contract above — member is a fully-constructed
+        // task; the tree/ring lock is held for the whole link.
+        let m = unsafe { &mut *member };
+        m.set_group_leader(leader);
+        m.set_tgid(self.tgid);
         // member.parent mirrors the leader's parent (threads share the real
         // parent) — but the member is NOT linked into the parent's children
         // list (wait4 only ever sees process products).
-        (*member).parent = self.parent;
-        (*member).parent_children_head = ptr::null_mut();
-        (*member).next_thread = (*leader).next_thread;
-        (*leader).next_thread = member;
-        (*leader).nr_threads.fetch_add(1, Ordering::Release);
+        m.parent = self.parent;
+        m.parent_children_head = ptr::null_mut();
+        m.next_thread = self.next_thread;
+        self.next_thread = member;
+        self.nr_threads.fetch_add(1, Ordering::Release);
     }
 
     /// Remove `member` from its thread group ring and return the leader.
@@ -4509,32 +4511,37 @@ impl Task {
     /// Returns NULL when the member is its own leader (nothing to leave).
     /// The caller must NOT be `member` itself already scheduled out.
     ///
-    /// # Safety
-    /// `member` is a live ring member of a well-formed ring.
-    pub unsafe fn thread_group_leave(member: *mut Task) -> *mut Task {
-        let leader = (*member).group_leader;
+    /// Contract: `member` is a live ring member of a well-formed ring.
+    pub fn thread_group_leave(member: *mut Task) -> *mut Task {
+        // SAFETY: caller contract above — member is a live ring member.
+        let m = unsafe { &mut *member };
+        let leader = m.group_leader;
         if leader.is_null() || leader as *const Task == member as *const Task {
             return ptr::null_mut();
         }
         let _lock = PROCESS_TREE_LOCK.lock();
         // Find member's predecessor, walking from the leader (ring, no tail).
+        // SAFETY: ring nodes stay linked under PROCESS_TREE_LOCK.
         let mut prev = leader;
         let mut guard = 0u32;
-        while guard < 65536 {
-            let next = (*prev).next_thread;
-            if next == member || next == leader {
-                break;
+        unsafe {
+            while guard < 65536 {
+                let next = (*prev).next_thread;
+                if next == member || next == leader {
+                    break;
+                }
+                prev = next;
+                guard += 1;
             }
-            prev = next;
-            guard += 1;
-        }
-        if (*prev).next_thread == member {
-            (*prev).next_thread = (*member).next_thread;
+            if (*prev).next_thread == member {
+                (*prev).next_thread = m.next_thread;
+            }
         }
         // Re-init to a self-ring so later accidental walks stay bounded.
-        (*member).next_thread = member;
-        (*member).group_leader = member;
-        (*leader).nr_threads.fetch_sub(1, Ordering::Release);
+        m.next_thread = member;
+        m.group_leader = member;
+        // SAFETY: leader is a live ring member (validated above).
+        unsafe { (*leader).nr_threads.fetch_sub(1, Ordering::Release) };
         // timer-gap lane: the leader may be PARKED in
         // wait_for_thread_group_death (exit_group/de_thread) waiting for
         // exactly this decrement — wake it so it re-checks nr_threads.
@@ -4554,21 +4561,26 @@ impl Task {
     /// delivery takes pid-hash pins and the GRQ, which must not nest under
     /// PROCESS_TREE_LOCK in the reverse order anywhere.
     ///
-    /// # Safety
-    /// `self` is a valid task whose ring is well-formed.
-    pub unsafe fn for_each_group_member<F>(&self, mut f: F)
+    /// Contract: `self` is a valid task whose ring is well-formed; each
+    /// `&Task` handed to `f` is valid only for the closure body (the
+    /// ring lock keeps members linked for the walk — do not store).
+    pub fn for_each_group_member<F>(&self, mut f: F)
     where
-        F: FnMut(*mut Task),
+        F: FnMut(&Task),
     {
         let _lock = PROCESS_TREE_LOCK.lock();
         let leader = self as *const Task as *mut Task;
-        f(leader);
-        let mut t = (*leader).next_thread;
-        let mut guard = 0u32;
-        while !t.is_null() && t != leader && guard < 65536 {
-            f(t);
-            t = (*t).next_thread;
-            guard += 1;
+        // SAFETY: leader is self (valid by contract); ring members stay
+        // linked while PROCESS_TREE_LOCK is held.
+        unsafe {
+            f(&*leader);
+            let mut t = (*leader).next_thread;
+            let mut guard = 0u32;
+            while !t.is_null() && t != leader && guard < 65536 {
+                f(&*t);
+                t = (*t).next_thread;
+                guard += 1;
+            }
         }
     }
 
@@ -4724,9 +4736,13 @@ impl Task {
 /// # Safety
 /// Caller must ensure `task` is a valid Task pointer and the task's
 /// vfork_parent (if set) points to a valid, still-alive Task.
-pub unsafe fn vfork_wake_parent(task: *mut Task) {
-    if let Some(parent) = (*task).vfork_parent_ptr() {
-        (*task).clear_vfork_parent();
+/// Contract: `task` is a valid task pointer (its vfork linkage fields
+/// are read and cleared).
+pub fn vfork_wake_parent(task: *mut Task) {
+    // SAFETY: caller contract above.
+    let t = unsafe { &mut *task };
+    if let Some(parent) = t.vfork_parent_ptr() {
+        t.clear_vfork_parent();
         crate::sched::wake_up_process(parent);
     }
 }
@@ -6270,41 +6286,39 @@ impl Task {
 
     // ==================== Process Tree Management ====================
 
+    /// Recover the Task that owns a `sibling` list node (container_of).
+    ///
+    /// Pure pointer arithmetic — no dereference — so the result is only
+    /// as valid as the node it came from: callers keep their existing
+    /// PROCESS_TREE_LOCK / pin / liveness contracts for any use.
+    #[inline]
+    pub fn from_sibling_node(node: *mut ListHead) -> *mut Task {
+        (node as usize - offset_of!(Task, sibling)) as *mut Task
+    }
+
     /// Get first child
     ///
     ///
     /// # Returns
     /// Some(child pointer) if has children, None otherwise
     pub fn first_child(&self) -> Option<*mut Task> {
-        // SAFETY: We hold PROCESS_TREE_LOCK via for_each_child callers or caller ensures
-        // no concurrent modification. The sibling offset is correct for Task layout.
-        unsafe {
-            // children list may be empty
-            if self.children.is_empty() {
-                return None;
-            }
-
-            // Get first sibling node from children list head
-            // Then use list_entry to get Task struct containing that sibling
-            let first_sibling = self.children.next;
-            // Calculate Task struct pointer containing that sibling
-            // sibling field is at end of Task struct
-            let task_ptr = (first_sibling as usize - offset_of!(Task, sibling)) as *mut Task;
-            Some(task_ptr)
+        // children list may be empty
+        if self.children.is_empty() {
+            return None;
         }
+        // Get first sibling node from children list head, then recover
+        // the Task containing it (container_of; no dereference here).
+        Some(Task::from_sibling_node(self.children.next))
     }
 
     /// Get next sibling
     ///
-    ///
-    /// # Safety
-    /// Caller must ensure self is not parent's children list head
+    /// Contract: caller must hold PROCESS_TREE_LOCK (or guarantee no
+    /// concurrent list modification) before dereferencing the result.
     ///
     /// # Returns
     /// Some(pointer) if has next sibling, None otherwise
-    // SAFETY: Caller must hold PROCESS_TREE_LOCK or guarantee no concurrent list
-    // modification. The sibling offset is correct for Task layout.
-    pub unsafe fn next_sibling(&self) -> Option<*mut Task> {
+    pub fn next_sibling(&self) -> Option<*mut Task> {
         // If parent's children list head not saved, not in any parent's children list
         if self.parent_children_head.is_null() {
             return None;
@@ -6317,9 +6331,8 @@ impl Task {
             return None;
         }
 
-        // Calculate Task struct pointer containing that sibling
-        let task_ptr = (next_sibling as usize - offset_of!(Task, sibling)) as *mut Task;
-        Some(task_ptr)
+        // Task struct pointer containing that sibling (no dereference)
+        Some(Task::from_sibling_node(next_sibling))
     }
 
     /// Check if has children
@@ -6332,82 +6345,80 @@ impl Task {
 
     /// Add child to process tree
     ///
-    ///
-    /// # Safety
-    /// Caller must ensure:
-    /// - self is valid parent process reference
-    /// - child is valid child process pointer
-    /// - child is not in any process tree
+    /// Contract: `self` is a valid parent, `child` is a valid,
+    /// fully-constructed task not yet in any process tree.
     ///
     /// # Arguments
     /// - `child`: Child process pointer to add
-    // SAFETY: Caller guarantees parent and child pointers are valid, child is not
-    /// already linked. PROCESS_TREE_LOCK is acquired internally.
-    pub unsafe fn add_child(&self, child: *mut Task) {
+    pub fn add_child(&self, child: *mut Task) {
         let _lock = PROCESS_TREE_LOCK.lock();
+        // SAFETY: caller contract above — child is a valid task pointer;
+        // PROCESS_TREE_LOCK is held for the whole link operation.
+        let c = unsafe { &mut *child };
 
         // R9 tripwire: linking an ALREADY-LINKED child double-links it —
         // one unlink leaves the other parent's list dangling, and the
         // freed/reused (zeroed) node shows up as the NULL children-walk
         // fault. Photograph the culprit before it strikes.
-        if let Some(old) = (*child).parent {
+        if let Some(old) = c.parent {
             if old as *const Task != self as *const Task {
                 let msg = b"TREE: DOUBLE add_child old=0x";
-                for &b in msg { unsafe { crate::console::putchar_no_lock(b); } }
+                for &b in msg { crate::console::putchar_no_lock(b); }
                 let mut sh = 64;
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((old as usize >> sh) & 0xF) as u8;
-                    unsafe { crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                    crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                 }
-                for &b in b" new=0x" { unsafe { crate::console::putchar_no_lock(b); } }
+                for &b in b" new=0x" { crate::console::putchar_no_lock(b); }
                 sh = 64;
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((self as *const Task as usize >> sh) & 0xF) as u8;
-                    unsafe { crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                    crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                 }
-                unsafe { crate::console::putchar_no_lock(b'\n'); }
+                crate::console::putchar_no_lock(b'\n');
             }
         }
 
         // Set child's parent
-        (*child).parent = Some(self as *const _ as *mut Task);
+        c.parent = Some(self as *const _ as *mut Task);
 
         // Save parent's children list head pointer (for next_sibling boundary check)
-        (*child).parent_children_head = &self.children as *const _ as *mut ListHead;
+        c.parent_children_head = &self.children as *const _ as *mut ListHead;
 
         // Link child's sibling to parent's children list
         // Use add_tail to add to list end
-        (*child).sibling.add_tail(&self.children as *const _ as *mut ListHead);
+        // SAFETY: the sibling node is initialized (child not yet linked)
+        // and the head is self's live children list; tree lock held.
+        unsafe { c.sibling.add_tail(&self.children as *const _ as *mut ListHead) };
     }
 
     /// Remove child from process tree
     ///
-    ///
-    /// # Safety
-    /// Caller must ensure:
-    /// - child is valid child process pointer
-    /// - child is in current process's children list
+    /// Contract: `child` is a valid task pointer currently linked in
+    /// this parent's children list.
     ///
     /// # Arguments
     /// - `child`: Child process pointer to remove
-    // SAFETY: Caller guarantees child is a valid pointer currently linked in this
-    /// parent's children list. PROCESS_TREE_LOCK is acquired internally.
-    pub unsafe fn remove_child(&self, child: *mut Task) {
+    pub fn remove_child(&self, child: *mut Task) {
         let _lock = PROCESS_TREE_LOCK.lock();
+        // SAFETY: caller contract above — child is valid and linked
+        // here; PROCESS_TREE_LOCK is held for the whole unlink.
+        let c = unsafe { &mut *child };
 
         // Remove child's sibling from parent's children list
-        (*child).sibling.del();
+        // SAFETY: the node is linked (contract); tree lock held.
+        unsafe { c.sibling.del() };
 
         // Reinitialize sibling list (prevent dangling pointer)
-        (*child).sibling.init();
+        c.sibling.init();
 
         // Clear parent pointer
-        (*child).parent = None;
+        c.parent = None;
 
         // Clear parent children list head pointer
-        (*child).parent_children_head = ptr::null_mut();
+        c.parent_children_head = ptr::null_mut();
     }
 
     /// E8-REPAR: collect `self`'s children into `out`, PINNING each one
@@ -6427,19 +6438,25 @@ impl Task {
     /// the free impossible until the mover task_put()s: release_task's
     /// final task_put finds refcnt > 1 and defers free_task_slot.
     ///
-    /// # Safety
-    /// `self` is a valid task; callers must Task::task_put every
-    /// returned pointer exactly once.
-    pub unsafe fn collect_children_pinned(&self, out: &mut alloc::vec::Vec<*mut Task>) {
+    /// Contract: `self` is a valid task; callers must Task::task_put
+    /// every returned pointer exactly once.
+    pub fn collect_children_pinned(&self, out: &mut alloc::vec::Vec<*mut Task>) {
         let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
-        ListHead::for_each(head, |node| {
-            let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
-            (*task_ptr)
-                .task_refcnt
-                .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-            out.push(task_ptr);
-        });
+        // SAFETY: head is self's live children list; the walk holds
+        // PROCESS_TREE_LOCK, so every node stays linked for the walk.
+        unsafe {
+            ListHead::for_each(head, |node| {
+                let task_ptr = Task::from_sibling_node(node);
+                // SAFETY: task_ptr owns this sibling node, which the tree
+                // lock keeps linked — the task page cannot be freed from
+                // under this shared reference mid-walk.
+                (*task_ptr)
+                    .task_refcnt
+                    .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                out.push(task_ptr);
+            });
+        }
     }
 
     /// E8-REPAR: atomically move `child` from `self`'s children list to
@@ -6461,25 +6478,28 @@ impl Task {
     /// concurrently unlinked (reaped / already moved) — do not touch it
     /// further beyond the caller's own task_put.
     ///
-    /// # Safety
-    /// `self`, `child` and `dest` are valid Task pointers; `child` is
-    /// pinned by the caller; `dest` is pinned by the caller.
-    pub unsafe fn move_child(&self, child: *mut Task, dest: *mut Task) -> bool {
+    /// Contract: `self`, `child` and `dest` are valid Task pointers;
+    /// `child` is pinned by the caller; `dest` is pinned by the caller.
+    pub fn move_child(&self, child: *mut Task, dest: *mut Task) -> bool {
         let _lock = PROCESS_TREE_LOCK.lock();
-        let still_ours = (*child).parent == Some(self as *const Task)
-            && (*child).parent_children_head == &self.children as *const _ as *mut ListHead;
+        // SAFETY: caller contract above — child and dest are valid,
+        // pinned tasks; PROCESS_TREE_LOCK is held for the whole move.
+        let (c, d) = unsafe { (&mut *child, &mut *dest) };
+        let still_ours = c.parent == Some(self as *const Task)
+            && c.parent_children_head == &self.children as *const _ as *mut ListHead;
         if !still_ours {
             return false;
         }
         // Unlink — the same mutations remove_child performs.
-        (*child).sibling.del();
-        (*child).sibling.init();
+        // SAFETY: node is linked here (validated above); tree lock held.
+        unsafe { c.sibling.del() };
+        c.sibling.init();
         // Relink — the same mutations add_child performs.
-        (*child).parent = Some(dest as *const Task);
-        (*child).parent_children_head = &(*dest).children as *const _ as *mut ListHead;
-        (*child)
-            .sibling
-            .add_tail(&(*dest).children as *const _ as *mut ListHead);
+        c.parent = Some(dest as *const Task);
+        c.parent_children_head = &d.children as *const _ as *mut ListHead;
+        // SAFETY: c.sibling was just re-initialized; d's children head is
+        // live (dest pinned); tree lock held.
+        unsafe { c.sibling.add_tail(&d.children as *const _ as *mut ListHead) };
         // E8-REPAR root cause (leg-29A): the moved child's thread-group
         // MEMBERS carry parent SNAPSHOTS (thread_group_join copies the
         // leader's parent verbatim; nothing maintained them), so a
@@ -6493,17 +6513,21 @@ impl Task {
         // the ring walk is the same bounded pattern the reparent member
         // scan uses, and members can't join/leave concurrently (both
         // take PROCESS_TREE_LOCK).
-        let mut m = (*child).next_thread_ptr();
+        let mut m = c.next_thread_ptr();
         let mut guard = 0u32;
         while (m as *const Task) != (child as *const Task)
             && !m.is_null()
             && guard < 65536
         {
-            if (*m).group_leader == child {
-                (*m).parent = Some(dest as *const Task);
-                (*m).parent_children_head = ptr::null_mut();
+            // SAFETY: ring members stay linked while PROCESS_TREE_LOCK is
+            // held (join/leave both take it); the walk is bounded.
+            unsafe {
+                if (*m).group_leader == child {
+                    (*m).parent = Some(dest as *const Task);
+                    (*m).parent_children_head = ptr::null_mut();
+                }
+                m = (*m).next_thread_ptr();
             }
-            m = (*m).next_thread_ptr();
             guard += 1;
         }
         true
@@ -6524,21 +6548,23 @@ impl Task {
     ///
     /// Returns true when this caller won the claim.
     ///
-    /// # Safety
-    /// CALLER MUST HOLD PROCESS_TREE_LOCK (invoked from inside
+    /// Contract: CALLER MUST HOLD PROCESS_TREE_LOCK (invoked from inside
     /// for_each_group_child's critical section); `child` is a valid,
     /// pinned-or-otherwise-still-linked Task.
-    pub unsafe fn claim_child_locked(child: *mut Task) -> bool {
-        if (*child).parent.is_none() {
+    pub fn claim_child_locked(child: *mut Task) -> bool {
+        // SAFETY: caller holds PROCESS_TREE_LOCK and vouches for `child`.
+        let c = unsafe { &mut *child };
+        if c.parent.is_none() {
             return false; // already claimed / never linked
         }
         // Unlink from the CURRENT list — the child's own sibling pointers
         // are the ground truth for which list the node is on, so del()
         // heals the owner's list without naming it.
-        (*child).sibling.del();
-        (*child).sibling.init();
-        (*child).parent = None;
-        (*child).parent_children_head = ptr::null_mut();
+        // SAFETY: node is linked (parent was Some); tree lock held.
+        unsafe { c.sibling.del() };
+        c.sibling.init();
+        c.parent = None;
+        c.parent_children_head = ptr::null_mut();
         true
     }
 
@@ -6548,20 +6574,24 @@ impl Task {
     /// # Arguments
     /// - `f`: Closure to call for each child
     ///
-    /// # Safety
-    /// Caller must ensure self is valid and process tree is not modified during iteration
-    // SAFETY: PROCESS_TREE_LOCK is acquired internally. The sibling offset is correct
-    /// for Task layout. ListHead::for_each has its own iteration bound.
-    pub unsafe fn for_each_child<F>(&self, mut f: F)
+    /// Contract: `self` is a valid task; PROCESS_TREE_LOCK is acquired
+    /// internally, so the tree cannot change during iteration.
+    pub fn for_each_child<F>(&self, mut f: F)
     where
-        F: FnMut(*mut Task),
+        F: FnMut(&Task),
     {
         let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
-        ListHead::for_each(head, |node| {
-            let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
-            f(task_ptr);
-        });
+        // SAFETY: head is self's live children list; the tree lock is
+        // held, so every node stays linked for the whole walk.
+        unsafe {
+            ListHead::for_each(head, |node| {
+                let task_ptr = Task::from_sibling_node(node);
+                // SAFETY: the node owns this Task and the tree lock keeps
+                // it linked (its parent cannot release it mid-walk).
+                f(&*task_ptr);
+            });
+        }
     }
 
     /// Iterate the children of EVERY member of the caller's thread group.
@@ -6576,12 +6606,12 @@ impl Task {
     /// CLONE_THREAD) are ever linked, so each child sits on exactly one
     /// member's list and no child is visited twice.
     ///
-    /// # Safety
-    /// Caller must ensure self is valid. PROCESS_TREE_LOCK is acquired
-    /// internally; it serializes ring joins/leaves and children-list
-    /// mutations, so every member we walk is still linked (members
-    /// unhook from the ring before their task memory is released).
-    pub unsafe fn for_each_group_child<F>(&self, mut f: F)
+    /// Contract: caller must ensure self is valid. PROCESS_TREE_LOCK is
+    /// acquired internally; it serializes ring joins/leaves and
+    /// children-list mutations, so every member we walk is still linked
+    /// (members unhook from the ring before their task memory is
+    /// released).
+    pub fn for_each_group_child<F>(&self, mut f: F)
     where
         F: FnMut(*mut Task),
     {
@@ -6590,14 +6620,19 @@ impl Task {
         let mut member = start;
         let mut guard = 0u32;
         loop {
-            let head = &(*member).children as *const _ as *mut ListHead;
-            ListHead::for_each(head, |node| {
-                let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
-                f(task_ptr);
-            });
+            // SAFETY: ring members stay linked under PROCESS_TREE_LOCK.
+            let head = unsafe { &(*member).children as *const _ as *mut ListHead };
+            // SAFETY: head is that member's live children list; tree lock
+            // held for the whole walk.
+            unsafe {
+                ListHead::for_each(head, |node| {
+                    f(Task::from_sibling_node(node));
+                });
+            }
             // Ring walk (next_thread_ptr heals a NULL to self — a
             // single-threaded task terminates on the first step).
-            member = (*member).next_thread_ptr();
+            // SAFETY: same ring-liveness contract as above.
+            member = unsafe { (*member).next_thread_ptr() };
             if member == start || member.is_null() {
                 break;
             }
@@ -6616,20 +6651,23 @@ impl Task {
     /// # Returns
     /// Some(child pointer) if found, None otherwise
     ///
-    /// # Safety
-    /// Caller must ensure self is valid
-    // SAFETY: PROCESS_TREE_LOCK is acquired internally. The sibling offset and Task
-    /// layout are correct. ListHead::for_each has its own iteration bound.
-    pub unsafe fn find_child_by_pid(&self, pid: Pid) -> Option<*mut Task> {
+    /// Contract: `self` is a valid task; PROCESS_TREE_LOCK is acquired
+    /// internally. The returned pointer is valid only under the caller's
+    /// own liveness discipline (pin or tree lock).
+    pub fn find_child_by_pid(&self, pid: Pid) -> Option<*mut Task> {
         let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
         let mut result = None;
-        ListHead::for_each(head, |node| {
-            let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
-            if (*task_ptr).pid == pid {
-                result = Some(task_ptr);
-            }
-        });
+        // SAFETY: head is self's live children list; tree lock held.
+        unsafe {
+            ListHead::for_each(head, |node| {
+                let task_ptr = Task::from_sibling_node(node);
+                // SAFETY: node owns this Task; tree lock keeps it linked.
+                if (*task_ptr).pid == pid {
+                    result = Some(task_ptr);
+                }
+            });
+        }
         result
     }
 
@@ -6637,18 +6675,16 @@ impl Task {
     ///
     /// # Returns
     /// Number of children
-    ///
-    /// # Safety
-    /// Caller must ensure self is valid
-    // SAFETY: PROCESS_TREE_LOCK is acquired internally. The sibling offset is correct
-    /// for Task layout.
-    pub unsafe fn count_children(&self) -> usize {
+    pub fn count_children(&self) -> usize {
         let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
         let mut count = 0;
-        ListHead::for_each(head, |_| {
-            count += 1;
-        });
+        // SAFETY: head is self's live children list; tree lock held.
+        unsafe {
+            ListHead::for_each(head, |_| {
+                count += 1;
+            });
+        }
         count
     }
 

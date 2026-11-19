@@ -212,10 +212,11 @@ pub fn kill_other_threads(current: *mut Task) {
     // SAFETY: current is a valid, running task; its ring is well-formed.
     unsafe {
         (*current).for_each_group_member(|m| {
-            if m != current {
-                let st = (*m).state();
+            let m_raw = m as *const Task as *mut Task;
+            if m_raw != current {
+                let st = m.state();
                 if !st.is_dead() {
-                    victims.push((*m).pid());
+                    victims.push(m.pid());
                 }
             }
             // nanosleep-loss conviction (wwcensus-gated): every member's
@@ -223,7 +224,7 @@ pub fn kill_other_threads(current: *mut Task) {
             // ownership qword, linkage, timed-sleep shadow, pending
             // signals, and the saved kernel resume address (names the
             // park site).
-            if crate::trace::EVENT_WWCENSUS.armed() && m != current {
+            if crate::trace::EVENT_WWCENSUS.armed() && m_raw != current {
                 use crate::dfx::taskdump::putc_brief as putchar;
                 fn pd(mut v: u64) {
                     use crate::dfx::taskdump::putc_brief as p;
@@ -239,31 +240,31 @@ pub fn kill_other_threads(current: *mut Task) {
                     core::sync::atomic::AtomicU32::new(0);
                 if XG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
                     let q = core::ptr::read_volatile(
-                        core::ptr::addr_of!((*m).ti_on_cpu) as *const u64,
+                        core::ptr::addr_of!(m.ti_on_cpu) as *const u64,
                     );
                     let (ph, ph_ago) =
-                        crate::sched::sched::pick_trace_peek(m).unwrap_or((0, 0));
-                    let tid = (*m)
+                        crate::sched::sched::pick_trace_peek(m_raw).unwrap_or((0, 0));
+                    let tid = m
                         .timed_sleep_timer_id
                         .load(core::sync::atomic::Ordering::Relaxed);
-                    let kind = (*m)
+                    let kind = m
                         .timed_sleep_kind
                         .load(core::sync::atomic::Ordering::Relaxed);
-                    let tdl = (*m)
+                    let tdl = m
                         .timed_sleep_deadline
                         .load(core::sync::atomic::Ordering::Relaxed);
                     let nowt = crate::drivers::timer::read_time();
-                    let linked = match (*m).policy() {
+                    let linked = match m.policy() {
                         crate::process::task::SchedPolicy::Fifo
                         | crate::process::task::SchedPolicy::Rr => false,
-                        _ => (*m).sched_entity().timeline_key().is_some(),
+                        _ => m.sched_entity().timeline_key().is_some(),
                     };
                     #[cfg(feature = "x86_64")]
-                    let ra = (*m).thread.callee.ret_addr as u64;
+                    let ra = m.thread.callee.ret_addr as u64;
                     #[cfg(not(feature = "x86_64"))]
-                    let ra = (*m).thread.ra as u64;
+                    let ra = m.thread.ra as u64;
                     for &b in b"\nXGM pid=" { putchar(b); }
-                    pd((*m).pid() as u64);
+                    pd(m.pid() as u64);
                     for &b in b" ph=" { putchar(b); }
                     pd(ph as u64);
                     for &b in b"/" { putchar(b); }
@@ -271,11 +272,11 @@ pub fn kill_other_threads(current: *mut Task) {
                     for &b in b" q=0x" { putchar(b); }
                     pd(q);
                     for &b in b" pk=" { putchar(b); }
-                    pd((*m).pick_state() as u64);
+                    pd(m.pick_state() as u64);
                     for &b in b" lnk=" { putchar(b); }
                     pd(linked as u64);
                     for &b in b" st=0x" { putchar(b); }
-                    pd((*m).state().bits() as u64);
+                    pd(m.state().bits() as u64);
                     for &b in b" ts=" { putchar(b); }
                     pd(kind as u64);
                     for &b in b"/tid=" { putchar(b); }
@@ -288,14 +289,14 @@ pub fn kill_other_threads(current: *mut Task) {
                         pd((nowt - tdl) / 10000);
                     }
                     for &b in b"ms pend=0x" { putchar(b); }
-                    pd((*m).pending.get_all());
+                    pd(m.pending.get_all());
                     for &b in b" ra=0x" { putchar(b); }
                     pd(ra);
                     // per-pid LAST fire (collision-free FWT table)
                     for k in 0..32 {
                         if crate::timer::FWT_PID[k].load(
                             core::sync::atomic::Ordering::Relaxed,
-                        ) == (*m).pid()
+                        ) == m.pid()
                         {
                             for &b in b" fw(ok" { putchar(b); }
                             pd(crate::timer::FWT_OK[k].load(
