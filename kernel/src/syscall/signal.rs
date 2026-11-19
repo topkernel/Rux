@@ -342,7 +342,7 @@ let new_action = SigAction {
 pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
     // Get current process
     let current = match crate::sched::current() {
-        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
 
@@ -375,7 +375,7 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
                     sp,
                     core::mem::size_of::<crate::signal::SignalFrame>(),
                 );
-            if sp_ok { sp as u64 } else { (*current).sigframe_addr }
+            if sp_ok { sp as u64 } else { current.sigframe_addr }
         };
         // aarch64: the handler is entered with sp == frame (arm64
         // frames carry no pretcode slot glibc pops first); same
@@ -389,7 +389,7 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
                     sp,
                     core::mem::size_of::<crate::signal::SignalFrame>(),
                 );
-            if sp_ok { sp as u64 } else { (*current).sigframe_addr }
+            if sp_ok { sp as u64 } else { current.sigframe_addr }
         };
         #[cfg(feature = "x86_64")]
         let frame_addr = {
@@ -404,7 +404,7 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
                     base,
                     core::mem::size_of::<crate::signal::SignalFrame>(),
                 );
-            if sp_ok { base as u64 } else { (*current).sigframe_addr }
+            if sp_ok { base as u64 } else { current.sigframe_addr }
         };
 
         // A zero frame address means rt_sigreturn was invoked without an
@@ -422,8 +422,8 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
             crate::pr_err!(
                 "rt_sigreturn: frame rejected sp={:#x} rec={:#x} pid={}",
                 regs.user_stack_pointer(),
-                (*current).sigframe_addr,
-                (*current).pid()
+                current.sigframe_addr,
+                current.pid()
             );
             let pid = crate::process::current_pid();
             let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);

@@ -55,6 +55,20 @@ impl TaskBorrow {
     pub fn as_ptr(&self) -> *mut Task {
         self.0.as_ptr()
     }
+
+    /// Adopt an already-validated raw task handle (round 4): the ONE
+    /// audited edge for handles that predate this type (tree-ring
+    /// handles, walk-callback pointers). The caller proves the same
+    /// contract `lookup` documents: a short read/write in syscall
+    /// context on this CPU, no yield, no store.
+    ///
+    /// # Safety
+    /// `p` must point at a live task (the caller's borrow/pin/tree-lock
+    /// keeps the slot alive for the borrow's duration) and must not be
+    /// adopted twice into handles that outlive that proof.
+    pub unsafe fn from_raw(p: *mut Task) -> Option<Self> {
+        NonNull::new(p).map(TaskBorrow)
+    }
 }
 
 impl Deref for TaskBorrow {
