@@ -228,6 +228,15 @@ pub struct RawSpinlock {
 }
 
 impl RawSpinlock {
+    /// R11 (deadlock-layer unblinding): the raw lock word for the
+    /// deadlock dumps — 0 = free, 1 = held, ANYTHING ELSE = the word
+    /// itself was scribbled (the acquire spin waits on this exact word,
+    /// so garbage here wedges every waiter with no holder anywhere).
+    /// One relaxed load; cold diagnostic paths only.
+    pub fn locked_word(&self) -> u32 {
+        self.locked.load(Ordering::Relaxed)
+    }
+
     #[inline]
     pub const fn new() -> Self {
         Self {
@@ -500,6 +509,26 @@ impl RawSpinlock {
             shift -= 4;
             let nibble = (caller_ra >> shift) & 0xF;
             let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+            unsafe { crate::console::uart_putc_raw(c); }
+        }
+
+        // R11 (deadlock-layer unblinding, the seventh blind printer): the
+        // lock WORD value, always. The holder-identity block below is
+        // dfx-lock-owner-gated, so on standard builds every stuck lock
+        // printed with NO holder datum at all — and the one value that
+        // discriminates "a real holder the tracker missed" (word == 1)
+        // from "the word itself was scribbled" (word ∉ {0,1}) was never
+        // printed. One relaxed load, cold path, raw uart.
+        let msg_lw = b" locked=0x";
+        for &b in msg_lw {
+            unsafe { crate::console::uart_putc_raw(b); }
+        }
+        let lw = unsafe { (&*lock_addr).locked_word() };
+        let mut shift_lw: i32 = 8;
+        while shift_lw > 0 {
+            shift_lw -= 4;
+            let nibble = ((lw >> shift_lw) & 0xF) as u8;
+            let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
             unsafe { crate::console::uart_putc_raw(c); }
         }
 

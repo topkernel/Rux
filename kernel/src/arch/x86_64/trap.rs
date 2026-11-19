@@ -3770,12 +3770,37 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // uart_putc_raw: the old marker was putchar_no_lock —
                 // SILENT on release builds, so these parks were
                 // invisible (every "silent" permanent wedge).
-                for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
+                for &b in b"trap: KERNPANIC re-entered during dump; halting cpu=" {
                     crate::console::uart_putc_raw(b);
                 }
+                {
+                    let c = crate::arch::cpu_id();
+                    if c < 10 {
+                        crate::console::uart_putc_raw(b'0' + c as u8);
+                    } else {
+                        crate::console::uart_putc_raw(b'A' + (c - 10) as u8);
+                    }
+                }
+                crate::console::uart_putc_raw(b'\n');
                 crate::sched::sched::terminal_release_grq_if_held();
-                // SAFETY: hlt halts until the next interrupt; safe in a
-                // halt loop.
+                // R11 (the parked-CPU interrupt strand, fr7 conviction):
+                // the halt loop must run with INTERRUPTS DISABLED. The old
+                // shape parked with whatever IF the fault arrived under —
+                // an IF=1 park wakes on the next timer tick, and the tick
+                // handler then runs scheduler_tick ON TOP of the broken
+                // dumper context: it acquires the GRQ (word=1, tracker
+                // set, site=tick) and wedges/faults inside the section,
+                // stranding the runqueue forever — fr7's crime scene: the
+                // FIRST holder ever named (cpu4/pid356 inside
+                // scheduler_tick) with TERM-GRQ-FORCE at ZERO fires (the
+                // park-time tracker was clear; the acquire came from the
+                // post-park interrupt). The reference shape is
+                // panic_smp_self_stop: local_irq_disable before the
+                // eternal halt — a dead CPU must never take interrupts
+                // again.
+                crate::arch::cpu::disable_irq();
+                // SAFETY: hlt with IF=0 never wakes — the intentional
+                // permanent park of a crashed CPU.
                 loop {
                     unsafe { core::arch::asm!("hlt") };
                 }

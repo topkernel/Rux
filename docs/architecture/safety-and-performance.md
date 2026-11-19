@@ -1088,3 +1088,36 @@ registered per the data-corruption doctrine.
   (the tracker), acquire adds one per-cpu register read for the
   owner encoding. [lane worktree grq-lock-1st run/GRQ-LOCK-1ST.md
   §9]
+
+
+  **The crash-path park and terminal-release closures (oh-launch round
+  11, 2026-11-19).** Two more safety properties landed on the exit and
+  crash paths: (1) the terminal deschedule loop's pre-schedule
+  ownership release (the sc191 v2 shape) made {DEAD, !on_cpu} true
+  while the dying task still executed its own schedule chain — the
+  exit-path frees could not distinguish that from a completed
+  switch-out and freed the stack under the running task (the
+  rip=0x1/rip=heap/#GP-on-ret family at exit-storm time, multiplied by
+  the abort storm's retry rounds); Task.terminal_switch_done — set
+  only at the real-switch retire sites with a current() != prev
+  discriminator so aborts never set it, re-armed each loop round — is
+  now required by every stack-free predicate. Positive knowledge
+  before a free, again. (2) A crashed CPU's park loop ran with
+  whatever IF the fault arrived under; an interrupt-enabled park woke
+  on the next timer tick and ran scheduler_tick on top of the broken
+  dumper context, which acquired the runqueue and wedged inside it —
+  fr7's crime scene is the first GRQ holder ever named (cpu4/pid356
+  inside scheduler_tick, word=0x01 genuinely held, the park-time
+  release at zero fires because the acquire came from the post-park
+  interrupt). Every crash-path recursion park now disables interrupts
+  before the eternal halt (the reference's panic_smp_self_stop shape):
+  a dead CPU never takes interrupts again. Evidence: armed-battery
+  boots — the panic count by 28 s fell from 4 (fr6) to 1 (fr7) with
+  the window closed; the fr7 wedge mechanism convicted and closed
+  same-round. Honest gaps: crash-path parks still release only the
+  GRQ — a CPU faulting while holding any other lock strands it (fr9:
+  the slab allocator lock in kmalloc, and a second static
+  simultaneously); the small-int pt_regs writer (rip=1/rsp=0/badaddr=3
+  pointer fields) remains at large and seeds every strand. make test
+  1555/1555 fresh rootfs; triple-arch rc=0. [lane worktree oh-launch
+  run/OH-LAUNCH.md round 11]

@@ -569,10 +569,22 @@ unsafe fn free_dead_member(member: *mut Task) -> bool {
         // freeing CPU win the race (RCU poll completes, stack freed,
         // recycled) before the switcher's ret lands. The marker clears
         // only in the incoming frame's post-switch tail, after prev's
-        // stack is abandoned for good — so {on_cpu=false AND no marker}
-        // is the positive knowledge that nothing references the stack.
+        // stack is abandoned for good.
+        // R11 (terminal-release window): neither condition covers the
+        // gap BEFORE the marker publish: the terminal deschedule loop
+        // releases the ownership pair BEFORE calling schedule() (the
+        // sc191 v2 fix), leaving {on_cpu=false, no marker} while the
+        // task still executes its own schedule chain on its stack —
+        // every abort/retry cycle of that loop re-opens the window.
+        // terminal_switch_done is the positive knowledge: set only at
+        // the real-switch retire sites, re-armed false by the loop each
+        // round — {flag set AND on_cpu false AND no marker} is the full
+        // no-references condition.
         while (*member).on_cpu()
             || crate::sched::sched::switching_out_names(member)
+            || !(*member)
+                .terminal_switch_done
+                .load(core::sync::atomic::Ordering::Acquire)
         {
             if spins == 0 {
                 let cur_pid = crate::sched::current().map(|c| c.pid()).unwrap_or(0);
@@ -695,8 +707,15 @@ pub fn sweep_dead_threads(leader: *mut Task) {
         for m in old {
             // SAFETY: m is a parked member pointer (pushed by its own do_exit
             // while holding the task alive via the dead-list reference).
+            // R11: terminal_switch_done is REQUIRED — the terminal loop's
+            // pre-schedule ownership release makes {DEAD, !on_cpu} true
+            // while the member still runs its own schedule chain.
             let dead_and_off_cpu = unsafe {
-                (*m).state().is_dead() && !(*m).on_cpu()
+                (*m).state().is_dead()
+                    && !(*m).on_cpu()
+                    && (*m)
+                        .terminal_switch_done
+                        .load(core::sync::atomic::Ordering::Acquire)
             };
             if dead_and_off_cpu {
                 reclaimable.push(m);
@@ -848,8 +867,15 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                     // to free_dead_member's bounded wait on every drain
                     // round; the loop below then defers the reap at ITS
                     // deadline instead.
+                    // R11: terminal_switch_done required for the same
+                    // reason as the sweep's predicate.
                     unsafe {
-                        if (**m).state().is_dead() && !(**m).on_cpu() {
+                        if (**m).state().is_dead()
+                            && !(**m).on_cpu()
+                            && (**m)
+                                .terminal_switch_done
+                                .load(core::sync::atomic::Ordering::Acquire)
+                        {
                             reclaim.push(*m);
                             false
                         } else {
@@ -1087,11 +1113,23 @@ unsafe fn release_task_storage(task: *mut Task) {
     // (this loop's unbounded shape was the leader-path face of the
     // r16type wedge class) and never a freed live stack (FTS's
     // leak-don't-dangle discipline applied to the stack).
+    // R11 (terminal-release window): the leader's terminal deschedule
+    // runs the same schedule_dead_never_returns loop (the sc191 pre-
+    // schedule ownership release), so {on_cpu=false, no marker} is also
+    // reachable HERE while the leader still executes its own schedule
+    // chain — terminal_switch_done (set only at the real-switch retire
+    // sites, re-armed by the loop each round) is the required positive
+    // knowledge.
     crate::arch::cpu::restore_irq(true);
     const RTS_SWITCH_WAIT_JIFFIES: u64 = 300;
     let rts_armed_at = crate::drivers::timer::get_jiffies();
     let mut stack_free_ok = true;
-    while (*task).on_cpu() || crate::sched::sched::switching_out_names(task) {
+    while (*task).on_cpu()
+        || crate::sched::sched::switching_out_names(task)
+        || !(*task)
+            .terminal_switch_done
+            .load(core::sync::atomic::Ordering::Acquire)
+    {
         if crate::drivers::timer::get_jiffies()
             .wrapping_sub(rts_armed_at)
             >= RTS_SWITCH_WAIT_JIFFIES
