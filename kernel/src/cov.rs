@@ -83,6 +83,30 @@ fn capture_profile() -> Result<Vec<u8>, i32> {
 /// Emit the captured profile over the suite console as hex between
 /// marker lines. Returns the byte count emitted, or a negative errno.
 pub fn dump_to_console() -> Result<usize, i32> {
+    // Quiesce window (byte-level stream integrity): printk's deferred
+    // drain (tick/idle) can interleave WHOLE or PARTIAL lines into the
+    // raw UART stream mid-dump and corrupt the host-side hex decode.
+    // Drain everything pending NOW, synchronously, then hold the
+    // deferred drain off for the duration of the dump.
+    while crate::printk::console_drain_pending(64) > 0 {}
+    CONSOLE_DUMP_ACTIVE.store(true, core::sync::atomic::Ordering::Release);
+    let result = dump_inner();
+    CONSOLE_DUMP_ACTIVE.store(false, core::sync::atomic::Ordering::Release);
+    result
+}
+
+/// Drain-suppression flag: while a coverage dump owns the console, the
+/// deferred drain skips (lines stay in the ring; the next drain after
+/// the dump emits them).
+static CONSOLE_DUMP_ACTIVE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+#[inline]
+pub fn console_dump_active() -> bool {
+    CONSOLE_DUMP_ACTIVE.load(core::sync::atomic::Ordering::Acquire)
+}
+
+fn dump_inner() -> Result<usize, i32> {
     let buf = capture_profile()?;
     let hdr = alloc::format!("[cov-begin] {} bytes", buf.len());
     cov_line(hdr.as_bytes());

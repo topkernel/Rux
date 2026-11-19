@@ -63,7 +63,15 @@ try:
     e = next(i for i, l in enumerate(lines) if l.strip().startswith("[cov-end]"))
 except StopIteration:
     sys.exit("coverage-battery: no [cov-begin]/[cov-end] markers in the boot log")
-hexdata = "".join(l.strip() for l in lines[b + 1:e] if not l.strip().startswith("[cov]"))
+# Hex-only filter: the dump is line-atomic, but kernel printk (e.g. the
+# watchdog's periodic lines) can interleave WHOLE lines between ours --
+# keep only lines that are pure hex, even length, non-empty.
+hexdata = "".join(
+    l.strip() for l in lines[b + 1:e]
+    if l.strip() and not l.strip().startswith("[cov]")
+    and len(l.strip()) % 2 == 0
+    and all(c in "0123456789abcdef" for c in l.strip())
+)
 data = bytes.fromhex(hexdata)
 open(sys.argv[2], "wb").write(data)
 print(f"profraw: {len(data)} bytes")
