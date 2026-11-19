@@ -209,6 +209,16 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
     }
 
     // ---- policy: Linux oops_end / make_task_dead ----
+    // gw2/fm5 (oh-launch round 6): EVERY arm of this policy either parks
+    // the CPU (the panic!s) or runs the dying task's exit (do_exit) —
+    // and the fault that brought us here may have struck INSIDE a GRQ
+    // section whose lock word would then strand (the permanent wedge;
+    // fm5: the first dumper parked via panic! holding the runqueue and
+    // 487 DEADLOCK rows piled). Release it NOW, before any arm: the
+    // interrupted section is abandoned by every arm below, later GRQ
+    // use on the dying path acquires fresh, and the terminal switch's
+    // own release becomes a no-op (the tracker is already clear).
+    crate::sched::sched::terminal_release_grq_if_held();
     if crate::interrupt::preempt::in_interrupt() {
         panic!("Fatal exception in interrupt");
     }
