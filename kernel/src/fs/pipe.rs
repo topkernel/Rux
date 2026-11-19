@@ -544,10 +544,19 @@ pub fn pipe_of_file(file: &File) -> Option<&'static Pipe> {
     if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
         return None;
     }
-    // SAFETY: ops identity confirms this is a pipe File; private_data was
-    // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
-    // while the File exists.
+    file_pipe_private(file)
+}
+
+/// INV-PIPE-PRIV: the caller verified the File's ops identity (PIPE_OPS
+/// or FIFO_OPS), so private_data is the `Arc::into_raw(Pipe)` installed
+/// at creation and the File's lifetime pins the Arc — one raw window
+/// replaces the four open-coded derefs this file carried.
+fn file_pipe_private(file: &File) -> Option<&'static Pipe> {
+    // SAFETY: INV-PIPE-PRIV above.
     let ptr = unsafe { *file.private_data.get() }?;
+    if ptr.is_null() {
+        return None;
+    }
     Some(unsafe { &*(ptr as *const Pipe) })
 }
 
@@ -588,11 +597,7 @@ fn pipe_or_fifo_of_file(file: &File) -> Option<&'static Pipe> {
     {
         return None;
     }
-    // SAFETY: ops identity confirms the File was created by create_pipe /
-    // fifo_open_file, both of which install Arc::into_raw(Pipe); the Arc
-    // held by the File keeps it alive while the caller holds the File.
-    let ptr = unsafe { *file.private_data.get() }?;
-    Some(unsafe { &*(ptr as *const Pipe) })
+    file_pipe_private(file)
 }
 
 /// Register `task` on the pipe's read AND write wait queues: producers

@@ -305,7 +305,7 @@ pub fn path_on_readonly_mount(abs_path: &str) -> bool {
 /// "/file" (LTP fchmod06/fchown04 saw EPERM instead of EROFS).
 pub fn file_on_readonly_mount(file: &crate::fs::File) -> bool {
     // SAFETY: dentry is written once at open time and never mutated.
-    let dentry_opt = unsafe { (*file.dentry.get()).clone() };
+    let dentry_opt = file.get_dentry().cloned();
     dentry_opt
         .map(|d| dentry_on_readonly_mount(&d))
         .unwrap_or(false)
@@ -749,9 +749,8 @@ fn mount_is_busy(mnt_root: &Arc<Dentry>) -> bool {
         // Open descriptors: any file whose dentry sits in the subtree.
         if let Some(fdtable) = task.try_fdtable() {
             fdtable.for_each_file(|_fd, file| {
-                // SAFETY: dentry is written once at open time before the
-                // File is published; read-only access here.
-                if let Some(d) = unsafe { &*file.dentry.get() } {
+                // dentry is write-once at open time (get_dentry doc).
+                if let Some(d) = file.get_dentry() {
                     if dentry_in_mount_subtree(d, mnt_root) {
                         busy.store(true, Ordering::Relaxed);
                     }
@@ -2341,7 +2340,7 @@ pub fn chrooted() -> bool {
 /// objects per call, paid 3x per lookup before this).
 pub fn process_rooted() -> bool {
     match crate::sched::current() {
-        Some(t) => unsafe { (*t).process_rooted_cheap() },
+        Some(t) => t.process_rooted_cheap(),
         None => false,
     }
 }
@@ -2399,7 +2398,7 @@ pub fn get_cwd_user() -> String {
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is the running task's Task pointer from
         // sched::current(); fs_arc() only clones the Arc out of it.
-        if let Some(fs) = unsafe { (*current).fs_arc() } {
+        if let Some(fs) = current.fs_arc() {
             let root = get_process_root();
             if root == "/" {
                 return get_cwd();
@@ -2440,7 +2439,7 @@ pub fn dentry_user_path(dentry: &alloc::sync::Arc<crate::fs::dentry::Dentry>) ->
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is the running task's Task pointer from
         // sched::current(); fs_arc() only clones the Arc out of it.
-        if let Some(fs) = unsafe { (*current).fs_arc() } {
+        if let Some(fs) = current.fs_arc() {
             if let Some(root_d) = fs.root_dentry() {
                 return dentry
                     .build_path_rooted(Some(&root_d))
@@ -2763,7 +2762,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 }
             };
             let task_root_ptr = crate::sched::current()
-                .and_then(|t| unsafe { (*t).fs_arc() })
+                .and_then(|t| t.fs_arc())
                 .and_then(|fs| fs.root_dentry())
                 .map(|d| Arc::as_ptr(&d) as usize)
                 .unwrap_or(0);
@@ -3503,8 +3502,8 @@ fn follow_symlink_hinted(
                 pid_val,
                 (rem - crate::fs::procfs::FD_LINK_INO_OFF) as u32,
             ) {
-                // SAFETY: dentry written once at open; read-only access.
-                let target = unsafe { &*file.dentry.get() }.clone();
+                // dentry written once at open; accessor handles it.
+                let target = file.get_dentry().cloned();
                 if let Some(d) = target {
                     // Unlinked-while-open (O_TMPFILE, or any fd surviving
                     // an unlink): vfs_unlink strips the dentry's inode to
@@ -3514,8 +3513,8 @@ fn follow_symlink_hinted(
                     // re-attaches the live inode so linkat/chmod/stat
                     // through /proc/[pid]/fd/N work on the real file.
                     if d.get_inode().is_none() {
-                        // SAFETY: inode written once at open; read-only.
-                        let live = unsafe { &*file.inode.get() }.clone();
+                        // inode written once at open; accessor handles it.
+                        let live = file.get_inode().cloned();
                         if let Some(inode_arc) = live {
                             d.set_inode(inode_arc);
                             d.clear_negative();
@@ -5161,9 +5160,7 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
         }
     }
 
-    // SAFETY: get_file_fd returns a valid Arc<File> for the given fd
-    let file = unsafe { get_file_fd(fd) }
-        .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+    let file = get_file_fd(fd).ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
 
     // EROFS: fd-based truncate on a read-only mount (Linux mnt_want_write).
     if file_on_readonly_mount(&file) {
@@ -5181,7 +5178,7 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
 
     // Get inode from file
     // SAFETY: file.inode is an UnsafeCell<Option<Arc<Inode>>>; accessing under current task's fd table lock
-    let inode_opt = unsafe { &*file.inode.get() };
+    let inode_opt = file.get_inode();
     // Sockets and other inode-less files: the fd is valid but the target
     // is not a regular file — EINVAL, not EBADF (LTP ftruncate03 sock_fd).
     let inode = inode_opt.as_ref()
@@ -5266,8 +5263,7 @@ const S_IXGRP_BIT: u32 = 0o010;
 fn in_group_or_capable_dir(dir_gid: u32) -> bool {
     match crate::sched::current() {
         Some(task) => {
-            // SAFETY: sched::current() yields a valid task reference.
-            let cred = unsafe { (*task).cred() };
+            let cred = task.cred();
             if cred.fsgid == dir_gid || cred.in_group(dir_gid) {
                 return true;
             }
@@ -5306,10 +5302,7 @@ pub fn mode_strip_sgid(dir_mode_bits: u32, dir_gid: u32, mode: u32) -> u32 {
 fn prepare_create_mode(dir_mode_bits: u32, dir_gid: u32, mode: u32) -> u32 {
     let stripped = mode_strip_sgid(dir_mode_bits, dir_gid, mode & 0o7777);
     let umask = match crate::sched::current() {
-        Some(task) => {
-            // SAFETY: sched::current() yields a valid task reference.
-            unsafe { (*task).get_umask() }
-        }
+        Some(task) => task.get_umask(),
         None => 0o022,
     };
     stripped & !umask
@@ -6150,7 +6143,7 @@ fn resolve_lock_region(
         1 => file.get_pos() as i64, // SEEK_CUR
         2 => {
             // SAFETY: inode is written once at open time; read-only access.
-            let inode_opt = unsafe { &*file.inode.get() };
+            let inode_opt = file.get_inode();
             match inode_opt.as_ref() {
                 Some(inode) => inode.get_size() as i64, // SEEK_END
                 None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
@@ -7002,7 +6995,7 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
         // ENOENT (LTP getdents02 "directory was unlinked" case).
         // SAFETY: dentry is written once at open time and never mutated.
         let dentry_negative = {
-            let dentry_opt = unsafe { (*file.dentry.get()).clone() };
+            let dentry_opt = file.get_dentry().cloned();
             dentry_opt.map(|d| d.is_negative()).unwrap_or(false)
         };
         if dentry_negative {
@@ -7072,7 +7065,7 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             let parent_ino = {
                 // SAFETY: dentry is written once at open time and never mutated
-                let dentry_opt = unsafe { (*file.dentry.get()).clone() };
+                let dentry_opt = file.get_dentry().cloned();
                 dentry_opt
                     .and_then(|d| d.parent.lock().clone())
                     .and_then(|p| p.inode.lock().clone())
@@ -7321,16 +7314,14 @@ pub const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
 /// behaviour lives here so the change is one call away.
 #[allow(dead_code)]
 pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), i32> {
-    // SAFETY: get_file_fd returns a valid Arc<File> for the given fd
-    let file = unsafe { get_file_fd(fd) }
-        .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+    let file = get_file_fd(fd).ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
 
     if !file.flags().is_writeonly() && file.flags().is_readonly() {
         return Err(errno::Errno::BadFileNumber.as_neg_i32());
     }
 
     // SAFETY: inode is written once at open time; read-only access here.
-    let inode_opt = unsafe { &*file.inode.get() };
+    let inode_opt = file.get_inode();
     let inode = inode_opt.as_ref()
         .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
 

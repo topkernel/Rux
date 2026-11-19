@@ -512,6 +512,8 @@ impl File {
 
     /// Get file operations
     pub fn get_ops(&self) -> Option<&'static FileOps> {
+        // SAFETY: write-once cell (see get_inode doc); no write after
+        // the File is published to an fd table.
         unsafe { *self.ops.get() }
     }
 
@@ -565,7 +567,7 @@ impl File {
             FileOpKind::Read | FileOpKind::Write => -22, // EINVAL
             FileOpKind::LSeek => -29,                    // ESPIPE
             FileOpKind::ReadAt => {
-                let ops = unsafe { *self.ops.get() };
+                let ops = self.get_ops();
                 match ops {
                     Some(o) if o.read.is_none() && o.read_at.is_none() => -22, // EINVAL (op-less type)
                     _ => -29, // ESPIPE (stream type)
@@ -587,7 +589,7 @@ impl File {
     /// convention now lives here once.
     pub fn poll_dispatch(&self, events: u16) -> u16 {
         use crate::syscall::misc::poll_events::*;
-        let ops = unsafe { *self.ops.get() };
+        let ops = self.get_ops();
         match ops.and_then(|o| o.poll) {
             Some(poll_fn) => poll_fn(self, events),
             None => {
@@ -756,7 +758,7 @@ impl File {
     /// read_at op, an lseek op (position-swing fallback), or an inode with
     /// data ops all qualify; pipes/sockets/fifos do not (ESPIPE).
     fn positional_capable(&self) -> bool {
-        if let Some(ops) = unsafe { *self.ops.get() } {
+        if let Some(ops) = self.get_ops() {
             if ops.read_at.is_some() || ops.lseek.is_some() {
                 return true;
             }
