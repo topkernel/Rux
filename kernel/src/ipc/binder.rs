@@ -215,8 +215,10 @@ pub struct BinderTransactionData {
 }
 const _: () = assert!(core::mem::size_of::<BinderTransactionData>() == 64);
 
-/// struct binder_write_read (LP64)
+/// struct binder_write_read (LP64). Copy: plain u64 UAPI record — the
+/// uaccess capsule round-trips it (copy_in_t/copy_out_t).
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct BinderWriteRead {
     pub write_size: u64,
     pub write_consumed: u64,
@@ -1201,11 +1203,11 @@ fn is_inst(pid: u32) -> bool {
     }
     // SAFETY: diagnostic task lookup + comm read (same contract as the
     // TXN-HANG comm decode).
-    let t = { crate::sched::find_task_by_pid(pid) };
-    if t.is_null() {
+    let t = crate::process::find_task_by_pid(pid);
+    let Some(t) = t else {
         return false;
-    }
-    let comm = unsafe { (*t).comm() };
+    };
+    let comm = t.comm();
     let name = core::str::from_utf8(&comm[..]).unwrap_or("");
     if name.starts_with("installs") {
         INST_PID.store(pid, core::sync::atomic::Ordering::Relaxed);
@@ -1228,11 +1230,11 @@ fn is_acct(pid: u32) -> bool {
     }
     // SAFETY: diagnostic task lookup + comm read (same contract as the
     // TXN-HANG comm decode).
-    let t = { crate::sched::find_task_by_pid(pid) };
-    if t.is_null() {
+    let t = crate::process::find_task_by_pid(pid);
+    let Some(t) = t else {
         return false;
-    }
-    let comm = unsafe { (*t).comm() };
+    };
+    let comm = t.comm();
     let name = core::str::from_utf8(&comm[..]).unwrap_or("");
     if name.starts_with("accountmgr") {
         ACCT_PID.store(pid, core::sync::atomic::Ordering::Relaxed);
@@ -1986,11 +1988,9 @@ impl Drop for BinderAlloc {
         let base_pfn = crate::mm::phys_to_pfn(self.phys);
         let mut still_pinned = false;
         for i in 0..self.npages {
-            let page = crate::mm::pfn_to_page_mut(base_pfn + i);
-            if !page.is_null() {
-                // SAFETY: page descriptor exists for this in-RAM page.
-                let r = unsafe { (*page).put_page() };
-                if r > 0 {
+            // INV-FRAME-1 typed descriptor (out-of-range -> None).
+            if let Some(page) = crate::mm::page_desc(base_pfn + i) {
+                if page.put_page() > 0 {
                     still_pinned = true;
                 }
             }
@@ -2066,13 +2066,14 @@ fn wait_for_context_manager(ctx: BinderCtx) {
         }
         // Park on MANAGER_WAIT with a timer backstop so a missing
         // set_context_mgr wake cannot strand the caller for the full
-        // budget (khungtaskd discipline).
-        let current = match crate::sched::current() {
-            Some(t) => t as *mut crate::process::task::Task,
+        // budget (khungtaskd discipline). sched::current() is the safe
+        // accessor; the raw twin feeds only the wait-queue API.
+        let cur_ref = match crate::sched::current() {
+            Some(t) => t,
             None => return,
         };
-        // SAFETY: current is this task's own pointer.
-        let my_pid = unsafe { (*current).pid() };
+        let current = cur_ref as *mut crate::process::task::Task;
+        let my_pid = cur_ref.pid();
         let target = crate::drivers::timer::get_jiffies() + SLICE_JIFFIES.max(1);
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
         MANAGER_WAIT.prepare_to_wait(current, false, true);
@@ -2081,14 +2082,13 @@ fn wait_for_context_manager(ctx: BinderCtx) {
             if timer_id != 0 {
                 crate::timer::del_timer(timer_id);
             }
-            // SAFETY: a racing wake may have enqueued us while we are
-            // still executing — take ourselves back off (NEW-C2).
-            unsafe {
-                (*current).set_state(crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::RUNNING,
-                ));
-                crate::sched::dequeue_task(&*current);
-            }
+            // A racing wake may have enqueued us while we are still
+            // executing — take ourselves back off (NEW-C2). cur_ref is
+            // this task's own &mut (sched::current contract).
+            cur_ref.set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::RUNNING,
+            ));
+            crate::sched::dequeue_task(cur_ref);
         } else {
             crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
@@ -2270,7 +2270,8 @@ pub fn world_section_report() -> alloc::string::String {
             continue;
         }
         let mx = r.max.load(core::sync::atomic::Ordering::Relaxed);
-        // SAFETY: keys are &'static Location refs stored at open time.
+        // SAFETY: keys are &'static Location refs stored at open time
+        // (INV-BINDER-WORLDSEC: the table only ever holds those keys).
         let l: &'static core::panic::Location<'static> =
             unsafe { &*(key as *const core::panic::Location<'static>) };
         for t in 0..rows.len() {
@@ -2780,13 +2781,28 @@ fn node_is_dead(world: &World, node: &Arc<BinderNode>) -> bool {
 // open / close / mmap / poll
 // ============================================================================
 
-/// Borrow the open's BinderProc Arc without changing the refcount.
-/// SAFETY: ptr came from Arc::into_raw and the fd still owns it.
-unsafe fn proc_ref(file: &crate::fs::File) -> Option<Arc<BinderProc>> {
-    let raw = (*file.private_data.get())? as *const BinderProc;
-    let arc = core::mem::ManuallyDrop::new(Arc::from_raw(raw));
-    // SAFETY: ManuallyDrop never drops, so the count is unchanged; the
-    // clone below is a proper +1 that the caller owns.
+/// INV-BINDER-PRIV (unsafe-slim r3): only binder_open installs
+/// `Arc::into_raw(BinderProc)` into private_data, and the devfs ops table
+/// dispatches here only for binder files — one raw window replaces the
+/// per-call-site derefs this file carried. The borrow is pinned by the
+/// fd owning the Arc (same contract as fs/pipe.rs's INV-PIPE-PRIV).
+fn proc_of_file(file: &crate::fs::File) -> Option<&'static BinderProc> {
+    // SAFETY: INV-BINDER-PRIV above.
+    let ptr = unsafe { *file.private_data.get() }? as *const BinderProc;
+    if ptr.is_null() {
+        return None;
+    }
+    Some(unsafe { &*ptr })
+}
+
+/// Owned twin of [`proc_of_file`]: ioctl paths hold the proc across
+/// sleeps, so they take a proper Arc clone instead of a borrow.
+fn proc_ref(file: &crate::fs::File) -> Option<Arc<BinderProc>> {
+    // SAFETY: INV-BINDER-PRIV — the pointer is Arc::into_raw(BinderProc)
+    // installed at open; ManuallyDrop never drops, so the count is
+    // unchanged and the clone below is a proper +1 the caller owns.
+    let raw = (unsafe { *file.private_data.get() })? as *const BinderProc;
+    let arc = core::mem::ManuallyDrop::new(unsafe { Arc::from_raw(raw) });
     Some((*arc).clone())
 }
 
@@ -2844,10 +2860,9 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
 /// so it re-evaluates its context (the reference comment: "make sure
 /// the thread goes back to userspace to complete the deferred close").
 pub fn binder_flush(file: &crate::fs::File) {
-    // SAFETY: private_data holds the Arc<BinderProc> from binder_open
-    // (the same contract binder_close/poll rely on).
-    let proc = match unsafe { *file.private_data.get() } {
-        Some(p) => unsafe { &*(p as *const BinderProc) },
+    // INV-BINDER-PRIV capsule (same contract binder_close/poll rely on).
+    let proc = match proc_of_file(file) {
+        Some(p) => p,
         None => return,
     };
     let w = world_lock();
@@ -2871,14 +2886,19 @@ pub fn binder_flush(file: &crate::fs::File) {
 /// txn->proc Arc cycles), fails in-flight transactions targeting or
 /// originating here, and releases the mmap region.
 pub fn binder_close(file: &crate::fs::File) -> i32 {
-    // SAFETY: private_data holds the Arc<BinderProc> from binder_open.
-    let raw = match unsafe { *file.private_data.get() } {
-        Some(p) => p as *const BinderProc,
-        None => return 0,
+    // INV-BINDER-PRIV close twin: take the single strong reference
+    // stashed at open and clear the slot. The one audited take window.
+    let proc = {
+        // SAFETY: INV-BINDER-PRIV — Arc::into_raw(BinderProc) from open;
+        // this is its single strong reference being reclaimed.
+        let raw = match unsafe { *file.private_data.get() } {
+            Some(p) => p as *const BinderProc,
+            None => return 0,
+        };
+        let proc = unsafe { Arc::from_raw(raw) };
+        unsafe { *file.private_data.get() = None };
+        proc
     };
-    // SAFETY: reclaim the single strong reference stashed at open.
-    let proc = unsafe { Arc::from_raw(raw) };
-    unsafe { *file.private_data.get() = None };
 
     let mut wake_targets: Vec<Arc<BinderProc>> = Vec::new();
     {
@@ -3543,7 +3563,7 @@ pub fn binder_mmap_handler(
     }
 
     // SAFETY: fd-backed lifetime; see proc_ref.
-    let Some(proc) = (unsafe { proc_ref(file) }) else {
+    let Some(proc) = (proc_ref(file)) else {
         return Err(-6); // ENXIO
     };
 
@@ -3723,19 +3743,13 @@ pub fn binder_mmap_handler(
             {
                 // Demand-fault winner: free its exclusive anon page, then
                 // replace below. put_page→0 frees; refcount is 1 (fresh
-                // zero page inside our private VMA window).
-                let page = crate::mm::pfn_to_page_mut(old_ppn as usize);
-                if !page.is_null() {
-                // SAFETY: descriptor of the mapped frame under PTE lock.
-                unsafe {
-                    (*page).rmap_alt_remove(
-                        addr_space as *const _ as usize,
-                        va / PAGE_SIZE,
-                    );
-                        (*page).dec_mapcount();
-                        if (*page).put_page() == 0 {
-                            crate::mm::page_alloc::free_pages((old_ppn as usize) << 12, 0);
-                        }
+                // zero page inside our private VMA window). INV-FRAME-1
+                // typed descriptor (out-of-range -> None).
+                if let Some(page) = crate::mm::page_desc(old_ppn as usize) {
+                    page.rmap_alt_remove(addr_space as *const _ as usize, va / PAGE_SIZE);
+                    page.dec_mapcount();
+                    if page.put_page() == 0 {
+                        crate::mm::page_alloc::free_pages((old_ppn as usize) << 12, 0);
                     }
                 }
                 addr_space.sub_rss(1);
@@ -3747,10 +3761,8 @@ pub fn binder_mmap_handler(
             }
             // Mapping reference (io_uring discipline): munmap drops one,
             // binder_close drops the owner one, the last drop frees.
-            let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(pa));
-            if !page.is_null() {
-                // SAFETY: descriptor of our freshly allocated frame.
-                unsafe { (*page).get_page(); }
+            if let Some(page) = crate::mm::page_desc(crate::mm::phys_to_pfn(pa)) {
+                page.get_page();
             }
         }
         crate::arch::mm::asid::flush_tlb_all();
@@ -4007,7 +4019,7 @@ pub fn binder_on_tgid_exit(tgid: u32) {
 /// parameter; the registration pair delivers the wake instead).
 fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
     // SAFETY: fd-backed lifetime; see proc_ref.
-    let Some(proc) = (unsafe { proc_ref(file) }) else {
+    let Some(proc) = (proc_ref(file)) else {
         return 0;
     };
     let tid = current_tid();
@@ -4063,12 +4075,14 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
 /// 10 ms re-check slice.
 pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Task) -> bool {
     // SAFETY: fd-backed lifetime; see proc_ref.
-    let Some(proc) = (unsafe { proc_ref(file) }) else {
+    let Some(proc) = (proc_ref(file)) else {
         return false;
     };
-    // SAFETY: task is the parking poller (the current task when the
-    // poll core registers it).
-    let tid = unsafe { (*task).ns_pid_local() };
+    // task is the parking poller == current (poll core contract); the
+    // safe accessor reads it, the raw pointer is the queue identity.
+    let tid = crate::sched::current()
+        .map(|t| t.ns_pid_local())
+        .unwrap_or_else(|| unsafe { (*task).ns_pid_local() });
     let w = world_lock();
     {
         let world = w.as_ref().unwrap();
@@ -4101,11 +4115,14 @@ pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task:
 /// our registry is per wait round, so no pollfree hazard exists).
 pub fn binder_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
     // SAFETY: fd-backed lifetime; see proc_ref.
-    let Some(proc) = (unsafe { proc_ref(file) }) else {
+    let Some(proc) = (proc_ref(file)) else {
         return;
     };
     // SAFETY: task is the same parking poller that registered.
-    let tid = unsafe { (*task).ns_pid_local() };
+    // task is the parking poller == current (poll core contract).
+    let tid = crate::sched::current()
+        .map(|t| t.ns_pid_local())
+        .unwrap_or_else(|| unsafe { (*task).ns_pid_local() });
     let w = world_lock();
     {
         let world = w.as_ref().unwrap();
@@ -4132,7 +4149,7 @@ pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
 // ============================================================================
 
 fn current_tid() -> u32 {
-    crate::sched::current().map(|t| (*t).ns_pid_local()).unwrap_or(0)
+    crate::sched::current().map(|t| t.ns_pid_local()).unwrap_or(0)
 }
 
 /// Returns Some(ret) when the file is a binder fd, None otherwise.
@@ -4226,13 +4243,162 @@ fn stall_thread_line(
 /// state and the holder's own page tables — sc89: safe (and required)
 /// to run OUTSIDE the WORLD guard; `t.tid` is immutable.
 /// (unsafe-slim r3) un-signed: `t` is an Arc pin (no raw contract left).
+// ============================================================================
+// INV-BINDER-ENTRYFRAME (unsafe-slim r3): the ONE audited entry-frame read
+// span in this file. Diagnostic decoders (sleep_snapshot / stall_report /
+// txn_hang_audit / bwr_park_audit / ams46_audit / holder_forensics /
+// user_task_park_stack_w) used to repeat a per-arch unsafe pt_regs deref
+// each; the precondition is discharged once here instead (INV-SAFECALL-1).
+// The frame slot is written by the arch entry path on every syscall entry;
+// these helpers only READ it, and top == 0 (stack-freed guard, sc261 —
+// the kernel stack is freed at thread exit while the Task struct survives
+// until its last pin) returns zeros instead of touching the frame.
+// ============================================================================
+
+/// Diagnostic entry-frame read: (pc, syscall-no, a0, a1, a2).
+/// Zeros when `top == 0` (see the INV-BINDER-ENTRYFRAME header).
+#[inline]
+fn entry_frame(top: usize) -> (u64, u64, u64, u64, u64) {
+    if top == 0 {
+        return (0, 0, 0, 0, 0);
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        // SAFETY: diagnostic read of this task's own entry frame; the
+        // caller obtained `top` from kernel_stack_top_checked() (or the
+        // owns_kernel_stack() gate), so the frame pages are mapped.
+        unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi, (*regs).rdx) }
+    }
+    #[cfg(feature = "riscv64")]
+    {
+        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::riscv64::pt_regs::PtRegs;
+        // SAFETY: same contract as the x86_64 arm.
+        unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1, (*regs).a2) }
+    }
+    #[cfg(feature = "aarch64")]
+    {
+        let regs = (top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::aarch64::pt_regs::PtRegs;
+        // SAFETY: same contract as the x86_64 arm.
+        unsafe { ((*regs).pc, (*regs).syscallno, (*regs).regs[0], (*regs).regs[1], (*regs).regs[2]) }
+    }
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64", feature = "aarch64")))]
+    (0, 0, 0, 0, 0)
+}
+
+/// Diagnostic entry-frame read of the user stack pointer + pc: (sp, pc).
+/// Zeros when `top == 0` (see the INV-BINDER-ENTRYFRAME header).
+#[inline]
+fn entry_frame_sp(top: usize) -> (u64, u64) {
+    if top == 0 {
+        return (0, 0);
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        // SAFETY: as entry_frame.
+        unsafe { ((*regs).rsp, (*regs).rip) }
+    }
+    #[cfg(feature = "riscv64")]
+    {
+        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::riscv64::pt_regs::PtRegs;
+        // SAFETY: as entry_frame.
+        unsafe { ((*regs).sp, (*regs).epc) }
+    }
+    #[cfg(feature = "aarch64")]
+    {
+        let regs = (top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::aarch64::pt_regs::PtRegs;
+        // SAFETY: as entry_frame.
+        unsafe { ((*regs).sp, (*regs).pc) }
+    }
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64", feature = "aarch64")))]
+    (0, 0)
+}
+
+/// Diagnostic leaf walk: (ppn, pte-bits) of the mapping at `va` in the
+/// target's live user page tables. INV-BINDER-PROBE: read-only, the one
+/// audited walk span all probes build on.
+#[inline]
+fn probe_leaf(root: u64, va: u64) -> Option<(u64, u64)> {
+    // SAFETY: read-only diagnostic walk of live user page tables.
+    unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) }
+}
+
+/// Diagnostic cross-address-space probe: walk the target's live user
+/// page tables and volatile-read one u32 from the mapped page. Returns
+/// None when the page is unmapped. INV-BINDER-PROBE: read-only and
+/// fault-free — the leaf is walked first and the read happens only
+/// through the walked, present mapping.
+#[inline]
+fn probe_u32(root: u64, addr: u64) -> Option<u32> {
+    probe_leaf(root, addr).map(|(ppn, _)| {
+        let pa = (ppn as usize) << 12;
+        let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64)).bits()
+            as usize
+            + (addr as usize & 0xfff);
+        // SAFETY: the walked leaf maps this user word.
+        unsafe { core::ptr::read_volatile(kv as *const u32) }
+    })
+}
+
+/// u64 twin of [`probe_u32`] (INV-BINDER-PROBE).
+#[inline]
+fn probe_u64(root: u64, addr: u64) -> Option<u64> {
+    probe_leaf(root, addr).map(|(ppn, _)| {
+        let pa = (ppn as usize) << 12;
+        let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64)).bits()
+            as usize
+            + (addr as usize & 0xfff);
+        // SAFETY: the walked leaf maps this user word.
+        unsafe { core::ptr::read_volatile(kv as *const u64) }
+    })
+}
+
+/// x86-only entry-frame triple the futex decode needs: (rbp, rsp, r10).
+/// INV-BINDER-ENTRYFRAME arm; zeros when `top == 0`.
+#[cfg(feature = "x86_64")]
+#[inline]
+fn entry_frame_futex_x86(top: usize) -> (u64, u64, u64) {
+    if top == 0 {
+        return (0, 0, 0);
+    }
+    let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+        as *const crate::arch::x86_64::pt_regs::PtRegs;
+    // SAFETY: diagnostic read of this task's own entry frame; the
+    // caller gated the stack via owns_kernel_stack/kernel_stack_top_checked.
+    unsafe { ((*regs).rbp, (*regs).rsp, (*regs).r10) }
+}
+
+/// Diagnostic kernel-stack word read: bounds-check `addr` inside the
+/// task's own kernel-stack window [base, top) and volatile-read one u64.
+/// INV-BINDER-STACKWIN: the only raw kernel-stack-window reads in this
+/// file's diagnostics. (The pre-conversion scans bounds-checked only the
+/// FIRST word and then walked up to 640 more — reads past `top` were
+/// never part of the documented "inside the task's own kernel-stack
+/// window" contract; the per-word check enforces it.)
+#[inline]
+fn stack_word(addr: usize, base: usize, top: usize) -> Option<u64> {
+    if addr < base || addr + 8 > top || addr & 7 != 0 {
+        return None;
+    }
+    // SAFETY: addr is inside the task's own kernel-stack window,
+    // 8-byte aligned, and the full word fits below `top`.
+    Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
+}
+
 fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) {
     use core::fmt::Write;
-    let task = { crate::sched::find_task_by_pid(t.tid) };
-    if task.is_null() {
+    // Safe task lookup (INV: process::find_task_by_pid pins under the
+    // pid-hash bucket; the &'static mut lives for this diagnostic).
+    let Some(tk) = crate::process::find_task_by_pid(t.tid) else {
         return;
-    }
-    let tk = unsafe { &*task };
+    };
     let comm = {
         let c = tk.comm();
         core::str::from_utf8(&c[..])
@@ -4245,37 +4411,14 @@ fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) {
     // died exactly so). The old SAFETY claim "the kernel stack stays
     // mapped while the Task lives" was wrong: the stack is freed at
     // thread exit while the Task struct survives until its last pin.
-    // top = 0 wraps to a noncanonical address on purpose-never-deref:
-    // the guards below skip the read instead.
+    // entry_frame() keeps the top == 0 zero-guard for this.
     let top = if tk.owns_kernel_stack() {
         tk.kernel_stack_top()
     } else {
         0
     };
-    #[cfg(feature = "x86_64")]
-    let (rip, sys, a0, a1) = if top == 0 {
-        (0, 0, 0, 0)
-    } else {
-        let regs = (top.wrapping_sub(
-            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-        // SAFETY: diagnostic read of this task's own entry
-        // frame; the kernel stack stays mapped while the Task
-        // lives, and the frame slot is written on every entry.
-        unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
-    };
-    #[cfg(feature = "riscv64")]
-    let (rip, sys, a0, a1) = if top == 0 {
-        (0, 0, 0, 0)
-    } else {
-        let regs = (top.wrapping_sub(
-            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-        // SAFETY: same contract as the x86_64 twin above.
-        unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1) }
-    };
-    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-    let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
+    // (pc, sys, a0, a1, a2) — sub-tuple used below.
+    let (rip, sys, a0, a1, _) = entry_frame(top);
     let _ = writeln!(
         out,
         "   holder task comm='{}' state={:#x} rip={:#x} sys={:#x} a0={:#x} a1={:#x}",
@@ -4290,13 +4433,15 @@ fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) {
     // waiter entry: woken=true-but-still-asleep indicts the
     // wake→run path; woken=false indicts the key match (key_mm
     // vs the task's own current identity) or the releaser.
-    if let Some((uaddr, key_mm, woken)) = crate::sync::futex::waiter_of(task) {
+    if let Some((uaddr, key_mm, woken)) =
+        crate::sync::futex::waiter_of(tk as *mut crate::process::task::Task)
+    {
         let _ = writeln!(
             out,
             "   futex waiter uaddr={:#x} key_mm={:#x} own_mm={:#x} woken={}",
             uaddr,
             key_mm,
-            crate::sync::futex::task_futex_mm_id(task),
+            crate::sync::futex::task_futex_mm_id(tk as *mut crate::process::task::Task),
             woken
         );
         // sc75: read the futex WORD through the HOLDER's own
@@ -4306,25 +4451,9 @@ fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) {
         // already released — a released word plus a sleeping
         // waiter is a lost futex wake; an owned word names the
         // owner to chase.
-        let word = tk.address_space().and_then(|aspace| {
-            let root = aspace.root_ppn();
-            // SAFETY: read-only diagnostic walk of the
-            // holder's live user page tables.
-            unsafe {
-                crate::arch::mm::mm_ops::PageTableWalker::walk(root, uaddr as u64)
-            }
-            .map(|(ppn, _)| {
-                let pa = (ppn as usize) << 12;
-                let kv = crate::arch::mm::phys_to_virt(
-                    crate::arch::mm::PhysAddr::new(pa as u64),
-                )
-                .bits() as usize
-                    + (uaddr & 0xfff);
-                // SAFETY: the walked leaf maps the holder's
-                // own futex word; one volatile u32 read.
-                unsafe { core::ptr::read_volatile(kv as *const u32) }
-            })
-        });
+        let word = tk
+            .address_space()
+            .and_then(|aspace| probe_u32(aspace.root_ppn(), uaddr as u64));
         match word {
             Some(v) => {
                 // Dump the neighbor words too (libc lock structs
@@ -4334,27 +4463,10 @@ fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) {
                 let mut got = 0;
                 for (k, slot) in nb.iter_mut().enumerate() {
                     let addr = uaddr + 4 + 4 * k;
-                    if let Some(x) = tk.address_space().and_then(|aspace| {
-                        let root = aspace.root_ppn();
-                        // SAFETY: read-only diagnostic walk.
-                        unsafe {
-                            crate::arch::mm::mm_ops::PageTableWalker::walk(
-                                root,
-                                addr as u64,
-                            )
-                        }
-                        .map(|(ppn, _)| {
-                            let pa = (ppn as usize) << 12;
-                            let kv = crate::arch::mm::phys_to_virt(
-                                crate::arch::mm::PhysAddr::new(pa as u64),
-                            )
-                            .bits() as usize
-                                + (addr & 0xfff);
-                            // SAFETY: one volatile u32 in the
-                            // holder's mapped user page.
-                            unsafe { core::ptr::read_volatile(kv as *const u32) }
-                        })
-                    }) {
+                    if let Some(x) = tk
+                        .address_space()
+                        .and_then(|aspace| probe_u32(aspace.root_ppn(), addr as u64))
+                    {
                         *slot = x;
                         got += 1;
                     }
@@ -4368,32 +4480,14 @@ fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) {
                 // owner TID in the mutex word for
                 // error-checking/recursive mutexes).
                 if v > 0 && v < 0x00ff_ffff {
-                    let owner = { crate::sched::find_task_by_pid(v) };
-                    if !owner.is_null() {
-                        let ot = unsafe { &*owner };
+                    if let Some(ot) = crate::process::find_task_by_pid(v) {
                         // Stack-freed guard (KILLDUMP census race class):
                         // the owner may have exited and freed its stack
                         // before this lookup — skip, never fault.
                         if let Some(otop) = ot.kernel_stack_top_checked() {
-                            #[cfg(feature = "x86_64")]
-                            let (osys, orip) = {
-                                let regs = (otop.wrapping_sub(
-                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                                // SAFETY: diagnostic read of the
-                                // owner's entry frame.
-                                unsafe { ((*regs).orig_rax, (*regs).rip) }
-                            };
-                            #[cfg(feature = "riscv64")]
-                            let (osys, orip) = {
-                                let regs = (otop.wrapping_sub(
-                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                                // SAFETY: same contract, riscv64.
-                                unsafe { ((*regs).a7, (*regs).epc) }
-                            };
-                            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-                            let (osys, orip) = (0u64, 0u64);
+                            // (sys, pc) — entry_frame gives (pc, sys, ..).
+                            let (pc, osys, _, _, _) = entry_frame(otop);
+                            let orip = pc;
                             let _ = writeln!(
                                 out,
                                 "   owner tid {} state={:#x} sys={:#x} rip={:#x}",
@@ -4536,13 +4630,9 @@ pub fn dump_latched_maps_taskctx() {
             return;
         }
         // The latch stores thread-group ids; the leader's pid == tgid.
-        // SAFETY: sched::find_task_by_pid returns a valid Task pointer
-        // from the pid hash (null when gone); we only read its aspace.
-        let tkp = { crate::sched::find_task_by_pid(tgid) };
-        if tkp.is_null() {
+        let Some(tk) = crate::process::find_task_by_pid(tgid) else {
             continue;
-        }
-        let tk = unsafe { &*tkp };
+        };
         let aspace = match tk.address_space() {
             Some(a) => a,
             None => continue,
@@ -4708,7 +4798,7 @@ pub fn sleep_snapshot() {
         // still takes the raw pointer identity.
         let task_raw = task as *const crate::process::task::Task
             as *mut crate::process::task::Task;
-        unsafe {
+        {
             let tk = task;
             if tk.pid() == 0 {
                 return;
@@ -4722,28 +4812,8 @@ pub fn sleep_snapshot() {
             let Some(top) = tk.kernel_stack_top_checked() else {
                 return;
             };
-            #[cfg(feature = "x86_64")]
-            let (rip, sys, a0, a1, a2) = if top == 0 {
-                (0, 0, 0, 0, 0)
-            } else {
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                // SAFETY: diagnostic read of this task's own entry frame;
-                // owns_kernel_stack checked above (sc261).
-                unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi, (*regs).rdx) }
-            };
-            #[cfg(feature = "riscv64")]
-            let (rip, sys, a0, a1, a2) = if top == 0 {
-                (0, 0, 0, 0, 0)
-            } else {
-                let regs = (top.wrapping_sub(
-                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1, (*regs).a2) }
-            };
-            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-            let (rip, sys, a0, a1, a2) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            // (pc, sys, a0, a1, a2) via the INV-BINDER-ENTRYFRAME helper.
+            let (rip, sys, a0, a1, a2) = entry_frame(top);
             let comm = tk.comm();
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
@@ -4804,16 +4874,10 @@ pub fn sleep_snapshot() {
             // bucket lock; hunting boots only, rux:sleepsnap (retired dfx=sleepsnap)-gated).
             #[cfg(feature = "x86_64")]
             if top != 0 {
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                // SAFETY: diagnostic read of this task's own entry frame
-                // (owns_kernel_stack checked above).
                 // r10, not rcx: at syscall entry the kernel ABI moves the
                 // 4th argument to r10 (syscall clobbers rcx with the
                 // return address) — for futex this is the timeout ptr.
-                let (urbp, ursp, ua3) =
-                    unsafe { ((*regs).rbp, (*regs).rsp, (*regs).r10) };
+                let (urbp, ursp, ua3) = entry_frame_futex_x86(top);
                 let main_stack_futex =
                     sys == 202 && a0 >= 0x7fff_ff00_0000 && a0 < 0x8000_0000_0000;
                 // 61st (ohw12 tid 344): the OTHER musl-cv park class — the
@@ -5049,25 +5113,15 @@ pub fn sleep_snapshot() {
                         UFW_SEEN_T[idx].store(now100, core::sync::atomic::Ordering::Relaxed);
                         if let Some(aspace) = tk.address_space() {
                             let root = aspace.root_ppn();
-                            // SAFETY: read-only diagnostic walk of the
-                            // task's own page tables (pollfd contract).
+                            // INV-BINDER-PROBE: the walk+volatile-read
+                            // lives in probe_u64; this adds only the
+                            // page-crossing guard (a word may not span
+                            // two pages — decode is best-effort).
                             let read_u64_at = |va: u64| -> Option<u64> {
                                 if va & 0xfff > 0xff8 {
                                     return None;
                                 }
-                                let (ppn, _) = unsafe {
-                                    crate::arch::mm::mm_ops::PageTableWalker::walk(
-                                        root,
-                                        va & !0xfff,
-                                    )
-                                }?;
-                                let pa = (ppn as usize) << 12;
-                                let kv = crate::arch::mm::phys_to_virt(
-                                    crate::arch::mm::PhysAddr::new(pa as u64),
-                                )
-                                .bits() as usize
-                                    + (va & 0xfff) as usize;
-                                Some(unsafe { core::ptr::read_volatile(kv as *const u64) })
+                                probe_u64(root, va & !0xfff)
                             };
                             let mut chain = alloc::string::String::new();
                             use core::fmt::Write as _;
@@ -5193,24 +5247,12 @@ pub fn sleep_snapshot() {
                     if let Some(aspace) = tk.address_space() {
                         let root = aspace.root_ppn();
                         let read_u64_at = |va: u64| -> Option<u64> {
-                            // SAFETY: read-only diagnostic walk of the
-                            // task's own page tables.
-                            let (ppn, _) = crate::arch::mm::mm_ops::PageTableWalker::walk(
-                                root,
-                                va & !0xfff,
-                            )?;
-                            let pa = (ppn as usize) << 12;
-                            let kv = crate::arch::mm::phys_to_virt(
-                                crate::arch::mm::PhysAddr::new(pa as u64),
-                            )
-                            .bits() as usize
-                                + (va & 0xfff) as usize;
+                            // INV-BINDER-PROBE (walk+volatile-read) plus
+                            // the page-crossing guard; read-only decode.
                             if va & 0xfff > 0xff8 {
                                 return None;
                             }
-                            // SAFETY: one volatile u64 in the task's own
-                            // mapped user page.
-                            Some({ core::ptr::read_volatile(kv as *const u64) })
+                            probe_u64(root, va)
                         };
                         let mut pfl = alloc::string::String::new();
                         use core::fmt::Write as _;
@@ -5673,38 +5715,10 @@ pub fn txn_hang_audit() {
                         let mut sys = 0u64;
                         let mut rip = 0u64;
                         if let Some(top) = tk.kernel_stack_top_checked() {
-                            #[cfg(feature = "x86_64")]
-                            {
-                                let regs = (top.wrapping_sub(
-                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                                ))
-                                    as *const crate::arch::x86_64::pt_regs::PtRegs;
-                                // SAFETY: entry-frame read of this task's
-                                // pinned kernel-stack pages.
-                                let r = unsafe { &*regs };
-                                sys = r.orig_rax as u64;
-                                rip = r.rip as u64;
-                            }
-                            #[cfg(feature = "riscv64")]
-                            {
-                                let regs = (top.wrapping_sub(
-                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                                ))
-                                    as *const crate::arch::riscv64::pt_regs::PtRegs;
-                                let r = unsafe { &*regs };
-                                sys = r.a7 as u64;
-                                rip = r.epc as u64;
-                            }
-                            #[cfg(feature = "aarch64")]
-                            {
-                                let regs = (top.wrapping_sub(
-                                    crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
-                                ))
-                                    as *const crate::arch::aarch64::pt_regs::PtRegs;
-                                let r = unsafe { &*regs };
-                                sys = r.syscallno as u64;
-                                rip = r.pc as u64;
-                            }
+                            // INV-BINDER-ENTRYFRAME: (pc, sys) sub-tuple.
+                            let (pc, fsys, _, _, _) = entry_frame(top);
+                            sys = fsys;
+                            rip = pc;
                         }
                         let _ = writeln!(
                             w,
@@ -5781,15 +5795,15 @@ pub fn txn_hang_audit() {
                                             && thsp as usize + 8 <= top
                                             && (thsp & 7) == 0
                                         {
-                                            // SAFETY: diagnostic read inside the
-                                            // task's own kernel-stack window;
-                                            // bounds checked above.
-                                            let p = thsp as *const u64;
                                             let _ = write!(w, " sp-up:");
                                             let mut shown = 0;
                                             for k in 0..640usize {
-                                                let v = unsafe {
-                                                    core::ptr::read_volatile(p.add(k))
+                                                let Some(v) = stack_word(
+                                                    thsp as usize + k * 8,
+                                                    base,
+                                                    top,
+                                                ) else {
+                                                    break;
                                                 };
                                                 if v >= lo && v < hi && (v & 1) == 0 {
                                                     let _ = write!(w, " {v:#x}");
@@ -5847,11 +5861,14 @@ pub fn txn_hang_audit() {
             }
         }
     }
+    // INV-BINDER-DIAG-COMM (unsafe-slim r3): the ONE audited raw-task comm
+    // read in the diagnostics. The pointer's provenance is a live pid-hash
+    // or walk callback task; every caller is safe code.
     let comm_of = |p: *mut crate::process::Task| -> &str {
         if p.is_null() {
             return "?";
         }
-        // SAFETY: diagnostic comm read of a live task.
+        // SAFETY: diagnostic comm read of a live task (INV above).
         let c = unsafe { (*p).comm() };
         core::str::from_utf8(&c[..])
             .unwrap_or("?")
@@ -5860,42 +5877,25 @@ pub fn txn_hang_audit() {
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
     for h in &hung {
-        let srv = { crate::sched::find_task_by_pid(h.stid) };
-        let (state, sys, rip, a0, a1) = if srv.is_null() {
-            (0u64, 0u64, 0u64, 0u64, 0u64)
-        } else {
-            // SAFETY: diagnostic reads of the task's own fields and its
-            // mapped kernel stack (sleep_snapshot contract, sc261).
-            let tk = unsafe { &*srv };
-            let state = tk.state().bits() as u64;
-            match tk.kernel_stack_top_checked() {
-                None => (state, 0, 0, 0, 0),
-                Some(top) => {
-                    #[cfg(feature = "x86_64")]
-                    let (sys, rip, a0, a1) = {
-                        let regs = (top.wrapping_sub(
-                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                        // SAFETY: entry-frame read of this task's own stack.
-                        unsafe { ((*regs).orig_rax, (*regs).rip, (*regs).rdi, (*regs).rsi) }
-                    };
-                    #[cfg(feature = "riscv64")]
-                    let (sys, rip, a0, a1) = {
-                        let regs = (top.wrapping_sub(
-                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                        // SAFETY: entry-frame read of this task's own stack.
-                        unsafe { ((*regs).a7, (*regs).epc, (*regs).a0, (*regs).a1) }
-                    };
-                    #[cfg(feature = "aarch64")]
-                    let (sys, rip, a0, a1) = {
-                        let regs = (top.wrapping_sub(
-                            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
-                        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
-                        // SAFETY: entry-frame read of this task's own stack.
-                        unsafe { ((*regs).syscallno, (*regs).pc, (*regs).regs[0], (*regs).regs[1]) }
-                    };
-                    (state, sys as u64, rip as u64, a0 as u64, a1 as u64)
+        let srv = crate::process::find_task_by_pid(h.stid);
+        // Raw identity for the sched diag APIs (they take *mut Task) and
+        // for the comm_of capsule; reads go through `srv.as_deref()`.
+        let srv_raw = srv
+            .as_deref()
+            .map(|t| t as *const crate::process::task::Task as *mut crate::process::task::Task)
+            .unwrap_or(core::ptr::null_mut());
+        let comm_srv = comm_of(srv_raw);
+        let (state, sys, rip, a0, a1) = match srv.as_deref() {
+            None => (0u64, 0u64, 0u64, 0u64, 0u64),
+            Some(tk) => {
+                let state = tk.state().bits() as u64;
+                match tk.kernel_stack_top_checked() {
+                    None => (state, 0, 0, 0, 0),
+                    // INV-BINDER-ENTRYFRAME: (sys, pc, a0, a1) reorder.
+                    Some(top) => {
+                        let (pc, sys, a0, a1, _) = entry_frame(top);
+                        (state, sys, pc, a0, a1)
+                    }
                 }
             }
         };
@@ -5906,10 +5906,14 @@ pub fn txn_hang_audit() {
             h.code,
             h.cpid,
             h.ctid,
-            comm_of({ crate::sched::find_task_by_pid(h.ctid) }),
+            comm_of(
+                crate::process::find_task_by_pid(h.ctid)
+                    .map(|t| t as *mut crate::process::task::Task)
+                    .unwrap_or(core::ptr::null_mut()),
+            ),
             h.spid,
             h.stid,
-            comm_of(srv),
+            comm_srv,
             h.exec_ms,
             h.total_ms,
             state,
@@ -5940,9 +5944,9 @@ pub fn txn_hang_audit() {
         // exec frozen), phantom (RUNNING unlinked slotless), a lying
         // busy slot (slot names it, exec frozen), and a genuinely
         // running server (exec advancing between 5s censuses).
-        if !srv.is_null() {
-            let tk = unsafe { &*srv };
-            let linked = crate::sched::sched::grq_diag_cfs_linked(srv);
+        if !srv_raw.is_null() {
+            let tk = srv.as_deref().expect("srv_raw non-null implies Some");
+            let linked = crate::sched::sched::grq_diag_cfs_linked(srv_raw);
             let onrq = tk.sched_entity().is_on_rq();
             let oncpu = tk.on_cpu();
             let claim = tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
@@ -5953,10 +5957,10 @@ pub fn txn_hang_audit() {
             let mut slot = -1i32;
             let mut swout = -1i32;
             for c in 0..crate::config::MAX_CPUS {
-                if crate::sched::sched::cpu_state(c).current == srv {
+                if crate::sched::sched::cpu_state(c).current == srv_raw {
                     slot = c as i32;
                 }
-                if crate::sched::sched::switching_out_mask(srv) & (1u32 << c) != 0 {
+                if crate::sched::sched::switching_out_mask(srv_raw) & (1u32 << c) != 0 {
                     swout = c as i32;
                 }
             }
@@ -6154,10 +6158,7 @@ pub fn txn_hang_audit() {
         //           dead-frame noise).
         // Cross-CPU reads are diagnostic-only (sc261 sleep_snapshot
         // contract); symbolize offline with addr2line.
-        if !srv.is_null() {
-            // SAFETY: diagnostic reads of the task's fields and its
-            // pinned kernel-stack pages (the Task exists).
-            let tk = unsafe { &*srv };
+        if let Some(tk) = srv.as_deref() {
             if let Some(top) = tk.kernel_stack_top_checked() {
                 #[cfg(feature = "x86_64")]
                 extern "C" {
@@ -6191,7 +6192,6 @@ pub fn txn_hang_audit() {
                     && thsp as usize + 8 <= top
                     && (thsp & 7) == 0
                 {
-                let p = thsp as *const u64;
                 let mut shown = 0;
                 let _ = write!(line, " sp-up:");
                 // 640-word window, leg-33B deepened: the sc329B 8-word
@@ -6202,9 +6202,10 @@ pub fn txn_hang_audit() {
                 // kernel-text words and split across a second record —
                 // printk records cap at 256 bytes.
                 for k in 0..640usize {
-                    // SAFETY: diagnostic read inside the task's own
-                    // kernel-stack window; bounds checked above.
-                    let v = unsafe { core::ptr::read_volatile(p.add(k)) };
+                    // INV-BINDER-STACKWIN: per-word window bounds.
+                    let Some(v) = stack_word(thsp as usize + k * 8, base, top) else {
+                        break;
+                    };
                     if is_text(v) {
                         if shown < 8 {
                             let _ = write!(line, " {v:#x}");
@@ -6239,9 +6240,10 @@ pub fn txn_hang_audit() {
                     if addr < base + 8 {
                         break;
                     }
-                    // SAFETY: diagnostic read inside the task's own
-                    // kernel-stack window; bounds checked above.
-                    let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
+                    // INV-BINDER-STACKWIN: per-word window bounds.
+                    let Some(v) = stack_word(addr, base, top) else {
+                        break;
+                    };
                     if is_text(v) {
                         let _ = write!(bline, " {v:#x}");
                         shown += 1;
@@ -6287,42 +6289,22 @@ pub fn txn_hang_audit() {
     // spot: if the hung handler's FFRT mutex is held by one of them,
     // the chain is handler -> mutex -> holder -> nested BWR -> peer.
     for hl in &holders {
-        let t = { crate::sched::find_task_by_pid(hl.tid) };
-        let (state, sys, a0, a1) = if t.is_null() {
-            (0u64, 0u64, 0u64, 0u64)
-        } else {
-            // SAFETY: diagnostic reads of the task's own fields and its
-            // mapped kernel stack (sleep_snapshot contract, sc261).
-            let tk = unsafe { &*t };
-            let state = tk.state().bits() as u64;
-            match tk.kernel_stack_top_checked() {
-                None => (state, 0, 0, 0),
-                Some(top) => {
-                    #[cfg(feature = "x86_64")]
-                    let (sys, a0, a1) = {
-                        let regs = (top.wrapping_sub(
-                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                        // SAFETY: entry-frame read of this task's own stack.
-                        unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
-                    };
-                    #[cfg(feature = "riscv64")]
-                    let (sys, a0, a1) = {
-                        let regs = (top.wrapping_sub(
-                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                        // SAFETY: entry-frame read of this task's own stack.
-                        unsafe { ((*regs).a7, (*regs).a0, (*regs).a1) }
-                    };
-                    #[cfg(feature = "aarch64")]
-                    let (sys, a0, a1) = {
-                        let regs = (top.wrapping_sub(
-                            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
-                        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
-                        // SAFETY: entry-frame read of this task's own stack.
-                        unsafe { ((*regs).syscallno, (*regs).regs[0], (*regs).regs[1]) }
-                    };
-                    (state, sys as u64, a0 as u64, a1 as u64)
+        let t = crate::process::find_task_by_pid(hl.tid);
+        let t_raw = t
+            .as_deref()
+            .map(|tk| tk as *const crate::process::task::Task as *mut crate::process::task::Task)
+            .unwrap_or(core::ptr::null_mut());
+        let (state, sys, a0, a1) = match t.as_deref() {
+            None => (0u64, 0u64, 0u64, 0u64),
+            Some(tk) => {
+                let state = tk.state().bits() as u64;
+                match tk.kernel_stack_top_checked() {
+                    None => (state, 0, 0, 0),
+                    // INV-BINDER-ENTRYFRAME: (sys, a0, a1) sub-tuple.
+                    Some(top) => {
+                        let (_, sys, a0, a1, _) = entry_frame(top);
+                        (state, sys, a0, a1)
+                    }
                 }
             }
         };
@@ -6331,7 +6313,7 @@ pub fn txn_hang_audit() {
             "TXN-HANG-HLD pid {} tid {} ({}) holds-pending txn{} code{} -> pid {} tid {}: state={:#x} sys={} a0={:#x} a1={:#x} todo={} looper={:#x}",
             hl.pid,
             hl.tid,
-            comm_of(t),
+            comm_of(t_raw),
             hl.txn_id,
             hl.code,
             hl.to_pid,
@@ -6553,12 +6535,13 @@ pub fn bwr_park_audit() {
         }
     }
     // WORLD released — task forensics + user BWR decode + prints.
-    // (comm_of + entry-frame read contract: sleep_snapshot / TXN-HANG.)
+    // (comm_of capsule contract: INV-BINDER-DIAG-COMM; entry-frame read
+    // contract: INV-BINDER-ENTRYFRAME.)
     let comm_of = |p: *mut crate::process::Task| -> &str {
         if p.is_null() {
             return "?";
         }
-        // SAFETY: diagnostic comm read of a live task.
+        // SAFETY: diagnostic comm read of a live task (INV above).
         let c = unsafe { (*p).comm() };
         core::str::from_utf8(&c[..])
             .unwrap_or("?")
@@ -6566,34 +6549,11 @@ pub fn bwr_park_audit() {
     };
     // Entry-frame (syscall nr, a0, a1, a2) of a task, if its kernel
     // stack is pinned and mapped.
-    let entry_regs = |p: *mut crate::process::Task| -> Option<(u64, u64, u64, u64)> {
-        if p.is_null() {
-            return None;
-        }
-        // SAFETY: diagnostic reads of the task's mapped kernel stack
-        // (same contract as TXN-HANG's sys= read).
-        let tk = unsafe { &*p };
-        let top = tk.kernel_stack_top_checked()?;
-        #[cfg(feature = "x86_64")]
-        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::x86_64::pt_regs::PtRegs;
-        #[cfg(feature = "x86_64")]
-        // SAFETY: entry-frame read of this task's own stack.
-        return Some(unsafe { ((*regs).orig_rax as u64, (*regs).rdi, (*regs).rsi, (*regs).rdx) });
-        #[cfg(feature = "riscv64")]
-        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::riscv64::pt_regs::PtRegs;
-        #[cfg(feature = "riscv64")]
-        // SAFETY: entry-frame read of this task's own stack.
-        return Some(unsafe { ((*regs).a7 as u64, (*regs).a0, (*regs).a1, (*regs).a2) });
-        #[cfg(feature = "aarch64")]
-        let regs = (top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::aarch64::pt_regs::PtRegs;
-        #[cfg(feature = "aarch64")]
-        // SAFETY: entry-frame read of this task's own stack.
-        return Some(unsafe {
-            ((*regs).syscallno as u64, (*regs).regs[0], (*regs).regs[1], (*regs).regs[2])
-        });
+    let entry_regs = |p: Option<&crate::process::task::Task>| -> Option<(u64, u64, u64, u64)> {
+        let top = p?.kernel_stack_top_checked()?;
+        // INV-BINDER-ENTRYFRAME: (sys, a0, a1, a2) reorder.
+        let (_, sys, a0, a1, a2) = entry_frame(top);
+        Some((sys, a0, a1, a2))
     };
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
@@ -6620,16 +6580,20 @@ pub fn bwr_park_audit() {
                 .max()
                 .unwrap_or(0)
         };
-        let task = { crate::sched::find_task_by_pid(s.tid) };
+        let task = crate::process::find_task_by_pid(s.tid);
+        // Raw identity for the *-mut-taking diag helpers below; reads go
+        // through task.as_deref().
+        let task_raw = task
+            .as_deref()
+            .map(|t| t as *const crate::process::task::Task as *mut crate::process::task::Task)
+            .unwrap_or(core::ptr::null_mut());
         // State bits (RUNNING=0, INT=1, UNINT=2): a RUNNING thread
         // caught mid-ioctl must not read as parked.
-        let st_bits = if task.is_null() {
-            0xFFFF_FFFFu32
-        } else {
-            // SAFETY: diagnostic state read of a live task.
-            unsafe { (*task).state().bits() }
-        };
-        let (sys, a0, a1, _a2) = match entry_regs(task) {
+        let st_bits = task
+            .as_deref()
+            .map(|t| t.state().bits())
+            .unwrap_or(0xFFFF_FFFFu32);
+        let (sys, a0, a1, _a2) = match entry_regs(task.as_deref()) {
             Some(r) => r,
             None => (0, 0, 0, 0),
         };
@@ -6700,10 +6664,10 @@ pub fn bwr_park_audit() {
             }
             if sys == 7
                 && a1 >= 1
-                && !task.is_null()
+                && !task_raw.is_null()
                 && PFD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4
             {
-                crate::sync::futex::oh67_poll_decode(task, a0 as u64, a1 as u64, _a2)
+                crate::sync::futex::oh67_poll_decode(task_raw, a0 as u64, a1 as u64, _a2)
             } else {
                 alloc::string::String::new()
             }
@@ -6806,9 +6770,9 @@ pub fn bwr_park_audit() {
         // parked after the pool fills). rux:fuxstuck (retired dfx=fuxstuck) gates the walker.
         let chain_txt = if park == "FUTEX"
             && crate::trace::EVENT_FUXSTUCK.armed()
-            && !task.is_null()
+            && !task_raw.is_null()
         {
-            match crate::sync::futex::ffrt_chain_walk(task, a0 as usize) {
+            match crate::sync::futex::ffrt_chain_walk(task_raw, a0 as usize) {
                 Some((t, head)) => {
                     if let Some(h) = head {
                         // sc57: ring closed — the lock object is named;
@@ -6924,7 +6888,7 @@ pub fn bwr_park_audit() {
             let samgr_row = s.pid as u32 == crate::ipc::binder::binder_sareg_samgr_pid()
                 && crate::ipc::binder::binder_sareg_samgr_pid() != 0;
             let eligible = park == "FUTEX"
-                && !task.is_null()
+                && !task_raw.is_null()
                 && (!s.stack.is_empty() || samgr_row);
             let budget_ok = if samgr_row {
                 MS_S.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3
@@ -6933,10 +6897,10 @@ pub fn bwr_park_audit() {
             };
             if (eligible && budget_ok || is_owner)
                 && park == "FUTEX"
-                && !task.is_null()
+                && !task_raw.is_null()
                 && crate::trace::EVENT_FUXSTUCK.armed()
             {
-                match crate::sync::futex::ffrt_mutex_scan(task) {
+                match crate::sync::futex::ffrt_mutex_scan(task_raw) {
                     Some(t) => {
                         // 77th: auto-arm fuxwatch slot 2 on the live
                         // contended mutex word (chain-detected; shifts
@@ -7009,14 +6973,14 @@ pub fn bwr_park_audit() {
                 || stuck_dump
             {
                 use core::fmt::Write as _;
-                let body = match crate::sync::futex::deep_ufw(task) {
+                let body = match crate::sync::futex::deep_ufw(task_raw) {
                     Some(t) => t,
                     None => alloc::string::String::from("none"),
                 };
                 let _ = write!(deep, " FUX-OWNER-DEEP[{}]", body);
                 // The park word's own object shape: an l word here names
                 // M3 (the inner mutex the ±64MB arena scan missed).
-                match crate::sync::futex::fuxw_word_shape(task, a0 as u64) {
+                match crate::sync::futex::fuxw_word_shape(task_raw, a0 as u64) {
                     Some(sh) => {
                         let _ = write!(deep, " FUX-OWNER-SHAPE[{}]", sh);
                         // Arm slot 2 on the shape-detected l word (the
@@ -7100,8 +7064,8 @@ pub fn bwr_park_audit() {
             // primitive and the handler that parked.
             if park_age_ms > 30_000 {
                 if census_tgid_due(1, s.pid as u32, now, 600) {
-                    if !task.is_null() {
-                        unsafe { user_task_park_stack_w(task, &mut w) };
+                    if !task_raw.is_null() {
+                        user_task_park_stack_w(task_raw, &mut w);
                         // 81st: if the parked word is a FROZEN rwlock
                         // (0x80000000|N-readers — ohw135 tid 1583: val
                         // 0x80000010, 16 readers never release), scan the
@@ -7119,7 +7083,7 @@ pub fn bwr_park_audit() {
                         // with a live waiter now qualifies; the
                         // park-standing gate above does the filtering.
                         if let Some(v) =
-                            unsafe { crate::sync::futex::read_park_word_via_task(task, a0 as u64) }
+                            unsafe { crate::sync::futex::read_park_word_via_task(task_raw, a0 as u64) }
                         {
                             let readers = v & 0x7fff_ffff;
                             if readers >= 1 && readers < 0x4000_0000 {
@@ -7176,9 +7140,9 @@ pub fn bwr_park_audit() {
             }
             if now.wrapping_sub(s.read_wait_since as u32) > 3000
                 && census_tgid_due(3, s.pid as u32, now, 600)
-                && !task.is_null()
+                && !task_raw.is_null()
             {
-                unsafe { user_task_park_stack_w(task, &mut w) };
+                user_task_park_stack_w(task_raw, &mut w);
             }
         }
         let _ = writeln!(
@@ -7186,7 +7150,7 @@ pub fn bwr_park_audit() {
             "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}{}",
             s.pid,
             s.tid,
-            comm_of(task),
+            comm_of(task_raw),
             park,
             st_bits,
             sys,
@@ -7302,46 +7266,19 @@ pub fn ams46_audit() {
                 core::sync::atomic::AtomicUsize::new(0);
             let n = SNAP_N.fetch_add(1, Relaxed);
             if n < 40 && (n % 2) == 0 {
-                let tk = { crate::sched::find_task_by_pid(rtid) };
-                if tk.is_null() {
+                let tk = crate::process::find_task_by_pid(rtid);
+                let t = tk.as_deref();
+                if t.is_none() {
                     crate::pr_warn!("AMS46-T j={} tid={} GONE", now / 100, rtid);
                 } else {
-                    // SAFETY: diagnostic reads of the task's own fields
-                    // and mapped kernel stack (sleep_snapshot contract).
-                    let t = unsafe { &*tk };
+                    let t = t.expect("checked above");
                     let state = t.state().bits() as u64;
                     let (sys, rip, a0) = match t.kernel_stack_top_checked() {
                         None => (0u64, 0u64, 0u64),
+                        // INV-BINDER-ENTRYFRAME: (sys, pc, a0) reorder.
                         Some(top) => {
-                            #[cfg(feature = "x86_64")]
-                            {
-                                let regs = (top.wrapping_sub(
-                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                                ))
-                                    as *const crate::arch::x86_64::pt_regs::PtRegs;
-                                // SAFETY: entry-frame read of this task's stack.
-                                unsafe { ((*regs).orig_rax, (*regs).rip, (*regs).rdi) }
-                            }
-                            #[cfg(feature = "riscv64")]
-                            {
-                                let regs = (top.wrapping_sub(
-                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                                ))
-                                    as *const crate::arch::riscv64::pt_regs::PtRegs;
-                                // SAFETY: entry-frame read of this task's stack.
-                                unsafe { ((*regs).a7, (*regs).epc, (*regs).a0) }
-                            }
-                            #[cfg(feature = "aarch64")]
-                            {
-                                let regs = (top.wrapping_sub(
-                                    crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
-                                ))
-                                    as *const crate::arch::aarch64::pt_regs::PtRegs;
-                                // SAFETY: entry-frame read of this task's stack.
-                                unsafe {
-                                    ((*regs).syscallno, (*regs).pc, (*regs).regs[0])
-                                }
-                            }
+                            let (pc, fsys, fa0, _, _) = entry_frame(top);
+                            (fsys, pc, fa0)
                         }
                     };
                     use core::fmt::Write;
@@ -7708,12 +7645,10 @@ fn hist_line_of(tid: u32, ring: &[(u8, u32, u32, u32); BHIST]) -> alloc::string:
 /// OUTSIDE the WORLD guard and must run there: this is one of the slow
 /// page-walk dumps that made the old WORLD-held stall_report a ~500 ms
 /// IRQ-off window (sc82, khungtaskd death).
-unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
-    let task = crate::sched::find_task_by_pid(t.tid);
-    if task.is_null() {
-        return;
-    }
-    user_task_park_stack(task);
+fn user_park_stack_dump(t: &Arc<BinderThread>) {
+    let task = crate::process::find_task_by_pid(t.tid);
+    let Some(task) = task else { return };
+    user_task_park_stack(task as *mut crate::process::task::Task);
 }
 
 /// 81st: the task-level half of the park-stack dump, callable from the
@@ -7723,7 +7658,7 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
 /// and the handler that parked (module+fileoff, offline-symbolized).
 /// Writes through the caller's ConsoleWriter — pr_warn from the censusd
 /// audit context is dropped (the missing FUXPARK-ARM prints class).
-unsafe fn user_task_park_stack(task: *mut crate::process::Task) {
+fn user_task_park_stack(task: *mut crate::process::Task) {
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
     user_task_park_stack_w(task, &mut w);
 }
@@ -7770,7 +7705,7 @@ fn census_tgid_due(gate: usize, tgid: u32, now: u32, interval: u32) -> bool {
     false
 }
 
-unsafe fn user_task_park_stack_w(
+fn user_task_park_stack_w(
     task: *mut crate::process::Task,
     w: &mut crate::dfx::backtrace::ConsoleWriter,
 ) {
@@ -7778,47 +7713,26 @@ unsafe fn user_task_park_stack_w(
     if task.is_null() {
         return;
     }
-    let tk = &*task;
+    // SAFETY: non-null live task from the caller's pid lookup (contract
+    // named at the call sites); the fn is the park-stack capsule.
+    let tk = unsafe { &*task };
     let Some(aspace) = tk.address_space() else { return };
     let root = aspace.root_ppn();
     let read_u64_at = |va: u64| -> Option<u64> {
-        // SAFETY: read-only diagnostic walk of the holder's tables.
-        let (ppn, _) = crate::arch::mm::mm_ops::PageTableWalker::walk(root, va & !0xfff)?;
-        let pa = (ppn as usize) << 12;
-        let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64))
-            .bits() as usize
-            + (va & 0xfff) as usize;
+        // INV-BINDER-PROBE (walk+volatile-read) plus the page-crossing
+        // guard; read-only decode of the holder's own user memory.
         if va & 0xfff > 0xff8 {
             return None; // crosses a page — skip rather than split
         }
-        // SAFETY: one volatile u64 in the holder's mapped user page.
-        Some(core::ptr::read_volatile(kv as *const u64))
+        probe_u64(root, va)
     };
     // Stack-freed guard (KILLDUMP census race class): the holder may
     // have exited and freed its stack — skip, never fault.
     let Some(top) = tk.kernel_stack_top_checked() else {
         return;
     };
-    #[cfg(feature = "x86_64")]
-    let (rsp, rip) = if top == 0 {
-        (0, 0)
-    } else {
-        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::x86_64::pt_regs::PtRegs;
-        // SAFETY: diagnostic read of the holder's entry frame.
-        unsafe { ((*regs).rsp, (*regs).rip) }
-    };
-    #[cfg(feature = "riscv64")]
-    let (rsp, rip) = if top == 0 {
-        (0, 0)
-    } else {
-        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::riscv64::pt_regs::PtRegs;
-        // SAFETY: same contract, riscv64.
-        unsafe { ((*regs).sp, (*regs).epc) }
-    };
-    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-    let (rsp, rip) = (0u64, 0u64);
+    // INV-BINDER-ENTRYFRAME: (sp, pc) arm.
+    let (rsp, rip) = entry_frame_sp(top);
     let _ = writeln!(
         w,
         "binder-stall:   PARK-STACK tid {} rip={:#x} rsp={:#x}",
@@ -7878,13 +7792,12 @@ unsafe fn user_task_park_stack_w(
 fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
     use core::fmt::Write;
     let (total, woken) = t.wait.vw_queue_census();
-    let task = { crate::sched::find_task_by_pid(t.tid) };
-    let state = if task.is_null() {
-        0xFF
-    } else {
-        unsafe { (*task).state().bits() }
-    };
-    let verdict = if task.is_null() {
+    let task = crate::process::find_task_by_pid(t.tid);
+    let state = task
+        .as_deref()
+        .map(|tk| tk.state().bits())
+        .unwrap_or(0xFF);
+    let verdict = if task.is_none() {
         "TASK-GONE"
     } else if woken > 0 && (state & 0x3) != 0 {
         // sleeping (INTERRUPTIBLE=1/UNINTERRUPTIBLE=2) with a woken entry
@@ -8091,10 +8004,17 @@ pub fn stall_report() {
                             // idle worker; the WAKE-STRANDED family). Dump
                             // the task's scheduler view: linked? on_cpu?
                             // pick_state? — names which stage ate the wake.
-                            let task = { crate::sched::find_task_by_pid(t.tid) };
-                            if !task.is_null() {
-                                let tk = { &*task };
-                                let linked = match crate::sched::sched::grq_diag_cfs_linked(task) {
+                            let task = crate::process::find_task_by_pid(t.tid);
+                            let task_raw = task
+                                .as_deref()
+                                .map(|tk| {
+                                    tk as *const crate::process::task::Task
+                                        as *mut crate::process::task::Task
+                                })
+                                .unwrap_or(core::ptr::null_mut());
+                            if !task_raw.is_null() {
+                                let tk = task.as_deref().expect("task_raw non-null");
+                                let linked = match crate::sched::sched::grq_diag_cfs_linked(task_raw) {
                                     Some(b) => {
                                         if b { "1" } else { "0" }
                                     }
@@ -8121,7 +8041,7 @@ pub fn stall_report() {
                                         "[pid{}{}{}]",
                                         pid,
                                         if *idle { "/idle" } else { "" },
-                                        if *cur == task { "/OWNER" } else { "" },
+                                        if *cur == task_raw { "/OWNER" } else { "" },
                                     );
                                 }
                                 // Leg-19 attribution: policy/on_rq/dl + the
@@ -8212,13 +8132,13 @@ pub fn stall_report() {
                                 let _ = writeln!(out, "binder-stall:{}", slots);
                                 // Watch this victim from now on — the ring
                                 // retains its events between censuses.
-                                crate::sched::sched::ww_watch_add(task);
+                                crate::sched::sched::ww_watch_add(task_raw);
                                 // Wakewatch tail: which scheduler stage last
                                 // touched the victim and when (W wake-ok,
                                 // L link, P unlink-pick, S unlink-sched,
                                 // D unlink-deq, K pick-publish, A affirm,
                                 // R refused; @jiffies-ago).
-                                crate::sched::sched::ww_append_dump(&mut out, task, now);
+                                crate::sched::sched::ww_append_dump(&mut out, task_raw, now);
                                 // WW-PROBE: re-issue the wake RIGHT HERE and
                                 // read back linkage+state in the same breath.
                                 // If wake_up_process returns true while
@@ -8226,9 +8146,9 @@ pub fn stall_report() {
                                 // links and the NEXT census still shows
                                 // unlinked+never-run, something unlinked a
                                 // parked task without running it.
-                                let pre_linked = crate::sched::sched::grq_diag_cfs_linked(task);
-                                let probe_ret = crate::sched::wake_up_process(task);
-                                let post_linked = crate::sched::sched::grq_diag_cfs_linked(task);
+                                let pre_linked = crate::sched::sched::grq_diag_cfs_linked(task_raw);
+                                let probe_ret = crate::sched::wake_up_process(task_raw);
+                                let post_linked = crate::sched::sched::grq_diag_cfs_linked(task_raw);
                                 let post_state = tk.state();
                                 let _ = writeln!(
                                     out,
@@ -8347,17 +8267,14 @@ pub fn stall_report() {
                 if let Some(op) = world.procs.iter().find(|p| Arc::ptr_eq(p, owner)) {
                     let opm = pm(world, op);
                     // Name the owing process via its main thread's comm.
-                    let pname = {
-                        let mt = crate::sched::find_task_by_pid(op.pid);
-                        if mt.is_null() {
-                            "?"
-                        } else {
-                            let c = (*mt).comm();
+                    let pname = crate::process::find_task_by_pid(op.pid)
+                        .map(|mt| {
+                            let c = mt.comm();
                             core::str::from_utf8(&c[..])
                                 .unwrap_or("?")
                                 .trim_end_matches('\0')
-                        }
-                    };
+                        })
+                        .unwrap_or("?");
                     let mut od = OwnerDump {
                         pid: op.pid,
                         name: alloc::string::String::from(pname),
@@ -8445,7 +8362,7 @@ pub fn stall_report() {
     // Impossible-shape user-stack snapshots: the page-table walks.
     for t in &late_parkdumps {
         // SAFETY: no binder state touched (task lookup + mm walk).
-        unsafe { user_park_stack_dump(t) };
+        user_park_stack_dump(t);
     }
     // One flush, interrupts on. Chunked: split on the last newline below
     // ~950 bytes so no single console write stalls the console lock.
@@ -8523,7 +8440,7 @@ fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) ->
 
 fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
     // SAFETY: fd-backed lifetime; see proc_ref.
-    let Some(proc) = (unsafe { proc_ref(file) }) else {
+    let Some(proc) = (proc_ref(file)) else {
         return -(EBADF as i64);
     };
     let tid = current_tid();
@@ -8558,8 +8475,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
     match request {
         BINDER_WRITE_READ => binder_ioctl_write_read(&proc, &thread, arg, file),
         BINDER_SET_MAX_THREADS => {
-            // SAFETY: get_user is fault-safe.
-            match unsafe { crate::arch::uaccess::get_user(arg as *const u32) } {
+            match crate::arch::uaccess_safe::read_user::<u32>(arg) {
                 Some(v) => {
                     let w = world_lock();
                     {
@@ -8579,10 +8495,10 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             if arg == 0 || !crate::arch::uaccess::access_ok(arg, 24) {
                 return -(EFAULT as i64);
             }
-            let ftype = unsafe { crate::arch::uaccess::get_user(arg as *const u32) };
-            let flags = unsafe { crate::arch::uaccess::get_user((arg + 4) as *const u32) };
-            let ptr = unsafe { crate::arch::uaccess::get_user((arg + 8) as *const u64) };
-            let cookie = unsafe { crate::arch::uaccess::get_user((arg + 16) as *const u64) };
+            let ftype = crate::arch::uaccess_safe::read_user::<u32>(arg);
+            let flags = crate::arch::uaccess_safe::read_user::<u32>(arg + 4);
+            let ptr = crate::arch::uaccess_safe::read_user::<u64>(arg + 8);
+            let cookie = crate::arch::uaccess_safe::read_user::<u64>(arg + 16);
             match (ftype, flags, ptr, cookie) {
                 (Some(_), Some(flags), Some(ptr), Some(cookie)) => {
                     set_context_mgr(&proc, ptr, cookie, flags)
@@ -8600,10 +8516,8 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             if arg == 0 || !crate::arch::uaccess::access_ok(arg, 8) {
                 return -(EFAULT as i64);
             }
-            // SAFETY: arg validated non-null, 8-byte writable.
-            if !unsafe {
-                crate::arch::uaccess::put_user(arg as *mut u64, BINDER_SUPPORTED_FEATURES)
-            } {
+            // arg validated non-null, 8-byte writable (access_ok above).
+            if !crate::arch::uaccess_safe::write_user(arg, BINDER_SUPPORTED_FEATURES) {
                 return -(EFAULT as i64);
             }
             0
@@ -8714,15 +8628,12 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             if with_pid {
                 rec[4] = sender_pid as u64;
             }
-            // SAFETY: arg validated, len bytes.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    rec.as_ptr() as *const u8,
-                    len,
-                )
-            } != 0
-            {
+            // arg validated, len bytes (access_ok above).
+            let mut rec_b = [0u8; 40];
+            for (i, r) in rec.iter().enumerate() {
+                rec_b[i * 8..i * 8 + 8].copy_from_slice(&r.to_ne_bytes());
+            }
+            if crate::arch::uaccess_safe::copy_out(arg, &rec_b[..len]) != 0 {
                 return -(EFAULT as i64);
             }
             0
@@ -8744,8 +8655,8 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             if arg == 0 || !crate::arch::uaccess::access_ok(arg, 4) {
                 return -(EFAULT as i64);
             }
-            // SAFETY: arg validated non-null, 4-byte writable.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, BINDER_CURRENT_PROTOCOL_VERSION) } {
+            // arg validated non-null, 4-byte writable (access_ok above).
+            if !crate::arch::uaccess_safe::write_user(arg, BINDER_CURRENT_PROTOCOL_VERSION) {
                 return -(EFAULT as i64);
             }
             0
@@ -8775,15 +8686,8 @@ fn binder_ioctl_write_read(
         read_consumed: 0,
         read_buffer: 0,
     };
-    // SAFETY: arg points to a 48-byte user binder_write_read.
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(
-            &mut bwr as *mut BinderWriteRead as *mut u8,
-            arg as *const u8,
-            core::mem::size_of::<BinderWriteRead>(),
-        )
-    } != 0
-    {
+    // arg points to a 48-byte user binder_write_read (fault-safe capsule).
+    if crate::arch::uaccess_safe::copy_in_t::<BinderWriteRead>(&mut bwr, arg) != 0 {
         return -(EFAULT as i64);
     }
 
@@ -8865,14 +8769,8 @@ fn binder_ioctl_write_read(
                 }
             }
             bwr.read_consumed = 0;
-            // SAFETY: 48-byte copy back to the same location.
-            unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    &bwr as *const BinderWriteRead as *const u8,
-                    core::mem::size_of::<BinderWriteRead>(),
-                );
-            }
+            // 48-byte copy back to the same location (fault-safe capsule).
+            let _ = crate::arch::uaccess_safe::copy_out_t(arg, &bwr);
             clear_live_bwr(thread);
             return ret;
         }
@@ -8977,14 +8875,8 @@ fn binder_ioctl_write_read(
             }
         }
         if ret < 0 {
-            // SAFETY: same 48-byte copy-back.
-            unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    &bwr as *const BinderWriteRead as *const u8,
-                    core::mem::size_of::<BinderWriteRead>(),
-                );
-            }
+            // Same 48-byte copy-back (fault-safe capsule).
+            let _ = crate::arch::uaccess_safe::copy_out_t(arg, &bwr);
             clear_live_bwr(thread);
             return ret;
         }
@@ -9010,17 +8902,10 @@ fn binder_ioctl_write_read(
             wake_proc_one(&proc, 0);
         }
     }
-    // SAFETY: same 48-byte copy-back.
-    unsafe {
-        if crate::arch::uaccess::copy_to_user(
-            arg as *mut u8,
-            &bwr as *const BinderWriteRead as *const u8,
-            core::mem::size_of::<BinderWriteRead>(),
-        ) != 0
-        {
-            clear_live_bwr(thread);
-            return -(EFAULT as i64);
-        }
+    // Same 48-byte copy-back (fault-safe capsule).
+    if crate::arch::uaccess_safe::copy_out_t(arg, &bwr) != 0 {
+        clear_live_bwr(thread);
+        return -(EFAULT as i64);
     }
     clear_live_bwr(thread);
     0
@@ -9033,12 +8918,10 @@ fn binder_ioctl_write_read(
 /// a flush's force-return is consumed exactly once by the read it broke.
 fn clear_live_bwr(thread: &Arc<BinderThread>) {
     let w = world_lock();
-    // SAFETY: under WORLD.
-    unsafe {
-        let ts = &mut *thread.st.get();
-        ts.live_bwr = None;
-        ts.looper_need_return = false;
-    }
+    // Under WORLD — token-checked accessor (INV-BINDER-HELD).
+    let ts = thread.st(w.as_ref().unwrap());
+    ts.live_bwr = None;
+    ts.looper_need_return = false;
 }
 
 // ============================================================================
@@ -9047,11 +8930,12 @@ fn clear_live_bwr(thread: &Arc<BinderThread>) {
 
 fn get_user_at<T: Copy>(base: u64, off: usize) -> Option<T> {
     let addr = base.checked_add(off as u64)?;
+    // access_ok pre-check kept for cheap rejection; read_user is the
+    // fault-safe capsule (uaccess_safe) and re-validates internally.
     if !crate::arch::uaccess::access_ok(addr as usize, core::mem::size_of::<T>()) {
         return None;
     }
-    // SAFETY: access_ok validated the range; get_user is fault-safe.
-    unsafe { crate::arch::uaccess::get_user(addr as *const T) }
+    crate::arch::uaccess_safe::read_user::<T>(addr as usize)
 }
 
 /// BC-FORENSICS: snapshot the state of the userspace page backing a bad
@@ -9161,9 +9045,9 @@ fn bc_corruption_snapshot(
         }
     }
 
-    // SAFETY: read-only diagnostic walk of the current task's live user
-    // page tables.
-    let walked = unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, page_va) };
+    // INV-BINDER-PROBE: diagnostic leaf walk of the current task's own
+    // live user page tables.
+    let walked = probe_leaf(root, page_va);
     match walked {
         Some((ppn, bits)) => {
             #[cfg(target_arch = "x86_64")]
@@ -9189,10 +9073,7 @@ fn bc_corruption_snapshot(
                 bits & 0x8 != 0
             );
 
-            let page = crate::mm::pfn_to_page_mut(ppn as usize);
-            if !page.is_null() {
-                // SAFETY: read-only descriptor access for a live frame.
-                let p = unsafe { &*page };
+            if let Some(p) = crate::mm::page_desc(ppn as usize) {
                 crate::pr_err!(
                     "BC-FORENSICS: page desc refcount={} mapcount={} Cow={} Anon={} SwapBacked={} OnFreelist={} Reserved={} Migrating={}",
                     p.refcount(),
@@ -9205,13 +9086,10 @@ fn bc_corruption_snapshot(
                     p.test_flag(crate::mm::page_desc::PageFlag::Migrating),
                 );
                 let mut mappings = alloc::string::String::new();
-                // SAFETY: same read-only descriptor.
-                unsafe {
-                    (*page).rmap_alt_for_each(|mm, vpn| {
-                        use core::fmt::Write;
-                        let _ = write!(mappings, " (mm:{:#x},vpn:{:#x})", mm, vpn);
-                    });
-                }
+                p.rmap_alt_for_each(|mm, vpn| {
+                    use core::fmt::Write;
+                    let _ = write!(mappings, " (mm:{:#x},vpn:{:#x})", mm, vpn);
+                });
                 if !mappings.is_empty() {
                     crate::pr_err!("BC-FORENSICS: page alt mappings:{}", mappings);
                 }
@@ -9366,13 +9244,10 @@ fn binder_thread_write(
                     static SC_POISON: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     let mut val: i32 = 0;
-                    let ok = unsafe {
-                        crate::arch::uaccess::copy_from_user(
-                            &mut val as *mut i32 as *mut u8,
-                            tr.data_buffer as *const u8,
-                            4,
-                        )
-                    } == 0;
+                    let ok = crate::arch::uaccess_safe::copy_in_t::<i32>(
+                        &mut val,
+                        tr.data_buffer as usize,
+                    ) == 0;
                     if ok && val != 0 {
                         let n = if val == 32 {
                             SC_POISON.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
@@ -9406,13 +9281,8 @@ fn binder_thread_write(
                     // BINDER_TYPE_BINDER -> HANDLE for the target).
                     let n = tr.data_size as usize;
                     let mut pb = [0u8; 160];
-                    if unsafe {
-                        crate::arch::uaccess::copy_from_user(
-                            pb.as_mut_ptr(),
-                            tr.data_buffer as *const u8,
-                            n,
-                        )
-                    } == 0
+                    if crate::arch::uaccess_safe::copy_in(&mut pb[..n], tr.data_buffer as usize)
+                        == 0
                     {
                         const HEX: &[u8; 16] = b"0123456789abcdef";
                         let mut hx = alloc::string::String::with_capacity(n * 2);
@@ -10212,14 +10082,7 @@ fn binder_transaction(
     let p32_sample: Option<i32> = if ams46_on() && tr.flags & _TF_STATUS_CODE != 0 && tr.data_size >= 4
     {
         let mut val: i32 = 0;
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(
-                &mut val as *mut i32 as *mut u8,
-                tr.data_buffer as *const u8,
-                4,
-            )
-        } == 0
-        {
+        if crate::arch::uaccess_safe::copy_in_t::<i32>(&mut val, tr.data_buffer as usize) == 0 {
             Some(val)
         } else {
             None
@@ -11302,13 +11165,7 @@ fn binder_transaction(
         {
             let mut hdr = [0u8; 16];
             let ok = tr.data_buffer != 0
-                && unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        hdr.as_mut_ptr(),
-                        tr.data_buffer as *const u8,
-                        hdr.len(),
-                    ) == 0
-                };
+                && crate::arch::uaccess_safe::copy_in(&mut hdr, tr.data_buffer as usize) == 0;
             // "oh" in UTF-16LE at offsets 12..16 (cheap prefilter; HDI
             // interfaces use "OH"/"HDI" prefixes).
             if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
@@ -11324,13 +11181,8 @@ fn binder_transaction(
                 // parcel offset 12 with u32 length 0x16 at offset 8 —
                 // match it fully.
                 let mut tok = [0u8; 56];
-                let tok_ok = unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        tok.as_mut_ptr(),
-                        tr.data_buffer as *const u8,
-                        tok.len(),
-                    ) == 0
-                };
+                let tok_ok = tr.data_buffer != 0
+                    && crate::arch::uaccess_safe::copy_in(&mut tok, tr.data_buffer as usize) == 0;
                 let is_samgr_proxy_req = tok_ok
                     && tok[8] == 22
                     && tok[9] == 0
@@ -11382,13 +11234,7 @@ fn binder_transaction(
         if !reply && tr.code == 2 && !is_samgr_req {
             let mut hdr = [0u8; 16];
             let ok = tr.data_buffer != 0
-                && unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        hdr.as_mut_ptr(),
-                        tr.data_buffer as *const u8,
-                        hdr.len(),
-                    ) == 0
-                };
+                && crate::arch::uaccess_safe::copy_in(&mut hdr, tr.data_buffer as usize) == 0;
             if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
                 static CSA_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
@@ -11404,13 +11250,8 @@ fn binder_transaction(
                     // extract the said for any shape.
                     let mut pb = [0u8; 24];
                     let pb_ok = tr.data_buffer != 0
-                        && unsafe {
-                            crate::arch::uaccess::copy_from_user(
-                                pb.as_mut_ptr(),
-                                tr.data_buffer as *const u8,
-                                pb.len(),
-                            ) == 0
-                        };
+                        && crate::arch::uaccess_safe::copy_in(&mut pb, tr.data_buffer as usize)
+                            == 0;
                     const HEXC: &[u8; 16] = b"0123456789abcdef";
                     let mut hex = alloc::string::String::with_capacity(pb.len() * 2);
                     if pb_ok {
@@ -11474,13 +11315,8 @@ fn binder_transaction(
                 let hex: alloc::string::String = if want_hex {
                     let mut pb = [0u8; 96];
                     let pb_ok = tr.data_buffer != 0
-                        && unsafe {
-                            crate::arch::uaccess::copy_from_user(
-                                pb.as_mut_ptr(),
-                                tr.data_buffer as *const u8,
-                                pb.len(),
-                            ) == 0
-                        };
+                        && crate::arch::uaccess_safe::copy_in(&mut pb, tr.data_buffer as usize)
+                            == 0;
                     if pb_ok {
                         const HEXC: &[u8; 16] = b"0123456789abcdef";
                         let mut s = alloc::string::String::with_capacity(pb.len() * 2);
@@ -11554,13 +11390,8 @@ fn binder_transaction(
                     let n = 64.min(data_size);
                     let mut pb = alloc::vec![0u8; n];
                     let ok = tr.data_buffer != 0
-                        && unsafe {
-                            crate::arch::uaccess::copy_from_user(
-                                pb.as_mut_ptr(),
-                                tr.data_buffer as *const u8,
-                                pb.len(),
-                            ) == 0
-                        };
+                        && crate::arch::uaccess_safe::copy_in(&mut pb, tr.data_buffer as usize)
+                            == 0;
                     if ok {
                         const HEXC: &[u8; 16] = b"0123456789abcdef";
                         let mut s = alloc::string::String::with_capacity(n * 2);
@@ -11628,13 +11459,10 @@ fn binder_transaction(
                 let n = if reply { 24 } else { 160 }.min(data_size.max(1));
                 let mut pb = alloc::vec![0u8; n];
                 let ok = tr.data_buffer != 0
-                    && unsafe {
-                        crate::arch::uaccess::copy_from_user(
-                            pb.as_mut_ptr(),
-                            tr.data_buffer as *const u8,
-                            pb.len(),
-                        ) == 0
-                    };
+                    && crate::arch::uaccess_safe::copy_in(
+                        &mut pb,
+                        tr.data_buffer as usize,
+                    ) == 0;
                 if ok {
                     const HEXC: &[u8; 16] = b"0123456789abcdef";
                     for &b in pb.iter() {
@@ -11666,13 +11494,10 @@ fn binder_transaction(
     if ams46_on() && !reply {
         let mut hb = [0u8; 64];
         let tok_ok = tr.data_buffer != 0
-            && unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    hb.as_mut_ptr(),
-                    tr.data_buffer as *const u8,
-                    hb.len(),
-                ) == 0
-            };
+            && crate::arch::uaccess_safe::copy_in(
+                &mut hb,
+                tr.data_buffer as usize,
+            ) == 0;
         if tok_ok && ams46_token_match(&hb) {
             let nid = target_node.as_ref().map(|n| n.id).unwrap_or(0);
             if ams46_node_id() == 0 && nid != 0 {
@@ -11742,13 +11567,10 @@ fn binder_transaction(
                         // 68 bytes total); 80 covers it whole.
                         let mut rb = [0u8; 80];
                         let hex: alloc::string::String = if tr.data_buffer != 0
-                            && unsafe {
-                                crate::arch::uaccess::copy_from_user(
-                                    rb.as_mut_ptr(),
-                                    tr.data_buffer as *const u8,
-                                    rb.len(),
-                                ) == 0
-                            }
+                            && crate::arch::uaccess_safe::copy_in(
+                                &mut rb,
+                                tr.data_buffer as usize,
+                            ) == 0
                         {
                             rb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
                         } else {
@@ -11836,13 +11658,10 @@ fn binder_transaction(
         {
             let mut pb = [0u8; 32];
             let hex: alloc::string::String = if tr.data_buffer != 0
-                && unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        pb.as_mut_ptr(),
-                        tr.data_buffer as *const u8,
-                        pb.len(),
-                    ) == 0
-                }
+                && crate::arch::uaccess_safe::copy_in(
+                    &mut pb,
+                    tr.data_buffer as usize,
+                ) == 0
             {
                 pb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
             } else {
@@ -11907,13 +11726,10 @@ fn binder_transaction(
                 if SACMP_RS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
                     let mut pb = [0u8; 32];
                     let hex: alloc::string::String = if tr.data_buffer != 0
-                        && unsafe {
-                            crate::arch::uaccess::copy_from_user(
-                                pb.as_mut_ptr(),
-                                tr.data_buffer as *const u8,
-                                pb.len(),
-                            ) == 0
-                        }
+                        && crate::arch::uaccess_safe::copy_in(
+                            &mut pb,
+                            tr.data_buffer as usize,
+                        ) == 0
                     {
                         pb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
                     } else {
@@ -11937,13 +11753,8 @@ fn binder_transaction(
             // Latch it for the FXDV frozen-rwlock tracer in futex.rs.
             if tr.code == 3 && tr.data_buffer != 0 {
                 let mut sb = [0u8; 64];
-                if unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        sb.as_mut_ptr(),
-                        tr.data_buffer as *const u8,
-                        sb.len(),
-                    ) == 0
-                } && sb[12] == 0x6f
+                if crate::arch::uaccess_safe::copy_in(&mut sb, tr.data_buffer as usize) == 0
+                    && sb[12] == 0x6f
                     && sb[13] == 0x00
                     && sb[14] == 0x68
                     && sb[15] == 0x00
@@ -11980,13 +11791,7 @@ fn binder_transaction(
         {
             let mut buf = [0u8; 192];
             let n = core::cmp::min(buf.len(), data_size);
-            if unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    buf.as_mut_ptr(),
-                    tr.data_buffer as *const u8,
-                    n,
-                ) == 0
-            } {
+            if crate::arch::uaccess_safe::copy_in(&mut buf[..n], tr.data_buffer as usize) == 0 {
                 'outer: for i in 0..n.saturating_sub(NAME16.len()) {
                     for (k, &b) in NAME16.iter().enumerate() {
                         if buf[i + k] != b {
@@ -13165,6 +12970,10 @@ fn binder_thread_read(
         fn as_ptr(&self) -> *const u8 {
             self.buf.as_ptr()
         }
+        #[inline]
+        fn as_slice(&self) -> &[u8] {
+            &self.buf[..*self.len]
+        }
     }
     let mut staged = Staged { buf: &mut staged_buf, len: &mut staged_len };
 
@@ -13617,9 +13426,7 @@ fn binder_thread_read(
                                         // The parcel was copied into the
                                         // RECEIVER's mmap buffer at enqueue
                                         // (user_base + buffer_off); read it
-                                        // back from there.
-                                        // SAFETY: diagnostic user copy from
-                                        // the receiver's own buffer mapping.
+                                        // back from there (fault-safe capsule).
                                         let src = pm(world, proc)
                                             .im(world)
                                             .alloc
@@ -13628,13 +13435,10 @@ fn binder_thread_read(
                                             .unwrap_or(0);
                                         let mut pb = [0u8; 64];
                                         let ok = src != 0
-                                            && {
-                                                crate::arch::uaccess::copy_from_user(
-                                                    pb.as_mut_ptr(),
-                                                    src as *const u8,
-                                                    pb.len(),
-                                                ) == 0
-                                            };
+                                            && crate::arch::uaccess_safe::copy_in(
+                                                &mut pb,
+                                                src as usize,
+                                            ) == 0;
                                         if ok {
                                             const HEXC: &[u8; 16] = b"0123456789abcdef";
                                             let mut s =
@@ -14225,11 +14029,9 @@ fn binder_thread_read(
     let Some(dst) = read_buffer.checked_add(*consumed) else {
         return -(EFAULT as i64);
     };
-    // SAFETY: staged is a kernel Vec; copy_to_user is fault-safe.
-    unsafe {
-        if crate::arch::uaccess::copy_to_user(dst as *mut u8, staged.as_ptr(), staged.len()) != 0 {
-            return -(EFAULT as i64);
-        }
+    // staged is a kernel Vec; the copy_out capsule is fault-safe.
+    if crate::arch::uaccess_safe::copy_out(dst as usize, staged.as_slice()) != 0 {
+        return -(EFAULT as i64);
     }
     *consumed += staged.len() as u64;
     0
