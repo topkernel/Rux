@@ -13,7 +13,6 @@
 //! - `taint`      — Kernel taint bitmask
 //! - `backtrace`  — Reusable `dump_stack()`, `dump_regs()`, `dump_csrs()`
 //! - `bug`        — `WARN()`, `BUG()` macros
-//! - `hexdump`    — Hex/memory dump utility
 //! - `softlockup` — Softlockup detector (per-CPU timestamp check)
 //! - `hung_task`  — Hung task detector (khungtaskd kernel thread)
 //!
@@ -35,7 +34,7 @@ pub mod taint;
 pub mod allocwatch;
 pub mod backtrace;
 pub mod bug;
-pub mod hexdump;
+
 pub mod softlockup;
 pub mod hung_task;
 #[cfg(feature = "riscv64")]
