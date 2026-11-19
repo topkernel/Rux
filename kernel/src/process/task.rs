@@ -361,6 +361,57 @@ fn stack_cache_alloc() -> *mut u8 {
     #[cfg(not(target_arch = "x86_64"))]
     let bottom = plain_kstack_alloc();
     if !bottom.is_null() {
+        // SCRIBBLE TRAP scan side (oh-launch round 9): if the scribble
+        // arm painted this stack at free time, any NON-poison word now
+        // was written AFTER the free — by the early-free dying task or
+        // by the recycled-frame writer. Report the first hits with the
+        // previous owner (the FREED_STACKS ring names it). The scan runs
+        // BEFORE the leg-16 zeroing and the canary write; armed boots
+        // only; cold allocation path.
+        let scribble_scan_known = crate::trace::EVENT_SCRIBBLE.armed()
+            && freed_stack_containing(bottom as usize + KERNEL_STACK_SIZE / 2).is_some();
+        if scribble_scan_known {
+            // Only slots the FREED_STACKS ring knows were painted — a
+            // fresh slab carve was never painted and its stale content
+            // is not evidence (fq1's 16 first-boot hits were all
+            // prev-owner-not-found false positives).
+            let base = bottom as usize;
+            let mut hits = 0u32;
+            let mut first_off = 0usize;
+            let mut first_val = 0u64;
+            // SAFETY: the whole stack is KERNEL_STACK_SIZE bytes of
+            // readable memory owned by this allocation.
+            unsafe {
+                let words = KERNEL_STACK_SIZE / 8;
+                for i in 0..words {
+                    let v = core::ptr::read_volatile((base + i * 8) as *const u64);
+                    if v != 0xA5A5_A5A5_A5A5_A5A5 {
+                        if hits == 0 {
+                            first_off = i * 8;
+                            first_val = v;
+                        }
+                        hits += 1;
+                        if hits >= 8 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if hits > 0 {
+                let prev = freed_stack_containing(base + KERNEL_STACK_SIZE / 2)
+                    .map(|(_, pid, age)| (pid, age))
+                    .unwrap_or((0, 0));
+                crate::pr_err!(
+                    "KSTACK-POSTFREE-WRITE bottom={:#x} first_off={:#x} val={:#x} hits={} prev_owner_pid={} freed_age={}j",
+                    base,
+                    first_off,
+                    first_val,
+                    hits,
+                    prev.0,
+                    prev.1
+                );
+            }
+        }
         if crate::trace::EVENT_SCHB.armed()
             && crate::trace::EVENT_KSPROBE.armed()
         {
@@ -5639,6 +5690,26 @@ impl Task {
                 stack_top as usize,
                 self.pid(),
             );
+
+            // SCRIBBLE TRAP (oh-launch round 9): paint the whole freed
+            // stack with the poison byte — the slab still recycles freed
+            // stacks, and the early-free race (the dying task executing
+            // its final frames while the slot is already handed onward —
+            // the disabled-cache-reuse comment's own fingerprint: a user
+            // sret restoring a pt_regs written by the NEW owner) predicts
+            // writes into freed stacks. The alloc-side scan names any
+            // non-poison word WITH its previous owner. Armed boots only
+            // (rux:scribble); the paint is the same cost class as the
+            // leg-16 zeroing.
+            if crate::trace::EVENT_SCRIBBLE.armed() {
+                unsafe {
+                    core::ptr::write_bytes(
+                        stack_bottom,
+                        0xA5,
+                        KERNEL_STACK_SIZE,
+                    );
+                }
+            }
 
             // Return to cache instead of deallocating
             stack_cache_free(stack_bottom);
