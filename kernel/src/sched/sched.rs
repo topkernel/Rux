@@ -3505,7 +3505,19 @@ unsafe fn __schedule() {
             let holdout = pc & !irq_class;
             let voluntary_sleep = prev_state.is_sleeping()
                 || prev_state.contains(TaskState::STOPPED);
-            if !voluntary_sleep || holdout != 0 {
+            // r-strand round 4: a LIVE hardirq bracket on this cpu makes
+            // the IRQ-class bits LEGAL nesting, not phantoms — the
+            // exemption below would zero a real bracket's count, its
+            // paired irq_exit sub then underflow-clamps or re-leaks on
+            // the parked sleeper (the 1k-round livelock's marks-drift
+            // producer). The reference never parks inside an interrupt:
+            // its IRQ nesting count is per-CPU and irq_exit runs it to
+            // zero before any sleeping context resumes. Refuse the park
+            // while the bracket is live; the interrupted wait loop
+            // retries its schedule once the bracket exits (the count is
+            // then clean and the phantom branch below applies).
+            let live_bracket = crate::interrupt::preempt::hardirq_depth_live(cpu_id);
+            if !voluntary_sleep || holdout != 0 || live_bracket {
                 // r10 (lmbench strand handoff): a VOLUNTARY sleeper with
                 // a real preempt-class holdout is the definitive leak
                 // moment — its wait loop now degenerates into an

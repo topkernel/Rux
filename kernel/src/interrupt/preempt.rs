@@ -394,6 +394,21 @@ static IRQ_BOOKED: [[core::sync::atomic::AtomicUsize; IRQ_BOOK_DEPTH];
 static IRQ_BOOK_DEPTH_CNT: [core::sync::atomic::AtomicUsize; crate::config::MAX_CPUS] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; crate::config::MAX_CPUS];
 
+/// r-strand round 4 (lat_fs conviction, 2026-11-19): does THIS cpu have
+/// live (booked, not yet exited) hardirq brackets? The __schedule
+/// voluntary-sleep exemption consults it: IRQ-class bits on a voluntary
+/// sleeper are zeroed and the park allowed — but while a REAL interrupt
+/// bracket is in flight on this cpu those bits are LEGAL nesting, and
+/// zeroing them breaks the bracket's paired sub (it underflow-clamps or
+/// re-leaks on the sleeper) — the marks-drift/counter-residue family
+/// behind the 1k-round livelock (worker parks from inside its write's
+/// IO wait with a tick/device IRQ in flight; the exemption wipes the
+/// live bracket; every later adjudication sees forged counts).
+pub fn hardirq_depth_live(cpu: usize) -> bool {
+    cpu < crate::config::MAX_CPUS
+        && IRQ_BOOK_DEPTH_CNT[cpu].load(core::sync::atomic::Ordering::Acquire) != 0
+}
+
 /// Per-CPU token of the task the in-flight outermost hardirq bracket
 /// booked +HARDIRQ_OFFSET on (s14 IRQ-PAIR probe; see irq_enter).
 static IRQ_PAIR_TASK: [core::sync::atomic::AtomicUsize;
