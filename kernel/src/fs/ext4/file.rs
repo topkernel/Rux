@@ -243,8 +243,8 @@ fn ext4_dio_read_batched(
                 None => None,
             };
         }
-        // SAFETY: bio::bread returns a valid pinned BufferHead; b_data
-        // is block_size bytes.
+        // INV-BIO-BHREF: bread pins the BufferHead until brelse; the
+        // data view rides the safe accessor.
         {
             let bh = match bio::bread(fs.device, phys) {
                 Some(b) => b,
@@ -770,8 +770,8 @@ fn ext4_file_read_perblock(
             continue;
         }
 
-        // SAFETY: bio::bread returns a valid pinned BufferHead on success;
-        // b_data points to a block-sized buffer aligned to block_size.
+        // INV-BIO-BHREF: bread pins the BufferHead until brelse; the
+        // data view rides the safe accessor (block-sized, aligned).
         {
             let bh = bio::bread(fs.device, this_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -1188,38 +1188,36 @@ fn ext4_file_read_cached_dst(
                 Err(_) => return Err(errno::Errno::IOError.as_neg_i32()),
             };
             if block_nr != 0 {
-                // SAFETY: bio::bread returns a valid pinned BufferHead on
-                // success; b_data points to a block-sized buffer.
-                unsafe {
-                    if let Some(bh) = bio::bread(fs.device, block_nr) {
-                        let data = bio::bh_data(&bh);
-                        // rux:exthunt (retired dfx=exthunt): sync-fallback serve truth (see
-                        // exthunt_rd_serve).
-                        crate::fs::ext4::extent::exthunt_rd_serve(
-                            ino,
-                            page_index,
-                            block_nr,
-                            data[0],
-                            data[1],
-                        );
-                        let avail = block_size_usize - page_offset;
-                        let copy_len = core::cmp::min(remaining, avail);
-                        match dst.put(buf_offset, data.as_ptr().add(page_offset), copy_len) {
-                            Ok(copied) => {
-                                total_read += copied;
-                                buf_offset += copied;
-                                current_offset += copied as u64;
-                            }
-                            Err(e) => {
-                                cache.insert(fs_id, ino, page_index, block_nr, data);
-                                bio::brelse(bh);
-                                return if total_read == 0 { Err(e) } else { Ok(total_read) };
-                            }
+                if let Some(bh) = bio::bread(fs.device, block_nr) {
+                    let data = bio::bh_data(&bh);
+                    // rux:exthunt (retired dfx=exthunt): sync-fallback serve truth (see
+                    // exthunt_rd_serve).
+                    crate::fs::ext4::extent::exthunt_rd_serve(
+                        ino,
+                        page_index,
+                        block_nr,
+                        data[0],
+                        data[1],
+                    );
+                    let avail = block_size_usize - page_offset;
+                    let copy_len = core::cmp::min(remaining, avail);
+                    // SAFETY: the audited ReadDst::put span — the raw
+                    // window add + user/kernel copy ride its contract.
+                    match unsafe { dst.put(buf_offset, data.as_ptr().add(page_offset), copy_len) } {
+                        Ok(copied) => {
+                            total_read += copied;
+                            buf_offset += copied;
+                            current_offset += copied as u64;
                         }
-                        cache.insert(fs_id, ino, page_index, block_nr, data);
-                        bio::brelse(bh);
-                        continue;
+                        Err(e) => {
+                            cache.insert(fs_id, ino, page_index, block_nr, data);
+                            bio::brelse(bh);
+                            return if total_read == 0 { Err(e) } else { Ok(total_read) };
+                        }
                     }
+                    cache.insert(fs_id, ino, page_index, block_nr, data);
+                    bio::brelse(bh);
+                    continue;
                 }
                 // Synchronous read failed: report I/O error rather than
                 // silently returning zeros for real data.
@@ -1488,54 +1486,55 @@ fn drain_batch(
     }
     // Insert completed pages into the page cache under their own indices.
     for i in 0..count {
-        // SAFETY: bread_wait has completed, so bh_ptrs[i] points to a valid
-        // BufferHead with fully populated b_data (status 0 only).
-        unsafe {
-            if status[i] == 0 {
-                let data = &(*bh_ptrs[i]).b_data;
-                let blocks = ra_len[i] as usize;
-                if blocks <= 1 {
-                    cache.insert(fs_id, ino, ra_idx[i], ra_blk[i], data);
-                } else {
-                    // Multi-block request: one bulk insert for the whole
-                    // contiguous buffer (one lock, buddy-alloc chunks, one
-                    // BTreeMap append — see insert_batch).
-                    cache.insert_batch(fs_id, ino, ra_idx[i], data.len() / blocks, data);
-                }
+        // bread_wait has completed, so bh_ptrs[i] points to a valid
+        // BufferHead with fully populated b_data (status 0 only); the
+        // data view rides the INV-BIO-BHREF accessor.
+        if status[i] == 0 {
+            let data = bio::bh_data(&bh_ptrs[i]);
+            let blocks = ra_len[i] as usize;
+            if blocks <= 1 {
+                cache.insert(fs_id, ino, ra_idx[i], ra_blk[i], data);
+            } else {
+                // Multi-block request: one bulk insert for the whole
+                // contiguous buffer (one lock, buddy-alloc chunks, one
+                // BTreeMap append — see insert_batch).
+                cache.insert_batch(fs_id, ino, ra_idx[i], data.len() / blocks, data);
             }
-            if ra_len[i] <= 1 {
-                // Single-block requests went through bread_async: they live
-                // in the block cache, release with brelse.
-                //
-                // Abandon discipline (10s-deadline): on WAIT_TIMED_OUT the
-                // device may still DMA into b_data, so the buffer must NOT
-                // re-enter the block cache for reuse — the pin is
-                // intentionally held forever (bounded by the rarity of 10s
-                // stalls; freeing it corrupted unrelated pages). A real
-                // device EIO COMPLETED its chain — brelse is safe there.
-                if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
-                    crate::pr_err!(
-                        "ext4: leaked timed-out read-ahead bh (block {}) — device may still DMA",
-                        ra_blk[i]
-                    );
-                } else {
-                    bio::brelse(bh_ptrs[i]);
-                }
-            } else if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
-                // Multi-block private buffer, timed out (the waiter already
-                // abandoned the pending so no late completion fires into
-                // its stack): the device may still DMA into it.
-                // NEVER free a buffer the device may still write — leak it
-                // (R21-N2 discipline: integrity over a bounded leak).
+        }
+        if ra_len[i] <= 1 {
+            // Single-block requests went through bread_async: they live
+            // in the block cache, release with brelse.
+            //
+            // Abandon discipline (10s-deadline): on WAIT_TIMED_OUT the
+            // device may still DMA into b_data, so the buffer must NOT
+            // re-enter the block cache for reuse — the pin is
+            // intentionally held forever (bounded by the rarity of 10s
+            // stalls; freeing it corrupted unrelated pages). A real
+            // device EIO COMPLETED its chain — brelse is safe there.
+            if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
                 crate::pr_err!(
-                    "ext4: leaked timed-out multi-block read-ahead ({} blocks from {}) — device may still DMA",
-                    ra_len[i], ra_blk[i]
+                    "ext4: leaked timed-out read-ahead bh (block {}) — device may still DMA",
+                    ra_blk[i]
                 );
             } else {
-                // Multi-block buffers are private: free directly. A real
-                // device EIO completed its chain — the DMA is done.
-                bio::bfree_multi(bh_ptrs[i]);
+                bio::brelse(bh_ptrs[i]);
             }
+        } else if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
+            // Multi-block private buffer, timed out (the waiter already
+            // abandoned the pending so no late completion fires into
+            // its stack): the device may still DMA into it.
+            // NEVER free a buffer the device may still write — leak it
+            // (R21-N2 discipline: integrity over a bounded leak).
+            crate::pr_err!(
+                "ext4: leaked timed-out multi-block read-ahead ({} blocks from {}) — device may still DMA",
+                ra_len[i], ra_blk[i]
+            );
+        } else {
+            // Multi-block buffers are private: free directly. A real
+            // device EIO completed its chain — the DMA is done.
+            // SAFETY: bfree_multi's contract — private (non-cached)
+            // buffer, DMA quiesced (status != WAIT_TIMED_OUT above).
+            unsafe { bio::bfree_multi(bh_ptrs[i]) };
         }
     }
 }
