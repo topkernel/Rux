@@ -1400,11 +1400,9 @@ pub fn inet_socket_type(file: &File) -> Option<SocketType> {
     ) {
         return None;
     }
-    // SAFETY: SOCKET_OPS files carry an Arc<Socket> in private_data,
-    // installed at socket creation (socket_read's invariant).
-    let ptr = unsafe { *file.private_data.get() }?;
-    // SAFETY: ptr is a valid Arc<Socket> pointer set during file creation.
-    Some(unsafe { &*(ptr as *const Socket) }.sock_type)
+    // SOCKET_OPS files carry an Arc<Socket> in private_data, installed
+    // at socket creation (socket_borrow's invariant).
+    socket_borrow(file, "inet_type").map(|s| s.sock_type)
 }
 
 /// r-p0 chase (bw_tcp stack-corruption hunt, 2026-11-19): validate the
@@ -1414,7 +1412,11 @@ pub fn inet_socket_type(file: &File) -> Option<SocketType> {
 /// either a non-socket File dispatched through SOCKET_OPS, or
 /// private_data overwritten. A hit names the raw value, caller pid/comm,
 /// and file id; budgeted. Returns the validated pointer.
-unsafe fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
+/// Contract: returns a validated kernel-heap pointer naming the file's
+/// private_data Arc (or None, refused loudly on a forged value).
+fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
+    // SAFETY: private_data cell read; set at socket creation, cleared
+    // only by close (serialized with the ops dispatch by the fd table).
     let raw = match unsafe { *file.private_data.get() } {
         Some(p) => p as usize,
         None => return None,
@@ -1462,11 +1464,13 @@ unsafe fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
         if BAD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
             let cur = crate::sched::current();
             let (pid, comm) = match cur {
-                Some(t) => unsafe {
-                    let cb = (*t).comm();
+                // current() returns the running task; comm reads its own
+                // fixed comm buffer (no unsafe deref needed).
+                Some(t) => {
+                    let cb = t.comm();
                     let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
-                    ((*t).pid(), core::str::from_utf8(&cb[..cl]).unwrap_or("?"))
-                },
+                    (t.pid(), core::str::from_utf8(&cb[..cl]).unwrap_or("?"))
+                }
                 None => (0, "?"),
             };
             crate::pr_err!(
@@ -1487,14 +1491,24 @@ unsafe fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
     None
 }
 
+/// Borrow the Socket behind a SOCKET_OPS file's private_data (the
+/// r-p0 validated deref). Contract: the cell holds an Arc<Socket> raw
+/// pointer installed at socket creation; the file's strong reference
+/// keeps it alive for the borrow; close() clears the cell under the fd
+/// table's dispatch serialization.
+fn socket_borrow(file: &File, site: &'static str) -> Option<&'static Socket> {
+    let ptr = checked_socket_ptr(file, site)?;
+    // SAFETY: validated in-kernel-heap pointer naming a live Arc<Socket>
+    // (strong ref held by private_data for the file's lifetime).
+    Some(unsafe { &*(ptr as *const Socket) })
+}
+
 fn socket_read(file: &File, buf: &mut [u8]) -> isize {
-    // r-p0 chase: validated deref (see checked_socket_ptr).
-    let ptr = match unsafe { checked_socket_ptr(file, "read") } {
-        Some(p) => p,
+    // r-p0 chase: validated deref (see socket_borrow).
+    let socket = match socket_borrow(file, "read") {
+        Some(s) => s,
         None => return -9, // EBADF / forged pointer refused
     };
-    // SAFETY: ptr validated in-kernel-heap and set during socket creation.
-    let socket = unsafe { &*(ptr as *const Socket) };
 
     // W3: O_NONBLOCK (fcntl F_SETFL / SOCK_NONBLOCK) differentiates EAGAIN
     // from blocking; SO_RCVTIMEO bounds the wait. The socket used to be
@@ -1595,13 +1609,11 @@ fn socket_send_flush(
 }
 
 fn socket_write(file: &File, buf: &[u8]) -> isize {
-    // r-p0 chase: validated deref (see checked_socket_ptr).
-    let ptr = match unsafe { checked_socket_ptr(file, "send") } {
-        Some(p) => p,
+    // r-p0 chase: validated deref (see socket_borrow).
+    let socket = match socket_borrow(file, "send") {
+        Some(s) => s,
         None => return -9, // EBADF / forged pointer refused
     };
-    // SAFETY: ptr validated in-kernel-heap and set during socket creation.
-    let socket = unsafe { &*(ptr as *const Socket) };
 
     // W3: blocking writes complete the whole buffer (retrying while the
     // window limits each send() to a prefix), bounded by SO_SNDTIMEO /
@@ -1644,9 +1656,7 @@ fn socket_close(file: &File) -> i32 {
     // SAFETY: table_slot was set during sys_socket_create; SOCKET_TABLE is
     // protected by Spinlock.
     if let Some(idx) = *socket_arc.table_slot.lock() {
-        unsafe {
-            SOCKET_TABLE.lock_irqsave().free(idx);
-        }
+        socket_table_lock().free(idx);
     }
 
     // socket_arc drops here, releasing the private_data reference.
@@ -1657,13 +1667,10 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     let mut ready = 0u16;
 
-    // SAFETY: private_data was set during socket creation.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
+    let socket = match socket_borrow(file, "poll") {
+        Some(s) => s,
         None => return POLLERR,
     };
-    // SAFETY: ptr is a valid Arc<Socket> pointer.
-    let socket = unsafe { &*(ptr as *const Socket) };
 
     if events & POLLIN != 0 {
         // R34: irqsave — same recv_queue reentrancy discipline as recv()
@@ -1987,6 +1994,20 @@ impl SocketTable {
 
 static mut SOCKET_TABLE: Spinlock<SocketTable> = Spinlock::new(SocketTable::new());
 
+/// Allocate a slot in the global socket table (one consolidated
+/// static-mut access; the Spinlock serializes all users, irqsave for
+/// the NetRx softirq's wake hooks).
+fn socket_table_alloc(socket: Arc<Socket>) -> Result<usize, ()> {
+    // SAFETY: static-mut access under the table Spinlock.
+    unsafe { SOCKET_TABLE.lock_irqsave().alloc(socket) }
+}
+
+/// Lock the global socket table for a caller-provided critical section.
+pub fn socket_table_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, SocketTable> {
+    // SAFETY: static-mut access; the Spinlock serializes all users.
+    unsafe { SOCKET_TABLE.lock_irqsave() }
+}
+
 // W3 wake hooks — called by the protocol layers (tcp_rcv / udp_rcv /
 // tcp_v4_err / the TCP timer tick) AFTER releasing their table locks.
 // irqsave: the NetRx softirq invokes these at irq_exit (R34 discipline).
@@ -2119,11 +2140,9 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
         fdtable.set_fd_cloexec(fd, true);
     }
 
-    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
-    // irqsave: mutated paths also run from the NetRx softirq's wake hooks.
-    let slot = unsafe {
-        SOCKET_TABLE.lock_irqsave().alloc(socket.clone())
-    };
+    // SOCKET_TABLE is a global protected by Spinlock (irqsave: mutated
+    // paths also run from the NetRx softirq's wake hooks).
+    let slot = socket_table_alloc(socket.clone());
     if let Ok(idx) = slot {
         *socket.table_slot.lock() = Some(idx);
     }
@@ -2240,11 +2259,9 @@ pub fn socket_create_accepted(tcp_fd: i32, flags: i32) -> Result<usize, i32> {
         fdtable.set_fd_cloexec(fd, true);
     }
 
-    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
-    // irqsave: mutated paths also run from the NetRx softirq's wake hooks.
-    let slot = unsafe {
-        SOCKET_TABLE.lock_irqsave().alloc(socket.clone())
-    };
+    // SOCKET_TABLE is a global protected by Spinlock (irqsave: mutated
+    // paths also run from the NetRx softirq's wake hooks).
+    let slot = socket_table_alloc(socket.clone());
     if let Ok(idx) = slot {
         *socket.table_slot.lock() = Some(idx);
     }
@@ -2295,8 +2312,8 @@ pub fn socket_of_arc(file: &Arc<File>) -> Option<Arc<Socket>> {
     // fake success on e.g. a pipe; getpeername accidentally returned
     // ENOTSOCK only because of its state check).
     {
-        let ops = unsafe { *file.ops.get() };
-        match ops {
+        // get_ops is the typed ops-cell read (fs::file).
+        match file.get_ops() {
             Some(ops) if core::ptr::eq(ops, &SOCKET_OPS) => {}
             _ => return None,
         }
