@@ -184,6 +184,8 @@ macro_rules! test_assert_eq {
 #[cfg(feature = "unit-test")]
 pub mod binder;
 #[cfg(feature = "unit-test")]
+pub mod fs_io;
+#[cfg(feature = "unit-test")]
 pub mod fs_pins;
 #[cfg(feature = "unit-test")]
 pub mod mm_sched_pins;
@@ -644,6 +646,11 @@ pub fn run_all_tests() {
 
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();
+
+    // Real-filesystem battery (kernel/src/tests/fs_io.rs): the ext4
+    // root is mounted BEFORE the suite runs — drive it (create/write/
+    // read-back/fsync-shape/stat/append/getdents/unlink + errno pins).
+    fs_io::test_fs_io();
 
     // FS + MM/sched pins (kernel/src/tests/{fs_pins,mm_sched_pins}.rs):
     // stat/superblock/vt/rootfs/ext4 csum+indirect, slab classes, VMA,
