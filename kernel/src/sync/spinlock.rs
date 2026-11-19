@@ -490,6 +490,13 @@ impl RawSpinlock {
 
         unsafe { crate::console::uart_putc_raw(b'\n'); }
 
+        // grq-lock-1st: the GRQ crime scene. A GRQ holder runs with IRQs
+        // OFF, so the REMOTE-BT capture below (an IPI) can never answer
+        // on a GRQ wedge — that is why every GRQ wedge so far ended with
+        // the holder UNNAMED. The GRQ site stamp is published BY the
+        // holder, so this dump reads it without any interrupt.
+        crate::sched::sched::grq_dump_holder("deadlock");
+
         // Leak forensics (dfx-lock-owner): the LAST acquirer's pid,
         // call site and acquire age — these persist past a cleared
         // owner word, so a leaked lock names who took it and when
