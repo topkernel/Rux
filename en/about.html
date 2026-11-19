@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Introduction · Rux</title>
+<meta name="description" content="Rux: a Linux-ABI-compatible operating-system kernel written from scratch in Rust. Unmodified Ubuntu 22.04 boots to a GNOME desktop, unmodified OpenHarmony brings up 135+ services. 419,502 lines, 349 system calls, 29 registered design divergences.">
+<link rel="stylesheet" href="../css/style.css?v=19">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a class="on" href="about.html">Introduction</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../about.html">中文</a><a href="about.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Project</div>
+    <a class="on" href="about.html">Introduction</a>
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Architecture and modules</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts and clocks</a>
+    <a href="../architecture/structure.html">Code structure</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock-order invariants</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance overview</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">Internal microbenchmarks</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security overview</a>
+    <a href="../security/formal.html">Formal verification</a>
+    <a href="../security/unsafe.html">Layered unsafe ledger</a>
+    <a href="../security/taxonomy.html">Defect taxonomy</a>
+    <a href="../security/hardening.html">Hardening and gaps</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Test overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP compatibility scan</a>
+    <a href="../testing/ltp-full.html">LTP case list</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoint framework</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic and symbolization</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Command reference</a>
+    <div class="grp">Interaction</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>What Rux is</h1>
+    <div class="sub">A Linux-ABI-compatible operating-system kernel written from scratch in Rust · 679 files / 419,502 lines under kernel/ (408,408 of them Rust) · 349 system calls · LTP 1,139/1,869</div>
+
+    <h2 id="why"><span class="anchor">§1</span>Why I wrote a kernel myself</h2>
+    <p>The Rust kernels that exist are usually one of three things: a teaching kernel, a microkernel prototype, or a compatibility claim expressed as a syscall-coverage number. What I want is concrete: <b>the performance floor of a monolithic kernel</b>, <b>the Linux ABI as a binary contract</b>, and <b>Rust's auditable safety</b>. All three, none optional.</p>
+    <p>Hence Rux. The code is public, and this page simply states what I built, how it is built, what the code looks like, and which parts are not finished.</p>
+    <p>The starting motivation is equally concrete: I ran a dozen agents in parallel on Ubuntu and the typing latency reached one to two seconds, which was not acceptable — rather than keep tuning someone else's kernel, I wrote my own. That motive decided the trade-offs that followed: the scheduler is a single global run queue (GRQ), designed by subtraction for personal devices with 8–16 CPUs, where it removes load migration and task stealing; a server kernel was never in scope.</p>
+
+    <h2 id="abi"><span class="anchor">§2</span>ABI compatibility: not "how many syscalls", but "boot it"</h2>
+    <p>My design principle in one line: <b>the ABI is the contract; the internals are free</b>.</p>
+    <p>Outward, everything userland can observe is contractual — syscall numbers and semantics, ELF and auxv, futex, POSIX and SysV IPC, binder, on-disk ext4, the procfs/sysfs/debugfs/tracefs layouts, down to the <code>uname</code> strings glibc's dynamic loader keys on. The current implementation has <b>349 system calls</b> on the asm-generic table (the x86_64 native numbering translates onto the same table), and a full LTP scan of the 1,869-case list passes <b>1,139</b>.</p>
+    <p>Inward, no constraint from the mainstream's internal history. Every internal design that differs from the common approach is written down with its compatibility evidence — <b>29 registered design divergences</b> at present (<a href="../architecture/design.html#divergences">the divergence register</a>).</p>
+    <p>The verification method matters more than the count. A curated syscall subset proves nothing; unmodified distribution images prove everything:</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Distribution</th><th>Result</th><th>Rig</th></tr></thead>
+      <tbody>
+        <tr><td>Ubuntu 22.04</td><td>Interactive GNOME Shell desktop; the full chain passes a 2,100 s, smp4, zero-panic gate</td><td>riscv64</td></tr>
+        <tr><td>Ubuntu 24.04</td><td>systemd 255 reaches the multi-user and graphical targets, with serial login</td><td>x86_64 + KVM</td></tr>
+        <tr><td>OpenHarmony</td><td>135+ services all come up, to an interactive launcher (bootanimation, hiview, the binder mesh, the input pipeline)</td><td>x86_64 + KVM</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout"><b>No patches, no recompilation, no configuration changes.</b> Syscall coverage is a number; an end-to-end boot is a fact.</div>
+
+    <h2 id="ai"><span class="anchor">§3</span>AI-written code is an engineering method, not a slogan</h2>
+    <p>I expect this one to be contested, so let me be precise: Rux's subsystems — scheduler, memory management, ext4, binder, the network stack, the verification harness — and all of the code, documentation and this site were written by AI. The human role is goal-setting, review and merge.</p>
+    <p>The working model: parallel agents, each with its own git worktree and branch, with the main session reviewing and merging; several merge rounds a day, each preceded by a full regression pass. About <b>200 worktrees</b> are live at the moment. Merging has exactly one gate (AGENTS.md): three-architecture build, the full in-kernel suite, tiered performance gates and data-integrity batteries — a change lands with all of them or not at all.</p>
+    <p>This is not "an assistant filling in a few lines". It puts AI where subsystems get implemented and keeps the human at architecture review and the merge gate. Whether that model holds at 400,000 lines is still under observation. So far it has produced a complete kernel that boots a desktop from a real distribution.</p>
+
+    <h2 id="safety"><span class="anchor">§4</span>Safety: not "Rust is safe", but the itemized bill</h2>
+    <p>"Rust is safe" is a sentence everyone has heard too often. What is actually worth knowing is: what has gone wrong inside unsafe code, and how I manage it.</p>
+    <p><b>How large the unsafe surface is.</b> <code>kernel/src</code> is 361,419 lines. Measured by the in-tree ledger script:</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Series</th><th>Lines</th><th>Share</th></tr></thead>
+      <tbody>
+        <tr><td><code>unsafe { … }</code> block bodies</td><td class="num">34,464</td><td class="num">9.5%</td></tr>
+        <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> bodies</td><td class="num">28,249</td><td class="num">7.8%</td></tr>
+        <tr><td><b>dual series — the honest total</b></td><td class="num"><b>60,376</b></td><td class="num"><b>16.7%</b></td></tr>
+      </tbody>
+    </table></div>
+    <p>In the layered view, <code>kernel/src</code> carries 5,590 unsafe tokens, of which <b>3,532 sit outside the Framework layer</b> — that is the reduction target (47 files already carry <code>#![forbid(unsafe_code)]</code>, and 63 more have no unsafe left at all). 63% of unsafe constructs carry a written <code>// SAFETY:</code> contract, and CI fails when a region appears in the tree without a ledger entry.</p>
+    <p><b>The defect history.</b> <b>33</b> memory-corruption-class bugs over Rux's whole history, each adjudicated individually: <b>23</b> had the defect inside unsafe code or assembly, <b>10</b> were in safe code — and every one of those ten is an ownership, refcount, lock-protocol or stack-depth decision. The classes that dominate the CVE history of C kernels — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are <b>zero</b> in safe code. Six of the 33 were caught in review before any boot ran them.</p>
+    <p><b>Formal verification.</b> 164 Kani harnesses discharge the core unsafe code for all inputs; 1,184 host-side tests; loom enumerates the interleavings of the mutex, PI-chain and timer primitives; 4 SPIN models; Miri nightly.</p>
+    <div class="callout">"I am 90% safe Rust" is not the claim. The claim is: here is exactly what the remaining unsafe surface is, where it concentrates, and which tool watches it. That is auditable safety, not a slogan. See the <a href="../security/index.html">security overview</a> and the <a href="../security/taxonomy.html">defect taxonomy</a>.</div>
+
+    <h2 id="perf"><span class="anchor">§5</span>Performance: same machine, same accelerator — the wins and the losses both published</h2>
+    <p>Every row is a QEMU + KVM comparison on the same host with the same accelerator; numbers from different environments are never mixed into one line.</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Suite</th><th>Rux relative to Linux</th></tr></thead>
+      <tbody>
+        <tr><td>lmbench, 27 rows</td><td><b>13 ahead</b>: semaphore 8.97×, context switch 5.1–6.3×, pipe 5.84×, page fault 2.8×, page-cache file read 1.45–1.54×; <b>13 behind or at parity</b>, the largest deficit file creation throughput at 22–26×, then loopback socket latency at 2.1–2.2×</td></tr>
+        <tr><td>Geekbench 5</td><td>single-core 114%, multi-core 107% (4-CPU pinned comparison)</td></tr>
+        <tr><td>fio 3.36</td><td>4 KiB write + fsync 1.24× ahead; 1 MiB buffered write 1.19–1.25× ahead (11.7 GiB/s at 78 µs/op); 1 MiB direct write 0.75–0.83×, direct read 0.83×</td></tr>
+        <tr><td>rt-tests v2.11</td><td>cyclictest SCHED_OTHER average 1.5× ahead; SCHED_FIFO minimum wins every clean pass, maximum 10× ahead, average 1.15–1.3× behind; hackbench 1.06–1.16× ahead on all three forms; pi_stress runs 273k–383k priority inversions cleanly</td></tr>
+      </tbody>
+    </table></div>
+    <p>The scheduler is a single global run queue (GRQ) with an explicit target: personal devices with 8–16 CPUs. The measured GRQ critical section is ≈60 ns and the buffer-cache hit rate is 99.1%. Performance gating is part of the merge flow — without measurement data nothing merges; performance is not a benchmark run afterwards, it is an admission condition for every change. The full boards and their method: <a href="../performance/index.html">performance overview</a>.</p>
+
+    <h2 id="tree"><span class="anchor">§6</span>What the 419,000 lines contain</h2>
+    <ul>
+      <li><b>Scheduler</b>: the GRQ, sized for 8–16 CPU personal devices; critical section ≈60 ns; no load balancer, no task migration</li>
+      <li><b>Memory management</b>: buddy page allocator with a magazine small-object allocator, a global page cache, per-task VMAs, reclaim</li>
+      <li><b>Filesystem</b>: ext4 read/write, jbd2, an async batching block layer, a per-inode page cache and a lock-free dcache</li>
+      <li><b>IPC and binder</b>: a complete binder (it carries OpenHarmony's whole service mesh), unix sockets, pipes, SysV IPC</li>
+      <li><b>Network</b>: a self-written TCP/IP stack with socket-API semantics matched to the ABI</li>
+      <li><b>Drivers</b>: virtio-blk (PCI and MMIO, async completion rings), serial, input devices; the display path renders both the GNOME desktop and the OpenHarmony launcher</li>
+      <li><b>Observability</b>: a unified trace-event framework with tracefs (semantics aligned), a symbol table, debugfs, task dumps</li>
+      <li><b>Porting layer</b>: x86_64 / riscv64 / aarch64; about 90% of the kernel is architecture-independent</li>
+    </ul>
+    <p>Because the host can use KVM directly, x86_64 is the primary platform for both function and performance work, while riscv64 and aarch64 carry the build and regression gates. The in-kernel test suite is <b>1,584/1,584</b> green on riscv64, and the desktop session passes a 2,100 s zero-panic gate.</p>
+
+    <h2 id="todo"><span class="anchor">§7</span>What is not finished</h2>
+    <ul>
+      <li>LTP: 1,139 of 1,869 pass; several hundred still fail. TIMEOUT cases are adjudicated one by one, and every failure that is not ours stays on record</li>
+      <li>lmbench: 13 rows trail, the largest at 22–26×; 1 MiB direct write sits at 0.75–0.83×. Each row carries a measured decomposition of the gap</li>
+      <li>The unsafe surface: 16.7% still depends on human review; the reduction campaign is running and the residue is being classified into irreducible classes</li>
+      <li>Kani covers the core unsafe code, not every key path; loom and SPIN cover the concurrency primitives</li>
+      <li>Whether the AI working model holds at 400,000 lines is under observation, not settled</li>
+      <li>The 29 registered divergences need their compatibility evidence kept current</li>
+    </ul>
+    <p>All of this is stated on the site. Rux is not a finished product; it is an engineering effort in progress.</p>
+
+    <h2 id="end"><span class="anchor">§8</span>Closing</h2>
+    <p>I am writing Rux first to test what AI-generated code can do, and second because I want one thing: the performance of a monolithic kernel, the Linux ABI as a binary contract, and Rust's auditable safety — all three at once. Progress so far looks good, and while I have the time I will keep updating it; the day it stops, it will be because I found a new hobby.</p>
+    <p>The code is on <a href="https://github.com/topkernel/Rux">GitHub</a>; start with <a href="../guides/getting-started.html">Getting started</a>, or go straight to the <a href="../architecture/design.html">architecture</a>.</p>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Page views <span id="busuanzi_value_site_pv"></span> · visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=19"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

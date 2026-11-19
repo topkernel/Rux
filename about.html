@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>项目介绍 · Rux</title>
+<meta name="description" content="Rux:用 Rust 从零编写的 Linux ABI 兼容操作系统内核。未修改的 Ubuntu 22.04 启动到 GNOME 桌面,未修改的 OpenHarmony 拉起 135+ 服务。41.9 万行代码,349 个系统调用,29 项设计分歧登记。">
+<link rel="stylesheet" href="css/style.css?v=19">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="index.html">首页</a>
+      <a class="on" href="about.html">项目介绍</a>
+      <a href="architecture/design.html">架构设计</a>
+      <a href="performance/index.html">性能</a>
+      <a href="security/index.html">安全</a>
+      <a href="testing/index.html">测试</a>
+      <a href="debugging/index.html">调试</a>
+      <a href="guides/getting-started.html">快速入门</a>
+      <a href="progress/roadmap.html">项目进展</a>
+      <a href="guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="about.html">中文</a><a href="en/about.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">项目</div>
+    <a class="on" href="about.html">项目介绍</a>
+    <div class="grp">架构设计</div>
+    <a href="architecture/design.html">架构与模块设计</a>
+    <a href="architecture/scheduler.html">调度器</a>
+    <a href="architecture/memory.html">内存管理</a>
+    <a href="architecture/filesystem.html">文件系统</a>
+    <a href="architecture/ipc.html">进程间通信</a>
+    <a href="architecture/boot.html">启动流程</a>
+    <a href="architecture/interrupts.html">中断与时钟</a>
+    <a href="architecture/structure.html">代码结构</a>
+    <a href="architecture/riscv64.html">架构移植指南</a>
+    <a href="architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="performance/index.html">性能总览</a>
+    <a href="performance/lmbench.html">lmbench</a>
+    <a href="performance/geekbench.html">Geekbench 5</a>
+    <a href="performance/fio.html">fio</a>
+    <a href="performance/rttests.html">rt-tests</a>
+    <a href="performance/microbench.html">内部微基准</a>
+    <div class="grp">安全</div>
+    <a href="security/index.html">安全总览</a>
+    <a href="security/formal.html">形式验证</a>
+    <a href="security/unsafe.html">分层 unsafe 台账</a>
+    <a href="security/taxonomy.html">缺陷分类学</a>
+    <a href="security/hardening.html">运行时强化与缺口</a>
+    <div class="grp">测试</div>
+    <a href="testing/index.html">测试总览</a>
+    <a href="testing/ci-pipeline.html">CI 流水线</a>
+    <a href="testing/ltp.html">LTP 兼容扫描</a>
+    <a href="testing/ltp-full.html">LTP 全量用例</a>
+    <a href="testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="testing/stability.html">稳定性</a>
+    <a href="testing/stress.html">压力</a>
+    <a href="testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a href="debugging/index.html">调试指南</a>
+    <a href="debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="debugging/perf.html">性能调试</a>
+    <a href="debugging/locks.html">锁调试</a>
+    <a href="debugging/memory.html">内存取证</a>
+    <a href="debugging/panic.html">panic 与符号化</a>
+    <div class="grp">开发指南</div>
+    <a href="guides/getting-started.html">快速入门</a>
+    <a href="guides/development.html">参与开发</a>
+    <a href="guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="progress/roadmap.html">路线图</a>
+    <a href="progress/changelog.html">更新日志</a>
+    <a href="progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Rux 是什么</h1>
+    <div class="sub">用 Rust 从零编写的 Linux ABI 兼容操作系统内核 · kernel/ 树 679 文件 / 419,502 行(其中 Rust 408,408 行)· 349 个系统调用 · LTP 1,139/1,869</div>
+
+    <h2 id="why"><span class="anchor">§1</span>为什么我要自己写一个内核</h2>
+    <p>市面上的 Rust 内核,要么是教学玩具,要么是微内核原型,要么兼容性靠"syscall 覆盖数量"声称。我想要的东西很具体:<b>宏内核的性能底盘</b>、<b>Linux ABI 的二进制契约</b>、<b>Rust 的可审计安全</b>。三样都要,一样不能少。</p>
+    <p>于是有了 Rux。代码全部公开,这篇文章就是简单说明:我做了什么、怎么做的、代码长什么样、哪些地方我还没做完。</p>
+    <p>最初的动机很具体:我在 Ubuntu 上同时开十几个 agent 工作,打字延迟到一两秒,不可接受 —— 与其继续调别人的内核,不如自己写一个。这个动机决定了后面所有的取舍:调度器是单一全局运行队列(GRQ),面向 8–16 CPU 的个人设备做减法,在该范围内消除负载迁移和任务窃取;从设计开始就没有考虑服务器内核。</p>
+
+    <h2 id="abi"><span class="anchor">§2</span>ABI 兼容:不说"支持多少 syscall",说"你直接启动试试"</h2>
+    <p>我的设计原则一句话:<b>ABI 是契约,内部实现自由</b>。</p>
+    <p>对外,Linux 用户态能看到的一切都是契约 —— 系统调用号与语义、ELF/auxv、futex、POSIX 与 SysV IPC、binder、磁盘上的 ext4、procfs/sysfs/debugfs/tracefs 布局,连 glibc 动态加载器会去读的 uname 字符串都需要对齐(我也不想对齐,不对齐启动不了)。当前实现 <b>349 个系统调用</b>(asm-generic 表;x86_64 原生编号翻译到同一张表),LTP 全量扫描 1,869 项过 <b>1,139 项</b>。</p>
+    <p>对内,不受主流实现的历史包袱约束。每一项和主流实现不同的内部设计都记录在案、附带兼容性证据,当前登记 <b>29 项设计分歧</b>(<a href="architecture/design.html#divergences">设计分歧登记表</a>)。</p>
+    <p>关键是验证方式:不拿一组精心挑选的 syscall 测试说自己兼容,我拿未修改的发行版镜像直接启动:</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>发行版</th><th>启动结果</th><th>环境</th></tr></thead>
+      <tbody>
+        <tr><td>Ubuntu 22.04</td><td>进入 GNOME Shell 交互桌面;整链 2,100 秒 smp4 零 panic 门禁通过</td><td>riscv64</td></tr>
+        <tr><td>Ubuntu 24.04</td><td>systemd 255 到达 multi-user 与 graphical 目标,支持串口登录</td><td>x86_64 + KVM</td></tr>
+        <tr><td>OpenHarmony</td><td>135+ 服务全部拉起,到交互式 launcher(bootanimation、hiview、binder 网、输入链路)</td><td>x86_64 + KVM</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout"><b>不打补丁、不重编译、不改配置。</b>syscall 覆盖率是数字,端到端启动是事实。</div>
+
+    <h2 id="ai"><span class="anchor">§3</span>AI 编码不是噱头,是工程方法</h2>
+    <p>这件事我知道会有争议,所以把话说清楚:Rux 的子系统 —— 调度器、内存管理、ext4、binder、网络栈、验证框架 —— 所有的代码、文档、主页全部由 AI 实现,人类负责目标设定、评审与合并。</p>
+    <p>具体模式:多代理并行开发,每个任务独立工作树、独立分支,主会话审阅合并;每日多轮合并,全量回归验证。当前约 <b>200 个工作树</b>在跑。合并有唯一门禁(AGENTS.md):三架构构建 + 全量内核套件 + 分层性能门禁 + 数据完整性电池,缺一项不合并。</p>
+    <p>这不是"用 Copilot 补几行代码"。这是把 AI 编码放到子系统完整实现的位置上,人类退到架构评审和合并门禁。这个模式能不能在 40 万行规模上长期成立,我自己也在验证。但至少现在,它产出了一个能在真实发行版上启动桌面的完整内核。</p>
+
+    <h2 id="safety"><span class="anchor">§4</span>安全:不喊"Rust 所以安全",给你看明细</h2>
+    <p>"Rust 所以安全"这句话大家听腻了。真正有价值的是:unsafe 里出过什么事,我怎么管的。</p>
+    <p><b>unsafe 面有多大。</b><code>kernel/src</code> 共 361,419 行,按仓库内的台账脚本口径:</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>口径</th><th>行数</th><th>占比</th></tr></thead>
+      <tbody>
+        <tr><td><code>unsafe { … }</code> 块体</td><td class="num">34,464</td><td class="num">9.5%</td></tr>
+        <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> 函数体</td><td class="num">28,249</td><td class="num">7.8%</td></tr>
+        <tr><td><b>双口径合计(诚实总数)</b></td><td class="num"><b>60,376</b></td><td class="num"><b>16.7%</b></td></tr>
+      </tbody>
+    </table></div>
+    <p>分层口径下,kernel/src 带 5,590 个 unsafe 记号,其中 <b>3,532 个在 Framework 层之外</b> —— 这就是收缩目标(47 个文件已带 <code>#![forbid(unsafe_code)]</code>,另有 63 个文件已无 unsafe)。63% 的 unsafe 构造带书写的 <code>// SAFETY:</code> 契约;树内出现台账未登记的区域,CI 直接失败。</p>
+    <p><b>缺陷史。</b>Rux 全史 <b>33 例</b>内存破坏类缺陷逐一归档:<b>23 例</b>在 unsafe/汇编,<b>10 例</b>在 safe 代码 —— 而这 10 例全部是所有权/引用计数/锁协议/栈深决策类;而 C 内核里最常见的指针越界、迭代器失效、格式串注入、野指针运算,在 safe 代码里是 <b>零</b>。另有 6 例在 boot 之前就被代码评审拦下。</p>
+    <p><b>形式验证。</b>164 个 Kani harness 对核心 unsafe 代码做全输入证明;1,184 个宿主侧测试;loom 枚举互斥锁、PI 链与定时器的交错执行;4 个 SPIN 模型;Miri nightly。</p>
+    <div class="callout">不说"我 90% 是 Safe Rust"就完事 —— 我告诉你剩下 16.7% 里出过什么、集中在哪、有没有被工具盯住。这是可审计的安全,不是口号。详见 <a href="security/index.html">安全总览</a>与<a href="security/taxonomy.html">缺陷分类学</a>。</div>
+
+    <h2 id="perf"><span class="anchor">§5</span>性能:同机同加速对照,领先的落后的都放出来</h2>
+    <p>我用 QEMU + KVM 同机同加速对照,不拿不同环境的数据互相比。</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>测试类别</th><th>Rux 相对 Linux</th></tr></thead>
+      <tbody>
+        <tr><td>lmbench 27 项</td><td><b>13 项领先</b>:信号量 8.97×、上下文切换 5.1–6.3×、管道 5.84×、缺页 2.8×、页缓存文件读 1.45–1.54×;<b>13 项落后或持平</b>,最大差距 = 文件创建吞吐 22–26×,其次是回环 socket 延迟 2.1–2.2×</td></tr>
+        <tr><td>Geekbench 5</td><td>单核 114% · 多核 107%(4 CPU 钉核对照)</td></tr>
+        <tr><td>fio 3.36</td><td>4K 写 + fsync 1.24× 领先;1M 缓冲写 1.19–1.25× 领先(11.7 GiB/s,78 µs/op);1M 直写 0.75–0.83×、直读 0.83×</td></tr>
+        <tr><td>rt-tests v2.11</td><td>cyclictest SCHED_OTHER 平均 1.5× 领先;SCHED_FIFO 最小值每轮胜、最大值 10× 领先、平均值落后 1.15–1.3×;hackbench 三形态 1.06–1.16× 领先;pi_stress 273k–383k 次优先级反转干净退出</td></tr>
+      </tbody>
+    </table></div>
+    <p>调度器是单一全局运行队列(GRQ),目标场景写得很明确:8–16 CPU 的个人设备,GRQ 临界区实测 ≈60 ns,buffer cache 命中率 99.1%。性能门禁进合并流程 —— 无测量数据不予合并,性能不是事后 benchmark,是每次变更的准入条件。各套件的完整表格与方法:<a href="performance/index.html">性能总览</a>。</p>
+
+    <h2 id="tree"><span class="anchor">§6</span>41 万行里有什么</h2>
+    <ul>
+      <li><b>调度器</b>:GRQ,面向 8–16 CPU 个人设备;临界区 ≈60 ns;无负载均衡、无任务迁移</li>
+      <li><b>内存管理</b>:buddy 页分配器 + magazine 小对象分配器、全局页缓存、每任务 VMA、回收</li>
+      <li><b>文件系统</b>:ext4 读写、jbd2、块层 bio 异步批量读、每 inode 页缓存与无锁 dcache</li>
+      <li><b>IPC 与 binder</b>:完整 binder(支撑 OpenHarmony 全部服务互通)、unix socket、pipe、SysV IPC</li>
+      <li><b>网络栈</b>:自研 TCP/IP,socket API 语义对齐</li>
+      <li><b>驱动</b>:virtio-blk(PCI/MMIO 双模、异步完成环)、串口、输入设备;显示路径支撑 GNOME 与 OH 渲染</li>
+      <li><b>可观测性</b>:统一 trace-event 框架 + tracefs(语义对齐)、符号表、debugfs、任务转储</li>
+      <li><b>架构移植层</b>:x86_64 / riscv64 / aarch64,约 90% 内核代码架构无关</li>
+    </ul>
+    <p>因为 host 可以直接用 KVM,x86_64 是功能与性能主战场,riscv64 和 aarch64 承担构建与回归门禁;内核自带测试套件在 riscv64 上 <b>1,584/1,584</b> 全绿,桌面会话通过 2,100 秒零 panic 门禁。</p>
+
+    <h2 id="todo"><span class="anchor">§7</span>我还没做完的事</h2>
+    <ul>
+      <li>LTP 1,869 项过 1,139 项,还有几百项没过;TIMEOUT 类按 P0 规则逐行归因,非本内核造成的失败逐条留档</li>
+      <li>lmbench 13 项落后,最大 22–26×;1M 直写 0.75–0.83×。每行都带测得的差距分解</li>
+      <li>unsafe 面还有 16.7% 依赖人工评审,收缩战役在继续,残余正在分类为不可约类</li>
+      <li>Kani 覆盖核心 unsafe,还没铺到全部关键路径;loom 与 SPIN 覆盖并发原语</li>
+      <li>AI 编码模式能不能长期撑住 40 万行,我自己也在观察</li>
+      <li>29 项设计分歧的兼容性证据需要持续维护</li>
+    </ul>
+    <p>这些我都在官网上说明了。Rux 不是完成品,是一个正在推进的工程。</p>
+
+    <h2 id="end"><span class="anchor">§8</span>最后</h2>
+    <p>我写 Rux,首先是想测试 AI 生成代码的能力,另外就是我想要一个东西:宏内核的性能,Linux ABI 的二进制契约,Rust 的可审计安全,三样同时成立。目前来看进展可喜,因为现在赋闲在家,所以有时间的话会一直更新下去,哪天不更新了,可能就是找到了新的爱好了。</p>
+    <p>代码在 <a href="https://github.com/topkernel/Rux">GitHub</a>,开始动手看 <a href="guides/getting-started.html">快速入门</a>,或者直接看<a href="architecture/design.html">架构设计</a>。</p>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="js/main.js?v=19"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
