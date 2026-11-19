@@ -1418,20 +1418,18 @@ pub fn sync_inode_tables(targets: &[(u64, u64)]) -> usize {
         let Some(tbl_blk) = inode::inode_table_block_of(fs, ino as u32) else {
             continue;
         };
-        // SAFETY: fs.device is a valid GenDisk of a live instance; bread
-        // returns a valid BufferHead on success.
-        unsafe {
-            if let Some(bh) = crate::fs::bio::bread(fs.device, tbl_blk) {
-                let dirty = (*bh).is_dirty();
-                let res = if dirty {
-                    crate::fs::bio::sync_dirty_buffer(bh)
-                } else {
-                    Ok(())
-                };
-                crate::fs::bio::brelse(bh);
-                if res.is_ok() && dirty {
-                    n += 1;
-                }
+        // INV-BIO-BHREF: bread pins until brelse; the dirty query rides
+        // the safe accessor.
+        if let Some(bh) = crate::fs::bio::bread(fs.device, tbl_blk) {
+            let dirty = crate::fs::bio::bh_is_dirty(&bh);
+            let res = if dirty {
+                crate::fs::bio::sync_dirty_buffer(bh)
+            } else {
+                Ok(())
+            };
+            crate::fs::bio::brelse(bh);
+            if res.is_ok() && dirty {
+                n += 1;
             }
         }
     }
@@ -1480,17 +1478,14 @@ pub fn sync_flushed_data(targets: &[(u64, u64)]) -> usize {
             if { crate::fs::bio::block_absent_durable(fs.device, block) } {
                 continue;
             }
-            // SAFETY: fs.device is a valid GenDisk of a live instance;
-            // bread returns a valid BufferHead on success.
-            unsafe {
-                if let Some(bh) = crate::fs::bio::bread(fs.device, block) {
-                    let dirty = (*bh).is_dirty();
-                    if dirty {
-                        let _ = crate::fs::bio::sync_dirty_buffer(bh);
-                        n += 1;
-                    }
-                    crate::fs::bio::brelse(bh);
+            // INV-BIO-BHREF: as sync_inode_tables.
+            if let Some(bh) = crate::fs::bio::bread(fs.device, block) {
+                let dirty = crate::fs::bio::bh_is_dirty(&bh);
+                if dirty {
+                    let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                    n += 1;
                 }
+                crate::fs::bio::brelse(bh);
             }
         }
     }
@@ -1664,25 +1659,24 @@ pub fn ext4_shutdown_sync() -> Result<(), i32> {
     let _ = sync_inode_tables(&flushed_targets);
 
     // 2. Superblock clean marking (block 0, byte offset 1024 + 58).
-    let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
-    if fs_ptr.is_null() {
-        return Ok(()); // no ext4 root — nothing to mark
-    }
-    // SAFETY: fs_ptr was set by mount_ext4 (Box::into_raw) and the fs is
-    // still mounted; only the device pointer and block size are read.
-    unsafe {
-        let device = (*fs_ptr).device;
-        if let Some(bh) = crate::fs::bio::bread(device, 0) {
-            // s_state offset within the on-disk superblock: 13 u32 fields
-            // (52) + s_mnt_count(2) + s_max_mnt_count(2) + s_magic(2) = 58.
-            const SB_OFF: usize = 1024;
-            const S_STATE_OFF: usize = SB_OFF + 58;
-            const EXT4_VALID_FS: u16 = 1;
-            (*bh).write(S_STATE_OFF, &EXT4_VALID_FS.to_le_bytes());
-            let r = crate::fs::bio::sync_dirty_buffer(bh);
-            crate::fs::bio::brelse(bh);
-            r?;
-        }
+    // No ext4 root — nothing to mark.
+    let device = match mounted_ext4_fs() {
+        Some(fs) => fs.device,
+        None => return Ok(()),
+    };
+    if let Some(bh) = crate::fs::bio::bread(device, 0) {
+        // s_state offset within the on-disk superblock: 13 u32 fields
+        // (52) + s_mnt_count(2) + s_max_mnt_count(2) + s_magic(2) = 58.
+        const SB_OFF: usize = 1024;
+        const S_STATE_OFF: usize = SB_OFF + 58;
+        const EXT4_VALID_FS: u16 = 1;
+        // INV-BIO-BHREF: the s_state store goes through the exclusive
+        // data view (BufferHead::write's body is this slice store).
+        crate::fs::bio::bh_data_mut(&bh)[S_STATE_OFF..S_STATE_OFF + 2]
+            .copy_from_slice(&EXT4_VALID_FS.to_le_bytes());
+        let r = crate::fs::bio::sync_dirty_buffer(bh);
+        crate::fs::bio::brelse(bh);
+        r?;
     }
 
     // 3. Disk-side volatile cache.
@@ -1692,25 +1686,18 @@ pub fn ext4_shutdown_sync() -> Result<(), i32> {
 /// Create a VFS inode for the ext4 root directory (inode 2).
 /// Called during mount to set up the root dentry's inode.
 pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
-    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
-    if fs_ptr.is_null() {
-        // Fallback: shouldn't happen at mount time
+    let fallback = || {
         let mut inode = Inode::new(2, InodeMode::new(InodeMode::S_IFDIR | 0o755));
         inode.ops = Some(&EXT4_INODE_OPS);
-        return alloc::sync::Arc::new(inode);
-    }
-    // SAFETY: fs_ptr was loaded from GLOBAL_EXT4_FS with null check above;
-    // the pointer is valid for the lifetime of the mount (set in ext4_mount).
-    unsafe {
-        let fs = &*fs_ptr;
-        match fs.read_inode(2) {
+        alloc::sync::Arc::new(inode)
+    };
+    match mounted_ext4_fs() {
+        Some(fs) => match fs.read_inode(2) {
             Ok(ext4_inode) => create_vfs_inode(2, &ext4_inode),
-            Err(_) => {
-                let mut inode = Inode::new(2, InodeMode::new(InodeMode::S_IFDIR | 0o755));
-                inode.ops = Some(&EXT4_INODE_OPS);
-                alloc::sync::Arc::new(inode)
-            }
-        }
+            // Fallback: shouldn't happen at mount time.
+            Err(_) => fallback(),
+        },
+        None => fallback(),
     }
 }
 
@@ -1746,41 +1733,30 @@ pub fn unmount_ext4() {
 /// - `Some(data)`: File content
 /// - `None`: Read failed
 pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
-    use core::sync::atomic::Ordering;
-
-    let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
-    if fs_ptr.is_null() {
-        return None;
-    }
-
     // Parse path to absolute path
     let abs_path = resolve_path(path);
 
-    // SAFETY: fs_ptr was loaded from GLOBAL_EXT4_FS with null check above;
-    // the pointer is valid for the lifetime of the mount.
-    unsafe {
-        let fs = &*fs_ptr;
+    let fs = mounted_ext4_fs()?;
 
-        // Use the global mounted filesystem directly instead of creating
-        // a temporary Ext4FileSystem, which avoids unnecessary buffer
-        // cache pressure and potential eviction issues.
-        let (_, inode) = fs.lookup_path(&abs_path).ok()?;
+    // Use the global mounted filesystem directly instead of creating
+    // a temporary Ext4FileSystem, which avoids unnecessary buffer
+    // cache pressure and potential eviction issues.
+    let (_, inode) = fs.lookup_path(&abs_path).ok()?;
 
-        let file_size = inode.get_size() as usize;
-        if file_size == 0 {
-            return Some(alloc::vec::Vec::new());
+    let file_size = inode.get_size() as usize;
+    if file_size == 0 {
+        return Some(alloc::vec::Vec::new());
+    }
+
+    let mut buffer = alloc::vec::Vec::with_capacity(file_size);
+    buffer.resize(file_size, 0);
+
+    match file::ext4_file_read(fs, &inode, 0, &mut buffer) {
+        Ok(n) => {
+            buffer.truncate(n);
+            Some(buffer)
         }
-
-        let mut buffer = alloc::vec::Vec::with_capacity(file_size);
-        buffer.resize(file_size, 0);
-
-        match file::ext4_file_read(fs, &inode, 0, &mut buffer) {
-            Ok(n) => {
-                buffer.truncate(n);
-                Some(buffer)
-            }
-            Err(_) => None,
-        }
+        Err(_) => None,
     }
 }
 
@@ -3055,17 +3031,11 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                         if block_nr != 0 {
                             let tail_start = (new_size % block_size) as usize;
                             if let Some(bh) = crate::fs::bio::bread(fs.device, block_nr) {
-                                // SAFETY: bh is a one-block buffer from
-                                // bread; the tail range is in-bounds and
-                                // the buffer is released after the sync.
-                                unsafe {
-                                    let data = (*bh).b_data.as_mut_ptr();
-                                    core::ptr::write_bytes(
-                                        data.add(tail_start),
-                                        0,
-                                        (block_size as usize) - tail_start,
-                                    );
-                                }
+                                // INV-BIO-BHREF: bh is a one-block buffer
+                                // from bread; the tail range is in-bounds
+                                // and the buffer is released after sync.
+                                let data = crate::fs::bio::bh_data_mut(&bh);
+                                data[tail_start..block_size as usize].fill(0);
                                 let _ = crate::fs::bio::sync_dirty_buffer(bh);
                                 crate::fs::bio::brelse(bh);
                             }
@@ -3523,6 +3493,19 @@ fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_na
     }
 }
 
+/// INV-EXT4-GLOBALFS (unsafe-slim r3c): the one audited read of the
+/// GLOBAL_EXT4_FS singleton — the Box is installed by mount_ext4 and only
+/// reclaimed by unmount_ext4, so a non-null Acquire load is live for the
+/// 'static mount lifetime. Every global-fs wrapper rides this.
+pub fn mounted_ext4_fs() -> Option<&'static Ext4FileSystem> {
+    let p = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: INV-EXT4-GLOBALFS above.
+    Some(unsafe { &*p })
+}
+
 /// Get Ext4FileSystem pointer from inode's private_data
 fn get_ext4_fs_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32> {
     let fs_ptr = inode.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -3903,16 +3886,19 @@ static LOOP_INSTANCE_REUSE: [LoopInstanceReuse; LOOP_REUSE_SLOTS] = [const {
 /// (same read init() uses: block 0, byte offset 1024; s_uuid at +0x68).
 /// None when the block cannot be read.
 fn sb_uuid_of(disk: &'static crate::drivers::blkdev::GenDisk) -> Option<(u64, u64)> {
-    // SAFETY: bread on a live GenDisk returns a valid BufferHead whose
-    // b_data covers the full block; brelse drops the reference.
-    unsafe {
-        let bh = crate::fs::bio::bread(disk, 0)?;
-        let data = (*bh).b_data.as_ptr();
-        let lo = core::ptr::read_unaligned(data.add(1024 + 0x68) as *const u64);
-        let hi = core::ptr::read_unaligned(data.add(1024 + 0x70) as *const u64);
-        crate::fs::bio::brelse(bh);
-        Some((lo.to_le(), hi.to_le()))
-    }
+    // INV-BIO-BHREF: bread on a live GenDisk returns a pinned BufferHead
+    // whose b_data covers the full block; the UUID fields are read as
+    // little-endian byte slices (equivalent to the old unaligned loads).
+    let bh = crate::fs::bio::bread(disk, 0)?;
+    let data = crate::fs::bio::bh_data(&bh);
+    let lo = u64::from_le_bytes(
+        data[1024 + 0x68..1024 + 0x68 + 8].try_into().expect("uuid lo"),
+    );
+    let hi = u64::from_le_bytes(
+        data[1024 + 0x70..1024 + 0x70 + 8].try_into().expect("uuid hi"),
+    );
+    crate::fs::bio::brelse(bh);
+    Some((lo, hi))
 }
 
 /// Publish a fresh instance for its device (replacing any stale row for
