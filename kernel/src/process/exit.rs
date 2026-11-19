@@ -43,27 +43,32 @@ const ROBUST_LIST_HEAD_SIZE: usize = 24;
 /// Optimistic walk: any unreadable pointer terminates that chain (Linux
 /// skips broken entries too); the head itself must be the registered
 /// 24-byte layout.
-unsafe fn exit_robust_list(task: *mut Task) {
-    use crate::arch::uaccess::get_user;
+///
+/// Contract: `task` is the exiting task (valid; its mm still lives).
+fn exit_robust_list(task: *mut Task) {
+    use crate::arch::uaccess_safe as ua;
 
-    let head = (*task).robust_list_head() as usize;
-    if head == 0 || (*task).robust_list_len() != ROBUST_LIST_HEAD_SIZE {
+    // SAFETY: the caller (do_exit) passes the running task about to
+    // exit; the mm is dropped strictly after this runs.
+    let t = unsafe { &mut *task };
+    let head = t.robust_list_head() as usize;
+    if head == 0 || t.robust_list_len() != ROBUST_LIST_HEAD_SIZE {
         return; // not registered / legacy len — nothing to do
     }
     #[cfg(feature = "dfx-futex-trace")]
     {
         use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX ROBUST-EXIT pid=");
-        taskdump_dec((*task).pid() as u64);
+        taskdump_dec(t.pid() as u64);
         taskdump_raw_line(b" head=");
         taskdump_dec(head as u64);
         taskdump_raw_line(b"\n");
     }
-    let my_tid = (*task).pid();
+    let my_tid = t.pid();
     let mm_id = crate::sync::futex::task_futex_mm_id(task);
 
     // futex_offset (signed long) at head+8: uaddr = entry + futex_offset.
-    let futex_offset: i64 = match get_user((head + 8) as *const i64) {
+    let futex_offset: i64 = match ua::read_user::<i64>(head + 8) {
         Some(v) => v,
         None => return,
     };
@@ -76,19 +81,19 @@ unsafe fn exit_robust_list(task: *mut Task) {
     // reference. The old `v | FUTEX_OWNER_DIED` kept the dead tid in the
     // word and left every PI waiter looping on an owner that could never
     // release.
-    // SAFETY: all user accesses go through the exception-table helpers.
-    unsafe fn handle_robust_entry(entry: usize, futex_offset: i64, tid: u32, mm_id: usize) {
-        use crate::arch::uaccess::{get_user, put_user};
+    // All user accesses go through the exception-table typed family.
+    fn handle_robust_entry(entry: usize, futex_offset: i64, tid: u32, mm_id: usize) {
+        use crate::arch::uaccess_safe as ua;
         let uaddr = (entry as i64).wrapping_add(futex_offset) as u64;
         if uaddr & 0x3 != 0 {
             return; // misaligned futex word — skip
         }
-        let v: u32 = match get_user(uaddr as *const u32) {
+        let v: u32 = match ua::read_user::<u32>(uaddr as usize) {
             Some(v) => v,
             None => return, // bad pointer — skip entry
         };
         if v & FUTEX_TID_MASK == tid {
-            let _ = put_user(uaddr as *mut u32, (v & FUTEX_WAITERS) | FUTEX_OWNER_DIED);
+            let _ = ua::write_user::<u32>(uaddr as usize, (v & FUTEX_WAITERS) | FUTEX_OWNER_DIED);
             crate::sync::futex::futex_wake_in_mm(
                 uaddr as usize,
                 mm_id,
@@ -103,14 +108,14 @@ unsafe fn exit_robust_list(task: *mut Task) {
     // the dying thread was killed between the userspace unlock and the
     // FUTEX_WAKE syscall — reference handle_futex_death's pending_op case
     // (700-703) wakes one waiter WITHOUT touching the word.
-    // SAFETY: exception-table user reads.
-    unsafe fn handle_pending_entry(pending: usize, futex_offset: i64, tid: u32, mm_id: usize) {
-        use crate::arch::uaccess::get_user;
+    // Exception-table user reads (the typed family).
+    fn handle_pending_entry(pending: usize, futex_offset: i64, tid: u32, mm_id: usize) {
+        use crate::arch::uaccess_safe as ua;
         let uaddr = (pending as i64).wrapping_add(futex_offset) as u64;
         if uaddr & 0x3 != 0 {
             return;
         }
-        let v: u32 = match get_user(uaddr as *const u32) {
+        let v: u32 = match ua::read_user::<u32>(uaddr as usize) {
             Some(v) => v,
             None => return,
         };
@@ -121,14 +126,14 @@ unsafe fn exit_robust_list(task: *mut Task) {
 
     // Walk a robust_list chain starting at `start` (an entry address);
     // the chain ends when next == head (circular) or is unreadable.
-    // SAFETY: bounded walk, exception-table user reads.
-    unsafe fn walk_robust_chain(start: usize, head: usize, futex_offset: i64, tid: u32, mm_id: usize) {
-        use crate::arch::uaccess::get_user;
+    // Bounded walk, exception-table user reads (the typed family).
+    fn walk_robust_chain(start: usize, head: usize, futex_offset: i64, tid: u32, mm_id: usize) {
+        use crate::arch::uaccess_safe as ua;
         let mut entry = start;
         let mut count = 0u32;
         while entry != 0 && entry != head && count < ROBUST_LIST_LIMIT {
             handle_robust_entry(entry, futex_offset, tid, mm_id);
-            entry = match get_user(entry as *const u64) {
+            entry = match ua::read_user::<u64>(entry) {
                 Some(next) => next as usize,
                 None => break,
             };
@@ -136,17 +141,17 @@ unsafe fn exit_robust_list(task: *mut Task) {
         }
     }
 
-    // Main list: first entry hangs off head+0.
-    // SAFETY: bounded, exception-table reads.
-    unsafe {
-        if let Some(first) = get_user(head as *const u64) {
+    // Main list: first entry hangs off head+0. Bounded, exception-table
+    // reads (the typed family).
+    {
+        if let Some(first) = ua::read_user::<u64>(head) {
             walk_robust_chain(first as usize, head, futex_offset, my_tid, mm_id);
         }
         // Pending list (held-when-killed locks): pointer at head+16; the
         // pointed-to node is itself an entry. Its word may already be
         // released (the unlock-syscall race) — handle it with the
         // reference's pending_op semantics instead of the list walk.
-        if let Some(pending) = get_user((head + 16) as *const u64) {
+        if let Some(pending) = ua::read_user::<u64>(head + 16) {
             if pending as usize != 0 {
                 handle_pending_entry(pending as usize, futex_offset, my_tid, mm_id);
             }
@@ -161,8 +166,13 @@ unsafe fn exit_robust_list(task: *mut Task) {
 /// Must run BEFORE the exiting task drops its mm reference, and the wake
 /// key must be the EXITING task's mm identity (all CLONE_VM threads share
 /// it, so the joiner's wait key matches).
-unsafe fn exit_clear_child_tid(task: *mut Task) {
-    let tid_ptr = (*task).clear_child_tid();
+///
+/// Contract: `task` is the exiting task; its mm still lives.
+fn exit_clear_child_tid(task: *mut Task) {
+    // SAFETY: the caller (do_exit) passes the exiting task; the mm is
+    // dropped strictly after this runs.
+    let t = unsafe { &mut *task };
+    let tid_ptr = t.clear_child_tid();
     if tid_ptr.is_null() {
         return;
     }
@@ -171,19 +181,15 @@ unsafe fn exit_clear_child_tid(task: *mut Task) {
     {
         use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX CLEARTID-EXIT pid=");
-        taskdump_dec((*task).pid() as u64);
+        taskdump_dec(t.pid() as u64);
         taskdump_raw_line(b" u=");
         taskdump_dec(tid_ptr as usize as u64);
         taskdump_raw_line(b"\n");
     }
 
-    // Write 0 to the tid pointer in user memory.
-    let zero: i32 = 0;
-    crate::arch::uaccess::copy_to_user(
-        tid_ptr as *mut u8,
-        &zero as *const i32 as *const u8,
-        core::mem::size_of::<i32>(),
-    );
+    // Write 0 to the tid pointer in user memory (the typed
+    // exception-table copy path).
+    let _ = crate::arch::uaccess_safe::write_user::<i32>(tid_ptr as usize, 0);
     // Wake any thread waiting on this futex (FUTEX_WAKE, 1 waiter).
     // Private semantics + the exiting task's mm as the key identity.
     // musl pthread_exit holds __thread_list_lock across SYS_exit and
@@ -197,7 +203,7 @@ unsafe fn exit_clear_child_tid(task: *mut Task) {
         1,
         u32::MAX,
     );
-    (*task).set_clear_child_tid(core::ptr::null_mut());
+    t.set_clear_child_tid(core::ptr::null_mut());
 }
 
 // ============================================================================
@@ -209,9 +215,11 @@ unsafe fn exit_clear_child_tid(task: *mut Task) {
 pub fn kill_other_threads(current: *mut Task) {
     // Collect member pids under the ring lock; deliver outside it.
     let mut victims: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
-    // SAFETY: current is a valid, running task; its ring is well-formed.
-    unsafe {
-        (*current).for_each_group_member(|m| {
+    // current is a valid, running task; its ring is well-formed (the
+    // walker's contract — it takes the ring lock itself).
+    // SAFETY: one consolidated deref of the caller's running task.
+    let cur = unsafe { &mut *current };
+    cur.for_each_group_member(|m| {
             let m_raw = m as *const Task as *mut Task;
             if m_raw != current {
                 let st = m.state();
@@ -239,9 +247,13 @@ pub fn kill_other_threads(current: *mut Task) {
                 static XG_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if XG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
-                    let q = core::ptr::read_volatile(
-                        core::ptr::addr_of!(m.ti_on_cpu) as *const u64,
-                    );
+                    // SAFETY: diagnostic volatile read of a linked ring
+                    // member's field (bounded, read-only).
+                    let q = unsafe {
+                        core::ptr::read_volatile(
+                            core::ptr::addr_of!(m.ti_on_cpu) as *const u64,
+                        )
+                    };
                     let (ph, ph_ago) =
                         crate::sched::sched::pick_trace_peek(m_raw).unwrap_or((0, 0));
                     let tid = m
@@ -365,7 +377,6 @@ pub fn kill_other_threads(current: *mut Task) {
                 }
             }
         });
-    }
         // gdm bring-up r9-r11: a silent mass SIGKILL took out the whole
         // daemon set with no print at any loglevel; every other kernel
         // SIGKILL fan-out path is either printed or was excluded by
@@ -512,10 +523,13 @@ pub fn de_thread(current: *mut Task) -> bool {
 /// when its switch-out truly completes, and a genuinely lost release
 /// leaks the stack loudly (FDM-DEFER, bounded) instead of corrupting.
 ///
-/// # Safety
-/// `member` is a DEAD task parked on a leader's dead_threads list (callers
-/// guarantee the DEAD state — see sweep_dead_threads / release_task).
-unsafe fn free_dead_member(member: *mut Task) -> bool {
+/// Contract: `member` is a DEAD task parked on a leader's dead_threads
+/// list (callers guarantee the DEAD state — see sweep_dead_threads /
+/// release_task).
+fn free_dead_member(member: *mut Task) -> bool {
+    // SAFETY: the caller parked `member` DEAD on the dead list; nothing
+    // else can reach it while we hold the list's discipline.
+    let m = unsafe { &mut *member };
     // The member's final context switch-out may still be in flight —
     // on_cpu is cleared exactly when __switch_to has saved its context
     // (see release_task R9 for the full rationale).
@@ -581,9 +595,9 @@ unsafe fn free_dead_member(member: *mut Task) -> bool {
         // the real-switch retire sites, re-armed false by the loop each
         // round — {flag set AND on_cpu false AND no marker} is the full
         // no-references condition.
-        while (*member).on_cpu()
+        while m.on_cpu()
             || crate::sched::sched::switching_out_names(member)
-            || !(*member)
+            || !m
                 .terminal_switch_done
                 .load(core::sync::atomic::Ordering::Acquire)
         {
@@ -592,9 +606,9 @@ unsafe fn free_dead_member(member: *mut Task) -> bool {
                 crate::dfx::taskdump::taskdump_raw_line(b"FDM-WAIT sweeper=");
                 crate::dfx::taskdump::taskdump_dec(cur_pid as u64);
                 crate::dfx::taskdump::taskdump_raw_line(b" member=");
-                crate::dfx::taskdump::taskdump_dec((*member).pid() as u64);
+                crate::dfx::taskdump::taskdump_dec(m.pid() as u64);
                 crate::dfx::taskdump::taskdump_raw_line(b" state=0x");
-                let st = (*member).state().bits() as u64;
+                let st = m.state().bits() as u64;
                 let mut sh: i32 = 32;
                 while sh > 0 {
                     sh -= 4;
@@ -633,13 +647,13 @@ unsafe fn free_dead_member(member: *mut Task) -> bool {
             core::sync::atomic::AtomicU32::new(0);
         let n = FDM_DEFER_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 64 {
-            let claim = (*member)
+            let claim = m
                 .running_on_cpu
                 .load(core::sync::atomic::Ordering::Acquire);
             crate::dfx::taskdump::taskdump_raw_line(b"FDM-DEFER #");
             crate::dfx::taskdump::taskdump_dec((n + 1) as u64);
             crate::dfx::taskdump::taskdump_raw_line(b" member=");
-            crate::dfx::taskdump::taskdump_dec((*member).pid() as u64);
+            crate::dfx::taskdump::taskdump_dec(m.pid() as u64);
             crate::dfx::taskdump::taskdump_raw_line(b" claim=");
             crate::dfx::taskdump::taskdump_dec(claim as u64);
             crate::dfx::taskdump::taskdump_raw_line(b" (owner live/ambiguous; free deferred to next sweep)\n");
@@ -650,23 +664,25 @@ unsafe fn free_dead_member(member: *mut Task) -> bool {
     // tens of seconds, freezing the exit — and every parent behind it.
     crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "thread-stack-free");
 
-    (*member).free_kernel_stack();
+    m.free_kernel_stack();
 
     // Heap PtRegs from the legacy fork path (unused by the live path).
-    let pt_regs_ptr = (*member).fork_pt_regs();
+    let pt_regs_ptr = m.fork_pt_regs();
     if !pt_regs_ptr.is_null() {
         use alloc::alloc::{dealloc, Layout};
         let layout = Layout::from_size_align(
             core::mem::size_of::<crate::arch::pt_regs::PtRegs>(), 16
         ).unwrap();
-        dealloc(pt_regs_ptr as *mut u8, layout);
+        // SAFETY: the pointer came from the fork path's alloc with this
+        // exact layout; freed exactly once (slot ownership).
+        unsafe { dealloc(pt_regs_ptr as *mut u8, layout) };
     }
 
     // Drop remaining Arc references (mm/fdtable were dropped at exit).
-    (*member).set_address_space(None);
-    (*member).set_fdtable(None);
-    (*member).signal = None;
-    (*member).set_fs(None);
+    m.set_address_space(None);
+    m.set_fdtable(None);
+    m.signal = None;
+    m.set_fs(None);
 
     crate::process::task::Task::task_put(member);
     true
@@ -732,7 +748,7 @@ pub fn sweep_dead_threads(leader: *mut Task) {
     for m in pending {
         // SAFETY: m came from the leader's dead list (DEAD, hash-removed,
         // final switch-out completed).
-        let freed = unsafe { free_dead_member(m) };
+        let freed = free_dead_member(m);
         if !freed {
             // R87: heal-fail defers the free — re-park for the next
             // sweep. Lifetime: this sweep's only caller is a member's own
@@ -820,9 +836,12 @@ const RELEASE_DRAIN_JIFFIES: u64 = 300;
 ///
 /// # Safety
 /// Caller must ensure task is in ZOMBIE state and not currently running
-// SAFETY: Caller guarantees task is a zombie and no CPU is running it. The RCU
-// grace period in synchronize_rcu() ensures no readers hold stale references.
-pub(crate) unsafe fn release_task(task: *mut Task) {
+// Contract: caller guarantees task is a zombie and no CPU is running it.
+// The RCU grace period in synchronize_rcu() ensures no readers hold stale
+// references.
+pub(crate) fn release_task(task: *mut Task) {
+    // SAFETY: zombie per the contract above; the reaper owns the release.
+    let t = unsafe { &mut *task };
     // A reaped leader first drains its dead-members list — every exited
     // group member is fully released before the leader's own storage
     // goes away (their group_leader pointers name `task`).
@@ -856,7 +875,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
         // stragglers parked. try_lock (not lock) so a WEDGED
         // dead_threads lock (the ohw80 DEADLOCK variant) cannot park
         // the reaper inside the acquisition itself.
-        let drained = match (*task).dead_threads.try_lock() {
+        let drained = match t.dead_threads.try_lock() {
             Some(mut dl) => {
                 let mut reclaim: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
                 dl.retain(|m| {
@@ -890,7 +909,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                 for m in reclaim {
                     // SAFETY: m was parked DEAD with its final switch-out
                     // complete; the list no longer references it.
-                    if unsafe { free_dead_member(m) } {
+                    if free_dead_member(m) {
                         continue;
                     }
                     // R87: heal-fail defers the free — re-park on this
@@ -899,7 +918,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                     // completes. `empty && !deferred_any` keeps the reap
                     // from completing while a deferral is parked.
                     deferred_any = true;
-                    let mut dl = (*task).dead_threads.lock();
+                    let mut dl = t.dead_threads.lock();
                     dl.push(m);
                 }
                 empty && !deferred_any
@@ -919,7 +938,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
             // the last dying member's sweep (and if a member never
             // dies, the group leaks — printed — but the reaper lives).
             deferred = true;
-            (*task).release_deferred.store(true, core::sync::atomic::Ordering::Release);
+            t.release_deferred.store(true, core::sync::atomic::Ordering::Release);
             {
                 static DEFER_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
@@ -928,11 +947,11 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                     let mut line: alloc::string::String = alloc::format!(
                         "RELEASE-DEFER #{} leader={} reaper_pid={} parked:",
                         n,
-                        (*task).pid(),
+                        t.pid(),
                         crate::process::current_pid()
                     );
                     // SAFETY: read-only diagnostics of parked member tasks.
-                    if let Some(dl) = (*task).dead_threads.try_lock() {
+                    if let Some(dl) = t.dead_threads.try_lock() {
                         for m in dl.iter().take(6) {
                             // SAFETY: read-only diagnostic field reads.
                             unsafe {
@@ -965,12 +984,12 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // children-hiwater). Runs before any child state is torn down.
     {
         use core::sync::atomic::Ordering::Relaxed;
-        let u = (*task).utime_ticks.load(Relaxed);
-        let s = (*task).stime_ticks.load(Relaxed);
-        let cu = (*task).cutime_ticks.load(Relaxed);
-        let cs = (*task).cstime_ticks.load(Relaxed);
-        let rss = (*task).exit_maxrss_kb.load(Relaxed);
-        let crss = (*task).cmaxrss_kb.load(Relaxed);
+        let u = t.utime_ticks.load(Relaxed);
+        let s = t.stime_ticks.load(Relaxed);
+        let cu = t.cutime_ticks.load(Relaxed);
+        let cs = t.cstime_ticks.load(Relaxed);
+        let rss = t.exit_maxrss_kb.load(Relaxed);
+        let crss = t.cmaxrss_kb.load(Relaxed);
         // release_task only ever runs in the REAPING parent's wait
         // context (do_wait/do_waitid, including init reaping orphans);
         // the child's own parent pointer is already None here (the
@@ -983,17 +1002,19 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     }
 
     // Remove from PID hash table before freeing resources
-    crate::process::pid_hash::pid_hash_remove((*task).pid());
+    crate::process::pid_hash::pid_hash_remove(t.pid());
 
     // Detach from parent's children list (must happen before freeing task memory)
     // E8-REPAR: screen the parent pointer first — do_wait claimed the
     // child under the tree lock (parent forced None), so a Some here is
     // either the normal pre-claim path or a stale pointer planted by
     // older corruption; never dereference an implausible one.
-    let parent_ptr = (*task).parent_ptr();
+    let parent_ptr = t.parent_ptr();
     if let Some(parent) = parent_ptr {
         if Task::is_plausible_task_ptr(parent) {
-            (*parent).remove_child(task);
+            // SAFETY: screened plausible above; remove_child takes the
+            // tree lock itself.
+            unsafe { (*parent).remove_child(task) };
         }
     }
 
@@ -1007,7 +1028,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // always-on detector that a hole reopened.
     {
         let mut stranded: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
-        (*task).collect_children_pinned(&mut stranded);
+        t.collect_children_pinned(&mut stranded);
         if !stranded.is_empty() {
             let init = crate::sched::find_task_by_pid(1);
             if !init.is_null() {
@@ -1016,12 +1037,12 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                 if HEAL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
                     crate::pr_info!(
                         "TREE-RELEASE-HEAL: pid {} released with {} children still linked; moved to init",
-                        (*task).pid(),
+                        t.pid(),
                         stranded.len()
                     );
                 }
                 for child in stranded {
-                    let ok = (*task).move_child(child, init);
+                    let ok = t.move_child(child, init);
                     if !ok {
                         Task::task_put(child);
                         continue;
@@ -1029,18 +1050,21 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                     // A healed ZOMBIE child must be signalled so init
                     // reaps it (same contract as the reparent mover:
                     // full child_exit siginfo, child's exit_signal).
-                    if (*child).state()
+                    // SAFETY: `child` is pinned (collect_children_pinned)
+                    // and still linked; read-only field reads.
+                    let c = unsafe { &*child };
+                    if c.state()
                         == crate::process::task::TaskState::new(
                             crate::process::task::TaskState::ZOMBIE,
                         )
                     {
                         let mut info = crate::signal::SigInfo::child_exit(
-                            (*child).pid(),
-                            (*child).cred().uid,
-                            (*child).exit_code(),
-                            (*child).core_dumped(),
+                            c.pid(),
+                            c.cred().uid,
+                            c.exit_code(),
+                            c.core_dumped(),
                         );
-                        let orphan_sig = (*child).get_exit_signal();
+                        let orphan_sig = c.get_exit_signal();
                         if orphan_sig != 0 {
                             if orphan_sig != crate::signal::Signal::SIGCHLD as u8 {
                                 info.si_signo = orphan_sig as i32;
@@ -1056,7 +1080,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
 
     // Free PID — belongs to the reap SEMANTICS (the number returns to
     // the pool even when the storage free is deferred).
-    crate::process::pid::free_pid((*task).pid());
+    crate::process::pid::free_pid(t.pid());
 
     if deferred {
         // 69th: the storage free (RCU grace + stack/Arc/Task free) is
@@ -1079,7 +1103,10 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
 /// through the pid hash or the process tree, that no other task still
 /// references it (the deferred path's dead_threads list must be empty),
 /// and that no CPU is running it.
-unsafe fn release_task_storage(task: *mut Task) {
+fn release_task_storage(task: *mut Task) {
+    // SAFETY: unreachable through the pid hash / process tree (the
+    // release contract); this call owns the storage.
+    let t = unsafe { &mut *task };
     // Wait for any RCU readers that may still be traversing this task's
     // pid_hash_links node to finish before we free the task memory.
     // BOUNDED (lb125 decode): pid_hash read sections are preempt-disable
@@ -1125,9 +1152,9 @@ unsafe fn release_task_storage(task: *mut Task) {
     const RTS_SWITCH_WAIT_JIFFIES: u64 = 300;
     let rts_armed_at = crate::drivers::timer::get_jiffies();
     let mut stack_free_ok = true;
-    while (*task).on_cpu()
+    while t.on_cpu()
         || crate::sched::sched::switching_out_names(task)
-        || !(*task)
+        || !t
             .terminal_switch_done
             .load(core::sync::atomic::Ordering::Acquire)
     {
@@ -1144,7 +1171,7 @@ unsafe fn release_task_storage(task: *mut Task) {
             let n = RTS_LEAK_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 64 {
                 crate::dfx::taskdump::taskdump_raw_line(b"RTS-STACK-LEAK (stack withheld) pid=");
-                crate::dfx::taskdump::taskdump_dec((*task).pid() as u64);
+                crate::dfx::taskdump::taskdump_dec(t.pid() as u64);
                 crate::dfx::taskdump::taskdump_raw_line(b"\n");
             }
             break;
@@ -1154,26 +1181,28 @@ unsafe fn release_task_storage(task: *mut Task) {
 
     // Free kernel stack
     if stack_free_ok {
-        (*task).free_kernel_stack();
+        t.free_kernel_stack();
     }
 
     // Free heap-allocated PtRegs from fork.
     // copy_thread() allocates PtRegs on the heap for the child's first
     // context switch; clear_fork_child() keeps the pointer so we can free it here.
-    let pt_regs_ptr = (*task).fork_pt_regs();
+    let pt_regs_ptr = t.fork_pt_regs();
     if !pt_regs_ptr.is_null() {
         use alloc::alloc::{dealloc, Layout};
         let layout = Layout::from_size_align(
             core::mem::size_of::<crate::arch::pt_regs::PtRegs>(), 16
         ).unwrap();
-        dealloc(pt_regs_ptr as *mut u8, layout);
+        // SAFETY: the pointer came from the fork path's alloc with this
+        // exact layout; freed exactly once (storage ownership).
+        unsafe { dealloc(pt_regs_ptr as *mut u8, layout) };
     }
 
     // Clear Arc references (this will decrement reference counts)
-    (*task).set_address_space(None);
-    (*task).set_fdtable(None);
-    (*task).signal = None;
-    (*task).set_fs(None);
+    t.set_address_space(None);
+    t.set_fdtable(None);
+    t.signal = None;
+    t.set_fs(None);
 
     // Free Task struct back to kernel heap — via task_put (R12-5): any
     // outstanding lookup pins delay the actual free to their own put.
@@ -1765,9 +1794,12 @@ pub fn do_exit(exit_code: i32) -> ! {
         }
     }
 
-    // SAFETY: current is the raw pointer to the calling task, guaranteed valid since
-    // we are the currently executing task and will never return from this function.
-    unsafe {
+    // current is the raw pointer to the calling task, guaranteed valid
+    // since we are the currently executing task and will never return
+    // from this function. One consolidated reference.
+    // SAFETY: we are `current`; do_exit never returns.
+    let cur = unsafe { &mut *current };
+    {
         // sc129 (Session P): the OH app children's FFRT worker threads are
         // CREATED (clone CLONE_THREAD succeeds, census pid logged) and then
         // exit instantly and CLEANLY (process survives) — the worker's own
@@ -1782,23 +1814,23 @@ pub fn do_exit(exit_code: i32) -> ! {
         // thread-heavy bring-up) paid it directly. The dumps belong to
         // the syscall-trace hunt that added them: default off behind
         // rux:syscalltrace (retired dfx=syscalltrace) (sc129/sc131/sc135 hunts re-arm with the flag).
-        if !((*current).pid() == (*current).tgid())
+        if !(cur.pid() == cur.tgid())
             && crate::trace::EVENT_SYSCALLTRACE.armed()
         {
             use core::fmt::Write;
             let mut s = alloc::string::String::new();
             {
                 let cur8 =
-                    (*current).last_fails_cur.load(core::sync::atomic::Ordering::Relaxed);
+                    cur.last_fails_cur.load(core::sync::atomic::Ordering::Relaxed);
                 for k in 0..8 {
                     let i = (cur8 + 8 - 1 - k) % 8; // newest first
-                    let v = (*current).last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
+                    let v = cur.last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
                     if v != 0 {
                         // sc135 (Session Q): a0/a1 name the failing call's
                         // leading args (prctl option et al).
-                        let a0 = (*current).last_fails_a0[i]
+                        let a0 = cur.last_fails_a0[i]
                             .load(core::sync::atomic::Ordering::Relaxed);
-                        let a1 = (*current).last_fails_a1[i]
+                        let a1 = cur.last_fails_a1[i]
                             .load(core::sync::atomic::Ordering::Relaxed);
                         let _ = write!(
                             s,
@@ -1820,10 +1852,10 @@ pub fn do_exit(exit_code: i32) -> ! {
             {
                 const RL: usize = crate::process::task::LAST_CALLS_LEN;
                 let cur12 =
-                    (*current).last_calls_cur.load(core::sync::atomic::Ordering::Relaxed);
+                    cur.last_calls_cur.load(core::sync::atomic::Ordering::Relaxed);
                 for k in 0..RL {
                     let i = (cur12 + RL - 1 - k) % RL; // newest first
-                    let v = (*current).last_calls[i].load(core::sync::atomic::Ordering::Relaxed);
+                    let v = cur.last_calls[i].load(core::sync::atomic::Ordering::Relaxed);
                     if v != 0 {
                         let _ = write!(c, " {}", v);
                     }
@@ -1832,15 +1864,17 @@ pub fn do_exit(exit_code: i32) -> ! {
             static NW: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-                let nc = core::str::from_utf8((*current).comm())
+                let nc = core::str::from_utf8(cur.comm())
                     .unwrap_or("")
                     .trim_end_matches('\0');
-                let lc = core::str::from_utf8((*(*current).group_leader_ptr()).comm())
+                // SAFETY: the leader is a live ring member (group not
+                // yet torn down at this point of do_exit).
+                let lc = core::str::from_utf8(unsafe { &*cur.group_leader_ptr() }.comm())
                     .unwrap_or("")
                     .trim_end_matches('\0');
                 crate::pr_warn!(
                     "thead-exit: tid {} comm='{}' leader='{}' code={} calls:{} fails:{}",
-                    (*current).pid(),
+                    cur.pid(),
                     nc,
                     lc,
                     exit_code,
@@ -1854,18 +1888,19 @@ pub fn do_exit(exit_code: i32) -> ! {
         // in particular) can refuse to "rescue" a task whose kernel stack
         // is live in the exit path — re-enqueueing it hands that stack to
         // a second hart (the n1-organic double-run panic).
-        (*current).set_ti_flags(
-            (*current).ti_flags()
+        cur.set_ti_flags(
+            cur.ti_flags()
                 | crate::process::task::task_flags::TaskFlags::PF_EXITING.bits(),
         );
-        let current_pid = (*current).pid();
-        let leader = (*current).group_leader_ptr();
+        let current_pid = cur.pid();
+        let leader = cur.group_leader_ptr();
         let is_leader = leader == current;
         let parent_pid = if is_leader {
-            (*current).ppid()
+            cur.ppid()
         } else {
             // Threads share the leader's real parent.
-            (*leader).ppid()
+            // SAFETY: leader resolved from the ring above; still live.
+            unsafe { (*leader).ppid() }
         };
 
         // ===== Journal handle unwind =====
@@ -1880,12 +1915,16 @@ pub fn do_exit(exit_code: i32) -> ! {
         // stack and can never reach ext4_journal_stop itself. The
         // registered dirty buffers stay in the transaction for the next
         // stopper to commit; nothing else in the handle needs release.
-        if let Some(handle_ptr) = crate::fs::ext4::namei::get_current_handle() {
-            let txn = (*handle_ptr).h_transaction.clone();
-            if let Some(txn) = txn {
-                txn.t_updates.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+        // SAFETY: the current-task handle owns this journalling slot;
+        // the calls document their per-task exclusivity.
+        unsafe {
+            if let Some(handle_ptr) = crate::fs::ext4::namei::get_current_handle() {
+                let txn = (*handle_ptr).h_transaction.clone();
+                if let Some(txn) = txn {
+                    txn.t_updates.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+                }
+                crate::fs::ext4::namei::clear_current_handle();
             }
-            crate::fs::ext4::namei::clear_current_handle();
         }
 
         // ===== Ext4 big lock force-release =====
@@ -1914,7 +1953,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // forever — when the tracee is init (ptrace11 attaches PID 1) the
         // whole guest wedges.
         {
-            crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+            crate::process::pid_hash::pid_hash_for_each_task(|t| {
                 if (*t).tracer_pid() != current_pid || (*t).pid() == current_pid {
                     return;
                 }
@@ -1941,8 +1980,8 @@ pub fn do_exit(exit_code: i32) -> ! {
         // also route through the same reaper via the ioctl.
         crate::ipc::binder::binder_task_died(
             current_pid,
-            (*current).tgid(),
-            (*current).ns_pid_local(),
+            cur.tgid(),
+            cur.ns_pid_local(),
         );
 
         // ===== Core dump (P1) =====
@@ -1951,11 +1990,13 @@ pub fn do_exit(exit_code: i32) -> ! {
         // default-action path (handle_default_signal -> do_exit_group)
         // and the direct trap paths (SIGSEGV/SIGILL/... -> do_exit).
         if exit_code < 0 && crate::process::coredump::signal_makes_core(-exit_code) {
-            crate::process::coredump::do_coredump(current, -exit_code);
+            // SAFETY: current is the exiting task (do_coredump's
+            // contract; it never runs twice for one task).
+            unsafe { crate::process::coredump::do_coredump(current, -exit_code) };
         }
 
         crate::pr_debug!("exit: pid={}, tgid={}, exit_code={}, ppid={} ({})",
-            current_pid, (*current).tgid(), exit_code, parent_pid,
+            current_pid, cur.tgid(), exit_code, parent_pid,
             if is_leader { "leader" } else { "thread" });
 
         // DFX (dbus-death hunt): every death-by-signal gets a KERN_INFO
@@ -1971,21 +2012,20 @@ pub fn do_exit(exit_code: i32) -> ! {
         if exit_code < 0
             && crate::trace::EVENT_SIGTRACE.armed()
         {
-            let comm_raw = (*current).comm();
+            let comm_raw = cur.comm();
             let comm_len = comm_raw.iter().position(|&b| b == 0).unwrap_or(comm_raw.len());
             // Sender forensics: SI_USER deaths (kill/tgkill) carry the
             // sender's pid in the queued siginfo — print it so "who killed
             // X" is answerable from the console (kernel-originated signals
             // have no sender and print si_code instead).
-            let sender = (*current)
-                .pending
+            let sender = cur.pending
                 .peek_info(-exit_code)
                 .map(|si| (si.si_pid, si.si_code))
                 .unwrap_or((0, 0));
             crate::pr_info!(
                 "SIGDEATH: pid={} tgid={} comm={:?} sig={} ppid={}{} si_pid={} si_code={:#x}",
                 current_pid,
-                (*current).tgid(),
+                cur.tgid(),
                 core::str::from_utf8(&comm_raw[..comm_len]),
                 -exit_code,
                 parent_pid,
@@ -2003,12 +2043,12 @@ pub fn do_exit(exit_code: i32) -> ! {
             taskdump_raw_line(b" code=");
             taskdump_dec(exit_code as i64 as u64);
             taskdump_raw_line(b" threads=");
-            taskdump_dec((*current).nr_threads() as u64);
+            taskdump_dec(cur.nr_threads() as u64);
             taskdump_raw_line(b"\n");
         }
 
         // Set exit code
-        (*current).set_exit_code(exit_code);
+        cur.set_exit_code(exit_code);
 
         // ===== CPU-time accounting fold =====
         // Linux semantics: a dying thread's user/system ticks fold into the
@@ -2020,19 +2060,18 @@ pub fn do_exit(exit_code: i32) -> ! {
         // fact that nobody can wait for them anymore.
         {
             use core::sync::atomic::Ordering::Relaxed;
-            let u = (*current).utime_ticks.load(Relaxed);
-            let s = (*current).stime_ticks.load(Relaxed);
+            let u = cur.utime_ticks.load(Relaxed);
+            let s = cur.stime_ticks.load(Relaxed);
             // ru_maxrss propagation (Linux signal->cmaxrss): the child's
             // resident set at exit (captured below while the mm is still
             // alive) folds into the parent's RUSAGE_CHILDREN hiwater.
             let rss_kb = {
-                let mm_rss = (*current)
-                    .address_space()
+                let mm_rss = cur.address_space()
                     .map(|mm| mm.rss())
                     .unwrap_or(0);
                 mm_rss * (crate::mm::page::PAGE_SIZE / 1024) as u64
             };
-            (*current).exit_maxrss_kb.store(rss_kb, Relaxed);
+            cur.exit_maxrss_kb.store(rss_kb, Relaxed);
             if is_leader {
                 // RUSAGE_CHILDREN folds at REAP time, not exit time
                 // (reference wait_task_zombie accumulates into the
@@ -2042,16 +2081,20 @@ pub fn do_exit(exit_code: i32) -> ! {
                 // (LTP getrusage03's pre_wait assertion). The fold lives
                 // in release_task; exit only captures exit_maxrss_kb.
             } else {
-                (*leader).utime_ticks.fetch_add(u, Relaxed);
-                (*leader).stime_ticks.fetch_add(s, Relaxed);
+                // SAFETY: the leader is alive (we are its member; the
+                // ring decrement happens below).
+                unsafe {
+                    (*leader).utime_ticks.fetch_add(u, Relaxed);
+                    (*leader).stime_ticks.fetch_add(s, Relaxed);
+                }
             }
         }
 
         // Drop any in-progress signal frame: a handler that longjmp'd out
         // left sigframe set, which blocks all further delivery including
         // SIGKILL (review H15) — clear it so the dying task stays killable.
-        (*current).sigframe = None;
-        (*current).sigframe_addr = 0;
+        cur.sigframe = None;
+        cur.sigframe_addr = 0;
 
         // ===== Robust list + clear_child_tid: BEFORE the mm ref drops =====
         // Both write into user memory and futex-wake with THIS task's mm
@@ -2086,8 +2129,9 @@ pub fn do_exit(exit_code: i32) -> ! {
         //   context, after the satp switch. SysV shm detach (nattch) runs
         //   inside MmStruct::drop — exactly once per mm, which subsumes
         //   the old strong_count==1 pre-check here (LTP shmat01 family).
-        if (*current).address_space_arc().is_some() {
-            let kernel_ppn = crate::arch::mm::mmu_init::root_page_table_ppn();
+        if cur.address_space_arc().is_some() {
+            // SAFETY: reads the boot-time root table constant.
+            let kernel_ppn = unsafe { crate::arch::mm::mmu_init::root_page_table_ppn() };
             let current_ppn = crate::arch::mm::read_satp() as u64 & 0xF_FFFF_FFFF_FFFF;
             if current_ppn != kernel_ppn {
                 // SAFETY: switching to the kernel root page table; the
@@ -2099,8 +2143,8 @@ pub fn do_exit(exit_code: i32) -> ! {
             }
         }
         let fp_t_mmdrop = if fp { crate::dfx::forkprof::now() } else { 0 };
-        (*current).set_address_space(None);
-        (*current).clear_active_mm();
+        cur.set_address_space(None);
+        cur.clear_active_mm();
         // (fork-frag lane) exit is the other natural table-churn point:
         // drain defer-freed leaf tables so the frames return before the
         // next fork's child-table allocs look for them (no-op on arches
@@ -2117,7 +2161,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::process::task::vfork_wake_parent(current);
 
         // ===== exit_files: Release file descriptor table reference =====
-        (*current).set_fdtable(None);
+        cur.set_fdtable(None);
 
         // ===== Clean up futex waiters =====
         crate::sync::futex::futex_cleanup(current);
@@ -2130,7 +2174,7 @@ pub fn do_exit(exit_code: i32) -> ! {
 
         // ===== Disarm interval timers (ITIMER_REAL/VIRTUAL/PROF) =====
         for i in 0..3 {
-            let old_id = (*current).itimer_ids[i].swap(0, core::sync::atomic::Ordering::AcqRel);
+            let old_id = cur.itimer_ids[i].swap(0, core::sync::atomic::Ordering::AcqRel);
             if old_id != 0 {
                 crate::timer::del_timer(old_id);
             }
@@ -2138,7 +2182,7 @@ pub fn do_exit(exit_code: i32) -> ! {
 
         // ===== Disarm POSIX timers =====
         {
-            let mut timers = (*current).posix_timers.lock();
+            let mut timers = cur.posix_timers.lock();
             for pt in timers.drain(..) {
                 if pt.kernel_timer_id != 0 {
                     crate::timer::del_timer(pt.kernel_timer_id);
@@ -2170,8 +2214,8 @@ pub fn do_exit(exit_code: i32) -> ! {
             // ---- Non-leader thread: deferred release, never a ZOMBIE ----
             // Our mm Arc reference is already dropped above; other members
             // keep the address space alive.
-            (*current).signal = None; // shared with the leader; drop our ref
-            (*current).set_fs(None); // CLONE_FS-shared; drop our ref
+            cur.signal = None; // shared with the leader; drop our ref
+            cur.set_fs(None); // CLONE_FS-shared; drop our ref
 
             // Park on the leader's dead list BEFORE leaving the ring.
             // Ordering matters: nr_threads hits 1 in thread_group_leave,
@@ -2186,7 +2230,8 @@ pub fn do_exit(exit_code: i32) -> ! {
             // still linked in its ring — it cannot be mid-release (its
             // release_task waits for ring members to be DEAD first).
             if !leader.is_null() {
-                (*leader).dead_threads.lock().push(current);
+                // SAFETY: the leader is alive; the list is lock-guarded.
+                unsafe { (*leader).dead_threads.lock().push(current) };
             }
 
             // Leave the ring (decrements the leader's nr_threads) — AFTER
@@ -2226,8 +2271,8 @@ pub fn do_exit(exit_code: i32) -> ! {
             // final schedule.
             crate::interrupt::preempt::preempt_count_add(1);
             // Final state: DEAD (not ZOMBIE — wait4 never sees threads).
-            (*current).set_state(TaskState::new(TaskState::DEAD));
-            crate::sched::dequeue_task(&*current);
+            cur.set_state(TaskState::new(TaskState::DEAD));
+            crate::sched::dequeue_task(cur);
             crate::interrupt::preempt::preempt_count_sub(1);
 
             // ===== do_task_dead: Final schedule, never returns =====
@@ -2252,7 +2297,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // If group members are still alive (exit() from the leader, or
         // exit_group), kill them and wait for the drain before tearing
         // down the shared-mm-dependent state any further.
-        if (*current).nr_threads() > 1 {
+        if cur.nr_threads() > 1 {
             kill_other_threads(current);
             // NOT killable: an exiting leader cannot unwind, and the
             // shared-mm teardown below requires the drain (see the
@@ -2269,8 +2314,8 @@ pub fn do_exit(exit_code: i32) -> ! {
         // init). Kernel-origin SIGKILL pierces the unkillable-init rule in
         // do_signal (the SEND_SIG_PRIV force exception), so nested
         // container inits die too.
-        if (*current).ns_pid.is_some() && (*current).ns_local_pid == 1 {
-            let dying_ns = (*current).ns_pid.clone();
+        if cur.ns_pid.is_some() && cur.ns_local_pid == 1 {
+            let dying_ns = cur.ns_pid.clone();
             // gdm bring-up r9/r10: a silent mass SIGKILL took out the
             // whole daemon set (dbus, upowerd, accounts, tailer, sink,
             // polkitd, gdm3) with ZERO prints at any loglevel and no
@@ -2279,14 +2324,14 @@ pub fn do_exit(exit_code: i32) -> ! {
             // until this is root-caused.
             // SAFETY: current is the raw pointer to the calling task,
             // valid because we are it.
-            let ccomm = unsafe { alloc::string::String::from((*current).comm_str()) };
+            let ccomm = unsafe { alloc::string::String::from(cur.comm_str()) };
             let ns_addr = dying_ns
                 .as_ref()
                 .map(|d| alloc::sync::Arc::as_ref(d) as *const _ as usize)
                 .unwrap_or(0);
             let mut victims: alloc::vec::Vec<(u32, alloc::string::String)> =
                 alloc::vec::Vec::new();
-            crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+            crate::process::pid_hash::pid_hash_for_each_task(|task| {
                 let t = &*task;
                 if t.pid() == current_pid {
                     return;
@@ -2347,10 +2392,10 @@ pub fn do_exit(exit_code: i32) -> ! {
         let fp_t_notify = if fp { crate::dfx::forkprof::now() } else { 0 };
         crate::interrupt::preempt::preempt_count_add(1);
         // Set process state to Zombie
-        (*current).set_state(TaskState::new(TaskState::ZOMBIE));
+        cur.set_state(TaskState::new(TaskState::ZOMBIE));
 
         // Dequeue from global run queue
-        crate::sched::dequeue_task(&*current);
+        crate::sched::dequeue_task(cur);
 
         // pidfd exit notification: every pidfd poller targeting this
         // thread group must observe EPOLLIN now (the reference wakes the
@@ -2386,7 +2431,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // notify would be noise) — skip; Some(p) = notify p (whether or
         // not it differs from the captured pid — same pid is the
         // identity case).
-        let notify_parent: u32 = match (*current).parent_ptr() {
+        let notify_parent: u32 = match cur.parent_ptr() {
             Some(pp) if Task::is_plausible_task_ptr(pp) => unsafe { (*pp).pid() },
             _ => 0,
         };
@@ -2405,9 +2450,9 @@ pub fn do_exit(exit_code: i32) -> ! {
                 current_pid,
                 exit_code,
                 notify_parent,
-                (*current).comm(),
-                (*current).last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed),
-                (*current).last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed),
+                cur.comm(),
+                cur.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed),
+                cur.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed),
             );
         }
         if fp {
@@ -3123,22 +3168,23 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
         }
     }
 
-    // SAFETY: current is the calling task's raw pointer, valid throughout the wait loop.
-    // The task sleeps via schedule() in INTERRUPTIBLE state so it won't be freed.
-    unsafe {
-        let current = match crate::sched::current() {
-            Some(c) => c as *mut Task,
-            None => return Err(errno::Errno::NoChild.as_neg_i32()),
-        };
+    // current is the calling task, valid throughout the wait loop (the
+    // task sleeps via schedule() in INTERRUPTIBLE state so it won't be
+    // freed). One consolidated reference; raw uses re-derive the pointer.
+    let cur = match crate::sched::current() {
+        Some(c) => c,
+        None => return Err(errno::Errno::NoChild.as_neg_i32()),
+    };
+    let current: *mut Task = cur;
 
-        let current_pid = (*current).pid();
+    let current_pid = cur.pid();
 
-        // If current is idle task (PID 0), no real process is running
-        if current_pid == 0 {
-            return Err(errno::Errno::NoChild.as_neg_i32());
-        }
+    // If current is idle task (PID 0), no real process is running
+    if current_pid == 0 {
+        return Err(errno::Errno::NoChild.as_neg_i32());
+    }
 
-        let caller_pgid = (*current).pgid();
+    let caller_pgid = cur.pgid();
 
         loop {
             let mut found_child = false;
@@ -3153,8 +3199,10 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
             // reaps children the main thread spawned). Threads are never
             // on these lists — only fork()/clone-without-CLONE_THREAD
             // products are.
-            (*current).for_each_group_child(|child_ptr| {
-                let child = &*child_ptr;
+            cur.for_each_group_child(|child_ptr| {
+                // SAFETY: the walker hands out children linked under the
+                // tree lock (valid for the closure body).
+                let child = unsafe { &*child_ptr };
 
                 if !wait_pid_matches(child, pid, caller_pgid) {
                     return;
@@ -3194,7 +3242,9 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
             // If found zombie child, reap it
             if let Some(child_ptr) = zombie_child {
-                let child = &*child_ptr;
+                // SAFETY: claimed under the tree lock (claim_child_locked)
+                // — this caller owns the reap.
+                let child = unsafe { &*child_ptr };
                 let child_pid = child.pid();
                 let raw_exit = child.exit_code();
 
@@ -3215,13 +3265,9 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     s
                 };
 
-                // Write exit status safely using copy_to_user
+                // Write exit status through the typed exception-table path.
                 if !status_ptr.is_null() {
-                    let _uncopied = crate::arch::uaccess::copy_to_user(
-                        status_ptr as *mut u8,
-                        &status as *const i32 as *const u8,
-                        core::mem::size_of::<i32>()
-                    );
+                    let _uncopied = crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status);
                 }
 
                 // Release task resources (kernel stack, Arc refs, PID)
@@ -3239,7 +3285,8 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
             // If found stopped child (WUNTRACED), report it
             if let Some(child_ptr) = stopped_child {
-                let child = &*child_ptr;
+                // SAFETY: selected under the tree lock; still linked.
+                let child = unsafe { &*child_ptr };
                 let child_pid = child.pid();
                 let stop_sig = child.stop_signal();
 
@@ -3248,11 +3295,8 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
                 // Write status safely using copy_to_user
                 if !status_ptr.is_null() {
-                    let _uncopied = crate::arch::uaccess::copy_to_user(
-                        status_ptr as *mut u8,
-                        &status as *const i32 as *const u8,
-                        core::mem::size_of::<i32>()
-                    );
+                    let _uncopied =
+                        crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status);
                 }
 
                 // Mark this stop event as reported (only report once)
@@ -3271,7 +3315,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
             let mut found_tracee = false;
             {
                 let mut tracee_stop: Option<*mut Task> = None;
-                crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+                crate::process::pid_hash::pid_hash_for_each_task(|t| {
                     if tracee_stop.is_some() {
                         return;
                     }
@@ -3289,17 +3333,18 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     }
                 });
                 if let Some(t) = tracee_stop {
-                    let child_pid = (*t).pid();
-                    let stop_sig = (*t).stop_signal();
+                    // SAFETY: `t` was found by the pid-hash walk under the
+                    // same scan discipline (a tracee of ours, pinned by
+                    // the hash's RCU section).
+                    let ts = unsafe { &*t };
+                    let child_pid = ts.pid();
+                    let stop_sig = ts.stop_signal();
                     let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
                     if !status_ptr.is_null() {
-                        let _uncopied = crate::arch::uaccess::copy_to_user(
-                            status_ptr as *mut u8,
-                            &status as *const i32 as *const u8,
-                            core::mem::size_of::<i32>()
-                        );
+                        let _uncopied =
+                            crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status);
                     }
-                    (*t).stop_reported.store(true, core::sync::atomic::Ordering::Release);
+                    ts.stop_reported.store(true, core::sync::atomic::Ordering::Release);
                     return Ok(child_pid);
                 }
             }
@@ -3310,7 +3355,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // Prevents lost-wakeup race where child exits between
                 // add() and set_state(), marking the entry woken but
                 // wake_up_process skips the actual wake (task still RUNNING).
-                (*current).wait_chldexit.prepare_to_wait(current, false, true);
+                cur.wait_chldexit.prepare_to_wait(current, false, true);
 
                 // Recheck after prepare_to_wait (waker may have fired
                 // between the initial scan and prepare_to_wait — a wake of
@@ -3324,26 +3369,27 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // wait slept forever (LTP ptrace05 wedge family).
                 {
                     let mut need_rescan = false;
-                    (*current).for_each_group_child(|child_ptr| {
+                    cur.for_each_group_child(|child_ptr| {
                         if need_rescan {
                             return;
                         }
-                        if !wait_pid_matches(&*child_ptr, pid, caller_pgid) {
+                        // SAFETY: tree-locked child from the walker.
+                        let c = unsafe { &*child_ptr };
+                        if !wait_pid_matches(c, pid, caller_pgid) {
                             return;
                         }
-                        let st = (*child_ptr).state();
+                        let st = c.state();
                         if st == TaskState::new(TaskState::ZOMBIE) {
                             need_rescan = true;
                         } else if st == TaskState::new(TaskState::STOPPED)
-                            && !(*child_ptr).stop_reported.load(core::sync::atomic::Ordering::Acquire)
-                            && (options & WUNTRACED != 0
-                                || (*child_ptr).tracer_pid() == current_pid)
+                            && !c.stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                            && (options & WUNTRACED != 0 || c.tracer_pid() == current_pid)
                         {
                             need_rescan = true;
                         }
                     });
                     if !need_rescan {
-                        crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+                        crate::process::pid_hash::pid_hash_for_each_task(|t| {
                             if need_rescan {
                                 return;
                             }
@@ -3361,12 +3407,12 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                         });
                     }
                     if need_rescan {
-                        (*current).wait_chldexit.finish_wait(current);
+                        cur.wait_chldexit.finish_wait(current);
                         // The child's wake_up() may have raced our
                         // prepare_to_wait and enqueued us; we are going to
                         // keep running on this CPU — take ourselves back
                         // off the queue (review NEW-C2).
-                        crate::sched::dequeue_if_enqueued(&*current);
+                        crate::sched::dequeue_if_enqueued(cur);
                         continue; // re-enter loop to report/reap
                     }
                 }
@@ -3374,8 +3420,8 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // Check for pending signals before sleeping
                 use crate::signal;
                 if signal::signal_pending() {
-                    (*current).wait_chldexit.finish_wait(current);
-                    crate::sched::dequeue_if_enqueued(&*current);
+                    cur.wait_chldexit.finish_wait(current);
+                    crate::sched::dequeue_if_enqueued(cur);
                     // ERESTARTSYS, not EINTR: the signal-delivery path
                     // restarts the wait when the handler is SA_RESTART
                     // (Linux semantics — glib's SIGCHLD handler is).
@@ -3403,13 +3449,12 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
                 // After wakeup: state is RUNNING (set by wake_up_process).
                 // Clean up waitqueue entry before next iteration.
-                (*current).wait_chldexit.finish_wait(current);
+                cur.wait_chldexit.finish_wait(current);
             } else {
                 // No child processes at all
                 return Err(errno::Errno::NoChild.as_neg_i32());
             }
         }
-    }
 }
 
 /// Non-blocking wait for child process
@@ -3427,21 +3472,22 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32> {
     const WUNTRACED: i32 = 0x00000002;
 
-    // SAFETY: current is the calling task's raw pointer, valid throughout this call.
-    unsafe {
-        let current = match crate::sched::current() {
-            Some(c) => c as *mut Task,
-            None => return Err(errno::Errno::NoChild.as_neg_i32()),
-        };
+    // current is the calling task, valid throughout this call; one
+    // consolidated reference (raw uses re-derive the pointer).
+    let cur = match crate::sched::current() {
+        Some(c) => c,
+        None => return Err(errno::Errno::NoChild.as_neg_i32()),
+    };
+    let current: *mut Task = cur;
 
-        let current_pid = (*current).pid();
+    let current_pid = cur.pid();
 
-        // If current is idle task (PID 0), no real process is running
-        if current_pid == 0 {
-            return Err(errno::Errno::NoChild.as_neg_i32());
-        }
+    // If current is idle task (PID 0), no real process is running
+    if current_pid == 0 {
+        return Err(errno::Errno::NoChild.as_neg_i32());
+    }
 
-        let caller_pgid = (*current).pgid();
+    let caller_pgid = cur.pgid();
 
         // W4SPIN entry heartbeat (69th): if a single wait4 call hangs
         // inside the group-child walk (tree-lock spin / corrupt list),
@@ -3473,8 +3519,9 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         // zombie / WUNTRACED stop — do NOT modify the list during
         // iteration. (Group-wide: glib's gmain worker thread polls
         // waitpid(WNOHANG) for children the main thread spawned.)
-        (*current).for_each_group_child(|child_ptr| {
-            let child = &*child_ptr;
+        cur.for_each_group_child(|child_ptr| {
+            // SAFETY: selected/claimed under the tree lock; still linked.
+            let child = unsafe { &*child_ptr };
 
             if !wait_pid_matches(child, pid, caller_pgid) {
                 return;
@@ -3506,7 +3553,8 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         });
 
         if let Some(child_ptr) = zombie_ptr {
-            let child = &*child_ptr;
+            // SAFETY: selected/claimed under the tree lock; still linked.
+            let child = unsafe { &*child_ptr };
             let child_pid = child.pid();
             // W4SPIN (69th, rux:pid1spin (retired dfx=pid1spin)): init's SIGCHLD handler loops
             // `while (waitpid(-1, &st, WNOHANG) > 0);` — a positive return
@@ -3539,7 +3587,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
                     // group children under the tree lock (the walk in
                     // this function just ran under the same lock).
                     unsafe {
-                        (*current).for_each_group_child(|cp| {
+                        cur.for_each_group_child(|cp| {
                             let c = &*cp;
                             let st = c.state().bits();
                             if line.len() < 700 {
@@ -3570,11 +3618,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
             };
 
             if !status_ptr.is_null() {
-                if crate::arch::uaccess::copy_to_user(
-                    status_ptr as *mut u8,
-                    &status as *const i32 as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) != 0 {
+                if crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status) != 0 {
                     // EFAULT: the caller passed an unwritable status
                     // pointer. The zombie is already CLAIMED (unlinked),
                     // so it cannot be left for a later wait — release it
@@ -3591,16 +3635,13 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         }
 
         if let Some(child_ptr) = stopped_ptr {
-            let child = &*child_ptr;
+            // SAFETY: selected/claimed under the tree lock; still linked.
+            let child = unsafe { &*child_ptr };
             let child_pid = child.pid();
             let stop_sig = child.stop_signal();
             let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
             if !status_ptr.is_null() {
-                if crate::arch::uaccess::copy_to_user(
-                    status_ptr as *mut u8,
-                    &status as *const i32 as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) != 0 {
+                if crate::arch::uaccess_safe::copy_out_t(status_ptr as usize, &status) != 0 {
                     return Err(crate::errno::Errno::BadAddress.as_neg_i32());
                 }
             }
@@ -3613,7 +3654,6 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         } else {
             Err(errno::Errno::NoChild.as_neg_i32())
         }
-    }
 }
 
 /// waitid options (match Linux wait.h)
@@ -3643,24 +3683,24 @@ const CLD_CONTINUED: i32 = 6;
 /// siginfo_t untouched.
 // SAFETY: Caller must ensure infop points to a valid, writable user buffer of at
 // least 128 bytes. copy_to_user handles user-space access safely.
-unsafe fn write_siginfo(
+fn write_siginfo(
     infop: *mut u8,
     si_code: i32,
     si_pid: u32,
     si_uid: u32,
     si_status: i32,
 ) {
-    use crate::arch::uaccess::copy_to_user;
-    let base = infop;
+    // Every field goes through the typed exception-table family.
+    use crate::arch::uaccess_safe as ua;
+    let base = infop as usize;
 
-    let signo = 17i32; // SIGCHLD
-    let _ = copy_to_user(base, &signo as *const i32 as *const u8, 4);
-    let _ = copy_to_user(base.add(4), &0i32 as *const i32 as *const u8, 4);
-    let _ = copy_to_user(base.add(8), &si_code as *const i32 as *const u8, 4);
+    let _ = ua::write_user::<i32>(base, 17); // SIGCHLD
+    let _ = ua::write_user::<i32>(base + 4, 0);
+    let _ = ua::write_user::<i32>(base + 8, si_code);
     // offset 12: padding
-    let _ = copy_to_user(base.add(16), &si_pid as *const u32 as *const u8, 4);
-    let _ = copy_to_user(base.add(20), &si_uid as *const u32 as *const u8, 4);
-    let _ = copy_to_user(base.add(24), &si_status as *const i32 as *const u8, 4);
+    let _ = ua::write_user::<u32>(base + 16, si_pid);
+    let _ = ua::write_user::<u32>(base + 20, si_uid);
+    let _ = ua::write_user::<i32>(base + 24, si_status);
 }
 
 /// Blocking waitid: wait for child process state change
@@ -3690,16 +3730,17 @@ pub fn do_waitid(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
-    // SAFETY: current is the calling task's raw pointer, valid throughout the wait loop.
-    unsafe {
-        let current = match crate::sched::current() {
-            Some(c) => c as *mut Task,
-            None => return Err(errno::Errno::NoChild.as_neg_i32()),
-        };
+    // current is the calling task, valid throughout the wait loop; one
+    // consolidated reference (raw uses re-derive the pointer).
+    let cur = match crate::sched::current() {
+        Some(c) => c,
+        None => return Err(errno::Errno::NoChild.as_neg_i32()),
+    };
+    let current: *mut Task = cur;
 
-        if (*current).pid() == 0 {
-            return Err(errno::Errno::NoChild.as_neg_i32());
-        }
+    if cur.pid() == 0 {
+        return Err(errno::Errno::NoChild.as_neg_i32());
+    }
 
         loop {
             let mut found_child = false;
@@ -3709,8 +3750,9 @@ pub fn do_waitid(
 
             // Group-wide scan (same as do_wait): any thread of the
             // process may waitid for any member's child.
-            (*current).for_each_group_child(|child_ptr| {
-                let child = &*child_ptr;
+            cur.for_each_group_child(|child_ptr| {
+                // SAFETY: the walker hands out tree-locked children.
+                let child = unsafe { &*child_ptr };
 
                 // idtype filter
                 if idtype == P_PID && child.pid() != id as u32 {
@@ -3789,7 +3831,9 @@ pub fn do_waitid(
             });
 
             if let Some(child_ptr) = result_child {
-                let child = &*child_ptr;
+                // SAFETY: selected (and zombie cases claimed) under the
+                // tree lock; this caller owns the report.
+                let child = unsafe { &*child_ptr };
                 let child_pid = child.pid();
                 let child_uid = child.cred().uid;
 
@@ -3828,7 +3872,7 @@ pub fn do_waitid(
                 // Mark the stop/continue event reported (one-shot,
                 // wait4-consistent)
                 if (result_kind == 1 || result_kind == 2) && options & WNOWAIT == 0 {
-                    (*child_ptr).stop_reported.store(true, core::sync::atomic::Ordering::Release);
+                    child.stop_reported.store(true, core::sync::atomic::Ordering::Release);
                 }
 
                 return Ok(true);
@@ -3842,7 +3886,7 @@ pub fn do_waitid(
                 }
 
                 // Atomically add to waitqueue AND set INTERRUPTIBLE.
-                (*current).wait_chldexit.prepare_to_wait(current, false, true);
+                cur.wait_chldexit.prepare_to_wait(current, false, true);
 
                 // R9-10: re-check for a zombie AFTER registration (do_wait
                 // has this; the child's deferred notify may have fired
@@ -3855,28 +3899,30 @@ pub fn do_waitid(
                 // kernel-space busy hang.
                 {
                     let mut found_zombie = false;
-                    (*current).for_each_group_child(|child_ptr| {
-                        if idtype == P_PID && (*child_ptr).pid() != id as u32 {
+                    cur.for_each_group_child(|child_ptr| {
+                        // SAFETY: tree-locked child from the walker.
+                        let c = unsafe { &*child_ptr };
+                        if idtype == P_PID && c.pid() != id as u32 {
                             return;
                         }
-                        if idtype == P_PGID && (*child_ptr).pgid() != id as u32 {
+                        if idtype == P_PGID && c.pgid() != id as u32 {
                             return;
                         }
-                        if (*child_ptr).state() == TaskState::new(TaskState::ZOMBIE) {
+                        if c.state() == TaskState::new(TaskState::ZOMBIE) {
                             found_zombie = true;
                         }
                     });
                     if found_zombie {
-                        (*current).wait_chldexit.finish_wait(current);
-                        crate::sched::dequeue_if_enqueued(&*current);
+                        cur.wait_chldexit.finish_wait(current);
+                        crate::sched::dequeue_if_enqueued(cur);
                         continue;
                     }
                 }
 
                 if crate::signal::signal_pending() {
-                    (*current).wait_chldexit.finish_wait(current);
+                    cur.wait_chldexit.finish_wait(current);
                     // R8-5 (NEW-C2): undo the signal's concurrent enqueue.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::dequeue_task(cur);
                     // ERESTARTSYS, not EINTR: the signal-delivery path
                     // restarts the wait when the handler is SA_RESTART.
                     return Err(ERESTARTSYS);
@@ -3890,10 +3936,9 @@ pub fn do_waitid(
                 crate::sched::schedule();
 
                 // After wakeup: state is RUNNING (set by wake_up_process).
-                (*current).wait_chldexit.finish_wait(current);
+                cur.wait_chldexit.finish_wait(current);
             } else {
                 return Err(errno::Errno::NoChild.as_neg_i32());
             }
         }
-    }
 }

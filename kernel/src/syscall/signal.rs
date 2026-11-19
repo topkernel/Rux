@@ -260,17 +260,18 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
                 sa_restorer: old_action.sa_restorer,
                 sa_mask: old_action.sa_mask,
             };
-            let src = &user_action as *const SigActionUser as *const u8;
+            // SAFETY: a byte view of a fully-initialized local struct.
+            let src = unsafe {
+                core::slice::from_raw_parts(
+                    &user_action as *const SigActionUser as *const u8,
+                    core::mem::size_of::<SigActionUser>(),
+                )
+            };
             let uncopied = crate::arch::uaccess_safe::UserSlice::new(
                 oldact_ptr as usize,
                 core::mem::size_of::<SigActionUser>(),
             )
-            .copy_out(unsafe {
-                core::slice::from_raw_parts(
-                    src,
-                    core::mem::size_of::<SigActionUser>(),
-                )
-            });
+            .copy_out(src);
             if uncopied > 0 {
                 return -(errno::EFAULT as i64);
             }
@@ -473,10 +474,12 @@ pub fn sys_sigpending(args: SyscallArgs) -> i64 {
         None => return -(errno::EPERM as i64),
     };
 
-    // SAFETY: current is the running task's Task pointer; set_ptr validated with access_ok(8).
-    unsafe {
-        let pending = (*current).pending.get_all();
-        let blocked = (*current).sigmask;
+    // current is the running task's Task pointer; set_ptr validated with access_ok(8).
+    {
+        // SAFETY: current is the running task.
+        let cur = unsafe { &*current };
+        let pending = cur.pending.get_all();
+        let blocked = cur.sigmask;
         // R7-D6: POSIX/Linux sigpending returns pending AND blocked (the
         // complement was written before — a blocked-and-pending signal
         // read as not-pending, breaking sigwait-style polling).
@@ -484,7 +487,7 @@ pub fn sys_sigpending(args: SyscallArgs) -> i64 {
 
         // Exception-table write (the old naked store could not produce
         // EFAULT on a bad page — it took a kernel fault instead).
-        if !crate::arch::uaccess::put_user(set_ptr, pending_and_blocked) {
+        if !crate::arch::uaccess_safe::write_user(set_ptr as usize, pending_and_blocked) {
             return -(errno::EFAULT as i64);
         }
     }
@@ -609,7 +612,7 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
     }
 
     // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
-    let new_mask = match unsafe { crate::arch::uaccess::get_user(mask_ptr) } {
+    let new_mask = match crate::arch::uaccess_safe::read_user::<u64>(mask_ptr as usize) {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
     };
@@ -742,16 +745,17 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
     }
 
     // Find target task (also needed for the sig==0 permission probe)
-    // SAFETY: find_task_by_pid returns null if tid not found; result checked below.
+    // find_task_by_pid returns null if tid not found; result checked below.
     let task = unsafe { crate::sched::find_task_by_pid(tid) };
     if task.is_null() {
         return -(errno::ESRCH as i64);
     }
 
     // Permission check for every signal, including the sig==0 probe
-    // (Linux do_tkill → check_kill_permission).
-    // SAFETY: task is non-null and stable while referenced.
-    if !unsafe { crate::security::can_send_signal((*task).cred()) } {
+    // (Linux do_tkill → check_kill_permission). Task is non-null and
+    // stable while referenced (syscall-context short read).
+    // SAFETY: non-null checked above; short read contract.
+    if !crate::security::can_send_signal(unsafe { &*task }.cred()) {
         return -(errno::EPERM as i64);
     }
 
