@@ -153,8 +153,35 @@ impl Ext4FileSystem {
         }
 
         // Create Journal instance
-        // j_last = j_first + j_maxlen (one past the last usable journal block)
-        let j_last = (j_first as u64) + (j_maxlen as u64);
+        //
+        // LOG AREA GEOMETRY (journal-life fix, 2026-11-19): the usable log
+        // area is [s_first, s_maxlen) — the reference reads the two fields
+        // side by side (fs/jbd2/journal.c journal_reset:
+        // `journal->j_first = be32_to_cpu(sb->s_first);
+        //   journal->j_last = be32_to_cpu(sb->s_maxlen);`).
+        // s_maxlen counts the journal inode's TOTAL blocks, superblock
+        // block included: a 4 MiB journal inode has logical 0..1023 with
+        // logical 0 the superblock, so the log area is [1, 1024) = 1023
+        // blocks. The old `j_last = j_first + j_maxlen` (= 1025 here)
+        // claimed logical block 1024 — one block BEYOND the journal inode
+        // — as usable log: as j_head marched forward under churn (write-
+        // through commits keep tail==head, so the ring never rewinds
+        // early), the first commit whose span crossed 1024 resolved
+        // logical 1024 through Journal::jmap, which has no extent for it
+        // (the map covers exactly the inode), returned 0 (hole) and the
+        // commit aborted the journal with EIO (~83 files x ~12 journal
+        // blocks ~= 1023: the deterministic "stops persisting after ~83
+        // files" face; every later op failed EROFS while error-code sign
+        // bugs made userspace see garbage non-error returns).
+        let j_last = j_maxlen as u64;
+        if j_first as u64 >= j_last {
+            // Degenerate on-disk geometry (s_first >= s_maxlen): the log
+            // area would be empty. Disable journaling rather than write
+            // through a zero-length ring.
+            crate::print_status("ext4", "journal log area empty, disabled", false);
+            bio::brelse(j_sb_bh);
+            return Ok(());
+        }
         let mut journal = jbd2::Journal::new(j_blocksize, j_maxlen);
         journal.j_feature_incompat
             .store(j_features, core::sync::atomic::Ordering::SeqCst);
@@ -165,15 +192,24 @@ impl Ext4FileSystem {
 
         // When journal is clean (s_start == 0), head/tail start at j_first,
         // not 0 — block 0 is the journal superblock and must not be overwritten.
-        let log_head = if j_start == 0 { j_first as u64 } else { j_start as u64 };
+        // A stale s_start beyond the (now correctly sized) log area clamps
+        // to j_first: recovery treats it as an empty log.
+        let log_head = if j_start == 0 || j_start as u64 >= j_last {
+            j_first as u64
+        } else {
+            j_start as u64
+        };
         journal.j_head.store(log_head, core::sync::atomic::Ordering::SeqCst);
         journal.j_tail.store(log_head, core::sync::atomic::Ordering::SeqCst);
         journal.j_tail_sequence.store(j_sequence, core::sync::atomic::Ordering::SeqCst);
         journal.j_transaction_sequence.store(j_sequence, core::sync::atomic::Ordering::SeqCst);
         journal.j_commit_sequence.store(j_sequence.saturating_sub(1), core::sync::atomic::Ordering::SeqCst);
 
-        // Free space = total log area minus used
-        journal.j_free.store(j_last - log_head, core::sync::atomic::Ordering::SeqCst);
+        // Free space: head == tail at mount (the whole ring is free no
+        // matter WHERE in the ring the head sits — the old
+        // `j_last - log_head` understated free space on a mid-ring crash
+        // recovery, where s_start lands mid-ring with an empty log).
+        journal.j_free.store(j_last - j_first as u64, core::sync::atomic::Ordering::SeqCst);
 
         // JOURNAL BLOCK MAP (ext4-persist P0 fix): e2fsprogs lays the
         // journal inode out as MULTIPLE extents with physical holes
