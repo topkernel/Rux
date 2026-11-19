@@ -5460,20 +5460,14 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // freed-page detector.
         let pid = (*task).pid();
         if pid == TASK_POISON {
-            // R34: SBI direct write — this probe fires while the GRQ lock is
-            // held; console::putchar would take the UART lock under GRQ
-            // (same discipline as RawSpinlock::deadlock_warn and the buddy
-            // double-free tripwire).
-            const MSG: &[u8] = b"ENQ-POISONED-TASK dropped pid=0x";
-            for &b in MSG { crate::dfx::taskdump::putc_brief(b); }
-            let mut sh = 64;
-            let v = pid as u64;
-            while sh > 0 {
-                sh -= 4;
-                let nb = ((v >> sh) & 0xF) as u8;
-                crate::dfx::taskdump::putc_brief(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-            }
-            crate::dfx::taskdump::putc_brief(b'\n');
+            // Rule 1 (grq-lock-1st): NO print under the GRQ — the event
+            // ring carries the evidence; the tick drain prints it.
+            crate::sched::sched_ev::sched_ev(
+                crate::sched::sched_ev::EV_ENQ_POISONED,
+                pid,
+                0,
+                0,
+            );
             return false;
         }
     }
@@ -5492,10 +5486,14 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
     {
         let st = (*task).state();
         if st.is_dead() {
-            // R34: SBI direct write — under the GRQ lock (was console::putchar,
-            // which nests the UART lock inside GRQ).
-            const MSG: &[u8] = b"ENQ-DEAD-TASK dropped\n";
-            for &b in MSG { crate::dfx::taskdump::putc_brief(b); }
+            // Rule 1: event ring, not the console (was console::putchar
+            // under GRQ).
+            crate::sched::sched_ev::sched_ev(
+                crate::sched::sched_ev::EV_ENQ_DEAD,
+                (*task).pid(),
+                st.bits() as u64,
+                0,
+            );
             return false;
         }
     }
@@ -5550,58 +5548,20 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
                 arm_dl_replenish_timer(task);
                 // R82 (silent-refusal attribution, the sc252/sc253
                 // wake-leak hunt): this branch is the ONLY wake refusal
-                // for a sleeping task that prints nothing anywhere. If
+                // for a sleeping task that records nothing anywhere. If
                 // the replenish timer keeps failing to re-link (timer
                 // table full / timer lost), the task parks forever in
                 // exactly the census shape (INTERRUPTIBLE ∧ unlinked ∧
-                // slotless, "kicked Nx" forever). Name each refusal
-                // live, rate-limited. R34 discipline: GRQ is held, so
-                // the report uses the direct console path (no printk
-                // wake under GRQ).
-                static DLDEF_N: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if DLDEF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
-                    use crate::dfx::taskdump::putc_brief as putchar;
-                    fn pdec(mut v: u64) {
-                        use crate::dfx::taskdump::putc_brief as putchar;
-                        let mut buf = [0u8; 20];
-                        let mut n = 0;
-                        if v == 0 {
-                            putchar(b'0');
-                            return;
-                        }
-                        while v > 0 {
-                            buf[n] = b'0' + (v % 10) as u8;
-                            v /= 10;
-                            n += 1;
-                        }
-                        while n > 0 {
-                            n -= 1;
-                            putchar(buf[n]);
-                        }
-                    }
-                    for &b in b"DL-ENQ-DEFERRED pid=" {
-                        putchar(b);
-                    }
-                    pdec((*task).pid() as u64);
-                    for &b in b" delta_ms=" {
-                        putchar(b);
-                    }
-                    pdec((deadline.saturating_sub(now)) / 1_000_000);
-                    let id = dl.replenish_timer.load(core::sync::atomic::Ordering::Acquire);
-                    for &b in b" timer=" {
-                        putchar(b);
-                    }
-                    pdec(id);
-                    let tail: &[u8] = if id != 0 && crate::timer::timer_pending(id) {
-                        b" pending\n"
-                    } else {
-                        b" LOST\n"
-                    };
-                    for &b in tail {
-                        putchar(b);
-                    }
-                }
+                // slotless, "kicked Nx" forever). Rule 1 (grq-lock-1st):
+                // the GRQ is held — record the event, the tick drain
+                // prints it (a = delta to deadline in ms, b = timer id;
+                // b == 0 with a live deadline is the LOST-timer shape).
+                crate::sched::sched_ev::sched_ev(
+                    crate::sched::sched_ev::EV_DL_ENQ_DEFERRED,
+                    (*task).pid(),
+                    (deadline.saturating_sub(now)) / 1_000_000,
+                    dl.replenish_timer.load(core::sync::atomic::Ordering::Acquire) as u64,
+                );
                 return false;
             }
             // Drop any stale timer so a late wake cannot double-enqueue.
@@ -6441,38 +6401,13 @@ pub fn wake_up_enqueue_opt(
                         crate::process::task::PICK_PICKED,
                         core::sync::atomic::Ordering::Release,
                     );
-                    // Budgeted report (direct console — the GRQ is held
-                    // and printk may re-enter the scheduler).
-                    {
-                        use crate::dfx::taskdump::putc_brief as putchar;
-                        fn pd(mut v: u64) {
-                            use crate::dfx::taskdump::putc_brief as p;
-                            let mut buf = [0u8; 20];
-                            let mut n = 0;
-                            while v > 0 {
-                                buf[n] = b'0' + (v % 10) as u8;
-                                v /= 10;
-                                n += 1;
-                            }
-                            if n == 0 {
-                                p(b'0');
-                            }
-                            while n > 0 {
-                                n -= 1;
-                                p(buf[n]);
-                            }
-                        }
-                        static S_N: core::sync::atomic::AtomicU32 =
-                            core::sync::atomic::AtomicU32::new(0);
-                        if S_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                            const M: &[u8] = b"\nR119-STALE-LIVE-MARK-CLEARED pid=";
-                            for &b in M {
-                                putchar(b);
-                            }
-                            pd((*task).pid() as u64);
-                            putchar(b'\n');
-                        }
-                    }
+                    // Rule 1 (grq-lock-1st): event ring, not the console.
+                    crate::sched::sched_ev::sched_ev(
+                        crate::sched::sched_ev::EV_R119_STALE_LIVE,
+                        (*task).pid(),
+                        0,
+                        0,
+                    );
                 }
             }
             // Not RUNNING-and-unowned: ZOMBIE/DEAD/TASK_NEW, already linked,
@@ -6924,10 +6859,12 @@ pub fn wake_up_enqueue_opt(
                     // is the frozen exec clock, so the threshold matures
                     // at ANY observer cadence — the old [50,60]-jiffy
                     // window could never open for 15-s-apart rekicks.)
-                    r56_print_pid(
-                        b"R80-LIVE-PHANTOM-CLEARED pid=",
+                    // Rule 1 (grq-lock-1st): event ring, not the console.
+                    crate::sched::sched_ev::sched_ev(
+                        crate::sched::sched_ev::EV_R80_LIVE_PHANTOM,
                         (*task).pid(),
-                        b"\n",
+                        0,
+                        0,
                     );
                     // Fall through to the release + insert below.
                 } else if ps == crate::process::task::PICK_PICKED
@@ -6937,21 +6874,16 @@ pub fn wake_up_enqueue_opt(
                     // the task right now) — not healable.
                     return false;
                 }
-                // R34: SBI direct write — we hold the GRQ lock here.
-                {
-                    const MSG: &[u8] = b"R49-ONCPU-ORPHAN healed pid=0x";
-                    for &b in MSG {
-                        crate::dfx::taskdump::putc_brief(b);
-                    }
-                    let v = (*task).pid() as u64;
-                    let mut sh = 64;
-                    while sh > 0 {
-                        sh -= 4;
-                        let nb = ((v >> sh) & 0xF) as u8;
-                        crate::dfx::taskdump::putc_brief(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                    }
-                    crate::dfx::taskdump::putc_brief(b'\n');
-                }
+                // Rule 1 (grq-lock-1st): event ring, not the console
+                // (a = the stale ownership qword being cleared).
+                crate::sched::sched_ev::sched_ev(
+                    crate::sched::sched_ev::EV_R49_ONCPU_ORPHAN,
+                    (*task).pid(),
+                    core::ptr::read_volatile(
+                        core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
+                    ),
+                    0,
+                );
                 // No CPU owns this mark (curr_on == false under the lock AND
                 // no in-flight switch names it): clearing it cannot break the
                 // NEW2 pick-skip protocol.
@@ -6962,114 +6894,18 @@ pub fn wake_up_enqueue_opt(
                 // with a live claimer that reset double-ran the task (r74a).
                 (*task).release_pick_ownership();
             }
-            // R34: SBI direct write — we hold the GRQ lock here.
-            {
-                const MSG: &[u8] = b"R46-RUNNING-PHANTOM healed pid=0x";
-                for &b in MSG {
-                    crate::dfx::taskdump::putc_brief(b);
-                }
-                let v = (*task).pid() as u64;
-                let mut sh = 64;
-                while sh > 0 {
-                    sh -= 4;
-                    let nb = ((v >> sh) & 0xF) as u8;
-                    crate::dfx::taskdump::putc_brief(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                }
-                // R76 (phantom producer hunt): name the victim's context —
-                // pick/claim word, cpu, exit flags, and the top kernel-text
-                // words of its parked stack. The R46 family needs the
-                // PRODUCER (which path left a RUNNING task unlinked and
-                // slotless); the parked stack symbolizes to exactly the
-                // wait/exit/spawn site that orphaned it.
-                {
-                    use crate::dfx::taskdump::putc_brief as putchar;
-                    fn pdec(mut v: u64) {
-                        use crate::dfx::taskdump::putc_brief as putchar;
-                        let mut buf = [0u8; 20];
-                        let mut n = 0;
-                        if v == 0 {
-                            putchar(b'0');
-                            return;
-                        }
-                        while v > 0 {
-                            buf[n] = b'0' + (v % 10) as u8;
-                            v /= 10;
-                            n += 1;
-                        }
-                        while n > 0 {
-                            n -= 1;
-                            putchar(buf[n]);
-                        }
-                    }
-                    fn phex(v: u64) {
-                        use crate::dfx::taskdump::putc_brief as putchar;
-                        for sh in (0..16u32).rev() {
-                            let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                        }
-                    }
-                    let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
-                    let exiting = (*task)
-                        .ti_flags()
-                        & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
-                        != 0;
-                    putchar(b' ');
-                    putchar(b'o');
-                    putchar(b'0' + (*task).on_cpu() as u8);
-                    const C: &[u8] = b" cl=";
-                    for &b in C { putchar(b); }
-                    if (claim as i64) < 0 { putchar(b'-'); }
-                    pdec((claim as i64).unsigned_abs() as u64);
-                    const P: &[u8] = b" pk=";
-                    for &b in P { putchar(b); }
-                    pdec((*task).pick_state() as u64);
-                    const T: &[u8] = b" cpu=";
-                    for &b in T { putchar(b); }
-                    pdec((*task).ti_cpu() as i64 as u64);
-                    const E: &[u8] = b" exiting=";
-                    for &b in E { putchar(b); }
-                    putchar(b'0' + exiting as u8);
-                    const SW: &[u8] = b" sw=";
-                    for &b in SW { putchar(b); }
-                    let mut any_sw = false;
-                    for c in 0..MAX_CPUS {
-                        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64 {
-                            putchar(b'0' + c as u8);
-                            any_sw = true;
-                        }
-                    }
-                    if !any_sw { putchar(b'-'); }
-                    const K: &[u8] = b" ksp=0x";
-                    for &b in K { putchar(b); }
-                    phex((*task).ti_kernel_sp());
-                    let thsp = (*task).thread().sp;
-                    if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
-                        const S: &[u8] = b" stk=0x";
-                        for &b in S { putchar(b); }
-                        phex(thsp);
-                        // Caller frames of the victim's parked chain — scan
-                        // UPWARD from sp (stacks grow down; below-sp words
-                        // are the shared switch machinery and name nothing).
-                        let base = thsp as *const u64;
-                        let mut shown = 0;
-                        for k in 0..64 {
-                        // SAFETY: diagnostic read of the task's own
-                        // kernel-stack pages (the Task pins them).
-                        let w = core::ptr::read_volatile(base.add(k));
-                        let (lo, hi) = kernel_text_window();
-                        if w >= lo && w < hi && (w & 1) == 0 {
-                                putchar(b' ');
-                                phex(w);
-                                shown += 1;
-                                if shown >= 6 {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                crate::dfx::taskdump::putc_brief(b'\n');
-            }
+            // Rule 1 (grq-lock-1st): the R46 heal record — event ring,
+            // not the console. a = the stale ownership qword, b = the
+            // parked kernel sp (the producer-hunt anchor; the historical
+            // in-line stack-words dump is gone with the print).
+            crate::sched::sched_ev::sched_ev(
+                crate::sched::sched_ev::EV_R46_RUNNING_PHANTOM,
+                (*task).pid(),
+                core::ptr::read_volatile(
+                    core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
+                ),
+                (*task).thread().sp as u64,
+            );
             // Fall through: enqueue_task_locked links the task (its
             // set_state(RUNNING) is a no-op re-write; nr_running pairs with
             // the new linkage per R7-B5).
@@ -7395,121 +7231,29 @@ pub fn wake_up_enqueue_opt(
                         if curr_on
                             && crate::trace::EVENT_LOSTPARK.armed()
                         {
-                            static LPW_N: core::sync::atomic::AtomicU32 =
-                                core::sync::atomic::AtomicU32::new(0);
-                            if LPW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                                < 96
-                            {
-                                lp_observed = true;
-                                fn pdec2(mut v: u64) {
-                                    use crate::dfx::taskdump::putc_brief as putchar;
-                                    let mut buf = [0u8; 20];
-                                    let mut n = 0;
-                                    if v == 0 {
-                                        putchar(b'0');
-                                        return;
-                                    }
-                                    while v > 0 {
-                                        buf[n] = b'0' + (v % 10) as u8;
-                                        v /= 10;
-                                        n += 1;
-                                    }
-                                    while n > 0 {
-                                        n -= 1;
-                                        putchar(buf[n]);
-                                    }
+                            // Rule 1 (grq-lock-1st): the lying-slot census
+                            // tail — event ring, not the console. a packs
+                            // (naming_cpu << 32) | slot_writer_tag, b is the
+                            // victim's ownership qword; the drain prints it.
+                            lp_observed = true;
+                            let mut a: u64 = 0xffff_ffff;
+                            for c in 0..MAX_CPUS {
+                                if cpu_state(c).current == task {
+                                    a = ((c as u64) << 32)
+                                        | SLOT_WRITER[c]
+                                            .load(core::sync::atomic::Ordering::Relaxed)
+                                            as u64;
+                                    break;
                                 }
-                                const M: &[u8] = b"LP-WAKE-SKIP-EMPTY pid=";
-                                for &b in M {
-                                    putchar(b);
-                                }
-                                pdec2((*task).pid() as u64);
-                                for c in 0..MAX_CPUS {
-                                    if cpu_state(c).current == task {
-                                        const MC: &[u8] = b" naming_cpu=";
-                                        for &b in MC {
-                                            putchar(b);
-                                        }
-                                        pdec2(c as u64);
-                                        const MW: &[u8] = b" slotw=";
-                                        for &b in MW {
-                                            putchar(b);
-                                        }
-                                        pdec2(
-                                            SLOT_WRITER[c]
-                                                .load(core::sync::atomic::Ordering::Relaxed)
-                                                as u64,
-                                        );
-                                        let bit = grq()
-                                            .idle_cpus
-                                            .load(core::sync::atomic::Ordering::Acquire)
-                                            & (1u32 << c)
-                                            != 0;
-                                        const MI: &[u8] = b" idlebit=";
-                                        for &b in MI {
-                                            putchar(b);
-                                        }
-                                        pdec2(bit as u64);
-                                        // r11: the pick-generation verdict on
-                                        // this lying slot. LOST convicts the
-                                        // R49 losing switch — the tag-1
-                                        // publish never materialized into a
-                                        // context switch-in (gen/done/
-                                        // pub_jif/age name it); "retired"
-                                        // means the ledger closed the
-                                        // generation and the lie has
-                                        // another producer.
-                                        let nowj = crate::drivers::timer::get_jiffies();
-                                        if pick_gen_is_lost(c, task, nowj) {
-                                            PICKGEN_LOST[c].fetch_add(
-                                                1,
-                                                core::sync::atomic::Ordering::Relaxed,
-                                            );
-                                            const PL: &[u8] = b" pickgen=LOST gen=";
-                                            for &b in PL {
-                                                putchar(b);
-                                            }
-                                            pdec2(
-                                                PICK_GEN[c]
-                                                    .load(core::sync::atomic::Ordering::Relaxed),
-                                            );
-                                            const PDD: &[u8] = b" done=";
-                                            for &b in PDD {
-                                                putchar(b);
-                                            }
-                                            pdec2(
-                                                PICK_GEN_DONE[c]
-                                                    .load(core::sync::atomic::Ordering::Relaxed),
-                                            );
-                                            const PJ: &[u8] = b" pub_jif=";
-                                            for &b in PJ {
-                                                putchar(b);
-                                            }
-                                            let pj = PICK_GEN_JIF[c]
-                                                .load(core::sync::atomic::Ordering::Relaxed);
-                                            pdec2(pj);
-                                            const PA: &[u8] = b" age=";
-                                            for &b in PA {
-                                                putchar(b);
-                                            }
-                                            pdec2(nowj.wrapping_sub(pj));
-                                        } else {
-                                            const PO: &[u8] = b" pickgen=retired";
-                                            for &b in PO {
-                                                putchar(b);
-                                            }
-        // grq-lock-1st: checkpoint before the enqueue (the class enqueue
-        // can ALLOCATE — the deadline queue is still a BTreeMap).
-        grq_site_mark_fp_at(
-            crate::arch::cpu_id() as usize,
-            grq_site(GRQ_CALLER_WAKE, GRQ_STEP_CLASS_OP),
-        );
-                                        }
-                                        break;
-                                    }
-                                }
-                                putchar(b'\n');
                             }
+                            crate::sched::sched_ev::sched_ev(
+                                crate::sched::sched_ev::EV_LP_WAKE_SKIP_EMPTY,
+                                (*task).pid(),
+                                a,
+                                core::ptr::read_volatile(
+                                    core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
+                                ),
+                            );
                         }
                     }
                 }
@@ -7526,27 +7270,15 @@ pub fn wake_up_enqueue_opt(
             pick_trace(task, 11);
             true
         } else {
-            // W2 twin: both the insert and the heal refused — name the
-            // shape (sc78: the reply-delivery lost-wake hunt). R34
-            // discipline: GRQ is held, so the report uses the direct
-            // console path (no printk/console lock under GRQ).
-            static W2B_N: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            if W2B_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                use crate::dfx::taskdump::putc_brief as putchar;
-                const MSG: &[u8] = b"W2-ENQUEUE-HEAL-REFUSED pid=";
-                for &b in MSG {
-                    putchar(b);
-                }
-                let v = (*task).pid() as u64;
-                let mut sh = 64;
-                while sh > 0 {
-                    sh -= 4;
-                    let nb = ((v >> sh) & 0xF) as u8;
-                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                }
-                putchar(b'\n');
-            }
+            // W2 twin: both the insert and the heal refused (sc78: the
+            // reply-delivery lost-wake hunt). Rule 1 (grq-lock-1st): the
+            // event ring carries it; the tick drain prints it.
+            crate::sched::sched_ev::sched_ev(
+                crate::sched::sched_ev::EV_W2_ENQ_HEAL_REFUSED,
+                (*task).pid(),
+                0,
+                0,
+            );
             false
         };
         // Wakewatch: the funnel's verdict for this task (W=linked and
@@ -7560,28 +7292,14 @@ pub fn wake_up_enqueue_opt(
         // (LostParkTrace already checked; 16-line boot budget, GRQ held
         // so direct console).
         if lp_observed {
-            static LPO_N: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            if LPO_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                use crate::dfx::taskdump::putc_brief as putchar;
-                const MSG: &[u8] = b"LP-WAKE-OUTCOME pid=";
-                for &b in MSG {
-                    putchar(b);
-                }
-                let v = (*task).pid() as u64;
-                let mut sh = 64;
-                while sh > 0 {
-                    sh -= 4;
-                    let nb = ((v >> sh) & 0xF) as u8;
-                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                }
-                const W: &[u8] = b" woken=";
-                for &b in W {
-                    putchar(b);
-                }
-                putchar(if woken { b'1' } else { b'0' });
-                putchar(b'\n');
-            }
+            // Rule 1 (grq-lock-1st): event ring, not the console (a =
+            // woken 0/1 — the LP verdict).
+            crate::sched::sched_ev::sched_ev(
+                crate::sched::sched_ev::EV_LP_WAKE_OUTCOME,
+                (*task).pid(),
+                woken as u64,
+                0,
+            );
         }
         // The sched:sched_wakeup tracepoint — the reference's
         // ttwu_do_wakeup record: the task left the wait queue and is
