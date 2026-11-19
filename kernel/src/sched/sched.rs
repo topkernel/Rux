@@ -1006,6 +1006,45 @@ pub fn grq_dump_holder(why: &str) {
     }
 }
 
+// ==================== GRQ WEDGE INJECTION (dfx-grq-wedge) ====================
+//
+// The holder-naming rig needs a REPRODUCIBLE wedge to prove it names the
+// holder. This hook creates one on demand: with `grqwedge=1` on the
+// cmdline, ONE cpu takes the GRQ and spins inside the schedule()'s
+// critical section forever. Every other cpu then spins on the GRQ,
+// the deadlock detector fires, and the GRQ crime-scene dump prints the
+// holder's site + its own backtrace.
+//
+// It is a COMPILE-TIME-gated diagnostic (the `dfx-grq-wedge` feature),
+// so the shipping build carries none of it — the rig it verifies (the
+// site stamp and the dump) is always on.
+
+/// Armed by `grqwedge=1` on the cmdline (one-shot, at sched init).
+#[cfg(feature = "dfx-grq-wedge")]
+static GRQ_WEDGE_ARMED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The wedge has already fired (one-shot).
+#[cfg(feature = "dfx-grq-wedge")]
+static GRQ_WEDGE_FIRED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Arm the injection (called once from `sched::init`).
+#[cfg(feature = "dfx-grq-wedge")]
+pub fn grq_wedge_arm() {
+    GRQ_WEDGE_ARMED.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Should THIS cpu inject the wedge now? One-shot.
+#[cfg(feature = "dfx-grq-wedge")]
+#[inline]
+pub fn grq_wedge_inject() -> bool {
+    if !GRQ_WEDGE_ARMED.load(core::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    !GRQ_WEDGE_FIRED.swap(true, core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Does THIS cpu currently hold the GRQ lock?
 ///
 /// grq-lock-1st: the printk path needs this to decide whether it may
@@ -2587,6 +2626,14 @@ fn clear_trap_scratch() {
 
 pub fn init() {
     let boot_cpu = crate::arch::cpu_id() as u64 as usize;
+
+    // grq-lock-1st: arm the wedge injection when the diagnostic build is
+    // asked for it (`grqwedge=1`). The injection itself is compile-time
+    // gated; the arming is a one-shot cmdline read at init.
+    #[cfg(feature = "dfx-grq-wedge")]
+    if crate::cmdline::get_param("grqwedge").as_deref() == Some("1") {
+        grq_wedge_arm();
+    }
 
     if boot_cpu >= MAX_CPUS {
         println!("sched: init: invalid cpu_id {}", boot_cpu);
@@ -4179,6 +4226,22 @@ unsafe fn __schedule() {
     sched_cs_stamp(cpu_id, 1);
     let mut grq_guard = grq().lock_irqsave_site(grq_site(GRQ_CALLER_SCHED, GRQ_STEP_TRY));
     sched_cs_stamp(cpu_id, 2);
+    // grq-lock-1st (dfx-grq-wedge): the reproducible-wedge injection. The
+    // cpu takes the GRQ and spins INSIDE the critical section — the
+    // exact shape of the OH wedge (a holder that never releases, IRQs
+    // off). Every other cpu then spins on the lock and the deadlock
+    // detector fires; the crime-scene dump names this holder's site and
+    // walks its stack.
+    #[cfg(feature = "dfx-grq-wedge")]
+    if grq_wedge_inject() {
+        grq_site_mark_fp_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_PICK));
+        grq_raw_puts(b"\nGRQ-WEDGE-INJECT: cpu=");
+        grq_raw_putdec(cpu_id as u64);
+        grq_raw_puts(b" holding the GRQ forever\n");
+        loop {
+            core::hint::spin_loop();
+        }
+    }
     let cc_t2 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_LOCKWAIT_NS, cc_t1);
     // grq-10ns: the EXACT GRQ critical section — one bracket from

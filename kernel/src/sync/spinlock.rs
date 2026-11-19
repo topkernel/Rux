@@ -432,6 +432,13 @@ impl RawSpinlock {
         // symbolization of any ops/vtable pointers), and one REMOTE-BT
         // of the holder per unique lock address per boot — the IPI
         // handler on the holder captures its live interrupted stack.
+        // grq-lock-1st: the GRQ crime scene. A GRQ holder runs with IRQs
+        // OFF, so the REMOTE-BT capture below (an IPI) can never answer
+        // on a GRQ wedge — that is why every GRQ wedge so far ended with
+        // the holder UNNAMED. The GRQ site stamp is published BY the
+        // holder, so this dump reads it without any interrupt.
+        crate::sched::sched::grq_dump_holder("deadlock");
+
         #[cfg(feature = "dfx-lock-owner")]
         {
             let msg4 = b" holder=";
@@ -489,13 +496,6 @@ impl RawSpinlock {
             }
 
         unsafe { crate::console::uart_putc_raw(b'\n'); }
-
-        // grq-lock-1st: the GRQ crime scene. A GRQ holder runs with IRQs
-        // OFF, so the REMOTE-BT capture below (an IPI) can never answer
-        // on a GRQ wedge — that is why every GRQ wedge so far ended with
-        // the holder UNNAMED. The GRQ site stamp is published BY the
-        // holder, so this dump reads it without any interrupt.
-        crate::sched::sched::grq_dump_holder("deadlock");
 
         // Leak forensics (dfx-lock-owner): the LAST acquirer's pid,
         // call site and acquire age — these persist past a cleared
