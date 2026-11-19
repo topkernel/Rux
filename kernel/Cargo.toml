@@ -52,6 +52,13 @@ dfx-futex-trace = []
 # clobbered by the EL2 trampoline), so a dfx= switch cannot be armed on
 # that board yet.
 dfx-aa64-uaccess-selftest = []
+# DFX (grq-lock-1st): the reproducible GRQ wedge injection — one cpu takes
+# the GRQ and spins inside the critical section forever, so the
+# holder-naming rig can be PROVED to name the holder (and its stack).
+# Compile-time gated: the shipping build carries none of it, while the
+# rig it verifies (the per-CPU GRQ site stamp + the crime-scene dump) is
+# always on.
+dfx-grq-wedge = []
 
 [[bin]]
 name = "rux"

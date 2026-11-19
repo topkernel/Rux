@@ -218,6 +218,10 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
     // interrupted section is abandoned by every arm below, later GRQ
     // use on the dying path acquires fresh, and the terminal switch's
     // own release becomes a no-op (the tracker is already clear).
+    // grq-lock-1st: the GRQ crime scene BEFORE the release — the site
+    // stamp and the holder's own stack name the operation the fault
+    // struck. IPI-free by construction (the holder has IRQs off).
+    crate::sched::sched::grq_dump_holder("oops");
     crate::sched::sched::terminal_release_grq_if_held();
     if crate::interrupt::preempt::in_interrupt() {
         panic!("Fatal exception in interrupt");

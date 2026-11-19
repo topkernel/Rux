@@ -112,12 +112,32 @@ impl GlobalRunQueue {
     #[inline]
     #[track_caller]
     pub fn lock_irqsave(&self) -> GrqGuard<'_> { // track_caller: syscost GRQ site attribution
+        self.lock_irqsave_site(grq_site(GRQ_CALLER_OTHER, GRQ_STEP_TRY))
+    }
+
+    /// Lock the global RQ, publishing the caller's site id for the
+    /// holder-naming rig (grq-lock-1st).
+    ///
+    /// The site is stamped BEFORE the lock attempt, so a cpu that spins
+    /// forever on a held GRQ shows up as "trying-to-acquire" with its
+    /// own frame pointer — that is the signature of the self-deadlock
+    /// (a GRQ re-acquire from inside a GRQ section) and of the
+    /// cross-CPU ABAA, and it names the CALLER that reached the lock.
+    #[inline]
+    #[track_caller]
+    pub fn lock_irqsave_site(&self, site: u32) -> GrqGuard<'_> {
         let flags = crate::arch::cpu::save_and_disable_irq();
         crate::interrupt::preempt::preempt_count_add(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
-        self.lock.lock();
         let cpu = crate::arch::cpu_id() as usize;
+        // Publish "trying" BEFORE the spin (the frame pointer is the
+        // caller's, so the dump names who wanted the lock).
+        grq_site_mark_fp_at(cpu, site);
+        self.lock.lock();
+        // Acquired: the section is now entered.
+        grq_site_mark_at(cpu, site | GRQ_STEP_HELD);
+        GRQ_ACQ_JIF[cpu].store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
         if cpu < GRQ_HELD.len() {
             GRQ_HELD[cpu].store(true, core::sync::atomic::Ordering::Relaxed);
         }
@@ -140,6 +160,21 @@ impl GlobalRunQueue {
         crate::sync::lockkey::GrqKey: crate::sync::lockkey::CanNestInside<Outer>,
     {
         self.lock_irqsave()
+    }
+
+    /// Nested variant that also publishes the caller's site id for the
+    /// holder-naming rig (grq-lock-1st) — see [`lock_irqsave_site`].
+    #[inline]
+    #[track_caller]
+    pub fn lock_irqsave_nested_site<'a, Outer: crate::sync::lockkey::NestKey>(
+        &self,
+        _proof: &crate::sync::lockkey::NestProof<'a, Outer>,
+        site: u32,
+    ) -> GrqGuard<'_>
+    where
+        crate::sync::lockkey::GrqKey: crate::sync::lockkey::CanNestInside<Outer>,
+    {
+        self.lock_irqsave_site(site)
     }
 
     /// Lock without IRQ save (for non-interrupt contexts like init).
@@ -547,6 +582,9 @@ impl<'a> GrqGuard<'a> {
         if cpu < GRQ_HELD.len() {
             GRQ_HELD[cpu].store(false, core::sync::atomic::Ordering::Relaxed);
         }
+        // grq-lock-1st: the section is over — clear the site stamp so a
+        // stale site is never mistaken for a live hold.
+        grq_site_mark_at(cpu, 0);
         // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
         unsafe { (*self.grq).lock.unlock() };
         core::mem::forget(self);
@@ -582,6 +620,8 @@ impl Drop for GrqGuard<'_> {
         if cpu < GRQ_HELD.len() {
             GRQ_HELD[cpu].store(false, core::sync::atomic::Ordering::Relaxed);
         }
+        // grq-lock-1st: the section is over — clear the site stamp.
+        grq_site_mark_at(cpu, 0);
         unsafe { (*self.grq).lock.unlock() };
         crate::arch::cpu::restore_irq(self.flags);
     }
@@ -660,6 +700,369 @@ static GRQ_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBoo
 /// the hold. Same discipline as the preempt-count clear beside it.
 static GRQ_HELD: [core::sync::atomic::AtomicBool; 32] =
     [const { core::sync::atomic::AtomicBool::new(false) }; 32];
+
+/// A diagnostic report CAPTURED under the GRQ and EMITTED after the lock
+/// is released (grq-lock-1st).
+///
+/// printk is not lock-free: its ring-buffer write ends in
+/// `KMSG_READ_WQ.wake_up_all()`, whose waitqueue lock is held across
+/// `wake_up_process` -> `wake_up_enqueue_opt` -> `grq().lock_irqsave()`.
+/// A report issued while the GRQ is held therefore re-acquires the GRQ
+/// on the same cpu — the non-reentrant spinlock then spins forever with
+/// IRQs off (the "IRQs-dead GRQ holder" wedge) — and against another cpu
+/// it is the textbook ABAA (this cpu: GRQ -> WQ; the other: WQ -> GRQ).
+/// The capture-then-emit shape keeps every field's value exact (they are
+/// read under the lock) while moving the report itself out of the
+/// critical section.
+#[derive(Clone, Copy)]
+pub struct GrqPendingReport {
+    /// Which report this is (see the `GRQ_RPT_*` constants).
+    pub kind: u8,
+    pub a: u64,
+    pub b: u64,
+    pub c: u64,
+    pub d: u64,
+    pub e: u64,
+    pub comm: [u8; 16],
+}
+
+/// Report kinds for [`GrqPendingReport`].
+pub const GRQ_RPT_COUNTER_RESYNC: u8 = 1;
+pub const GRQ_RPT_SHOUT_RETIRED: u8 = 2;
+pub const GRQ_RPT_STRAND_ID: u8 = 3;
+pub const GRQ_RPT_STRAND_ID_NOTRACE: u8 = 4;
+
+/// Emit reports captured under the GRQ. Call AFTER the guard is dropped.
+pub fn emit_grq_reports(reports: &[GrqPendingReport]) {
+    for r in reports {
+        let cl = r.comm.iter().position(|&b| b == 0).unwrap_or(16);
+        let comm = core::str::from_utf8(&r.comm[..cl]).unwrap_or("?");
+        match r.kind {
+            GRQ_RPT_COUNTER_RESYNC => {
+                crate::pr_warn!("STRAND-COUNTER-RESYNC cfs was={} now={}", r.a, r.b);
+            }
+            GRQ_RPT_SHOUT_RETIRED => {
+                crate::pr_warn!("SWOUT-STALE-RETIRED cpu={} pid={}", r.a, r.b);
+            }
+            GRQ_RPT_STRAND_ID => {
+                crate::pr_warn!(
+                    "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true ago={}",
+                    r.a,
+                    comm,
+                    r.b,
+                    r.c,
+                    r.d,
+                    r.e,
+                );
+            }
+            GRQ_RPT_STRAND_ID_NOTRACE => {
+                crate::pr_warn!(
+                    "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true trace=none",
+                    r.a,
+                    comm,
+                    r.b,
+                    r.c,
+                    r.d,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+// ==================== GRQ SITE STAMP — the holder-naming rig (grq-lock-1st) =
+//
+// THE PROBLEM THIS SOLVES. The generic deadlock detector names the lock
+// and the holder CPU, but it cannot name the HOLDER'S STACK: the capture
+// is an IPI (REMOTE-BT), and a GRQ holder runs with IRQs OFF (the lock is
+// `spin_lock_irqsave`), so the IPI is never serviced and the capture
+// times out — "REMOTE-BT TIMEOUT (not servicing IPIs)". That is why
+// every GRQ wedge so far ended with the holder UNNAMED: the only
+// instrument that could have named it is the one instrument a GRQ holder
+// cannot answer.
+//
+// THE SHAPE. The holder publishes its own progress. Every GRQ critical
+// section stamps a per-CPU slot with the id of the operation it is
+// performing, plus the frame pointer of the code performing it. A
+// wedged system then reads those slots from ANY cpu — no IPI, no
+// interrupt, no lock — and walks the holder's own stack (its kernel
+// stack is mapped, and for a wedged holder it is frozen).
+//
+// The same slots also serve the SPINNERS: a cpu that is waiting for the
+// lock stamps "trying" before it spins, so the dump separates the
+// holder from the waiters without any cross-cpu handshake.
+//
+// COST. One relaxed store per checkpoint on a per-CPU word (the existing
+// `SCHED_CS_PHASE` shape) plus one frame-pointer read at the
+// checkpoints where the holder can actually stall. Measured against the
+// cctx `SCH_HOLD_NS` bracket in run/GRQ-LOCK-1ST.md.
+
+/// Caller classes (site id bits [8:15]).
+pub const GRQ_CALLER_SCHED: u32 = 1;
+pub const GRQ_CALLER_WAKE: u32 = 2;
+pub const GRQ_CALLER_DEQUEUE: u32 = 3;
+pub const GRQ_CALLER_ENQUEUE: u32 = 4;
+pub const GRQ_CALLER_TICK: u32 = 5;
+pub const GRQ_CALLER_OTHER: u32 = 6;
+
+/// Steps within a section (site id bits [0:7]).
+pub const GRQ_STEP_TRY: u32 = 0;
+pub const GRQ_STEP_HELD: u32 = 1;
+pub const GRQ_STEP_NESTED_LOCK: u32 = 2;
+pub const GRQ_STEP_CLASS_OP: u32 = 3;
+pub const GRQ_STEP_PICK: u32 = 4;
+pub const GRQ_STEP_DISPATCH: u32 = 5;
+pub const GRQ_STEP_PUBLISH: u32 = 6;
+
+/// Build a site id from a caller class and a step.
+#[inline(always)]
+pub const fn grq_site(caller: u32, step: u32) -> u32 {
+    (caller << 8) | step
+}
+
+/// The last site each cpu reached (0 = not in a GRQ section).
+pub static GRQ_SITE: [core::sync::atomic::AtomicU32; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
+
+/// The frame pointer of the code that reached that site. Published by
+/// the holder itself, so the wedge dump can walk the holder's stack
+/// WITHOUT an IPI (which a GRQ holder, IRQs off, can never service).
+pub static GRQ_SITE_FP: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// Jiffies at the section's acquire — the hold's age.
+pub static GRQ_ACQ_JIF: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// Read the current frame pointer (rbp on x86_64, s0 on riscv64).
+#[inline(always)]
+fn grq_current_fp() -> u64 {
+    let fp: u64;
+    #[cfg(feature = "x86_64")]
+    // SAFETY: reading the frame-pointer register is side-effect free.
+    unsafe {
+        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(feature = "riscv64")]
+    // SAFETY: reading the frame-pointer register is side-effect free.
+    unsafe {
+        core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(feature = "aarch64")]
+    // SAFETY: reading the frame-pointer register is side-effect free.
+    unsafe {
+        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    fp
+}
+
+/// Stamp the site on `cpu` (one relaxed store — the hot-path shape).
+#[inline(always)]
+fn grq_site_mark_at(cpu: usize, site: u32) {
+    if cpu < MAX_CPUS {
+        GRQ_SITE[cpu].store(site, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Stamp the site AND the caller's frame pointer (two stores) — used at
+/// the checkpoints where the holder can actually stall, so the dump can
+/// walk the holder's stack.
+#[inline(always)]
+fn grq_site_mark_fp_at(cpu: usize, site: u32) {
+    if cpu < MAX_CPUS {
+        GRQ_SITE[cpu].store(site, core::sync::atomic::Ordering::Relaxed);
+        GRQ_SITE_FP[cpu].store(grq_current_fp(), core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Name a site id for the dump.
+pub fn grq_site_name(site: u32) -> &'static str {
+    let caller = site >> 8;
+    let step = site & 0xFF;
+    match (caller, step) {
+        (GRQ_CALLER_SCHED, GRQ_STEP_TRY) => "schedule:trying-to-acquire",
+        (GRQ_CALLER_SCHED, GRQ_STEP_HELD) => "schedule:acquired",
+        (GRQ_CALLER_SCHED, GRQ_STEP_NESTED_LOCK) => "schedule:nested-lock",
+        (GRQ_CALLER_SCHED, GRQ_STEP_CLASS_OP) => "schedule:class-op",
+        (GRQ_CALLER_SCHED, GRQ_STEP_PICK) => "schedule:pick",
+        (GRQ_CALLER_SCHED, GRQ_STEP_PUBLISH) => "schedule:publish",
+        (GRQ_CALLER_WAKE, GRQ_STEP_TRY) => "wake:trying-to-acquire",
+        (GRQ_CALLER_WAKE, GRQ_STEP_HELD) => "wake:acquired",
+        (GRQ_CALLER_WAKE, GRQ_STEP_NESTED_LOCK) => "wake:nested-lock",
+        (GRQ_CALLER_WAKE, GRQ_STEP_CLASS_OP) => "wake:class-op",
+        (GRQ_CALLER_WAKE, GRQ_STEP_PICK) => "wake:pick",
+        (GRQ_CALLER_WAKE, GRQ_STEP_DISPATCH) => "wake:dispatch",
+        (GRQ_CALLER_SCHED, GRQ_STEP_DISPATCH) => "schedule:dispatch",
+        (GRQ_CALLER_DEQUEUE, GRQ_STEP_TRY) => "dequeue_task:trying-to-acquire",
+        (GRQ_CALLER_DEQUEUE, GRQ_STEP_HELD) => "dequeue_task:acquired",
+        (GRQ_CALLER_ENQUEUE, GRQ_STEP_TRY) => "enqueue_task:trying-to-acquire",
+        (GRQ_CALLER_ENQUEUE, GRQ_STEP_HELD) => "enqueue_task:acquired",
+        (GRQ_CALLER_TICK, GRQ_STEP_TRY) => "tick:trying-to-acquire",
+        (GRQ_CALLER_TICK, GRQ_STEP_HELD) => "tick:acquired",
+        (GRQ_CALLER_OTHER, GRQ_STEP_TRY) => "grq:trying-to-acquire",
+        (GRQ_CALLER_OTHER, GRQ_STEP_HELD) => "grq:acquired",
+        _ => "grq:other",
+    }
+}
+
+/// The GRQ crime-scene dump (grq-lock-1st).
+///
+/// Prints, for every cpu that is inside (or trying to enter) a GRQ
+/// section: the cpu, its task, the site (named), the age of the hold,
+/// and — for the HOLDER — the holder's own stack, walked from the frame
+/// pointer the holder published at that site.
+///
+/// The walk is IPI-FREE ON PURPOSE. A GRQ holder runs with IRQs off, so
+/// the REMOTE-BT capture (an IPI) always times out on a GRQ wedge —
+/// which is exactly why every GRQ wedge so far ended with the holder
+/// UNNAMED. The holder's kernel stack is mapped and (for a wedged
+/// holder) frozen, so another cpu can read it directly.
+///
+/// Allocation-free and lock-free: it runs in the fragile states the
+/// deadlock detector and the oops policy report from. Output goes to
+/// the raw serial port (`uart_putc_raw`) — printk may be the very thing
+/// that is wedged.
+pub fn grq_dump_holder(why: &str) {
+    // Nothing to report unless some cpu is inside (or trying to enter) a
+    // GRQ section — the dump is called from generic deadlock paths.
+    let mut any = false;
+    for cpu in 0..MAX_CPUS {
+        if GRQ_SITE[cpu].load(core::sync::atomic::Ordering::Relaxed) != 0 {
+            any = true;
+            break;
+        }
+    }
+    if !any {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    grq_raw_puts(b"\nGRQ-CRIME-SCENE ");
+    grq_raw_puts(why.as_bytes());
+    grq_raw_puts(b"\n");
+    for cpu in 0..MAX_CPUS {
+        let site = GRQ_SITE[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        if site == 0 {
+            continue;
+        }
+        let holds = GRQ_HELD[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        let acq = GRQ_ACQ_JIF[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        let age = now.wrapping_sub(acq);
+        let cur = unsafe { crate::sched::sched::cpu_state(cpu).current };
+        grq_raw_puts(b"GRQ-HOLDER cpu=");
+        grq_raw_putdec(cpu as u64);
+        grq_raw_puts(b" role=");
+        grq_raw_puts(if holds { b"holder" } else { b"waiting" });
+        grq_raw_puts(b" pid=");
+        if cur.is_null() {
+            grq_raw_puts(b"none");
+        } else {
+            grq_raw_putdec(unsafe { (*cur).pid() } as u64);
+        }
+        grq_raw_puts(b" site=");
+        grq_raw_puts(grq_site_name(site).as_bytes());
+        grq_raw_puts(b" age_jif=");
+        grq_raw_putdec(age);
+        grq_raw_puts(b"\n");
+        if !holds {
+            continue;
+        }
+        // The holder's own stack: walk the frame-pointer chain the
+        // holder published. The frame words are read from the holder's
+        // kernel stack; a wedged holder does not move, so the walk is
+        // consistent. Every hop is validated (alignment, kernel range,
+        // strictly ascending, sane gap) exactly like the REMOTE-BT
+        // walker.
+        let mut fp = GRQ_SITE_FP[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        grq_raw_puts(b"GRQ-HOLDER-BT cpu=");
+        grq_raw_putdec(cpu as u64);
+        grq_raw_puts(b"\n");
+        let mut n = 0u32;
+        while n < 20 {
+            if fp == 0 || fp % 8 != 0 || fp < 0x8000_0000 {
+                break;
+            }
+            // SAFETY: fp is validated (aligned, in the kernel range); the
+            // two frame-word reads are the standard unwind operation on a
+            // live kernel stack.
+            let (ret, next) =
+                unsafe { (*((fp + 8) as *const u64), *(fp as *const u64)) };
+            if ret == 0 {
+                break;
+            }
+            grq_raw_puts(b"GRQ-BT  #");
+            grq_raw_putdec(n as u64);
+            grq_raw_puts(b" ra=0x");
+            grq_raw_puthex(ret);
+            grq_raw_puts(b"\n");
+            n += 1;
+            if next <= fp || next - fp > 0x4000 {
+                break;
+            }
+            fp = next;
+        }
+        if n == 0 {
+            grq_raw_puts(b"GRQ-BT  (no frames)\n");
+        }
+    }
+}
+
+// ==================== GRQ WEDGE INJECTION (dfx-grq-wedge) ====================
+//
+// The holder-naming rig needs a REPRODUCIBLE wedge to prove it names the
+// holder. This hook creates one on demand: with `grqwedge=1` on the
+// cmdline, ONE cpu takes the GRQ and spins inside the schedule()'s
+// critical section forever. Every other cpu then spins on the GRQ,
+// the deadlock detector fires, and the GRQ crime-scene dump prints the
+// holder's site + its own backtrace.
+//
+// It is a COMPILE-TIME-gated diagnostic (the `dfx-grq-wedge` feature),
+// so the shipping build carries none of it — the rig it verifies (the
+// site stamp and the dump) is always on.
+
+/// Armed by `grqwedge=1` on the cmdline (one-shot, at sched init).
+#[cfg(feature = "dfx-grq-wedge")]
+static GRQ_WEDGE_ARMED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The wedge has already fired (one-shot).
+#[cfg(feature = "dfx-grq-wedge")]
+static GRQ_WEDGE_FIRED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Arm the injection (called once from `sched::init`).
+#[cfg(feature = "dfx-grq-wedge")]
+pub fn grq_wedge_arm() {
+    GRQ_WEDGE_ARMED.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Should THIS cpu inject the wedge now? One-shot.
+#[cfg(feature = "dfx-grq-wedge")]
+#[inline]
+pub fn grq_wedge_inject() -> bool {
+    if !GRQ_WEDGE_ARMED.load(core::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    !GRQ_WEDGE_FIRED.swap(true, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Does THIS cpu currently hold the GRQ lock?
+///
+/// grq-lock-1st: the printk path needs this to decide whether it may
+/// touch a waitqueue lock. printk's ring-buffer write ends in
+/// `KMSG_READ_WQ.wake_up_all()`, and `WaitQueueHead::wake_up` holds the
+/// queue's list lock ACROSS `wake_up_process` -> `wake_up_enqueue_opt`
+/// -> `grq().lock_irqsave()`. A printk issued while this cpu holds the
+/// GRQ therefore re-acquires the GRQ on the SAME cpu (self-deadlock on
+/// a non-reentrant spinlock, IRQs off forever) — and against another
+/// cpu it is the textbook ABAA (this cpu: GRQ -> WQ; the other: WQ ->
+/// GRQ). The tracker is positive knowledge (written under IRQs-off by
+/// the owning cpu only), so a false positive is impossible and a false
+/// negative only costs one deferred wake.
+#[inline]
+pub fn grq_held_here() -> bool {
+    let cpu = crate::arch::cpu_id() as usize;
+    cpu < GRQ_HELD.len() && GRQ_HELD[cpu].load(core::sync::atomic::Ordering::Relaxed)
+}
 
 /// Initialize the global run queue (called once during boot).
 unsafe fn grq_init() {
@@ -1129,7 +1532,7 @@ pub fn member_release_stale_ownership(member: *mut Task) -> bool {
     // SAFETY: the member is DEAD and unlinked (the caller's dead-list
     // invariant); no picker can touch it, and the GRQ hold above excludes
     // every in-flight switch-out, so the qword write races nothing.
-    unsafe {
+    let (pid, claim, pk, st, tcpu, slot, swout, n) = unsafe {
         let pid = (*member).pid();
         let claim = (*member).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
         let pk = (*member).ti_pick_state.load(core::sync::atomic::Ordering::Acquire);
@@ -1141,18 +1544,27 @@ pub fn member_release_stale_ownership(member: *mut Task) -> bool {
         static FDM_STALE_SEEN: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         let n = FDM_STALE_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 8 {
-            crate::pr_warn!(
-                "FDM-STALE-RELEASE pid={} claim={} pk={} st={:#x} tcpu={} slot={:#x} swout={:#x}",
-                pid,
-                claim,
-                pk,
-                st,
-                tcpu,
-                slot,
-                swout
-            );
-        }
+        (pid, claim, pk, st, tcpu, slot, swout, n)
+    };
+    // PROBE-LOCK DISCIPLINE (grq-lock-1st): report AFTER the guard drop.
+    // printk's ring-buffer write ends in `KMSG_READ_WQ.wake_up_all()`, whose
+    // waitqueue lock is held across `wake_up_process` -> the GRQ acquire.
+    // A printk issued under the GRQ therefore re-acquires the GRQ on this
+    // cpu (self-deadlock with IRQs off) or forms the GRQ->WQ / WQ->GRQ
+    // ABAA with another cpu. Every field the report needs was captured
+    // above, so release-then-report cannot change the outcome.
+    drop(guard);
+    if n < 8 {
+        crate::pr_warn!(
+            "FDM-STALE-RELEASE pid={} claim={} pk={} st={:#x} tcpu={} slot={:#x} swout={:#x}",
+            pid,
+            claim,
+            pk,
+            st,
+            tcpu,
+            slot,
+            swout
+        );
     }
     true
 }
@@ -2215,6 +2627,14 @@ fn clear_trap_scratch() {
 pub fn init() {
     let boot_cpu = crate::arch::cpu_id() as u64 as usize;
 
+    // grq-lock-1st: arm the wedge injection when the diagnostic build is
+    // asked for it (`grqwedge=1`). The injection itself is compile-time
+    // gated; the arming is a one-shot cmdline read at init.
+    #[cfg(feature = "dfx-grq-wedge")]
+    if crate::cmdline::get_param("grqwedge").as_deref() == Some("1") {
+        grq_wedge_arm();
+    }
+
     if boot_cpu >= MAX_CPUS {
         println!("sched: init: invalid cpu_id {}", boot_cpu);
         return;
@@ -3093,20 +3513,81 @@ pub fn terminal_release_grq_if_held() {
         static GRQFORCE_N: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         let n = GRQFORCE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 8 {
-            let pid = crate::sched::current()
-                .map(|t| unsafe { (*t).pid() })
-                .unwrap_or(0);
-            crate::pr_warn!(
-                "TERM-GRQ-FORCE pid={} cpu={} released the runqueue lock stranded by the dying section",
-                pid,
-                cpu
-            );
-        }
+        // RELEASE THE LOCK FIRST, REPORT AFTER (grq-lock-1st).
+        //
+        // The report used to go through printk, and printk is NOT
+        // lock-free: pr_warn! -> printk_ln -> write_to_ring_buffer ->
+        // KMSG_READ_WQ.wake_up_all() -> WaitQueueHead::wake_up ->
+        // wake_up_process -> wake_up_enqueue_opt -> grq().lock_irqsave().
+        // A /dev/kmsg reader parked on KMSG_READ_WQ therefore turns a
+        // printk issued while THIS CPU holds the GRQ into a
+        // SELF-DEADLOCK: the wake re-acquires the very lock this CPU
+        // already owns, and the spin runs with IRQs off forever — the
+        // exact "IRQs-dead GRQ holder" signature the OH campaign kept
+        // capturing (four CPUs at RawSpinlock::lock+1359 behind one
+        // holder). The cross-CPU form is the textbook ABAA: this CPU
+        // holds the GRQ and wants the waitqueue lock; the other holds
+        // the waitqueue lock (inside wake_up) and wants the GRQ.
+        //
+        // The release therefore comes FIRST, and the report goes out
+        // through the LOCK-FREE raw console (uart_putc_raw — the same
+        // path the KERNPANIC park uses), never through printk.
+        //
         // SAFETY: grq() returns the initialized GRQ (late callers run
         // well past sched init); the per-CPU hold marker proves this
         // CPU's acquire.
         unsafe { grq().lock.force_unlock_terminal() };
+        if n < 8 {
+            let pid = crate::sched::current()
+                .map(|t| unsafe { (*t).pid() })
+                .unwrap_or(0);
+            grq_raw_puts(b"TERM-GRQ-FORCE pid=");
+            grq_raw_putdec(pid as u64);
+            grq_raw_puts(b" cpu=");
+            grq_raw_putdec(cpu as u64);
+            grq_raw_puts(b" released the runqueue lock stranded by the dying section\n");
+        }
+    }
+}
+
+/// Lock-free raw console writers for the GRQ death path (grq-lock-1st).
+///
+/// These exist because printk is NOT lock-free: its ring-buffer write
+/// ends in `KMSG_READ_WQ.wake_up_all()`, whose waitqueue lock is held
+/// across `wake_up_process` — which takes the GRQ. A printk issued
+/// under the GRQ therefore self-deadlocks (see
+/// `terminal_release_grq_if_held`). `uart_putc_raw` writes the serial
+/// port directly: no printk ring, no waitqueue, no scheduler lock.
+fn grq_raw_puts(bytes: &[u8]) {
+    for &b in bytes {
+        crate::console::uart_putc_raw(b);
+    }
+}
+
+fn grq_raw_putdec(mut v: u64) {
+    let mut buf = [0u8; 20];
+    let mut n = 0;
+    loop {
+        buf[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        crate::console::uart_putc_raw(buf[n]);
+    }
+}
+
+fn grq_raw_puthex(v: u64) {
+    let mut shift: i32 = 64;
+    while shift > 0 {
+        shift -= 4;
+        let nibble = ((v >> shift) & 0xF) as u8;
+        let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+        crate::console::uart_putc_raw(c);
     }
 }
 
@@ -3743,8 +4224,24 @@ unsafe fn __schedule() {
     let cc_t1 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PRE_NS, cc_t0);
     sched_cs_stamp(cpu_id, 1);
-    let mut grq_guard = grq().lock_irqsave();
+    let mut grq_guard = grq().lock_irqsave_site(grq_site(GRQ_CALLER_SCHED, GRQ_STEP_TRY));
     sched_cs_stamp(cpu_id, 2);
+    // grq-lock-1st (dfx-grq-wedge): the reproducible-wedge injection. The
+    // cpu takes the GRQ and spins INSIDE the critical section — the
+    // exact shape of the OH wedge (a holder that never releases, IRQs
+    // off). Every other cpu then spins on the lock and the deadlock
+    // detector fires; the crime-scene dump names this holder's site and
+    // walks its stack.
+    #[cfg(feature = "dfx-grq-wedge")]
+    if grq_wedge_inject() {
+        grq_site_mark_fp_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_PICK));
+        grq_raw_puts(b"\nGRQ-WEDGE-INJECT: cpu=");
+        grq_raw_putdec(cpu_id as u64);
+        grq_raw_puts(b" holding the GRQ forever\n");
+        loop {
+            core::hint::spin_loop();
+        }
+    }
     let cc_t2 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_LOCKWAIT_NS, cc_t1);
     // grq-10ns: the EXACT GRQ critical section — one bracket from
@@ -3839,6 +4336,9 @@ unsafe fn __schedule() {
             let id = (*prev)
                 .timed_sleep_timer_id
                 .load(core::sync::atomic::Ordering::Relaxed);
+            // grq-lock-1st: checkpoint before the TIMER_TABLE lock (the
+            // one nested lock the schedule path takes under the GRQ).
+            grq_site_mark_fp_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_NESTED_LOCK));
             if id != 0 && !crate::timer::timer_pending(id) {
                 // SAFETY: prev is this CPU's current task.
                 (*prev).set_state(TaskState::new(TaskState::RUNNING));
@@ -3851,6 +4351,8 @@ unsafe fn __schedule() {
         pick_trace(prev, 10);
         match prev_policy {
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+        // grq-lock-1st: checkpoint before the prev dequeue (class op).
+        grq_site_mark_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_CLASS_OP));
                 if grq_guard.cfs_rq.dequeue(prev) {
                     ww_record(prev, WW_EV_UNLINK_SCHED);
                 } else {
@@ -3882,6 +4384,10 @@ unsafe fn __schedule() {
         // phantom (RUNNING, unlinked, never picked; see requeue_prev_locked).
         // The old plain enqueue_task_locked call trusted the class on_rq
         // guard; a stale-true flag dropped prev permanently.
+        // grq-lock-1st: checkpoint before the requeue (the class enqueue
+        // is the one GRQ operation that can ALLOCATE — the deadline queue
+        // is still a BTreeMap).
+        grq_site_mark_fp_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_CLASS_OP));
         requeue_prev_locked(&mut *grq_guard, prev);
         // timer-gap lane (pinned-RT slot-corruption fix, the pi_stress
         // -g 2 wedge): prev is leaving THIS cpu and its affinity no
@@ -3944,6 +4450,9 @@ unsafe fn __schedule() {
 
     // Pick next task (R8-1b: prev is passed so the switching CPU may
     // re-pick itself through the next == prev fast path).
+    // grq-lock-1st: checkpoint before the pick (the pick walks the
+    // class trees; a corrupt tree can wedge the walk).
+    grq_site_mark_fp_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_PICK));
     let next = pick_next_task(&mut *grq_guard, cpu_id, prev);
     let cc_t4 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PICK_NS, cc_t3);
@@ -3981,6 +4490,8 @@ unsafe fn __schedule() {
     }
 
     // Update per-CPU current under lock
+        // grq-lock-1st: the holder-naming rig's checkpoint (publish).
+        grq_site_mark_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_PUBLISH));
     this_cpu_mut().current = next;
     if switching {
         crate::sched::sched::ww_record(next, WW_EV_PICK_PUB);
@@ -5280,7 +5791,7 @@ pub fn enqueue_task(task: &'static mut Task) -> bool {
     }
 
     // Lock GRQ and enqueue
-    let mut grq_guard = grq().lock_irqsave();
+    let mut grq_guard = grq().lock_irqsave_site(grq_site(GRQ_CALLER_ENQUEUE, GRQ_STEP_TRY));
     // SAFETY: GRQ lock is held via grq_guard; enqueue_task_locked expects the lock to be held.
     let inserted = unsafe {
         enqueue_task_locked(&mut *grq_guard, task_ptr)
@@ -5770,8 +6281,8 @@ pub fn wake_up_enqueue_opt(
         return false;
     }
     let mut grq_guard = match nested {
-        Some(proof) => grq().lock_irqsave_nested(proof),
-        None => grq().lock_irqsave(),
+        Some(proof) => grq().lock_irqsave_nested_site(proof, grq_site(GRQ_CALLER_WAKE, GRQ_STEP_TRY)),
+        None => grq().lock_irqsave_site(grq_site(GRQ_CALLER_WAKE, GRQ_STEP_TRY)),
     };
     // SAFETY: task is non-null and validated by the caller (Task::wake_up's
     // poison check plus an unlocked wakeable-state filter, or a pinned
@@ -5848,6 +6359,12 @@ pub fn wake_up_enqueue_opt(
             };
             // R56c (slot-capture orphan): a slot that names this task while
             // its CPU is IDLE-MARKED is lying. In-tree the combination is
+            // grq-lock-1st: checkpoint before the current-slot scan (the
+            // R56c lying-slot heal).
+            grq_site_mark_at(
+                crate::arch::cpu_id() as usize,
+                grq_site(GRQ_CALLER_WAKE, GRQ_STEP_CLASS_OP),
+            );
             // unconstructible: a pick publishes current=next and clears its
             // idle bit BEFORE releasing this lock, and mark_idle runs only
             // from the idle loop with the slot naming the idle task
@@ -6981,6 +7498,12 @@ pub fn wake_up_enqueue_opt(
                                             for &b in PO {
                                                 putchar(b);
                                             }
+        // grq-lock-1st: checkpoint before the enqueue (the class enqueue
+        // can ALLOCATE — the deadline queue is still a BTreeMap).
+        grq_site_mark_fp_at(
+            crate::arch::cpu_id() as usize,
+            grq_site(GRQ_CALLER_WAKE, GRQ_STEP_CLASS_OP),
+        );
                                         }
                                         break;
                                     }
@@ -8039,7 +8562,7 @@ fn check_dl_preempt(task: *mut Task, cpus_allowed: u32, prefer: i32) {
 pub fn dequeue_task(task: &Task) {
     let task_ptr = task as *const Task as *mut Task;
 
-    let mut grq_guard = grq().lock_irqsave();
+    let mut grq_guard = grq().lock_irqsave_site(grq_site(GRQ_CALLER_DEQUEUE, GRQ_STEP_TRY));
 
     // R39: read the policy UNDER the GRQ lock. The old read raced
     // change_task_policy (which swaps policy + migrates the class queues
@@ -8256,6 +8779,12 @@ pub fn dequeue_if_enqueued(task: &Task) {
 
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    // grq-lock-1st: service a deferred /dev/kmsg reader wake. The printk
+    // path defers the wake when the printing cpu holds the GRQ (the wake
+    // would re-acquire the GRQ — self-deadlock / GRQ<->WQ ABAA). The tick
+    // runs with NO scheduler lock held, so it is the safe servicer; the
+    // reader's delivery latency costs at most one tick.
+    crate::printk::service_deferred_kmsg_wake();
     crate::dfx::softlockup::touch(cpu_id);
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
@@ -9759,7 +10288,7 @@ pub fn scheduler_tick() {
                 // lock/unlock cycles, which doubled the contention window
                 // and caused soft lockups when other CPUs held the lock.
                 let should_resched = {
-                    let mut grq_guard = grq().lock_irqsave();
+                    let mut grq_guard = grq().lock_irqsave_site(grq_site(GRQ_CALLER_TICK, GRQ_STEP_TRY));
                     // R20-6: see __schedule — only the CPU whose task owns
                     // the single cfs_rq.curr slot charges through it; every
                     // CPU charges its own current task exactly once.
@@ -9835,7 +10364,7 @@ pub fn scheduler_tick() {
                     // current is paused on THIS CPU inside the IRQ, so the
                     // state read is race-free.
                     if (*current).state() == TaskState::new(TaskState::RUNNING) {
-                        let mut grq_guard = grq().lock_irqsave();
+                        let mut grq_guard = grq().lock_irqsave_site(grq_site(GRQ_CALLER_TICK, GRQ_STEP_TRY));
                         // R39: propagate the insert result and pair the
                         // grq.nr_running count. The rotation links a RUNNING
                         // task that __schedule will then NOT re-count (its
@@ -11069,6 +11598,14 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
         return;
     }
     let cpus_allowed;
+    // PROBE-LOCK DISCIPLINE (grq-lock-1st): the report is deferred to
+    // AFTER the guard drop — printk's ring-buffer write ends in
+    // `KMSG_READ_WQ.wake_up_all()`, whose waitqueue lock is held across
+    // `wake_up_process` -> the GRQ acquire. A printk issued under the GRQ
+    // re-acquires the GRQ on this cpu (self-deadlock with IRQs off) or
+    // forms the GRQ->WQ / WQ->GRQ ABAA with another cpu. Capture the
+    // fields under the lock, report after it is released.
+    let mut report: Option<(usize, u32, i32, u32, u8)> = None;
     {
         let mut g = grq().lock_irqsave();
         // SAFETY: next was this CPU's just-aborted pick: the pick's GRQ
@@ -11123,16 +11660,19 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
                 core::sync::atomic::AtomicU32::new(0);
             let n = SWABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 8 {
-                crate::pr_warn!(
-                    "SWITCH-ABORT-RELINK cpu={} pid={} claim={} pk={} rq={}",
-                    cpu,
-                    (*next).pid(),
-                    claim,
-                    pk,
-                    rq as u8
-                );
+                report = Some((cpu, (*next).pid(), claim, pk, rq as u8));
             }
         }
+    }
+    if let Some((cpu, pid, claim, pk, rq)) = report {
+        crate::pr_warn!(
+            "SWITCH-ABORT-RELINK cpu={} pid={} claim={} pk={} rq={}",
+            cpu,
+            pid,
+            claim,
+            pk,
+            rq
+        );
     }
     // Nudge an idle CPU outside the lock (mirrors enqueue_task's tail) so
     // the just-relinked task does not wait for this CPU's next pass.
@@ -11634,6 +12174,16 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
     let mut healed = 0u32;
     let mut report_pid = 0u32;
     let mut report_pc = 0i32;
+    // PROBE-LOCK DISCIPLINE (grq-lock-1st): the reports below used to be
+    // issued INSIDE this GRQ hold. printk's ring-buffer write ends in
+    // `KMSG_READ_WQ.wake_up_all()`, whose waitqueue lock is held across
+    // `wake_up_process` -> the GRQ acquire — a report issued under the GRQ
+    // re-acquires the GRQ on this cpu (self-deadlock with IRQs off) or
+    // forms the GRQ->WQ / WQ->GRQ ABAA with another cpu. Capture the
+    // fields here, emit after the guard is released.
+    let mut pending: [GrqPendingReport; 8] =
+        [GrqPendingReport { kind: 0, a: 0, b: 0, c: 0, d: 0, e: 0, comm: [0; 16] }; 8];
+    let mut npending = 0usize;
     {
         let mut g = grq().lock_irqsave();
         // r-strand face (a) (lat_fs conviction, 2026-11-19): the same
@@ -11649,12 +12199,17 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
         if let Some((was, now)) = g.cfs_rq.resync_nr_running_from_timeline() {
             static CR_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
-            if CR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                crate::pr_warn!(
-                    "STRAND-COUNTER-RESYNC cfs was={} now={}",
-                    was,
-                    now
-                );
+            if CR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 && npending < 8 {
+                pending[npending] = GrqPendingReport {
+                    kind: GRQ_RPT_COUNTER_RESYNC,
+                    a: was,
+                    b: now,
+                    c: 0,
+                    d: 0,
+                    e: 0,
+                    comm: [0; 16],
+                };
+                npending += 1;
             }
             healed += 1;
         }
@@ -11711,12 +12266,18 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                                 if SR_N
                                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                     < 24
+                                    && npending < 8
                                 {
-                                    crate::pr_warn!(
-                                        "SWOUT-STALE-RETIRED cpu={} pid={}",
-                                        c,
-                                        tk.pid()
-                                    );
+                                    pending[npending] = GrqPendingReport {
+                                        kind: GRQ_RPT_SHOUT_RETIRED,
+                                        a: c as u64,
+                                        b: tk.pid() as u64,
+                                        c: 0,
+                                        d: 0,
+                                        e: 0,
+                                        comm: [0; 16],
+                                    };
+                                    npending += 1;
                                 }
                             }
                         }
@@ -11764,34 +12325,28 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                             Some((_, a)) => (a, true),
                             None => (u64::MAX, false),
                         };
-                        if ago > 200 {
+                        if ago > 200 && npending < 8 {
                             let q = core::ptr::read_volatile(
                                 core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
                             );
                             let cb = tk.comm();
                             let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
-                            let comm =
-                                core::str::from_utf8(&cb[..cl]).unwrap_or("?");
-                            if traced {
-                                crate::pr_warn!(
-                                    "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true ago={}",
-                                    tk.pid(),
-                                    comm,
-                                    st.bits(),
-                                    q,
-                                    tk.pick_state(),
-                                    ago,
-                                );
-                            } else {
-                                crate::pr_warn!(
-                                    "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true trace=none",
-                                    tk.pid(),
-                                    comm,
-                                    st.bits(),
-                                    q,
-                                    tk.pick_state(),
-                                );
-                            }
+                            let mut comm = [0u8; 16];
+                            comm[..cl.min(16)].copy_from_slice(&cb[..cl.min(16)]);
+                            pending[npending] = GrqPendingReport {
+                                kind: if traced {
+                                    GRQ_RPT_STRAND_ID
+                                } else {
+                                    GRQ_RPT_STRAND_ID_NOTRACE
+                                },
+                                a: tk.pid() as u64,
+                                b: st.bits() as u64,
+                                c: q,
+                                d: tk.pick_state() as u64,
+                                e: ago,
+                                comm,
+                            };
+                            npending += 1;
                         }
                     }
                     continue;
@@ -11810,6 +12365,10 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
             }
         }
     }
+    // Emit the reports captured under the GRQ — AFTER the guard is
+    // released (grq-lock-1st: a printk under the GRQ re-acquires the GRQ
+    // through the printk ring buffer's kmsg wake).
+    emit_grq_reports(&pending[..npending]);
     // Drop the pins outside the GRQ (task_put may free).
     for i in 0..n {
         if !cand[i].is_null() {

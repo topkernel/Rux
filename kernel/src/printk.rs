@@ -573,7 +573,30 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     // Wake /dev/kmsg readers: a blocking kmsg read (Linux semantics)
     // sleeps until the next record lands. The waitqueue wake is
     // IRQ-context safe (irqsave discipline inside).
-    KMSG_READ_WQ.wake_up_all();
+    //
+    // grq-lock-1st: NOT unconditional. `WaitQueueHead::wake_up` holds
+    // the queue's list lock ACROSS `wake_up_process` ->
+    // `wake_up_enqueue_opt` -> `grq().lock_irqsave()`. So waking the
+    // readers from a printer that HOLDS the GRQ re-acquires the GRQ on
+    // this very cpu — the non-reentrant spinlock then spins forever
+    // with IRQs off (the "IRQs-dead GRQ holder" wedge the OH campaign
+    // kept capturing: four CPUs at RawSpinlock::lock+1359 behind one
+    // holder). Against another cpu the same pair is the textbook ABAA:
+    // this cpu holds the GRQ and wants the waitqueue lock, the other
+    // holds the waitqueue lock (inside wake_up) and wants the GRQ.
+    //
+    // The reference's shape is the same idea: Linux does not wake the
+    // log readers from inside the printer's critical section — the
+    // console unlock / klogd wake is deferred to a context that holds
+    // no lock. Rux's equivalent: when the printing cpu holds the GRQ,
+    // the reader wake is DEFERRED to the next tick (which runs with no
+    // scheduler lock held); otherwise the wake stays synchronous and
+    // the delivery latency is unchanged.
+    if crate::sched::sched::grq_held_here() {
+        KMSG_WAKE_PENDING.store(true, Ordering::Release);
+    } else {
+        KMSG_READ_WQ.wake_up_all();
+    }
 
     // NOTE (klogd redesign): the persistent /var/log/kmsg copy is NO
     // LONGER taken here. The old per-record synchronous ext4 write ran
@@ -1296,6 +1319,27 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
 /// context — IRQs may be off; WaitQueueHead takes irqsave locks).
 static KMSG_READ_WQ: crate::process::wait::WaitQueueHead =
     crate::process::wait::WaitQueueHead::new();
+
+/// Deferred /dev/kmsg reader wake (grq-lock-1st).
+///
+/// Set by the ring-buffer write when the PRINTING cpu holds the GRQ —
+/// the wake would otherwise re-acquire the GRQ on that cpu (self-
+/// deadlock) or form the GRQ->WQ / WQ->GRQ ABAA with another cpu.
+/// Serviced from the tick path, which holds no scheduler lock.
+static KMSG_WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Service a deferred /dev/kmsg reader wake.
+///
+/// Called from the tick path — a context that holds no scheduler lock.
+/// The swap makes exactly one caller do the wake; the others observe
+/// `false` and return. The wake itself takes the waitqueue lock and
+/// calls `wake_up_process`, which takes the GRQ: legal here because the
+/// caller holds nothing.
+pub fn service_deferred_kmsg_wake() {
+    if KMSG_WAKE_PENDING.swap(false, Ordering::AcqRel) {
+        KMSG_READ_WQ.wake_up_all();
+    }
+}
 
 /// perf-audit counters for the hilogd.rd_kmsg spin hunt (pa3: 92.6K
 /// read()/s sustained — which arm of the read does that?): records
