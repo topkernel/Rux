@@ -76,17 +76,39 @@ const FDT_END: u32 = 0x9;
 /// # Returns
 /// - `Some(bootargs)`: Found bootargs string
 /// - `None`: Not found
-unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
+/// The ONE audited read edge for boot-time FDT byte accesses
+/// (INV-FDT-1): boot.S maps the bootloader-provided DTB blob at its
+/// physical address for the machine's lifetime; every parse fn anchors
+/// the blob with the 0xd00dfeed magic check before walking, and the
+/// walkers keep their cursors inside [fdt, fdt+totalsize).
+#[inline]
+fn fdt_u8(p: *const u8) -> u8 {
+    // SAFETY: INV-FDT-1 — a 1-byte read inside the mapped DTB blob.
+    unsafe { p.read() }
+}
+
+/// Cursor advance inside the mapped DTB (INV-FDT-1): a safe wrapper so
+/// the walkers never hand-roll pointer arithmetic.
+#[inline]
+fn fdt_add(p: *const u8, n: isize) -> *const u8 {
+    // SAFETY: INV-FDT-1 — arithmetic within the mapped DTB blob; the
+    // walkers bound their loops by the header-derived `end`.
+    unsafe { p.offset(n) }
+}
+
+/// Big-endian u32 read at a cursor inside the mapped DTB (INV-FDT-1).
+#[inline]
+fn fdt_u32(p: *const u8) -> u32 {
+    // SAFETY: INV-FDT-1 — a 4-byte read inside the mapped DTB blob.
+    unsafe { u32::from_be_bytes(core::ptr::read_unaligned(p as *const [u8; 4])) }
+}
+
+/// Parse the kernel command line from the bootloader DTB (`/chosen`).
+fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     let fdt = dtb_ptr as *const u8;
 
-    // Helper function: read u32 (big endian)
-    let read_u32 = |offset: usize| -> u32 {
-        let b0 = *fdt.offset(offset as isize) as u32;
-        let b1 = *fdt.offset(offset as isize + 1) as u32;
-        let b2 = *fdt.offset(offset as isize + 2) as u32;
-        let b3 = *fdt.offset(offset as isize + 3) as u32;
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-    };
+    // Big-endian u32 at a header offset (INV-FDT-1 reads).
+    let read_u32 = |offset: usize| -> u32 { fdt_u32(fdt_add(fdt, offset as isize)) };
 
     // Read magic number
     let magic = read_u32(0);
@@ -116,39 +138,33 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     let size_dt_strings = read_u32(0x20) as usize;
     let size_dt_struct = read_u32(0x24) as usize;
 
-    let mut ptr = fdt.offset(off_dt_struct as isize);
-    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
-    let strings = fdt.offset(off_dt_strings as isize);
+    let mut ptr = fdt_add(fdt, off_dt_struct as isize);
+    let end = fdt_add(fdt, (off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt_add(fdt, off_dt_strings as isize);
 
-    // Helper function: read u32 from pointer position (big endian)
-    let read_u32_at = |p: *const u8| -> u32 {
-        let b0 = unsafe { *p as u32 };
-        let b1 = unsafe { *p.offset(1) as u32 };
-        let b2 = unsafe { *p.offset(2) as u32 };
-        let b3 = unsafe { *p.offset(3) as u32 };
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-    };
+    // Big-endian u32 at a cursor (INV-FDT-1 reads).
+    let read_u32_at = |p: *const u8| -> u32 { fdt_u32(p) };
 
     let mut depth = 0;
     let mut in_chosen = false;
 
     while ptr < end {
-        let token = read_u32_at(ptr);
-        ptr = ptr.offset(4);
+        let token = fdt_u32(ptr);
+        ptr = fdt_add(ptr, 4);
 
         match token {
             FDT_BEGIN_NODE => {
                 // Read node name
                 let mut nodename = [0u8; 64];
                 let mut i = 0;
-                while *ptr != 0 && i < 64 {
-                    nodename[i] = *ptr;
-                    ptr = ptr.offset(1);
+                while fdt_u8(ptr) != 0 && i < 64 {
+                    nodename[i] = fdt_u8(ptr);
+                    ptr = fdt_add(ptr, 1);
                     i += 1;
                 }
-                ptr = ptr.offset(1);
+                ptr = fdt_add(ptr, 1);
                 // Align to 4 bytes
-                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+                ptr = fdt_add(ptr, ((4 - ((ptr as usize) & 3)) & 3) as isize);
 
                 let name = core::str::from_utf8(&nodename[..i]).ok()?;
                 if name == "chosen" || name.starts_with("chosen@") {
@@ -163,17 +179,17 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                 depth -= 1;
             }
             FDT_PROP => {
-                let len = read_u32_at(ptr) as usize;
-                let nameoff = read_u32_at(ptr.offset(4)) as usize;
-                ptr = ptr.offset(8);
+                let len = fdt_u32(ptr) as usize;
+                let nameoff = fdt_u32(fdt_add(ptr, 4)) as usize;
+                ptr = fdt_add(ptr, 8);
 
                 // Read property name
-                let mut name_ptr = strings.offset(nameoff as isize);
+                let mut name_ptr = strings ;
                 let mut prop_name = [0u8; 32];
                 let mut i = 0;
-                while *name_ptr != 0 && i < 32 {
-                    prop_name[i] = *name_ptr;
-                    name_ptr = name_ptr.offset(1);
+                while fdt_u8(name_ptr) != 0 && i < 32 {
+                    prop_name[i] = fdt_u8(name_ptr);
+                    name_ptr = fdt_add(name_ptr, 1);
                     i += 1;
                 }
                 let name = core::str::from_utf8(&prop_name[..i]).ok().unwrap_or("???");
@@ -182,7 +198,7 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                     // Read bootargs string
                     let mut bootargs = vec![0u8; len];
                     for j in 0..len {
-                        bootargs[j] = *ptr.offset(j as isize);
+                        bootargs[j] = fdt_u8(fdt_add(ptr, j as isize));
                     }
                     if let Ok(bootargs_str) = core::str::from_utf8(&bootargs) {
                         // Remove trailing null character
@@ -191,9 +207,9 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                     }
                 }
 
-                ptr = ptr.offset(len as isize);
+                ptr = fdt_add(ptr, len as isize);
                 // Align to 4 bytes
-                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+                ptr = fdt_add(ptr, ((4 - ((ptr as usize) & 3)) & 3) as isize);
             }
             FDT_END => {
                 break;
@@ -231,19 +247,16 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 /// Maximum number of memory regions we track (stack-allocated, no heap needed)
 const MAX_MEMORY_REGIONS: usize = 8;
 
-pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_REGIONS] {
-    let mut regions: [MemoryRegion; MAX_MEMORY_REGIONS] = core::mem::zeroed();
+pub fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_REGIONS] {
+    // SAFETY: MemoryRegion is a plain-data struct (usize fields only);
+    // all-zero bytes are a valid array of them.
+    let mut regions: [MemoryRegion; MAX_MEMORY_REGIONS] =
+        unsafe { core::mem::zeroed() };
     let mut count = 0usize;
     let fdt = dtb_ptr as *const u8;
 
-    // Helper function: read u32 (big endian)
-    let read_u32 = |offset: usize| -> u32 {
-        let b0 = *fdt.offset(offset as isize) as u32;
-        let b1 = *fdt.offset(offset as isize + 1) as u32;
-        let b2 = *fdt.offset(offset as isize + 2) as u32;
-        let b3 = *fdt.offset(offset as isize + 3) as u32;
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-    };
+    // Big-endian u32 at a header offset (INV-FDT-1 reads).
+    let read_u32 = |offset: usize| -> u32 { fdt_u32(fdt_add(fdt, offset as isize)) };
 
     // Read magic number
     let magic = read_u32(0);
@@ -258,18 +271,12 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
     let size_dt_strings = read_u32(0x20) as usize;
     let size_dt_struct = read_u32(0x24) as usize;
 
-    let mut ptr = fdt.offset(off_dt_struct as isize);
-    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
-    let strings = fdt.offset(off_dt_strings as isize);
+    let mut ptr = fdt_add(fdt, off_dt_struct as isize);
+    let end = fdt_add(fdt, (off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt_add(fdt, off_dt_strings as isize);
 
-    // Helper function: read u32 from pointer position (big endian)
-    let read_u32_at = |p: *const u8| -> u32 {
-        let b0 = unsafe { *p as u32 };
-        let b1 = unsafe { *p.offset(1) as u32 };
-        let b2 = unsafe { *p.offset(2) as u32 };
-        let b3 = unsafe { *p.offset(3) as u32 };
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-    };
+    // Big-endian u32 at a cursor (INV-FDT-1 reads).
+    let read_u32_at = |p: *const u8| -> u32 { fdt_u32(p) };
 
     let mut depth = 0;
     let mut in_memory = false;
@@ -280,22 +287,22 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
     let mut pending_reg: Option<(u64, u64)> = None;
 
     while ptr < end {
-        let token = read_u32_at(ptr);
-        ptr = ptr.offset(4);
+        let token = fdt_u32(ptr);
+        ptr = fdt_add(ptr, 4);
 
         match token {
             FDT_BEGIN_NODE => {
                 // Read node name
                 let mut nodename = [0u8; 64];
                 let mut i = 0;
-                while *ptr != 0 && i < 64 {
-                    nodename[i] = *ptr;
-                    ptr = ptr.offset(1);
+                while fdt_u8(ptr) != 0 && i < 64 {
+                    nodename[i] = fdt_u8(ptr);
+                    ptr = fdt_add(ptr, 1);
                     i += 1;
                 }
-                ptr = ptr.offset(1);
+                ptr = fdt_add(ptr, 1);
                 // Align to 4 bytes
-                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+                ptr = fdt_add(ptr, ((4 - ((ptr as usize) & 3)) & 3) as isize);
 
                 let name = core::str::from_utf8(&nodename[..i]).unwrap_or("");
                 // Memory nodes are named "memory" or "memory@<address>"
@@ -321,17 +328,17 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
                 depth -= 1;
             }
             FDT_PROP => {
-                let len = read_u32_at(ptr) as usize;
-                let nameoff = read_u32_at(ptr.offset(4)) as usize;
-                ptr = ptr.offset(8);
+                let len = fdt_u32(ptr) as usize;
+                let nameoff = fdt_u32(fdt_add(ptr, 4)) as usize;
+                ptr = fdt_add(ptr, 8);
 
                 // Read property name
-                let mut name_ptr = strings.offset(nameoff as isize);
+                let mut name_ptr = strings ;
                 let mut prop_name = [0u8; 32];
                 let mut i = 0;
-                while *name_ptr != 0 && i < 32 {
-                    prop_name[i] = *name_ptr;
-                    name_ptr = name_ptr.offset(1);
+                while fdt_u8(name_ptr) != 0 && i < 32 {
+                    prop_name[i] = fdt_u8(name_ptr);
+                    name_ptr = fdt_add(name_ptr, 1);
                     i += 1;
                 }
                 let name = core::str::from_utf8(&prop_name[..i]).unwrap_or("???");
@@ -340,7 +347,7 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
                 if in_memory && name == "device_type" {
                     let mut value = [0u8; 16];
                     for j in 0..len.min(16) {
-                        value[j] = *ptr.offset(j as isize);
+                        value[j] = fdt_u8(fdt_add(ptr, j as isize));
                     }
                     if let Ok(value_str) = core::str::from_utf8(&value[..len.min(16)]) {
                         has_device_type_memory = value_str.trim_end_matches('\0') == "memory";
@@ -353,9 +360,9 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
                 if in_memory && name == "reg" && len >= 16 {
                     // Read 64-bit address and size (each is 2 cells of 32 bits)
                     let addr_high = read_u32_at(ptr) as u64;
-                    let addr_low = read_u32_at(ptr.offset(4)) as u64;
-                    let size_high = read_u32_at(ptr.offset(8)) as u64;
-                    let size_low = read_u32_at(ptr.offset(12)) as u64;
+                    let addr_low = read_u32_at(fdt_add(ptr, 4)) as u64;
+                    let size_high = read_u32_at(fdt_add(ptr, 8)) as u64;
+                    let size_low = read_u32_at(fdt_add(ptr, 12)) as u64;
 
                     let base = (addr_high << 32) | addr_low;
                     let size = (size_high << 32) | size_low;
@@ -365,9 +372,9 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
                     }
                 }
 
-                ptr = ptr.offset(len as isize);
+                ptr = fdt_add(ptr, len as isize);
                 // Align to 4 bytes
-                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+                ptr = fdt_add(ptr, ((4 - ((ptr as usize) & 3)) & 3) as isize);
             }
             FDT_END => {
                 break;
@@ -399,63 +406,53 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
 /// optional _multi_letter names after): the base prefix "rv" + width
 /// digits is skipped, then any single-letter extension 'v' counts.
 /// Used to prime the V-extension capability cache at boot (vext.rs).
-pub unsafe fn parse_cpu_isa_has_v(dtb_ptr: u64) -> bool {
+pub fn parse_cpu_isa_has_v(dtb_ptr: u64) -> bool {
     let fdt = dtb_ptr as *const u8;
 
-    // SAFETY: mirrors parse_memory_regions — the bootloader-provided
-    // DTB is mapped at its physical address by boot.S's early tables.
-    unsafe fn read_u32(p: *const u8) -> u32 {
-        let b0 = *p as u32;
-        let b1 = *p.offset(1) as u32;
-        let b2 = *p.offset(2) as u32;
-        let b3 = *p.offset(3) as u32;
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-    }
-
-    if unsafe { read_u32(fdt) } != 0xd00dfeed {
+    if fdt_u32(fdt) != 0xd00dfeed {
         return false;
     }
-    let off_dt_struct = unsafe { read_u32(fdt.offset(0x08)) } as usize;
-    let off_dt_strings = unsafe { read_u32(fdt.offset(0x0C)) } as usize;
-    let size_dt_struct = unsafe { read_u32(fdt.offset(0x24)) } as usize;
+    let off_dt_struct = fdt_u32(fdt_add(fdt, 0x08)) as usize;
+    let off_dt_strings = fdt_u32(fdt_add(fdt, 0x0C)) as usize;
+    let size_dt_struct = fdt_u32(fdt_add(fdt, 0x24)) as usize;
 
-    let mut ptr = fdt.offset(off_dt_struct as isize);
-    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
-    let strings = fdt.offset(off_dt_strings as isize);
+    let mut ptr = fdt_add(fdt, off_dt_struct as isize);
+    let end = fdt_add(fdt, (off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt_add(fdt, off_dt_strings as isize);
 
     let mut in_cpu = false;
     while ptr < end {
-        let token = unsafe { read_u32(ptr) };
-        ptr = ptr.offset(4);
+        let token = fdt_u32(ptr);
+        ptr = fdt_add(ptr, 4);
         match token {
             FDT_BEGIN_NODE => {
                 let mut name = [0u8; 32];
                 let mut i = 0;
-                while unsafe { *ptr } != 0 && i < 32 {
-                    name[i] = unsafe { *ptr };
-                    ptr = ptr.offset(1);
+                while fdt_u8(ptr) != 0 && i < 32 {
+                    name[i] = fdt_u8(ptr);
+                    ptr = fdt_add(ptr, 1);
                     i += 1;
                 }
-                while unsafe { *ptr } != 0 {
-                    ptr = ptr.offset(1);
+                while fdt_u8(ptr) != 0 {
+                    ptr = fdt_add(ptr, 1);
                 }
-                ptr = ptr.offset(1); // NUL
+                ptr = fdt_add(ptr, 1); // NUL
                 // Align to 4
                 let pad = (4 - (ptr as usize & 3)) & 3;
-                ptr = ptr.offset(pad as isize);
+                ptr = fdt_add(ptr, pad as isize);
                 let n = &name[..i];
                 in_cpu = n.starts_with(b"cpu@") || n == b"cpu";
             }
             FDT_PROP => {
-                let len = unsafe { read_u32(ptr) } as usize;
-                let nameoff = unsafe { read_u32(ptr.offset(4)) } as usize;
-                ptr = ptr.offset(8);
+                let len = fdt_u32(ptr) as usize;
+                let nameoff = fdt_u32(fdt_add(ptr, 4)) as usize;
+                ptr = fdt_add(ptr, 8);
                 let val = ptr;
                 // Property block is 4-aligned already (len padded).
                 let mut name = [0u8; 32];
                 let mut i = 0;
                 while i < 32 {
-                    let c = unsafe { *strings.offset((nameoff + i) as isize) };
+                    let c = fdt_u8(fdt_add(strings, (nameoff + i) as isize));
                     if c == 0 {
                         break;
                     }
@@ -468,15 +465,15 @@ pub unsafe fn parse_cpu_isa_has_v(dtb_ptr: u64) -> bool {
                     let mut j = 0usize;
                     let v = val as *const u8;
                     // skip base "rv"
-                    if j + 1 < len && unsafe { *v.add(j) } == b'r' && unsafe { *v.add(j + 1) } == b'v' {
+                    if j + 1 < len && fdt_u8(fdt_add(v, j as isize)) == b'r' && fdt_u8(fdt_add(v, (j + 1) as isize)) == b'v' {
                         j += 2;
                         // skip width digits
-                        while j < len && unsafe { *v.add(j) }.is_ascii_digit() {
+                        while j < len && fdt_u8(fdt_add(v, j as isize)).is_ascii_digit() {
                             j += 1;
                         }
                         // single-letter extensions until separator
                         while j < len {
-                            let c = unsafe { *v.add(j) };
+                            let c = fdt_u8(fdt_add(v, j as isize));
                             if c == 0 || c == b'_' {
                                 break;
                             }
@@ -488,7 +485,7 @@ pub unsafe fn parse_cpu_isa_has_v(dtb_ptr: u64) -> bool {
                     }
                 }
                 let pad = (4 - (len & 3)) & 3;
-                ptr = ptr.offset((len + pad) as isize);
+                ptr = fdt_add(ptr, (len + pad) as isize);
             }
             FDT_END_NODE => {
                 in_cpu = false;
@@ -499,7 +496,7 @@ pub unsafe fn parse_cpu_isa_has_v(dtb_ptr: u64) -> bool {
     false
 }
 
-pub unsafe fn parse_initrd_region(dtb_ptr: u64) -> Option<(usize, usize)> {
+pub fn parse_initrd_region(dtb_ptr: u64) -> Option<(usize, usize)> {
     let (start, end) = parse_chosen_u64_pair(dtb_ptr, "linux,initrd-start", "linux,initrd-end")?;
     if end > start && start != 0 {
         Some((start as usize, end as usize))
@@ -509,7 +506,7 @@ pub unsafe fn parse_initrd_region(dtb_ptr: u64) -> Option<(usize, usize)> {
 }
 
 /// Read a pair of /chosen integer properties (used for the initrd range).
-unsafe fn parse_chosen_u64_pair(
+fn parse_chosen_u64_pair(
     dtb_ptr: u64,
     name_a: &str,
     name_b: &str,
@@ -520,16 +517,10 @@ unsafe fn parse_chosen_u64_pair(
 }
 
 /// Read one /chosen integer property (1 or 2 big-endian u32 cells).
-unsafe fn parse_chosen_prop(dtb_ptr: u64, name: &str) -> Option<u64> {
+fn parse_chosen_prop(dtb_ptr: u64, name: &str) -> Option<u64> {
     let fdt = dtb_ptr as *const u8;
 
-    let read_u32 = |offset: usize| -> u32 {
-        let b0 = *fdt.offset(offset as isize) as u32;
-        let b1 = *fdt.offset(offset as isize + 1) as u32;
-        let b2 = *fdt.offset(offset as isize + 2) as u32;
-        let b3 = *fdt.offset(offset as isize + 3) as u32;
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-    };
+    let read_u32 = |offset: usize| -> u32 { fdt_u32(fdt_add(fdt, offset as isize)) };
 
     if read_u32(0) != 0xd00dfeed {
         return None;
@@ -538,36 +529,30 @@ unsafe fn parse_chosen_prop(dtb_ptr: u64, name: &str) -> Option<u64> {
     let off_dt_strings = read_u32(0x0C) as usize;
     let size_dt_struct = read_u32(0x24) as usize;
 
-    let mut ptr = fdt.offset(off_dt_struct as isize);
-    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
-    let strings = fdt.offset(off_dt_strings as isize);
+    let mut ptr = fdt_add(fdt, off_dt_struct as isize);
+    let end = fdt_add(fdt, (off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt_add(fdt, off_dt_strings as isize);
 
-    let read_u32_at = |p: *const u8| -> u32 {
-        let b0 = *p as u32;
-        let b1 = *p.offset(1) as u32;
-        let b2 = *p.offset(2) as u32;
-        let b3 = *p.offset(3) as u32;
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-    };
+    let read_u32_at = |p: *const u8| -> u32 { fdt_u32(p) };
 
     let mut depth = 0;
     let mut in_chosen = false;
 
     while ptr < end {
-        let token = read_u32_at(ptr);
-        ptr = ptr.offset(4);
+        let token = fdt_u32(ptr);
+        ptr = fdt_add(ptr, 4);
 
         match token {
             FDT_BEGIN_NODE => {
                 let mut nodename = [0u8; 64];
                 let mut i = 0;
-                while *ptr != 0 && i < 64 {
-                    nodename[i] = *ptr;
-                    ptr = ptr.offset(1);
+                while fdt_u8(ptr) != 0 && i < 64 {
+                    nodename[i] = fdt_u8(ptr);
+                    ptr = fdt_add(ptr, 1);
                     i += 1;
                 }
-                ptr = ptr.offset(1);
-                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+                ptr = fdt_add(ptr, 1);
+                ptr = fdt_add(ptr, ((4 - ((ptr as usize) & 3)) & 3) as isize);
 
                 let node_name = core::str::from_utf8(&nodename[..i]).ok()?;
                 if node_name == "chosen" || node_name.starts_with("chosen@") {
@@ -582,16 +567,16 @@ unsafe fn parse_chosen_prop(dtb_ptr: u64, name: &str) -> Option<u64> {
                 depth -= 1;
             }
             FDT_PROP => {
-                let len = read_u32_at(ptr) as usize;
-                let nameoff = read_u32_at(ptr.offset(4)) as usize;
-                ptr = ptr.offset(8);
+                let len = fdt_u32(ptr) as usize;
+                let nameoff = fdt_u32(fdt_add(ptr, 4)) as usize;
+                ptr = fdt_add(ptr, 8);
 
-                let mut name_ptr = strings.offset(nameoff as isize);
+                let mut name_ptr = strings ;
                 let mut prop_name = [0u8; 32];
                 let mut i = 0;
-                while *name_ptr != 0 && i < 32 {
-                    prop_name[i] = *name_ptr;
-                    name_ptr = name_ptr.offset(1);
+                while fdt_u8(name_ptr) != 0 && i < 32 {
+                    prop_name[i] = fdt_u8(name_ptr);
+                    name_ptr = fdt_add(name_ptr, 1);
                     i += 1;
                 }
                 let pname = core::str::from_utf8(&prop_name[..i]).ok()?;
@@ -602,14 +587,14 @@ unsafe fn parse_chosen_prop(dtb_ptr: u64, name: &str) -> Option<u64> {
                         4 => Some(read_u32_at(ptr) as u64),
                         8 => Some(
                             ((read_u32_at(ptr) as u64) << 32)
-                                | read_u32_at(ptr.offset(4)) as u64,
+                                | read_u32_at(fdt_add(ptr, 4)) as u64,
                         ),
                         _ => None,
                     };
                 }
 
-                ptr = ptr.offset(len as isize);
-                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+                ptr = fdt_add(ptr, len as isize);
+                ptr = fdt_add(ptr, ((4 - ((ptr as usize) & 3)) & 3) as isize);
 
                 if let Some(v) = result {
                     return Some(v);
@@ -648,7 +633,7 @@ pub fn init(dtb_ptr: u64) {
         crate::arch::mm::PhysAddr::new(dtb_phys)
     ).bits();
 
-    let cmdline: &'static str = unsafe {
+    let cmdline: &'static str = {
         match parse_bootargs(dtb_virt) {
             Some(bootargs) => {
                 // Convert String to &'static str (via Box::leak)
@@ -732,6 +717,9 @@ pub fn get_cmdline() -> Option<&'static str> {
         return None;
     }
 
+    // SAFETY (one storage edge): ptr/len were set together by the boot
+    // parse (Box::leak of the bootargs string) — machine-lifetime,
+    // never freed, len exactly the string's byte length.
     unsafe {
         let slice = core::slice::from_raw_parts(ptr, len);
         core::str::from_utf8(slice).ok()
