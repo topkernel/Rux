@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rux — 用 Rust 从零编写的 Linux ABI 兼容操作系统内核</title>
-<meta name="description" content="Rux 是一个完全用 Rust 编写的 Linux ABI 兼容操作系统内核:未经修改的 Ubuntu 22.04 可启动至 GNOME Shell 桌面、24.04 可启动至图形目标并支持串口登录,未经修改的 OpenHarmony 可启动全部 135+ 服务。约 40.8 万行 Rust,349 个系统调用,三大架构。">
+<meta name="description" content="Rux 是一个完全用 Rust 编写的 Linux ABI 兼容操作系统内核:未经修改的 Ubuntu 22.04 可启动至 GNOME Shell 桌面、24.04 可启动至图形目标并支持串口登录,未经修改的 OpenHarmony 可启动全部 135+ 服务。约 40.9 万行 Rust,349 个系统调用,三大架构。">
 <link rel="stylesheet" href="css/style.css?v=19">
 </head>
 <body>
@@ -81,7 +81,7 @@
 <section class="section-tight">
   <div class="container">
     <div class="stats">
-      <div class="stat"><div class="v">40.8<em>万+</em></div><div class="l">行 Rust 代码</div></div>
+      <div class="stat"><div class="v">40.9<em>万+</em></div><div class="l">行 Rust 代码</div></div>
       <div class="stat"><div class="v">349</div><div class="l">系统调用</div></div>
       <div class="stat"><div class="v">4560<em>+</em></div><div class="l">测试用例</div></div>
       <div class="stat"><div class="v">3</div><div class="l">架构移植</div></div>
@@ -159,7 +159,7 @@
       <div class="card">
         <h3><span class="ico">🛡️</span>Rust 安全,有台账</h3>
         <p>全内核 Rust(no_std)。全史 33 个内存破坏类缺陷逐一归档:23 个位于被审计的 <code>unsafe</code>/汇编,10 个位于 safe 代码(全部是安全 Rust 尚不类型检查的所有权/锁协议类);统治 C 内核的指针表达式类(越界/野指针/格式串)在 safe 代码中为零。</p>
-        <div class="nums">unsafe 行占比 16.7%(双口径) · Kani 164 proofs</div>
+        <div class="nums">unsafe 行占比 14.0%(双口径) · Kani 164 proofs</div>
         <a class="more" href="security/index.html">安全栏目 →</a>
       </div>
       <div class="card">
@@ -268,7 +268,7 @@
       <div class="card">
         <h3><span class="ico">🔐</span>安全</h3>
         <p>bug 分类学全史 33 例逐条归档(23 unsafe/汇编 + 10 safe 所有权类),指针表达式类缺陷为零;164 个 Kani harness 证明核心 unsafe 代码。</p>
-        <div class="nums">unsafe 行 16.7%(双口径)· 缺口直说</div>
+        <div class="nums">unsafe 行 14.0%(双口径)· 缺口直说</div>
         <a class="more" href="security/index.html">安全与形式验证 →</a>
       </div>
     </div>
@@ -383,7 +383,7 @@ make ubuntu-run <span class="c"># 完整 Ubuntu 24.04 桌面(串口登录 root /
     </div>
     <div class="foot-meta">
       <span>Rux Kernel · MIT License · <a href="https://github.com/topkernel/Rux">github.com/topkernel/Rux</a></span>
-      <span>~419,000 lines (408,000 Rust) · built by AI agents under human direction · 2026</span>
+      <span>~420,000 lines (409,000 Rust) · built by AI agents under human direction · 2026</span>
     
       <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
   </div>

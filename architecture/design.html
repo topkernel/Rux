@@ -89,16 +89,16 @@
       <table>
         <thead><tr><th>子系统</th><th>代码量(行)</th><th>占比</th><th>一句话职责</th></tr></thead>
         <tbody>
-          <tr><td>process/ + sched/ + sync/</td><td class="num">60,323</td><td class="num">16.7%</td><td>进程/调度/同步原语</td></tr>
-          <tr><td>fs/(ext4·VFS·页缓存·jbd2)</td><td class="num">76,617</td><td class="num">21.2%</td><td>文件系统栈与缓存</td></tr>
+          <tr><td>process/ + sched/ + sync/</td><td class="num">60,321</td><td class="num">16.7%</td><td>进程/调度/同步原语</td></tr>
+          <tr><td>fs/(ext4·VFS·页缓存·jbd2)</td><td class="num">76,886</td><td class="num">21.3%</td><td>文件系统栈与缓存</td></tr>
           <tr><td>arch/(三架构移植层)</td><td class="num">45,175</td><td class="num">12.5%</td><td>启动/陷入/上下文切换/TLB</td></tr>
-          <tr><td>syscall/</td><td class="num">41,041</td><td class="num">11.4%</td><td>系统调用边界(胶囊边界)</td></tr>
+          <tr><td>syscall/</td><td class="num">41,041</td><td class="num">11.3%</td><td>系统调用边界(胶囊边界)</td></tr>
           <tr><td>dfx/ + trace/(syscost·kallsyms·看门狗·trace-event)</td><td class="num">23,737</td><td class="num">6.6%</td><td>诊断与可观测性</td></tr>
           <tr><td>drivers/(virtio·DRM·输入)</td><td class="num">26,280</td><td class="num">7.3%</td><td>设备驱动</td></tr>
-          <tr><td>ipc/(binder·SysV·MQ)</td><td class="num">21,920</td><td class="num">6.1%</td><td>进程间通信</td></tr>
+          <tr><td>ipc/(binder·SysV·MQ)</td><td class="num">22,109</td><td class="num">6.1%</td><td>进程间通信</td></tr>
           <tr><td>net/(TCP/IP·unix·netlink)</td><td class="num">20,637</td><td class="num">5.7%</td><td>网络协议栈</td></tr>
           <tr><td>mm/</td><td class="num">20,126</td><td class="num">5.6%</td><td>内存管理</td></tr>
-          <tr><td>其他(顶层文件·interrupt·timer·perf·io_uring·safety·security·module)</td><td class="num">25,563</td><td class="num">7.1%</td><td>基础设施与安全模块</td></tr>
+          <tr><td>其他(顶层文件·interrupt·timer·perf·io_uring·safety·security·module)</td><td class="num">25,561</td><td class="num">7.1%</td><td>基础设施与安全模块</td></tr>
         </tbody>
       </table>
     </div>
@@ -277,7 +277,7 @@
     <p>核心主张:<b>安全检查在编译期发生、从快路径消失 —— 快的设计与安全的设计是同一个设计。</b>出处:<code>docs/architecture/safety-and-performance.md</code>。</p>
     <ul>
       <li><b>bug 分类学 v1</b>(全史 3,358 个去重提交逐条裁定):33 个内存破坏类缺陷中 <b>23 个位于显式 unsafe 块/架构汇编</b>,<b>10 个位于 safe 代码</b> —— 但全部是安全 Rust 当今不类型检查的所有权/引用计数/锁协议类;<b>零</b>指针表达式缺陷(越界/迭代器失效/野指针运算/格式串)出现在 safe 代码。33 例中 6 例在任何 boot 前被评审抓到。</li>
-      <li><b>unsafe 表面已枚举且带合同</b>:unsafe 行占比 9.5%(双口径 16.7%);47 个服务文件编译期 forbid(unsafe_code)、另 63 个已无 unsafe;SAFETY 注释覆盖 63%;164 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
+      <li><b>unsafe 表面已枚举且带合同</b>:unsafe 行占比 7.1%(双口径 14.0%);47 个服务文件编译期 forbid(unsafe_code)、另 63 个已无 unsafe;SAFETY 注释覆盖 63%;164 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
       <li><b>性能每条配对安全句</b>:如切换路径携带类型化 per-CPU 存储 + 键控锁;lmbench/Geekbench 数字与调度事件普查的判定结果记入同一张表;代价侧(futex 唤醒正在运行的任务时 ~10ms tick 量化)如实记录。</li>
       <li><b>诚实缺口登记册 v1</b>:缺 KASLR(无 boot 熵源)、内核 text/rodata W^X 收紧、编译器栈保护、KASAN 式毒化广度、KCSAN 观察点、kallsyms 掩蔽 —— 逐条写明"补齐长什么样"。</li>
     </ul>

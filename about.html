@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>项目介绍 · Rux</title>
-<meta name="description" content="Rux:用 Rust 从零编写的 Linux ABI 兼容操作系统内核。未修改的 Ubuntu 22.04 启动到 GNOME 桌面,未修改的 OpenHarmony 拉起 135+ 服务。41.9 万行代码,349 个系统调用,29 项设计分歧登记。">
+<meta name="description" content="Rux:用 Rust 从零编写的 Linux ABI 兼容操作系统内核。未修改的 Ubuntu 22.04 启动到 GNOME 桌面,未修改的 OpenHarmony 拉起 135+ 服务。42 万行代码,349 个系统调用,29 项设计分歧登记。">
 <link rel="stylesheet" href="css/style.css?v=19">
 </head>
 <body>
@@ -88,7 +88,7 @@
 
   <article class="doc-main">
     <h1>Rux 是什么</h1>
-    <div class="sub">用 Rust 从零编写的 Linux ABI 兼容操作系统内核 · kernel/ 树 679 文件 / 419,502 行(其中 Rust 408,408 行)· 349 个系统调用 · LTP 1,139/1,869</div>
+    <div class="sub">用 Rust 从零编写的 Linux ABI 兼容操作系统内核 · kernel/ 树 679 文件 / 419,958 行(其中 Rust 408,864 行)· 349 个系统调用 · LTP 1,139/1,869</div>
 
     <h2 id="why"><span class="anchor">§1</span>为什么我要自己写一个内核</h2>
     <p>市面上的 Rust 内核,要么是教学玩具,要么是微内核原型,要么兼容性靠"syscall 覆盖数量"声称。我想要的东西很具体:<b>宏内核的性能底盘</b>、<b>Linux ABI 的二进制契约</b>、<b>Rust 的可审计安全</b>。三样都要,一样不能少。</p>
@@ -117,19 +117,19 @@
 
     <h2 id="safety"><span class="anchor">§4</span>安全:不喊"Rust 所以安全",给你看明细</h2>
     <p>"Rust 所以安全"这句话大家听腻了。真正有价值的是:unsafe 里出过什么事,我怎么管的。</p>
-    <p><b>unsafe 面有多大。</b><code>kernel/src</code> 共 361,419 行,按仓库内的台账脚本口径:</p>
+    <p><b>unsafe 面有多大。</b><code>kernel/src</code> 共 361,875 行,按仓库内的台账脚本口径:</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>口径</th><th>行数</th><th>占比</th></tr></thead>
       <tbody>
-        <tr><td><code>unsafe { … }</code> 块体</td><td class="num">34,464</td><td class="num">9.5%</td></tr>
-        <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> 函数体</td><td class="num">28,249</td><td class="num">7.8%</td></tr>
-        <tr><td><b>双口径合计(诚实总数)</b></td><td class="num"><b>60,376</b></td><td class="num"><b>16.7%</b></td></tr>
+        <tr><td><code>unsafe { … }</code> 块体</td><td class="num">25,769</td><td class="num">7.1%</td></tr>
+        <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> 函数体</td><td class="num">27,097</td><td class="num">7.5%</td></tr>
+        <tr><td><b>双口径合计(诚实总数)</b></td><td class="num"><b>50,630</b></td><td class="num"><b>14.0%</b></td></tr>
       </tbody>
     </table></div>
-    <p>分层口径下,kernel/src 带 5,590 个 unsafe 记号,其中 <b>3,532 个在 Framework 层之外</b> —— 这就是收缩目标(47 个文件已带 <code>#![forbid(unsafe_code)]</code>,另有 63 个文件已无 unsafe)。63% 的 unsafe 构造带书写的 <code>// SAFETY:</code> 契约;树内出现台账未登记的区域,CI 直接失败。</p>
+    <p>分层口径下,kernel/src 带 5,224 个 unsafe 记号,其中 <b>3,166 个在 Framework 层之外</b> —— 这就是收缩目标(47 个文件已带 <code>#![forbid(unsafe_code)]</code>,另有 63 个文件已无 unsafe)。63% 的 unsafe 构造带书写的 <code>// SAFETY:</code> 契约;树内出现台账未登记的区域,CI 直接失败。</p>
     <p><b>缺陷史。</b>Rux 全史 <b>33 例</b>内存破坏类缺陷逐一归档:<b>23 例</b>在 unsafe/汇编,<b>10 例</b>在 safe 代码 —— 而这 10 例全部是所有权/引用计数/锁协议/栈深决策类;而 C 内核里最常见的指针越界、迭代器失效、格式串注入、野指针运算,在 safe 代码里是 <b>零</b>。另有 6 例在 boot 之前就被代码评审拦下。</p>
     <p><b>形式验证。</b>164 个 Kani harness 对核心 unsafe 代码做全输入证明;1,184 个宿主侧测试;loom 枚举互斥锁、PI 链与定时器的交错执行;4 个 SPIN 模型;Miri nightly。</p>
-    <div class="callout">不说"我 90% 是 Safe Rust"就完事 —— 我告诉你剩下 16.7% 里出过什么、集中在哪、有没有被工具盯住。这是可审计的安全,不是口号。详见 <a href="security/index.html">安全总览</a>与<a href="security/taxonomy.html">缺陷分类学</a>。</div>
+    <div class="callout">不说"我 90% 是 Safe Rust"就完事 —— 我告诉你剩下 14.0% 里出过什么、集中在哪、有没有被工具盯住。这是可审计的安全,不是口号。详见 <a href="security/index.html">安全总览</a>与<a href="security/taxonomy.html">缺陷分类学</a>。</div>
 
     <h2 id="perf"><span class="anchor">§5</span>性能:同机同加速对照,领先的落后的都放出来</h2>
     <p>我用 QEMU + KVM 同机同加速对照,不拿不同环境的数据互相比。</p>
@@ -161,7 +161,7 @@
     <ul>
       <li>LTP 1,869 项过 1,139 项,还有几百项没过;TIMEOUT 类按 P0 规则逐行归因,非本内核造成的失败逐条留档</li>
       <li>lmbench 13 项落后,最大 22–26×;1M 直写 0.75–0.83×。每行都带测得的差距分解</li>
-      <li>unsafe 面还有 16.7% 依赖人工评审,收缩战役在继续,残余正在分类为不可约类</li>
+      <li>unsafe 面还有 14.0% 依赖人工评审;收缩战役目标是 ≤5,000 行(≤1%),每块残余都要写明不可约理由(台账与阶梯见 docs/development/unsafe-5000-plan.md)</li>
       <li>Kani 覆盖核心 unsafe,还没铺到全部关键路径;loom 与 SPIN 覆盖并发原语</li>
       <li>AI 编码模式能不能长期撑住 40 万行,我自己也在观察</li>
       <li>29 项设计分歧的兼容性证据需要持续维护</li>

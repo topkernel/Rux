@@ -89,16 +89,16 @@
       <table>
         <thead><tr><th>Subsystem</th><th class="num">Lines</th><th class="num">Share</th><th>Role</th></tr></thead>
         <tbody>
-          <tr><td>process/ + sched/ + sync/</td><td class="num">60,323</td><td class="num">16.7%</td><td>tasks / scheduling / synchronization</td></tr>
-          <tr><td>fs/ (ext4 · VFS · page cache · jbd2)</td><td class="num">76,617</td><td class="num">21.2%</td><td>filesystem stack and caches</td></tr>
+          <tr><td>process/ + sched/ + sync/</td><td class="num">60,321</td><td class="num">16.7%</td><td>tasks / scheduling / synchronization</td></tr>
+          <tr><td>fs/ (ext4 · VFS · page cache · jbd2)</td><td class="num">76,886</td><td class="num">21.3%</td><td>filesystem stack and caches</td></tr>
           <tr><td>arch/ (three port layers)</td><td class="num">45,175</td><td class="num">12.5%</td><td>boot / traps / context switch / TLB</td></tr>
-          <tr><td>syscall/</td><td class="num">41,041</td><td class="num">11.4%</td><td>syscall boundary (the capsule edge)</td></tr>
+          <tr><td>syscall/</td><td class="num">41,041</td><td class="num">11.3%</td><td>syscall boundary (the capsule edge)</td></tr>
           <tr><td>dfx/ + trace/ (syscost · kallsyms · watchdog · trace-event)</td><td class="num">23,737</td><td class="num">6.6%</td><td>diagnostics and observability</td></tr>
           <tr><td>drivers/ (virtio · DRM · input)</td><td class="num">26,280</td><td class="num">7.3%</td><td>device drivers</td></tr>
-          <tr><td>ipc/ (binder · SysV · MQ)</td><td class="num">21,920</td><td class="num">6.1%</td><td>inter-process communication</td></tr>
+          <tr><td>ipc/ (binder · SysV · MQ)</td><td class="num">22,109</td><td class="num">6.1%</td><td>inter-process communication</td></tr>
           <tr><td>net/ (TCP/IP · unix · netlink)</td><td class="num">20,637</td><td class="num">5.7%</td><td>network stack</td></tr>
           <tr><td>mm/</td><td class="num">20,126</td><td class="num">5.6%</td><td>memory management</td></tr>
-          <tr><td>others (top-level files · interrupt · timer · perf · io_uring · safety · security · module)</td><td class="num">25,563</td><td class="num">7.1%</td><td>infrastructure and security modules</td></tr>
+          <tr><td>others (top-level files · interrupt · timer · perf · io_uring · safety · security · module)</td><td class="num">25,561</td><td class="num">7.1%</td><td>infrastructure and security modules</td></tr>
         </tbody>
       </table>
     </div>
@@ -266,7 +266,7 @@
     <p>Thesis: <b>security checks happen at compile time and vanish from the fast paths — the fast design and the safe design are the same design.</b> Source: <code>docs/architecture/safety-and-performance.md</code>.</p>
     <ul>
       <li><b>Bug taxonomy v1</b> (3,358 deduplicated commits adjudicated one by one): of 33 memory-corruption defects, <b>23 live in explicit unsafe blocks/arch assembly</b> and <b>10 in safe code</b> — all ownership/refcount/lock-protocol classes safe Rust does not type-check today; <b>zero</b> pointer-expression defects (OOB/iterator invalidation/wild-pointer arithmetic/format strings) in safe code. 6 of 33 were caught by review before any boot.</li>
-      <li><b>The unsafe surface is enumerated and contracted</b>: 9.5% of lines (16.7% on the dual series); 47 service files compile-time forbid(unsafe_code), 63 more already unsafe-free; SAFETY comments cover 63%; 164 Kani harnesses prove the core unsafe code for all inputs.</li>
+      <li><b>The unsafe surface is enumerated and contracted</b>: 7.1% of lines (14.0% on the dual series); 47 service files compile-time forbid(unsafe_code), 63 more already unsafe-free; SAFETY comments cover 63%; 164 Kani harnesses prove the core unsafe code for all inputs.</li>
       <li><b>Every performance row is paired with its safety sentence</b>: e.g. the switch path carries typed per-CPU storage + keyed locks; lmbench/Geekbench numbers and the census-adjudicated structure share a table; the cost side (futex wake→run ~10 ms behind a running task, tick-quantized) is recorded as-is.</li>
       <li><b>The honest gap register v1</b>: KASLR (no boot entropy source), kernel text/rodata W^X tightening, compiler stack protectors, KASAN-style poisoning breadth, KCSAN watchpoints, kallsyms masking — each with what closing it looks like.</li>
     </ul>
