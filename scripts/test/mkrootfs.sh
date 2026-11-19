@@ -240,6 +240,29 @@ fi
 # "Permission denied at __cfi_slowpath" SIGSEGV family that kills samgr).
 MUSL_SDK="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
 
+# Build + install the kselftest coverage battery (the reference-shaped
+# syscall-ABI battery; see test/kselftest_battery.c). musl recipe per
+# biglock_fair below — static glibc SIGILLs on the pinned QEMU CPU.
+KSELFTEST_SRC="$PROJECT_ROOT/test/kselftest_battery.c"
+MUSL_SDK_RISCV="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
+if [ ! -d "$MUSL_SDK_RISCV/lib" ]; then
+    MUSL_SDK_RISCV="/home/william/workspace/Rux/toolchain/riscv64-rux-linux-musl"
+fi
+if [ -f "$KSELFTEST_SRC" ] && [ -d "$MUSL_SDK_RISCV/lib" ]; then
+    echo "Installing kselftest_battery to /test/kselftest_battery..."
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -static -O2 -Wall \
+         -nostdinc -isystem "$MUSL_SDK_RISCV/include" -nostdlib \
+         -o "$STAGING/test/kselftest_battery" "$KSELFTEST_SRC" \
+         "$MUSL_SDK_RISCV/lib/crt1.o" "$MUSL_SDK_RISCV/lib/crti.o" "$MUSL_SDK_RISCV/lib/crtn.o" \
+         -L"$MUSL_SDK_RISCV/lib" -lc \
+         $(riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -print-libgcc-file-name); then
+        chmod +x "$STAGING/test/kselftest_battery"
+    else
+        echo "Warning: kselftest_battery failed to compile (skipped)"
+        rm -f "$STAGING/test/kselftest_battery"
+    fi
+fi
+
 # Build + install the EXT4_BIG_LOCK fairness probe (the b139 starvation
 # shape — many tenants driving page-cache MISS reads through ext4 at SMP2
 # while a 10 Hz canary reader asserts bounded latency; gate for the R84
