@@ -647,7 +647,7 @@ pub fn memblock_phys_alloc() -> Option<usize> {
         // SCRIBBLE HUNT: the kernel image occupies the low ~12MB; a page
         // handed out from there becomes a live page table over .text
         // (the x86 text-scribbler). Catch it red-handed.
-        if phys < 0x1E0_0000 {
+        if phys < 0x220_0000 {
             crate::pr_err!(
                 "MEMBLOCK-LOW-HIT phys={:#x} — kernel-image page handed out!",
                 phys

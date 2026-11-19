@@ -495,10 +495,26 @@ pub fn de_thread(current: *mut Task) -> bool {
 /// Arcs at exit time — here we only wait out on_cpu, drop remaining Arcs
 /// (signal/fs), free the kernel stack, and put the Task slot.
 ///
+/// R87 (oh-launch round 10, the scribbler producer): returns FALSE —
+/// freeing NOTHING — when the bounded wait's deadline adjudication could
+/// not confirm with positive knowledge that no owner remains (a slot or
+/// a SWITCHING_OUT marker of any age still names the member; see
+/// member_release_stale_ownership). The caller must then RE-PARK the
+/// member on the leader's dead_threads list for the next sweep. The old
+/// shape had exactly two failure modes, both fatal somewhere: spin
+/// forever (r16type/r20type — one CPU lost per wedged member), or
+/// force-release marks an aged-but-live switch still depends on and free
+/// the stack the switching CPU was still executing on (the recycled-
+/// frame scribbler behind the string-byte hijacks and the 0xb9 PTE
+/// face). Deferral is the recovery-path shape: skip, never corrupt —
+/// the sweeper returns immediately, the member frees on a later sweep
+/// when its switch-out truly completes, and a genuinely lost release
+/// leaks the stack loudly (FDM-DEFER, bounded) instead of corrupting.
+///
 /// # Safety
 /// `member` is a DEAD task parked on a leader's dead_threads list (callers
 /// guarantee the DEAD state — see sweep_dead_threads / release_task).
-unsafe fn free_dead_member(member: *mut Task) {
+unsafe fn free_dead_member(member: *mut Task) -> bool {
     // The member's final context switch-out may still be in flight —
     // on_cpu is cleared exactly when __switch_to has saved its context
     // (see release_task R9 for the full rationale).
@@ -516,10 +532,17 @@ unsafe fn free_dead_member(member: *mut Task) {
     // terminal state — nothing will ever clear on_cpu, and the old
     // forever-spin here cost this CPU for the rest of the boot (r16type/
     // r20type: both SMP2 CPUs lost mid shell-init, screen dark 2700 s,
-    // PREEMPT-HEAL 255/466 firings, kernel otherwise healthy). A live
-    // owner re-arms the deadline; the wait then behaves exactly as
-    // before for the legitimate window.
+    // PREEMPT-HEAL 255/466 firings, kernel otherwise healthy).
+    //
+    // R87: the adjudication is now POSITIVE-KNOWLEDGE and ONE-SHOT. The
+    // heal fires only on the pure lost-release face (named by no slot
+    // and no SWITCHING_OUT marker of ANY age); every other shape — an
+    // aged-but-possibly-live switch-out window included — returns false
+    // and this call DEFERS the free to the next sweep (returns false;
+    // the caller re-parks the member). No re-arm, no forever-spin: the
+    // sweeper is back on the runqueue within the one deadline window.
     const FDM_STALE_RELEASE_JIFFIES: u64 = 300;
+    let mut deferred = false;
     {
         // LTP-open lane (cve-2017-17052 wedge, 2026-11-14): the wait used
         // to be a pure spin_loop. on_cpu clears on the MEMBER's OWN CPU
@@ -538,7 +561,31 @@ unsafe fn free_dead_member(member: *mut Task) {
         const FDM_SPIN_BATCH: u32 = 100_000;
         let mut spins: u32 = 0;
         let mut armed_at = crate::drivers::timer::get_jiffies();
-        while (*member).on_cpu() {
+        // R87 (tail window): the wait must ALSO cover the SWITCHING_OUT
+        // marker. on_cpu (the asm release store) clears BEFORE the
+        // register restore — the switching CPU still executes its final
+        // loads, push and ret ON THE MEMBER'S STACK with on_cpu already
+        // false, and under KVM a host deschedule right there lets the
+        // freeing CPU win the race (RCU poll completes, stack freed,
+        // recycled) before the switcher's ret lands. The marker clears
+        // only in the incoming frame's post-switch tail, after prev's
+        // stack is abandoned for good.
+        // R11 (terminal-release window): neither condition covers the
+        // gap BEFORE the marker publish: the terminal deschedule loop
+        // releases the ownership pair BEFORE calling schedule() (the
+        // sc191 v2 fix), leaving {on_cpu=false, no marker} while the
+        // task still executes its own schedule chain on its stack —
+        // every abort/retry cycle of that loop re-opens the window.
+        // terminal_switch_done is the positive knowledge: set only at
+        // the real-switch retire sites, re-armed false by the loop each
+        // round — {flag set AND on_cpu false AND no marker} is the full
+        // no-references condition.
+        while (*member).on_cpu()
+            || crate::sched::sched::switching_out_names(member)
+            || !(*member)
+                .terminal_switch_done
+                .load(core::sync::atomic::Ordering::Acquire)
+        {
             if spins == 0 {
                 let cur_pid = crate::sched::current().map(|c| c.pid()).unwrap_or(0);
                 crate::dfx::taskdump::taskdump_raw_line(b"FDM-WAIT sweeper=");
@@ -559,10 +606,15 @@ unsafe fn free_dead_member(member: *mut Task) {
                 .wrapping_sub(armed_at)
                 >= FDM_STALE_RELEASE_JIFFIES
             {
-                // R86: past the deadline — adjudicate the ownership. A
-                // true heal (stale marks released) makes on_cpu false and
-                // exits the loop; a live owner re-arms and keeps waiting.
-                crate::sched::sched::member_release_stale_ownership(member);
+                // R86/R87: past the deadline — ONE adjudication per call.
+                // A true heal (pure lost-release, marks released) makes
+                // on_cpu false and exits the loop; anything else is a
+                // live or ambiguous owner — DEFER to the next sweep,
+                // never free what a live owner claims.
+                if !crate::sched::sched::member_release_stale_ownership(member) {
+                    deferred = true;
+                    break;
+                }
                 armed_at = crate::drivers::timer::get_jiffies();
             }
             spins = spins.wrapping_add(1);
@@ -572,6 +624,26 @@ unsafe fn free_dead_member(member: *mut Task) {
                 core::hint::spin_loop();
             }
         }
+    }
+    if deferred {
+        // Bounded, cold-path report on the raw-uart channel (same as
+        // FDM-WAIT): the free was DEFERRED, the member stays parked.
+        static FDM_DEFER_SEEN: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = FDM_DEFER_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 64 {
+            let claim = (*member)
+                .running_on_cpu
+                .load(core::sync::atomic::Ordering::Acquire);
+            crate::dfx::taskdump::taskdump_raw_line(b"FDM-DEFER #");
+            crate::dfx::taskdump::taskdump_dec((n + 1) as u64);
+            crate::dfx::taskdump::taskdump_raw_line(b" member=");
+            crate::dfx::taskdump::taskdump_dec((*member).pid() as u64);
+            crate::dfx::taskdump::taskdump_raw_line(b" claim=");
+            crate::dfx::taskdump::taskdump_dec(claim as u64);
+            crate::dfx::taskdump::taskdump_raw_line(b" (owner live/ambiguous; free deferred to next sweep)\n");
+        }
+        return false;
     }
     // BOUNDED (lb125 decode): monopolist windows stalled this wait for
     // tens of seconds, freezing the exit — and every parent behind it.
@@ -596,6 +668,7 @@ unsafe fn free_dead_member(member: *mut Task) {
     (*member).set_fs(None);
 
     crate::process::task::Task::task_put(member);
+    true
 }
 
 /// Opportunistic sweep of a leader's dead-members list: free everyone
@@ -634,8 +707,15 @@ pub fn sweep_dead_threads(leader: *mut Task) {
         for m in old {
             // SAFETY: m is a parked member pointer (pushed by its own do_exit
             // while holding the task alive via the dead-list reference).
+            // R11: terminal_switch_done is REQUIRED — the terminal loop's
+            // pre-schedule ownership release makes {DEAD, !on_cpu} true
+            // while the member still runs its own schedule chain.
             let dead_and_off_cpu = unsafe {
-                (*m).state().is_dead() && !(*m).on_cpu()
+                (*m).state().is_dead()
+                    && !(*m).on_cpu()
+                    && (*m)
+                        .terminal_switch_done
+                        .load(core::sync::atomic::Ordering::Acquire)
             };
             if dead_and_off_cpu {
                 reclaimable.push(m);
@@ -651,7 +731,16 @@ pub fn sweep_dead_threads(leader: *mut Task) {
     for m in pending {
         // SAFETY: m came from the leader's dead list (DEAD, hash-removed,
         // final switch-out completed).
-        unsafe { free_dead_member(m) };
+        let freed = unsafe { free_dead_member(m) };
+        if !freed {
+            // R87: heal-fail defers the free — re-park for the next
+            // sweep. Lifetime: this sweep's only caller is a member's own
+            // do_exit BEFORE its terminal DEAD store, so the leader's
+            // group-death wait is still blocked on us and the leader
+            // cannot have been reaped or freed mid-sweep.
+            let mut dl = unsafe { (*leader).dead_threads.lock() };
+            dl.push(m);
+        }
         // Perf gate (2026-10-20): the sweep frees stacks, PtRegs and Arc
         // references per member under the OH thread-churn load; without
         // a yield point a long sweep monopolizes this CPU (steady
@@ -771,8 +860,22 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                 let mut reclaim: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
                 dl.retain(|m| {
                     // SAFETY: m is a parked member pointer owned by this list.
+                    // R87: require the final switch-out to have completed
+                    // (!on_cpu) — the same exact partition as
+                    // sweep_dead_threads — so a re-parked deferral (whose
+                    // on_cpu is the ambiguous live mark) is never re-fed
+                    // to free_dead_member's bounded wait on every drain
+                    // round; the loop below then defers the reap at ITS
+                    // deadline instead.
+                    // R11: terminal_switch_done required for the same
+                    // reason as the sweep's predicate.
                     unsafe {
-                        if (**m).state().is_dead() {
+                        if (**m).state().is_dead()
+                            && !(**m).on_cpu()
+                            && (**m)
+                                .terminal_switch_done
+                                .load(core::sync::atomic::Ordering::Acquire)
+                        {
                             reclaim.push(*m);
                             false
                         } else {
@@ -782,12 +885,23 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                 });
                 let empty = dl.is_empty();
                 drop(dl);
+                let mut deferred_any = false;
                 for m in reclaim {
-                    // SAFETY: m was parked DEAD; the list no longer
-                    // references it.
-                    free_dead_member(m);
+                    // SAFETY: m was parked DEAD with its final switch-out
+                    // complete; the list no longer references it.
+                    if unsafe { free_dead_member(m) } {
+                        continue;
+                    }
+                    // R87: heal-fail defers the free — re-park on this
+                    // leader (alive in the reaper's own context) so a
+                    // later sweep retries once the switch-out truly
+                    // completes. `empty && !deferred_any` keeps the reap
+                    // from completing while a deferral is parked.
+                    deferred_any = true;
+                    let mut dl = (*task).dead_threads.lock();
+                    dl.push(m);
                 }
-                empty
+                empty && !deferred_any
             }
             None => {
                 // Lock contention (a member's park/sweep holds it):
@@ -980,17 +1094,67 @@ unsafe fn release_task_storage(task: *mut Task) {
     // context save — would land in live objects (the corrupted wait4
     // statuses, EBADF, zeroed children-list nodes). on_cpu is cleared by
     // __switch_to exactly when this task's context is saved: wait for that
-    // before freeing. Bounded: the task is on its way out; no locks held.
+    // before freeing.
     // R9-16 (actually landed, round 10): spin with interrupts enabled —
     // this CPU must keep reporting RCU quiescent states and taking ticks
     // while waiting (the round-9 commit claimed this but never landed).
+    //
+    // R87 (tail window, oh-launch round 10): on_cpu is NOT sufficient —
+    // the asm release store precedes the register restore, so the dying
+    // task's CPU still executes its final loads, push and ret ON THIS
+    // STACK with on_cpu already false; a KVM host deschedule of the
+    // switcher right there let the reaper win the race to the free (the
+    // recycled-frame scribbler's early-strike face at 1.2-1.3 s on the
+    // armed battery boots). ALSO wait out the SWITCHING_OUT marker (it
+    // clears only in the incoming frame's tail, after this stack is
+    // abandoned for good — switching_out_names), and BOUND the wait
+    // (same 300-jiffy budget class as FDM/FTS): past the deadline the
+    // stack is WITHHELD (leaked, printed) — never a spinning reaper
+    // (this loop's unbounded shape was the leader-path face of the
+    // r16type wedge class) and never a freed live stack (FTS's
+    // leak-don't-dangle discipline applied to the stack).
+    // R11 (terminal-release window): the leader's terminal deschedule
+    // runs the same schedule_dead_never_returns loop (the sc191 pre-
+    // schedule ownership release), so {on_cpu=false, no marker} is also
+    // reachable HERE while the leader still executes its own schedule
+    // chain — terminal_switch_done (set only at the real-switch retire
+    // sites, re-armed by the loop each round) is the required positive
+    // knowledge.
     crate::arch::cpu::restore_irq(true);
-    while (*task).on_cpu() {
+    const RTS_SWITCH_WAIT_JIFFIES: u64 = 300;
+    let rts_armed_at = crate::drivers::timer::get_jiffies();
+    let mut stack_free_ok = true;
+    while (*task).on_cpu()
+        || crate::sched::sched::switching_out_names(task)
+        || !(*task)
+            .terminal_switch_done
+            .load(core::sync::atomic::Ordering::Acquire)
+    {
+        if crate::drivers::timer::get_jiffies()
+            .wrapping_sub(rts_armed_at)
+            >= RTS_SWITCH_WAIT_JIFFIES
+        {
+            stack_free_ok = false;
+            // Raw-uart bounded report (cold path): one 16K stack leaked
+            // per wedged switch; the alternative is a spinning reaper or
+            // pages freed under a running owner.
+            static RTS_LEAK_SEEN: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = RTS_LEAK_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 64 {
+                crate::dfx::taskdump::taskdump_raw_line(b"RTS-STACK-LEAK (stack withheld) pid=");
+                crate::dfx::taskdump::taskdump_dec((*task).pid() as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b"\n");
+            }
+            break;
+        }
         core::hint::spin_loop();
     }
 
     // Free kernel stack
-    (*task).free_kernel_stack();
+    if stack_free_ok {
+        (*task).free_kernel_stack();
+    }
 
     // Free heap-allocated PtRegs from fork.
     // copy_thread() allocates PtRegs on the heap for the child's first

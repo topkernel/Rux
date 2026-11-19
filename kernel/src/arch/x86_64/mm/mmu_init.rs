@@ -371,6 +371,41 @@ unsafe fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_ppn: u
         }
     }
     crate::dfx::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // 0xb9 canary (oh-launch round 7): scan the table's content BEFORE
+    // the free for flags-only entries — PRESENT with zero address bits
+    // (phys page 0 is never a legal target; the x86 boot reserves
+    // 0..image_end). The hilogd teardown fault walked exactly such an
+    // entry (0xb9 = P|PWT|PCD|A|PS). A hit here means the entry was
+    // corrupt while the tree was LIVE (this frame passed the ledger's
+    // ownership takes) — the producer wrote it before death; the
+    // install-side validator names the writer when it happens live.
+    // Gated by rux:mmforensics; deferred printk (lock-safe post
+    // e1a2a5b1a); zero cost when not armed.
+    if crate::trace::EVENT_MMFORENSICS.armed() {
+        let t = get_page_table_virt(phys_addr);
+        let mut bad: u64 = 0;
+        let mut first: u64 = 0;
+        for i in 0..512usize {
+            let e = (*t).get(i).bits();
+            if (e & 0x1) != 0 && (e & 0x000F_FFFF_FFFF_F000) == 0 {
+                bad += 1;
+                if first == 0 {
+                    first = e;
+                }
+            }
+        }
+        if bad > 0 {
+            crate::pr_err!(
+                "PT-CANARY: table {:#x} (site {} root {:#x} pid {}) has {} flags-only entr(ies), first={:#x}",
+                phys_addr,
+                site,
+                root_ppn,
+                crate::sched::get_current_pid(),
+                bad,
+                first
+            );
+        }
+    }
     free_page_table(phys_addr)
 }
 
@@ -1666,6 +1701,27 @@ fn pt_alloc_fail(level: &str, va: u64) {
 /// (munmap/mprotect) flushes what it zaps. Callers REPLACING a present
 /// leaf must flush that VA themselves.
 pub(crate) unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+    // 0xb9 install validator (oh-launch round 7) — see write_pte_raw's
+    // twin: a PRESENT entry with zero address bits is corrupt by
+    // construction; name the installer the moment it is written. Gated
+    // by rux:mmforensics; deferred printk; one load when off.
+    if crate::trace::EVENT_MMFORENSICS.armed()
+        && (flags & 0x1) != 0
+        && ((flags | phys.bits()) & 0x000F_FFFF_FFFF_F000) == 0
+    {
+        static BADMN_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if BADMN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+            crate::pr_err!(
+                "PT-BAD-INSTALL: map_page_noflush flags={:#x} phys={:#x} va={:#x} root={:#x} pid {}",
+                flags,
+                phys.bits(),
+                virt.bits(),
+                root_ppn,
+                crate::sched::get_current_pid()
+            );
+        }
+    }
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
 

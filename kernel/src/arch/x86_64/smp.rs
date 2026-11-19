@@ -295,6 +295,19 @@ struct BootStack([u8; STACK_SIZE]);
 #[link_section = ".bss.stack"]
 static AP_BOOT_STACKS: [BootStack; MAX_CPUS] = [const { BootStack([0; STACK_SIZE]) }; MAX_CPUS];
 
+/// R87 (stale-rsp0 feeder, oh-launch round 10): the address range of the
+/// static per-CPU boot stacks. The idle tasks run on these stacks — their
+/// tops lie OUTSIDE the kernel-heap range that x86_update_rsp0's
+/// corruption screen accepts, so every switch to idle silently kept the
+/// PREVIOUS task's rsp0 (the dying task's top staying installed while its
+/// stack was freed and recycled — the live-stack foreign-content writer
+/// fr3 caught with STACKFREE-LIVE-RSP0). The screen now accepts this
+/// range explicitly.
+pub fn ap_boot_stacks_range() -> (usize, usize) {
+    let base = AP_BOOT_STACKS.as_ptr() as usize;
+    (base, base + STACK_SIZE * MAX_CPUS)
+}
+
 /// Write into the trampoline copy at low memory through the linear map.
 fn tramp_write(off: usize, bytes: &[u8]) {
     let va = crate::arch::mm::memory_layout::phys_to_virt(

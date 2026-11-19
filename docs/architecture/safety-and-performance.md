@@ -1036,3 +1036,101 @@ registered per the data-corruption doctrine.
   write_fsync +0.7%, mkdrmdir +1.6%, unlink −4.4%); riscv make test and
   triple-arch builds green. [lane worktree journal-life
   run/JOURNAL-LIFE.md]
+
+  **The exit-path stack-free safety closure (oh-launch round 10,
+  2026-11-19).** Three stacked races could free a kernel stack its
+  owner still executed on — the recycled-frame scribbler behind the
+  string-byte execution hijacks (rip='s.boot.s'), the 0xb9 PTE face
+  and the R83 ti_kernel_sp family: (1) the R86 deadline-heal reused
+  the pick-side liveness check whose 50-jiffy age discount reads a
+  monopolist/KVM-stalled switch-out as stale, then force-released the
+  ownership qword under a still-switching owner; (2) the asm release
+  store precedes the register restore, so the switcher's final
+  loads/push/ret still ran on its own stack with on_cpu already
+  false — a host deschedule there let the free win the race; (3) THE
+  stale-rsp0 engine, caught in the act (fr3: STACKFREE-LIVE-RSP0 at
+  1.472 s, panic 1 ms later): an aborted switch skips the rsp0
+  install and a switch to idle silently keeps the previous value
+  (the idle task's static boot-stack top fails the heap-bound
+  screen), leaving a dying task's top installed while its stack was
+  freed, recycled, and torn by the next trap frame pushed through
+  it. The safety shape, all three: positive knowledge before a free
+  (any-age SWITCHING_OUT marker, no live rsp0 naming the top),
+  recovery paths that DEFER or WITHHOLD instead of proceeding
+  (heal-fail re-parks the member for the next sweep; a stale-rsp0
+  stack is leaked, never re-carved; bounded waits, never a spinning
+  reaper), and two more blind printers unblinded (the rsp0 detector
+  was pr_debug; both rsp0 keep-legs printed via putchar_no_lock —
+  the fifth and sixth of the campaign). Evidence: the armed battery
+  boots fr1/fr2/fr3 struck at 1.2-1.5 s on every prior kernel (the
+  #GP-on-ret family); fr4 with the closure is the FIRST armed boot
+  through the window — all three defenses fired in production (the
+  same top=0xffff888079280000/pid=316 stack that killed fr3 was
+  WITHHELD on fr4; FDM-DEFER member=319; FTS-SLOT-LEAK pid=316), 1187
+  R56 aborts churned with zero early panic. Remaining honest gap:
+  the 5-15 s degradation layer (stranded PICKED picks under the
+  abort storm, panic-dumper re-entry halting a CPU, timer stall into
+  a GRQ deadlock at 15.5 s) — the historical 6-22 s window family,
+  now the outermost. make test 1555/1555 fresh rootfs; triple-arch
+  rc=0. [lane worktree oh-launch run/OH-LAUNCH.md round 10]
+  **Orphaned-lock-word class eliminated by construction (grq-source-fix,
+  2026-11-19).** The round-6 GRQ_HELD per-cpu tracker made every GRQ
+  release two steps (tracker-clear, then word-store); a fault landing
+  in the gap stranded a word no tracker claimed — the gl3/gl4 shape
+  (seven waiters, no holder) that was being papered over by a
+  self-invented heal (force-release of an UNCLAIMED word; deleted —
+  the reference has no counterpart, and acting on absence of evidence
+  is the lying-slot-heal mistake shape). Source fix: the owner lives
+  IN the lock word (`0` free, `cpu+1` held-by-cpu; acquire = one
+  cmpxchg, release = one ordered Release store of 0 — spin_unlock
+  stays the reference's single ordered store). GRQ_HELD, the
+  grq_word_orphaned heal, and the TERM-GRQ-ORPHAN-WORD branch are
+  gone; `grq_held_here`, the crime-scene dump's holder roles, and the
+  terminal release's ownership proof are all DERIVED from the word —
+  one authority that cannot disagree with itself. Detectors kept as
+  debug_asserts (release-profile-qualified): holder_cpu's
+  no-valid-owner assert plus the reference CONFIG_DEBUG_SPINLOCK
+  ownership check in unlock(). Evidence: make test 1555/1555 with
+  both detectors compiled in, zero fires; triple-arch builds rc=0;
+  gl-class OH battery (q35 KVM smp8 8G, userdata-fresh3, release
+  kernel, 3 boots + 1 debug): 0 orphaned words, 0 GRQ wedges, 0
+  assertion fires, and the word-proven release exercised live on a
+  real fault-inside-section event (gsf1: crime scene named cpu1/
+  pid597 as holder from the word, TERM-GRQ-FORCE released it, six
+  waiters proceeded). Protocol cost: release path drops one store
+  (the tracker), acquire adds one per-cpu register read for the
+  owner encoding. [lane worktree grq-lock-1st run/GRQ-LOCK-1ST.md
+  §9]
+
+
+  **The crash-path park and terminal-release closures (oh-launch round
+  11, 2026-11-19).** Two more safety properties landed on the exit and
+  crash paths: (1) the terminal deschedule loop's pre-schedule
+  ownership release (the sc191 v2 shape) made {DEAD, !on_cpu} true
+  while the dying task still executed its own schedule chain — the
+  exit-path frees could not distinguish that from a completed
+  switch-out and freed the stack under the running task (the
+  rip=0x1/rip=heap/#GP-on-ret family at exit-storm time, multiplied by
+  the abort storm's retry rounds); Task.terminal_switch_done — set
+  only at the real-switch retire sites with a current() != prev
+  discriminator so aborts never set it, re-armed each loop round — is
+  now required by every stack-free predicate. Positive knowledge
+  before a free, again. (2) A crashed CPU's park loop ran with
+  whatever IF the fault arrived under; an interrupt-enabled park woke
+  on the next timer tick and ran scheduler_tick on top of the broken
+  dumper context, which acquired the runqueue and wedged inside it —
+  fr7's crime scene is the first GRQ holder ever named (cpu4/pid356
+  inside scheduler_tick, word=0x01 genuinely held, the park-time
+  release at zero fires because the acquire came from the post-park
+  interrupt). Every crash-path recursion park now disables interrupts
+  before the eternal halt (the reference's panic_smp_self_stop shape):
+  a dead CPU never takes interrupts again. Evidence: armed-battery
+  boots — the panic count by 28 s fell from 4 (fr6) to 1 (fr7) with
+  the window closed; the fr7 wedge mechanism convicted and closed
+  same-round. Honest gaps: crash-path parks still release only the
+  GRQ — a CPU faulting while holding any other lock strands it (fr9:
+  the slab allocator lock in kmalloc, and a second static
+  simultaneously); the small-int pt_regs writer (rip=1/rsp=0/badaddr=3
+  pointer fields) remains at large and seeds every strand. make test
+  1555/1555 fresh rootfs; triple-arch rc=0. [lane worktree oh-launch
+  run/OH-LAUNCH.md round 11]

@@ -42,7 +42,10 @@ mkdir -p "$COV_DIR"
 
 if [ "$SKIP_BOOT" != "1" ]; then
     echo "=== [1/5] Boot instrumented kernel + run suite (COV=1 make test) ==="
-    COV=1 PLATFORM="$PLATFORM" make test 2>&1 | tee "$COV_DIR/boot.log"
+    # Instrumented boots run slower (a counter increment per region) and
+    # the suite keeps growing — the coverage flow gets a 20-minute budget
+    # instead of run.sh's 10-minute default.
+    COV=1 PLATFORM="$PLATFORM" MAKETEST_TIMEOUT=1200 make test 2>&1 | tee "$COV_DIR/boot.log"
 else
     echo "=== [1/5] Skipping boot (--skip-boot) ==="
 fi

@@ -150,7 +150,7 @@ pub const KERNEL_ENTRY: u64 = 0x80200000;
 /// RUX-RISCV-LAYOUT-5: the LTP r27 session (pidfd subsystem, ext4 file
 /// handles, portable mincore walk) outgrew 20MB; the same set moved
 /// 20MB->24MB.
-pub const KERNEL_SIZE: u64 = 0x1C00000; // 28MB (RUX-RISCV-LAYOUT-7, hp89)
+pub const KERNEL_SIZE: u64 = 0x2000000; // 32MB (RUX-RISCV-LAYOUT-8, cov campaign: the instrumented build (coverage counters + names + data + the 221-test suite) outgrew 28MB; heap+reserve move together)
 
 /// Heap start address (after kernel)
 /// RUX-RISCV-LAYOUT: must stay at/above the boot.S image-window end
@@ -166,7 +166,10 @@ pub const KERNEL_SIZE: u64 = 0x1C00000; // 28MB (RUX-RISCV-LAYOUT-7, hp89)
 /// gap" family documented above. Moved to the window end 0x81e00000
 /// with the reserve (30MB), the coordinator's proven layout-hunt
 /// pattern: no gap, heap at the window end.
-pub const HEAP_START: u64 = 0x81e00000;
+/// RUX-RISCV-LAYOUT-8 (cov campaign): window 28MB -> 32MB (both boot.S
+/// PMD tables grew PMD[14]/PMD[15]); heap at the new window end
+/// 0x80200000 + 32MB = 0x82200000, reserve 34MB, no gap.
+pub const HEAP_START: u64 = 0x82200000;
 
 /// Slab start address (after heap)
 /// Note: Actual address depends on KERNEL_HEAP_SIZE config

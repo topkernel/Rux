@@ -189,6 +189,25 @@ fn caller_return_address() -> usize {
 }
 
 pub struct RawSpinlock {
+    /// THE single authority for the lock's state: `0` = free,
+    /// `cpu + 1` = held by `cpu` (grq-source-fix, 2026-11-19).
+    ///
+    /// The reference discipline (qspinlock's locked byte + tail cpu, and
+    /// debug spinlocks' owner check) is that ONE word answers BOTH
+    /// "is it held" and "by whom": the acquire is a single cmpxchg that
+    /// publishes lock+owner together, and the release is a single
+    /// ordered Release store of 0 that clears them together. An
+    /// auxiliary "held" tracker written as a SECOND step (the round-6
+    /// GRQ_HELD per-cpu bool) made the release interruptible between
+    /// "tracker now says free" and "word still says held" — a fault in
+    /// that window strands a word no tracker claims (the gl3 orphaned-
+    /// word wedge: seven waiters, no holder, forever). With the owner
+    /// IN the word there is no second authority that can disagree:
+    /// any interruption before the release store leaves the word
+    /// self-describing (owner = the interrupted cpu), and after it
+    /// leaves nothing stranded. Ownership queries (`holder_cpu`,
+    /// `held_by`) are DERIVED from this word and can never be stale
+    /// relative to it.
     locked: AtomicU32,
     /// Deadlock diagnostics: holder's hart id + 1 (0 = free).  Written
     /// AFTER acquiring / cleared BEFORE releasing, so a concurrent reader
@@ -209,6 +228,15 @@ pub struct RawSpinlock {
 }
 
 impl RawSpinlock {
+    /// R11 (deadlock-layer unblinding): the raw lock word for the
+    /// deadlock dumps — 0 = free, 1 = held, ANYTHING ELSE = the word
+    /// itself was scribbled (the acquire spin waits on this exact word,
+    /// so garbage here wedges every waiter with no holder anywhere).
+    /// One relaxed load; cold diagnostic paths only.
+    pub fn locked_word(&self) -> u32 {
+        self.locked.load(Ordering::Relaxed)
+    }
+
     #[inline]
     pub const fn new() -> Self {
         Self {
@@ -243,6 +271,59 @@ impl RawSpinlock {
     #[cfg(feature = "dfx-lock-owner")]
     fn clear_owner(&self) {
         self.owner.store(0, Ordering::Relaxed);
+    }
+
+    // ---- owner-in-word: the single-authority protocol (grq-source-fix) --
+    //
+    // Word encoding: 0 = free, `cpu + 1` = held by `cpu`. Every protocol
+    // operation publishes lock state and ownership in ONE atomic:
+    //   acquire  = cmpxchg(0 -> cpu+1)   (lock + owner, together)
+    //   release  = store(0, Release)     (unlock + owner-clear, together)
+    // The TTAS spin (`load() != 0`) and `is_locked()` are unchanged for
+    // any nonzero encoding. There is no state in which the word is set
+    // but unattributable: the orphaned-word class (word set, every
+    // per-cpu tracker clear — the gl3 wedge) is unreachable by
+    // construction because the tracker no longer exists as a separate
+    // authority to disagree with it.
+
+    /// The held word value for THIS cpu (`cpu + 1`; 1..=MAX_CPUS).
+    #[inline]
+    fn held_word() -> u32 {
+        (crate::arch::smp::cpu_id() as u32) + 1
+    }
+
+    /// Which cpu holds this lock right now, DERIVED from the lock word
+    /// (the single authority — never stale relative to it).
+    ///
+    /// The debug_assert is the ORPHAN-STATE DETECTOR (grq-source-fix):
+    /// a set word whose value names no valid cpu can now only be
+    /// produced by a wild store into the word itself, not by any
+    /// interrupt/retry interleaving of the acquire/release protocol.
+    /// It compiles out of release builds (hot-path rules); its silence
+    /// across the boot batteries is the proof the state is unreachable.
+    #[inline]
+    pub fn holder_cpu(&self) -> Option<usize> {
+        let w = self.locked.load(Ordering::Relaxed);
+        debug_assert!(
+            w == 0 || (w as usize) <= crate::config::MAX_CPUS,
+            "spinlock word corrupted (no valid owner): {}",
+            w
+        );
+        if w == 0 || (w as usize) > crate::config::MAX_CPUS {
+            return None;
+        }
+        Some(w as usize - 1)
+    }
+
+    /// Positive knowledge that `cpu` holds this lock right now —
+    /// derived from the lock word (single load, single authority).
+    /// For same-cpu queries (the printk deferral gate, the terminal
+    /// release) the word was written by this cpu's own acquire, so a
+    /// Relaxed load observes it coherently; only this cpu's own release
+    /// store can change the answer under us.
+    #[inline]
+    pub fn held_by(&self, cpu: usize) -> bool {
+        self.locked.load(Ordering::Relaxed) == (cpu as u32).wrapping_add(1)
     }
 
     #[inline]
@@ -318,7 +399,13 @@ impl RawSpinlock {
         // an atomic RMW on every iteration, hammering the cacheline (and
         // the QEMU TCG atomic slow path) for the whole hold duration.
         loop {
-            if self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
+            // Single cmpxchg publishes lock + owner together (see
+            // `held_word`): the winner is self-describing in the word.
+            if self
+                .locked
+                .compare_exchange(0, Self::held_word(), Ordering::Acquire, Ordering::Acquire)
+                .is_ok()
+            {
                 break;
             }
             while self.locked.load(Ordering::Relaxed) != 0 {
@@ -422,6 +509,26 @@ impl RawSpinlock {
             shift -= 4;
             let nibble = (caller_ra >> shift) & 0xF;
             let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+            unsafe { crate::console::uart_putc_raw(c); }
+        }
+
+        // R11 (deadlock-layer unblinding, the seventh blind printer): the
+        // lock WORD value, always. The holder-identity block below is
+        // dfx-lock-owner-gated, so on standard builds every stuck lock
+        // printed with NO holder datum at all — and the one value that
+        // discriminates "a real holder the tracker missed" (word == 1)
+        // from "the word itself was scribbled" (word ∉ {0,1}) was never
+        // printed. One relaxed load, cold path, raw uart.
+        let msg_lw = b" locked=0x";
+        for &b in msg_lw {
+            unsafe { crate::console::uart_putc_raw(b); }
+        }
+        let lw = unsafe { (&*lock_addr).locked_word() };
+        let mut shift_lw: i32 = 8;
+        while shift_lw > 0 {
+            shift_lw -= 4;
+            let nibble = ((lw >> shift_lw) & 0xF) as u8;
+            let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
             unsafe { crate::console::uart_putc_raw(c); }
         }
 
@@ -711,7 +818,10 @@ impl RawSpinlock {
 
     #[inline]
     pub fn try_lock(&self) -> bool {
-        let ok = self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok();
+        let ok = self
+            .locked
+            .compare_exchange(0, Self::held_word(), Ordering::Acquire, Ordering::Acquire)
+            .is_ok();
         if ok {
             self.record_owner(caller_return_address());
             // RT-plan R1 completion: symmetric with lock()/unlock().
@@ -724,6 +834,16 @@ impl RawSpinlock {
 
     #[inline]
     pub fn unlock(&self) {
+        // The ownership DETECTOR (debug builds only — the reference's
+        // CONFIG_DEBUG_SPINLOCK `spin_bug` shape): the releaser must be
+        // the holder the word names. A double unlock, a foreign unlock,
+        // or a corrupted word all land here instead of silently
+        // corrupting someone else's section.
+        debug_assert!(
+            self.locked.load(Ordering::Relaxed) == Self::held_word(),
+            "spinlock released by non-holder: word={:#x}",
+            self.locked.load(Ordering::Relaxed)
+        );
         // RT-plan R1 completion: pair of the acquire-side bump (see lock).
         // Sub BEFORE the store: the glib-mutex ORDER FIX discipline (preempt
         // sub precedes the unlock store) — the grq-10ns capture convicted
@@ -732,19 +852,29 @@ impl RawSpinlock {
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
         self.clear_owner();
+        // THE release: one ordered store clears lock + owner together
+        // (owner-in-word, grq-source-fix). Nothing can observe a
+        // post-release state that still names this cpu, and nothing
+        // this side of the store can strand the word.
         self.locked.store(0, Ordering::Release);
     }
 
-    /// Terminal-path force release (oh-launch round 6, gw1): a task that
-    /// dies mid-section (the paging-oops class faulting under a lock)
-    /// never runs its paired unlock — the word stays 1 forever and every
-    /// later acquirer spins (the permanent GRQ wedge: four CPUs at
-    /// lock+1359 while the dying task's terminal switch had already
-    /// cleared only the preempt COUNT). The caller must have POSITIVE
-    /// knowledge this CPU holds the lock (the per-CPU GRQ_HELD tracker —
-    /// never call this speculatively: force-releasing a lock another CPU
-    /// legitimately holds corrupts the section). No preempt_count_sub:
-    /// the terminal path resets the whole count anyway.
+    /// Terminal-path force release (oh-launch round 6, gw1; reworked
+    /// grq-source-fix): a CPU that abandons a section forever (a task
+    /// dying mid-section — the paging-oops class faulting under the
+    /// lock; a park in the KERNPANIC halt loop) never runs its paired
+    /// unlock, and the word would stay held while every later acquirer
+    /// spins (the permanent GRQ wedge: four CPUs at lock+1359).
+    ///
+    /// The caller must have PROVEN this CPU holds the lock — the proof
+    /// is the lock word itself (`held_by(cpu)`: the single authority
+    /// naming the caller as the owner), never a second tracker and
+    /// never speculation: force-releasing a lock another CPU holds
+    /// corrupts that section. This is exit-releases-what-it-holds
+    /// semantics (the reference's exit releases the dying task's
+    /// locks), with ownership provable from one load. No
+    /// preempt_count_sub: the terminal path resets the whole count
+    /// anyway.
     pub fn force_unlock_terminal(&self) {
         self.clear_owner();
         self.locked.store(0, Ordering::Release);

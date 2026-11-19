@@ -117,6 +117,13 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
         for &b in b"trap: oops re-entered during report; halting\n" {
             put(b);
         }
+        // R11 (the parked-CPU interrupt strand): park with interrupts
+        // DISABLED — an IF=1 park wakes on the next timer tick and runs
+        // scheduler_tick on top of this broken report context, which can
+        // acquire the runqueue lock and wedge inside it (fr7's stranded
+        // GRQ holder). The reference shape is panic_smp_self_stop: a
+        // dead CPU never takes interrupts again.
+        crate::arch::cpu::disable_irq();
         loop {
             crate::arch::cpu::wfi();
         }

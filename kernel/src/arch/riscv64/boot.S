@@ -258,6 +258,22 @@ _start:
     or t4, t4, t5
     sd t4, 104(t3)
 
+    // PMD[14] (RUX-RISCV-LAYOUT-8, cov-campaign): fifteenth 2MB — window 30MB.
+    li t4, KERNEL_PHYS
+    li t6, 0x1C00000             // 28MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 112(t3)
+
+    // PMD[15] (RUX-RISCV-LAYOUT-8): sixteenth 2MB — window 32MB.
+    li t4, KERNEL_PHYS
+    li t6, 0x1E00000             // 30MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 120(t3)
+
     // --- Create early page table (full kernel mapping) ---
     // early_pg_dir: same as trampoline but points to early_pmd
     la t2, early_pg_dir
@@ -433,6 +449,22 @@ _start:
     srli t4, t4, 2
     or t4, t4, t5
     sd t4, 104(t3)
+
+    // PMD[14] (RUX-RISCV-LAYOUT-8, cov-campaign): fifteenth 2MB — window 30MB.
+    li t4, KERNEL_PHYS
+    li t6, 0x1C00000             // 28MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 112(t3)
+
+    // PMD[15] (RUX-RISCV-LAYOUT-8): sixteenth 2MB — window 32MB.
+    li t4, KERNEL_PHYS
+    li t6, 0x1E00000             // 30MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 120(t3)
 
     // --- MMIO identity mapping (UART at 0x10000000) ---
     // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)

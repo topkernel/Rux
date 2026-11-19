@@ -1679,11 +1679,35 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             // otherwise).
             if KP_DUMP_ENTERED.swap(true, core::sync::atomic::Ordering::Relaxed) {
                 let mut put = |b: u8| crate::console::putchar_no_lock(b);
-                for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
+                for &b in b"trap: KERNPANIC re-entered during dump; halting cpu=" {
                     put(b);
                 }
-                // SAFETY: wfi stalls until the next interrupt; safe in a
-                // halt loop.
+                {
+                    let c = crate::arch::cpu_id();
+                    if c < 10 {
+                        crate::console::putchar_no_lock(b'0' + c as u8);
+                    } else {
+                        crate::console::putchar_no_lock(b'A' + (c - 10) as u8);
+                    }
+                }
+                crate::console::putchar_no_lock(b'\n');
+                // gw2 twin parity (grq-source-fix): this CPU parks in the
+                // eternal wfi loop with whatever it holds — release a GRQ
+                // this CPU PROVABLY holds (the lock word names the owner;
+                // single authority) BEFORE halting, or every later GRQ
+                // acquirer spins behind the parked CPU forever. The x86_64
+                // twin's re-entry arm has carried this since gw2.
+                crate::sched::sched::terminal_release_grq_if_held();
+                // R11 (the parked-CPU interrupt strand, x86_64 twin's fr7
+                // conviction): park with interrupts DISABLED — an
+                // interrupt-enabled park wakes on the next timer tick and
+                // runs scheduler_tick on top of this broken dumper
+                // context, which can acquire the runqueue lock and wedge
+                // inside it. A dead CPU never takes interrupts again
+                // (the reference's panic_smp_self_stop shape).
+                crate::arch::cpu::disable_irq();
+                // SAFETY: wfi with interrupts disabled never wakes — the
+                // intentional permanent park of a crashed CPU.
                 loop {
                     unsafe { core::arch::asm!("wfi") };
                 }

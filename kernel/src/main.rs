@@ -1326,7 +1326,9 @@ use core::arch::global_asm;
 // (0x81e00000, the coordinator's proven layout-hunt pattern), reserve
 // 30MB = heap base - RAM base: no gap, heap at/above window end.
 #[cfg(feature = "riscv64")]
-const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
+// RUX-RISCV-LAYOUT-8 (cov campaign): window 28MB -> 32MB, heap at the
+// window end 0x82200000; reserve = heap base - RAM base = 34MB, no gap.
+const KERNEL_RESERVE_SIZE: usize = 0x220_0000; // 34MB
 #[cfg(feature = "x86_64")]
 // 30MB -> 40MB (layout-hunt 2026-11-10): the SMP8 const-block arrays pushed
 // the image to 31.4MB; the 30MB reserve left 368KB of live .bss unreserved

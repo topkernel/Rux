@@ -3763,17 +3763,44 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // CPU arriving here parks in the eternal halt loop WITH
                 // WHATEVER IT HELD — seven CPUs spun on the GRQ behind
                 // one such parker. Release the stranded runqueue lock
-                // (positive per-CPU knowledge via the GRQ_HELD tracker)
-                // BEFORE halting; the section it protected is dead with
-                // this CPU either way. uart_putc_raw: the old marker was
-                // putchar_no_lock — SILENT on release builds, so these
-                // parks were invisible (every "silent" permanent wedge).
-                for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
+                // (positive knowledge via the lock word's owner field —
+                // terminal_release_grq_if_held reads held_by(cpu), the
+                // single authority) BEFORE halting; the section it
+                // protected is dead with this CPU either way.
+                // uart_putc_raw: the old marker was putchar_no_lock —
+                // SILENT on release builds, so these parks were
+                // invisible (every "silent" permanent wedge).
+                for &b in b"trap: KERNPANIC re-entered during dump; halting cpu=" {
                     crate::console::uart_putc_raw(b);
                 }
+                {
+                    let c = crate::arch::cpu_id();
+                    if c < 10 {
+                        crate::console::uart_putc_raw(b'0' + c as u8);
+                    } else {
+                        crate::console::uart_putc_raw(b'A' + (c - 10) as u8);
+                    }
+                }
+                crate::console::uart_putc_raw(b'\n');
                 crate::sched::sched::terminal_release_grq_if_held();
-                // SAFETY: hlt halts until the next interrupt; safe in a
-                // halt loop.
+                // R11 (the parked-CPU interrupt strand, fr7 conviction):
+                // the halt loop must run with INTERRUPTS DISABLED. The old
+                // shape parked with whatever IF the fault arrived under —
+                // an IF=1 park wakes on the next timer tick, and the tick
+                // handler then runs scheduler_tick ON TOP of the broken
+                // dumper context: it acquires the GRQ (word=1, tracker
+                // set, site=tick) and wedges/faults inside the section,
+                // stranding the runqueue forever — fr7's crime scene: the
+                // FIRST holder ever named (cpu4/pid356 inside
+                // scheduler_tick) with TERM-GRQ-FORCE at ZERO fires (the
+                // park-time tracker was clear; the acquire came from the
+                // post-park interrupt). The reference shape is
+                // panic_smp_self_stop: local_irq_disable before the
+                // eternal halt — a dead CPU must never take interrupts
+                // again.
+                crate::arch::cpu::disable_irq();
+                // SAFETY: hlt with IF=0 never wakes — the intentional
+                // permanent park of a crashed CPU.
                 loop {
                     unsafe { core::arch::asm!("hlt") };
                 }
@@ -3784,7 +3811,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
             crate::dfx::scribble::kernpanic_park(fault_addr, regs.rip, regs.rsp);
             // Raw serial print (printk may be wedged on a lock this CPU
             // holds), then halt — the twin's R9 discipline.
-            // putchar_no_lock writes the serial port directly (no locks).
+            // uart_putc_raw writes the serial port directly (no locks).
             // (x86-smprace: the old (0..64).step_by(4).rev() loops hit a
             // shift-overflow panic on their final iterator step; the
             // explicit while form below cannot.)
@@ -3793,7 +3820,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((v >> sh) & 0xF) as u8;
-                    crate::console::putchar_no_lock(if nb < 10 {
+                    crate::console::uart_putc_raw(if nb < 10 {
                         b'0' + nb
                     } else {
                         b'a' + nb - 10
@@ -3801,18 +3828,18 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 }
             }
             for &b in b"trap: KERNPANIC pfault badaddr=0x" {
-                crate::console::putchar_no_lock(b);
+                crate::console::uart_putc_raw(b);
             }
             kp_put_hex(fault_addr);
             for &b in b" rip=0x" {
-                crate::console::putchar_no_lock(b);
+                crate::console::uart_putc_raw(b);
             }
             kp_put_hex(regs.rip);
             for &b in b" rsp=0x" {
-                crate::console::putchar_no_lock(b);
+                crate::console::uart_putc_raw(b);
             }
             kp_put_hex(regs.rsp);
-            crate::console::putchar_no_lock(b'\n');
+            crate::console::uart_putc_raw(b'\n');
             // OH bring-up forensics: dump 16 kernel-stack words at rsp
             // and walk the frame-pointer chain, raw. When control flow
             // jumps through a garbage pointer (executed stack garbage,
@@ -3833,7 +3860,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 let addr = regs.rsp as usize + i * 8;
                 if addr + 8 > kstack_top {
                     for &b in b"kp-stk <rest past kernel stack top>\n" {
-                        crate::console::putchar_no_lock(b);
+                        crate::console::uart_putc_raw(b);
                     }
                     break;
                 }
@@ -3841,13 +3868,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // R73 comment above).
                 let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
                 for &b in b"kp-stk " {
-                    crate::console::putchar_no_lock(b);
+                    crate::console::uart_putc_raw(b);
                 }
                 kp_put_hex(addr as u64);
-                crate::console::putchar_no_lock(b':');
-                crate::console::putchar_no_lock(b' ');
+                crate::console::uart_putc_raw(b':');
+                crate::console::uart_putc_raw(b' ');
                 kp_put_hex(v);
-                crate::console::putchar_no_lock(b'\n');
+                crate::console::uart_putc_raw(b'\n');
             }
             // Frame-pointer walk: [rbp] = next rbp, [rbp+8] = return
             // address. Stops at the stack top or the first bogus frame.
@@ -3865,10 +3892,10 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     )
                 };
                 for &b in b"kp-frame " {
-                    crate::console::putchar_no_lock(b);
+                    crate::console::uart_putc_raw(b);
                 }
                 kp_put_hex(ret);
-                crate::console::putchar_no_lock(b'\n');
+                crate::console::uart_putc_raw(b'\n');
                 if next <= rbp || next >= stack_top {
                     break;
                 }
@@ -3887,20 +3914,20 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     let idx = (cur + len - 1 - k) % len;
                     let e = &SYSCALL_RING[idx];
                     for &b in b"kp-sys " {
-                        crate::console::putchar_no_lock(b);
+                        crate::console::uart_putc_raw(b);
                     }
                     kp_put_hex(e.pid.load(core::sync::atomic::Ordering::Relaxed) as u64);
-                    crate::console::putchar_no_lock(b' ');
+                    crate::console::uart_putc_raw(b' ');
                     kp_put_hex(e.nr.load(core::sync::atomic::Ordering::Relaxed) as u64);
-                    crate::console::putchar_no_lock(b' ');
+                    crate::console::uart_putc_raw(b' ');
                     kp_put_hex(e.a0.load(core::sync::atomic::Ordering::Relaxed));
-                    crate::console::putchar_no_lock(b' ');
+                    crate::console::uart_putc_raw(b' ');
                     kp_put_hex(e.ret.load(core::sync::atomic::Ordering::Relaxed));
-                    crate::console::putchar_no_lock(b'\n');
+                    crate::console::uart_putc_raw(b'\n');
                 }
             } else {
                 for &b in b"kp-sys ring off (boot with dfx=sysring)\n" {
-                    crate::console::putchar_no_lock(b);
+                    crate::console::uart_putc_raw(b);
                 }
             }
             // The old terminal was an unconditional hlt loop — every

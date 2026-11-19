@@ -168,6 +168,40 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol round 7 (2026-11-19 15:xx): the corruption hunt's instrument round — one conviction retracted (instrument bug), the guard retained, the P0 narrowed to an intermittent forged-pointer class
+
+Round-6 chase status, honestly: the SOCK-BAD-PTR guard (f2a271f32,
+894addbbd) now validates every socket-ops private_data deref against
+buddy bounds, the slab packing region, and — for region-unclassified
+pages — the Arc strong/weak counts at the TRUE ArcInner offsets
+(raw-16/raw-8). Two retractions on the way:
+
+- The "Arc strong=0x0 on live sockets" reading was an INSTRUMENT BUG
+  (the read hit the Socket's first field; Arc::into_raw hands out
+  &data, the counts live 16/8 bytes behind). Corrected offsets read
+  strong=2 on both stable pointers — file + table, exactly as the
+  creation protocol intends. The premature-free and header-zeroing
+  theories are RETRACTED; the sockets and files in the bw_tcp rig are
+  healthy.
+- The c1 "EBADF-refused everything" run was the same wrong-offset
+  guard refusing valid sockets.
+
+What STANDS: the round-6 crime scene (forged Socket* = heap_base-2
+reaching socket_wait_round's accept arm; wild rip=0x180; holder stack
+garbage) is real and did not reproduce across four guarded boots —
+intermittent class. The guard now converts its recurrence into EBADF
+plus a forensic line (site/raw/strong/weak/pid/comm/file_id) instead
+of a wild jump — the crash-to-report net the next recurrence needs.
+Layout fact banked: the slab packing region is a SEPARATE region
+after the buddy's heap_end (init_slab at heap_base+heap_size_eff);
+buddy bounds alone are too tight for object validation, and
+is_slab_ptr must be handed the slab region base.
+
+Also this round: resolved the parallel grq-lock-1st merge's conflict
+markers in the shared tree (comment resolved to the actual held_by(cpu)
+mechanism; the safety ledger keeps both round entries), gated the
+combined tree (riscv make test 1555/1555, triple-arch rc=0), pushed.
+
 ## Patrol round 6 (2026-11-19 13:xx): bw_tcp retest captures the NEXT P0 live — kernel stack corruption, wild ret to 0x180 inside the GRQ section
 
 The new crime-scene instrument (grq-lock-1st, cd2f10c91) fired on its

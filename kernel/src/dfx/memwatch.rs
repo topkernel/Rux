@@ -855,6 +855,33 @@ fn put_hex(v: u64) {
 /// Raw UART, allocation-free, safe from softirq context.
 pub fn dump_mem() {
     taskdump_raw_line(b"\nMEM heap ");
+        // r-bwslow census (bw_tcp zero-window deadlock hunt): every tcp
+        // slot's state / recv_buffer len / advertised window, so a stuck
+        // boot names the deadlock side (data-at-client-unread vs
+        // data-never-arrived) in one line.
+        {
+            let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+            let tbl = crate::net::tcp::get_tcp_socket_table();
+            taskdump_raw_line(b"\nTCPCEN ");
+            let mut n = 0;
+            for fd in 0..crate::net::tcp::TCP_SOCKET_TABLE_SIZE {
+                if let Some(ts) = crate::net::tcp::tcp_socket_get(fd as i32) {
+                    taskdump_raw_line(b"[");
+                    taskdump_dec(fd as u64);
+                    taskdump_raw_line(b":st=");
+                    taskdump_dec(ts.state as u64);
+                    taskdump_raw_line(b",rx=");
+                    taskdump_dec(ts.recv_buffer.len() as u64);
+                    taskdump_raw_line(b",wnd=");
+                    taskdump_dec(ts.rcv_wnd as u64);
+                    taskdump_raw_line(b",lp=");
+                    taskdump_dec(ts.local_port.to_be() as u64);
+                    taskdump_raw_line(b"] ");
+                    n += 1;
+                    if n >= 8 { break; }
+                }
+            }
+        }
         // r-strand instrument (lat_fs conviction round): the sync-wait
         // phase counts on this proven raw path (pr_warn in the timer
         // softirq was dropped by printk on loaded boots).
