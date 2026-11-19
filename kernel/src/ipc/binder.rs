@@ -7959,9 +7959,11 @@ pub fn stall_report() {
     let mut retire_wake_ths: Vec<Arc<BinderThread>> = Vec::new();
     {
         let w = world_lock();
-        // SAFETY: read-only traversal under WORLD (pm() casts are only used
-        // to reach each live proc's thread list).
-        unsafe {
+        // (unsafe-slim r3) un-signed: the traversal is pure safe code now —
+        // every raw deref rides the token-checked accessors (pm/im/st/hist,
+        // INV-BINDER-HELD), the task lookups are process::find_task_by_pid,
+        // and the phase-2 census cells carry their own audited spans.
+        {
             let world = match w.as_ref() {
                 Some(world) => world,
                 None => return,
