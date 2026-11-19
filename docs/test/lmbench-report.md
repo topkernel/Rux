@@ -168,6 +168,35 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol round 6 (2026-11-19 13:xx): bw_tcp retest captures the NEXT P0 live — kernel stack corruption, wild ret to 0x180 inside the GRQ section
+
+The new crime-scene instrument (grq-lock-1st, cd2f10c91) fired on its
+first bw_tcp boot and delivered the full scene: GRQ-HOLDER cpu=3
+pid=314 (the bw_tcp SERVER) site=schedule:acquired holds the GRQ;
+`pagefault: kernel fault addr=0x180 rip=0x180 pid=314 (no fixup)` — a
+wild indirect call/return to 0x180 INSIDE the GRQ section; the
+holder's saved stack is garbage (BT #0 ra=0x10, #1 ra=0x1) — the
+kernel stack was corrupted before the jump; the panic path then
+re-acquired the dead GRQ (DEADLOCK lock=0xffffffff818fe028 = the GRQ
+lock word, ra=lock_irqsave_site), the dumper re-entered, machine
+halted. Every waiting CPU's census row is recorded (schedule/wake/tick
+trying-to-acquire).
+
+Classification: memory-corruption class (return address smashed) — P0
+by doctrine, above everything. The corruption happens on the bw_tcp
+server's kernel stack; candidates: the server's deep recv path
+(sg/copy chains), or a lifetime bug freeing a stack the task still
+runs on (the withheld-page/FTS family is adjacent). The zw1 lat_fs
+boot's single intermittent lockup (SigQueue::enqueue stack) is
+plausibly the same corruption class showing a different face.
+
+Round facts: zw1 (lat_fs, all stacked fixes): DONE/zero-timeout/zero-
+mkdirfail, 0k 20976/19598 / 1k 20071/17314 / 4k 4021/3726 / 10k
+1557/1511 — the homepage row now carries the latest reading. bw_tcp
+invocation lesson: the runner needs the server host in the spec
+(lmbench=bw_tcp,127.0.0.1 — commas become spaces; the runner does not
+append it).
+
 ## Patrol round 5 (2026-11-19 11:xx): lat_fs CLOSED as a stall — four-round numbers on the official rig; tmpfs alloc fix landed
 
 The round-4 residual chain is fixed at its head (63825a62b, gated
