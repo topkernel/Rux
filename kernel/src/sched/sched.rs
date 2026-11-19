@@ -117,6 +117,10 @@ impl GlobalRunQueue {
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
         self.lock.lock();
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < GRQ_HELD.len() {
+            GRQ_HELD[cpu].store(true, core::sync::atomic::Ordering::Relaxed);
+        }
         GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
     }
 
@@ -539,6 +543,10 @@ impl<'a> GrqGuard<'a> {
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < GRQ_HELD.len() {
+            GRQ_HELD[cpu].store(false, core::sync::atomic::Ordering::Relaxed);
+        }
         // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
         unsafe { (*self.grq).lock.unlock() };
         core::mem::forget(self);
@@ -570,6 +578,10 @@ impl Drop for GrqGuard<'_> {
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < GRQ_HELD.len() {
+            GRQ_HELD[cpu].store(false, core::sync::atomic::Ordering::Relaxed);
+        }
         unsafe { (*self.grq).lock.unlock() };
         crate::arch::cpu::restore_irq(self.flags);
     }
@@ -635,6 +647,19 @@ static mut GRQ: core::mem::MaybeUninit<GlobalRunQueue> = core::mem::MaybeUninit:
 
 /// Whether GRQ has been initialized
 static GRQ_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// gw1 (oh-launch round 6, gdbstub on the wedge): the permanent GRQ
+/// wedge's root. A task that faults inside a GRQ section (the paging-
+/// oops class) dies through the terminal switch, which resets the
+/// leaked preempt COUNT but never releases the lock WORD — every later
+/// GRQ acquirer spins forever (four CPUs at RawSpinlock::lock+1359,
+/// three more queued in the oops entry spin, serial dead). Track the
+/// hold per-CPU (written only by the owning CPU under IRQs-off, so a
+/// plain bool per CPU is race-free and touches no shared cacheline);
+/// the terminal path force-releases when the dying CPU still carries
+/// the hold. Same discipline as the preempt-count clear beside it.
+static GRQ_HELD: [core::sync::atomic::AtomicBool; 32] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; 32];
 
 /// Initialize the global run queue (called once during boot).
 unsafe fn grq_init() {
@@ -3113,6 +3138,37 @@ pub fn schedule_dead_never_returns() {
                         );
                     }
                     crate::interrupt::preempt::preempt_count_reset();
+                }
+                // gw1 (oh-launch round 6): the count clear above is only
+                // half the terminal cleanup — a task that faulted inside
+                // a GRQ section also strands the LOCK WORD (its paired
+                // unlock will never run), and every later GRQ acquirer
+                // spun forever (the permanent wedge: 4 CPUs at
+                // RawSpinlock::lock+1359, gdbstub capture). GRQ_HELD is
+                // the per-CPU positive-knowledge tracker written at
+                // acquire/release under IRQs-off; force-release ONLY
+                // when this CPU's own hold is still marked. The section
+                // it protected is dead with the task — same trade the
+                // preempt-count reset above already makes.
+                {
+                    let cpu = crate::arch::cpu_id() as usize;
+                    if cpu < GRQ_HELD.len()
+                        && GRQ_HELD[cpu].swap(false, core::sync::atomic::Ordering::Relaxed)
+                    {
+                        static GRQFORCE_N: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = GRQFORCE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 8 {
+                            crate::pr_warn!(
+                                "TERM-GRQ-FORCE pid={} cpu={} released the runqueue lock stranded by the dying section",
+                                (*cur).pid(),
+                                cpu
+                            );
+                        }
+                        // SAFETY: grq() returns the initialized GRQ; the
+                        // per-CPU hold marker proves this CPU's acquire.
+                        unsafe { grq().lock.force_unlock_terminal() };
+                    }
                 }
             }
         }

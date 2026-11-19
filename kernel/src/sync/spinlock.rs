@@ -728,6 +728,21 @@ impl RawSpinlock {
         self.locked.store(0, Ordering::Release);
     }
 
+    /// Terminal-path force release (oh-launch round 6, gw1): a task that
+    /// dies mid-section (the paging-oops class faulting under a lock)
+    /// never runs its paired unlock — the word stays 1 forever and every
+    /// later acquirer spins (the permanent GRQ wedge: four CPUs at
+    /// lock+1359 while the dying task's terminal switch had already
+    /// cleared only the preempt COUNT). The caller must have POSITIVE
+    /// knowledge this CPU holds the lock (the per-CPU GRQ_HELD tracker —
+    /// never call this speculatively: force-releasing a lock another CPU
+    /// legitimately holds corrupts the section). No preempt_count_sub:
+    /// the terminal path resets the whole count anyway.
+    pub fn force_unlock_terminal(&self) {
+        self.clear_owner();
+        self.locked.store(0, Ordering::Release);
+    }
+
     #[inline]
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Acquire) != 0
