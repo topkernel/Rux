@@ -325,20 +325,22 @@ pub fn tick_check() {
         let mut thsp = 0u64;
         let mut comm_out = [0u8; 16];
         let mut comm_len = 0usize;
-        unsafe {
+        {
             crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
-                if !found && (*t).pid() == pid {
-                    state_bits = (*t).state().bits();
-                    preempt = (*t).preempt_count();
-                    ti_cpu = (*t).ti_cpu();
-                    thsp = (*t).thread().sp;
-                    let c = (*t).comm();
+                if !found && t.pid() == pid {
+                    state_bits = t.state().bits();
+                    preempt = t.preempt_count();
+                    ti_cpu = t.ti_cpu();
+                    thsp = t.thread().sp;
+                    let c = t.comm();
                     let n = c.iter().position(|&x| x == 0).unwrap_or(16);
                     comm_out[..n].copy_from_slice(&c[..n]);
                     comm_len = n;
                     found = true;
                 }
             });
+        // (task scan done)
+    
         }
         let comm = core::str::from_utf8(&comm_out[..comm_len]).unwrap_or("?");
         let cls = if found {
@@ -428,13 +430,20 @@ pub fn tick_check() {
             let lo = core::ptr::addr_of!(_stext) as u64;
             #[cfg(not(feature = "x86_64"))]
             let hi = core::ptr::addr_of!(_etext) as u64;
-            let base = thsp as *const u64;
+            // Upward scan of the holder's own stack through the
+            // bounds-checked window (INV-WINDOW-*); the Task pins the
+            // stack pages.
+            let win = crate::safety::frame::KernelStackWindow::new(
+                thsp as usize,
+                (thsp as usize) + 80 * 8,
+            );
             let mut shown = 0;
             crate::pr_warn!("ALLOC-HOLD-STK pid={} sp={:#x}", pid, thsp);
             for k in 0..80 {
-                // SAFETY: diagnostic read within the holder's own kernel
-                // stack pages (the Task exists and pins them).
-                let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+                let v = match win.and_then(|w| w.read_u64((thsp as usize) + k * 8)) {
+                    Some(v) => v,
+                    None => break,
+                };
                 if v >= lo && v < hi && (v & 1) == 0 {
                     crate::pr_warn!("ALLOC-HOLD-STK2 {:#x}", v);
                     shown += 1;

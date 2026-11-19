@@ -108,15 +108,13 @@ pub struct TimedSleepShadow;
 impl TimedSleepShadow {
     pub fn new(kind: u32, deadline: u64, timer_id: u64, dur_ms: u32) -> Option<Self> {
         let t = crate::sched::current()?;
-        // SAFETY: t is the currently running task (we are it).
-        unsafe {
-            (*t).timed_sleep_deadline.store(deadline, Ordering::Release);
-            (*t).timed_sleep_kind.store(kind, Ordering::Release);
-            (*t).timed_sleep_timer_id.store(timer_id, Ordering::Release);
-            (*t).timed_sleep_armed_j
-                .store(crate::drivers::timer::get_jiffies() as u32, Ordering::Release);
-            (*t).timed_sleep_dur_ms.store(dur_ms, Ordering::Release);
-        }
+        // t is the currently running task (we are it) — plain writes.
+        t.timed_sleep_deadline.store(deadline, Ordering::Release);
+        t.timed_sleep_kind.store(kind, Ordering::Release);
+        t.timed_sleep_timer_id.store(timer_id, Ordering::Release);
+        t.timed_sleep_armed_j
+            .store(crate::drivers::timer::get_jiffies() as u32, Ordering::Release);
+        t.timed_sleep_dur_ms.store(dur_ms, Ordering::Release);
         Some(TimedSleepShadow)
     }
 
@@ -125,10 +123,7 @@ impl TimedSleepShadow {
     /// must name the LIVE entry).
     pub fn refresh_id(&self, timer_id: u64) {
         if let Some(t) = crate::sched::current() {
-            // SAFETY: t is the currently running task (we are it).
-            unsafe {
-                (*t).timed_sleep_timer_id.store(timer_id, Ordering::Release);
-            }
+            t.timed_sleep_timer_id.store(timer_id, Ordering::Release);
         }
     }
 }
@@ -136,14 +131,11 @@ impl TimedSleepShadow {
 impl Drop for TimedSleepShadow {
     fn drop(&mut self) {
         if let Some(t) = crate::sched::current() {
-            // SAFETY: t is the currently running task (we are it). A
-            // drop on a task switch away cannot happen: the guard lives
-            // in the wait function's own frame, above schedule().
-            unsafe {
-                (*t).timed_sleep_kind.store(TSLEEP_NONE, Ordering::Release);
-                (*t).timed_sleep_deadline.store(0, Ordering::Release);
-                (*t).timed_sleep_timer_id.store(0, Ordering::Release);
-            }
+            // A drop on a task switch away cannot happen: the guard
+            // lives in the wait function's own frame, above schedule().
+            t.timed_sleep_kind.store(TSLEEP_NONE, Ordering::Release);
+            t.timed_sleep_deadline.store(0, Ordering::Release);
+            t.timed_sleep_timer_id.store(0, Ordering::Release);
         }
     }
 }
@@ -681,39 +673,26 @@ pub fn timer_softirq_handler(_nr: usize) {
                 const NS_SYS: [u64; 2] = [35, 415]; // nanosleep, clock_nanosleep_time64
                 #[cfg(feature = "aarch64")]
                 const NS_SYS: [u64; 2] = [115, 115]; // clock_nanosleep
-                let entry_sys = |p: *mut crate::process::Task| -> u64 {
-                    if p.is_null() {
-                        return 0;
+                // Entry-frame read through the typed accessor: the walk
+                // hands &Task (pinned by the pid-hash walk), and
+                // Task::pt_regs_ref() is the shared read view of the
+                // frame at the top of the task's own kernel stack.
+                let entry_sys = |tk: &crate::process::Task| -> u64 {
+                    let regs = match tk.pt_regs_ref() {
+                        Some(r) => r,
+                        None => return 0,
+                    };
+                    #[cfg(feature = "x86_64")]
+                    {
+                        return regs.orig_rax;
                     }
-                    // SAFETY: entry-frame read of a live task's mapped
-                    // kernel stack (sleep_snapshot / TXN-HANG contract).
-                    unsafe {
-                        let tk = &*p;
-                        let top = match tk.kernel_stack_top_checked() {
-                            Some(t) => t,
-                            None => return 0,
-                        };
-                        #[cfg(feature = "x86_64")]
-                        {
-                            let regs = (top.wrapping_sub(
-                                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                            return (*regs).orig_rax;
-                        }
-                        #[cfg(feature = "riscv64")]
-                        {
-                            let regs = (top.wrapping_sub(
-                                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                            return (*regs).a7;
-                        }
-                        #[cfg(feature = "aarch64")]
-                        {
-                            let regs = (top.wrapping_sub(
-                                crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
-                            )) as *const crate::arch::aarch64::pt_regs::PtRegs;
-                            return (*regs).syscallno;
-                        }
+                    #[cfg(feature = "riscv64")]
+                    {
+                        return regs.a7;
+                    }
+                    #[cfg(feature = "aarch64")]
+                    {
+                        return regs.syscallno;
                     }
                 };
                 let mut rows: [Option<TtRow>; 16] = [None, None, None, None, None, None, None,
@@ -721,15 +700,11 @@ pub fn timer_softirq_handler(_nr: usize) {
                 let mut ghost_rows = 0usize;
                 let nfound = crate::sched::for_each_task_try(|t| {
                     // Diagnostic reads of a live task pinned by the
-                    // pid-hash walk; helper entry_sys takes raw identity.
-                    let t = t as *const crate::process::task::Task
-                        as *mut crate::process::task::Task;
-                    let (kind, sleeping) = unsafe {
-                        (
-                            (*t).timed_sleep_kind.load(Ordering::Acquire),
-                            (*t).state().is_sleeping(),
-                        )
-                    };
+                    // pid-hash walk — plain &Task reads.
+                    let (kind, sleeping) = (
+                        t.timed_sleep_kind.load(Ordering::Acquire),
+                        t.state().is_sleeping(),
+                    );
                     if !sleeping {
                         return;
                     }
@@ -748,22 +723,17 @@ pub fn timer_softirq_handler(_nr: usize) {
                                 // site), NOT ti_kernel_sp (creation-time
                                 // only). Same read contract as TXN-HANG-STK.
                                 let mut stk = [0u64; 4];
-                                unsafe {
-                                    let tk = &*t;
-                                    let sp = tk.thread().sp as usize;
-                                    let top = tk.kernel_stack_top_checked().unwrap_or(0);
-                                    let base = top.wrapping_sub(
-                                        crate::config::KERNEL_STACK_SIZE,
-                                    );
-                                    if sp >= base && sp + 8 * 4 <= top && (sp & 7) == 0 {
-                                        for (i, w) in stk.iter_mut().enumerate() {
-                                            *w = core::ptr::read_volatile(
-                                                (sp + i * 8) as *const u64,
-                                            );
-                                        }
+                                // Stack-word scan through the bounds-checked
+                                // window primitive (INV-WINDOW-*): the walk's
+                                // &Task keeps the stack live for the read.
+                                if let Some(top) = t.kernel_stack_top_checked() {
+                                    let base = top - crate::config::KERNEL_STACK_SIZE;
+                                    if let Some(win) = crate::safety::frame::KernelStackWindow::new(base, top) {
+                                        let sp = t.thread().sp as usize;
+                                        win.read_frame(sp, &mut stk);
                                     }
                                 }
-                                let pid = unsafe { (*t).pid() };
+                                let pid = t.pid();
                                 for r in rows.iter_mut() {
                                     if r.is_none() {
                                         *r = Some(TtRow {
@@ -789,15 +759,13 @@ pub fn timer_softirq_handler(_nr: usize) {
                     // futex timeouts would flood the print, so the jiffy
                     // class reports only >= 30 s parks.
                     // SAFETY: same diagnostic-read contract.
-                    let (pid, armed_j, deadline, tid, dur) = unsafe {
-                        (
-                            (*t).pid(),
-                            (*t).timed_sleep_armed_j.load(Ordering::Acquire),
-                            (*t).timed_sleep_deadline.load(Ordering::Acquire),
-                            (*t).timed_sleep_timer_id.load(Ordering::Acquire),
-                            (*t).timed_sleep_dur_ms.load(Ordering::Acquire),
-                        )
-                    };
+                    let (pid, armed_j, deadline, tid, dur) = (
+                        t.pid(),
+                        t.timed_sleep_armed_j.load(Ordering::Acquire),
+                        t.timed_sleep_deadline.load(Ordering::Acquire),
+                        t.timed_sleep_timer_id.load(Ordering::Acquire),
+                        t.timed_sleep_dur_ms.load(Ordering::Acquire),
+                    );
                     let gate = if kind == TSLEEP_HRES { 200 } else { 3000 };
                     if current.wrapping_sub(armed_j as u64) < gate {
                         return;
@@ -934,23 +902,16 @@ pub fn timer_softirq_handler(_nr: usize) {
     // `expire_hres_inline` runs the identical sequence at the top of
     // the timer IRQ; the diagnostics above this point stay
     // softirq-side only.
-    static mut EXPIRED_BUF: [[FiredToken; wheel::EXPIRY_BUDGET];
-        crate::config::MAX_CPUS] =
-        [[FiredToken {
-            id: 0,
-            action: Action::None,
-            late_ticks: 0,
-            deadline: 0,
-        }; wheel::EXPIRY_BUDGET]; crate::config::MAX_CPUS];
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu >= crate::config::MAX_CPUS {
-        return; // unreachable on this platform; keep the handler total
-    }
-    // SAFETY: per-CPU rows indexed by this CPU's id; the SOFTIRQ_IN_PROGRESS
-    // guard prevents re-entry, so this CPU's row is exclusively ours.
-    let buf_ptr: *mut [FiredToken; wheel::EXPIRY_BUDGET] =
-        unsafe { (core::ptr::addr_of_mut!(EXPIRED_BUF) as *mut [FiredToken; wheel::EXPIRY_BUDGET]).add(cpu) };
-    run_wheel_sweep(current, now_time, hres_due, buf_ptr);
+    static EXPIRED_BUF: crate::sync::percpu::CpuLocal<
+        [FiredToken; wheel::EXPIRY_BUDGET],
+        { crate::config::MAX_CPUS },
+    > = crate::sync::percpu::CpuLocal::new([FiredToken {
+        id: 0,
+        action: Action::None,
+        late_ticks: 0,
+        deadline: 0,
+    }; wheel::EXPIRY_BUDGET]);
+    run_wheel_sweep(current, now_time, hres_due, &EXPIRED_BUF);
     softirq_diagnostics(current);
 }
 
@@ -1027,20 +988,14 @@ pub fn expire_hres_inline() -> bool {
     // the OH-campaign "wake TRUE, task unlinked" signature. Per-CPU
     // rows close it (the reference runs hrtimer expiry on per-CPU
     // bases; a shared expiry buffer is unrepresentable there).
-    static mut HRES_FAST_BUF: [[FiredToken; wheel::EXPIRY_BUDGET];
-        crate::config::MAX_CPUS] =
-        [[FiredToken { id: 0, action: Action::None, late_ticks: 0, deadline: 0 }; wheel::EXPIRY_BUDGET];
-            crate::config::MAX_CPUS];
-    let cpu = crate::arch::cpu_id() as usize;
-    // SAFETY: per-CPU row owned by THIS cpu's hardirq path (same shape
-    // as the softirq EXPIRED_BUF row above); the wheel writes at most
-    // EXPIRY_BUDGET tokens.
-    let buf: *mut [FiredToken; wheel::EXPIRY_BUDGET] = unsafe {
-        (core::ptr::addr_of_mut!(HRES_FAST_BUF) as *mut [FiredToken; wheel::EXPIRY_BUDGET])
-            .add(cpu % crate::config::MAX_CPUS)
-    };
+    static HRES_FAST_BUF: crate::sync::percpu::CpuLocal<
+        [FiredToken; wheel::EXPIRY_BUDGET],
+        { crate::config::MAX_CPUS },
+    > = crate::sync::percpu::CpuLocal::new(
+        [FiredToken { id: 0, action: Action::None, late_ticks: 0, deadline: 0 }; wheel::EXPIRY_BUDGET],
+    );
     let current = timer::get_jiffies();
-    run_wheel_sweep(current, now_time, true, buf);
+    run_wheel_sweep(current, now_time, true, &HRES_FAST_BUF);
     true
 }
 
@@ -1061,16 +1016,19 @@ fn run_wheel_sweep(
     current: u64,
     now_time: u64,
     hres_due: bool,
-    buf_ptr: *mut [FiredToken; wheel::EXPIRY_BUDGET],
+    buf: &crate::sync::percpu::CpuLocal<[FiredToken; wheel::EXPIRY_BUDGET], { crate::config::MAX_CPUS }>,
 ) {
-    // SAFETY: caller-owned row (per-CPU softirq row or the hardirq fast
-    // row); the wheel writes at most EXPIRY_BUDGET tokens.
+    // Per-CPU expiry row via CpuLocal (D-7): the softirq path's
+    // SOFTIRQ_IN_PROGRESS guard and the hardirq fast path's own CPU
+    // exclusivity are what CpuLocal's IRQ-off window encodes. An
+    // out-of-range cpu id (unreachable) refuses the row and the sweep
+    // becomes a no-op — the survive-and-taint stance.
     let expired_len = {
         let now = Now::new(current, now_time);
         let mut table = TIMER_TABLE.lock_irqsave();
         table.advance(now);
-        let row: &mut [FiredToken; wheel::EXPIRY_BUDGET] = unsafe { &mut *buf_ptr };
-        table.collect(now, row)
+        buf.with(|mut row| table.collect(now, &mut row[..]))
+            .unwrap_or(0)
     }; // TIMER_TABLE released here
 
     // Refresh the earliest-hres view: fired/removed timers may have been
@@ -1090,10 +1048,15 @@ fn run_wheel_sweep(
     // were removed from the wheel under the lock above (or re-armed
     // in place with a fresh delivery queued for the NEXT expiry).
     // The SoftirqCtx token records the delivery-context contract.
-    let ctx = SoftirqCtx::new();
-    // SAFETY: slice of the caller's row, filled under the lock above.
-    let expired: &[FiredToken] = &unsafe { &*buf_ptr }[..expired_len];
-    deliver_fired(expired, ctx);
+    // Delivery window: reads the row snapshot filled under the lock
+    // above. On the softirq path the window keeps the existing IRQ-off
+    // discipline (softirq runs with IRQs off); on the hardirq fast path
+    // the window is already inside the timer IRQ.
+    buf.with(|row| {
+        let ctx = SoftirqCtx::new();
+        let expired: &[FiredToken] = &row[..expired_len];
+        deliver_fired(expired, ctx);
+    });
 }
 
 /// The softirq-side 1 Hz-class diagnostics that used to trail the sweep
@@ -1241,9 +1204,9 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                                 }
                             }
                             let (cpid, cpol, cpc) =
-                                crate::sched::current().map(|t| unsafe {
-                                    ((*t).pid() as u64, (*t).policy() as u64, (*t).preempt_count() as u64)
-                                }).unwrap_or((u64::MAX, 9, 0));
+                                crate::sched::current()
+                                    .map(|t| (t.pid() as u64, t.policy() as u64, t.preempt_count() as u64))
+                                    .unwrap_or((u64::MAX, 9, 0));
                             for &b in b"\nCYC-FIRE-LATE us=" { putchar(b); }
                             ph(late_us);
                             // rt-r4 discriminator: this CPU's LAST LAPIC
@@ -1373,15 +1336,22 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                     // nanosleep-loss hunt: the wake's outcome + the
                     // target's post-wake linkage state.
                     if !task.is_null() {
-                        // SAFETY: pinned task, diagnostic reads.
-                        let (onrq, key, stb) = unsafe {
-                            (
-                                (*task).sched_entity().on_rq.load(Ordering::Relaxed),
-                                (*task).sched_entity().timeline_key().is_some(),
-                                (*task).state().bits(),
-                            )
-                        };
-                        fw_record(pid, ok, onrq, key, stb);
+                        // SAFETY (one adopt edge): the FiredToken target is
+                        // the pinned wake target (pin held by the token's
+                        // id through the wheel's removal discipline);
+                        // TaskBorrow's short-read contract.
+                        if let Some(t) = unsafe {
+                            crate::process::task_ref::TaskBorrow::from_raw(task)
+                        } {
+                            let (onrq, key, stb) = (
+                                t.sched_entity().on_rq.load(Ordering::Relaxed),
+                                t.sched_entity().timeline_key().is_some(),
+                                t.state().bits(),
+                            );
+                            fw_record(pid, ok, onrq, key, stb);
+                        } else {
+                            fw_record(pid, ok, false, false, 0xFFFF);
+                        }
                     } else {
                         fw_record(pid, ok, false, false, 0xFFFF);
                     }
@@ -1394,13 +1364,16 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                     // and the sleeper may be stranded — the line names
                     // which, live.
                     if !ok {
-                        // SAFETY: diagnostic reads of the pinned task.
-                        let (st, on_rq, pk) = unsafe {
-                            (
-                                (*task).state().bits(),
-                                (*task).sched_entity().on_rq.load(Ordering::Relaxed),
-                                (*task).pick_state(),
-                            )
+                        // Same pinned-target adopt as above.
+                        let (st, on_rq, pk) = match unsafe {
+                            crate::process::task_ref::TaskBorrow::from_raw(task)
+                        } {
+                            Some(t) => (
+                                t.state().bits(),
+                                t.sched_entity().on_rq.load(Ordering::Relaxed),
+                                t.pick_state(),
+                            ),
+                            None => (0xFFFF, false, 0),
                         };
                         // A RUNNING target at delivery is the benign
                         // recheck-window class (r41v17 boots show one
@@ -1776,23 +1749,25 @@ fn ww_heartbeat(now_time: u64) {
             && PTBUDGET.fetch_add(1, Ordering::Relaxed) < 60 {
             putchar(b'\n');
             crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
-                // Helper APIs (pick_trace_peek / nsleep_iter_of) take raw
-                // identity; recover it once.
-                let task = task as *const crate::process::task::Task
+                // The walk hands &Task under the bucket lock — plain reads.
+                // Helper APIs taking raw identity get the safe &-to-raw cast.
+                let task_raw = task as *const crate::process::task::Task
                     as *mut crate::process::task::Task;
-                unsafe {
-                let pid = (*task).pid();
+                {
+                let pid = task.pid();
                 if pid == 0 || pid == crate::sched::sched::TASK_POISON { return; }
-                let q = core::ptr::read_volatile(
-                    core::ptr::addr_of!((*task).ti_on_cpu) as *const u64);
-                let st = (*task).state().bits();
-                let linked = match (*task).policy() {
+                let q = unsafe {
+                    core::ptr::read_volatile(
+                        core::ptr::addr_of!(task.ti_on_cpu) as *const u64)
+                };
+                let st = task.state().bits();
+                let linked = match task.policy() {
                     crate::process::task::SchedPolicy::Fifo
                     | crate::process::task::SchedPolicy::Rr => false,
-                    _ => (*task).sched_entity().timeline_key().is_some(),
+                    _ => task.sched_entity().timeline_key().is_some(),
                 };
                 let (ptc, ptj) =
-                    match crate::sched::sched::pick_trace_peek(task) {
+                    match crate::sched::sched::pick_trace_peek(task_raw) {
                         Some(x) => x,
                         None => (0, 0),
                     };
@@ -1805,11 +1780,11 @@ fn ww_heartbeat(now_time: u64) {
                 for &b in b" q=0x" { putchar(b); }
                 pdec(q);
                 for &b in b" pk=" { putchar(b); }
-                pdec((*task).pick_state() as u64);
+                pdec(task.pick_state() as u64);
                 for &b in b" lnk=" { putchar(b); }
                 pdec(linked as u64);
-                let tid = (*task).timed_sleep_timer_id.load(Ordering::Relaxed);
-                let tdl = (*task).timed_sleep_deadline.load(Ordering::Relaxed);
+                let tid = task.timed_sleep_timer_id.load(Ordering::Relaxed);
+                let tdl = task.timed_sleep_deadline.load(Ordering::Relaxed);
                 let tpend = crate::timer::timer_pending(tid);
                 for &b in b" tid=" { putchar(b); }
                 pdec(tid);
@@ -1826,7 +1801,7 @@ fn ww_heartbeat(now_time: u64) {
                 for &b in b" st=0x" { putchar(b); }
                 pdec(st as u64);
                 for &b in b" itr=" { putchar(b); }
-                pdec(crate::timer::nsleep_iter_of(task));
+                pdec(crate::timer::nsleep_iter_of(task_raw));
                 // last fire-record for this pid (per-pid table)
                 for k in 0..32 {
                     if FWT_PID[k].load(Ordering::Relaxed) == pid {

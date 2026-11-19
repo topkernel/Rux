@@ -11,6 +11,7 @@
 //! - `struct sigaction`: Signal handling action
 //! - Signal sending (kill) and processing (do_signal)
 
+use crate::safety::bytes as cbytes;
 use crate::sync::rwlock::RwSpinlock;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
@@ -966,22 +967,12 @@ impl SigContext {
     /// block and terminate the list (null record right after). The
     /// reference kernel writes exactly this pair.
     pub fn set_fpsimd(&mut self, fpsimd: &FpsimdContext) {
-        let bytes = self.reserved.0.as_mut_ptr() as *mut u8;
-        // SAFETY: fpsimd is a plain Copy struct; reserved is 4096 bytes,
-        // far larger than the 0x210 record + 8-byte terminator.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                fpsimd as *const FpsimdContext as *const u8,
-                bytes,
-                core::mem::size_of::<FpsimdContext>(),
-            );
-            // null terminator immediately after the record
-            core::ptr::write_bytes(
-                bytes.add(core::mem::size_of::<FpsimdContext>()),
-                0,
-                core::mem::size_of::<Aarch64Ctx>(),
-            );
-        }
+        let bytes = cbytes::bytes_of_mut(&mut self.reserved.0);
+        bytes[..core::mem::size_of::<FpsimdContext>()]
+            .copy_from_slice(cbytes::bytes_of(fpsimd));
+        // null terminator immediately after the record
+        let after = core::mem::size_of::<FpsimdContext>();
+        bytes[after..after + core::mem::size_of::<Aarch64Ctx>()].fill(0);
     }
 
     /// Read the fpsimd_context record back out of the extension block
@@ -989,26 +980,17 @@ impl SigContext {
     /// that swapped ucontexts, or a forged frame).
     pub fn get_fpsimd(&self) -> Option<FpsimdContext> {
         let mut off: usize = 0;
-        let bytes = self.reserved.0.as_ptr() as *const u8;
-        while off + core::mem::size_of::<Aarch64Ctx>() <= self.reserved.0.len() {
-            // SAFETY: off is bounded to the 4096-byte block; both fields
-            // are u32-aligned (the block is 16-aligned).
-            let head = unsafe {
-                core::ptr::read_unaligned(bytes.add(off) as *const Aarch64Ctx)
-            };
+        let bytes = cbytes::bytes_of(&self.reserved.0);
+        while off + core::mem::size_of::<Aarch64Ctx>() <= bytes.len() {
+            let head: Aarch64Ctx = cbytes::read_at(bytes, off)?;
             if head.magic == 0 || head.size == 0 {
                 return None; // terminator / empty
             }
             if head.magic == aarch64_ctx_magic::FPSIMD
                 && head.size == FpsimdContext::SIZE
-                && off + head.size as usize <= self.reserved.0.len()
+                && off + head.size as usize <= bytes.len()
             {
-                // SAFETY: size validated against the block bounds.
-                return Some(unsafe {
-                    core::ptr::read_unaligned(
-                        bytes.add(off) as *const FpsimdContext
-                    )
-                });
+                return cbytes::read_at(bytes, off); // size validated above
             }
             off = off.checked_add(head.size as usize)?; // skip unknown records
         }
@@ -1354,283 +1336,280 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
     use crate::sched;
     use crate::process::task::TaskState;
 
-    // SAFETY: sched::current() returns a valid pointer to the running task;
-    // regs is passed from trap handler and is valid for the current context.
-    unsafe {
-        let current = match sched::current() {
-            Some(c) => c,
-            None => return false,
-        };
+    let current = match sched::current() {
+        Some(c) => c,
+        None => return false,
+    };
+    // SAFETY (the one frame edge): regs comes from the arch trap handler
+    // and is the running task's live frame for the whole of do_signal;
+    // every later use is a plain struct access through this reference.
+    let regs: &mut crate::arch::pt_regs::PtRegs = unsafe { &mut *regs };
 
-        // The body is a LOOP, not a single pass: a signal whose disposition
-        // parks the task (group stop, ptrace signal-delivery-stop) resumes
-        // execution inside this loop, and the signals that arrived while it
-        // was stopped must be re-selected (Linux get_signal() discipline).
-        // delivered tracks whether ANY pass consumed a signal, so a resume
-        // that empties the queue still reports truthfully.
-        let mut delivered = false;
-        loop {
-        // SMP lost-wait fix (Linux restore_saved_sigmask discipline):
-        // rt_sigsuspend parks the task with a TEMPORARY mask and arms
-        // sigmask_restore. The restore must happen on EVERY trip back to
-        // userspace, delivered or not — the old code never restored when
-        // no signal was selected, leaking the suspend mask PERMANENTLY
-        // (dash's SIGCHLD left blocked, `wait` wedged). Ordering matters:
-        // signal SELECTION uses the mask that was active when the syscall
-        // decided to return (for a sigsuspend return that is the SUSPEND
-        // mask — POSIX), so the restore runs AFTER selection: right before
-        // the handler frame is built (uc_sigmask and the during-handler
-        // mask then derive from the REAL mask) and on every no-delivery
-        // exit. This mirrors Linux's get_signal()/restore_saved_sigmask()
-        // split; restoring before the filter re-blocked the very signal
-        // that made sigsuspend return, turning every wait into a hot
-        // EINTR livelock (observed with dash).
-        let blocked = (*current).sigmask;
-        let sig = match (*current).pending.first_unmasked(blocked) {
-            Some(s) => s,
-            None => {
-                if (*current).sigmask_restore_valid {
-                    (*current).sigmask = (*current).sigmask_restore;
-                    (*current).sigmask_restore_valid = false;
-                }
-                return delivered;
+    // The body is a LOOP, not a single pass: a signal whose disposition
+    // parks the task (group stop, ptrace signal-delivery-stop) resumes
+    // execution inside this loop, and the signals that arrived while it
+    // was stopped must be re-selected (Linux get_signal() discipline).
+    // delivered tracks whether ANY pass consumed a signal, so a resume
+    // that empties the queue still reports truthfully.
+    let mut delivered = false;
+    loop {
+    // SMP lost-wait fix (Linux restore_saved_sigmask discipline):
+    // rt_sigsuspend parks the task with a TEMPORARY mask and arms
+    // sigmask_restore. The restore must happen on EVERY trip back to
+    // userspace, delivered or not — the old code never restored when
+    // no signal was selected, leaking the suspend mask PERMANENTLY
+    // (dash's SIGCHLD left blocked, `wait` wedged). Ordering matters:
+    // signal SELECTION uses the mask that was active when the syscall
+    // decided to return (for a sigsuspend return that is the SUSPEND
+    // mask — POSIX), so the restore runs AFTER selection: right before
+    // the handler frame is built (uc_sigmask and the during-handler
+    // mask then derive from the REAL mask) and on every no-delivery
+    // exit. This mirrors Linux's get_signal()/restore_saved_sigmask()
+    // split; restoring before the filter re-blocked the very signal
+    // that made sigsuspend return, turning every wait into a hot
+    // EINTR livelock (observed with dash).
+    let blocked = current.sigmask;
+    let sig = match current.pending.first_unmasked(blocked) {
+        Some(s) => s,
+        None => {
+            if current.sigmask_restore_valid {
+                current.sigmask = current.sigmask_restore;
+                current.sigmask_restore_valid = false;
             }
-        };
-        if (*current).sigmask_restore_valid {
-            (*current).sigmask = (*current).sigmask_restore;
-            (*current).sigmask_restore_valid = false;
+            return delivered;
         }
+    };
+    if current.sigmask_restore_valid {
+        current.sigmask = current.sigmask_restore;
+        current.sigmask_restore_valid = false;
+    }
 
-        // gdm bring-up r16: name the dequeued fatal signal's queued info
-        // (non-destructive front PEEK — first_info() would consume it).
-        // si_code/si_pid distinguish a real sender (SI_USER/SI_TKILL
-        // carry one) from a bare/stale bitmap bit (empty queue). The
-        // storm's SIGKILLs bypassed every send-path print; this is the
-        // delivery-side ground truth. 110th: rides the rux:sigtrace tracepoint (retired token rux:sigtrace (retired dfx=sigtrace)) (the
-        // kill-storm census printed on the crash-restart loops of every
-        // perf boot).
-        if (sig == 9 || sig == 15)
-            && crate::trace::EVENT_SIGTRACE.armed()
-        {
-            static DQ_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if DQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-                let qi = {
-                    let q = (*current).pending.queue.inner.lock();
-                    q.front().cloned()
-                };
-                crate::pr_err!(
-                    "DEQUEUE sig={} pid={} comm='{}' info={}",
-                    sig,
-                    (*current).pid(),
-                    (*current).comm_str(),
-                    match &qi {
-                        Some(i) => {
-                            let st = unsafe {
-                                crate::sched::find_task_by_pid(i.si_pid as u32)
-                            };
-                            let scomm = if st.is_null() {
-                                alloc::string::String::from("GONE")
-                            } else {
-                                unsafe {
-                                    alloc::string::String::from(
-                                        (*st).comm_str(),
-                                    )
-                                }
-                            };
-                            alloc::format!(
-                                "signo={} code={:#x} pid={}({}) uid={}",
-                                i.si_signo, i.si_code, i.si_pid, scomm, i.si_uid
-                            )
-                        }
-                        None => alloc::string::String::from("NONE (bare bitmap)"),
+    // gdm bring-up r16: name the dequeued fatal signal's queued info
+    // (non-destructive front PEEK — first_info() would consume it).
+    // si_code/si_pid distinguish a real sender (SI_USER/SI_TKILL
+    // carry one) from a bare/stale bitmap bit (empty queue). The
+    // storm's SIGKILLs bypassed every send-path print; this is the
+    // delivery-side ground truth. 110th: rides the rux:sigtrace tracepoint (retired token rux:sigtrace (retired dfx=sigtrace)) (the
+    // kill-storm census printed on the crash-restart loops of every
+    // perf boot).
+    if (sig == 9 || sig == 15)
+        && crate::trace::EVENT_SIGTRACE.armed()
+    {
+        static DQ_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if DQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+            let qi = {
+                let q = current.pending.queue.inner.lock();
+                q.front().cloned()
+            };
+            crate::pr_err!(
+                "DEQUEUE sig={} pid={} comm='{}' info={}",
+                sig,
+                current.pid(),
+                current.comm_str(),
+                match &qi {
+                    Some(i) => {
+                        // Short read in syscall context: TaskBorrow's
+                        // lookup contract (the reaper cannot run here).
+                        let scomm = match crate::process::task_ref::TaskBorrow::lookup(
+                            i.si_pid as u32,
+                        ) {
+                            Some(t) => alloc::string::String::from(t.comm_str()),
+                            None => alloc::string::String::from("GONE"),
+                        };
+                        alloc::format!(
+                            "signo={} code={:#x} pid={}({}) uid={}",
+                            i.si_signo, i.si_code, i.si_pid, scomm, i.si_uid
+                        )
                     }
-                );
-            }
-        }
-
-        // If a handler is already active (sigframe armed), a recorded
-        // frame whose region the current sp sits inside MIGHT be live.
-        // SMP livelock fix: do NOT drop the delivery on this heuristic.
-        // setup_frame always places the new frame BELOW the current sp,
-        // so a nested delivery can never overwrite the recorded frame;
-        // blocking delivery instead wedged any task whose sp stayed below
-        // a stale (abandoned) frame_addr forever — the pending signal was
-        // never consumed, and rt_sigsuspend hot-looped on EINTR with the
-        // zombies unreapable (observed with dash `wait`). sigreturn reads
-        // its restore data from the user-side frame it returns through,
-        // so arming a newer frame is safe. This mirrors Linux, which
-        // allows nested signal delivery.
-        if (*current).sigframe.is_some() {
-            (*current).sigframe = None;
-            (*current).sigframe_addr = 0;
-        }
-
-        // PTRACE interception (P1): a traced task does not run the
-        // disposition itself — it stops for its tracer instead. The
-        // signal is dequeued into task.ptrace_siginfo so PTRACE_CONT(0)
-        // swallows it and CONT(sig) re-injects it. A signal re-injected
-        // by CONT is marked ptrace_sigdeliver and delivered for real.
-        // SIGKILL is never intercepted (cannot be traced away).
-        if (*current).tracer_pid() != 0 && sig != Signal::SIGKILL as i32 {
-            // Peek first, consume only on match: a different signal
-            // arriving before the re-injected one must not eat the mark.
-            if (*current).ptrace_sigdeliver_peek() != sig as u32 {
-                // No handler frame is built for a traced stop, so convert
-                // any syscall-restart sentinel HERE (else the raw -512
-                // leaks to userspace as a bogus errno when the tracee
-                // resumes — same engine as review syscallb-H-06).
-                restart_syscall_no_handler(regs);
-                let info = (*current).pending.peek_info(sig)
-                    .unwrap_or_else(|| SigInfo::new(sig, si_code::SI_KERNEL, (*current).pid(), 0));
-                (*current).pending.remove(sig);
-                // SAFETY: current is the running (about-to-stop) task.
-                crate::process::ptrace::ptrace_stop(current, sig, info);
-                // ptrace_stop parked the task; on resume re-select — the
-                // tracer may have re-injected a signal or sent SIGKILL.
-                delivered = true;
-                continue;
-            }
-            (*current).take_ptrace_sigdeliver();
-        }
-
-        // Get signal handling action (clone needed data)
-        let action = (*current).signal.as_ref()
-            .and_then(|s| s.get_action(sig));
-
-        // Global-init delivery filter (Linux get_signal()'s
-        // SIGNAL_UNKILLABLE rule, signal(7): "the only signals that can be
-        // delivered to process ID 1 are those for which it has installed a
-        // handler"). For pid 1, a dequeued signal with no installed
-        // handler is DISCARDED here instead of executed — SIGKILL/SIGSTOP
-        // included (no handler can exist for those), so a userspace
-        // broadcast/process-group kill (LTP kill10) still cannot take PID
-        // 1 down. This is deliberately on the DELIVERY path only: at send
-        // time the signal is queued like for any task, so a BLOCKED
-        // signal on init stays pending and remains observable through
-        // signalfd/sigwaitinfo — the systemd/OH-init reaper pattern
-        // (block SIGCHLD + read it via signalfd, no handler installed)
-        // depends on exactly that. Kernel-forced kills of a crashing init
-        // bypass do_signal (trap path calls do_exit directly).
-        if is_unkillable_init(&*current) {
-            let handled = action
-                .as_ref()
-                .map(|a| a.action() == SigActionKind::Handler)
-                .unwrap_or(false);
-            // Only kernel-forced SIGKILL and user SIGKILLs from OUTSIDE
-            // the receiver's namespace pierce the rule (reference
-            // __send_signal's from_ancestor_ns: same-namespace user kills
-            // of a pid-namespace init are discarded — LTP pidns04's
-            // kill(1, SIGKILL) — while an ancestor-namespace user kill
-            // DOES take the init down — LTP pidns05's parent kill). The
-            // queue-time si_pid translation already encodes the sender's
-            // visibility: a cross-namespace sender's pid reads 0.
-            let same_ns_user_kill = (*current)
-                .pending
-                .peek_info(sig)
-                .map(|i| {
-                    (i.si_code == si_code::SI_USER || i.si_code == si_code::SI_TKILL)
-                        && i.si_pid != 0
-                })
-                .unwrap_or(false);
-            let forced_kill = sig == Signal::SIGKILL as i32 && !same_ns_user_kill;
-            // SIGNAL_UNKILLABLE protects only FATAL default actions
-            // (terminate/core). The group-stop family STOPS a pid-ns
-            // init and SIGCONT resumes it (reference get_signal():
-            // sig_kernel_stop -> do_group_stop with no UNKILLABLE
-            // consult; SIGCONT acts at send time in prepare_signal) —
-            // a container init honors SIGSTOP/SIGCONT even with no
-            // handler installed. kselftest memfd's nested-sysctl legs
-            // park their helper children exactly this way.
-            let stop_or_cont = matches!(sig, 18 | 19 | 20 | 21 | 22);
-            if !handled && !forced_kill && !stop_or_cont {
-                // Discard without running a disposition. No handler frame
-                // is built, so convert any syscall-restart sentinel now
-                // (else the raw -512 could leak to userspace as a bogus
-                // errno — same engine as the traced-stop path above).
-                restart_syscall_no_handler(regs);
-                (*current).pending.remove(sig);
-                // Re-select: more signals may be pending behind this one.
-                delivered = true;
-                continue;
-            }
-        }
-
-        // Snapshot the queued siginfo payload for this signal (kernel-
-        // generated signals like SIGCHLD carry si_code/si_status here).
-        // It is consumed together with the bitmap bit at the remove()
-        // below once the disposition has been taken.
-        let queued_info: Option<SigInfo> = (*current).pending.peek_info(sig);
-
-        // Handle signal
-        if let Some(action) = action {
-            // Check if has custom handler
-            if action.has_handler() {
-                // Call signal handler
-                if !setup_frame(current, sig, &action, regs, queued_info) {
-                    // Setup failed, execute default action
-                    handle_default_signal(sig);
-                } else if action.sa_flags.bits() & SigFlags::SA_RESETHAND != 0 {
-                    // POSIX SA_RESETHAND (System V semantics): the
-                    // disposition resets to SIG_DFL once delivery has
-                    // started, so a second occurrence of the signal takes
-                    // the default action unless re-armed. Linux
-                    // (kernel/signal.c get_signal) resets ONLY the
-                    // sa_handler field — sa_flags/sa_mask survive, so a
-                    // subsequent sigaction(NULL, &oact) query still
-                    // reports e.g. SA_SIGINFO (LTP sigaction01 case 1:
-                    // SA_RESETHAND must not clear SA_SIGINFO).
-                    if let Some(sig_struct) = (*current).signal.as_ref() {
-                        let mut reset = action;
-                        reset.sa_handler = SigAction::default_handler();
-                        let _ = sig_struct.set_action(sig, reset);
-                    }
+                    None => alloc::string::String::from("NONE (bare bitmap)"),
                 }
-            } else if action.action() == SigActionKind::Ignore {
-                // SIG_IGN disposition: nothing to execute. Do NOT fall
-                // through to handle_default_signal — its terminate list
-                // would kill a process that explicitly ignores the signal
-                // (reachable when rt_sigaction races the queued signal).
-                // No handler frame is built, so convert any syscall
-                // restart sentinel here instead of leaking it to userspace.
-                restart_syscall_no_handler(regs);
-            } else {
-                // Execute default action. No handler frame is built here,
-                // and only setup_frame converts syscall restart sentinels
-                // — so a default-ignore signal (SIGCHLD/SIGURG/SIGWINCH/
-                // SIGCONT) interrupting a wait_event_interruptible loop
-                // returned the raw -ERESTARTSYS (-512) to userspace as a
-                // bogus errno. Linux's do_signal() restarts the syscall
-                // on this no-handler path; mirror it.
-                restart_syscall_no_handler(regs);
-                handle_default_signal(sig);
-            }
+            );
         }
+    }
 
-        // Remove signal from pending queue
-        (*current).pending.remove(sig);
+    // If a handler is already active (sigframe armed), a recorded
+    // frame whose region the current sp sits inside MIGHT be live.
+    // SMP livelock fix: do NOT drop the delivery on this heuristic.
+    // setup_frame always places the new frame BELOW the current sp,
+    // so a nested delivery can never overwrite the recorded frame;
+    // blocking delivery instead wedged any task whose sp stayed below
+    // a stale (abandoned) frame_addr forever — the pending signal was
+    // never consumed, and rt_sigsuspend hot-looped on EINTR with the
+    // zombies unreapable (observed with dash `wait`). sigreturn reads
+    // its restore data from the user-side frame it returns through,
+    // so arming a newer frame is safe. This mirrors Linux, which
+    // allows nested signal delivery.
+    if current.sigframe.is_some() {
+        current.sigframe = None;
+        current.sigframe_addr = 0;
+    }
 
-        // Group stop (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU default action):
-        // handle_default_signal did the bookkeeping and marked this task
-        // STOPPED — park until continued, then re-select like Linux's
-        // get_signal() loop (signals arriving while stopped are handled
-        // after the resume).
-        if (*current).state().contains(TaskState::STOPPED) {
-            park_stopped_task(current);
+    // PTRACE interception (P1): a traced task does not run the
+    // disposition itself — it stops for its tracer instead. The
+    // signal is dequeued into task.ptrace_siginfo so PTRACE_CONT(0)
+    // swallows it and CONT(sig) re-injects it. A signal re-injected
+    // by CONT is marked ptrace_sigdeliver and delivered for real.
+    // SIGKILL is never intercepted (cannot be traced away).
+    if current.tracer_pid() != 0 && sig != Signal::SIGKILL as i32 {
+        // Peek first, consume only on match: a different signal
+        // arriving before the re-injected one must not eat the mark.
+        if current.ptrace_sigdeliver_peek() != sig as u32 {
+            // No handler frame is built for a traced stop, so convert
+            // any syscall-restart sentinel HERE (else the raw -512
+            // leaks to userspace as a bogus errno when the tracee
+            // resumes — same engine as review syscallb-H-06).
+            restart_syscall_no_handler(regs);
+            let info = current.pending.peek_info(sig)
+                .unwrap_or_else(|| SigInfo::new(sig, si_code::SI_KERNEL, current.pid(), 0));
+            current.pending.remove(sig);
+            // SAFETY (one cross-module edge): current is the running task; ptrace_stop
+            // stays an unsafe fn of the ptrace lane until that lane converts it.
+            unsafe { crate::process::ptrace::ptrace_stop(current, sig, info) };
+            // ptrace_stop parked the task; on resume re-select — the
+            // tracer may have re-injected a signal or sent SIGKILL.
             delivered = true;
             continue;
         }
+        current.take_ptrace_sigdeliver();
+    }
 
-        // If process is set to ZOMBIE or STOPPED, set need_resched flag
-        // The actual schedule() call happens in trap.S when returning to user mode
-        let task_state = (*current).state();
-        if task_state.is_dead() || task_state.contains(TaskState::STOPPED) {
-            // Set need_resched flag - schedule() will be called in trap.S
-            crate::sched::set_need_resched();
+    // Get signal handling action (clone needed data)
+    let action = current.signal.as_ref()
+        .and_then(|s| s.get_action(sig));
+
+    // Global-init delivery filter (Linux get_signal()'s
+    // SIGNAL_UNKILLABLE rule, signal(7): "the only signals that can be
+    // delivered to process ID 1 are those for which it has installed a
+    // handler"). For pid 1, a dequeued signal with no installed
+    // handler is DISCARDED here instead of executed — SIGKILL/SIGSTOP
+    // included (no handler can exist for those), so a userspace
+    // broadcast/process-group kill (LTP kill10) still cannot take PID
+    // 1 down. This is deliberately on the DELIVERY path only: at send
+    // time the signal is queued like for any task, so a BLOCKED
+    // signal on init stays pending and remains observable through
+    // signalfd/sigwaitinfo — the systemd/OH-init reaper pattern
+    // (block SIGCHLD + read it via signalfd, no handler installed)
+    // depends on exactly that. Kernel-forced kills of a crashing init
+    // bypass do_signal (trap path calls do_exit directly).
+    if is_unkillable_init(&*current) {
+        let handled = action
+            .as_ref()
+            .map(|a| a.action() == SigActionKind::Handler)
+            .unwrap_or(false);
+        // Only kernel-forced SIGKILL and user SIGKILLs from OUTSIDE
+        // the receiver's namespace pierce the rule (reference
+        // __send_signal's from_ancestor_ns: same-namespace user kills
+        // of a pid-namespace init are discarded — LTP pidns04's
+        // kill(1, SIGKILL) — while an ancestor-namespace user kill
+        // DOES take the init down — LTP pidns05's parent kill). The
+        // queue-time si_pid translation already encodes the sender's
+        // visibility: a cross-namespace sender's pid reads 0.
+        let same_ns_user_kill = current
+            .pending
+            .peek_info(sig)
+            .map(|i| {
+                (i.si_code == si_code::SI_USER || i.si_code == si_code::SI_TKILL)
+                    && i.si_pid != 0
+            })
+            .unwrap_or(false);
+        let forced_kill = sig == Signal::SIGKILL as i32 && !same_ns_user_kill;
+        // SIGNAL_UNKILLABLE protects only FATAL default actions
+        // (terminate/core). The group-stop family STOPS a pid-ns
+        // init and SIGCONT resumes it (reference get_signal():
+        // sig_kernel_stop -> do_group_stop with no UNKILLABLE
+        // consult; SIGCONT acts at send time in prepare_signal) —
+        // a container init honors SIGSTOP/SIGCONT even with no
+        // handler installed. kselftest memfd's nested-sysctl legs
+        // park their helper children exactly this way.
+        let stop_or_cont = matches!(sig, 18 | 19 | 20 | 21 | 22);
+        if !handled && !forced_kill && !stop_or_cont {
+            // Discard without running a disposition. No handler frame
+            // is built, so convert any syscall-restart sentinel now
+            // (else the raw -512 could leak to userspace as a bogus
+            // errno — same engine as the traced-stop path above).
+            restart_syscall_no_handler(regs);
+            current.pending.remove(sig);
+            // Re-select: more signals may be pending behind this one.
+            delivered = true;
+            continue;
         }
+    }
+
+    // Snapshot the queued siginfo payload for this signal (kernel-
+    // generated signals like SIGCHLD carry si_code/si_status here).
+    // It is consumed together with the bitmap bit at the remove()
+    // below once the disposition has been taken.
+    let queued_info: Option<SigInfo> = current.pending.peek_info(sig);
+
+    // Handle signal
+    if let Some(action) = action {
+        // Check if has custom handler
+        if action.has_handler() {
+            // Call signal handler
+            if !setup_frame(current, sig, &action, regs, queued_info) {
+                // Setup failed, execute default action
+                handle_default_signal(sig);
+            } else if action.sa_flags.bits() & SigFlags::SA_RESETHAND != 0 {
+                // POSIX SA_RESETHAND (System V semantics): the
+                // disposition resets to SIG_DFL once delivery has
+                // started, so a second occurrence of the signal takes
+                // the default action unless re-armed. Linux
+                // (kernel/signal.c get_signal) resets ONLY the
+                // sa_handler field — sa_flags/sa_mask survive, so a
+                // subsequent sigaction(NULL, &oact) query still
+                // reports e.g. SA_SIGINFO (LTP sigaction01 case 1:
+                // SA_RESETHAND must not clear SA_SIGINFO).
+                if let Some(sig_struct) = current.signal.as_ref() {
+                    let mut reset = action;
+                    reset.sa_handler = SigAction::default_handler();
+                    let _ = sig_struct.set_action(sig, reset);
+                }
+            }
+        } else if action.action() == SigActionKind::Ignore {
+            // SIG_IGN disposition: nothing to execute. Do NOT fall
+            // through to handle_default_signal — its terminate list
+            // would kill a process that explicitly ignores the signal
+            // (reachable when rt_sigaction races the queued signal).
+            // No handler frame is built, so convert any syscall
+            // restart sentinel here instead of leaking it to userspace.
+            restart_syscall_no_handler(regs);
+        } else {
+            // Execute default action. No handler frame is built here,
+            // and only setup_frame converts syscall restart sentinels
+            // — so a default-ignore signal (SIGCHLD/SIGURG/SIGWINCH/
+            // SIGCONT) interrupting a wait_event_interruptible loop
+            // returned the raw -ERESTARTSYS (-512) to userspace as a
+            // bogus errno. Linux's do_signal() restarts the syscall
+            // on this no-handler path; mirror it.
+            restart_syscall_no_handler(regs);
+            handle_default_signal(sig);
+        }
+    }
+
+    // Remove signal from pending queue
+    current.pending.remove(sig);
+
+    // Group stop (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU default action):
+    // handle_default_signal did the bookkeeping and marked this task
+    // STOPPED — park until continued, then re-select like Linux's
+    // get_signal() loop (signals arriving while stopped are handled
+    // after the resume).
+    if current.state().contains(TaskState::STOPPED) {
+        park_stopped_task(current);
+        delivered = true;
+        continue;
+    }
+
+    // If process is set to ZOMBIE or STOPPED, set need_resched flag
+    // The actual schedule() call happens in trap.S when returning to user mode
+    let task_state = current.state();
+    if task_state.is_dead() || task_state.contains(TaskState::STOPPED) {
+        // Set need_resched flag - schedule() will be called in trap.S
+        crate::sched::set_need_resched();
+    }
 
         return true;
-        }
     }
 }
 
@@ -1645,12 +1624,14 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
 /// handlers present" path: rewind epc to the ecall and restore orig_a0 so
 /// the syscall re-executes transparently.
 ///
-/// # Safety
-/// `regs` is the current task's live PtRegs (from the trap path).
-unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
+/// `regs` is the current task's live PtRegs (from the trap path) — the
+/// one audited frame edge below; the body itself is plain struct access.
+fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
     const ERESTARTSYS: i64 = -512;
     const ERESTARTNOHAND: i64 = -514;
-    let regs = &mut *regs;
+    // SAFETY: the trap path's live frame for the current task, same
+    // contract do_signal's frame edge documents.
+    let regs: &mut crate::arch::pt_regs::PtRegs = unsafe { &mut *regs };
 
     #[cfg(feature = "riscv64")]
     {
@@ -1689,14 +1670,7 @@ unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
             return;
         }
         let mut insn = [0u8; 2];
-        // SAFETY: reads 2 user bytes through the exception-table path.
-        let bad = unsafe {
-            crate::arch::uaccess::copy_from_user(
-                insn.as_mut_ptr(),
-                (regs.rip - 2) as *const u8,
-                2,
-            )
-        };
+        let bad = crate::arch::uaccess_safe::copy_in(&mut insn, (regs.rip - 2) as usize);
         if bad != 0 || insn != [0x0f, 0x05] {
             return;
         }
@@ -1763,27 +1737,24 @@ pub const SIGTRAMP_BASE: u64 = 0x3FBE_0000_00;
 
 /// Set up the arch-specific signal frame and redirect the trap frame into
 /// the handler.
-unsafe fn setup_frame(
-    task: *mut crate::process::task::Task,
+fn setup_frame(
+    task: &mut crate::process::task::Task,
     sig: i32,
     action: &SigAction,
-    regs: *mut crate::arch::pt_regs::PtRegs,
+    regs: &mut crate::arch::pt_regs::PtRegs,
     queued_info: Option<SigInfo>,
 ) -> bool {
     #[cfg(feature = "riscv64")]
     {
-        // SAFETY: forwarding the caller's validated pointers.
-        unsafe { setup_frame_riscv64(task, sig, action, regs, queued_info) }
+        setup_frame_riscv64(task, sig, action, regs, queued_info)
     }
     #[cfg(feature = "x86_64")]
     {
-        // SAFETY: forwarding the caller's validated pointers.
-        unsafe { setup_frame_x86_64(task, sig, action, regs, queued_info) }
+        setup_frame_x86_64(task, sig, action, regs, queued_info)
     }
     #[cfg(feature = "aarch64")]
     {
-        // SAFETY: forwarding the caller's validated pointers.
-        unsafe { setup_frame_aarch64(task, sig, action, regs, queued_info) }
+        setup_frame_aarch64(task, sig, action, regs, queued_info)
     }
 }
 
@@ -1800,16 +1771,14 @@ unsafe fn setup_frame(
 /// # Safety
 /// `regs` is the current task's live PtRegs; `task` is the running task.
 #[cfg(feature = "aarch64")]
-unsafe fn setup_frame_aarch64(
-    task: *mut crate::process::task::Task,
+fn setup_frame_aarch64(
+    task: &mut crate::process::task::Task,
     sig: i32,
     action: &SigAction,
-    regs: *mut crate::arch::pt_regs::PtRegs,
+    regs: &mut crate::arch::pt_regs::PtRegs,
     queued_info: Option<SigInfo>,
 ) -> bool {
     use crate::arch::pt_regs::Cause;
-
-    let regs = &mut *regs;
 
     // Check if need to use signal stack
     let use_altstack = (action.sa_flags.bits() & crate::signal::SigFlags::SA_ONSTACK) != 0;
@@ -1820,7 +1789,7 @@ unsafe fn setup_frame_aarch64(
 
     // Decide which stack to use based on flags (twin contract)
     let frame_addr = if use_altstack {
-        let sigstack = &(*task).sigstack;
+        let sigstack = &task.sigstack;
 
         if sigstack.is_disabled() || sigstack.ss_sp == 0 {
             user_sp - SIGNAL_FRAME_SIZE
@@ -1843,7 +1812,7 @@ unsafe fn setup_frame_aarch64(
     // placeholder (twin contract).
     let mut frame = SignalFrame {
         info: queued_info
-            .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0)),
+            .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, task.pid(), 0)),
         uc: UContext::new(),
     };
 
@@ -1887,7 +1856,7 @@ unsafe fn setup_frame_aarch64(
     // user set v0=0x1111..., aa64-signal lane gdb trace). rt_sigreturn
     // writes its restore back into the same buffer; the eret tail
     // re-installs it into the live registers.
-    let u = &(*task).thread.user_fpsimd;
+    let u = &task.thread.user_fpsimd;
     let mut fpsimd = FpsimdContext::zeroed();
     fpsimd.head.magic = aarch64_ctx_magic::FPSIMD;
     fpsimd.head.size = FpsimdContext::SIZE;
@@ -1901,33 +1870,29 @@ unsafe fn setup_frame_aarch64(
     // unblockable (twin contract). The FRAME's uc_sigmask must hold the
     // PRE-handler mask — it is what rt_sigreturn reinstates (SMP
     // lost-wait root fix, see the riscv64 twin).
-    let mut new_sigmask = (*task).sigmask | action.sa_mask;
+    let mut new_sigmask = task.sigmask | action.sa_mask;
     if (action.sa_flags.bits() & SigFlags::SA_NODEFER) == 0 {
         new_sigmask |= 1u64 << ((sig as u32) - 1);
     }
     new_sigmask &= !((1u64 << 8) | (1u64 << 18));
-    frame.uc.uc_sigmask = (*task).sigmask;
-    (*task).sigmask = new_sigmask;
+    frame.uc.uc_sigmask = task.sigmask;
+    task.sigmask = new_sigmask;
 
     // Save signal stack info
-    frame.uc.uc_stack = (*task).sigstack;
+    frame.uc.uc_stack = task.sigstack;
 
     // Save signal frame to task structure (kernel backup copy)
-    (*task).sigframe_addr = frame_addr;
-    (*task).sigframe = Some(frame);
+    task.sigframe_addr = frame_addr;
+    task.sigframe = Some(frame);
 
     // Copy signal frame to user stack so the handler can access
     // siginfo/ucontext
     let frame_size = core::mem::size_of::<SignalFrame>();
-    let uncopied = crate::arch::uaccess::copy_to_user(
-        frame_addr as *mut u8,
-        &frame as *const SignalFrame as *const u8,
-        frame_size,
-    );
+    let uncopied = crate::arch::uaccess_safe::copy_out(frame_addr as usize, cbytes::bytes_of(&frame));
     if uncopied != 0 {
         // copy_to_user failed (e.g., stack overflow) — force SIGSEGV
-        (*task).sigframe = None;
-        (*task).sigframe_addr = 0;
+        task.sigframe = None;
+        task.sigframe_addr = 0;
         handle_default_signal(11);
         return false;
     }
@@ -1974,7 +1939,7 @@ unsafe fn setup_frame_aarch64(
     if crate::trace::EVENT_SIGTRACE.armed() {
         crate::pr_info!(
             "SIGTRACE setup pid={} sig={} sp={:#x} frame={:#x} handler={:#x} restorer={:#x} ->pc={:#x}",
-            (*task).pid(),
+            task.pid(),
             sig,
             user_sp,
             frame_addr,
@@ -1987,7 +1952,7 @@ unsafe fn setup_frame_aarch64(
         // the family's arm switch).
         crate::trace::trace_sigtrace(
             0,
-            (*task).pid() as u32,
+            task.pid() as u32,
             sig,
             user_sp as u64,
             frame_addr as u64,
@@ -2003,14 +1968,14 @@ unsafe fn setup_frame_aarch64(
 // ============================================================================
 
 #[cfg(feature = "riscv64")]
-unsafe fn setup_frame_riscv64(
-    task: *mut crate::process::task::Task,
+fn setup_frame_riscv64(
+    task: &mut crate::process::task::Task,
     sig: i32,
     action: &SigAction,
-    regs: *mut crate::arch::pt_regs::PtRegs,
+    regs: &mut crate::arch::pt_regs::PtRegs,
     queued_info: Option<SigInfo>,
 ) -> bool {
-    let regs = &mut *regs;
+
 
     // Check if need to use signal stack
     let use_altstack = (action.sa_flags.bits() & crate::signal::SigFlags::SA_ONSTACK) != 0;
@@ -2022,7 +1987,7 @@ unsafe fn setup_frame_riscv64(
     // Decide which stack to use based on flags
     let frame_addr = if use_altstack {
         // Use signal stack
-        let sigstack = &(*task).sigstack;
+        let sigstack = &task.sigstack;
 
         // Check if signal stack is valid
         if sigstack.is_disabled() || sigstack.ss_sp == 0 {
@@ -2046,7 +2011,7 @@ unsafe fn setup_frame_riscv64(
     let mut frame = SignalFrame {
         reserved: [0; 4],
         info: queued_info
-            .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0)),
+            .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, task.pid(), 0)),
         uc: UContext::new(),
         trampoline: [
             0x93, 0x08, 0x8b, 0x00,  // li a7, 139 (rt_sigreturn)
@@ -2128,7 +2093,7 @@ unsafe fn setup_frame_riscv64(
     // the signal itself (unless SA_NODEFER). sa_mask was never merged
     // before, so handlers ran with their configured block mask ignored
     // (review M-01). SIGKILL/SIGSTOP stay unblockable.
-    let mut new_sigmask = (*task).sigmask | action.sa_mask;
+    let mut new_sigmask = task.sigmask | action.sa_mask;
     if (action.sa_flags.bits() & SigFlags::SA_NODEFER) == 0 {
         new_sigmask |= 1u64 << ((sig as u32) - 1);
     }
@@ -2141,27 +2106,23 @@ unsafe fn setup_frame_riscv64(
     // the shell kept SIGCHLD (plus sa_mask bits) blocked forever, `wait`
     // then parked in an unsatisfiable sigsuspend with the children
     // unreapable — the -smp pipeline wedge.
-    frame.uc.uc_sigmask = (*task).sigmask;
-    (*task).sigmask = new_sigmask;
+    frame.uc.uc_sigmask = task.sigmask;
+    task.sigmask = new_sigmask;
 
     // Save signal stack info
-    frame.uc.uc_stack = (*task).sigstack;
+    frame.uc.uc_stack = task.sigstack;
 
     // Save signal frame to task structure
-    (*task).sigframe_addr = frame_addr;
-    (*task).sigframe = Some(frame);
+    task.sigframe_addr = frame_addr;
+    task.sigframe = Some(frame);
 
     // Copy signal frame to user stack so the handler can access siginfo/ucontext
     let frame_size = core::mem::size_of::<SignalFrame>();
-    let uncopied = crate::arch::uaccess::copy_to_user(
-        frame_addr as *mut u8,
-        &frame as *const SignalFrame as *const u8,
-        frame_size,
-    );
+    let uncopied = crate::arch::uaccess_safe::copy_out(frame_addr as usize, cbytes::bytes_of(&frame));
     if uncopied != 0 {
         // copy_to_user failed (e.g., stack overflow) — force SIGSEGV
-        (*task).sigframe = None;
-        (*task).sigframe_addr = 0;
+        task.sigframe = None;
+        task.sigframe_addr = 0;
         handle_default_signal(11);
         return false;
     }
@@ -2211,28 +2172,25 @@ unsafe fn setup_frame_riscv64(
 ///
 /// * `true` - Restore successful
 /// * `false` - Restore failed
-pub unsafe fn restore_sigcontext(
-    task: *mut crate::process::task::Task,
+pub fn restore_sigcontext(
+    task: &mut crate::process::task::Task,
     frame_addr: u64,
-    regs: *mut crate::arch::pt_regs::PtRegs,
+    regs: &mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
     #[cfg(feature = "riscv64")]
     {
-        // SAFETY: forwarding the caller's validated pointers.
-        unsafe { restore_sigcontext_riscv64(task, frame_addr, regs) }
+        restore_sigcontext_riscv64(task, frame_addr, regs)
     }
     #[cfg(feature = "x86_64")]
     {
-        // SAFETY: forwarding the caller's validated pointers.
-        unsafe { restore_sigcontext_x86_64(task, frame_addr, regs) }
+        restore_sigcontext_x86_64(task, frame_addr, regs)
     }
     #[cfg(feature = "aarch64")]
     {
         // STAGE 2: decode the arm64 sigcontext (regs[31]+sp/pc/pstate)
         // back into PtRegs — frame located at the user sp (the restorer
         // never moves sp).
-        // SAFETY: forwarding the caller's validated pointers.
-        unsafe { restore_sigcontext_aarch64(task, frame_addr, regs) }
+        restore_sigcontext_aarch64(task, frame_addr, regs)
     }
 }
 
@@ -2245,10 +2203,10 @@ pub unsafe fn restore_sigcontext(
 /// # Safety
 /// `task` is the running task; `regs` is its live PtRegs.
 #[cfg(feature = "aarch64")]
-unsafe fn restore_sigcontext_aarch64(
-    task: *mut crate::process::task::Task,
+fn restore_sigcontext_aarch64(
+    task: &mut crate::process::task::Task,
     frame_addr: u64,
-    regs: *mut crate::arch::pt_regs::PtRegs,
+    regs: &mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
     // Validate signal frame address
     if frame_addr == 0 {
@@ -2259,24 +2217,21 @@ unsafe fn restore_sigcontext_aarch64(
     // handler that edited the ucontext — swapcontext, siglongjmp
     // trampolines — must have its edits win). Fall back to the kernel
     // backup only when the user copy is unreadable.
+    // SAFETY: SignalFrame is a POD byte-image (ints + byte arrays only);
+    // all-zero bytes are a valid instance.
     let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
-    let copied = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            &mut user_frame as *mut SignalFrame as *mut u8,
-            frame_addr as *const u8,
-            core::mem::size_of::<SignalFrame>(),
-        )
-    };
+    let copied = crate::arch::uaccess_safe::copy_in(
+        cbytes::bytes_of_mut(&mut user_frame),
+        frame_addr as usize,
+    );
     let frame = if copied == 0 {
         user_frame
     } else {
-        match (*task).sigframe {
+        match task.sigframe {
             Some(f) => f,
             None => return false,
         }
     };
-
-    let regs = &mut *regs;
 
     // Restore x0..x30, sp, pc
     let mc = &frame.uc.uc_mcontext;
@@ -2311,7 +2266,7 @@ unsafe fn restore_sigcontext_aarch64(
     // The kernel-side thread.fpu image is left alone: the eager
     // __switch_to rewrites it at the next context switch anyway.
     if let Some(fpsimd) = mc.get_fpsimd() {
-        let u = &mut (*task).thread.user_fpsimd;
+        let u = &mut task.thread.user_fpsimd;
         u.vregs.copy_from_slice(&fpsimd.vregs);
         u.fpsr = fpsimd.fpsr;
         u.fpcr = fpsimd.fpcr;
@@ -2322,12 +2277,12 @@ unsafe fn restore_sigcontext_aarch64(
     // kill buys nothing here (the GPR/pstate restore already validated).
 
     // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
-    (*task).sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
+    task.sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
 
     if crate::trace::EVENT_SIGTRACE.armed() {
         crate::pr_info!(
             "SIGTRACE restore pid={} frame={:#x} copied={} ->pc={:#x} sp={:#x} x29={:#x} x0={:#x}",
-            (*task).pid(),
+            task.pid(),
             frame_addr,
             copied,
             regs.pc,
@@ -2338,7 +2293,7 @@ unsafe fn restore_sigcontext_aarch64(
         // dfx-migrate: rux:sigtrace kind=FRAME_RESTORE.
         crate::trace::trace_sigtrace(
             1,
-            (*task).pid() as u32,
+            task.pid() as u32,
             0,
             regs.sp as u64,
             frame_addr as u64,
@@ -2347,8 +2302,8 @@ unsafe fn restore_sigcontext_aarch64(
     }
 
     // Clear signal frame record
-    (*task).sigframe = None;
-    (*task).sigframe_addr = 0;
+    task.sigframe = None;
+    task.sigframe_addr = 0;
 
     true
 }
@@ -2358,10 +2313,10 @@ unsafe fn restore_sigcontext_aarch64(
 // ============================================================================
 
 #[cfg(feature = "riscv64")]
-unsafe fn restore_sigcontext_riscv64(
-    task: *mut crate::process::task::Task,
+fn restore_sigcontext_riscv64(
+    task: &mut crate::process::task::Task,
     frame_addr: u64,
-    regs: *mut crate::arch::pt_regs::PtRegs,
+    regs: &mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
     // Validate signal frame address
     if frame_addr == 0 {
@@ -2373,24 +2328,21 @@ unsafe fn restore_sigcontext_riscv64(
     // the stack, and those edits must win (review M-04 — the kernel
     // backup copy used to be authoritative). Fall back to the kernel
     // backup only when the user copy is unreadable.
+    // SAFETY: SignalFrame is a POD byte-image (ints + byte arrays only);
+    // all-zero bytes are a valid instance.
     let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
-    let copied = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            &mut user_frame as *mut SignalFrame as *mut u8,
-            frame_addr as *const u8,
-            core::mem::size_of::<SignalFrame>(),
-        )
-    };
+    let copied = crate::arch::uaccess_safe::copy_in(
+        cbytes::bytes_of_mut(&mut user_frame),
+        frame_addr as usize,
+    );
     let frame = if copied == 0 {
         user_frame
     } else {
-        match (*task).sigframe {
+        match task.sigframe {
             Some(f) => f,
             None => return false,
         }
     };
-
-    let regs = &mut *regs;
 
     // Restore registers from signal frame's uc_mcontext (RISC-V)
     // sc_regs layout: [0]=pc, [1]=ra(x1), [2]=sp(x2), ..., [31]=t6(x31)
@@ -2455,11 +2407,11 @@ unsafe fn restore_sigcontext_riscv64(
         | SSTATUS_SPIE;
 
     // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
-    (*task).sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
+    task.sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
 
     // Clear signal frame
-    (*task).sigframe = None;
-    (*task).sigframe_addr = 0;
+    task.sigframe = None;
+    task.sigframe_addr = 0;
 
     true
 }
@@ -2469,14 +2421,14 @@ unsafe fn restore_sigcontext_riscv64(
 // ============================================================================
 
 #[cfg(feature = "x86_64")]
-unsafe fn setup_frame_x86_64(
-    task: *mut crate::process::task::Task,
+fn setup_frame_x86_64(
+    task: &mut crate::process::task::Task,
     sig: i32,
     action: &SigAction,
-    regs: *mut crate::arch::pt_regs::PtRegs,
+    regs: &mut crate::arch::pt_regs::PtRegs,
     queued_info: Option<SigInfo>,
 ) -> bool {
-    let regs = &mut *regs;
+
 
     // Check if need to use signal stack
     let use_altstack = (action.sa_flags.bits() & SigFlags::SA_ONSTACK) != 0;
@@ -2513,7 +2465,7 @@ unsafe fn setup_frame_x86_64(
     let fpstate_area = crate::arch::x86_64::thread::xstate_sigframe_size();
     let mut frame_addr = user_sp - 128; // (1) redzone (64-bit only)
     if use_altstack {
-        let sigstack = &(*task).sigstack;
+        let sigstack = &task.sigstack;
         let ss_top = sigstack.ss_sp.saturating_add(sigstack.ss_size);
         let on_altstack = !sigstack.is_disabled()
             && sigstack.ss_sp != 0
@@ -2542,7 +2494,7 @@ unsafe fn setup_frame_x86_64(
                     sigstack.ss_size,
                     full_frame,
                     sig,
-                    (*task).pid()
+                    task.pid()
                 );
                 handle_default_signal(11);
                 return false;
@@ -2583,7 +2535,7 @@ unsafe fn setup_frame_x86_64(
         _pad: 0,
         uc: UContext::zeroed(),
         info: queued_info
-            .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0)),
+            .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, task.pid(), 0)),
         retcode: [0u8; 16],
     };
     frame.retcode[..SignalFrame::TRAMPOLINE.len()]
@@ -2622,22 +2574,22 @@ unsafe fn setup_frame_x86_64(
 
     // Signal mask during handler execution (POSIX): old mask | sa_mask |
     // the signal itself (unless SA_NODEFER); SIGKILL/SIGSTOP unblockable.
-    let mut new_sigmask = (*task).sigmask | action.sa_mask;
+    let mut new_sigmask = task.sigmask | action.sa_mask;
     if (action.sa_flags.bits() & SigFlags::SA_NODEFER) == 0 {
         new_sigmask |= 1u64 << ((sig as u32) - 1);
     }
     new_sigmask &= !((1u64 << 8) | (1u64 << 18));
     // The frame's uc_sigmask is what rt_sigreturn reinstates — it must
     // hold the PRE-handler mask (see the riscv64 twin's M-01/M-04 notes).
-    frame.uc.uc_sigmask[0] = (*task).sigmask;
-    (*task).sigmask = new_sigmask;
+    frame.uc.uc_sigmask[0] = task.sigmask;
+    task.sigmask = new_sigmask;
 
     // Save signal stack info
     frame.uc.uc_stack = X86StackT {
-        ss_sp: (*task).sigstack.ss_sp,
-        ss_flags: (*task).sigstack.ss_flags,
+        ss_sp: task.sigstack.ss_sp,
+        ss_flags: task.sigstack.ss_flags,
         _pad: 0,
-        ss_size: (*task).sigstack.ss_size,
+        ss_size: task.sigstack.ss_size,
     };
 
     // Handler return path — reference x86_64 semantics (arch/x86
@@ -2666,25 +2618,21 @@ unsafe fn setup_frame_x86_64(
         crate::pr_err!(
             "sigframe: no SA_RESTORER (sig={} pid={}) -> force SIGSEGV",
             sig,
-            (*task).pid()
+            task.pid()
         );
-        (*task).sigframe = None;
-        (*task).sigframe_addr = 0;
+        task.sigframe = None;
+        task.sigframe_addr = 0;
         handle_default_signal(11);
         return false;
     }
 
     // Save signal frame to task structure
-    (*task).sigframe_addr = frame_addr;
-    (*task).sigframe = Some(frame);
+    task.sigframe_addr = frame_addr;
+    task.sigframe = Some(frame);
 
     // Copy signal frame to user stack
     let frame_size = core::mem::size_of::<SignalFrame>();
-    let uncopied = crate::arch::uaccess::copy_to_user(
-        frame_addr as *mut u8,
-        &frame as *const SignalFrame as *const u8,
-        frame_size,
-    );
+    let uncopied = crate::arch::uaccess_safe::copy_out(frame_addr as usize, cbytes::bytes_of(&frame));
     if uncopied != 0 {
         // X3 hunt: the silent SIGSEGV path — name the frame target so a
         // copy failure here (altstack not mapped / bad ss_sp) is
@@ -2693,11 +2641,11 @@ unsafe fn setup_frame_x86_64(
             "sigframe: copy_to_user failed frame={:#x} sig={} pid={} altstack={}",
             frame_addr,
             sig,
-            (*task).pid(),
+            task.pid(),
             use_altstack
         );
-        (*task).sigframe = None;
-        (*task).sigframe_addr = 0;
+        task.sigframe = None;
+        task.sigframe_addr = 0;
         handle_default_signal(11);
         return false;
     }
@@ -2727,10 +2675,10 @@ unsafe fn setup_frame_x86_64(
 // ============================================================================
 
 #[cfg(feature = "x86_64")]
-unsafe fn restore_sigcontext_x86_64(
-    task: *mut crate::process::task::Task,
+fn restore_sigcontext_x86_64(
+    task: &mut crate::process::task::Task,
     frame_addr: u64,
-    regs: *mut crate::arch::pt_regs::PtRegs,
+    regs: &mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
     if frame_addr == 0 {
         return false;
@@ -2738,24 +2686,22 @@ unsafe fn restore_sigcontext_x86_64(
 
     // The user copy wins over the kernel backup (handler/swapcontext
     // edits must be honored — M-04).
+    // SAFETY: SignalFrame is a POD byte-image (ints + byte arrays only);
+    // all-zero bytes are a valid instance.
     let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
-    let copied = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            &mut user_frame as *mut SignalFrame as *mut u8,
-            frame_addr as *const u8,
-            core::mem::size_of::<SignalFrame>(),
-        )
-    };
+    let copied = crate::arch::uaccess_safe::copy_in(
+        cbytes::bytes_of_mut(&mut user_frame),
+        frame_addr as usize,
+    );
     let frame = if copied == 0 {
         user_frame
     } else {
-        match (*task).sigframe {
+        match task.sigframe {
             Some(f) => f,
             None => return false,
         }
     };
 
-    let regs = &mut *regs;
     let mc = &frame.uc.uc_mcontext;
 
     regs.r15 = mc.r15; regs.r14 = mc.r14; regs.r13 = mc.r13; regs.r12 = mc.r12;
@@ -2776,11 +2722,11 @@ unsafe fn restore_sigcontext_x86_64(
     regs.mark_user_frame();
 
     // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
-    (*task).sigmask = frame.uc.uc_sigmask[0] & !((1u64 << 8) | (1u64 << 18));
+    task.sigmask = frame.uc.uc_sigmask[0] & !((1u64 << 8) | (1u64 << 18));
 
     // Clear signal frame
-    (*task).sigframe = None;
-    (*task).sigframe_addr = 0;
+    task.sigframe = None;
+    task.sigframe_addr = 0;
 
     true
 }
@@ -2822,7 +2768,7 @@ fn handle_default_signal(sig: i32) {
         // is invisible to them), stop_reported re-armed = unreported.
         18 => {
             // SAFETY: current is a valid task pointer from sched::current().
-            unsafe {
+            {
                 if let Some(current) = sched::current() {
                     // "Resuming from a job-control stop" = stopped right
                     // now, OR woken from the stop by this signal's own
@@ -2840,25 +2786,36 @@ fn handle_default_signal(sig: i32) {
                         (*current).set_stop_signal(-(Signal::SIGCONT as i32));
                         (*current).stop_reported.store(false, core::sync::atomic::Ordering::Release);
                         (*current).set_state(TaskState::new(TaskState::RUNNING));
-                        signal_wake_up(current as *const _ as *mut _);
+                        signal_wake_up(current);
                         // CLD_CONTINUED SIGCHLD to the parent + wake any
                         // blocked wait(WCONTINUED) sleeper — same
                         // discipline as the stop arm below (parents
                         // without a SIGCHLD handler rely on the
                         // waitqueue wake).
-                        if let Some(parent_ptr) = (*current).parent_ptr() {
-                            let parent = parent_ptr as *mut crate::process::task::Task;
+                        if let Some(parent_ptr) = current.parent_ptr() {
+                            // SAFETY (one adopt edge): tree handle under the
+                            // caller's syscall context — TaskBorrow's
+                            // short-read contract.
+                            let parent =
+                                match unsafe { crate::process::task_ref::TaskBorrow::from_raw(parent_ptr as *mut crate::process::task::Task) } {
+                                    Some(p) => p,
+                                    None => return,
+                                };
                             let mut info = SigInfo::new(
                                 Signal::SIGCHLD as i32,
                                 si_code::CLD_CONTINUED,
-                                (*current).pid(),
-                                (*current).cred().uid,
+                                current.pid(),
+                                current.cred().uid,
                             );
                             info._rest[..4]
                                 .copy_from_slice(&(Signal::SIGCONT as i32).to_le_bytes());
-                            let _ = crate::signal::send_signal_with_info((*parent).pid(), info);
-                            crate::process::exit::wake_group_chldexit(parent);
-                            crate::signal::signal_wake_up(parent);
+                            let _ = crate::signal::send_signal_with_info(parent.pid(), info);
+                            // SAFETY (one exit-path edge): the parent
+                            // handle is TaskBorrow-adopted above; exit.rs's
+                            // wake helper stays unsafe until its lane
+                            // converts it.
+                            unsafe { crate::process::exit::wake_group_chldexit(parent.as_ptr()) };
+                            crate::signal::signal_wake_up(parent.as_ptr());
                         }
                     }
                 }
@@ -2868,7 +2825,7 @@ fn handle_default_signal(sig: i32) {
         19 | 20 | 21 | 22 => {
             // SIGSTOP, SIGTSTP - stop process
             // SAFETY: current is a valid task pointer from sched::current().
-            unsafe {
+            {
                 if let Some(current) = sched::current() {
                     (*current).set_stop_signal(sig);
                     (*current).stop_reported.store(false, core::sync::atomic::Ordering::Release);
@@ -2880,18 +2837,25 @@ fn handle_default_signal(sig: i32) {
                     // carries si_code CLD_STOPPED / si_status = stop signal
                     // (reference do_notify_parent_cldstop) for SA_SIGINFO
                     // parents that decode it.
-                    if let Some(parent_ptr) = (*current).parent_ptr() {
-                        let parent = parent_ptr as *mut crate::process::task::Task;
+                    if let Some(parent_ptr) = current.parent_ptr() {
+                        // SAFETY (one adopt edge): tree handle under the
+                        // caller's syscall context — TaskBorrow's contract.
+                        let parent =
+                            match unsafe { crate::process::task_ref::TaskBorrow::from_raw(parent_ptr as *mut crate::process::task::Task) } {
+                                Some(p) => p,
+                                None => return,
+                            };
                         let mut info = SigInfo::new(
                             Signal::SIGCHLD as i32,
                             si_code::CLD_STOPPED,
-                            (*current).pid(),
-                            (*current).cred().uid,
+                            current.pid(),
+                            current.cred().uid,
                         );
                         info._rest[..4].copy_from_slice(&sig.to_le_bytes());
-                        let _ = crate::signal::send_signal_with_info((*parent).pid(), info);
-                        crate::process::exit::wake_group_chldexit(parent);
-                        crate::signal::signal_wake_up(parent);
+                        let _ = crate::signal::send_signal_with_info(parent.pid(), info);
+                        // SAFETY (one exit-path edge): as above.
+                        unsafe { crate::process::exit::wake_group_chldexit(parent.as_ptr()) };
+                        crate::signal::signal_wake_up(parent.as_ptr());
                     }
                     // The actual park happens in do_signal's group-stop
                     // branch (park_stopped_task).
@@ -2960,8 +2924,7 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
     let (sender_pid, sender_uid) = match crate::sched::current() {
-        // SAFETY: the current task pointer is valid for the call duration.
-        Some(t) => unsafe { ((*t).pid(), (*t).cred().uid) },
+        Some(t) => (t.pid(), t.cred().uid),
         None => (0, 0),
     };
     // sc150 (Session Q, launcher lane): early-boot service threads are
@@ -3000,8 +2963,7 @@ fn abort_reason_dump(leader_tid: u32) {
         Some(t) => t,
         None => return,
     };
-    // SAFETY: task is the current task, valid for the duration.
-    let (comm, tgid) = unsafe { ((*task).comm(), (*task).tgid()) };
+    let (comm, tgid) = (task.comm(), task.tgid());
     let comm = core::str::from_utf8(comm).unwrap_or("").trim_end_matches('\0');
 
     let (rip, rsp) = {
@@ -3025,7 +2987,7 @@ fn abort_reason_dump(leader_tid: u32) {
         rsp
     );
 
-    let Some(aspace) = (unsafe { (*task).address_space_arc() }) else {
+    let Some(aspace) = (unsafe { task.address_space_arc() }) else {
         crate::pr_warn!("ABORT-DUMP: no address space");
         return;
     };
@@ -3079,10 +3041,7 @@ fn abort_reason_dump(leader_tid: u32) {
     let mut line = alloc::string::String::new();
     for i in 0..64u64 {
         let mut w = [0u8; 8];
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(w.as_mut_ptr(), (rsp + i * 8) as *const u8, 8)
-        } != 0
-        {
+        if crate::arch::uaccess_safe::copy_in(&mut w, (rsp + i * 8) as usize) != 0 {
             continue;
         }
         let v = u64::from_le_bytes(w);
@@ -3134,14 +3093,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             && TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000
         {
             let (cp, cc) = crate::sched::current()
-                .map(|t| unsafe {
-                    (
-                        (*t).pid(),
-                        alloc::string::String::from(
-                            (*t).comm_str(),
-                        ),
-                    )
-                })
+                .map(|t| (t.pid(), alloc::string::String::from(t.comm_str())))
                 .unwrap_or((0, alloc::string::String::from("kernel")));
             crate::pr_err!(
                 "TKSIG{}: caller pid={} comm='{}' -> tid={}",
@@ -3179,7 +3131,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             // dfx-migrate: the abort also records into the unified
             // framework (rux:ohhunt kind=SIGABRT — the event is also
             // the family's arm switch). a=the dying tid, b=the raiser.
-            let raiser = crate::sched::current().map(|t| unsafe { (*t).pid() as u64 }).unwrap_or(0);
+            let raiser = crate::sched::current().map(|t| t.pid() as u64).unwrap_or(0);
             crate::trace::trace_ohhunt(3, tid, raiser, 0);
             abort_reason_dump(tid);
         }
@@ -3188,8 +3140,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
     let (sender_pid, sender_uid) = match crate::sched::current() {
-        // SAFETY: the current task pointer is valid for the call duration.
-        Some(t) => unsafe { ((*t).pid(), (*t).cred().uid) },
+        Some(t) => (t.pid(), t.cred().uid),
         None => (0, 0),
     };
     // sc151: tgkill/raise suicide path of the SIGKILL-SEND tracer (see
@@ -3231,10 +3182,7 @@ pub fn force_unblock_current(sig: i32) {
         return;
     }
     if let Some(t) = crate::sched::current() {
-        // SAFETY: current() is valid for this call on the running CPU.
-        unsafe {
-            (*t).sigmask &= !(1u64 << (sig - 1));
-        }
+        t.sigmask &= !(1u64 << (sig - 1));
     }
 }
 
@@ -3281,14 +3229,7 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
             && KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000
         {
             let (cp, cc) = crate::sched::current()
-                .map(|t| unsafe {
-                    (
-                        (*t).pid(),
-                        alloc::string::String::from(
-                            (*t).comm_str(),
-                        ),
-                    )
-                })
+                .map(|t| (t.pid(), alloc::string::String::from(t.comm_str())))
                 .unwrap_or((0, alloc::string::String::from("kernel")));
             crate::pr_debug!(
                             "KSIG{}: caller pid={} comm='{}' -> target pid={} group={}",
@@ -3309,32 +3250,35 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
     // wake below would then enqueue a dead page into the runqueue
     // (on_rq on the freed page reads false) — the S-R illegal-instruction
     // engine. The pin keeps the Task alive until task_put below.
-    unsafe {
-        // Look up target process via PID hash table
-        let task_ptr = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
-        if task_ptr.is_null() {
-            return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32());
-        }
+    // PINNED lookup (R15-6): synchronize_rcu() is a no-op (RCU_GEN never
+    // advances; only the Rcu softirq bumps it and is never raised), so an
+    // unpinned lookup could hand back a Task that release_task() freed and
+    // the buddy already reused. TaskRef owns the pin until task_put below.
+    let task_ref = match crate::process::task_ref::TaskRef::from_pinned(
+        crate::process::pid_hash::pid_hash_lookup_pinned(pid),
+    ) {
+        Some(t) => t,
+        None => return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32()),
+    };
 
-        let result = send_signal_locked(task_ptr, pid, sig, group);
+    let result = send_signal_locked(&*task_ref, pid, sig, group);
 
-        // Release the pin taken by the lookup above.
-        crate::process::task::Task::task_put(task_ptr);
-        result
-    }
+    // Release the pin taken by the lookup above.
+    crate::process::task::Task::task_put(task_ref.as_ptr());
+    result
 }
 
 /// Signal-sending core, operating on a PINNED task pointer.
 ///
 /// SAFETY: `task_ptr` is pinned (task_refcnt held by the caller); it cannot
 /// be freed for the duration of this call.
-unsafe fn send_signal_locked(
-    task_ptr: *mut crate::process::task::Task,
+fn send_signal_locked(
+    task: &crate::process::task::Task,
     _pid: u32,
     sig: i32,
     group: i32,
 ) -> Result<(), i32> {
-    send_signal_locked_info(task_ptr, sig, None, group)
+    send_signal_locked_info(task, sig, None, group)
 }
 
 /// Signal-sending core with optional siginfo (rt_sigqueueinfo family and
@@ -3351,16 +3295,15 @@ unsafe fn send_signal_locked(
 /// wants_signal): the shared SignalStruct's mask field is not per-thread,
 /// and threads routinely run with different blocked sets.
 ///
-/// SAFETY: `task_ptr` is pinned (task_refcnt held by the caller).
-unsafe fn send_signal_locked_info(
-    task_ptr: *mut crate::process::task::Task,
+/// `task` is borrowed from the caller's PINNED handle (task_refcnt held
+/// by the caller) — liveness is the pin's, not this fn's problem.
+fn send_signal_locked_info(
+    task: &crate::process::task::Task,
     sig: i32,
     si: Option<SigInfo>,
     group: i32,
 ) -> Result<(), i32> {
     use crate::signal::Signal;
-
-    let task = &*task_ptr;
 
     // The signal:signal_generate tracepoint — the reference fires it
     // once per __send_signal at the outcome (its `ret:` label) with the
@@ -3465,8 +3408,8 @@ unsafe fn send_signal_locked_info(
         static KILLTRACE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if let Some(cur) = crate::sched::current() {
-            unsafe {
-                let same_group = (*cur).tgid() == task.tgid();
+            {
+                let same_group = cur.tgid() == task.tgid();
                 let s_comm = (*cur).comm();
                 let s_len = s_comm
                     .iter()
@@ -3492,7 +3435,7 @@ unsafe fn send_signal_locked_info(
                     match si {
                         Some(i) => crate::pr_info!(
                             "KILLTRACE: pid={}({}) -> pid={}({}) tgid={} ppid={} sig={} origin={:#x}",
-                            (*cur).pid(),
+                            cur.pid(),
                             core::str::from_utf8(&s_comm[..s_len])
                                 .unwrap_or("?"),
                             task.pid(),
@@ -3504,7 +3447,7 @@ unsafe fn send_signal_locked_info(
                         ),
                         None => crate::pr_info!(
                             "KILLTRACE: pid={}({}) -> pid={}({}) tgid={} ppid={} sig={} origin=none",
-                            (*cur).pid(),
+                            cur.pid(),
                             core::str::from_utf8(&s_comm[..s_len])
                                 .unwrap_or("?"),
                             task.pid(),
@@ -3550,9 +3493,9 @@ unsafe fn send_signal_locked_info(
         } else {
             task.pending.add(sig);
         }
-        signal_wake_up(task_ptr);
+        signal_wake_up(task as *const crate::process::task::Task as *mut crate::process::task::Task);
         // P1 signalfd hook: wake signalfd readers of this task.
-        crate::syscall::misc::signalfd_notify_task(task_ptr);
+        crate::syscall::misc::signalfd_notify_task(task as *const crate::process::task::Task as *mut crate::process::task::Task);
         emit(if already_std { 2 } else { 0 });
         return Ok(());
     }
@@ -3562,9 +3505,9 @@ unsafe fn send_signal_locked_info(
         Some(s) => s,
         None => {
             task.pending.add(sig);
-            signal_wake_up(task_ptr);
+            signal_wake_up(task as *const crate::process::task::Task as *mut crate::process::task::Task);
             // P1 signalfd hook: wake signalfd readers of this task.
-            crate::syscall::misc::signalfd_notify_task(task_ptr);
+            crate::syscall::misc::signalfd_notify_task(task as *const crate::process::task::Task as *mut crate::process::task::Task);
             emit(if already_std { 2 } else { 0 });
             return Ok(());
         }
@@ -3678,12 +3621,12 @@ unsafe fn send_signal_locked_info(
             // sigwaitinfo01/rt_sigtimedwait01). Waking is always safe:
             // every sleeper re-checks its own condition and re-sleeps if
             // unmet.
-            signal_wake_up(task_ptr);
+            signal_wake_up(task as *const crate::process::task::Task as *mut crate::process::task::Task);
             // P1 signalfd hook: a BLOCKED signal is exactly the signalfd
             // use case (the app blocks the mask and reads via the fd) —
             // no handler path will run, so this wake is the only thing
             // that unblocks a read(sfd) on this signal.
-            crate::syscall::misc::signalfd_notify_task(task_ptr);
+            crate::syscall::misc::signalfd_notify_task(task as *const crate::process::task::Task as *mut crate::process::task::Task);
             emit(if already_std { 2 } else { 0 });
             return Ok(());
         }
@@ -3691,11 +3634,11 @@ unsafe fn send_signal_locked_info(
 
     // Default or Handler disposition — wake the target so an
     // interruptible sleeper reaches the delivery point.
-    signal_wake_up(task_ptr);
+    signal_wake_up(task as *const crate::process::task::Task as *mut crate::process::task::Task);
     // P1 signalfd hook: wake signalfd readers of this task (in-mask
     // signals are typically blocked, so they stay pending and are only
     // observable through the fd — this wake is what unblocks read(sfd)).
-    crate::syscall::misc::signalfd_notify_task(task_ptr);
+    crate::syscall::misc::signalfd_notify_task(task as *const crate::process::task::Task as *mut crate::process::task::Task);
     emit(if already_std { 2 } else { 0 });
     Ok(())
 }
@@ -3758,14 +3701,7 @@ pub fn send_signal_with_info(pid: u32, info: SigInfo) -> Result<(), i32> {
             core::sync::atomic::AtomicUsize::new(0);
         if SWI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
             let (cp, cc) = crate::sched::current()
-                .map(|t| unsafe {
-                    (
-                        (*t).pid(),
-                        alloc::string::String::from(
-                            (*t).comm_str(),
-                        ),
-                    )
-                })
+                .map(|t| (t.pid(), alloc::string::String::from(t.comm_str())))
                 .unwrap_or((0, alloc::string::String::from("kernel")));
             crate::pr_debug!(
                 "SWI{}: caller pid={}({}) -> pid={} info signo={} code={:#x} sipid={} siuid={}",
@@ -3790,16 +3726,17 @@ fn send_signal_with_info_g(pid: u32, info: SigInfo, group: i32) -> Result<(), i3
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
-    // SAFETY: pinned lookup keeps the Task alive across the call.
-    unsafe {
-        let task_ptr = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
-        if task_ptr.is_null() {
-            return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32());
-        }
-        let result = send_signal_locked_info(task_ptr, sig, Some(info), group);
-        crate::process::task::Task::task_put(task_ptr);
-        result
-    }
+    // PINNED lookup (R15-6, same contract as send_signal_g): TaskRef
+    // owns the pin until task_put below.
+    let task_ref = match crate::process::task_ref::TaskRef::from_pinned(
+        crate::process::pid_hash::pid_hash_lookup_pinned(pid),
+    ) {
+        Some(t) => t,
+        None => return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32()),
+    };
+    let result = send_signal_locked_info(&*task_ref, sig, Some(info), group);
+    crate::process::task::Task::task_put(task_ref.as_ptr());
+    result
 }
 
 /// Send a signal to all processes in a given process group.
@@ -3810,50 +3747,37 @@ pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
     // Broadcast over the PID hash so sleeping tasks receive it too; each
     // target still goes through the kill permission check (kernel-originated
     // signals from the TTY layer pass because init runs as root).
-    crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
-        if (*task).pgid() == pgid && crate::security::can_send_signal((*task).cred()) {
-            let _ = send_signal((*task).pid(), sig);
+    crate::process::pid_hash::pid_hash_for_each_task(|task| {
+        // The walk hands &Task under the bucket lock — plain safe reads.
+        if task.pgid() == pgid && crate::security::can_send_signal(task.cred()) {
+            let _ = send_signal(task.pid(), sig);
         }
     });
 }
 
-/// Park the CURRENT task while it is in group/ptrace stop.
-///
-/// The stop bookkeeping (STOPPED state, stop signal, parent/tracer
-/// SIGCHLD) is done by the callers; this drives the actual sleep: Linux's
-/// signal-stop paths call schedule() from the task's own context
-/// (do_signal_stop/ptrace_stop), but Rux previously only set STOPPED +
-/// need_resched and relied on the trap-return preemption check — which is
-/// effectively disabled (ti_preempt_count is read with a straddling `ld`
-/// that is almost always nonzero), so a "stopped" task returned to user
-/// mode and kept running. SIGSTOP/ptrace stops were completely lost.
-///
-/// Loop discipline: any wake sets the state back to RUNNING
-/// (wake_up_enqueue), which means "resumed" (SIGCONT / PTRACE_CONT /
-/// DETACH) and breaks the park. A signal that arrives while stopped also
-/// wakes the task; do_signal's re-select loop then runs its disposition
-/// (fatal signals kill the stopped task, traced tasks re-stop with the
-/// new signal — Linux signal-delivery-stop semantics).
-///
-/// # Safety
-/// `task` must be the currently running task, in task (syscall/trap)
-/// context with a valid kernel stack — schedule() switches away on it.
-pub unsafe fn park_stopped_task(task: *mut crate::process::task::Task) {
+pub fn park_stopped_task(task: *mut crate::process::task::Task) {
     use crate::process::task::TaskState;
+
+    // SAFETY (the one adopt edge): park_stopped_task parks the CURRENT
+    // task; the running task's slot cannot be freed while this CPU
+    // executes it, across every schedule() in the loop below — the
+    // running-task contract extended to the park window because the
+    // parker IS the owner.
+    let t = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) } {
+        Some(t) => t,
+        None => return,
+    };
 
     // Sleeping with SIE=0 on this hart would starve the timer; every
     // blocking syscall re-enables IRQs before schedule() (see do_wait).
     crate::arch::cpu::restore_irq(true);
     loop {
         crate::sched::schedule();
-        if (*task).state().contains(TaskState::STOPPED) {
+        if t.state().contains(TaskState::STOPPED) {
             // schedule() returned without a resume (preempt refusal /
             // next == prev fast path). Keep parking unless a deliverable
             // signal needs a disposition decision.
-            // SAFETY: current task, plain field reads.
-            if unsafe {
-                (*task).pending.first_unmasked((*task).sigmask).is_none()
-            } {
+            if t.pending.first_unmasked(t.sigmask).is_none() {
                 continue;
             }
         }
@@ -4040,40 +3964,47 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
         return false;
     }
 
-    // SAFETY: task is a valid Task pointer from the caller (e.g., signal delivery).
-    unsafe {
-        let task_state = (*task).state();
+    // SAFETY (the one adopt edge): callers hold a live handle (the
+    // current task, a pid-hash pin, or a tree-lock-protected parent) —
+    // the same short-read contract TaskBorrow documents; the wake below
+    // does not yield, so the borrow lives to its end.
+    let t = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) } {
+        Some(t) => t,
+        None => return false,
+    };
+    let task_state = t.state();
 
-        // Wake sleeping tasks, and also STOPPED tasks (R7-3): a stopped
-        // task was dequeued when it scheduled away, so SIGCONT/SIGKILL must
-        // re-enqueue it — otherwise it can never be continued or killed
-        // (job-control DoS: Ctrl+Z then kill -9 does nothing).
-        //
-        // R46: also route a RUNNING task that is on NO CPU (on_cpu == 0)
-        // into Task::wake_up. Such a state is not producible by the
-        // scheduler itself (off-CPU prev leaves __schedule either
-        // RUNNING+linked or !RUNNING+unlinked) — it is the B-form phantom,
-        // and without this it would be permanently unwakeable: every wake
-        // of a "RUNNING" target was refused here. Task::wake_up's
-        // GRQ-locked re-check authoritatively separates the genuine phantom
-        // (healed + linked) from a queued/on-CPU RUNNING task (refused).
-        // R49: the on_cpu == 0 condition was dropped — an ORPHANED pick
-        // mark (RUNNING, unlinked, owned by no CPU's current slot) reads
-        // on_cpu == 1 and is the same unwakeable phantom; only
-        // wake_up_enqueue's locked current-slot scan can tell it from a
-        // mark a CPU genuinely owns mid-pick. Route every RUNNING suspect;
-        // the authoritative re-check refuses the legitimate ones.
-        if task_state.is_sleeping()
-            || task_state.contains(TaskState::STOPPED)
-            || task_state == TaskState::new(TaskState::RUNNING)
-        {
-            // Use Task::wake_up which properly enqueues the task to its CPU's run queue
-            crate::process::Task::wake_up(task);
+    // Wake sleeping tasks, and also STOPPED tasks (R7-3): a stopped
+    // task was dequeued when it scheduled away, so SIGCONT/SIGKILL must
+    // re-enqueue it — otherwise it can never be continued or killed
+    // (job-control DoS: Ctrl+Z then kill -9 does nothing).
+    //
+    // R46: also route a RUNNING task that is on NO CPU (on_cpu == 0)
+    // into Task::wake_up. Such a state is not producible by the
+    // scheduler itself (off-CPU prev leaves __schedule either
+    // RUNNING+linked or !RUNNING+unlinked) — it is the B-form phantom,
+    // and without this it would be permanently unwakeable: every wake
+    // of a "RUNNING" target was refused here. Task::wake_up's
+    // GRQ-locked re-check authoritatively separates the genuine phantom
+    // (healed + linked) from a queued/on-CPU RUNNING task (refused).
+    // R49: the on_cpu == 0 condition was dropped — an ORPHANED pick
+    // mark (RUNNING, unlinked, owned by no CPU's current slot) reads
+    // on_cpu == 1 and is the same unwakeable phantom; only
+    // wake_up_enqueue's locked current-slot scan can tell it from a
+    // mark a CPU genuinely owns mid-pick. Route every RUNNING suspect;
+    // the authoritative re-check refuses the legitimate ones.
+    if task_state.is_sleeping()
+        || task_state.contains(TaskState::STOPPED)
+        || task_state == TaskState::new(TaskState::RUNNING)
+    {
+        // Task::wake_up is the safe-enqueue entry (its GRQ-locked
+        // re-check owns the exclusion); the raw hand-off stays the wake
+        // path's interface.
+        crate::process::Task::wake_up(task);
 
-            true
-        } else {
-            false
-        }
+        true
+    } else {
+        false
     }
 }
 

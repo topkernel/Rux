@@ -35,7 +35,10 @@
 //!    queue/DMA internals that still live on raw addresses; their docs
 //!    name the obligation that transfers to the caller.
 
+pub mod bytes;
 pub mod call;
 pub mod dma;
+pub mod frame;
 pub mod mmio;
 pub mod ptr;
+pub mod ring;

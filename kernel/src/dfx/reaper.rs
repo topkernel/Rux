@@ -371,11 +371,11 @@ pub fn zombie_scan(now: u64) {
     // holding a pid-hash bucket spinlock).
     let mut found: [(u32, i32, [u8; 16], u32, u32); 16] = [(0, 0, [0; 16], 0, 0); 16];
     let mut nfound = 0usize;
-    crate::process::pid_hash::pid_hash_for_each_task_try(|t| unsafe {
+    crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
         if nfound >= found.len() {
             return;
         }
-        let task = &*t;
+        let task = t;
         if task.state() == crate::process::task::TaskState::new(
             crate::process::task::TaskState::ZOMBIE,
         ) && task.pid() != 0

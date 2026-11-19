@@ -423,16 +423,16 @@ fn apply_content(node: &Arc<CgroupNode>, kind: CgroupFileKind, buf: &[u8]) -> i3
         }
         CgroupFileKind::CgroupSubtreeControl => {
             // SAFETY: see above.
-            apply_subtree_control(unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) }, input)
+            apply_subtree_control(node, input)
         }
         CgroupFileKind::CpuMax => apply_cpu_max(node, input),
         CgroupFileKind::MemoryMax => {
             // SAFETY: see above.
-            apply_memory_max(unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) }, input)
+            apply_memory_max(node, input)
         }
         CgroupFileKind::PidsMax => {
             // SAFETY: see above.
-            apply_pids_max(unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) }, input)
+            apply_pids_max(node, input)
         }
         // memory.oom_control: "0"/"1" toggles oom_kill_disable (Linux
         // v1 semantics; the flag is stored and reported, the killer
@@ -631,7 +631,7 @@ pub fn create_root_inode() -> Arc<Inode> {
 fn make_dir_inode(node: Arc<CgroupNode>) -> Arc<Inode> {
     // SAFETY: the Arc keeps the node alive for the inode's lifetime (and
     // nodes are never freed anyway — see sched::cgroup lifetime docs).
-    let node_ref = unsafe { &*(Arc::as_ptr(&node) as *const CgroupNode) };
+    let node_ref = &node;
     let mut inode = Inode::new(
         ino_of_dir(node_ref),
         InodeMode::new(InodeMode::S_IFDIR | 0o755),
@@ -645,7 +645,7 @@ fn make_dir_inode(node: Arc<CgroupNode>) -> Arc<Inode> {
 /// Build a control-file inode.
 fn make_file_inode(node: Arc<CgroupNode>, kind: CgroupFileKind) -> Arc<Inode> {
     // SAFETY: see make_dir_inode.
-    let node_ref = unsafe { &*(Arc::as_ptr(&node) as *const CgroupNode) };
+    let node_ref = &node;
     let writable = CONTROL_FILES
         .iter()
         .find(|(_, k, _)| *k == kind)
@@ -702,7 +702,7 @@ unsafe fn cgroupfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno>
 
     if let Some(child) = cgroup::cgroup_lookup_child(&data.node, core::str::from_utf8(name).unwrap_or("")) {
         // SAFETY: child is a live Arc.
-        return Ok(ino_of_dir(unsafe { &*(Arc::as_ptr(&child) as *const CgroupNode) }));
+        return Ok(ino_of_dir(&child));
     }
 
     Err(errno::Errno::NoSuchFileOrDirectory)
@@ -775,7 +775,7 @@ unsafe fn cgroupfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
     };
     for child in children {
         // SAFETY: live Arc; nodes are never freed.
-        let child_ref = unsafe { &*(Arc::as_ptr(&child) as *const CgroupNode) };
+        let child_ref = &child;
         entries.push(VfsDirEntry {
             ino: ino_of_dir(child_ref),
             name: child_ref.name.as_bytes().to_vec(),
@@ -802,7 +802,7 @@ unsafe fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Ino
     let name_str = core::str::from_utf8(name).unwrap_or("");
     if let Some(child) = cgroup::cgroup_lookup_child(&data.node, name_str) {
         // SAFETY: live Arc.
-        let child_ref = unsafe { &*(Arc::as_ptr(&child) as *const CgroupNode) };
+        let child_ref = &child;
         if ino_of_dir(child_ref) == ino {
             return Ok(make_dir_inode(child));
         }

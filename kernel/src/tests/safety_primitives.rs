@@ -183,3 +183,134 @@ pub fn test_safety_primitives() {
         test_fail("safety_cast same-size layout cast", "layout mismatch");
     }
 }
+
+/// Round-4 primitive additions: CopyBytes byte views, SpscRing, and
+/// KernelStackWindow (each: construction edge + bounds discipline).
+pub fn test_safety_primitives_r4() {
+    test_group_start("safety primitives r4");
+
+    use crate::safety::bytes as cbytes;
+    use crate::safety::frame::KernelStackWindow;
+    use crate::safety::ring::SpscRing;
+
+    // ---- CopyBytes: struct <-> byte image ----
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct DiskNode {
+        magic: u32,
+        count: u16,
+        pad: u16,
+    }
+    let mut node = DiskNode { magic: 0xA1B2_C3D4, count: 7, pad: 0 };
+    let img = cbytes::bytes_of(&node);
+    if img.len() == 8 && img[0] == 0xD4 && img[4] == 0x07 {
+        test_pass("copybytes bytes_of image");
+    } else {
+        test_fail("copybytes bytes_of image", "layout mismatch");
+    }
+    // Round-trip through a packed buffer at a misaligned offset.
+    let mut buf = [0u8; 16];
+    buf[3..11].copy_from_slice(cbytes::bytes_of(&node));
+    let back: DiskNode = match cbytes::read_at(&buf, 3) {
+        Some(v) => v,
+        None => {
+            test_fail("copybytes read_at", "refused in-bounds read");
+            return;
+        }
+    };
+    if back.magic == 0xA1B2_C3D4 && back.count == 7 {
+        test_pass("copybytes read_at unaligned round-trip");
+    } else {
+        test_fail("copybytes read_at unaligned round-trip", "value mismatch");
+    }
+    if cbytes::read_at::<u64>(&buf, 9).is_none() {
+        test_pass("copybytes read_at bounds refusal");
+    } else {
+        test_fail("copybytes read_at bounds refusal", "out-of-bounds accepted");
+    }
+    cbytes::write_at(&mut buf, 3, DiskNode { magic: 5, count: 6, pad: 0 });
+    let img2 = cbytes::bytes_of_mut(&mut node);
+    img2.copy_from_slice(&buf[3..11]);
+    if node.magic == 5 && node.count == 6 {
+        test_pass("copybytes write_at + bytes_of_mut");
+    } else {
+        test_fail("copybytes write_at + bytes_of_mut", "value mismatch");
+    }
+    if cbytes::from_bytes::<DiskNode>(&buf[0..2]).is_none() {
+        test_pass("copybytes from_bytes short refusal");
+    } else {
+        test_fail("copybytes from_bytes short refusal", "short slice accepted");
+    }
+
+    // ---- SpscRing: IRQ-producer / CAS-consumer ----
+    static RING: SpscRing<u8, 4> = SpscRing::new();
+    RING.put(1);
+    RING.put(2);
+    if RING.depth_hint() == 2 {
+        test_pass("spscring depth hint");
+    } else {
+        test_fail("spscring depth hint", "depth mismatch");
+    }
+    let got = (RING.get(), RING.get(), RING.get());
+    if got == (Some(1), Some(2), None) {
+        test_pass("spscring fifo + empty");
+    } else {
+        test_fail("spscring fifo + empty", "order mismatch");
+    }
+    for i in 0..6u8 {
+        RING.put(i); // overflow: drops beyond capacity
+    }
+    let mut n = 0;
+    while RING.get().is_some() {
+        n += 1;
+    }
+    if n == 3 {
+        // capacity 4: mask N-1 => at most N-1 buffered (3).
+        test_pass("spscring drop-on-full respects capacity");
+    } else {
+        test_fail("spscring drop-on-full respects capacity", "count mismatch");
+    }
+
+    // ---- KernelStackWindow: bounds + alignment + frame walk ----
+    let mut stack = [0u64; 16];
+    let base = stack.as_mut_ptr() as usize;
+    let top = base + stack.len() * 8;
+    let win = match KernelStackWindow::new(base, top) {
+        Some(w) => w,
+        None => {
+            test_fail("stack window construction", "refused valid window");
+            return;
+        }
+    };
+    if KernelStackWindow::new(top, base).is_none() {
+        test_pass("stack window inversion refusal");
+    } else {
+        test_fail("stack window inversion refusal", "inverted accepted");
+    }
+    stack[2] = 0xFEED_FACE_BEEF_1234;
+    if win.read_u64(base + 16) == Some(0xFEED_FACE_BEEF_1234)
+        && win.read_u64(base + 4).is_none()
+        && win.read_u64(top).is_none()
+    {
+        test_pass("stack window bounds/alignment");
+    } else {
+        test_fail("stack window bounds/alignment", "edge mismatch");
+    }
+    let mut frame = [0u64; 4];
+    // sp=base+16 with a 4-word frame stays inside the 16-word window —
+    // the walk fills all 4 slots and frame[0] is the marked word.
+    let n = win.read_frame(base + 16, &mut frame);
+    if n == 4 && frame[0] == 0xFEED_FACE_BEEF_1234 {
+        test_pass("stack window frame walk in-bounds fill");
+    } else {
+        test_fail("stack window frame walk in-bounds fill", "walk mismatch");
+    }
+    // A walk starting at top - 16 crosses the top boundary after two
+    // words — partial fill is the caller's stop signal.
+    let n2 = win.read_frame(top - 16, &mut frame);
+    if n2 == 2 {
+        test_pass("stack window frame walk stops at top");
+    } else {
+        test_fail("stack window frame walk stops at top", "walk mismatch");
+    }
+}
