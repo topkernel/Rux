@@ -168,6 +168,38 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol round 8 (2026-11-19 19:xx): bw_tcp teardown deadlock FIXED — tcp_socket_free wakes its orphans; dead-slot polls error; the slow-mode census rig
+
+The TCPCEN census (per-tcp-slot state/rx/window on the periodic dump's
+raw path) convicted the slow mode's teardown face: the connection slot
+VANISHING under sleeping waiters (bwl3: slots gone, server asleep in
+sendto across every dump; client asleep in select). Two stacked
+lost-wakes, both reference-shaped fixes (a989d2b60):
+
+1. tcp_socket_free freed the protocol slot without waking any VFS
+   wrapper still carrying that tcp_fd — the orphan timer's CLOSE_WAIT
+   reap ran under the waiters; their wait condition had flipped
+   (send-ready reads a missing slot as true) but nothing fired the
+   re-check. The free now wakes the wrappers (after the table lock
+   drops — no nesting).
+2. The poll arm treated a missing slot as not-ready — the woken select
+   sleeper re-polled, re-slept, forever. A dead slot now polls
+   POLLIN|POLLERR|POLLHUP (the reference dead-socket shape).
+
+Verification (official rig, 3 boots): timeouts 3/3-persistent → 1/3,
+the residual being the user-mode KVM tick-delay print family plus the
+RTS-STACK-LEAK safety net firing (both recorded); zero teardown
+deadlocks. The MB/s row stays invisible to the rig (benchmp child
+never flushes through the runner pipe — rig artifact class).
+
+CROSS-LANE FINGERPRINT: oh-launch round 11 (9f2b57b04) decoded the
+0x1-hijack family as small-int corruption in the faulting frame's OWN
+pt_regs — Rust enum tags/boolean values in pointer slots — the SAME
+fingerprint as this lane's BT garbage (ra=0x10/0x1) and the forged
+heap_base-2 pointer. Their saved-context writers audit continues; the
+intermittent forged-pointer P0 (round 6/7) is now part of that joint
+hunt.
+
 ## Patrol round 7 (2026-11-19 15:xx): the corruption hunt's instrument round — one conviction retracted (instrument bug), the guard retained, the P0 narrowed to an intermittent forged-pointer class
 
 Round-6 chase status, honestly: the SOCK-BAD-PTR guard (f2a271f32,
