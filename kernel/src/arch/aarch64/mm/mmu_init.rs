@@ -74,15 +74,18 @@ unsafe fn adopt_boot_ttbr1() {
 /// Get the physical page number of the kernel root table
 /// (ROOT_PAGE_TABLE lives at KERNEL_LINK_ADDR; convert via the image offset)
 #[inline]
-pub unsafe fn root_page_table_ppn() -> u64 {
+pub fn root_page_table_ppn() -> u64 {
     let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
-    let root_phys = root_virt.wrapping_sub(KERNEL_MAP.va_kernel_pa_offset as u64);
+    // SAFETY: KERNEL_MAP is set by boot.S before rust_main; the offset
+    // never changes afterwards.
+    let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+    let root_phys = root_virt.wrapping_sub(offset);
     root_phys / (PAGE_SIZE as u64)
 }
 
 /// Kernel root PPN (alias; interface parity)
 #[inline]
-pub unsafe fn get_kernel_page_table_ppn() -> u64 {
+pub fn get_kernel_page_table_ppn() -> u64 {
     root_page_table_ppn()
 }
 
@@ -91,7 +94,7 @@ pub unsafe fn get_kernel_page_table_ppn() -> u64 {
 /// # Safety
 /// Valid once boot.S has placed the kernel image (always, past _start).
 #[inline]
-pub unsafe fn root_static_phys() -> u64 {
+pub fn root_static_phys() -> u64 {
     root_page_table_ppn() << PAGE_SHIFT
 }
 
@@ -170,7 +173,7 @@ static EARLY_L3_NEXT: AtomicUsize = AtomicUsize::new(0);
 ///
 /// # Safety
 /// Early-boot single-threaded context, or PTE_MODIFY_LOCK held later.
-pub unsafe fn alloc_page_table() -> Option<u64> {
+pub fn alloc_page_table() -> Option<u64> {
     match get_alloc_stage() {
         AllocStage::Early | AllocStage::Fixmap => {
             // SAFETY: static pools with bump counters (see early_alloc).
@@ -233,7 +236,7 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
 ///
 /// # Safety
 /// The frame must not be reachable from any live table.
-pub unsafe fn free_page_table(phys_addr: u64) {
+pub fn free_page_table(phys_addr: u64) {
     if !free_page_table_checked(phys_addr, "pt") {
         return;
     }
@@ -244,7 +247,7 @@ pub unsafe fn free_page_table(phys_addr: u64) {
 /// frame to the buddy (exactly-one-live-stamp discipline; a double or
 /// foreign free is refused with the frame left leaked rather than wired
 /// into two live trees).
-unsafe fn free_page_table_checked(phys_addr: u64, site: &str) -> bool {
+fn free_page_table_checked(phys_addr: u64, site: &str) -> bool {
     if get_alloc_stage() != AllocStage::Late {
         return false; // boot-stage frames are permanent
     }
@@ -445,36 +448,31 @@ unsafe fn release_user_leaf_mm(entry: PageTableEntry) {
 /// # Safety
 /// root_ppn must be a valid user root; va page-aligned.
 pub unsafe fn set_user_leaf_flags(root_ppn: u64, va: u64, sw_flags: u64) {
-    unsafe {
-        let l3 = match user_l3_table_for(root_ppn, va) {
-            Some(p) => p,
-            None => return,
-        };
-        let idx = ((va >> PAGE_SHIFT) & 0x1FF) as usize;
-        let old = (*l3).get(idx);
-        if old.is_valid() {
-            (*l3).set(idx, PageTableEntry::rebuild_user_leaf(old.bits(), sw_flags));
-        }
+    let l3 = match user_l3_table_for(root_ppn, va) {
+        Some(p) => p,
+        None => return,
+    };
+    let idx = ((va >> PAGE_SHIFT) & 0x1FF) as usize;
+    let old = l3.get(idx);
+    if old.is_valid() {
+        l3.set(idx, PageTableEntry::rebuild_user_leaf(old.bits(), sw_flags));
     }
 }
 
 /// Descend to the L3 table for `va` WITHOUT allocating (present tables
 /// only); None when any intermediate is missing or non-table.
-pub unsafe fn user_l3_table_for(root_ppn: u64, va: u64) -> Option<*mut PageTable> {
-    unsafe {
-        let mut table_phys = root_ppn << PAGE_SHIFT;
-        for cur in 0..3u32 {
-            let shift = PAGE_SHIFT + 9 * (3 - cur) as u64;
-            let idx = ((va >> shift) & 0x1FF) as usize;
-            let table = get_page_table_virt(table_phys);
-            let entry = (*table).get(idx);
-            if !entry.is_valid() || !entry.is_table() {
-                return None;
-            }
-            table_phys = entry.ppn() << PAGE_SHIFT;
+pub fn user_l3_table_for(root_ppn: u64, va: u64) -> Option<super::unsafe_edges::PtTable> {
+    let mut table = super::unsafe_edges::PtTable::from_phys(root_ppn << PAGE_SHIFT)?;
+    for cur in 0..3u32 {
+        let shift = PAGE_SHIFT + 9 * (3 - cur) as u64;
+        let idx = ((va >> shift) & 0x1FF) as usize;
+        let entry = table.get(idx);
+        if !entry.is_valid() || !entry.is_table() {
+            return None;
         }
-        Some(get_page_table_virt(table_phys))
+        table = super::unsafe_edges::PtTable::from_phys(entry.ppn() << PAGE_SHIFT)?;
     }
+    Some(table)
 }
 
 /// Page-table ledger — the live-table registry backing the double-free
