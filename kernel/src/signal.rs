@@ -1406,7 +1406,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
         // si_code/si_pid distinguish a real sender (SI_USER/SI_TKILL
         // carry one) from a bare/stale bitmap bit (empty queue). The
         // storm's SIGKILLs bypassed every send-path print; this is the
-        // delivery-side ground truth. 110th: rides dfx=sigtrace (the
+        // delivery-side ground truth. 110th: rides the rux:sigtrace tracepoint (retired token dfx=sigtrace) (the
         // kill-storm census printed on the crash-restart loops of every
         // perf boot).
         if (sig == 9 || sig == 15)
