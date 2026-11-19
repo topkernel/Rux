@@ -107,6 +107,12 @@ pub fn i_block_bytes_mut(i_block: &mut [u32; 15]) -> &mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(i_block.as_mut_ptr() as *mut u8, 60) }
 }
 
+/// Mutable twin of [`get_extent_header`] (INV-EXT-VIEW: the single
+/// transmute point is i_block_bytes_mut).
+pub fn get_extent_header_mut(i_block: &mut [u32; 15]) -> &mut Ext4ExtentHeader {
+    node_header_mut(i_block_bytes_mut(i_block))
+}
+
 /// Parse extent header from i_block array
 pub fn get_extent_header(i_block: &[u32; 15]) -> &Ext4ExtentHeader {
     // i_block is 60 bytes; the header is 12 — node_header's size guard

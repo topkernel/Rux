@@ -245,12 +245,12 @@ fn ext4_dio_read_batched(
         }
         // SAFETY: bio::bread returns a valid pinned BufferHead; b_data
         // is block_size bytes.
-        unsafe {
+        {
             let bh = match bio::bread(fs.device, phys) {
                 Some(b) => b,
                 None => return None,
             };
-            let data = &(*bh).b_data;
+            let data = bio::bh_data(&bh);
             crate::fs::ext4::extent::exthunt_rd_od(
                 inode.ino as u64,
                 block_index,
@@ -772,11 +772,11 @@ fn ext4_file_read_perblock(
 
         // SAFETY: bio::bread returns a valid pinned BufferHead on success;
         // b_data points to a block-sized buffer aligned to block_size.
-        unsafe {
+        {
             let bh = bio::bread(fs.device, this_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            let data = &(*bh).b_data;
+            let data = bio::bh_data(&bh);
             // rux:exthunt (retired dfx=exthunt): O_DIRECT serve truth (see exthunt_rd_od).
             crate::fs::ext4::extent::exthunt_rd_od(
                 inode.ino as u64,
@@ -1192,7 +1192,7 @@ fn ext4_file_read_cached_dst(
                 // success; b_data points to a block-sized buffer.
                 unsafe {
                     if let Some(bh) = bio::bread(fs.device, block_nr) {
-                        let data = &(*bh).b_data;
+                        let data = bio::bh_data(&bh);
                         // rux:exthunt (retired dfx=exthunt): sync-fallback serve truth (see
                         // exthunt_rd_serve).
                         crate::fs::ext4::extent::exthunt_rd_serve(
@@ -1438,9 +1438,9 @@ fn fill_page_cache_batch(
                     // on success; b_data points to a block-sized buffer.
                     let mut ok = true;
                     for k in 0..n {
-                        unsafe {
+                        {
                             if let Some(bh) = bio::bread(fs.device, block_nr + k) {
-                                let data = &(*bh).b_data;
+                                let data = bio::bh_data(&bh);
                                 cache.insert(fs_id, ino, run_first + k, block_nr + k, &data);
                                 bio::brelse(bh);
                             } else {
@@ -2189,9 +2189,9 @@ fn ext4_file_write_src(
                             crate::fs::ext4::extent::exthunt_zzero(
                                 "mat", inode.ino, block_index, phys,
                             );
-                            unsafe {
+                            {
                                 if let Some(bh) = bio::getblk_zero(fs.device, phys) {
-                                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                                     bio::brelse(bh);
                                 } else {
                                     partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32());
@@ -2269,16 +2269,16 @@ fn ext4_file_write_src(
                     // cache write-back persists it — see ext4_file_write).
                     // SAFETY: bio::bread returns a valid BufferHead;
                     // b_data is a block-sized writable buffer.
-                    unsafe {
+                    {
                         let bh = match bio::bread(fs.device, new_block) {
                             Some(b) => b,
                             None => partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32()),
                         };
 
-                        for byte in (*bh).b_data.iter_mut() {
+                        for byte in bio::bh_data_mut(&bh).iter_mut() {
                             *byte = 0;
                         }
-                        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                        bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                         bio::brelse(bh);
                     }
 
@@ -2303,7 +2303,7 @@ fn ext4_file_write_src(
 
         // SAFETY: bio::bread returns a valid BufferHead; b_data is a writable
         // block-sized buffer. The slice ranges are bounded by block_size.
-        unsafe {
+        {
             // FULL-BLOCK OVERWRITE (flush-wall fix, 2026-11): when this
             // loop step covers the whole buffer-cache block (4096 — the
             // cache's fixed granularity), fetch it with getblk_overwrite
@@ -2336,7 +2336,7 @@ fn ext4_file_write_src(
                 None => partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32()),
             };
 
-            let data = &mut (*bh).b_data;
+            let data = bio::bh_data_mut(&bh);
             let remaining = to_write as usize - total_written;
             let available_in_block = block_size as usize - block_offset;
             let write_in_block = core::cmp::min(remaining, available_in_block);
@@ -2365,7 +2365,7 @@ fn ext4_file_write_src(
             // (ext4_sync_file syncs the file's dirty data blocks), the
             // buffer-cache eviction path (dirty victims are synced before
             // reuse), and sync(2).
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
             bio::brelse(bh);
             // Dirty-note (see DIRTY_DATA_BLOCKS): the fsync walk is
             // note-driven for regular files — every data block left
@@ -2513,15 +2513,15 @@ pub fn allocate_blocks_for_file(
             // Zero newly allocated data block (deferred-dirty).
             // SAFETY: bio::bread returns a valid BufferHead; b_data is a
             // block-sized writable buffer. We zero it before use.
-            unsafe {
+            {
                 let bh = bio::bread(fs.device, data_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                for byte in (*bh).b_data.iter_mut() {
+                for byte in bio::bh_data_mut(&bh).iter_mut() {
                     *byte = 0;
                 }
 
-                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                 bio::brelse(bh);
             }
             // Dirty-note (see DIRTY_DATA_BLOCKS).
@@ -2642,13 +2642,13 @@ fn allocate_blocks_with_extents(
         // SAFETY: bio::bread returns a valid BufferHead; b_data is a
         // block-sized writable buffer.
         for b in run_start..run_start + run_len as u64 {
-            unsafe {
+            {
                 let bh = bio::bread(fs.device, b)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
-                for byte in (*bh).b_data.iter_mut() {
+                for byte in bio::bh_data_mut(&bh).iter_mut() {
                     *byte = 0;
                 }
-                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                 bio::brelse(bh);
             }
         }
@@ -2797,15 +2797,15 @@ pub fn allocate_indirect_block(
             // SAFETY: bio::bread returns a valid BufferHead; b_data is a
             // block-sized writable buffer. We zero it to initialize block
             // pointers before use.
-            unsafe {
+            {
                 let bh = bio::bread(fs.device, indirect_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                for byte in (*bh).b_data.iter_mut() {
+                for byte in bio::bh_data_mut(&bh).iter_mut() {
                     *byte = 0;
                 }
 
-                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                 let sync_res = bio::sync_dirty_buffer(bh);
                 bio::brelse(bh);
                 sync_res?;
@@ -2838,11 +2838,11 @@ pub fn allocate_indirect_block(
                     let bh = bio::bread(fs.device, double_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                    for byte in (*bh).b_data.iter_mut() {
+                    for byte in bio::bh_data_mut(&bh).iter_mut() {
                         *byte = 0;
                     }
 
-                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                     // Family b: journal registration (metadata zeroing).
                     if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
                         let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
@@ -2876,11 +2876,11 @@ pub fn allocate_indirect_block(
                     let bh = bio::bread(fs.device, indirect_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                    for byte in (*bh).b_data.iter_mut() {
+                    for byte in bio::bh_data_mut(&bh).iter_mut() {
                         *byte = 0;
                     }
 
-                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                     // Family b: journal registration (metadata zeroing).
                     if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
                         let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
@@ -3398,12 +3398,11 @@ fn ext4_sync_file_inner(
             if bio::block_absent_durable(fs.device, block) {
                 continue;
             }
-            // SAFETY: bio::bread returns a valid BufferHead on success.
-            unsafe {
+            {
                 let bh = bio::bread(fs.device, block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let sync_res = if (*bh).is_dirty() {
+                let sync_res = if bio::bh_is_dirty(&bh) {
                     bio::sync_dirty_buffer(bh)
                 } else {
                     Ok(())
@@ -3482,7 +3481,7 @@ fn ext4_sync_file_inner(
         if !inode.has_extent() {
             // SAFETY: bio::bread returns valid BufferHeads; the indirect
             // blocks are plain metadata blocks of this inode.
-            unsafe {
+            {
                 let mut chain = [0u64; 2];
                 if inode.block[12] != 0 {
                     chain[0] = inode.block[12] as u64;
@@ -3499,7 +3498,7 @@ fn ext4_sync_file_inner(
                         None => continue,
                     };
                     // Sync the top-level indirect block itself.
-                    if (*bh).is_dirty() {
+                    if bio::bh_is_dirty(&bh) {
                         let _ = bio::sync_dirty_buffer(bh);
                     }
                     // Double-indirect: sync each pointed single-indirect
@@ -3508,7 +3507,7 @@ fn ext4_sync_file_inner(
                         let ppc = (fs.block_size / 4) as usize;
                         for i in 0..ppc {
                             let v = {
-                                let src = &(*bh).b_data;
+                                let src = bio::bh_data(&bh);
                                 let mut b4 = [0u8; 4];
                                 let end = (i * 4 + 4).min(src.len());
                                 if i * 4 < end {
@@ -3519,7 +3518,7 @@ fn ext4_sync_file_inner(
                             };
                             if v != 0 {
                                 if let Some(sb) = bio::bread(fs.device, v) {
-                                    if (*sb).is_dirty() {
+                                    if bio::bh_is_dirty(&sb) {
                                         let _ = bio::sync_dirty_buffer(sb);
                                     }
                                     bio::brelse(sb);
@@ -5608,13 +5607,13 @@ pub fn ext4_flush_dirty_inode(
             let (mj, mi) = { ((*dev).major, (*dev).first_minor) };
             // SAFETY: probe/pin of the fs's ITB cache block; the pin is
             // balanced inside submit_span's settle (or the put below).
-            unsafe {
+            {
                 if bio::block_dirty_cached(dev, tbl_blk) {
                     let cache = crate::fs::bio::get_block_cache();
                     if let Some(bh) = cache.peek_buffer((mj, mi), tbl_blk) {
-                        if (*bh).is_dirty() {
+                        if bio::bh_is_dirty(&bh) {
                             let mut bhs = alloc::vec![bh];
-                            let bytes: &[u8] = &(*bh).b_data;
+                            let bytes: &[u8] = bio::bh_data(&bh);
                             flusher.submit_span(
                                 dev,
                                 tbl_blk * (4096 / 512),
@@ -5896,8 +5895,8 @@ impl SpanFlusher {
                     for &bh in bhs.iter() {
                         // SAFETY: bh is a pinned cached BufferHead whose
                         // content just persisted.
-                        unsafe {
-                            (*bh).clear_state_bit(crate::fs::bio::BufferState::BH_Dirty)
+                        {
+                            bio::bh_clear_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty)
                         };
                     }
                 }
@@ -5941,7 +5940,7 @@ impl SpanFlusher {
                 for &bh in bhs.iter() {
                     // SAFETY: bh is a pinned cached BufferHead; b_data is
                     // its block-sized buffer.
-                    let cur = unsafe { &(*bh).b_data };
+                    let cur = bio::bh_data(&bh);
                     if !snap.is_empty() {
                         if snap.len() - off < cur.len() || cur[..] != snap[off..off + cur.len()] {
                             // Settle guard tripped: the buffer changed
@@ -5960,8 +5959,8 @@ impl SpanFlusher {
                         // SAFETY: bh is a pinned cached BufferHead; the
                         // span's device write was acked AND the buffer
                         // still matches the persisted bytes.
-                        unsafe {
-                            (*bh).clear_state_bit(crate::fs::bio::BufferState::BH_Dirty)
+                        {
+                            bio::bh_clear_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty)
                         };
                     }
                 }
@@ -6049,7 +6048,7 @@ fn run_sync_spans(
                 for &bh in span_bhs.iter() {
                     // SAFETY: bh is pinned (peek_buffer) and holds a
                     // 4096-byte b_data Vec.
-                    let src = unsafe { &(*bh).b_data };
+                    let src = bio::bh_data(&bh);
                     stage[dst_off..dst_off + src.len()].copy_from_slice(src);
                     dst_off += src.len();
                 }
@@ -6093,7 +6092,7 @@ fn run_sync_spans(
                 continue;
             }
         };
-        let dirty = unsafe { (*bh).is_dirty() };
+        let dirty = bio::bh_is_dirty(&bh);
         if !dirty {
             { cache.put(bh) };
             close_span!();

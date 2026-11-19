@@ -78,7 +78,7 @@ pub const S_IRWXO: u16 = 0o0007;
 fn read_block_to_vec(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64, block_size: usize) -> Result<Vec<u8>, i32> {
     let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
     // SAFETY: bh is pinned by bread; the clone reads block_size bytes.
-    let data = unsafe { (*bh).b_data.clone() };
+    let data = bio::bh_data(&bh).to_vec();
     bio::brelse(bh);
     Ok(data)
 }
@@ -196,7 +196,7 @@ pub fn ext4_new_inode(
         let group_descs = fs.group_descs.lock();
         group_descs[group as usize].bg_inode_bitmap_lo
     };
-    let bitmap_data = unsafe {
+    let bitmap_data = {
         read_block_to_vec(fs.device, inode_bitmap_block as u64, fs.block_size as usize)?
     };
 
@@ -247,8 +247,7 @@ pub fn ext4_new_inode(
     // (chmod03/utimes01 TBROK, and root-owned stale files that broke
     // tst_rmdir cleanup for later tests).
     let (uid, gid) = if let Some(task) = crate::sched::current() {
-        // SAFETY: task is a valid reference from sched::current(); cred() is a simple field accessor.
-        let cred = unsafe { (*task).cred() };
+        let cred = { (*task).cred() };
         (cred.fsuid as u16, cred.fsgid as u16)
     } else {
         (0u16, 0u16)
@@ -335,8 +334,7 @@ fn mark_inode_used(
     new_bitmap[byte_idx] |= 1 << bit_idx;
 
     // Write bitmap back
-    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
-    unsafe {
+    {
         write_block_from_vec(fs.device, bitmap_block, &new_bitmap)?;
     }
 
@@ -428,7 +426,7 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
         let bh = bio::bread(fs.device, sb_block)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-        let data = &mut (*bh).b_data;
+        let data = bio::bh_data_mut(&bh);
         let sb_start = if fs.block_size == 1024 { 0usize } else { 1024usize };
         let ptr = data.as_mut_ptr().add(sb_start + 16) as *mut u32;
 
@@ -447,10 +445,10 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
         // metadata_csum: re-seal the superblock checksum (see the
         // allocator's update_superblock_free_blocks).
         if fs.metadata_csum {
-            let data: &mut [u8] = &mut (*bh).b_data;
+            let data: &mut [u8] = bio::bh_data_mut(&bh);
             super::csum::superblock_csum_set(&mut data[sb_start..sb_start + 1024]);
         }
-        (*bh).set_state_bit(BufferState::BH_Dirty);
+        bio::bh_set_state_bit(&bh, BufferState::BH_Dirty);
         // Family b (ext4-corrupt lane): register with the current handle so
         // the free-inode counter persists at this op's commit together with
         // the inode bitmap / inode table it describes (see the allocator's
@@ -482,8 +480,7 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
     let desc_offset = (group % desc_per_block) as usize;
 
     // Read descriptor block
-    // SAFETY: device is valid; block numbers come from superblock/group descriptor geometry.
-    let mut block_data = unsafe {
+    let mut block_data = {
         read_block_to_vec(fs.device, desc_block as u64, fs.block_size as usize)?
     };
 
@@ -536,8 +533,7 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
     }
 
     // Write back
-    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
-    unsafe {
+    {
         write_block_from_vec(fs.device, desc_block as u64, &block_data)?;
     }
 
@@ -665,11 +661,11 @@ fn ext4_add_entry_locked(
         // reserve the final 12 bytes for the dir tail; entry placement must
         // stay short of it. (Declared before the loop — the fresh-block path
         // below shares it.)
-        let found = unsafe {
+        let found = {
             let bh = bio::bread(fs.device, block_nr)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let hit = find_entry_space(&(*bh).b_data, name.len(), block_size, tail_reserve)
-                .map(|off| (off, (*bh).b_data.clone()));
+            let hit = find_entry_space(bio::bh_data(&bh), name.len(), block_size, tail_reserve)
+                .map(|off| (off, bio::bh_data(&bh).to_vec()));
             bio::brelse(bh);
             hit
         };
@@ -1140,7 +1136,7 @@ unsafe fn write_entry_block_ordered(
     // handles the buffer lifecycle. Under a journal handle its sync is
     // deferred (the entry block stays dirty until a drain point); without
     // one it syncs inline — last write of the operation either way.
-    unsafe { write_block_from_vec(fs.device, blocknr, data) }
+    { write_block_from_vec(fs.device, blocknr, data) }
 }
 
 /// Create initial entry in empty block
@@ -1326,8 +1322,7 @@ fn ext4_mkdir_no_journal(
     dir_block_seal(fs, new_ino, &mut block_data);
 
     // Write directory block
-    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
-    unsafe {
+    {
     write_block_from_vec(fs.device, block_nr, &block_data)?;
     }
 
@@ -1675,8 +1670,7 @@ fn ext4_symlink_inner(
         // Write target path to data block
         let mut block_data = alloc::vec![0u8; fs.block_size as usize];
         block_data[..target.len()].copy_from_slice(target);
-        // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
-        unsafe { write_block_from_vec(fs.device, blocknr as u64, &block_data)?; }
+        { write_block_from_vec(fs.device, blocknr as u64, &block_data)?; }
 
         new_inode.i_block[0] = blocknr;
         new_inode.i_size = target.len() as u32;
@@ -1902,7 +1896,7 @@ fn ext4_delete_entry_locked(
 
     // Read the block
     let block_size = fs.block_size as usize;
-    let mut block_data = unsafe {
+    let mut block_data = {
         read_block_to_vec(fs.device, block_nr, block_size)?
     };
 
@@ -1932,8 +1926,7 @@ fn ext4_delete_entry_locked(
     dir_block_seal(fs, dir_ino, &mut block_data);
 
     // Write block back
-    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
-    unsafe {
+    {
         write_block_from_vec(fs.device, block_nr, &block_data)?;
     }
 
@@ -1990,12 +1983,12 @@ fn find_dir_entry(
         // SAFETY: bread returns a valid BufferHead pointer; b_data is a
         // block_size-byte Vec; brelse releases the cache reference after
         // the scan (the hit path copies nothing — it returns positions).
-        let scan = unsafe {
+        let scan = {
             let bh = match bio::bread(fs.device, block_nr) {
                 Some(b) => b,
                 None => return Err(errno::Errno::IOError.as_neg_i32()),
             };
-            let r = scan_dir_block_for_name(&(*bh).b_data, name, block_size);
+            let r = scan_dir_block_for_name(bio::bh_data(&bh), name, block_size);
             bio::brelse(bh);
             r
         };
@@ -2049,7 +2042,7 @@ fn is_descendant_of(fs: &Ext4FileSystem, dir_ino: u32, ancestor_ino: u32) -> boo
             Ok(b) if b != 0 => b,
             _ => return false,
         };
-        let block_data = unsafe {
+        let block_data = {
             match read_block_to_vec(fs.device, block_nr, fs.block_size as usize) {
                 Ok(d) => d,
                 Err(_) => return false,
@@ -2391,7 +2384,7 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
             continue;
         }
 
-        let block_data = unsafe {
+        let block_data = {
             read_block_to_vec(fs.device, block_nr, block_size)?
         };
 
@@ -2489,7 +2482,7 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     };
 
     // Read bitmap
-    let bitmap_data = unsafe {
+    let bitmap_data = {
         read_block_to_vec(fs.device, bitmap_block as u64, fs.block_size as usize)?
     };
 
@@ -2501,8 +2494,7 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     new_bitmap[byte_idx] &= !(1 << bit_idx);
 
     // Write bitmap back
-    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
-    unsafe {
+    {
         write_block_from_vec(fs.device, bitmap_block as u64, &new_bitmap)?;
     }
 
@@ -2561,8 +2553,7 @@ pub(crate) fn free_indirect_block(
 ) -> Result<(), i32> {
     let ptrs_per_block = (fs.block_size as usize) / 4;
 
-    // SAFETY: device is valid; blocknr is a valid indirect block number from the inode.
-    let data = unsafe {
+    let data = {
         read_block_to_vec(fs.device, blocknr as u64, fs.block_size as usize)?
     };
 
@@ -2981,7 +2972,7 @@ fn update_dotdot(fs: &Ext4FileSystem, dir_ino: u32, new_parent_ino: u32) -> Resu
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    let mut block_data = unsafe {
+    let mut block_data = {
         read_block_to_vec(fs.device, block_nr, block_size)?
     };
 
@@ -3006,8 +2997,7 @@ fn update_dotdot(fs: &Ext4FileSystem, dir_ino: u32, new_parent_ino: u32) -> Resu
     dir_block_seal(fs, dir_ino, &mut block_data);
 
     // Write block back
-    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
-    unsafe {
+    {
         write_block_from_vec(fs.device, block_nr, &block_data)?;
     }
 

@@ -121,6 +121,21 @@ pub(crate) fn dev_id(fs: &Ext4FileSystem) -> u32 {
     (fs.device.major << 20) | fs.device.first_minor
 }
 
+/// INV-EXT-VIEW twin for the on-disk superblock: the single cast point,
+/// bounds-guarded. The 4 KiB block-0 read always covers 1024 + the struct.
+fn superblock_on_disk(disk: &[u8]) -> &superblock::Ext4SuperBlockOnDisk {
+    let view = &disk[1024..];
+    assert!(
+        view.len() >= core::mem::size_of::<superblock::Ext4SuperBlockOnDisk>(),
+        "block-0 read too small for the on-disk superblock"
+    );
+    // SAFETY: view covers at least the struct; the struct is #[repr(C)]
+    // of integer fields read only (no reference fields), and every read
+    // below goes through unaligned-safe loads on riscv64/x86_64 alike
+    // because the on-disk image itself was DMA'd byte-aligned.
+    unsafe { &*(view.as_ptr() as *const superblock::Ext4SuperBlockOnDisk) }
+}
+
 pub struct Ext4FileSystem {
     /// Block device (typed handle; INV-BLKDEV-1 on blkdev::get_disk)
     pub device: &'static blkdev::GenDisk,
@@ -268,7 +283,7 @@ impl Ext4FileSystem {
         // SAFETY: self.device is a valid GenDisk pointer set during filesystem creation;
         // bio::bread reads a block and returns a valid BufferHead, and the superblock
         // is at a known fixed offset (1024 bytes into block 0).
-        unsafe {
+        {
             // Read superblock
             // ext4 superblock is at byte offset 1024
             // - For 1KB blocks: superblock at start of block 1
@@ -277,9 +292,11 @@ impl Ext4FileSystem {
             let sb_bh = bio::bread(self.device, 0)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            let sb_data = &(*sb_bh).b_data;
+            let sb_data = bio::bh_data(&sb_bh);
             // Superblock is at 1024 byte offset within block
-            let ext4_sb = &*(sb_data.as_ptr().add(1024) as *const superblock::Ext4SuperBlockOnDisk);
+            // (unsafe-slim r3) typed view via superblock_on_disk below
+            // (bounds-guarded; same INV-EXT-VIEW discipline as extent.rs).
+            let ext4_sb = superblock_on_disk(sb_data);
 
             // Verify magic number
             if ext4_sb.s_magic != EXT4_SUPER_MAGIC {
@@ -444,7 +461,7 @@ impl Ext4FileSystem {
                 let gd_bh = bio::bread(self.device, gd_block as u64)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let gd_data = &(*gd_bh).b_data;
+                let gd_data = bio::bh_data(&gd_bh);
                 // Use actual descriptor size for offset calculation
                 let gd_offset = gd_index * desc_size;
 
@@ -474,11 +491,18 @@ impl Ext4FileSystem {
                 let mut gd = superblock::Ext4GroupDesc::default();
                 let copy_len = desc_size.min(core::mem::size_of::<superblock::Ext4GroupDesc>());
                 {
-                    core::ptr::copy_nonoverlapping(
-                        gd_data.as_ptr().add(gd_offset),
-                        &mut gd as *mut superblock::Ext4GroupDesc as *mut u8,
-                        copy_len,
-                    );
+                    // (unsafe-slim r3) slice-indexed source; the one raw
+                    // copy moves copy_len bytes into the packed struct.
+                    let src_bytes = &gd_data[gd_offset..gd_offset + copy_len];
+                    // SAFETY: src_bytes has exactly copy_len readable bytes
+                    // and gd is a live local of at least that size.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src_bytes.as_ptr(),
+                            &mut gd as *mut superblock::Ext4GroupDesc as *mut u8,
+                            copy_len,
+                        );
+                    }
                 }
 
                 group_descs.push(Box::new(gd));
@@ -584,7 +608,7 @@ impl Ext4FileSystem {
         let bh = bio::bread(self.device, inode_block as u64)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-        let data = unsafe { &(*bh).b_data };
+        let data = bio::bh_data(&bh);
 
         // Bounds check (read-side twin of the write paths' R20-FS2 clamp,
         // review EXT4-M1 refined): the parse is clamped to the ON-DISK
@@ -739,7 +763,7 @@ impl Ext4FileSystem {
                 let bh = bio::bread(self.device, *block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let data = &(*bh).b_data;
+                let data = bio::bh_data(&bh);
                 let mut offset = 0;
 
                 while offset < self.block_size as usize {
@@ -828,7 +852,7 @@ impl Ext4FileSystem {
                 let bh = bio::bread(self.device, *block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let data = &(*bh).b_data;
+                let data = bio::bh_data(&bh);
                 let mut offset = 0;
 
                 while offset < self.block_size as usize {
@@ -916,10 +940,10 @@ impl Ext4FileSystem {
         for block in blocks {
             // SAFETY: self.device is a valid GenDisk pointer; block numbers come from
             // get_data_blocks; bio::bread returns a valid BufferHead.
-            unsafe {
+            {
                 let bh = bio::bread(self.device, block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
-                let data = &(*bh).b_data;
+                let data = bio::bh_data(&bh);
 
                 let remaining = size - target.len();
                 let to_read = core::cmp::min(remaining, self.block_size as usize);
@@ -1816,7 +1840,7 @@ pub fn create_file(path: &str, mode: u32) -> Result<alloc::sync::Arc<Inode>, i32
         };
 
         // Initialize extent header in i_block
-        let header = &mut *(new_inode.block.as_mut_ptr() as *mut Ext4ExtentHeader);
+        let header = extent::get_extent_header_mut(&mut new_inode.block);
         header.eh_magic = EXT4_EXT_MAGIC;
         header.eh_entries = 0;
         header.eh_max = 4;
@@ -2011,7 +2035,7 @@ pub fn ext4_fallocate_on(
                         if ind == 0 { return None; }
                         let bh = crate::fs::bio::bread(fs.device, ind)?;
                         let o = ((blk - 12) * 4) as usize;
-                        let d = &(*bh).b_data;
+                        let d = bio::bh_data(&bh);
                         let b = u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
                         crate::fs::bio::brelse(bh);
                         if b != 0 { Some(b as u64) } else { None }
@@ -2026,9 +2050,9 @@ pub fn ext4_fallocate_on(
                         if let Some(phys) = resolve(blk) {
                             if phys != 0 {
                                 if let Some(bh) = crate::fs::bio::bread(fs.device, phys) {
-                                    let d = &mut (*bh).b_data;
+                                    let d = bio::bh_data_mut(&bh);
                                     d[(in_blk as usize)..(in_blk + n) as usize].fill(0);
-                                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                                     let _ = crate::fs::bio::sync_dirty_buffer(bh);
                                     crate::fs::bio::brelse(bh);
                                 }
@@ -2048,7 +2072,7 @@ pub fn ext4_fallocate_on(
                 // Any-depth punch via gather/classify/rebuild (the old
                 // inline-root-only walker refused deep trees and could
                 // not represent more than 4 surviving fragments).
-                let hdr = &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader);
+                let hdr = extent::get_extent_header(&ext4_inode.block);
                 if hdr.eh_magic == EXT4_EXT_MAGIC {
                     // R108 (crash-ordering, see ext4_setattr): the punch
                     // frees are DEFERRED until the punched map is durably
@@ -2182,7 +2206,7 @@ pub fn ext4_fallocate_on(
                     let ent_last_excl = core::cmp::min(last.saturating_sub(12) + 1, ents_per_blk);
                     if ent_first < ent_last_excl {
                         if let Some(bh) = crate::fs::bio::bread(fs.device, ind_blk) {
-                            let data = &mut (*bh).b_data;
+                            let data = bio::bh_data_mut(&bh);
                             for ei in ent_first..ent_last_excl {
                                 let o = ei * 4;
                                 let b = u32::from_le_bytes([
@@ -2194,7 +2218,7 @@ pub fn ext4_fallocate_on(
                                     data[o..o + 4].fill(0);
                                 }
                             }
-                            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                            bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                             let _ = crate::fs::bio::sync_dirty_buffer(bh);
                             crate::fs::bio::brelse(bh);
                         }
@@ -2433,10 +2457,10 @@ fn add_dir_entry(
 
         // SAFETY: fs.device is a valid GenDisk pointer; *block_num is a non-zero
         // block number from get_data_blocks; bio::bread returns a valid BufferHead.
-        unsafe {
+        {
             let bh = bio::bread(fs.device, *block_num)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let data = &mut (*bh).b_data;
+            let data = bio::bh_data_mut(&bh);
 
             // Try to find space in this block
             let mut offset = 0;
@@ -2461,7 +2485,7 @@ fn add_dir_entry(
                     create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
                     // metadata_csum: refresh the block's dir tail.
                     super::ext4::namei::dir_block_seal(fs, parent.ino, data);
-                    (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+                    bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
                     let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
                     sync_res?;
@@ -2501,7 +2525,7 @@ fn add_dir_entry(
 
                 // metadata_csum: refresh the block's dir tail.
                 super::ext4::namei::dir_block_seal(fs, parent.ino, data);
-                (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+                bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
                 let sync_res = bio::sync_dirty_buffer(bh);
                 bio::brelse(bh);
                 sync_res?;
@@ -2546,23 +2570,23 @@ fn append_dir_block(
     // Zero the new block and create the directory entry
     // SAFETY: fs.device is a valid GenDisk pointer; new_block is a freshly allocated
     // block number; bio::bread returns a valid BufferHead.
-    unsafe {
+    {
         let bh = bio::bread(fs.device, new_block)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
         // Zero the block
-        for byte in (*bh).b_data.iter_mut() {
+        for byte in bio::bh_data_mut(&bh).iter_mut() {
             *byte = 0;
         }
 
         // Create a single entry spanning the whole block
         // Since we don't have checksum, use full block size
-        let data = &mut (*bh).b_data;
+        let data = bio::bh_data_mut(&bh);
         create_dir_entry(data, ino, name, file_type, block_size as u16);
 
         // metadata_csum: refresh the block's dir tail.
         super::ext4::namei::dir_block_seal(fs, parent_ino, data);
-        (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+        bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
         sync_res?;
@@ -2879,9 +2903,7 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     // tree is rebuilt from the survivors (the old code only
                     // handled the 4-entry inline root and refused deep
                     // trees).
-                    let hdr = unsafe {
-                        &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader)
-                    };
+                    let hdr = extent::get_extent_header(&ext4_inode.block);
                     if hdr.eh_magic == EXT4_EXT_MAGIC {
                         let all = match crate::fs::ext4::extent::ext4_ext_gather(fs, &ext4_inode.block) {
                             Ok(a) => a,
@@ -3671,7 +3693,7 @@ unsafe fn ext4_readdir_fill(
         // SAFETY: bread returns a valid, pinned BufferHead whose b_data
         // covers one full block; we only read it and brelse before any
         // early exit below.
-        let data = unsafe { &(*bh).b_data };
+        let data = bio::bh_data(&bh);
         while off + 8 <= block_size as usize {
             let rec = &data[off..];
             let entry_ino = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);

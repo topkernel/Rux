@@ -834,7 +834,7 @@ impl BlockCache {
                                 static DUPR: AtomicUsize = AtomicUsize::new(0);
                                 if DUPR.fetch_add(1, Ordering::Relaxed) < 20 {
                                     let msg = b"EXT-HUNT-BHDUP blk=";
-                                    unsafe {
+                                    {
                                         for &b in msg {
                                             crate::console::putchar_no_lock(b);
                                         }
@@ -867,7 +867,7 @@ impl BlockCache {
                         // and treat as a miss so the caller re-reads.
                         if entry.bh().is_none_or(|bh| bh.b_data.len() != self.block_size as usize) {
                             let msg = b"bio: dead bh in chain blk=";
-                            unsafe {
+                            {
                                 for &b in msg { crate::console::putchar_no_lock(b); }
                                 let mut v = blocknr;
                                 let mut digs = [0u8; 20];
@@ -1417,6 +1417,53 @@ pub fn get_block_cache() -> &'static BlockCache {
 /// Read a block from cache (or disk if not cached)
 ///
 /// Read a block from cache (or disk if not cached)
+// ============================================================================
+// INV-BIO-BHREF (unsafe-slim r3): typed borrows of a PINED raw BufferHead
+// handle. bread/bread_async hand out *mut BufferHead with the refcount pin
+// (b_count >= 1); the pin holds until brelse. These accessors confine the
+// raw deref to one marked span each; the returned borrow ties to the
+// caller's handle borrow, so the pin window stays compiler-visible at the
+// call site. (Local minimal primitive; consolidate with the KPtr/StaticRef
+// family the sibling lane is landing.)
+// ============================================================================
+
+/// Shared view of a pinned buffer's data block.
+pub fn bh_data<'a>(bh: &'a *mut BufferHead) -> &'a [u8] {
+    // SAFETY: bread-family contract — non-null, pinned until brelse; the
+    // borrow outlives only the caller's handle borrow.
+    unsafe { &(*(*bh)).b_data }
+}
+
+/// Exclusive view of a pinned buffer's data block (read-modify-write).
+pub fn bh_data_mut<'a>(bh: &'a *mut BufferHead) -> &'a mut [u8] {
+    // SAFETY: as bh_data; exclusive borrow of the caller's handle.
+    unsafe { &mut (*(*bh)).b_data }
+}
+
+/// Block number of a pinned buffer (metadata loops).
+pub fn bh_blocknr(bh: &*mut BufferHead) -> u64 {
+    // SAFETY: as bh_data.
+    unsafe { (*(*bh)).b_blocknr }
+}
+
+/// State-bit set on a pinned buffer (dirty marking).
+pub fn bh_set_state_bit(bh: &*mut BufferHead, bit: u8) {
+    // SAFETY: as bh_data.
+    unsafe { (*(*bh)).set_state_bit(bit) }
+}
+
+/// State-bit clear on a pinned buffer.
+pub fn bh_clear_state_bit(bh: &*mut BufferHead, bit: u8) {
+    // SAFETY: as bh_data.
+    unsafe { (*(*bh)).clear_state_bit(bit) }
+}
+
+/// Dirty query on a pinned buffer.
+pub fn bh_is_dirty(bh: &*mut BufferHead) -> bool {
+    // SAFETY: as bh_data.
+    unsafe { (*(*bh)).is_dirty() }
+}
+
 pub fn bread(device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     crate::dfx::fsw::note_bread();
     get_block_cache().get(device, blocknr)
@@ -2741,8 +2788,7 @@ pub fn sync_dirty_blocks_batched(
         // Ordered-publication guard: constrained blocks take the serial
         // path that satisfies their pre/entry/post obligations first.
         if publication_constrained(mj, mi, blk) {
-            // SAFETY: bh is pinned; sync_dirty_buffer handles ordering.
-            unsafe {
+            {
                 let _ = sync_dirty_buffer(bh);
                 get_block_cache().put(bh);
             }
@@ -2761,8 +2807,7 @@ pub fn sync_dirty_blocks_batched(
             if retried {
                 pinned.push(bh);
             } else {
-                // SAFETY: persistent window lag — serial fallback.
-                unsafe {
+                {
                     let _ = sync_dirty_buffer(bh);
                     get_block_cache().put(bh);
                 }
@@ -3181,7 +3226,7 @@ fn publication_capture_note_dirty(
     };
     // SAFETY: journal_handle is set/cleared by this task around the
     // enclosing ext4 operation; it is null outside one.
-    let hptr = unsafe { (*task).journal_handle.get() };
+    let hptr = { (*task).journal_handle.get() };
     if hptr.is_null() {
         return;
     }
