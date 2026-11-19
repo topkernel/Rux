@@ -552,32 +552,51 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
         return; // keep the previous rsp0
     }
     if top != 0 && (top < HEAP_LO || top >= HEAP_HI || top & 0xF != 0) {
-        use crate::console::putchar_no_lock as putchar;
-        const MSG: &[u8] = b"\nR64-BAD-RSP0 task=0x";
-        // SAFETY: raw console write, no locks, no allocation.
-        unsafe {
-            for &b in MSG {
-                putchar(b);
+        // R87 (stale-rsp0 feeder, oh-launch round 10): the idle tasks run
+        // on the STATIC per-CPU boot stacks (smp::AP_BOOT_STACKS), whose
+        // tops legitimately fail the heap-range screen — this leg silently
+        // kept the PREVIOUS task's rsp0 on every switch to idle, leaving a
+        // dying task's top installed while its stack was freed and
+        // recycled (the live-stack foreign-content writer fr3 caught with
+        // STACKFREE-LIVE-RSP0). Accept the boot-stack range explicitly.
+        let (bs_lo, bs_hi) = super::smp::ap_boot_stacks_range();
+        let static_boot_stack = (top as usize) >= bs_lo && (top as usize) < bs_hi;
+        if !static_boot_stack || top & 0xF != 0 {
+            // Raw-uart bounded report (the old print was putchar_no_lock —
+            // blind on release builds; the campaign's sixth blind printer):
+            // a genuinely out-of-range top is corruption-class evidence.
+            static BADRSP0_SEEN: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = BADRSP0_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 64 {
+                crate::dfx::taskdump::taskdump_raw_line(b"R64-BAD-RSP0 task=0x");
+                let mut v = task as u64;
+                let mut sh: i32 = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((v >> sh) & 0xF) as u8;
+                    crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 {
+                        b'0' + nb
+                    } else {
+                        b'a' + nb - 10
+                    })]);
+                }
+                crate::dfx::taskdump::taskdump_raw_line(b" top=0x");
+                let mut v2 = top;
+                let mut sh2: i32 = 64;
+                while sh2 > 0 {
+                    sh2 -= 4;
+                    let nb = ((v2 >> sh2) & 0xF) as u8;
+                    crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 {
+                        b'0' + nb
+                    } else {
+                        b'a' + nb - 10
+                    })]);
+                }
+                crate::dfx::taskdump::taskdump_raw_line(b"\n");
             }
-            let mut v = task as u64;
-            for _ in 0..16 {
-                let n = (v >> 60) as u8;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                v <<= 4;
-            }
-            const M2: &[u8] = b" top=0x";
-            for &b in M2 {
-                putchar(b);
-            }
-            let mut v = top;
-            for _ in 0..16 {
-                let n = (v >> 60) as u8;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                v <<= 4;
-            }
-            putchar(b'\n');
+            return; // keep the previous (valid) rsp0
         }
-        return; // keep the previous (valid) rsp0
     }
     super::trap::set_tss_rsp0(top);
 }
