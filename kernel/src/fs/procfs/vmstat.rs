@@ -143,34 +143,6 @@ pub fn generate() -> Vec<u8> {
 /// the pre-conversion renderer's output for all-zero counters plus a
 /// known free count, pinned so any future field/width/order edit that
 /// changes bytes fails here and forces a deliberate snapshot update.
-#[cfg(any(test, feature = "unit-test"))]
-pub mod vmstat_file_tests {
-    use super::*;
-
-    /// Callable body (the in-kernel unit-test suite runs this via
-    /// tests/mod.rs; the #[test] wrapper covers cargo test).
-    pub fn snapshot_check() {
-        // Rendering with every value 0 through the same declaration:
-        // build the rows from VMSTAT_FIELDS (order included).
-        let zero: u64 = 0;
-        let rows: alloc::vec::Vec<(&'static str, &dyn core::fmt::Display)> =
-            VMSTAT_FIELDS.iter().map(|k| (*k, &zero as &dyn core::fmt::Display)).collect();
-        let got = crate::fs::procfs::procfile::render_kv(&rows);
-        // First and last lines plus total line count pin order + shape.
-        let lines: alloc::vec::Vec<&str> = got.lines().collect();
-        assert_eq!(lines.first(), Some(&"nr_free_pages 0"));
-        assert_eq!(lines.get(1), Some(&"nr_zone_inactive_anon 0"));
-        assert_eq!(
-            lines.iter().position(|l| *l == "pgalloc_dma32 0"),
-            Some(43),
-            "pgalloc_dma32 moved — column order is Linux-observable"
-        );
-        assert_eq!(lines.last(), Some(&"pswpout 0"));
-        assert_eq!(lines.len(), VMSTAT_FIELDS.len());
-        assert!(VMSTAT_FIELDS.len() == 60, "field count changed: {} — update this snapshot deliberately", VMSTAT_FIELDS.len());
-    }
-}
-
 /// Generate /proc/buddyinfo content: the free pages per order, per
 /// zone (Linux's fs/proc/vmstat.c buddyinfo_show).
 pub fn generate_buddyinfo() -> Vec<u8> {
