@@ -466,9 +466,8 @@ pub fn inotify_init1(flags: u32) -> Result<usize, i32> {
     // close op reclaims it (pipe.rs discipline).
     file.set_private_data(Arc::into_raw(instance) as *mut u8);
 
-    // SAFETY: get_file_fd_install installs the Arc<File> into the current
-    // task's fd table (well-defined safe-to-call syscall-layer helper).
-    match unsafe { get_file_fd_install(file) } {
+    // (unsafe-slim r3) get_file_fd_install is safe (un-signed, verified).
+    match get_file_fd_install(file) {
         Some(fd) => {
             if flags & IN_CLOEXEC != 0 {
                 crate::fs::set_cloexec_fd(fd, true);

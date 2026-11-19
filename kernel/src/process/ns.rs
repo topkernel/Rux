@@ -1100,11 +1100,9 @@ fn ns_file_content(handle: &NsRef) -> Vec<u8> {
 /// read() returns "<kind>:[<inum>]\n".
 pub fn open_ns_file(pid: u32, kind: NsKind, flags: u32) -> Result<usize, i32> {
     let file = build_ns_file(pid, kind, flags)?;
-    // SAFETY: installs the returned Arc<File> into the caller's fd table.
-    unsafe {
-        crate::fs::file::get_file_fd_install(file)
-            .ok_or(crate::errno::Errno::TooManyOpenFiles.as_neg_i32())
-    }
+    // (unsafe-slim r3) get_file_fd_install is safe (un-signed, verified).
+    crate::fs::file::get_file_fd_install(file)
+        .ok_or(crate::errno::Errno::TooManyOpenFiles.as_neg_i32())
 }
 
 /// Build the ns descriptor File for (pid, kind) without installing an fd

@@ -1732,7 +1732,9 @@ pub fn get_file_fd_safe(fd: usize) -> Option<Arc<File>> {
     unsafe { get_file_fd(fd) }
 }
 
-pub unsafe fn get_file_fd_install(file: Arc<File>) -> Option<usize> {
+/// (unsafe-slim r3) un-signed: parameters are safe (Arc<File>) and the
+/// body runs only safe operations — the `unsafe` was vestigial.
+pub fn get_file_fd_install(file: Arc<File>) -> Option<usize> {
     use crate::sched;
     // (perf-path lane) single entry-lock alloc+install — see
     // install_lowest_fd.

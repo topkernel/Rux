@@ -1548,22 +1548,27 @@ fn bind_clone_attach(
                         Some(o) => o,
                         None => return,
                     };
-                    let child_inode = match unsafe {
-                        let ino = match ops.lookup {
-                            Some(f) => match f(&*dir_inode, comp.as_bytes()) {
-                                Ok(ino) => Some(ino),
-                                // absent on disk — try source side
-                                Err(_) => None,
-                            },
-                            None => None,
+                    let child_inode = match {
+                        // INV-VFSOPS-1 dispatchers (best-effort clone
+                        // attach: every miss maps to None — try source side).
+                        let ino = match ops.call_lookup(
+                            &*dir_inode,
+                            comp.as_bytes(),
+                            Err(errno::Errno::NoSuchFileOrDirectory),
+                        ) {
+                            // absent on disk — try source side
+                            Err(_) => None,
+                            Ok(ino) => Some(ino),
                         };
                         match ino {
-                            Some(ino) => match ops.iget {
-                                Some(f) => match f(&*dir_inode, comp.as_bytes(), ino) {
-                                    Ok(i) => Some(i),
-                                    Err(_) => None,
-                                },
-                                None => None,
+                            Some(ino) => match ops.call_iget(
+                                &*dir_inode,
+                                comp.as_bytes(),
+                                ino,
+                                Err(errno::Errno::NoSuchFileOrDirectory),
+                            ) {
+                                Ok(i) => Some(i),
+                                Err(_) => None,
                             },
                             None => None,
                         }
@@ -1642,22 +1647,27 @@ fn bind_clone_attach(
                     Some(o) => o,
                     None => return,
                 };
-                let child_inode = match unsafe {
-                    let ino = match ops.lookup {
-                        Some(f) => match f(&*dir_inode, comp.as_bytes()) {
-                            Ok(ino) => Some(ino),
-                            // absent on disk — try source side
-                            Err(_) => None,
-                        },
-                        None => None,
+                let child_inode = match {
+                    // INV-VFSOPS-1 dispatchers (best-effort clone
+                    // attach: every miss maps to None — try source side).
+                    let ino = match ops.call_lookup(
+                        &*dir_inode,
+                        comp.as_bytes(),
+                        Err(errno::Errno::NoSuchFileOrDirectory),
+                    ) {
+                        // absent on disk — try source side
+                        Err(_) => None,
+                        Ok(ino) => Some(ino),
                     };
                     match ino {
-                        Some(ino) => match ops.iget {
-                            Some(f) => match f(&*dir_inode, comp.as_bytes(), ino) {
-                                Ok(i) => Some(i),
-                                Err(_) => None,
-                            },
-                            None => None,
+                        Some(ino) => match ops.call_iget(
+                            &*dir_inode,
+                            comp.as_bytes(),
+                            ino,
+                            Err(errno::Errno::NoSuchFileOrDirectory),
+                        ) {
+                            Ok(i) => Some(i),
+                            Err(_) => None,
                         },
                         None => None,
                     }
@@ -3085,15 +3095,18 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 let ops = dir_inode.ops.as_ref()
                     .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
-                // SAFETY: ops.lookup is a VFS callback with a well-defined contract;
-                // dir_inode Arc dereference is valid for the scope of this block
-                unsafe {
+                // INV-VFSOPS-1 dispatchers below carry the fs callbacks;
+                // unsupported errno is ENOTDIR for both (the original
+                // fn-None branches).
+                {
                     // Call lookup to get inode number
-                    let ino = match ops.lookup {
-                        Some(lookup_fn) => {
-                            match lookup_fn(&*dir_inode, component.as_bytes()) {
-                                Ok(ino) => ino,
-                                Err(e) => {
+                    let ino = match ops.call_lookup(
+                        &*dir_inode,
+                        component.as_bytes(),
+                        Err(errno::Errno::NotADirectory),
+                    ) {
+                        Ok(ino) => ino,
+                        Err(e) => {
                                     // (21st successor) Bounded negative-lookup
                                     // memo, reference-dcache parity: existence
                                     // probes re-scanned the WHOLE directory on
@@ -3141,16 +3154,17 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                     }
                                     return Err(e.as_neg_i32());
                                 }
-                            }
-                        }
-                        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
                     };
 
                     // Call iget to instantiate the VFS Inode
-                    let child_inode = match ops.iget {
-                        Some(iget_fn) => iget_fn(&*dir_inode, component.as_bytes(), ino).map_err(|e| e.as_neg_i32())?,
-                        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
-                    };
+                    let child_inode = ops
+                        .call_iget(
+                            &*dir_inode,
+                            component.as_bytes(),
+                            ino,
+                            Err(errno::Errno::NotADirectory),
+                        )
+                        .map_err(|e| e.as_neg_i32())?;
 
                     // Create new dentry and cache it
                     let name = String::from(*component);
@@ -3659,26 +3673,30 @@ fn follow_symlink_hinted(
                 let ops = dir_inode.ops.as_ref()
                     .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
-                // SAFETY: VFS callback contract; dir_inode Arc is valid in scope
-                unsafe {
-                    let ino = match ops.lookup {
-                        Some(lookup_fn) => {
-                            match lookup_fn(&*dir_inode, component.as_bytes()) {
-                                Ok(ino) => ino,
-                                Err(e) => {
-                                    // No negative-dentry caching on ENOENT
-                                    // (same unbounded-leak reasoning as the
-                                    // other path-walk variant).
-                                    return Err(e.as_neg_i32());
-                                }
-                            }
+                // INV-VFSOPS-1 dispatchers; unsupported errno is ENOTDIR
+                // for both (the original fn-None branches).
+                {
+                    let ino = match ops.call_lookup(
+                        &*dir_inode,
+                        component.as_bytes(),
+                        Err(errno::Errno::NotADirectory),
+                    ) {
+                        Ok(ino) => ino,
+                        Err(e) => {
+                            // No negative-dentry caching on ENOENT
+                            // (same unbounded-leak reasoning as the
+                            // other path-walk variant).
+                            return Err(e.as_neg_i32());
                         }
-                        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
                     };
-                    let child_inode = match ops.iget {
-                        Some(iget_fn) => iget_fn(&*dir_inode, component.as_bytes(), ino).map_err(|e| e.as_neg_i32())?,
-                        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
-                    };
+                    let child_inode = ops
+                        .call_iget(
+                            &*dir_inode,
+                            component.as_bytes(),
+                            ino,
+                            Err(errno::Errno::NotADirectory),
+                        )
+                        .map_err(|e| e.as_neg_i32())?;
                     let name = String::from(*component);
                     let d = alloc::sync::Arc::new(Dentry::new(name.clone()));
                     d.set_inode(child_inode.clone());
@@ -3992,87 +4010,86 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
-    // Call mkdir through inode_operations
-    // SAFETY: ops.mkdir is a VFS callback; parent_inode Arc is valid in scope
-    unsafe {
-        if let Some(mkdir_fn) = ops.mkdir {
-            let inode_mode = InodeMode::new(InodeMode::S_IFDIR | (mode & 0o7777));
-            let new_inode = match mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode) {
-                Ok(i) => i,
-                Err(e) => {
-                    let e = e.as_neg_i32();
-                    sbx_mkdir_stage("fs-mkdir", e);
-                    return Err(e);
-                }
-            };
-            vfs_dir_epoch_bump();
-            parent_inode.dir_mut_gen_bump();
+    // Call mkdir through inode_operations (INV-VFSOPS-1 dispatcher; the
+    // unsupported errno below is the original fn-None branch — EROFS).
+    let inode_mode = InodeMode::new(InodeMode::S_IFDIR | (mode & 0o7777));
+    let new_inode = match ops.call_mkdir(
+        parent_inode.as_ref(),
+        name.as_bytes(),
+        inode_mode,
+        Err(errno::Errno::ReadOnlyFileSystem),
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            let e = e.as_neg_i32();
+            sbx_mkdir_stage("fs-mkdir", e);
+            return Err(e);
+        }
+    };
+    vfs_dir_epoch_bump();
+    parent_inode.dir_mut_gen_bump();
 
-            // inode_init_owner (Linux): a new entry gets the caller's fsuid,
-            // and when the PARENT directory has S_ISGID set the child
-            // inherits the parent's GID — plus the S_ISGID bit itself for
-            // directories. LTP mkdir02 depends on both. Mode AND gid come
-            // from the filesystem's getattr: a prior chown of the parent
-            // updates the on-disk/fs-private inode while the cached VFS
-            // inode keeps its instantiation-time gid, so
-            // parent_inode.gid.load() returned a STALE gid and the child
-            // inherited the wrong group.
-            let (parent_mode_bits, parent_gid) = {
-                let mut st = crate::fs::Stat::default();
-                if parent_inode.op_getattr(&mut st) == 0 {
-                    (st.st_mode, st.st_gid as u32)
-                } else {
-                    (
-                        parent_inode.mode.bits(),
-                        parent_inode.gid.load(Ordering::Relaxed),
-                    )
-                }
-            };
-            if parent_mode_bits & 0o2000 != 0 {
-                let mut st = crate::fs::Stat::default();
-                if new_inode.op_getattr(&mut st) == 0 {
-                    let keep_uid = st.st_uid as u64;
-                    let _ = new_inode.op_setattr(
-                        setattr_attr::ATTR_UID_GID,
-                        keep_uid,
-                        parent_gid as u64,
-                    );
-                    // Re-read the (possibly updated) mode and set S_ISGID on
-                    // the new directory, preserving its type bits.
-                    let mut st2 = crate::fs::Stat::default();
-                    if new_inode.op_getattr(&mut st2) == 0 {
-                        let _ = new_inode.op_setattr(
-                            setattr_attr::ATTR_MODE,
-                            (st2.st_mode | 0o2000) as u64,
-                            0,
-                        );
-                    }
-                }
-            }
-
-            // Invalidate negative dentry and cache the new one
-            if let Some(ref parent_dentry) = parent_vpath.dentry {
-                parent_dentry.remove_child(&name);
-                let d = Arc::new(Dentry::new(name.clone()));
-                d.set_inode(new_inode.clone());
-                d.set_parent(parent_dentry.clone());
-                parent_dentry.add_child(name.clone(), d);
-            }
-
-            // inotify: IN_CREATE|IN_ISDIR on the parent (named).
-            crate::fs::inotify::notify(
-                Some(parent_inode),
-                Some(&new_inode),
-                ino::IN_CREATE | ino::IN_ISDIR,
-                Some(name.as_bytes()),
-                0,
-            );
-
-            Ok(())
+    // inode_init_owner (Linux): a new entry gets the caller's fsuid,
+    // and when the PARENT directory has S_ISGID set the child
+    // inherits the parent's GID — plus the S_ISGID bit itself for
+    // directories. LTP mkdir02 depends on both. Mode AND gid come
+    // from the filesystem's getattr: a prior chown of the parent
+    // updates the on-disk/fs-private inode while the cached VFS
+    // inode keeps its instantiation-time gid, so
+    // parent_inode.gid.load() returned a STALE gid and the child
+    // inherited the wrong group.
+    let (parent_mode_bits, parent_gid) = {
+        let mut st = crate::fs::Stat::default();
+        if parent_inode.op_getattr(&mut st) == 0 {
+            (st.st_mode, st.st_gid as u32)
         } else {
-            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+            (
+                parent_inode.mode.bits(),
+                parent_inode.gid.load(Ordering::Relaxed),
+            )
+        }
+    };
+    if parent_mode_bits & 0o2000 != 0 {
+        let mut st = crate::fs::Stat::default();
+        if new_inode.op_getattr(&mut st) == 0 {
+            let keep_uid = st.st_uid as u64;
+            let _ = new_inode.op_setattr(
+                setattr_attr::ATTR_UID_GID,
+                keep_uid,
+                parent_gid as u64,
+            );
+            // Re-read the (possibly updated) mode and set S_ISGID on
+            // the new directory, preserving its type bits.
+            let mut st2 = crate::fs::Stat::default();
+            if new_inode.op_getattr(&mut st2) == 0 {
+                let _ = new_inode.op_setattr(
+                    setattr_attr::ATTR_MODE,
+                    (st2.st_mode | 0o2000) as u64,
+                    0,
+                );
+            }
         }
     }
+
+    // Invalidate negative dentry and cache the new one
+    if let Some(ref parent_dentry) = parent_vpath.dentry {
+        parent_dentry.remove_child(&name);
+        let d = Arc::new(Dentry::new(name.clone()));
+        d.set_inode(new_inode.clone());
+        d.set_parent(parent_dentry.clone());
+        parent_dentry.add_child(name.clone(), d);
+    }
+
+    // inotify: IN_CREATE|IN_ISDIR on the parent (named).
+    crate::fs::inotify::notify(
+        Some(parent_inode),
+        Some(&new_inode),
+        ino::IN_CREATE | ino::IN_ISDIR,
+        Some(name.as_bytes()),
+        0,
+    );
+
+    Ok(())
 }
 
 /// Create a special node (device / FIFO / socket) on the filesystem that
@@ -4116,38 +4133,39 @@ pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
     let ops = parent_inode.ops.as_ref()
         .ok_or(-(errno::constants::EOPNOTSUPP))?;
 
-    // SAFETY: ops.mknod is a VFS callback; parent_inode Arc is valid in
-    // scope.
-    unsafe {
-        match ops.mknod {
-            Some(mknod_fn) => {
-                let inode_mode =
-                    crate::fs::inode::InodeMode::new(mode & 0o170000 | (mode & 0o7777));
-                mknod_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode, dev).map_err(|e| e.as_neg_i32())?;
-                vfs_dir_epoch_bump();
-                parent_inode.dir_mut_gen_bump();
-
-                // Invalidate any stale (negative) dentry, the same
-                // discipline as vfs_mkdir. The mknod callback returns no
-                // inode here, so the next lookup repopulates it lazily.
-                if let Some(ref parent_dentry) = parent_vpath.dentry {
-                    parent_dentry.remove_child(&name);
-                }
-
-                // inotify: IN_CREATE (named) on the parent.
-                crate::fs::inotify::notify(
-                    Some(parent_inode),
-                    None,
-                    ino::IN_CREATE,
-                    Some(name.as_bytes()),
-                    0,
-                );
-
-                Ok(())
-            }
-            None => Err(-(errno::constants::EOPNOTSUPP)),
-        }
+    // INV-VFSOPS-1 dispatcher; unsupported errno is EOPNOTSUPP (the
+    // original fn-None branch — callers fall back to legacy paths).
+    {
+        let inode_mode = crate::fs::inode::InodeMode::new(mode & 0o170000 | (mode & 0o7777));
+        ops.call_mknod(
+            parent_inode.as_ref(),
+            name.as_bytes(),
+            inode_mode,
+            dev,
+            Err(errno::Errno::OperationNotSupported),
+        )
+        .map_err(|e| e.as_neg_i32())?;
     }
+    vfs_dir_epoch_bump();
+    parent_inode.dir_mut_gen_bump();
+
+    // Invalidate any stale (negative) dentry, the same
+    // discipline as vfs_mkdir. The mknod callback returns no
+    // inode here, so the next lookup repopulates it lazily.
+    if let Some(ref parent_dentry) = parent_vpath.dentry {
+        parent_dentry.remove_child(&name);
+    }
+
+    // inotify: IN_CREATE (named) on the parent.
+    crate::fs::inotify::notify(
+        Some(parent_inode),
+        None,
+        ino::IN_CREATE,
+        Some(name.as_bytes()),
+        0,
+    );
+
+    Ok(())
 }
 
 /// Create symbolic link - unified implementation using inode_operations
@@ -4175,35 +4193,39 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
-    // SAFETY: ops.symlink is a VFS callback; parent_inode Arc is valid in scope
-    unsafe {
-        if let Some(symlink_fn) = ops.symlink {
-            let new_inode = symlink_fn(parent_inode.as_ref(), name.as_bytes(), target.as_bytes()).map_err(|e| e.as_neg_i32())?;
-            vfs_dir_epoch_bump();
-            parent_inode.dir_mut_gen_bump();
+    // INV-VFSOPS-1 dispatcher; unsupported errno is EROFS (the original
+    // fn-None branch).
+    {
+        let new_inode = ops
+            .call_symlink(
+                parent_inode.as_ref(),
+                name.as_bytes(),
+                target.as_bytes(),
+                Err(errno::Errno::ReadOnlyFileSystem),
+            )
+            .map_err(|e| e.as_neg_i32())?;
+        vfs_dir_epoch_bump();
+        parent_inode.dir_mut_gen_bump();
 
-            // Invalidate negative dentry and cache the new one
-            if let Some(ref parent_dentry) = parent_vpath.dentry {
-                parent_dentry.remove_child(&name);
-                let d = Arc::new(Dentry::new(name.clone()));
-                d.set_inode(new_inode);
-                d.set_parent(parent_dentry.clone());
-                parent_dentry.add_child(name.clone(), d);
-            }
-
-            // inotify: IN_CREATE on the parent (named).
-            crate::fs::inotify::notify(
-                Some(parent_inode),
-                None,
-                ino::IN_CREATE,
-                Some(name.as_bytes()),
-                0,
-            );
-
-            Ok(())
-        } else {
-            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+        // Invalidate negative dentry and cache the new one
+        if let Some(ref parent_dentry) = parent_vpath.dentry {
+            parent_dentry.remove_child(&name);
+            let d = Arc::new(Dentry::new(name.clone()));
+            d.set_inode(new_inode);
+            d.set_parent(parent_dentry.clone());
+            parent_dentry.add_child(name.clone(), d);
         }
+
+        // inotify: IN_CREATE on the parent (named).
+        crate::fs::inotify::notify(
+            Some(parent_inode),
+            None,
+            ino::IN_CREATE,
+            Some(name.as_bytes()),
+            0,
+        );
+
+        Ok(())
     }
 }
 
@@ -4315,60 +4337,58 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
-    // Call rmdir through inode_operations
-    // SAFETY: ops.rmdir is a VFS callback; parent_inode Arc is valid in scope
-    unsafe {
-        if let Some(rmdir_fn) = ops.rmdir {
-            let result = rmdir_fn(parent_inode.as_ref(), name.as_bytes());
-            if result == 0 {
-                vfs_dir_epoch_bump();
-                parent_inode.dir_mut_gen_bump();
-                // Invalidate icache entry for the removed directory
-                if let Some((ino, fs_id)) = target_ino_and_fs_id {
-                    crate::fs::inode::icache_remove(ino, fs_id);
-                }
-                // Kill the cached dentry the same way unlink does: negative
-                // flag for fds still holding an Arc (getdents02), inode
-                // dropped, entry detached from the parent's child map —
-                // cached-forever negative dentries are an unbounded heap
-                // leak under mkdir/rmdir churn.
-                if let Some(ref parent_dentry) = parent_vpath.dentry {
-                    if let Some(child) = parent_dentry.lookup_child(&name) {
-                        child.set_negative();
-                        child.clear_inode();
-                        parent_dentry.remove_child(&name);
-                    }
-                }
-                // inotify: IN_DELETE|IN_ISDIR on the parent (named) and
-                // IN_DELETE_SELF on the directory itself (auto-removes its
-                // watches, delivering IN_IGNORED).
-                let target_inode = target_vpath.as_ref().and_then(|vp| vp.inode.clone());
-                crate::fs::inotify::notify(
-                    Some(parent_inode),
-                    None,
-                    ino::IN_DELETE | ino::IN_ISDIR,
-                    Some(name.as_bytes()),
-                    0,
-                );
-                if let Some(ref ti) = target_inode {
-                    // IN_ISDIR is NOT set on IN_DELETE_SELF (Linux
-                    // fsnotify_nameremove / inotify(7): the flag belongs
-                    // to the parent's named IN_DELETE above).
-                    crate::fs::inotify::notify(
-                        None,
-                        Some(ti),
-                        ino::IN_DELETE_SELF,
-                        None,
-                        0,
-                    );
-                }
-                Ok(())
-            } else {
-                Err(result)
-            }
-        } else {
-            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+    // Call rmdir through inode_operations (INV-VFSOPS-1 dispatcher;
+    // unsupported errno is EROFS, the original fn-None branch).
+    let result = ops.call_rmdir(
+        parent_inode.as_ref(),
+        name.as_bytes(),
+        errno::Errno::ReadOnlyFileSystem.as_neg_i32(),
+    );
+    if result == 0 {
+        vfs_dir_epoch_bump();
+        parent_inode.dir_mut_gen_bump();
+        // Invalidate icache entry for the removed directory
+        if let Some((ino, fs_id)) = target_ino_and_fs_id {
+            crate::fs::inode::icache_remove(ino, fs_id);
         }
+        // Kill the cached dentry the same way unlink does: negative
+        // flag for fds still holding an Arc (getdents02), inode
+        // dropped, entry detached from the parent's child map —
+        // cached-forever negative dentries are an unbounded heap
+        // leak under mkdir/rmdir churn.
+        if let Some(ref parent_dentry) = parent_vpath.dentry {
+            if let Some(child) = parent_dentry.lookup_child(&name) {
+                child.set_negative();
+                child.clear_inode();
+                parent_dentry.remove_child(&name);
+            }
+        }
+        // inotify: IN_DELETE|IN_ISDIR on the parent (named) and
+        // IN_DELETE_SELF on the directory itself (auto-removes its
+        // watches, delivering IN_IGNORED).
+        let target_inode = target_vpath.as_ref().and_then(|vp| vp.inode.clone());
+        crate::fs::inotify::notify(
+            Some(parent_inode),
+            None,
+            ino::IN_DELETE | ino::IN_ISDIR,
+            Some(name.as_bytes()),
+            0,
+        );
+        if let Some(ref ti) = target_inode {
+            // IN_ISDIR is NOT set on IN_DELETE_SELF (Linux
+            // fsnotify_nameremove / inotify(7): the flag belongs
+            // to the parent's named IN_DELETE above).
+            crate::fs::inotify::notify(
+                None,
+                Some(ti),
+                ino::IN_DELETE_SELF,
+                None,
+                0,
+            );
+        }
+        Ok(())
+    } else {
+        Err(result)
     }
 }
 
@@ -4429,89 +4449,87 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
-    // Call unlink through inode_operations
-    // SAFETY: ops.unlink is a VFS callback; parent_inode Arc is valid in scope
-    unsafe {
-        if let Some(unlink_fn) = ops.unlink {
-            let result = unlink_fn(parent_inode.as_ref(), name.as_bytes());
-            if result == 0 {
-                vfs_dir_epoch_bump();
-                parent_inode.dir_mut_gen_bump();
-                // inotify: capture the target inode before the caches drop
-                // it — IN_DELETE on the parent (named); IN_DELETE_SELF on
-                // the inode itself only when the last link went away.
-                let target_inode = target_vpath.as_ref().and_then(|vp| vp.inode.clone());
-                let last_link = target_inode
-                    .as_ref()
-                    .map(|i| inode_nlink(i) <= 1)
-                    .unwrap_or(true);
+    // Call unlink through inode_operations (INV-VFSOPS-1 dispatcher;
+    // unsupported errno is EROFS, the original fn-None branch).
+    let result = ops.call_unlink(
+        parent_inode.as_ref(),
+        name.as_bytes(),
+        errno::Errno::ReadOnlyFileSystem.as_neg_i32(),
+    );
+    if result == 0 {
+        vfs_dir_epoch_bump();
+        parent_inode.dir_mut_gen_bump();
+        // inotify: capture the target inode before the caches drop
+        // it — IN_DELETE on the parent (named); IN_DELETE_SELF on
+        // the inode itself only when the last link went away.
+        let target_inode = target_vpath.as_ref().and_then(|vp| vp.inode.clone());
+        let last_link = target_inode
+            .as_ref()
+            .map(|i| inode_nlink(i) <= 1)
+            .unwrap_or(true);
 
-                // Invalidate icache entry for the removed inode
-                if let Some((ino, fs_id)) = target_ino_and_fs_id {
-                    crate::fs::inode::icache_remove(ino, fs_id);
+        // Invalidate icache entry for the removed inode
+        if let Some((ino, fs_id)) = target_ino_and_fs_id {
+            crate::fs::inode::icache_remove(ino, fs_id);
+        }
+        // P1 FIFO: drop the named-pipe peer registered for this
+        // inode — the path is going away, and a future mknod of
+        // the same name allocates a NEW inode (fresh pipe). Fds
+        // that still hold the old pipe keep it alive via their
+        // private_data Arc (POSIX unlinked-FIFO semantics).
+        if let Some(ref vp) = target_vpath {
+            if let Some(ref i) = vp.inode {
+                if i.mode.is_fifo() {
+                    crate::fs::fifo::forget(i.fs_id, i.ino);
                 }
-                // P1 FIFO: drop the named-pipe peer registered for this
-                // inode — the path is going away, and a future mknod of
-                // the same name allocates a NEW inode (fresh pipe). Fds
-                // that still hold the old pipe keep it alive via their
-                // private_data Arc (POSIX unlinked-FIFO semantics).
-                if let Some(ref vp) = target_vpath {
-                    if let Some(ref i) = vp.inode {
-                        if i.mode.is_fifo() {
-                            crate::fs::fifo::forget(i.fs_id, i.ino);
-                        }
-                    }
-                }
-                // Kill the cached dentry: mark it negative first (fds that
-                // still hold their own Arc must observe the deletion —
-                // getdents02's unlinked-directory readdir), clear its inode,
-                // then DETACH it from the parent's child map. Keeping the
-                // negative entry cached forever leaked one Dentry + name
-                // String per deleted file (no dcache reclaim exists), which
-                // exhausted the 128MB kernel heap under creat/unlink churn
-                // (LTP inode02: ALLOCTHROW storm ~40s into the run).
-                if let Some(ref parent_dentry) = parent_vpath.dentry {
-                    if let Some(child) = parent_dentry.lookup_child(&name) {
-                        child.set_negative();
-                        child.clear_inode();
-                        parent_dentry.remove_child(&name);
-                    }
-                }
+            }
+        }
+        // Kill the cached dentry: mark it negative first (fds that
+        // still hold their own Arc must observe the deletion —
+        // getdents02's unlinked-directory readdir), clear its inode,
+        // then DETACH it from the parent's child map. Keeping the
+        // negative entry cached forever leaked one Dentry + name
+        // String per deleted file (no dcache reclaim exists), which
+        // exhausted the 128MB kernel heap under creat/unlink churn
+        // (LTP inode02: ALLOCTHROW storm ~40s into the run).
+        if let Some(ref parent_dentry) = parent_vpath.dentry {
+            if let Some(child) = parent_dentry.lookup_child(&name) {
+                child.set_negative();
+                child.clear_inode();
+                parent_dentry.remove_child(&name);
+            }
+        }
 
-                // IN_DELETE goes to the parent watch (named); the inode
-                // itself first gets IN_ATTRIB — unlink(2) drops its link
-                // count, and that metadata change is reported to the
-                // file's own watch (LTP inotify04: an unlinked watched
-                // file must see IN_ATTRIB before IN_DELETE_SELF) — then
-                // IN_DELETE_SELF when the last link went away.
+        // IN_DELETE goes to the parent watch (named); the inode
+        // itself first gets IN_ATTRIB — unlink(2) drops its link
+        // count, and that metadata change is reported to the
+        // file's own watch (LTP inotify04: an unlinked watched
+        // file must see IN_ATTRIB before IN_DELETE_SELF) — then
+        // IN_DELETE_SELF when the last link went away.
+        crate::fs::inotify::notify(
+            Some(parent_inode),
+            None,
+            ino::IN_DELETE,
+            Some(name.as_bytes()),
+            0,
+        );
+        if let Some(ref ti) = target_inode {
+            crate::fs::inotify::notify(None, Some(ti), ino::IN_ATTRIB, None, 0);
+        }
+        if last_link {
+            if let Some(ref ti) = target_inode {
                 crate::fs::inotify::notify(
-                    Some(parent_inode),
                     None,
-                    ino::IN_DELETE,
-                    Some(name.as_bytes()),
+                    Some(ti),
+                    ino::IN_DELETE_SELF,
+                    None,
                     0,
                 );
-                if let Some(ref ti) = target_inode {
-                    crate::fs::inotify::notify(None, Some(ti), ino::IN_ATTRIB, None, 0);
-                }
-                if last_link {
-                    if let Some(ref ti) = target_inode {
-                        crate::fs::inotify::notify(
-                            None,
-                            Some(ti),
-                            ino::IN_DELETE_SELF,
-                            None,
-                            0,
-                        );
-                    }
-                }
-                Ok(())
-            } else {
-                Err(result)
             }
-        } else {
-            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
         }
+        Ok(())
+    } else {
+        Err(result)
     }
 }
 
@@ -4557,36 +4575,35 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
-    // Call link through inode_operations
-    // SAFETY: ops.link is a VFS callback; parent_inode and src_inode Arcs are valid in scope
-    unsafe {
-        if let Some(link_fn) = ops.link {
-            let result = link_fn(parent_inode.as_ref(), name.as_bytes(), src_inode.as_ref());
-            if result == 0 {
-                vfs_dir_epoch_bump();
-                parent_inode.dir_mut_gen_bump();
-                // Invalidate stale/negative dentry at new path
-                if let Some(ref parent_dentry) = parent_vpath.dentry {
-                    parent_dentry.remove_child(&name);
-                }
-                // inotify: a hard link appearing is IN_CREATE in the
-                // destination directory (named); the linked inode itself
-                // sees IN_ATTRIB (its link count changed).
-                crate::fs::inotify::notify(
-                    Some(parent_inode),
-                    None,
-                    ino::IN_CREATE,
-                    Some(name.as_bytes()),
-                    0,
-                );
-                crate::fs::inotify::notify(None, Some(src_inode), ino::IN_ATTRIB, None, 0);
-                Ok(())
-            } else {
-                Err(result)
-            }
-        } else {
-            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+    // Call link through inode_operations (INV-VFSOPS-1 dispatcher;
+    // unsupported errno is EROFS, the original fn-None branch).
+    let result = ops.call_link(
+        parent_inode.as_ref(),
+        name.as_bytes(),
+        src_inode.as_ref(),
+        errno::Errno::ReadOnlyFileSystem.as_neg_i32(),
+    );
+    if result == 0 {
+        vfs_dir_epoch_bump();
+        parent_inode.dir_mut_gen_bump();
+        // Invalidate stale/negative dentry at new path
+        if let Some(ref parent_dentry) = parent_vpath.dentry {
+            parent_dentry.remove_child(&name);
         }
+        // inotify: a hard link appearing is IN_CREATE in the
+        // destination directory (named); the linked inode itself
+        // sees IN_ATTRIB (its link count changed).
+        crate::fs::inotify::notify(
+            Some(parent_inode),
+            None,
+            ino::IN_CREATE,
+            Some(name.as_bytes()),
+            0,
+        );
+        crate::fs::inotify::notify(None, Some(src_inode), ino::IN_ATTRIB, None, 0);
+        Ok(())
+    } else {
+        Err(result)
     }
 }
 
@@ -4815,17 +4832,18 @@ fn is_ancestor_of(start: Arc<Inode>, candidate_ino: u64) -> bool {
                 if parent_ino == current.ino {
                     return false; // reached filesystem root
                 }
-                // Materialize the parent inode through iget.
+                // Materialize the parent inode through iget
+                // (INV-VFSOPS-1 dispatcher; unsupported → give up).
                 let ops = match current.ops {
                     Some(o) => o,
                     None => return false,
                 };
-                let iget = match ops.iget {
-                    Some(f) => f,
-                    None => return false,
-                };
-                // SAFETY: VFS callback contract; `current` is a valid Inode.
-                let parent_inode = match unsafe { iget(&current, b"..", parent_ino) } {
+                let parent_inode = match ops.call_iget(
+                    &current,
+                    b"..",
+                    parent_ino,
+                    Err(errno::Errno::NoSuchFileOrDirectory),
+                ) {
                     Ok(i) => i,
                     Err(_) => return false,
                 };
@@ -5220,20 +5238,22 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
 
     // Get inode operations
     if let Some(ops) = inode.ops.as_ref() {
-        // SAFETY: ops.getattr is a VFS callback; inode Arc is valid in scope
-        unsafe {
-            if let Some(getattr_fn) = ops.getattr {
-                let result = getattr_fn(inode.as_ref(), stat);
-                if result == 0 {
-                    // st_dev: the filesystem instance's anonymous device
-                    // (Linux s_dev), stamped centrally over whatever the
-                    // per-fs getattr wrote — see inode::stat_dev_user.
-                    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
-                    return Ok(());
-                } else {
-                    return Err(result);
-                }
-            }
+        // INV-VFSOPS-1 dispatcher: getattr when provided, else fall
+        // through to the generic fill below (unsupported = 1 forces the
+        // fallback, matching the old fn-None fall-through).
+        let result = ops.call_getattr(
+            inode.as_ref(),
+            stat,
+            1, // unsupported: not a real errno; the caller falls through
+        );
+        if result == 0 {
+            // st_dev: the filesystem instance's anonymous device
+            // (Linux s_dev), stamped centrally over whatever the
+            // per-fs getattr wrote — see inode::stat_dev_user.
+            stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
+            return Ok(());
+        } else if ops.getattr.is_some() {
+            return Err(result);
         }
     }
 
@@ -5419,8 +5439,9 @@ pub fn file_open_tmpfile(dirpath: &str, flags: u32, mode: u32) -> Result<usize, 
 }
 
 pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
-    // SAFETY: file descriptor operations use well-defined VFS callbacks and Arc-based refcounting
-    unsafe {
+    // (unsafe-slim r3) the body runs without an unsafe context: every fs
+    // callback goes through the INV-VFSOPS-1 dispatchers.
+    {
         let o_creat = (flags & FileFlags::O_CREAT) != 0;
         let o_excl = (flags & FileFlags::O_EXCL) != 0;
         let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
@@ -5607,8 +5628,6 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 let ops = parent_inode.ops.as_ref()
                     .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
                 let new_inode = {
-                    let create_fn = ops.create
-                        .ok_or(errno::Errno::PermissionDenied.as_neg_i32())?;
                     // Linux vfs_prepare_mode() (S_ISGID strip then umask) —
                     // the parent's live mode/gid decide both the strip and
                     // the gid inheritance below (cached fields can lag a
@@ -5626,7 +5645,14 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     };
                     let filtered_mode =
                         prepare_create_mode(parent_mode_bits, parent_gid, mode);
-                    let new_inode = create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(filtered_mode)).map_err(|e| e.as_neg_i32())?;
+                    // INV-VFSOPS-1 dispatcher; unsupported errno is EACCES
+                    // (the original fn-None branch).
+                    let new_inode = ops.call_create(
+                        &*parent_inode,
+                        child_name.as_bytes(),
+                        crate::fs::inode::InodeMode::new(filtered_mode),
+                        Err(errno::Errno::PermissionDenied),
+                    ).map_err(|e| e.as_neg_i32())?;
                     // Linux inode_init_owner(): a setgid parent hands its
                     // gid to everything created inside it (LTP creat09,
                     // CVE-2018-13405 family).
@@ -5679,8 +5705,9 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // ENXIO (no such device or address) — not a silent ops-less File
         // whose read/write would return EBADF.
         if inode.mode.is_char_device() || inode.mode.is_block_device() {
-            let has_ops = match inode.ops.and_then(|o| o.get_file_ops) {
-                Some(f) => unsafe { f(&*inode) }.is_some(),
+            // INV-VFSOPS-1 dispatcher (None layers identical: no ops).
+            let has_ops = match inode.ops {
+                Some(o) => o.call_get_file_ops(&*inode).is_some(),
                 None => false,
             };
             if !has_ops {
@@ -5775,19 +5802,16 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             file.set_dentry(d);
         }
 
-        // Get FileOps from inode callback
+        // Get FileOps from inode callback (INV-VFSOPS-1 dispatchers;
+        // absent ops map to no-op, matching the original None branches).
         if let Some(ops) = inode.ops {
-            if let Some(get_file_ops_fn) = ops.get_file_ops {
-                if let Some(file_ops) = get_file_ops_fn(&*inode) {
-                    file.set_ops(file_ops);
-                }
+            if let Some(file_ops) = ops.call_get_file_ops(&*inode) {
+                file.set_ops(file_ops);
             }
             // Call open callback (e.g., procfs pre-read)
-            if let Some(open_fn) = ops.open {
-                let result = open_fn(&*inode, &*file);
-                if result != 0 {
-                    return Err(result);
-                }
+            let result = ops.call_open(&*inode, &*file, 0);
+            if result != 0 {
+                return Err(result);
             }
         }
 
@@ -5834,12 +5858,10 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
 /// through the returned Arc behave as a normal O_RDONLY descriptor.
 /// Best-effort: None on lookup failure, a missing inode, or a directory.
 pub fn open_file_arc_nofd(path: &str) -> Option<alloc::sync::Arc<File>> {
-    // SAFETY: path_lookup resolves through the dentry tree (root falls back
-    // to "/" with no current task); File construction mirrors file_open's.
-    unsafe {
-        let vpath = path_lookup(path, 0).ok()?;
-        open_file_arc_from_vpath(&vpath)
-    }
+    // (unsafe-slim r3) plain safe body: path_lookup resolves through the
+    // dentry tree and open_file_arc_from_vpath is safe now.
+    let vpath = path_lookup(path, 0).ok()?;
+    open_file_arc_from_vpath(&vpath)
 }
 
 /// Build the kernel-internal read-only File from an ALREADY-RESOLVED
@@ -5849,10 +5871,11 @@ pub fn open_file_arc_nofd(path: &str) -> Option<alloc::sync::Arc<File>> {
 /// semantics: no fdtable slot, invisible to inotify, None on a missing
 /// inode or a directory.
 ///
-/// # Safety
-/// `vpath` must come from a successful `path_lookup` (its dentry/inode
-/// pointers are live).
-pub unsafe fn open_file_arc_from_vpath(vpath: &VfsPath) -> Option<alloc::sync::Arc<File>> {
+/// (unsafe-slim r3) un-signed: VfsPath carries Arc'd dentry/inode (the
+/// raw `mnt` pointer is never dereferenced here), and every ops call goes
+/// through the INV-VFSOPS-1 dispatchers. Hand-verified: safe parameter
+/// types, no unsafe ops in the body, no caller contract left to uphold.
+pub fn open_file_arc_from_vpath(vpath: &VfsPath) -> Option<alloc::sync::Arc<File>> {
     let inode = vpath.inode.as_ref()?;
     if inode.mode.is_directory() {
         return None;
@@ -5865,15 +5888,12 @@ pub unsafe fn open_file_arc_from_vpath(vpath: &VfsPath) -> Option<alloc::sync::A
         file.set_dentry(d);
     }
     if let Some(ops) = inode.ops {
-        if let Some(get_file_ops_fn) = ops.get_file_ops {
-            if let Some(file_ops) = get_file_ops_fn(&**inode) {
-                file.set_ops(file_ops);
-            }
+        // INV-VFSOPS-1 dispatchers; absent ops map to no-op.
+        if let Some(file_ops) = ops.call_get_file_ops(&**inode) {
+            file.set_ops(file_ops);
         }
-        if let Some(open_fn) = ops.open {
-            if open_fn(&**inode, &*file) != 0 {
-                return None;
-            }
+        if ops.call_open(&**inode, &*file, 0) != 0 {
+            return None;
         }
     }
     Some(file)
@@ -5887,15 +5907,8 @@ pub unsafe fn open_file_arc_from_vpath(vpath: &VfsPath) -> Option<alloc::sync::A
 /// # Returns
 /// Returns Ok(()) on success, error code on failure
 pub fn file_close(fd: usize) -> Result<(), i32> {
-    // SAFETY: close_file_fd safely handles fd validity check and cleanup
-    unsafe {
-        // Use close_file_fd to close the file descriptor
-        // This will:
-        // 1. Check file descriptor validity
-        // 2. Call the file's close operation
-        // 3. Release the file descriptor
-        close_file_fd(fd)
-    }
+    // (unsafe-slim r3) close_file_fd is a safe fn; the wrapper was vestigial.
+    close_file_fd(fd)
 }
 
 ///
@@ -5908,27 +5921,19 @@ pub fn file_close(fd: usize) -> Result<(), i32> {
 /// # Returns
 /// Returns number of bytes read on success, error code on failure
 pub fn file_read(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> {
-    // SAFETY: get_file_fd returns valid Arc<File>; File::read handles bounds
-    unsafe {
-        // Get file object
-        match get_file_fd(fd) {
-            Some(file) => {
-                // Arc auto-derefs to File
-                let file_ref: &File = &*file;
-                let buf_ptr = buf.as_mut_ptr();
-                let read_count = count.min(buf.len());
-
-                // Call file's read operation
-                let result = file_ref.read(buf_ptr, read_count);
-                if result < 0 {
-                    Err(result as i32)
-                } else {
-                    Ok(result as usize)
-                }
+    // (unsafe-slim r3) slice-typed dispatch (File::read_slice).
+    match get_file_fd(fd) {
+        Some(file) => {
+            let read_count = count.min(buf.len());
+            let result = file.read_slice(&mut buf[..read_count]);
+            if result < 0 {
+                Err(result as i32)
+            } else {
+                Ok(result as usize)
             }
-            None => {
-                Err(errno::Errno::BadFileNumber.as_neg_i32())
-            }
+        }
+        None => {
+            Err(errno::Errno::BadFileNumber.as_neg_i32())
         }
     }
 }
@@ -5943,41 +5948,33 @@ pub fn file_read(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> 
 /// # Returns
 /// Returns number of bytes written on success, error code on failure
 pub fn file_write(fd: usize, buf: &[u8], count: usize) -> Result<usize, i32> {
-    // SAFETY: get_file_fd returns valid Arc<File>; File::write handles bounds
-    unsafe {
-        // Get file object
-        match get_file_fd(fd) {
-            Some(file) => {
-                // Arc auto-derefs to File
-                let file_ref: &File = &*file;
-                let buf_ptr = buf.as_ptr();
-                let write_count = count.min(buf.len());
-
-                // Call file's write operation
-                let result = file_ref.write(buf_ptr, write_count);
-                if result < 0 {
-                    Err(result as i32)
-                } else {
-                    Ok(result as usize)
-                }
+    // (unsafe-slim r3) slice-typed dispatch (File::write_slice).
+    match get_file_fd(fd) {
+        Some(file) => {
+            let write_count = count.min(buf.len());
+            let result = file.write_slice(&buf[..write_count]);
+            if result < 0 {
+                Err(result as i32)
+            } else {
+                Ok(result as usize)
             }
-            None => {
-                Err(errno::Errno::BadFileNumber.as_neg_i32())
-            }
+        }
+        None => {
+            Err(errno::Errno::BadFileNumber.as_neg_i32())
         }
     }
 }
 
 /// Get file status by fd (fstat)
 pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
-    // SAFETY: get_file_fd returns valid Arc<File>; inode UnsafeCell accessed under fd table lock
-    unsafe {
+    // (unsafe-slim r3) the inode cell read goes through File::get_inode
+    // (write-once cell, safe accessor).
+    {
         let file = match get_file_fd(fd) {
             Some(f) => f,
             None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
         };
-        let inode_opt = &*file.inode.get();
-        let inode = match inode_opt.as_ref() {
+        let inode = match file.get_inode() {
             Some(i) => i,
             None => {
                 // Anonymous file description (pipe ends, kernel console):
@@ -6039,18 +6036,20 @@ pub fn stat_file_by_path_with_flags(path: &str, stat: &mut Stat, flags: u32) -> 
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
     if let Some(ops) = inode.ops.as_ref() {
-        unsafe {
-            if let Some(getattr_fn) = ops.getattr {
-                let result = getattr_fn(inode.as_ref(), stat);
-                if result == 0 {
-                    // st_dev: the instance's anonymous device (Linux
-                    // s_dev) — same stamp as vfs_stat.
-                    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
-                    return Ok(());
-                } else {
-                    return Err(result);
-                }
-            }
+        // INV-VFSOPS-1 dispatcher; unsupported = EINVAL (the original
+        // fn-None fall-through result below).
+        let result = ops.call_getattr(
+            inode.as_ref(),
+            stat,
+            errno::Errno::InvalidArgument.as_neg_i32(),
+        );
+        if result == 0 {
+            // st_dev: the instance's anonymous device (Linux
+            // s_dev) — same stamp as vfs_stat.
+            stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
+            return Ok(());
+        } else {
+            return Err(result);
         }
     }
     Err(errno::Errno::InvalidArgument.as_neg_i32())
@@ -6205,8 +6204,8 @@ fn resolve_lock_region(
 pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
     use crate::fs::file::{get_file_fd, get_file_fd_install};
 
-    // SAFETY: fcntl operations use valid fd from get_file_fd; no raw pointer dereference
-    unsafe {
+    // (unsafe-slim r3) the body runs without an unsafe context.
+    {
         match cmd {
             // F_DUPFD: Duplicate file descriptor
             fcntl::F_DUPFD => {
@@ -6890,27 +6889,25 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
         file.set_dentry(d.clone());
     }
 
-    // SAFETY: inode.ops callbacks are well-defined; inode Arc is valid in scope
-    unsafe {
-        // Get directory file ops from inode callback
+    // Get directory file ops from inode callback (INV-VFSOPS-1
+    // dispatcher; absent op maps to no-op).
+    {
         if let Some(ops) = inode.ops {
-            if let Some(get_file_ops_fn) = ops.get_file_ops {
-                if let Some(dir_ops) = get_file_ops_fn(&*inode) {
-                    file.set_ops(dir_ops);
-                    // /proc/<pid> directories: attach the pinned pidfd
-                    // identity at open (these fds are pidfds for
-                    // pidfd_send_signal / pidfd_getfd / poll-exit, the
-                    // reference's pre-pidfd_open mechanism). file_opendir
-                    // has no inode open hook, so the attach lives here.
-                    if core::ptr::eq(
-                        dir_ops as *const _,
-                        &crate::fs::procfs::PROC_PIDDIR_OPS as *const _,
-                    ) {
-                        if let Some(data) =
-                            crate::fs::pidfd::make_pidfd_data(inode.ino as u32)
-                        {
-                            crate::fs::pidfd::attach(&file, data);
-                        }
+            if let Some(dir_ops) = ops.call_get_file_ops(&*inode) {
+                file.set_ops(dir_ops);
+                // /proc/<pid> directories: attach the pinned pidfd
+                // identity at open (these fds are pidfds for
+                // pidfd_send_signal / pidfd_getfd / poll-exit, the
+                // reference's pre-pidfd_open mechanism). file_opendir
+                // has no inode open hook, so the attach lives here.
+                if core::ptr::eq(
+                    dir_ops as *const _,
+                    &crate::fs::procfs::PROC_PIDDIR_OPS as *const _,
+                ) {
+                    if let Some(data) =
+                        crate::fs::pidfd::make_pidfd_data(inode.ino as u32)
+                    {
+                        crate::fs::pidfd::attach(&file, data);
                     }
                 }
             }
@@ -6972,15 +6969,16 @@ pub fn getdents_with_dots(
 /// # Returns
 /// Returns number of bytes read on success, error code on failure
 pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> {
-    // SAFETY: get_file_fd returns valid Arc<File>; inode UnsafeCell accessed under fd table lock
-    unsafe {
+    // (unsafe-slim r3) the inode cell read goes through File::get_inode
+    // (write-once cell, safe accessor); fs callbacks use the INV-VFSOPS-1
+    // dispatchers below.
+    {
         let file = match get_file_fd(fd) {
             Some(f) => f,
             None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
         };
 
-        let inode_opt = &*file.inode.get();
-        let inode = match inode_opt.as_ref() {
+        let inode = match file.get_inode() {
             Some(i) => i,
             None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
         };
@@ -7016,19 +7014,16 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
         // directory byte offset and each record's d_off names the
         // resume point, so telldir/seekdir and lseek(fd, 0) restart
         // work unchanged.
-        if let Some(fill_fn) = ops.readdir_fill {
-            let pos = file.get_pos();
+        // INV-VFSOPS-1 dispatchers: readdir_fill short-circuits when the
+        // filesystem provides it; readdir's unsupported errno is ENOTDIR
+        // (the original fn-None branch).
+        if let Some(fill) = ops.call_readdir_fill(inode, file.get_pos(), buf) {
             // May sleep in block I/O — no spinlock is held here (the fd
             // table slot was released; the Arc keeps the File alive).
-            let (filled, next_pos) = unsafe { fill_fn(inode, pos, buf) }?;
+            let (filled, next_pos) = fill?;
             file.set_pos(next_pos);
             return Ok(filled);
         }
-
-        let readdir_fn = match ops.readdir {
-            Some(f) => f,
-            None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
-        };
 
         // F4 route-4: cacheable filesystems (INodeOps::readdir_cacheable
         // — ext4, tmpfs: content changes ONLY through the mutation entry
@@ -7059,9 +7054,14 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
         // readdir may sleep in block I/O — no spinlock is held here.
         let fresh_snap: Option<alloc::sync::Arc<crate::fs::file::DirentCacheSnapshot>>;
         if cache_hit.is_none() {
-            // SAFETY: readdir is a VFS callback; the Arc<Inode> backing
-            // `inode` outlives this call (the open File holds it).
-            let base = unsafe { readdir_fn(&*inode) }
+            // INV-VFSOPS-1 dispatcher. errno precedence preserved from the
+            // raw form: no readdir op -> ENOTDIR; op ran and answered
+            // None (not a directory / error) -> EIO.
+            if ops.readdir.is_none() {
+                return Err(errno::Errno::NotADirectory.as_neg_i32());
+            }
+            let base = ops
+                .call_readdir(inode)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             let parent_ino = {
                 // SAFETY: dentry is written once at open time and never mutated
@@ -7157,22 +7157,44 @@ struct MemFileContent {
     regen: Option<fn() -> alloc::vec::Vec<u8>>,
 }
 
+/// INV-MEMFILE-1 (unsafe-slim r3): open_mem_file stores an OWNED
+/// Box<MemFileContent> in File::private_data (raw via Box::into_raw);
+/// these three accessors are the only code that touches it. Identity is
+/// guarded by ops == &MEM_FILE_OPS at every call site (the mem_file
+/// ops table is only installed by open_mem_file).
+fn mem_file_content(file: &File) -> Option<&MemFileContent> {
+    // SAFETY: INV-MEMFILE-1 — the pointer, when present, is a live
+    // Box<MemFileContent> owned by this File; shared read here.
+    let ptr = unsafe { *file.private_data.get() }?;
+    Some(unsafe { &*(ptr as *const MemFileContent) })
+}
+
+fn mem_file_content_mut(file: &File) -> Option<&mut MemFileContent> {
+    // SAFETY: INV-MEMFILE-1 — sole mutable reach; mem-file ops are the
+    // only private_data users for this File.
+    let ptr = unsafe { *file.private_data.get() }?;
+    Some(unsafe { &mut *(ptr as *mut MemFileContent) })
+}
+
+/// Take the owned Box back (close path — frees the content).
+fn mem_file_take_owned(file: &File) -> Option<alloc::boxed::Box<MemFileContent>> {
+    // SAFETY: INV-MEMFILE-1 — take() hands the unique ownership to us.
+    let ptr = unsafe { &mut *file.private_data.get() }.take()?;
+    Some(unsafe { alloc::boxed::Box::from_raw(ptr as *mut MemFileContent) })
+}
+
 /// Read operation for memory files
 fn mem_file_read(file: &File, buf: &mut [u8]) -> isize {
-    // SAFETY: private_data contains a valid MemFileContent pointer set by open_mem_file
-    unsafe {
-        let data_opt = &*file.private_data.get();
-        if let Some(content_ptr) = *data_opt {
-            let content = &*(content_ptr as *const MemFileContent);
+    match mem_file_content(file) {
+        Some(content) => {
             let offset = file.get_pos() as usize;
             let remaining = content.data.len().saturating_sub(offset);
             let to_read = remaining.min(buf.len());
             buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
             file.set_pos((offset + to_read) as u64);
             to_read as isize
-        } else {
-            0
         }
+        None => 0,
     }
 }
 
@@ -7186,12 +7208,10 @@ pub fn mem_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
     if !core::ptr::eq(ops as *const _, &MEM_FILE_OPS as *const _) {
         return None;
     }
-    // SAFETY: ops identity confirms this is a mem File; private_data was
-    // installed by open_mem_file as Box::into_raw(MemFileContent) and
-    // remains valid while the File exists.
-    let ptr = unsafe { *file.private_data.get() }?;
-    // SAFETY: read-only access to the content length for st_size.
-    let size = unsafe { (*(ptr as *const MemFileContent)).data.len() };
+    // INV-MEMFILE-1 accessor (ops identity checked above).
+    let content = mem_file_content(file)?;
+    let ptr = content as *const MemFileContent;
+    let size = content.data.len();
     // Generated procfs content files belong to the procfs instance's
     // device (Linux stats them on proc's s_dev — never 0).
     stat.st_dev = crate::fs::inode::stat_dev_user(crate::fs::inode::FS_ID_PROCFS);
@@ -7212,50 +7232,39 @@ pub fn mem_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
 
 /// Lseek operation for memory files
 fn mem_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
-    // SAFETY: private_data contains a valid MemFileContent pointer set by open_mem_file
-    unsafe {
-        let data_opt = &*file.private_data.get();
-        if let Some(content_ptr) = *data_opt {
-            let content = &mut *(content_ptr as *mut MemFileContent);
-            let file_size = content.data.len() as isize;
-            let new_offset = match whence {
-                0 => offset,
-                1 => file.get_pos() as isize + offset,
-                2 => file_size + offset,
-                _ => return -22,
-            };
-            if new_offset < 0 || new_offset > file_size {
-                return -22;
-            }
-            // seq_file rewind semantics for dynamic content (the mount
-            // tables): a rewind re-runs the generator, so readers that
-            // keep the fd open and re-read (systemd v255's sandbox
-            // setup loop, bind_remount_recursive_with_mountinfo) see the
-            // mounts made since the last read instead of a stale
-            // snapshot (which made the loop re-bind 32x and fail every
-            // ProtectHostname spawn with EBUSY, ub2404 2026-11-15).
-            if new_offset == 0 {
-                if let Some(regen) = content.regen {
-                    content.data = regen();
-                }
-            }
-            file.set_pos(new_offset as u64);
-            new_offset
-        } else {
-            -9 // EBADF
+    let Some(content) = mem_file_content_mut(file) else {
+        return -9; // EBADF
+    };
+    let file_size = content.data.len() as isize;
+    let new_offset = match whence {
+        0 => offset,
+        1 => file.get_pos() as isize + offset,
+        2 => file_size + offset,
+        _ => return -22,
+    };
+    if new_offset < 0 || new_offset > file_size {
+        return -22;
+    }
+    // seq_file rewind semantics for dynamic content (the mount
+    // tables): a rewind re-runs the generator, so readers that
+    // keep the fd open and re-read (systemd v255's sandbox
+    // setup loop, bind_remount_recursive_with_mountinfo) see the
+    // mounts made since the last read instead of a stale
+    // snapshot (which made the loop re-bind 32x and fail every
+    // ProtectHostname spawn with EBUSY, ub2404 2026-11-15).
+    if new_offset == 0 {
+        if let Some(regen) = content.regen {
+            content.data = regen();
         }
     }
+    file.set_pos(new_offset as u64);
+    new_offset
 }
 
 /// Close operation for memory files
 fn mem_file_close(file: &File) -> i32 {
-    // SAFETY: private_data contains a valid MemFileContent pointer set by open_mem_file
-    unsafe {
-        let data_opt = &mut *file.private_data.get();
-        if let Some(content_ptr) = data_opt.take() {
-            let _ = alloc::boxed::Box::from_raw(content_ptr as *mut MemFileContent);
-        }
-    }
+    // INV-MEMFILE-1 accessor: take + drop the owned Box.
+    drop(mem_file_take_owned(file));
     0
 }
 
