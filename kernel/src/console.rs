@@ -140,76 +140,14 @@ const UART_IRQ: u32 = 10;
 
 /// Ring buffer size (power of 2 for cheap modulo)
 const UART_RX_BUF_SIZE: usize = 1024;
-const UART_RX_BUF_MASK: usize = UART_RX_BUF_SIZE - 1;
 
-struct UartRxBuf {
-    data: core::cell::UnsafeCell<[u8; UART_RX_BUF_SIZE]>,
-    /// Consumer index (read path)
-    head: AtomicUsize,
-    /// Producer index (IRQ handler)
-    tail: AtomicUsize,
-}
-
-// SAFETY: SPSC pattern — single producer (IRQ), single consumer (task).
-// Atomic head/tail provide the synchronization barrier.
-unsafe impl Send for UartRxBuf {}
-unsafe impl Sync for UartRxBuf {}
-
-impl UartRxBuf {
-    const fn new() -> Self {
-        Self {
-            data: core::cell::UnsafeCell::new([0; UART_RX_BUF_SIZE]),
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
-        }
-    }
-
-    /// Producer: write byte. Called from IRQ context only (single producer).
-    #[inline]
-    fn put(&self, c: u8) {
-        let tail = self.tail.load(Ordering::Relaxed);
-        let next_tail = (tail + 1) & UART_RX_BUF_MASK;
-        // Check if full
-        if next_tail == self.head.load(Ordering::Acquire) {
-            return; // Drop byte — buffer full
-        }
-        // SAFETY: tail is within bounds (0..UART_RX_BUF_SIZE); self.data is a static
-        // UnsafeCell initialized with a fixed-size array; no concurrent mutation.
-        unsafe {
-            core::ptr::write_volatile(&mut (*self.data.get())[tail], c);
-        }
-        self.tail.store(next_tail, Ordering::Release);
-    }
-
-    /// Consumer: read byte. CAS loop — fork'd children sharing stdin are
-    /// MULTIPLE consumers; the old load/read/store could duplicate a byte
-    /// and skip the next (R27-1, the cold-boot first-byte loss family).
-    #[inline]
-    fn get(&self) -> Option<u8> {
-        let mut head = self.head.load(Ordering::Acquire);
-        loop {
-            if head == self.tail.load(Ordering::Acquire) {
-                return None; // Empty
-            }
-            // SAFETY: head is within bounds (0..UART_RX_BUF_SIZE); self.data is a static
-            // UnsafeCell initialized with a fixed-size array.
-            let c = unsafe { core::ptr::read_volatile(&(*self.data.get())[head]) };
-            let next = (head + 1) & UART_RX_BUF_MASK;
-            match self.head.compare_exchange_weak(
-                head,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(c),
-                Err(h) => head = h, // another consumer advanced — retry
-            }
-        }
-    }
-}
-
-/// Global UART RX ring buffer
-static UART_RX_BUF: UartRxBuf = UartRxBuf::new();
+/// Global UART RX ring buffer — the `safety::ring::SpscRing` primitive
+/// (INV-RING-*): IRQ producer, CAS consumer (fork'd children sharing
+/// stdin are MULTIPLE consumers — the R27-1 first-byte-loss family is
+/// owned by the primitive's get() CAS loop now, not by hand-rolled
+/// index arithmetic here).
+static UART_RX_BUF: crate::safety::ring::SpscRing<u8, UART_RX_BUF_SIZE> =
+    crate::safety::ring::SpscRing::new();
 
 /// Set once init_irq() has registered the RX IRQ handler. While clear,
 /// task-context code may poll RBR directly (early boot); once set, the
@@ -221,12 +159,14 @@ static UART_IRQ_ARMED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// Rolling match position for the DFX "DUMP!" magic (RX IRQ context only).
-static mut DUMP_MAGIC_POS: usize = 0;
+/// Atomics instead of `static mut`: the RX IRQ is the only writer, but a
+/// plain atomic removes the shared-mutable-static hazard outright.
+static DUMP_MAGIC_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Rolling-match position for the "LEDGER!" accounting-census magic
 /// (the ledger trigger; retired cmdline token rux:ledger (retired dfx=ledger)). The RX handler only latches dfx::ledger::PENDING — the
 /// census itself runs from the timer softirq (see ledger.rs).
-static mut LEDGER_MAGIC_POS: usize = 0;
+static LEDGER_MAGIC_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Rolling match position for the serial Ctrl-Alt-Del sequence (RX IRQ
 /// context only). The xterm/modifier encoding of Ctrl+Alt+Delete is
@@ -234,7 +174,7 @@ static mut LEDGER_MAGIC_POS: usize = 0;
 /// + Alt(2) — what a real terminal emulator sends for the combo. The
 /// sequence stays in the RX ring (a raw-mode reader just sees unknown
 /// escape bytes); only the CAD latch side effect fires.
-static mut CAD_SEQ_POS: usize = 0;
+static CAD_SEQ_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 /// Ctrl-Alt-Del over the serial console: ESC [ 3 ; 7 ~ (xterm CSI-u style
 /// modifier encoding — see CAD_SEQ_POS).
 const CAD_MAGIC: &[u8; 6] = b"\x1b[3;7~";
@@ -724,58 +664,60 @@ fn read_reg(base: u16, offset: usize) -> u8 {
 ///   signal/cascade runs in task context via cad_deliver_pending() (the
 ///   ISIG rule: never walk the pid hash from the RX IRQ).
 fn uart_rx_debug_magic(c: u8) {
-    // SAFETY: RX-IRQ context only (single consumer), matching the riscv64
-    // original these matchers were factored out of.
-    unsafe {
-        // DFX taskdump magic trigger (dfx-migrate: the rux:taskdump
-        // event IS the gate; kind=SYSRQ fires when the magic lands).
-        if crate::trace::EVENT_TASKDUMP.armed() {
-            const MAGIC: &[u8; 5] = b"DUMP!";
-            DUMP_MAGIC_POS = if DUMP_MAGIC_POS < MAGIC.len() && c == MAGIC[DUMP_MAGIC_POS] {
-                DUMP_MAGIC_POS + 1
-            } else if c == MAGIC[0] {
-                1
-            } else {
-                0
-            };
-            if DUMP_MAGIC_POS == MAGIC.len() {
-                DUMP_MAGIC_POS = 0;
-                crate::drivers::virtio::vw_report("dump");
-                crate::dfx::taskdump::dump_all_tasks("uart-magic");
-                crate::ipc::binder::binder_dfx_dump();
-            }
-        }
-
-        // Accounting-ledger magic trigger (the ledger trigger; retired cmdline token rux:ledger (retired dfx=ledger)): latch only — the
-        // census is printk-heavy and runs from the timer softirq.
-        if crate::trace::EVENT_LEDGER.armed() {
-            const LMAGIC: &[u8; 7] = b"LEDGER!";
-            LEDGER_MAGIC_POS = if LEDGER_MAGIC_POS < LMAGIC.len()
-                && c == LMAGIC[LEDGER_MAGIC_POS]
-            {
-                LEDGER_MAGIC_POS + 1
-            } else if c == LMAGIC[0] {
-                1
-            } else {
-                0
-            };
-            if LEDGER_MAGIC_POS == LMAGIC.len() {
-                LEDGER_MAGIC_POS = 0;
-                crate::dfx::ledger::PENDING.store(true, core::sync::atomic::Ordering::Release);
-            }
-        }
-
-        CAD_SEQ_POS = if CAD_SEQ_POS < CAD_MAGIC.len() && c == CAD_MAGIC[CAD_SEQ_POS] {
-            CAD_SEQ_POS + 1
-        } else if c == CAD_MAGIC[0] {
+    // RX-IRQ context only (single writer per matcher); the rolling
+    // positions are plain atomics, so this whole function is safe code.
+    // DFX taskdump magic trigger (dfx-migrate: the rux:taskdump
+    // event IS the gate; kind=SYSRQ fires when the magic lands).
+    if crate::trace::EVENT_TASKDUMP.armed() {
+        const MAGIC: &[u8; 5] = b"DUMP!";
+        let pos = DUMP_MAGIC_POS.load(Ordering::Relaxed);
+        let next = if pos < MAGIC.len() && c == MAGIC[pos] {
+            pos + 1
+        } else if c == MAGIC[0] {
             1
         } else {
             0
         };
-        if CAD_SEQ_POS == CAD_MAGIC.len() {
-            CAD_SEQ_POS = 0;
-            crate::syscall::process::ctrl_alt_del_latch();
+        DUMP_MAGIC_POS.store(next, Ordering::Relaxed);
+        if next == MAGIC.len() {
+            DUMP_MAGIC_POS.store(0, Ordering::Relaxed);
+            crate::drivers::virtio::vw_report("dump");
+            crate::dfx::taskdump::dump_all_tasks("uart-magic");
+            crate::ipc::binder::binder_dfx_dump();
         }
+    }
+
+    // Accounting-ledger magic trigger (the ledger trigger; retired cmdline token rux:ledger (retired dfx=ledger)): latch only — the
+    // census is printk-heavy and runs from the timer softirq.
+    if crate::trace::EVENT_LEDGER.armed() {
+        const LMAGIC: &[u8; 7] = b"LEDGER!";
+        let pos = LEDGER_MAGIC_POS.load(Ordering::Relaxed);
+        let next = if pos < LMAGIC.len() && c == LMAGIC[pos] {
+            pos + 1
+        } else if c == LMAGIC[0] {
+            1
+        } else {
+            0
+        };
+        LEDGER_MAGIC_POS.store(next, Ordering::Relaxed);
+        if next == LMAGIC.len() {
+            LEDGER_MAGIC_POS.store(0, Ordering::Relaxed);
+            crate::dfx::ledger::PENDING.store(true, core::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let pos = CAD_SEQ_POS.load(Ordering::Relaxed);
+    let next = if pos < CAD_MAGIC.len() && c == CAD_MAGIC[pos] {
+        pos + 1
+    } else if c == CAD_MAGIC[0] {
+        1
+    } else {
+        0
+    };
+    CAD_SEQ_POS.store(next, Ordering::Relaxed);
+    if next == CAD_MAGIC.len() {
+        CAD_SEQ_POS.store(0, Ordering::Relaxed);
+        crate::syscall::process::ctrl_alt_del_latch();
     }
 }
 
@@ -1021,9 +963,7 @@ pub fn uart_data_ready() -> bool {
 pub fn uart_rx_bridge_to_tty() {
     // Bounded so a flood cannot hold the CPU forever in task context.
     for _ in 0..256 {
-        let head = UART_RX_BUF.head.load(Ordering::Relaxed);
-        let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
-        if head == tail {
+        if UART_RX_BUF.depth_hint() == 0 {
             break;
         }
         match UART_RX_BUF.get() {
@@ -1037,9 +977,7 @@ pub fn getchar() -> Option<u8> {
     #[cfg(feature = "riscv64")]
     {
         // Try ring buffer first (interrupt-driven path)
-        let head = UART_RX_BUF.head.load(Ordering::Relaxed);
-        let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
-        if head != tail {
+        if UART_RX_BUF.depth_hint() > 0 {
             // R32-2: the emptiness check above is only a hint — another
             // consumer (fork'd child sharing stdin, the reason get() is a
             // CAS loop) can drain the byte between the check and the CAS.
@@ -1075,9 +1013,7 @@ pub fn getchar() -> Option<u8> {
     #[cfg(feature = "x86_64")]
     {
         // Ring first (IRQ-driven path), mirroring the riscv64 ordering.
-        let head = UART_RX_BUF.head.load(Ordering::Relaxed);
-        let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
-        if head != tail {
+        if UART_RX_BUF.depth_hint() > 0 {
             if let Some(c) = UART_RX_BUF.get() {
                 return process_input(c);
             }
@@ -1099,9 +1035,7 @@ pub fn getchar() -> Option<u8> {
     #[cfg(feature = "aarch64")]
     {
         // Ring buffer first (interrupt-driven path)
-        let head = UART_RX_BUF.head.load(Ordering::Relaxed);
-        let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
-        if head != tail {
+        if UART_RX_BUF.depth_hint() > 0 {
             if let Some(c) = UART_RX_BUF.get() {
                 return process_input(c);
             }
@@ -1131,9 +1065,7 @@ pub fn read_waitq() -> &'static crate::process::wait::WaitQueueHead {
 #[cfg(feature = "riscv64")]
 pub fn uart_has_data() -> bool {
     // Check ring buffer
-    let head = UART_RX_BUF.head.load(Ordering::Relaxed);
-    let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
-    if head != tail {
+    if UART_RX_BUF.depth_hint() > 0 {
         return true;
     }
     // Check hardware — only while the RX IRQ is not armed. Once armed, a
@@ -1155,9 +1087,7 @@ pub fn uart_has_data() -> bool {
 pub fn uart_has_data() -> bool {
     // Ring first; LSR only while the RX IRQ is not armed (same ownership
     // rule as riscv64 — an armed DR=1 byte is about to move to the ring).
-    let head = UART_RX_BUF.head.load(Ordering::Relaxed);
-    let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
-    if head != tail {
+    if UART_RX_BUF.depth_hint() > 0 {
         return true;
     }
     if UART_IRQ_ARMED.load(Ordering::Acquire) {
@@ -1253,9 +1183,7 @@ pub fn init_irq() {
 /// (same ownership rule as the twins).
 #[cfg(feature = "aarch64")]
 pub fn uart_has_data() -> bool {
-    let head = UART_RX_BUF.head.load(Ordering::Relaxed);
-    let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
-    if head != tail {
+    if UART_RX_BUF.depth_hint() > 0 {
         return true;
     }
     if UART_IRQ_ARMED.load(Ordering::Acquire) {
