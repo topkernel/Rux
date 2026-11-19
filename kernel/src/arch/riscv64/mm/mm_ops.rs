@@ -1426,6 +1426,13 @@ pub fn create_user_address_space() -> Option<u64> {
 
 /// Copy kernel mappings to user page table
 ///
+/// NOTE (observed 2026-11-19): this inherits the device MMIO PGDs
+/// VPN2[0..2] into every user root, so user VAs in 0x0..0x7FFF_FFFF
+/// resolve to DEVICE 2MB leaves — a MAP_FIXED anon mapping placed there
+/// silently aliases MMIO registers (PTE ppn=0x40000 = the virtio window)
+/// instead of faulting in RAM. Anything mapping user memory must place
+/// it at VPN2[3] or above.
+///
 /// This function copies PGD entries (pointers to L1 tables), NOT the L1 tables themselves.
 /// All processes share the same kernel L1/L0 page tables.
 ///
