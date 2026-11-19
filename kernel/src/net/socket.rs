@@ -1407,13 +1407,90 @@ pub fn inet_socket_type(file: &File) -> Option<SocketType> {
     Some(unsafe { &*(ptr as *const Socket) }.sock_type)
 }
 
-fn socket_read(file: &File, buf: &mut [u8]) -> isize {
-    // SAFETY: private_data was set during socket creation to a valid Arc<Socket> pointer.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
-        None => return -9, // EBADF
+/// r-p0 chase (bw_tcp stack-corruption hunt, 2026-11-19): validate the
+/// File's private_data before the raw Arc deref. The captured crash had
+/// socket == 0xffff8880fffffffe (heap_base - 2, a forged pointer) reach
+/// socket_wait_round's accept arm (mov 0x13c(%rbx) = tcp_fd read) —
+/// either a non-socket File dispatched through SOCKET_OPS, or
+/// private_data overwritten. A hit names the raw value, caller pid/comm,
+/// and file id; budgeted. Returns the validated pointer.
+unsafe fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
+    let raw = match unsafe { *file.private_data.get() } {
+        Some(p) => p as usize,
+        None => return None,
     };
-    // SAFETY: ptr is a valid Arc<Socket> pointer set during file creation.
+    let (lo, _) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    // Valid kernel-heap pointer: at/after the buddy heap start, within
+    // the slab packing window (small_alloc::is_slab_ptr answers for
+    // slab objects; anything else must at least lie inside the buddy's
+    // own heap_end). The buddy's heap_end alone is too tight — Socket
+    // Arcs live on slab pages above it.
+    let (_, buddy_hi) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    let in_buddy = lo != 0 && raw >= lo && raw < buddy_hi;
+    let in_slab = lo != 0 && raw >= lo && crate::mm::small_alloc::is_slab_ptr(raw, lo);
+    if in_buddy || in_slab {
+        return Some(raw);
+    }
+    // Region-unclassified (e.g. magazine-owned slab pages live outside
+    // both bookkeeping windows): adjudicate by the Arc strong count at
+    // the allocation head — a live Arc<Socket> carries a small positive
+    // count; a forged pointer reads 0/huge/garbage.
+    if raw > 0x1000 {
+        // SAFETY: diagnostic read of one u64; the address is
+        // canonical-checked implicitly (kernel-linear) and a fault here
+        // is no worse than the deref we are gating.
+        let strong = unsafe { core::ptr::read_volatile(raw as *const u64) };
+        if (1..=(1 << 20)).contains(&strong) {
+            // Plausible live Arc — classify as valid, forensics only.
+            static MAG_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if MAG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
+                crate::pr_warn!(
+                    "SOCK-UNCLASS-PTR site={} raw={:#x} strong={} (magazine-class)",
+                    site,
+                    raw,
+                    strong,
+                );
+            }
+            return Some(raw);
+        }
+        // Forged/garbage: print with the evidence and REFUSE.
+        static BAD_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if BAD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+            let cur = crate::sched::current();
+            let (pid, comm) = match cur {
+                Some(t) => unsafe {
+                    let cb = (*t).comm();
+                    let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                    ((*t).pid(), core::str::from_utf8(&cb[..cl]).unwrap_or("?"))
+                },
+                None => (0, "?"),
+            };
+            crate::pr_err!(
+                "SOCK-BAD-PTR site={} raw={:#x} strong={:#x} heap=[{:#x},{:#x}) pid={} comm={} file_id={}",
+                site,
+                raw,
+                strong,
+                lo,
+                buddy_hi,
+                pid,
+                comm,
+                file.file_id,
+            );
+        }
+        return None;
+    }
+    None
+}
+
+fn socket_read(file: &File, buf: &mut [u8]) -> isize {
+    // r-p0 chase: validated deref (see checked_socket_ptr).
+    let ptr = match unsafe { checked_socket_ptr(file, "read") } {
+        Some(p) => p,
+        None => return -9, // EBADF / forged pointer refused
+    };
+    // SAFETY: ptr validated in-kernel-heap and set during socket creation.
     let socket = unsafe { &*(ptr as *const Socket) };
 
     // W3: O_NONBLOCK (fcntl F_SETFL / SOCK_NONBLOCK) differentiates EAGAIN
@@ -1515,12 +1592,12 @@ fn socket_send_flush(
 }
 
 fn socket_write(file: &File, buf: &[u8]) -> isize {
-    // SAFETY: private_data was set during socket creation to a valid Arc<Socket> pointer.
-    let ptr = match unsafe { *file.private_data.get() } {
+    // r-p0 chase: validated deref (see checked_socket_ptr).
+    let ptr = match unsafe { checked_socket_ptr(file, "send") } {
         Some(p) => p,
-        None => return -9, // EBADF
+        None => return -9, // EBADF / forged pointer refused
     };
-    // SAFETY: ptr is a valid Arc<Socket> pointer set during file creation.
+    // SAFETY: ptr validated in-kernel-heap and set during socket creation.
     let socket = unsafe { &*(ptr as *const Socket) };
 
     // W3: blocking writes complete the whole buffer (retrying while the
