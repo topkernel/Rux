@@ -1682,6 +1682,13 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
                     put(b);
                 }
+                // gw2 twin parity (grq-source-fix): this CPU parks in the
+                // eternal wfi loop with whatever it holds — release a GRQ
+                // this CPU PROVABLY holds (the lock word names the owner;
+                // single authority) BEFORE halting, or every later GRQ
+                // acquirer spins behind the parked CPU forever. The x86_64
+                // twin's re-entry arm has carried this since gw2.
+                crate::sched::sched::terminal_release_grq_if_held();
                 // SAFETY: wfi stalls until the next interrupt; safe in a
                 // halt loop.
                 loop {

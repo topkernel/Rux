@@ -138,9 +138,13 @@ impl GlobalRunQueue {
         // Acquired: the section is now entered.
         grq_site_mark_at(cpu, site | GRQ_STEP_HELD);
         GRQ_ACQ_JIF[cpu].store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
-        if cpu < GRQ_HELD.len() {
-            GRQ_HELD[cpu].store(true, core::sync::atomic::Ordering::Relaxed);
-        }
+        // grq-source-fix: no separate "held" tracker is written here.
+        // The lock word itself names this cpu as the owner (owner-in-
+        // word, RawSpinlock::held_word) — one authority, published by
+        // the acquire's single cmpxchg. The round-6 GRQ_HELD bool made
+        // the release two steps (tracker-clear, then word-store) whose
+        // gap produced the gl3 orphaned-word wedge; with the owner in
+        // the word there is nothing left to disagree with it.
         GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
     }
 
@@ -579,11 +583,9 @@ impl<'a> GrqGuard<'a> {
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
         let cpu = crate::arch::cpu_id() as usize;
-        if cpu < GRQ_HELD.len() {
-            GRQ_HELD[cpu].store(false, core::sync::atomic::Ordering::Relaxed);
-        }
-        // grq-lock-1st: the section is over — clear the site stamp so a
-        // stale site is never mistaken for a live hold.
+        // grq-source-fix: the release is site-clear + the single
+        // word store below. No tracker step exists that could clear
+        // ahead of the word (the orphaned-word producer).
         grq_site_mark_at(cpu, 0);
         // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
         unsafe { (*self.grq).lock.unlock() };
@@ -617,10 +619,8 @@ impl Drop for GrqGuard<'_> {
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
         let cpu = crate::arch::cpu_id() as usize;
-        if cpu < GRQ_HELD.len() {
-            GRQ_HELD[cpu].store(false, core::sync::atomic::Ordering::Relaxed);
-        }
-        // grq-lock-1st: the section is over — clear the site stamp.
+        // grq-source-fix: site-clear + the single word store below —
+        // no separate tracker step (see lock_irqsave_site).
         grq_site_mark_at(cpu, 0);
         unsafe { (*self.grq).lock.unlock() };
         crate::arch::cpu::restore_irq(self.flags);
@@ -688,18 +688,22 @@ static mut GRQ: core::mem::MaybeUninit<GlobalRunQueue> = core::mem::MaybeUninit:
 /// Whether GRQ has been initialized
 static GRQ_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// gw1 (oh-launch round 6, gdbstub on the wedge): the permanent GRQ
-/// wedge's root. A task that faults inside a GRQ section (the paging-
-/// oops class) dies through the terminal switch, which resets the
-/// leaked preempt COUNT but never releases the lock WORD — every later
-/// GRQ acquirer spins forever (four CPUs at RawSpinlock::lock+1359,
-/// three more queued in the oops entry spin, serial dead). Track the
-/// hold per-CPU (written only by the owning CPU under IRQs-off, so a
-/// plain bool per CPU is race-free and touches no shared cacheline);
-/// the terminal path force-releases when the dying CPU still carries
-/// the hold. Same discipline as the preempt-count clear beside it.
-static GRQ_HELD: [core::sync::atomic::AtomicBool; 32] =
-    [const { core::sync::atomic::AtomicBool::new(false) }; 32];
+/// gw1 (oh-launch round 6) introduced GRQ_HELD — a per-CPU positive-
+/// knowledge bool written at acquire/release — so the death path could
+/// force-release a strand the dying CPU provably held. DELETED by the
+/// grq-source-fix (2026-11-19): making the tracker a SECOND authority
+/// turned the release into two steps (tracker-clear, then word-store),
+/// and a fault landing in that gap stranded a word no tracker claimed
+/// — the gl3/gl4 orphaned-word shape (seven waiters, no holder), which
+/// then needed a self-invented heal (951d9ec33) the reference kernel
+/// has no counterpart for. The construction now carries the owner IN
+/// the lock word itself (RawSpinlock: 0 = free, cpu+1 = held by cpu;
+/// acquire = one cmpxchg, release = one ordered store) — a single
+/// authority that cannot disagree with itself. Every former tracker
+/// consumer is derived: `grq_held_here` (printk deferral gate), the
+/// crime-scene dump's holder/waiter roles, and the terminal release's
+/// ownership proof. The unreachable-state detector lives in
+/// `RawSpinlock::holder_cpu` (debug_assert, hot-path rules).
 
 /// A diagnostic report CAPTURED under the GRQ and EMITTED after the lock
 /// is released (grq-lock-1st).
@@ -936,6 +940,15 @@ pub fn grq_dump_holder(why: &str) {
         return;
     }
     let now = crate::drivers::timer::get_jiffies();
+    // grq-source-fix: the holder is DERIVED from the lock word (the
+    // single authority — owner-in-word). Before sched init there is no
+    // word to read; the site stamps alone still name the participants.
+    let holder = if GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+        // SAFETY: GRQ_READY checked; read-only lock word access.
+        unsafe { grq() }.lock.holder_cpu()
+    } else {
+        None
+    };
     grq_raw_puts(b"\nGRQ-CRIME-SCENE ");
     grq_raw_puts(why.as_bytes());
     grq_raw_puts(b"\n");
@@ -944,7 +957,7 @@ pub fn grq_dump_holder(why: &str) {
         if site == 0 {
             continue;
         }
-        let holds = GRQ_HELD[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        let holds = holder == Some(cpu);
         let acq = GRQ_ACQ_JIF[cpu].load(core::sync::atomic::Ordering::Relaxed);
         let age = now.wrapping_sub(acq);
         let cur = unsafe { crate::sched::sched::cpu_state(cpu).current };
@@ -1055,35 +1068,21 @@ pub fn grq_wedge_inject() -> bool {
 /// GRQ therefore re-acquires the GRQ on the SAME cpu (self-deadlock on
 /// a non-reentrant spinlock, IRQs off forever) — and against another
 /// cpu it is the textbook ABAA (this cpu: GRQ -> WQ; the other: WQ ->
-/// GRQ). The tracker is positive knowledge (written under IRQs-off by
-/// the owning cpu only), so a false positive is impossible and a false
-/// negative only costs one deferred wake.
+/// GRQ).
+///
+/// grq-source-fix: the answer is DERIVED from the lock word (the
+/// single authority — the word names its owner), not from a second
+/// tracker. Same-cpu query on a word our own acquire wrote: a false
+/// positive is impossible and a false negative only costs one
+/// deferred wake.
 #[inline]
 pub fn grq_held_here() -> bool {
-    let cpu = crate::arch::cpu_id() as usize;
-    cpu < GRQ_HELD.len() && GRQ_HELD[cpu].load(core::sync::atomic::Ordering::Relaxed)
-}
-
-/// Is the GRQ lock word set while NO cpu's tracker claims the hold?
-///
-/// This is the ORPHANED-WORD shape (gl3): an interrupted release left
-/// the word set with every tracker clear, so every acquirer spins
-/// forever and no holder exists to name. Only meaningful on the
-/// terminal/heal paths (cheap scan: MAX_CPUS loads + one lock word).
-pub fn grq_word_orphaned() -> bool {
     if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
         return false;
     }
+    let cpu = crate::arch::cpu_id() as usize;
     // SAFETY: GRQ_READY checked; read-only lock word access.
-    if !unsafe { grq() }.lock.is_locked() {
-        return false;
-    }
-    for c in 0..GRQ_HELD.len() {
-        if GRQ_HELD[c].load(core::sync::atomic::Ordering::Relaxed) {
-            return false; // a live holder exists — not orphaned
-        }
-    }
-    true
+    unsafe { grq() }.lock.held_by(cpu)
 }
 
 /// Initialize the global run queue (called once during boot).
@@ -3512,83 +3511,73 @@ pub extern "C" fn asm_schedule() {
 /// stranding a CPU for), clear anything that can make the discipline or
 /// the recursion guard refuse the switch, and retry until a REAL context
 /// switch happens. Never returns to the caller on success.
-/// Death-path GRQ release (oh-launch round 6): a task/CPU that dies or
-/// parks forever inside a GRQ section strands the lock WORD (its paired
-/// unlock will never run) — every later GRQ acquirer spins permanently.
-/// gw1 (gdbstub): 4 CPUs at RawSpinlock::lock+1359 behind a task whose
-/// terminal switch had cleared only the preempt count; gw2: 7 CPUs
-/// behind a CPU parked in the KERNPANIC halt loop with the GRQ held.
-/// GRQ_HELD is the per-CPU positive-knowledge tracker written at
-/// acquire/release under IRQs-off; force-release ONLY when this CPU's
-/// own hold is still marked — never speculatively. Callers: the
-/// terminal switch (schedule_dead_never_returns) and the x86 kernel-
-/// panic halt paths (the re-entered short arm and the full dump's halt).
+/// Death-path GRQ release (oh-launch round 6; reworked grq-source-fix):
+/// a task/CPU that dies or parks forever inside a GRQ section strands
+/// the lock WORD (its paired unlock will never run) — every later GRQ
+/// acquirer spins permanently. gw1 (gdbstub): 4 CPUs at
+/// RawSpinlock::lock+1359 behind a task whose terminal switch had
+/// cleared only the preempt count; gw2: 7 CPUs behind a CPU parked in
+/// the KERNPANIC halt loop with the GRQ held.
+///
+/// grq-source-fix: the ownership proof is the LOCK WORD itself (0 =
+/// free, cpu+1 = held by cpu — the single authority). The round-6
+/// per-CPU tracker made this a two-step release whose gap the gl3
+/// orphaned-word class lived in, and its heal branch (951d9ec33)
+/// force-released an UNCLAIMED word — self-invented remediation with
+/// no reference counterpart, the lying-slot-heal mistake shape. Both
+/// are gone: a release here happens only when the word POSITIVELY
+/// names this cpu, so it can never touch another cpu's live section,
+/// and an interruption anywhere else in the protocol leaves a word
+/// that still names its owner for a later terminal pass to release.
+/// Callers: the terminal switch (schedule_dead_never_returns), the
+/// oops policy (before every arm), and the KERNPANIC re-entry park
+/// arms (x86_64 + riscv64 twins).
 pub fn terminal_release_grq_if_held() {
     let cpu = crate::arch::cpu_id() as usize;
-    if cpu < GRQ_HELD.len()
-        && GRQ_HELD[cpu].swap(false, core::sync::atomic::Ordering::Relaxed)
-    {
-        static GRQFORCE_N: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        let n = GRQFORCE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        // RELEASE THE LOCK FIRST, REPORT AFTER (grq-lock-1st).
-        //
-        // The report used to go through printk, and printk is NOT
-        // lock-free: pr_warn! -> printk_ln -> write_to_ring_buffer ->
-        // KMSG_READ_WQ.wake_up_all() -> WaitQueueHead::wake_up ->
-        // wake_up_process -> wake_up_enqueue_opt -> grq().lock_irqsave().
-        // A /dev/kmsg reader parked on KMSG_READ_WQ therefore turns a
-        // printk issued while THIS CPU holds the GRQ into a
-        // SELF-DEADLOCK: the wake re-acquires the very lock this CPU
-        // already owns, and the spin runs with IRQs off forever — the
-        // exact "IRQs-dead GRQ holder" signature the OH campaign kept
-        // capturing (four CPUs at RawSpinlock::lock+1359 behind one
-        // holder). The cross-CPU form is the textbook ABAA: this CPU
-        // holds the GRQ and wants the waitqueue lock; the other holds
-        // the waitqueue lock (inside wake_up) and wants the GRQ.
-        //
-        // The release therefore comes FIRST, and the report goes out
-        // through the LOCK-FREE raw console (uart_putc_raw — the same
-        // path the KERNPANIC park uses), never through printk.
-        //
-        // SAFETY: grq() returns the initialized GRQ (late callers run
-        // well past sched init); the per-CPU hold marker proves this
-        // CPU's acquire.
-        unsafe { grq().lock.force_unlock_terminal() };
-        if n < 8 {
-            let pid = crate::sched::current()
-                .map(|t| unsafe { (*t).pid() })
-                .unwrap_or(0);
-            grq_raw_puts(b"TERM-GRQ-FORCE pid=");
-            grq_raw_putdec(pid as u64);
-            grq_raw_puts(b" cpu=");
-            grq_raw_putdec(cpu as u64);
-            grq_raw_puts(b" released the runqueue lock stranded by the dying section\n");
-        }
+    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
         return;
     }
-    // ORPHANED-WORD HEAL (gl3 conviction, grq-lock-1st): the crime scene
-    // on the release build caught the shape — the lock WORD is set, every
-    // cpu's tracker is clear, seven cpus spin at lock() and the dump
-    // names NO holder. The producer is a release sequence interrupted
-    // between the tracker clear and the word store (a fault or park in
-    // that window strands the word with the tracker already saying
-    // "free" — the positive-knowledge gate above then refuses to touch
-    // it, forever). When NO cpu claims the hold, nobody owns the
-    // section: releasing the unclaimed word is always safe and is the
-    // only way the waiters ever run. Rate-limited report, raw console.
-    if crate::sched::sched::grq_word_orphaned() {
-        static GRQORPH_N: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        let n = GRQORPH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        // SAFETY: no cpu holds the lock (the scan below proved it); the
-        // word is debris from an interrupted release.
-        unsafe { grq().lock.force_unlock_terminal() };
-        if n < 8 {
-            grq_raw_puts(b"TERM-GRQ-ORPHAN-WORD cpu=");
-            grq_raw_putdec(crate::arch::cpu_id() as u64);
-            grq_raw_puts(b" released an unclaimed runqueue lock word\n");
-        }
+    // SAFETY: GRQ_READY checked. held_by reads the word read-only; only
+    // this cpu's own acquire/release writes this cpu's ownership into
+    // it, so a `true` here is stable until our own release below.
+    if !unsafe { grq() }.lock.held_by(cpu) {
+        return;
+    }
+    static GRQFORCE_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    let n = GRQFORCE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // RELEASE THE LOCK FIRST, REPORT AFTER (grq-lock-1st).
+    //
+    // The report used to go through printk, and printk is NOT
+    // lock-free: pr_warn! -> printk_ln -> write_to_ring_buffer ->
+    // KMSG_READ_WQ.wake_up_all() -> WaitQueueHead::wake_up ->
+    // wake_up_process -> wake_up_enqueue_opt -> grq().lock_irqsave().
+    // A /dev/kmsg reader parked on KMSG_READ_WQ therefore turns a
+    // printk issued while THIS CPU holds the GRQ into a
+    // SELF-DEADLOCK: the wake re-acquires the very lock this CPU
+    // already owns, and the spin runs with IRQs off forever — the
+    // exact "IRQs-dead GRQ holder" signature the OH campaign kept
+    // capturing (four CPUs at RawSpinlock::lock+1359 behind one
+    // holder). The cross-CPU form is the textbook ABAA: this CPU
+    // holds the GRQ and wants the waitqueue lock; the other holds
+    // the waitqueue lock (inside wake_up) and wants the GRQ.
+    //
+    // The release therefore comes FIRST, and the report goes out
+    // through the LOCK-FREE raw console (uart_putc_raw — the same
+    // path the KERNPANIC park uses), never through printk.
+    //
+    // SAFETY: grq() returns the initialized GRQ (GRQ_READY checked
+    // above); the word names THIS cpu as the holder (held_by).
+    unsafe { grq().lock.force_unlock_terminal() };
+    if n < 8 {
+        let pid = crate::sched::current()
+            .map(|t| unsafe { (*t).pid() })
+            .unwrap_or(0);
+        grq_raw_puts(b"TERM-GRQ-FORCE pid=");
+        grq_raw_putdec(pid as u64);
+        grq_raw_puts(b" cpu=");
+        grq_raw_putdec(cpu as u64);
+        grq_raw_puts(b" released the runqueue lock stranded by the dying section\n");
     }
 }
 
