@@ -184,7 +184,7 @@ fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                 ptr = fdt_add(ptr, 8);
 
                 // Read property name
-                let mut name_ptr = strings ;
+                let mut name_ptr = fdt_add(strings, nameoff as isize);
                 let mut prop_name = [0u8; 32];
                 let mut i = 0;
                 while fdt_u8(name_ptr) != 0 && i < 32 {
@@ -333,7 +333,7 @@ pub fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_REGIONS] 
                 ptr = fdt_add(ptr, 8);
 
                 // Read property name
-                let mut name_ptr = strings ;
+                let mut name_ptr = fdt_add(strings, nameoff as isize);
                 let mut prop_name = [0u8; 32];
                 let mut i = 0;
                 while fdt_u8(name_ptr) != 0 && i < 32 {
@@ -571,7 +571,7 @@ fn parse_chosen_prop(dtb_ptr: u64, name: &str) -> Option<u64> {
                 let nameoff = fdt_u32(fdt_add(ptr, 4)) as usize;
                 ptr = fdt_add(ptr, 8);
 
-                let mut name_ptr = strings ;
+                let mut name_ptr = fdt_add(strings, nameoff as isize);
                 let mut prop_name = [0u8; 32];
                 let mut i = 0;
                 while fdt_u8(name_ptr) != 0 && i < 32 {
