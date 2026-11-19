@@ -101,7 +101,7 @@ impl TraceEvent {
     ///
     /// ONE relaxed load — the whole disabled-path cost at a call site
     /// (the lane charter's overhead gate; the same class as the bespoke
-    /// `dfx=` switch table). The global `tracing_on` master is checked
+    /// retired dfx switch table). The global `tracing_on` master is checked
     /// inside `record`, after the arguments are marshalled — exactly
     /// where the reference checks it (the tracepoint's static key gates
     /// the site; `tracing_on` gates the ring buffer reserve, which

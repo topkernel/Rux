@@ -1706,7 +1706,7 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
 // shell on the serial console, debugfs not mounted), so the per-hop
 // verdict is read off the serial log. When the input tracepoints are
 // armed — through the reference's `trace_event=` boot parameter, the
-// unified-framework enable path (NOT a dfx= switch) — each traced hop
+// unified-framework enable path (not a legacy switch) — each traced hop
 // ALSO echoes one budgeted line through uart_putc_raw (the raw UART
 // path that is deliberately not compiled out of release builds; safe
 // from the softirq tasklet context push_input_event runs in). Off by

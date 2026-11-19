@@ -590,7 +590,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // kernel stack while the boot is still young; the khungtaskd
             // 60 s cadence continues afterward.
             crate::dfx::taskdump::sleep_snapshot_early();
-            // 69th (105-family hunt): pid=1 RUNNING-spin watch (dfx=
+            // 69th (105-family hunt): pid=1 RUNNING-spin watch (rux:
             // pid1spin, self-gated + rate-capped inside) — init going
             // 100%-CPU silent is the sole remaining 105 cause; this
             // names the spin site via the kernel-entry frame.
