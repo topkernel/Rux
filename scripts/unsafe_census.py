@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -343,12 +344,41 @@ def scan_texts(texts):
     return regions
 
 
+def tracked_sources():
+    """kernel/src sources git tracks, as paths relative to ROOT.
+
+    The census must measure the source tree, not whatever a previous
+    build left behind: a stale generated file (kernel/src/debug/
+    ksyms_generated.rs, 27,625 lines, written by an older build and
+    referenced by no module) used to be picked up by the rglob. Counting
+    only tracked files makes a bare checkout and a built tree produce the
+    same census by construction. Falls back to the on-disk scan when git
+    is unavailable.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "--", "kernel/src"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    rels = set()
+    for entry in out.split("\0"):
+        if entry:
+            rels.add(entry)
+    return rels
+
+
 def full_census():
     """Read kernel/src from disk and census it."""
+    tracked = tracked_sources()
     texts = {}
     for path in sorted(KERNEL_SRC.rglob("*.rs")):
+        rel = str(path.relative_to(ROOT))
+        if tracked is not None and rel not in tracked:
+            continue
         try:
-            texts[str(path.relative_to(ROOT))] = path.read_text(
+            texts[rel] = path.read_text(
                 encoding="utf-8", errors="replace")
         except OSError as e:
             print(f"  [skip] {path}: {e}", file=sys.stderr)

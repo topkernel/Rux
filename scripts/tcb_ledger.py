@@ -63,6 +63,7 @@ roadmap: it may only go down, or the increase must be justified.
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -284,8 +285,42 @@ def subsystem_of(rel: Path) -> str:
     return parts[0]
 
 
+def tracked_sources():
+    """The set of kernel/src sources git tracks, relative to KERNEL_SRC.
+
+    The ledger must measure the SOURCE TREE, not whatever a previous
+    build left in the working directory. A stale generated file
+    (kernel/src/debug/ksyms_generated.rs — 27,625 lines, written by an
+    older build, not referenced by any module) used to be picked up by
+    the rglob and silently inflated the line denominator, which diluted
+    every percentage in the table. Tracking the file list removes the
+    whole class: a bare checkout and a built tree now produce the same
+    numbers by construction.
+
+    Falls back to the on-disk scan when git is unavailable.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "--", "kernel/src"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    rels = set()
+    for entry in out.split("\0"):
+        if not entry:
+            continue
+        p = REPO_ROOT / entry
+        try:
+            rels.add(p.relative_to(KERNEL_SRC))
+        except ValueError:
+            continue
+    return rels
+
+
 def collect():
     stats = {}  # subsystem -> dict
+    tracked = tracked_sources()
     for path in sorted(KERNEL_SRC.rglob("*.rs")):
         rel = path.relative_to(KERNEL_SRC)
         if rel.parts[0] in EXCLUDE_DIRS:
@@ -293,6 +328,8 @@ def collect():
         if rel in EXCLUDE_FILES:
             continue
         if any(path.match(g) for g in EXCLUDE_GLOBS):
+            continue
+        if tracked is not None and rel not in tracked:
             continue
         fs = count_file(path)
         sub = subsystem_of(rel)
