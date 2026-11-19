@@ -12703,6 +12703,17 @@ pub fn cpu_idle_loop() -> ! {
                 crate::console::read_waitq().wake_up_one();
             }
 
+            // printk deferred-console drain (Rule 2, grq-lock-1st): the
+            // idle loop runs with IRQs ON and holds no lock — the best
+            // context to pay the serial baud time of console lines that
+            // printk deferred out of atomic/locked callers. Budget 4 per
+            // idle pass; the tick drains 1/tick as the floor, so a busy
+            // box still drains at ~100 lines/s (the serial line's own
+            // physical rate class).
+            if crate::printk::console_emit_pending_flag() {
+                crate::printk::console_drain_pending(4);
+            }
+
             // Close the IPI-before-halt window for wake dispatches to an
             // idle CPU (perf-ipc): a resched IPI that lands between the
             // nr_running recheck above and the halt below is SERVICED but

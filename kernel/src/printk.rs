@@ -8,6 +8,7 @@
 //! a ring buffer for storing all messages, and a syslog(2) syscall
 //! for userspace `dmesg` to read/manage kernel logs.
 
+use core::cell::UnsafeCell;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
@@ -50,7 +51,6 @@ const RING_BUFFER_CAPACITY: usize = crate::config::PRINTK_RING_BUFFER_SIZE / REC
 
 /// A single log record in the ring buffer.
 #[repr(C)]
-#[derive(Clone, Copy)]
 struct LogRecord {
     /// Log level (0-7).
     level: u8,
@@ -62,48 +62,111 @@ struct LogRecord {
     pid: u32,
     /// Length of valid text in `text` (0..RECORD_TEXT_SIZE).
     text_len: u16,
-    /// Monotonically increasing sequence number.
+    /// Monotonically increasing sequence number (plain data — only
+    /// trustworthy after `pub_seq` validated the record).
     seq: u64,
     /// Timestamp: raw cycles from clint::read_time().
     timestamp: u64,
     /// The message text (not NUL-terminated; use text_len).
     text: [u8; RECORD_TEXT_SIZE],
+    /// Lock-free publication marker (Rule 2, grq-lock-1st): 0 = free or
+    /// being (re)written; `seq + 1` = the record with sequence `seq` is
+    /// fully published. The writer stores 0, then fills, then stores
+    /// `seq + 1` with Release; readers Acquire-load this FIRST and touch
+    /// no other field unless it matches the sequence they expect. This
+    /// is the reference prb descriptor-state discipline collapsed to one
+    /// word, and it is what makes the writer lock-free — printk can no
+    /// longer spin on a ring lock while holding an arbitrary caller lock
+    /// (the KVM deschedule lesson: an IRQs-off spin can stretch to
+    /// milliseconds while the box burns).
+    pub_seq: AtomicU64,
 }
 
-/// The printk ring buffer.
-struct RingBuffer {
-    /// Fixed array of record slots.
-    records: [LogRecord; RING_BUFFER_CAPACITY],
-    /// Next slot index to write to.
-    write_idx: usize,
-    /// Sequence counter: monotonically increasing.
-    next_seq: u64,
-    /// Sequence number that the next sequential syslog READ will start from.
-    read_seq: u64,
-}
-
-impl RingBuffer {
-    const fn new() -> Self {
+impl LogRecord {
+    const fn empty() -> Self {
         Self {
-            records: [LogRecord {
-                level: 0,
-                cpu_id: 0,
-                _pad: 0,
-                pid: 0,
-                text_len: 0,
-                seq: 0,
-                timestamp: 0,
-                text: [0u8; RECORD_TEXT_SIZE],
-            }; RING_BUFFER_CAPACITY],
-            write_idx: 0,
-            next_seq: 0,
-            read_seq: 0,
+            level: 0,
+            cpu_id: 0,
+            _pad: 0,
+            pid: 0,
+            text_len: 0,
+            seq: 0,
+            timestamp: 0,
+            text: [0u8; RECORD_TEXT_SIZE],
+            pub_seq: AtomicU64::new(0),
         }
     }
 }
 
-/// Global ring buffer instance.
-static RING_BUFFER: Spinlock<RingBuffer> = Spinlock::new(RingBuffer::new());
+/// The lock-free record slots (Rule 2). Writers reserve a sequence with
+/// one `fetch_add` and publish with the per-record `pub_seq`; readers
+/// snapshot under the publication protocol. Distinct sequences map to
+/// distinct slots, so at most one writer fills a slot at a time — the
+/// one exception is a writer stalling (preempted mid-fill) for a full
+/// ring's worth of records, at which point the next writer of that slot
+/// interleaves with it: the tear window is documented, bounded by
+/// `RING_BUFFER_CAPACITY` prints inside ONE preemption window, and
+/// memory-safe by construction (every reader clamps `text_len`).
+struct RecordsArray(UnsafeCell<[LogRecord; RING_BUFFER_CAPACITY]>);
+unsafe impl Sync for RecordsArray {}
+
+static RING_RECORDS: RecordsArray = RecordsArray(UnsafeCell::new([const {
+    LogRecord::empty()
+}; RING_BUFFER_CAPACITY]));
+
+/// Lock-free slot accessor (Rule 2 writer/reader entry point).
+///
+/// SAFETY contract (callers): the slot protocol above — a reader may
+/// only trust the record's fields between an Acquire load of `pub_seq`
+/// that matched its expected sequence and the reads it performs after
+/// that load; a writer owns the slot between the 0-store and the
+/// publish-store of its reserved sequence.
+#[inline]
+fn ring_rec(seq: u64) -> &'static LogRecord {
+    let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+    // SAFETY: RING_RECORDS is a fixed static array; idx is bounds-checked
+    // by the modulo. The aliasing discipline is the slot protocol above
+    // (this is the standard lock-free ring access shape).
+    unsafe { &(*RING_RECORDS.0.get())[idx] }
+}
+
+/// Writable slot view for the lock-free writer (Rule 2). Same slot
+/// protocol as `ring_rec`; the writer owns the slot between the
+/// invalidation store and the publication store of its reserved
+/// sequence.
+#[inline]
+fn ring_rec_mut(seq: u64) -> &'static mut LogRecord {
+    let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+    // SAFETY: see `ring_rec` — the writer's slot-protocol ownership makes
+    // this the standard lock-free ring write access.
+    unsafe { &mut (*RING_RECORDS.0.get())[idx] }
+}
+
+/// Clamped text length for a record: never trust the raw u16 (a torn
+/// record in the documented storm window must garble, never panic).
+#[inline]
+fn rec_text_len(rec: &LogRecord) -> usize {
+    (rec.text_len as usize).min(RECORD_TEXT_SIZE)
+}
+
+/// The ring's write sequence counter — sequences are reserved LOCK-FREE
+/// (Rule 2). Sequence `s` lives at slot `s % CAP`; `RING_NEXT_SEQ` is
+/// the NEXT sequence to assign. Reset only by syslog clear (racing one
+/// in-flight record is accepted, same as the reference's clear).
+static RING_NEXT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The printk ring's READER cursor state (the write side is lock-free).
+///
+/// Only the sequential-read cursor lives here; the lock serializes
+/// READERS against readers (syslog(2), /proc/kmsg). It no longer
+/// excludes writers — writers never take it (see `RING_RECORDS`).
+struct RingBuffer {
+    /// Sequence number that the next sequential syslog READ will start from.
+    read_seq: u64,
+}
+
+/// Global reader-cursor instance.
+static RING_BUFFER: Spinlock<RingBuffer> = Spinlock::new(RingBuffer { read_seq: 0 });
 
 // ==================== Global State ====================
 
@@ -530,8 +593,103 @@ fn printk_bytes(level: u8, text: &[u8]) {
         write_to_ring_buffer(level, text, timestamp);
     }
 
-    // Console emit (level filter already passed above)
+    // Console emit (level filter already passed above).
+    //
+    // DEFERRED IN UNSAFE CONTEXTS (Rule 2, grq-lock-1st): the serial
+    // emit pays real baud time (a full line can be tens of ms of THRE
+    // polling) and that cost must never run under the CALLER's locks or
+    // with interrupts off. When the caller is preemptible task context
+    // (preempt_count == 0, IRQs on — holding no spinlock) the emit is
+    // inline, exactly as before; every atomic/locked/IRQs-off caller
+    // only marks the console pending flag and returns — the record is
+    // already safe in the ring, and the tick/idle drain emits it from a
+    // context that holds nothing. Early boot (before PRINTK_INITIALIZED)
+    // stays inline: there is no tick to drain yet and the box is
+    // single-CPU.
+    if printk_should_defer_output() {
+        CONSOLE_EMIT_PENDING.store(true, Ordering::Release);
+        return;
+    }
     emit_to_console(text);
+}
+
+/// Should the console emit for THIS print be deferred to the tick/idle
+/// drain? (Rule 2 — see `printk_bytes`.)
+#[inline]
+fn printk_should_defer_output() -> bool {
+    // Before the ring is initialized there is no tick drain to rely on —
+    // early boot emits inline (single CPU, the historical behavior).
+    if !PRINTK_INITIALIZED.load(Ordering::Relaxed) {
+        return false;
+    }
+    // Any spinlock holder (RawSpinlock/Spinlock book PREEMPT_OFFSET on
+    // acquire), any interrupt context (hardirq/softirq/NMI bits), any
+    // explicit preempt-disable, or IRQs off — all pay the serial line
+    // later, from a context that holds nothing.
+    crate::interrupt::preempt::preempt_count() != 0
+        || !crate::arch::cpu::get_interrupts_state()
+        || crate::sched::sched::grq_held_here()
+}
+
+/// A console line is waiting to be emitted by the drain (set by printk
+/// callers in unsafe contexts; cleared when the drain catches up).
+static CONSOLE_EMIT_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Drain cursor: the next sequence whose console line has NOT been
+/// emitted yet. Lagging the ring is fine (the drain skips overrun);
+/// a syslog clear resets the ring and this cursor clamps down to it.
+static CONSOLE_DRAIN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Read side of `CONSOLE_EMIT_PENDING` for the idle-loop drain gate
+/// (one Acquire load; the idle loop skips the drain call when nothing
+/// is pending).
+#[inline]
+pub fn console_emit_pending_flag() -> bool {
+    CONSOLE_EMIT_PENDING.load(Ordering::Acquire)
+}
+
+/// Emit at most `budget` pending console lines, oldest first.
+///
+/// Called from contexts that hold NO scheduler lock and NO caller lock:
+/// the tick (`service_deferred_kmsg_wake`) and the idle loop's poll
+/// window. `emit_to_console` is bounded-CAS on the emit lock and the
+/// UART writer is lock-free MMIO, so a bounded budget per call keeps
+/// the hardirq extension small (1 line/tick ≈ the serial line's own
+/// physical rate at 115200 baud).
+///
+/// Returns the number of lines emitted (diagnostics).
+pub fn console_drain_pending(budget: usize) -> usize {
+    let mut emitted = 0usize;
+    while emitted < budget {
+        let next = RING_NEXT_SEQ.load(Ordering::Relaxed);
+        let mut d = CONSOLE_DRAIN_SEQ.load(Ordering::Relaxed);
+        // Clamp both ways: ring overran us (skip the overwritten tail)
+        // or a syslog clear reset the sequence space.
+        let oldest = next.saturating_sub(RING_BUFFER_CAPACITY as u64);
+        if d < oldest {
+            d = oldest;
+        }
+        if d > next {
+            d = next;
+        }
+        if d >= next {
+            CONSOLE_EMIT_PENDING.store(false, Ordering::Release);
+            break;
+        }
+        let rec = ring_rec(d);
+        if rec.pub_seq.load(Ordering::Acquire) != d + 1 {
+            // A writer is mid-fill at this slot (or the documented storm
+            // tear) — stop here, keep order, retry next service.
+            break;
+        }
+        if rec.level <= CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+            let tl = rec_text_len(rec);
+            emit_to_console(&rec.text[..tl]);
+        }
+        CONSOLE_DRAIN_SEQ.store(d + 1, Ordering::Release);
+        emitted += 1;
+    }
+    emitted
 }
 
 // ==================== Ring Buffer Write ====================
@@ -543,60 +701,54 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     // CPU 0, hiding cross-CPU issues in the logs).
     let cpu_id: u16 = (crate::arch::cpu_id() as u16).min(u16::MAX);
 
-    let mut rb = RING_BUFFER.lock_irqsave();
-
-    let idx = rb.write_idx;
-    let seq = rb.next_seq;
-
-    let record = &mut rb.records[idx];
-    record.level = level;
-    record.pid = pid;
-    record.cpu_id = cpu_id;
-    record.timestamp = timestamp;
-    record.seq = seq;
+    // LOCK-FREE writer (Rule 2, grq-lock-1st): one fetch_add reserves a
+    // sequence (and with it a slot — distinct sequences map to distinct
+    // slots), the fill is plain stores, and the per-record pub_seq
+    // publishes with Release. printk can thus be called while holding
+    // ANY lock, from any interrupt context, without ever spinning on a
+    // ring lock (the old spinlock made every caller pay an IRQs-off
+    // spin whenever the holder was KVM-descheduled — the same stretched
+    // window that convicted the GRQ re-acquire).
+    let seq = RING_NEXT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let rec = ring_rec_mut(seq);
+    // Invalidate the previous publication of this slot BEFORE filling:
+    // readers of the OLD sequence must not consume half-new data. The
+    // Release fence orders the invalidation before the fills on weak
+    // archs (riscv64); the publish store below orders the fills before
+    // the publication.
+    rec.pub_seq.store(0, Ordering::Relaxed);
+    core::sync::atomic::fence(Ordering::Release);
+    rec.level = level;
+    rec.pid = pid;
+    rec.cpu_id = cpu_id;
+    rec.timestamp = timestamp;
+    rec.seq = seq;
     let copy_len = text.len().min(RECORD_TEXT_SIZE);
-    record.text[..copy_len].copy_from_slice(&text[..copy_len]);
-    record.text_len = copy_len as u16;
+    rec.text[..copy_len].copy_from_slice(&text[..copy_len]);
+    rec.text_len = copy_len as u16;
+    // Publish (Release pairs with the readers' Acquire of pub_seq).
+    rec.pub_seq.store(seq + 1, Ordering::Release);
 
-    // Advance write index (wrap around)
-    rb.write_idx = (idx + 1) % RING_BUFFER_CAPACITY;
-    rb.next_seq = seq + 1;
+    // The sequential reader's cursor self-heals on overwrite (it detects
+    // `pub_seq` divergence and jumps to the oldest kept sequence), so the
+    // writer no longer repairs read_seq under the lock.
 
-    // If sequential reader is behind, advance past overwritten records
-    if rb.read_seq < rb.next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64) {
-        rb.read_seq = rb.next_seq - RING_BUFFER_CAPACITY as u64;
-    }
-
-    // Drop lock before persistent log write to avoid deadlock
-    drop(rb);
-
-    // Wake /dev/kmsg readers: a blocking kmsg read (Linux semantics)
-    // sleeps until the next record lands. The waitqueue wake is
-    // IRQ-context safe (irqsave discipline inside).
+    // Wake /dev/kmsg readers (Linux semantics: a blocking kmsg read
+    // sleeps until the next record lands).
     //
-    // grq-lock-1st: NOT unconditional. `WaitQueueHead::wake_up` holds
-    // the queue's list lock ACROSS `wake_up_process` ->
-    // `wake_up_enqueue_opt` -> `grq().lock_irqsave()`. So waking the
-    // readers from a printer that HOLDS the GRQ re-acquires the GRQ on
-    // this very cpu — the non-reentrant spinlock then spins forever
-    // with IRQs off (the "IRQs-dead GRQ holder" wedge the OH campaign
-    // kept capturing: four CPUs at RawSpinlock::lock+1359 behind one
-    // holder). Against another cpu the same pair is the textbook ABAA:
-    // this cpu holds the GRQ and wants the waitqueue lock, the other
-    // holds the waitqueue lock (inside wake_up) and wants the GRQ.
-    //
-    // The reference's shape is the same idea: Linux does not wake the
-    // log readers from inside the printer's critical section — the
-    // console unlock / klogd wake is deferred to a context that holds
-    // no lock. Rux's equivalent: when the printing cpu holds the GRQ,
-    // the reader wake is DEFERRED to the next tick (which runs with no
-    // scheduler lock held); otherwise the wake stays synchronous and
-    // the delivery latency is unchanged.
-    if crate::sched::sched::grq_held_here() {
-        KMSG_WAKE_PENDING.store(true, Ordering::Release);
-    } else {
-        KMSG_READ_WQ.wake_up_all();
-    }
+    // ALWAYS DEFERRED (Rule 2, grq-lock-1st): `WaitQueueHead::wake_up`
+    // holds the queue's list lock ACROSS `wake_up_process` ->
+    // `wake_up_enqueue_opt` -> `grq().lock_irqsave()` — a wake from the
+    // print path ENTERS THE SCHEDULER. From a GRQ holder it re-acquired
+    // the GRQ on the same cpu (the convicted wedge: holder spins forever
+    // on GRQ+0x0, IRQs dead); from any other locked context it is an
+    // unbounded walk under the caller's lock. The reference never wakes
+    // log readers from inside the printer (console_unlock's deferred
+    // wakeup, printk_deferred); Rux now does the same unconditionally:
+    // the print path only sets the pending flag, the tick services it
+    // from a context that holds nothing. Reader delivery latency is one
+    // tick (the pa11-accepted poll class).
+    KMSG_WAKE_PENDING.store(true, Ordering::Release);
 
     // NOTE (klogd redesign): the persistent /var/log/kmsg copy is NO
     // LONGER taken here. The old per-record synchronous ext4 write ran
@@ -688,7 +840,7 @@ pub fn sys_syslog(args: [u64; 6]) -> i64 {
         // Return unread bytes (approximation)
         9 => {
             let rb = RING_BUFFER.lock_irqsave();
-            let unread = rb.next_seq.saturating_sub(rb.read_seq);
+            let unread = RING_NEXT_SEQ.load(Ordering::Relaxed).saturating_sub(rb.read_seq);
             // Approximate: assume each record is ~128 bytes average
             (unread * 128) as i64
         }
@@ -950,7 +1102,7 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
     let (produced, next_read_seq) = {
         let mut rb = RING_BUFFER.lock_irqsave();
         let read_seq = rb.read_seq;
-        let next_seq = rb.next_seq;
+        let next_seq = RING_NEXT_SEQ.load(Ordering::Relaxed);
 
         if read_seq >= next_seq {
             (0usize, read_seq)
@@ -960,14 +1112,15 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
 
             // Iterate through all slots, find records with seq >= read_seq
             for i in 0..RING_BUFFER_CAPACITY {
-                let record = &rb.records[i];
-                if record.text_len == 0 || record.seq < read_seq {
+                let record = ring_rec(i as u64);
+                let pub_ok = record.pub_seq.load(Ordering::Acquire);
+                if pub_ok == 0 || pub_ok - 1 < read_seq {
                     continue;
                 }
 
                 // Format: <level>[timestamp] pid(N) cpu(M): text\n
                 let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp, record.pid, record.cpu_id);
-                let text_bytes = &record.text[..record.text_len as usize];
+                let text_bytes = &record.text[..rec_text_len(record)];
                 let trailing_nl = text_bytes.last() == Some(&b'\n');
                 let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
 
@@ -1025,20 +1178,20 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
 
     let produced = {
         let mut rb = RING_BUFFER.lock_irqsave();
-        let next_seq = rb.next_seq;
+        let next_seq = RING_NEXT_SEQ.load(Ordering::Relaxed);
 
         if next_seq == 0 {
             0usize
         } else {
             let mut offset = 0usize;
             let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
-            let write_idx = rb.write_idx;
+            let write_idx = next_seq as usize % RING_BUFFER_CAPACITY;
 
             // Read records from oldest to newest.
             // The oldest record is at write_idx (the slot about to be overwritten).
             for i in 0..RING_BUFFER_CAPACITY {
                 let idx = (write_idx + i) % RING_BUFFER_CAPACITY;
-                let record = &rb.records[idx];
+                let record = ring_rec(idx as u64);
 
                 // Skip empty/zeroed records
                 if record.text_len == 0 {
@@ -1047,7 +1200,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
 
                 // Format: <level>[timestamp] pid(N) cpu(M): text\n
                 let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp, record.pid, record.cpu_id);
-                let text_bytes = &record.text[..record.text_len as usize];
+                let text_bytes = &record.text[..rec_text_len(record)];
                 let trailing_nl = text_bytes.last() == Some(&b'\n');
                 let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
 
@@ -1067,12 +1220,12 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
 
             if clear {
                 // Clear all records
-                for record in rb.records.iter_mut() {
-                    record.text_len = 0;
+                for s in 0..RING_BUFFER_CAPACITY as u64 {
+                    ring_rec(s).pub_seq.store(0, Ordering::Release);
                 }
-                rb.write_idx = 0;
+                RING_NEXT_SEQ.store(0, Ordering::Release);
+                CONSOLE_DRAIN_SEQ.store(0, Ordering::Release);
                 rb.read_seq = 0;
-                rb.next_seq = 0;
             }
 
             offset
@@ -1094,12 +1247,12 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
 /// Clear the ring buffer.
 fn syslog_clear() {
     let mut rb = RING_BUFFER.lock_irqsave();
-    for record in rb.records.iter_mut() {
-        record.text_len = 0;
+    for s in 0..RING_BUFFER_CAPACITY as u64 {
+        ring_rec(s).pub_seq.store(0, Ordering::Release);
     }
-    rb.write_idx = 0;
+    RING_NEXT_SEQ.store(0, Ordering::Release);
+    CONSOLE_DRAIN_SEQ.store(0, Ordering::Release);
     rb.read_seq = 0;
-    rb.next_seq = 0;
 }
 
 /// Newest `n` records, oldest-first, syslog-style one line each.
@@ -1123,19 +1276,21 @@ pub fn ring_tail(n: usize) -> alloc::string::String {
     let mut recs: alloc::vec::Vec<TailRec> = alloc::vec::Vec::new();
     {
         let rb = RING_BUFFER.lock_irqsave();
-        if rb.next_seq == 0 {
+        let next_seq_probe = RING_NEXT_SEQ.load(Ordering::Relaxed);
+    if next_seq_probe == 0 {
             return out;
         }
-        let oldest_kept = rb.next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
-        let start = rb.next_seq.saturating_sub(n as u64).max(oldest_kept);
+        let ring_next = RING_NEXT_SEQ.load(Ordering::Relaxed);
+        let oldest_kept = ring_next.saturating_sub(RING_BUFFER_CAPACITY as u64);
+        let start = ring_next.saturating_sub(n as u64).max(oldest_kept);
         let mut seq = start;
-        while seq < rb.next_seq {
+        while seq < ring_next {
             let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-            let record = &rb.records[idx];
-            if record.text_len != 0 && record.seq == seq {
+            let record = ring_rec(idx as u64);
+            if record.pub_seq.load(Ordering::Acquire) == seq + 1 && record.text_len != 0 {
                 let mut text = [0u8; RECORD_TEXT_SIZE];
                 text[..record.text_len as usize]
-                    .copy_from_slice(&record.text[..record.text_len as usize]);
+                    .copy_from_slice(&record.text[..rec_text_len(record)]);
                 recs.push(TailRec {
                     level: record.level,
                     timestamp: record.timestamp,
@@ -1213,7 +1368,8 @@ pub fn ring_tail_into(dst: &mut [u8]) -> usize {
         );
         return at;
     };
-    if rb.next_seq == 0 || dst.is_empty() {
+    let next_seq_probe = RING_NEXT_SEQ.load(Ordering::Relaxed);
+    if next_seq_probe == 0 || dst.is_empty() {
         return at;
     }
 
@@ -1221,15 +1377,16 @@ pub fn ring_tail_into(dst: &mut [u8]) -> usize {
     // this hold is bounded by the copy below): walk newest-first until
     // the formatted records no longer fit, remembering the first seq
     // the tail starts from.
-    let oldest_kept = rb.next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
-    let mut first = rb.next_seq;
+    let ring_next = RING_NEXT_SEQ.load(Ordering::Relaxed);
+        let oldest_kept = ring_next.saturating_sub(RING_BUFFER_CAPACITY as u64);
+    let mut first = ring_next;
     let mut used = 0usize;
-    let mut seq = rb.next_seq;
+    let mut seq = ring_next;
     while seq > oldest_kept {
         seq -= 1;
         let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-        let record = &rb.records[idx];
-        if record.text_len == 0 || record.seq != seq {
+        let record = ring_rec(idx as u64);
+        if record.pub_seq.load(Ordering::Acquire) != seq + 1 {
             continue;
         }
         let cost = record.text_len as usize + SYSLOG_HEADER_LEN + 1;
@@ -1242,10 +1399,10 @@ pub fn ring_tail_into(dst: &mut [u8]) -> usize {
 
     // Pass 2: emit oldest-first.
     let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
-    for seq in first..rb.next_seq {
+    for seq in first..ring_next {
         let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-        let record = &rb.records[idx];
-        if record.text_len == 0 || record.seq != seq {
+        let record = ring_rec(idx as u64);
+        if record.pub_seq.load(Ordering::Acquire) != seq + 1 {
             continue;
         }
         let hlen = format_syslog_header(
@@ -1256,7 +1413,7 @@ pub fn ring_tail_into(dst: &mut [u8]) -> usize {
             record.cpu_id,
         );
         push(dst, &mut at, &header_buf[..hlen]);
-        push(dst, &mut at, &record.text[..record.text_len as usize]);
+        push(dst, &mut at, &record.text[..rec_text_len(record)]);
         // One record per line, the ring_tail convention.
         if at == 0 || dst[at - 1] != b'\n' {
             push(dst, &mut at, b"\n");
@@ -1274,7 +1431,7 @@ pub fn ring_tail_into(dst: &mut [u8]) -> usize {
 /// Format: "<level>text\n" per record, matching dmesg expected format.
 pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
     let rb = RING_BUFFER.lock_irqsave();
-    let next_seq = rb.next_seq;
+    let next_seq = RING_NEXT_SEQ.load(Ordering::Relaxed);
 
     if next_seq == 0 {
         return alloc::vec::Vec::new();
@@ -1282,19 +1439,19 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
 
     let mut result = alloc::vec::Vec::new();
     let mut header_buf = [0u8; MAX_HEADER_LEN];
-    let write_idx = rb.write_idx;
+    let write_idx = next_seq as usize % RING_BUFFER_CAPACITY;
 
     // Read records from oldest to newest
     for i in 0..RING_BUFFER_CAPACITY {
         let idx = (write_idx + i) % RING_BUFFER_CAPACITY;
-        let record = &rb.records[idx];
+        let record = ring_rec(idx as u64);
 
         if record.text_len == 0 {
             continue;
         }
 
         // Skip whitespace-only records (e.g. bare newlines from println!(""))
-        let text_bytes = &record.text[..record.text_len as usize];
+        let text_bytes = &record.text[..rec_text_len(record)];
         if text_bytes.iter().all(|&b| b == b'\n' || b == b'\r') {
             continue;
         }
@@ -1328,14 +1485,21 @@ static KMSG_READ_WQ: crate::process::wait::WaitQueueHead =
 /// Serviced from the tick path, which holds no scheduler lock.
 static KMSG_WAKE_PENDING: AtomicBool = AtomicBool::new(false);
 
-/// Service a deferred /dev/kmsg reader wake.
+/// Service the printk deferrals (Rule 2 drain): the pending console
+/// lines and the deferred /dev/kmsg reader wake.
 ///
-/// Called from the tick path — a context that holds no scheduler lock.
-/// The swap makes exactly one caller do the wake; the others observe
-/// `false` and return. The wake itself takes the waitqueue lock and
-/// calls `wake_up_process`, which takes the GRQ: legal here because the
-/// caller holds nothing.
+/// Called from the tick path — a context that holds no scheduler lock
+/// and no caller lock. The console drain budget is 1 line per tick
+/// (the serial line's own physical rate class at 115200 baud); the
+/// idle loop's poll window drains a larger batch (see
+/// `console_drain_pending`). The wake swap makes exactly one caller do
+/// the waitqueue walk; the wake takes the queue lock and calls
+/// `wake_up_process` (GRQ) — legal here because the caller holds
+/// nothing.
 pub fn service_deferred_kmsg_wake() {
+    if CONSOLE_EMIT_PENDING.load(Ordering::Acquire) {
+        console_drain_pending(1);
+    }
     if KMSG_WAKE_PENDING.swap(false, Ordering::AcqRel) {
         KMSG_READ_WQ.wake_up_all();
     }
@@ -1371,7 +1535,7 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
         {
             let mut rb = RING_BUFFER.lock_irqsave();
             let pos = file.get_pos();
-            let next_seq = rb.next_seq;
+            let next_seq = RING_NEXT_SEQ.load(Ordering::Relaxed);
 
             if pos >= next_seq {
                 drop(rb);
@@ -1388,7 +1552,7 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                 KMSG_READ_WQ.prepare_to_wait(current, false, true);
                 {
                     let rb2 = RING_BUFFER.lock_irqsave();
-                    let ready = file.get_pos() < rb2.next_seq;
+                    let ready = (file.get_pos() as u64) < RING_NEXT_SEQ.load(Ordering::Relaxed);
                     drop(rb2);
                     if ready {
                         KMSG_READ_WQ.finish_wait(current);
@@ -1416,10 +1580,10 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
             let seq = if pos < oldest { oldest } else { pos };
 
             let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-            let record = &rb.records[idx];
+            let record = ring_rec(idx as u64);
 
             // Check if record was overwritten
-            if record.text_len == 0 || record.seq != seq {
+            if record.pub_seq.load(Ordering::Acquire) != seq + 1 {
                 // Record was overwritten, skip to next available
                 file.set_pos(next_seq);
                 drop(rb);
@@ -1441,7 +1605,7 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
             lpos = header_len;
 
             // Write message text
-            let text_bytes = &record.text[..record.text_len as usize];
+            let text_bytes = &record.text[..rec_text_len(record)];
             let text_len = text_bytes.len().min(line_buf.len() - lpos);
             line_buf[lpos..lpos + text_len].copy_from_slice(&text_bytes[..text_len]);
             lpos += text_len;
@@ -1597,7 +1761,7 @@ fn kmsg_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
     let mut ready = 0u16;
     if events & POLLIN != 0 {
         let rb = RING_BUFFER.lock_irqsave();
-        if file.get_pos() < rb.next_seq {
+        if (file.get_pos() as u64) < RING_NEXT_SEQ.load(Ordering::Relaxed) {
             ready |= POLLIN | POLLRDNORM;
         }
     }
@@ -1624,7 +1788,7 @@ fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> 
         2 => {
             // SEEK_END: set to next_seq (to read future messages)
             let rb = RING_BUFFER.lock_irqsave();
-            let next_seq = rb.next_seq;
+            let next_seq = RING_NEXT_SEQ.load(Ordering::Relaxed);
             drop(rb);
             file.set_pos(next_seq);
             next_seq as isize
@@ -1707,14 +1871,14 @@ fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
         // Produce one record if the cursor has not caught up.
         let produced = {
             let mut rb = RING_BUFFER.lock_irqsave();
-            let next_seq = rb.next_seq;
+            let next_seq = RING_NEXT_SEQ.load(Ordering::Relaxed);
             if rb.read_seq < next_seq {
                 // Skip records the ring has already overwritten.
                 let oldest = next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
                 let seq = rb.read_seq.max(oldest);
                 let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-                let record = &rb.records[idx];
-                if record.text_len == 0 || record.seq != seq {
+                let record = ring_rec(idx as u64);
+                if record.pub_seq.load(Ordering::Acquire) != seq + 1 {
                     // Overwritten: jump the cursor to live records.
                     rb.read_seq = next_seq;
                     drop(rb);
@@ -1728,7 +1892,7 @@ fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                     record.pid,
                     record.cpu_id,
                 );
-                let text_bytes = &record.text[..record.text_len as usize];
+                let text_bytes = &record.text[..rec_text_len(record)];
 
                 // Stage header+text in one line buffer, then truncate to
                 // the caller's request (record consumed regardless).
@@ -1825,7 +1989,7 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
 fn proc_kmsg_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     let rb = RING_BUFFER.lock_irqsave();
-    let readable = rb.read_seq < rb.next_seq;
+    let readable = rb.read_seq < RING_NEXT_SEQ.load(Ordering::Relaxed);
     drop(rb);
     let mut ready = 0u16;
     if readable && events & POLLIN != 0 {
@@ -2227,18 +2391,19 @@ mod persistent_log {
         // at most MAX_RECORDS_PER_FLUSH of the newest ones.
         let mut lines: alloc::vec::Vec<(u64, Line)> = alloc::vec::Vec::new();
         {
-            let rb = RING_BUFFER.lock_irqsave();
-            let oldest_kept = rb.next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
+            let _rb = RING_BUFFER.lock_irqsave();
+            let ring_next = super::RING_NEXT_SEQ.load(Ordering::Relaxed);
+        let oldest_kept = ring_next.saturating_sub(RING_BUFFER_CAPACITY as u64);
             let start = (LAST_SEQ.load(Ordering::Relaxed) + 1).max(oldest_kept);
-            let end = rb.next_seq.saturating_sub(0);
+            let end = ring_next;
             // Bound the count (newest-bound): if the window is huge,
             // skip to the newest MAX_RECORDS_PER_FLUSH records.
             let start = start.max(end.saturating_sub(MAX_RECORDS_PER_FLUSH));
             let mut seq = start;
             while seq < end {
                 let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-                let record = &rb.records[idx];
-                if record.text_len != 0 && record.seq == seq {
+                let record = super::ring_rec(idx as u64);
+                if record.pub_seq.load(Ordering::Acquire) == seq + 1 && record.text_len != 0 {
                     let mut line = Line { buf: [0; 320], len: 0 };
                     let timestamp_us = record.timestamp / 10; // 10 MHz ticks -> us
                     line.push_dec(record.seq);
@@ -2251,7 +2416,7 @@ mod persistent_log {
                     line.push(b" ");
                     line.push_dec(record.cpu_id as u64);
                     line.push(b" ");
-                    line.push(&record.text[..record.text_len as usize]);
+                    line.push(&record.text[..super::rec_text_len(record)]);
                     if line.buf[line.len - 1] != b'\n' {
                         line.push(b"\n");
                     }
