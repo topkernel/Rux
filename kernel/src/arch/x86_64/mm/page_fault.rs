@@ -2121,6 +2121,29 @@ pub(crate) fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
             return;
         }
         let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        // 0xb9 install validator (oh-launch round 7): a PRESENT entry
+        // with zero address bits is corrupt by construction (physical
+        // page 0 is reserved at boot on x86). The hilogd teardown
+        // fault walked one; this arm names the INSTALLER the moment a
+        // bad value is written, live. Gated by rux:mmforensics;
+        // deferred printk (lock-safe); one load when off.
+        if crate::trace::EVENT_MMFORENSICS.armed()
+            && (bits & 0x1) != 0
+            && (bits & 0x000F_FFFF_FFFF_F000) == 0
+        {
+            static BADPT_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if BADPT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                crate::pr_err!(
+                    "PT-BAD-INSTALL: write_pte_raw bits={:#x} vaddr={:#x} root={:#x} pid={} ra={:#x}",
+                    bits,
+                    a.bits(),
+                    root_ppn,
+                    crate::sched::get_current_pid(),
+                    crate::dfx::backtrace::caller_return_address()
+                );
+            }
+        }
         (*table1).set(vpn1, super::pagetable::PageTableEntry::from_bits(bits));
     }
 }
