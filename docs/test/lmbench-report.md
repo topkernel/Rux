@@ -168,6 +168,48 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol round 9 (2026-11-19 22:xx): the no-heal directive's removal experiment + a completion-regression admission with a contaminated baseline
+
+Two threads, honestly recorded:
+
+(1) NO-HEAL DIRECTIVE COMPLIANCE (user rule 11-19: no self-invented
+corrective paths for lock/ownership state; detectors stay). My round-2/3
+correctives (STRAND-COUNTER-RESYNC, SWOUT-STALE-RETIRED + qword clear,
+and the dead report arms) were removed locally and the removal
+experiment run: the lat_fs battery regressed 3/3 (EXIT 0, PICK-SKIP
+back to ~110) — the layer IS load-bearing against still-live source
+producers. Per the directive's intent this records the DEBT precisely:
+the heals stay on main (pushing the removal would regress it) until the
+producers are fixed at the source; after each producer fix, re-run the
+removal experiment. The load-bearing finding: the sweep's corroborated
+ownership check + the silent qword clear are what make the PRE-EXISTING
+phantom-sweep heal function — i.e. a switch-out retire/ownership-release
+is still being lost somewhere (the oh-launch rounds 10-13 territory;
+their r13 handed a leaked-preempt-bit producer at misc.rs:594-family to
+the pick-protocol lane). Removal NOT pushed; main keeps the layer.
+
+(2) COMPLETION REGRESSION ON CURRENT MAIN, with a contaminated
+baseline. The lat_fs default battery now FAILS to complete on clean
+committed trees — including 63825a62b itself (the commit the r4-era
+passing boots nominally ran on). Resolution of the paradox: the r4/zw1
+passing kernels were built from the SHARED working tree carrying then-
+UNCOMMITTED parallel-session fixes (oh-launch rounds 9-12 in flight);
+that exact kernel exists at no commit. Current-main failure anatomy
+(worker 317: RUNNING in write(2), preempt=0 clean — a slow/stuck IO
+face, not a scheduler artifact); the 63825-era worktree build failed
+with a DIFFERENT face (worker preempt=7, PICK-PC-ZERO was=0x1 fired —
+leaked preempt bits growing). wwcensus-armed rigs add the PICK-SKIP
+noise (132→2 clean cmdline) but do not explain completion.
+
+Status consequences: the lat_fs row's published numbers (zw1: 0k
+20976/19598 … 10k 1557/1511; homepage 20.1k/17.3k) were honestly
+measured on that now-unreproducible kernel — kept, with this
+reproducibility debt recorded. NEXT ROUND (clean-room): pin kernel +
+rig + cmdline, re-baseline completion on current main, then bisect
+across COMMITTED commits only (candidates: unsafe-slim2's guard
+conversion, oh-launch r12/13, the tcp fix), never against the shared
+working tree.
+
 ## Patrol round 8 (2026-11-19 19:xx): bw_tcp teardown deadlock FIXED — tcp_socket_free wakes its orphans; dead-slot polls error; the slow-mode census rig
 
 The TCPCEN census (per-tcp-slot state/rx/window on the periodic dump's
