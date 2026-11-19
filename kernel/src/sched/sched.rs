@@ -353,21 +353,21 @@ fn arm_dl_replenish_timer(task: *mut Task) {
 /// the runnable set (INTERRUPTIBLE, so the upcoming __schedule treats it as
 /// a blocker instead of demanding a requeue link), and arm the replenish
 /// timer for its deadline. Idempotent.
-unsafe fn dl_throttle(task: *mut Task) {
-    let dl = (*task).dl_entity();
+fn dl_throttle(task: &mut Task) {
+    let dl = task.dl_entity();
     if dl.dl_throttled.load(core::sync::atomic::Ordering::Acquire) {
         // A second exhaustion report for an already-throttled task can only
         // be a straggler tick — but its timer may have fired and failed to
         // re-arm, so refresh it.
-        arm_dl_replenish_timer(task);
+        arm_dl_replenish_timer(core::ptr::from_mut(task));
         return;
     }
     dl.dl_throttled.store(true, core::sync::atomic::Ordering::Release);
     // Only RUNNING tasks are on a CPU; anything else is already blocking.
-    if (*task).state() == TaskState::new(TaskState::RUNNING) {
-        (*task).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+    if task.state() == TaskState::new(TaskState::RUNNING) {
+        task.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     }
-    arm_dl_replenish_timer(task);
+    arm_dl_replenish_timer(core::ptr::from_mut(task));
 }
 
 // ==================== RT bandwidth throttling (batch 8 MED) ====================
@@ -682,11 +682,11 @@ impl PerCpuState {
 
 // ==================== Static Instances ====================
 
-/// Global run queue — MaybeUninit because GlobalRunQueue::new() is not const.
-static mut GRQ: core::mem::MaybeUninit<GlobalRunQueue> = core::mem::MaybeUninit::uninit();
-
-/// Whether GRQ has been initialized
-static GRQ_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+// GRQ and GRQ_READY moved into the framework edges module (unsafe-slim
+// L1): the MaybeUninit boot-provenance accesses live in
+// sched::edges under INV-SCE-3; this file reads them through
+// edges::grq_ref()/edges::grq_mut() and initializes through the
+// claim/stage/publish protocol.
 
 /// gw1 (oh-launch round 6) introduced GRQ_HELD — a per-CPU positive-
 /// knowledge bool written at acquire/release — so the death path could
@@ -943,7 +943,7 @@ pub fn grq_dump_holder(why: &str) {
     // grq-source-fix: the holder is DERIVED from the lock word (the
     // single authority — owner-in-word). Before sched init there is no
     // word to read; the site stamps alone still name the participants.
-    let holder = if GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+    let holder = if crate::sched::edges::grq_is_ready() {
         // SAFETY: GRQ_READY checked; read-only lock word access.
         unsafe { grq() }.lock.holder_cpu()
     } else {
@@ -1123,7 +1123,7 @@ pub fn grq_wedge_inject() -> bool {
 /// deferred wake.
 #[inline]
 pub fn grq_held_here() -> bool {
-    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+    if !crate::sched::edges::grq_is_ready() {
         return false;
     }
     let cpu = crate::arch::cpu_id() as usize;
@@ -1132,16 +1132,13 @@ pub fn grq_held_here() -> bool {
 }
 
 /// Initialize the global run queue (called once during boot).
-unsafe fn grq_init() {
-    // SAFETY: called exactly once during boot on the primary CPU before any
-    // concurrent access; GRQ_READY flag serializes initialization.
-    if GRQ_READY.compare_exchange(
-        false, true,
-        core::sync::atomic::Ordering::AcqRel,
-        core::sync::atomic::Ordering::Acquire,
-    ).is_err() {
+fn grq_init() {
+    // INV-SCE-3 (edges): the claim CAS takes the single-initializer
+    // role; the staged value publishes with the Release every
+    // edges::grq_ref()/grq_mut() reader gates on.
+    if crate::sched::edges::grq_claim_init() {
         // Another CPU is initializing; spin until done
-        while !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+        while !crate::sched::edges::grq_is_ready() {
             core::hint::spin_loop();
         }
         return;
@@ -1162,21 +1159,20 @@ unsafe fn grq_init() {
     // T+15-19min, byte-identical every boot). Nothing is enqueued yet
     // (GRQ_READY gates all enqueue paths), so re-self-linking the heads
     // at their final address here is safe and complete.
-    GRQ = core::mem::MaybeUninit::new(GlobalRunQueue::new());
-    // SAFETY: written immediately above on the sole initialization path;
-    // re-initializing the embedded ListHead array is plain memory writes.
-    unsafe {
-        GRQ.assume_init_mut().rt_rq.init();
-    }
+    crate::sched::edges::grq_stage(GlobalRunQueue::new());
+    // RT-HEADS FIX tail (see above): re-self-link the 100 priority
+    // heads at their final address. Still on the claim-winning path
+    // (INV-SCE-3 writer side, pre-publish).
+    crate::sched::edges::grq_mut().rt_rq.init();
+    crate::sched::edges::grq_publish_init();
 }
 
 /// Get a shared reference to GRQ.
 fn grq() -> &'static GlobalRunQueue {
-    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+    if !crate::sched::edges::grq_is_ready() {
         panic!("GRQ accessed before initialization");
     }
-    // SAFETY: GRQ_READY is checked above; if true, GRQ was fully initialized by grq_init().
-    unsafe { GRQ.assume_init_ref() }
+    crate::sched::edges::grq_ref()
 }
 
 /// b50 #GP guard (x86-scribble family): 48-bit canonical-address check
@@ -1286,11 +1282,7 @@ pub fn kernel_task_ptr_range_ok(p: *const u8) -> bool {
     if a >= init_lo && a < init_lo + core::mem::size_of::<crate::process::task::Task>() {
         return true;
     }
-    // SAFETY: only the static's address is read, never its (possibly
-    // uninitialized) contents.
-    let idle_lo = unsafe {
-        core::ptr::addr_of!(IDLE_TASK_STORAGES) as usize
-    };
+    let idle_lo = crate::sched::edges::idle_task_storage_base();
     let idle_span = core::mem::size_of::<crate::process::task::Task>() * MAX_CPUS;
     a >= idle_lo && a < idle_lo + idle_span
 }
@@ -1353,11 +1345,11 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
 /// Scribble hunter (rux:scribble (retired dfx=scribble)): trylock the GRQ for the diagnostic
 /// consistency scan. None when uninitialized or currently held.
 pub fn try_grq_lock() -> Option<GrqGuard<'static>> {
-    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+    if !crate::sched::edges::grq_is_ready() {
         return None;
     }
     // SAFETY: guarded by GRQ_READY above.
-    unsafe { GRQ.assume_init_ref() }.try_lock_irqsave()
+    crate::sched::edges::grq_ref().try_lock_irqsave()
 }
 
 /// Per-CPU state array (indexed by cpu_id)
@@ -2145,7 +2137,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
 }
 
 /// Per-CPU idle task storage
-static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [const { core::mem::MaybeUninit::uninit() }; MAX_CPUS];
+// IDLE_TASK_STORAGES moved into sched::edges (INV-SCE-4).
 
 /// Per-CPU idle task pointers, accessed by boot.S to set tp on secondary CPUs.
 /// Written once by sched::init() on the boot CPU, read by secondary_start in
@@ -2202,7 +2194,7 @@ pub extern "C" fn asm_need_resched() -> i64 {
 /// boot guard keeps pre-grq_init ticks periodic (grq() panics before
 /// grq_init).
 pub fn sched_can_stop_tick() -> bool {
-    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+    if !crate::sched::edges::grq_is_ready() {
         return false;
     }
     let g = grq();
@@ -2717,8 +2709,7 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
     }
 
     // Initialize the global RQ once
-    // SAFETY: grq_init() is idempotent (checks GRQ_READY); called during boot.
-    unsafe { grq_init(); }
+    grq_init(); // idempotent (edges::grq_claim_init gates the work)
 
     RQ_INITIALIZED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
 }
@@ -2731,7 +2722,7 @@ pub fn init_secondary(cpu_id: usize) {
     // tp was already set to the idle task pointer by boot.S (loaded from
     // __secondary_idle_tasks).  Just register with the per-CPU state.
     unsafe {
-        let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_ptr() as *mut Task;
+        let idle_ptr = crate::sched::edges::idle_task_ptr(cpu_id);
 
         // Verify the current-task pointer matches the pre-created idle task
         let current_tp = crate::arch::cpu::get_thread_id() as usize;
@@ -2791,11 +2782,12 @@ pub fn init() {
     for cpu in 0..MAX_CPUS {
         init_per_cpu_rq(cpu);
 
-        // SAFETY: cpu is bounds-checked (loop 0..MAX_CPUS);
-        // IDLE_TASK_STORAGES[cpu] is a per-CPU MaybeUninit<Task>
-        // only written once during init.
+        // SAFETY: INV-SCE-4 writer side — the BSP init loop writes each
+        // cpu's idle slot exactly once, before any secondary schedules;
+        // __secondary_idle_tasks is consumed read-only by boot.S after
+        // this loop publishes it.
         unsafe {
-            let idle_ptr = IDLE_TASK_STORAGES[cpu].as_mut_ptr();
+            let idle_ptr = crate::sched::edges::idle_task_ptr(cpu);
             Task::new_idle_at(idle_ptr);
 
             crate::process::pid_hash::pid_hash_insert(idle_ptr);
@@ -3657,7 +3649,7 @@ pub extern "C" fn asm_schedule() {
 /// arms (x86_64 + riscv64 twins).
 pub fn terminal_release_grq_if_held() {
     let cpu = crate::arch::cpu_id() as usize;
-    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+    if !crate::sched::edges::grq_is_ready() {
         return;
     }
     // SAFETY: GRQ_READY checked. held_by reads the word read-only; only
@@ -3948,13 +3940,7 @@ unsafe fn __schedule() {
     // RE-DERIVABLE, and two compares per schedule are cheap. Heal
     // unconditionally; report the first hit per CPU.
     if cpu_id < MAX_CPUS {
-        let static_idle = {
-            // SAFETY: IDLE_TASK_STORAGES was fully initialized by
-            // sched::init before any CPU schedules; read-only access.
-            unsafe {
-                IDLE_TASK_STORAGES[cpu_id].as_mut_ptr()
-            }
-        };
+        let static_idle = crate::sched::edges::idle_task_ptr(cpu_id);
         let pcpu = cpu_state_mut(cpu_id);
         if pcpu.idle != static_idle {
             static PCDATA_HIT: [core::sync::atomic::AtomicBool; MAX_CPUS] =
@@ -4482,7 +4468,7 @@ unsafe fn __schedule() {
         if exec_start != 0 && now > exec_start {
             let delta = now - exec_start;
             if !dl.consume_runtime(delta) {
-                dl_throttle(prev);
+                dl_throttle(&mut *prev);
             }
         }
         dl.exec_start.store(now, core::sync::atomic::Ordering::Release);
@@ -4597,7 +4583,7 @@ unsafe fn __schedule() {
         // is the one GRQ operation that can ALLOCATE — the deadline queue
         // is still a BTreeMap).
         grq_site_mark_fp_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_CLASS_OP));
-        requeue_prev_locked(&mut *grq_guard, prev);
+        requeue_prev_locked(&mut *grq_guard, &mut *prev);
         // timer-gap lane (pinned-RT slot-corruption fix, the pi_stress
         // -g 2 wedge): prev is leaving THIS cpu and its affinity no
         // longer includes it — the sched_setaffinity self-migration
@@ -5023,7 +5009,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                     |v| v.checked_sub(1),
                 );
             } else {
-                mark_picked_on_cpu(task, task == prev);
+                mark_picked_on_cpu(crate::sched::edges::task_mut(task), task == prev);
                 // R32-DL1: reset the CBS execution clock at pick (mirror of the
                 // CFS R20-6 fix). exec_start otherwise still holds the
                 // timestamp of the task's PREVIOUS switch-out (or 0 before its
@@ -5122,7 +5108,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                     |v| v.checked_sub(1),
                 );
             } else {
-                mark_picked_on_cpu(task, task == prev);
+                mark_picked_on_cpu(crate::sched::edges::task_mut(task), task == prev);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
                     core::sync::atomic::Ordering::SeqCst,
@@ -5155,7 +5141,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                     |v| v.checked_sub(1),
                 );
             } else {
-                mark_picked_on_cpu(task, task == prev);
+                mark_picked_on_cpu(crate::sched::edges::task_mut(task), task == prev);
                 // grq-10ns: single locked-RMW form (one xadd) instead of
                 // the fetch_update CAS loop — every writer of this
                 // counter holds the GRQ, so a wrap (old == 0) is
@@ -5349,22 +5335,26 @@ pub fn psledger_peek(task: *mut Task) -> Option<(u32, u32, u64)> {
 /// twice — the NEW2 root cause. The idle task is never marked (it is not
 /// on the class queues; clearing a never-set flag is a harmless no-op).
 #[inline]
-unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
-    if !task.is_null() {
+fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
+    // The raw identity of the picked task, for the helper APIs still on
+    // pointer currency (rings, ledgers) — INV-SCE-1 supplies the
+    // reference; the pointer is its address, not a second derivation.
+    let task_ptr = core::ptr::from_mut(task);
+    {
         // Wakewatch ring (118th): the PICK unlink edge — the pick removes
         // the task from its class queue HERE; if the switch-in is later
         // abandoned (revoked / no affirm), this event plus the missing A
         // names the strand. Single site covers the DL/RT/CFS pick arms.
-        ww_record(task, WW_EV_UNLINK_PICK);
+        ww_record(task_ptr, WW_EV_UNLINK_PICK);
         // Wakewatch forensics: consume the wake stamp and classify the
         // wake→pick latency (direct-console prints follow the R34
         // discipline — we hold the GRQ lock here).
-        crate::sched::wakewatch::check_picked(task, crate::arch::cpu_id() as usize);
+        crate::sched::wakewatch::check_picked(task_ptr, crate::arch::cpu_id() as usize);
         // 63rd: persistent per-task history (strand-wall hunt) — the
         // pick_n counter vs a frozen exec clock is the
         // picked-but-never-executes signature.
         if sched_hist_armed() {
-            sched_hist_pick(task, crate::arch::cpu_id() as usize);
+            sched_hist_pick(task_ptr, crate::arch::cpu_id() as usize);
         }
         // Scribble hunter (R65 double-run seed tripwire): we hold the GRQ
         // lock here, so the ownership picture is stable. A task that is
@@ -5386,9 +5376,9 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
                     break;
                 }
             }
-            let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+            let claim = task.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
             if owner_slot >= 0 || (claim != -1 && claim as usize != me) {
-                crate::dfx::scribble::double_seed(task, me as u64, owner_slot, claim);
+                crate::dfx::scribble::double_seed(task_ptr, me as u64, owner_slot, claim);
             }
         }
         // R74 (riscv64 double-run seed tripwire, always on): same check as
@@ -5403,22 +5393,22 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
             let me = crate::arch::cpu_id() as usize;
             let mut owner_slot: i32 = -1;
             for c in 0..crate::config::MAX_CPUS {
-                if c != me && cpu_state(c).current == task {
+                if c != me && cpu_state(c).current == task_ptr {
                     owner_slot = c as i32;
                     break;
                 }
             }
-            let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
-            let pick_st = (*task).pick_state();
+            let claim = task.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+            let pick_st = task.pick_state();
             let tp = crate::arch::cpu::get_thread_id() as usize;
-            let tp_is_task = tp == task as usize;
+            let tp_is_task = tp == task_ptr as usize;
             // NOTE: pick_st==LIVE alone is NOT a seed signal — it persists
             // after a legitimate switch-out (the release store does not
             // reset it). Only a foreign slot or a foreign claim convicts.
             if owner_slot >= 0 || (claim != -1 && claim as usize != me) {
                 r56_print_pid(
                     b"R74-DOUBLE-SEED cpu=", me as u32, b" pid=");
-                r56_print_pid(b"", (*task).pid(), b" owner_slot=");
+                r56_print_pid(b"", task.pid(), b" owner_slot=");
                 r56_print_pid(b"", owner_slot as u32, b" claim=");
                 r56_print_pid(b"", claim as u32, b" pick_st=");
                 r56_print_pid(b"", pick_st, b" tp_is_task=");
@@ -5430,7 +5420,7 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
         crate::dfx::scribble::ring_log(
             crate::arch::cpu_id() as usize,
             1,
-            task as u64,
+            task_ptr as u64,
             0,
         );
         // R56-heal: publish the FULL ownership qword {on_cpu = true,
@@ -5452,8 +5442,8 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
         // correction is reported: seeing it means a caller computed
         // is_repick=false for a task this CPU owns — a bug worth naming.
         let me = crate::arch::cpu_id() as usize;
-        let owned_here = (me < MAX_CPUS && cpu_state(me).current == task)
-            || (*task).running_on_cpu.load(core::sync::atomic::Ordering::Acquire) == me as i32;
+        let owned_here = (me < MAX_CPUS && cpu_state(me).current == task_ptr)
+            || task.running_on_cpu.load(core::sync::atomic::Ordering::Acquire) == me as i32;
         let live = is_repick || owned_here;
         if owned_here && !is_repick {
             // First-hit-only: an in-tree impossibility — if a caller ever
@@ -5463,7 +5453,7 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
                 core::sync::atomic::AtomicBool::new(false);
             if !PICK_LIVE_FORCED_SEEN.swap(true, core::sync::atomic::Ordering::AcqRel) {
                 r56_print_pid(b"PICK-LIVE-FORCED cpu=", me as u32, b" pid=");
-                r56_print_pid(b"", (*task).pid(), b"\n");
+                r56_print_pid(b"", task.pid(), b"\n");
             }
         }
         // leg-26 (PICK-PC-ZERO): a task being picked FRESH (not live on
@@ -5482,12 +5472,12 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
         // invariant above); if one ever does, its drop underflow-clamps
         // and REPORTS rather than poisoning. Rate-gated one line per 2 j.
         if !live {
-            let pc = (*task).preempt_count();
+            let pc = task.preempt_count();
             let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
             let nest_extra = (pc & crate::interrupt::preempt::HARDIRQ_MASK)
                 .saturating_sub(crate::interrupt::preempt::HARDIRQ_OFFSET);
             if base != 0 || nest_extra > 0 || (pc & crate::interrupt::preempt::NMI_MASK) != 0 {
-                (*task).ti_preempt_count_zero();
+                task.ti_preempt_count_zero();
                 static PICKZERO_LAST: core::sync::atomic::AtomicU64 =
                     core::sync::atomic::AtomicU64::new(0);
                 let now = crate::drivers::timer::get_jiffies();
@@ -5504,23 +5494,23 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
                 {
                     r56_print_pid(
                         b"PICK-PC-ZERO pid=",
-                        (*task).pid(),
+                        task.pid(),
                         b" was=0x",
                     );
                     r56_print_pid(b"", pc as u32, b"\n");
                 }
             }
         }
-        (*task).publish_pick_ownership(crate::arch::cpu_id() as i32, live);
+        task.publish_pick_ownership(crate::arch::cpu_id() as i32, live);
         // pick→switch ledger: record the publication; the switch-in
         // affirm/abort consume it. An intact record at a later stale
         // heal = switchless pick.
         psledger_note_publish(
-            task,
+            task_ptr,
             crate::arch::cpu_id() as usize,
             if live { crate::process::task::PICK_LIVE } else { crate::process::task::PICK_PICKED },
         );
-        pick_trace(task, 2);
+        pick_trace(task_ptr, 2);
     }
 }
 
@@ -5549,11 +5539,14 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
 /// self-healing event that pins the manufacturer for the follow-up hunt.
 ///
 /// Called with the GRQ lock held, only on the refused path.
-unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool {
+fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> bool {
+    // Pointer identity for the queue-internal linkage queries (the class
+    // rqueues match on the embedded node's address).
+    let task_ptr = core::ptr::from_mut(task);
     // Re-run the guards that legitimately refuse (freed-page poison,
     // exiting task) BEFORE any field read below — a freed page cannot be
     // healed, and the policy/entity reads must not touch it.
-    if (*task).pid() == TASK_POISON || (*task).state().is_dead() {
+    if task.pid() == TASK_POISON || task.state().is_dead() {
         return false;
     }
 
@@ -5561,20 +5554,20 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
     // budget window has not expired. Do not "heal" it (the forced re-insert
     // below would re-open the 100%-CPU hole CBS closes); the replenish
     // timer is the guaranteed wake that re-links it.
-    if (*task).policy() == SchedPolicy::Deadline
-        && (*task).dl_entity().dl_throttled.load(core::sync::atomic::Ordering::Acquire)
+    if task.policy() == SchedPolicy::Deadline
+        && task.dl_entity().dl_throttled.load(core::sync::atomic::Ordering::Acquire)
     {
-        arm_dl_replenish_timer(task);
+        arm_dl_replenish_timer(task_ptr);
         return false;
     }
 
     // Check ACTUAL linkage — never trust the flag that just lied.
-    let policy = (*task).policy();
+    let policy = task.policy();
     let linked = match policy {
-        SchedPolicy::Fifo | SchedPolicy::Rr => grq.rt_rq.is_linked(task),
-        SchedPolicy::Deadline => grq.dl_rq.is_linked(task),
+        SchedPolicy::Fifo | SchedPolicy::Rr => grq.rt_rq.is_linked(task_ptr),
+        SchedPolicy::Deadline => grq.dl_rq.is_linked(task_ptr),
         SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-            grq.cfs_rq.is_linked(task)
+            grq.cfs_rq.is_linked(task_ptr)
         }
     };
     if linked {
@@ -5589,7 +5582,7 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
         for &b in MSG {
             crate::dfx::taskdump::putc_brief(b);
         }
-        let v = (*task).pid() as u64;
+        let v = task.pid() as u64;
         let mut sh = 64;
         while sh > 0 {
             sh -= 4;
@@ -5600,22 +5593,24 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
     }
     match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
-            (*task).rt_entity().set_on_rq(false);
+            task.rt_entity().set_on_rq(false);
         }
         SchedPolicy::Deadline => {
-            (*task).dl_entity().on_rq.store(
+            task.dl_entity().on_rq.store(
                 false,
                 core::sync::atomic::Ordering::Release,
             );
         }
         SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-            (*task).sched_entity().set_on_rq(false);
+            task.sched_entity().set_on_rq(false);
         }
     }
     // With the flag cleared the class insert is admitted, and its success
     // pairs set_state(RUNNING) + grq.nr_running with the actual linkage
     // (R7-B5 discipline).
-    enqueue_task_locked(grq, task)
+    // Bridge (until enqueue_task_locked's own conversion lands): the one
+    // audited call with pointer currency, same INV-SCE-1 exclusion.
+    unsafe { enqueue_task_locked(grq, task_ptr) }
 }
 
 /// R41 (B-form phantom — prev re-enqueue): requeue `prev` for its upcoming
@@ -5629,8 +5624,10 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
 /// wake, policy-change re-enqueue) are never double-linked.
 ///
 /// Called with the GRQ lock held.
-unsafe fn requeue_prev_locked(grq: &mut GlobalRunQueue, prev: *mut Task) {
-    if enqueue_task_locked(grq, prev) {
+fn requeue_prev_locked(grq: &mut GlobalRunQueue, prev: &mut Task) {
+    // Bridge (same as ensure_linked_locked's tail): pointer currency for
+    // the pre-conversion enqueue path.
+    if unsafe { enqueue_task_locked(grq, core::ptr::from_mut(prev)) } {
         return; // normal path: fresh insert linked prev (state already RUNNING)
     }
     // Refused — verify and heal (no-op skip when prev is already linked).
@@ -7479,7 +7476,7 @@ pub fn wake_up_enqueue_opt(
         let woken = if enqueue_task_locked(&mut *grq_guard, task) {
             pick_trace(task, 11);
             true
-        } else if ensure_linked_locked(&mut *grq_guard, task) {
+        } else if ensure_linked_locked(&mut *grq_guard, &mut *task) {
             (*task).set_state(TaskState::new(TaskState::RUNNING));
             pick_trace(task, 11);
             true
@@ -8296,38 +8293,36 @@ fn g_diag_idle_bit(cpu: usize) -> bool {
 /// CPU (within the task's affinity) whose current task loses to the waker
 /// by the wakeup granularity.
 fn check_cfs_preempt(task: *mut Task, cpus_allowed: u32) {
-    // SAFETY: task is a valid pointer from enqueue_task; per-CPU current/idle
-    // pointers are valid when not null (set during CPU init).
-    unsafe {
-        let se_vruntime = (*task).sched_entity().get_vruntime();
-        for cpu in 0..MAX_CPUS {
-            if (cpus_allowed & (1u32 << cpu)) == 0 {
-                continue;
-            }
-            let running = cpu_state(cpu).current;
-            if running.is_null() || running == cpu_state(cpu).idle {
-                continue;
-            }
-            let r_policy = (*running).policy();
-            if r_policy == SchedPolicy::Normal
-                || r_policy == SchedPolicy::Batch
-                || r_policy == SchedPolicy::Idle
-            {
-                // Idle-policy tasks never preempt anyone (Linux).
-                if (*task).policy() == SchedPolicy::Idle {
-                    continue;
-                }
-                let curr_vruntime = (*running).sched_entity().get_vruntime();
-                if se_vruntime < curr_vruntime {
-                    let delta = curr_vruntime - se_vruntime;
-                    if delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS {
-                        resched_cpu(cpu);
-                        return;
-                    }
-                }
-            }
-            // RT/DL incumbents preempt CFS regardless — their own checks handle those.
+    let wakee = crate::sched::edges::task_shared(task);
+    let se_vruntime = wakee.sched_entity().get_vruntime();
+    for cpu in 0..MAX_CPUS {
+        if (cpus_allowed & (1u32 << cpu)) == 0 {
+            continue;
         }
+        let running = cpu_state(cpu).current;
+        if running.is_null() || running == cpu_state(cpu).idle {
+            continue;
+        }
+        let incumbent = crate::sched::edges::task_shared(running);
+        let r_policy = incumbent.policy();
+        if r_policy == SchedPolicy::Normal
+            || r_policy == SchedPolicy::Batch
+            || r_policy == SchedPolicy::Idle
+        {
+            // Idle-policy tasks never preempt anyone (Linux).
+            if wakee.policy() == SchedPolicy::Idle {
+                continue;
+            }
+            let curr_vruntime = incumbent.sched_entity().get_vruntime();
+            if se_vruntime < curr_vruntime {
+                let delta = curr_vruntime - se_vruntime;
+                if delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS {
+                    resched_cpu(cpu);
+                    return;
+                }
+            }
+        }
+        // RT/DL incumbents preempt CFS regardless — their own checks handle those.
     }
 }
 
@@ -8339,7 +8334,7 @@ fn check_cfs_preempt(task: *mut Task, cpus_allowed: u32) {
 /// reference's check_preempt_curr_rt shape.
 // SAFETY: task is a valid pointer from enqueue_task; cpu_state(cpu).current/idle
 // are valid pointers set during init; null checks before dereference.
-unsafe fn rt_try_poke_cpu(task: *mut Task, task_prio: u32, cpu: usize) -> bool {
+fn rt_try_poke_cpu(task: &Task, task_prio: u32, cpu: usize) -> bool {
     let running = cpu_state(cpu).current;
     if running.is_null() || running == cpu_state(cpu).idle {
         // timer-gap fix (the RT-2X §3.3 double-refusal): an
@@ -8379,7 +8374,7 @@ unsafe fn rt_try_poke_cpu(task: *mut Task, task_prio: u32, cpu: usize) -> bool {
                     for &b in b"CRP-POKE-IDLE-SLOT cpu=" { putchar(b); }
                     ph(cpu as u64);
                     for &b in b" wakee=0x" { putchar(b); }
-                    ph((*task).pid() as u64);
+                    ph(task.pid() as u64);
                     for &b in b" prio=" { putchar(b); }
                     ph(task_prio as u64);
                     putchar(b'\n');
@@ -8390,7 +8385,8 @@ unsafe fn rt_try_poke_cpu(task: *mut Task, task_prio: u32, cpu: usize) -> bool {
         }
         return false;
     }
-    let r_policy = (*running).policy();
+    let incumbent = crate::sched::edges::task_shared(running);
+    let r_policy = incumbent.policy();
     if r_policy == SchedPolicy::Normal
         || r_policy == SchedPolicy::Batch
         || r_policy == SchedPolicy::Idle
@@ -8399,7 +8395,7 @@ unsafe fn rt_try_poke_cpu(task: *mut Task, task_prio: u32, cpu: usize) -> bool {
         return true;
     }
     if (r_policy == SchedPolicy::Fifo || r_policy == SchedPolicy::Rr)
-        && task_prio > (*running).rt_priority()
+        && task_prio > incumbent.rt_priority()
     {
         resched_cpu(cpu);
         return true;
@@ -8421,23 +8417,19 @@ unsafe fn rt_try_poke_cpu(task: *mut Task, task_prio: u32, cpu: usize) -> bool {
 /// the placement loses the comparison, so no dispatch is lost vs the old
 /// shape.
 fn check_rt_preempt(task: *mut Task, cpus_allowed: u32, prefer: i32) {
-    // SAFETY: task is a valid pointer from enqueue_task; cpu_state(cpu).current/idle
-    // are valid pointers set during init; null checks before dereference.
-    unsafe {
-        let task_prio = (*task).rt_priority();
-        if prefer >= 0 && (prefer as usize) < MAX_CPUS && (cpus_allowed & (1u32 << prefer)) != 0
-        {
-            if rt_try_poke_cpu(task, task_prio, prefer as usize) {
-                return;
-            }
+    let wakee = crate::sched::edges::task_shared(task);
+    let task_prio = wakee.rt_priority();
+    if prefer >= 0 && (prefer as usize) < MAX_CPUS && (cpus_allowed & (1u32 << prefer)) != 0 {
+        if rt_try_poke_cpu(wakee, task_prio, prefer as usize) {
+            return;
         }
-        for cpu in 0..MAX_CPUS {
-            if (cpus_allowed & (1u32 << cpu)) == 0 {
-                continue;
-            }
-            if rt_try_poke_cpu(task, task_prio, cpu) {
-                return;
-            }
+    }
+    for cpu in 0..MAX_CPUS {
+        if (cpus_allowed & (1u32 << cpu)) == 0 {
+            continue;
+        }
+        if rt_try_poke_cpu(wakee, task_prio, cpu) {
+            return;
         }
     }
 }
@@ -8447,17 +8439,18 @@ fn check_rt_preempt(task: *mut Task, cpus_allowed: u32, prefer: i32) {
 /// as rt_try_poke_cpu (placement-first + scan share one decision path).
 // SAFETY: cpu_state(cpu).current/idle are valid pointers set during CPU
 // init; null checks before dereference.
-unsafe fn dl_try_poke_cpu(task_dl: u64, cpu: usize) -> bool {
+fn dl_try_poke_cpu(task_dl: u64, cpu: usize) -> bool {
     let running = cpu_state(cpu).current;
     if running.is_null() || running == cpu_state(cpu).idle {
         return false;
     }
-    let r_policy = (*running).policy();
+    let incumbent = crate::sched::edges::task_shared(running);
+    let r_policy = incumbent.policy();
     if r_policy != SchedPolicy::Deadline {
         resched_cpu(cpu);
         return true;
     }
-    let r_dl = (*running).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
+    let r_dl = incumbent.dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
     if task_dl < r_dl {
         resched_cpu(cpu);
         return true;
@@ -8469,23 +8462,19 @@ unsafe fn dl_try_poke_cpu(task_dl: u64, cpu: usize) -> bool {
 /// R3 (rt-r3 lane): `prefer` = the wakee's placement cpu (see
 /// check_rt_preempt) — tried first, then the affinity scan.
 fn check_dl_preempt(task: *mut Task, cpus_allowed: u32, prefer: i32) {
-    // SAFETY: task is a valid pointer from enqueue_task; per-CPU current/idle
-    // pointers are valid when not null (set during CPU init).
-    unsafe {
-        let task_dl = (*task).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
-        if prefer >= 0 && (prefer as usize) < MAX_CPUS && (cpus_allowed & (1u32 << prefer)) != 0
-        {
-            if dl_try_poke_cpu(task_dl, prefer as usize) {
-                return;
-            }
+    let wakee = crate::sched::edges::task_shared(task);
+    let task_dl = wakee.dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
+    if prefer >= 0 && (prefer as usize) < MAX_CPUS && (cpus_allowed & (1u32 << prefer)) != 0 {
+        if dl_try_poke_cpu(task_dl, prefer as usize) {
+            return;
         }
-        for cpu in 0..MAX_CPUS {
-            if (cpus_allowed & (1u32 << cpu)) == 0 {
-                continue;
-            }
-            if dl_try_poke_cpu(task_dl, cpu) {
-                return;
-            }
+    }
+    for cpu in 0..MAX_CPUS {
+        if (cpus_allowed & (1u32 << cpu)) == 0 {
+            continue;
+        }
+        if dl_try_poke_cpu(task_dl, cpu) {
+            return;
         }
     }
 }
@@ -10333,7 +10322,7 @@ pub fn scheduler_tick() {
                     // Batch 8 (CBS): budget exhausted — throttle (state left
                     // INTERRUPTIBLE, replenish timer armed at the deadline)
                     // and leave the CPU to lower classes.
-                    dl_throttle(current);
+                    dl_throttle(&mut *current);
                     set_need_resched();
                 }
             }
@@ -11013,15 +11002,15 @@ fn orphan_watch_clear(task: *mut Task) {
 
 /// Per-policy on_rq flag read (cheap, unlocked — a pre-filter only; the
 /// GRQ-locked paths never trust it).
-unsafe fn task_onrq_flag(t: *mut Task) -> bool {
-    match (*t).policy() {
-        SchedPolicy::Fifo | SchedPolicy::Rr => (*t).rt_entity().is_on_rq(),
-        SchedPolicy::Deadline => (*t)
+fn task_onrq_flag(t: &Task) -> bool {
+    match t.policy() {
+        SchedPolicy::Fifo | SchedPolicy::Rr => t.rt_entity().is_on_rq(),
+        SchedPolicy::Deadline => t
             .dl_entity()
             .on_rq
             .load(core::sync::atomic::Ordering::Acquire),
         SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-            (*t).sched_entity().is_on_rq()
+            t.sched_entity().is_on_rq()
         }
     }
 }
@@ -11759,7 +11748,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
         if !unsafe { (*t).state() }.is_running() {
             return;
         }
-        let onrq = task_onrq_flag(t);
+        let onrq = task_onrq_flag(&*t);
         let oncpu = unsafe { (*t).on_cpu() };
         let slot = (0..MAX_CPUS).find(|&c| cpu_state(c).current == t as *const Task as *mut Task);
         if !onrq {
@@ -11962,7 +11951,7 @@ fn lp_idle_lie_report(cpu: usize) {
         for &b in M8 {
             putchar(b);
         }
-        pdec(task_onrq_flag(curr) as u64);
+        pdec(task_onrq_flag(&*curr) as u64);
         const M9: &[u8] = b" slotw=";
         for &b in M9 {
             putchar(b);
@@ -12324,7 +12313,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                 // Same insert pair as wake_up_enqueue_opt: plain insert,
                 // then the R41 stale-flag heal if the insert refused.
                 let ok = enqueue_task_locked(&mut *g, task)
-                    || ensure_linked_locked(&mut *g, task);
+                    || ensure_linked_locked(&mut *g, &mut *task);
                 if ok {
                     healed += 1;
                     if report_pid == 0 {
