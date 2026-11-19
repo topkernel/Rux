@@ -3771,7 +3771,14 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 for &b in b"trap: KERNPANIC re-entered during dump; halting cpu=" {
                     crate::console::uart_putc_raw(b);
                 }
-                crate::dfx::taskdump::taskdump_dec(crate::arch::cpu_id() as u64);
+                {
+                    let c = crate::arch::cpu_id();
+                    if c < 10 {
+                        crate::console::uart_putc_raw(b'0' + c as u8);
+                    } else {
+                        crate::console::uart_putc_raw(b'A' + (c - 10) as u8);
+                    }
+                }
                 crate::console::uart_putc_raw(b'\n');
                 crate::sched::sched::terminal_release_grq_if_held();
                 // R11 (the parked-CPU interrupt strand, fr7 conviction):

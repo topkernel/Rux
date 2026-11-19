@@ -1682,7 +1682,14 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 for &b in b"trap: KERNPANIC re-entered during dump; halting cpu=" {
                     put(b);
                 }
-                crate::dfx::taskdump::taskdump_dec(crate::arch::cpu_id() as u64);
+                {
+                    let c = crate::arch::cpu_id();
+                    if c < 10 {
+                        crate::console::putchar_no_lock(b'0' + c as u8);
+                    } else {
+                        crate::console::putchar_no_lock(b'A' + (c - 10) as u8);
+                    }
+                }
                 crate::console::putchar_no_lock(b'\n');
                 // R11 (the parked-CPU interrupt strand, x86_64 twin's fr7
                 // conviction): park with interrupts DISABLED — an
