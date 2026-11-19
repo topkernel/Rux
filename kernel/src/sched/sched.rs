@@ -3858,13 +3858,41 @@ pub fn schedule_dead_never_returns() {
                     let claim = unsafe {
                         (*cur).running_on_cpu.load(core::sync::atomic::Ordering::Acquire)
                     };
+                    // R13 (the liveness stall discriminator): is the pacing
+                    // DEAD task still LINKED in its class tree? linked=true
+                    // on a DEAD+dequeued task means a RE-LINKER exists (a
+                    // wake/heal path resurrecting it — the pick keeps
+                    // finding it); linked=false with the loop still pacing
+                    // means the pick/refuse decision resolves prev some
+                    // other way (the same-task repick fast path). One read
+                    // under the GRQ at power-of-two rounds, cold path.
+                    let linked = {
+                        let g = grq().lock_irqsave();
+                        let l = unsafe {
+                            match (*cur).policy() {
+                                crate::process::task::SchedPolicy::Fifo
+                                | crate::process::task::SchedPolicy::Rr => {
+                                    g.rt_rq.is_linked(cur)
+                                }
+                                crate::process::task::SchedPolicy::Deadline => {
+                                    g.dl_rq.is_linked(cur)
+                                }
+                                _ => g.cfs_rq.is_linked(cur),
+                            }
+                        };
+                        let nrr = g.nr_running.load(core::sync::atomic::Ordering::Relaxed);
+                        drop(g);
+                        (l, nrr)
+                    };
                     crate::pr_warn!(
-                        "TERM-DESCHED stuck pid={} rounds={} state={:#x} pc={:#x} claim={} rip_paced",
+                        "TERM-DESCHED stuck pid={} rounds={} state={:#x} pc={:#x} claim={} linked={} nr_running={} rip_paced",
                         unsafe { (*cur).pid() },
                         rounds,
                         st.bits(),
                         pc,
-                        claim
+                        claim,
+                        linked.0,
+                        linked.1
                     );
                 }
             }
