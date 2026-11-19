@@ -80,8 +80,6 @@ pub struct VirtIOBlkDevice {
     virtqueue: Spinlock<Option<queue::VirtQueue>>,
     /// Queue size
     queue_size: u16,
-    /// IRQ number
-    irq: u32,
 }
 
 // SAFETY: VirtIOBlkDevice is only accessed from kernel context; internal Spinlocks
@@ -102,7 +100,6 @@ impl VirtIOBlkDevice {
             initialized: Spinlock::new(false),
             virtqueue: Spinlock::new(None),
             queue_size: 0,
-            irq: 1,  // Default IRQ 1 (first VirtIO device)
         }
     }
 
@@ -319,26 +316,17 @@ impl VirtIOBlkDevice {
         self.capacity
     }
 
-    /// Handle I/O request
-    ///
-    /// SAFETY: `req.device` points to a valid GenDisk whose `private_data` contains
-    /// a valid pointer to a VirtIOBlkDevice. Called only from the block layer
-    /// for registered devices.
-    unsafe extern "C" fn handle_request(req: &mut Request) {
-        // Get VirtIOBlkDevice pointer from private_data
-        let gd = &*req.device;
-        let device_ptr = match gd.private_data {
-            Some(ptr) => ptr as *const VirtIOBlkDevice,
+    /// Handle I/O request (registered as `request_fn`; INV-BLKDEV-2/3 —
+    /// the block layer calls this only for THIS device, whose
+    /// private_data is the init-time `&'static VirtIOBlkDevice`).
+    fn handle_request(req: &mut Request) {
+        let device = match req.device.private::<VirtIOBlkDevice>() {
+            Some(d) => d,
             None => {
                 req.error.store(-5, core::sync::atomic::Ordering::Release);
-                if let Some(end_io) = req.end_io {
-                    end_io(req, -5);  // EIO
-                }
                 return;
             }
         };
-
-        let device = &*device_ptr;
 
         // Execute operation based on command type
         let result = match req.cmd_type {
@@ -361,18 +349,10 @@ impl VirtIOBlkDevice {
         // caller never saw these errors (blkdev_read copied a zero buffer
         // and returned success, which bio then cached as BH_Uptodate).
         match result {
-            Ok(()) => {
-                req.error.store(0, core::sync::atomic::Ordering::Release);
-                if let Some(end_io) = req.end_io {
-                    end_io(req, 0);  // Success
-                }
-            }
+            Ok(()) => req.error.store(0, core::sync::atomic::Ordering::Release),
             Err(err) => {
                 crate::pr_err!("virtio-blk: I/O error: {}", err);
                 req.error.store(err, core::sync::atomic::Ordering::Release);
-                if let Some(end_io) = req.end_io {
-                    end_io(req, err);
-                }
             }
         }
     }
@@ -1001,7 +981,10 @@ impl VirtIOBlkDevice {
         Ok(())
     }
 
-    /// Static wrapper for async read — matches `async_read_fn` signature on GenDisk.
+    /// Static wrapper for async read — the registered `async_read_fn`
+    /// (INV-BLKDEV-2/3: called only for THIS device, whose private_data
+    /// is the init-time `&'static VirtIOBlkDevice`; `buf` stays a valid
+    /// DMA target until the completion fires — the caller's contract).
     ///
     /// Resolves the owning device through GenDisk.private_data (set to the
     /// VirtIOBlkDevice address in `init()`). The previous body cast the
@@ -1009,38 +992,31 @@ impl VirtIOBlkDevice {
     /// field pointer miscast into its container; every standard boot uses
     /// virtio-blk-pci so the path was dead, but any MMIO-disk boot that
     /// reached it would have read device fields out of bounds.
-    /// SAFETY: `disk` must be the MMIO GenDisk whose private_data names
-    /// this device; `completion` must be a valid pointer to an IoCompletion.
-    unsafe fn async_read_fn(
-        disk: *const crate::drivers::blkdev::GenDisk,
+    fn async_read_fn(
+        disk: &crate::drivers::blkdev::GenDisk,
         sector: u64,
         buf: &mut [u8],
-        completion: *mut core::ffi::c_void,
+        completion: &crate::fs::io_completion::IoCompletion,
     ) -> i32 {
-        let device = &*((*disk).private_data.unwrap() as *const VirtIOBlkDevice);
-        let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
-        match device.submit_read_async(sector, buf, comp) {
+        let Some(device) = disk.private::<VirtIOBlkDevice>() else { return -5 };
+        match device.submit_read_async(sector, buf, completion) {
             Ok(()) => 0,
             Err(e) => e,
         }
     }
 
-    /// Static wrapper for async write — matches `async_write_fn` signature
-    /// on GenDisk. `buf` is the DMA source and must stay stable until the
-    /// completion fires (see `submit_write_async`).
-    ///
-    /// SAFETY: `disk` must be the MMIO GenDisk whose private_data names
-    /// this device; `buf` a stable DMA source; `completion` a valid
-    /// IoCompletion pointer that outlives the I/O.
-    unsafe fn async_write_fn(
-        disk: *const crate::drivers::blkdev::GenDisk,
+    /// Static wrapper for async write — the registered `async_write_fn`
+    /// (INV-BLKDEV-2/3). `buf` is the DMA source and must stay stable
+    /// until the completion fires (see `submit_write_async`) — the
+    /// caller's registration contract.
+    fn async_write_fn(
+        disk: &crate::drivers::blkdev::GenDisk,
         sector: u64,
         buf: &[u8],
-        completion: *mut core::ffi::c_void,
+        completion: &crate::fs::io_completion::IoCompletion,
     ) -> i32 {
-        let device = &*((*disk).private_data.unwrap() as *const VirtIOBlkDevice);
-        let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
-        match device.submit_write_async(sector, buf, comp) {
+        let Some(device) = disk.private::<VirtIOBlkDevice>() else { return -5 };
+        match device.submit_write_async(sector, buf, completion) {
             Ok(()) => 0,
             Err(e) => e,
         }
@@ -1048,7 +1024,8 @@ impl VirtIOBlkDevice {
 }
 
 /// Global VirtIO block device (MMIO)
-static mut VIRTIO_BLK: Option<VirtIOBlkDevice> = None;
+static VIRTIO_BLK: crate::safety::slot::OnceSlot<VirtIOBlkDevice> =
+    crate::safety::slot::OnceSlot::new();
 
 /// Maximum number of PCI virtio-blk disks (OH boots six: updater/system/
 /// vendor/sys_prod/chip_prod/userdata as vda..vdf; two spare letters).
@@ -1216,12 +1193,13 @@ pub(crate) fn deliver_completion(
 /// boot probe found PCI disks). Each slot owns its complete I/O engine:
 /// device, vring, BLK lock, sync wait queue, expected-used counter, pending
 /// table and unked counter — the singletons the pre-1b kernel had, per disk.
-static mut PCI_BLK_DEVICES: [Option<crate::drivers::virtio::virtio_pci::VirtIOPCI>; MAX_PCI_BLK_DISKS] =
-    [const { None }; MAX_PCI_BLK_DISKS];
+static PCI_BLK_DEVICES: [crate::safety::slot::OnceSlot<crate::drivers::virtio::virtio_pci::VirtIOPCI>; MAX_PCI_BLK_DISKS] =
+    [const { crate::safety::slot::OnceSlot::new() }; MAX_PCI_BLK_DISKS];
 
-/// Configured VirtQueues, one per PCI virtio-blk slot.
-static mut PCI_BLK_QUEUES: [Option<queue::VirtQueue>; MAX_PCI_BLK_DISKS] =
-    [const { None }; MAX_PCI_BLK_DISKS];
+/// Configured VirtQueues, one per PCI virtio-blk slot (mutable access
+/// requires the slot's BLK lock — see `get_pci_device_queue_mut_at`).
+static PCI_BLK_QUEUES: [crate::safety::slot::OnceSlot<queue::VirtQueue>; MAX_PCI_BLK_DISKS] =
+    [const { crate::safety::slot::OnceSlot::new() }; MAX_PCI_BLK_DISKS];
 
 /// Per-slot BLK lock: serializes all I/O operations on ONE disk (submit +
 /// pending-store under the lock, completion collection under the same
@@ -1450,6 +1428,12 @@ impl PciBlkGuard {
         Self { slot, inner }
     }
 }
+
+// INV-SLOT-3 (OnceSlot::get_mut_locked): PCI_BLK_LOCKS[slot] governs
+// every mutation of PCI_BLK_QUEUES[slot]'s queue — submit paths, the
+// completion walker, and set_pci_device_queue's one-time publication
+// all run under (or before any) holder of this lock.
+impl crate::safety::slot::ExclusivityProof for PciBlkGuard {}
 
 impl Drop for PciBlkGuard {
     #[inline]
@@ -2270,27 +2254,24 @@ pub fn abandon_pending_completion(
 /// `pci_submit_data_async_sg` for the scatter-gather form and the shared
 /// design notes.
 ///
-/// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); `data_ptr`
-/// must remain valid and, for writes, UNMODIFIED until the completion
-/// fires; `completion` must outlive the I/O.
-unsafe fn pci_submit_data_async(
-    disk: *const crate::drivers::blkdev::GenDisk,
+/// The DMA-stability contract (`data_ptr` valid until the completion
+/// fires, unmodified for writes) is the registered-fn contract documented
+/// at the blkdev edge (INV-BLKDEV-2) and on the segment form below.
+fn pci_submit_data_async(
+    disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     data_ptr: *mut u8,
     data_len: usize,
     is_write: bool,
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Result<(), i32> {
-    // SAFETY: same contract, forwarded.
-    unsafe {
-        pci_submit_data_async_sg(
-            disk,
-            sector,
-            &[crate::drivers::blkdev::DmaSeg { ptr: data_ptr, len: data_len }],
-            is_write,
-            completion,
-        )
-    }
+    pci_submit_data_async_sg(
+        disk,
+        sector,
+        &[crate::drivers::blkdev::DmaSeg { ptr: data_ptr, len: data_len }],
+        is_write,
+        completion,
+    )
 }
 
 /// Submit an async SCATTER-GATHER data chain on the PCI VirtIO block
@@ -2315,11 +2296,11 @@ unsafe fn pci_submit_data_async(
 /// the pending so the window-overlap check and the descs_held budget see
 /// the chain's real footprint.
 ///
-/// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); every
-/// segment's `ptr` must remain valid and, for writes, UNMODIFIED until
-/// the completion fires; `completion` must outlive the I/O.
-unsafe fn pci_submit_data_async_sg(
-    disk: *const crate::drivers::blkdev::GenDisk,
+/// The segments' DMA-stability contract (valid until the completion
+/// fires, unmodified for writes) rides INV-BLKDEV-2 from the blkdev
+/// registration edge.
+fn pci_submit_data_async_sg(
+    disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     segs: &[crate::drivers::blkdev::DmaSeg],
     is_write: bool,
@@ -2329,7 +2310,7 @@ unsafe fn pci_submit_data_async_sg(
 
     // Route to the disk's own slot: register_pci_gen_disk stashes the
     // slot index in GenDisk.private_data.
-    let slot = (*disk).private_data.map(|p| p as usize).unwrap_or(0);
+    let slot = disk.private_data.map(|p| p as usize).unwrap_or(0);
     if slot >= MAX_PCI_BLK_DISKS
         || !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire)
     {
@@ -2410,7 +2391,7 @@ unsafe fn pci_submit_data_async_sg(
             let _guard = pci_blk_lock(slot);
             let _nest = VirtioLockNest::new();
 
-            let virt_queue = match get_pci_device_queue_mut_at(slot) {
+            let virt_queue = match get_pci_device_queue_mut_at(slot, &_guard) {
                 Some(q) => q,
                 None => {
                     // io_buf is unreferenced; no chain was built for it.
@@ -2568,19 +2549,16 @@ unsafe fn pci_submit_data_async_sg(
     Err(-5)
 }
 
-/// Static wrapper matching GenDisk's `async_read_fn` signature for the PCI disk.
-///
-/// SAFETY: `disk` is the registered PCI virtio-blk GenDisk; `completion` is a
-/// valid IoCompletion pointer that outlives the I/O.
-unsafe fn pci_async_read_fn(
-    disk: *const crate::drivers::blkdev::GenDisk,
+/// Static wrapper matching GenDisk's `async_read_fn` signature for the PCI
+/// disk (INV-BLKDEV-2: called only for the registered PCI GenDisk; `buf`
+/// stays a valid DMA target until the completion fires).
+fn pci_async_read_fn(
+    disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     buf: &mut [u8],
-    completion: *mut core::ffi::c_void,
+    completion: &crate::fs::io_completion::IoCompletion,
 ) -> i32 {
-    let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
-    // SAFETY: buf stays valid until the completion fires (read contract).
-    match pci_submit_data_async(disk, sector, buf.as_mut_ptr(), buf.len(), false, comp) {
+    match pci_submit_data_async(disk, sector, buf.as_mut_ptr(), buf.len(), false, completion) {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -2596,11 +2574,9 @@ unsafe fn pci_async_read_fn(
 /// completion fires. Callers that cannot promise that submit from a private
 /// copy (bio's WriteBatch does).
 ///
-/// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); `buf` must
-/// remain stable until the completion fires; `completion` must outlive the
-/// I/O.
-unsafe fn pci_submit_write_async(
-    disk: *const crate::drivers::blkdev::GenDisk,
+/// The write's DMA-source stability contract rides INV-BLKDEV-2.
+fn pci_submit_write_async(
+    disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     buf: &[u8],
     completion: &crate::fs::io_completion::IoCompletion,
@@ -2609,19 +2585,15 @@ unsafe fn pci_submit_write_async(
 }
 
 /// Static wrapper matching GenDisk's `async_write_fn` signature for the PCI
-/// disk.
-///
-/// SAFETY: `disk` is the registered PCI virtio-blk GenDisk; `buf` is a
-/// stable DMA source; `completion` is a valid IoCompletion pointer that
-/// outlives the I/O.
-unsafe fn pci_async_write_fn(
-    disk: *const crate::drivers::blkdev::GenDisk,
+/// disk (INV-BLKDEV-2: called only for the registered PCI GenDisk; `buf`
+/// is a stable DMA source until the completion fires).
+fn pci_async_write_fn(
+    disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     buf: &[u8],
-    completion: *mut core::ffi::c_void,
+    completion: &crate::fs::io_completion::IoCompletion,
 ) -> i32 {
-    let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
-    match pci_submit_write_async(disk, sector, buf, comp) {
+    match pci_submit_write_async(disk, sector, buf, completion) {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -2629,41 +2601,31 @@ unsafe fn pci_async_write_fn(
 
 /// Static wrapper matching GenDisk's `async_read_sg_fn` signature: one
 /// fused multi-segment READ chain covering the segments' contiguous
-/// sector range.
-///
-/// SAFETY: `disk` is the registered PCI virtio-blk GenDisk; every segment
-/// stays a valid DMA target until the completion fires; `completion`
-/// outlives the I/O.
-unsafe fn pci_async_read_sg_fn(
-    disk: *const crate::drivers::blkdev::GenDisk,
+/// sector range (INV-BLKDEV-2: every segment stays a valid DMA target
+/// until the completion fires).
+fn pci_async_read_sg_fn(
+    disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     segs: &[crate::drivers::blkdev::DmaSeg],
-    completion: *mut core::ffi::c_void,
+    completion: &crate::fs::io_completion::IoCompletion,
 ) -> i32 {
-    let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
-    // SAFETY: contract forwarded (see pci_submit_data_async_sg).
-    match unsafe { pci_submit_data_async_sg(disk, sector, segs, false, comp) } {
+    match pci_submit_data_async_sg(disk, sector, segs, false, completion) {
         Ok(()) => 0,
         Err(e) => e,
     }
 }
 
 /// Static wrapper matching GenDisk's `async_write_sg_fn` signature: one
-/// fused multi-segment WRITE chain; every segment is a DMA source that
-/// must stay valid and unmodified until the completion fires.
-///
-/// SAFETY: `disk` is the registered PCI virtio-blk GenDisk; segments stay
-/// stable DMA sources until the completion fires; `completion` outlives
-/// the I/O.
-unsafe fn pci_async_write_sg_fn(
-    disk: *const crate::drivers::blkdev::GenDisk,
+/// fused multi-segment WRITE chain (INV-BLKDEV-2: every segment is a DMA
+/// source that must stay valid and unmodified until the completion
+/// fires).
+fn pci_async_write_sg_fn(
+    disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     segs: &[crate::drivers::blkdev::DmaSeg],
-    completion: *mut core::ffi::c_void,
+    completion: &crate::fs::io_completion::IoCompletion,
 ) -> i32 {
-    let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
-    // SAFETY: contract forwarded (see pci_submit_data_async_sg).
-    match unsafe { pci_submit_data_async_sg(disk, sector, segs, true, comp) } {
+    match pci_submit_data_async_sg(disk, sector, segs, true, completion) {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -3389,24 +3351,18 @@ static PCI_BLK_COUNT: core::sync::atomic::AtomicUsize =
 /// # Parameters
 /// - `base_addr`: MMIO base address (QEMU virt platform typically 0x10001000)
 pub fn init(base_addr: u64) -> Result<(), &'static str> {
-    // SAFETY: Called once during kernel init; VIRTIO_BLK is a global static
-    // that is not accessed concurrently at this point.
-    unsafe {
-        let mut device = VirtIOBlkDevice::new(base_addr);
+    let mut device = VirtIOBlkDevice::new(base_addr);
 
-        device.init()?;
+    device.init()?;
 
-        // Store device to static variable
-        VIRTIO_BLK = Some(device);
-
-        // Device is now in static storage, update private_data pointer
-        if let Some(ref mut dev) = VIRTIO_BLK {
-            let device_ptr = dev as *const VirtIOBlkDevice as *mut u8;
-            dev.disk.private_data = Some(device_ptr);
-        }
-
-        Ok(())
-    }
+    // Publish into the static slot; private_data receives the device's
+    // own final static address (INV-SLOT-1/2 — OnceSlot owns the
+    // publication protocol the hand-rolled static mut used to carry).
+    VIRTIO_BLK.publish_with_addr(|addr| {
+        device.disk.private_data = Some(addr as *mut u8);
+        device
+    });
+    Ok(())
 }
 
 /// Register PCI VirtIO device
@@ -3420,15 +3376,11 @@ pub fn register_pci_device(slot: usize, mut device: crate::drivers::virtio::virt
     // Stamp the slot into the device: every I/O path reaches its queue,
     // lock, wait queue and pending table THROUGH this number.
     device.blk_slot = slot;
-    // SAFETY: Called once during device probe before any I/O requests;
-    // SeqCst fence ensures write visibility before ready flag is set.
-    unsafe {
-        PCI_BLK_DEVICES[slot] = Some(device);
-        // Ensure device write is visible to all CPUs
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        // Set ready flag (must be set after writing device)
-        PCI_BLK_READY[slot].store(true, core::sync::atomic::Ordering::SeqCst);
-    }
+    // INV-SLOT-1/2: publish (Release) then the ready flag (SeqCst keeps
+    // the probe's original ordering guarantee for the READY readers).
+    PCI_BLK_DEVICES[slot].publish(device);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    PCI_BLK_READY[slot].store(true, core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Number of registered PCI virtio-blk disks (slots 0..n).
@@ -3451,13 +3403,9 @@ pub fn pci_blk_slot_ready(slot: usize) -> bool {
 ///
 /// Returns PCI VirtIO device first, or MMIO device if unavailable
 pub fn get_device() -> Option<&'static VirtIOBlkDevice> {
-    // SAFETY: VIRTIO_BLK is initialized before any caller; we return an immutable
-    // reference and the device's internal locks protect mutable state.
-    unsafe {
-        // If PCI device exists, use it for I/O
-        // Note: Currently PCI device uses separate I/O interface, returning MMIO device as fallback
-        VIRTIO_BLK.as_ref()
-    }
+    // If PCI device exists, use it for I/O
+    // Note: Currently PCI device uses separate I/O interface, returning MMIO device as fallback
+    VIRTIO_BLK.get()
 }
 
 /// Get the BOOT PCI virtio-blk device (slot 0). Legacy single-disk
@@ -3475,12 +3423,7 @@ pub fn get_pci_device_at(slot: usize) -> Option<&'static crate::drivers::virtio:
     if !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire) {
         return None;
     }
-    // SAFETY: The ready flag guarantees the slot was written; returning an
-    // immutable reference while the device is initialized and not being
-    // mutated.
-    unsafe {
-        PCI_BLK_DEVICES[slot].as_ref()
-    }
+    PCI_BLK_DEVICES[slot].get()
 }
 
 /// Set a slot's configured VirtQueue.
@@ -3488,14 +3431,10 @@ pub fn set_pci_device_queue(slot: usize, queue: queue::VirtQueue) {
     if slot >= MAX_PCI_BLK_DISKS {
         return;
     }
-    // SAFETY: Called once during device init before any I/O; stores
-    // the configured VirtQueue into the slot's array cell.
-    unsafe {
-        PCI_BLK_QSIZE[slot].store(queue.queue_size, core::sync::atomic::Ordering::Release);
-        PCI_BLK_QUEUES[slot] = Some(queue);
-        // Initialize expected used.idx to 0 (new queue starts at 0)
-        PCI_BLK_EXPECTED_USED_IDX[slot].store(0, core::sync::atomic::Ordering::Release);
-    }
+    PCI_BLK_QSIZE[slot].store(queue.queue_size, core::sync::atomic::Ordering::Release);
+    PCI_BLK_QUEUES[slot].publish(queue);
+    // Initialize expected used.idx to 0 (new queue starts at 0)
+    PCI_BLK_EXPECTED_USED_IDX[slot].store(0, core::sync::atomic::Ordering::Release);
 }
 
 /// Per-slot negotiated virtqueue depth (GUP-DIO: the SG arms size their
@@ -3523,8 +3462,14 @@ pub fn pci_blk_sg_limits(slot: usize) -> (usize, usize) {
 
 /// Get a slot's VirtQueue (mutable reference).
 ///
-/// Caller must hold that slot's PCI_BLK_LOCKS[slot] for mutual exclusion.
-pub fn get_pci_device_queue_mut_at(slot: usize) -> Option<&'static mut queue::VirtQueue> {
+/// Exclusivity is PROVEN by the guard: `proof` must be a live
+/// `pci_blk_lock(slot)` guard (INV-SLOT-3 — PciBlkGuard's
+/// ExclusivityProof impl is the audited assertion that this lock
+/// governs all queue mutation).
+pub fn get_pci_device_queue_mut_at(
+    slot: usize,
+    proof: &PciBlkGuard,
+) -> Option<&'static mut queue::VirtQueue> {
     if slot >= MAX_PCI_BLK_DISKS {
         return None;
     }
@@ -3532,11 +3477,7 @@ pub fn get_pci_device_queue_mut_at(slot: usize) -> Option<&'static mut queue::Vi
     if !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire) {
         return None;
     }
-    // SAFETY: The ready flag guarantees the slot's queue was initialized;
-    // exclusion comes from the slot's BLK lock (caller-held).
-    unsafe {
-        PCI_BLK_QUEUES[slot].as_mut()
-    }
+    PCI_BLK_QUEUES[slot].get_mut_locked(proof)
 }
 
 /// Get a slot's VirtQueue (read-only reference).
@@ -3548,10 +3489,7 @@ pub fn get_pci_device_queue_at(slot: usize) -> Option<&'static queue::VirtQueue>
     if !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire) {
         return None;
     }
-    // SAFETY: The ready flag guarantees the slot's queue was initialized.
-    unsafe {
-        PCI_BLK_QUEUES[slot].as_ref()
-    }
+    PCI_BLK_QUEUES[slot].get()
 }
 
 /// Get a slot's expected used.idx (for waiting I/O completion).
@@ -3661,24 +3599,20 @@ pub fn register_pci_gen_disk(slot: usize) {
     pci_blk_slot_online(slot);
 }
 
-/// PCI VirtIO block device request handler
-///
-/// This function is called by block device layer to handle read/write requests.
-///
-/// SAFETY: `req.device` points to a valid GenDisk registered by register_pci_gen_disk.
-unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
+/// PCI VirtIO block device request handler — the registered
+/// `request_fn` for every PCI virtio-blk disk (INV-BLKDEV-2/3: called
+/// only for disks registered by register_pci_gen_disk, whose
+/// private_data is the slot index).
+fn pci_virtio_handle_request(req: &mut Request) {
     use crate::drivers::blkdev::ReqCmd;
 
     // Route to the OWNING disk: GenDisk.private_data carries the slot.
-    let slot = (*req.device).private_data.map(|p| p as usize).unwrap_or(0);
+    let slot = req.device.private_data.map(|p| p as usize).unwrap_or(0);
 
     // Check if device is ready (use SeqCst for strongest memory visibility)
     if slot >= MAX_PCI_BLK_DISKS || !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::SeqCst) {
         crate::pr_err!("virtio: PCI device not ready");
         req.error.store(-6, core::sync::atomic::Ordering::Release);
-        if let Some(end_io) = req.end_io {
-            end_io(req, -6);  // ENXIO
-        }
         return;
     }
 
@@ -3688,9 +3622,6 @@ unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
         None => {
             crate::pr_err!("virtio: No PCI device for request");
             req.error.store(-6, core::sync::atomic::Ordering::Release);
-            if let Some(end_io) = req.end_io {
-                end_io(req, -6);  // ENXIO
-            }
             return;
         }
     };
@@ -3711,22 +3642,11 @@ unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
         }
     };
 
-    // Call completion callback
+    // Record the device status (R9-4: blkdev_read/write check it — the
+    // PCI path previously swallowed errors entirely).
     match result {
-        Ok(()) => {
-            req.error.store(0, core::sync::atomic::Ordering::Release);
-            if let Some(end_io) = req.end_io {
-                end_io(req, 0);
-            }
-        }
-        Err(err) => {
-            // R9-4: record the status — blkdev_read/write check it (the
-            // PCI path previously swallowed errors entirely).
-            req.error.store(err, core::sync::atomic::Ordering::Release);
-            if let Some(end_io) = req.end_io {
-                end_io(req, err);
-            }
-        }
+        Ok(()) => req.error.store(0, core::sync::atomic::Ordering::Release),
+        Err(err) => req.error.store(err, core::sync::atomic::Ordering::Release),
     }
 }
 
@@ -4159,11 +4079,6 @@ pub fn enable_device_interrupt(base_addr: u64) {
         base_addr as usize,
     ).ok();
 
-    // Also update IRQ number in device
-    // SAFETY: VIRTIO_BLK is initialized before interrupt setup; writing irq field.
-    unsafe {
-        if let Some(ref mut dev) = VIRTIO_BLK {
-            dev.irq = irq;
-        }
-    }
+    // (round-5: the device's `irq` field was written here once and
+    // never read anywhere — dead store on a dead field, both deleted.)
 }

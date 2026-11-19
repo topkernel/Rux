@@ -141,14 +141,13 @@ impl ThreadedIrq {
             if raw == 0 {
                 return 0;
             }
-            // SAFETY: this IS the kthread the pointer names (set at
-            // spawn, before the thread can run thread_loop).
-            let t = raw as *mut Task;
-            unsafe {
-                (*t).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-            }
+            // This IS the kthread the pointer names (set at spawn,
+            // before the thread can run thread_loop) — the scheduler's
+            // current() handle is that same task.
+            let Some(t) = crate::sched::current() else { return 0 };
+            t.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
             if self.pending.swap(false, Ordering::AcqRel) {
-                unsafe { (*t).set_state(TaskState::new(TaskState::RUNNING)) };
+                t.set_state(TaskState::new(TaskState::RUNNING));
                 continue;
             }
             crate::sched::schedule();

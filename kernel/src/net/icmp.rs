@@ -50,9 +50,7 @@ impl IcmpHdr {
         if data.len() < ICMP_HDR_LEN {
             return None;
         }
-        // SAFETY: length checked above guarantees `data` has at least ICMP_HDR_LEN (8) bytes;
-        // IcmpHdr is repr(C) with no padding so the cast covers exactly 8 aligned bytes.
-        unsafe { Some(&*(data.as_ptr() as *const IcmpHdr)) }
+        crate::net::buffer::hdr_view::<IcmpHdr>(data)
     }
 
     /// Calculate ICMP checksum over header + data
@@ -97,9 +95,7 @@ impl IcmpHdr {
 /// - `src_ip`: Source IP address
 /// - `dest_ip`: Destination IP address
 pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
-    // SAFETY: skb.data points to the ICMP payload within the skb buffer and
-    // skb.len is the valid byte count; the skb is still owned by this caller.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
+    let data = skb.data_all();
 
     if data.len() < ICMP_HDR_LEN {
         return Err(());
@@ -132,12 +128,10 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
         icmp_type::DEST_UNREACH | icmp_type::TIME_EXCEEDED => {
             // Pass to upper layer protocols (TCP/UDP)
             if payload.len() >= core::mem::size_of::<crate::net::ipv4::IpHdr>() + 8 {
-                // The payload starts with original IP header + 8 bytes of transport header
-                // SAFETY: payload length was checked to be >= IPHDR_LEN + 8 above,
-                // and IpHdr is repr(C) with size IPHDR_LEN, so the cast is valid.
-                let orig_ip_hdr = unsafe {
-                    &*(payload.as_ptr() as *const crate::net::ipv4::IpHdr)
-                };
+                // The payload starts with original IP header + 8 bytes
+                // of transport header (length checked above — the
+                // shared header-view edge, INH-BUF-3).
+                let Some(orig_ip_hdr) = crate::net::buffer::hdr_view::<crate::net::ipv4::IpHdr>(payload) else { break };
                 let orig_src_ip = u32::from_be(orig_ip_hdr.saddr);
                 let orig_dst_ip = u32::from_be(orig_ip_hdr.daddr);
                 let orig_proto = orig_ip_hdr.protocol;
@@ -200,14 +194,7 @@ fn icmp_echo_reply(src_ip: u32, req_hdr: &IcmpHdr, payload: &[u8]) {
         seq: req_hdr.seq,
     };
 
-    // SAFETY: &hdr is a valid stack-local reference; IcmpHdr is repr(C) so
-    // reinterpreting its bytes as [u8] covers exactly size_of::<IcmpHdr>() bytes.
-    let hdr_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &hdr as *const IcmpHdr as *const u8,
-            core::mem::size_of::<IcmpHdr>(),
-        )
-    };
+    let hdr_bytes = crate::safety::bytes::bytes_of(&hdr);
 
     hdr.checksum = IcmpHdr::compute_checksum(hdr_bytes, payload);
 
@@ -216,19 +203,9 @@ fn icmp_echo_reply(src_ip: u32, req_hdr: &IcmpHdr, payload: &[u8]) {
         return;
     }
 
-    let ptr = match skb.skb_push(ICMP_HDR_LEN as u32) {
-        Some(p) => p,
-        None => return,
-    };
-
-    // SAFETY: ptr was returned by skb_push with ICMP_HDR_LEN bytes of space,
-    // and &hdr is a valid stack-local IcmpHdr of exactly that size.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &hdr as *const IcmpHdr as *const u8,
-            ptr as *mut u8,
-            ICMP_HDR_LEN,
-        );
+    // Push the ready header (push_hdr_val owns the copy edge).
+    if skb.push_hdr_val::<IcmpHdr>(&hdr).is_none() {
+        return;
     }
 
     let _ = crate::net::ipv4::ipv4_send(skb, src_ip, 1); // IPPROTO_ICMP = 1
@@ -243,7 +220,7 @@ fn icmp_echo_reply(src_ip: u32, req_hdr: &IcmpHdr, payload: &[u8]) {
 pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
     // SAFETY: orig_skb.data points to the packet data within the skb buffer and
     // orig_skb.len is the valid byte count; the skb is still owned by this caller.
-    let data = unsafe { core::slice::from_raw_parts(orig_skb.data, orig_skb.len as usize) };
+    let data = orig_skb.data_all();
 
     // Build ICMP dest unreachable: type=3, code, checksum, unused(4 bytes) + original IP header + 8 bytes
     let mut hdr = IcmpHdr {
@@ -258,14 +235,7 @@ pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
     let incl_len = core::cmp::min(data.len(), crate::net::ipv4::IPHDR_LEN + 8);
     let orig_data = &data[..incl_len];
 
-    // SAFETY: &hdr is a valid stack-local reference; IcmpHdr is repr(C) so
-    // reinterpreting its bytes as [u8] covers exactly size_of::<IcmpHdr>() bytes.
-    let hdr_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &hdr as *const IcmpHdr as *const u8,
-            core::mem::size_of::<IcmpHdr>(),
-        )
-    };
+    let hdr_bytes = crate::safety::bytes::bytes_of(&hdr);
 
     hdr.checksum = IcmpHdr::compute_checksum(hdr_bytes, orig_data);
 
@@ -278,28 +248,15 @@ pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
         return;
     }
 
-    let ptr = match skb.skb_push(ICMP_HDR_LEN as u32) {
-        Some(p) => p,
-        None => return,
-    };
-
-    // SAFETY: ptr was returned by skb_push with ICMP_HDR_LEN bytes of space,
-    // and &hdr is a valid stack-local IcmpHdr of exactly that size.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &hdr as *const IcmpHdr as *const u8,
-            ptr as *mut u8,
-            ICMP_HDR_LEN,
-        );
+    // Push the ready header (push_hdr_val owns the copy edge).
+    if skb.push_hdr_val::<IcmpHdr>(&hdr).is_none() {
+        return;
     }
 
     // Extract source IP from original IP header to use as destination
     if data.len() >= crate::net::ipv4::IPHDR_LEN {
-        // SAFETY: data length was checked to be >= IPHDR_LEN above,
-        // and IpHdr is repr(C) with size IPHDR_LEN, so the cast is valid.
-        let orig_ip_hdr = unsafe {
-            &*(data.as_ptr() as *const crate::net::ipv4::IpHdr)
-        };
+        // Length checked above; the shared header-view edge.
+        let Some(orig_ip_hdr) = crate::net::buffer::hdr_view::<crate::net::ipv4::IpHdr>(&data[..crate::net::ipv4::IPHDR_LEN]) else { return };
         let orig_src_ip = u32::from_be(orig_ip_hdr.saddr);
         let _ = crate::net::ipv4::ipv4_send(skb, orig_src_ip, 1);
     }
@@ -323,11 +280,10 @@ pub fn icmp_send_port_unreach(local_ip: u32, remote_ip: u32, udp_hdr8: &[u8]) {
         return;
     }
 
-    // Synthetic IP header of the quoted datagram.
+    // Synthetic IP header of the quoted datagram (hdr_view_mut owns the
+    // typed write into the exactly-sized byte array).
     let mut quoted_ip = [0u8; crate::net::ipv4::IPHDR_LEN];
-    // SAFETY: quoted_ip is exactly IPHDR_LEN bytes; writing repr(C) fields.
-    unsafe {
-        let h = &mut *(quoted_ip.as_mut_ptr() as *mut crate::net::ipv4::IpHdr);
+    if let Some(h) = crate::net::buffer::hdr_view_mut::<crate::net::ipv4::IpHdr>(&mut quoted_ip[..]) {
         h.version_ihl = 0x45;
         h.tot_len = ((crate::net::ipv4::IPHDR_LEN + 8) as u16).to_be();
         h.ttl = crate::net::ipv4::IP_DEFAULT_TTL;
@@ -345,13 +301,7 @@ pub fn icmp_send_port_unreach(local_ip: u32, remote_ip: u32, udp_hdr8: &[u8]) {
     };
 
     // Checksum over header + quoted (IP hdr + 8 bytes UDP).
-    // SAFETY: &hdr is a valid stack-local reference; IcmpHdr is repr(C).
-    let hdr_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &hdr as *const IcmpHdr as *const u8,
-            core::mem::size_of::<IcmpHdr>(),
-        )
-    };
+    let hdr_bytes = crate::safety::bytes::bytes_of(&hdr);
     // Sum quote in two segments (compute_checksum takes hdr + data).
     let mut sum: u32 = 0;
     for chunk in [quoted_ip.as_slice(), udp_hdr8] {
@@ -390,21 +340,10 @@ pub fn icmp_send_port_unreach(local_ip: u32, remote_ip: u32, udp_hdr8: &[u8]) {
         skb.free();
         return;
     }
-    let ptr = match skb.skb_push(ICMP_HDR_LEN as u32) {
-        Some(p) => p,
-        None => {
-            skb.free();
-            return;
-        }
-    };
-    // SAFETY: skb_push returned ICMP_HDR_LEN bytes of space; &hdr is a
-    // valid stack-local IcmpHdr of exactly that size.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &hdr as *const IcmpHdr as *const u8,
-            ptr as *mut u8,
-            ICMP_HDR_LEN,
-        );
+    // Push the ready header (push_hdr_val owns the copy edge).
+    if skb.push_hdr_val::<IcmpHdr>(&hdr).is_none() {
+        skb.free();
+        return;
     }
 
     let _ = crate::net::ipv4::ipv4_send(skb, remote_ip, 1); // IPPROTO_ICMP = 1

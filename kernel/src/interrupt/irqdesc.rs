@@ -496,9 +496,9 @@ pub fn handle_fasteoi_irq(irq: u32) {
         let tp = desc.thread_task.load(Ordering::Acquire) as *const Task;
         if !tp.is_null() {
             desc.pending.store(true, Ordering::Release);
-            // SAFETY: set once at spawn, never cleared.
-            let t = unsafe { &*tp } as *const Task as *mut Task;
-            crate::sched::wake_up_process(t);
+            // Set once at spawn, never cleared; wake_up_process takes the
+            // raw handle (sched's own audited contract).
+            crate::sched::wake_up_process(tp as *mut Task);
             return;
         }
         // The thread has not spawned (registration raced the IRQ): run
@@ -601,12 +601,12 @@ extern "C" fn irq_thread_fn(arg: *mut core::ffi::c_void) -> i32 {
         if tp.is_null() {
             return 0;
         }
-        let t = unsafe { &*tp } as *const Task as *mut Task;
-        unsafe {
-            (*t).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        }
+        // Park: the kthread owns itself — the scheduler's current()
+        // handle is this thread's task.
+        let Some(cur) = crate::sched::current() else { return 0 };
+        cur.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         if desc.pending.swap(false, Ordering::AcqRel) {
-            unsafe { (*t).set_state(TaskState::new(TaskState::RUNNING)) };
+            cur.set_state(TaskState::new(TaskState::RUNNING));
             continue;
         }
         crate::sched::schedule();
@@ -624,9 +624,9 @@ fn irq_thread_wake(irq: u32) {
     if ptr.is_null() {
         return; // the thread has not spawned (or failed)
     }
-    // SAFETY: the pointer was set once at spawn and never cleared.
-    let t = unsafe { &*ptr } as *const Task as *mut Task;
-    crate::sched::wake_up_process(t);
+    // Set once at spawn and never cleared; the raw-handle wake is
+    // sched's audited contract.
+    crate::sched::wake_up_process(ptr as *mut Task);
 }
 
 /// Spawn the per-IRQ thread (called from request_irq's first-action arm
@@ -665,10 +665,11 @@ fn irq_thread_spawn(irq: u32, name: &'static str) {
             owned.push(digits[dn]);
         }
     }
-    // SAFETY: "irq/" + decimal digits is valid UTF-8.
-    let tname: &'static str = unsafe {
-        core::str::from_utf8_unchecked(alloc::boxed::Box::leak(owned.into_boxed_slice()))
-    };
+    // "irq/" + decimal digits is always valid UTF-8; checked form.
+    let tname: &'static str = core::str::from_utf8(alloc::boxed::Box::leak(
+        owned.into_boxed_slice(),
+    ))
+    .unwrap_or("irq");
     if let Some(t) = crate::process::kthread::kthread_run(
         irq_thread_fn,
         irq as *mut core::ffi::c_void,
@@ -725,8 +726,15 @@ type NmiHandler = fn();
 
 /// NMI handler slots (write-once at init, read-only during dispatch).
 /// Protected by NMI_LOCK during registration; no lock needed during dispatch.
-static mut NMI_HANDLERS: [Option<NmiHandler>; NR_NMI] = [None; NR_NMI];
-static mut NMI_COUNT: usize = 0;
+/// NMI handler slots as raw function-pointer words (0 = free).
+/// Registration (boot-only, BKL-serialized) stores; NMI dispatch
+/// load-reads — lock-free by requirement (an NMI cannot spin on a
+/// lock). The word round-trip is the round-5 conversion of the old
+/// `static mut [Option<fn>]` table.
+static NMI_HANDLERS: [core::sync::atomic::AtomicUsize; NR_NMI] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; NR_NMI];
+static NMI_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 /// Register an NMI handler.
 ///
@@ -734,17 +742,12 @@ static mut NMI_COUNT: usize = 0;
 /// Handlers must be registered before NMIs can fire (i.e., during boot init).
 pub fn request_nmi(_name: &'static str, handler: NmiHandler) -> Result<usize, &'static str> {
     // BKL serializes registration — no extra lock needed
-    // SAFETY: BKL serializes all request_nmi calls; NMI_COUNT is only mutated here.
-    if unsafe { NMI_COUNT } >= NR_NMI {
+    let idx = NMI_COUNT.load(Ordering::Acquire);
+    if idx >= NR_NMI {
         return Err("No free NMI handler slots");
     }
-    let idx = unsafe { NMI_COUNT };
-    // SAFETY: BKL serializes registration; idx is bounds-checked above;
-    // NMI_HANDLERS slot is unused and will be written before any NMI can fire.
-    unsafe {
-        NMI_HANDLERS[idx] = Some(handler);
-        NMI_COUNT += 1;
-    }
+    NMI_HANDLERS[idx].store(handler as usize, Ordering::Release);
+    NMI_COUNT.store(idx + 1, Ordering::Release);
     Ok(idx)
 }
 
@@ -753,10 +756,7 @@ pub fn free_nmi(index: usize) -> Result<(), &'static str> {
     if index >= NR_NMI {
         return Err("NMI index out of range");
     }
-    // SAFETY: index is bounds-checked above; BKL serializes free_nmi with request_nmi.
-    unsafe {
-        NMI_HANDLERS[index] = None;
-    }
+    NMI_HANDLERS[index].store(0, Ordering::Release);
     Ok(())
 }
 
@@ -768,9 +768,12 @@ pub fn handle_fasteoi_nmi() {
     super::preempt::irqentry_nmi_enter();
 
     for i in 0..NR_NMI {
-        // SAFETY: NMI_HANDLERS is only written during boot (request_nmi, serialized by BKL);
-        // read during NMI dispatch sees fully initialized Option<NmiHandler>.
-        if let Some(handler) = unsafe { NMI_HANDLERS[i] } {
+        let word = NMI_HANDLERS[i].load(Ordering::Acquire);
+        if word != 0 {
+            // SAFETY: the word was stored by request_nmi from a live
+            // NmiHandler fn pointer (round-trip; usize casts back are
+            // not primitive-castable, hence the transmute).
+            let handler: NmiHandler = unsafe { core::mem::transmute(word) };
             handler();
         }
     }

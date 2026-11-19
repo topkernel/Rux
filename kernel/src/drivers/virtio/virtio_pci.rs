@@ -1324,7 +1324,7 @@ fn read_block_once(
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
         // Get configured VirtQueue (mutable reference)
-        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot, &_guard) {
             Some(q) => q,
             None => {
                 // SAFETY: io_buf was allocated above and no chain was
@@ -1597,7 +1597,7 @@ fn write_block_once(
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
         // Get configured VirtQueue (mutable reference)
-        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot, &_guard) {
             Some(q) => q,
             None => break 'blk Err("No configured VirtQueue found"),
         };
@@ -1831,7 +1831,7 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
         let _guard = crate::drivers::virtio::pci_blk_lock(slot);
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
-        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot, &_guard) {
             Some(q) => q,
             None => break 'blk Err("No configured VirtQueue found"),
         };

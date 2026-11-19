@@ -37,8 +37,9 @@ pub mod bug;
 
 pub mod softlockup;
 pub mod hung_task;
-#[cfg(feature = "riscv64")]
-pub mod sbi_debug;
+// (round-5: dfx/sbi_debug.rs DELETED — the SBI low-level print helpers
+// had zero consumers anywhere in the tree; same dead-hunt-module class
+// as round-4D's hexdump.rs.)
 pub mod switches;
 /// Runtime kernel symbol table (/proc/kallsyms, symbolized traces).
 pub mod ksyms;

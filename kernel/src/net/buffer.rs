@@ -483,6 +483,38 @@ impl SkBuff {
         })
     }
 
+    /// Push `size_of::<T>()` bytes of headroom and hand the caller a
+    /// typed mutable view of them (the header-BUILD edge — round-5
+    /// consolidation: every protocol's `&mut *(ptr as *mut Hdr)` push
+    /// site routes through here).
+    ///
+    /// INH-BUF-4: `T` is a repr(C) wire header; the view is exactly the
+    /// pushed bytes; the buffer stays exclusively owned.
+    pub fn push_hdr<T: Copy>(&mut self, build: impl FnOnce(&mut T)) -> Option<()> {
+        let ptr = self.skb_push(core::mem::size_of::<T>() as u32)?;
+        // SAFETY: skb_push returned headroom of at least size_of::<T>()
+        // bytes inside this exclusively-owned buffer.
+        let h: &mut T = unsafe { &mut *ptr.cast::<T>() };
+        build(h);
+        Some(())
+    }
+
+    /// Push a ready-made header VALUE as new headroom (the build edge
+    /// for callers that compute the header on the stack — INH-BUF-4).
+    pub fn push_hdr_val<T: Copy>(&mut self, hdr: &T) -> Option<()> {
+        let ptr = self.skb_push(core::mem::size_of::<T>() as u32)?;
+        // SAFETY: skb_push returned headroom of at least size_of::<T>()
+        // bytes inside this exclusively-owned buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                hdr as *const T as *const u8,
+                ptr,
+                core::mem::size_of::<T>(),
+            );
+        }
+        Some(())
+    }
+
     /// Copy SkBuff data
     ///
     /// # Arguments
@@ -531,3 +563,39 @@ pub fn kfree_skb(skb: SkBuff) {
     skb.free();
 }
 
+
+// ==================== Net-family header-view edges (round-5) ====================
+
+impl SkBuff {
+    /// The whole data area as a shared slice (safe composition of
+    /// `data_slice` at full length — round-5).
+    pub fn data_all(&self) -> &[u8] {
+        self.data_slice(self.len)
+    }
+}
+
+/// View the head of `data` as a shared `&T` wire header — the ONE
+/// audited parse edge shared by the protocol modules (replaces the
+/// per-protocol `&*(data.as_ptr() as *const Hdr)` duplicates).
+///
+/// INH-BUF-3: `T: Copy` (a repr(C) wire header) and `data` has at
+/// least `size_of::<T>()` bytes (checked; None otherwise). The borrow
+/// is tied to `data` — no invented lifetimes.
+pub fn hdr_view<T: Copy>(data: &[u8]) -> Option<&T> {
+    if data.len() < core::mem::size_of::<T>() {
+        return None;
+    }
+    // SAFETY: length checked above; T is a plain wire header; the
+    // reference borrows from `data` with its own lifetime.
+    Some(unsafe { &*(data.as_ptr() as *const T) })
+}
+
+/// The mutable twin of [`hdr_view`] (the build side over a caller-owned
+/// byte region).
+pub fn hdr_view_mut<T: Copy>(data: &mut [u8]) -> Option<&mut T> {
+    if data.len() < core::mem::size_of::<T>() {
+        return None;
+    }
+    // SAFETY: as hdr_view, over the exclusive borrow.
+    Some(unsafe { &mut *(data.as_mut_ptr() as *mut T) })
+}

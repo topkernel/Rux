@@ -74,9 +74,8 @@ pub type SoftirqHandler = fn(usize);
 
 /// Global softirq vector table.
 /// Write-once at init time (via `open_softirq`), read lock-free during dispatch.
-static mut SOFTIRQ_VEC: [Option<SoftirqHandler>; NR_SOFTIRQS] = [
-    None, None, None, None, None, None, None, None, None, None,
-];
+static SOFTIRQ_VEC: [crate::safety::slot::OnceSlot<SoftirqHandler>; NR_SOFTIRQS] =
+    [const { crate::safety::slot::OnceSlot::new() }; NR_SOFTIRQS];
 
 // ============================================================================
 // Per-CPU pending bitmask
@@ -84,7 +83,7 @@ static mut SOFTIRQ_VEC: [Option<SoftirqHandler>; NR_SOFTIRQS] = [
 
 /// Per-CPU softirq pending bitmask. Bit N is set when softirq N is pending.
 /// Each CPU only operates on its own element — no cross-CPU contention.
-static mut SOFTIRQ_PENDING: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+static SOFTIRQ_PENDING: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 // ==================== Wakewatch forensics (softirq-storm hunt) ====
 //
@@ -108,7 +107,7 @@ pub static WW_SOFTIRQ_RUNS: AtomicU64 = AtomicU64::new(0);
 
 /// Per-CPU flag: is __do_softirq currently executing on this CPU?
 /// Prevents recursive softirq invocation.
-static mut SOFTIRQ_IN_PROGRESS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+static SOFTIRQ_IN_PROGRESS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 // ==================== Softirq window progress (phantom-bits) ====
 //
@@ -140,7 +139,7 @@ pub fn stuck_window(cpu: usize) -> Option<(u64, u64)> {
         return None;
     }
     // SAFETY: per-CPU arrays; bounded index above.
-    let inprog = unsafe { SOFTIRQ_IN_PROGRESS[cpu].load(Ordering::Acquire) };
+    let inprog =  SOFTIRQ_IN_PROGRESS[cpu].load(Ordering::Acquire) ;
     if inprog == 0 {
         return None;
     }
@@ -171,9 +170,9 @@ fn win_note(cpu: usize, open: bool, bit: usize, restart: usize, pending: u32) {
         0
     };
     // SAFETY: per-CPU arrays written only by current CPU; bounded index.
-    unsafe {
+    
         SOFTIRQ_WIN[cpu].store(v, Ordering::Release);
-    }
+    
 }
 
 // ==================== Carrier evidence (CARRIER-HEAL, 123rd) ====================
@@ -318,9 +317,9 @@ pub fn carrier_evidence_age(cpu: usize, now: u64) -> u64 {
 pub fn open_softirq(nr: usize, handler: SoftirqHandler) {
     assert!(nr < NR_SOFTIRQS, "softirq: invalid vector number {}", nr);
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
-    unsafe {
-        SOFTIRQ_VEC[nr] = Some(handler);
-    }
+    
+        SOFTIRQ_VEC[nr].publish(handler);
+    
 }
 
 // ============================================================================
@@ -335,9 +334,9 @@ pub fn raise_softirq_irqoff(nr: usize) {
     debug_assert!(nr < NR_SOFTIRQS);
     let cpu = crate::arch::cpu_id() as usize;
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
-    unsafe {
+    
         SOFTIRQ_PENDING[cpu].fetch_or(1u32 << nr, Ordering::Release);
-    }
+    
     // /proc/softirqs: count the raise on the CPU that raised it.
     if cpu < crate::config::MAX_CPUS && nr < NR_SOFTIRQS {
         SOFTIRQ_RAISED[cpu][nr].fetch_add(1, Ordering::Relaxed);
@@ -374,17 +373,17 @@ pub fn __do_softirq() -> bool {
     let cpu = crate::arch::cpu_id() as usize;
 
     // Prevent recursion
-    if unsafe { SOFTIRQ_IN_PROGRESS[cpu].load(Ordering::Acquire) } != 0 {
+    if  SOFTIRQ_IN_PROGRESS[cpu].load(Ordering::Acquire)  != 0 {
         return false;
     }
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
-    unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(1, Ordering::Release); }
+     SOFTIRQ_IN_PROGRESS[cpu].store(1, Ordering::Release); 
     // phantom-bits: window-open progress record (cross-CPU readable).
     win_note(cpu, true, 0, 0, 0);
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
-    unsafe {
+    
         SOFTIRQ_WIN_T0[cpu].store(crate::drivers::timer::read_time(), Ordering::Release);
-    }
+    
 
     // Session-6 discriminator (fleet s2): bracket the SOFTIRQ PROCESSING
     // window itself. The timer/soft/ext TRAP brackets are silent on v7
@@ -425,9 +424,9 @@ pub fn __do_softirq() -> bool {
 
     'outer: loop {
         // Atomically snapshot and clear pending bits
-        let pending = unsafe {
+        let pending = 
             SOFTIRQ_PENDING[cpu].swap(0, Ordering::AcqRel)
-        };
+        ;
 
         if pending == 0 {
             break;
@@ -461,16 +460,16 @@ pub fn __do_softirq() -> bool {
                 // Leave the vectors we did not reach pending (Linux
                 // leaves them in local_softirq_pending); the caller
                 // then wakes ksoftirqd to run them.
-                unsafe {
+                
                     SOFTIRQ_PENDING[cpu].fetch_or(remaining, Ordering::Release);
-                }
+                
                 break 'outer;
             }
             let bit = remaining.trailing_zeros() as usize;
             remaining &= !(1u32 << bit);
 
             // Dispatch to registered handler
-            let handler = unsafe { SOFTIRQ_VEC[bit] };
+            let handler = SOFTIRQ_VEC[bit].get();
             if let Some(h) = handler {
                 WW_VEC_RUN[bit].fetch_add(1, Ordering::Relaxed);
                 // phantom-bits: progress record — cross-CPU readers (the
@@ -548,15 +547,17 @@ pub fn __do_softirq() -> bool {
     // phantom-bits: window closed.
     win_note(cpu, false, 0, 0, 0);
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
-    unsafe {
+    
         SOFTIRQ_WIN_T0[cpu].store(0, Ordering::Release);
-    }
+    
 
     // Session-6 discriminator exit side (see entry comment): print when
     // the task switched inside the processing window. Direct console —
     // this can print from deep inside the irq-exit/ksoftirqd paths.
     let tp_exit = crate::arch::cpu::get_thread_id() as usize;
     if tp_entry != tp_exit {
+        // Forensics edge (SOFTIRQ-BRACKET-LEAK): raw reads of tasks that
+        // may already be gone — no typed handle can prove liveness here.
         let a = tp_entry as *mut crate::process::task::Task;
         let b = tp_exit as *mut crate::process::task::Task;
         let (pa, pb) = unsafe {
@@ -573,12 +574,10 @@ pub fn __do_softirq() -> bool {
     }
     crate::dfx::syscost::zone_softirq_exit(); // syscost probe
 
-    // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
-    unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(0, Ordering::Release); }
+    SOFTIRQ_IN_PROGRESS[cpu].store(0, Ordering::Release);
 
     // Return whether there are still pending softirqs
-    // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
-    unsafe { SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) != 0 }
+    SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) != 0
 }
 
 /// Called from `irq_exit()` to process pending softirqs.
@@ -588,9 +587,9 @@ pub fn __do_softirq() -> bool {
 #[inline]
 pub fn invoke_softirq() {
     let cpu = crate::arch::cpu_id() as usize;
-    let pending = unsafe {
+    let pending = 
         SOFTIRQ_PENDING[cpu].load(Ordering::Acquire)
-    };
+    ;
 
     if pending == 0 {
         return;
@@ -616,7 +615,7 @@ pub fn softirq_pending_raw(cpu: usize) -> u32 {
         return 0;
     }
     // SAFETY: bounded read of a per-CPU static.
-    unsafe { SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) }
+     SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) 
 }
 
 /// Is a softirq processing window open on `cpu`? (phantom-bits orphan
@@ -629,7 +628,7 @@ pub fn in_progress_cpu(cpu: usize) -> bool {
         return false;
     }
     // SAFETY: per-CPU static read, bounded index.
-    unsafe { SOFTIRQ_IN_PROGRESS[cpu].load(Ordering::Acquire) != 0 }
+     SOFTIRQ_IN_PROGRESS[cpu].load(Ordering::Acquire) != 0 
 }
 
 /// Run `__do_softirq()` on the per-CPU interrupt stack.
@@ -643,9 +642,7 @@ pub fn in_progress_cpu(cpu: usize) -> bool {
 /// directly (without stack switch).  The stack-switch optimisation can be
 /// re-introduced later using a proper separate assembly file.
 fn do_softirq_own_stack() -> bool {
-    // SAFETY: __do_softirq is our own function that manages its own
-    // preempt_count and recursion guard.
-    unsafe { __do_softirq() }
+    __do_softirq()
 }
 
 // ============================================================================
@@ -659,7 +656,7 @@ pub fn has_pending_softirqs() -> bool {
     let cpu = crate::arch::cpu_id() as usize;
     // SAFETY: SOFTIRQ_PENDING is a per-CPU array indexed by cpu_id; current CPU
     // only accesses its own element, so no cross-CPU data race is possible.
-    unsafe { SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) != 0 }
+     SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) != 0 
 }
 
 // ============================================================================

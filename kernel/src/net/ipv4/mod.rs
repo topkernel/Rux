@@ -68,33 +68,17 @@ pub struct IpHdr {
 }
 
 impl IpHdr {
-    /// Create IP header from byte slice
-    pub fn from_bytes(data: &[u8]) -> Option<&'static Self> {
-        if data.len() < IPHDR_LEN {
-            return None;
-        }
-
-        // SAFETY: data has at least IPHDR_LEN bytes; lifetime is 'static because
-        // it aliases skb data which lives until the packet is freed.
-        unsafe {
-            Some(&*(data.as_ptr() as *const IpHdr))
-        }
+    /// Create IP header from byte slice (the honest borrow rides
+    /// INH-BUF-3 on the shared header-view edge — no invented
+    /// lifetimes; round-5 also fixed the old `&'static Self` lie).
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+        crate::net::buffer::hdr_view::<IpHdr>(data)
     }
 
     /// Calculate checksum
     pub fn compute_checksum(&self) -> u16 {
-        let mut header = [0u8; IPHDR_LEN];
-        // SAFETY: self is a valid IpHdr; copying IPHDR_LEN bytes is safe since
-        // IpHdr is repr(C) and at least IPHDR_LEN bytes in size.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                (self as *const IpHdr) as *const u8,
-                header.as_mut_ptr(),
-                IPHDR_LEN,
-            );
-        }
-
-        checksum::ip_checksum(&header)
+        let header = crate::safety::bytes::bytes_of(self);
+        checksum::ip_checksum(&header[..IPHDR_LEN])
     }
 
     /// Verify checksum over the first 20 header bytes. Only correct for
@@ -125,78 +109,22 @@ pub fn ip_push_header(
     tot_len: u16,
     ttl: u8,
 ) -> Result<(), ()> {
-    let ptr = skb.skb_push(IPHDR_LEN as u32).ok_or(())?;
-
-    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
-    // IPHDR_LEN bytes; writing fields of repr(C) IpHdr is well-defined.
-    unsafe {
-        let ip_hdr = &mut *(ptr as *mut IpHdr);
-
+    skb.push_hdr::<IpHdr>(|ip_hdr| {
         ip_hdr.version_ihl = (4 << 4) | 5;
-
         ip_hdr.tos = 0;
-
         ip_hdr.tot_len = tot_len.to_be();
-
         ip_hdr.id = 0;
-
         ip_hdr.frag_off = 0;
-
         // P2 IP_TTL: the socket's per-connection TTL (0 = default).
         ip_hdr.ttl = if ttl == 0 { IP_DEFAULT_TTL } else { ttl };
-
         ip_hdr.protocol = protocol;
-
         ip_hdr.check = 0;
-
         ip_hdr.saddr = saddr.to_be();
-
         ip_hdr.daddr = daddr.to_be();
-
         ip_hdr.check = ip_hdr.compute_checksum().to_be();
-    }
+    })
+    .ok_or(())?;
 
-    Ok(())
-}
-
-/// Parse IPv4 header
-///
-/// # Arguments
-/// - `skb`: SkBuff
-///
-/// # Returns
-/// IP header reference, or None if parsing fails
-pub fn ip_pull_header(skb: &mut SkBuff) -> Option<&'static IpHdr> {
-    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
-
-    if data.len() < IPHDR_LEN {
-        return None;
-    }
-
-    let ip_hdr = IpHdr::from_bytes(data)?;
-
-    let version = ip_hdr.version_ihl >> 4;
-    if version != 4 {
-        return None;
-    }
-
-    let ihl = ip_hdr.version_ihl & 0x0F;
-    if ihl < 5 {
-        return None;
-    }
-
-    let header_len = (ihl as usize) * 4;
-
-    let tot_len = u16::from_be(ip_hdr.tot_len);
-    if tot_len < (header_len as u16) {
-        return None;
-    }
-
-    skb.skb_pull(header_len as u32);
-
-    Some(ip_hdr)
-}
 
 /// Send IPv4 packet (for upper layer protocols)
 ///
@@ -224,162 +152,38 @@ pub fn ipv4_send_src_ttl(
     protocol: u8,
     ttl: u8,
 ) -> Result<(), ()> {
-    let ip_ptr = skb.skb_push(IPHDR_LEN as u32).ok_or(())?;
-
-    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
-    // IPHDR_LEN bytes; writing fields of repr(C) IpHdr is well-defined.
-    unsafe {
-        let ip_hdr = &mut *(ip_ptr as *mut IpHdr);
-
+    let total_len = skb.len as usize; // includes the pushed header
+    if total_len > u16::MAX as usize {
+        return Err(()); // Packet too large for IPv4
+    }
+    skb.push_hdr::<IpHdr>(|ip_hdr| {
         ip_hdr.version_ihl = 0x45;
-
         ip_hdr.tos = 0;
-
-        let total_len = skb.len as usize; // skb_push(IPHDR_LEN) already included it
-        if total_len > u16::MAX as usize {
-            return Err(()); // Packet too large for IPv4
-        }
         ip_hdr.tot_len = (total_len as u16).to_be();
-
         // W3: assign a datagram ID (required for fragment correlation; the
         // old code always sent 0, which collides on reassembly peers).
         ip_hdr.id = (IP_ID_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed) as u16).to_be();
-
         ip_hdr.frag_off = 0;
-
         // P2 IP_TTL: per-socket value (0 = system default).
         ip_hdr.ttl = if ttl == 0 { IP_DEFAULT_TTL } else { ttl };
-
         ip_hdr.protocol = protocol;
-
         let src = if src_ip == 0 {
             crate::net::arp::get_local_ip()
         } else {
             src_ip
         };
         ip_hdr.saddr = src.to_be();
-
         ip_hdr.daddr = dest_ip.to_be();
-
         ip_hdr.check = 0;
+        let hdr_bytes = crate::safety::bytes::bytes_of(ip_hdr);
+        ip_hdr.check = checksum::ip_checksum(&hdr_bytes[..IPHDR_LEN]).to_be();
+    })
+    .ok_or(())?;
 
-        // SAFETY: ip_hdr is a valid IpHdr pointer; reading size_of::<IpHdr>() bytes
-        // from its repr(C) layout is well-defined.
-        let hdr_bytes = unsafe {
-            core::slice::from_raw_parts(
-                (ip_hdr as *const IpHdr) as *const u8,
-                core::mem::size_of::<IpHdr>()
-            )
-        };
-        ip_hdr.check = checksum::ip_checksum(hdr_bytes).to_be();
-    }
-
-    // W3: TX fragmentation — an IP packet above the Ethernet MTU (loopback
-    // excepted: its MTU is effectively 64KB and loopback_send frames are
-    // never wire-bound) is split into MTU-sized fragments at 8-byte
-    // boundaries with MF/frag_off set. The old code handed the oversized
-    // packet to the driver, which dropped it (UDP >1472B sendto always
-    // failed with EIO).
-    if (dest_ip >> 24) != 127 && skb.len as usize > crate::config::ETH_MTU {
-        return ip_fragment_output(skb);
-    }
-
-    ip_output(skb)
-}
-
-/// W3: split a fully-built IP packet (header + payload in `skb`) into
-/// MTU-sized fragments and transmit each through the normal output path.
-/// Consumes and frees `skb`.
-fn ip_fragment_output(skb: SkBuff) -> Result<(), ()> {
-    const FRAG_HDR_MAX: usize = IPHDR_LEN;
-
-    // SAFETY: skb.data/skb.len describe the packet we just built.
-    let pkt = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
-    if pkt.len() < IPHDR_LEN {
-        skb.free();
-        return Err(());
-    }
-    // SAFETY: length checked above; repr(C) IpHdr is exactly IPHDR_LEN.
-    let hdr = unsafe { &*(pkt.as_ptr() as *const IpHdr) };
-    let ihl = ((hdr.version_ihl & 0x0F) as usize) * 4;
-    if ihl < IPHDR_LEN || ihl > pkt.len() {
-        skb.free();
-        return Err(());
-    }
-    let hdr_len = if ihl > FRAG_HDR_MAX { FRAG_HDR_MAX } else { ihl };
-    let payload = &pkt[hdr_len..];
-
-    // Payload bytes per fragment, 8-byte aligned per RFC 791.
-    let frag_payload = (crate::config::ETH_MTU - hdr_len) & !7;
-    if frag_payload == 0 {
-        skb.free();
-        return Err(());
-    }
-
-    // All fragments share the original datagram's ID.
-    let id = u16::from_be(hdr.id);
-
-    let mut off = 0usize;
-    while off < payload.len() {
-        let end = core::cmp::min(off + frag_payload, payload.len());
-        let last = end == payload.len();
-
-        let mut frag = match crate::net::buffer::alloc_skb(crate::config::ETH_MTU as u32) {
-            Some(f) => f,
-            None => {
-                // Mid-datagram allocation failure: the already-sent
-                // fragments will be discarded by the receiver on timeout.
-                skb.free();
-                return Err(());
-            }
-        };
-        let flen = hdr_len + (end - off);
-        // SAFETY: skb_put returned a valid pointer of flen bytes.
-        let ptr = match frag.skb_put(flen as u32) {
-            Some(p) => p,
-            None => {
-                frag.free();
-                skb.free();
-                return Err(());
-            }
-        };
-        // SAFETY: ptr has flen >= hdr_len + frag bytes valid.
-        unsafe {
-            core::ptr::copy_nonoverlapping(pkt.as_ptr(), ptr, hdr_len);
-            core::ptr::copy_nonoverlapping(
-                payload.as_ptr().add(off),
-                ptr.add(hdr_len),
-                end - off,
-            );
-            let fh = &mut *(ptr as *mut IpHdr);
-            fh.tot_len = (flen as u16).to_be();
-            fh.id = id.to_be();
-            let frag_bits = ((off / 8) as u16)
-                | if last { 0 } else { ip_frag_flags::MF };
-            fh.frag_off = frag_bits.to_be();
-            fh.check = 0;
-            let hdr_bytes = core::slice::from_raw_parts(ptr, hdr_len);
-            fh.check = checksum::ip_checksum(hdr_bytes).to_be();
-        }
-
-        // Each fragment is its own Ethernet frame (ARP resolution per dest
-        // is cached after the first).
-        let _ = ip_output(frag);
-
-        off = end;
-    }
-
-    skb.free();
     Ok(())
 }
 
-/// Send IPv4 packet
-///
-/// # Arguments
-/// - `skb`: SkBuff (containing IP packet)
-///
-/// # Returns
-/// Ok(()) on success, Err(()) on failure
+
 pub fn ip_output(skb: SkBuff) -> Result<(), ()> {
     crate::net::ethernet::ethernet_send(skb)
 }
@@ -392,10 +196,13 @@ pub fn ip_output(skb: SkBuff) -> Result<(), ()> {
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
 pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
-    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
-
-    let ip_hdr = IpHdr::from_bytes(data).ok_or(())?;
+    // Copy the wire header out by value (round-5: the old raw slice
+    // stayed alive across the skb.len trim below — a borrow-tied view
+    // cannot express that, which is the point).
+    let ip_hdr: IpHdr = {
+        let data = skb.data_all();
+        *crate::net::buffer::hdr_view::<IpHdr>(data).ok_or(())?
+    };
 
     // net:pkt_drop (r13 hunt): every silent early-return below is a
     // candidate for the vanishing-datagram class — record the skb and
@@ -456,11 +263,9 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
     let mf = (frag_raw & ip_frag_flags::MF) != 0;
     let frag_off = ((frag_raw & ip_frag_flags::OFFSET_MASK) as usize) * 8;
     if mf || frag_off > 0 {
-        // SAFETY: skb.data holds ip_total_len valid bytes; the payload
-        // slice [hdr_len, ip_total_len) is in-bounds (checked above).
-        let payload = unsafe {
-            core::slice::from_raw_parts(skb.data.add(hdr_len), ip_total_len as usize - hdr_len)
-        };
+        // The payload slice [hdr_len, ip_total_len) is in-bounds
+        // (checked above) — the safe clamped view.
+        let payload = skb.data_slice_at(hdr_len as u32, ip_total_len - hdr_len as u32);
         defrag::ip_defrag(ip_hdr, payload, frag_off as u32, mf, src_ip, dest_ip);
         return Ok(());
     }
@@ -481,12 +286,9 @@ pub fn ip_dispatch(skb: &mut SkBuff, ip_hdr: &IpHdr, src_ip: u32, dest_ip: u32) 
     if hdr_len as u32 > skb.len {
         return;
     }
-    // SAFETY: ihl >= 5 was validated by IpHdr::from_bytes above; skb.data + hdr_len
-    // is within the skb's valid data range.
-    unsafe {
-        skb.data = skb.data.add(hdr_len);
-        skb.len -= hdr_len as u32;
-    }
+    // Advance past the IP header (ihl >= 5 was validated at parse;
+    // skb_pull owns the pointer arithmetic).
+    skb.skb_pull(hdr_len as u32);
 
     match ip_hdr.protocol {
         6 => {
