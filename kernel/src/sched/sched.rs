@@ -1064,6 +1064,28 @@ pub fn grq_held_here() -> bool {
     cpu < GRQ_HELD.len() && GRQ_HELD[cpu].load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Is the GRQ lock word set while NO cpu's tracker claims the hold?
+///
+/// This is the ORPHANED-WORD shape (gl3): an interrupted release left
+/// the word set with every tracker clear, so every acquirer spins
+/// forever and no holder exists to name. Only meaningful on the
+/// terminal/heal paths (cheap scan: MAX_CPUS loads + one lock word).
+pub fn grq_word_orphaned() -> bool {
+    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return false;
+    }
+    // SAFETY: GRQ_READY checked; read-only lock word access.
+    if !unsafe { grq() }.lock.is_locked() {
+        return false;
+    }
+    for c in 0..GRQ_HELD.len() {
+        if GRQ_HELD[c].load(core::sync::atomic::Ordering::Relaxed) {
+            return false; // a live holder exists — not orphaned
+        }
+    }
+    true
+}
+
 /// Initialize the global run queue (called once during boot).
 unsafe fn grq_init() {
     // SAFETY: called exactly once during boot on the primary CPU before any
@@ -3542,6 +3564,30 @@ pub fn terminal_release_grq_if_held() {
             grq_raw_puts(b" cpu=");
             grq_raw_putdec(cpu as u64);
             grq_raw_puts(b" released the runqueue lock stranded by the dying section\n");
+        }
+        return;
+    }
+    // ORPHANED-WORD HEAL (gl3 conviction, grq-lock-1st): the crime scene
+    // on the release build caught the shape — the lock WORD is set, every
+    // cpu's tracker is clear, seven cpus spin at lock() and the dump
+    // names NO holder. The producer is a release sequence interrupted
+    // between the tracker clear and the word store (a fault or park in
+    // that window strands the word with the tracker already saying
+    // "free" — the positive-knowledge gate above then refuses to touch
+    // it, forever). When NO cpu claims the hold, nobody owns the
+    // section: releasing the unclaimed word is always safe and is the
+    // only way the waiters ever run. Rate-limited report, raw console.
+    if crate::sched::sched::grq_word_orphaned() {
+        static GRQORPH_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = GRQORPH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // SAFETY: no cpu holds the lock (the scan below proved it); the
+        // word is debris from an interrupted release.
+        unsafe { grq().lock.force_unlock_terminal() };
+        if n < 8 {
+            grq_raw_puts(b"TERM-GRQ-ORPHAN-WORD cpu=");
+            grq_raw_putdec(crate::arch::cpu_id() as u64);
+            grq_raw_puts(b" released an unclaimed runqueue lock word\n");
         }
     }
 }
