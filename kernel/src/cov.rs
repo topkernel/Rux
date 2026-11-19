@@ -23,12 +23,41 @@
 
 #![allow(dead_code)]
 
-use crate::test_println;
 use alloc::vec::Vec;
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 /// Hex characters per emitted line (log-line-based host extraction).
 const LINE_HEX: usize = 2048;
+
+/// Raw console line writer (same byte stream the unit-test suite's
+/// test_println produces: batched UART bytes, '\n' then '\r'). Works in
+/// ANY boot shape — the in-kernel suite AND the userspace-battery boot
+/// (init=/test/...), where test_println does not exist.
+fn cov_line(bytes: &[u8]) {
+    let mut out = alloc::vec::Vec::with_capacity(bytes.len() + 2);
+    out.extend_from_slice(bytes);
+    out.push(b'\n');
+    out.push(b'\r');
+    let mut uart = crate::console::lock();
+    uart.puts_batch(&out);
+}
+
+/// KCOV-alignment trigger: a write to /proc/sys/kernel/cov_dump from a
+/// userspace test process captures the whole-kernel profile and emits it
+/// on the console (the reference exposes coverage through debugfs to the
+/// driving process; the console-hex variant keeps our extraction pipeline
+/// identical across boot shapes).
+pub fn trigger_write(input: &[u8]) -> i32 {
+    match dump_to_console() {
+        Ok(_) => input.len() as i32,
+        Err(e) => e,
+    }
+}
+
+/// Read side of the trigger file: "0\n" (dump-on-write knob).
+pub fn trigger_generate() -> alloc::vec::Vec<u8> {
+    alloc::vec![b'0', b'\n']
+}
 
 /// Capture the whole-program profile into a `.profraw` byte buffer.
 ///
@@ -55,21 +84,22 @@ fn capture_profile() -> Result<Vec<u8>, i32> {
 /// marker lines. Returns the byte count emitted, or a negative errno.
 pub fn dump_to_console() -> Result<usize, i32> {
     let buf = capture_profile()?;
-    test_println!("[cov-begin] {} bytes", buf.len());
+    let hdr = alloc::format!("[cov-begin] {} bytes", buf.len());
+    cov_line(hdr.as_bytes());
     let mut line = Vec::with_capacity(LINE_HEX);
     for b in buf.iter() {
         line.push(HEX[(b >> 4) as usize]);
         line.push(HEX[(b & 0xf) as usize]);
         if line.len() == LINE_HEX {
             // SAFETY: line is valid UTF-8 by construction (hex digits).
-            test_println!("{}", core::str::from_utf8(&line).unwrap_or(""));
+            cov_line(&line);
             line.clear();
         }
     }
     if !line.is_empty() {
         // SAFETY: as above.
-        test_println!("{}", core::str::from_utf8(&line).unwrap_or(""));
+        cov_line(&line);
     }
-    test_println!("[cov-end]");
+    cov_line(b"[cov-end]");
     Ok(buf.len())
 }

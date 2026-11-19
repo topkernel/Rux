@@ -856,6 +856,15 @@ self.create_dynamic_file("cgroups", || {
             sysctl::generate_tainted,
             self.alloc_ino(),
         )));
+        // cov_dump — write-side coverage trigger for the userspace test
+        // battery (KCOV alignment; cov-dump builds only).
+        #[cfg(feature = "cov-dump")]
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"cov_dump".to_vec(),
+            sysctl::generate_cov_dump,
+            sysctl::write_cov_dump,
+            self.alloc_ino(),
+        )));
         // panic_on_oops — the oops policy knob (seeded from oops=panic).
         kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"panic_on_oops".to_vec(),

@@ -159,6 +159,19 @@ pub fn generate_panic_on_oops() -> Vec<u8> {
     .into_bytes()
 }
 
+/// /proc/sys/kernel/cov_dump — write to capture+emit the whole-kernel
+/// coverage profile (cov-dump builds only; the userspace test battery's
+/// KCOV-alignment trigger).
+#[cfg(feature = "cov-dump")]
+pub fn generate_cov_dump() -> Vec<u8> {
+    crate::cov::trigger_generate()
+}
+
+#[cfg(feature = "cov-dump")]
+pub fn write_cov_dump(input: &[u8]) -> i32 {
+    crate::cov::trigger_write(input)
+}
+
 pub fn write_panic_on_oops(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v @ 0..=1) => {
