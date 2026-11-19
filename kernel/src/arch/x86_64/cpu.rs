@@ -351,6 +351,43 @@ pub fn enable_fsgsbase() {
     crate::println!("arch: CR4.FSGSBASE enabled");
 }
 
+/// CR4.SMEP (bit 20): Supervisor-Mode Execution Prevention. When set, a
+/// ring-0 instruction fetch of a U=1 page faults IMMEDIATELY at the
+/// fetch — the reference kernel arms it whenever CPUID offers it.
+/// R12 (oh-launch round 12, the rip=0x1 family): without SMEP the kernel
+/// happily EXECUTES user-mapped (and zero) pages, which is the
+/// amplifier half of the last scribbler face: a kernel rip that lands
+/// on a small-int garbage target (a return address or fn pointer
+/// overwritten with 1/0/3 — PICK_LIVE, a bool, an enum tag) does not
+/// fault at the fetch if the page happens to be mapped; it executes
+/// whatever bytes sit there (mostly zeros = `add [rax],al`-class ops)
+/// and the machine only faults later on a DATA access at a small
+/// address — the captured shape (rip=0x1 rsp=0x0 badaddr=0x3 and
+/// badaddr=-0x30, data faults while "executing" at 1). With SMEP on,
+/// the same jump faults AT THE TARGET: a clean #PF with badaddr=rip
+/// naming the hijack address, no zero-page execution cascade, no
+/// follow-on dumper re-entry. The kernel-EXEC-fault routing in
+/// mm/exception.rs already assumes these semantics ("SMEP blocks U=1
+/// fetches at CPL0 even when mapped" — kernel EXEC faults route to the
+/// exception table / KernelPanic instead of demand-filling); arming the
+/// bit is what makes that comment true.
+pub fn enable_smep() {
+    // CPUID leaf 7 subleaf 0, EBX bit 7 = SMEP.
+    let (_, ebx, _, _) = cpuid(7, 0);
+    if ebx & (1 << 7) == 0 {
+        crate::println!("arch: SMEP not available");
+        return;
+    }
+    // SAFETY: CR4 update with the SMEP bit only; CPUID gated and
+    // idempotent. Set on the BSP before SMP bring-up so every AP
+    // inherits CR4 via the boot trampoline.
+    unsafe {
+        let cr4 = read_cr4();
+        write_cr4(cr4 | (1 << 20));
+    }
+    crate::println!("arch: CR4.SMEP enabled (kernel EXEC of user pages faults at the fetch)");
+}
+
 /// WRFSBASE — set FS.base without an MSR write.
 ///
 /// # Safety
