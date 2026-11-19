@@ -94,7 +94,7 @@
       <thead><tr><th>Layer</th><th>Contents</th><th>unsafe policy</th></tr></thead>
       <tbody>
         <tr><td><b>Framework</b></td><td>the hardware/privilege TCB: trap entry, page tables, context switch, raw MMIO/DMA, uaccess, low-level sync primitives (arch/, mm/, interrupt/, the virtio·intc·timer·pci cores, console/printk/sbi/main etc.)</td><td>unsafe permitted; every block carries a <code>// SAFETY:</code> invariant comment, coverage tracked in the ledger</td></tr>
-        <tr><td><b>service</b></td><td>everything userspace-facing (syscall, fs, ipc, net, process, the sched upper layer, cgroup, procfs...)</td><td><code>#![forbid(unsafe_code)]</code> is the target state (currently 47 files compile-time forbidden + 56 files already unsafe-free)</td></tr>
+        <tr><td><b>service</b></td><td>everything userspace-facing (syscall, fs, ipc, net, process, the sched upper layer, cgroup, procfs...)</td><td><code>#![forbid(unsafe_code)]</code> is the target state (currently 47 files compile-time forbidden + 63 files already unsafe-free)</td></tr>
         <tr><td><b>diagnostics</b></td><td>dfx/ forensic instruments, raw-memory tooling</td><td>reported separately — diagnostic churn must not hide inside the Framework bucket</td></tr>
         <tr><td><b>test</b></td><td>test code</td><td>excluded from the headline figure</td></tr>
       </tbody>
@@ -109,27 +109,27 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>Directory</th><th class="num">unsafe lines</th><th class="num">unsafe density</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td>Whole kernel</td><td class="num">20,926 / 417,023 lines (263 files, 5,420 unsafe blocks)</td><td class="num"><b>10.6%</b></td><td>budget rule: the percentage only goes down, or an increase is justified per release</td></tr>
-        <tr><td>fs</td><td class="num">5,352</td><td class="num">12.6%</td><td>ext4 and the page cache form the bulk of the budget</td></tr>
-        <tr><td>syscall</td><td class="num">3,955</td><td class="num">15.8%</td><td>the capsule boundary layer</td></tr>
-        <tr><td>process / drivers</td><td class="num">2,807 / 2,131</td><td class="num">24.6% / 15.7%</td><td>process is the densest (trap/context-switch adjacency)</td></tr>
-        <tr><td>sched</td><td class="num">—</td><td class="num">17.6%</td><td>the GRQ/switch paths</td></tr>
-        <tr><td>mm</td><td class="num">2,194</td><td class="num">6.8%</td><td>allocator unsafety is cohesive inside the primitives</td></tr>
-        <tr><td>sync</td><td class="num">—</td><td class="num"><b>2.8%</b></td><td>the shape's living instance: one small unsafe core per primitive, a safe API above it</td></tr>
+        <tr><td>Whole kernel</td><td class="num">34,464 / 361,419 lines (376 files, 4,660 unsafe blocks); dual series 60,376 lines (with unsafe fn/impl bodies)</td><td class="num"><b>9.5%</b> (dual <b>16.7%</b>)</td><td>budget rule: the percentage only goes down, or an increase is justified per release</td></tr>
+        <tr><td>fs</td><td class="num">7,644</td><td class="num">10.0%</td><td>ext4 and the page cache form the bulk of the budget</td></tr>
+        <tr><td>syscall</td><td class="num">1,963</td><td class="num">4.8%</td><td>the capsule boundary layer</td></tr>
+        <tr><td>process / drivers</td><td class="num">1,781 / 1,189</td><td class="num">9.5% / 4.5%</td><td>process completed its typed-handle conversion (round 3b)</td></tr>
+        <tr><td>sched</td><td class="num">4,610</td><td class="num">22.4%</td><td>the GRQ/switch paths</td></tr>
+        <tr><td>mm</td><td class="num">805</td><td class="num">4.0%</td><td>allocator unsafety is cohesive inside the primitives</td></tr>
+        <tr><td>sync</td><td class="num">860</td><td class="num"><b>4.1%</b></td><td>the shape's living instance: one small unsafe core per primitive, a safe API above it</td></tr>
       </tbody>
     </table></div>
-    <p>External reference point: Asterinas (USENIX ATC'25, a same-class Rust kernel) reports a memory-safety TCB of ~14% under the same kind of measurement — this kernel sits on the same axis at 10.6%.</p>
+    <p>Accounting note: the dual series (block bodies plus <code>unsafe fn</code>/<code>impl</code> bodies) is the honest total; the block-only series is kept for trend continuity. Since 2026-11-20 the ledger counts only git-tracked sources, so stale build artifacts no longer dilute the denominator. External reference point: Asterinas (USENIX ATC'25, a same-class Rust kernel) reports a memory-safety TCB of ~14% under the same kind of measurement — this kernel sits below it on the block series (9.5%) and above it on the dual series (16.7%), for which the reference publishes no figure.</p>
     <h3>Token basis (scripts/gen_tcb_ledger.py; the rule table mirrors kernel-layers.md)</h3>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Bucket</th><th class="num">unsafe tokens</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td>service</td><td class="num">3,158</td><td>the shrink target (baseline 10-29: 3,085; forbid files 0 → 47)</td></tr>
-        <tr><td>Framework</td><td class="num">1,340</td><td>SAFETY-comment coverage 3,207/5,009 = <b>64%</b></td></tr>
-        <tr><td>diagnostics</td><td class="num">193</td><td>dfx instruments</td></tr>
-        <tr><td>test</td><td class="num">80</td><td>excluded from the headline</td></tr>
+        <tr><td>service</td><td class="num">3,532</td><td>the shrink target (baseline 10-29: 3,085; forbid files 0 → 47)</td></tr>
+        <tr><td>Framework</td><td class="num">1,484</td><td>SAFETY-comment coverage 3,533/5,576 = <b>63%</b></td></tr>
+        <tr><td>diagnostics</td><td class="num">225</td><td>dfx instruments</td></tr>
+        <tr><td>test</td><td class="num">105</td><td>excluded from the headline</td></tr>
       </tbody>
     </table></div>
-    <p>Service-token hotspots: syscall 722, fs 556, ipc 295, process 277, net 223, mm 219, sched 207.</p>
+    <p>Service-token hotspots: fs 622, syscall 479, sync 450, ipc 394, sched 391, process 345, fs/ext4 315, mm 241, net 147.</p>
 
     <h2 id="forbid"><span class="anchor">§4</span>The forbid campaign and the shrink roadmap</h2>
     <ul>
@@ -144,7 +144,7 @@
       <li><b>Class elimination (compile time)</b>, against C-kernel CVE history: buffer overruns (bounds-checked slices), Arc-owned use-after-free/double-free, data races on typed shared state (Send/Sync), iterator invalidation (borrowck), format-string injection (typed formatting) — the dominant classes are <b>unrepresentable in safe code</b>; the taxonomy's zero pointer-expression defects is the empirical face of the same argument (see <a href="taxonomy.html">taxonomy</a>).</li>
       <li><b>The density argument</b>: sync at 2.8% unsafe density is the layering's living sample — unsafe area scales with primitive complexity, not API surface.</li>
       <li><b>The pairing argument</b>: every Framework primitive carries (a) a Kani harness, (b) a proptest, and (c) — as the Framework shrinks — a Verus function spec (the registered next step, page-flag/refcount algebra first); RustBelt is cited as the trust anchor, not a build dependency.</li>
-      <li><b>The budget argument</b>: the monotone-down rule on 10.6% + every newly added unsafe requiring a commit-body explanation of "why safe code was not possible" — TCB growth is constrained by process, not convention.</li>
+      <li><b>The budget argument</b>: the monotone-down rule on the 16.7% dual series + every newly added unsafe requiring a commit-body explanation of "why safe code was not possible" — TCB growth is constrained by process, not convention.</li>
     </ul>
 
     <div class="callout">Reproduce: python3 scripts/gen_tcb_ledger.py --markdown (the layered token basis); python3 scripts/tcb_ledger.py (the line basis). Canonical: docs/architecture/kernel-layers.md (the rules + forbid campaign), docs/development/tcb-ledger.md (the generated ledger). Related: <a href="formal.html">formal verification</a> (Kani proving unsafe), <a href="taxonomy.html">defect taxonomy</a> (the residency evidence).</div>

@@ -103,7 +103,7 @@
     <h2 id="model-checking"><span class="anchor">§4</span>Defense line 3: model checking and formal verification</h2>
     <ul>
       <li><b>SPIN</b> (<code>kernel/verify/spin/</code>, 4 models: lock_ordering/futex_wait_wake/interrupt_preempt/sched_enqueue_dequeue): deadlock-freedom proofs over documented paths; the key nesting (INV-LOCK-5: bucket_lock → GRQ allowed, GRQ → bucket forbidden) is explicit in the model.</li>
-      <li><b>Kani</b>: 159 <code>#[kani::proof]</code> harnesses prove the core unsafe code and protocol invariants for all inputs.</li>
+      <li><b>Kani</b>: 164 <code>#[kani::proof]</code> harnesses prove the core unsafe code and protocol invariants for all inputs.</li>
       <li><b>loom</b>: an interleaving model check of the extracted SleepMutex state machine (8 scenarios) — within its first 90 seconds it caught a real pid-0 recursion defect (011a71c5); Kani proves INV-M1..M5.</li>
       <li>Together the three cover the layers beyond "unnamed lock pairs + unmodeled paths": concrete paths by SPIN, concrete code by Kani, concurrent interleavings by loom.</li>
     </ul>

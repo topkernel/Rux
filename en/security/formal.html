@@ -89,18 +89,18 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>Instrument</th><th>Method</th><th>Proof target</th><th class="num">Scale (current tree)</th><th>Cadence</th></tr></thead>
       <tbody>
-        <tr><td class="mono">make verify</td><td>mirror-sync check + property tests + unit tests</td><td>kernel algorithms mirrored into the host crate</td><td class="num">1,164 #[test] fns (incl. 109 proptest! blocks) + 100 in-kernel unit tests</td><td><span class="chip ok">every push</span></td></tr>
-        <tr><td class="mono">make kani</td><td>symbolic execution — asserts and panic reachability for ALL inputs</td><td>core unsafe code and protocol invariants</td><td class="num">159 #[kani::proof] harnesses (34 files)</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        <tr><td class="mono">make verify</td><td>mirror-sync check + property tests + unit tests</td><td>kernel algorithms mirrored into the host crate</td><td class="num">1,184 #[test] fns (incl. proptest! blocks) + 1,584 in-kernel cases</td><td><span class="chip ok">every push</span></td></tr>
+        <tr><td class="mono">make kani</td><td>symbolic execution — asserts and panic reachability for ALL inputs</td><td>core unsafe code and protocol invariants</td><td class="num">164 #[kani::proof] harnesses (34 files)</td><td><span class="chip cyan">nightly CI</span></td></tr>
         <tr><td class="mono">make spin</td><td>Promela model checking (state enumeration + LTL)</td><td>lock ordering / futex wait-wake / interrupt-preempt / sched enqueue-dequeue</td><td class="num">4 models, all PASS</td><td><span class="chip cyan">nightly CI</span></td></tr>
         <tr><td class="mono">loom</td><td>interleaving enumeration under a preemption bound</td><td>the SleepMutex handoff state machine</td><td class="num">8 scenarios (5 clean + 3 planted must-catch)</td><td><span class="chip cyan">nightly CI</span></td></tr>
-        <tr><td class="mono">make miri</td><td>interpreted execution + UB detection</td><td>the whole verify mirror crate</td><td class="num">with the 1,164 tests</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        <tr><td class="mono">make miri</td><td>interpreted execution + UB detection</td><td>the whole verify mirror crate</td><td class="num">with the 1,184 tests</td><td><span class="chip cyan">nightly CI</span></td></tr>
       </tbody>
     </table></div>
     <p>All instruments run host-side with no kernel-image dependency: the proof targets are <b>pure types and state machines mirrored from kernel/src into the verify crate</b>. The instruments are complementary — proptest answers "correct on sampled inputs", Kani answers "correct on all inputs", SPIN/loom answer "no deadlock/lost wakeups under every interleaving", Miri answers "no undefined behavior".</p>
 
-    <h2 id="kani"><span class="anchor">§2</span>Kani symbolic execution (159 harnesses)</h2>
+    <h2 id="kani"><span class="anchor">§2</span>Kani symbolic execution (164 harnesses)</h2>
     <ul>
-      <li><b>Coverage distribution</b>: fs 19, drivers 18, arch 17, process 16, signal 14, net 14, interrupt 11, sched 9, security 9, mm 18, ipc 5, errno 5, sync 4 (per file; 159 across 34 files).</li>
+      <li><b>Coverage distribution</b>: arch 22, fs 19, mm 18, drivers 18, process 16, signal 14, net 14, interrupt 11, security 9, sched 9, ipc 5, sync 4, errno 5 (per module; 164 across 34 files).</li>
       <li><b>Harness contract style</b>: each harness mirrors pure types from kernel/src into verify (the source file cited verbatim in a comment), takes symbolic inputs with <code>kani::any()</code>, narrows preconditions with <code>kani::assume</code>, and asserts named invariants <code>INV-&lt;domain&gt;-K&lt;n&gt;</code>. Examples: INV-CAP-K1 (capability mask valid at 41 bits), INV-RT-K1 (empty bitmap returns None), INV-INODE-K3 (file types mutually exclusive), INV-PCI-K4 (64-bit BAR detection bit shape), INV-ERRNO-K3 (EWOULDBLOCK == EAGAIN — POSIX).</li>
       <li><b>The flagship proof</b> (sync/mutex_kani.rs, the S-1 pilot's data half): K1 proves that for <b>every disciplined operation sequence of length K</b> the invariant table INV-M1..M4 holds after every step, INV-M5 token conservation holds throughout, and INV-M6 no arithmetic panics occur (Kani checks panic reachability directly); K2 proves the designed do_exit orphaned-waiter leak is bounded and does not impair the gate/epoch/anti-starvation paths. Both proofs complete in ~2.2 s (Kani 0.68.0).</li>
       <li><b>Invariant density</b>: 902 INV- references in the verify crate across ~150 invariant families; the kernel source carries another 158 runtime invariant references (INV-PCP, INV-LOCK, INV-FUTEX, INV-SCHED etc.).</li>
@@ -135,7 +135,7 @@
 
     <h2 id="proptest"><span class="anchor">§5</span>Property testing and Miri</h2>
     <ul>
-      <li><b>Scale</b>: 1,164 #[test] functions in the verify crate (102 files), of which 109 are proptest! blocks (proptest 1.5, 256 cases per test by default, PROPTEST_CASES configurable); the kernel adds 100 #[test] fns (the unit-test feature, run in QEMU by make test).</li>
+      <li><b>Scale</b>: 1,184 #[test] functions in the verify crate (164 files), of which some are proptest! blocks (proptest 1.5, 256 cases per test by default, PROPTEST_CASES configurable); the kernel adds 1,584 cases (the unit-test feature, run in QEMU by make test).</li>
       <li><b>Coverage</b>: buddy alignment/involution, refcount never-negative with underflow-free release, VMA non-overlap, Newton integer sqrt and watermark formulas, Sv39 PTE/Satp encoding, RFC 1071 checksum / RFC 6298 RTT / RFC 5681 congestion, longest-prefix match, ARP-cache LRU, path normalization with root-escape prevention, Unix DAC checks (incl. CAP_DAC_OVERRIDE), ext4 indirect/namei/superblock/allocator, OOM badness scoring (10 tests: OOM_SCORE_ADJ_MIN immunity, saturation avoidance, small totalpages unadjusted, symmetry), CFS weight-table monotonicity, deadline bandwidth clamp, futex key matching, capability algebra (De Morgan/subset/complement), cmdline parsing, JBD2 tag arithmetic.</li>
       <li><b>The boundary is stated as such</b>: not covered are raw pointers/inline asm/GlobalAlloc impls, runtime concurrency and interrupts, and QEMU-required integration — "verify answers 'is the algorithm correct', unit tests answer 'is the implementation correct'"; the integration face is carried by LTP and the stress fleet.</li>
       <li><b>Miri</b>: interprets the entire verify crate with <code>-Zmiri-disable-isolation</code>; any UB fails the run (nightly, 360-minute budget).</li>
@@ -149,8 +149,8 @@
 
     <h2 id="cadence"><span class="anchor">§7</span>Cadence</h2>
     <ul>
-      <li><b>Every push</b>: the triple-arch build smoke + the mirror sync + the full verify suite (1,164 tests) — within a per-commit budget.</li>
-      <li><b>Nightly</b>: all 159 Kani harnesses, full Miri, the 4 SPIN models, the 8 loom scenarios — heavyweight jobs stay off the per-push path (so kernel commits are not painted red).</li>
+      <li><b>Every push</b>: the triple-arch build smoke + the mirror sync + the full verify suite (1,184 tests) — within a per-commit budget.</li>
+      <li><b>Nightly</b>: all 164 Kani harnesses, full Miri, the 4 SPIN models, the 8 loom scenarios — heavyweight jobs stay off the per-push path (so kernel commits are not painted red).</li>
       <li><b>Before a proof-bearing change lands</b>: make verify &amp;&amp; make kani is run manually.</li>
     </ul>
 

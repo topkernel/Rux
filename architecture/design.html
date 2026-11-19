@@ -84,24 +84,25 @@
     <div class="sub">每个子系统的机制、数据结构与实测数字 · 数字出处见各仓库文档,未测处如实标注</div>
 
     <h2 id="overview"><span class="anchor">§0</span>总览</h2>
-    <p>Rux 是一份源码树服务三种架构(riscv64 / x86_64 / aarch64),约 90% 代码架构无关。对外以 345+ 系统调用对齐Linux ABI;对内是净室设计 —— 每一项与主流实现不同的内部决策都登记在<a href="#divergences">设计分歧登记表</a>并携带兼容性证据。</p>
+    <p>Rux 是一份源码树服务三种架构(riscv64 / x86_64 / aarch64),约 90% 代码架构无关。对外以 349 个系统调用对齐Linux ABI;对内是净室设计 —— 每一项与主流实现不同的内部决策都登记在<a href="#divergences">设计分歧登记表</a>并携带兼容性证据。</p>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>子系统</th><th>代码量(行)</th><th>占比</th><th>一句话职责</th></tr></thead>
         <tbody>
-          <tr><td>fs/(ext4·VFS·页缓存·jbd2)</td><td class="num">61,091</td><td class="num">19.1%</td><td>文件系统栈与缓存</td></tr>
-          <tr><td>arch/(三架构移植层)</td><td class="num">43,440</td><td class="num">13.6%</td><td>启动/陷入/上下文切换/TLB</td></tr>
-          <tr><td>debug/(syscost·kallsyms·看门狗)</td><td class="num">37,946</td><td class="num">11.9%</td><td>诊断与可观测性</td></tr>
-          <tr><td>syscall/</td><td class="num">33,840</td><td class="num">10.6%</td><td>系统调用边界(胶囊边界)</td></tr>
-          <tr><td>drivers/(virtio·DRM·输入)</td><td class="num">23,247</td><td class="num">7.3%</td><td>设备驱动</td></tr>
-          <tr><td>net/(TCP/IP·unix·netlink)</td><td class="num">18,649</td><td class="num">5.8%</td><td>网络协议栈</td></tr>
-          <tr><td>process/ + sched/ + sync/</td><td class="num">34,637</td><td class="num">10.9%</td><td>进程/调度/同步原语</td></tr>
-          <tr><td>mm/</td><td class="num">16,712</td><td class="num">5.2%</td><td>内存管理</td></tr>
-          <tr><td>ipc/(binder·SysV·MQ)</td><td class="num">14,559</td><td class="num">4.6%</td><td>进程间通信</td></tr>
+          <tr><td>process/ + sched/ + sync/</td><td class="num">60,323</td><td class="num">16.7%</td><td>进程/调度/同步原语</td></tr>
+          <tr><td>fs/(ext4·VFS·页缓存·jbd2)</td><td class="num">76,617</td><td class="num">21.2%</td><td>文件系统栈与缓存</td></tr>
+          <tr><td>arch/(三架构移植层)</td><td class="num">45,175</td><td class="num">12.5%</td><td>启动/陷入/上下文切换/TLB</td></tr>
+          <tr><td>syscall/</td><td class="num">41,041</td><td class="num">11.4%</td><td>系统调用边界(胶囊边界)</td></tr>
+          <tr><td>dfx/ + trace/(syscost·kallsyms·看门狗·trace-event)</td><td class="num">23,737</td><td class="num">6.6%</td><td>诊断与可观测性</td></tr>
+          <tr><td>drivers/(virtio·DRM·输入)</td><td class="num">26,280</td><td class="num">7.3%</td><td>设备驱动</td></tr>
+          <tr><td>ipc/(binder·SysV·MQ)</td><td class="num">21,920</td><td class="num">6.1%</td><td>进程间通信</td></tr>
+          <tr><td>net/(TCP/IP·unix·netlink)</td><td class="num">20,637</td><td class="num">5.7%</td><td>网络协议栈</td></tr>
+          <tr><td>mm/</td><td class="num">20,126</td><td class="num">5.6%</td><td>内存管理</td></tr>
+          <tr><td>其他(顶层文件·interrupt·timer·perf·io_uring·safety·security·module)</td><td class="num">25,563</td><td class="num">7.1%</td><td>基础设施与安全模块</td></tr>
         </tbody>
       </table>
     </div>
-    <p>分层模型(<code>docs/architecture/kernel-layers.md</code>):Framework 层(arch/mm 原语/interrupt/virtio 核心/trace)允许 <code>unsafe</code> 且逐块要求 <code>// SAFETY:</code> 注释;service 层目标 100% <code>forbid(unsafe_code)</code>(已 47 个文件编译期禁止,另 56 个已无 unsafe);syscall 入口是胶囊边界,统一校验并翻译用户指针。</p>
+    <p>分层模型(<code>docs/architecture/kernel-layers.md</code>):Framework 层(arch/mm 原语/interrupt/virtio 核心/trace)允许 <code>unsafe</code> 且逐块要求 <code>// SAFETY:</code> 注释;service 层目标 100% <code>forbid(unsafe_code)</code>(已 47 个文件编译期禁止,另 63 个已无 unsafe);syscall 入口是胶囊边界,统一校验并翻译用户指针。</p>
 
     <!-- ================= 调度 ================= -->
     <div class="mod-anchor" id="sched"></div>
@@ -229,7 +230,7 @@
     </ul>
 
     <!-- ================= 分歧登记表 ================= -->
-    <h2 id="divergences"><span class="anchor">§9</span>设计分歧登记表(20 项)</h2>
+    <h2 id="divergences"><span class="anchor">§9</span>设计分歧登记表(29 项)</h2>
     <p>出处:<code>docs/architecture/design-divergences.md</code>。每条须过三关 —— 外部兼容完好、LTP 受影响族绿、上层软件零破坏;永不删除,被取代者保留历史。</p>
     <div class="tbl-wrap">
       <table>
@@ -254,7 +255,7 @@
           <tr><td><b>D-17</b></td><td><b>内核侧设备地址别名区(arena)</b>:运行期无恒等 MMIO 窗,uaccess 无恒等洞(坏用户指针 fault 而非读物理内存)。守卫:PF-NOCTX/SMAP-VIOL 信标静默。</td></tr>
           <tr><td><b>D-18</b></td><td><b>SMAP 以 pushfq EFLAGS.AC 序列启用</b>:STAC/CLAC 在 TCG 无条件 #UD(配对实验确证);括号 ~55 ns,硬件与 TCG 双可启动。</td></tr>
           <tr><td><b>D-19</b></td><td><b>类型化定时器轮</b>:时钟域不可混比,periodic 需 NonZeroU64,WakeArmed/WakeSpent 作用域守卫。六类历史 bug 成为编译错;同一测试平台 A/B:定时器 arm 锁 924→697 ns、nanosleep 772.6→662.7 ms、p2_ctxsw 12.198 vs 15.400 µs。</td></tr>
-          <tr><td><b>D-20</b></td><td><b>写者侧脏页回写水位(空闲比例标记,无全局脏页记账)</b>:Normal zone 空闲页数低于受管页一半(zone_below_dirty_writeback_mark)时,缓冲写者自行冲刷本 inode 脏区间并执行系统级恢复(writeback_recover:先释放已净页,全表轮转收集脏 inode 逐个冲刷,直接淘汰已冲刷页)。与 Linux 的差异:Linux 按 per-BDI 脏页阈值/balance_dirty_pages 的脏页比例节流,Rux 不维护 per-BDI 记账,以 zone 空闲比例作标记 —— <b>约束的是纪律而非常量</b>。消除延迟分配脏页气球楔死(24.3 万脏页涨至 RAM 规模、zone 排空);LTP fallocate05/06 三次全新启动 RC=0;riscv64 make test 1328/1328。代价:无 per-BDI 精度,多盘负载下水位粒度粗于 Linux。注:PSI(/proc/pressure)不在主线,登记于调试对齐恢复队列。</td></tr>
+          <tr><td><b>D-20</b></td><td><b>写者侧脏页回写水位(空闲比例标记,无全局脏页记账)</b>:Normal zone 空闲页数低于受管页一半(zone_below_dirty_writeback_mark)时,缓冲写者自行冲刷本 inode 脏区间并执行系统级恢复(writeback_recover:先释放已净页,全表轮转收集脏 inode 逐个冲刷,直接淘汰已冲刷页)。与 Linux 的差异:Linux 按 per-BDI 脏页阈值/balance_dirty_pages 的脏页比例节流,Rux 不维护 per-BDI 记账,以 zone 空闲比例作标记 —— <b>约束的是纪律而非常量</b>。消除延迟分配脏页气球楔死(24.3 万脏页涨至 RAM 规模、zone 排空);LTP fallocate05/06 三次全新启动 RC=0;riscv64 make test 1584/1584。代价:无 per-BDI 精度,多盘负载下水位粒度粗于 Linux。注:PSI(/proc/pressure)不在主线,登记于调试对齐恢复队列。</td></tr>
         </tbody>
       </table>
     </div>
@@ -275,8 +276,8 @@
     <h2 id="safety"><span class="anchor">§11</span>安全与性能双优(台账要点)</h2>
     <p>核心主张:<b>安全检查在编译期发生、从快路径消失 —— 快的设计与安全的设计是同一个设计。</b>出处:<code>docs/architecture/safety-and-performance.md</code>。</p>
     <ul>
-      <li><b>bug 分类学 v1</b>(全史 3,358 个去重提交逐条裁定):34 个内存破坏类缺陷中 <b>23 个位于显式 unsafe 块/架构汇编</b>,<b>11 个位于 safe 代码</b> —— 但全部是安全 Rust 当今不类型检查的所有权/引用计数/锁协议类;<b>零</b>指针表达式缺陷(越界/迭代器失效/野指针运算/格式串)出现在 safe 代码。34 例中 6 例在任何 boot 前被评审抓到。</li>
-      <li><b>unsafe 表面已枚举且带合同</b>:unsafe 行占比 10.6%;47 个服务文件编译期 forbid(unsafe_code)、另 56 个已无 unsafe;SAFETY 注释覆盖 64%;159 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
+      <li><b>bug 分类学 v1</b>(全史 3,358 个去重提交逐条裁定):33 个内存破坏类缺陷中 <b>23 个位于显式 unsafe 块/架构汇编</b>,<b>10 个位于 safe 代码</b> —— 但全部是安全 Rust 当今不类型检查的所有权/引用计数/锁协议类;<b>零</b>指针表达式缺陷(越界/迭代器失效/野指针运算/格式串)出现在 safe 代码。33 例中 6 例在任何 boot 前被评审抓到。</li>
+      <li><b>unsafe 表面已枚举且带合同</b>:unsafe 行占比 9.5%(双口径 16.7%);47 个服务文件编译期 forbid(unsafe_code)、另 63 个已无 unsafe;SAFETY 注释覆盖 63%;164 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
       <li><b>性能每条配对安全句</b>:如切换路径携带类型化 per-CPU 存储 + 键控锁;lmbench/Geekbench 数字与调度事件普查的判定结果记入同一张表;代价侧(futex 唤醒正在运行的任务时 ~10ms tick 量化)如实记录。</li>
       <li><b>诚实缺口登记册 v1</b>:缺 KASLR(无 boot 熵源)、内核 text/rodata W^X 收紧、编译器栈保护、KASAN 式毒化广度、KCSAN 观察点、kallsyms 掩蔽 —— 逐条写明"补齐长什么样"。</li>
     </ul>

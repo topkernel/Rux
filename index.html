@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rux — 用 Rust 从零编写的 Linux ABI 兼容操作系统内核</title>
-<meta name="description" content="Rux 是一个完全用 Rust 编写的 Linux ABI 兼容操作系统内核:未经修改的 Ubuntu 22.04 可启动至 GNOME Shell 桌面、24.04 可启动至图形目标并支持串口登录,未经修改的 OpenHarmony 可启动全部 135+ 服务。约 39.2 万行 Rust,345+ 系统调用,三大架构。">
+<meta name="description" content="Rux 是一个完全用 Rust 编写的 Linux ABI 兼容操作系统内核:未经修改的 Ubuntu 22.04 可启动至 GNOME Shell 桌面、24.04 可启动至图形目标并支持串口登录,未经修改的 OpenHarmony 可启动全部 135+ 服务。约 40.8 万行 Rust,349 个系统调用,三大架构。">
 <link rel="stylesheet" href="css/style.css?v=19">
 </head>
 <body>
@@ -41,12 +41,13 @@
       <div class="hero-badges">
         <span class="chip">Rust no_std</span>
         <span class="chip">POSIX 兼容</span>
-        <span class="chip">345+ 系统调用</span>
+        <span class="chip">349 个系统调用</span>
         <span class="chip">x86_64 · riscv64 · aarch64</span>
         <span class="chip">ext4 / binder / ELF</span>
       </div>
       <div class="hero-actions">
         <a class="btn btn-primary" href="guides/getting-started.html">快速开始 →</a>
+        <a class="btn btn-ghost" href="about.html">项目介绍</a>
         <a class="btn btn-ghost" href="architecture/design.html">架构与模块设计</a>
         <a class="btn btn-ghost" href="https://github.com/topkernel/Rux">GitHub</a>
       </div>
@@ -70,7 +71,7 @@
 <div class="ln"> </div>
 <div class="ln"><span class="c"># ③ 内核自带测试套件</span></div>
 <div class="ln"><span class="p">$</span> make test</div>
-<div class="ln"><span class="ok">1328 / 1328 passed ✓</span> <span class="dim">(riscv64)</span></div>
+<div class="ln"><span class="ok">1584 / 1584 passed ✓</span> <span class="dim">(riscv64)</span></div>
 <div class="ln"><span class="acc">▌</span> <span class="dim">ABI is the contract; internals are free.</span></div></div>
     </div>
   </div>
@@ -80,12 +81,12 @@
 <section class="section-tight">
   <div class="container">
     <div class="stats">
-      <div class="stat"><div class="v">38.7<em>万+</em></div><div class="l">行 Rust 代码</div></div>
-      <div class="stat"><div class="v">345<em>+</em></div><div class="l">系统调用</div></div>
-      <div class="stat"><div class="v">4300<em>+</em></div><div class="l">测试用例</div></div>
+      <div class="stat"><div class="v">40.8<em>万+</em></div><div class="l">行 Rust 代码</div></div>
+      <div class="stat"><div class="v">349</div><div class="l">系统调用</div></div>
+      <div class="stat"><div class="v">4560<em>+</em></div><div class="l">测试用例</div></div>
       <div class="stat"><div class="v">3</div><div class="l">架构移植</div></div>
       <div class="stat"><div class="v">1139<em>/1869</em></div><div class="l">LTP 通过</div></div>
-      <div class="stat"><div class="v">19</div><div class="l">设计分歧(登记在册)</div></div>
+      <div class="stat"><div class="v">29</div><div class="l">设计分歧(登记在册)</div></div>
     </div>
   </div>
 </section>
@@ -132,7 +133,7 @@
         <thead><tr><th>架构</th><th>QEMU 机型</th><th>加速</th><th>用户态</th><th>当前状态</th></tr></thead>
         <tbody>
           <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM(主平台)</td><td>Ubuntu 22.04 + 24.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>22.04 GNOME 桌面 5/5 · 24.04 图形目标 + 串口登录 · LTP/性能主战场</span></td></tr>
-          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG(MTTCG)</td><td>Ubuntu 22.04 (glibc) / musl 最小根文件系统</td><td><span class="chip ok"><span class="dot g"></span>桌面 + 内核套件 1328/1328</span></td></tr>
+          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG(MTTCG)</td><td>Ubuntu 22.04 (glibc) / musl 最小根文件系统</td><td><span class="chip ok"><span class="dot g"></span>桌面 + 内核套件 1584/1584</span></td></tr>
           <tr><td><b>aarch64</b></td><td class="mono">virt (gic-version=3)</td><td>TCG</td><td>交互 shell</td><td><span class="chip cyan"><span class="dot o"></span>shell / 信号 / 内核套件全绿</span></td></tr>
         </tbody>
       </table>
@@ -152,19 +153,19 @@
       <div class="card">
         <h3><span class="ico">📜</span>兼容性即宪法</h3>
         <p>以 POSIX 标准与 Linux 内核 ABI 为最高准则:LTP 测试族逐族通过,发行版用户态零修改运行。</p>
-        <div class="nums">345+ 系统调用 · LTP <b>1139/1869</b></div>
+        <div class="nums">349 个系统调用 · LTP <b>1139/1869</b></div>
         <a class="more" href="architecture/design.html#divergences">分歧登记表 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Rust 安全,有台账</h3>
-        <p>全内核 Rust(no_std)。全史 34 个内存破坏类缺陷逐一归档:23 个位于被审计的 <code>unsafe</code>/汇编,11 个位于 safe 代码(全部是安全 Rust 尚不类型检查的所有权/锁协议类);统治 C 内核的指针表达式类(越界/野指针/格式串)在 safe 代码中为零。</p>
-        <div class="nums">unsafe 行占比 10.6% · Kani 157 proofs</div>
+        <p>全内核 Rust(no_std)。全史 33 个内存破坏类缺陷逐一归档:23 个位于被审计的 <code>unsafe</code>/汇编,10 个位于 safe 代码(全部是安全 Rust 尚不类型检查的所有权/锁协议类);统治 C 内核的指针表达式类(越界/野指针/格式串)在 safe 代码中为零。</p>
+        <div class="nums">unsafe 行占比 16.7%(双口径) · Kani 164 proofs</div>
         <a class="more" href="security/index.html">安全栏目 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🤖</span>AI 并行工程化</h3>
         <p>多代理并行开发:每任务独立工作树、独立分支,主会话审阅合并。每日多轮合并,全量回归验证。</p>
-        <div class="nums">工作树 <b>130+</b> · 并发工作分支 5</div>
+        <div class="nums">工作树 <b>200+</b></div>
       </div>
       <div class="card">
         <h3><span class="ico">⚡</span>性能即门禁</h3>
@@ -255,7 +256,7 @@
       <div class="card">
         <h3><span class="ico">🛡️</span>稳定性与压力</h3>
         <p>内核套件三架构全绿、桌面会话 2100 秒门 ×3、调度事件普查/heal 自愈 MISS=0;22.04 GNOME 桌面在 188+ 提交后的 main 上 5/5 次启动稳定性验证(shell 5 s、成帧 9.1 s,零 panic/OOM/SIGSEGV);stress-fleet 常驻 11 台 QEMU 并发测试集群(随机化测试/模糊测试/内存压力);riscv64 启动参数矩阵 smp{2,4,6,8} × mem{1,2,4,8}G 十六格全部干净启动(此前多个 panic/挂起格)。</p>
-        <div class="nums">make test <b>1328/1328</b> · 启动矩阵 <b>16/16</b> · GNOME <b>5/5</b></div>
+        <div class="nums">make test <b>1584/1584</b> · 启动矩阵 <b>16/16</b> · GNOME <b>5/5</b></div>
         <a class="more" href="testing/stability.html">稳定性 →</a>
       </div>
       <div class="card">
@@ -266,8 +267,8 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔐</span>安全</h3>
-        <p>bug 分类学全史 34 例逐条归档(23 unsafe/汇编 + 11 safe 所有权类),指针表达式类缺陷为零;159 个 Kani harness 证明核心 unsafe 代码。</p>
-        <div class="nums">unsafe 行 10.6% · 缺口直说</div>
+        <p>bug 分类学全史 33 例逐条归档(23 unsafe/汇编 + 10 safe 所有权类),指针表达式类缺陷为零;164 个 Kani harness 证明核心 unsafe 代码。</p>
+        <div class="nums">unsafe 行 16.7%(双口径)· 缺口直说</div>
         <a class="more" href="security/index.html">安全与形式验证 →</a>
       </div>
     </div>
@@ -382,7 +383,7 @@ make ubuntu-run <span class="c"># 完整 Ubuntu 24.04 桌面(串口登录 root /
     </div>
     <div class="foot-meta">
       <span>Rux Kernel · MIT License · <a href="https://github.com/topkernel/Rux">github.com/topkernel/Rux</a></span>
-      <span>~392,000 lines of Rust · built by AI agents under human direction · 2026</span>
+      <span>~419,000 lines (408,000 Rust) · built by AI agents under human direction · 2026</span>
     
       <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
   </div>

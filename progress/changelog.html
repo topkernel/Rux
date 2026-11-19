@@ -83,6 +83,13 @@
     <h1>更新日志(精选)</h1>
     <div class="sub">逐条全史见仓库 docs/progress/changelog.md 与 git log · 本页只收录结构性节点</div>
 
+    <h2 id="n1120"><span class="anchor">2026-11-20</span></h2>
+    <ul>
+      <li><b>新增「项目介绍」页</b>(<a href="../about.html">about.html</a>,中英双份):把项目立场、ABI 契约、AI 工程方法、unsafe 明细、性能对照、代码构成与未完成项集中到一页 —— 顶部导航与首页按钮均已接入。</li>
+      <li><b>全站数字刷新到 main @ 782745d36</b>:kernel/ 679 文件 · <b>419,502 行</b>(Rust 408,408);系统调用 <b>349</b>;内核内套件 <b>1,584/1,584</b>(riscv64);Kani <b>164</b> harness;宿主测试 1,184;设计分歧登记 <b>29</b> 项(D-21 编号冲突已消,D-29 补位);缺陷分类学 33 例(23 unsafe/汇编 + 10 safe)。</li>
+      <li><b>unsafe 台账口径修正</b>:台账与 census 脚本改为只统计 git 跟踪的源文件 —— 旧构建残留的生成文件(kernel/src/debug/ksyms_generated.rs,27,625 行,无任何模块引用)此前稀释了分母,使同一份代码读数偏低。修正后 kernel/src 361,419 行中,unsafe 块体占 <b>9.5%</b>,双口径(块体 + unsafe fn/impl 体)<b>16.7%</b>;2026-11-19 基线为 10.9% / 18.4%。</li>
+    </ul>
+
     <h2 id="n1116"><span class="anchor">2026-11-16</span></h2>
     <ul>
       <li><b>LTP 审计轮并入 main</b>:官方校正计数 <b>1122/1869</b>(x86_64+KVM,较上一审计口径 1093 净 +29 —— 32 项增益、3 项损失,损失项 accept03/ioperm01/iopl01 已定位修复并随本轮并入);POISON/WEDGE/NOTRUN 行清零。</li>

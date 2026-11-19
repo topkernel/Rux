@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rux — A Linux ABI-compatible OS kernel written from scratch in Rust</title>
-<meta name="description" content="Rux is a Linux ABI-compatible operating system kernel written entirely in Rust: unmodified Ubuntu 22.04 boots to a GNOME Shell desktop, 24.04 reaches the graphical targets with serial login, and unmodified OpenHarmony boots all 135+ services. ~392k lines of Rust, 345+ syscalls, three architectures.">
+<meta name="description" content="Rux is a Linux ABI-compatible operating system kernel written entirely in Rust: unmodified Ubuntu 22.04 boots to a GNOME Shell desktop, 24.04 reaches the graphical targets with serial login, and unmodified OpenHarmony boots all 135+ services. ~409k lines of Rust, 349 syscalls, three architectures.">
 <link rel="stylesheet" href="../css/style.css?v=19">
 </head>
 <body>
@@ -40,12 +40,13 @@
       <div class="hero-badges">
         <span class="chip">Rust no_std</span>
         <span class="chip">POSIX compatible</span>
-        <span class="chip">345+ syscalls</span>
+        <span class="chip">349 syscalls</span>
         <span class="chip">x86_64 · riscv64 · aarch64</span>
         <span class="chip">ext4 / binder / ELF</span>
       </div>
       <div class="hero-actions">
         <a class="btn btn-primary" href="guides/getting-started.html">Get started →</a>
+        <a class="btn btn-ghost" href="about.html">Introduction</a>
         <a class="btn btn-ghost" href="architecture/design.html">Architecture &amp; design</a>
         <a class="btn btn-ghost" href="https://github.com/topkernel/Rux">GitHub</a>
       </div>
@@ -69,7 +70,7 @@
 <div class="ln"> </div>
 <div class="ln"><span class="c"># ③ In-kernel test suite</span></div>
 <div class="ln"><span class="p">$</span> make test</div>
-<div class="ln"><span class="ok">1328 / 1328 passed ✓</span> <span class="dim">(riscv64)</span></div>
+<div class="ln"><span class="ok">1584 / 1584 passed ✓</span> <span class="dim">(riscv64)</span></div>
 <div class="ln"><span class="acc">▌</span> <span class="dim">ABI is the contract; internals are free.</span></div></div>
     </div>
   </div>
@@ -78,12 +79,12 @@
 <section class="section-tight">
   <div class="container">
     <div class="stats">
-      <div class="stat"><div class="v">387<em>k+</em></div><div class="l">lines of Rust</div></div>
-      <div class="stat"><div class="v">345<em>+</em></div><div class="l">syscalls</div></div>
-      <div class="stat"><div class="v">4300<em>+</em></div><div class="l">test cases</div></div>
+      <div class="stat"><div class="v">408<em>k+</em></div><div class="l">lines of Rust</div></div>
+      <div class="stat"><div class="v">349</div><div class="l">syscalls</div></div>
+      <div class="stat"><div class="v">4560<em>+</em></div><div class="l">test cases</div></div>
       <div class="stat"><div class="v">3</div><div class="l">architectures</div></div>
       <div class="stat"><div class="v">1139<em>/1869</em></div><div class="l">LTP passing</div></div>
-      <div class="stat"><div class="v">19</div><div class="l">design divergences (registered)</div></div>
+      <div class="stat"><div class="v">29</div><div class="l">design divergences (registered)</div></div>
     </div>
   </div>
 </section>
@@ -128,7 +129,7 @@
         <thead><tr><th>Architecture</th><th>QEMU machine</th><th>Accel</th><th>Userspace</th><th>Status</th></tr></thead>
         <tbody>
           <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM (primary)</td><td>Ubuntu 22.04 + 24.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>22.04 GNOME desktop 5/5 · 24.04 graphical targets + serial login · main LTP/perf test platform</span></td></tr>
-          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG (MTTCG)</td><td>Ubuntu 22.04 / musl minimal rootfs</td><td><span class="chip ok"><span class="dot g"></span>Desktop + kernel suite 1328/1328</span></td></tr>
+          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG (MTTCG)</td><td>Ubuntu 22.04 / musl minimal rootfs</td><td><span class="chip ok"><span class="dot g"></span>Desktop + kernel suite 1584/1584</span></td></tr>
           <tr><td><b>aarch64</b></td><td class="mono">virt (gic-version=3)</td><td>TCG</td><td>Interactive shell</td><td><span class="chip cyan"><span class="dot o"></span>shell / signals / kernel suite green</span></td></tr>
         </tbody>
       </table>
@@ -147,19 +148,19 @@
       <div class="card">
         <h3><span class="ico">📜</span>Compatibility as the constitution</h3>
         <p>POSIX and the Linux kernel ABI are the supreme constraints: LTP families pass family by family; distribution userspace runs unmodified.</p>
-        <div class="nums">345+ syscalls · LTP <b>1139/1869</b></div>
+        <div class="nums">349 syscalls · LTP <b>1139/1869</b></div>
         <a class="more" href="architecture/design.html#divergences">Divergence register →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Rust safety, with a ledger</h3>
-        <p>All-Rust kernel (no_std). All 34 memory-corruption defects in history are individually filed: 23 in audited <code>unsafe</code>/assembly, 11 in safe code (all ownership/lock-protocol classes safe Rust does not type-check today); pointer-expression classes (OOB, wild pointers, format strings) are zero in safe code.</p>
-        <div class="nums">unsafe lines 10.6% · Kani 159 proofs</div>
+        <p>All-Rust kernel (no_std). All 33 memory-corruption defects in history are individually filed: 23 in audited <code>unsafe</code>/assembly, 10 in safe code (all ownership/lock-protocol classes safe Rust does not type-check today); pointer-expression classes (OOB, wild pointers, format strings) are zero in safe code.</p>
+        <div class="nums">unsafe lines 16.7% (dual series) · Kani 164 proofs</div>
         <a class="more" href="security/index.html">Security section →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🤖</span>Parallel AI engineering</h3>
         <p>Multiple agents develop in parallel: one worktree and branch per task, the main session reviews and merges. Several merges per day, full regression protection.</p>
-        <div class="nums">worktrees <b>130+</b> · 5 concurrent work lanes</div>
+        <div class="nums">worktrees <b>200+</b></div>
       </div>
       <div class="card">
         <h3><span class="ico">⚡</span>Performance is a gate</h3>
@@ -248,7 +249,7 @@
       <div class="card">
         <h3><span class="ico">🛡️</span>Stability &amp; stress</h3>
         <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; the 22.04 GNOME desktop stability-verified 5/5 boots on main 188+ commits past the previous campaign (shell up 5 s, desktop frame 9.1 s, zero panics/OOM/SIGSEGV); a standing 11-QEMU concurrent stress cluster (randomized/fuzz/memstorm); the riscv64 boot-parameter matrix smp{2,4,6,8} × mem{1,2,4,8}G is clean in all sixteen cells (previously several panic/hang cells).</p>
-        <div class="nums">make test <b>1328/1328</b> · boot matrix <b>16/16</b> · GNOME <b>5/5</b></div>
+        <div class="nums">make test <b>1584/1584</b> · boot matrix <b>16/16</b> · GNOME <b>5/5</b></div>
         <a class="more" href="testing/stability.html">Stability →</a>
       </div>
       <div class="card">
@@ -259,8 +260,8 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔐</span>Security</h3>
-        <p>All 34 memory-corruption defects in history individually adjudicated (23 audited unsafe/asm + 11 safe ownership-class), zero pointer-expression defects in safe code; 159 Kani harnesses prove the core unsafe code for all inputs.</p>
-        <div class="nums">unsafe lines 10.6% · gaps stated plainly</div>
+        <p>All 33 memory-corruption defects in history individually adjudicated (23 audited unsafe/asm + 10 safe ownership-class), zero pointer-expression defects in safe code; 164 Kani harnesses prove the core unsafe code for all inputs.</p>
+        <div class="nums">unsafe lines 16.7% (dual series) · gaps stated plainly</div>
         <a class="more" href="security/index.html">Security →</a>
       </div>
     </div>
@@ -346,7 +347,7 @@ make ubuntu-run <span class="c"># full Ubuntu 24.04 desktop (serial login: root 
   <div class="container">
     <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
       <span>Rux Kernel · MIT License · <a href="https://github.com/topkernel/Rux">github.com/topkernel/Rux</a></span>
-      <span>~392,000 lines of Rust · built by AI agents under human direction · 2026</span>
+      <span>~419,000 lines (408,000 Rust) · built by AI agents under human direction · 2026</span>
     
       <span class="foot-stats">Site traffic: <span id="busuanzi_value_site_pv"></span> views · <span id="busuanzi_value_site_uv"></span> visitors</span></div>
   </div>

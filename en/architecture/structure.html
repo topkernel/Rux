@@ -113,7 +113,7 @@
       <li><b>Framework layer</b> (arch/mm primitives/interrupt/virtio core/trace/perf): unsafe allowed, every block requiring a <code>// SAFETY:</code> comment (3,207/5,009 = 64% covered).</li>
       <li><b>Service layer</b>: targets 100% <code>forbid(unsafe_code)</code> — 47 files already forbid it at compile time, 56 more contain none; the first named shrink target <code>syscall/io.rs</code> went 69 unsafe tokens → 0 (typed entries + uaccess_safe).</li>
       <li><b>The syscall boundary is the capsule boundary</b>: entries validate and translate user pointers; uaccess_safe.rs provides typed copy_in/copy_out.</li>
-      <li><b>10.6% of lines are unsafe</b>; the trace module bans unsafe entirely.</li>
+      <li><b>9.5% of lines are unsafe</b> (16.7% on the dual series); the trace module bans unsafe entirely.</li>
     </ul>
 
     <h2 id="repo"><span class="anchor">§3</span>Top-level repository layout</h2>

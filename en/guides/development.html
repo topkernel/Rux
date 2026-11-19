@@ -183,7 +183,7 @@
     <h2 id="first"><span class="anchor">§8</span>A newcomer's first task</h2>
     <ol>
       <li><b>Environment verification</b>: finish <a href="getting-started.html">Getting started</a>, then explore <code>/proc</code> and <code>/dev</code> in the mrsh shell.</li>
-      <li><b>Run the tests</b>: watch make test's 1328 assertions go green; run one LTP quick set (<code>./run_quick.sh</code>).</li>
+      <li><b>Run the tests</b>: watch make test's 1584 assertions go green; run one LTP quick set (<code>./run_quick.sh</code>).</li>
       <li><b>Read one module</b>: <code>kernel/src/sched/</code> is recommended (11 files: the stop/deadline/rt/fair/idle class framework, the main loop <code>schedule()</code> → <code>__schedule()</code> → <code>context_switch()</code>) against the <a href="../architecture/design.html#sched">scheduler design page</a>.</li>
       <li><b>Implement a small probe</b>: model it on an existing C probe in <code>test/</code>, cross-compile, drop it into the rootfs <code>/test/</code>, verify in the shell.</li>
       <li><b>Claim a small fix</b>: pick a failing LTP case or a small bug and walk the full §2/§3 flow from branch to merge gate.</li>
