@@ -5978,6 +5978,28 @@ impl Task {
         }
     }
 
+    /// Shared read view of the task's trap frame (round-4 companion to
+    /// `pt_regs_mut`): the PtRegs-sized window at the top of its own
+    /// kernel stack, for diagnostic readers that must not mutate.
+    ///
+    /// Same layout contract as `pt_regs()`/`pt_regs_mut()` (the stack
+    /// is allocated with the task slot and the frame lives at its
+    /// fixed top offset); the reference is shared, so concurrent reads
+    /// while another CPU runs the task see a frame mid-flight — the
+    /// caller's diagnostic-read contract.
+    #[inline]
+    pub fn pt_regs_ref(&self) -> Option<&'static super::super::arch::pt_regs::PtRegs> {
+        if self.kernel_stack.is_some() {
+            let p = self.pt_regs();
+            // SAFETY: kernel_stack is Some, so pt_regs() is non-null and
+            // points into this task's own kernel-stack window (same
+            // argument as pt_regs_mut); shared reads only.
+            Some(unsafe { &*p })
+        } else {
+            None
+        }
+    }
+
     /// Has address space (user process)
     #[inline]
     pub fn has_address_space(&self) -> bool {

@@ -478,6 +478,7 @@ pub fn run_all_tests() {
     // DmaBlock/MmioRegion/safety_cast.
     test_group_start("safety primitives");
     safety_primitives::test_safety_primitives();
+    safety_primitives::test_safety_primitives_r4();
 
     test_group_start("path");
     path::test_path();
