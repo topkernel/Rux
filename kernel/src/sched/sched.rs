@@ -1030,7 +1030,37 @@ pub fn grq_dump_holder(why: &str) {
             fp = next;
         }
         if n == 0 {
-            grq_raw_puts(b"GRQ-BT  (no frames)\n");
+            grq_raw_puts(b"GRQ-BT  (no frames)");
+            // R13 (fr12's unnameable inner-spin holder): when the frame
+            // chain is unwalkable (fp stamp 0/invalid or the chain
+            // corrupt), dump the holder's stack TOP raw — the deepest
+            // 16 qwords below the top carry the most recent context
+            // (an IRQ-interrupted frame's pt_regs + the interrupted
+            // return addresses), symbolizable offline. The holder is
+            // wedged, so the reads are consistent.
+            let cur = unsafe { crate::sched::sched::cpu_state(cpu).current };
+            if !cur.is_null() {
+                let top = unsafe { (*cur).kernel_stack_top() };
+                if top != 0 {
+                    grq_raw_puts(b" top-raw:\n");
+                    let mut off = 168 + 16 * 8; // below the pt_regs anchor
+                    while off >= 8 * 8 {
+                        off -= 8;
+                        // SAFETY: the holder's own kernel stack, in-bounds
+                        // by construction (top - off within the 16K stack).
+                        let v = unsafe {
+                            core::ptr::read_volatile((top - off) as *const u64)
+                        };
+                        grq_raw_puts(b"GRQ-BT   @-");
+                        grq_raw_putdec(off as u64);
+                        grq_raw_puts(b" 0x");
+                        grq_raw_puthex(v);
+                        grq_raw_puts(b"\n");
+                    }
+                }
+            } else {
+                grq_raw_puts(b"\n");
+            }
         }
     }
 }
@@ -3828,13 +3858,41 @@ pub fn schedule_dead_never_returns() {
                     let claim = unsafe {
                         (*cur).running_on_cpu.load(core::sync::atomic::Ordering::Acquire)
                     };
+                    // R13 (the liveness stall discriminator): is the pacing
+                    // DEAD task still LINKED in its class tree? linked=true
+                    // on a DEAD+dequeued task means a RE-LINKER exists (a
+                    // wake/heal path resurrecting it — the pick keeps
+                    // finding it); linked=false with the loop still pacing
+                    // means the pick/refuse decision resolves prev some
+                    // other way (the same-task repick fast path). One read
+                    // under the GRQ at power-of-two rounds, cold path.
+                    let linked = {
+                        let g = grq().lock_irqsave();
+                        let l = unsafe {
+                            match (*cur).policy() {
+                                crate::process::task::SchedPolicy::Fifo
+                                | crate::process::task::SchedPolicy::Rr => {
+                                    g.rt_rq.is_linked(cur)
+                                }
+                                crate::process::task::SchedPolicy::Deadline => {
+                                    g.dl_rq.is_linked(cur)
+                                }
+                                _ => g.cfs_rq.is_linked(cur),
+                            }
+                        };
+                        let nrr = g.nr_running.load(core::sync::atomic::Ordering::Relaxed);
+                        drop(g);
+                        (l, nrr)
+                    };
                     crate::pr_warn!(
-                        "TERM-DESCHED stuck pid={} rounds={} state={:#x} pc={:#x} claim={} rip_paced",
+                        "TERM-DESCHED stuck pid={} rounds={} state={:#x} pc={:#x} claim={} linked={} nr_running={} rip_paced",
                         unsafe { (*cur).pid() },
                         rounds,
                         st.bits(),
                         pc,
-                        claim
+                        claim,
+                        linked.0,
+                        linked.1
                     );
                 }
             }
@@ -4465,10 +4523,36 @@ unsafe fn __schedule() {
             // one nested lock the schedule path takes under the GRQ).
             grq_site_mark_fp_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_NESTED_LOCK));
             if id != 0 && !crate::timer::timer_pending(id) {
-                // SAFETY: prev is this CPU's current task.
-                (*prev).set_state(TaskState::new(TaskState::RUNNING));
-                prev_running = true;
-                NSLPARK_RESCUED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                // R13 (oh-launch round 13, the pid-312 strand): the rescue
+                // may flip ONLY a task that actually went to sleep
+                // voluntarily — a SLEEPING prev. The terminal deschedule
+                // path (schedule_dead_never_returns) calls schedule() with
+                // STALE timer ids/kinds left over from the dying task's
+                // earlier timed sleeps, and the unconditional
+                // set_state(RUNNING) here kept flipping the parked-dying
+                // task DEAD -> RUNNING on EVERY retry round (fr11:
+                // TERM-DESCHED stuck pid=312 rounds=N state=0x1 pacing
+                // 13+ seconds under the abort storm; every relink screen
+                // then legitimately treats it as a live RUNNING task —
+                // the harvest, the phantom sweep, the picks). A DEAD or
+                // otherwise non-sleeping prev is never "rescued" from a
+                // sleep it is not in; clear the stale id so the dead leg
+                // does not re-evaluate every round.
+                if (*prev).state().is_sleeping() {
+                    // SAFETY: prev is this CPU's current task.
+                    (*prev).set_state(TaskState::new(TaskState::RUNNING));
+                    prev_running = true;
+                    NSLPARK_RESCUED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                } else {
+                    // SAFETY: prev is this CPU's current task; clearing its
+                    // own stale sleep-timer record.
+                    (*prev)
+                        .timed_sleep_timer_id
+                        .store(0, core::sync::atomic::Ordering::Relaxed);
+                    (*prev)
+                        .timed_sleep_kind
+                        .store(crate::timer::TSLEEP_NONE, core::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
     }

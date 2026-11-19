@@ -1139,3 +1139,26 @@ registered per the data-corruption doctrine.
   already documented these semantics; arming the bit makes the code
   match its own comment. make test 1555/1555; triple-arch rc=0. [lane
   worktree oh-launch run/OH-LAUNCH.md round 12]
+
+  **The schedule-path state-write closure (oh-launch round 13,
+  2026-11-19).** The last unconditional task-state writer on the
+  schedule path is gone: the nanosleep-park rescue in __schedule's prev
+  preparation flipped prev to RUNNING whenever a stale timed-sleep
+  timer record read expired — with no sleeping-state check and no
+  dead-check. The terminal deschedule path calls schedule() with
+  exactly those stale records, so every retry round resurrected the
+  parked-dying task DEAD->RUNNING (fr11's TERM-DESCHED state=0x1 rows,
+  the pid-312 strand); every relink screen then legitimately treated
+  the corpse as a live RUNNING task. The rescue now requires
+  prev.state().is_sleeping() and clears the stale records on the
+  refusing leg. Also latched: the user-segv forensic dump now carries
+  the R73 re-entrancy guard the KERNPANIC dump has had since sc195 (a
+  fault inside the forensics parked CPUs silently — fr13's mid-trace
+  death with zero evidence). Evidence: fr13's TERM-DESCHED rows flipped
+  from state=0x1 to properly-DEAD; fr14 became the campaign's FIRST
+  full-300 s surviving armed boot (3 panics survived, zero deadlocks).
+  The remaining failure is now pure liveness — the harvester steals
+  dying CPUs' terminal picks (evidence chain and suggested fix shape
+  handed to the pick-protocol lane in run/COORD-NOTE-R11.md). make test
+  1555/1555 fresh rootfs; triple-arch rc=0. [lane worktree oh-launch
+  run/OH-LAUNCH.md round 13]
