@@ -90,24 +90,24 @@ documented in the script header; the important ones:
 
 Lane A delta vs its fork point: drivers 2985 -> 1189 unsafe block-lines (-60%, unsafe %% 11.2 -> 4.5), mm 1385 -> 805 (-42%%, 6.8 -> 4.0); territory total 4370 -> 1994 (-54.4%%). Whole-kernel unsafe %% 11.6 -> 10.9.
 
-## Current baseline (2026-11-20, unsafe-slim round 3b: net/syscall/process territory)
+## Current baseline (2026-11-20, unsafe-slim round 3c: binder conversion + the fs wrappers)
 
 | Subsystem | .rs files | .rs lines | unsafe blocks | unsafe lines | unsafe % | unsafe fn/impl | fn/impl lines | dual unsafe lines | dual % |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| fs | 85 | 76617 | 808 | 7644 | 10.0% | 263 | 6576 | 14056 | 18.3% |
+| fs | 85 | 76886 | 715 | 3978 | 5.2% | 257 | 6715 | 10570 | 13.7% |
 | sched | 12 | 20576 | 358 | 4610 | 22.4% | 33 | 2660 | 6915 | 33.6% |
-| ipc | 9 | 21920 | 353 | 5331 | 24.3% | 41 | 1301 | 6572 | 30.0% |
 | arch/x86_64 | 20 | 20055 | 334 | 2772 | 13.8% | 82 | 4026 | 6144 | 30.6% |
 | arch/riscv64 | 21 | 15095 | 226 | 1960 | 13.0% | 69 | 3434 | 5303 | 35.1% |
-| process | 13 | 18725 | 322 | 1781 | 9.5% | 23 | 2328 | 4006 | 21.4% |
+| process | 13 | 18723 | 321 | 1777 | 9.5% | 23 | 2328 | 4002 | 21.4% |
 | (top-level files) | 14 | 15241 | 150 | 1353 | 8.9% | 34 | 2043 | 3283 | 21.5% |
 | arch/aarch64 | 20 | 9636 | 185 | 1458 | 15.1% | 58 | 1676 | 2493 | 25.9% |
 | drivers | 40 | 26280 | 296 | 1189 | 4.5% | 64 | 1174 | 2330 | 8.9% |
-| syscall | 12 | 41041 | 474 | 1963 | 4.8% | 5 | 103 | 2065 | 5.0% |
+| syscall | 12 | 41041 | 473 | 1962 | 4.8% | 5 | 103 | 2064 | 5.0% |
 | dfx | 40 | 19097 | 214 | 1434 | 7.5% | 11 | 586 | 1979 | 10.4% |
 | sync | 13 | 21022 | 391 | 860 | 4.1% | 59 | 1141 | 1968 | 9.4% |
 | mm | 31 | 20126 | 182 | 805 | 4.0% | 59 | 1171 | 1928 | 9.6% |
 | net | 18 | 20637 | 165 | 670 | 3.2% | 8 | 18 | 688 | 3.3% |
+| ipc | 9 | 22109 | 119 | 307 | 1.4% | 10 | 10 | 317 | 1.4% |
 | interrupt | 9 | 3339 | 52 | 239 | 7.2% | 0 | 0 | 239 | 7.2% |
 | io_uring | 1 | 1173 | 43 | 131 | 11.2% | 0 | 0 | 131 | 11.2% |
 | perf | 1 | 2109 | 46 | 124 | 5.9% | 0 | 0 | 124 | 5.9% |
@@ -117,16 +117,16 @@ Lane A delta vs its fork point: drivers 2985 -> 1189 unsafe block-lines (-60%, u
 | trace | 2 | 4640 | 4 | 15 | 0.3% | 4 | 4 | 19 | 0.4% |
 | module | 1 | 486 | 4 | 12 | 2.5% | 0 | 0 | 12 | 2.5% |
 | timer | 3 | 1814 | 2 | 8 | 0.4% | 0 | 0 | 8 | 0.4% |
-| **Whole kernel** | **376** | **361419** | **4660** | **34464** | **9.5%** | **817** | **28249** | **60376** | **16.7%** |
+| **Whole kernel** | **376** | **361875** | **4331** | **25769** | **7.1%** | **780** | **27097** | **50630** | **14.0%** |
 
-Round 3b delta vs the 2026-11-19 baseline: whole-kernel unsafe share
-10.9% -> 9.5% (block series), dual series 18.4% -> 16.7%. Territory
-census: net -57.4%, syscall -44.8%, process -58.3% unsafe block-lines;
-`fork.rs`'s ~740-line unsafe body dissolved onto typed handles (925 -> 94
-block-lines) and `exec.rs`'s two hand-rolled inline page-table walks
-(684 -> 155). The measurement itself changed in this round: the ledger
-now counts git-tracked sources only, so the 27,625-line stale generated
-file no longer dilutes the denominator (see Method).
+Round 3c delta vs round 3b: whole-kernel block bodies 34,464 -> 25,769
+lines (9.5% -> 7.1%), fn/impl bodies 28,249 -> 27,097, dual series
+60,376 -> 50,630 (16.7% -> 14.0%). The binder's block-view census cells
+were rewritten as relaxed atomics, one audited TxnBlock window replaced
+~20 scattered volatile derefs (INV-BINDER-BLOCKVIEW), and eleven ext4
+VFS wrappers now ride one audited (inode, fs, ext4-inode) resolution
+(INV-EXT4-FILERES). The scope rule from this morning still applies: the
+ledger counts git-tracked sources only.
 
 ## Prior baseline (pre-campaign reading, retained for trend continuity)
 | Subsystem | .rs files | .rs lines | unsafe blocks | unsafe lines | unsafe % | unsafe fn/impl | fn/impl lines | dual unsafe lines | dual % |
@@ -157,16 +157,16 @@ file no longer dilutes the denominator (see Method).
 
 Reading the baseline:
 
-- Whole kernel (2026-11-20 baseline above): **9.5%** of lines inside
-  `unsafe` blocks, **16.7%** on the dual series (blocks plus `unsafe
+- Whole kernel (2026-11-20 baseline above): **7.1%** of lines inside
+  `unsafe` blocks, **14.0%** on the dual series (blocks plus `unsafe
   fn`/`impl` bodies) — the honest total. The token-metric headline
-  (unsafe constructs outside the Framework layer) is 3,532 of 5,590.
-- Largest absolute contributors: `fs` (7,644 unsafe block-lines),
-  `ipc` (5,331), `sched` (4,610), `syscall` (1,963) — the fs/ext4 +
+  (unsafe constructs outside the Framework layer) is 3,166 of 5,224.
+- Largest absolute contributors: `sched` (4,610 unsafe block-lines),
+  `fs` (3,978), `syscall` (1,962), `sync` (860) — the fs/ext4 +
   uaccess paths are where the budget is spent.
-- Highest density: `ipc` 24.3% and `sched` 22.4% (task lifecycle,
-  context switch, runqueue surgery) — the areas where raw `Task`
-  pointers are most entrenched, and the natural first targets of the
-  F2 newtype/guard migration.
+- Highest density: `sched` 22.4% (task lifecycle, context switch,
+  runqueue surgery) — the area where raw `Task` pointers are most
+  entrenched, and the natural first target of the F2 newtype/guard
+  migration. `ipc` is at 1.4% after the binder conversion.
 - `sync` at 4.1% shows the intended shape: one small unsafe core per
   primitive, safe API above it (§1.5 of the best-practices guide).
