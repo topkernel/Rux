@@ -365,3 +365,20 @@ macro_rules! bug {
         $crate::dfx::bug::bug(file!(), line!());
     };
 }
+
+/// DFX shared: diagnostic read of ONE `T: Copy` through a task's page
+/// tables (round-4 consolidation — the ONE audited PageTableWalker edge
+/// for the dfx family; INV-DFXWALK-1: `root` is the diagnosed task's own
+/// mm root and the read is read-only through the linear map).
+pub(crate) fn walk_read<T: Copy>(root: u64, va: u64) -> Option<T> {
+    use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
+    use crate::arch::mm::mm_ops::PageTableWalker;
+    // SAFETY: INV-DFXWALK-1 — the backend walk is the arch contract
+    // (caller holds the address space), and the linear map covers all of
+    // RAM for a read-only diagnostic access.
+    let (ppn, _) = unsafe { PageTableWalker::walk(root, va) }?;
+    let base = phys_to_virt(PhysAddr((ppn << 12) as u64));
+    Some(unsafe {
+        core::ptr::read_volatile((base.as_usize() + (va & 0xfff) as usize) as *const T)
+    })
+}

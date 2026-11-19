@@ -39,17 +39,21 @@ struct Slot {
     printed_j: u64,
 }
 
-static mut SLOTS: [Slot; TABLE_N] = [const {
-    Slot {
-        pid: 0,
-        sys: 0,
-        epc: 0,
-        state: 0,
-        first_j: 0,
-        last_j: 0,
-        printed_j: 0,
-    }
-}; TABLE_N];
+// Round table under a spinlock: the heartbeat CAS admits ONE auditor,
+// so the lock is uncontended in the healthy case — it exists so the
+// slot array's exclusivity is type-checked, not review-enforced.
+static SLOTS: crate::sync::spinlock::Spinlock<[Slot; TABLE_N]> =
+    crate::sync::spinlock::Spinlock::new([const {
+        Slot {
+            pid: 0,
+            sys: 0,
+            epc: 0,
+            state: 0,
+            first_j: 0,
+            last_j: 0,
+            printed_j: 0,
+        }
+    }; TABLE_N]);
 
 /// Round counter (incremented per audit fire; a fire is every ~4 s).
 static ROUND: AtomicU32 = AtomicU32::new(0);
@@ -111,12 +115,12 @@ pub fn tick() {
 
 /// Collect this round's stuck entries (>= 8 s old), print them.
 ///
-/// SAFETY: called only from `tick` (single auditor).
-unsafe fn audit(now: u64) {
+/// Called only from `tick` (single auditor, heartbeat CAS).
+fn audit(now: u64) {
     // Age out stale slots (task exited / syscall changed): anything not
     // refreshed this round dies.
     if TABLE_USED.load(Ordering::Relaxed) {
-        for s in SLOTS.iter_mut() {
+        for s in SLOTS.lock_irqsave().iter_mut() {
             if s.pid != 0 && now.saturating_sub(s.last_j) > 20 * 100 {
                 s.pid = 0;
             }
@@ -142,8 +146,8 @@ unsafe fn audit(now: u64) {
     // snapshot time are skipped; a tuple missed one round simply
     // re-baselines next round (the >=8 s persistence filter is unaffected).
     let skipped = crate::sched::for_each_task_try(|task| {
-        // SAFETY: diagnostic reads under the for_each_task contract.
-        let tk = unsafe { &*task };
+        // The walk hands &Task under the bucket lock — plain reads.
+        let tk = task;
         let st_bits = tk.state().bits();
         // Lost-park all-task census (rux:lostpark (retired dfx=lostpark)): one unfiltered row
         // per task every audit round while wedged-hunting — answers
@@ -205,33 +209,15 @@ unsafe fn audit(now: u64) {
         let Some(top) = tk.kernel_stack_top_checked() else {
             return;
         };
+        let _ = top;
+        // Entry-frame read through the typed shared view.
+        let Some(r) = tk.pt_regs_ref() else { return };
         #[cfg(feature = "x86_64")]
-        let (sys, epc, a0, a1) = {
-            let regs = (top.wrapping_sub(
-                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-            // SAFETY: entry-frame read of this task's own kernel stack.
-            let r = unsafe { &*regs };
-            (r.orig_rax as u64, r.rip as u64, r.rdi, r.rsi)
-        };
+        let (sys, epc, a0, a1) = (r.orig_rax as u64, r.rip as u64, r.rdi, r.rsi);
         #[cfg(feature = "riscv64")]
-        let (sys, epc, a0, a1) = {
-            let regs = (top.wrapping_sub(
-                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-            // SAFETY: entry-frame read of this task's own kernel stack.
-            let r = unsafe { &*regs };
-            (r.a7 as u64, r.epc as u64, r.a0 as u64, r.a1 as u64)
-        };
+        let (sys, epc, a0, a1) = (r.a7 as u64, r.epc as u64, r.a0 as u64, r.a1 as u64);
         #[cfg(feature = "aarch64")]
-        let (sys, epc, a0, a1) = {
-            let regs = (top.wrapping_sub(
-                crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::aarch64::pt_regs::PtRegs;
-            // SAFETY: entry-frame read of this task's own kernel stack.
-            let r = unsafe { &*regs };
-            (r.syscallno, r.pc, r.regs[0], r.regs[1])
-        };
+        let (sys, epc, a0, a1) = (r.syscallno as u64, r.pc as u64, r.regs[0] as u64, r.regs[1] as u64);
         if sys == 0 {
             // Not a syscall entry (interrupt frame) — skip, except for
             // the lost-park census (rux:lostpark (retired dfx=lostpark)): a USER task parked
@@ -256,25 +242,40 @@ unsafe fn audit(now: u64) {
             return;
         }
         let pid = tk.pid();
-        // SAFETY: single-auditor table (heartbeat CAS admits one CPU;
-        // SLOTS is only touched from this path).
-        let (i, matched) = unsafe {
+        // Single-auditor table (heartbeat CAS admits one CPU); the
+        // spinlock makes the exclusivity type-checked. The lock is
+        // dropped before any printing.
+        let (i, matched, first_j) = {
+            let mut table = SLOTS.lock_irqsave();
             let mut idx: Option<usize> = None;
-            for (i, s) in SLOTS.iter().enumerate() {
+            for (i, s) in table.iter().enumerate() {
                 if s.pid == pid {
                     idx = Some(i);
                     break;
                 }
             }
             match idx {
-                Some(i) => (
-                    i,
-                    SLOTS[i].sys == sys && SLOTS[i].epc == epc,
-                ),
+                Some(i) => {
+                    let slot = &mut table[i];
+                    let matched = slot.sys == sys && slot.epc == epc;
+                    if matched {
+                        slot.last_j = now;
+                        slot.state = st_bits;
+                    } else {
+                        // Entry changed since last round — restart aging.
+                        slot.sys = sys;
+                        slot.epc = epc;
+                        slot.state = st_bits;
+                        slot.first_j = now;
+                        slot.last_j = now;
+                    }
+                    (i, matched, slot.first_j)
+                }
                 None => {
-                    let free = SLOTS.iter().position(|s| s.pid == 0);
-                    let Some(i) = free else { return };
-                    let s = &mut SLOTS[i];
+                    let Some(i) = table.iter().position(|s| s.pid == 0) else {
+                        return;
+                    };
+                    let s = &mut table[i];
                     s.pid = pid;
                     s.sys = sys;
                     s.epc = epc;
@@ -283,26 +284,14 @@ unsafe fn audit(now: u64) {
                     s.last_j = now;
                     s.printed_j = 0;
                     TABLE_USED.store(true, Ordering::Relaxed);
-                    (i, true)
+                    (i, true, s.first_j)
                 }
             }
         };
-        // SAFETY: single-auditor table.
-        let slot = unsafe { &mut SLOTS[i] };
-        if matched {
-            slot.last_j = now;
-            slot.state = st_bits;
-        } else {
-            // Entry changed since last round — restart aging.
-            slot.sys = sys;
-            slot.epc = epc;
-            slot.state = st_bits;
-            slot.first_j = now;
-            slot.last_j = now;
-        }
-        let age_j = now.saturating_sub(slot.first_j);
+        let age_j = now.saturating_sub(first_j);
         // Two-round persistence (>= 8 s) and a 32 s reprint cadence.
-        if age_j >= 8 * 100 && now.saturating_sub(slot.printed_j) >= 32 * 100 {
+        let printed_j = SLOTS.lock_irqsave()[i].printed_j;
+        if age_j >= 8 * 100 && now.saturating_sub(printed_j) >= 32 * 100 {
             notes.push(Note {
                 pid,
                 sys,
@@ -312,7 +301,7 @@ unsafe fn audit(now: u64) {
                 a1,
                 age_j,
             });
-            slot.printed_j = now;
+            SLOTS.lock_irqsave()[i].printed_j = now;
         }
     });
     if skipped > 0 {
@@ -363,10 +352,8 @@ unsafe fn audit(now: u64) {
         let mut comm_buf = [0u8; 16];
         let comm_len;
         {
-            let t = crate::sched::find_task_by_pid(n.pid);
-            if !t.is_null() {
-                // SAFETY: diagnostic comm read; task found by pid.
-                let c = unsafe { (*t).comm() };
+            if let Some(t) = crate::process::task_ref::TaskBorrow::lookup(n.pid) {
+                let c = t.comm();
                 let n = c.len().min(comm_buf.len());
                 comm_buf[..n].copy_from_slice(&c[..n]);
                 comm_len = comm_buf[..n].iter().position(|&b| b == 0).unwrap_or(n);
@@ -400,14 +387,11 @@ unsafe fn audit(now: u64) {
 /// Print up to 24 parked-chain kernel-text words from the task's saved
 /// sp upward (the wait chain; symbolize offline).
 fn print_parked_chain(pid: u32, epc: u64) {
-    // SAFETY: pid lookup + diagnostic reads below are read-only.
-    let t = unsafe { crate::sched::find_task_by_pid(pid) };
-    if t.is_null() {
-        return;
-    }
-    // SAFETY: diagnostic reads of the task's fields and its pinned
-    // kernel-stack pages (the Task exists).
-    let tk = unsafe { &*t };
+    // TaskBorrow's short-read contract (diagnostic, no yield below).
+    let tk = match crate::process::task_ref::TaskBorrow::lookup(pid) {
+        Some(t) => t,
+        None => return,
+    };
     let Some(top) = tk.kernel_stack_top_checked() else {
         return;
     };
@@ -437,13 +421,19 @@ fn print_parked_chain(pid: u32, epc: u64) {
     if sp < base || sp + 8 > top as u64 || (sp & 7) != 0 {
         return;
     }
-    let p = sp as *const u64;
+    // Upward walk of the task's own stack through the bounds-checked
+    // window (INV-WINDOW-*).
+    let win = crate::safety::frame::KernelStackWindow::new(
+        top - crate::config::KERNEL_STACK_SIZE,
+        top,
+    );
     let mut words: [u64; 24] = [0; 24];
     let mut n = 0usize;
     for k in 0..640usize {
-        // SAFETY: diagnostic read inside the task's own kernel-stack
-        // window; bounds checked above.
-        let v = unsafe { core::ptr::read_volatile(p.add(k)) };
+        let v = match win.and_then(|w| w.read_u64((sp as usize) + k * 8)) {
+            Some(v) => v,
+            None => break,
+        };
         if is_text(v) {
             words[n] = v;
             n += 1;

@@ -251,20 +251,8 @@ pub fn dump_syscall_ring_for(pid: u32) {    use crate::syscall::dispatch::{SYSCA
 /// DFX: read one user u32 through a task's page tables (diagnostic).
 #[cfg(feature = "dfx-futex-trace")]
 fn dfx_task_read_u32(t: &crate::process::Task, va: u64) -> Option<u32> {
-    use crate::arch::mm::mm_ops::PageTableWalker;
-    use crate::arch::mm::memory_layout::phys_to_virt;
     let as_arc = t.address_space_arc()?;
-    let root = as_arc.root_ppn();
-    // SAFETY: diagnostic walk + linear-map read of the task's own mm.
-    unsafe {
-        let (ppn, _) = PageTableWalker::walk(root, va)?;
-        let base = phys_to_virt(crate::arch::mm::memory_layout::PhysAddr(
-            (ppn << 12) as u64,
-        ));
-        Some(core::ptr::read_volatile(
-            (base.as_usize() + (va & 0xfff) as usize) as *const u32,
-        ))
-    }
+    crate::dfx::walk_read::<u32>(as_arc.root_ppn(), va)
 }
 
 /// DFX: one-line periodic snapshot of a tracked user word.
@@ -300,29 +288,9 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
     };
     let root = as_arc.root_ppn();
     // Read one user u32 through the task's page tables.
-    // SAFETY: diagnostic walk + linear-map read of the task's own mm.
-    let read_u32 = |va: u64| -> Option<u32> {
-        unsafe {
-            let (ppn, _) = PageTableWalker::walk(root, va)?;
-            let base = phys_to_virt(crate::arch::mm::memory_layout::PhysAddr(
-                (ppn << 12) as u64,
-            ));
-            Some(core::ptr::read_volatile(
-                (base.as_usize() + (va & 0xfff) as usize) as *const u32,
-            ))
-        }
-    };
-    let read_u64 = |va: u64| -> Option<u64> {
-        unsafe {
-            let (ppn, _) = PageTableWalker::walk(root, va)?;
-            let base = phys_to_virt(crate::arch::mm::memory_layout::PhysAddr(
-                (ppn << 12) as u64,
-            ));
-            Some(core::ptr::read_volatile(
-                (base.as_usize() + (va & 0xfff) as usize) as *const u64,
-            ))
-        }
-    };
+    // Diagnostic walk + linear-map reads through the family's one edge.
+    let read_u32 = |va: u64| -> Option<u32> { crate::dfx::walk_read::<u32>(root, va) };
+    let read_u64 = |va: u64| -> Option<u64> { crate::dfx::walk_read::<u64>(root, va) };
     // Xorg input-thread globals: guard ptr @0x1c9a58, input_mutex @0x1c81f0,
     // lock counter @0x206598.
     if let Some(p) = read_u64(0x1c9a58) {
@@ -349,23 +317,15 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
     let mut addr = lo;
     let mut shown = 0;
     while addr < hi && shown < 60 {
-        // SAFETY: diagnostic page-table walk of the task's own mm.
-        let found = unsafe { PageTableWalker::walk(root, addr) };
-        let (ppn, _) = match found {
-            Some(x) => x,
-            None => {
-                addr = (addr + 0x1000) & !0xfffu64;
-                continue;
-            }
-        };
-        let page_va = phys_to_virt(crate::arch::mm::memory_layout::PhysAddr(
-            (ppn << 12) as u64,
-        ));
-        let mut off = (addr & 0xfff) as usize;
-        while off < 0x1000 && addr < hi && shown < 60 {
-            // SAFETY: linear-mapped physical page; read-only diagnostic.
-            let v = unsafe {
-                core::ptr::read_volatile((page_va.as_usize() + off) as *const u64)
+        {
+            // Diagnostic walk + linear-map read (one edge for the family);
+            // per-word walks keep the original skip-unmapped semantics.
+            let v = match crate::dfx::walk_read::<u64>(root, addr) {
+                Some(v) => v,
+                None => {
+                    addr = (addr + 0x1000) & !0xfffu64;
+                    continue;
+                }
             };
             // User code pointers: Xorg image (< 0x1d0000) or shared libs
             // (0x0000_3000_xxxx_xxxx) or any canonical user text pointer.
@@ -383,10 +343,6 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
                 shown += 1;
             }
             addr += 8;
-            off += 8;
-            if off >= 0x1000 {
-                break;
-            }
         }
     }
     if shown == 0 {
@@ -404,18 +360,23 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
 // rip/rsp/orig_rax/rdi/rsi/rdx. nr==0 means "in pure user mode" on
 // both (no syscall in flight).
 #[cfg(feature = "dfx-taskdump-bt")]
-unsafe fn bt_frame(
-    pr: *mut crate::arch::pt_regs::PtRegs,
-) -> (u64, u64, u64, u64, u64, u64) {
+fn bt_frame(pr: &crate::arch::pt_regs::PtRegs) -> (u64, u64, u64, u64, u64, u64) {
     #[cfg(feature = "riscv64")]
-    unsafe { ((*pr).epc, (*pr).sp, (*pr).a7, (*pr).orig_a0, (*pr).a1, (*pr).a2) }
+    {
+        (pr.epc, pr.sp, pr.a7, pr.orig_a0, pr.a1, pr.a2)
+    }
     #[cfg(feature = "x86_64")]
-    unsafe { ((*pr).rip, (*pr).rsp, (*pr).orig_rax, (*pr).rdi, (*pr).rsi, (*pr).rdx) }
+    {
+        (pr.rip, pr.rsp, pr.orig_rax, pr.rdi, pr.rsi, pr.rdx)
+    }
     #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
-    unsafe { (0, 0, 0, 0, 0, 0) }
+    {
+        (0, 0, 0, 0, 0, 0)
+    }
 }
 
-/// Kernel-text window for the stack-word return-address filter.
+
+// Kernel-text window for the stack-word return-address filter.
 /// riscv64: kernel half from 0xffffffff80000000; x86_64: linked image
 /// at 0xffffffff80200000 (boot log "image 0xffffffff80200000-...") with
 /// headroom to 0xffffffff82000000 for the tail/bss — diagnostics only,
@@ -491,7 +452,15 @@ pub fn dump_all_tasks(reason: &str) {
         for c in 0..crate::config::MAX_CPUS {
             putc(b' ');
             let cur = cs[c].2;
-            if cur.is_null() { put_dec(999999); } else { put_dec(unsafe { (*cur).pid() as u64 }); }
+            if cur.is_null() {
+                put_dec(999999);
+            } else {
+                // SAFETY (one adopt edge): the per-CPU current Task stays
+                // allocated; pid is a stable field read.
+                put_dec(unsafe { crate::process::task_ref::TaskBorrow::from_raw(cur) }
+                    .map(|t| t.pid() as u64)
+                    .unwrap_or(999999));
+            }
         }
         putc(b'\n');
     }
@@ -532,12 +501,14 @@ pub fn dump_all_tasks(reason: &str) {
             if t.is_null() {
                 continue;
             }
-            // SAFETY: diagnostic read of stable fields on the per-CPU current
-            // Task; the idle tasks and any hash-invisible exiting tasks are
-            // still valid allocated Task objects.
-            let (pid, st, preempt) = unsafe {
-                ((*t).pid(), (*t).state().bits(), (*t).preempt_count())
+            // SAFETY (one adopt edge): the per-CPU current snapshot's Task
+            // stays allocated (idle tasks and hash-invisible exiting tasks
+            // are still valid Task objects); stable-field diagnostic read.
+            let tk = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(t) } {
+                Some(tk) => tk,
+                None => continue,
             };
+            let (pid, st, preempt) = (tk.pid(), tk.state().bits(), tk.preempt_count());
             puts("cpu");
             put_dec(c as u64);
             puts(" cur pid=");
@@ -555,9 +526,8 @@ pub fn dump_all_tasks(reason: &str) {
             // Last user epc (pt_regs at kernel-stack top) — a userland
             // tight-loop vs mid-exit distinction.
             {
-                let pr = unsafe { (*t).pt_regs() };
-                if !pr.is_null() {
-                    let (epc, _usp, _nr, _a0, _a1, _a2) = unsafe { bt_frame(pr) };
+                if let Some(pr) = tk.pt_regs_ref() {
+                    let (epc, _usp, _nr, _a0, _a1, _a2) = bt_frame(pr);
                     let (lo, hi) = bt_user_window();
                     if epc > lo && epc < hi {
                         puts(" uepc=");
@@ -568,7 +538,7 @@ pub fn dump_all_tasks(reason: &str) {
             puts(" @0x");
             put_hex(t as u64);
             {
-                let sp = unsafe { (*t).thread().sp };
+                let sp = tk.thread().sp;
                 // Bounded readability (kernel_va_readable): the old
                 // kernel-half-only guard accepted the 64TB unmapped
                 // window above RAM — a stale sp there faulted the dump
@@ -581,17 +551,28 @@ pub fn dump_all_tasks(reason: &str) {
                 {
                     puts(" sp=");
                     put_hex(sp);
-                    let base = sp as *const u64;
+                    // Stack-word scan through the bounds-checked window
+                    // (INV-WINDOW-*): the task's stack pages stay mapped
+                    // while the Task exists.
+                    let win = tk.kernel_stack_top_checked().and_then(|top| {
+                        crate::safety::frame::KernelStackWindow::new(
+                            top - crate::config::KERNEL_STACK_SIZE,
+                            top,
+                        )
+                    });
                     let mut shown = 0;
                     for k in 0..40 {
-                        // SAFETY: diagnostic read within the task's own kernel
-                        // stack pages (mapped while the Task exists).
-                        let v = unsafe { core::ptr::read_volatile(base.wrapping_sub(k)) };
+                        let v = match win.and_then(|w| w.read_u64((sp as usize).wrapping_sub(k))) {
+                            Some(v) => v,
+                            None => continue,
+                        };
                         if v >= bt_text_window().0 && v < bt_text_window().1 && (v & 1) == 0 {
                             putc(b' ');
                             put_hex(v);
                             shown += 1;
-                            if shown >= 6 { break; }
+                            if shown >= 6 {
+                                break;
+                            }
                         }
                     }
                 }
@@ -616,7 +597,7 @@ pub fn dump_all_tasks(reason: &str) {
     // exiting on another CPU concurrently may be missed (fine for a
     // snapshot) but can never be half-printed: the slot is freed only after
     // pid_hash_remove, which the iterator's bucket locks serialize against.
-    let skipped = unsafe {
+    let skipped =
         crate::process::pid_hash::pid_hash_for_each_task_try(|task_ptr| {
             let t: &crate::process::task::Task = task_ptr;
             count += 1;
@@ -742,11 +723,8 @@ pub fn dump_all_tasks(reason: &str) {
                 // Hunt addition: last user epc/sp — pinpoints the user
                 // instruction a sleeper is blocked at (musl futex etc.).
                 {
-                    let pr = t.pt_regs();
-                    if !pr.is_null() {
-                        // SAFETY: pt_regs is the task's own kernel-stack-top
-                        // trap frame; read-only diagnostic access.
-                        let (epc, usp, a7, a0, a1, a2) = unsafe { bt_frame(pr) };
+                    if let Some(pr) = t.pt_regs_ref() {
+                        let (epc, usp, a7, a0, a1, a2) = bt_frame(pr);
                         let (ulo, uhi) = bt_user_window();
                         if epc > ulo && epc < uhi {
                             puts(" uepc=");
@@ -817,12 +795,21 @@ pub fn dump_all_tasks(reason: &str) {
                 {
                     puts("     sp=");
                     put_hex(sp);
-                    let base = sp as *const u64;
+                    // Stack-word scan through the bounds-checked window
+                    // (INV-WINDOW-*): the walk's bucket lock keeps the
+                    // task's slot alive for the read.
+                    let win = t.kernel_stack_top_checked().and_then(|top| {
+                        crate::safety::frame::KernelStackWindow::new(
+                            top - crate::config::KERNEL_STACK_SIZE,
+                            top,
+                        )
+                    });
                     let mut shown = 0;
                     for k in 0..40 {
-                        // SAFETY: diagnostic read within the task's own kernel
-                        // stack pages (mapped while the Task exists).
-                        let v = unsafe { core::ptr::read_volatile(base.wrapping_sub(k)) };
+                        let v = match win.and_then(|w| w.read_u64((sp as usize).wrapping_sub(k))) {
+                            Some(v) => v,
+                            None => continue,
+                        };
                         if v >= bt_text_window().0 && v < bt_text_window().1 && (v & 1) == 0 {
                             putc(b' ');
                             put_hex(v);
@@ -833,8 +820,7 @@ pub fn dump_all_tasks(reason: &str) {
                     puts("\n");
                 }
             }
-        })
-    };
+        });
     puts("=== ");
     put_dec(count as u64);
     puts(" tasks ===\n");
@@ -990,8 +976,10 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
     // are the monopolist loop's live instruction and stack pointer.
     let pr = crate::arch::trap::current_pt_regs() as *const crate::arch::pt_regs::PtRegs;
     if !pr.is_null() && (pr as u64) >= 0xffff_8000_0000_0000 {
-        // SAFETY: diagnostic read of the live IPI frame's fixed slots.
-        let (rip, rsp) = unsafe { ((*pr).rip, (*pr).rsp) };
+        // SAFETY: CURRENT_PT_REGS[cpu] was swapped to this IPI's live
+        // frame by trap_handler before dispatch — the one frame edge.
+        let frame = unsafe { &*pr };
+        let (rip, rsp) = (frame.rip, frame.rsp);
         a.int_rip.store(rip, Ordering::Relaxed);
         a.int_rsp.store(rsp, Ordering::Relaxed);
 
@@ -999,12 +987,14 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
         // the frame's callers), keep kernel-text return addresses.
         if rsp > 0x1000 && (rsp & 7) == 0 {
             let mut n = 0usize;
+            // Upward scan of the interrupted task's own stack through the
+            // bounds-checked window (INV-WINDOW-*); the stack stays mapped
+            // while the task monopolizes the CPU.
+            let win = KernelStackWindow::new(rsp, rsp + 64 * 8);
             for k in 0..64 {
-                // SAFETY: diagnostic read inside the running task's own
-                // kernel stack, which stays mapped while it monopolizes
-                // the CPU (worst case: a word beyond the live frames).
-                let v = unsafe {
-                    core::ptr::read_volatile((rsp + k * 8) as *const u64)
+                let v = match win.and_then(|w| w.read_u64(rsp + k * 8)) {
+                    Some(v) => v,
+                    None => continue,
                 };
                 if v >= FROZEN_TEXT_LO && v < FROZEN_TEXT_HI && (v & 1) == 0 {
                     a.stack[n].store(v, Ordering::Relaxed);
@@ -1086,24 +1076,33 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
             let cur = crate::sched::sched::grq_diag_cpu_currents();
             let t = cur[stuck].2 as *mut crate::process::task::Task;
             if !t.is_null() {
-                // SAFETY: diagnostic read of stable fields on the
-                // per-CPU current Task (idle/static or heap-allocated;
-                // both stay valid while current).
-                let sp = unsafe { (*t).thread().sp };
+                // SAFETY (one adopt edge): as the per-CPU walk — the
+                // current Task stays allocated; stable-field reads.
+                let tk = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(t) } {
+                    Some(tk) => tk,
+                    None => return,
+                };
+                let sp = tk.thread().sp;
                 puts("FROZEN-CPU victim pid=");
-                put_dec(unsafe { (*t).pid() } as u64);
+                put_dec(tk.pid() as u64);
                 puts(" preempt=");
-                put_dec(unsafe { (*t).preempt_count() } as u64);
+                put_dec(tk.preempt_count() as u64);
                 puts(" saved_sp=");
                 put_hex(sp);
                 if (sp >> 48) == 0xffff && (sp & 7) == 0 && sp > 0x1000 {
                     puts(" stack:");
-                    let base = sp as *const u64;
+                    let win = tk.kernel_stack_top_checked().and_then(|top| {
+                        crate::safety::frame::KernelStackWindow::new(
+                            top - crate::config::KERNEL_STACK_SIZE,
+                            top,
+                        )
+                    });
                     let mut shown = 0usize;
                     for k in 0..96 {
-                        // SAFETY: diagnostic read within the victim's own
-                        // kernel stack pages (mapped while the Task exists).
-                        let v = unsafe { core::ptr::read_volatile(base.wrapping_sub(k)) };
+                        let v = match win.and_then(|w| w.read_u64((sp as usize).wrapping_sub(k))) {
+                            Some(v) => v,
+                            None => continue,
+                        };
                         if v >= FROZEN_TEXT_LO && v < FROZEN_TEXT_HI && (v & 1) == 0 {
                             putc(b' ');
                             put_hex(v);
@@ -1258,10 +1257,21 @@ pub fn parked_kstack_syms(t: &crate::process::task::Task) -> alloc::string::Stri
     } else {
         4096
     };
+    // Upward walk of the sleeping task's own stack through the
+    // bounds-checked window (INV-WINDOW-*); the Task pins the pages.
+    let win = if bottom != 0 {
+        crate::safety::frame::KernelStackWindow::new(
+            bottom,
+            bottom + crate::config::KERNEL_STACK_SIZE,
+        )
+    } else {
+        None
+    };
     for k in 0..limit {
-        // SAFETY: diagnostic read inside the sleeping task's own kernel
-        // stack pages (pinned by the Task while it exists).
-        let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+        let v = match win.and_then(|w| w.read_u64((base as usize) + k * 8)) {
+            Some(v) => v,
+            None => break,
+        };
         if v >= lo && v < hi && (v & 1) == 0 {
             let sym = crate::dfx::ksyms::format_symbol(v);
             if seg_len + sym.len() + 1 > 230 {
@@ -1597,18 +1607,14 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
             }
         }
         // Sleep 250 ms (jiffies discipline as mmprofd).
-        let current = match crate::sched::current() {
-            Some(t) => t as *mut Task,
+        let pid = match crate::sched::current() {
+            Some(t) => t.pid(),
             None => return 0,
         };
-        // SAFETY: current is the running task's pointer (we are it).
-        let pid = unsafe { (*current).pid() };
         let wake_at = crate::drivers::timer::get_jiffies() + 25;
         let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
-        // SAFETY: setting our own task's state.
-        unsafe {
-            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        }
+        // Re-derived borrow (never held across schedule() below).
+        crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
         crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
         if timer_id != 0 {
@@ -1687,15 +1693,13 @@ pub fn pid1spin_audit() {
     if n % 10 == 0 {
         crate::syscall::misc::pid1_epoll_interest_dump(1);
     }
-    // SAFETY: diagnostic lookup of the init task (find_task_by_pid
-    // contract); reads only task fields + its mapped kernel stack
+    // Short diagnostic read of init (pid 1) — TaskBorrow's lookup
+    // contract; reads only task fields + its mapped kernel stack
     // (sleep_snapshot contract, sc261).
-    let init = unsafe { crate::sched::find_task_by_pid(1) };
-    if init.is_null() {
-        return;
-    }
-    // SAFETY: init is a live task pointer from the scheduler registry.
-    let tk = unsafe { &*init };
+    let tk = match crate::process::task_ref::TaskBorrow::lookup(1) {
+        Some(t) => t,
+        None => return,
+    };
     let running = tk.state().is_running();
     let on_cpu = tk.on_cpu();
     if !running && !on_cpu {
@@ -1706,32 +1710,20 @@ pub fn pid1spin_audit() {
     if n >= 40 && n % 10 != 0 {
         return;
     }
-    let (sys, rip, a0, a1, a2) = match tk.kernel_stack_top_checked() {
+    let (sys, rip, a0, a1, a2) = match tk.pt_regs_ref() {
         None => (0u64, 0u64, 0u64, 0u64, 0u64),
-        Some(top) => {
+        Some(pr) => {
             #[cfg(feature = "x86_64")]
             {
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                // SAFETY: entry-frame read of this task's own stack.
-                unsafe { ((*regs).orig_rax as u64, (*regs).rip as u64, (*regs).rdi as u64, (*regs).rsi as u64, (*regs).rdx as u64) }
+                (pr.orig_rax as u64, pr.rip as u64, pr.rdi as u64, pr.rsi as u64, pr.rdx as u64)
             }
             #[cfg(feature = "riscv64")]
             {
-                let regs = (top.wrapping_sub(
-                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                // SAFETY: entry-frame read of this task's own stack.
-                unsafe { ((*regs).a7 as u64, (*regs).epc as u64, (*regs).a0 as u64, (*regs).a1 as u64, (*regs).a2 as u64) }
+                (pr.a7 as u64, pr.epc as u64, pr.a0 as u64, pr.a1 as u64, pr.a2 as u64)
             }
             #[cfg(feature = "aarch64")]
             {
-                let regs = (top.wrapping_sub(
-                    crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::aarch64::pt_regs::PtRegs;
-                // SAFETY: entry-frame read of this task's own stack.
-                unsafe { ((*regs).syscallno as u64, (*regs).pc as u64, (*regs).regs[0] as u64, (*regs).regs[1] as u64, (*regs).regs[2] as u64) }
+                (pr.syscallno as u64, pr.pc as u64, pr.regs[0] as u64, pr.regs[1] as u64, pr.regs[2] as u64)
             }
         }
     };
