@@ -1691,6 +1691,17 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
             let tfd_v = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
     if tfd_v >= 0 { let tcp_fd = tfd_v;
                 let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+                // r-bwslow: a wrapper whose protocol slot is GONE (freed
+                // under it — the orphan timer's CLOSE_WAIT reap, a peer
+                // reset path) polls dead: POLLERR|POLLHUP plus readable,
+                // the reference's sk_err/dead-socket shape. Without this
+                // the freed-slot wake re-polls not-ready and the select
+                // sleeper loops forever (the bw_tcp client's face).
+                if crate::net::tcp::tcp_socket_get(tcp_fd).is_none() {
+                    ready |= 0x0001 /* POLLIN */ | 0x0008 /* POLLERR */
+                        | 0x0010 /* POLLHUP */;
+                    readable = true;
+                }
                 if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                     readable = !ts.recv_buffer.is_empty();
                     // LISTEN sockets are readable when a child connection

@@ -3475,6 +3475,15 @@ pub fn tcp_socket_free(fd: i32) {
         let _g = TCP_TABLE_LOCK.lock_irqsave();
         TCP_SOCKET_TABLE.free(fd as usize);
     }
+    // r-bwslow (bw_tcp teardown deadlock, 2026-11-19): every sleeper on
+    // this slot must re-evaluate NOW — sendto/select waiters whose
+    // condition flipped (slot gone => send-ready-true / poll-error)
+    // slept FOREVER otherwise: the orphan timer reaps CLOSE_WAIT
+    // connections under their waiters, tcp_send_ready(None)=true but
+    // nothing fires the re-check (the reference wakes all sk waiters at
+    // free). Wake AFTER the table lock drops (wake takes SOCKET_TABLE's
+    // lock; no nesting).
+    crate::net::socket::wake_tcp_socket(fd);
 }
 
 /// Get mutable reference to TCP socket table (for timers)
