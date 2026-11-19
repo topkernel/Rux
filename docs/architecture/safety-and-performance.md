@@ -1121,3 +1121,21 @@ registered per the data-corruption doctrine.
   pointer fields) remains at large and seeds every strand. make test
   1555/1555 fresh rootfs; triple-arch rc=0. [lane worktree oh-launch
   run/OH-LAUNCH.md round 11]
+
+  **CR4.SMEP armed (oh-launch round 12, 2026-11-19).** The last
+  scribbler face's amplifier closed: without SMEP the kernel EXECUTES
+  user-mapped and zero pages, so a kernel rip landing on a small-int
+  jump target (a return address or fn pointer overwritten with 1/0/3/7
+  — PICK_LIVE, a bool, an enum tag) did not fault at the fetch — it
+  executed mostly-zero bytes and only faulted later on a DATA access at
+  a small address (the captured rip=0x1 rsp=0x0 badaddr=0x3 /
+  badaddr=-0x30 shapes — the pt_regs was never corrupted; execution
+  really was wandering the zero page). SMEP is now armed
+  (CPUID.7.0:EBX[7]-gated, per-CPU through fpu_init's read-modify-write,
+  BSP+APs), matching the reference kernel's default-deny: the same jump
+  now faults AT THE TARGET — a clean #PF with badaddr=rip naming the
+  hijack address, no zero-page cascade, no follow-on dumper re-entry
+  crashing CPUs. The kernel-EXEC-fault routing in mm/exception.rs
+  already documented these semantics; arming the bit makes the code
+  match its own comment. make test 1555/1555; triple-arch rc=0. [lane
+  worktree oh-launch run/OH-LAUNCH.md round 12]
