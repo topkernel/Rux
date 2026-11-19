@@ -380,10 +380,13 @@ fn stack_cache_alloc() -> *mut u8 {
             let mut first_off = 0usize;
             let mut first_val = 0u64;
             // SAFETY: the whole stack is KERNEL_STACK_SIZE bytes of
-            // readable memory owned by this allocation.
+            // readable memory owned by this allocation. Word 0 is the
+            // canary slot — never painted (R87 paint skips it so
+            // stack_cache_free's check stays meaningful) and still
+            // holding the old canary at scan time — skip it.
             unsafe {
                 let words = KERNEL_STACK_SIZE / 8;
-                for i in 0..words {
+                for i in 1..words {
                     let v = core::ptr::read_volatile((base + i * 8) as *const u64);
                     if v != 0xA5A5_A5A5_A5A5_A5A5 {
                         if hits == 0 {
@@ -5668,19 +5671,45 @@ impl Task {
             // deterministic rip=0 "Kernel stack overflow" panics (frames
             // observed ~7KB deep inside an unowned kstack slot). The
             // switch path re-installs rsp0 on every switch, so a hit here
-            // names the exact ordering hole. Raw UART, no allocation.
+            // names the exact ordering hole.
+            // R87 (oh-launch round 10, the FIFTH blind printer): this was
+            // pr_debug — invisible at LOGLEVEL=4, so the engine could fire
+            // on every armed-boot strike with zero evidence. Raw UART,
+            // bounded, no allocation — the stale-rsp0 write is the exact
+            // shape of the live-stack foreign-content writer (a trap frame
+            // pushed through a stale rsp0 lands on whatever task now owns
+            // the recycled stack).
             #[cfg(feature = "x86_64")]
             for c in 0..crate::config::MAX_CPUS {
                 let rsp0 = crate::arch::x86_64::smp::PER_CPU[c]
                     .tss_rsp0
                     .load(core::sync::atomic::Ordering::Acquire);
                 if rsp0 == stack_top as u64 {
-                    crate::pr_debug!(
-                        "STACKFREE-LIVE-RSP0 cpu={} top={:#x} freeing_pid={}",
-                        c,
-                        stack_top as u64,
-                        self.pid()
-                    );
+                    static RSP0_SEEN: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n =
+                        RSP0_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 64 {
+                        crate::dfx::taskdump::taskdump_raw_line(
+                            b"STACKFREE-LIVE-RSP0 cpu=",
+                        );
+                        crate::dfx::taskdump::taskdump_dec(c as u64);
+                        crate::dfx::taskdump::taskdump_raw_line(b" top=0x");
+                        let mut v = stack_top as u64;
+                        let mut sh: i32 = 64;
+                        while sh > 0 {
+                            sh -= 4;
+                            let nb = ((v >> sh) & 0xF) as u8;
+                            crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 {
+                                b'0' + nb
+                            } else {
+                                b'a' + nb - 10
+                            })]);
+                        }
+                        crate::dfx::taskdump::taskdump_raw_line(b" freeing_pid=");
+                        crate::dfx::taskdump::taskdump_dec(self.pid() as u64);
+                        crate::dfx::taskdump::taskdump_raw_line(b"\n");
+                    }
                 }
             }
 
@@ -5701,12 +5730,18 @@ impl Task {
             // non-poison word WITH its previous owner. Armed boots only
             // (rux:scribble); the paint is the same cost class as the
             // leg-16 zeroing.
+            // R87 (instrument correction): skip the canary qword at the
+            // bottom — the round-9 paint covered it, so EVERY armed-boot
+            // free tripped stack_cache_free's canary check below and
+            // printed a false STACK-OVERFLOW (fr1: canary read back as
+            // the paint value 0xa5a5...), burying the real overflow
+            // signal under one artifact line per free.
             if crate::trace::EVENT_SCRIBBLE.armed() {
                 unsafe {
                     core::ptr::write_bytes(
-                        stack_bottom,
+                        stack_bottom.add(8),
                         0xA5,
-                        KERNEL_STACK_SIZE,
+                        KERNEL_STACK_SIZE - 8,
                     );
                 }
             }
