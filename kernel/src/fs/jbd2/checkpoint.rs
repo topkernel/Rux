@@ -177,7 +177,7 @@ pub fn jbd2_log_space_left(journal: &Arc<Journal>) -> i32 {
 /// - 1 if nothing to clean up
 pub fn jbd2_cleanup_journal_tail(journal: &Arc<Journal>) -> i32 {
     if journal.is_aborted() {
-        return -EIO;
+        return EIO; // already negative (transaction.rs convention)
     }
 
     let (first_tid, blocknr) = jbd2_journal_get_log_tail(journal);

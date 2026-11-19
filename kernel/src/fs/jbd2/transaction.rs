@@ -18,10 +18,16 @@ use super::types::*;
 // Error codes
 // ============================================================================
 
-pub const EROFS: i32 = 30;   // Read-only filesystem
-pub const ENOMEM: i32 = 12;  // Out of memory
-pub const EIO: i32 = 5;      // I/O error
-pub const EINVAL: i32 = 22;  // Invalid argument
+// Error codes: NEGATIVE errno (the kernel-wide Result<i32> convention —
+// ext4 and bio return -errno; the syscall layer forwards Err(e) straight
+// out as `e as i64`). The old POSITIVE values crossed the syscall
+// boundary as garbage non-error returns (an aborted journal made
+// journal_start fail Err(30) → sys_mkdirat returned +30 → userspace
+// could not recognize it as an error while nothing persisted).
+pub const EROFS: i32 = -30;  // Read-only filesystem
+pub const ENOMEM: i32 = -12; // Out of memory
+pub const EIO: i32 = -5;     // I/O error
+pub const EINVAL: i32 = -22; // Invalid argument
 
 // ============================================================================
 // Transaction helper functions

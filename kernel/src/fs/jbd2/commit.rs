@@ -24,8 +24,9 @@ use crate::fs::bio;
 // Error codes
 // ============================================================================
 
-const EIO: i32 = 5;
-const ENOMEM: i32 = 12;
+// Negative errno (see transaction.rs's convention).
+const EIO: i32 = -5;
+const ENOMEM: i32 = -12;
 
 // ============================================================================
 // Main commit function
