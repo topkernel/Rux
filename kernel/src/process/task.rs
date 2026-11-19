@@ -5951,6 +5951,33 @@ impl Task {
         }
     }
 
+    /// Typed view of the task's trap frame: the PtRegs-sized window at
+    /// the top of its own kernel stack.
+    ///
+    /// Single audited edge for the fork/copy_thread family (round 3b):
+    /// when `kernel_stack` is Some, the window `stack_top -
+    /// size_of::<PtRegs>()` is this task's own trap frame (the stack is
+    /// allocated with the task slot and the frame lives at its fixed
+    /// top offset — the same layout contract the raw `pt_regs()`
+    /// exposes); the returned reference is exclusive while the task is
+    /// not yet enqueued (fork builds the child before `enqueue_task`
+    /// transfers ownership).
+    #[inline]
+    pub fn pt_regs_mut(
+        &mut self,
+    ) -> Option<&'static mut super::super::arch::pt_regs::PtRegs> {
+        if self.kernel_stack.is_some() {
+            let p = self.pt_regs();
+            // SAFETY: kernel_stack is Some, so pt_regs() is non-null and
+            // points into this task's own kernel-stack window; the slot
+            // discipline (boxed once, freed only via free_task_slot)
+            // keeps the frame alive for the slot's 'static lifetime.
+            Some(unsafe { &mut *p })
+        } else {
+            None
+        }
+    }
+
     /// Has address space (user process)
     #[inline]
     pub fn has_address_space(&self) -> bool {
