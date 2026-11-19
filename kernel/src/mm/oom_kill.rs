@@ -199,11 +199,11 @@ fn select_bad_process(oc: &mut OomControl) {
     // the phases — re-resolve by pid (pinned) and skip stale entries;
     // task-side fields (oom_score_adj, state) are read through the pin.
     for (pid, mm_arc) in candidates {
-        let tp = pid_hash_lookup_pinned(pid);
-        if tp.is_null() {
+        // Pinned handle (TaskRef owns the pin; Drop releases it).
+        let Some(tp) = crate::process::task_ref::TaskRef::lookup(pid) else {
             continue;
-        }
-        let points = unsafe {
+        };
+        let points = {
             let task = &*tp;
             // Exited while we were collecting: not a kill candidate.
             let state = task.state();
@@ -213,7 +213,7 @@ fn select_bad_process(oc: &mut OomControl) {
                 oom_badness_mm(task, mm_arc.as_ref(), oc.totalpages)
             }
         };
-        crate::process::task::Task::task_put(tp);
+        drop(tp);
 
         if points > oc.chosen_points {
             // Re-resolve the winner as a raw pointer for the (existing)
@@ -261,10 +261,15 @@ fn oom_kill_process(oc: &mut OomControl) {
         }
         return;
     }
+    // TaskRef adopts the verified pin (Drop's task_put replaces the
+    // manual put at every exit below).
+    let Some(victim) = crate::process::task_ref::TaskRef::from_pinned(victim) else {
+        return;
+    };
 
-    unsafe {
-        let victim_pid = (*victim).pid();
-        let victim_name = (*victim).comm();
+    {
+        let victim_pid = victim.pid();
+        let victim_name = victim.comm();
         let name_str = core::str::from_utf8(
             victim_name.split(|&b| b == 0).next().unwrap_or(b"?"),
         ).unwrap_or("?");
@@ -281,7 +286,7 @@ fn oom_kill_process(oc: &mut OomControl) {
         // counterpart and report 0. Marshals only behind armed().
         if crate::trace::EVENT_MARK_VICTIM.armed() {
             let words = crate::trace::comm_to_words(&*victim_name);
-            let (total_vm, anon_rss) = (*victim)
+            let (total_vm, anon_rss) = victim
                 .address_space_arc()
                 .map(|mm| (mm.total_vm(), mm.rss()))
                 .unwrap_or((0, 0));
@@ -295,9 +300,9 @@ fn oom_kill_process(oc: &mut OomControl) {
                     anon_rss,
                     0,
                     0,
-                    (*victim).cred().uid as u64,
+                    victim.cred().uid as u64,
                     0,
-                    (*victim).oom_score_adj() as i16 as u64,
+                    victim.oom_score_adj() as i16 as u64,
                 ],
             );
         }
@@ -316,7 +321,7 @@ fn oom_kill_process(oc: &mut OomControl) {
         // comparison, so it PEEKS the slot under the mm-slot lock without
         // a reference: no Arc is cloned or dropped inside the bucket
         // lock, and the pinned victim Arc makes the comparison ABA-free.
-        let victim_mm_ptr = (*victim).address_space_arc()
+        let victim_mm_ptr = victim.address_space_arc()
             .map(|mm| mm.as_ref() as *const _ as usize);
         if let Some(mm_ptr) = victim_mm_ptr {
             crate::process::pid_hash::pid_hash_for_each_task(|task_ptr| {
@@ -340,12 +345,10 @@ fn oom_kill_process(oc: &mut OomControl) {
 
         // Step 3: Set TIF_MEMDIE on victim
         // This grants the victim access to memory reserves so it can exit cleanly.
-        (*victim).set_ti_flag(TIF_MEMDIE);
+        victim.set_ti_flag(TIF_MEMDIE);
     }
-
-    // Release the pin taken above (the old code never put it — the leaked
-    // task_refcnt pinned the victim's Task slot forever).
-    crate::process::task::Task::task_put(victim);
+    // TaskRef::drop releases the pin (the old code never put it — the
+    // leaked task_refcnt pinned the victim's Task slot forever).
 }
 
 // ==================== out_of_memory ====================

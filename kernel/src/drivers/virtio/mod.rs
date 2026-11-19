@@ -1192,6 +1192,14 @@ pub(crate) fn io_buf_release(ptr: *mut u8, layout: alloc::alloc::Layout) {
 /// audited deref edge; the delivering-protocol count taken under the
 /// table lock keeps the IoCompletion (and its waiter's stack) alive
 /// across the call).
+/// Mark a pending's completion as under delivery (the walker-vs-abandon
+/// handshake; same audited-deref discipline as [`deliver_completion`]).
+pub(crate) fn begin_delivery(completion: *mut crate::fs::io_completion::IoCompletion) {
+    // SAFETY: the count protocol keeps the IoCompletion alive; callers
+    // hold the pending-table lock that serializes the handshake.
+    unsafe { (*completion).begin_delivery(); }
+}
+
 pub(crate) fn deliver_completion(
     completion: *mut crate::fs::io_completion::IoCompletion,
     status: i32,
@@ -3624,9 +3632,10 @@ pub fn register_pci_gen_disk(slot: usize) {
         } else {
             pci_dev.common_cfg_bar + 0x2000
         };
-        let capacity_ptr = device_cfg_addr as *const u64;
-        // SAFETY: the device cfg region is valid MMIO for this function.
-        let capacity_sectors = unsafe { core::ptr::read_volatile(capacity_ptr) };
+        // INV-MMIO-1..3: the device-config region for this function
+        // (dedicated BAR, or common-cfg + 0x2000 per the fallback above).
+        let capacity_sectors =
+            crate::safety::mmio::MmioRegion::new(device_cfg_addr as usize, 8).read_u64(0);
         disk.set_capacity(capacity_sectors as u64);
     }
 
@@ -3815,30 +3824,33 @@ pub fn interrupt_handler_pci(_irq: u32, dev_id: usize) -> crate::interrupt::IrqR
     if slot >= MAX_PCI_BLK_DISKS {
         return crate::interrupt::IrqReturn::None;
     }
-    // SAFETY: the slot's device is initialized before its IRQ registration.
-    unsafe {
-        if let Some(pci_device) = get_pci_device_at(slot) {
-            // Read ISR status FIRST: per the virtio 1.1 spec the read drops
-            // the device's interrupt line (device-side EOI for level-
-            // triggered INTx). Skipping it caused immediate re-entry
-            // storms once the IRQ line actually fires (review DRIV-H3).
-            // Bit 0 = queue used, bit 1 = configuration change.
-            if pci_device.isr_cfg_bar != 0 {
-                let isr = core::ptr::read_volatile(pci_device.isr_cfg_bar as *const u32);
-                if isr == 0 {
-                    // Not ours — spurious or another device on the shared line.
-                    return crate::interrupt::IrqReturn::None;
-                }
+    // (Registry access via the audited accessor; the ISR read is the
+    // device-side EOI — INV-MMIO-1..3.)
+    if let Some(pci_device) = get_pci_device_at(slot) {
+        // Read ISR status FIRST: per the virtio 1.1 spec the read drops
+        // the device's interrupt line (device-side EOI for level-
+        // triggered INTx). Skipping it caused immediate re-entry
+        // storms once the IRQ line actually fires (review DRIV-H3).
+        // Bit 0 = queue used, bit 1 = configuration change.
+        if pci_device.isr_cfg_bar != 0 {
+            let isr = crate::safety::mmio::MmioRegion::new(
+                pci_device.isr_cfg_bar as usize,
+                4,
+            )
+            .read_u32(0);
+            if isr == 0 {
+                // Not ours — spurious or another device on the shared line.
+                return crate::interrupt::IrqReturn::None;
             }
-            // Deferred-wake discipline (R12-3): collect in the top half,
-            // deliver in the bottom half. The Block softirq runs at
-            // irq_exit() time, so wakeup latency stays bounded while the
-            // hard-IRQ section stays minimal.
-            VW_IRQS[slot].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-            crate::interrupt::softirq::raise_softirq_irqoff(
-                crate::interrupt::softirq::SoftirqIndex::Block as usize,
-            );
         }
+        // Deferred-wake discipline (R12-3): collect in the top half,
+        // deliver in the bottom half. The Block softirq runs at
+        // irq_exit() time, so wakeup latency stays bounded while the
+        // hard-IRQ section stays minimal.
+        VW_IRQS[slot].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        crate::interrupt::softirq::raise_softirq_irqoff(
+            crate::interrupt::softirq::SoftirqIndex::Block as usize,
+        );
     }
     crate::interrupt::IrqReturn::Handled
 }
@@ -3849,26 +3861,23 @@ pub fn interrupt_handler_pci(_irq: u32, dev_id: usize) -> crate::interrupt::IrqR
 /// to the Block softirq bottom half.
 /// Registered via request_irq. EOI is done by the IRQ framework.
 pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
-    // SAFETY: VIRTIO_BLK is initialized before IRQ registration; MMIO register
-    // reads/writes use volatile access at correct offsets per VirtIO spec.
-    unsafe {
-        // MMIO VirtIO device (Legacy VirtIO)
-        if let Some(device) = VIRTIO_BLK.as_ref() {
-            // Read interrupt status (INTERRUPT_STATUS at 0x60)
-            let irq_status_ptr = (device.base_addr + 0x60) as *const u32;
-            let irq_status = core::ptr::read_volatile(irq_status_ptr);
+    // INV-MMIO-1..3: the device's register window; registry access via
+    // the audited get_device accessor.
+    if let Some(device) = get_device() {
+        // MMIO VirtIO device
+        // Read interrupt status (INTERRUPT_STATUS at 0x60)
+        let mmio = crate::safety::mmio::MmioRegion::new(device.base_addr as usize, 0x120);
+        let irq_status = mmio.read_u32(0x60);
 
-            if irq_status != 0 {
-                // Clear interrupt (INTERRUPT_ACK at 0x64)
-                let irq_ack_ptr = (device.base_addr + 0x64) as *mut u32;
-                core::ptr::write_volatile(irq_ack_ptr, irq_status);
+        if irq_status != 0 {
+            // Clear interrupt (INTERRUPT_ACK at 0x64)
+            mmio.write_u32(0x64, irq_status);
 
-                // Defer completion processing to Block softirq bottom half
-                crate::interrupt::softirq::raise_softirq_irqoff(
-                    crate::interrupt::softirq::SoftirqIndex::Block as usize,
-                );
-                return crate::interrupt::IrqReturn::Handled;
-            }
+            // Defer completion processing to Block softirq bottom half
+            crate::interrupt::softirq::raise_softirq_irqoff(
+                crate::interrupt::softirq::SoftirqIndex::Block as usize,
+            );
+            return crate::interrupt::IrqReturn::Handled;
         }
     }
     crate::interrupt::IrqReturn::None
@@ -3888,9 +3897,11 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
 pub fn block_bh_handler(_vec: usize) {
     // SAFETY: Runs in softirq context; VIRTIO_BLK is initialized. The irqsave
     // lock on virtqueue ensures mutual exclusion with hardirq handlers.
-    unsafe {
+    // (Registry access via the audited get_device accessor; every ring
+    // read routes through the typed volatile helpers.)
+    {
         let mut mmio_collected = 0usize;
-        if let Some(device) = VIRTIO_BLK.as_ref() {
+        if let Some(device) = get_device() {
             // MMIO pending table holds at most MAX_PENDING_IO live entries,
             // so one collection array covers a full catch-up pass.
             let mut done: [Option<PendingIo>; MAX_PENDING_IO] =
@@ -3977,7 +3988,7 @@ pub fn block_bh_handler(_vec: usize) {
                             // drops.
                             if let Some(p) = fired.as_ref() {
                                 if !p.completion.is_null() {
-                                    (*p.completion).begin_delivery();
+                                    begin_delivery(p.completion);
                                 }
                             }
                         }

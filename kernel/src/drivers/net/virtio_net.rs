@@ -92,9 +92,11 @@ impl VirtIONetDevice {
 
     /// Initialize device
     pub fn init(&mut self) -> Result<(), &'static str> {
-        // SAFETY: base_addr points to valid VirtIO MMIO registers; all register
-        // offsets follow the VirtIO MMIO device specification.
-        unsafe {
+        // INV-MMIO-1..3 (unsafe-slim round 3): the device's register
+        // window as a bounds-checked MmioRegion; every access below is
+        // a safe volatile op (the 0x120 window covers the config area).
+        let mmio = crate::safety::mmio::MmioRegion::new(self.base_addr as usize, 0x120);
+        {
             // VirtIO MMIO register offsets (linux/virtio_mmio.h — the
             // shared legacy/modern layout; queueSel=0x30, status=0x70,
             // ready=0x44). R34: the previous code was missing feature
@@ -135,7 +137,7 @@ impl VirtIONetDevice {
             const S_DRIVER_OK: u32 = 0x04;
 
             // Verify magic number
-            let magic = core::ptr::read_volatile((self.base_addr + MAGIC_VALUE) as *const u32);
+            let magic = mmio.read_u32(MAGIC_VALUE as usize);
             if magic != 0x74726976 {
                 return Err("Invalid VirtIO magic value");
             }
@@ -143,29 +145,29 @@ impl VirtIONetDevice {
             // Verify version — only Modern (v2) is supported. The register
             // block below uses the modern split-address layout (0x80/0x90/
             // 0xa0); legacy v1 devices need the QueuePFN model instead.
-            let version = core::ptr::read_volatile((self.base_addr + VERSION) as *const u32);
+            let version = mmio.read_u32(VERSION as usize);
             if version != 2 {
                 return Err("Unsupported VirtIO version (only Modern v2)");
             }
 
             // Verify device ID (network device = 1)
-            let device_id = core::ptr::read_volatile((self.base_addr + DEVICE_ID) as *const u32);
+            let device_id = mmio.read_u32(DEVICE_ID as usize);
             if device_id != 1 {
                 return Err("Not a VirtIO network device");
             }
 
             // Reset device, then walk the standard status sequence.
-            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0);
+            mmio.write_u32(STATUS as usize, 0);
             for _ in 0..100_000u32 {
-                if core::ptr::read_volatile((self.base_addr + STATUS) as *const u32) == 0 {
+                if mmio.read_u32(STATUS as usize) == 0 {
                     break;
                 }
                 core::hint::spin_loop();
             }
 
             // Set driver status: ACKNOWLEDGE, then DRIVER
-            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, S_ACKNOWLEDGE);
-            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, S_ACKNOWLEDGE | S_DRIVER);
+            mmio.write_u32(STATUS as usize, S_ACKNOWLEDGE);
+            mmio.write_u32(STATUS as usize, S_ACKNOWLEDGE | S_DRIVER);
 
             // R34: feature negotiation was missing entirely. VIRTIO_F_VERSION_1
             // MUST be accepted on a modern (v2) device — without it QEMU's
@@ -173,43 +175,38 @@ impl VirtIONetDevice {
             // this driver submits 12-byte headers, corrupting every frame by
             // 2 bytes. Accept exactly VERSION_1 (+MAC); MRG_RXBUF/CTRL_VQ/
             // EVENT_IDX/GSO are deliberately NOT accepted.
-            core::ptr::write_volatile((self.base_addr + DEVICE_FEATURES_SEL) as *mut u32, 1);
-            let feats_hi = core::ptr::read_volatile((self.base_addr + DEVICE_FEATURES) as *const u32);
+            mmio.write_u32(DEVICE_FEATURES_SEL as usize, 1);
+            let feats_hi = mmio.read_u32(DEVICE_FEATURES as usize);
             if feats_hi & F_VERSION_1 == 0 {
                 return Err("Device does not offer VIRTIO_F_VERSION_1");
             }
-            core::ptr::write_volatile((self.base_addr + DEVICE_FEATURES_SEL) as *mut u32, 0);
-            let feats_lo = core::ptr::read_volatile((self.base_addr + DEVICE_FEATURES) as *const u32);
+            mmio.write_u32(DEVICE_FEATURES_SEL as usize, 0);
+            let feats_lo = mmio.read_u32(DEVICE_FEATURES as usize);
             // Word 0: accept only VIRTIO_NET_F_MAC (informative — we read the
             // MAC from config space either way), and only if offered.
             let accept_lo = feats_lo & F_NET_MAC;
             // Word 1: accept VIRTIO_F_VERSION_1.
             let accept_hi = feats_hi & F_VERSION_1;
-            core::ptr::write_volatile((self.base_addr + DRIVER_FEATURES_SEL) as *mut u32, 0);
-            core::ptr::write_volatile((self.base_addr + DRIVER_FEATURES) as *mut u32, accept_lo);
-            core::ptr::write_volatile((self.base_addr + DRIVER_FEATURES_SEL) as *mut u32, 1);
-            core::ptr::write_volatile((self.base_addr + DRIVER_FEATURES) as *mut u32, accept_hi);
+            mmio.write_u32(DRIVER_FEATURES_SEL as usize, 0);
+            mmio.write_u32(DRIVER_FEATURES as usize, accept_lo);
+            mmio.write_u32(DRIVER_FEATURES_SEL as usize, 1);
+            mmio.write_u32(DRIVER_FEATURES as usize, accept_hi);
 
-            core::ptr::write_volatile(
-                (self.base_addr + STATUS) as *mut u32,
-                S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK,
-            );
-            let status = core::ptr::read_volatile((self.base_addr + STATUS) as *const u32);
+            mmio.write_u32(STATUS as usize, S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK);
+            let status = mmio.read_u32(STATUS as usize);
             if status & S_FEATURES_OK == 0 {
                 return Err("Device rejected negotiated features (features_ok cleared)");
             }
 
             // Read MAC address (from config space, offset 0x100).
-            let config_ptr = (self.base_addr + CONFIG) as *const u8;
-            for i in 0..6 {
-                self.mac[i] = core::ptr::read_volatile(config_ptr.add(i));
+            for i in 0..6usize {
+                self.mac[i] = mmio.read_u8(CONFIG as usize + i);
             }
 
             // Read MTU — virtio-net config: mac[6], status u16 @6,
             // max_virtqueue_pairs u16 @8, mtu u16 @10 → MMIO 0x10a.
             // (0x106 was the old wrong offset: that is the STATUS field.)
-            let mtu_ptr = (self.base_addr + CONFIG + 10) as *const u16;
-            self.mtu = u16::from_le(core::ptr::read_volatile(mtu_ptr));
+            self.mtu = u16::from_le(mmio.read_u16(CONFIG as usize + 10));
             if self.mtu == 0 || self.mtu > 1500 {
                 self.mtu = 1500; // No VIRTIO_NET_F_MTU negotiated
             }
@@ -221,10 +218,10 @@ impl VirtIONetDevice {
             // device neither direction could ever work.
             //
             // ========== Setup RX queue (Queue 0) ==========
-            core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 0);
+            mmio.write_u32(QUEUE_SEL as usize, 0);
 
             // Read max queue size
-            let max_queue_size = core::ptr::read_volatile((self.base_addr + QUEUE_NUM_MAX) as *const u32);
+            let max_queue_size = mmio.read_u32(QUEUE_NUM_MAX as usize);
             if max_queue_size == 0 {
                 return Err("VirtIO device has zero queue size");
             }
@@ -260,24 +257,24 @@ impl VirtIONetDevice {
             ).0;
 
             // Set queue count
-            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
+            mmio.write_u32(QUEUE_NUM as usize, self.queue_size as u32);
 
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (rx_desc_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (rx_desc_phys >> 32) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, (rx_avail_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, (rx_avail_phys >> 32) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, (rx_used_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, (rx_used_phys >> 32) as u32);
+            mmio.write_u32(QUEUE_DESC_LO as usize, (rx_desc_phys & 0xFFFFFFFF) as u32);
+            mmio.write_u32(QUEUE_DESC_HI as usize, (rx_desc_phys >> 32) as u32);
+            mmio.write_u32(QUEUE_DRIVER_LO as usize, (rx_avail_phys & 0xFFFFFFFF) as u32);
+            mmio.write_u32(QUEUE_DRIVER_HI as usize, (rx_avail_phys >> 32) as u32);
+            mmio.write_u32(QUEUE_DEVICE_LO as usize, (rx_used_phys & 0xFFFFFFFF) as u32);
+            mmio.write_u32(QUEUE_DEVICE_HI as usize, (rx_used_phys >> 32) as u32);
 
             // Set queue ready
-            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
+            mmio.write_u32(QUEUE_READY as usize, 1);
 
             *self.rx_queue.lock() = Some(rx_queue);
 
             // ========== Setup TX queue (Queue 1) ==========
-            core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 1);
+            mmio.write_u32(QUEUE_SEL as usize, 1);
 
-            let max_queue_size_tx = core::ptr::read_volatile((self.base_addr + QUEUE_NUM_MAX) as *const u32);
+            let max_queue_size_tx = mmio.read_u32(QUEUE_NUM_MAX as usize);
             if max_queue_size_tx < self.queue_size as u32 {
                 return Err("VirtIO TX queue smaller than RX queue");
             }
@@ -305,26 +302,23 @@ impl VirtIONetDevice {
             ).0;
 
             // Set queue count
-            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
+            mmio.write_u32(QUEUE_NUM as usize, self.queue_size as u32);
 
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (tx_desc_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (tx_desc_phys >> 32) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, (tx_avail_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, (tx_avail_phys >> 32) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, (tx_used_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, (tx_used_phys >> 32) as u32);
+            mmio.write_u32(QUEUE_DESC_LO as usize, (tx_desc_phys & 0xFFFFFFFF) as u32);
+            mmio.write_u32(QUEUE_DESC_HI as usize, (tx_desc_phys >> 32) as u32);
+            mmio.write_u32(QUEUE_DRIVER_LO as usize, (tx_avail_phys & 0xFFFFFFFF) as u32);
+            mmio.write_u32(QUEUE_DRIVER_HI as usize, (tx_avail_phys >> 32) as u32);
+            mmio.write_u32(QUEUE_DEVICE_LO as usize, (tx_used_phys & 0xFFFFFFFF) as u32);
+            mmio.write_u32(QUEUE_DEVICE_HI as usize, (tx_used_phys >> 32) as u32);
 
             // Set queue ready
-            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
+            mmio.write_u32(QUEUE_READY as usize, 1);
 
             *self.tx_queue.lock() = Some(tx_queue);
 
             // Set driver status: DRIVER_OK (acknowledge | driver |
             // features_ok | driver_ok)
-            core::ptr::write_volatile(
-                (self.base_addr + STATUS) as *mut u32,
-                S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK | S_DRIVER_OK,
-            );
+            mmio.write_u32(STATUS as usize, S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK | S_DRIVER_OK);
 
             // Mark as initialized
             *self.initialized.lock() = true;
@@ -366,28 +360,21 @@ impl VirtIONetDevice {
             None => return -5, // EIO
         };
 
-        // Allocate VirtIO network packet header
-        let hdr_layout = alloc::alloc::Layout::new::<VirtIONetHdr>();
-        let hdr_ptr: *mut VirtIONetHdr;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            hdr_ptr = alloc::alloc::alloc(hdr_layout) as *mut VirtIONetHdr;
-        }
-        if hdr_ptr.is_null() {
-            return -12; // ENOMEM
-        }
-        // SAFETY: hdr_ptr is non-null and properly aligned for VirtIONetHdr.
-        unsafe {
-            *hdr_ptr = VirtIONetHdr {
-                flags: 0,
-                gso_type: 0,
-                hdr_len: 0,
-                gso_size: 0,
-                csum_start: 0,
-                csum_offset: 0,
-                num_buffers: 0, // unused on TX (spec 5.1.6.1)
-            };
-        }
+        // INV-KPTR-1: one audited allocation; error paths below drop
+        // it automatically.
+        let hdr = match crate::safety::ptr::KPtr::new(VirtIONetHdr {
+            flags: 0,
+            gso_type: 0,
+            hdr_len: 0,
+            gso_size: 0,
+            csum_start: 0,
+            csum_offset: 0,
+            num_buffers: 0, // unused on TX (spec 5.1.6.1)
+        }) {
+            Some(h) => h,
+            None => return -12, // ENOMEM
+        };
+        let hdr_ptr = hdr.as_ptr();
 
         // VirtIO descriptor flags
         const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -398,20 +385,11 @@ impl VirtIONetDevice {
         // TX chains correctly instead of the blk-shaped 3-desc default)
         let header_desc_idx = match queue.alloc_desc_chain(2) {
             Some(idx) => idx,
-            None => {
-                // R24 (R23-6 completion): the FIRST allocation failure leaked
-                // hdr_ptr too — only the second branch was fixed in R23-6.
-                unsafe { alloc::alloc::dealloc(hdr_ptr as *mut u8, hdr_layout); }
-                return -5;  // EIO
-            }
+            None => return -5,  // EIO (hdr drops via KPtr)
         };
         let data_desc_idx = match queue.alloc_desc_chain(2) {
             Some(idx) => idx,
-            None => {
-                // R23-6: hdr leaks on desc exhaustion (R22-6 pattern).
-                unsafe { alloc::alloc::dealloc(hdr_ptr as *mut u8, hdr_layout); }
-                return -5;  // EIO
-            }
+            None => return -5,  // EIO
         };
 
         // Set packet header descriptor (use physical address for DMA)
@@ -477,9 +455,7 @@ impl VirtIONetDevice {
             for _ in 0..TX_LATE_DRAIN_BUDGET {
                 // SAFETY: used_ring points to this queue's used ring; offset 2
                 // is the idx field (u16) within the ring structure.
-                let idx = unsafe {
-                    core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-                };
+                let idx = queue::used_ring_idx(used_ring);
                 if idx != prev_used {
                     late = true;
                     break;
@@ -490,20 +466,19 @@ impl VirtIONetDevice {
                 let mut stats = self.stats.lock_irqsave();
                 stats.tx_errors += 1;
                 drop(stats);
-                // hdr and skb deliberately NOT freed — device still owns them.
-                // SkBuff's Drop releases its buffer, so forget() it to make
-                // the leak explicit (R21-N2: integrity over a leak).
+                // hdr and skb deliberately NOT freed — device still owns
+                // them. SkBuff's Drop releases its buffer, so forget() it
+                // to make the leak explicit (R21-N2: integrity over a
+                // leak); same for the KPtr'd header.
                 core::mem::forget(skb);
+                core::mem::forget(hdr);
                 return -5;  // EIO
             }
             // Completed late — fall through to the normal cleanup.
         }
 
-        // Free packet header
-        // SAFETY: hdr_ptr was allocated with hdr_layout above and is still valid.
-        unsafe {
-            alloc::alloc::dealloc(hdr_ptr as *mut u8, hdr_layout);
-        }
+        // Free packet header (KPtr drop — INV-KPTR-3)
+        drop(hdr);
 
         // Update statistics
         let mut stats = self.stats.lock_irqsave();
@@ -730,27 +705,21 @@ impl VirtIONetDevice {
 
 /// VirtIO network device transmit function (for NetDevice calls)
 fn virtio_net_xmit(skb: SkBuff) -> i32 {
-    // Get global VirtIO network device
-    // SAFETY: VIRTIO_NET is initialized before any network I/O can occur.
-    unsafe {
-        if let Some(device) = VIRTIO_NET.as_ref() {
-            device.xmit(skb)
-        } else {
-            skb.free();
-            -5 // EIO
-        }
+    // (Registry access through the audited get_device accessor.)
+    if let Some(device) = get_device() {
+        device.xmit(skb)
+    } else {
+        skb.free();
+        -5 // EIO
     }
 }
 
 /// VirtIO network device statistics function
 fn virtio_net_get_stats() -> DeviceStats {
-    // SAFETY: VIRTIO_NET is initialized before any network I/O can occur.
-    unsafe {
-        if let Some(device) = VIRTIO_NET.as_ref() {
-            device.get_stats()
-        } else {
-            DeviceStats::default()
-        }
+    if let Some(device) = get_device() {
+        device.get_stats()
+    } else {
+        DeviceStats::default()
     }
 }
 
@@ -855,24 +824,20 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
         None => return crate::interrupt::IrqReturn::None,
     };
 
-    // SAFETY: base_addr is from a valid, initialized VirtIO device;
-    // MMIO register reads/writes at correct offsets per VirtIO spec.
-    unsafe {
-        // Read interrupt status (INTERRUPT_STATUS at 0x60)
-        let irq_status_ptr = (base_addr + 0x60) as *const u32;
-        let irq_status = core::ptr::read_volatile(irq_status_ptr);
+    // INV-MMIO-1..3: the device's register window (same mapping the
+    // init path proved), register offsets per VirtIO spec.
+    let mmio = crate::safety::mmio::MmioRegion::new(base_addr as usize, 0x120);
+    // Read interrupt status (INTERRUPT_STATUS at 0x60)
+    let irq_status = mmio.read_u32(0x60);
+    if irq_status != 0 {
+        // Clear interrupt (INTERRUPT_ACK at 0x64)
+        mmio.write_u32(0x64, irq_status);
 
-        if irq_status != 0 {
-            // Clear interrupt (INTERRUPT_ACK at 0x64)
-            let irq_ack_ptr = (base_addr + 0x64) as *mut u32;
-            core::ptr::write_volatile(irq_ack_ptr, irq_status);
-
-            // Defer packet processing to NetRx softirq bottom half
-            crate::interrupt::softirq::raise_softirq_irqoff(
-                crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
-            );
-            return crate::interrupt::IrqReturn::Handled;
-        }
+        // Defer packet processing to NetRx softirq bottom half
+        crate::interrupt::softirq::raise_softirq_irqoff(
+            crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
+        );
+        return crate::interrupt::IrqReturn::Handled;
     }
     crate::interrupt::IrqReturn::None
 }
@@ -927,18 +892,14 @@ static PCI_ISR_ADDR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 /// Select `queue_index` in the PCI common config and return its maximum
 /// size (0 = queue not available).
 fn pci_select_queue(pci_dev: &VirtIOPCI, queue_index: u16) -> u16 {
-    let common = pci_dev.common_cfg_bar;
-    // SAFETY: common_cfg_bar points to the MMIO-mapped virtio PCI common
-    // config; queue_select is a standard per-queue register.
-    unsafe {
-        core::ptr::write_volatile(
-            (common + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16,
-            queue_index,
-        );
-        core::ptr::read_volatile(
-            (common + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16,
-        )
-    }
+    // INV-MMIO-1..3: the common-config window (BAR mapping proven at
+    // probe).
+    let cfg = crate::safety::mmio::MmioRegion::new(pci_dev.common_cfg_bar as usize, 0x100);
+    cfg.write_u16(
+        crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SELECT as usize,
+        queue_index,
+    );
+    cfg.read_u16(crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as usize)
 }
 
 /// Program a smaller queue size than the device maximum.
@@ -947,14 +908,12 @@ fn pci_select_queue(pci_dev: &VirtIOPCI, queue_index: u16) -> u16 {
 /// the queue; the size register must be programmed while the queue is
 /// selected and still disabled.
 fn pci_set_queue_size(pci_dev: &VirtIOPCI, queue_size: u16) {
-    // SAFETY: queue still selected by pci_select_queue and not yet enabled.
-    unsafe {
-        core::ptr::write_volatile(
-            (pci_dev.common_cfg_bar
-                + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as u64) as *mut u16,
-            queue_size,
-        );
-    }
+    // Queue still selected by pci_select_queue and not yet enabled.
+    let cfg = crate::safety::mmio::MmioRegion::new(pci_dev.common_cfg_bar as usize, 0x100);
+    cfg.write_u16(
+        crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as usize,
+        queue_size,
+    );
 }
 
 /// Initialize a PCI virtio-net device.
@@ -1003,14 +962,14 @@ pub fn init_pci(pci_dev: &mut VirtIOPCI) -> Result<(), &'static str> {
     }
     let mut mac = [0u8; 6];
     let mut mtu;
-    // SAFETY: cfg_base is the MMIO-mapped device config region from the
-    // parsed DEVICE_CFG capability; byte reads at 0..6 and 10..12 are the
-    // virtio-net config fields.
-    unsafe {
-        for (i, m) in mac.iter_mut().enumerate() {
-            *m = core::ptr::read_volatile((cfg_base + i as u64) as *const u8);
-        }
-        let dev_mtu = u16::from_le(core::ptr::read_volatile((cfg_base + 10) as *const u16));
+    // INV-MMIO-1..3: the device-config capability window; bytes 0..6
+    // and 10..12 are the virtio-net config fields.
+    let cfg = crate::safety::mmio::MmioRegion::new(cfg_base as usize, 12);
+    for i in 0..6usize {
+        mac[i] = cfg.read_u8(i);
+    }
+    {
+        let dev_mtu = u16::from_le(cfg.read_u16(10));
         // 0 means VIRTIO_NET_F_MTU was not offered — fall back to 1500.
         mtu = dev_mtu;
         if mtu == 0 || mtu > 1500 {
@@ -1132,9 +1091,10 @@ pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::Irq
     if isr_addr == 0 {
         return crate::interrupt::IrqReturn::None;
     }
-    // SAFETY: isr_addr was stored from a VirtIOPCI whose ISR capability is
-    // MMIO-mapped; the read is the device-side interrupt acknowledge.
-    let isr = unsafe { core::ptr::read_volatile(isr_addr as *const u32) };
+    // INV-MMIO-1..3: isr_addr was stored from a VirtIOPCI whose ISR
+    // capability is MMIO-mapped; the read is the device-side interrupt
+    // acknowledge.
+    let isr = crate::safety::mmio::MmioRegion::new(isr_addr as usize, 4).read_u32(0);
     if isr == 0 {
         // Not ours — spurious or another device on the shared line.
         return crate::interrupt::IrqReturn::None;

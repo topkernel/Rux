@@ -39,7 +39,7 @@
 // — never a &mut. No `&'static mut` escapes this module (the audit
 // failure that killed the wave-6 module).
 
-use super::page_desc::{pfn_to_page_mut, PageFlag};
+use super::page_desc::{pfn_to_page_mut, PageFlag, page_desc};
 use super::zone::Zone;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -177,12 +177,9 @@ pub fn alloc_order0(zone: &Zone) -> Option<usize> {
         // the buddy now (they were never cached in a row).
         zone.free_pages_sub(n_overflow);
         for i in 0..n_overflow {
-            let pg = pfn_to_page_mut(overflow[i]);
-            if !pg.is_null() {
-                unsafe {
-                    (*pg).set_refcount(1);
-                    (*pg).clear_flag(PageFlag::OnPcp);
-                }
+            if let Some(pg) = page_desc(overflow[i]) {
+                            pg.set_refcount(1);
+                pg.clear_flag(PageFlag::OnPcp);
             }
             zone.free_pages(overflow[i], 0);
         }
@@ -348,11 +345,8 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
         for p in pfns.iter() {
             // SAFETY: frame was cached (OnPcp) — transition back through
             // the zone's own free path, which relinks and merges it.
-            let pg = pfn_to_page_mut(*p);
-            if !pg.is_null() {
-                unsafe {
-                    (*pg).clear_flag(PageFlag::OnPcp);
-                }
+            if let Some(pg) = page_desc(*p) {
+                            pg.clear_flag(PageFlag::OnPcp);
             }
             zone.free_pages(*p, 0);
         }
@@ -363,11 +357,8 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
         // the drain loop's frames).
         PCP_DRAINS.fetch_add(1, Ordering::Relaxed);
         zone.free_pages_sub(1);
-        let pg = pfn_to_page_mut(pfn);
-        if !pg.is_null() {
-            unsafe {
-                (*pg).clear_flag(PageFlag::OnPcp);
-            }
+        if let Some(pg) = page_desc(pfn) {
+                    pg.clear_flag(PageFlag::OnPcp);
         }
         zone.free_pages(pfn, 0);
     }
@@ -377,36 +368,30 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
 /// Descriptor transition: cached (OnPcp, rc==0). Caller guarantees the
 /// frame is in the "in use" or "just allocated" state.
 fn to_cached(pfn: usize) {
-    let page = pfn_to_page_mut(pfn);
-    if !page.is_null() {
+    if let Some(page) = page_desc(pfn) {
         // SAFETY: refill batch frames come from alloc_pages_locked in
         // the in-use state (rc==1, Referenced); this flips them to the
         // pcp-cached free state.
-        unsafe {
-            (*page).set_refcount(0);
-            (*page).clear_flag(PageFlag::Referenced);
-            (*page).set_flag(PageFlag::OnPcp);
-        }
+            page.set_refcount(0);
+        page.clear_flag(PageFlag::Referenced);
+        page.set_flag(PageFlag::OnPcp);
     }
 }
 
 /// Descriptor transition: in use — bit-identical to the state
 /// alloc_pages_locked produces for an order-0 frame.
 fn to_in_use(pfn: usize) {
-    let page = pfn_to_page_mut(pfn);
-    if !page.is_null() {
+    if let Some(page) = page_desc(pfn) {
         // SAFETY: pop from this CPU's row under irq-off; the frame was
         // cached (OnPcp, rc==0).
-        unsafe {
-            (*page).clear_all_flags();
-            (*page).reset_mapcount();
-            (*page).set_refcount(1);
-            // SP-7 (stress-port r7): no Referenced flag on handout (see
-            // the zone.rs alloc-path note — the reference's prep_new_page
-            // produces flag-clear pages; the plant made every PCP-served
-            // order-0 fault page look hot to reclaim).
-            (*page).set_order(0);
-        }
+            page.clear_all_flags();
+        page.reset_mapcount();
+        page.set_refcount(1);
+        // SP-7 (stress-port r7): no Referenced flag on handout (see
+        // the zone.rs alloc-path note — the reference's prep_new_page
+        // produces flag-clear pages; the plant made every PCP-served
+        // order-0 fault page look hot to reclaim).
+        page.set_order(0);
     }
 }
 

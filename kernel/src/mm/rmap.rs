@@ -365,10 +365,10 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
     });
 
     for mm_arc in mm_pins.take() {
-        // SAFETY: the Arc pins this mm (page tables and VMA tree stay
-        // allocated); the PTE walk/mutation below follows the same
-        // discipline the old closure body used.
-        unsafe {
+        // The Arc pins this mm (page tables and VMA tree stay
+        // allocated); everything below is safe API except the single
+        // leaf_pte_replace edge (audited at its call).
+        {
         let mm = mm_arc.as_ref();
 
             for target_vaddr in target_vaddrs.iter() {
@@ -412,9 +412,13 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                 // vma_mgr still held — protects page table walk below
 
                 let root_ppn = mm.pgd();
-                let walk_result = crate::arch::mm::mm_ops::PageTableWalker::walk(
-                    root_ppn, target_vaddr as u64,
-                );
+                // SAFETY: root_ppn is the Arc-pinned mm's live root;
+                // the walker only reads page-table pages.
+                let walk_result = unsafe {
+                    crate::arch::mm::mm_ops::PageTableWalker::walk(
+                        root_ppn, target_vaddr as u64,
+                    )
+                };
 
                 if let Some((ppn, _pte_bits)) = walk_result {
                     if ppn as usize == target_pfn {
@@ -426,6 +430,10 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                         // unmap and migration never unmapped anything on
                         // x86_64/aarch64. TLB flush stays with the caller
                         // (R10-6: hart-local; the batch shootdown below).
+                        // SAFETY: FD-1 — the arch's audited leaf
+                        // replace: mm is Arc-pinned, root_ppn is this
+                        // mm's live root, the ppn was just re-validated
+                        // by the walk above.
                         if unsafe {
                             crate::arch::mm::mm_ops::leaf_pte_replace(
                                 mm,
