@@ -3768,9 +3768,11 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // this CPU either way. uart_putc_raw: the old marker was
                 // uart_putc_raw — SILENT on release builds, so these
                 // parks were invisible (every "silent" permanent wedge).
-                for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
+                for &b in b"trap: KERNPANIC re-entered during dump; halting cpu=" {
                     crate::console::uart_putc_raw(b);
                 }
+                crate::dfx::taskdump::taskdump_dec(crate::arch::cpu_id() as u64);
+                crate::console::uart_putc_raw(b'\n');
                 crate::sched::sched::terminal_release_grq_if_held();
                 // R11 (the parked-CPU interrupt strand, fr7 conviction):
                 // the halt loop must run with INTERRUPTS DISABLED. The old

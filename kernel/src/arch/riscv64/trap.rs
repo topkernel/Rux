@@ -1679,9 +1679,11 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             // otherwise).
             if KP_DUMP_ENTERED.swap(true, core::sync::atomic::Ordering::Relaxed) {
                 let mut put = |b: u8| crate::console::putchar_no_lock(b);
-                for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
+                for &b in b"trap: KERNPANIC re-entered during dump; halting cpu=" {
                     put(b);
                 }
+                crate::dfx::taskdump::taskdump_dec(crate::arch::cpu_id() as u64);
+                crate::console::putchar_no_lock(b'\n');
                 // R11 (the parked-CPU interrupt strand, x86_64 twin's fr7
                 // conviction): park with interrupts DISABLED — an
                 // interrupt-enabled park wakes on the next timer tick and
