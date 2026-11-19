@@ -2581,8 +2581,8 @@ pub fn preallocate_unwritten_extents(
         };
         // Make sure the root carries a valid (empty) extent header.
         {
-            // SAFETY: inode.block is 60 bytes; the 12-byte header is in-bounds.
-            let header = unsafe { &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader) };
+            // INV-EXT4-IBLOCK-HDR: typed header view of the 60-byte root.
+            let header = crate::fs::ext4::extent::iblock_header_mut(&mut inode.block);
             if header.eh_magic != EXT4_EXT_MAGIC {
                 header.eh_magic = EXT4_EXT_MAGIC;
                 header.eh_entries = 0;
@@ -2656,9 +2656,8 @@ fn allocate_blocks_with_extents(
 
         // Valid (possibly empty) extent header on the root.
         {
-            // SAFETY: inode.block is 60 bytes; header at its start is
-            // in-bounds.
-            let header = unsafe { &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader) };
+            // INV-EXT4-IBLOCK-HDR: typed header view of the 60-byte root.
+            let header = crate::fs::ext4::extent::iblock_header_mut(&mut inode.block);
             if header.eh_magic != EXT4_EXT_MAGIC {
                 header.eh_magic = EXT4_EXT_MAGIC;
                 header.eh_entries = 0;
@@ -2734,9 +2733,8 @@ fn allocate_blocks_unwritten_dio(
         // Valid (possibly empty) extent header on the root (same as the
         // written twin).
         {
-            // SAFETY: inode.block is 60 bytes; header at its start is
-            // in-bounds.
-            let header = unsafe { &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader) };
+            // INV-EXT4-IBLOCK-HDR: typed header view of the 60-byte root.
+            let header = crate::fs::ext4::extent::iblock_header_mut(&mut inode.block);
             if header.eh_magic != EXT4_EXT_MAGIC {
                 header.eh_magic = EXT4_EXT_MAGIC;
                 header.eh_entries = 0;

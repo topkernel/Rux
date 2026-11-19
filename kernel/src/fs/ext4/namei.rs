@@ -278,7 +278,7 @@ pub fn ext4_new_inode(
         // SAFETY: i_block is a [u32; 15] = 60 bytes; a 12-byte header at
         // its start is in-bounds.
         unsafe {
-            *(inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader) = hdr;
+            *crate::fs::ext4::extent::iblock_header_mut(&mut inode.i_block) = hdr;
         }
     }
     // Fresh inodes are born "now" (wall-clock epoch seconds —
@@ -1332,23 +1332,25 @@ fn ext4_mkdir_no_journal(
     // overwrote the extent HEADER with the block number, corrupting the
     // tree before the directory was ever read.
     if (new_inode.i_flags & 0x80000) != 0 {
-    use super::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
-    // SAFETY: i_block is 60 bytes — a 12-byte header plus one
-    // 12-byte extent entry fits with room to spare.
-    unsafe {
-        let hdr = new_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader;
-        (*hdr).eh_magic = EXT4_EXT_MAGIC;
-        (*hdr).eh_entries = 1;
-        (*hdr).eh_max = 4;
-        (*hdr).eh_depth = 0;
-        (*hdr).eh_generation = 0;
-        let e = (new_inode.i_block.as_mut_ptr() as *mut u8)
-            .add(core::mem::size_of::<Ext4ExtentHeader>())
-            as *mut Ext4Extent;
-        (*e).ee_block = 0;
-        (*e).ee_len = 1; // written
-        (*e).ee_start_hi = (block_nr >> 32) as u16;
-        (*e).ee_start_lo = block_nr as u32;
+    use super::extent::EXT4_EXT_MAGIC;
+    // INV-EXT4-IBLOCK-HDR: i_block is 60 bytes — a 12-byte header plus
+    // one 12-byte extent entry fits with room to spare (the accessor
+    // bounds-checks both views).
+    {
+        let hdr = super::extent::iblock_header_mut(&mut new_inode.i_block);
+        hdr.eh_magic = EXT4_EXT_MAGIC;
+        hdr.eh_entries = 1;
+        hdr.eh_max = 4;
+        hdr.eh_depth = 0;
+        hdr.eh_generation = 0;
+    }
+    {
+        let e = super::extent::iblock_extent_mut(&mut new_inode.i_block, 0)
+            .expect("header + first extent entry fit in i_block");
+        e.ee_block = 0;
+        e.ee_len = 1; // written
+        e.ee_start_hi = (block_nr >> 32) as u16;
+        e.ee_start_lo = block_nr as u32;
     }
     } else {
     new_inode.i_block[0] = block_nr as u32;
