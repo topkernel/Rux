@@ -304,6 +304,9 @@ pub unsafe fn fpu_init() {
         // (its own RMW read the pre-write value; a pre-write call here
         // would be clobbered by the store).
         crate::arch::x86_64::cpu::enable_fsgsbase();
+        // SMEP (CPUID-gated inside, R12): same per-CPU arming discipline —
+        // the fpu_init CR4 write above is an RMW so the bit sticks.
+        crate::arch::x86_64::cpu::enable_smep();
 
         let mut cr0: u64;
         core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
