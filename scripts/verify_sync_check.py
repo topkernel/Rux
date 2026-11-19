@@ -147,6 +147,11 @@ def normalize(text):
     # treat preemption as an explicit environment hook instead).
     text = re.sub(r'[ \t]*crate::interrupt::preempt::preempt_count_(?:add|sub)\([^;]*\);[ \t]*\n?', '', text)
 
+    # Remove debug_assert!(...) blocks (kernel-only ownership-detector
+    # diagnostics, the CONFIG_DEBUG_SPINLOCK shape — mirrors model the
+    # lock protocol, not the debug checks).
+    text = re.sub(r'[ \t]*debug_assert!\((?:[^;]|;[^\s])*\);[ \t]*\n?', '\n', text)
+
     # Remove #[inline], #[inline(never)], #[inline(always)]
     text = re.sub(r'#\[inline[^\]]*\]\s*\n?', '', text)
 
@@ -261,7 +266,10 @@ MAPPINGS = [
             {
                 # lock()'s registration critical section (R7-B6b / R84/R85)
                 "fn": "register_and_recheck",
-                "in_fn": "lock",
+                # lock() is a thin wrapper over lock_inner (the killable
+                # acquisition rework); the registration region lives in
+                # lock_inner's body.
+                "in_fn": "lock_inner",
                 "start": "let now = crate::drivers::timer::get_jiffies();",
                 "end": "drop(st);",
                 "post": [(r'\s*let now = now;\s*\n?', '\n'), (r';\s*$', '; take')],

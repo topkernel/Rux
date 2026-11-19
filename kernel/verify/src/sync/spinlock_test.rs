@@ -31,7 +31,10 @@ impl RawSpinlock {
 
     #[inline]
     pub fn try_lock(&self) -> bool {
-        let ok = self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok();
+        let ok = self
+            .locked
+            .compare_exchange(0, Self::held_word(), Ordering::Acquire, Ordering::Acquire)
+            .is_ok();
         if ok {
             self.record_owner(caller_return_address());
         }
@@ -42,6 +45,14 @@ impl RawSpinlock {
     pub fn unlock(&self) {
         self.clear_owner();
         self.locked.store(0, Ordering::Release);
+    }
+
+    /// The held word for THIS cpu — the mirror models a single cpu, so
+    /// the constant 1 (the kernel's is cpu_id + 1; the sync-checker
+    /// transform canonicalizes that body to this text).
+    #[inline]
+    fn held_word() -> u32 {
+        1u32
     }
 
     /// The kernel records the lock owner for its deadlock detector; the
