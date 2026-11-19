@@ -348,6 +348,325 @@ fn align8(v: usize) -> usize {
     (v + 7) & !7
 }
 
+/// INV-BINDER-BLOCKVIEW (unsafe-slim r3c): the ONE audited raw window over
+/// an in-flight transaction block, replacing the ~20 scattered volatile
+/// derefs the payload copy + flat-object walk used to carry. A TxnBlock is
+/// built after `BinderAlloc::new_buf` returns the block offset and lives
+/// for the duration of THIS transaction's fixup phase.
+///
+/// Layout contract (same arithmetic `BinderAlloc::block_need` reserved):
+/// the allocation is `alloc_len` bytes at `base` (page-aligned buddy
+/// block; `base` never escapes this type except through the audited
+/// `extra_copy_in`/`block_window` bodies that feed uaccess), and this
+/// txn's block is
+///   [data (data_size)][offsets (align8(offsets_size))][extra (align8(extra_size))]
+/// starting at `block_off` (8-aligned: new_buf carves sums of align8'd
+/// needs from 0). Every accessor checks BOTH the sub-layout bound AND the
+/// absolute allocation bound — a slip in either contract fails the
+/// transaction instead of writing out of the buffer (the sender controls
+/// the offsets array, so the bounds are hostile-input territory; see the
+/// wrap-proof checks the pre-conversion audit added).
+///
+/// Reads/writes stay volatile exactly as before the conversion (the
+/// buffer is concurrently observable through the target's user mapping).
+/// Misaligned object offsets were UB-shaped volatile reads before; now
+/// they are a clean None -> BR_FAILED_REPLY.
+struct TxnBlock {
+    /// Kernel-side base of the whole binder buffer allocation
+    /// (BinderAlloc::kvirt). Never handed out except by the audited
+    /// bodies below.
+    base: *mut u8,
+    /// Size of the whole allocation (npages * PAGE_SIZE).
+    alloc_len: usize,
+    /// This txn's block start within the allocation (8-aligned).
+    block_off: usize,
+    /// Parcel payload size (the [data] sub-area, unaligned tail is fine —
+    /// only align8() sizes are reserved).
+    data_size: usize,
+    /// Offsets-array size in bytes (8-aligned by the caller marshalling).
+    offsets_size: usize,
+    /// Extra/sg area payload size (sg buffers + optional secctx string).
+    extra_size: usize,
+    /// Target-user base of the whole allocation (BinderAlloc::user_base);
+    /// the user-side addresses the sender's PTR objects carry map back
+    /// against block_user_base() = user_base + block_off.
+    user_base: u64,
+}
+
+impl TxnBlock {
+    fn new(
+        base: *mut u8,
+        alloc_len: usize,
+        block_off: usize,
+        data_size: usize,
+        offsets_size: usize,
+        extra_size: usize,
+        user_base: u64,
+    ) -> Self {
+        Self {
+            base,
+            alloc_len,
+            block_off,
+            data_size,
+            offsets_size,
+            extra_size,
+            user_base,
+        }
+    }
+
+    /// End of this block's reserved layout within the allocation.
+    fn layout_end(&self) -> usize {
+        self.block_off
+            + align8(self.data_size)
+            + align8(self.offsets_size)
+            + align8(self.extra_size)
+    }
+
+    /// True when [abs, abs+len) lies fully inside the allocation AND
+    /// inside this block's reserved layout. The one place both bounds
+    /// are computed.
+    fn span_ok(&self, abs: usize, len: usize) -> bool {
+        len.checked_add(abs).map_or(false, |end| {
+            end <= self.alloc_len && abs >= self.block_off && end <= self.layout_end()
+        })
+    }
+
+    /// Alignment of the absolute address (base is page-aligned; the
+    /// check covers whatever block_off/at contribute).
+    fn aligned(&self, abs: usize, a: usize) -> bool {
+        (self.base as usize + abs) % a == 0
+    }
+
+    /// Mutable byte window into the block for a caller-supplied copy:
+    /// `at`/`len` are block-relative. The only accessor that produces a
+    /// slice; the caller folds it into `uaccess_safe::copy_in` (the
+    /// audited user-read primitive zero-fills the tail on fault).
+    fn block_window(&mut self, at: usize, len: usize) -> Option<&mut [u8]> {
+        let abs = self.block_off.checked_add(at)?;
+        if !self.span_ok(abs, len) {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — [abs, abs+len) is inside the
+        // exclusively-owned in-flight block (span_ok checked both the
+        // layout and the allocation bounds), and the slice aliases no
+        // other live reference: the TxnBlock is the sole window.
+        Some(unsafe { core::slice::from_raw_parts_mut(self.base.add(abs), len) })
+    }
+
+    /// Volatile-read one u32 at data-area offset `at`.
+    fn data_u32(&self, at: usize) -> Option<u32> {
+        let abs = self.block_off.checked_add(at)?;
+        if !self.span_ok(abs, 4) || !self.aligned(abs, 4) {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + 4-alignment checked.
+        Some(unsafe { core::ptr::read_volatile((self.base.add(abs)) as *const u32) })
+    }
+
+    /// Volatile-write one u32 at data-area offset `at`.
+    fn write_data_u32(&self, at: usize, v: u32) -> Option<()> {
+        let abs = self.block_off.checked_add(at)?;
+        if !self.span_ok(abs, 4) || !self.aligned(abs, 4) {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + 4-alignment checked.
+        unsafe { core::ptr::write_volatile((self.base.add(abs)) as *mut u32, v) };
+        Some(())
+    }
+
+    /// Volatile-read one `Copy` POD at data-area offset `at`
+    /// (BinderBufferObject / BinderFdArrayObject reads; sizes match
+    /// binder_object_size for their types).
+    fn data_obj<T: Copy>(&self, at: usize) -> Option<T> {
+        let abs = self.block_off.checked_add(at)?;
+        if !self.span_ok(abs, core::mem::size_of::<T>())
+            || !self.aligned(abs, core::mem::align_of::<T>())
+        {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok (bounds) + native
+        // alignment checked; T is Copy so a by-value volatile read has
+        // no drop glue half-value hazard.
+        Some(unsafe { core::ptr::read_volatile((self.base.add(abs)) as *const T) })
+    }
+
+    /// Volatile-write one `Copy` POD back at data-area offset `at`.
+    fn write_data_obj<T: Copy>(&self, at: usize, v: T) -> Option<()> {
+        let abs = self.block_off.checked_add(at)?;
+        if !self.span_ok(abs, core::mem::size_of::<T>())
+            || !self.aligned(abs, core::mem::align_of::<T>())
+        {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + native alignment
+        // checked; exclusive block ownership (see struct doc).
+        unsafe { core::ptr::write_volatile((self.base.add(abs)) as *mut T, v) };
+        Some(())
+    }
+
+    /// Materialize `&mut T` at data-area offset `at` for a caller that
+    /// rewrites fields (FlatBinderObject translation). Alignment +
+    /// bounds checked; the block is exclusively owned by this txn.
+    fn data_obj_mut<T>(&mut self, at: usize) -> Option<&mut T> {
+        let abs = self.block_off.checked_add(at)?;
+        if !self.span_ok(abs, core::mem::size_of::<T>())
+            || !self.aligned(abs, core::mem::align_of::<T>())
+        {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + native alignment
+        // checked; no other reference into the block exists (struct
+        // doc); T is a plain repr(C) struct (any bit pattern valid).
+        Some(unsafe { &mut *(self.base.add(abs) as *mut T) })
+    }
+
+    /// Volatile-read the i-th entry of the offsets array (sender-
+    /// controlled usize; the caller re-validates it against data_size).
+    fn offsets_entry(&self, i: usize) -> Option<usize> {
+        let abs = self.block_off + align8(self.data_size) + i.checked_mul(8)?;
+        if !self.span_ok(abs, 8) || !self.aligned(abs, 8) {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + 8-alignment checked.
+        Some(unsafe {
+            core::ptr::read_volatile((self.base.add(abs)) as *const u64) as usize
+        })
+    }
+
+    /// Write the secctx string (+ NUL) at extra-area offset `at`.
+    /// `secctx_space` reserved >= bytes.len() + 1.
+    fn extra_write_bytes(&self, at: usize, bytes: &[u8]) -> Option<()> {
+        let abs = self.block_off + align8(self.data_size) + align8(self.offsets_size) + at;
+        let total = bytes.len().checked_add(1)?;
+        if !self.span_ok(abs, total) {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok checked; dst is inside
+        // the exclusively-owned block, src is a shared slice.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(abs), bytes.len());
+            core::ptr::write_volatile(self.base.add(abs + bytes.len()), 0u8);
+        }
+        Some(())
+    }
+
+    /// Mutable byte window into the extra (sg) area (extra-relative
+    /// `at`/`len`); the sg-copy twin of block_window.
+    fn extra_window(&mut self, at: usize, len: usize) -> Option<&mut [u8]> {
+        let abs = self.block_off + align8(self.data_size) + align8(self.offsets_size) + at;
+        if !self.span_ok(abs, len) {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok checked; sole window.
+        Some(unsafe { core::slice::from_raw_parts_mut(self.base.add(abs), len) })
+    }
+
+    /// Copy `len` bytes from user `src_user` into the extra (sg) area at
+    /// offset `at`. Returns false on fault/bounds failure.
+    fn extra_copy_in(&mut self, at: usize, src_user: usize, len: usize) -> bool {
+        let Some(dst) = self.extra_window(at, len) else {
+            return false;
+        };
+        crate::arch::uaccess_safe::copy_in(dst, src_user) == 0
+    }
+
+    /// Target-user address of this block's start (user_base + block_off).
+    fn block_user_base(&self) -> Option<u64> {
+        self.user_base
+            .checked_add(self.block_off as u64)
+    }
+
+    /// Resolve the parent BINDER_TYPE_PTR object referenced by offsets-
+    /// array index `parent_idx` (binder_validate_ptr semantics: the
+    /// parent must appear EARLIER in the offsets array — already fixed
+    /// up — and be a PTR object). Safe port of the pre-conversion
+    /// `unsafe fn resolve_parent_ptr`: returns a bound window over the
+    /// parent's kernel-side sg copy instead of a raw pointer.
+    fn parent_window(&self, cur_idx: usize, parent_idx: u64) -> Option<ParentWindow<'_>> {
+        if parent_idx >= cur_idx as u64 {
+            return None;
+        }
+        let parent_off = self.offsets_entry(parent_idx as usize)?;
+        // Sender-controlled offsets entry: wrapping-proof bounds check
+        // (the old `parent_off + size > data_size` form let near-u64::MAX
+        // offsets wrap through — binder audit, same class as obj_off).
+        if !parent_off
+            .checked_add(core::mem::size_of::<BinderBufferObject>())
+            .map_or(false, |e| e <= self.data_size)
+        {
+            return None;
+        }
+        let p: BinderBufferObject = self.data_obj(parent_off)?;
+        if p.hdr_type != BINDER_TYPE_PTR {
+            return None;
+        }
+        // The parent's .buffer was already rewritten to the target-user
+        // address of its sg copy; map it back to the kernel address and
+        // bound it inside the extra area.
+        let block_user = self.block_user_base()?;
+        let extra_base = align8(self.data_size) + align8(self.offsets_size);
+        let rel = p.buffer.checked_sub(block_user)? as usize;
+        if rel < extra_base
+            || !rel
+                .checked_add(p.length as usize)
+                .map_or(false, |e| e <= extra_base + self.extra_size)
+        {
+            return None;
+        }
+        Some(ParentWindow {
+            block: self,
+            abs: self.block_off + rel,
+            len: p.length as usize,
+        })
+    }
+}
+
+/// Bound window over a resolved parent BINDER_TYPE_PTR sg copy (see
+/// TxnBlock::parent_window). Carries offsets, not pointers — every
+/// access re-checks against `len`.
+struct ParentWindow<'a> {
+    block: &'a TxnBlock,
+    /// Absolute offset of the parent buffer start within the allocation.
+    abs: usize,
+    len: usize,
+}
+
+impl ParentWindow<'_> {
+    /// Volatile-read one u32 at window offset `at`.
+    fn u32_at(&self, at: usize) -> Option<u32> {
+        let a = self.abs.checked_add(at)?;
+        if !self.block.span_ok(a, 4) || !self.block.aligned(a, 4) {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — the window was resolved against
+        // the extra-area bounds and this access re-checks both bounds.
+        Some(unsafe { core::ptr::read_volatile(self.block.base.add(a) as *const u32) })
+    }
+
+    /// Volatile-write one u32 at window offset `at`.
+    fn set_u32(&self, at: usize, v: u32) -> Option<()> {
+        let a = self.abs.checked_add(at)?;
+        if !self.block.span_ok(a, 4) || !self.block.aligned(a, 4) {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — same contract as u32_at.
+        unsafe { core::ptr::write_volatile(self.block.base.add(a) as *mut u32, v) };
+        Some(())
+    }
+
+    /// Volatile-write one u64 at window offset `at` (the PTR fixup write
+    /// of the child buffer's target-user address).
+    fn write_u64_at(&self, at: usize, v: u64) -> Option<()> {
+        let a = self.abs.checked_add(at)?;
+        if !self.block.span_ok(a, 8) || !self.block.aligned(a, 8) {
+            return None;
+        }
+        // SAFETY: INV-BINDER-BLOCKVIEW — same contract as u32_at.
+        unsafe { core::ptr::write_volatile(self.block.base.add(a) as *mut u64, v) };
+        Some(())
+    }
+}
+
 // ============================================================================
 // Core state — everything behind UnsafeCell is mutated ONLY under WORLD.
 // ============================================================================
@@ -10796,13 +11115,13 @@ fn binder_transaction(
                     .im(world)
                     .alloc
                     .as_ref()
-                    .map(|a| (a.kvirt, a.user_base))
+                    .map(|a| (a.kvirt, a.user_base, a.npages * PAGE_SIZE))
             } else {
                 None
             }
         }
     };
-    let (kvirt, user_base) = match pair {
+    let (kvirt, user_base, alloc_len) = match pair {
         Some(p) => p,
         None => {
             release_block(&target, block_off);
@@ -10825,18 +11144,28 @@ fn binder_transaction(
             return;
         }
     };
-    // SAFETY: the block is exclusively owned by this in-flight txn.
-    unsafe {
-        let dst = kvirt.add(block_off);
-        if data_size > 0
-            && crate::arch::uaccess::copy_from_user(dst, tr.data_buffer as *const u8, data_size) != 0
-        {
+    // (unsafe-slim r3c) INV-BINDER-BLOCKVIEW: the one audited window over
+    // this in-flight block; every payload access below goes through it.
+    let mut block = TxnBlock::new(
+        kvirt,
+        alloc_len,
+        block_off,
+        data_size,
+        offsets_size,
+        sg_total,
+        user_base,
+    );
+    if data_size > 0 {
+        let fault = match block.block_window(0, data_size) {
+            Some(dst) => crate::arch::uaccess_safe::copy_in(dst, tr.data_buffer as usize) != 0,
+            None => true,
+        };
+        if fault {
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
             sendfail_why(15);
             if reply {
                 let w = world_lock();
-                // SAFETY: under WORLD.
                 send_failed_reply(w.as_ref().unwrap(), thread, in_reply_to.as_ref().unwrap(), BR_FAILED_REPLY);
             } else {
                 *err_cmd = BR_FAILED_REPLY;
@@ -10844,19 +11173,18 @@ fn binder_transaction(
             crate::pr_info!("binder: txn data copy fault from {:#x}", tr.data_buffer);
             return;
         }
-        if offsets_size > 0
-            && crate::arch::uaccess::copy_from_user(
-                dst.add(align8(data_size)),
-                tr.data_offsets as *const u8,
-                offsets_size,
-            ) != 0
-        {
+    }
+    if offsets_size > 0 {
+        let fault = match block.block_window(align8(data_size), offsets_size) {
+            Some(dst) => crate::arch::uaccess_safe::copy_in(dst, tr.data_offsets as usize) != 0,
+            None => true,
+        };
+        if fault {
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
             sendfail_why(16);
             if reply {
                 let w = world_lock();
-                // SAFETY: under WORLD.
                 send_failed_reply(w.as_ref().unwrap(), thread, in_reply_to.as_ref().unwrap(), BR_FAILED_REPLY);
             } else {
                 *err_cmd = BR_FAILED_REPLY;
@@ -10882,15 +11210,16 @@ fn binder_transaction(
     let mut security_ctx: u64 = 0;
     if secctx_space > 0 {
         let bytes = SECCTX_SID.as_bytes();
-        // SAFETY: the sg area is sized for secctx_space (>= len+1, NUL
-        // included; SECCTX_SID has no interior NULs).
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                kvirt.add(block_off + extra_base),
-                bytes.len(),
-            );
-            core::ptr::write_volatile(kvirt.add(block_off + extra_base + bytes.len()), 0u8);
+        // INV-BINDER-BLOCKVIEW: sg area sized for secctx_space (>= len+1,
+        // NUL included; SECCTX_SID has no interior NULs) — the window
+        // accessor re-checks both bounds.
+        if block.extra_write_bytes(0, bytes).is_none() {
+            release_block(&target, block_off);
+            unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            sendfail_why(15);
+            *err_cmd = BR_FAILED_REPLY;
+            crate::pr_info!("binder: secctx write out of sg area");
+            return;
         }
         security_ctx = user_base + block_off as u64 + extra_base as u64;
         sg_used += secctx_space;
@@ -10905,23 +11234,36 @@ fn binder_transaction(
         let n = offsets_size / 8;
         let block_user = user_base + block_off as u64;
         for i in 0..n {
-            // SAFETY: offsets array inside the kernel-side block.
-            let obj_off = unsafe {
-                core::ptr::read_volatile((kvirt.add(block_off + align8(data_size)) as *const u64).add(i)) as usize
-            };
-            // The offsets array is SENDER-controlled: every offset must be
-            // bounds-checked with wrapping-proof arithmetic. The old
+            // (unsafe-slim r3c) offsets entry through the block view —
+            // the offsets array is SENDER-controlled: every offset must
+            // be bounds-checked with wrapping-proof arithmetic (the old
             // `obj_off + N > data_size` form let obj_off near usize::MAX
             // wrap past the check and point the reads below at
-            // kvirt + block_off - 4 (binder audit: offsets-entry wrap).
+            // kvirt + block_off - 4; binder audit: offsets-entry wrap).
+            let obj_off = match block.offsets_entry(i) {
+                Some(o) => o,
+                None => {
+                    fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                    crate::pr_info!("binder: object offset (entry {}) out of range", i);
+                    return;
+                }
+            };
             let obj_end4 = obj_off.checked_add(4).filter(|&e| e <= data_size);
             if obj_end4.is_none() {
                 fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                 crate::pr_info!("binder: object offset {} out of range", obj_off);
                 return;
             }
-            // SAFETY: header word validated within the data area.
-            let ty = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off) as *const u32) };
+            // Header word validated within the data area (the view
+            // re-checks bounds + alignment itself).
+            let ty = match block.data_u32(obj_off) {
+                Some(t) => t,
+                None => {
+                    fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                    crate::pr_info!("binder: object type at {} out of range", obj_off);
+                    return;
+                }
+            };
             let osz = binder_object_size(ty);
             if osz == 0 || !obj_off.checked_add(osz).map_or(false, |e| e <= data_size) {
                 fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
@@ -10931,8 +11273,14 @@ fn binder_transaction(
             match ty {
                 BINDER_TYPE_FD => {
                     // fd lives in the handle field; pad/cookie cleared.
-                    // SAFETY: validated within the data area.
-                    let fd = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off + 8) as *const u32) };
+                    let fd = match block.data_u32(obj_off + 8) {
+                        Some(f) => f,
+                        None => {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            crate::pr_info!("binder: fd object at {} out of range", obj_off);
+                            return;
+                        }
+                    };
                     if !allows_fd {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: fd {} to target that does not accept fds", fd);
@@ -10944,29 +11292,30 @@ fn binder_transaction(
                         return;
                     };
                     installed_fds.push((target.pid, tfd));
-                    // SAFETY: validated within the data area.
-                    unsafe {
-                        core::ptr::write_volatile(kvirt.add(block_off + obj_off + 8) as *mut u32, tfd as u32);
-                        core::ptr::write_volatile(kvirt.add(block_off + obj_off + 12) as *mut u32, 0);
+                    if block.write_data_u32(obj_off + 8, tfd as u32).is_none()
+                        || block.write_data_u32(obj_off + 12, 0).is_none()
+                    {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        crate::pr_info!("binder: fd object write at {} out of range", obj_off);
+                        return;
                     }
                 }
                 BINDER_TYPE_PTR => {
-                    // SAFETY: validated within the data area.
-                    let mut bp = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderBufferObject).cast_mut()) };
+                    let bp: BinderBufferObject = match block.data_obj(obj_off) {
+                        Some(o) => o,
+                        None => {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            crate::pr_info!("binder: ptr object at {} out of range", obj_off);
+                            return;
+                        }
+                    };
                     let bp_len = bp.length as usize;
                     if bp_len > sg_total - sg_used {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: sg buffer overruns buffers_size");
                         return;
                     }
-                    // SAFETY: block layout bounds were validated above.
-                    let sg_dst = unsafe { kvirt.add(block_off + extra_base + sg_used) };
-                    // SAFETY: sg area sized for buffers_size.
-                    if bp_len > 0
-                        && unsafe {
-                            crate::arch::uaccess::copy_from_user(sg_dst, bp.buffer as *const u8, bp_len)
-                        } != 0
-                    {
+                    if bp_len > 0 && !block.extra_copy_in(sg_used, bp.buffer as usize, bp_len) {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: sg copy fault from {:#x}", bp.buffer);
                         return;
@@ -10974,33 +11323,42 @@ fn binder_transaction(
                     let child_user = block_user + (extra_base + sg_used) as u64;
                     sg_used += align8(bp_len);
                     // Rewrite to the target's address of the copy.
-                    bp.buffer = child_user;
-                    // SAFETY: validated within the data area.
-                    unsafe { core::ptr::write_volatile(kvirt.add(block_off + obj_off) as *mut BinderBufferObject, bp) };
+                    let mut bp2 = bp;
+                    bp2.buffer = child_user;
+                    if block.write_data_obj(obj_off, bp2).is_none() {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        crate::pr_info!("binder: ptr object write at {} out of range", obj_off);
+                        return;
+                    }
                     if bp.flags as u64 & (BINDER_BUFFER_FLAG_HAS_PARENT as u64) != 0 {
                         // binder_fixup_parent: write this buffer's target
                         // address into the parent buffer at parent_offset.
-                        let Some((parent_kernel, parent_len)) =
-                            (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_total, i, bp.parent) })
-                        else {
+                        let Some(pw) = block.parent_window(i, bp.parent) else {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                             crate::pr_info!("binder: PTR fixup parent invalid");
                             return;
                         };
-                        if parent_len < 8 || bp.parent_offset > (parent_len - 8) as u64 {
+                        if pw.len < 8 || bp.parent_offset > (pw.len - 8) as u64 {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                             crate::pr_info!("binder: PTR fixup offset out of parent");
                             return;
                         }
-                        // SAFETY: parent buffer is inside our sg area.
-                        unsafe {
-                            core::ptr::write_volatile(parent_kernel.add(bp.parent_offset as usize) as *mut u64, child_user);
+                        if pw.write_u64_at(bp.parent_offset as usize, child_user).is_none() {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            crate::pr_info!("binder: PTR fixup offset out of parent");
+                            return;
                         }
                     }
                 }
                 BINDER_TYPE_FDA => {
-                    // SAFETY: validated within the data area.
-                    let fda = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderFdArrayObject).cast_mut()) };
+                    let fda: BinderFdArrayObject = match block.data_obj(obj_off) {
+                        Some(o) => o,
+                        None => {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            crate::pr_info!("binder: fda object at {} out of range", obj_off);
+                            return;
+                        }
+                    };
                     if !allows_fd {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: fda to target that does not accept fds");
@@ -11010,38 +11368,49 @@ fn binder_transaction(
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         return;
                     }
-                    let Some((parent_kernel, parent_len)) =
-                        (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_total, i, fda.parent) })
-                    else {
+                    let Some(pw) = block.parent_window(i, fda.parent) else {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: FDA parent invalid");
                         return;
                     };
                     let fd_buf_size = 4 * fda.num_fds as usize;
-                    if fd_buf_size > parent_len || fda.parent_offset as usize > parent_len - fd_buf_size {
+                    if fd_buf_size > pw.len || fda.parent_offset as usize > pw.len - fd_buf_size {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: FDA does not fit in parent buffer");
                         return;
                     }
-                    // SAFETY: fd array inside the parent's sg buffer.
-                    let fd_array = unsafe { parent_kernel.add(fda.parent_offset as usize) as *mut u32 };
                     for k in 0..fda.num_fds as usize {
-                        // SAFETY: bounds validated above against the parent.
-                        let fd = unsafe { core::ptr::read_volatile(fd_array.add(k)) };
+                        let fd = match pw.u32_at(fda.parent_offset as usize + k * 4) {
+                            Some(f) => f,
+                            None => {
+                                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                                crate::pr_info!("binder: FDA does not fit in parent buffer");
+                                return;
+                            }
+                        };
                         let Some(tfd) = translate_fd_into(fd, &target) else {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                             crate::pr_info!("binder: fda fd {} install into pid {} failed", fd, target.pid);
                             return;
                         };
                         installed_fds.push((target.pid, tfd));
-                        // SAFETY: same slot we read.
-                        unsafe { core::ptr::write_volatile(fd_array.add(k), tfd as u32) };
+                        if pw.set_u32(fda.parent_offset as usize + k * 4, tfd as u32).is_none() {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            crate::pr_info!("binder: FDA does not fit in parent buffer");
+                            return;
+                        }
                     }
                 }
                 _ => {
                     // flat binder/handle objects (24 bytes).
-                    // SAFETY: validated within the data area.
-                    let obj = unsafe { &mut *(kvirt.add(block_off + obj_off) as *mut FlatBinderObject) };
+                    let obj = match block.data_obj_mut::<FlatBinderObject>(obj_off) {
+                        Some(o) => o,
+                        None => {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            crate::pr_info!("binder: flat object at {} out of range", obj_off);
+                            return;
+                        }
+                    };
                     if !translate_object(proc, obj, &target) {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!(
@@ -12561,58 +12930,10 @@ fn fail_txn_after_fixups(
     *err_cmd = BR_FAILED_REPLY;
 }
 
-/// Resolve the parent BINDER_TYPE_PTR object referenced by offsets-array
-/// index from an FDA or a PTR fixup (binder_validate_ptr): the parent must
-/// appear EARLIER in the offsets array (already fixed up) and be a PTR
-/// object. Returns the parent's kernel-side buffer address (in our sg
-/// area) and its length.
-/// SAFETY: caller owns the target block exclusively (in-flight txn).
-unsafe fn resolve_parent_ptr(
-    kvirt: *mut u8,
-    block_off: usize,
-    block_user: u64,
-    offsets_at: usize,
-    data_size: usize,
-    offsets_size: usize,
-    sg_size: usize,
-    cur_idx: usize,
-    parent_idx: u64,
-) -> Option<(*mut u8, usize)> {
-    if parent_idx >= cur_idx as u64 {
-        return None;
-    }
-    // SAFETY: offsets array inside the kernel-side block; index < cur_idx
-    // bounds it within offsets_size (validated 8-aligned at resolve time).
-    let parent_off =
-        core::ptr::read_volatile((kvirt.add(block_off + offsets_at) as *const u64).add(parent_idx as usize)) as usize;
-    // Sender-controlled offsets entry: wrapping-proof bounds check (the old
-    // `parent_off + size > data_size` form let near-u64::MAX offsets wrap
-    // through — binder audit, same class as the obj_off fixup check).
-    if !parent_off
-        .checked_add(core::mem::size_of::<BinderBufferObject>())
-        .map_or(false, |e| e <= data_size)
-    {
-        return None;
-    }
-    // SAFETY: validated within the data area.
-    let p = core::ptr::read_volatile((kvirt.add(block_off + parent_off) as *const BinderBufferObject).cast_mut());
-    if p.hdr_type != BINDER_TYPE_PTR {
-        return None;
-    }
-    // The parent's .buffer was already rewritten to the target-user
-    // address of its sg copy; map it back to the kernel address and bound
-    // it inside the sg area.
-    let extra_base = offsets_at + align8(offsets_size);
-    let rel = p.buffer.checked_sub(block_user)? as usize;
-    if rel < extra_base
-        || !rel
-            .checked_add(p.length as usize)
-            .map_or(false, |e| e <= extra_base + sg_size)
-    {
-        return None;
-    }
-    Some((kvirt.add(block_off + rel), p.length as usize))
-}
+// (unsafe-slim r3c) resolve_parent_ptr was dissolved into
+// TxnBlock::parent_window / ParentWindow (INV-BINDER-BLOCKVIEW): the same
+// binder_validate_ptr semantics, but the raw pointer out-parameter became
+// a bounds-carrying window and every access re-checks.
 
 /// Undo the pins taken at resolve time when the transaction failed after
 /// them.
