@@ -65,15 +65,15 @@ This is not "an assistant filling in a few lines." It places AI where subsystems
 
 ## Safety: the itemized bill, not the slogan
 
-**The surface.** `kernel/src` is 361,419 lines. Measured by the in-tree ledger script:
+**The surface.** `kernel/src` is 361,875 lines. Measured by the in-tree ledger script:
 
 | Series | Lines | Share |
 |---|---:|---:|
-| `unsafe { … }` block bodies | 34,464 | 9.5% |
-| `unsafe fn` / `unsafe impl` bodies | 28,249 | 7.8% |
-| **Dual series — the honest total** | **60,376** | **16.7%** |
+| `unsafe { … }` block bodies | 25,769 | 7.1% |
+| `unsafe fn` / `unsafe impl` bodies | 27,097 | 7.5% |
+| **Dual series — the honest total** | **50,630** | **14.0%** |
 
-The dual series became the headline on 2026-11-19: the earlier line count missed raw-pointer `unsafe fn` bodies. On the block-only series the tree is 9.5%, down from 10.9% a day earlier and 12.1% before the reduction campaign. Layered by privilege, `kernel/src` carries 5,590 unsafe tokens — **3,532 of them outside the Framework layer**, which is the reduction target (47 files already carry `#![forbid(unsafe_code)]`; 63 more have no unsafe left at all). 63% of unsafe constructs carry a written `// SAFETY:` contract, and CI fails the build when a region appears in the tree but not in the [ledger](docs/development/tcb-ledger.md).
+The dual series became the headline on 2026-11-19: the earlier line count missed raw-pointer `unsafe fn` bodies. On the block-only series the tree is 7.1%, down from 9.5% the day before and 12.1% before the reduction campaign. Layered by privilege, `kernel/src` carries 5,224 unsafe tokens — **3,166 of them outside the Framework layer**, which is the reduction target (47 files already carry `#![forbid(unsafe_code)]`; 63 more have no unsafe left at all). 63% of unsafe constructs carry a written `// SAFETY:` contract, and CI fails the build when a region appears in the tree but not in the [ledger](docs/development/tcb-ledger.md).
 
 **The record.** 33 memory-corruption-class bugs over the project's history, each adjudicated individually: **23** had the defect inside an explicitly audited `unsafe` block, architecture assembly, or an `unsafe` interior; **10** were in safe code — and every one of those ten is an ownership, refcount, lock-protocol, or stack-depth decision that the type system does not check today. Pointer-expression classes — indexing overrun, iterator invalidation, format string, wild pointer arithmetic — are **zero in safe code**. Six of the 33 were caught in review before any boot ran them.
 
@@ -110,7 +110,7 @@ Reports: [test index](https://topkernel.github.io/Rux/testing/index.html).
 
 ## What is in the 419,000 lines
 
-The `kernel/` tree holds 679 files and 419,502 lines, of which 408,408 are Rust.
+The `kernel/` tree holds 679 files and 419,958 lines, of which 408,864 are Rust.
 
 - **Scheduler** — a single global run queue (D-1), sized for 8–16 CPU personal devices: one priority-ordered pick, no balancer, no migration. Measured critical section ≈60 ns; the contention ceiling extrapolates to roughly 950 cores at the observed 241–273 ns hold.
 - **Memory management** — buddy page allocator with a magazine small-object allocator, a global page cache, per-task VMAs, reclaim.
@@ -128,7 +128,7 @@ Because the host can use KVM, x86_64 is the primary platform for both function a
 - **LTP**: 1,139 of 1,869 pass. Several hundred still fail; the TIMEOUT class is adjudicated case by case, and each failure that is not ours is recorded as such.
 - **lmbench**: 13 rows trail, the largest deficit file creation at 22–26× and loopback socket latency at 2.1–2.2×. Each row carries a measured decomposition of the gap.
 - **Direct I/O**: 1 MiB sequential streams sit at 0.75–0.83× of the reference.
-- **The unsafe surface**: 16.7% of the kernel still depends on human review. The reduction campaign is ongoing and the residue is being classified into irreducible classes.
+- **The unsafe surface**: 14.0% of the kernel still depends on human review. The campaign targets ≤5,000 unsafe lines (≤1%) with a per-block irreducibility proof recorded in the [ledger](docs/development/tcb-ledger.md); the ladder and the measured starting point are in [the plan](docs/development/unsafe-5000-plan.md).
 - **Formal verification**: Kani covers the core unsafe primitives, not every key path; loom and SPIN cover the concurrency primitives.
 - **The AI working model** at 400,000 lines is under observation, not settled.
 - **The 29 registered divergences** need their compatibility evidence kept current as the kernel moves.
