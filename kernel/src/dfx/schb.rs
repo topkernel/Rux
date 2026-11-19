@@ -314,26 +314,22 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         // --- Periodic sleep (khungtaskd discipline: arm a one-shot timer
         // as the only waker, mark INTERRUPTIBLE, re-check, then sleep). ---
-        let current = match crate::sched::current() {
-            Some(t) => t as *mut crate::process::task::Task,
+        let my_pid = match crate::sched::current() {
+            Some(t) => t.pid(),
             None => break,
         };
-        // SAFETY: current is this kthread's own task pointer.
-        let my_pid = unsafe { (*current).pid() };
         let target = crate::drivers::timer::get_jiffies() + beat_jiffies;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
         if timer_id != 0 {
-            // SAFETY: current is the running task's pointer.
-            unsafe {
-                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-            }
+            // Re-derived running-task borrows (never held across
+            // schedule() below).
+            crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
             if crate::drivers::timer::get_jiffies() >= target {
-                // SAFETY: current is the running task's pointer.
-                unsafe {
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                if let Some(t) = crate::sched::current() {
+                    t.set_state(TaskState::new(TaskState::RUNNING));
                     // A racing wake may have enqueued us mid-exit — take
                     // ourselves back off (NEW-C2 discipline).
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::dequeue_task(t);
                 }
                 crate::timer::del_timer(timer_id);
             } else {
@@ -359,10 +355,10 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         let mut young_pid: u32 = 0;
         let mut young_comm = [0u8; 16];
         crate::sched::for_each_task(|task| {
-            // SAFETY: callback runs under the pid-hash bucket lock; reads
-            // only plain fields (same contract as khungtaskd's check_tasks).
-            unsafe {
-                let t = &*task;
+            // The walk hands &Task under the bucket lock; plain-field
+            // reads only (same contract as khungtaskd's check_tasks).
+            {
+                let t = task;
                 let pid = t.pid();
                 n_tasks += 1;
                 if t.tgid() == pid {
@@ -555,10 +551,9 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
     }
     let mut snaps: alloc::vec::Vec<Snap> = alloc::vec::Vec::new();
     crate::sched::for_each_task(|task| {
-        // SAFETY: plain-field reads under the bucket lock (khungtaskd
-        // contract).
-        unsafe {
-            let t = &*task;
+        // Plain-field reads under the bucket lock (khungtaskd contract).
+        {
+            let t = task;
             let b = t.state().bits();
             if (b & 0x37 == 0 && !t.on_cpu()) || (b & 0x02 != 0) {
                 snaps.push(Snap {
@@ -576,14 +571,13 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
     {
         let mut s = alloc::string::String::new();
         for sn in &snaps {
-            // SAFETY: diagnostic re-find; the pointer is only read for
-            // the linked query and may be gone (exited between walk and
-            // now) — find returns null then.
-            let linked = unsafe { crate::sched::find_task_by_pid(sn.pid) };
-            let linked_str = if linked.is_null() {
+            // Diagnostic re-find via TaskBorrow (short read; the task may
+            // have exited between walk and now — lookup returns None).
+            let linked = crate::process::task_ref::TaskBorrow::lookup(sn.pid);
+            let linked_str = if linked.is_none() {
                 "gone"
             } else {
-                match crate::sched::sched::grq_diag_cfs_linked(linked) {
+                match crate::sched::sched::grq_diag_cfs_linked(linked.unwrap().as_ptr()) {
                     Some(true) => "1",
                     Some(false) => "0",
                     None => "n/a",

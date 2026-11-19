@@ -78,30 +78,27 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // tasks were detected minutes late or never). Mirror the
         // nanosleep_impl state-first discipline: arm a one-shot timer for
         // our pid, mark INTERRUPTIBLE, re-check, then sleep.
-        let current = match crate::sched::current() {
-            Some(t) => t as *mut crate::process::task::Task,
+        let my_pid = match crate::sched::current() {
+            Some(t) => t.pid(),
             None => break,
         };
-        // SAFETY: current is this kthread's own task pointer.
-        let my_pid = unsafe { (*current).pid() };
         let target = crate::drivers::timer::get_jiffies() + interval_jiffies;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
 
         if timer_id != 0 {
-            // SAFETY: current is the running task's pointer.
-            unsafe {
-                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-            }
+            // Re-derived running-task borrows (never held across
+            // schedule() below — the discipline that replaces the raw
+            // pointer this loop carried).
+            crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
             // Re-check AFTER marking sleeping: the one-shot timer may have
             // fired between arming and set_state — either its wake captured
             // the INTERRUPTIBLE state, or the deadline is already visible.
             if crate::drivers::timer::get_jiffies() >= target {
-                // SAFETY: current is the running task's pointer.
-                unsafe {
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                if let Some(t) = crate::sched::current() {
+                    t.set_state(TaskState::new(TaskState::RUNNING));
                     // NEW-C2: a racing wake may have enqueued us while we
                     // are still executing — take ourselves back off.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::dequeue_task(t);
                 }
                 crate::timer::del_timer(timer_id);
             } else {
@@ -151,10 +148,10 @@ fn check_tasks() {
     let timeout_ns = HUNG_TASK_TIMEOUT_SECS * 1_000_000_000;
 
     crate::sched::for_each_task(|task| {
-        // SAFETY: callback runs under the pid-hash bucket lock; reads and
-        // atomic stores on the task's own hung_task_since field only.
-        unsafe {
-            let task_ref = &*task;
+        // The walk hands &Task under the bucket lock; reads and atomic
+        // stores on the task's own hung_task_since field only.
+        {
+            let task_ref = task;
             let state = task_ref.state();
             let pid = task_ref.pid();
 
@@ -179,7 +176,7 @@ fn check_tasks() {
                 let elapsed = now.saturating_sub(last_time);
                 if elapsed > timeout_ns {
                     // Hung task detected!
-                    report_hung_task(task as *const crate::process::task::Task as *mut crate::process::task::Task, elapsed / 1_000_000_000);
+                    report_hung_task(task, elapsed / 1_000_000_000);
 
                     // Reset to avoid repeated reports
                     task_ref.hung_task_since.store(now, Ordering::Release);
@@ -190,9 +187,8 @@ fn check_tasks() {
 }
 
 /// Report a hung task.
-fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
+fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
     let mut w = ConsoleWriter::new();
-    let task_ref = unsafe { &*task };
 
     // rwlock-livelock: comm was a pid placeholder — the ub2404 wedge left
     // an anonymous D-state task (312) whose identity decided the whole
@@ -218,7 +214,13 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
         use crate::process::task::Task;
         let t: &Task = task_ref;
         let claim = t.running_on_cpu.load(Ordering::Acquire);
-        let vfork_ppid = t.vfork_parent_ptr().map(|p| unsafe { (*p).pid() }).unwrap_or(0);
+        // SAFETY (one adopt edge): the vfork parent tree handle under the
+        // caller's softirq context — TaskBorrow's short-read contract.
+        let vfork_ppid = t
+            .vfork_parent_ptr()
+            .and_then(|p| unsafe { crate::process::task_ref::TaskBorrow::from_raw(p as *mut crate::process::task::Task) })
+            .map(|p| p.pid())
+            .unwrap_or(0);
         let _ = write!(
             w,
             "      HUNG-CTX pid={} state={:#x} oncpu={} claim={} pk={} ti_cpu={} onrq={} vfork_ppid={} lastsys={} a0={:#x}",
@@ -237,25 +239,30 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
         // nr + user rip decide "kernel thread" (no user frame) vs
         // "userspace task blocked in syscall X at library Y". The old
         // print left task 312 anonymous; lastsys/a0 stayed 0.
-        {
-            let pr = t.pt_regs();
-            if !pr.is_null() {
-                #[cfg(feature = "x86_64")]
-                let (urip, _usp, unr, _ua0, _ua1, _ua2) =
-                    unsafe { ((*pr).rip, (*pr).rsp, (*pr).orig_rax, (*pr).rdi, (*pr).rsi, (*pr).rdx) };
-                #[cfg(feature = "riscv64")]
-                let (urip, _usp, unr, _ua0, _ua1, _ua2) =
-                    unsafe { ((*pr).epc, (*pr).sp, (*pr).a7, (*pr).orig_a0, (*pr).a1, (*pr).a2) };
-                #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
-                let (urip, unr) = (0u64, 0u64);
-                let _ = write!(w, " unrip={:#x} unrsys={}", urip, unr as i64);
-            }
+        if let Some(pr) = t.pt_regs_ref() {
+            #[cfg(feature = "x86_64")]
+            let (urip, _usp, unr, _ua0, _ua1, _ua2) =
+                (pr.rip, pr.rsp, pr.orig_rax, pr.rdi, pr.rsi, pr.rdx);
+            #[cfg(feature = "riscv64")]
+            let (urip, _usp, unr, _ua0, _ua1, _ua2) =
+                (pr.epc, pr.sp, pr.a7, pr.orig_a0, pr.a1, pr.a2);
+            #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+            let (urip, unr) = (0u64, 0u64);
+            let _ = write!(w, " unrip={:#x} unrsys={}", urip, unr as i64);
         }
         let _ = writeln!(w);
         let thsp = t.thread().sp;
         if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
             let _ = write!(w, "      HUNG-STK sp={:#x}", thsp);
-            let base = thsp as *const u64;
+            // R76: scan UPWARD from the parked sp through the
+            // bounds-checked window (INV-WINDOW-*); the Task pins the
+            // stack pages.
+            let win = t.kernel_stack_top_checked().and_then(|top| {
+                crate::safety::frame::KernelStackWindow::new(
+                    top - crate::config::KERNEL_STACK_SIZE,
+                    top,
+                )
+            });
             let mut shown = 0;
             // R76: scan UPWARD from the parked sp — the caller frames of
             // the parked chain live at HIGHER addresses (stacks grow down);
@@ -286,9 +293,10 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
             #[cfg(not(feature = "x86_64"))]
             let hi = core::ptr::addr_of!(_etext) as u64;
             for k in 0..200 {
-                // SAFETY: diagnostic read within the task's own kernel
-                // stack pages (the Task exists and pins them).
-                let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+                let v = match win.and_then(|w2| w2.read_u64(thsp as usize + k * 8)) {
+                    Some(v) => v,
+                    None => break,
+                };
                 if v >= lo && v < hi && (v & 1) == 0 {
                     let _ = write!(w, " {:#x}", v);
                     shown += 1;
@@ -302,7 +310,7 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
     }
 
     let taint_str = taint::taint_string_arr();
-    let taint_display = unsafe { core::str::from_utf8_unchecked(&taint_str) };
+    let taint_display = core::str::from_utf8(&taint_str).unwrap_or("?");
     let _ = write!(w, "      Tainted: {}\n", taint_display);
 
     // Stack trace
