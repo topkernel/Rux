@@ -22,7 +22,7 @@ use crate::list::ListHead;
 ///
 /// RISC-V typically uses 16KB kernel stack, but we increase to 32KB
 /// because some operations (like FdTable creation) need larger stack space
-const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
+pub(crate) const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
 
 // ==================== Stack Cache Implementation ====================
 

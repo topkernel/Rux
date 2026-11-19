@@ -284,6 +284,9 @@ pub fn audit_tick() {
         if !bad[0].0.is_empty() {
             report(b"audit", task, &bad);
         }
+        // R83c (round 10): live-stack foreign-content scan on the same
+        // cadence — a strike becomes a report BEFORE the bytes execute.
+        stack_foreign_scan(task);
     });
 }
 
@@ -580,4 +583,91 @@ pub extern "C" fn r84_ksp_trap(site: u64, val: u64, tp: u64, sepc: u64) {
         pdec(pid as u64);
     }
     putchar(b'\n');
+}
+
+// ==================== R83c: live-stack foreign-content scan (oh-launch round 10) ====================
+//
+// Round 9's recycled-stack trap came back CLEAN (zero post-free writes)
+// while a strike still landed — the writer targets LIVE stacks. This
+// scan converts every strike into a report BEFORE the foreign bytes
+// execute: fresh stacks start leg-16-zeroed, so any all-printable
+// 8-byte word that ALSO matches a slice of the kernel's cmdline blob
+// ("s.boot.s"/"os.requi" — the round-7/8 fingerprints) is foreign
+// content with provenance by construction. A coarse ASCII-dense-region
+// counter (16+ consecutive printable words) catches non-cmdline
+// strings too. Gated by rux:scribble; bounded depth (32KB from the
+// bottom); one task-set sweep rides the audit cadence.
+
+/// True when all 8 bytes are printable ASCII (the fingerprint shape).
+#[inline]
+fn word_is_ascii(v: u64) -> bool {
+    let b = v.to_le_bytes();
+    b.iter().all(|&c| (0x20..0x7f).contains(&c))
+}
+
+/// True when the exact 8 bytes appear anywhere in the cmdline blob
+/// (unaligned search — the observed words are unaligned slices).
+fn word_in_cmdline(v: u64) -> bool {
+    let ptr = crate::cmdline::CMDLINE_PTR.load(Ordering::Acquire) as usize;
+    let len = crate::cmdline::CMDLINE_LEN.load(Ordering::Acquire);
+    if ptr == 0 || len < 8 {
+        return false;
+    }
+    let needle = v.to_le_bytes();
+    // SAFETY: blob is [ptr, ptr+len) for the whole boot; read-only scan.
+    unsafe {
+        let blob = core::slice::from_raw_parts(ptr as *const u8, len);
+        blob.windows(8).any(|w| w == needle)
+    }
+}
+
+/// Scan one live task's kernel stack for foreign shapes. Reports at
+// most once per task per boot (dedup ring reused via SEEN-like table).
+pub fn stack_foreign_scan(task: *mut Task) {
+    if !crate::trace::EVENT_SCRIBBLE.armed() {
+        return;
+    }
+    let t = unsafe { &*task };
+    let bottom = t.kernel_stack_bottom();
+    if bottom == 0 {
+        return;
+    }
+    // Bounded depth: the strikes landed deep (rsp near the bottom in
+    // the captured dumps); 32KB covers the frame region without
+    // walking the whole 128KB every sweep.
+    let depth = core::cmp::min(32 * 1024, crate::process::task::KERNEL_STACK_SIZE);
+    let mut cmdline_hits = 0u32;
+    let mut dense_run = 0u32;
+    let mut dense_best = 0u32;
+    let mut first_hit = (0usize, 0u64);
+    for off in (0..depth).step_by(8) {
+        // SAFETY: within the task's own kernel stack allocation.
+        let v = unsafe { core::ptr::read_volatile((bottom + off) as *const u64) };
+        if word_is_ascii(v) {
+            dense_run += 1;
+            if dense_run > dense_best {
+                dense_best = dense_run;
+            }
+            if cmdline_hits < 4 && word_in_cmdline(v) {
+                if cmdline_hits == 0 {
+                    first_hit = (off, v);
+                }
+                cmdline_hits += 1;
+            }
+        } else {
+            dense_run = 0;
+        }
+    }
+    if cmdline_hits > 0 || dense_best >= 16 {
+        report(
+            b"stackscan",
+            task,
+            &[
+                (b"cmdline_words", cmdline_hits as u64),
+                (b"dense_run", dense_best as u64),
+                (b"first_off", first_hit.0 as u64),
+                (b"first_val", first_hit.1),
+            ],
+        );
+    }
 }
