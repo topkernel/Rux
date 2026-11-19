@@ -1330,12 +1330,8 @@ da68e43281f2	kernel/src/drivers/drm/mod.rs	present_fb	2088	volatile,ptr-ops	GAP
 d55d0fcc2ff5	kernel/src/drivers/gpu/fbdev.rs	kfbflush_fn	49		GAP
 3271e3ef5258	kernel/src/drivers/gpu/fbdev.rs	kfbflush_fn	55		GAP
 a466956259cb	kernel/src/drivers/gpu/fbdev.rs	kfbflush_fn	60		GAP
-1f23637b01c5	kernel/src/drivers/gpu/fbdev.rs	fbioget_cmap	394	ptr-ops	GAP
-46b7d99ef1f4	kernel/src/drivers/gpu/fbdev.rs	fbdev_ioctl	461	ptr-ops	GAP
-00b4fbb0c551	kernel/src/drivers/gpu/fbdev.rs	fbdev_ioctl	477	ptr-ops	GAP
-d50057dd4a3f	kernel/src/drivers/gpu/fbdev.rs	fbdev_ioctl	501	ptr-ops	GAP
-9b2dc95f39ab	kernel/src/drivers/gpu/fbdev.rs	fbdev_ioctl	526	ptr-ops	GAP
-e995ff32fe71	kernel/src/drivers/gpu/fbdev.rs	fbdev_ioctl	549	ptr-ops	GAP
+091957aea761	kernel/src/drivers/gpu/fbdev.rs	fbdev_ioctl	442	ptr-ops	GAP
+b505e8b7f9d6	kernel/src/drivers/gpu/fbdev.rs	fbdev_ioctl	458	ptr-ops	GAP
 5a900bb0705b	kernel/src/drivers/gpu/framebuffer.rs	<module>	52		GAP
 4911701dfd17	kernel/src/drivers/gpu/framebuffer.rs	<module>	53		GAP
 8cf05c0b2ed4	kernel/src/drivers/gpu/framebuffer.rs	<module>	60	ptr-ops	GAP
@@ -1357,79 +1353,57 @@ b35156bdc26b	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	244	volatile,ptr-o
 4cbe77b896ca	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	253	volatile,ptr-ops	GAP
 61ab037e8cc2	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	261	volatile,ptr-ops	GAP
 9da8f07364c6	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	266	volatile,ptr-ops	GAP
-606a3ecec75c	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	293		GAP
-11812f0c2af2	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	296		GAP
-ba00289764a3	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	299		GAP
-79dcbf3f3a6f	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	302	volatile,ptr-ops	GAP
-b30ecc5d72c0	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	312	volatile,ptr-ops	GAP
-ae111f623b1a	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	320	volatile,ptr-ops	GAP
-695aff647d77	kernel/src/drivers/gpu/virtio_gpu.rs	init_framebuffer	353		GAP
-1b733fb56ef5	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	745		GAP
-02870a97f6df	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	752	ptr-ops	GAP
-79feebb1bd9e	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	754	ptr-ops	GAP
-9619b55516b1	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	773	asm,volatile,ptr-ops	GAP
-9c131b08b25b	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	885		GAP
-f7ca822360bb	kernel/src/drivers/gpu/virtio_gpu.rs	get_framebuffer	914		GAP
-4cb71ad50454	kernel/src/drivers/gpu/virtio_gpu.rs	drop	931		GAP
-18586922f1a8	kernel/src/drivers/input/evdev.rs	file_id_is_input	508		GAP
-03bca8fd19f7	kernel/src/drivers/input/evdev.rs	device_of_devno	553		GAP
-2c21a3103159	kernel/src/drivers/input/evdev.rs	device_of_devno	555		GAP
-a992694cf63f	kernel/src/drivers/input/evdev.rs	device_of_devno	557		GAP
-f0030d7b40e4	kernel/src/drivers/input/evdev.rs	<module>	568	ptr-ops	GAP
-5a4304253047	kernel/src/drivers/input/evdev.rs	sleep_ms_interruptible	606		GAP
-1818caaf0d59	kernel/src/drivers/input/evdev.rs	sleep_ms_interruptible	628		GAP
-41ab60f67cdf	kernel/src/drivers/input/evdev.rs	sleep_ms_interruptible	634		GAP
-e860ab06943b	kernel/src/drivers/input/evdev.rs	sleep_ms_interruptible	640		GAP
-f27425fdb28e	kernel/src/drivers/input/evdev.rs	<module>	658	ptr-ops	GAP
-4b8ea7fe85ed	kernel/src/drivers/input/evdev.rs	node_of_file	665		GAP
-4365e2dd8374	kernel/src/drivers/input/evdev.rs	node_of_file	667		GAP
-0d1daa40d226	kernel/src/drivers/input/evdev.rs	node_of_file	669		GAP
-e957cbfcb839	kernel/src/drivers/input/evdev.rs	evdev_file_read	686		GAP
-3350d3869109	kernel/src/drivers/input/evdev.rs	evdev_file_read	764	ptr-ops	GAP
-dc99eb9e05a2	kernel/src/drivers/input/evdev.rs	evdev_file_close	839	ptr-ops	GAP
-fdb9e7086d1a	kernel/src/drivers/input/evdev.rs	evdev_file_poll	873		GAP
-35c57a5100b6	kernel/src/drivers/input/evdev.rs	evdev_poll_wait	927		GAP
-2f6eb25084c4	kernel/src/drivers/input/evdev.rs	evdev_poll_wait	941		GAP
-e3dd3c0ce2ba	kernel/src/drivers/input/evdev.rs	evdev_poll_unwait	968		GAP
-090c59892748	kernel/src/drivers/input/evdev.rs	evdev_poll_unwait	986		GAP
-1685c3c7c49f	kernel/src/drivers/input/evdev.rs	evdev_file_write	1028		GAP
-e858d98127bb	kernel/src/drivers/input/evdev.rs	evdev_file_ioctl	1098		GAP
-e5644f3764b5	kernel/src/drivers/input/evdev.rs	evdev_file_ioctl	1119		GAP
-abfabbb4bb59	kernel/src/drivers/input/evdev.rs	copy_out	1136	ptr-ops	GAP
-71bd457e2ae3	kernel/src/drivers/input/evdev.rs	init_evdev	1406		GAP
-2bf340f25556	kernel/src/drivers/input/evdev.rs	init_evdev	1430		GAP
-6d6b21ebd12c	kernel/src/drivers/input/evdev.rs	init_evdev	1486		GAP
-4a692982cfce	kernel/src/drivers/input/evdev.rs	init_evdev	1491		GAP
-a540c1bffcdd	kernel/src/drivers/input/evdev.rs	init_evdev	1506		GAP
-f6eefe981f5d	kernel/src/drivers/input/evdev.rs	push_input_event	1671		GAP
-92db88f4a4a8	kernel/src/drivers/input/evdev.rs	current_pid_tgid	1846		GAP
+e8720711f4b0	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	303	volatile,ptr-ops	GAP
+a79041409f48	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	313	volatile,ptr-ops	GAP
+80eeda89edaf	kernel/src/drivers/gpu/virtio_gpu.rs	init_virtio	321	volatile,ptr-ops	GAP
+d227de243a8a	kernel/src/drivers/gpu/virtio_gpu.rs	init_framebuffer	354		GAP
+2f9acaada523	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	746		GAP
+92e16d084db6	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	753	ptr-ops	GAP
+9e0f643ad3d9	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	755	ptr-ops	GAP
+da1c26878505	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	808	asm	GAP
+c1c611e76c7d	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	878	ptr-ops	GAP
+961ec0466386	kernel/src/drivers/gpu/virtio_gpu.rs	send_command	899		GAP
+10ce77ef68f6	kernel/src/drivers/gpu/virtio_gpu.rs	get_framebuffer	928		GAP
+80c03e364bb1	kernel/src/drivers/gpu/virtio_gpu.rs	drop	945		GAP
+8fc1321f6214	kernel/src/drivers/input/evdev.rs	evdev_keyboard	514		INV:INV-SREF-1
+c7e774dc4d54	kernel/src/drivers/input/evdev.rs	evdev_pointer	518		INV:INV-SREF-1
+5b1ef30bea49	kernel/src/drivers/input/evdev.rs	evdev_touchscreen	522		INV:INV-SREF-1
+36e8c313d658	kernel/src/drivers/input/evdev.rs	evdev_keyboard_mut	527		INV:INV-SREF-1
+a00884991c91	kernel/src/drivers/input/evdev.rs	evdev_pointer_mut	531		INV:INV-SREF-1
+ae5307c38986	kernel/src/drivers/input/evdev.rs	evdev_touchscreen_mut	535		INV:INV-SREF-1
+161a2e5c1119	kernel/src/drivers/input/evdev.rs	<module>	599	ptr-ops	GAP
+a1bab42648ea	kernel/src/drivers/input/evdev.rs	sleep_ms_interruptible	637		GAP
+1dedadced814	kernel/src/drivers/input/evdev.rs	sleep_ms_interruptible	659		GAP
+31e9ee416e1f	kernel/src/drivers/input/evdev.rs	sleep_ms_interruptible	665		GAP
+1353209d7235	kernel/src/drivers/input/evdev.rs	sleep_ms_interruptible	671		GAP
+cd0a022a7e13	kernel/src/drivers/input/evdev.rs	<module>	689	ptr-ops	GAP
+a2b07a7db74a	kernel/src/drivers/input/evdev.rs	evdev_file_read	717		GAP
+06fba696efa6	kernel/src/drivers/input/evdev.rs	evdev_file_read	795	ptr-ops	GAP
+8f7b28af5d2f	kernel/src/drivers/input/evdev.rs	evdev_file_close	870	ptr-ops	GAP
+ec01cf0449f7	kernel/src/drivers/input/evdev.rs	evdev_file_poll	904		GAP
+91e65c2d9af5	kernel/src/drivers/input/evdev.rs	evdev_poll_wait	958		GAP
+bae167b17826	kernel/src/drivers/input/evdev.rs	evdev_poll_wait	972		GAP
+5bc58ba5bc07	kernel/src/drivers/input/evdev.rs	evdev_poll_unwait	999		GAP
+1c7d62c4924f	kernel/src/drivers/input/evdev.rs	evdev_poll_unwait	1017		GAP
+bb0a3abe2d8d	kernel/src/drivers/input/evdev.rs	evdev_file_write	1059		GAP
+a02fdfd298b8	kernel/src/drivers/input/evdev.rs	evdev_file_ioctl	1129		GAP
+8d55fd85367d	kernel/src/drivers/input/evdev.rs	evdev_file_ioctl	1150		GAP
+9f81ab325509	kernel/src/drivers/input/evdev.rs	copy_out	1167	ptr-ops	GAP
+ef1d77845d04	kernel/src/drivers/input/evdev.rs	init_evdev	1437		GAP
+e5ce430b49ae	kernel/src/drivers/input/evdev.rs	init_evdev	1461		GAP
+5ee73949b4e2	kernel/src/drivers/input/evdev.rs	init_evdev	1517		GAP
+0563c25cedb3	kernel/src/drivers/input/evdev.rs	init_evdev	1522		GAP
+deed709fc05a	kernel/src/drivers/input/evdev.rs	init_evdev	1537		GAP
+295b715770f0	kernel/src/drivers/input/evdev.rs	current_pid_tgid	1875		GAP
 5934af0a48dd	kernel/src/drivers/input/mod.rs	virtio_input_irq_handler	173	volatile,ptr-ops	GAP
 0e714094fec2	kernel/src/drivers/input/mod.rs	virtio_input_irq_handler	181		GAP
 28c406b97d84	kernel/src/drivers/input/mod.rs	input_intx_service	196		GAP
 16e6bc85afde	kernel/src/drivers/input/mod.rs	init_virtio_input	247		GAP
 3decc3e88fa9	kernel/src/drivers/input/virtio_input.rs	<module>	113		GAP
 5b48dea86940	kernel/src/drivers/input/virtio_input.rs	<module>	114		GAP
-a0ee55f8315c	kernel/src/drivers/input/virtio_input.rs	init_virtio	148	volatile,ptr-ops	GAP
-2e182462e8c3	kernel/src/drivers/input/virtio_input.rs	init_virtio	154	volatile,ptr-ops	GAP
-745a04c374ca	kernel/src/drivers/input/virtio_input.rs	init_virtio	163	volatile,ptr-ops	GAP
-15df28efbb1d	kernel/src/drivers/input/virtio_input.rs	init_virtio	172	volatile,ptr-ops	GAP
-6fbc83b1ce59	kernel/src/drivers/input/virtio_input.rs	init_virtio	180	volatile,ptr-ops	GAP
-e8303b6dd615	kernel/src/drivers/input/virtio_input.rs	init_virtio	188	volatile,ptr-ops	GAP
-0bbcb056ec4f	kernel/src/drivers/input/virtio_input.rs	init_virtio	202		GAP
-17cca1f729ab	kernel/src/drivers/input/virtio_input.rs	init_virtio	231		GAP
-f6bf8769d232	kernel/src/drivers/input/virtio_input.rs	init_virtio	234		GAP
-49736c38dffa	kernel/src/drivers/input/virtio_input.rs	init_virtio	237		GAP
-9ff4dbb975be	kernel/src/drivers/input/virtio_input.rs	init_virtio	241	volatile,ptr-ops	GAP
-a1e6b9a9c548	kernel/src/drivers/input/virtio_input.rs	init_virtio	270	volatile,ptr-ops	GAP
-bf4283c60b58	kernel/src/drivers/input/virtio_input.rs	init_virtio	281	volatile,ptr-ops	GAP
-8ee15f36bac1	kernel/src/drivers/input/virtio_input.rs	read_device_info	306	volatile,ptr-ops	GAP
-5bee592c7137	kernel/src/drivers/input/virtio_input.rs	check_pointer_device	332	volatile,ptr-ops	GAP
-152aef0f6878	kernel/src/drivers/input/virtio_input.rs	submit_event_buffers	367	volatile,ptr-ops	GAP
-cb30d2f38048	kernel/src/drivers/input/virtio_input.rs	read_event	396	volatile,ptr-ops	GAP
-0ba7ce73124f	kernel/src/drivers/input/virtio_input.rs	has_event	456		GAP
-0f6aaff0a9e2	kernel/src/drivers/input/virtio_input.rs	read_ev_bitmap	511	volatile,ptr-ops	GAP
-3e058a769f3b	kernel/src/drivers/input/virtio_input.rs	read_absinfo	540	volatile,ptr-ops	GAP
-433df7cdaaad	kernel/src/drivers/input/virtio_input.rs	drop	574	ptr-ops	GAP
+d25183514f4e	kernel/src/drivers/input/virtio_input.rs	init_virtio	191		INV:INV-MMIO-2
+aec2ef78f73f	kernel/src/drivers/input/virtio_input.rs	read_event	388	volatile	INV:INV-DMA-3
+7551c41964ed	kernel/src/drivers/input/virtio_input.rs	drop	542	ptr-ops	GAP
 538026adb462	kernel/src/drivers/intc/apic.rs	reg_read	139		GAP
 32d8431bd7b8	kernel/src/drivers/intc/apic.rs	reg_read	149	volatile,ptr-ops	GAP
 ba5ac813b931	kernel/src/drivers/intc/apic.rs	reg_write	158		GAP
@@ -1539,30 +1513,16 @@ f0001ba75ff0	kernel/src/drivers/net/loopback.rs	loopback_xmit	69	volatile,ptr-op
 5c6a4fff43a5	kernel/src/drivers/net/loopback.rs	get_loopback_device	163		GAP
 a878d02e4540	kernel/src/drivers/net/space.rs	<module>	106		GAP
 cabe3f9d046d	kernel/src/drivers/net/virtio_net.rs	<module>	74		GAP
-ba8767e7f151	kernel/src/drivers/net/virtio_net.rs	init	97	volatile,ptr-ops,addr-arith	GAP
-2db3e7dc682b	kernel/src/drivers/net/virtio_net.rs	xmit	373	ptr-ops	GAP
-a22cef8d4504	kernel/src/drivers/net/virtio_net.rs	xmit	380		GAP
-cff4c329dd45	kernel/src/drivers/net/virtio_net.rs	xmit	404	ptr-ops	GAP
-4477f4a9cead	kernel/src/drivers/net/virtio_net.rs	xmit	412	ptr-ops	GAP
-e131f1134154	kernel/src/drivers/net/virtio_net.rs	xmit	480	volatile,ptr-ops	GAP
-e75a76d4110e	kernel/src/drivers/net/virtio_net.rs	xmit	504	ptr-ops	GAP
-7dae46c9632b	kernel/src/drivers/net/virtio_net.rs	poll	591	raw-construct,ptr-ops	GAP
-4139e6e3a80a	kernel/src/drivers/net/virtio_net.rs	dealloc_rx_buffer	659	ptr-ops	GAP
-2e0f342c7e39	kernel/src/drivers/net/virtio_net.rs	refill_rx_buffers	691	ptr-ops	GAP
-f432d61e12f0	kernel/src/drivers/net/virtio_net.rs	refill_rx_buffers	703		GAP
-c23324faf8e1	kernel/src/drivers/net/virtio_net.rs	virtio_net_xmit	735		GAP
-d46ad9890646	kernel/src/drivers/net/virtio_net.rs	virtio_net_get_stats	748		GAP
-90709fa1448e	kernel/src/drivers/net/virtio_net.rs	init	776		GAP
-2b86673f5e6b	kernel/src/drivers/net/virtio_net.rs	<module>	791	ptr-ops	GAP
-2b50619831d4	kernel/src/drivers/net/virtio_net.rs	get_device	830		GAP
-34245e50c6d7	kernel/src/drivers/net/virtio_net.rs	get_net_device	836		GAP
-7f16ce9d03db	kernel/src/drivers/net/virtio_net.rs	get_device_base_addr	842		GAP
-828335e684f7	kernel/src/drivers/net/virtio_net.rs	interrupt_handler	860	volatile,ptr-ops	GAP
-a13baecec25b	kernel/src/drivers/net/virtio_net.rs	pci_select_queue	933	volatile,ptr-ops	GAP
-b208e648c6fa	kernel/src/drivers/net/virtio_net.rs	pci_set_queue_size	951	volatile,ptr-ops	GAP
-3b9e0496d9c9	kernel/src/drivers/net/virtio_net.rs	init_pci	1009	volatile,ptr-ops	GAP
-8a552f72130c	kernel/src/drivers/net/virtio_net.rs	init_pci	1095		GAP
-8758d385fc4e	kernel/src/drivers/net/virtio_net.rs	interrupt_handler_pci	1137	volatile,ptr-ops	GAP
+cdc9f2f1551a	kernel/src/drivers/net/virtio_net.rs	poll	566	raw-construct,ptr-ops	GAP
+5c401e81c649	kernel/src/drivers/net/virtio_net.rs	dealloc_rx_buffer	634	ptr-ops	GAP
+cce1f530299d	kernel/src/drivers/net/virtio_net.rs	refill_rx_buffers	666	ptr-ops	GAP
+f569f7b80895	kernel/src/drivers/net/virtio_net.rs	refill_rx_buffers	678		GAP
+7b913db30f14	kernel/src/drivers/net/virtio_net.rs	init	745		INV:INV-MMIO-2
+96e14163a6a6	kernel/src/drivers/net/virtio_net.rs	<module>	760	ptr-ops	GAP
+cbcf3c756e91	kernel/src/drivers/net/virtio_net.rs	get_device	799		GAP
+3ee562e113fb	kernel/src/drivers/net/virtio_net.rs	get_net_device	805		GAP
+ed01359789e9	kernel/src/drivers/net/virtio_net.rs	get_device_base_addr	811		GAP
+bb38846cefe6	kernel/src/drivers/net/virtio_net.rs	init_pci	1054		INV:INV-MMIO-2
 d88a5b4d6612	kernel/src/drivers/pci/mod.rs	read_config_dword	141	volatile,ptr-ops	GAP
 1f8a81f1b70e	kernel/src/drivers/pci/mod.rs	write_config_dword	149	volatile,ptr-ops	GAP
 1fd40d5ea36c	kernel/src/drivers/pci/mod.rs	read_config_word	157	volatile,ptr-ops	GAP
@@ -1591,206 +1551,67 @@ b14fe8a10501	kernel/src/drivers/timer/hpet.rs	init	475		GAP
 c2b1c873d3f8	kernel/src/drivers/timer/x86_64.rs	init	451		GAP
 7b96ef873504	kernel/src/drivers/virtio/mod.rs	<module>	89		GAP
 e9d573f88b0b	kernel/src/drivers/virtio/mod.rs	<module>	92		GAP
-12d11f21c6cf	kernel/src/drivers/virtio/mod.rs	init	142	volatile,ptr-ops,addr-arith	GAP
-fae146154e5d	kernel/src/drivers/virtio/mod.rs	init	311	volatile	GAP
-6b28377ba623	kernel/src/drivers/virtio/mod.rs	<module>	343	ptr-ops,ffi	GAP
-1e3777df4867	kernel/src/drivers/virtio/mod.rs	read_block	425	ptr-ops	GAP
-08e9d4c89b65	kernel/src/drivers/virtio/mod.rs	read_block	432		GAP
-0749673220dd	kernel/src/drivers/virtio/mod.rs	read_block	440	ptr-ops	GAP
-1ab63fa2edba	kernel/src/drivers/virtio/mod.rs	read_block	445	ptr-ops	GAP
-9e599e62d7eb	kernel/src/drivers/virtio/mod.rs	read_block	451		GAP
-2fcad8da552b	kernel/src/drivers/virtio/mod.rs	read_block	475	ptr-ops	GAP
-80df67e7b9b3	kernel/src/drivers/virtio/mod.rs	read_block	485	ptr-ops	GAP
-d1b9d1f28f01	kernel/src/drivers/virtio/mod.rs	read_block	495	ptr-ops	GAP
-85504449980f	kernel/src/drivers/virtio/mod.rs	read_block	580	volatile,ptr-ops	GAP
-4bab355667c3	kernel/src/drivers/virtio/mod.rs	read_block	609	ptr-ops	GAP
-835b323501db	kernel/src/drivers/virtio/mod.rs	write_block	648	ptr-ops	GAP
-0e3577a6c6ec	kernel/src/drivers/virtio/mod.rs	write_block	655		GAP
-f74d0acf45ce	kernel/src/drivers/virtio/mod.rs	write_block	663	ptr-ops	GAP
-e956b79f85e4	kernel/src/drivers/virtio/mod.rs	write_block	668	ptr-ops	GAP
-1ff025a76278	kernel/src/drivers/virtio/mod.rs	write_block	674		GAP
-3d49fe05c4f3	kernel/src/drivers/virtio/mod.rs	write_block	775	volatile,ptr-ops	GAP
-0163f5702b0d	kernel/src/drivers/virtio/mod.rs	write_block	804	ptr-ops	GAP
-4432d857f64c	kernel/src/drivers/virtio/mod.rs	submit_read_async	862		GAP
-694d614417f8	kernel/src/drivers/virtio/mod.rs	submit_read_async	869	ptr-ops	GAP
-e6c3b5627e2b	kernel/src/drivers/virtio/mod.rs	submit_read_async	881		GAP
-fd35692f8b3d	kernel/src/drivers/virtio/mod.rs	submit_read_async	886		GAP
-0ea10ffc7b56	kernel/src/drivers/virtio/mod.rs	submit_read_async	890	ptr-ops	GAP
-36dfa81808f5	kernel/src/drivers/virtio/mod.rs	submit_read_async	911		GAP
-a32ebd612572	kernel/src/drivers/virtio/mod.rs	submit_read_async	922		GAP
-1600244c548e	kernel/src/drivers/virtio/mod.rs	submit_read_async	933		GAP
-103247745abc	kernel/src/drivers/virtio/mod.rs	submit_read_async	964	ptr-ops	GAP
-63b0161dd5b7	kernel/src/drivers/virtio/mod.rs	submit_write_async	1049		GAP
-f32f85f68626	kernel/src/drivers/virtio/mod.rs	submit_write_async	1056	ptr-ops	GAP
-71392d696b02	kernel/src/drivers/virtio/mod.rs	submit_write_async	1068		GAP
-5587c654526e	kernel/src/drivers/virtio/mod.rs	submit_write_async	1073		GAP
-fceb83a41c80	kernel/src/drivers/virtio/mod.rs	submit_write_async	1077	ptr-ops	GAP
-6aec3455608c	kernel/src/drivers/virtio/mod.rs	submit_write_async	1098		GAP
-cf68507fd3aa	kernel/src/drivers/virtio/mod.rs	submit_write_async	1109		GAP
-746a3dc4d8b3	kernel/src/drivers/virtio/mod.rs	submit_write_async	1120		GAP
-467ddaea55dc	kernel/src/drivers/virtio/mod.rs	submit_write_async	1148	ptr-ops	GAP
-847147712056	kernel/src/drivers/virtio/mod.rs	<module>	1195	ptr-ops	GAP
-b9fd625fc7d8	kernel/src/drivers/virtio/mod.rs	<module>	1216	ptr-ops	GAP
-9a3f12f0ec93	kernel/src/drivers/virtio/mod.rs	<module>	1263		GAP
-0872c9633287	kernel/src/drivers/virtio/mod.rs	io_buf_alloc	1299	ptr-ops	GAP
-a30fe6e312e0	kernel/src/drivers/virtio/mod.rs	io_buf_alloc	1305		GAP
-64b244d3afef	kernel/src/drivers/virtio/mod.rs	io_buf_free	1320	ptr-ops	GAP
-7f45a65c0c3d	kernel/src/drivers/virtio/mod.rs	io_buf_free	1327		GAP
-36003135431f	kernel/src/drivers/virtio/mod.rs	pci_blk_acquire_site	1405	asm	GAP
-b80524837926	kernel/src/drivers/virtio/mod.rs	pci_blk_acquire_site	1411	asm	GAP
-bd91042e45d1	kernel/src/drivers/virtio/mod.rs	wedge_put	1427		GAP
-4e9029890046	kernel/src/drivers/virtio/mod.rs	pci_blk_contended_forensics	1526	volatile,ptr-ops	GAP
-f63b57547c95	kernel/src/drivers/virtio/mod.rs	pci_blk_holder_watchdog	1682	volatile,ptr-ops	GAP
-552ece15729b	kernel/src/drivers/virtio/mod.rs	<module>	1786		GAP
-39e87c926683	kernel/src/drivers/virtio/mod.rs	pci_pending_slot_reservable_len	2146		GAP
-d557b30bbb29	kernel/src/drivers/virtio/mod.rs	pci_publish_sync_chain	2186		GAP
-090224e7dc6b	kernel/src/drivers/virtio/mod.rs	pci_flag_sync_tombstone_timed_out	2233		GAP
-6f3a1be405ab	kernel/src/drivers/virtio/mod.rs	abandon_pending_completion	2295		GAP
-58e7417347d3	kernel/src/drivers/virtio/mod.rs	abandon_pending_completion	2387		GAP
-774eecfb9c90	kernel/src/drivers/virtio/mod.rs	<module>	2403		GAP
-4f197e806615	kernel/src/drivers/virtio/mod.rs	pci_submit_data_async	2412		GAP
-a4248f425dae	kernel/src/drivers/virtio/mod.rs	<module>	2448	ptr-ops,addr-arith	GAP
-4cbe27ac1a2b	kernel/src/drivers/virtio/mod.rs	pci_submit_data_async_sg	2496	ptr-ops	GAP
-7096d22e5290	kernel/src/drivers/virtio/mod.rs	pci_submit_data_async_sg	2498		GAP
-34adf5ba11a3	kernel/src/drivers/virtio/mod.rs	pci_submit_data_async_sg	2646		GAP
-169d177150f9	kernel/src/drivers/virtio/mod.rs	<module>	2708	ptr-ops	GAP
-e3912bf75125	kernel/src/drivers/virtio/mod.rs	<module>	2735	ptr-ops	GAP
-366bde590d40	kernel/src/drivers/virtio/mod.rs	<module>	2750	ptr-ops	GAP
-92b72c141fa2	kernel/src/drivers/virtio/mod.rs	<module>	2770	ptr-ops	GAP
-d8e06819c663	kernel/src/drivers/virtio/mod.rs	pci_async_read_sg_fn	2778		GAP
-51afc7aa191d	kernel/src/drivers/virtio/mod.rs	<module>	2791	ptr-ops	GAP
-521b75a8b5bf	kernel/src/drivers/virtio/mod.rs	pci_async_write_sg_fn	2799		GAP
-137495743c6d	kernel/src/drivers/virtio/mod.rs	vw_report	2897	volatile,ptr-ops	GAP
-37c7af98fcb8	kernel/src/drivers/virtio/mod.rs	vw_snap_direct	3014	volatile,ptr-ops	GAP
-2eca2ffb5418	kernel/src/drivers/virtio/mod.rs	vw_lag_watchdog	3060	volatile,ptr-ops	GAP
-58949dd36e14	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3206	volatile,ptr-ops	GAP
-f6621b0c8e04	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3263	volatile,ptr-ops	GAP
-78e3df945c5f	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3275	volatile,ptr-ops	GAP
-04efc5bcf886	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3292		GAP
-920cd95c0dfd	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3327		GAP
-1fa549307aca	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3416	ptr-ops	GAP
-854694f1212f	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3430		GAP
-68ca4b23aa30	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3452		GAP
-843a81d391e0	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3458		GAP
-0cc84d8e52c5	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3470	volatile,ptr-ops	GAP
-40fda19519ca	kernel/src/drivers/virtio/mod.rs	pci_rescue_lagged_completions	3523	volatile,ptr-ops	GAP
-974e0106795a	kernel/src/drivers/virtio/mod.rs	init	3561	ptr-ops	GAP
-18512a6e85a6	kernel/src/drivers/virtio/mod.rs	register_pci_device	3592		GAP
-d243b44fb774	kernel/src/drivers/virtio/mod.rs	get_device	3623		GAP
-ecbd17c2cf5c	kernel/src/drivers/virtio/mod.rs	get_pci_device_at	3648		GAP
-349f0da9e17e	kernel/src/drivers/virtio/mod.rs	set_pci_device_queue	3660		GAP
-04feb28ee2b4	kernel/src/drivers/virtio/mod.rs	get_pci_device_queue_mut_at	3704		GAP
-736bec7ca89a	kernel/src/drivers/virtio/mod.rs	get_pci_device_queue_at	3719		GAP
-c0745f67bd1f	kernel/src/drivers/virtio/mod.rs	register_pci_gen_disk	3804	volatile	GAP
-8f24c512588f	kernel/src/drivers/virtio/mod.rs	<module>	3835	ffi	GAP
-7f82391791a8	kernel/src/drivers/virtio/mod.rs	get_pci_gen_disk_at	3960		GAP
-7ba1f660f33d	kernel/src/drivers/virtio/mod.rs	interrupt_handler_pci	3994	volatile,ptr-ops	GAP
-8de278e20fd8	kernel/src/drivers/virtio/mod.rs	interrupt_handler	4029	volatile,ptr-ops	GAP
-d7ad6e9c3679	kernel/src/drivers/virtio/mod.rs	block_bh_handler	4066	volatile,ptr-ops	GAP
-b650d000db19	kernel/src/drivers/virtio/mod.rs	block_bh_handler	4250		GAP
-1125e16d3689	kernel/src/drivers/virtio/mod.rs	block_bh_handler	4256		GAP
-9af77e739258	kernel/src/drivers/virtio/mod.rs	enable_device_interrupt	4339		GAP
+4ae78158ca94	kernel/src/drivers/virtio/mod.rs	<module>	327	ptr-ops,ffi	GAP
+60f4799b010d	kernel/src/drivers/virtio/mod.rs	<module>	1014	ptr-ops	GAP
+b18dad33714c	kernel/src/drivers/virtio/mod.rs	<module>	1035	ptr-ops	GAP
+a9b000b54255	kernel/src/drivers/virtio/mod.rs	<module>	1082		GAP
+ecc7b9d52b29	kernel/src/drivers/virtio/mod.rs	io_buf_alloc	1118	ptr-ops	GAP
+7b6be1be37b5	kernel/src/drivers/virtio/mod.rs	io_buf_alloc	1124		GAP
+d8fdbec2f2c8	kernel/src/drivers/virtio/mod.rs	io_buf_free	1139	ptr-ops	GAP
+f39d1446e5eb	kernel/src/drivers/virtio/mod.rs	io_buf_free	1146		GAP
+a7634cbb180c	kernel/src/drivers/virtio/mod.rs	io_buf_init	1161	ptr-ops	INV:INV-SAFECALL-1
+cbb2dea89813	kernel/src/drivers/virtio/mod.rs	io_buf_release	1187		INV:INV-SAFECALL-1
+4f022d819bf0	kernel/src/drivers/virtio/mod.rs	begin_delivery	1200		INV:INV-SAFECALL-1
+bec6747bfa27	kernel/src/drivers/virtio/mod.rs	deliver_completion	1209		INV:INV-SAFECALL-1
+6e69d6cc775f	kernel/src/drivers/virtio/mod.rs	pci_blk_acquire_site	1290	asm	GAP
+fe04e125292b	kernel/src/drivers/virtio/mod.rs	pci_blk_acquire_site	1296	asm	GAP
+aef5d367a4f0	kernel/src/drivers/virtio/mod.rs	wedge_put	1312		GAP
+7ece9d742962	kernel/src/drivers/virtio/mod.rs	<module>	1659		GAP
+5fc4b7ebd80b	kernel/src/drivers/virtio/mod.rs	pci_pending_slot_reservable_len	2019		GAP
+13a8724473e7	kernel/src/drivers/virtio/mod.rs	pci_publish_sync_chain	2059		GAP
+3a2219edff51	kernel/src/drivers/virtio/mod.rs	pci_flag_sync_tombstone_timed_out	2106		GAP
+d6546bf7525c	kernel/src/drivers/virtio/mod.rs	abandon_pending_completion	2168		GAP
+b0d92b729602	kernel/src/drivers/virtio/mod.rs	abandon_pending_completion	2260		GAP
+43b800081b49	kernel/src/drivers/virtio/mod.rs	<module>	2276		GAP
+9e3152500e8e	kernel/src/drivers/virtio/mod.rs	pci_submit_data_async	2285		GAP
+fa96ff4c818e	kernel/src/drivers/virtio/mod.rs	<module>	2321	ptr-ops,addr-arith	GAP
+3176f590d963	kernel/src/drivers/virtio/mod.rs	pci_submit_data_async_sg	2513		GAP
+f9fdadcdb662	kernel/src/drivers/virtio/mod.rs	<module>	2575	ptr-ops	GAP
+588294fe8226	kernel/src/drivers/virtio/mod.rs	<module>	2602	ptr-ops	GAP
+2bff9b52888c	kernel/src/drivers/virtio/mod.rs	<module>	2617	ptr-ops	GAP
+4879c778f826	kernel/src/drivers/virtio/mod.rs	<module>	2637	ptr-ops	GAP
+aa595ba4636c	kernel/src/drivers/virtio/mod.rs	pci_async_read_sg_fn	2645		GAP
+92685d9194ab	kernel/src/drivers/virtio/mod.rs	<module>	2658	ptr-ops	GAP
+c0538f1ef883	kernel/src/drivers/virtio/mod.rs	pci_async_write_sg_fn	2666		GAP
+35b597a36257	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3145		GAP
+489fb8ebf832	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3180		GAP
+d3477bb33005	kernel/src/drivers/virtio/mod.rs	init	3394	ptr-ops	INV:INV-MMIO-2
+a511b8c74890	kernel/src/drivers/virtio/mod.rs	register_pci_device	3425		INV:INV-MMIO-2
+bbd22acd4ff2	kernel/src/drivers/virtio/mod.rs	get_device	3456		INV:INV-SREF-1
+f9f819ce3d50	kernel/src/drivers/virtio/mod.rs	get_pci_device_at	3481		GAP
+d8c0ce430889	kernel/src/drivers/virtio/mod.rs	set_pci_device_queue	3493		GAP
+41d303be1cd5	kernel/src/drivers/virtio/mod.rs	get_pci_device_queue_mut_at	3537		GAP
+aaab591502eb	kernel/src/drivers/virtio/mod.rs	get_pci_device_queue_at	3552		GAP
+298a2f38753e	kernel/src/drivers/virtio/mod.rs	<module>	3669	ffi	GAP
+eb712b3af0b9	kernel/src/drivers/virtio/mod.rs	get_pci_gen_disk_at	3794		GAP
+803310fb9d91	kernel/src/drivers/virtio/mod.rs	enable_device_interrupt	4164		GAP
 1243d08bf4fb	kernel/src/drivers/virtio/probe.rs	virtio_probe_devices	94	volatile,ptr-ops	GAP
 46209d525514	kernel/src/drivers/virtio/probe.rs	virtio_probe_devices	102	volatile,ptr-ops	GAP
 33e3296442c4	kernel/src/drivers/virtio/probe.rs	init_pci_block_devices	428	volatile,ptr-ops	GAP
 a2804df3a25e	kernel/src/drivers/virtio/probe.rs	init_pci_block_devices	433	volatile,ptr-ops	GAP
 8bf707533159	kernel/src/drivers/virtio/probe.rs	pci_rescan_block_hotplug	707	volatile,ptr-ops	GAP
-30d10fcd990f	kernel/src/drivers/virtio/queue.rs	<module>	126		GAP
-7be065e4e6d4	kernel/src/drivers/virtio/queue.rs	<module>	127		GAP
-65a460f5a71b	kernel/src/drivers/virtio/queue.rs	with_notify_width	175	ptr-ops	GAP
-9ab400516b41	kernel/src/drivers/virtio/queue.rs	with_notify_width	184		GAP
-055a6620e87c	kernel/src/drivers/virtio/queue.rs	with_notify_width	191	ptr-ops	GAP
-b52c81644529	kernel/src/drivers/virtio/queue.rs	with_notify_width	192	ptr-ops	GAP
-6d51f9eba1fd	kernel/src/drivers/virtio/queue.rs	with_notify_width	195		GAP
-66b3e72bb138	kernel/src/drivers/virtio/queue.rs	with_notify_width	204		GAP
-c1dd8800629c	kernel/src/drivers/virtio/queue.rs	<module>	239	ptr-ops	GAP
-868627d766f3	kernel/src/drivers/virtio/queue.rs	free_vring	243	ptr-ops	GAP
-0a8c807ace70	kernel/src/drivers/virtio/queue.rs	get_avail	256	volatile	GAP
-b7c1a3797924	kernel/src/drivers/virtio/queue.rs	get_used	262	volatile	GAP
-3ee23cbd889c	kernel/src/drivers/virtio/queue.rs	get_used_elem	278	volatile,ptr-ops	GAP
-8a4b77ae6bfe	kernel/src/drivers/virtio/queue.rs	notify	303	asm	GAP
-7a10a62a48d9	kernel/src/drivers/virtio/queue.rs	notify	319	asm	GAP
-dbfc755e0659	kernel/src/drivers/virtio/queue.rs	notify	325	volatile,ptr-ops	GAP
-5e0c656c3a48	kernel/src/drivers/virtio/queue.rs	notify	349	asm	GAP
-92a6f5b1c6cc	kernel/src/drivers/virtio/queue.rs	notify	356	asm	GAP
-21a0212ae6ea	kernel/src/drivers/virtio/queue.rs	wait_for_completion_max	391	volatile,ptr-ops	GAP
-ea881bac38eb	kernel/src/drivers/virtio/queue.rs	vw_pollstall_print	478	volatile	GAP
-9778779d96f3	kernel/src/drivers/virtio/queue.rs	vw_pollstall_print	486	volatile,ptr-ops	GAP
-608a138f737f	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	564	volatile	GAP
-1e16add084a0	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	684		GAP
-7950559f7188	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	686	volatile,ptr-ops	GAP
-049a2e516ea9	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	724		GAP
-1c07f49ffc77	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	726	volatile,ptr-ops	GAP
-dd120ca8bed6	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	771		GAP
-370c92ee222e	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	773	volatile,ptr-ops	GAP
-16c07d4b519f	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	803		GAP
-beeb23a9e96d	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	805	volatile,ptr-ops	GAP
-415b61def7d3	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	839		GAP
-d0382dedfcd7	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	848	volatile,ptr-ops	GAP
-b553a72825cb	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	870		GAP
-891846a03fa7	kernel/src/drivers/virtio/queue.rs	wait_for_used_interruptible	872	volatile,ptr-ops	GAP
-c5717144b3f0	kernel/src/drivers/virtio/queue.rs	wait_for_desc_completion	1015	volatile,ptr-ops	GAP
-9e3a432312b9	kernel/src/drivers/virtio/queue.rs	wait_for_desc_completion	1026	volatile,ptr-ops	GAP
-30e8fbd2775a	kernel/src/drivers/virtio/queue.rs	wait_for_desc_completion	1060	volatile,ptr-ops	GAP
-69c63d9ee98c	kernel/src/drivers/virtio/queue.rs	wait_for_desc_completion	1067	volatile,ptr-ops	GAP
-b0f0c2bc38f1	kernel/src/drivers/virtio/queue.rs	submit_quiet	1114	volatile,ptr-ops	GAP
-a2407f11fa70	kernel/src/drivers/virtio/queue.rs	get_desc	1150		GAP
-64f17ac0d81a	kernel/src/drivers/virtio/queue.rs	set_desc	1352		GAP
-2ba796ee1598	kernel/src/drivers/virtio/virtio_pci.rs	find_virtio_capability	122		GAP
-c36c89a88ae8	kernel/src/drivers/virtio/virtio_pci.rs	read_virtio_cap	170		GAP
-525d20550e76	kernel/src/drivers/virtio/virtio_pci.rs	reset_device	627	volatile,ptr-ops	GAP
-aae88f591563	kernel/src/drivers/virtio/virtio_pci.rs	set_status	636	volatile,ptr-ops	GAP
-4cddab9838e9	kernel/src/drivers/virtio/virtio_pci.rs	get_status	645	volatile,ptr-ops	GAP
-41c6f42d74e2	kernel/src/drivers/virtio/virtio_pci.rs	read_device_features	659	volatile,ptr-ops	GAP
-c14db4782d77	kernel/src/drivers/virtio/virtio_pci.rs	write_driver_features	678	volatile,ptr-ops	GAP
-1d2dd6c6403a	kernel/src/drivers/virtio/virtio_pci.rs	setup_queue	698	volatile,ptr-ops	GAP
-24fabeb35afc	kernel/src/drivers/virtio/virtio_pci.rs	setup_queue	704	volatile,ptr-ops	GAP
-3ebdc8e72bbc	kernel/src/drivers/virtio/virtio_pci.rs	setup_queue	734	volatile,ptr-ops	GAP
-430668506e08	kernel/src/drivers/virtio/virtio_pci.rs	setup_queue	742	volatile,ptr-ops	GAP
-fdb38f0e6288	kernel/src/drivers/virtio/virtio_pci.rs	setup_queue	750	volatile,ptr-ops	GAP
-3c1e519e6470	kernel/src/drivers/virtio/virtio_pci.rs	setup_queue	758	volatile,ptr-ops	GAP
-148f8d8ef946	kernel/src/drivers/virtio/virtio_pci.rs	get_notify_addr	784	volatile,ptr-ops	GAP
-3d692ffbda88	kernel/src/drivers/virtio/virtio_pci.rs	notify	798	volatile,ptr-ops	GAP
-0548cbc2f40f	kernel/src/drivers/virtio/virtio_pci.rs	find_pci_capability	907		GAP
-171531550fc3	kernel/src/drivers/virtio/virtio_pci.rs	enable_msix_vector0	948	volatile,ptr-ops	GAP
-340b0bd08f10	kernel/src/drivers/virtio/virtio_pci.rs	set_queue_vector	996	volatile,ptr-ops	GAP
-876faf96399a	kernel/src/drivers/virtio/virtio_pci.rs	read_block	1051	ptr-ops	GAP
-0152bfdcdea6	kernel/src/drivers/virtio/virtio_pci.rs	read_block	1058		GAP
-2f2a6e13e818	kernel/src/drivers/virtio/virtio_pci.rs	read_block	1066	ptr-ops	GAP
-2c9138cc14a5	kernel/src/drivers/virtio/virtio_pci.rs	read_block	1071	ptr-ops	GAP
-106a64bf40cb	kernel/src/drivers/virtio/virtio_pci.rs	read_block	1077		GAP
-e699c255b672	kernel/src/drivers/virtio/virtio_pci.rs	read_block	1141	ptr-ops	GAP
-7ed3572e4e44	kernel/src/drivers/virtio/virtio_pci.rs	read_block	1149		GAP
-1cf5eb860a3a	kernel/src/drivers/virtio/virtio_pci.rs	read_block	1152	ptr-ops	GAP
-588a4e9f1e50	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1192		GAP
-6511d28b08ec	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1200		GAP
-098345c652b8	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1208		GAP
-f7a0ccd18921	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1223	ptr-ops	GAP
-26b3fa9457d9	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1228		GAP
-9376d378f08d	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1232		GAP
-a97fed65a258	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1239	ptr-ops	GAP
-08d40a97f3be	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1244	ptr-ops	GAP
-b88f7b4ea0b2	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1251		GAP
-29f4f119f33a	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1305	ptr-ops	GAP
-611e8cad551c	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1313		GAP
-23d3a1342eef	kernel/src/drivers/virtio/virtio_pci.rs	write_block	1316	ptr-ops	GAP
-cb854ae269d9	kernel/src/drivers/virtio/virtio_pci.rs	read_block_once	1405	ptr-ops	GAP
-bf334d1cdd59	kernel/src/drivers/virtio/virtio_pci.rs	read_block_once	1407		GAP
-ecadef72ae70	kernel/src/drivers/virtio/virtio_pci.rs	read_block_once	1579	ptr-ops	GAP
-5ddd54a6d534	kernel/src/drivers/virtio/virtio_pci.rs	read_block_once	1592	volatile,ptr-ops	GAP
-75051b825a83	kernel/src/drivers/virtio/virtio_pci.rs	read_block_once	1617		GAP
-164e1ac272db	kernel/src/drivers/virtio/virtio_pci.rs	write_block_once	1687	ptr-ops	GAP
-29e839e3d60e	kernel/src/drivers/virtio/virtio_pci.rs	write_block_once	1689		GAP
-495ccfe9d230	kernel/src/drivers/virtio/virtio_pci.rs	write_block_once	1835	ptr-ops	GAP
-2afd7709ff09	kernel/src/drivers/virtio/virtio_pci.rs	write_block_once	1848	volatile,ptr-ops	GAP
-addad8119bda	kernel/src/drivers/virtio/virtio_pci.rs	write_block_once	1870		GAP
-e1d171aa6eab	kernel/src/drivers/virtio/virtio_pci.rs	flush_block_once	1936	ptr-ops	GAP
-1a1f4b90d9a1	kernel/src/drivers/virtio/virtio_pci.rs	flush_block_once	1938		GAP
-400a83a19918	kernel/src/drivers/virtio/virtio_pci.rs	flush_block_once	2050	ptr-ops	GAP
-2a2be6689618	kernel/src/drivers/virtio/virtio_pci.rs	flush_block_once	2060	volatile,ptr-ops	GAP
-33c6a182c0da	kernel/src/drivers/virtio/virtio_pci.rs	flush_block_once	2081		GAP
-990a57ae8b18	kernel/src/drivers/virtio/virtio_pci.rs	intx_dispatch	2174	volatile,ptr-ops	GAP
-74bd54d7f90b	kernel/src/drivers/virtio/virtio_pci.rs	intx_dispatch	2190	transmute	GAP
+a4ea6ae6fa18	kernel/src/drivers/virtio/queue.rs	<module>	144		GAP
+16a3424a6e97	kernel/src/drivers/virtio/queue.rs	<module>	145		GAP
+9566bd6c378f	kernel/src/drivers/virtio/queue.rs	used_ring_idx	163	volatile,ptr-ops	INV:INV-DMA-3
+2b3511bcc5c7	kernel/src/drivers/virtio/queue.rs	used_ring_elem_id	176	volatile,ptr-ops	INV:INV-DMA-3
+850c3bcf2153	kernel/src/drivers/virtio/queue.rs	resp_status_byte	198	volatile	INV:INV-DMA-3
+dac52d79e68f	kernel/src/drivers/virtio/queue.rs	notify	384	asm	GAP
+fec1539fab50	kernel/src/drivers/virtio/queue.rs	notify	400	asm	GAP
+c3ee4ccdb8b5	kernel/src/drivers/virtio/queue.rs	notify	406	volatile,ptr-ops	GAP
+17856eff27b5	kernel/src/drivers/virtio/queue.rs	notify	430	asm	GAP
+420dd35ab796	kernel/src/drivers/virtio/queue.rs	notify	437	asm	GAP
+9e93179b2a12	kernel/src/drivers/virtio/queue.rs	desc_mut	1422		INV:INV-DMA-2
+68f965adc864	kernel/src/drivers/virtio/queue.rs	avail_header_mut	1435		INV:INV-DMA-2
 973a49e343e9	kernel/src/drivers/watchdog.rs	watchdog_file_ioctl	100		GAP
 9252ea8296bf	kernel/src/drivers/watchdog.rs	<module>	109	ptr-ops	GAP
 d1e398358302	kernel/src/drivers/watchdog.rs	<module>	121	ptr-ops	GAP
@@ -3501,11 +3322,9 @@ e84ea9ceb342	kernel/src/mm/mod.rs	<module>	144	addr-arith	GAP
 35294ffffdfe	kernel/src/mm/mod.rs	alloc_and_map_user_memory	158	addr-arith	GAP
 05eab2388c76	kernel/src/mm/mod.rs	<module>	175		GAP
 f28bb13f3727	kernel/src/mm/oom_kill.rs	select_bad_process	160		GAP
-21f4bc67fccc	kernel/src/mm/oom_kill.rs	select_bad_process	206		GAP
-7f700b2d0e6e	kernel/src/mm/oom_kill.rs	oom_kill_process	265	ptr-ops	GAP
-d319b060dd26	kernel/src/mm/oom_kill.rs	fault_oom_kill_or_retry	490		GAP
-c40d6a19fad8	kernel/src/mm/oom_kill.rs	kernel_fault_oom_kill	534		GAP
-1f1d97d61ec2	kernel/src/mm/oom_kill.rs	sysrq_oom_kill	564		GAP
+c0400a9641ce	kernel/src/mm/oom_kill.rs	fault_oom_kill_or_retry	493		GAP
+587da749b353	kernel/src/mm/oom_kill.rs	kernel_fault_oom_kill	537		GAP
+648b4968d275	kernel/src/mm/oom_kill.rs	sysrq_oom_kill	567		GAP
 68c1cc37b40f	kernel/src/mm/page_alloc.rs	reclaim_gate_census	239		GAP
 f9dbbd4cdfca	kernel/src/mm/page_alloc.rs	reclaim_gate_census	247		GAP
 22899ca72999	kernel/src/mm/page_alloc.rs	alloc_pages	341		GAP
@@ -3540,18 +3359,13 @@ a5b62be832a9	kernel/src/mm/page_desc.rs	<module>	1325	addr-arith	GAP
 3455162d9615	kernel/src/mm/pcp.rs	<module>	75		GAP
 ab3b103127ec	kernel/src/mm/pcp.rs	with_row	103		GAP
 45c345ce5c1f	kernel/src/mm/pcp.rs	with_row	104		GAP
-9dc55e139f86	kernel/src/mm/pcp.rs	alloc_order0	182		GAP
-62c391307b07	kernel/src/mm/pcp.rs	free_order0	246	addr-arith	GAP
-6ef58de29219	kernel/src/mm/pcp.rs	free_order0	353		GAP
-bf21deafbbde	kernel/src/mm/pcp.rs	free_order0	368		GAP
-27f021d66103	kernel/src/mm/pcp.rs	to_cached	385		GAP
-4839cbbbefa1	kernel/src/mm/pcp.rs	to_in_use	400		GAP
-7d823a94c0ac	kernel/src/mm/pcp.rs	cached_pages_total	420		GAP
-2152770b7ef2	kernel/src/mm/pcp.rs	cached_pages_total	421		GAP
-9e66320ea491	kernel/src/mm/pcp.rs	cached_pages_per_cpu	431		GAP
-6397c6a00a2a	kernel/src/mm/pcp.rs	cached_pages_per_cpu	432		GAP
-3cbac61726cf	kernel/src/mm/pcp.rs	forensics_scan_rows	449		GAP
-a5b7aebc3250	kernel/src/mm/pcp.rs	forensics_scan_rows	450		GAP
+1198d4b940f3	kernel/src/mm/pcp.rs	free_order0	243	addr-arith	GAP
+ab615b07264b	kernel/src/mm/pcp.rs	cached_pages_total	405		GAP
+92ebe3a006c7	kernel/src/mm/pcp.rs	cached_pages_total	406		GAP
+8e47eacece34	kernel/src/mm/pcp.rs	cached_pages_per_cpu	416		GAP
+c20298bcac03	kernel/src/mm/pcp.rs	cached_pages_per_cpu	417		GAP
+c23cd33a87b5	kernel/src/mm/pcp.rs	forensics_scan_rows	434		GAP
+a6ae29156bd9	kernel/src/mm/pcp.rs	forensics_scan_rows	435		GAP
 4993ac67d608	kernel/src/mm/pglist.rs	<module>	246		GAP
 66d48669f293	kernel/src/mm/pglist.rs	node_data	263		GAP
 c48d4facc055	kernel/src/mm/pglist.rs	node_data_mut	276		GAP
@@ -3561,8 +3375,8 @@ a0ed489c05c3	kernel/src/mm/rmap.rs	page_add_anon_rmap	101		GAP
 8b254ab67e79	kernel/src/mm/rmap.rs	page_add_file_rmap	129	ptr-ops	GAP
 a9cb4935323b	kernel/src/mm/rmap.rs	page_remove_rmap	151		GAP
 fa85ea42bfe5	kernel/src/mm/rmap.rs	try_to_unmap_inner	350		GAP
-e07af43fb75b	kernel/src/mm/rmap.rs	try_to_unmap_inner	371		GAP
-d3f8e2bb8f76	kernel/src/mm/rmap.rs	try_to_unmap_inner	429		GAP
+91e9f880699f	kernel/src/mm/rmap.rs	try_to_unmap_inner	417		GAP
+fecba8da3775	kernel/src/mm/rmap.rs	try_to_unmap_inner	437		GAP
 f48d5598a6fe	kernel/src/mm/slab.rs	alloc_from_slab	202	ptr-ops	GAP
 ae0db92605fc	kernel/src/mm/slab.rs	free	293	ptr-ops	GAP
 7d0944e9fb31	kernel/src/mm/slab.rs	create_slab	348		GAP
@@ -3588,16 +3402,11 @@ c17998775d4d	kernel/src/mm/small_alloc.rs	census_peek3	1011	volatile,ptr-ops	GAP
 cce0d8d31e3b	kernel/src/mm/small_alloc.rs	census_peek3	1012	volatile,ptr-ops	GAP
 dc4d38da850e	kernel/src/mm/small_alloc.rs	census_peek3	1013	volatile,ptr-ops	GAP
 4b293d09e97e	kernel/src/mm/small_alloc.rs	census_peek3	1020	volatile,ptr-ops	GAP
-602bb3d0b04f	kernel/src/mm/swap.rs	swap_activate	286	ptr-ops	GAP
-5269d81d618a	kernel/src/mm/swap.rs	swap_deactivate	305		GAP
-c142fcfd3ee6	kernel/src/mm/swap.rs	nr_active_swap	356		GAP
-b62528bc183f	kernel/src/mm/swap.rs	swap_alloc_slot	365		GAP
-d548f203069c	kernel/src/mm/swap.rs	swap_free_slot	404		GAP
-258b5a7950a5	kernel/src/mm/swap.rs	swap_read_page	439	ptr-ops,addr-arith	GAP
-ab30c3c2f047	kernel/src/mm/swap.rs	swap_write_page	474	raw-construct,ptr-ops,addr-arith	GAP
-a2990d4e0fbf	kernel/src/mm/swap.rs	swap_stats	517		GAP
-b927bb710f0c	kernel/src/mm/swap.rs	get_swap_disk	551	ptr-ops	GAP
-ddf4e31a14a9	kernel/src/mm/swap.rs	get_swap_sector	564		GAP
+72bb0388811c	kernel/src/mm/swap.rs	swap_dev	151		INV:INV-SREF-1
+5f8b002a0b2e	kernel/src/mm/swap.rs	swap_page_slice_mut	163	ptr-ops,addr-arith	INV:INV-SAFECALL-1
+8f68caf02334	kernel/src/mm/swap.rs	swap_page_slice	173	raw-construct,ptr-ops,addr-arith	INV:INV-SAFECALL-1
+6bf4017e6c0d	kernel/src/mm/swap.rs	swap_activate	322	ptr-ops	GAP
+019b97a64429	kernel/src/mm/swap.rs	get_swap_disk	565	ptr-ops	INV:INV-BLKDEV-1
 a8799ee7dd99	kernel/src/mm/vdso.rs	<module>	81	ptr-ops	GAP
 133b391868db	kernel/src/mm/vdso.rs	vdso_seq	82	ptr-ops	GAP
 273f6b4d3607	kernel/src/mm/vdso.rs	vdso_data_tick	97	volatile,ptr-ops	GAP
@@ -3626,29 +3435,19 @@ d52d87a663a3	kernel/src/mm/vmemmap.rs	vmemmap_to_pfn	68		GAP
 0afe51233abd	kernel/src/mm/vmemmap.rs	init_vmemmap	191		GAP
 f92beccd3da8	kernel/src/mm/vmemmap.rs	vmemmap_stats	214		GAP
 444207622d17	kernel/src/mm/vmscan.rs	shrink_node	472		GAP
-0416293bab6b	kernel/src/mm/vmscan.rs	reclaim_anonymous_pages	628	addr-arith	GAP
 c55708540569	kernel/src/mm/zone.rs	alloc_pages_order0_batch	416		GAP
 3183b66dafe2	kernel/src/mm/zone.rs	alloc_pages_order0_batch	438		GAP
 b527fe9a0c98	kernel/src/mm/zone.rs	alloc_pages_order0_batch	482		GAP
-0d934b697d45	kernel/src/mm/zone.rs	alloc_pages_order0_batch	507		GAP
-3b948e2f4855	kernel/src/mm/zone.rs	alloc_pages_order0_batch	534		GAP
-378fe00558be	kernel/src/mm/zone.rs	alloc_pages_locked	615		GAP
-c58fb2fee8b2	kernel/src/mm/zone.rs	alloc_pages_locked	625		GAP
-4f838c16c65c	kernel/src/mm/zone.rs	alloc_from_order	667		GAP
-9164cd4c7e32	kernel/src/mm/zone.rs	alloc_from_order	704		GAP
-1cc329bc1ac8	kernel/src/mm/zone.rs	free_pages	758		GAP
-5936b80d7d7b	kernel/src/mm/zone.rs	free_pages	800		GAP
-0b3d96c3e5fa	kernel/src/mm/zone.rs	free_pages	826		GAP
-9428bf7de27d	kernel/src/mm/zone.rs	is_buddy_free	916		GAP
-e26bed5cbbd7	kernel/src/mm/zone.rs	add_to_free_list	939		GAP
-5fbeb11d252a	kernel/src/mm/zone.rs	add_to_free_list	949		GAP
-f4948db51ecd	kernel/src/mm/zone.rs	add_to_free_list_init	970		GAP
-54cb2757aac6	kernel/src/mm/zone.rs	remove_from_free_list	997		GAP
-26da76340aa7	kernel/src/mm/zone.rs	remove_from_free_list	1015		GAP
-7cf5c4644aae	kernel/src/mm/zone.rs	remove_from_free_list	1023		GAP
-691a545fa84d	kernel/src/mm/zone.rs	remove_from_free_list	1026		GAP
-c14f7371c109	kernel/src/mm/zone.rs	remove_from_free_list	1038		GAP
-cfc590976b29	kernel/src/mm/zone.rs	forensic_free_report	1089		GAP
+cd5ed29c1209	kernel/src/mm/zone.rs	alloc_from_order	655		GAP
+8cf1a80ee532	kernel/src/mm/zone.rs	free_pages	743		GAP
+62e2ca693f2e	kernel/src/mm/zone.rs	is_buddy_free	895		GAP
+a98dc55a2685	kernel/src/mm/zone.rs	add_to_free_list	918		GAP
+efa223106007	kernel/src/mm/zone.rs	remove_from_free_list	970		GAP
+6ab6b09add15	kernel/src/mm/zone.rs	remove_from_free_list	988		GAP
+65c2eef14450	kernel/src/mm/zone.rs	remove_from_free_list	996		GAP
+536c3bdc0cf1	kernel/src/mm/zone.rs	remove_from_free_list	999		GAP
+e3587d750a66	kernel/src/mm/zone.rs	remove_from_free_list	1011		GAP
+b80e5e73b3bd	kernel/src/mm/zone.rs	forensic_free_report	1062		GAP
 52943d9a2124	kernel/src/module/mod.rs	sys_init_module_impl	367	ptr-ops	GAP
 b4bc10a3f4ca	kernel/src/module/mod.rs	sys_finit_module_impl	404		GAP
 86c8618086f5	kernel/src/module/mod.rs	sys_finit_module_impl	417		GAP
@@ -4339,20 +4138,23 @@ c96deb88583a	kernel/src/process/wait.rs	prepare_to_wait	682		GAP
 71b541dec270	kernel/src/process/wait.rs	finish_wait	721		GAP
 c9630bcedbda	kernel/src/safety/call.rs	safety_cast	109		INV:INV-SAFECAST-1
 c42f1426d8fc	kernel/src/safety/dma.rs	new	61		INV:INV-DMA-1
-774d78b6cfb0	kernel/src/safety/dma.rs	carve_array	105	ptr-ops	INV:INV-DMA-2
-a86e5b1b9c04	kernel/src/safety/dma.rs	read_volatile_at	143	volatile,ptr-ops	INV:INV-DMA-3
-4f5ad5ba97c0	kernel/src/safety/dma.rs	write_volatile_at	154	volatile,ptr-ops	INV:INV-DMA-3
-f9cf25fd5bc4	kernel/src/safety/dma.rs	drop	162		INV:INV-DMA-1
-82087b90cb3e	kernel/src/safety/dma.rs	read_volatile	202	volatile	INV:INV-DMA-3
-e90e978023f0	kernel/src/safety/dma.rs	write_volatile	212	volatile	INV:INV-DMA-3
-ddee3760f397	kernel/src/safety/dma.rs	deref	222		INV:INV-DMA-2
-e21f7b0f0ef7	kernel/src/safety/dma.rs	deref_mut	230		INV:INV-DMA-2
-2851d977317e	kernel/src/safety/mmio.rs	read_u8	69	volatile	INV:INV-MMIO-2
-f88b3d33dd1d	kernel/src/safety/mmio.rs	read_u32	80	volatile	INV:INV-MMIO-2
-69c188527441	kernel/src/safety/mmio.rs	read_u64	88	volatile	INV:INV-MMIO-2
-675190b54189	kernel/src/safety/mmio.rs	write_u8	97	volatile	INV:INV-MMIO-2
-c8bd0927590e	kernel/src/safety/mmio.rs	write_u32	105	volatile	INV:INV-MMIO-2
-9dcc50ca676c	kernel/src/safety/mmio.rs	write_u64	113	volatile	INV:INV-MMIO-2
+6f057209725f	kernel/src/safety/dma.rs	carve_array	111	ptr-ops	GAP
+4cdba45b59e5	kernel/src/safety/dma.rs	carve_array_aligned	135	ptr-ops	GAP
+9eb9b5f818fe	kernel/src/safety/dma.rs	read_volatile_at	182	volatile,ptr-ops	GAP
+a962016216a8	kernel/src/safety/dma.rs	write_volatile_at	193	volatile,ptr-ops	GAP
+60ac02e498ca	kernel/src/safety/dma.rs	drop	201		GAP
+de1100521e66	kernel/src/safety/dma.rs	read_volatile	241	volatile	GAP
+fcee3c7825f9	kernel/src/safety/dma.rs	write_volatile	251	volatile	GAP
+bec96ca1d959	kernel/src/safety/dma.rs	deref	261		GAP
+b4a7ba1c5133	kernel/src/safety/dma.rs	deref_mut	269		GAP
+ea4995f06791	kernel/src/safety/mmio.rs	read_u8	69	volatile	GAP
+d0de44c2de3f	kernel/src/safety/mmio.rs	read_u16	77	volatile	GAP
+6a9f2a61ee05	kernel/src/safety/mmio.rs	read_u32	88	volatile	GAP
+4559055d9466	kernel/src/safety/mmio.rs	read_u64	96	volatile	GAP
+e258ce79d370	kernel/src/safety/mmio.rs	write_u8	105	volatile	GAP
+9d3261e2105d	kernel/src/safety/mmio.rs	write_u16	113	volatile	GAP
+0e83f52511df	kernel/src/safety/mmio.rs	write_u32	121	volatile	GAP
+f747d0d8b738	kernel/src/safety/mmio.rs	write_u64	129	volatile	GAP
 3e73fab377d8	kernel/src/safety/ptr.rs	new	68	ptr-ops	INV:INV-KPTR-1
 5f9e5b3edf42	kernel/src/safety/ptr.rs	new	72		INV:INV-KPTR-1
 699339226c6c	kernel/src/safety/ptr.rs	read_volatile	100	volatile	INV:INV-KPTR-5
