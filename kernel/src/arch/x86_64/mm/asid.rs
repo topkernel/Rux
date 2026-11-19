@@ -311,15 +311,32 @@ pub fn satp_to_ppn(cr3: u64) -> u64 {
 ///   entries cannot leak into this one;
 /// - PCID off: plain write (the legacy flush-on-load).
 ///
-/// # Safety
-/// `ppn` must be a live page-table root PPN.
-pub unsafe fn switch_root(ppn: u64, asid: u16) {
+/// INV-XE-SWITCHROOT: the ppn is validated before any CR3 write — zero
+/// or off-machine roots are refused with a bounded line instead of
+/// loading garbage into CR3 (the same containment the walk guards give).
+pub fn switch_root(ppn: u64, asid: u16) {
+    if ppn == 0 {
+        static BAD0: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if BAD0.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_err!("SWITCH-ROOT: refusing ppn=0 asid={}", asid);
+        }
+        return;
+    }
+    if crate::mm::page_desc::descs_published()
+        && !crate::mm::phys_valid((ppn << 12) as usize)
+    {
+        static BADP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if BADP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_err!("SWITCH-ROOT: refusing off-machine ppn={:#x}", ppn << 12);
+        }
+        return;
+    }
     if asid != 0 || !pcid_enabled() {
-        // SAFETY: caller guarantees a valid root; tagging per fn doc.
+        // SAFETY: ppn validated above (live root); tagging per fn doc.
         unsafe { write_cr3(build_satp(asid, ppn)) };
     } else {
-        // SAFETY: plain load of a valid root; flushes on entry (only
-        // reachable with PCID on for a PCID-less user root).
+        // SAFETY: validated plain load of a valid root; flushes on entry
+        // (only reachable with PCID on for a PCID-less user root).
         unsafe { write_cr3(ppn << 12) };
     }
 }
