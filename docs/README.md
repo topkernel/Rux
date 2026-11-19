@@ -114,6 +114,7 @@ docs/
 │   ├── structure.md       # Code structure (stats refreshed 2026-11-01)
 │   ├── design-divergences.md  # Divergence register D-1..D-18 (each with rationale/evidence/guard)
 │   ├── security-design.md  # Layered defense: language isolation / syscall boundary / privilege / hardware / verification / runtime
+│   ├── memory-safety-architecture.md  # Memory-safety umbrella: threat model / primitives / lock protocol / measurement / verification / process / gaps
 │   ├── riscv64.md         # RISC-V implementation (status banner 2026-11-01)
 │   ├── aarch64.md         # aarch64 port map
 │   ├── boot.md            # Boot: all three ports (rewritten 2026-11-01)
