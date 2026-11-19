@@ -241,9 +241,9 @@ pub fn note_acquire(
                     .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
             {
-                use crate::console::putchar_no_lock as putchar;
+                use crate::console::uart_putc_raw as putchar;
                 fn phex(v: usize) {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::console::uart_putc_raw as putchar;
                     for sh in (0..16).rev() {
                         let n = ((v >> (sh * 4)) & 0xF) as u8;
                         putchar(if n < 10 {
@@ -254,7 +254,7 @@ pub fn note_acquire(
                     }
                 }
                 fn pdec(mut v: u64) {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::console::uart_putc_raw as putchar;
                     let mut buf = [0u8; 12];
                     let mut n = 0;
                     if v == 0 {
@@ -338,7 +338,7 @@ fn report_acquire_divergent(
     if N.compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
+    use crate::console::uart_putc_raw as putchar;
     // SAFETY: diagnostic scalar reads of stable Task fields; `task` is
     // current on this CPU (pinned by execution), `slot_task` was this
     // CPU's slot content moments before (same discipline as the s14
@@ -472,9 +472,9 @@ pub fn note_release(task: *mut crate::process::Task) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
+    use crate::console::uart_putc_raw as putchar;
     fn ph(v: usize) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::console::uart_putc_raw as putchar;
         for sh in (0..16).rev() {
             let n = ((v >> (sh * 4)) & 0xF) as u8;
             putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
@@ -702,7 +702,7 @@ pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
+    use crate::console::uart_putc_raw as putchar;
     fn putd(mut v: u64) {
         let mut buf = [0u8; 20];
         let mut n = 0;
@@ -773,7 +773,7 @@ pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::Task) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
+    use crate::console::uart_putc_raw as putchar;
     fn putd(mut v: u64) {
         let mut buf = [0u8; 20];
         let mut n = 0;
@@ -888,9 +888,9 @@ pub fn report_parked_site(task: *mut crate::process::Task) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
+    use crate::console::uart_putc_raw as putchar;
     fn pd(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::console::uart_putc_raw as putchar;
         let mut buf = [0u8; 20];
         let mut n = 0;
         if v == 0 {
@@ -969,9 +969,9 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
+    use crate::console::uart_putc_raw as putchar;
     fn putd(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::console::uart_putc_raw as putchar;
         let mut buf = [0u8; 20];
         let mut n = 0;
         if v == 0 {
@@ -1048,7 +1048,7 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
 /// One report line: tag, pid, pc, site=<file>:<line> cnt_after=<n>
 /// age=<jiffies> for the recorded acquire.
 fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
-    use crate::console::putchar_no_lock as putchar;
+    use crate::console::uart_putc_raw as putchar;
     let b = BUDGET.load(Ordering::Acquire);
     if b == 0 {
         return;
@@ -1057,7 +1057,7 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
         .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
         .ok();
     fn put_i64(mut v: i64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::console::uart_putc_raw as putchar;
         if v < 0 {
             putchar(b'-');
             v = v.wrapping_neg();
