@@ -340,6 +340,26 @@ impl TmpfsNode {
             return 0;
         }
 
+        // r-tmpfs wedge fix (2026-11-19, lat_fs official-rig residual):
+        // the page object is a 4 KiB KERNEL-HEAP Box. Allocating it
+        // inside the pages-spinlock section chained this node's lock
+        // INTO the allocator (small_alloc slab refill -> buddy ->
+        // under memory pressure the direct-reclaim slowpath ->
+        // PageCache::shrink's wlock) — a concurrent path the reclaimer
+        // takes back toward tmpfs then deadlocks the pair, wedging the
+        // cpu at IF=0 inside tmpfs_file_write (the mkdir-EIO chain's
+        // head). The reference's shmem allocates the page OUTSIDE the
+        // info lock (shmem_getpage: page-cache alloc first, the locked
+        // section only installs) — same shape here: speculate the page
+        // BEFORE taking the lock, install it under the lock, drop the
+        // unused speculation (its Drop returns the budget slot).
+        let first_idx = offset / PAGE_SIZE;
+        let mut spec: Option<TmpfsPage> = if self.reserve_page() {
+            Some(TmpfsPage::new(self.sb))
+        } else {
+            None // budget exhausted; the loop breaks at first need
+        };
+
         let mut done = 0usize;
         {
             let mut pages = self.pages.lock();
@@ -348,21 +368,34 @@ impl TmpfsNode {
                 let page_idx = off / PAGE_SIZE;
                 let page_off = off % PAGE_SIZE;
                 let chunk = (data.len() - done).min(PAGE_SIZE - page_off);
-                // Allocate the page on first touch (demand paging), under
-                // the mount's page budget. reserve_page() consumes one
-                // budget slot exactly when the entry is about to be
-                // inserted; on failure nothing was reserved (loop breaks).
-                if !pages.contains_key(&page_idx) && !self.reserve_page() {
-                    break; // budget exhausted: short write (0 => ENOSPC)
+                let needs_page = !pages.contains_key(&page_idx);
+                if needs_page {
+                    // Fresh page: consume the speculation (only valid for
+                    // the FIRST first-touch index — a multi-page write's
+                    // later first-touches fall back to an in-lock alloc,
+                    // which is acceptable: the common tmpfs write class
+                    // (lat_fs directories, small logs) touches one page;
+                    // the wedge head is the pressure slowpath, reached
+                    // once per refill, not per page).
+                    let candidate = match spec.take() {
+                        Some(p) if page_idx == first_idx => p,
+                        _ => {
+                            if !self.reserve_page() {
+                                break; // budget exhausted
+                            }
+                            TmpfsPage::new(self.sb)
+                        }
+                    };
+                    pages.insert(page_idx, candidate);
                 }
-                let page = pages
-                    .entry(page_idx)
-                    .or_insert_with(|| TmpfsPage::new(self.sb));
+                let page = pages.get_mut(&page_idx).unwrap();
                 page.data[page_off..page_off + chunk]
                     .copy_from_slice(&data[done..done + chunk]);
                 done += chunk;
             }
         }
+        // Unused speculation (page existed, or budget broke the loop
+        // before first touch): Drop returns the reserved slot.
 
         // size = max(size, offset + done) — only bytes that actually
         // landed extend the logical size (no fetch_max on AtomicU64,
