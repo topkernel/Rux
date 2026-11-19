@@ -3763,11 +3763,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // CPU arriving here parks in the eternal halt loop WITH
                 // WHATEVER IT HELD — seven CPUs spun on the GRQ behind
                 // one such parker. Release the stranded runqueue lock
-                // (positive per-CPU knowledge via the GRQ_HELD tracker)
-                // BEFORE halting; the section it protected is dead with
-                // this CPU either way. uart_putc_raw: the old marker was
-                // uart_putc_raw — SILENT on release builds, so these
-                // parks were invisible (every "silent" permanent wedge).
+                // (positive knowledge via the lock word's owner field —
+                // terminal_release_grq_if_held reads held_by(cpu), the
+                // single authority) BEFORE halting; the section it
+                // protected is dead with this CPU either way.
+                // uart_putc_raw: the old marker was putchar_no_lock —
+                // SILENT on release builds, so these parks were
+                // invisible (every "silent" permanent wedge).
                 for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
                     crate::console::uart_putc_raw(b);
                 }

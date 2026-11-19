@@ -1436,10 +1436,12 @@ unsafe fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
     // the allocation head — a live Arc<Socket> carries a small positive
     // count; a forged pointer reads 0/huge/garbage.
     if raw > 0x1000 {
-        // SAFETY: diagnostic read of one u64; the address is
-        // canonical-checked implicitly (kernel-linear) and a fault here
-        // is no worse than the deref we are gating.
-        let strong = unsafe { core::ptr::read_volatile(raw as *const u64) };
+        // Arc layout: [strong:u64, weak:u64, data...] — into_raw hands
+        // out &data, so the counts live at raw-16/raw-8 (the first c3
+        // run read *raw = the Socket's first field, not the count).
+        // SAFETY: diagnostic reads of two u64s in the same allocation.
+        let strong = unsafe { core::ptr::read_volatile((raw - 16) as *const u64) };
+        let weak = unsafe { core::ptr::read_volatile((raw - 8) as *const u64) };
         if (1..=(1 << 20)).contains(&strong) {
             // Plausible live Arc — classify as valid, forensics only.
             static MAG_N: core::sync::atomic::AtomicU32 =
@@ -1468,10 +1470,11 @@ unsafe fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
                 None => (0, "?"),
             };
             crate::pr_err!(
-                "SOCK-BAD-PTR site={} raw={:#x} strong={:#x} heap=[{:#x},{:#x}) pid={} comm={} file_id={}",
+                "SOCK-BAD-PTR site={} raw={:#x} strong={:#x} weak={:#x} heap=[{:#x},{:#x}) pid={} comm={} file_id={}",
                 site,
                 raw,
                 strong,
+                weak,
                 lo,
                 buddy_hi,
                 pid,

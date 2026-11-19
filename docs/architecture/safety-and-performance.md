@@ -1060,3 +1060,31 @@ registered per the data-corruption doctrine.
   a GRQ deadlock at 15.5 s) — the historical 6-22 s window family,
   now the outermost. make test 1555/1555 fresh rootfs; triple-arch
   rc=0. [lane worktree oh-launch run/OH-LAUNCH.md round 10]
+  **Orphaned-lock-word class eliminated by construction (grq-source-fix,
+  2026-11-19).** The round-6 GRQ_HELD per-cpu tracker made every GRQ
+  release two steps (tracker-clear, then word-store); a fault landing
+  in the gap stranded a word no tracker claimed — the gl3/gl4 shape
+  (seven waiters, no holder) that was being papered over by a
+  self-invented heal (force-release of an UNCLAIMED word; deleted —
+  the reference has no counterpart, and acting on absence of evidence
+  is the lying-slot-heal mistake shape). Source fix: the owner lives
+  IN the lock word (`0` free, `cpu+1` held-by-cpu; acquire = one
+  cmpxchg, release = one ordered Release store of 0 — spin_unlock
+  stays the reference's single ordered store). GRQ_HELD, the
+  grq_word_orphaned heal, and the TERM-GRQ-ORPHAN-WORD branch are
+  gone; `grq_held_here`, the crime-scene dump's holder roles, and the
+  terminal release's ownership proof are all DERIVED from the word —
+  one authority that cannot disagree with itself. Detectors kept as
+  debug_asserts (release-profile-qualified): holder_cpu's
+  no-valid-owner assert plus the reference CONFIG_DEBUG_SPINLOCK
+  ownership check in unlock(). Evidence: make test 1555/1555 with
+  both detectors compiled in, zero fires; triple-arch builds rc=0;
+  gl-class OH battery (q35 KVM smp8 8G, userdata-fresh3, release
+  kernel, 3 boots + 1 debug): 0 orphaned words, 0 GRQ wedges, 0
+  assertion fires, and the word-proven release exercised live on a
+  real fault-inside-section event (gsf1: crime scene named cpu1/
+  pid597 as holder from the word, TERM-GRQ-FORCE released it, six
+  waiters proceeded). Protocol cost: release path drops one store
+  (the tracker), acquire adds one per-cpu register read for the
+  owner encoding. [lane worktree grq-lock-1st run/GRQ-LOCK-1ST.md
+  §9]
