@@ -1990,9 +1990,9 @@ pub fn do_exit(exit_code: i32) -> ! {
         // default-action path (handle_default_signal -> do_exit_group)
         // and the direct trap paths (SIGSEGV/SIGILL/... -> do_exit).
         if exit_code < 0 && crate::process::coredump::signal_makes_core(-exit_code) {
-            // SAFETY: current is the exiting task (do_coredump's
-            // contract; it never runs twice for one task).
-            unsafe { crate::process::coredump::do_coredump(current, -exit_code) };
+            // cur is the exiting task (do_coredump's contract; it never
+            // runs twice for one task).
+            crate::process::coredump::do_coredump(cur, -exit_code);
         }
 
         crate::pr_debug!("exit: pid={}, tgid={}, exit_code={}, ppid={} ({})",
