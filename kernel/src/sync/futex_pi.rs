@@ -116,17 +116,18 @@ fn kernel_key(mutex: usize) -> FutexKey {
 /// a PI park changes these only via PI boosts, so a torn (policy, prio)
 /// pair is a transient a later walk re-evaluates (priority is a
 /// scheduling hint, not a memory-safety datum).
-unsafe fn task_live_rank(task: *mut Task) -> Option<(Option<u32>, i32)> {
+fn task_live_rank(task: *mut Task) -> Option<(Option<u32>, i32)> {
+    let tr = crate::sched::edges::task_shared(task);
     if task.is_null() {
         return None;
     }
-    let policy = (*task).policy();
+    let policy = crate::sched::edges::task_shared(task).policy();
     let rt = if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
-        Some((*task).rt_priority())
+        Some(crate::sched::edges::task_shared(task).rt_priority())
     } else {
         None
     };
-    Some((rt, (*task).nice()))
+    Some((rt, crate::sched::edges::task_shared(task).nice()))
 }
 
 /// One task queued on a PI futex. Allocated by the enqueue site (the
@@ -227,21 +228,15 @@ pub(crate) fn pi_bucket_lock(key: &FutexKey) -> crate::sync::spinlock::SpinlockI
 // contract the plain side uses for WAKE_OP).
 // ---------------------------------------------------------------------------
 
-unsafe fn word_read(uaddr: usize) -> Option<u32> {
-    crate::arch::uaccess::get_user(uaddr as *const u32)
+fn word_read(uaddr: usize) -> Option<u32> {
+    crate::sync::edges::word_read(uaddr)
 }
 
 /// Compare-and-swap the user word: writes `new` only when it reads
 /// `expect`. Returns the observed pre-value; callers compare against
 /// `expect` to learn whether the swap happened.
-unsafe fn word_cas(uaddr: usize, expect: u32, new: u32) -> Option<u32> {
-    let cur = word_read(uaddr)?;
-    if cur == expect
-        && !crate::arch::uaccess::put_user(uaddr as *mut u32, new)
-    {
-        return None;
-    }
-    Some(cur)
+fn word_cas(uaddr: usize, expect: u32, new: u32) -> Option<u32> {
+    crate::sync::edges::word_cas(uaddr, expect, new)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,14 +248,14 @@ fn pi_waiter_alloc(task: *mut Task) -> Option<usize> {
     // Snapshot the scheduling configuration under the pool scan — the
     // waiter's class/priority cannot change while it is blocked, so the
     // enqueue-time snapshot is stable for the chain's lifetime.
-    let (nice, rt_prio) = unsafe {
-        let policy = (*task).policy();
+    let (nice, rt_prio) = {
+        let policy = crate::sched::edges::task_shared(task).policy();
         let rt = if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
-            Some((*task).rt_priority())
+            Some(crate::sched::edges::task_shared(task).rt_priority())
         } else {
             None
         };
-        ((*task).nice(), rt)
+        (crate::sched::edges::task_shared(task).nice(), rt)
     };
     for i in 0..PI_WAITER_POOL_SIZE {
         let mut slot = PI_WAITER_POOL[i].lock_irqsave();
@@ -333,7 +328,7 @@ fn pi_state_maybe_free(si: usize) {
 /// Insert ordered by `waiter_rank` (RT by rt_priority desc first, then
 /// CFS nice asc), FIFO among equals — the same discipline as the
 /// reference plist, extended with the RT class (RT-2X item 7).
-unsafe fn pi_queue_insert(si: usize, wi: usize) {
+fn pi_queue_insert(si: usize, wi: usize) {
     let rank = waiter_rank(wi);
     let mut st = PI_STATE_POOL[si].lock_irqsave();
     let s = match st.as_mut() {
@@ -383,7 +378,7 @@ unsafe fn pi_queue_insert(si: usize, wi: usize) {
 }
 
 /// Unlink waiter `wi` from state `si`; true when it was in the chain.
-unsafe fn pi_queue_unlink(si: usize, wi: usize) -> bool {
+fn pi_queue_unlink(si: usize, wi: usize) -> bool {
     let mut st = PI_STATE_POOL[si].lock_irqsave();
     let s = match st.as_mut() {
         Some(s) => s,
@@ -454,24 +449,24 @@ fn pi_state_waiter_count(si: usize) -> usize {
 /// half of the reference's rt_mutex_setprio). The GRQ-locked class
 /// migration handles both the RT->RT priority drop and the FIFO->CFS
 /// conversion; a pure nice change takes the renice path.
-unsafe fn pi_restore_saved(task: *mut Task, sv: &SavedSched) {
-    let cur_policy = (*task).policy();
+fn pi_restore_saved(task: *mut Task, sv: &SavedSched) {
+    let cur_policy = crate::sched::edges::task_shared(task).policy();
     if cur_policy != sv.policy {
         crate::sched::sched::change_task_policy(task, sv.policy, sv.rt_prio);
         // change_task_policy does not restore the nice (it only moves
         // class/priority) — a boosted-then-converted owner returns to
         // its CFS weight here.
-        crate::sched::sched::sched_renice_locked(&mut *task, sv.nice);
+        crate::sched::sched::sched_renice_locked(crate::sched::edges::task_mut(task), sv.nice);
         return;
     }
     if matches!(sv.policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
-        if (*task).rt_priority() != sv.rt_prio {
+        if crate::sched::edges::task_shared(task).rt_priority() != sv.rt_prio {
             crate::sched::sched::change_task_policy(task, sv.policy, sv.rt_prio);
         }
         return;
     }
-    if (*task).nice() != sv.nice {
-        crate::sched::sched::sched_renice_locked(&mut *task, sv.nice);
+    if crate::sched::edges::task_shared(task).nice() != sv.nice {
+        crate::sched::sched::sched_renice_locked(crate::sched::edges::task_mut(task), sv.nice);
     }
 }
 
@@ -493,7 +488,7 @@ unsafe fn pi_restore_saved(task: *mut Task, sv: &SavedSched) {
 /// only ever apply to the LIVE owner: ownership moves re-point
 /// `owner_pid` and route through here before returning (see
 /// futex_unlock_pi / the owner-died handoff).
-unsafe fn pi_adjust_owner_boost(si: usize) {
+fn pi_adjust_owner_boost(si: usize) {
     let (owner_pid, head, saved) = {
         let st = PI_STATE_POOL[si].lock_irqsave();
         match st.as_ref() {
@@ -527,7 +522,7 @@ unsafe fn pi_adjust_owner_boost(si: usize) {
             let w = PI_WAITER_POOL[wi].lock_irqsave();
             w.as_ref().map(|w| w.task).unwrap_or(core::ptr::null_mut())
         };
-        unsafe { task_live_rank(wtask) }
+        task_live_rank(wtask)
     });
 
     // Does the owner's LIVE configuration already equal the desired
@@ -536,12 +531,12 @@ unsafe fn pi_adjust_owner_boost(si: usize) {
         match desired {
             None => saved.is_none(),
             Some((Some(p), _)) => {
-                matches!((*task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
-                    && (*task).rt_priority() >= p.min(99)
+                matches!(crate::sched::edges::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
+                    && crate::sched::edges::task_shared(task).rt_priority() >= p.min(99)
             }
             Some((None, n)) => {
-                !matches!((*task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
-                    && (*task).nice() <= n
+                !matches!(crate::sched::edges::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
+                    && crate::sched::edges::task_shared(task).nice() <= n
             }
         }
     };
@@ -565,21 +560,21 @@ unsafe fn pi_adjust_owner_boost(si: usize) {
         let mut st = PI_STATE_POOL[si].lock_irqsave();
         if let Some(ref mut s) = *st {
             s.owner_saved = Some(SavedSched {
-                nice: (*task).nice(),
-                policy: (*task).policy(),
-                rt_prio: (*task).rt_priority(),
+                nice: crate::sched::edges::task_shared(task).nice(),
+                policy: crate::sched::edges::task_shared(task).policy(),
+                rt_prio: crate::sched::edges::task_shared(task).rt_priority(),
             });
         }
     }
     match rt_prio {
         Some(p) => {
             let p = p.min(99);
-            if matches!((*task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr) {
-                if (*task).rt_priority() < p {
+            if matches!(crate::sched::edges::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr) {
+                if crate::sched::edges::task_shared(task).rt_priority() < p {
                     // Same class, higher priority: the class migration
                     // re-links the priority-array bucket (change_task_policy
                     // keeps the policy when it matches).
-                    crate::sched::sched::change_task_policy(task, (*task).policy(), p);
+                    crate::sched::sched::change_task_policy(task, crate::sched::edges::task_shared(task).policy(), p);
                 }
             } else {
                 // CFS owner under an RT waiter: convert to FIFO at the
@@ -589,10 +584,10 @@ unsafe fn pi_adjust_owner_boost(si: usize) {
             }
         }
         None => {
-            if !matches!((*task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
-                && (*task).nice() > nice
+            if !matches!(crate::sched::edges::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
+                && crate::sched::edges::task_shared(task).nice() > nice
             {
-                crate::sched::sched::sched_renice_locked(&mut *task, nice);
+                crate::sched::sched::sched_renice_locked(crate::sched::edges::task_mut(task), nice);
             }
         }
     }
@@ -602,7 +597,7 @@ unsafe fn pi_adjust_owner_boost(si: usize) {
 /// (its saved configuration is restored), the incoming owner's is
 /// armed from the remaining chain. Called after `owner_pid` was
 /// re-pointed (caller holds the PI bucket lock).
-unsafe fn pi_owner_handoff(si: usize, old_pid: u32) {
+fn pi_owner_handoff(si: usize, old_pid: u32) {
     let saved = {
         let mut st = PI_STATE_POOL[si].lock_irqsave();
         match st.as_mut() {
@@ -640,7 +635,7 @@ fn pi_state_owner(si: usize) -> u32 {
 /// lock. No-op when the task has no entry (it left the queue between
 /// the pool scan and this critical section — the walk's fresh re-scan
 /// makes that benign).
-unsafe fn pi_waiter_refresh_rank(si: usize, task: *mut Task) {
+fn pi_waiter_refresh_rank(si: usize, task: *mut Task) {
     // Find the entry (pi_queue_unlink needs the index).
     let mut cur = {
         let st = PI_STATE_POOL[si].lock_irqsave();
@@ -698,7 +693,7 @@ unsafe fn pi_waiter_refresh_rank(si: usize, task: *mut Task) {
 /// abort exists because its walk carries waiter pointers across steps;
 /// our re-scan needs no such guard). Bounded by MAX_PI_CHAIN like the
 /// reference's max_lock_depth.
-unsafe fn pi_chain_walk(owner: *mut Task) {
+fn pi_chain_walk(owner: *mut Task) {
     if owner.is_null() {
         return;
     }
@@ -718,7 +713,7 @@ unsafe fn pi_chain_walk(owner: *mut Task) {
             return;
         }
         let next = crate::sched::sched::find_task_by_pid(next_pid);
-        if next.is_null() || (*next).state().is_dead() {
+        if next.is_null() || crate::sched::edges::task_shared(next).state().is_dead() {
             return;
         }
         cur = next;
@@ -762,7 +757,7 @@ fn pi_blocked_state_of(task: *mut Task) -> Option<usize> {
 /// the middle of acquiring — and missed owner-side cycles (X owns A,
 /// Y blocks on A, X blocks on B owned by Y: legal-looking edges, dead
 /// graph; found by the R6 model's cycle scenario).
-unsafe fn pi_chain_hits(start: *mut Task, target_si: usize) -> bool {
+fn pi_chain_hits(start: *mut Task, target_si: usize) -> bool {
     let mut cur_pid = {
         let st = PI_STATE_POOL[target_si].lock_irqsave();
         match st.as_ref() {
@@ -808,9 +803,9 @@ fn my_task() -> Option<*mut Task> {
 /// set, -EAGAIN when the word moved to a foreign owner (userspace
 /// broke the kernel-writer contract; glibc re-issues LOCK_PI).
 /// Caller holds the PI bucket lock.
-unsafe fn handed_fixup(uaddr: usize, mytid: u32) -> i64 {
+fn handed_fixup(uaddr: usize, mytid: u32) -> i64 {
     use crate::syscall::errno::{EAGAIN, EFAULT, EOWNERDEAD};
-    unsafe fn death_take(uaddr: usize, uval: u32, mytid: u32) -> i64 {
+    fn death_take(uaddr: usize, uval: u32, mytid: u32) -> i64 {
         use crate::syscall::errno::{EAGAIN, EFAULT};
         // Reference contract (kernel/futex/pi.c has NO EOWNERDEAD
         // return): LOCK_PI returns 0 while the word carries
@@ -864,10 +859,10 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
     let Some(current) = my_task() else {
         return -(crate::syscall::errno::EFAULT as i64);
     };
-    let mytid = unsafe { (*current).pid() } as u32;
+    let mytid = crate::sched::edges::task_shared(current).pid() as u32;
 
     loop {
-        let Some(uval) = (unsafe { word_read(uaddr) }) else {
+        let Some(uval) = (word_read(uaddr)) else {
             return -(EFAULT as i64);
         };
         let tid = uval & TID_MASK;
@@ -878,7 +873,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             // Uncontended acquire; preserve a latched OWNER_DIED so the
             // new owner runs robust recovery (reference behavior).
             let newv = mytid | (uval & FUTEX_OWNER_DIED);
-            match unsafe { word_cas(uaddr, uval, newv) } {
+            match word_cas(uaddr, uval, newv) {
                 Some(v) if v == uval => {
                     // Preserve the latched OWNER_DIED IN THE WORD and
                     // return 0 — glibc's robust recovery reads the
@@ -896,17 +891,17 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         // the next acquirer takes the word with FUTEX_OWNER_DIED latched
         // and returns EOWNERDEAD (the documented death contract robust
         // users recover from).
-        let owner_live = unsafe {
+        let owner_live = {
             let t = crate::sched::sched::find_task_by_pid(tid as u32);
             if t.is_null() {
                 false
             } else {
-                !(*t).state().is_dead()
+                !crate::sched::edges::task_shared(t).state().is_dead()
             }
         };
         if !owner_live {
             let newv = mytid | FUTEX_OWNER_DIED | FUTEX_WAITERS;
-            match unsafe { word_cas(uaddr, uval, newv) } {
+            match word_cas(uaddr, uval, newv) {
                 // 0 with the death flag IN THE WORD (glibc contract —
                 // see handed_fixup).
                 Some(v) if v == uval => return 0,
@@ -917,7 +912,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
 
         // Latch WAITERS before queueing (reference order).
         if uval & FUTEX_WAITERS == 0 {
-            match unsafe { word_cas(uaddr, uval, uval | FUTEX_WAITERS) } {
+            match word_cas(uaddr, uval, uval | FUTEX_WAITERS) {
                 Some(_) => {} // landed or raced; either way re-loop
                 None => return -(EFAULT as i64),
             }
@@ -933,7 +928,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         );
         let _bkt = pi_bucket_lock(&key);
 
-        let Some(uval2) = (unsafe { word_read(uaddr) }) else {
+        let Some(uval2) = (word_read(uaddr)) else {
             return -(EFAULT as i64);
         };
         let tid2 = uval2 & TID_MASK;
@@ -958,7 +953,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         // the owner-moved retry continues, the committed path assigns).
         #[allow(unused_assignments)]
         let mut walk_from: *mut Task = core::ptr::null_mut();
-        unsafe {
+        {
             if pi_chain_hits(current, si) {
                 pi_waiter_free(wi);
                 pi_state_maybe_free(si);
@@ -983,7 +978,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
 
             // Park. C8 ordering: waiter state + INTERRUPTIBLE published
             // under the bucket lock, then drop, then schedule.
-            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+            crate::sched::edges::task_shared(current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         }
         drop(_bkt);
         cpu::restore_irq(true);
@@ -997,9 +992,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         // time; a concurrent unlock that hands to us (handed=true)
         // finds our sleep state already published, so the wake pairs
         // with the schedule() below.
-        unsafe {
-            pi_chain_walk(walk_from);
-        }
+        pi_chain_walk(walk_from);
         let wake = deadline.map(|dl| {
             crate::timer::WakeArmed::arm_jiffy(
                 dl,
@@ -1019,7 +1012,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             // recovery keys on exactly this pair).
             let ret = {
                 let _bkt2 = pi_bucket_lock(&key);
-                unsafe { handed_fixup(uaddr, mytid) }
+                handed_fixup(uaddr, mytid)
             };
             pi_waiter_free(wi);
             return ret;
@@ -1037,7 +1030,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             let mut walk_from: *mut Task = core::ptr::null_mut();
             {
                 let _bkt2 = pi_bucket_lock(&key);
-                unsafe {
+                {
                     pi_queue_unlink(si, wi);
                     pi_waiter_free(wi);
                     pi_adjust_owner_boost(si);
@@ -1051,7 +1044,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             }
             // R6 deboost propagation (reference remove_waiter ->
             // adjust_prio_chain).
-            unsafe { pi_chain_walk(walk_from) };
+            pi_chain_walk(walk_from);
         }
         if timed {
             return -(ETIMEDOUT as i64);
@@ -1069,9 +1062,9 @@ pub fn futex_trylock_pi(uaddr: usize, shared: bool) -> i64 {
     let Some(current) = my_task() else {
         return -(EFAULT as i64);
     };
-    let mytid = unsafe { (*current).pid() } as u32;
+    let mytid = crate::sched::edges::task_shared(current).pid() as u32;
     loop {
-        let Some(uval) = (unsafe { word_read(uaddr) }) else {
+        let Some(uval) = (word_read(uaddr)) else {
             return -(EFAULT as i64);
         };
         let tid = uval & TID_MASK;
@@ -1080,7 +1073,7 @@ pub fn futex_trylock_pi(uaddr: usize, shared: bool) -> i64 {
         }
         if tid == 0 {
             let newv = mytid | (uval & FUTEX_OWNER_DIED);
-            match unsafe { word_cas(uaddr, uval, newv) } {
+            match word_cas(uaddr, uval, newv) {
                 // Death flag preserved in the word; ret 0 (glibc
                 // contract — see handed_fixup).
                 Some(v) if v == uval => return 0,
@@ -1099,9 +1092,9 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
     let Some(current) = my_task() else {
         return -(EFAULT as i64);
     };
-    let mytid = unsafe { (*current).pid() } as u32;
+    let mytid = crate::sched::edges::task_shared(current).pid() as u32;
 
-    let Some(uval) = (unsafe { word_read(uaddr) }) else {
+    let Some(uval) = (word_read(uaddr)) else {
         return -(EFAULT as i64);
     };
     if uval & TID_MASK != mytid {
@@ -1118,13 +1111,13 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
 
     let Some(si) = pi_state_find(&key) else {
         // No kernel state: plain release of the word.
-        return match unsafe { word_cas(uaddr, uval, 0) } {
+        return match word_cas(uaddr, uval, 0) {
             Some(v) if v == uval => 0,
             Some(_) => {
                 // The word changed under us. If it still names us it
                 // gained WAITERS (a locker latched the bit between our
                 // read and CAS): retry once through the whole path.
-                let now = unsafe { word_read(uaddr) };
+                let now = word_read(uaddr);
                 match now {
                     Some(v) if v & TID_MASK == mytid => {
                         drop(_bkt);
@@ -1145,7 +1138,7 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
     let Some(wi) = top else {
         // State exists with no chain (transient): release + drop.
         pi_state_maybe_free(si);
-        return match unsafe { word_cas(uaddr, uval, 0) } {
+        return match word_cas(uaddr, uval, 0) {
             Some(v) if v == uval => 0,
             Some(_) => -(EAGAIN as i64),
             None => -(EFAULT as i64),
@@ -1161,14 +1154,14 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
             None => return -(ESRCH as i64),
         }
     };
-    let wtid = unsafe { (*wtask).pid() } as u32;
+    let wtid = crate::sched::edges::task_shared(wtask).pid() as u32;
     let newv = wtid | if more { FUTEX_WAITERS } else { 0 };
-    match unsafe { word_cas(uaddr, uval, newv) } {
+    match word_cas(uaddr, uval, newv) {
         Some(v) if v == uval => {}
         Some(_) => {
             // Userspace raced the word. If it no longer names us the
             // reference shape is EPERM; else a retry-able race.
-            let now = unsafe { word_read(uaddr) }.map(|x| x & TID_MASK);
+            let now = word_read(uaddr).map(|x| x & TID_MASK);
             return if now != Some(mytid) {
                 -(EPERM as i64)
             } else {
@@ -1177,9 +1170,7 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
         }
         None => return -(EFAULT as i64),
     }
-    unsafe {
-        pi_queue_unlink(si, wi);
-    }
+    pi_queue_unlink(si, wi);
     {
         let mut w = PI_WAITER_POOL[wi].lock_irqsave();
         if let Some(ref mut x) = *w {
@@ -1197,9 +1188,7 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
             s.owner_pid = wtid;
         }
     }
-    unsafe {
-        pi_owner_handoff(si, mytid);
-    }
+    pi_owner_handoff(si, mytid);
     let _ = Task::wake_up(wtask);
     pi_state_maybe_free(si);
     0
@@ -1217,7 +1206,7 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
 ///
 /// Caller holds uaddr1's PLAIN bucket lock and `pi_bkt` (this PI
 /// bucket) — the fixed plain->PI order.
-pub unsafe fn pi_requeue_attach(
+pub fn pi_requeue_attach(
     pi_bkt: &mut crate::sync::spinlock::SpinlockIrqGuard<'static, Option<usize>>,
     key2: &FutexKey,
     owner_tid: u32,
@@ -1242,7 +1231,7 @@ pub unsafe fn pi_requeue_attach(
 
 /// Sleeper-side detach of a requeue_pi waiter (timeout / signal /
 /// exit before handoff). Idempotent.
-pub unsafe fn pi_requeue_detach(key2: &FutexKey, wi: usize) {
+pub fn pi_requeue_detach(key2: &FutexKey, wi: usize) {
     let _bkt = pi_bucket_lock(key2);
     if let Some(si) = pi_state_find(key2) {
         pi_queue_unlink(si, wi);
@@ -1274,8 +1263,8 @@ pub fn rt_waiter_enter(
     owner_pid: u32,
     task: *mut Task,
 ) -> Option<(usize, usize)> {
-    unsafe {
-        let policy = (*task).policy();
+    {
+        let policy = crate::sched::edges::task_shared(task).policy();
         if !matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
             return None;
         }
@@ -1313,7 +1302,7 @@ pub fn rt_waiter_leave(mutex: usize, si: usize, wi: usize) {
     let mut walk_from: *mut Task = core::ptr::null_mut();
     {
         let _bkt = pi_bucket_lock(&key);
-        unsafe {
+        {
             pi_queue_unlink(si, wi);
             pi_waiter_free(wi);
             pi_adjust_owner_boost(si);
@@ -1322,7 +1311,7 @@ pub fn rt_waiter_leave(mutex: usize, si: usize, wi: usize) {
         }
         pi_state_maybe_free(si);
     }
-    unsafe { pi_chain_walk(walk_from) };
+    pi_chain_walk(walk_from);
 }
 
 /// Release-side boost routing (reference mark_wakeup_next_waiter): the
@@ -1336,7 +1325,7 @@ pub fn rt_release_handoff(mutex: usize, new_owner_pid: u32) {
     let _bkt = pi_bucket_lock(&key);
     if let Some(si) = pi_state_find(&key) {
         let old = pi_state_owner(si);
-        unsafe {
+        {
             // Re-point BEFORE the handoff routing (same order as
             // futex_unlock_pi): the incoming owner inherits the boost
             // from the remaining chain.
@@ -1394,7 +1383,7 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
         }
         let Some(wi) = found else { break };
         let mut walk_from: *mut Task = core::ptr::null_mut();
-        unsafe {
+        {
             pi_queue_unlink(si, wi);
             pi_waiter_free(wi);
             pi_adjust_owner_boost(si);
@@ -1404,12 +1393,12 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
         pi_state_maybe_free(si);
         // R6: the dying waiter's removal DEBOOSTS the owner — propagate
         // up its chain (reference remove_waiter walk).
-        unsafe { pi_chain_walk(walk_from) };
+        pi_chain_walk(walk_from);
     }
 
     // 2. Owner side: died holding PI locks — hand each to its top
     //    waiter with OWNER_DIED latched.
-    let dead_tid = unsafe { (*task).pid() } as u32;
+    let dead_tid = crate::sched::edges::task_shared(task).pid() as u32;
     for si in 0..PI_STATE_POOL_SIZE {
         let owner_key = {
             let st = PI_STATE_POOL[si].lock_irqsave();
@@ -1426,7 +1415,7 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
             st.as_ref().and_then(|s| s.waiters)
         };
         match top {
-            Some(wi) => unsafe {
+            Some(wi) => {
                 let (wtask, more) = {
                     let w = PI_WAITER_POOL[wi].lock_irqsave();
                     match w.as_ref() {
@@ -1437,7 +1426,7 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
                         }
                     }
                 };
-                let wtid = (*wtask).pid() as u32;
+                let wtid = crate::sched::edges::task_shared(wtask).pid() as u32;
                 let newv = wtid
                     | FUTEX_OWNER_DIED
                     | if more { FUTEX_WAITERS } else { 0 };

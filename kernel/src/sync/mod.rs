@@ -10,6 +10,7 @@
 //! - Futex (Fast Userspace Mutex)
 //! - Spinlock / RwSpinlock
 
+pub mod edges;
 pub mod semaphore;
 pub mod condvar;
 pub mod futex;

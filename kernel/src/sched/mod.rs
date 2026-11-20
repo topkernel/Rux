@@ -18,6 +18,7 @@
 //! 4. fair_sched_class - CFS
 //! 5. idle_sched_class - Per-CPU idle task
 
+pub mod edges;
 pub mod sched;
 pub mod sched_ev;
 pub mod class;

@@ -122,19 +122,16 @@ impl RtRunQueue {
                 let head = &self.queue[word_idx * 64 + bit] as *const _ as *mut ListHead;
                 // SAFETY: head anchors linked tasks; bounded walk (8) —
                 // a corrupted ring cannot loop forever.
-                let mut pos = unsafe { (*head).next };
+                let mut pos = crate::sched::edges::list_next(head);
                 let mut n = 0;
                 while pos != head && n < 8 {
                     n += 1;
                     // SAFETY: pos is an embedded rt_run_list in a linked Task.
-                    let task = unsafe {
-                        let offset = core::mem::offset_of!(Task, rt_run_list);
-                        (pos as *mut u8).sub(offset) as *mut Task
-                    };
-                    if unsafe { (*task).cpus_allowed() } & mask != 0 {
+                    let task = crate::sched::edges::task_of_rt_list(pos);
+                    if crate::sched::edges::task_shared(task).cpus_allowed() & mask != 0 {
                         return true;
                     }
-                    pos = unsafe { (*pos).next };
+                    pos = crate::sched::edges::list_next(pos);
                 }
             }
         }
@@ -158,17 +155,14 @@ impl RtRunQueue {
         // SAFETY: head anchors linked tasks; walking next pointers under
         // the GRQ lock is stable. Bounded at 8 entries to be safe against
         // a corrupted ring.
-        let mut pos = unsafe { (*head).next };
+        let mut pos = crate::sched::edges::list_next(head);
         let mut n = 0;
         while pos != head && n < 8 {
             n += 1;
             // SAFETY: pos is an embedded rt_run_list in a linked Task.
-            let task = unsafe {
-                let offset = core::mem::offset_of!(Task, rt_run_list);
-                (pos as *mut u8).sub(offset) as *mut Task
-            };
+            let task = crate::sched::edges::task_of_rt_list(pos);
             f(task);
-            pos = unsafe { (*pos).next };
+            pos = crate::sched::edges::list_next(pos);
         }
     }
 
@@ -241,8 +235,9 @@ impl RtRunQueue {
 
         // SAFETY: caller guarantees task is a valid pointer; null check above;
         // task is not yet in the RT queue and we are adding it under the caller's lock.
-        unsafe {
-            let t = &mut *task;
+        {
+            // INV-SCE-1: GRQ-held task.
+            let t = crate::sched::edges::task_mut(task);
             let raw = t.rt_priority() as usize;
             if raw >= MAX_RT_PRIO {
                 return false;
@@ -262,10 +257,10 @@ impl RtRunQueue {
             // Add to priority list
             if head {
                 // Add to front of list (for preempted tasks)
-                t.rt_run_list.add(&mut self.queue[prio] as *mut ListHead);
+                crate::sched::edges::rt_list_add(t as *mut Task, &mut self.queue[prio] as *mut ListHead);
             } else {
                 // Add to tail (for normal enqueue)
-                t.rt_run_list.add_tail(&mut self.queue[prio] as *mut ListHead);
+                crate::sched::edges::rt_list_add_tail(t as *mut Task, &mut self.queue[prio] as *mut ListHead);
             }
 
             // Set bit in bitmap
@@ -307,8 +302,9 @@ impl RtRunQueue {
 
         // SAFETY: task was previously enqueued and is still in the RT queue;
         // null check above; dequeue removes it from the list.
-        unsafe {
-            let t = &mut *task;
+        {
+            // INV-SCE-1: GRQ-held task.
+            let t = crate::sched::edges::task_mut(task);
             // P08: dequeue of a task that is not linked (e.g. the currently
             // running task, already dequeued at pick time) must be a no-op —
             // it used to decrement rt_nr_running/rr_nr_running regardless,
@@ -324,7 +320,7 @@ impl RtRunQueue {
             let prio = MAX_RT_PRIO - 1 - raw; // same inversion as enqueue
 
             // Remove from list
-            t.rt_run_list.del();
+            crate::sched::edges::rt_list_del(t as *mut Task);
 
             // Clear bit in bitmap if list is now empty
             if self.queue[prio].is_empty() {
@@ -366,13 +362,7 @@ impl RtRunQueue {
         if task.is_null() {
             return false;
         }
-        // SAFETY: task is a valid, null-checked Task pointer; only the
-        // embedded rt_run_list node's link words are read.
-        unsafe {
-            let node = core::ptr::addr_of!((*task).rt_run_list);
-            let next = (*task).rt_run_list.next;
-            !next.is_null() && next != node as *mut ListHead
-        }
+        crate::sched::edges::rt_list_linked(task)
     }
 
     /// Unlink `task` from its priority list WITHOUT trusting the entity's
@@ -394,12 +384,13 @@ impl RtRunQueue {
         // SAFETY: is_linked() proved the node is linked into one of
         // self.queue's lists; the caller (free_task_slot) holds the GRQ
         // lock and the Task memory is not yet freed/poisoned.
-        unsafe {
-            let t = &mut *task;
+        {
+            // INV-SCE-1: GRQ-held task.
+            let t = crate::sched::edges::task_mut(task);
             let raw = t.rt_priority() as usize;
             // Remove from list regardless of the (possibly stale) on_rq
             // flag — the linkage check above is the authority.
-            t.rt_run_list.del();
+            crate::sched::edges::rt_list_del(t as *mut Task);
 
             if raw < MAX_RT_PRIO {
                 // Same bitmap inversion as enqueue/dequeue.
@@ -461,10 +452,7 @@ impl RtRunQueue {
         // Task contains rt_run_list at some offset
         // SAFETY: list_ptr is the head of a non-empty priority list; the embedded
         // ListHead is at offset rt_run_list within Task, so sub(offset) yields the Task.
-        let task = unsafe {
-            let offset = core::mem::offset_of!(Task, rt_run_list);
-            (list_ptr as *mut u8).sub(offset) as *mut Task
-        };
+        let task = crate::sched::edges::task_of_rt_list(list_ptr);
 
         // Dequeue it
         self.dequeue(task);
@@ -484,10 +472,7 @@ impl RtRunQueue {
 
         // Calculate task pointer from list head pointer
         // SAFETY: same as pick_next — list_ptr is an embedded ListHead in an enqueued Task.
-        let task = unsafe {
-            let offset = core::mem::offset_of!(Task, rt_run_list);
-            (list_ptr as *mut u8).sub(offset) as *mut Task
-        };
+        let task = crate::sched::edges::task_of_rt_list(list_ptr);
 
         Some(task)
     }
@@ -547,10 +532,7 @@ impl RtRunQueue {
                         break;
                     }
                     // SAFETY: pos is an embedded ListHead in an enqueued Task; offset_of gives the correct back-pointer.
-                    let task = unsafe {
-                        let offset = core::mem::offset_of!(Task, rt_run_list);
-                        (pos as *mut u8).sub(offset) as *mut Task
-                    };
+                    let task = crate::sched::edges::task_of_rt_list(pos);
                     if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
                         crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
                         break;
@@ -565,11 +547,11 @@ impl RtRunQueue {
                     // claim must both be free) — see the fair-class twin.
                     // cgroup v2 (U1b): skip cpu-throttled cgroup chains —
                     // see the fair-class twin for the unthrottle story.
-                    let allowed = unsafe {
+                    let allowed = {
                         // R65-pick (probe-slow): single-qword ownership
                         // read — see the fair-class twin.
                         let ownership_ok =
-                            task == prev || (*task).ownership_pickable(cpu_id);
+                            task == prev || crate::sched::edges::task_shared(task).ownership_pickable(cpu_id);
                         // timer-gap lane: an AFFINITY-ALLOWED task refused
                         // only for ownership is mid-switch-OUT on its
                         // departing cpu (the sched_setaffinity
@@ -577,21 +559,21 @@ impl RtRunQueue {
                         // lands within microseconds. Name the owner so
                         // the caller can re-arm NEED_RESCHED and retry
                         // instead of consuming the migration poke.
-                        if !ownership_ok && task != prev && (*task).cpu_allowed(cpu_id) {
+                        if !ownership_ok && task != prev && crate::sched::edges::task_shared(task).cpu_allowed(cpu_id) {
                             let claim =
-                                (*task).running_on_cpu.load(Ordering::Relaxed);
+                                crate::sched::edges::task_shared(task).running_on_cpu.load(Ordering::Relaxed);
                             if claim >= 0 {
                                 *skipped_owned_owner = claim as usize;
                             }
                         }
-                        (*task).cpu_allowed(cpu_id)
+                        crate::sched::edges::task_shared(task).cpu_allowed(cpu_id)
                             && ownership_ok
                             && !crate::sched::cgroup::task_cgroup_throttled(task)
                     };
 
                     // Save next before potential dequeue
                     // SAFETY: pos is a valid ListHead pointer from the queue; next is saved before dequeue mutates the list.
-                    let next_pos = unsafe { (*pos).next };
+                    let next_pos = crate::sched::edges::list_next(pos);
 
                     if allowed {
                         // Dequeue this task
@@ -621,14 +603,15 @@ impl RtRunQueue {
                                     v <<= 4;
                                 }
                             }
-                            unsafe {
-                                let pid = (*task).pid() as u64;
-                                let mask = (*task).cpus_allowed() as u64;
-                                let oncpu = (*task).on_cpu() as u64;
-                                let claim = (*task)
+                            {
+                                let tr = crate::sched::edges::task_shared(task);
+                                let pid = tr.pid() as u64;
+                                let mask = tr.cpus_allowed() as u64;
+                                let oncpu = tr.on_cpu() as u64;
+                                let claim = tr
                                     .running_on_cpu
                                     .load(Ordering::Relaxed) as u64;
-                                let pk = (*task).pick_state() as u64;
+                                let pk = crate::sched::edges::task_shared(task).pick_state() as u64;
                                 let throt =
                                     crate::sched::cgroup::task_cgroup_throttled(task) as u64;
                                 for &b in b"RT-PICK-SKIP pid=0x" { putchar(b); }
@@ -812,8 +795,8 @@ impl SchedClass for RtSchedClass {
         }
 
         // SAFETY: task is a valid pointer from the scheduler; null check above.
-        unsafe {
-            if (*task).policy() == SchedPolicy::Rr {
+        {
+            if crate::sched::edges::task_shared(task).policy() == SchedPolicy::Rr {
                 RR_TIMESLICE_TICKS
             } else {
                 0 // SCHED_FIFO has no time slice
