@@ -286,16 +286,22 @@ pub fn pidfd_data_of(file: &crate::fs::File) -> Option<&'static crate::fs::pidfd
     unsafe { crate::fs::pidfd::data_of(file) }
 }
 
-/// ext4 iget by on-disk inode number (the name_to_handle_at follower).
+/// Write a FRESH File's inode cell before the File is published to any
+/// fd table (INV-SYSC-7 pre-publish arm).
 ///
-/// INV-SYSC-6: `base` carries EXT4_INODE_OPS (the caller dispatches on
-/// the ops identity before reaching here) — the SAFETY contract
-/// `ext4::iget_by_ino` states.
+/// This is the raw-cell write the pre-conversion sites performed — it
+/// deliberately does NOT take `File::set_inode`'s lease registration
+/// (an O_PATH tree descriptor holds no read/write lease on the inode,
+/// and registering one would change close-path behavior). Contract:
+/// `file` was constructed in this call path, has no inode cell value
+/// yet, and is not reachable from any other thread until the following
+/// install.
 #[inline]
-pub fn ext4_iget_by_ino(
-    base: &crate::fs::inode::Inode,
-    ino: u64,
-) -> Result<alloc::sync::Arc<crate::fs::inode::Inode>, crate::errno::Errno> {
-    // SAFETY: INV-SYSC-6 — base is an ext4 inode (ops-checked).
-    unsafe { crate::fs::ext4::iget_by_ino(base, ino) }
+pub fn file_inode_set_pre_publish(
+    file: &crate::fs::File,
+    inode: alloc::sync::Arc<crate::fs::inode::Inode>,
+) {
+    // SAFETY: INV-SYSC-7 — fresh, unpublished File; the plain cell
+    // store races nothing and skips lease bookkeeping on purpose.
+    unsafe { *file.inode.get() = Some(inode) }
 }
