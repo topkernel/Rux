@@ -824,15 +824,34 @@ pub fn timer_softirq_handler(_nr: usize) {
                         } else {
                             ("jiffy", current >= r.deadline)
                         };
+                        // L6-routed overflow (2026-11-20, 2/2 debug fio
+                        // boots): `deadline` is a per-task atomic that a
+                        // dying/recycled or scribbled page can leave with
+                        // garbage (ch=[...0xdeadbeef...] repro) or with the
+                        // WRONG domain's units — a jiffy-class value read
+                        // against the hres ns clock makes |d| ~1e13 and
+                        // d.abs()*1000 overflows i64 (debug panics at
+                        // timer.rs:835; release wraps, which is why the fio
+                        // lanes never saw it). A garbage registration is an
+                        // INPUT to this diagnostic, not an invariant
+                        // violation: saturate the scale-up and let the row
+                        // itself carry the report (the printed deadline-ms
+                        // clamps at the saturation bound).
+                        let scale_ms = |d: i64, hz: i64| -> i64 {
+                            d.abs().saturating_mul(1000) / hz.max(1)
+                        };
                         let (rel_ms, rel_txt) = if r.kind == TSLEEP_HRES {
                             let d = now_time as i64 - r.deadline as i64;
                             (
-                                d.abs() * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as i64,
+                                scale_ms(d, crate::config::TIMER_CLOCK_FREQ_HZ as i64),
                                 if d >= 0 { "past" } else { "future" },
                             )
                         } else {
                             let d = current as i64 - r.deadline as i64;
-                            (d.abs() * 1000 / crate::config::KERNEL_HZ as i64, if d >= 0 { "past" } else { "future" })
+                            (
+                                scale_ms(d, crate::config::KERNEL_HZ as i64),
+                                if d >= 0 { "past" } else { "future" },
+                            )
                         };
                         crate::pr_debug!(
                             "TIMEDSLEEP-PARK pid={} kind={} age_s={} dur_ms={} deadline_{}ms_{} wheel={} timer_id={:#x}",
