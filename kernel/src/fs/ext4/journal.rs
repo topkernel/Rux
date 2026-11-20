@@ -6,6 +6,9 @@
 //!
 //! Bridges ext4 filesystem with JBD2 journaling layer.
 
+// (INV-JBD2-INIT-1: journal init — the on-disk superblock probe and
+// the handle setup ride INV-JBD2-BH-1's bread-pinned discipline at
+// mount time (single-threaded).)
 use alloc::sync::Arc;
 
 use crate::fs::bio;

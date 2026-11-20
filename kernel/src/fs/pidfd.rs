@@ -28,6 +28,10 @@
 //! do_exit (`exit_notify_all_waiters`) is the same observable behavior —
 //! spurious wakes are handled by the poll round's readiness re-check.
 
+// (INV-PIDFD-PIN-1: the pidfd family — leader pins ride
+// pid_hash_lookup_pinned + the thread-ring linkage (group_leader_ptr
+// of a pinned task is ring-pinned); Drop/free release exactly the
+// pins taken; the data Box rides the file-cell close discipline.)
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust except for the documented task-pin
 // accessors, which follow the same SAFETY contracts as the wake paths.

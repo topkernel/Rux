@@ -38,6 +38,10 @@
 //! dentry/mount registry as mount(2) mounts (VfsMountInternal), so
 //! /proc/mounts, umount2 and MS_MOVE see them identically.
 
+// (INV-FSCTX-1: the fs_context fd family — private_data holds the
+// Box<FsContext> installed by sys_fsopen; every typed view is
+// OPS-IDENTITY-checked (FSCTX_OPS) before adoption, and the close
+// path is the single Box reclaim (INV-FS-FILEPRIV-1's cell twin).)
 use crate::fs::dentry::{Dentry, VfsMountInternal};
 use crate::fs::file::{FileFlags, FileOps};
 use crate::fs::inode::Inode;

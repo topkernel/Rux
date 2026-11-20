@@ -14,6 +14,10 @@
 //!
 //! Reference: Documentation/filesystems/ext4/
 
+// (residue rows: ext4_kill_sb rides the fs-type raw ABI
+// (INV-SBTYPE-1, superblock.rs); read_file_internal and
+// create_vfs_inode_in ride INV-EXT4-GLOBALFS/SBRES-1 provenance;
+// ext4_instance_from_id rides the registry's liveness authority.)
 pub mod superblock;
 pub mod inode;
 pub mod dir;
