@@ -312,7 +312,9 @@ const ANON_FAULTAROUND_MIN_VMA: usize = 1024 * 1024;
 /// # SAFETY
 /// `page_ptr` must be a PAGE_SIZE-byte kernel VA of an exclusively owned
 /// fresh physical page (phys_to_virt of an alloc_user_phys_page result).
-unsafe fn fill_file_page(
+/// `page_ptr` is a freshly allocated, exclusively owned page
+/// (INV-XE-ZP discipline; the caller holds it before mapping).
+fn fill_file_page(
     file: &crate::fs::file::File,
     file_offset: usize,
     page_ptr: *mut u8,
@@ -321,20 +323,24 @@ unsafe fn fill_file_page(
     let will_full_read =
         file_offset < effective_size && effective_size - file_offset >= PAGE_SIZE_USIZE;
     if !will_full_read {
-        core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+        // SAFETY: fresh exclusive page frame (INV-XE-ZP).
+        unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
     }
     if file_offset >= effective_size {
         return; // within VMA but past EOF: stays zero (sparse/hole)
     }
     let bytes_to_read = core::cmp::min(PAGE_SIZE_USIZE, effective_size - file_offset);
-    let bytes_read = file.read_at(file_offset as u64, page_ptr, bytes_to_read);
+    // SAFETY: read_at fills the fresh exclusive frame (INV-XE-ZP); a
+    // short/failed read is re-zeroed below.
+    let bytes_read = unsafe { file.read_at(file_offset as u64, page_ptr, bytes_to_read) };
     let good = if bytes_read > 0 {
         bytes_read as usize
     } else {
         0
     };
     if good < PAGE_SIZE_USIZE {
-        core::ptr::write_bytes(page_ptr.add(good), 0, PAGE_SIZE_USIZE - good);
+        // SAFETY: same frame; tail zero of the uncovered bytes.
+        unsafe { core::ptr::write_bytes(page_ptr.add(good), 0, PAGE_SIZE_USIZE - good) };
     }
 }
 
@@ -401,16 +407,12 @@ fn filemap_pin_cache_page(
 /// # SAFETY
 /// `phys` is a page-cache frame pinned for THIS mapping (pin taken by
 /// `filemap_pin_cache_page`), being mapped right now under the PTE lock.
-unsafe fn filemap_bookkeep_mapped_cache_page(phys: u64) {
-    use crate::mm::page_desc::pfn_to_page_mut;
-    let page = pfn_to_page_mut((phys >> PAGE_SHIFT) as usize);
-    if page.is_null() {
-        return;
-    }
-    // SAFETY: descriptor of a live, pinned cache frame.
-    unsafe {
-        (*page).get_page();
-        (*page).inc_mapcount();
+fn filemap_bookkeep_mapped_cache_page(phys: u64) {
+    use crate::mm::page_desc::page_desc;
+    // Descriptor of a live, pinned cache frame.
+    if let Some(page) = page_desc((phys >> PAGE_SHIFT) as usize) {
+        page.get_page();
+        page.inc_mapcount();
     }
 }
 
