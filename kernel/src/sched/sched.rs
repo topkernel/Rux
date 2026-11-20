@@ -2151,7 +2151,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
             // steer_task_cpu). The is_sleeping() filter stays unlocked
             // (cheap pre-filter); the on_cpu re-check moved under the
             // GRQ lock inside steer_task_cpu.
-            if (*parent).state().is_sleeping() {
+            if crate::sched::edges::task_shared(parent).state().is_sleeping() {
                 steer_task_cpu(parent, cpu as i32);
             }
         }
@@ -2178,7 +2178,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
 pub fn need_resched() -> bool {
     // SAFETY: cpu_id is bounds-checked against MAX_CPUS before array access;
     // NEED_RESCHED elements are AtomicBool, safe for concurrent reads.
-    unsafe {
+    {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
         if cpu_id >= MAX_CPUS {
             return false;
@@ -2288,7 +2288,7 @@ pub fn resched_cpu(cpu: usize) {
     let cc_t = crate::dfx::cctx::now();
     crate::dfx::cctx::bump(&crate::dfx::cctx::IPI_N);
     // SAFETY: cpu is bounds-checked against MAX_CPUS; NEED_RESCHED[cpu] is AtomicBool.
-    unsafe {
+    {
         if cpu < MAX_CPUS {
             NEED_RESCHED[cpu].store(true, core::sync::atomic::Ordering::Release);
             let this_cpu = crate::arch::cpu_id() as usize;
@@ -2332,7 +2332,8 @@ pub fn resched_cpu(cpu: usize) {
                     let (cpid, cpolicy) = if cur.is_null() {
                         (0xDEADu64, 9u64)
                     } else {
-                        ((*cur).pid() as u64, (*cur).policy() as u64)
+                        (crate::sched::edges::task_shared(cur).pid() as u64,
+                         crate::sched::edges::task_shared(cur).policy() as u64)
                     };
                     let poll = POLLING_IDLE[cpu].load(core::sync::atomic::Ordering::Acquire);
                     for &b in b"RESCHED-CPU tgt=" { putchar(b); }
@@ -2571,9 +2572,10 @@ pub fn ww_sched_snapshot() -> [u64; 10] {
                 let cur = cpu_state(c).current;
                 let base = 4 + c * 3;
                 if !cur.is_null() {
-                    out[base] = (*cur).pid() as u64;
-                    out[base + 1] = (*cur).state().bits() as u64;
-                    out[base + 2] = (*cur).preempt_count() as u64;
+                    let cur_t = crate::sched::edges::task_shared(cur);
+                    out[base] = cur_t.pid() as u64;
+                    out[base + 1] = cur_t.state().bits() as u64;
+                    out[base + 2] = cur_t.preempt_count() as u64;
                 } else {
                     out[base] = u64::MAX;
                 }
