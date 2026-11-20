@@ -399,3 +399,13 @@ pub fn switch_address_space(root_ppn: u64, asid: u16) {
 // teardown drains readers before Drop).
 unsafe impl Send for super::mm_struct::MmStruct {}
 unsafe impl Sync for super::mm_struct::MmStruct {}
+
+/// Copy one page's contents between two frames' linear-map aliases
+/// (the compaction mover; INV-MM-2 copy arm: src pinned by the
+/// migration window's refcount, dst exclusively owned by the claim).
+#[inline]
+pub fn compact_copy_page(src_pfn: usize, dst_pfn: usize) {
+    // SAFETY: INV-MM-2 — both frames live for the copy; the migration
+    // window holds the source and the claim owns the destination.
+    unsafe { super::page_desc::copy_page_contents(src_pfn, dst_pfn) }
+}

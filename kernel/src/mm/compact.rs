@@ -13,6 +13,8 @@
 //! Reference: `refer/linux/mm/compaction.c`
 
 
+#![forbid(unsafe_code)]
+
 use super::page_desc::{
     Page, PageFlag, pfn_to_page, pfn_to_page_mut, page_to_pfn, copy_page_contents,
 };
@@ -79,11 +81,12 @@ pub fn migration_in_progress() -> bool {
 /// Scans the zone with two pointers (migrate UP, free DOWN), relocating
 /// movable anonymous pages to create contiguous free space.
 ///
-/// # Safety
-/// `zone` must be a valid pointer to an initialized zone.
-pub unsafe fn compact_zone(zone: *mut Zone, order: usize) -> CompactResult {
-    let start = (*zone).start_pfn();
-    let end = (*zone).end_pfn();
+/// Contract: `zone` is a valid pointer to an initialized zone (the
+/// compaction caller's zone-table reference).
+pub fn compact_zone(zone: *mut Zone, order: usize) -> CompactResult {
+    let zone_ref: &mut Zone = crate::syscall::edges::boxed_mut(zone);
+    let start = zone_ref.start_pfn();
+    let end = zone_ref.end_pfn();
 
     if start >= end {
         return CompactResult::Skipped;
@@ -119,9 +122,8 @@ pub unsafe fn compact_zone(zone: *mut Zone, order: usize) -> CompactResult {
 
 /// Core compaction loop: alternate between free and migrate scanners.
 ///
-/// # Safety
-/// `cc.zone` must be a valid pointer to an initialized zone.
-unsafe fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
+/// Contract: cc.zone is a valid initialized-zone pointer (as above).
+fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
     loop {
         // Termination: scanners met or exceeded scan limit
         if cc.migrate_pfn >= cc.free_pfn || cc.nr_scanned >= MAX_SCAN_PAGES {
@@ -154,7 +156,7 @@ unsafe fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
         }
 
         // Phase 4: Check if we already have a suitable free block
-        if (*cc.zone).has_free_block(cc.order) {
+        if crate::syscall::edges::boxed_ref(cc.zone).has_free_block(cc.order) {
             return CompactResult::Success;
         }
     }
@@ -169,11 +171,10 @@ unsafe fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
 /// First tries the buddy free list. If empty, walks downward from
 /// `free_pfn` looking for an unmapped, free page descriptor.
 ///
-/// # Safety
-/// `cc.zone` must be a valid pointer; `cc.free_pfn` and `cc.migrate_pfn`
-/// must be within the zone's PFN range.
-unsafe fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
-    let zone = &*cc.zone;
+/// Contract: cc.zone is a valid zone pointer; the scanner PFNs stay
+/// within the zone's range by the loop bounds.
+fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
+    let zone = crate::syscall::edges::boxed_ref(cc.zone);
 
     // Fast path: try buddy allocator
     if let Some(pfn) = zone.alloc_single_page() {
@@ -186,12 +187,11 @@ unsafe fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
         cc.free_pfn -= 1;
         cc.nr_scanned += 1;
 
-        let page = pfn_to_page(cc.free_pfn);
-        if page.is_null() {
-            continue;
-        }
-
-        let p = &*page;
+        // INV-MM-2 chain arm (descriptor probe inside the zone range).
+        let p = match super::edges::page_ref_of(cc.free_pfn) {
+            Some(p) => p,
+            None => continue,
+        };
         if p.is_free() && !p.test_flag(PageFlag::Reserved) && !p.test_flag(PageFlag::OnFreelist) {
             return Some(cc.free_pfn);
         }
@@ -212,11 +212,10 @@ unsafe fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
 /// - Not reserved, not locked
 /// - Not dirty (avoids writeback complexity)
 ///
-/// # Safety
-/// `cc.zone` must be a valid pointer; `cc.migrate_pfn` must be within
-/// the zone's PFN range.
-unsafe fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
-    let zone = &*cc.zone;
+/// Contract: cc.zone is a valid zone pointer; the scanner stays in
+/// range by the loop bound.
+fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
+    let zone = crate::syscall::edges::boxed_ref(cc.zone);
     let end = zone.end_pfn();
 
     while cc.migrate_pfn < cc.free_pfn && cc.migrate_pfn < end {
@@ -224,12 +223,11 @@ unsafe fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
         cc.migrate_pfn += 1;
         cc.nr_scanned += 1;
 
-        let page = pfn_to_page(pfn);
-        if page.is_null() {
-            continue;
-        }
-
-        let p = &*page;
+        // INV-MM-2 chain arm.
+        let p = match super::edges::page_ref_of(pfn) {
+            Some(p) => p,
+            None => continue,
+        };
 
         // Skip free pages
         if p.is_free() && !p.test_flag(PageFlag::OnFreelist) { // R26-1: linked-free members are NOT stealable
@@ -297,15 +295,17 @@ unsafe fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
 /// be exclusively owned (refcount == 1). The destination must be free.
 ///
 /// Returns true on success.
-unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
-    let src_page = pfn_to_page(src_pfn);
-    let dst_page = pfn_to_page_mut(dst_pfn);
-    if src_page.is_null() || dst_page.is_null() {
-        return false;
-    }
-
-    let src = &*src_page;
-    let dst = &*dst_page;
+/// Contract: both PFNs are valid descriptors; the source is
+/// exclusively owned (refcount == 1), the destination free.
+fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
+    let src = match super::edges::page_ref_of(src_pfn) {
+        Some(p) => p,
+        None => return false,
+    };
+    let dst = match super::edges::page_of(dst_pfn) {
+        Some(p) => p,
+        None => return false,
+    };
 
     // Step 1: Recover the virtual address. page.index stores the PAGE NUMBER
     // (address / PAGE_SIZE, see page_add_anon_rmap / the fault path), not the
@@ -340,8 +340,8 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     // runs the schedulable teardown), walk them after. Cell::take: the
     // walker takes F: Fn.
     let flag_mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<crate::mm::mm_struct::MmStruct>>::new());
-    crate::sched::for_each_task(|task_ptr| unsafe {
-        if let Some(mm_arc) = (*task_ptr).address_space_arc() {
+    crate::sched::for_each_task(|task| {
+        if let Some(mm_arc) = task.address_space_arc() {
             let mut pins = flag_mm_pins.take();
             pins.push(mm_arc);
             flag_mm_pins.set(pins);
@@ -380,7 +380,7 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
 ///
 /// # Safety
 /// Same contract as migrate_page; window is open (markers allowed in PTEs).
-unsafe fn migrate_page_window(
+fn migrate_page_window(
     src: &Page,
     dst: &Page,
     src_pfn: usize,
@@ -396,7 +396,7 @@ unsafe fn migrate_page_window(
     }
 
     // Step 3: Copy page contents
-    copy_page_contents(src_pfn, page_to_pfn(dst as *const Page));
+    super::edges::compact_copy_page(src_pfn, page_to_pfn(dst as *const Page));
 
     // Step 4: Install new PTEs pointing to dst_pfn
     remap_page(dst, old_vaddr, saved_pte_flags);
@@ -466,7 +466,7 @@ unsafe fn migrate_page_window(
 /// # Safety
 /// `dst` must be a valid, initialized page descriptor. `old_vaddr` must
 /// be a virtual address that was previously mapped to the source page.
-unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
+fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
     let new_pfn = page_to_pfn(dst as *const Page);
     let new_ppn = new_pfn as u64;
 
@@ -475,8 +475,8 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
     // schedulable mm teardown under the spinlock), then remap after.
     // Cell::take: the walker takes F: Fn.
     let mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<crate::mm::mm_struct::MmStruct>>::new());
-    crate::sched::for_each_task(|task_ptr| {
-        if let Some(mm_arc) = (*task_ptr).address_space_arc() {
+    crate::sched::for_each_task(|task| {
+        if let Some(mm_arc) = task.address_space_arc() {
             let mut pins = mm_pins.take();
             pins.push(mm_arc);
             mm_pins.set(pins);
@@ -514,15 +514,15 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         // aborted after freeing the source). TLB flush stays local here;
         // rmap's try_to_unmap pass already broadcast the shootdown.
         let root_ppn = mm.pgd();
-        if unsafe {
-            crate::arch::mm::mm_ops::leaf_pte_install(
-                mm,
-                root_ppn,
-                old_vaddr as u64,
-                new_ppn,
-                saved_flags,
-            )
-        } {
+        // leaf_pte_install is a safe fn — the old wrapper was vestigial
+        // (same class as leaf_pte_replace).
+        if crate::arch::mm::mm_ops::leaf_pte_install(
+            mm,
+            root_ppn,
+            old_vaddr as u64,
+            new_ppn,
+            saved_flags,
+        ) {
             // Flush TLB for this address
             crate::mm::flush_tlb_page_local(old_vaddr as u64);
         }
