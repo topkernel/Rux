@@ -2073,7 +2073,7 @@ fn process_deferred_exit_pid(packed: i64) {
         // Group-wide wake: Linux's wait_chldexit queue is shared by the
         // whole thread group — a sibling blocked in wait4/waitid (e.g.
         // glib's gmain worker) must also observe the child exit.
-        unsafe { crate::process::exit::wake_group_chldexit(parent) };
+        crate::process::exit::wake_group_chldexit(crate::process::unsafe_edges::borrow_task(parent));
         crate::process::task::Task::task_put(parent);
     }
     if fp {

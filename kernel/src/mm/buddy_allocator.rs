@@ -641,8 +641,11 @@ impl BuddyAllocator {
         core::ptr::null_mut()
     }
 
-    /// Free memory
-    unsafe fn free_blocks(&self, ptr: *mut u8, order: usize) {
+    /// Free memory (the merge loop). The body is safe: metadata access
+    /// goes through the bounds-checked MetaArray::get and the free-list
+    /// ops are safe methods — this was signed only by declaration
+    /// granularity.
+    fn free_blocks(&self, ptr: *mut u8, order: usize) {
         let addr = ptr as usize;
         let mut page_idx = match self.addr_to_page_idx_checked(addr) {
             Some(idx) => idx,
@@ -942,7 +945,7 @@ fn trace_kfree_at(ptr: u64) {
 
 /// Free through the live global allocator, bypassing the deferred-free
 /// interception (drainer entry point, mm/deferred_free.rs).
-pub unsafe fn dealloc_untracked_pub(ptr: *mut u8, layout: Layout) {
+pub fn dealloc_untracked_pub(ptr: *mut u8, layout: Layout) {
     GLOBAL_ALLOCATOR.dealloc_untracked(ptr, layout);
 }
 
@@ -952,7 +955,7 @@ impl BuddyAllocator {
     /// path (NET_PAGES, tripwires) but no memwatch note and no
     /// size-to-order walk. Callers must NOT hold the buddy lock; the
     /// small-alloc class lock MAY be held (class -> buddy order only).
-    pub unsafe fn alloc_page_raw(&self) -> *mut u8 {
+    pub fn alloc_page_raw(&self) -> *mut u8 {
         if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
             || self.initialized.load(Ordering::Acquire) == 0
         {
@@ -972,7 +975,7 @@ impl BuddyAllocator {
     }
 
     /// Raw order-0 free, the matching twin of alloc_page_raw.
-    pub unsafe fn free_page_raw(&self, ptr: *mut u8) {
+    pub fn free_page_raw(&self, ptr: *mut u8) {
         if self.initialized.load(Ordering::Acquire) == 0 {
             return;
         }
@@ -998,7 +1001,7 @@ impl BuddyAllocator {
     /// The real buddy free path, unintercepted — the deferred-free
     /// drainer (mm/deferred_free.rs) calls this so a held-back entry can
     /// never be re-deferred.
-    unsafe fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {
+    fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {
         // Small-object packing layer FIRST (alloc-crash r12-16): slab-page
         // objects free through their page's freelist, never the buddy —
         // and this must run before the R69 task-page probe, whose

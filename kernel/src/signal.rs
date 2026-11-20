@@ -2814,7 +2814,7 @@ fn handle_default_signal(sig: i32) {
                             // handle is TaskBorrow-adopted above; exit.rs's
                             // wake helper stays unsafe until its lane
                             // converts it.
-                            unsafe { crate::process::exit::wake_group_chldexit(parent.as_ptr()) };
+                            crate::process::exit::wake_group_chldexit(&*parent);
                             crate::signal::signal_wake_up(parent.as_ptr());
                         }
                     }
@@ -2854,7 +2854,7 @@ fn handle_default_signal(sig: i32) {
                         info._rest[..4].copy_from_slice(&sig.to_le_bytes());
                         let _ = crate::signal::send_signal_with_info(parent.pid(), info);
                         // SAFETY (one exit-path edge): as above.
-                        unsafe { crate::process::exit::wake_group_chldexit(parent.as_ptr()) };
+                        crate::process::exit::wake_group_chldexit(&*parent);
                         crate::signal::signal_wake_up(parent.as_ptr());
                     }
                     // The actual park happens in do_signal's group-stop
