@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Scripted riscv64 repro boot for the sched fix set.
 
 Boots the minimal musl rootfs with init=/bin/sh, feeds shell commands over

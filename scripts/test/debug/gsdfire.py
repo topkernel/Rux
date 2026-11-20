@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """gsdfire.py — fast probe booter for the gsd-discovery investigation.
 
 Copies the GNOME image, injects /root/gsdprobe + /root/glibprobe (+ a

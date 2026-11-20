@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # oh-wedge-ab-x86.sh — OH-lane wedge-rate A/B through the stress-port rig
 # (joint run per the OH 27th close entry point 2): 5x cg26b vs 5x
 # pollwake rolls, identical recipe, interleaved to cancel host-load

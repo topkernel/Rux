@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """serialclean-boot.py — scripted serial-log boot check (serial-clean agent).
 
 Boots the worktree kernel on the minimal rootfs with a fixed shell command

@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # Rux OS - LTP Test Suite Build Script
 #
 # Download and build official LTP (Linux Test Project) tests

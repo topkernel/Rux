@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # build-rootfs.sh — build an ext4 rootfs carrying the lmbench suite for
 # the x86_64 rig, mirroring the LTP lane's shape (test/ltpscan): a
 # static musl runner at /test/lmbench_run is the PID-1 init, the

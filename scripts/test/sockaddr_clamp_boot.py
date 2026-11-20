@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """sockaddr_clamp_boot.py — boot the Rux kernel (x86_64) with the
 sockaddr_clamp probe as init and judge the review-func network.rs round
 (socket address write-back clamps + unix datagram all-or-nothing sends).

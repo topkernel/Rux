@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """repro-drive.py — batched-read + exit-storm repro driver.
 
 Copies the shared rootfs image (sparse), injects /root/repro.sh via

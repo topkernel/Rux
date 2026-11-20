@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # Rux OS - mrsh Build Script
 #
 # Cross-compile mrsh (minimal POSIX shell) using musl libc,

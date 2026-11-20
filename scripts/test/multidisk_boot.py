@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """multidisk_boot.py — multi-disk virtio-blk boot test (OH Phase 1b gap 2).
 
 Boots the Rux kernel on a QEMU virt with TWO virtio-blk-pci functions

@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # run-class-x86.sh — one stressor class per boot on the x86_64+KVM
 # vehicle (stress-port lane). Mirrors test/ltpscan/run1-x86.sh's rig;
 # PID 1 is /test/stress-ng/rsrun, which runs the single line of

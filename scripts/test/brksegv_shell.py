@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """brksegv_shell.py — the ltp lane's exact brkseq wedge shape, driven
 through a REAL shell (mrsh as init, fork+exec per probe run).
 

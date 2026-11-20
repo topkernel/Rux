@@ -59,6 +59,7 @@ fi
 echo "=== [3/4] Extract profile + test suite verdict ==="
 grep -c "COV: PASS" "$COV_DIR/boot.log" || true
 grep "COV: FAIL" "$COV_DIR/boot.log" || echo "no test suite failures"
+grep -m1 "PANIC:" "$COV_DIR/boot.log" || true
 python3 - "$COV_DIR/boot.log" "$COV_DIR/rux.profraw" <<'PYEOF'
 import sys
 lines = open(sys.argv[1], errors="replace").read().splitlines()

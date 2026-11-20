@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 # loader_vma_boot.py — boot the x86_64 kernel with the dynamic musl
 # loader_vma probe as init (cfi_shadow_boot.py shape) and report the
 # verdict for the /proc/self/maps file-VMA parity fix.

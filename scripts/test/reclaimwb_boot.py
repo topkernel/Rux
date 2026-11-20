@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 # reclaimwb_boot.py — boot the kernel with the reclaim-time dirty
 # writeback probe as init (wildwrite lane session 28). Single boot; the
 # verdict comes from the pressure child's outcome:

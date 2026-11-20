@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 # filedrain_boot.py — boot the riscv64 kernel with the filedrain probe
 # as init (fake-OOM drainer A/B; wildwrite session 24).
 #

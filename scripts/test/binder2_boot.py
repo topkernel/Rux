@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """binder2_boot.py — boot the Rux kernel with the binder S2 samgr-lifecycle
 probe as init and report the verdict.
 

@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """run.py — drive the udev/hotplug verification boot end to end.
 
 Boots the hotplug test image (test/hotplug/build-img.sh) with the worktree

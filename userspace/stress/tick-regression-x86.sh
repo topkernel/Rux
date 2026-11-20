@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # tick-regression-x86.sh — SP-5 round-5 regression test: the timer IRQs
 # must keep flowing through the memory-exhaustion cascade.
 #
