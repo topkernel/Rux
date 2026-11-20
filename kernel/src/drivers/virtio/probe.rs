@@ -90,27 +90,20 @@ pub fn virtio_probe_devices() -> usize {
         #[cfg(not(feature = "x86_64"))]
         let base_addr = VIRTIO_MMIO_BASE + (device_index as u64 * VIRTIO_MMIO_SIZE);
 
-        // Quick read magic number
-        let magic = unsafe {
-            let magic_ptr = base_addr as *const u32;
-            core::ptr::read_volatile(magic_ptr)
-        };
+        // Quick read magic number (INV-MMIO-1: the virtio-mmio config
+        // window at the fixed per-device base).
+        let cfg = crate::safety::mmio::MmioRegion::new(base_addr as usize, 0x100);
+        let magic = cfg.read_u32(0);
 
         // Check magic number ("virt" = 0x74726976)
         if magic == 0x74726976 {
             // Found VirtIO device, read more info
-            let (version, device_id, _vendor, _device_features) = unsafe {
-                let version_ptr = (base_addr + 4) as *const u32;
-                let device_id_ptr = (base_addr + 8) as *const u32;
-                let vendor_ptr = (base_addr + 12) as *const u32;
-                let features_ptr = (base_addr + 16) as *const u32;
-                (
-                    core::ptr::read_volatile(version_ptr),
-                    core::ptr::read_volatile(device_id_ptr),
-                    core::ptr::read_volatile(vendor_ptr),
-                    core::ptr::read_volatile(features_ptr),
-                )
-            };
+            let (version, device_id, _vendor, _device_features) = (
+                cfg.read_u32(4),
+                cfg.read_u32(8),
+                cfg.read_u32(12),
+                cfg.read_u32(16),
+            );
 
             // Check version
             if version == 1 || version == 2 {
@@ -424,16 +417,19 @@ pub fn init_pci_block_devices() -> usize {
                         continue;
                     }
 
-                    // Select queue 0 and read queue size
-                    unsafe {
-                        let queue_select_ptr = (virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
-                        core::ptr::write_volatile(queue_select_ptr, 0u16);
-                    }
+                    // Select queue 0 (INV-MMIO-1 window).
+                    crate::safety::mmio::MmioRegion::new(
+                        virtio_dev.common_cfg_bar as usize,
+                        0x1000,
+                    )
+                    .write_u16(crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SELECT as usize, 0);
 
-                    let queue_max = unsafe {
-                        let queue_size_max_ptr = (virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16;
-                        core::ptr::read_volatile(queue_size_max_ptr)
-                    };
+                    // INV-MMIO-1: the common-config window the PCI probe mapped.
+                    let queue_max = crate::safety::mmio::MmioRegion::new(
+                        virtio_dev.common_cfg_bar as usize,
+                        0x1000,
+                    )
+                    .read_u16(crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as usize);
 
                     // Create VirtQueue
                     // (serial-clean: the raw "slot N queue0 notify/isr/
@@ -704,7 +700,7 @@ pub fn pci_rescan_block_hotplug() -> usize {
             "AUDIT: rescan cfg_base={:#x} dev_bar={:#x} common_bar={:#x}",
             cfg_base, dev.device_cfg_bar, dev.common_cfg_bar
         );
-        let capacity = unsafe { core::ptr::read_volatile(cfg_base as *const u64) };
+        let capacity = crate::safety::mmio::MmioRegion::new(cfg_base as usize, 8).read_u64(0);
 
         // Assign identity: vdX with minor stride 16, continuing past the
         // boot-probe disks.
