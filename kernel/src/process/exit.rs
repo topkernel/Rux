@@ -1081,6 +1081,12 @@ pub(crate) fn release_task(task: *mut Task) {
 /// through the pid hash or the process tree, that no other task still
 /// references it (the deferred path's dead_threads list must be empty),
 /// and that no CPU is running it.
+/// RTS-DEFER amendment (2026-11-21): when the owner's terminal switch
+/// has not completed at the wait deadline, this call returns EARLY with
+/// NOTHING freed — the storage release is handed to the reaper's own
+/// dead-threads drain (re-run on every reap) / the leader's sweep, and
+/// the safety contract above is re-established by the drain's own
+/// predicate before any retry touches the page.
 fn release_task_storage(task: *mut Task) {
     // SAFETY: unreachable through the pid hash / process tree (the
     // release contract); this call owns the storage.
@@ -1129,7 +1135,6 @@ fn release_task_storage(task: *mut Task) {
     crate::arch::cpu::restore_irq(true);
     const RTS_SWITCH_WAIT_JIFFIES: u64 = 300;
     let rts_armed_at = crate::drivers::timer::get_jiffies();
-    let mut stack_free_ok = true;
     while t.on_cpu()
         || crate::sched::sched::switching_out_names(task)
         || !t
@@ -1140,27 +1145,62 @@ fn release_task_storage(task: *mut Task) {
             .wrapping_sub(rts_armed_at)
             >= RTS_SWITCH_WAIT_JIFFIES
         {
-            stack_free_ok = false;
-            // Raw-uart bounded report (cold path): one 16K stack leaked
-            // per wedged switch; the alternative is a spinning reaper or
-            // pages freed under a running owner.
-            static RTS_LEAK_SEEN: core::sync::atomic::AtomicU32 =
+            // RTS-DEFER (the sys_wait4+892 NULL children-walk root cause,
+            // 2026-11-21): the OLD deadline path withheld only the STACK
+            // and then CONTINUED freeing the Task struct — but the owner
+            // is still executing its terminal deschedule loop on that
+            // page (re-arming terminal_switch_done=false, releasing pick
+            // ownership, re-asserting DEAD). task_put → free_task_slot's
+            // gate passes (no per-CPU current names it, no SWITCHING_OUT
+            // marker — the real switch has not even STARTED), the page
+            // goes back to the allocator mid-fork-storm, and the next
+            // fork's place_task window (Task::new's NULL ListHeads, init
+            // three instructions later) is exactly the NULL children.next
+            // the child-scan walk dereferences. The dying task keeps
+            // writing the freed page (the free-while-executing shape the
+            // FDM lane convicted years ago).
+            // FIX (source-first protocol, leak-don't-dangle — the same
+            // discipline free_dead_member already applies to members):
+            // the deadline path DEFERS THE WHOLE STORAGE FREE. The Task
+            // page (and its stack) stays untouched; the release is
+            // retried by the reaper's own dead-threads drain (release_task
+            // drains on every reap) once the terminal switch truly
+            // completes. One page held per wedged switch, never a page
+            // freed under its running owner.
+            static RTS_DEFER_SEEN: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
-            let n = RTS_LEAK_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let n = RTS_DEFER_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 64 {
-                crate::dfx::taskdump::taskdump_raw_line(b"RTS-STACK-LEAK (stack withheld) pid=");
+                crate::dfx::taskdump::taskdump_raw_line(
+                    b"RTS-DEFER (storage free deferred; owner still switching) pid=",
+                );
                 crate::dfx::taskdump::taskdump_dec(t.pid() as u64);
                 crate::dfx::taskdump::taskdump_raw_line(b"\n");
             }
-            break;
+            // Hand the retry the reaper's ownership: re-park the task on
+            // the reaping task's dead_threads list. The drain ladder
+            // (release_task's drain, run on every reap; sweep_dead_
+            // threads on the leader side) re-runs release_task_storage
+            // when the terminal flag settles. The reaper's own reference
+            // (the one this call was about to drop via the final
+            // task_put) is transferred to the list — the count is
+            // unchanged and the page outlives the owner's switch.
+            if let Some(reaper) = crate::sched::current() {
+                let rp = reaper as *mut Task as *mut Task;
+                if rp != task {
+                    crate::process::unsafe_edges::borrow_task_mut(rp)
+                        .dead_threads
+                        .lock()
+                        .push(task);
+                }
+            }
+            return;
         }
         core::hint::spin_loop();
     }
 
     // Free kernel stack
-    if stack_free_ok {
-        t.free_kernel_stack();
-    }
+    t.free_kernel_stack();
 
     // Free heap-allocated PtRegs from fork.
     // copy_thread() allocates PtRegs on the heap for the child's first
