@@ -237,37 +237,47 @@ __switch_to:
 /// published at pick time (mark_picked_on_cpu, under the GRQ); the idle
 /// task (pid 0) is never pick-marked and skips the gate.
 #[no_mangle]
-pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) -> u64 {
+pub extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) -> u64 {
+    // One adoption per entry (TaskBorrow::from_raw's contract: the
+    // switch path runs with IRQs off on this CPU — a yield is impossible
+    // for the whole handler, exactly the short-op proof the type wants).
+    // SAFETY: the asm caller passes the two tasks the scheduler picked;
+    // both are live for the handler's duration (pick-marked / idle).
+    let prev = unsafe { crate::process::task_ref::TaskBorrow::from_raw(prev) };
+    let next = unsafe { crate::process::task_ref::TaskBorrow::from_raw(next) };
     let cpu = crate::arch::cpu_id() as i32;
     // R65 witness: prev must still carry its pick mark here. A clear mark
     // at publish entry means the R49 heal (or a scribble) reset the
     // ownership word inside the switch-out window — name it.
-    if !prev.is_null()
-        && crate::trace::EVENT_SCRIBBLE.armed()
-        && !unsafe { (*prev).on_cpu() }
-    {
-        crate::dfx::scribble::switch_window_heal(prev as u64);
+    if let Some(prev) = &prev {
+        if crate::trace::EVENT_SCRIBBLE.armed() && !prev.on_cpu() {
+            crate::dfx::scribble::switch_window_heal(prev.as_ptr() as u64);
+        }
     }
     // RACE-FORENSICS (x86-smprace): claim next's continuation BEFORE its
     // registers are restored. A claim held by another CPU is a double-run
     // — the two CPUs would execute one task on one kernel stack (the SMP
     // fork/exec/exit crash family; caught live twice with the pre-GS-fix
     // kernel, silent since the trap_exit cli/swapgs fix).
-    if !next.is_null() {
+    if let Some(next) = &next {
         // R65 hunt: never publish a non-Task `next` into the per-CPU
         // current slot — a poisoned slot makes the NEXT __schedule run
         // its whole prev-side bookkeeping through garbage (the
         // self-propagating half of the x86-scribble3 cascade). Report and
         // keep the previous current instead.
         if crate::trace::EVENT_SCRIBBLE.armed()
-            && !crate::dfx::scribble::task_plausible(next)
+            && !crate::dfx::scribble::task_plausible(next.as_ptr())
         {
-            crate::dfx::scribble::bad_switch_arg(2, next as u64, prev as u64);
+            crate::dfx::scribble::bad_switch_arg(
+                2,
+                next.as_ptr() as u64,
+                prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
+            );
             crate::dfx::scribble::ring_log(
                 crate::arch::cpu_id() as usize,
                 2,
-                prev as u64,
-                next as u64,
+                prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
+                next.as_ptr() as u64,
             );
             return 1;
         }
@@ -277,30 +287,28 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
         // unconditional claim swap() is gone (it clobbered the very state
         // the harvester arbitrates on); a REVOKED pick (the steal won the
         // race) or an already-LIVE breach aborts here.
-        if unsafe { (*next).pid() } != 0 {
-            if let Err(observed) = unsafe { (*next).try_affirm_pick() } {
+        if next.pid() != 0 {
+            if let Err(observed) = next.try_affirm_pick() {
                 // Not ours: REVOKED by the slot-capture steal, or a
                 // protocol breach. Report through the scribble hunter
                 // when armed, then abort — the asm repairs nothing of
                 // next and returns with prev still running.
                 if crate::trace::EVENT_SCRIBBLE.armed() {
                     crate::dfx::scribble::double_run(
-                        unsafe { (*next).pid() } as u64,
+                        next.pid() as u64,
                         cpu as u64,
                         observed as u64,
-                        if prev.is_null() {
-                            0
-                        } else {
-                            unsafe { (*prev).pid() as u64 }
-                        },
-                        next as u64,
+                        prev.as_ref().map(|p| p.pid() as u64).unwrap_or(0),
+                        next.as_ptr() as u64,
                     );
                 }
                 return 1;
             }
         }
     }
-    crate::arch::smp::set_current_task_ptr(next as u64);
+    crate::arch::smp::set_current_task_ptr(
+        next.as_ref().map(|n| n.as_ptr() as u64).unwrap_or(0),
+    );
     // SCRIBBLE2-GUARD (switch-in sp): the resume point __switch_to is
     // about to load must lie inside next's own kernel stack.  A foreign
     // sp (stale/double-run save or a scribbled thread.sp) makes the task
@@ -308,21 +316,21 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
     // while kernel_stack stays pristine.  NOTE: report-only — the idle
     // tasks intentionally run on the static boot stacks, so the report
     // is a lead, not proof.
-    if !next.is_null() {
-        // SAFETY: header reads of the task we are switching into; its
+    if let Some(next) = &next {
+        // Header reads of the task we are switching into; its
         // thread.sp/kstack fields are stable during the switch.
-        unsafe {
-            let sp = (*next).thread().sp as usize;
-            let top = (*next).get_kernel_stack().map_or(0, |p| p as usize);
-            let bottom = (*next).kernel_stack_bottom();
+        {
+            let sp = next.thread().sp as usize;
+            let top = next.get_kernel_stack().map_or(0, |p| p as usize);
+            let bottom = next.kernel_stack_bottom();
             // Static tasks (idle storages, the boot task) legitimately run
             // on the static boot stacks — their kstack fields never match
             // the live sp. Reporting them spammed the console on every
             // idle switch-in (and, pre-R65, widened the on-prev-stack
             // window of this very helper). Heap tasks only. (Range check:
             // kernel-image addresses are numerically ABOVE the heap.)
-            let is_static =
-                !(0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&(next as usize));
+            let is_static = !(0xffff_8880_4000_0000..0xffff_8880_4800_0000)
+                .contains(&(next.as_ptr() as usize));
             // Resume-boundary guard (LTP chunk@700 panic hunt, KSO census
             // 2026-11-02): a HEAP task with NO kernel stack (fields cleared
             // at exit-free) or a DEAD state, resumed through a stale link,
@@ -351,12 +359,11 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
             // refusing PF_EXITING picks hung pid 307 at 30 s and killed
             // the whole boot). The freed-context dangers are exactly
             // top==0 and is_dead; a merely-exiting task has neither.
-            if !is_static && (top == 0 || (*next).state().is_dead()) {
+            if !is_static && (top == 0 || next.state().is_dead()) {
                 putfrag_no_lock(b"\nSWITCHIN-DEAD-TASK task=0x");
-                puthex_no_lock(next as u64);
+                puthex_no_lock(next.as_ptr() as u64);
                 putfrag_no_lock(b" pid=");
-                // SAFETY: header read of the task we refuse to resume.
-                puthex32_no_lock(unsafe { (*next).pid() } as u64);
+                puthex32_no_lock(next.pid() as u64);
                 putfrag_no_lock(b" top=0x");
                 puthex_no_lock(top as u64);
                 putfrag_no_lock(b" sp=0x");
@@ -366,7 +373,7 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
             }
             if !is_static && top != 0 && !(sp > bottom && sp <= top) {
                 putfrag_no_lock(b"\nSWITCHIN-FOREIGN-SP task=0x");
-                puthex_no_lock(next as u64);
+                puthex_no_lock(next.as_ptr() as u64);
                 putfrag_no_lock(b" sp=0x");
                 puthex_no_lock(sp as u64);
                 putfrag_no_lock(b" kstack=[0x");
@@ -386,14 +393,14 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
     crate::dfx::scribble::ring_log(
         crate::arch::cpu_id() as usize,
         2,
-        prev as u64,
-        next as u64,
+        prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
+        next.as_ref().map(|n| n.as_ptr() as u64).unwrap_or(0),
     );
     // Scribble hunter (rux:scribble (retired dfx=scribble)): quiesce point — prev's context is
     // fully saved here, so any tracked field off its shadow was written
     // by someone else while it ran.
-    if !prev.is_null() {
-        crate::dfx::scribble::quiesce(prev);
+    if let Some(prev) = &prev {
+        crate::dfx::scribble::quiesce(prev.as_ptr());
     }
     0 // proceed with the resume
 }
@@ -419,13 +426,13 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
 /// # Safety
 /// `task` must be a valid Task (or null).
 #[no_mangle]
-pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
-    let top = if task.is_null() {
-        0
-    } else {
-        // SAFETY: get_kernel_stack returns the stack top for live tasks;
-        // Option's niche encodes None as 0.
-        unsafe { (*task).get_kernel_stack().map_or(0, |p| p as u64) }
+pub extern "C" fn x86_update_rsp0(task: *mut Task) {
+    // One adoption (same IRQs-off short-op proof as the publish twin).
+    // SAFETY: the asm caller passes the incoming task.
+    let task = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) };
+    let top = match &task {
+        Some(t) => t.get_kernel_stack().map_or(0, |p| p as u64),
+        None => 0,
     };
     // Kernel stacks live in the kernel heap region of the direct map
     // (VIRTUAL 0xffff8880_40000000 — the physical 0x40000000 base plus
@@ -446,12 +453,11 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
     // keeps the PREVIOUS task's rsp0 — if that task has exited and its
     // stack was freed, every later user entry on this CPU lands on
     // recycled memory (the stale-rsp0 engine). Name it.
-    if !task.is_null() && top == 0 {
+    if task.is_some() && top == 0 {
         putfrag_no_lock(b"\nR64-NOTOP-SKIP task=0x");
-        puthex_no_lock(task as u64);
+        puthex_no_lock(task.as_ref().map(|t| t.as_ptr() as u64).unwrap_or(0));
         putfrag_no_lock(b" pid=");
-        // SAFETY: header read of the task whose rsp0 install is skipped.
-        puthex32_no_lock(unsafe { (*task).pid() } as u64);
+        puthex32_no_lock(task.as_ref().map(|t| t.pid() as u64).unwrap_or(0));
         putfrag_no_lock(b"\n");
         return; // keep the previous rsp0
     }
@@ -474,7 +480,7 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
             let n = BADRSP0_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 64 {
                 crate::dfx::taskdump::taskdump_raw_line(b"R64-BAD-RSP0 task=0x");
-                let mut v = task as u64;
+                let mut v = task.as_ref().map(|t| t.as_ptr() as u64).unwrap_or(0);
                 let mut sh: i32 = 64;
                 while sh > 0 {
                     sh -= 4;
@@ -834,11 +840,18 @@ fn puthex32_no_lock(v: u64) {
 /// prev never stopped running; repair its address space, the per-task
 /// MSRs (asm site only), and the lying sched slot. IRQs stay disabled.
 #[no_mangle]
-pub unsafe extern "C" fn x86_switch_abort(
+pub extern "C" fn x86_switch_abort(
     prev: *mut Task,
     next: *mut Task,
     msrs_switched: u64,
 ) {
+    // One adoption (IRQs-off abort repair; same proof as the publish
+    // twin — prev never stopped running).
+    // SAFETY: the asm/early-check callers pass the two pick targets.
+    let prev = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(prev) } {
+        Some(p) => p,
+        None => return,
+    };
     // Address space: compare-based — no write at the early-check site.
     // The repair must reinstall prev's root under prev's OWN PCID (a
     // user mm that was switched in with PCID X and is repaired under
@@ -846,31 +859,38 @@ pub unsafe extern "C" fn x86_switch_abort(
     // allocator-pressure hazard without the pressure). prev->thread's
     // mm still pins the asid; fallback mms (asid 0) reload untagged,
     // exactly how they were loaded.
-    let prev_root = if let Some(mm) = (*prev).address_space() {
+    let prev_root = if let Some(mm) = prev.address_space() {
         mm.root_ppn()
     } else {
         super::mm::mmu_init::root_page_table_ppn()
     };
     if super::mm::asid::satp_to_ppn(read_cr3()) != prev_root {
-        let prev_asid = (*prev).address_space().map(|mm| mm.asid()).unwrap_or(0);
-        if prev_asid != 0 || !super::mm::asid::pcid_enabled() {
-            write_cr3(super::mm::asid::build_satp(prev_asid, prev_root));
-        } else {
-            write_cr3(prev_root << 12);
+        let prev_asid = prev.address_space().map(|mm| mm.asid()).unwrap_or(0);
+        // SAFETY: prev_root is prev's live mm root (or the kernel root
+        // resolved above), reloaded under prev's own PCID.
+        unsafe {
+            if prev_asid != 0 || !super::mm::asid::pcid_enabled() {
+                write_cr3(super::mm::asid::build_satp(prev_asid, prev_root));
+            } else {
+                write_cr3(prev_root << 12);
+            }
         }
     }
 
     // Per-task MSRs: only when the wrapper already swapped them (the
     // saved values in prev->thread are exactly the live-at-entry ones).
     if msrs_switched != 0 {
-        wrmsr(MSR_FS_BASE, (*prev).thread().fs_base);
-        wrmsr(MSR_KERNEL_GS_BASE, (*prev).thread().gs_base);
+        // SAFETY: cached per-task mirror values (register writes).
+        unsafe {
+            wrmsr(MSR_FS_BASE, prev.thread().fs_base);
+            wrmsr(MSR_KERNEL_GS_BASE, prev.thread().gs_base);
+        }
     }
 
     // Sched slot + tripwire.
     let cpu = crate::arch::cpu_id() as usize;
-    crate::sched::sched::republish_current_after_abort(cpu, prev);
-    crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
+    crate::sched::sched::republish_current_after_abort(cpu, prev.as_ptr());
+    crate::sched::sched::r56_report_switch_abort(cpu, prev.pid());
 
     // `next` (smp8 orphan-race): the "the steal already re-linked it"
     // assumption holds only for REVOKED aborts. A LIVE-published pick
