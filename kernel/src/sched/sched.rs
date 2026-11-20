@@ -11296,14 +11296,11 @@ fn task_is_dying(task: *mut Task) -> bool {
     if task.is_null() {
         return true;
     }
-    unsafe {
+    {
         if crate::sched::edges::task_shared(task).ti_flags() & TaskFlags::PF_EXITING.bits() != 0 {
             return true;
         }
-        (*task)
-            .pending
-            .peek_info(crate::signal::Signal::SIGKILL as i32)
-            .is_some()
+        crate::sched::edges::task_shared(task).pending.peek_info(crate::signal::Signal::SIGKILL as i32).is_some()
     }
 }
 
