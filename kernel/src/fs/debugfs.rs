@@ -332,10 +332,14 @@ pub struct DebugFsEntryData {
     pub node: Arc<DebugFsNode>,
 }
 
-/// Recover the entry data from an inode.
-/// SAFETY: private_data must have come from debugfs_iget/create_root_inode.
-unsafe fn entry_of(inode: &Inode) -> Option<&'static DebugFsEntryData> {
-    inode.private_data.map(|p| &*(p as *const DebugFsEntryData))
+/// Recover the entry data from an inode (private_data came from the
+/// iget/create_root_inode path — the one audited deref below).
+fn entry_of(inode: &Inode) -> Option<&'static DebugFsEntryData> {
+    inode.private_data.map(|p| {
+        // SAFETY: iget/create_root_inode stored the entry
+        // (inode-lifetime); read-only view.
+        unsafe { &*(p as *const DebugFsEntryData) }
+    })
 }
 
 /// Resolve a child of `dir`.
@@ -521,9 +525,8 @@ pub struct DebugFsFileContent {
 /// read: serve from the open-time snapshot at the file position.
 fn debugfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data was installed by debugfs_open under this File.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
-        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+    let Some(ptr) = file.private_data_ptr() else {
+        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
     };
     // SAFETY: pointer provenance is Box::into_raw in debugfs_open.
     let content = unsafe { &*(ptr as *const DebugFsFileContent) };
@@ -542,12 +545,12 @@ fn debugfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 /// write: dispatch to the file's store handler.
 fn debugfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: inode pointer set at open; read-only access here.
-    let inode = match unsafe { (*file.inode.get()).clone() } {
+    let inode = match file.get_inode().cloned() {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
     // SAFETY: inode provenance is the debugfs iget path.
-    let entry = match unsafe { entry_of(&inode) } {
+    let entry = match entry_of(&inode) {
         Some(e) => e,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -567,9 +570,8 @@ fn debugfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 /// lseek within the snapshot.
 fn debugfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
     // SAFETY: see debugfs_file_read.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
-        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+    let Some(ptr) = file.private_data_ptr() else {
+        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
     };
     // SAFETY: pointer provenance is Box::into_raw in debugfs_open.
     let content = unsafe { &*(ptr as *const DebugFsFileContent) };
@@ -590,9 +592,11 @@ fn debugfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isi
 /// close: free the content snapshot.
 fn debugfs_file_close(file: &crate::fs::File) -> i32 {
     // SAFETY: see debugfs_file_read; null-out first to close the race window.
-    let ptr = unsafe { (*file.private_data.get()).take() };
+    let ptr = file.private_data_ptr();
+    file.clear_private_data();
     if let Some(ptr) = ptr {
         // SAFETY: provenance is Box::into_raw in debugfs_open.
+        // SAFETY: the Box<DebugFsFileContent> the open path stored (sole ref).
         drop(unsafe { Box::from_raw(ptr as *mut DebugFsFileContent) });
     }
     0

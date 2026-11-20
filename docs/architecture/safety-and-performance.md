@@ -709,6 +709,28 @@ exercising the oops/trap path; "safety" here means the trap, not the
 absence of UB at the probe. *Reference:* Linux's `BUG()`/`BUG_ON`
 selftests. *Containment:* debugfs-gated, boot-diagnostic only.
 
+**F11. buffer-cache intrusive protocol** — owner
+`kernel/src/fs/bio.rs`. *Reads/writes:* the hash chains and LRU list
+that link `CacheEntry` nodes by raw pointers (move/push/remove_lru,
+evict_one's four-phase pick/unhash/unlink/free, get()'s insertion
+relink). *Why no safe shape exists (this round):* the cache is ONE
+allocator-lifetime structure — entries are Boxed once, linked into two
+intrusive lists, and freed exactly when both unlinked and count==0; the
+eviction protocol's correctness IS the ordering of those raw relinks
+(R7-C1's orphaned-tail race, R11-1's presence-is-authoritative fix —
+both landed as raw-link-order fixes with panic evidence). A typed
+redesign (entry handles + link methods, tasklet's splice_all shape)
+is the right end state but changes the hot metadata path of the
+data-integrity domain: it must land WITH the fio --verify battery and
+pbench fs rows in band, not inside a conversion lane. Registered as
+the next measured step; the protocol blocks stay behind INV-BIO-ENTRY/
+INV-BIO-BH/INV-BIO-PIN with their history comments.
+*Containment:* all link ops run under the bucket/LRU locks; the
+pinned-handle family (`bh_pinned`, one edge) fronts every caller-facing
+deref; BLOCK_CACHE is an OnceSlot now (INV-SLOT-1/2).
+*Reference:* `buffer_head`'s `b_hash`/`b_assoc_map` intrusive links —
+the same C shape with no type discipline at all.
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once

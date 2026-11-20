@@ -330,12 +330,14 @@ pub struct TraceFsEntryData {
     pub gid: core::sync::atomic::AtomicU32,
 }
 
-/// Recover the entry data from an inode.
-/// SAFETY: private_data must have come from tracefs_iget/create_root_inode.
-unsafe fn entry_of(inode: &Inode) -> Option<&'static TraceFsEntryData> {
-    inode
-        .private_data
-        .map(|p| &*(p as *const TraceFsEntryData))
+/// Recover the entry data from an inode (private_data came from the
+/// iget/create_root_inode path — the one audited deref below).
+fn entry_of(inode: &Inode) -> Option<&'static TraceFsEntryData> {
+    inode.private_data.map(|p| {
+        // SAFETY: iget/create_root_inode stored an Arc'd entry
+        // (inode-lifetime); read-only view.
+        unsafe { &*(p as *const TraceFsEntryData) }
+    })
 }
 
 /// Resolve a child of `dir`.
@@ -607,9 +609,8 @@ pub struct TraceFsFileContent {
 /// EAGAIN-equivalent.
 fn tracefs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data was installed by tracefs_open under this File.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
-        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+    let Some(ptr) = file.private_data_ptr() else {
+        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
     };
     // SAFETY: pointer provenance is Box::into_raw in tracefs_open.
     let content = unsafe { &mut *(ptr as *mut TraceFsFileContent) };
@@ -618,10 +619,10 @@ fn tracefs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         // Refill: drain the generator into the live batch. The inode
         // lookup mirrors tracefs_file_write; a missing entry leaves the
         // batch empty (reads report 0).
-        let inode = unsafe { (*file.inode.get()).clone() };
+        let inode = file.get_inode().cloned();
         let fresh = inode
             .as_ref()
-            .and_then(|i| unsafe { entry_of(i) })
+            .and_then(|i| entry_of(i))
             .and_then(|e| e.node.show.as_ref().map(|show| show()))
             .unwrap_or_default();
         content.data = fresh;
@@ -642,12 +643,12 @@ fn tracefs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 /// write: dispatch to the file's store handler.
 fn tracefs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: inode pointer set at open; read-only access here.
-    let inode = match unsafe { (*file.inode.get()).clone() } {
+    let inode = match file.get_inode().cloned() {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
     // SAFETY: inode provenance is the tracefs iget path.
-    let entry = match unsafe { entry_of(&inode) } {
+    let entry = match entry_of(&inode) {
         Some(e) => e,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -667,9 +668,8 @@ fn tracefs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 /// lseek within the snapshot.
 fn tracefs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
     // SAFETY: see tracefs_file_read.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
-        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+    let Some(ptr) = file.private_data_ptr() else {
+        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
     };
     // SAFETY: pointer provenance is Box::into_raw in tracefs_open.
     let content = unsafe { &*(ptr as *const TraceFsFileContent) };
@@ -690,9 +690,11 @@ fn tracefs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isi
 /// close: free the content snapshot.
 fn tracefs_file_close(file: &crate::fs::File) -> i32 {
     // SAFETY: see tracefs_file_read; null-out first to close the race window.
-    let ptr = unsafe { (*file.private_data.get()).take() };
+    let ptr = file.private_data_ptr();
+    file.clear_private_data();
     if let Some(ptr) = ptr {
         // SAFETY: provenance is Box::into_raw in tracefs_open.
+        // SAFETY: the Box<TraceFsFileContent> the open path stored (sole ref).
         drop(unsafe { Box::from_raw(ptr as *mut TraceFsFileContent) });
     }
     0
