@@ -442,10 +442,10 @@ fn resolve_futex_phys(uaddr: usize) -> usize {
     // in the caller's own syscall context, so a sleeping fault (file I/O)
     // is legal here. Any fault outcome is fine: the re-walk decides
     // (a still-absent leaf just falls back to uaddr keying).
-    // SAFETY: AddressSpace accessor; handle_mm_fault operates on the
-    // current task's address space, same as the trap path.
-    unsafe {
-        if let Some(mm) = (*task).address_space() {
+    // AddressSpace accessor; handle_mm_fault operates on the current
+    // task's address space, same as the trap path (INV-SCE-2).
+    {
+        if let Some(mm) = crate::sched::edges::task_shared(task).address_space() {
             let page = uaddr & !0xfff;
             let _ = crate::arch::mm::handle_mm_fault(
                 &mm,
@@ -563,10 +563,11 @@ pub fn task_futex_mm_id(task: *const Task) -> usize {
     if task.is_null() {
         return 0;
     }
-    // SAFETY: caller guarantees a valid Task; address_space_arc() clones the
-    // Arc (bumping the refcount) and we drop it after taking the pointer.
-    unsafe {
-        match (*task).address_space_arc() {
+    // Caller guarantees a valid Task (INV-SCE-2); address_space_arc()
+    // clones the Arc (bumping the refcount) and we drop it after taking
+    // the pointer.
+    {
+        match crate::sched::edges::task_shared(task).address_space_arc() {
             Some(arc) => {
                 let id = alloc::sync::Arc::as_ptr(&arc) as usize;
                 drop(arc);
@@ -826,23 +827,11 @@ pub fn ffrt_chain_walk(
     let tk = crate::sched::edges::task_shared(task);
     let top = tk.kernel_stack_top_checked()?;
     #[cfg(feature = "x86_64")]
-    let usp = unsafe {
-        (*(top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE)
-            as *const crate::arch::x86_64::pt_regs::PtRegs))
-        .rsp as u64
-    };
+    let usp = crate::sched::edges::pt_regs_at_top(top).rsp as u64;
     #[cfg(feature = "riscv64")]
-    let usp = unsafe {
-        (*(top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE)
-            as *const crate::arch::riscv64::pt_regs::PtRegs))
-        .sp as u64
-    };
+    let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
     #[cfg(feature = "aarch64")]
-    let usp = unsafe {
-        (*(top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE)
-            as *const crate::arch::aarch64::pt_regs::PtRegs))
-        .sp as u64
-    };
+    let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
     if usp == 0 {
         return None;
     }
@@ -1086,23 +1075,11 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string:
     let tk = crate::sched::edges::task_shared(task);
     let top = tk.kernel_stack_top_checked()?;
     #[cfg(feature = "x86_64")]
-    let usp = unsafe {
-        (*(top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE)
-            as *const crate::arch::x86_64::pt_regs::PtRegs))
-        .rsp as u64
-    };
+    let usp = crate::sched::edges::pt_regs_at_top(top).rsp as u64;
     #[cfg(feature = "riscv64")]
-    let usp = unsafe {
-        (*(top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE)
-            as *const crate::arch::riscv64::pt_regs::PtRegs))
-        .sp as u64
-    };
+    let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
     #[cfg(feature = "aarch64")]
-    let usp = unsafe {
-        (*(top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE)
-            as *const crate::arch::aarch64::pt_regs::PtRegs))
-        .sp as u64
-    };
+    let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
     if usp == 0 {
         return None;
     }
@@ -1672,14 +1649,10 @@ pub fn fuxwatch_arm_round() {
         // SAFETY: root is a live user page-table root; R-only heap
         // data pages.
         for &wa in to_arm.iter().take(narm) {
-            unsafe {
-                crate::arch::mm::mm_ops::mprotect_pte_range(
-                    root,
+            crate::arch::mm::mm_ops::mprotect_pte_range(root,
                     wa & !0xfff,
                     1,
-                    0x1,
-                )
-            };
+                    0x1);
         }
         drop(g);
         crate::arch::x86_64::mm::asid::flush_tlb_all();
@@ -4548,23 +4521,11 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
             return;
         };
         #[cfg(feature = "x86_64")]
-        let usp = unsafe {
-            (*(top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE)
-                as *const crate::arch::x86_64::pt_regs::PtRegs))
-            .rsp as u64
-        };
+        let usp = crate::sched::edges::pt_regs_at_top(top).rsp as u64;
         #[cfg(feature = "riscv64")]
-        let usp = unsafe {
-            (*(top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE)
-                as *const crate::arch::riscv64::pt_regs::PtRegs))
-            .sp as u64
-        };
+        let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
         #[cfg(feature = "aarch64")]
-        let usp = unsafe {
-            (*(top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE)
-                as *const crate::arch::aarch64::pt_regs::PtRegs))
-            .sp as u64
-        };
+        let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
         if usp == 0 {
             return;
         }
@@ -6565,9 +6526,7 @@ fn pool_full_backoff() {
             // A racing wake may have enqueued us while still executing —
             // take ourselves back off (NEW-C2 discipline).
             // SAFETY: current is the running task's pointer.
-            unsafe {
-                crate::sched::dequeue_task(&*current);
-            }
+            crate::sched::dequeue_task(crate::sched::edges::task_shared(current));
             break;
         }
         // SAFETY: schedule() operates on the current task.
@@ -6712,18 +6671,16 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                     let tn = THEFT_N
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if tn < 32 {
-                        // SAFETY: read-only comm/pid of a waiter still
-                        // linked in this bucket under our lock.
-                        unsafe {
-                            // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
-                            crate::pr_warn!(
-                                "FUTEX-WAKE-THEFT waker mm={:#x} consumed waiter mm={:#x} uaddr={:#x} waiter tid {}",
-                                mm,
-                                waiter_mm,
-                                uaddr,
-                                (*woken_task).pid(),
-                            );
-                        }
+                        // Read-only pid of a waiter still linked in this
+                        // bucket under our lock (INV-SCE-2).
+                        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
+                        crate::pr_warn!(
+                            "FUTEX-WAKE-THEFT waker mm={:#x} consumed waiter mm={:#x} uaddr={:#x} waiter tid {}",
+                            mm,
+                            waiter_mm,
+                            uaddr,
+                            crate::sched::edges::task_shared(woken_task).pid(),
+                        );
                     }
                 }
             }
@@ -7029,9 +6986,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // Re-check value under lock (prevents lost wakeup).
         // SAFETY: get_user goes through the exception-table copy path; an
         // unmapped user address yields EFAULT instead of a kernel page fault.
-        let uval = match unsafe {
-            crate::arch::uaccess::get_user(uaddr_ptr as *const u32)
-        } {
+        let uval = match crate::sync::edges::word_read(uaddr_ptr as usize) {
             Some(v) => v,
             None => return -EFAULT as i64,
         };
@@ -7158,12 +7113,15 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // SAFETY: current is the current task, valid for the duration of this
         // function.  We hold the hash bucket lock so futex_wake will see the
         // state transition before checking is_sleeping().
-        unsafe {
+        {
+            // INV-SCE-2: current is the parking task itself; the bucket
+            // lock holds the chain stable (see the comment above).
+            let current_t = crate::sched::edges::task_shared(current);
             // timer-gap lane: the park edge for cpu0-pinned FIFO tasks
             // (rt2xdbg=1, 64 lines) — the pi_min wedge question is
             // whether the waiter ever parks on the word the waker walks.
             if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-                && (*current).cpus_allowed() == 1
+                && current_t.cpus_allowed() == 1
             {
                 static FWT: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
@@ -7177,7 +7135,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                         }
                     }
                     for &b in b"FWT-PARK pid=0x" { putchar(b); }
-                    ph((*current).pid() as u64);
+                    ph(current_t.pid() as u64);
                     for &b in b" uaddr=0x" { putchar(b); }
                     ph(uaddr as u64);
                     for &b in b" val=0x" { putchar(b); }
@@ -7185,7 +7143,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                     putchar(b'\n');
                 }
             }
-            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+            current_t.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         }
 
         // Release the hash bucket lock.  The Release semantics ensure that the
@@ -7558,11 +7516,8 @@ pub fn futex_parse_timeout_ns(
     }
     let mut buf = [0u8; 16];
     // SAFETY: access_ok-validated user pointer; exception-table copy.
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            buf.as_mut_ptr(), timeout_ptr as *const u8, 16,
-        )
-    };
+    let uncopied =
+        crate::sync::edges::copy_from_user_bytes(buf.as_mut_ptr(), timeout_ptr as usize, 16);
     if uncopied > 0 {
         return Err(EFAULT);
     }
@@ -8039,9 +7994,7 @@ pub fn futex_wake_op(
     {
         let _head2 = HASH_HEADS[bucket2].lock_irqsave();
         // SAFETY: exception-table protected access; EFAULT on bad pointer.
-        let old = match unsafe {
-            crate::arch::uaccess::get_user(uaddr2 as *const u32)
-        } {
+        let old = match crate::sync::edges::word_read(uaddr2) {
             Some(v) => v,
             None => return -EFAULT as i64,
         };
@@ -8063,9 +8016,7 @@ pub fn futex_wake_op(
             FUTEX_OP_CMP_GE => old_i >= cmparg,
             _ => unreachable!("cmp range checked in futex_wake_op_decode"),
         };
-        if unsafe {
-            !crate::arch::uaccess::put_user(uaddr2 as *mut u32, new)
-        } {
+        if !crate::sync::edges::word_write(uaddr2 as usize, new) {
             return -EFAULT as i64;
         }
     }
@@ -8615,9 +8566,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 return -EINVAL as i64;
             }
             // uaddr2 must be a readable user word (get_futex_key faults).
-            if unsafe {
-                crate::arch::uaccess::get_user(uaddr2 as *const u32).is_none()
-            } {
+            if crate::sync::edges::word_read(uaddr2).is_none() {
                 return -EFAULT as i64;
             }
             futex_requeue(uaddr, flags, val as i32, nr_requeue, uaddr2, val3, cmd == FUTEX_CMP_REQUEUE)
@@ -9505,13 +9454,11 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                 let n = FTW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if n < 240 {
                     let mut ts = [0u8; 16];
-                    let ts_ok = unsafe {
-                        crate::arch::uaccess::copy_from_user(
-                            ts.as_mut_ptr(),
-                            timeout as *const u8,
-                            ts.len(),
-                        ) == 0
-                    };
+                    let ts_ok = crate::sync::edges::copy_from_user_bytes(
+                        ts.as_mut_ptr(),
+                        timeout as usize,
+                        ts.len(),
+                    ) == 0;
                     let (sec, nsec) = if ts_ok {
                         (
                             u64::from(ts[0]) | (u64::from(ts[1]) << 8) | (u64::from(ts[2]) << 16)
@@ -10047,7 +9994,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                     "pipe" => {
                         if let Some(pipe) = crate::fs::pipe::pipe_of_file(&f) {
                             let (fill, cap, rc, wc) = pipe.diag_snapshot();
-                            let pipe_ptr = unsafe { *f.private_data.get() }
+                            let pipe_ptr = f.private_data_ptr()
                                 .map(|p| p as usize)
                                 .unwrap_or(0);
                             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
@@ -10082,7 +10029,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                                         {
                                             let hty = kd_fd_type(&hf);
                                             if hty == "pipe"
-                                                && unsafe { *hf.private_data.get() }
+                                                && hf.private_data_ptr()
                                                     == Some(pipe_ptr as *mut u8)
                                             {
                                                 let hcomm = core::str::from_utf8(hk.comm())
@@ -11935,12 +11882,14 @@ pub fn freeze_scan(now: u64, hz: u64) {
                             let pr = tk.pt_regs();
                             if !pr.is_null() {
                                 #[cfg(feature = "x86_64")]
-                                let (urip, uop, uval) = unsafe {
-                                    ((*pr).rip, (*pr).rsi as i64, (*pr).rdx)
+                                let (urip, uop, uval) = match tk.pt_regs_ref() {
+                                    Some(r) => (r.rip, r.rsi as i64, r.rdx),
+                                    None => (0, 0, 0),
                                 };
                                 #[cfg(feature = "riscv64")]
-                                let (urip, uop, uval) = unsafe {
-                                    ((*pr).epc, (*pr).a1 as i64, (*pr).a2)
+                                let (urip, uop, uval) = match tk.pt_regs_ref() {
+                                    Some(r) => (r.epc, r.a1 as i64, r.a2),
+                                    None => (0, 0, 0),
                                 };
                                 #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
                                 let (urip, uop, uval) = (0u64, 0i64, 0u32);
