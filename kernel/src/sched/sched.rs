@@ -2951,10 +2951,25 @@ pub fn task_page_is_owned(ptr: *const u8) -> bool {
     }
 }
 
+/// Slot take (INV-TL-1): the ownership-take half of the task-page
+/// lifecycle. Pairing audit — the page becomes a Task only through
+/// this sequence, all inside one function with no yield point:
+/// alloc (raw bytes, uninitialized) -> pid take (its failure deallocs
+/// the SAME layout back — pre-init, no observer can hold the pointer)
+/// -> new_task_at in-place init (its failure routes through
+/// free_task_slot so the page leaves POISONED, never raw — the R48
+/// note below) -> pid_hash_insert (the first publish; before it, no
+/// other CPU can name this page). IN_TASK_ALLOC is a diagnostic flag
+/// for the buddy's free-side audit, NOT an ownership tracker (no
+/// second authority — the poison words themselves are the only
+/// freed-state truth).
 pub fn alloc_task_slot() -> Option<*mut Task> {
     let layout = core::alloc::Layout::new::<Task>();
     IN_TASK_ALLOC.store(true, core::sync::atomic::Ordering::Release);
-    // SAFETY: Layout is non-zero (Task is sized); null check follows immediately.
+    // SAFETY (INV-TL-1): Layout is non-zero (Task is sized); the raw
+    // allocator has no safe wrapper that preserves the Task slot's
+    // raw-pointer identity (Round-B typed-handle conversion pending);
+    // null check follows immediately.
     let task_ptr = unsafe { alloc::alloc::alloc(layout) } as *mut Task;
     IN_TASK_ALLOC.store(false, core::sync::atomic::Ordering::Release);
     if task_ptr.is_null() {
@@ -3013,6 +3028,24 @@ static FREED_RING_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::At
 /// R12-4: poison marker written into a freed Task's state/pid words.
 pub const TASK_POISON: u32 = 0xDEAD_BEEF;
 
+/// Slot release (INV-TL-2): the terminal-release half of the
+/// lifecycle — the family the sc191 v2 fix and the R63
+/// terminal_switch_done protocol hang off. The single-atomic-window
+/// discipline: between the last observer's release (the callers'
+/// task_put / terminal_switch_done handshake proves no CPU still
+/// runs or can still reach the task) and the dealloc below there is
+/// ONE window with ONE writer (this CPU); the steps inside it are
+/// strictly ordered — wakewatch stamp invalidation (phantom-strand
+/// guard), drop_in_place (field destructors; the Arc fields were
+/// already released to None by the exit paths), the R12-4 ring
+/// record, the R47 positional poison of state+pid (the ONLY
+/// freed-state authority — R15-6/R33/R41/R47 guards read it), the
+/// R83 header paint, task_page_unmark, and the dealloc. NO second
+/// tracker: IN_TASK_FREE is the buddy audit's diagnostic flag, not
+/// ownership. No safe shape exists for this sequence: it writes
+/// through a pointer that is logically dead (the poison/paint) —
+/// by definition outside the language's model — and runs the
+/// destructor for the last reference the type system cannot see.
 pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
@@ -3361,6 +3394,11 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // must not inherit the old occupant's stamp (phantom-strand
         // guard, see wakewatch::note_task_freed).
         crate::sched::wakewatch::note_task_freed(task_ptr);
+        // SAFETY (INV-TL-2): drop_in_place runs the field destructors
+        // for the page's last type-system-invisible reference; the
+        // call-site audit (the comment block above) proves every path
+        // here operates on a FULLY initialized task (new_task_at's only
+        // failure return precedes any Drop-bearing field).
         unsafe {
             core::ptr::drop_in_place(task_ptr);
         }
@@ -3368,6 +3406,12 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // linked child" or wild-pointer wake then shows this exact marker
         // instead of anonymous zeros, proving (or ruling out) the
         // freed-while-referenced family at first sight.
+        // SAFETY (INV-TL-2, the poison window): every write below goes
+        // through a pointer the type system already considers dead —
+        // that is the POINT of the poison discipline (the R47/R12-4
+        // guards read these words to refuse stale wakes). Volatile
+        // stores at the compile-time offsets; the paint loop bounds
+        // itself to 0x100 bytes; the dealloc closes the window.
         unsafe {
             let slot = task_ptr as *mut u8;
             let h = FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
