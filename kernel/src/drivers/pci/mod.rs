@@ -136,44 +136,36 @@ impl PCIConfig {
         Self { base_addr: ecam_va(ecam_addr) }
     }
 
+    /// The device's configuration-space window (INV-MMIO-1: the ECAM /
+    /// port window this accessor was built from maps the function's
+    /// 4 KiB config page; offsets below are u8-in-range).
+    fn cfg(&self) -> crate::safety::mmio::MmioRegion {
+        crate::safety::mmio::MmioRegion::new(self.base_addr as usize, 0x1000)
+    }
+
     /// Read 32-bit configuration space register
     pub fn read_config_dword(&self, offset: u8) -> u32 {
-        unsafe {
-            let ptr = (self.base_addr + offset as u64) as *const u32;
-            core::ptr::read_volatile(ptr)
-        }
+        self.cfg().read_u32(offset as usize)
     }
 
     /// Write 32-bit configuration space register
     pub fn write_config_dword(&self, offset: u8, value: u32) {
-        unsafe {
-            let ptr = (self.base_addr + offset as u64) as *mut u32;
-            core::ptr::write_volatile(ptr, value);
-        }
+        self.cfg().write_u32(offset as usize, value)
     }
 
     /// Read 16-bit configuration space register
     pub fn read_config_word(&self, offset: u8) -> u16 {
-        unsafe {
-            let ptr = (self.base_addr + offset as u64) as *const u16;
-            core::ptr::read_volatile(ptr)
-        }
+        self.cfg().read_u16(offset as usize)
     }
 
     /// Write 16-bit configuration space register
     pub fn write_config_word(&self, offset: u8, value: u16) {
-        unsafe {
-            let ptr = (self.base_addr + offset as u64) as *mut u16;
-            core::ptr::write_volatile(ptr, value);
-        }
+        self.cfg().write_u16(offset as usize, value)
     }
 
     /// Read 8-bit configuration space register
     pub fn read_config_byte(&self, offset: u8) -> u8 {
-        unsafe {
-            let ptr = (self.base_addr + offset as u64) as *const u8;
-            core::ptr::read_volatile(ptr)
-        }
+        self.cfg().read_u8(offset as usize)
     }
 
     /// Read BAR

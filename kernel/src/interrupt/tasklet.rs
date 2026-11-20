@@ -201,51 +201,47 @@ pub fn tasklet_kill(t: *mut TaskletStruct) {
 // Softirq action handlers
 // ============================================================================
 
-/// TASKLET_SOFTIRQ action handler.
-/// Called by `__do_softirq` when TASKLET_SOFTIRQ is pending.
-fn tasklet_action(_vec: usize) {
-    let cpu = crate::arch::cpu_id() as usize;
-
-    // 1. Detach the entire list under lock
-    let mut local_head = ListHead::new();
-    local_head.init();
-
-    {
-        let _lock = TASKLET_LOCK[cpu].lock_irqsave();
-        // SAFETY: per-CPU list is accessed only under its own lock with IRQs
-        // disabled, so no concurrent modification. TASKLET_VEC[cpu] is a valid
-        // static mutable list head, and list nodes were placed by tasklet_schedule.
-        unsafe {
-            if !TASKLET_VEC[cpu].is_empty() {
-                // Splice: move all entries from per-CPU list to local list
-                local_head.next = TASKLET_VEC[cpu].next;
-                local_head.prev = TASKLET_VEC[cpu].prev;
-                (*local_head.next).prev = &mut local_head;
-                (*local_head.prev).next = &mut local_head;
-                TASKLET_VEC[cpu].init();
-            }
+/// Splice the whole per-CPU list onto `dst` (caller holds the source's
+/// per-CPU lock with IRQs disabled — the single audited splice edge of
+/// the intrusive tasklet list).
+unsafe fn splice_all(dst: &mut ListHead, src: &mut ListHead) {
+    // SAFETY: per-CPU list is accessed only under its own lock with IRQs
+    // disabled, so no concurrent modification; nodes were placed by
+    // tasklet_schedule under the same lock.
+    unsafe {
+        if !src.is_empty() {
+            dst.next = src.next;
+            dst.prev = src.prev;
+            (*dst.next).prev = dst;
+            (*dst.prev).next = dst;
+            src.init();
         }
     }
+}
 
-    // 2. Process local list (no lock needed — local to this context)
-    // SAFETY: local_head was spliced from the per-CPU list above; all list
-    // nodes are valid TaskletStruct::list entries. The offset_of! calculation
-    // recovers the enclosing TaskletStruct pointer. We hold no references into
-    // the list that could alias with the mutable derefs below.
+/// Walk a privately-spliced tasklet list: CAS-clear SCHED/set RUN, run
+/// the enabled callbacks, clear RUN. The offset_of! calculation
+/// recovers the enclosing TaskletStruct pointer (the container_of
+/// edge — one audited walk, shared by both action handlers since
+/// round-5).
+unsafe fn drain_tasklet_list(local_head: &mut ListHead) {
+    // SAFETY: local_head was spliced from the per-CPU list under its
+    // lock; all list nodes are valid TaskletStruct::list entries, and
+    // we hold no references into the list that could alias the mutable
+    // derefs below.
     unsafe {
         let mut pos = local_head.next;
-        while pos != &mut local_head as *mut ListHead {
+        while pos != local_head as *mut ListHead {
             let next = (*pos).next;
             let tasklet = (pos as usize - offset_of!(TaskletStruct, list)) as *mut TaskletStruct;
 
-            // CAS (review批次8): atomically clear SCHED and set RUN in one
-            // swap. This is the Linux tasklet_trylock() +
-            // test_and_clear_bit(SCHED) pair. It closes the double-link race
-            // of the old plain store: an interrupt re-scheduling the tasklet
-            // DURING func() sets SCHED (0→1) and links it once; the old code
-            // then ALSO re-linked it after observing SCHED set, leaving the
-            // tasklet on the per-CPU list twice (double run + list
-            // corruption on the second dequeue).
+            // CAS (review batch 8): atomically clear SCHED and set RUN in
+            // one swap — the Linux tasklet_trylock() +
+            // test_and_clear_bit(SCHED) pair. This closes the double-link
+            // race of the old plain store: an interrupt re-scheduling the
+            // tasklet DURING func() sets SCHED (0->1) and links it once;
+            // re-linking here as well left the tasklet on the per-CPU
+            // list twice (double run + corruption on the second dequeue).
             let old_state = (*tasklet).state.swap(
                 1u32 << TASKLET_STATE_RUN,
                 Ordering::AcqRel
@@ -267,9 +263,9 @@ fn tasklet_action(_vec: usize) {
                 }
             }
 
-            // Clear RUN only. If the tasklet was re-scheduled during func(),
-            // THAT path (tasklet_schedule's fetch_or SCHED 0→1) already
-            // linked it — do NOT link again here.
+            // Clear RUN only. If the tasklet was re-scheduled during
+            // func(), THAT path (tasklet_schedule's fetch_or SCHED 0->1)
+            // already linked it — do NOT link again here.
             (*tasklet).state.fetch_and(
                 !(1u32 << TASKLET_STATE_RUN),
                 Ordering::AcqRel
@@ -280,65 +276,38 @@ fn tasklet_action(_vec: usize) {
     }
 }
 
-/// HI_SOFTIRQ action handler.
-/// Identical to tasklet_action but uses HI_VEC and HI_LOCK.
+/// TASKLET_SOFTIRQ action handler: detach the per-CPU list, then drain.
+fn tasklet_action(_vec: usize) {
+    let cpu = crate::arch::cpu_id() as usize;
+
+    // 1. Detach the entire list under lock
+    let mut local_head = ListHead::new();
+    local_head.init();
+    {
+        let _lock = TASKLET_LOCK[cpu].lock_irqsave();
+        // SAFETY: splice edge — see splice_all.
+        unsafe { splice_all(&mut local_head, &mut TASKLET_VEC[cpu]) };
+    }
+
+    // 2. Process local list (no lock needed — local to this context)
+    // SAFETY: the shared walk edge.
+    unsafe { drain_tasklet_list(&mut local_head) };
+}
+
+/// HI_SOFTIRQ action handler — identical path on the HI vector.
 fn tasklet_hi_action(_vec: usize) {
     let cpu = crate::arch::cpu_id() as usize;
 
     let mut local_head = ListHead::new();
     local_head.init();
-
     {
         let _lock = TASKLET_HI_LOCK[cpu].lock_irqsave();
-        // SAFETY: same reasoning as tasklet_action splice above — per-CPU list
-        // accessed only under its own lock with IRQs disabled.
-        unsafe {
-            if !TASKLET_HI_VEC[cpu].is_empty() {
-                local_head.next = TASKLET_HI_VEC[cpu].next;
-                local_head.prev = TASKLET_HI_VEC[cpu].prev;
-                (*local_head.next).prev = &mut local_head;
-                (*local_head.prev).next = &mut local_head;
-                TASKLET_HI_VEC[cpu].init();
-            }
-        }
+        // SAFETY: splice edge — see splice_all.
+        unsafe { splice_all(&mut local_head, &mut TASKLET_HI_VEC[cpu]) };
     }
 
-    // SAFETY: same reasoning as tasklet_action local list processing above.
-    unsafe {
-        let mut pos = local_head.next;
-        while pos != &mut local_head as *mut ListHead {
-            let next = (*pos).next;
-            let tasklet = (pos as usize - offset_of!(TaskletStruct, list)) as *mut TaskletStruct;
-
-            // CAS: clear SCHED + set RUN atomically (see tasklet_action).
-            let old_state = (*tasklet).state.swap(
-                1u32 << TASKLET_STATE_RUN,
-                Ordering::AcqRel
-            );
-            if old_state & (1u32 << TASKLET_STATE_SCHED) == 0 {
-                (*tasklet).state.fetch_and(
-                    !(1u32 << TASKLET_STATE_RUN),
-                    Ordering::AcqRel,
-                );
-                pos = next;
-                continue;
-            }
-
-            if !(*tasklet).is_disabled() {
-                if let Some(func) = (*tasklet).func {
-                    func(tasklet);
-                }
-            }
-
-            // Clear RUN only; a re-schedule during func() linked itself.
-            (*tasklet).state.fetch_and(
-                !(1u32 << TASKLET_STATE_RUN),
-                Ordering::AcqRel
-            );
-
-            pos = next;
-        }
-    }
+    // SAFETY: the shared walk edge.
+    unsafe { drain_tasklet_list(&mut local_head) };
 }
 
 // ============================================================================

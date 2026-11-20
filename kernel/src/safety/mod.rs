@@ -42,3 +42,4 @@ pub mod frame;
 pub mod mmio;
 pub mod ptr;
 pub mod ring;
+pub mod slot;

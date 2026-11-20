@@ -91,8 +91,10 @@ struct LoopDev {
     /// by the current task (see shrink_reclaim), so the reference
     /// discipline holds: no synchronous writeback under a held io lock.
     io_owner_pid: AtomicU32,
-    /// The GenDisk handed out to the block layer (stable address: boxed).
-    disk: Option<&'static GenDisk>,
+    /// The GenDisk handed out to the block layer (stable address: boxed;
+    /// written once at init — the round-5 D-7 conversion makes every
+    /// LoopDev field interior-mutable, so LOOPS is a plain `static`).
+    disk: Spinlock<Option<&'static GenDisk>>,
 }
 
 impl LoopDev {
@@ -105,12 +107,12 @@ impl LoopDev {
             name: Spinlock::new([0; 64]),
             io_lock: crate::sync::mutex::SleepMutex::new_rt("loop-io", false),
             io_owner_pid: AtomicU32::new(0),
-            disk: None,
+            disk: Spinlock::new(None),
         }
     }
 }
 
-static mut LOOPS: [LoopDev; N_LOOPS] = [
+static LOOPS: [LoopDev; N_LOOPS] = [
     LoopDev::new(), LoopDev::new(), LoopDev::new(), LoopDev::new(),
     LoopDev::new(), LoopDev::new(), LoopDev::new(), LoopDev::new(),
 ];
@@ -134,11 +136,10 @@ pub fn init_loops() {
         return;
     }
     for i in 0..N_LOOPS {
-        // SAFETY: LOOPS is a static; index is bounded by N_LOOPS. The
-        // leaked GenDisk lives for the machine's lifetime (blkdev's
-        // registry stores it; the buffer cache keys on its address).
-        unsafe {
-            let dev = &mut LOOPS[i];
+        {
+            let dev = &LOOPS[i];
+            // The leaked GenDisk lives for the machine's lifetime (blkdev's
+            // registry stores it; the buffer cache keys on its address).
             let disk = Box::leak(Box::new(GenDisk::new(
                 loop_static_name(i),
                 LOOP_MAJOR,
@@ -150,7 +151,7 @@ pub fn init_loops() {
             disk.minors = 1;
             disk.capacity.store(0, Ordering::Release);
             disk.request_fn = Some(loop_request_fn);
-            dev.disk = Some(disk);
+            *dev.disk.lock() = Some(disk);
             // The registry deduplicates by major; one representative row
             // exposes the loop family to /proc/partitions consumers.
             if i == 0 {
@@ -182,8 +183,7 @@ pub fn loop_disk(idx: usize) -> Option<&'static GenDisk> {
         return None;
     }
     init_loops();
-    // SAFETY: static array access bounded by N_LOOPS.
-    unsafe { LOOPS[idx].disk }
+    *LOOPS[idx].disk.lock()
 }
 
 fn loop_static_name(i: usize) -> &'static str {
@@ -194,8 +194,7 @@ fn loop_static_name(i: usize) -> &'static str {
 pub fn loop_get_free() -> i32 {
     init_loops();
     for i in 0..N_LOOPS {
-        // SAFETY: static array access bounded by N_LOOPS.
-        let bound = unsafe { LOOPS[i].file.lock().is_some() };
+        let bound = LOOPS[i].file.lock().is_some();
         if !bound {
             return i as i32;
         }
@@ -211,7 +210,7 @@ pub fn loop_set_fd(idx: usize, file: Arc<File>) -> Result<(), i32> {
     }
     init_loops();
     // SAFETY: static array access bounded by N_LOOPS.
-    let dev = unsafe { &LOOPS[idx] };
+    let dev = &LOOPS[idx];
     let mut slot = dev.file.lock();
     if slot.is_some() {
         return return_errno(crate::errno::Errno::DeviceOrResourceBusy);
@@ -225,7 +224,7 @@ pub fn loop_set_fd(idx: usize, file: Arc<File>) -> Result<(), i32> {
     dev.sizelimit.store(0, Ordering::Release);
     dev.flags.store(0, Ordering::Release);
     *dev.name.lock() = [0; 64];
-    if let Some(disk) = dev.disk {
+    if let Some(disk) = *dev.disk.lock() {
         disk.capacity.store(size / 512, Ordering::Release);
         // A re-bound loop is a NEW device image (mkfs follows): drop any
         // reused ext4 instance for this disk so the next mount reads the
@@ -241,7 +240,7 @@ pub fn loop_set_fd(idx: usize, file: Arc<File>) -> Result<(), i32> {
 pub fn loop_set_fd_named(idx: usize, file: Arc<File>, path: &[u8]) -> Result<(), i32> {
     loop_set_fd(idx, file)?;
     // SAFETY: static array access bounded by N_LOOPS.
-    let dev = unsafe { &LOOPS[idx] };
+    let dev = &LOOPS[idx];
     let mut name = dev.name.lock();
     let n = path.len().min(63);
     name[..n].copy_from_slice(&path[..n]);
@@ -255,13 +254,13 @@ pub fn loop_clr_fd(idx: usize) -> Result<(), i32> {
         return return_errno(crate::errno::Errno::InvalidArgument);
     }
     // SAFETY: static array access bounded by N_LOOPS.
-    let dev = unsafe { &LOOPS[idx] };
+    let dev = &LOOPS[idx];
     let mut slot = dev.file.lock();
     match slot.take() {
         Some(_) => {
             dev.flags.store(0, Ordering::Release);
             *dev.name.lock() = [0; 64];
-            if let Some(disk) = dev.disk {
+            if let Some(disk) = *dev.disk.lock() {
                 disk.capacity.store(0, Ordering::Release);
                 // The device image is going away: a reused ext4 instance
                 // must not outlive its disk (see loop_set_fd).
@@ -292,7 +291,7 @@ pub fn loop_size_bytes(idx: usize) -> u64 {
         return 0;
     }
     // SAFETY: static array access bounded by N_LOOPS.
-    let dev = unsafe { &LOOPS[idx] };
+    let dev = &LOOPS[idx];
     let guard = dev.file.lock();
     let Some(file) = guard.as_ref() else { return 0 };
     let total = file_size_bytes(file).unwrap_or(0) as u64;
@@ -308,7 +307,7 @@ pub fn loop_is_bound(idx: usize) -> bool {
         return false;
     }
     // SAFETY: static array access bounded by N_LOOPS.
-    unsafe { LOOPS[idx].file.lock().is_some() }
+    LOOPS[idx].file.lock().is_some()
 }
 
 /// falloc-wedge (2026-11-16): does the CURRENT task hold the io claim of
@@ -329,7 +328,7 @@ pub fn loop_io_claim_held_by_current() -> bool {
     }
     for i in 0..N_LOOPS {
         // SAFETY: static array access bounded by N_LOOPS.
-        if unsafe { &LOOPS[i] }.io_owner_pid.load(Ordering::Acquire) == me {
+        if LOOPS[i].io_owner_pid.load(Ordering::Acquire) == me {
             return true;
         }
     }
@@ -338,9 +337,7 @@ pub fn loop_io_claim_held_by_current() -> bool {
 
 /// File I/O size: stat through the inode size (regular files).
 fn file_size_bytes(file: &Arc<File>) -> Result<usize, i32> {
-    // SAFETY: inode cell written at open time; read-only.
-    let inode_opt = unsafe { &*file.inode.get() };
-    match inode_opt.as_ref() {
+    match file.get_inode() {
         Some(inode) => Ok(inode.size.load(Ordering::Acquire) as usize),
         None => Ok(0),
     }
@@ -352,14 +349,14 @@ fn return_errno(e: crate::errno::Errno) -> Result<(), i32> {
 
 /// Block-layer request function shared by all loop GenDisks: translate
 /// the request into a positioned read/write on the backing file.
-unsafe extern "C" fn loop_request_fn(req: &mut Request) {
-    let idx = unsafe { (*req.device).first_minor as usize };
+/// (INV-BLKDEV-2: registered as `request_fn` on every loop GenDisk.)
+fn loop_request_fn(req: &mut Request) {
+    let idx = req.device.first_minor as usize;
     if idx >= N_LOOPS {
         req.error.store(-6, Ordering::Release); // ENXIO
         return;
     }
-    // SAFETY: static array access bounded by N_LOOPS.
-    let dev = unsafe { &LOOPS[idx] };
+    let dev = &LOOPS[idx];
     // Re-entrancy guard (see io_owner_pid): claim the device for this
     // pid BEFORE waiting on io_lock; a recursive request (this pid
     // already inside) fails with EDEADLK instead of self-spinning.
@@ -412,7 +409,7 @@ unsafe extern "C" fn loop_request_fn(req: &mut Request) {
 
 /// Body of [`loop_request_fn`] with the io_owner_pid re-entrancy claim
 /// held; the wrapper releases it on return.
-unsafe fn loop_request_fn_claimed(req: &mut Request, dev: &'static LoopDev, idx: usize) {
+fn loop_request_fn_claimed(req: &mut Request, dev: &'static LoopDev, idx: usize) {
     let _io = dev.io_lock.guard();
     let guard = dev.file.lock();
     let Some(file) = guard.as_ref() else {
@@ -474,14 +471,11 @@ fn loop_devno_of(file: &crate::fs::file::File) -> Option<DevNo> {
     ) {
         return None;
     }
-    // SAFETY: private_data was set by devfs_open (Box<DevNo>, file-lifetime).
-    unsafe {
-        let cell = file.private_data.get();
-        match (*cell).as_ref() {
-            Some(pd) => Some(*(pd.cast_const() as *const DevNo)),
-            None => None,
-        }
-    }
+    file.private_data_ptr().map(|pd| {
+        // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime) in the
+        // slot; read-only here.
+        unsafe { *(pd.cast_const() as *const DevNo) }
+    })
 }
 
 /// Read from the loop device at the file position (buffer-cache backed —
@@ -658,14 +652,13 @@ fn loop_status_of(idx: usize) -> LoopStatus {
         return st;
     }
     // SAFETY: static array access bounded by N_LOOPS.
-    let dev = unsafe { &LOOPS[idx] };
+    let dev = &LOOPS[idx];
     st.offset = dev.offset.load(Ordering::Acquire);
     st.sizelimit = dev.sizelimit.load(Ordering::Acquire);
     st.flags = dev.flags.load(Ordering::Acquire) as u32;
     st.name = *dev.name.lock();
     if let Some(file) = dev.file.lock().as_ref() {
-        // SAFETY: inode cell written at open time; read-only.
-        if let Some(inode) = unsafe { &*file.inode.get() }.as_ref() {
+        if let Some(inode) = file.get_inode().as_ref() {
             st.inode = inode.ino;
         }
     }
@@ -678,13 +671,13 @@ fn loop_change_fd(idx: usize, fd: usize) -> Result<(), i32> {
         .ok_or_else(|| crate::errno::Errno::BadFileNumber.as_neg_i32())?;
     let size = file_size_bytes(&file)? as u64;
     // SAFETY: static array access bounded by N_LOOPS (checked by caller).
-    let dev = unsafe { &LOOPS[idx] };
+    let dev = &LOOPS[idx];
     let mut slot = dev.file.lock();
     if slot.is_none() {
         return Err(crate::errno::Errno::NoSuchDeviceOrAddress.as_neg_i32());
     }
     *slot = Some(file);
-    if let Some(disk) = dev.disk {
+    if let Some(disk) = *dev.disk.lock() {
         disk.capacity.store(size / 512, Ordering::Release);
     }
     Ok(())
@@ -698,7 +691,7 @@ fn loop_set_capacity(idx: usize) -> Result<(), i32> {
         return Err(crate::errno::Errno::NoSuchDeviceOrAddress.as_neg_i32());
     }
     // SAFETY: static array access bounded by N_LOOPS.
-    if let Some(disk) = unsafe { LOOPS[idx].disk } {
+    if let Some(disk) = *LOOPS[idx].disk.lock() {
         disk.capacity.store(bytes / 512, Ordering::Release);
     }
     Ok(())
@@ -712,7 +705,7 @@ pub fn loop_file_ioctl(
     request: u32,
     arg: usize,
 ) -> Option<i64> {
-    use crate::arch::uaccess::{copy_from_user, copy_to_user};
+    use crate::arch::uaccess_safe as uaccess;
 
     if !core::ptr::eq(
         file.get_ops()? as *const _,
@@ -720,15 +713,10 @@ pub fn loop_file_ioctl(
     ) {
         return None;
     }
-    // SAFETY: private_data was set by devfs_open to a Box<DevNo> (leaked,
-    // file-lifetime). Read-only.
-    let devno = unsafe {
-        let cell = file.private_data.get();
-        match (*cell).as_ref() {
-            Some(pd) => *(pd.cast_const() as *const DevNo),
-            None => return None,
-        }
-    };
+    let Some(pd) = file.private_data_ptr() else { return None };
+    // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime) in the
+    // slot; read-only here.
+    let devno = unsafe { *(pd.cast_const() as *const DevNo) };
     let is_loop = devno.major == LOOP_MAJOR && (devno.minor as usize) < N_LOOPS;
     let idx = devno.minor as usize;
     // Linux loop_ioctl order: ENXIO for any loop-specific request on an
@@ -807,11 +795,8 @@ pub fn loop_file_ioctl(
             // struct loop_config { __u32 fd; __u32 block_size;
             //                     struct loop_info64 info; ... }
             let mut cfg = [0u8; 8 + LOOP_INFO64_SIZE];
-            // SAFETY: copy_from_user bounds-checks the userspace range.
-            unsafe {
-                if copy_from_user(cfg.as_mut_ptr(), arg as *const u8, cfg.len()) != 0 {
-                    return Some(-14i64); // EFAULT
-                }
+            if uaccess::copy_in(&mut cfg, arg) != 0 {
+                return Some(-14i64); // EFAULT
             }
             let fd = u32::from_le_bytes(cfg[0..4].try_into().unwrap()) as usize;
             let offset = u64::from_le_bytes(cfg[8 + 24..8 + 32].try_into().unwrap());
@@ -856,7 +841,7 @@ pub fn loop_file_ioctl(
             let bytes = val.to_le_bytes();
             let mut out = [0u8; 8];
             out[..len].copy_from_slice(&bytes[..len]);
-            if unsafe { copy_to_user(arg as *mut u8, out.as_ptr(), len) } != 0 {
+            if uaccess::copy_out(arg, &out[..len]) != 0 {
                 return Some(-14i64); // EFAULT
             }
             0
@@ -882,11 +867,8 @@ pub fn loop_file_ioctl(
             info[56..56 + LO_NAME_SIZE].copy_from_slice(&st.name);
             put64(&mut info, 216, st.init[0]);
             put64(&mut info, 224, st.init[1]);
-            // SAFETY: copy_to_user validates the userspace range.
-            unsafe {
-                if copy_to_user(arg as *mut u8, info.as_ptr(), LOOP_INFO64_SIZE) != 0 {
-                    return Some(-14i64); // EFAULT
-                }
+            if uaccess::copy_out(arg, &info) != 0 {
+                return Some(-14i64); // EFAULT
             }
             0
         }
@@ -895,11 +877,8 @@ pub fn loop_file_ioctl(
                 return Some(-6i64);
             }
             let mut info = [0u8; LOOP_INFO64_SIZE];
-            // SAFETY: copy_from_user bounds-checks the userspace range.
-            unsafe {
-                if copy_from_user(info.as_mut_ptr(), arg as *const u8, LOOP_INFO64_SIZE) != 0 {
-                    return Some(-14i64);
-                }
+            if uaccess::copy_in(&mut info, arg) != 0 {
+                return Some(-14i64); // EFAULT
             }
             let offset = u64::from_le_bytes(info[24..32].try_into().unwrap());
             let limit = u64::from_le_bytes(info[32..40].try_into().unwrap());
@@ -917,8 +896,7 @@ pub fn loop_file_ioctl(
             }
             match set_loop_geometry(idx, offset, limit) {
                 Ok(()) => {
-                    // SAFETY: static array access bounded by N_LOOPS.
-                    unsafe {
+                    {
                         LOOPS[idx].flags.store(flags as u64, Ordering::Release);
                         if !info[56..56 + LO_NAME_SIZE].iter().all(|&b| b == 0) {
                             let mut name = LOOPS[idx].name.lock();
@@ -954,11 +932,8 @@ pub fn loop_file_ioctl(
             info[LI_OFF_NAME..LI_OFF_NAME + LO_NAME_SIZE].copy_from_slice(&st.name);
             info[LI_OFF_INIT..LI_OFF_INIT + 8].copy_from_slice(&st.init[0].to_le_bytes());
             info[LI_OFF_INIT + 8..LI_OFF_INIT + 16].copy_from_slice(&st.init[1].to_le_bytes());
-            // SAFETY: copy_to_user validates the userspace range.
-            unsafe {
-                if copy_to_user(arg as *mut u8, info.as_ptr(), LOOP_INFO_SIZE) != 0 {
-                    return Some(-14i64); // EFAULT
-                }
+            if uaccess::copy_out(arg, &info) != 0 {
+                return Some(-14i64); // EFAULT
             }
             0
         }
@@ -969,11 +944,8 @@ pub fn loop_file_ioctl(
                 return Some(-6i64);
             }
             let mut info = [0u8; LOOP_INFO_SIZE];
-            // SAFETY: copy_from_user bounds-checks the userspace range.
-            unsafe {
-                if copy_from_user(info.as_mut_ptr(), arg as *const u8, LOOP_INFO_SIZE) != 0 {
-                    return Some(-14i64);
-                }
+            if uaccess::copy_in(&mut info, arg) != 0 {
+                return Some(-14i64); // EFAULT
             }
             let offset = u64::from(u32::from_le_bytes(
                 info[LI_OFF_OFFSET..LI_OFF_OFFSET + 4].try_into().unwrap(),
@@ -984,8 +956,7 @@ pub fn loop_file_ioctl(
             if flags & !(LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR | LO_FLAGS_PARTSCAN) != 0 {
                 return Some(-22i64); // EINVAL
             }
-            // SAFETY: static array access bounded by N_LOOPS.
-            unsafe {
+            {
                 LOOPS[idx].offset.store(offset, Ordering::Release);
                 LOOPS[idx].flags.store(flags as u64, Ordering::Release);
                 if !info[LI_OFF_NAME..LI_OFF_NAME + LO_NAME_SIZE].iter().all(|&b| b == 0) {
@@ -1052,7 +1023,7 @@ fn loop_offset_of(idx: usize) -> u64 {
         return 0;
     }
     // SAFETY: static array access bounded by N_LOOPS.
-    unsafe { LOOPS[idx].offset.load(Ordering::Acquire) }
+    LOOPS[idx].offset.load(Ordering::Acquire)
 }
 
 #[allow(dead_code)]
@@ -1061,7 +1032,7 @@ fn loop_sizelimit_of(idx: usize) -> u64 {
         return 0;
     }
     // SAFETY: static array access bounded by N_LOOPS.
-    unsafe { LOOPS[idx].sizelimit.load(Ordering::Acquire) }
+    LOOPS[idx].sizelimit.load(Ordering::Acquire)
 }
 
 fn set_loop_geometry(idx: usize, offset: u64, sizelimit: u64) -> Result<(), i32> {
@@ -1069,7 +1040,7 @@ fn set_loop_geometry(idx: usize, offset: u64, sizelimit: u64) -> Result<(), i32>
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
     // SAFETY: static array access bounded by N_LOOPS.
-    let dev = unsafe { &LOOPS[idx] };
+    let dev = &LOOPS[idx];
     dev.offset.store(offset, Ordering::Release);
     dev.sizelimit.store(sizelimit, Ordering::Release);
     Ok(())

@@ -37,12 +37,18 @@ pub mod bug;
 
 pub mod softlockup;
 pub mod hung_task;
-#[cfg(feature = "riscv64")]
-pub mod sbi_debug;
+// (round-5: dfx/sbi_debug.rs DELETED — the SBI low-level print helpers
+// had zero consumers anywhere in the tree; same dead-hunt-module class
+// as round-4D's hexdump.rs.)
 pub mod switches;
 /// Runtime kernel symbol table (/proc/kallsyms, symbolized traces).
 pub mod ksyms;
 pub mod taskdump;
+/// The hunt-era forensics family's shared raw edges (round-5
+/// consolidation; the irreducibility proofs in
+/// docs/architecture/safety-and-performance.md name this file as the
+/// owner of the stale-handle read family).
+pub mod forensics_edges;
 pub mod memwatch;
 /// Full physical-accounting ledger (fake-OOM family): census + counters
 /// reconciliation, triggered at the OOM moment and via the UART magic.

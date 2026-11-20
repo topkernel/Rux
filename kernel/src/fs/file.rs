@@ -533,6 +533,26 @@ impl File {
         unsafe { *self.private_data.get() = Some(data); }
     }
 
+    /// Read-private-data twin of [`File::set_private_data`] (round-5):
+    /// hands out a COPY of the slot's raw pointer. The copy itself is
+    /// safe; dereferencing the pointer is the caller's audited step
+    /// (the slot is written at open time before the file is published,
+    /// and cleared only at close — both under the owning file's
+    /// lifecycle, never concurrently with a live handle's use).
+    pub fn private_data_ptr(&self) -> Option<*mut u8> {
+        // SAFETY: a plain load of a pointer-sized word; the value is
+        // handed out as an opaque copy, not dereferenced here.
+        unsafe { *self.private_data.get() }
+    }
+
+    /// Clear the private-data slot (the close-path twin; called only
+    /// from a file's own close serialization).
+    pub fn clear_private_data(&self) {
+        // SAFETY: the store races no live handle (close is the last
+        // user of this open file description).
+        unsafe { *self.private_data.get() = None };
+    }
+
     /// Get close-on-exec flag
     pub fn get_cloexec(&self) -> bool {
         *self.cloexec.lock()

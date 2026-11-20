@@ -44,16 +44,12 @@ pub struct EthHdr {
 
 impl EthHdr {
     /// Create Ethernet header from byte slice
-    pub fn from_bytes(data: &[u8]) -> Option<&'static Self> {
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
         if data.len() < ETH_HLEN {
             return None;
         }
 
-        // SAFETY: data has at least ETH_HLEN bytes; lifetime is 'static because
-        // it aliases skb data which lives until the packet is freed.
-        unsafe {
-            Some(&*(data.as_ptr() as *const EthHdr))
-        }
+        crate::net::buffer::hdr_view::<EthHdr>(data)
     }
 
     /// Get protocol type. Unknown ethertypes map to None at the dispatch
@@ -101,19 +97,15 @@ pub struct EthFcs {
 /// # Notes
 /// Adds Ethernet header at the front of SkBuff
 pub fn eth_push_header(skb: &mut SkBuff, dest: [u8; ETH_ALEN], src: [u8; ETH_ALEN], proto: EthProtocol) -> Result<(), ()> {
-    let ptr = skb.skb_push(ETH_HLEN as u32).ok_or(())?;
-
-    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
-    // ETH_HLEN bytes; writing fields of repr(C) EthHdr is well-defined.
-    unsafe {
-        let eth_hdr = &mut *(ptr as *mut EthHdr);
+    skb.push_hdr::<EthHdr>(|eth_hdr| {
         eth_hdr.h_dest = dest;
         eth_hdr.h_source = src;
         // Wire format is big-endian; the RX side reads with from_be, so the
         // TX side must convert (review NET-H1 — every outbound frame was
         // dropped by the peer with the raw little-endian value).
         eth_hdr.h_proto = proto.to_u16().to_be();
-    }
+    })
+    .ok_or(())?;
 
     Ok(())
 }
@@ -125,18 +117,20 @@ pub fn eth_push_header(skb: &mut SkBuff, dest: [u8; ETH_ALEN], src: [u8; ETH_ALE
 ///
 /// # Returns
 /// Ethernet header reference, or None if parsing fails
-pub fn eth_pull_header(skb: &mut SkBuff) -> Option<&'static EthHdr> {
-    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
-
-    if data.len() < ETH_HLEN {
-        return None;
-    }
-
-    let eth_hdr = EthHdr::from_bytes(data)?;
+pub fn eth_pull_header(skb: &mut SkBuff) -> Option<EthHdr> {
+    let eth_hdr: EthHdr = {
+        let data = skb.data_all();
+        if data.len() < ETH_HLEN {
+            return None;
+        }
+        *EthHdr::from_bytes(data)?
+    };
 
     skb.skb_pull(ETH_HLEN as u32);
 
+    // (round-5: returns the parsed VALUE — the old code returned a
+    // pointer INTO the skb while also advancing it, a shape the borrow
+    // checker rightly refuses.)
     Some(eth_hdr)
 }
 
@@ -267,14 +261,8 @@ pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
         None => [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
     };
 
-    // SAFETY: skb.data and skb.len describe a valid byte range.
-    let first = unsafe {
-        if skb.len > 0 {
-            Some(*skb.data)
-        } else {
-            None
-        }
-    };
+    // First byte of the frame decides v4/v6 (clamped safe view).
+    let first = skb.data_slice(1).first().copied();
 
     // ---- IPv6 path (P1) ----
     if first.map(|b| b >> 4 == 6).unwrap_or(false) {
@@ -288,7 +276,7 @@ pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
     // accident of ip_rcv not checking the destination address).
     let dest_ip = if (skb.len as usize) >= crate::net::ipv4::IPHDR_LEN {
         // SAFETY: skb.data and skb.len describe a valid byte range.
-        let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
+        let data = skb.data_all();
         crate::net::ipv4::IpHdr::from_bytes(data)
             .filter(|hdr| hdr.version_ihl >> 4 == 4)
             .map(|hdr| u32::from_be(hdr.daddr))
@@ -361,11 +349,12 @@ fn ethernet_send_ipv6(mut skb: SkBuff, src_mac: [u8; ETH_ALEN]) -> Result<(), ()
         return Err(());
     }
 
-    // SAFETY: length checked above; daddr occupies bytes [24, 40) of the
-    // base header (repr(C) Ipv6Hdr field order validated by size 40).
-    let daddr = unsafe {
+    // daddr occupies bytes [24, 40) of the base header (repr(C) Ipv6Hdr
+    // field order validated by size 40); the clamped safe view copies it.
+    let daddr: [u8; 16] = {
+        let bytes = skb.data_slice_at(24, 16);
         let mut d = [0u8; 16];
-        core::ptr::copy_nonoverlapping(skb.data.add(24), d.as_mut_ptr(), 16);
+        d.copy_from_slice(bytes);
         d
     };
 
@@ -507,7 +496,7 @@ pub fn ethernet_rcv(mut skb: SkBuff) -> Result<(), ()> {
             crate::net::ipv4::ip_rcv(&mut skb)?;
         }
         EthProtocol::ETH_P_ARP => {
-            let _ = crate::net::arp::arp_rcv(&skb, eth_hdr);
+            let _ = crate::net::arp::arp_rcv(&skb, &eth_hdr);
         }
         // P1 IPv6: dispatch to the v6 stack (base header still attached —
         // ipv6_rcv pulls it itself, mirroring ip_rcv).

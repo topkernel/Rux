@@ -231,7 +231,7 @@ fn gc_listeners(listeners: &mut Vec<WeakArc>) {
 /// ICMP header) to every raw ICMP socket. Called from icmp_rcv.
 pub fn icmp_input(skb: &SkBuff, src_ip: u32) {
     // SAFETY: skb.data and skb.len describe a valid byte range.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
+    let data = skb.data_all();
     let mut src = [0u8; SOCKADDR_LL_LEN];
     src[0..2].copy_from_slice(&(2u16).to_le_bytes()); // AF_INET
     src[4..8].copy_from_slice(&src_ip.to_be_bytes());
@@ -253,7 +253,7 @@ pub fn icmp_input(skb: &SkBuff, src_ip: u32) {
 /// starts at the network-layer header (Ethernet header stripped).
 pub fn packet_input(ifindex: u32, skb: &SkBuff) {
     // SAFETY: skb.data and skb.len describe a valid byte range.
-    let frame = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
+    let frame = skb.data_all();
     if frame.len() < crate::net::ethernet::ETH_HLEN {
         return;
     }
@@ -442,19 +442,15 @@ pub fn raw_bind(sock: &Arc<RawSocket>, ifindex: i32, protocol: i32) {
 // File operations
 // ============================================================================
 
-/// Recover a strong Arc<RawSocket> from a File's private_data.
-/// SAFETY: the caller must have identity-checked the File against
-/// RAW_OPS first.
-unsafe fn raw_of_file(file: &File) -> Option<Arc<RawSocket>> {
-    let ptr = (*file.private_data.get())?;
-    let socket_ptr = ptr as *const RawSocket;
-    Arc::increment_strong_count(socket_ptr);
-    Some(Arc::from_raw(socket_ptr))
+/// Recover a strong Arc<RawSocket> from a File's private_data (the
+/// shared net-family edge, INV-NETARC-1; ops identity pre-checked).
+fn raw_of_file(file: &File) -> Option<Arc<RawSocket>> {
+    crate::net::file_arc::<RawSocket>(file)
 }
 
 fn raw_file_read(file: &File, buf: &mut [u8]) -> isize {
     // SAFETY: ops identity was verified — created by raw_socket_install.
-    let socket = match unsafe { raw_of_file(file) } {
+    let socket = match raw_of_file(file) {
         Some(s) => s,
         None => return -9,
     };
@@ -468,7 +464,7 @@ fn raw_file_read(file: &File, buf: &mut [u8]) -> isize {
 
 fn raw_file_write(file: &File, buf: &[u8]) -> isize {
     // SAFETY: ops identity was verified (see raw_file_read).
-    let socket = match unsafe { raw_of_file(file) } {
+    let socket = match raw_of_file(file) {
         Some(s) => s,
         None => return -9,
     };
@@ -487,22 +483,19 @@ fn raw_file_write(file: &File, buf: &[u8]) -> isize {
 }
 
 fn raw_file_close(file: &File) -> i32 {
-    // SAFETY: private_data came from Arc::into_raw(Arc<RawSocket>).
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
-        None => return 0,
-    };
-    unsafe { *file.private_data.get() = None; }
-    // SAFETY: reconstruct the leaked Arc so close runs and the ref drops.
-    let socket = unsafe { Arc::from_raw(ptr as *const RawSocket) };
-    raw_close(&socket);
+    // INV-NETARC-1: recover the stored Arc, run close, drop the ref.
+    if let Some(socket) = crate::net::file_arc::<RawSocket>(file) {
+        raw_close(&socket);
+        drop(socket);
+        crate::net::take_file_arc::<RawSocket>(file);
+    }
     0
 }
 
 fn raw_file_poll(file: &File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     // SAFETY: ops identity was verified (see raw_file_read).
-    let socket = match unsafe { raw_of_file(file) } {
+    let socket = match raw_of_file(file) {
         Some(s) => s,
         None => return POLLERR,
     };
@@ -559,11 +552,9 @@ fn raw_socket_install(socket: &Arc<RawSocket>, nonblock: bool, cloexec: bool) ->
 }
 
 fn unwind_raw_file(file: &Arc<File>) {
-    // SAFETY: the raw pointer came from Arc::into_raw above; sole owner.
-    let ptr = unsafe { *file.private_data.get() };
-    if let Some(ptr) = ptr {
-        unsafe { drop(Arc::from_raw(ptr as *const RawSocket)); }
-    }
+    // The slot holds the sole Arc reference (create failed before the
+    // fd was published): take and drop it.
+    crate::net::take_file_arc::<RawSocket>(file);
 }
 
 /// socket(AF_PACKET, SOCK_DGRAM, htons(ethertype)) — cooked packet socket.
@@ -640,14 +631,14 @@ pub fn raw_socket_from_fd(fd: usize) -> Option<Arc<RawSocket>> {
 /// see unix_file_of_file for the amplification note.
 pub fn raw_socket_of_file(file: &Arc<File>) -> Option<Arc<RawSocket>> {
     {
-        let ops = unsafe { *file.ops.get() };
+        let ops = file.get_ops();
         match ops {
             Some(ops) if core::ptr::eq(ops, &RAW_OPS) => {}
             _ => return None,
         }
     }
     // SAFETY: ops identity confirmed; private_data is a leaked Arc.
-    unsafe { raw_of_file(file) }
+    raw_of_file(file)
 }
 
 /// (RawSocket, file O_NONBLOCK) for a fd.

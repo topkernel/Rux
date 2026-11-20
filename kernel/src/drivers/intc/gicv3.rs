@@ -153,25 +153,31 @@ fn default_priority_for(intid: u32) -> u32 {
 }
 
 // ==================== MMIO accessors ====================
+//
+// Round-5: the raw volatile words route through safety::mmio::MmioRegion
+// (INV-MMIO-1: the GIC distributor/redistributor register files are
+// mapped at the fixed aliases this module computes — see the module
+// doc; every access below is a single word inside that mapping).
 
+/// Access one u32 register by alias address (INV-MMIO-1/2/3).
 #[inline]
-unsafe fn reg_read32(addr: usize) -> u32 {
-    unsafe { core::ptr::read_volatile(addr as *const u32) }
+fn reg_read32(addr: usize) -> u32 {
+    crate::safety::mmio::MmioRegion::new(addr, 4).read_u32(0)
 }
 
 #[inline]
-unsafe fn reg_write32(addr: usize, v: u32) {
-    unsafe { core::ptr::write_volatile(addr as *mut u32, v) }
+fn reg_write32(addr: usize, v: u32) {
+    crate::safety::mmio::MmioRegion::new(addr, 4).write_u32(0, v)
 }
 
 #[inline]
-unsafe fn reg_read64(addr: usize) -> u64 {
-    unsafe { core::ptr::read_volatile(addr as *const u64) }
+fn reg_read64(addr: usize) -> u64 {
+    crate::safety::mmio::MmioRegion::new(addr, 8).read_u64(0)
 }
 
 #[inline]
-unsafe fn reg_write64(addr: usize, v: u64) {
-    unsafe { core::ptr::write_volatile(addr as *mut u64, v) }
+fn reg_write64(addr: usize, v: u64) {
+    crate::safety::mmio::MmioRegion::new(addr, 8).write_u64(0, v)
 }
 
 /// Wait for a RWP-style busy bit to clear (bounded; the emulated GIC
@@ -179,7 +185,7 @@ unsafe fn reg_write64(addr: usize, v: u64) {
 fn wait_not_set(addr: usize, bit: u32) {
     for _ in 0..1_000_000 {
         // SAFETY: diagnostic poll of a GIC register previously written.
-        if unsafe { reg_read32(addr) } & bit == 0 {
+        if  reg_read32(addr)  & bit == 0 {
             return;
         }
         core::hint::spin_loop();
@@ -242,12 +248,12 @@ static DIST_INTID_LIMIT: AtomicU32 = AtomicU32::new(0);
 const DOMAIN_SIZE: u32 = crate::config::PLIC_MAX_INTERRUPTS as u32;
 
 fn dist_init() {
-    let typer = unsafe { reg_read32(GICD_BASE + gicd::TYPER) };
+    let typer =  reg_read32(GICD_BASE + gicd::TYPER) ;
     let lines = ((typer & 0x1F) as u32 + 1) * 32;
     DIST_INTID_LIMIT.store(lines, Ordering::Release);
 
     // 1. Disable the distributor while reconfiguring.
-    unsafe { reg_write32(GICD_BASE + gicd::CTLR, 0) };
+     reg_write32(GICD_BASE + gicd::CTLR, 0) ;
     wait_not_set(GICD_BASE + gicd::CTLR, gicd_ctlr_bits::RWP);
 
     // 2. Configure every SPI: priority + routing per INTID, then
@@ -273,28 +279,28 @@ fn dist_init() {
         // offset word_id itself. The original +4*word_id spread wrote
         // each word 4x too far out (INTID 32's priorities landed in
         // INTID 128's slots), leaving every SPI at its reset priority.
-        unsafe { reg_write32(GICD_BASE + gicd::IPRIORITYR + word_id as usize, word) };
+         reg_write32(GICD_BASE + gicd::IPRIORITYR + word_id as usize, word) ;
     }
     for intid in 32..limit {
-        unsafe {
+        
             reg_write64(
                 GICD_BASE + gicd::IROUTER + 8 * (intid as usize - 32),
                 boot_mpidr,
             );
-        }
+        
     }
     for n in 1..(limit as usize + 31) / 32 {
-        unsafe {
+        
             reg_write32(GICD_BASE + gicd::IGROUPR + 4 * n, 0xFFFF_FFFF);
             reg_write32(GICD_BASE + gicd::ICENABLER + 4 * n, 0xFFFF_FFFF);
-        }
+        
     }
 
     // 3. Enable: Group-1 forwarding (bit 1 — see gicd_ctlr_bits; ARE is
     //    RAO/WI on this machine and needs no write).
-    unsafe {
+    
         reg_write32(GICD_BASE + gicd::CTLR, gicd_ctlr_bits::ENABLE_G1)
-    };
+    ;
     wait_not_set(GICD_BASE + gicd::CTLR, gicd_ctlr_bits::RWP);
 }
 
@@ -323,7 +329,7 @@ fn find_my_rd_base() -> Option<usize> {
 
     let mut frame = GICR_FRAMES;
     for _ in 0..GICR_MAX_FRAMES {
-        let typer = unsafe { reg_read64(frame + gicr::TYPER) };
+        let typer =  reg_read64(frame + gicr::TYPER) ;
         let aff = (typer >> 32) as u64 & 0xFFFF_FFFF;
         if aff == my_aff {
             if cpu < crate::config::MAX_CPUS {
@@ -347,10 +353,10 @@ fn redist_configure_local(rd: usize) {
     // Wake the frame if it slept (PSCI-off CPUs can re-enter sleep;
     // QEMU clears ProcessorSleep itself, the poll is for real HW).
     let waker = rd + gicr::WAKER;
-    if unsafe { reg_read32(waker) } & gicr_waker_bits::PROCESSOR_SLEEP != 0 {
-        unsafe { reg_write32(waker, 0) };
+    if  reg_read32(waker)  & gicr_waker_bits::PROCESSOR_SLEEP != 0 {
+         reg_write32(waker, 0) ;
         for _ in 0..1_000_000 {
-            if unsafe { reg_read32(waker) } & gicr_waker_bits::CHILDREN_ASLEEP == 0 {
+            if  reg_read32(waker)  & gicr_waker_bits::CHILDREN_ASLEEP == 0 {
                 break;
             }
             core::hint::spin_loop();
@@ -359,7 +365,7 @@ fn redist_configure_local(rd: usize) {
 
     // Group 1 for the whole SGI/PPI bank; keep SGIs + timer PPI enabled.
     // (IPRIORITYR packs four INTIDs per word — accumulate, see dist_init.)
-    unsafe {
+    
         reg_write32(rd + gicr::SGI_IGROUPR0, 0xFFFF_FFFF);
         reg_write32(rd + gicr::SGI_ICENABLER0, 0xFFFF_FFFF);
         for word_id in (0..32u32).step_by(4) {
@@ -375,7 +381,7 @@ fn redist_configure_local(rd: usize) {
         }
         enable0 |= 1 << TIMER_PPI_INTID; // arch timer
         reg_write32(rd + gicr::SGI_ISENABLER0, enable0);
-    }
+    
 }
 
 /// Enable the CPU interface system registers (ICC_*): SRE, PMR, group-1
@@ -413,7 +419,7 @@ pub fn enable_ppi(intid: u32) {
     }
     if let Some(rd) = find_my_rd_base() {
         // SAFETY: set-alias write to this CPU's own frame.
-        unsafe { reg_write32(rd + gicr::SGI_ISENABLER0, 1 << intid) };
+         reg_write32(rd + gicr::SGI_ISENABLER0, 1 << intid) ;
     }
 }
 
@@ -424,16 +430,16 @@ fn gic_mask(data: &IrqData) {
     if intid < 32 {
         if let Some(rd) = find_my_rd_base() {
             // SAFETY: clear-alias write, own frame.
-            unsafe { reg_write32(rd + gicr::SGI_ICENABLER0, 1 << intid) };
+             reg_write32(rd + gicr::SGI_ICENABLER0, 1 << intid) ;
         }
     } else {
         // SAFETY: clear-alias write to the distributor.
-        unsafe {
+        
             reg_write32(
                 GICD_BASE + gicd::ICENABLER + 4 * (intid / 32) as usize,
                 1 << (intid % 32),
             )
-        };
+        ;
     }
 }
 
@@ -443,12 +449,12 @@ fn gic_unmask(data: &IrqData) {
         enable_ppi(intid);
     } else {
         // SAFETY: set-alias write to the distributor.
-        unsafe {
+        
             reg_write32(
                 GICD_BASE + gicd::ISENABLER + 4 * (intid / 32) as usize,
                 1 << (intid % 32),
             )
-        };
+        ;
     }
 }
 
