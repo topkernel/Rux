@@ -85,7 +85,7 @@ const EINVAL: i64 = 22;
 pub fn ptrace_may_access(target_cred: &crate::process::task::Cred) -> bool {
     if let Some(cur) = crate::sched::current() {
         // SAFETY: current is the running task; cred() is immutable.
-        let cred = unsafe { (*cur).cred() };
+        let cred = crate::process::unsafe_edges::borrow_task(cur as *mut Task).cred();
         if cred.euid == 0
             || cred.euid == target_cred.euid
             || cred.uid == target_cred.uid
@@ -97,49 +97,6 @@ pub fn ptrace_may_access(target_cred: &crate::process::task::Cred) -> bool {
 }
 
 // ==================== target memory access ====================
-
-/// Translate a user VA in the target's address space to a physical
-/// address plus the page size used for the copy chunking.
-///
-/// The walk goes through the arch walker
-/// (`arch::mm::mm_ops::PageTableWalker`). An earlier hand-rolled SV39
-/// loop ran on every arch: on x86_64 it misread x86 PTEs (SV39 index
-/// bits and leaf/PPN decoding on an x86 PML4/PDP/PD/PT chain), so it
-/// either died mid-walk (process_vm_readv on a musl heap at
-/// 0x7ff000000000 returned EFAULT — LTP r21 process_vm_readv02/03)
-/// or, worse, misdecoded a PML4 entry as a 1 GiB SV39 leaf and
-/// returned a garbage physical address, and process_vm_writev02
-/// copied 100000 bytes through the wrong linear-map pages (silent
-/// cross-process corruption). The arch walker decodes per-arch PTEs
-/// and root/intermediate-guards stale entries.
-///
-/// Returns (phys_of_va_frame_base, 4096): the walker folds huge-leaf
-/// offsets in, so the answer is always the 4 KiB frame containing
-/// `va`.
-///
-/// (fork-frag lane) The walk runs under the target mm's PTE lock
-/// (INV-LOCK-7): x86_64 munmap now UNLINKS and defer-frees emptied leaf
-/// tables of live mms, and this walker dereferences a PMD-resolved leaf
-/// table — without the lock a racing same-mm munmap could hand the walk
-/// a freed frame (garbage PPN past the bounds check = cross-process
-/// read). Under the lock the unlink and this walk serialize; the fault
-/// paths re-walk under the same lock, so nothing else changes.
-///
-/// # Safety
-/// `mm` must be the pinned target mm whose root the walk uses.
-unsafe fn translate(
-    mm: &crate::mm::mm_struct::MmStruct,
-    va: u64,
-) -> Option<(u64, u64)> {
-    use crate::arch::mm::mm_ops::PageTableWalker;
-    let root_ppn = mm.root_ppn();
-    let _pte_guard = mm.pte_lock().lock();
-    // SAFETY: root_ppn belongs to the pinned target mm; the walker
-    // bounds-checks the root and every intermediate entry against
-    // machine memory.
-    let (ppn, _) = unsafe { PageTableWalker::walk(root_ppn, va) }?;
-    Some((ppn << 12, 4096))
-}
 
 /// Read one word of target user memory at `addr`.
 ///
@@ -156,11 +113,11 @@ pub fn read_target_word(task: *mut Task, addr: u64) -> Option<u64> {
     }
     let page_fault_addr = addr & !0xFFFu64;
 
-    // SAFETY: task is pinned by the caller (sys_ptrace) for the call.
-    unsafe {
-        let mm = (*task).address_space_arc()?;
+    // task is pinned by the caller (sys_ptrace) for the call.
+    {
+        let mm = crate::process::unsafe_edges::borrow_task(task).address_space_arc()?;
 
-        if translate(&mm, page_fault_addr).is_none() {
+        if crate::process::unsafe_edges::ptrace_translate(&mm, page_fault_addr).is_none() {
             // Fault the page in through the target's mm (file-backed VMAs
             // are filled from their pinned File, anonymous ones zeroed).
             let r = crate::arch::mm::handle_mm_fault(
@@ -176,17 +133,16 @@ pub fn read_target_word(task: *mut Task, addr: u64) -> Option<u64> {
             }
         }
 
-        let (phys, page_len) = translate(&mm, addr)?;
+        let (phys, page_len) = crate::process::unsafe_edges::ptrace_translate(&mm, addr)?;
         let off = (addr & (page_len - 1)) as usize;
         if off + 8 > page_len as usize {
             return None;
         }
-        // SAFETY: kernel linear map of a user page of the target.
-        Some(unsafe {
-            core::ptr::read_volatile(
-                phys_to_virt(PhysAddr::new(phys + off as u64)).0 as *const u64
-            )
-        })
+        // Kernel linear map of a user page of the target
+        // (INV-PROC-PTRACE-MEM-1).
+        Some(crate::process::unsafe_edges::ptrace_read_word(
+            phys_to_virt(PhysAddr::new(phys + off as u64)).0 as usize,
+        ))
     }
 }
 
@@ -204,14 +160,14 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
     }
     let page_fault_addr = addr & !0xFFFu64;
 
-    // SAFETY: task is pinned by the caller (sys_ptrace) for the call.
-    unsafe {
-        let mm = match (*task).address_space_arc() {
+    // task is pinned by the caller (sys_ptrace) for the call.
+    {
+        let mm = match crate::process::unsafe_edges::borrow_task(task).address_space_arc() {
             Some(m) => m,
             None => return false,
         };
 
-        if translate(&mm, page_fault_addr).is_none() {
+        if crate::process::unsafe_edges::ptrace_translate(&mm, page_fault_addr).is_none() {
             let r = crate::arch::mm::handle_mm_fault(
                 &mm,
                 crate::arch::mm::VirtAddr::new(page_fault_addr),
@@ -222,7 +178,7 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
             }
         }
 
-        let (phys, page_len) = match translate(&mm, addr) {
+        let (phys, page_len) = match crate::process::unsafe_edges::ptrace_translate(&mm, addr) {
             Some(v) => v,
             None => return false,
         };
@@ -230,16 +186,15 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
         if off + 8 > page_len as usize {
             return false;
         }
-        // SAFETY: kernel linear map of a user page of the target.
-        unsafe {
-            core::ptr::write_volatile(
-                phys_to_virt(PhysAddr::new(phys + off as u64)).0 as *mut u64,
-                value,
-            );
-        }
+        // Kernel linear map of a user page of the target
+        // (INV-PROC-PTRACE-MEM-1).
+        crate::process::unsafe_edges::ptrace_write_word(
+            phys_to_virt(PhysAddr::new(phys + off as u64)).0 as usize,
+            value,
+        );
         // Coherent ordering: make the store visible before any fetch on
         // any hart (text writes — POKETEXT breakpoints).
-        flush_icache_range(addr);
+        crate::process::unsafe_edges::ptrace_flush_icache(addr);
         true
     }
 }
@@ -269,9 +224,9 @@ pub fn process_vm_copy(
     if len == 0 {
         return Ok(0);
     }
-    // SAFETY: task is pinned by the caller for the whole call; the mm Arc
-    // keeps the address space alive even if the target exits mid-copy.
-    let mm = match unsafe { (*task).address_space_arc() } {
+    // task is pinned by the caller for the whole call; the mm Arc keeps
+    // the address space alive even if the target exits mid-copy.
+    let mm = match crate::process::unsafe_edges::borrow_task(task).address_space_arc() {
         Some(m) => m,
         None => return Err(14), // EFAULT: kernel-thread style target
     };
@@ -298,7 +253,7 @@ pub fn process_vm_copy(
         }
         let page = r & !0xFFFu64;
         // SAFETY: translate only reads the target's page tables.
-        if unsafe { translate(&mm, page) }.is_none() {
+        if crate::process::unsafe_edges::ptrace_translate(&mm, page).is_none() {
             let fl = if to_remote {
                 crate::arch::mm::FaultFlags::WRITE
             } else {
@@ -314,24 +269,19 @@ pub fn process_vm_copy(
             }
         }
         // SAFETY: translate only reads the target's page tables.
-        let (phys, page_len) = match unsafe { translate(&mm, r) } {
+        let (phys, page_len) = match crate::process::unsafe_edges::ptrace_translate(&mm, r) {
             Some(v) => v,
             None => break,
         };
         let off = (r & (page_len - 1)) as usize;
         let chunk = core::cmp::min(remaining, page_len as usize - off);
-        // SAFETY: dst points into the kernel linear map of the target's
-        // user page; kbuf is a kernel buffer supplied by the caller.
+        // dst points into the kernel linear map of the target's user
+        // page; kbuf is a kernel buffer supplied by the caller
+        // (INV-PROC-PTRACE-MEM-1).
         let lin = phys_to_virt(PhysAddr::new(phys + off as u64)).0 as *mut u8;
-        unsafe {
-            if to_remote {
-                core::ptr::copy_nonoverlapping(k as *const u8, lin, chunk);
-            } else {
-                core::ptr::copy_nonoverlapping(lin as *const u8, k, chunk);
-            }
-        }
+        crate::process::unsafe_edges::ptrace_copy_chunk(lin, k, chunk, to_remote);
         r += chunk as u64;
-        k = unsafe { k.add(chunk) };
+        k = k.wrapping_add(chunk);
         done += chunk;
         remaining -= chunk;
     }
@@ -341,86 +291,7 @@ pub fn process_vm_copy(
     Ok(done)
 }
 
-/// Make a text write coherent before subsequent execution (breakpoints).
-///
-/// riscv64: full store fence + per-address TLB invalidation + fence.i.
-/// x86_64: self-modifying code is cache-coherent; a serializing fence for
-/// compiler ordering is sufficient.
-/// aarch64: clean d-cache to PoU, invalidate i-cache to PoU, then
-/// barrier + context sync (Linux arm64 flush_icache_range shape; the
-/// page is already mapped, so no TLB op is needed for the store).
-#[inline]
-fn flush_icache_range(_addr: u64) {
-    #[cfg(feature = "riscv64")]
-    // SAFETY: fence/sfence.vma/fence.i are the standard text-write
-    // coherence sequence; no memory operands beyond the address register.
-    unsafe {
-        core::arch::asm!(
-            "fence rw, rw",
-            "sfence.vma {0}, zero",
-            "fence.i",
-            in(reg) _addr,
-            options(nostack, preserves_flags)
-        );
-    }
-    #[cfg(feature = "x86_64")]
-    {
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    }
-    #[cfg(feature = "aarch64")]
-    // SAFETY: dc cvau/ic ivau on the text page are the arm64 text-write
-    // coherence sequence; no memory operands beyond the address register.
-    unsafe {
-        core::arch::asm!(
-            "dc cvau, {0}",
-            "ic ivau, {0}",
-            "dsb ish",
-            "isb",
-            in(reg) _addr,
-            options(nostack, preserves_flags)
-        );
-    }
-}
-
 // ==================== gregset access ====================
-
-/// Read the tracee's NT_PRSTATUS gregset (32 × u64) from its saved trap
-/// frame. Returns None when the task has no kernel stack / trap frame.
-///
-/// # Safety
-/// `task` must be pinned and stopped (its trap frame quiescent).
-unsafe fn read_gregset(task: *mut Task, out: &mut [u8; GREGSET_BYTES]) -> bool {
-    let regs = unsafe { (*task).pt_regs() };
-    if regs.is_null() {
-        return false;
-    }
-    // PtRegs stores epc, ra, sp, gp, tp, t0..t6, s0..s11, a0..a7 as its
-    // first 32 u64 words — exactly the RISC-V user_regs_struct layout.
-    // SAFETY: regs is the task's live trap frame; the first 256 bytes are
-    // the 32 general-purpose words.
-    unsafe {
-        let src = regs as *const u8;
-        core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), GREGSET_BYTES);
-    }
-    true
-}
-
-/// Write the tracee's NT_PRSTATUS gregset back into its trap frame.
-///
-/// # Safety
-/// `task` must be pinned and stopped.
-unsafe fn write_gregset(task: *mut Task, from: &[u8]) -> bool {
-    let regs = unsafe { (*task).pt_regs() };
-    if regs.is_null() {
-        return false;
-    }
-    let n = from.len().min(GREGSET_BYTES);
-    // SAFETY: regs is the task's live trap frame; only GP words written.
-    unsafe {
-        core::ptr::copy_nonoverlapping(from.as_ptr(), regs as *mut u8, n);
-    }
-    true
-}
 
 // ==================== stop / notify machinery ====================
 
@@ -432,19 +303,19 @@ unsafe fn write_gregset(task: *mut Task, from: &[u8]) -> bool {
 /// the task (schedule loop) until the tracer resumes it (PTRACE_CONT /
 /// DETACH) or a signal arrives — Linux ptrace_stop() discipline.
 ///
-/// # Safety
 /// `task` is the current (about to stop) task.
-pub unsafe fn ptrace_stop(task: *mut Task, sig: i32, info: SigInfo) {
+pub fn ptrace_stop(task: *mut Task, sig: i32, info: SigInfo) {
     use crate::process::task::TaskState;
 
-    // SAFETY: task is current.
-    unsafe {
-        (*task).set_ptrace_siginfo(info);
-        (*task).set_stop_signal(sig);
-        (*task).stop_reported().store(false, core::sync::atomic::Ordering::Release);
-        (*task).set_state(TaskState::new(TaskState::STOPPED));
+    // task is current (INV-PROC-BORROW-1's current-task arm).
+    {
+        let t = crate::process::unsafe_edges::borrow_task_mut(task);
+        t.set_ptrace_siginfo(info);
+        t.set_stop_signal(sig);
+        t.stop_reported().store(false, core::sync::atomic::Ordering::Release);
+        t.set_state(TaskState::new(TaskState::STOPPED));
 
-        let tracer_pid = (*task).tracer_pid();
+        let tracer_pid = t.tracer_pid();
         if tracer_pid != 0 {
             // Tracer visibility. SIGCHLD alone is NOT reliable: its default
             // disposition is SIG_IGN (send_signal discards it for tracers
@@ -479,7 +350,7 @@ pub fn sys_ptrace(args: SyscallArgs) -> i64 {
         None => return -ESRCH,
     };
     // SAFETY: dereferenced below only after null check.
-    let my_pid = unsafe { (*current).pid() };
+    let my_pid = crate::process::unsafe_edges::borrow_task(current as *mut Task).pid();
 
     // ---- PTRACE_TRACEME: no target lookup ----
     if request == PTRACE_TRACEME {
@@ -489,29 +360,29 @@ pub fn sys_ptrace(args: SyscallArgs) -> i64 {
         // Linux: a task that is already being traced may not TRACEME again
         // (LTP ptrace03 "process which is already been traced" expects EPERM).
         // SAFETY: tracer_pid is an atomic field.
-        if unsafe { (*current).tracer_pid() } != 0 {
+        if crate::process::unsafe_edges::borrow_task(current as *mut Task).tracer_pid() != 0 {
             return -EPERM;
         }
         // Future stops of THIS task are reported to its real parent.
         // SAFETY: parent_ptr returns the real parent or None.
-        let ppid = unsafe { (*current).parent_ptr() }.map(|p| unsafe { (*p).pid() }).unwrap_or(0);
+        let ppid = crate::process::unsafe_edges::borrow_task(current as *mut Task).parent_ptr().map(|p| unsafe { (*p).pid() }).unwrap_or(0);
         if ppid == 0 {
             return -ESRCH;
         }
         // SAFETY: tracer_pid is an atomic field.
-        unsafe { (*current).set_tracer_pid(ppid) };
+        crate::process::unsafe_edges::borrow_task(current as *mut Task).set_tracer_pid(ppid);
         return 0;
     }
 
     // ---- all other requests operate on a pinned target ----
     // SAFETY: pinned lookup keeps the Task alive until task_put below.
-    let target = unsafe { crate::process::pid_hash::pid_hash_lookup_pinned(pid) };
+    let target = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
     if target.is_null() {
         return -ESRCH;
     }
     let ret = dispatch_request(current, my_pid, target, request, addr, data);
     // SAFETY: release the pin taken above.
-    unsafe { crate::process::task::Task::task_put(target) };
+    crate::process::task::Task::task_put(target);
     ret
 }
 
@@ -523,36 +394,37 @@ fn dispatch_request(
     addr: u64,
     data: u64,
 ) -> i64 {
-    use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
+    use crate::arch::uaccess_safe as ua;
+    use crate::arch::uaccess::access_ok;
 
     // SAFETY: target is pinned for the whole call.
-    let is_stopped = unsafe { (*target).state().contains(crate::process::task::TaskState::STOPPED) };
+    let is_stopped = crate::process::unsafe_edges::borrow_task(target).state().contains(crate::process::task::TaskState::STOPPED);
 
     if request == PTRACE_ATTACH {
         if target == _current {
             return -EPERM;
         }
         // SAFETY: cred is immutable.
-        let cred = unsafe { (*target).cred().clone() };
+        let cred = crate::process::unsafe_edges::borrow_task(target).cred().clone();
         if !ptrace_may_access(&cred) {
             return -EPERM;
         }
-        let cur_tracer = unsafe { (*target).tracer_pid() };
+        let cur_tracer = crate::process::unsafe_edges::borrow_task(target).tracer_pid();
         if cur_tracer != 0 && cur_tracer != my_pid {
             return -EPERM; // already traced by someone else
         }
         // SAFETY: atomics.
-        unsafe { (*target).set_tracer_pid(my_pid) };
+        crate::process::unsafe_edges::borrow_task(target).set_tracer_pid(my_pid);
         // Stop the tracee: queue SIGSTOP — do_signal() sees tracer_pid set
         // and routes it to ptrace_stop instead of the default stop.
         // SAFETY: pending set is lock-protected.
-        unsafe { (*target).pending.add(Signal::SIGSTOP as i32) };
+        crate::process::unsafe_edges::borrow_task(target).pending.add(Signal::SIGSTOP as i32);
         crate::signal::signal_wake_up(target);
         return 0;
     }
 
     // Everything else requires the caller to be the configured tracer.
-    if unsafe { (*target).tracer_pid() } != my_pid {
+    if crate::process::unsafe_edges::borrow_task(target).tracer_pid() != my_pid {
         return -ESRCH;
     }
 
@@ -562,13 +434,13 @@ fn dispatch_request(
             let sig = data as i32;
             if sig >= 1 && sig <= 64 && sig != Signal::SIGKILL as i32 {
                 // SAFETY: pending set is lock-protected.
-                unsafe { (*target).pending.add(sig) };
+                crate::process::unsafe_edges::borrow_task(target).pending.add(sig);
             }
-            // SAFETY: atomics.
-            unsafe {
-                (*target).set_tracer_pid(0);
-                (*target).set_ptrace_options(0);
-                (*target).clear_single_step();
+            {
+                let t = crate::process::unsafe_edges::borrow_task(target);
+                t.set_tracer_pid(0);
+                t.set_ptrace_options(0);
+                t.clear_single_step();
             }
             if is_stopped {
                 crate::signal::signal_wake_up(target);
@@ -584,31 +456,32 @@ fn dispatch_request(
             let sig = data as i32;
             if sig >= 1 && sig <= 64 {
                 // SAFETY: pending set is lock-protected.
-                unsafe { (*target).pending.add(sig) };
+                crate::process::unsafe_edges::borrow_task(target).pending.add(sig);
                 // Mark it for direct delivery so do_signal does not
                 // re-intercept it into another trace stop.
                 // SAFETY: atomics.
-                unsafe { (*target).set_ptrace_sigdeliver(sig as u32) };
+                crate::process::unsafe_edges::borrow_task(target).set_ptrace_sigdeliver(sig as u32);
             }
             // Clear the stashed stop info: it has been consumed.
             // SAFETY: lock-protected field.
-            unsafe { (*target).clear_ptrace_siginfo() };
+            crate::process::unsafe_edges::borrow_task(target).clear_ptrace_siginfo();
 
             if request == PTRACE_SINGLESTEP {
                 // Displace the instruction at epc with EBREAK; the trap
                 // handler reports SIGTRAP and restores it.
-                // SAFETY: pinned + stopped target has a quiescent frame.
-                unsafe {
-                    let regs = (*target).pt_regs();
-                    if regs.is_null() {
-                        return -EIO;
-                    }
-                    let epc = (*regs).instruction_pointer();
+                // Pinned + stopped target has a quiescent frame
+                // (INV-PROC-FRAME-1's read arm).
+                let regs = crate::process::unsafe_edges::borrow_task(target).pt_regs();
+                if regs.is_null() {
+                    return -EIO;
+                }
+                {
+                    let epc = crate::process::unsafe_edges::frame_ref(regs).instruction_pointer();
                     match read_target_word(target, epc) {
                         Some(word) => {
-                            (*target).arm_single_step(epc, word);
+                            crate::process::unsafe_edges::borrow_task(target).arm_single_step(epc, word);
                             if !write_target_word(target, epc, EBREAK_INSN) {
-                                (*target).clear_single_step();
+                                crate::process::unsafe_edges::borrow_task(target).clear_single_step();
                                 return -EIO;
                             }
                         }
@@ -623,7 +496,7 @@ fn dispatch_request(
         PTRACE_KILL => {
             // Historical alias: deliver a SIGKILL to the tracee.
             // SAFETY: pending set is lock-protected.
-            unsafe { (*target).pending.add(Signal::SIGKILL as i32) };
+            crate::process::unsafe_edges::borrow_task(target).pending.add(Signal::SIGKILL as i32);
             crate::signal::signal_wake_up(target);
             0
         }
@@ -635,9 +508,9 @@ fn dispatch_request(
             match read_target_word(target, addr) {
                 Some(word) => {
                     if data != 0 && access_ok(data as usize, 8) {
-                        // SAFETY: access_ok-validated pointer; put_user is
-                        // the exception-table copy path.
-                        unsafe { let _ = put_user(data as *mut u64, word); }
+                        // access_ok-validated; write_user is the
+                        // exception-table copy path.
+                        let _ = ua::write_user(data as usize, word);
                     }
                     word as i64
                 }
@@ -663,19 +536,19 @@ fn dispatch_request(
             if addr % 8 != 0 || addr as usize >= GREGSET_BYTES {
                 return -EIO;
             }
-            // SAFETY: pinned + stopped; frame quiescent.
-            unsafe {
-                let regs = (*target).pt_regs();
-                if regs.is_null() {
-                    return -EIO;
-                }
-                let word =
-                    core::ptr::read_volatile((regs as *const u64).add((addr / 8) as usize));
-                if data != 0 && access_ok(data as usize, 8) {
-                    let _ = put_user(data as *mut u64, word);
-                }
-                word as i64
+            // Pinned + stopped; frame quiescent
+            // (INV-PROC-PTRACE-GREG-1/MEM-1).
+            let regs = crate::process::unsafe_edges::borrow_task(target).pt_regs();
+            if regs.is_null() {
+                return -EIO;
             }
+            let word = crate::process::unsafe_edges::ptrace_read_word(
+                regs as usize + addr as usize,
+            );
+            if data != 0 && access_ok(data as usize, 8) {
+                let _ = ua::write_user(data as usize, word);
+            }
+            word as i64
         }
 
         PTRACE_POKEUSR => {
@@ -685,18 +558,16 @@ fn dispatch_request(
             if addr % 8 != 0 || addr as usize >= GREGSET_BYTES {
                 return -EIO;
             }
-            // SAFETY: pinned + stopped; frame quiescent.
-            unsafe {
-                let regs = (*target).pt_regs();
-                if regs.is_null() {
-                    return -EIO;
-                }
-                core::ptr::write_volatile(
-                    (regs as *mut u64).add((addr / 8) as usize),
-                    data,
-                );
-                crate::arch::cpu::isb();
+            // Pinned + stopped; frame quiescent (INV-PROC-PTRACE-GREG-1).
+            let regs = crate::process::unsafe_edges::borrow_task(target).pt_regs();
+            if regs.is_null() {
+                return -EIO;
             }
+            crate::process::unsafe_edges::ptrace_write_word(
+                regs as usize + addr as usize,
+                data,
+            );
+            crate::arch::cpu::isb();
             0
         }
 
@@ -706,7 +577,7 @@ fn dispatch_request(
             }
             let mut buf = [0u8; GREGSET_BYTES];
             // SAFETY: pinned + stopped.
-            if !unsafe { read_gregset(target, &mut buf) } {
+            if !crate::process::unsafe_edges::ptrace_read_gregset(crate::process::unsafe_edges::borrow_task(target).pt_regs(), &mut buf) {
                 return -EIO;
             }
             if request == PTRACE_GETREGS {
@@ -714,13 +585,9 @@ fn dispatch_request(
                 if data == 0 || !access_ok(data as usize, GREGSET_BYTES) {
                     return -EINVAL;
                 }
-                // SAFETY: access_ok-validated; exception-table copy.
-                unsafe {
-                    let uncopied =
-                        copy_to_user(data as *mut u8, buf.as_ptr(), GREGSET_BYTES);
-                    if uncopied != 0 {
-                        return -EIO;
-                    }
+                // access_ok-validated; exception-table copy.
+                if ua::copy_out(data as usize, &buf[..GREGSET_BYTES]) != 0 {
+                    return -EIO;
                 }
                 0
             } else {
@@ -732,21 +599,17 @@ fn dispatch_request(
                 if data == 0 || !access_ok(data as usize, 16) {
                     return -EINVAL;
                 }
-                // SAFETY: validated iovec reads via get_user.
-                unsafe {
-                    let base = get_user(data as *const u64).unwrap_or(0);
-                    let len = get_user((data as *const u64).add(1)).unwrap_or(0);
-                    if base == 0 || len == 0 || !access_ok(base as usize, GREGSET_BYTES) {
-                        return -EINVAL;
-                    }
-                    let uncopied =
-                        copy_to_user(base as *mut u8, buf.as_ptr(), GREGSET_BYTES);
-                    if uncopied != 0 {
-                        return -EIO;
-                    }
-                    // Report the actual copied length (256).
-                    let _ = put_user((data as *mut u64).add(1), GREGSET_BYTES as u64);
+                // Validated iovec reads via read_user.
+                let base = ua::read_user::<u64>(data as usize).unwrap_or(0);
+                let len = ua::read_user::<u64>(data as usize + 8).unwrap_or(0);
+                if base == 0 || len == 0 || !access_ok(base as usize, GREGSET_BYTES) {
+                    return -EINVAL;
                 }
+                if ua::copy_out(base as usize, &buf[..GREGSET_BYTES]) != 0 {
+                    return -EIO;
+                }
+                // Report the actual copied length (256).
+                let _ = ua::write_user(data as usize + 8, GREGSET_BYTES as u64);
                 0
             }
         }
@@ -768,29 +631,27 @@ fn dispatch_request(
                 if data == 0 || !access_ok(data as usize, 16) {
                     return -EINVAL;
                 }
-                // SAFETY: validated iovec reads via get_user.
-                unsafe {
-                    let base = get_user(data as *const u64).unwrap_or(0);
-                    let len = get_user((data as *const u64).add(1)).unwrap_or(0);
-                    if base == 0 || len == 0 {
-                        return -EINVAL;
-                    }
-                    (base, len)
+                // Validated iovec reads via read_user.
+                let base = ua::read_user::<u64>(data as usize).unwrap_or(0);
+                let len = ua::read_user::<u64>(data as usize + 8).unwrap_or(0);
+                if base == 0 || len == 0 {
+                    return -EINVAL;
                 }
+                (base, len)
             };
             let n = (len as usize).min(GREGSET_BYTES);
             if !access_ok(src as usize, n) {
                 return -EINVAL;
             }
-            // SAFETY: access_ok-validated; exception-table copy.
-            unsafe {
-                let uncopied = copy_from_user(buf.as_mut_ptr(), src as *const u8, n);
-                if uncopied != 0 {
-                    return -EIO;
-                }
-                if !write_gregset(target, &buf[..n]) {
-                    return -EIO;
-                }
+            // access_ok-validated; exception-table copy.
+            if ua::copy_in(&mut buf[..n], src as usize) != 0 {
+                return -EIO;
+            }
+            if !crate::process::unsafe_edges::ptrace_write_gregset(
+                crate::process::unsafe_edges::borrow_task(target).pt_regs(),
+                &buf[..n],
+            ) {
+                return -EIO;
             }
             0
         }
@@ -801,19 +662,16 @@ fn dispatch_request(
                 return -EINVAL;
             }
             // SAFETY: lock-protected field read.
-            let info = unsafe { (*target).ptrace_siginfo() };
+            let info = crate::process::unsafe_edges::borrow_task(target).ptrace_siginfo();
             match info {
                 Some(i) => {
-                    // SAFETY: validated; exception-table copy.
-                    unsafe {
-                        let uncopied = copy_to_user(
-                            data as *mut u8,
-                            &i as *const SigInfo as *const u8,
-                            core::mem::size_of::<SigInfo>(),
-                        );
-                        if uncopied != 0 {
-                            return -EIO;
-                        }
+                    // Validated; exception-table copy (bytes_of owns the
+                    // value-to-bytes view).
+                    if ua::copy_out(
+                        data as usize,
+                        crate::safety::bytes::bytes_of(&i),
+                    ) != 0 {
+                        return -EIO;
                     }
                     0
                 }
@@ -825,19 +683,13 @@ fn dispatch_request(
             if data == 0 || !access_ok(data as usize, core::mem::size_of::<SigInfo>()) {
                 return -EINVAL;
             }
-            // SAFETY: validated read into a local zeroed siginfo.
-            unsafe {
-                let mut info: SigInfo = core::mem::zeroed();
-                let uncopied = copy_from_user(
-                    &mut info as *mut SigInfo as *mut u8,
-                    data as *const u8,
-                    core::mem::size_of::<SigInfo>(),
-                );
-                if uncopied != 0 {
-                    return -EIO;
-                }
-                (*target).set_ptrace_siginfo(info);
+            // Validated read into a local zeroed siginfo (copy_in_t
+            // owns the typed user read).
+            let mut info: SigInfo = crate::process::unsafe_edges::zeroed_siginfo();
+            if ua::copy_in_t(&mut info, data as usize) != 0 {
+                return -EIO;
             }
+            crate::process::unsafe_edges::borrow_task(target).set_ptrace_siginfo(info);
             0
         }
 
@@ -845,7 +697,7 @@ fn dispatch_request(
             // Options are recorded (minimal): no option changes behavior
             // yet beyond O_EXITKILL-style bookkeeping.
             // SAFETY: atomic field.
-            unsafe { (*target).set_ptrace_options(data) };
+            crate::process::unsafe_edges::borrow_task(target).set_ptrace_options(data);
             0
         }
 

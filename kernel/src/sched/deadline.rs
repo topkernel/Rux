@@ -109,15 +109,16 @@ impl DlRunQueue {
         // futex_wake on another) both passed the is_sleeping check and
         // inserted the Task twice: two CPUs picked it and ran one kernel
         // stack on two harts.
-        if unsafe { (*task).dl_entity().on_rq.load(Ordering::Acquire) } {
+        if crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.load(Ordering::Acquire) {
             return false;
         }
 
-        // SAFETY: Caller guarantees `task` points to a valid, live Task that
-        // remains allocated for the duration of this enqueue. The Task is not
+        // Caller guarantees `task` points to a valid, live Task that
+        // remains allocated for the duration of this enqueue (the GRQ
+        // hold pins it — INV-PROC-BORROW-1's GRQ arm). The Task is not
         // currently on any runqueue (precondition for enqueue).
-        unsafe {
-            let t = &*task;
+        {
+            let t = crate::process::unsafe_edges::borrow_task(task);
             let dl = t.dl_entity();
 
             // Get deadline
@@ -163,9 +164,10 @@ impl DlRunQueue {
             return false;
         }
 
-        // SAFETY: Caller guarantees `task` points to a valid, live Task.
-        unsafe {
-            let t = &*task;
+        // Caller guarantees `task` points to a valid, live Task
+        // (INV-PROC-BORROW-1's GRQ arm).
+        {
+            let t = crate::process::unsafe_edges::borrow_task(task);
             let dl = t.dl_entity();
 
             // P08-mirror: a task that is not linked must be a no-op. The
@@ -236,12 +238,9 @@ impl DlRunQueue {
                 self.earliest_dl.store(u64::MAX, Ordering::Release);
             }
 
-            // Clear on_rq flag
-            // SAFETY: `task` was just removed from self.tasks, so it is a valid
-            // pointer to a live Task that was previously enqueued here.
-            unsafe {
-                (*task).dl_entity().on_rq.store(false, Ordering::Release);
-            }
+            // Clear on_rq flag: `task` was just removed from self.tasks
+            // (a valid pointer to a live Task previously enqueued here).
+            crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
 
             return Some(task);
         }
@@ -295,12 +294,13 @@ impl DlRunQueue {
             // the switching CPU's own prev (fast path).
             // R65: dual-bit ownership (on_cpu AND running_on_cpu claim
             // must both be free) — see the fair-class twin.
-            let allowed = unsafe {
+            let allowed = {
                 // R65-pick (probe-slow): single-qword ownership read —
                 // see the fair-class twin.
+                let t = crate::process::unsafe_edges::borrow_task(task);
                 let ownership_ok =
-                    task == prev || (*task).ownership_pickable(cpu_id);
-                (*task).cpu_allowed(cpu_id) && ownership_ok
+                    task == prev || t.ownership_pickable(cpu_id);
+                t.cpu_allowed(cpu_id) && ownership_ok
             };
             if allowed {
                 // Found a match — remove and return it
@@ -313,11 +313,9 @@ impl DlRunQueue {
                     self.earliest_dl.store(u64::MAX, Ordering::Release);
                 }
 
-                // SAFETY: `task` was just removed from self.tasks; it is a
-                // valid pointer to a live Task that was previously enqueued.
-                unsafe {
-                    (*task).dl_entity().on_rq.store(false, Ordering::Release);
-                }
+                // `task` was just removed from self.tasks; a valid
+                // pointer to a live Task previously enqueued.
+                crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
 
                 result = Some(task);
                 break;
@@ -345,8 +343,7 @@ impl DlRunQueue {
     }
 }
 
-unsafe impl Send for DlRunQueue {}
-unsafe impl Sync for DlRunQueue {}
+// Send/Sync impls live in side_edges.rs (this file carries zero unsafe).
 
 /// Deadline scheduling entity
 #[derive(Debug)]

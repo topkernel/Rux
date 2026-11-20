@@ -1236,7 +1236,7 @@ impl RootFSSuperBlock {
 /// RootFS mount function
 // SAFETY: _fc is a valid FsContext reference from the VFS mount call;
 // RootFSSuperBlock is a simple wrapper with no unsafe invariants.
-unsafe extern "C" fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
+fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     // Create RootFS superblock
     let rootfs_sb = Box::new(RootFSSuperBlock::new());
 

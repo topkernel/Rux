@@ -1222,7 +1222,7 @@ static GLOBAL_PROC_MOUNT: core::sync::atomic::AtomicPtr<VfsMount> =
 /// ProcFS mount function
 // SAFETY: _fs_context is a valid FsContext reference from the VFS mount call;
 // ProcFSSuperBlock is a simple wrapper with no unsafe invariants.
-unsafe extern "C" fn procfs_mount(_fs_context: &crate::fs::superblock::FsContext<'_>) -> Result<*mut SuperBlock, i32> {
+fn procfs_mount(_fs_context: &crate::fs::superblock::FsContext<'_>) -> Result<*mut SuperBlock, i32> {
     let procfs_sb = alloc::boxed::Box::new(ProcFSSuperBlock::new());
     let procfs_sb_ptr = alloc::boxed::Box::into_raw(procfs_sb) as *mut SuperBlock;
     Ok(procfs_sb_ptr)
@@ -1231,9 +1231,10 @@ unsafe extern "C" fn procfs_mount(_fs_context: &crate::fs::superblock::FsContext
 /// ProcFS unmount function
 // SAFETY: sb is a valid SuperBlock pointer from a previous procfs_mount call;
 // Box::from_raw reclaims the ProcFSSuperBlock created during mount.
-unsafe extern "C" fn procfs_kill_sb(sb: *mut SuperBlock) {
+fn procfs_kill_sb(sb: *mut SuperBlock) {
     if !sb.is_null() {
-        let _ = alloc::boxed::Box::from_raw(sb as *mut ProcFSSuperBlock);
+        // SAFETY: the Box the mount callback stored (unmount path).
+        let _ = unsafe { alloc::boxed::Box::from_raw(sb as *mut ProcFSSuperBlock) };
     }
 }
 
@@ -2365,7 +2366,9 @@ fn procfs_file_close(file: &crate::fs::File) -> i32 {
         if let Some(content_ptr) = *data_opt {
             // Null out pointer first to prevent use-after-free by concurrent readers
             *file.private_data.get() = None;
-            let _ = alloc::boxed::Box::from_raw(content_ptr as *mut ProcfsFileContent);
+            // SAFETY: the Box<ProcfsFileContent> procfs_open stored (close
+            // is the last user of this open file description).
+            let _ = unsafe { alloc::boxed::Box::from_raw(content_ptr as *mut ProcfsFileContent) };
         }
         0
     }

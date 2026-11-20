@@ -428,7 +428,7 @@ impl Default for PageTableEntry {
 #[repr(C, align(4096))]
 #[derive(Clone, Copy)]
 pub struct PageTable {
-    entries: [PageTableEntry; 512],
+    pub(crate) entries: [PageTableEntry; 512],
 }
 
 impl PageTable {

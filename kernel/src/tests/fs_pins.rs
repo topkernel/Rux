@@ -56,12 +56,12 @@ fn test_stat_pins() {
 
 // ---- fs/superblock.rs --------------------------------------------------
 
-extern "C" fn test_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
+fn test_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     let sb = Box::new(SuperBlock::new(4096, 0x1234));
     Ok(Box::into_raw(sb) as *mut SuperBlock)
 }
 
-extern "C" fn test_kill_sb(_sb: *mut SuperBlock) {}
+fn test_kill_sb(_sb: *mut SuperBlock) {}
 
 fn test_superblock_pins() {
     // The registry stores &'static FileSystemType, so the test type is

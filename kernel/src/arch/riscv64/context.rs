@@ -529,6 +529,13 @@ extern "C" {
 /// After __switch_to, the stack pointer changes, so we must use tp (thread pointer)
 /// to get the current task for FPU restoration.
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // Thin contract wrapper (IRQs-off + locals-invalid-after-switch stay
+    // the caller-visible protocol); the body below is safe Rust over the
+    // audited switch edges.
+    context_switch_body(prev, next)
+}
+
+fn context_switch_body(prev: &mut Task, next: &mut Task) {
     // R56-heal (early revoked-pick check): if the slot-capture steal
     // already revoked this pick (the picking vCPU was TCG-starved past
     // the whole GRQ-release → wrapper window), the pick state is
@@ -540,16 +547,19 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     if (*next).pid() != 0 {
         let st = next.pick_state();
         if st != crate::process::task::PICK_PICKED {
-            riscv_switch_abort(prev, next);
+            // SAFETY: the early-abort repair edge (nothing switched yet).
+            unsafe { riscv_switch_abort(prev, next) };
             return;
         }
     }
 
     // Step 1: Save prev FPU state
-    prev.thread_mut().fpu_save_for_switch();
+    // SAFETY: prev is the running task on this hart.
+    unsafe { prev.thread_mut().fpu_save_for_switch() };
     // RVV state rides the same switch discipline (vext.rs): Dirty-gated
     // save, VS dropped to Off for the outgoing task.
-    prev.thread_mut().vstate_save_for_switch();
+    // SAFETY: same.
+    unsafe { prev.thread_mut().vstate_save_for_switch() };
 
     // Store prev task for ret_from_fork
     set_prev_task(prev as *mut Task);
@@ -571,7 +581,8 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
             } else {
                 next_mm.alloc_asid().unwrap_or(0)
             };
-            switch_mm(next_ppn, asid);
+            // SAFETY: next_ppn is the live mm root just resolved.
+            unsafe { switch_mm(next_ppn, asid) };
         }
     } else {
         // Next task is a kernel thread or idle task — switch to the
@@ -585,7 +596,8 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         if current_ppn != kernel_ppn {
             // Kernel address space: ASID 0 (lazy-TLB style — no user
             // translations are needed while running kernel threads).
-            switch_mm(kernel_ppn, 0);
+            // SAFETY: the static kernel root.
+            unsafe { switch_mm(kernel_ppn, 0) };
         }
     }
 
@@ -606,7 +618,9 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     //
     // ti_cpu is already set correctly by sched::context_switch() BEFORE
     // calling us, so there is nothing to do here after the switch.
-    __switch_to(prev, next);
+    // SAFETY: the scheduler's switch protocol (IRQs off; both tasks valid
+    // pick targets) — the one register/stack switch edge.
+    unsafe { __switch_to(prev, next) };
 
     // Restore the incoming task's FPU state (review ARCH-H1). tp and the
     // per-CPU current now refer to `next`; locals above are invalid, so
@@ -615,10 +629,11 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // silent numeric corruption across tasks plus cross-task information
     // leakage.
     if let Some(cur) = crate::sched::current() {
-        // SAFETY: cur is the task now running on this CPU.
+        // cur is the task now running on this hart.
+        // SAFETY: cur is the task now running on this hart.
         unsafe {
-            (*cur).thread_mut().restore_fpu();
-            (*cur).thread_mut().restore_vstate();
+            cur.thread_mut().restore_fpu();
+            cur.thread_mut().restore_vstate();
         }
     }
 }

@@ -11,6 +11,7 @@
 //! walk depth are x86-specific.
 
 use super::memory_layout::*;
+use super::unsafe_edges::PtTable;
 use super::mm_ops::{alloc_user_phys_page, check_pte_permissions, is_cow_page, PageTableWalker};
 use super::mmu_init::{get_page_table_virt, map_page, map_page_noflush, ROOT_PAGE_TABLE};
 use super::pagetable::*;
@@ -192,7 +193,7 @@ fn try_expand_stack(
     // must not be mistaken for the winner's mapping here, or this path
     // "Handles" forever against it while the user instruction keeps
     // refaulting.
-    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+    if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
         .map_or(false, |(_ppn, bits)| {
             pte_counts_as_mapped(bits, fault_addr.bits() as u64)
         })
@@ -524,7 +525,7 @@ pub fn handle_mm_fault(
     if already_mapped {
         // Check COW
         // SAFETY: root_ppn is a valid page table root. is_cow_page only reads the PTE.
-        if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
+        if is_write &&  is_cow_page(root_ppn, fault_addr)  {
             // wildwrite-hunt note: arming CR0.WP makes supervisor uaccess
             // writes take this path too (previously they silently wrote
             // through the COW protection). OH boots then COW-fault the
@@ -558,7 +559,7 @@ pub fn handle_mm_fault(
         // Check if page permissions meet access requirements
         // SAFETY: root_ppn is a valid page table root. check_pte_permissions only reads PTEs.
         if let Some((has_read, has_write, has_exec, pte_is_user)) =
-            unsafe { check_pte_permissions(root_ppn, fault_addr) }
+             check_pte_permissions(root_ppn, fault_addr) 
         {
             // Verify permissions
             let perm_ok = (!is_write || has_write)
@@ -822,7 +823,7 @@ pub fn handle_mm_fault(
                         sp_flags &= !PageTableEntry::NX;
                     }
                     let _sp_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
-                    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+                    if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
                         .map_or(false, |(_ppn, bits)| {
                             pte_counts_as_mapped(bits, fault_addr.bits() as u64)
                         })
@@ -1004,7 +1005,7 @@ pub fn handle_mm_fault(
                             .max(vma_start);
                         let mut back_start = fault_page; // gap = [back_start, fault_page)
                         {
-                            let mut l1b: Option<(*mut PageTable, usize)> = None;
+                            let mut l1b: Option<(PtTable, usize)> = None;
                             let mut b = fault_page;
                             while b > win_back_start {
                                 let p = b - PAGE_SIZE_USIZE;
@@ -1013,16 +1014,13 @@ pub fn handle_mm_fault(
                                     // SAFETY: root_ppn is this address
                                     // space's valid root; read-only walk.
                                     l1b =
-                                        unsafe { l1_table_for(root_ppn, VirtAddr::new(p as u64)) }
+                                         l1_table_for(root_ppn, VirtAddr::new(p as u64)) 
                                             .map(|t| (t, region));
                                 }
                                 match l1b {
                                     Some((table, _)) => {
                                         let slot = (p >> 12) & 0x1FF;
-                                        // SAFETY: table is the L1 for
-                                        // this verified region; slot
-                                        // < 512.
-                                        let bits = unsafe { (*table).get(slot).bits() };
+                                        let bits = table.get_raw(slot);
                                         if bits != 0 && pte_counts_as_mapped(bits, p as u64) {
                                             break; // mapped page below:
                                                    // the gap starts above it
@@ -1123,7 +1121,7 @@ pub fn handle_mm_fault(
                                 // level / huge leaf) falls back to
                                 // map_page_noflush for that page, which
                                 // allocates/demotes, then re-resolves.
-                                let mut l1: Option<(*mut PageTable, usize)> = None;
+                                let mut l1: Option<(PtTable, usize)> = None;
                                 // Pin ownership per page of this chunk: all
                                 // n start pinned (get_range_into). A page
                                 // that fails its map releases its own pin
@@ -1150,19 +1148,16 @@ pub fn handle_mm_fault(
                                     if l1.map_or(true, |(_t, b)| b != region) {
                                         // SAFETY: root_ppn is the address
                                         // space's valid root; read-only walk.
-                                        l1 = unsafe {
+                                        l1 = 
                                             l1_table_for(root_ppn, VirtAddr::new(va as u64))
-                                        }
+                                        
                                         .map(|t| (t, region));
                                     }
                                     let mut installed = false;
                                     match l1 {
                                         Some((table, _)) => {
                                             let slot = (va >> 12) & 0x1FF;
-                                            // SAFETY: table is the L1 for
-                                            // this verified region of this
-                                            // address space; slot < 512.
-                                            let bits = unsafe { (*table).get(slot).bits() };
+                                            let bits = table.get_raw(slot);
                                             if bits != 0 && pte_counts_as_mapped(bits, va as u64) {
                                                 // Already mapped — stop here.
                                                 stop_at = i;
@@ -1171,35 +1166,33 @@ pub fn handle_mm_fault(
                                             }
                                             let phys_i =
                                                 virt_to_phys(VirtAddr::new(run[i].1 as u64));
-                                            // SAFETY: leaf slot verified
+                                            // Leaf slot verified
                                             // non-present above, under the
                                             // PTE lock; phys is the pinned
                                             // cache frame. No invlpg —
                                             // fresh installs are not TLB
                                             // cached (map_page_noflush's
                                             // contract).
-                                            unsafe {
-                                                (*table).set(
-                                                    slot,
-                                                    PageTableEntry::from_bits(
-                                                        phys_i.bits() | sp_flags,
-                                                    ),
-                                                );
-                                            }
+                                            table.set(
+                                                slot,
+                                                PageTableEntry::from_bits(
+                                                    phys_i.bits() | sp_flags,
+                                                ),
+                                            );
                                             installed = true;
                                         }
                                         None => {
                                             // SAFETY: fallback with full
                                             // allocation/demotion handling;
                                             // same contract as the arms.
-                                            let ok = unsafe {
+                                            let ok = 
                                                 map_page_noflush(
                                                     root_ppn,
                                                     VirtAddr::new(va as u64),
                                                     virt_to_phys(VirtAddr::new(run[i].1 as u64)),
                                                     sp_flags,
                                                 )
-                                            };
+                                            ;
                                             if ok {
                                                 installed = true;
                                             } else {
@@ -1365,7 +1358,7 @@ pub fn handle_mm_fault(
                         sp_flags &= !PageTableEntry::NX;
                     }
                     let _sp_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
-                    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+                    if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
                         .map_or(false, |(_ppn, bits)| {
                             pte_counts_as_mapped(bits, fault_addr.bits() as u64)
                         })
@@ -1579,7 +1572,7 @@ pub fn handle_mm_fault(
                     // A page that lost a race (concurrent CLONE_VM fault
                     // or a racing mprotect marker) releases its pin/copy
                     // and is skipped.
-                    if unsafe { PageTableWalker::walk(root_ppn, va_i.bits() as u64) }
+                    if  PageTableWalker::walk(root_ppn, va_i.bits() as u64) 
                         .map_or(false, |(_ppn, bits)| {
                             pte_counts_as_mapped(bits, va_i.bits() as u64)
                         })
@@ -1692,7 +1685,7 @@ pub fn handle_mm_fault(
         let max_end = (fault_page + ANON_FAULTAROUND_PAGES * PAGE_SIZE_USIZE).min(vma_end);
         let mut win_end = fault_page + PAGE_SIZE_USIZE;
         while win_end < max_end {
-            if unsafe { PageTableWalker::walk(root_ppn, win_end as u64) }
+            if  PageTableWalker::walk(root_ppn, win_end as u64) 
                 .map_or(false, |(_p, bits)| {
                     pte_counts_as_mapped(bits, win_end as u64)
                 })
@@ -1768,7 +1761,7 @@ pub fn handle_mm_fault(
                 let va_i = VirtAddr::new((fault_page + i * PAGE_SIZE_USIZE) as u64);
                 // Re-check per page (E8-MM rule): a page that lost a race
                 // frees its copy and is skipped.
-                if unsafe { PageTableWalker::walk(root_ppn, va_i.bits() as u64) }
+                if  PageTableWalker::walk(root_ppn, va_i.bits() as u64) 
                     .map_or(false, |(_p, bits)| {
                         pte_counts_as_mapped(bits, va_i.bits() as u64)
                     })
@@ -1955,7 +1948,7 @@ pub fn handle_mm_fault(
     let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
     // Re-check under the lock (same double-fault race as above; E8-MM
     // device-window-hole rule applies).
-    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+    if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
         .map_or(false, |(_ppn, bits)| {
             pte_counts_as_mapped(bits, fault_addr.bits() as u64)
         })
@@ -2068,7 +2061,7 @@ pub fn handle_mm_fault(
 /// and returns the physical page address (page-aligned).
 pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
     // SAFETY: caller guarantees root_ppn is a live user root.
-    unsafe { PageTableWalker::walk(root_ppn, vaddr).map(|(ppn, _)| ppn << 12) }
+     PageTableWalker::walk(root_ppn, vaddr).map(|(ppn, _)| ppn << 12) 
 }
 
 // ==================== Swap-In Support ====================
@@ -2160,29 +2153,29 @@ pub(crate) fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
 /// # SAFETY
 /// `root_ppn` is a valid root page-table PPN for the current address
 /// space. Read-only walk of paging structures.
-pub(crate) unsafe fn l1_table_for(root_ppn: u64, vaddr: VirtAddr) -> Option<*mut PageTable> {
+/// Typed leaf-table handle for the fault paths (the stale-frame guard is
+/// baked into construction).
+pub(crate) fn l1_table_for(root_ppn: u64, vaddr: VirtAddr) -> Option<PtTable> {
     let a = VirtAddr::new(vaddr.bits());
     let vpn4 = a.pgd_index() as usize;
     let vpn3 = a.pud_index() as usize;
     let vpn2 = a.pmd_index() as usize;
-    unsafe {
-        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-        let pte4 = (*root_table).get(vpn4);
-        if !pte4.is_valid() {
-            return None;
-        }
-        let table3 = get_page_table_virt(pte4.ppn() << PAGE_SHIFT);
-        let pte3 = (*table3).get(vpn3);
-        if !pte3.is_valid() || pte3.is_leaf() {
-            return None;
-        }
-        let table2 = get_page_table_virt(pte3.ppn() << PAGE_SHIFT);
-        let pte2 = (*table2).get(vpn2);
-        if !pte2.is_valid() || pte2.is_leaf() {
-            return None;
-        }
-        Some(get_page_table_virt(pte2.ppn() << PAGE_SHIFT))
+    let root_table = PtTable::from_phys(root_ppn << PAGE_SHIFT)?;
+    let pte4 = root_table.get(vpn4);
+    if !pte4.is_valid() {
+        return None;
     }
+    let table3 = PtTable::from_phys(pte4.ppn() << PAGE_SHIFT)?;
+    let pte3 = table3.get(vpn3);
+    if !pte3.is_valid() || pte3.is_leaf() {
+        return None;
+    }
+    let table2 = PtTable::from_phys(pte3.ppn() << PAGE_SHIFT)?;
+    let pte2 = table2.get(vpn2);
+    if !pte2.is_valid() || pte2.is_leaf() {
+        return None;
+    }
+    PtTable::from_phys(pte2.ppn() << PAGE_SHIFT)
 }
 
 pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
@@ -2192,18 +2185,16 @@ pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
     let vpn2 = a.pmd_index() as usize;
     let vpn1 = a.pte_index() as usize;
 
-    // SAFETY: root_ppn is a valid root page table PPN. get_page_table_virt
-    // returns valid kernel-virtual pointers. Only reads PTEs, including the
-    // leaf even if P=0.
-    unsafe {
-        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-        let pte4 = (*root_table).get(vpn4);
+    // Typed walk; only reads PTEs, including the leaf even if P=0.
+    {
+        let root_table = PtTable::from_phys(root_ppn << PAGE_SHIFT)?;
+        let pte4 = root_table.get(vpn4);
         if !pte4.is_valid() {
             return None;
         }
 
-        let table3 = get_page_table_virt(pte4.ppn() << PAGE_SHIFT);
-        let pte3 = (*table3).get(vpn3);
+        let table3 = PtTable::from_phys(pte4.ppn() << PAGE_SHIFT)?;
+        let pte3 = table3.get(vpn3);
         if !pte3.is_valid() {
             return None;
         }
@@ -2214,8 +2205,8 @@ pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
             return Some(pte3.bits());
         }
 
-        let table2 = get_page_table_virt(pte3.ppn() << PAGE_SHIFT);
-        let pte2 = (*table2).get(vpn2);
+        let table2 = PtTable::from_phys(pte3.ppn() << PAGE_SHIFT)?;
+        let pte2 = table2.get(vpn2);
         if !pte2.is_valid() {
             return None;
         }
@@ -2223,8 +2214,8 @@ pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
             return Some(pte2.bits());
         }
 
-        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-        let pte1 = (*table1).get(vpn1);
+        let table1 = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT)?;
+        let pte1 = table1.get(vpn1);
 
         let raw = pte1.bits();
         if raw == 0 {
@@ -2341,7 +2332,7 @@ fn handle_swap_fault(
     // paths). The swap-in page is exclusively owned, so freeing on loss is
     // safe; the swap slot is freed by the winner. E8-MM: device-window-
     // hole rule applies here too (see pte_counts_as_mapped).
-    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+    if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
         .map_or(false, |(_ppn, bits)| {
             pte_counts_as_mapped(bits, fault_addr.bits() as u64)
         })

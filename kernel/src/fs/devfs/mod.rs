@@ -312,10 +312,7 @@ pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
         if *len == 0 {
             return 0;
         }
-        // SAFETY-free slice call; uart_write only reads the slice.
-        let n = unsafe {
-            crate::fs::char_dev::uart_write(chunk.as_ptr(), *len)
-        };
+        let n = crate::fs::char_dev::uart_write(&chunk[..*len]);
         *len = 0;
         n
     };

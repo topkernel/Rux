@@ -15,6 +15,9 @@ pub use pagetable::*;
 
 // MMU initialization and page mapping
 pub mod mmu_init;
+
+pub mod unsafe_edges;
+pub use unsafe_edges::*;
 pub use mmu_init::*;
 
 // Memory management operations (MmStruct extensions, COW)

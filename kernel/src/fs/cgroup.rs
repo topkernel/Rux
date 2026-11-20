@@ -489,7 +489,7 @@ static GLOBAL_CGROUP2_SB: core::sync::atomic::AtomicPtr<SuperBlock> =
 
 // SAFETY: FsContext is a valid mount context from the VFS; the superblock
 // is a plain SuperBlock with no filesystem-private invariants.
-unsafe extern "C" fn cgroup2_mount(
+fn cgroup2_mount(
     _fs_context: &crate::fs::superblock::FsContext<'_>,
 ) -> Result<*mut SuperBlock, i32> {
     let sb = Box::new(SuperBlock::new(4096, CGROUP2_MAGIC));
@@ -497,12 +497,13 @@ unsafe extern "C" fn cgroup2_mount(
 }
 
 // SAFETY: sb came from cgroup2_mount (Box::into_raw of a SuperBlock).
-unsafe extern "C" fn cgroup2_kill_sb(sb: *mut SuperBlock) {
+fn cgroup2_kill_sb(sb: *mut SuperBlock) {
     if !sb.is_null() {
         // The boot-created superblock is shared; only free private mounts.
         let current = GLOBAL_CGROUP2_SB.load(Ordering::Acquire);
         if current != sb {
-            drop(Box::from_raw(sb));
+            // SAFETY: the Box the mount callback stored (unmount path).
+            drop(unsafe { alloc::boxed::Box::from_raw(sb) });
         }
     }
 }

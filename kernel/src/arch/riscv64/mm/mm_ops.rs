@@ -36,6 +36,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::memory_layout::*;
+use super::unsafe_edges::PtTable;
 use super::mmu_init::*;
 use super::pagetable::*;
 use crate::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
@@ -50,27 +51,36 @@ pub use crate::mm::AddressSpace;
 
 impl MmStruct {
     /// Enable this address space (switch page table)
-    pub unsafe fn enable(&self) {
+    pub fn enable(&self) {
         let satp = Satp::sv39(self.pgd, 0);
-        asm!("csrw satp, {}", in(reg) satp.bits());
-        asm!("sfence.vma zero, zero");
+        // SAFETY: satp CSR write + TLB fence (register-level effects; the
+        // root PPN is this live mm's own).
+        unsafe {
+            asm!("csrw satp, {}", in(reg) satp.bits());
+            asm!("sfence.vma zero, zero");
+        }
     }
 
     /// Disable address space (switch to bare mode)
-    pub unsafe fn disable() {
+    pub fn disable() {
         let satp = Satp::new(Satp::MODE_BARE, 0, 0);
-        asm!("csrw satp, {}", in(reg) satp.bits());
-        asm!("sfence.vma zero, zero");
+        // SAFETY: bare-mode satp write + TLB fence.
+        unsafe {
+            asm!("csrw satp, {}", in(reg) satp.bits());
+            asm!("sfence.vma zero, zero");
+        }
     }
 
     /// Flush entire TLB
-    pub unsafe fn flush_tlb() {
-        asm!("sfence.vma zero, zero");
+    pub fn flush_tlb() {
+        // SAFETY: TLB fence (memory-safe in any context).
+        unsafe { asm!("sfence.vma zero, zero") };
     }
 
     /// Flush TLB for specified page
-    pub unsafe fn flush_tlb_addr_page(vaddr: PageVirtAddr) {
-        asm!("sfence.vma {}, zero", in(reg) vaddr.as_usize());
+    pub fn flush_tlb_addr_page(vaddr: PageVirtAddr) {
+        // SAFETY: TLB fence (memory-safe in any context).
+        unsafe { asm!("sfence.vma {}, zero", in(reg) vaddr.as_usize()) };
     }
 
     // ==================== VMA Operations ====================
@@ -846,29 +856,22 @@ impl MmStruct {
                 }
                 // Remove reverse mapping before clearing PTE, then drop this
                 // mapping's reference; the last reference frees the page.
-                use crate::mm::page_desc::pfn_to_page_mut;
-                let page = pfn_to_page_mut(ppn_val as usize);
-                if !page.is_null() {
+                use crate::mm::page_desc::page_desc;
+                if let Some(page) = page_desc(ppn_val as usize) {
                     // Multi-mapping bookkeeping (review 4.10): drop this
                     // (mm, vpn) from the page's alternate rmap slots.
-                    unsafe {
-                        (*page).rmap_alt_remove(
-                            self as *const _ as usize,
-                            addr / PAGE_SIZE_USIZE,
-                        );
-                    }
+                    page.rmap_alt_remove(
+                        self as *const _ as usize,
+                        addr / PAGE_SIZE_USIZE,
+                    );
                     // SIGILL-stamp adjudicated release (gnome-sigill):
                     // stamp lifecycle, put_page, and the foreign-free
                     // refusal/refusal-report in one place.
-                    // SAFETY: page is non-null and is a leaf frame mapped
-                    // by this address space at `addr`.
-                    unsafe {
-                        crate::arch::mm::mmu_init::release_user_leaf(
-                            page,
-                            ppn_val as usize,
-                            addr,
-                        );
-                    }
+                    crate::arch::mm::mmu_init::release_user_leaf(
+                        page,
+                        ppn_val as usize,
+                        addr,
+                    );
                     // PCACHE mapping (filemap_fault, riscv64 port): drop
                     // this mapping's page-cache pin AFTER the descriptor
                     // put inside release_user_leaf — the pin's release may
@@ -878,11 +881,7 @@ impl MmStruct {
                         release_cache_mapping_pin(ppn_val as usize);
                     }
                 }
-                // SAFETY: addr is a valid, page-aligned virtual address in this address space,
-                // and its reverse mapping has just been removed above.
-                unsafe {
-                    self.clear_pte(addr as u64);
-                }
+                self.clear_pte(addr as u64);
                 // RSS accounting (review 4.14): one resident page leaves
                 // this address space.
                 self.sub_rss(1);
@@ -920,7 +919,7 @@ impl MmStruct {
     /// atomically under mmap_lock and the move REPLACES whatever sits in
     /// the destination; skipping the page (the old MREMAP-DST-LIVE guard)
     /// permanently lost the source data.
-    pub unsafe fn unmap_one_user_leaf_locked(&self, va: usize) -> bool {
+    pub fn unmap_one_user_leaf_locked(&self, va: usize) -> bool {
         let Some((ppn_val, pte_bits)) = PageTableWalker::walk(self.pgd, va as u64) else {
             return false;
         };
@@ -939,54 +938,47 @@ impl MmStruct {
                 return true;
             }
         }
-        use crate::mm::page_desc::pfn_to_page_mut;
-        let page = pfn_to_page_mut(ppn_val as usize);
-        if !page.is_null() {
-            // SAFETY: page is non-null (checked) and points to the page
-            // descriptor of the leaf frame mapped at `va`.
-            unsafe {
-                (*page).rmap_alt_remove(
-                    self as *const _ as usize,
-                    va / PAGE_SIZE_USIZE,
-                );
-            }
+        use crate::mm::page_desc::page_desc;
+        if let Some(page) = page_desc(ppn_val as usize) {
+            page.rmap_alt_remove(
+                self as *const _ as usize,
+                va / PAGE_SIZE_USIZE,
+            );
             // SIGILL-stamp adjudicated release (same as unmap_pages).
-            // SAFETY: page is non-null and is a leaf frame mapped by this
-            // address space at `va`.
-            unsafe {
-                crate::arch::mm::mmu_init::release_user_leaf(
-                    page,
-                    ppn_val as usize,
-                    va,
-                );
-            }
+            crate::arch::mm::mmu_init::release_user_leaf(
+                page,
+                ppn_val as usize,
+                va,
+            );
             // PCACHE mapping: drop the pin after the descriptor put (same
             // ordering as unmap_pages; x86_64 twin).
             if pte_bits & cow_flags::PCACHE != 0 {
                 release_cache_mapping_pin(ppn_val as usize);
             }
         }
-        // SAFETY: `va` was just verified as a mapped user leaf.
-        unsafe { self.clear_pte(va as u64) };
+        self.clear_pte(va as u64);
         self.sub_rss(1);
         true
     }
 
     /// Clear page table entry at specified virtual address
-    unsafe fn clear_pte(&self, virt: u64) {
+    fn clear_pte(&self, virt: u64) {
         let vpn2 = ((virt >> 30) & 0x1FF) as usize;
         let vpn1 = ((virt >> 21) & 0x1FF) as usize;
         let vpn0 = ((virt >> 12) & 0x1FF) as usize;
 
-        let root_table = get_page_table_virt(self.pgd << PAGE_SHIFT);
-
-        let pte2 = (*root_table).get(vpn2);
+        let Some(root_table) = PtTable::from_phys(self.pgd << PAGE_SHIFT) else {
+            return;
+        };
+        let pte2 = root_table.get(vpn2);
         if !pte2.is_valid() {
             return;
         }
 
-        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-        let pte1 = (*table1).get(vpn1);
+        let Some(table1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else {
+            return;
+        };
+        let pte1 = table1.get(vpn1);
         // A still-megapaged L1 leaf means no user page was ever mapped at
         // this VA (user maps over a megapage demote it first) — nothing to
         // clear, and treating the leaf's frame as an L0 table would write
@@ -995,7 +987,9 @@ impl MmStruct {
             return;
         }
 
-        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+        let Some(table0) = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT) else {
+            return;
+        };
 
         // E8-MM: if this VA sits inside a kernel low-half device window
         // (PLIC/ECAM/PCI-MMIO/UART/...), the PTE being cleared may cover
@@ -1007,7 +1001,7 @@ impl MmStruct {
         // KERNPANIC. Ordinary user VAs (the None case) clear to 0 as
         // before.
         let new_bits = super::mmu_init::kernel_device_window_pte(virt).unwrap_or(0);
-        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+        table0.set(vpn0, PageTableEntry::from_bits(new_bits));
     }
 
     /// Rewrite the leaf-PTE permission flags for [start, start+size) in the
@@ -1018,7 +1012,7 @@ impl MmStruct {
     /// low PTE bits (V/U/R/W/X/A/D); pages not currently mapped are left
     /// alone. Callers must ensure `end <= USER_END` (kernel range PTEs are
     /// shared and must never be rewritten from here).
-    pub unsafe fn set_range_permissions(&self, start: u64, size: usize, flags: u64) {
+    pub fn set_range_permissions(&self, start: u64, size: usize, flags: u64) {
         use super::memory_layout::user_addr;
         let aligned_start = start & !(PAGE_SIZE_USIZE as u64 - 1);
         let end = match aligned_start.checked_add(size as u64) {
@@ -1036,30 +1030,39 @@ impl MmStruct {
             let vpn1 = ((va >> 21) & 0x1FF) as usize;
             let vpn0 = ((va >> 12) & 0x1FF) as usize;
 
-            let root_table = get_page_table_virt(self.pgd << PAGE_SHIFT);
-            let pte2 = (*root_table).get(vpn2);
+            let Some(root_table) = PtTable::from_phys(self.pgd << PAGE_SHIFT) else {
+                va += PAGE_SIZE_USIZE as u64;
+                continue;
+            };
+            let pte2 = root_table.get(vpn2);
             if !pte2.is_valid() {
                 va += PAGE_SIZE_USIZE as u64;
                 continue;
             }
-            let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-            let pte1 = (*table1).get(vpn1);
+            let Some(table1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else {
+                va += PAGE_SIZE_USIZE as u64;
+                continue;
+            };
+            let pte1 = table1.get(vpn1);
             if !pte1.is_valid() {
                 va += PAGE_SIZE_USIZE as u64;
                 continue;
             }
-            let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
-            let old = (*table0).get(vpn0);
+            let Some(table0) = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT) else {
+                va += PAGE_SIZE_USIZE as u64;
+                continue;
+            };
+            let old = table0.get(vpn0);
             if old.is_valid() {
                 // Preserve PPN ([53:10]), replace the flag bits.
                 let ppn_bits = old.bits() & !0x3FFu64;
-                (*table0).set(vpn0, PageTableEntry::from_bits(ppn_bits | flags));
+                table0.set(vpn0, PageTableEntry::from_bits(ppn_bits | flags));
             }
             va += PAGE_SIZE_USIZE as u64;
         }
-        // SAFETY: sfence.vma invalidates TLB entries so the tightened
-        // permissions take effect immediately.
-        asm!("sfence.vma zero, zero");
+        // sfence.vma invalidates TLB entries so the tightened permissions
+        // take effect immediately. SAFETY: TLB fence (memory-safe).
+        unsafe { asm!("sfence.vma zero, zero") };
     }
 
     /// brk system call implementation (legacy interface)
@@ -1125,19 +1128,17 @@ impl MmStruct {
         // faults of this mm take the same per-mm lock. Other mms' writers
         // are no longer excluded (they never needed to be).
         let _pte_guard = pte_lock_for(self).lock_irqsave();
-        let new_root_ppn = unsafe {
-            copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
-        };
+        let new_root_ppn =
+            copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?;
         drop(_pte_guard);
 
-        // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
-        // a valid, freshly allocated root page table. space_type and brk are valid by
-        // construction from the current address space.
-        let new_space = unsafe { MmStruct::new_shared(
-            new_root_ppn,
-            self.space_type(),
-            self.brk(),
-        ) };
+        // new_root_ppn was just returned from copy_page_table_cow, so it
+        // points to a valid, freshly allocated root page table; space_type
+        // and brk are valid by construction. (new_shared still carries the
+        // mm-tree's root contract — the mm/ lane owns its conversion.)
+        let new_space = unsafe {
+            MmStruct::new_shared(new_root_ppn, self.space_type(), self.brk())
+        };
 
         {
             // Snapshot VMA data under the SAME parent read-guard held
@@ -1258,7 +1259,7 @@ impl PageTableWalker {
     /// Walk page table to find physical page number for virtual address
     /// Returns (ppn, full_pte_value) for debugging
     /// Handles both 4KB pages and 2MB huge pages
-    pub(crate) unsafe fn walk(user_root_ppn: u64, virt: u64) -> Option<(u64, u64)> {
+    pub(crate) fn walk(user_root_ppn: u64, virt: u64) -> Option<(u64, u64)> {
         let virt_addr = VirtAddr::new(virt);
 
         let vpn2 = virt_addr.vpn(2) as usize;
@@ -1286,9 +1287,9 @@ impl PageTableWalker {
                 return None;
             }
         }
-        let root_table = get_page_table_virt(user_root_ppn << PAGE_SHIFT);
+        let root_table = PtTable::from_phys(user_root_ppn << PAGE_SHIFT)?;
 
-        let pte2 = (*root_table).get(vpn2);
+        let pte2 = root_table.get(vpn2);
         if !pte2.is_valid() {
             return None;
         }
@@ -1322,8 +1323,8 @@ impl PageTableWalker {
         }
 
         let ppn1 = pte2.ppn();
-        let table1 = get_page_table_virt(ppn1 << PAGE_SHIFT);
-        let pte1 = (*table1).get(vpn1);
+        let table1 = PtTable::from_phys(ppn1 << PAGE_SHIFT)?;
+        let pte1 = table1.get(vpn1);
         if !pte1.is_valid() {
             return None;
         }
@@ -1360,8 +1361,8 @@ impl PageTableWalker {
         }
 
         let ppn0 = pte1.ppn();
-        let table0 = get_page_table_virt(ppn0 << PAGE_SHIFT);
-        let pte0 = (*table0).get(vpn0);
+        let table0 = PtTable::from_phys(ppn0 << PAGE_SHIFT)?;
+        let pte0 = table0.get(vpn0);
         if !pte0.is_valid() {
             return None;
         }
@@ -1406,22 +1407,19 @@ pub fn create_user_address_space() -> Option<u64> {
     // is refused — one leaked frame per exec'd mm).
     super::mmu_init::PT_LEDGER.stamp_root(root_page >> PAGE_SHIFT);
 
-    // SAFETY: root_page is a freshly allocated physical page; get_page_table_virt returns a
-    // valid kernel-virtual pointer to it. copy_kernel_mappings and copy_fixmap_to_user expect
-    // a valid root PPN for a page-sized allocation that we exclusively own.
-    unsafe {
-        let root_table = get_page_table_virt(root_page);
-        (*root_table).zero();
-
-        let kernel_ppn = super::mmu_init::root_page_table_ppn();
-        let root_ppn = root_page / PAGE_SIZE;
-        copy_kernel_mappings(root_ppn, kernel_ppn);
-
-        // Copy fixmap (UART) to user page table so console works after switch_mm
-        super::fixmap::copy_fixmap_to_user(root_ppn);
-
-        Some(root_ppn)
+    if let Some(root_table) = PtTable::from_phys(root_page) {
+        root_table.zero_entries();
     }
+
+    let kernel_ppn = super::mmu_init::root_page_table_ppn();
+    let root_ppn = root_page / PAGE_SIZE;
+    copy_kernel_mappings(root_ppn, kernel_ppn);
+
+    // Copy fixmap (UART) to user page table so console works after switch_mm
+    // (fixmap lane owns its conversion; no-op contract documented there.)
+    unsafe { super::fixmap::copy_fixmap_to_user(root_ppn) };
+
+    Some(root_ppn)
 }
 
 /// Copy kernel mappings to user page table
@@ -1440,17 +1438,14 @@ pub fn create_user_address_space() -> Option<u64> {
 /// 1. MMIO PGD entries (VPN2[0..2]) for device access from kernel mode
 ///    when running with a user page table (e.g., during syscall handling)
 /// 2. All kernel space PGD entries (VPN2 >= KERNEL_PGD_START = 256)
-unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
+fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let kernel_phys = kernel_root_ppn * PAGE_SIZE;
     let user_phys = user_root_ppn * PAGE_SIZE;
 
-    let kernel_virt = get_page_table_virt(kernel_phys);
-    let user_virt = get_page_table_virt(user_phys);
+    let kernel_table = PtTable::from_phys(kernel_phys);
+    let Some(user_table) = PtTable::from_phys(user_phys) else { return };
 
-    let kernel_table = kernel_virt as *const PageTable;
-    let user_table = user_virt as *mut PageTable;
-
-    (*user_table).zero();
+    user_table.zero_entries();
 
     // Copy MMIO PGD entries (VPN2[0] and VPN2[1])
     // These map device memory (PLIC, CLINT, UART, VirtIO, PCI MMIO) at their
@@ -1460,73 +1455,74 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     // for VPN2[0..1] may contain non-leaf entries pointing to user-space L0 tables
     // (from a previous process's mappings). Instead, create a new L1 table and
     // copy only entries that are safe (MMIO), skipping entries that belong to user space.
+    let Some(kernel_table) = kernel_table else { return };
     for i in 0..2usize {
-        let pte = (*kernel_table).get(i);
+        let pte = kernel_table.get(i);
         if !pte.is_valid() {
             continue;
         }
 
         if pte.is_leaf() {
             // L2 leaf (1GB huge page) — safe to copy directly
-            (*user_table).set(i, pte);
+            user_table.set(i, pte);
         } else {
             // Non-leaf: create new L1 table, copy only safe entries
             let kernel_l1_phys = pte.ppn() << PAGE_SHIFT;
-            let kernel_l1 = get_page_table_virt(kernel_l1_phys) as *const PageTable;
+            let Some(kernel_l1) = PtTable::from_phys(kernel_l1_phys) else { continue };
 
             if let Some(new_l1_phys) = super::mmu_init::alloc_page_table() {
-                let new_l1_virt = get_page_table_virt(new_l1_phys) as *mut PageTable;
-                (*new_l1_virt).zero();
+                let Some(new_l1_virt) = PtTable::from_phys(new_l1_phys) else { continue };
+                new_l1_virt.zero_entries();
 
                 for j in 0..512 {
-                    let l1_entry = (*kernel_l1).get(j);
+                    let l1_entry = kernel_l1.get(j);
                     if !l1_entry.is_valid() {
                         continue;
                     }
 
                     if l1_entry.is_leaf() {
                         // Leaf entry (huge page MMIO) — safe to copy
-                        (*new_l1_virt).set(j, l1_entry);
+                        new_l1_virt.set(j, l1_entry);
                     } else {
                         // Non-leaf L1 entry: points to kernel L0 table.
                         // Must NOT share the kernel L0 table pointer directly because
                         // free_user_page_tables() would free it on process exit.
                         // Instead, create a new L0 table and copy only leaf entries.
                         let l0_phys = l1_entry.ppn() << PAGE_SHIFT;
-                        let l0_table = get_page_table_virt(l0_phys) as *const PageTable;
+                        let Some(l0_table) = PtTable::from_phys(l0_phys) else { continue };
 
                         if let Some(new_l0_phys) = super::mmu_init::alloc_page_table() {
-                            let new_l0_virt = get_page_table_virt(new_l0_phys) as *mut PageTable;
-                            (*new_l0_virt).zero();
+                            let Some(new_l0_virt) = PtTable::from_phys(new_l0_phys) else { continue };
+                            new_l0_virt.zero_entries();
 
                             for k in 0..512 {
-                                let l0_entry = (*l0_table).get(k);
+                                let l0_entry = l0_table.get(k);
                                 if l0_entry.is_valid() && l0_entry.is_leaf() {
                                     // Copy leaf entries (kernel MMIO pages, U=0)
                                     // Skip user entries (U=1) — they belong to another process
                                     if !l0_entry.is_user() {
-                                        (*new_l0_virt).set(k, l0_entry);
+                                        new_l0_virt.set(k, l0_entry);
                                     }
                                 }
                             }
 
                             let new_l0_ppn = new_l0_phys >> PAGE_SHIFT;
-                            (*new_l1_virt).set(j, PageTableEntry::new_table(new_l0_ppn));
+                            new_l1_virt.set(j, PageTableEntry::new_table(new_l0_ppn));
                         }
                     }
                 }
 
                 let new_l1_ppn = new_l1_phys >> PAGE_SHIFT;
-                (*user_table).set(i, PageTableEntry::new_table(new_l1_ppn));
+                user_table.set(i, PageTableEntry::new_table(new_l1_ppn));
             }
         }
     }
 
     // Copy kernel-space PGD entries (VPN2 >= KERNEL_PGD_START = 256)
     for i in KERNEL_PGD_START..PTRS_PER_PGD as usize {
-        let pte = (*kernel_table).get(i);
+        let pte = kernel_table.get(i);
         if pte.is_valid() {
-            (*user_table).set(i, pte);
+            user_table.set(i, pte);
         }
     }
 
@@ -1620,7 +1616,7 @@ pub const PTE_FLAGS_ANON_DEFAULT: u64 = PageTableEntry::V | PageTableEntry::R
 /// # Safety
 /// `root_ppn` must be a live page-table root of `mm` (pinned by the
 /// caller), and `vaddr` a user address of that mm.
-pub unsafe fn leaf_pte_replace(
+pub fn leaf_pte_replace(
     mm: &crate::mm::mm_struct::MmStruct,
     root_ppn: u64,
     vaddr: u64,
@@ -1628,30 +1624,31 @@ pub unsafe fn leaf_pte_replace(
     new_bits: u64,
 ) -> bool {
     let _g = pte_lock_for(mm).lock_irqsave();
-    // SAFETY: caller guarantees a live root; the walk only reads table
-    // frames reachable from it, and the leaf write goes through the
-    // validated slot.
-    unsafe {
-        let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
-        let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
-        let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
-        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-        let pte2 = (*root_table).get(vpn2);
-        if !pte2.is_valid() || pte2.is_leaf() {
-            return false;
-        }
-        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-        let pte1 = (*table1).get(vpn1);
-        if !pte1.is_valid() || pte1.is_leaf() {
-            return false;
-        }
-        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
-        let pte0 = (*table0).get(vpn0);
-        if !pte0.is_valid() || pte0.ppn() != expect_pfn {
-            return false;
-        }
-        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+    let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+    let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+    let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+    let Some(root_table) = PtTable::from_phys(root_ppn << PAGE_SHIFT) else {
+        return false;
+    };
+    let pte2 = root_table.get(vpn2);
+    if !pte2.is_valid() || pte2.is_leaf() {
+        return false;
     }
+    let Some(table1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else {
+        return false;
+    };
+    let pte1 = table1.get(vpn1);
+    if !pte1.is_valid() || pte1.is_leaf() {
+        return false;
+    }
+    let Some(table0) = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT) else {
+        return false;
+    };
+    let pte0 = table0.get(vpn0);
+    if !pte0.is_valid() || pte0.ppn() != expect_pfn {
+        return false;
+    }
+    table0.set(vpn0, PageTableEntry::from_bits(new_bits));
     true
 }
 
@@ -1666,7 +1663,7 @@ pub unsafe fn leaf_pte_replace(
 /// # Safety
 /// `root_ppn` must be a live page-table root of `mm` (pinned by the
 /// caller), and `vaddr` a user address of that mm.
-pub unsafe fn leaf_pte_install(
+pub fn leaf_pte_install(
     mm: &crate::mm::mm_struct::MmStruct,
     root_ppn: u64,
     vaddr: u64,
@@ -1674,29 +1671,32 @@ pub unsafe fn leaf_pte_install(
     flags: u64,
 ) -> bool {
     let _g = pte_lock_for(mm).lock_irqsave();
-    // SAFETY: see leaf_pte_replace.
-    unsafe {
-        let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
-        let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
-        let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
-        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-        let pte2 = (*root_table).get(vpn2);
-        if !pte2.is_valid() || pte2.is_leaf() {
-            return false;
-        }
-        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-        let pte1 = (*table1).get(vpn1);
-        if !pte1.is_valid() || pte1.is_leaf() {
-            return false;
-        }
-        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
-        let new_bits = (pfn << 10) | (flags & 0x3FF) | PageTableEntry::V;
-        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+    let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+    let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+    let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+    let Some(root_table) = PtTable::from_phys(root_ppn << PAGE_SHIFT) else {
+        return false;
+    };
+    let pte2 = root_table.get(vpn2);
+    if !pte2.is_valid() || pte2.is_leaf() {
+        return false;
     }
+    let Some(table1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else {
+        return false;
+    };
+    let pte1 = table1.get(vpn1);
+    if !pte1.is_valid() || pte1.is_leaf() {
+        return false;
+    }
+    let Some(table0) = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT) else {
+        return false;
+    };
+    let new_bits = (pfn << 10) | (flags & 0x3FF) | PageTableEntry::V;
+    table0.set(vpn0, PageTableEntry::from_bits(new_bits));
     true
 }
 
-pub unsafe fn map_user_region(
+pub fn map_user_region(
     user_root_ppn: u64,
     virt_start: u64,
     phys_start: u64,
@@ -1741,7 +1741,7 @@ pub unsafe fn map_user_region(
 /// corruption (!prev)", bogus swap-in entries and random pagefault OOM
 /// kills. Chunking the allocation keeps the mapped range inside pages we
 /// own.
-pub unsafe fn alloc_and_map_user_memory(
+pub fn alloc_and_map_user_memory(
     user_root_ppn: u64,
     virt_addr: u64,
     size: u64,
@@ -1782,11 +1782,14 @@ pub unsafe fn alloc_and_map_user_memory(
         // freed data) to user space for the duration of the memset — an
         // information leak window on every execve.
         let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-        core::ptr::write_bytes(
-            virt_addr_ptr.bits() as *mut u8,
-            0,
-            block_pages * PAGE_SIZE as usize,
-        );
+        // SAFETY: fresh exclusive buddy block (INV-RE-ZP).
+        unsafe {
+            core::ptr::write_bytes(
+                virt_addr_ptr.bits() as *mut u8,
+                0,
+                block_pages * PAGE_SIZE as usize,
+            )
+        };
 
         // PRESERVE PRESENT LEAVES (Linux do_brk_flags only maps ABSENT
         // pages — twin of the x86_64 fix): a stale leaf left in the brk
@@ -1850,7 +1853,7 @@ pub unsafe fn alloc_and_map_user_memory(
 }
 
 /// Allocate and map to kernel table
-pub unsafe fn alloc_and_map_to_kernel_table(
+pub fn alloc_and_map_to_kernel_table(
     virt_addr: u64,
     size: u64,
     flags: u64,
@@ -1880,7 +1883,8 @@ pub unsafe fn alloc_and_map_to_kernel_table(
 
     // Zero BEFORE mapping (same leak-window fix as alloc_and_map_user_memory).
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
+    // SAFETY: fresh exclusive buddy block (INV-RE-ZP).
+    unsafe { core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size) };
 
     map_user_region(kernel_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
@@ -1905,7 +1909,7 @@ pub unsafe fn alloc_and_map_to_kernel_table(
 }
 
 /// Allocate and map to user table
-pub unsafe fn alloc_and_map_to_user_table(
+pub fn alloc_and_map_to_user_table(
     user_ppn: u64,
     virt_addr: u64,
     size: u64,
@@ -1971,11 +1975,14 @@ pub unsafe fn alloc_and_map_to_user_table(
         // whole block — the old block_pages zero covered the rounded-up
         // excess too, pure waste.
         let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-        core::ptr::write_bytes(
-            virt_addr_ptr.bits() as *mut u8,
-            0,
-            chunk_bytes,
-        );
+        // SAFETY: fresh exclusive buddy block (INV-RE-ZP).
+        unsafe {
+            core::ptr::write_bytes(
+                virt_addr_ptr.bits() as *mut u8,
+                0,
+                chunk_bytes,
+            )
+        };
 
         map_user_region(
             user_ppn,
@@ -2050,20 +2057,15 @@ pub mod cow_flags {
 /// invalidated entry — decides the frame's fate. No-op when the cache
 /// entry is already gone (floored put discipline, R14-16).
 pub(super) fn release_cache_mapping_pin(ppn: usize) {
-    use crate::mm::page_desc::pfn_to_page_mut;
-    let page = pfn_to_page_mut(ppn);
-    if page.is_null() {
-        return;
-    }
-    // SAFETY: descriptor of a live frame that was mapped until this unmap;
-    // mapping/index are only cleared by the cache's own release path, which
-    // cannot run while a pin (held until this call) exists.
-    unsafe {
-        let key = (*page).mapping() as u64;
-        let index = (*page).index() as u64;
-        if key != 0 {
-            crate::fs::page_cache::get_page_cache().put_by_key(key, index);
-        }
+    use crate::mm::page_desc::page_desc;
+    let Some(page) = page_desc(ppn) else { return };
+    // Descriptor of a live frame that was mapped until this unmap;
+    // mapping/index are only cleared by the cache's own release path,
+    // which cannot run while a pin (held until this call) exists.
+    let key = page.mapping() as u64;
+    let index = page.index() as u64;
+    if key != 0 {
+        crate::fs::page_cache::get_page_cache().put_by_key(key, index);
     }
 }
 
@@ -2074,7 +2076,7 @@ pub(super) fn release_cache_mapping_pin(ppn: usize) {
 ///
 /// `parent` supplies the walk's root (and, on split-mode arches, the
 /// per-mm PTE section; riscv64 is GLOBAL mode — INV-LOCK-7).
-pub unsafe fn copy_page_table_cow(
+pub fn copy_page_table_cow(
     parent: &crate::mm::mm_struct::MmStruct,
     cow_exempt: &[(u64, u64)],
 ) -> Option<u64> {
@@ -2083,7 +2085,7 @@ pub unsafe fn copy_page_table_cow(
     // PTE section, serializing it against demand faults, COW faults,
     // and exec/unmap teardown. Per-leaf PTL granularity (Linux-style) is
     // still a TODO for SMP scalability.
-    use crate::mm::page_desc::pfn_to_page_mut;
+    use crate::mm::page_desc::page_desc;
 
     // Framebuffer frames (virtio-gpu scanout backing store) are
     // device-shared memory and must NEVER be COW-marked. The VMA-range
@@ -2109,11 +2111,14 @@ pub unsafe fn copy_page_table_cow(
     let child_root_ppn = child_root_phys >> PAGE_SHIFT;
 
     let parent_root_phys = parent_root_ppn << PAGE_SHIFT;
-    let parent_root = get_page_table_virt(parent_root_phys);
-    let child_root = get_page_table_virt(child_root_phys);
+    // Structural liveness: the caller holds this mm's PTE section for the
+    // whole walk (see the NOTE above); the stale-frame guard adds the
+    // recycled-frame containment.
+    let parent_root = PtTable::from_phys_live(parent_root_phys)?;
+    let child_root = PtTable::from_phys_live(child_root_phys)?;
 
     for vpn2 in 0..512 {
-        let pte2 = (*parent_root).get(vpn2);
+        let pte2 = parent_root.get(vpn2);
 
         if !pte2.is_valid() {
             continue;
@@ -2125,7 +2130,7 @@ pub unsafe fn copy_page_table_cow(
         // Kernel region (VPN2 >= KERNEL_PGD_START): directly share PGD entry
         // For leaf entries, also check U bit - kernel pages (U=0) are shared
         if vpn2 >= KERNEL_PGD_START || (is_l2_leaf && !pte2.is_user()) {
-            (*child_root).set(vpn2, pte2);
+            child_root.set(vpn2, pte2);
             continue;
         }
 
@@ -2141,26 +2146,24 @@ pub unsafe fn copy_page_table_cow(
                     (pte2.ppn() as usize) << PAGE_SHIFT,
                 )
             {
-                let phys_ppn = pte2.ppn() as usize;
-                let page = pfn_to_page_mut(phys_ppn);
-                if !page.is_null() {
-                    (*page).get_page();
-                    (*page).inc_mapcount();
+                if let Some(page) = page_desc(pte2.ppn() as usize) {
+                    page.get_page();
+                    page.inc_mapcount();
                 }
             }
-            (*child_root).set(vpn2, pte2);
+            child_root.set(vpn2, pte2);
             continue;
         }
 
         let child_table1_phys = alloc_page_table()?;
         let child_ppn1 = child_table1_phys >> PAGE_SHIFT;
-        (*child_root).set(vpn2, PageTableEntry::new_table(child_ppn1));
+        child_root.set(vpn2, PageTableEntry::new_table(child_ppn1));
 
-        let parent_table1 = get_page_table_virt(ppn1 << PAGE_SHIFT);
-        let child_table1_ref = &mut *get_page_table_virt(child_table1_phys);
+        let parent_table1 = PtTable::from_phys_live(ppn1 << PAGE_SHIFT)?;
+        let child_table1_ref = PtTable::from_phys_live(child_table1_phys)?;
 
         for vpn1 in 0..512 {
-            let pte1 = (*parent_table1).get(vpn1);
+            let pte1 = parent_table1.get(vpn1);
 
             if !pte1.is_valid() {
                 continue;
@@ -2176,14 +2179,12 @@ pub unsafe fn copy_page_table_cow(
                         (pte1.ppn() as usize) << PAGE_SHIFT,
                     )
                 {
-                    let phys_ppn = pte1.ppn() as usize;
-                    let page = pfn_to_page_mut(phys_ppn);
-                    if !page.is_null() {
-                        (*page).get_page();
-                        (*page).inc_mapcount();
+                    if let Some(page) = page_desc(pte1.ppn() as usize) {
+                        page.get_page();
+                        page.inc_mapcount();
                     }
                 }
-                (*child_table1_ref).set(vpn1, pte1);
+                child_table1_ref.set(vpn1, pte1);
                 continue;
             }
 
@@ -2191,18 +2192,18 @@ pub unsafe fn copy_page_table_cow(
 
             let child_table0_phys = alloc_page_table()?;
             let child_ppn0 = child_table0_phys >> PAGE_SHIFT;
-            (*child_table1_ref).set(vpn1, PageTableEntry::new_table(child_ppn0));
+            child_table1_ref.set(vpn1, PageTableEntry::new_table(child_ppn0));
 
             let parent_table0_phys = ppn0 << PAGE_SHIFT;
-            let parent_table0 = get_page_table_virt(parent_table0_phys);
-            let child_table0_ref = &mut *get_page_table_virt(child_table0_phys);
+            let parent_table0 = PtTable::from_phys_live(parent_table0_phys)?;
+            let child_table0_ref = PtTable::from_phys_live(child_table0_phys)?;
 
             for vpn0 in 0..512 {
                 // The whole walk runs under AddressSpace::fork()'s
                 // PTE_MODIFY_LOCK (mm_ops.rs fork()), which serializes it
                 // against demand faults, COW faults, and teardown — no
                 // per-leaf locking here (the lock is not reentrant).
-                let pte0 = (*parent_table0).get(vpn0);
+                let pte0 = parent_table0.get(vpn0);
 
                 if !pte0.is_valid() {
                     continue;
@@ -2256,17 +2257,15 @@ pub unsafe fn copy_page_table_cow(
                     // inherited unchanged; the owning subsystem frees the
                     // memory).
                     let phys_ppn = pte0.ppn() as usize;
-                    let page = pfn_to_page_mut(phys_ppn);
-
-                    if !page.is_null() {
+                    page_desc(phys_ppn).map_or(pte0, |page| {
                         // PCACHE leaf (filemap_fault, riscv64 port): the
                         // child's copy owns its own pin — without this, the
                         // parent's unmap would drop the LAST pin and
                         // eviction could free a frame the child still maps
                         // (x86_64 twin).
                         if pte0.bits() & cow_flags::PCACHE != 0 {
-                            let key = (*page).mapping() as u64;
-                            let index = (*page).index() as u64;
+                            let key = page.mapping() as u64;
+                            let index = page.index() as u64;
                             if !crate::fs::page_cache::get_page_cache()
                                 .pin_by_key(key, index)
                             {
@@ -2279,8 +2278,8 @@ pub unsafe fn copy_page_table_cow(
                             }
                         }
                         // Increment refcount for shared user pages (one ref per sharer)
-                        let after = (*page).get_page();
-                        (*page).inc_mapcount();
+                        let after = page.get_page();
+                        page.inc_mapcount();
                         // Lifecycle ring (gnome-sigill): this fork just
                         // took a reference on a stamped (file-fill) frame.
                         crate::mm::page_desc::text_stamp_note(
@@ -2292,25 +2291,22 @@ pub unsafe fn copy_page_table_cow(
 
                         if is_writable && !cow_exempt_leaf {
                             // COW: mark both parent and child PTEs as read-only
-                            (*page).set_flag(crate::mm::page_desc::PageFlag::Cow);
+                            page.set_flag(crate::mm::page_desc::PageFlag::Cow);
 
                             let cow_pte_bits = pte0.bits() & !PageTableEntry::W | cow_flags::COW;
 
-                            let parent_table0_mut = parent_table0 as *mut PageTable;
-                            (*parent_table0_mut).set(vpn0, PageTableEntry::from_bits(cow_pte_bits));
+                            parent_table0.set(vpn0, PageTableEntry::from_bits(cow_pte_bits));
 
                             PageTableEntry::from_bits(cow_pte_bits)
                         } else {
                             pte0
                         }
-                    } else {
-                        pte0
-                    }
+                    })
                 } else {
                     pte0
                 };
 
-                (*child_table0_ref).set(vpn0, new_pte);
+                child_table0_ref.set(vpn0, new_pte);
                 crate::arch::mm::mmu_init::pte_install_log(
                     child_root_ppn,
                     (vpn2 << 30) as u64 | ((vpn1 as u64) << 21) | ((vpn0 as u64) << 12),
@@ -2331,7 +2327,8 @@ pub unsafe fn copy_page_table_cow(
     // a live mm require a TLB shootdown on ALL harts (Linux
     // flush_tlb_mm-style): IPI the peers, full-flush locally.
     crate::arch::ipi::flush_tlb_others();
-    asm!("sfence.vma zero, zero", options(nostack, preserves_flags));
+    // SAFETY: TLB fence (memory-safe in any context).
+    unsafe { asm!("sfence.vma zero, zero", options(nostack, preserves_flags)) };
 
     Some(child_root_ppn)
 }
@@ -2371,7 +2368,7 @@ pub enum CowFaultResult {
 
 /// Handle copy-on-write page fault (GLOBAL-mode PTE section on riscv64,
 /// INV-LOCK-7; `mm` is the owning address space of `root_ppn`).
-pub unsafe fn handle_cow_fault(
+pub fn handle_cow_fault(
     mm: &crate::mm::mm_struct::MmStruct,
     root_ppn: u64,
     fault_addr: VirtAddr,
@@ -2404,7 +2401,7 @@ pub unsafe fn handle_cow_fault(
     let mut spec = SpecPage(Some(spec_phys));
 
     let _pte_guard = pte_lock_for(mm).lock_irqsave();
-    use crate::mm::page_desc::pfn_to_page_mut;
+    use crate::mm::page_desc::page_desc;
 
     let virt_addr = fault_addr.bits();
 
@@ -2412,9 +2409,12 @@ pub unsafe fn handle_cow_fault(
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-
-    let pte2 = (*root_table).get(vpn2);
+    // Re-walk under the section; a guard miss returns the same Retry the
+    // restructured-tree arms below produce.
+    let Some(root_table) = PtTable::from_phys(root_ppn << PAGE_SHIFT) else {
+        return CowFaultResult::Retry;
+    };
+    let pte2 = root_table.get(vpn2);
     if !pte2.is_valid() {
         // Walk failure at re-check time: the upper levels were restructured
         // (teardown/fork) after handle_mm_fault's lock-free COW check.
@@ -2422,18 +2422,22 @@ pub unsafe fn handle_cow_fault(
     }
 
     let ppn1 = pte2.ppn();
-    let table1 = get_page_table_virt(ppn1 << PAGE_SHIFT);
+    let Some(table1) = PtTable::from_phys(ppn1 << PAGE_SHIFT) else {
+        return CowFaultResult::Retry;
+    };
 
-    let pte1 = (*table1).get(vpn1);
+    let pte1 = table1.get(vpn1);
     if !pte1.is_valid() {
         return CowFaultResult::Retry;
     }
 
     let ppn0 = pte1.ppn();
     let table0_phys = ppn0 << PAGE_SHIFT;
-    let table0 = get_page_table_virt(table0_phys);
+    let Some(table0) = PtTable::from_phys(table0_phys) else {
+        return CowFaultResult::Retry;
+    };
 
-    let old_pte = (*table0).get(vpn0);
+    let old_pte = table0.get(vpn0);
     if !old_pte.is_valid() {
         return CowFaultResult::Retry;
     }
@@ -2448,12 +2452,11 @@ pub unsafe fn handle_cow_fault(
     }
 
     let old_ppn = old_pte.ppn();
-    let old_page = pfn_to_page_mut(old_ppn as usize);
+    let old_page = page_desc(old_ppn as usize);
 
-    let refcount = if !old_page.is_null() {
-        (*old_page).refcount()
-    } else {
-        1
+    let refcount = match old_page {
+        Some(p) => p.refcount(),
+        None => 1,
     };
 
     // If refcount <= 1, we're the only owner - just enable write.
@@ -2479,11 +2482,11 @@ pub unsafe fn handle_cow_fault(
 
         // R7-C9: the page is exclusively owned now — clear the descriptor
         // flag too, or stats/invariants see "COW set with refcount 1".
-        if !old_page.is_null() {
-            (*old_page).clear_flag(crate::mm::page_desc::PageFlag::Cow);
+        if let Some(p) = old_page {
+            p.clear_flag(crate::mm::page_desc::PageFlag::Cow);
         }
 
-        (*table0).set(vpn0, new_pte);
+        table0.set(vpn0, new_pte);
 
         // SMP coherence fix: the fast-path PTE replacement (RO+COW → RW)
         // must be visible to EVERY hart that may hold the old entry —
@@ -2494,13 +2497,16 @@ pub unsafe fn handle_cow_fault(
         // PTE_MODIFY_LOCK cannot deadlock).
         crate::arch::ipi::flush_tlb_others();
         let vaddr = virt_addr;
-        asm!(
-            "fence",
-            "sfence.vma {0}, zero",
-            "fence",
-            in(reg) vaddr,
-            options(nostack)
-        );
+        // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
+        unsafe {
+            asm!(
+                "fence",
+                "sfence.vma {0}, zero",
+                "fence",
+                in(reg) vaddr,
+                options(nostack)
+            )
+        };
 
         return CowFaultResult::Resolved;
     }
@@ -2524,15 +2530,8 @@ pub unsafe fn handle_cow_fault(
     };
     let new_ppn = new_phys >> PAGE_SHIFT;
 
-    let new_virt = phys_to_virt(PhysAddr::new(new_phys));
-    let old_virt = phys_to_virt(PhysAddr::new(old_ppn << PAGE_SHIFT));
-
     // Copy while old page is still pinned (refcount >= 2)
-    core::ptr::copy_nonoverlapping(
-        old_virt.bits() as *const u8,
-        new_virt.bits() as *mut u8,
-        PAGE_SIZE as usize
-    );
+    super::unsafe_edges::copy_page(old_ppn << PAGE_SHIFT, new_phys);
 
     // R7-A3: W requires R (reserved-encoding livelock otherwise — see the
     // exclusive branch above).
@@ -2540,7 +2539,7 @@ pub unsafe fn handle_cow_fault(
     let new_pte = PageTableEntry::from_bits((new_ppn << 10) | flags);
 
     // Install new PTE before dropping our reference to the old page
-    (*table0).set(vpn0, new_pte);
+    table0.set(vpn0, new_pte);
 
     // SMP coherence fix: this replacement (old frame → private copy) is
     // exactly the stale-entry hazard — without a shootdown, a hart the
@@ -2549,16 +2548,17 @@ pub unsafe fn handle_cow_fault(
     // user reads/writes from the stale hart hit the old one — the
     // lost-write/stale-read family behind the sigsuspend mask corruption).
     crate::arch::ipi::flush_tlb_others();
-    asm!("sfence.vma zero, zero");
+    // SAFETY: TLB fence.
+    unsafe { asm!("sfence.vma zero, zero") };
 
     // Now safe to release our share of the old page.
     // Both refcount and mapcount must be released: the child's PTE no
     // longer points to the old shared page, so the old page loses one
     // mapping reference.  Without dec_mapcount the count leaks across
     // COW cycles and eventually corrupts page reclaim / rmap decisions.
-    if !old_page.is_null() {
-        let after = (*old_page).put_page_site(crate::dfx::driftwatch::S_COW_RV);
-        (*old_page).dec_mapcount();
+    if let Some(op) = old_page {
+        let after = op.put_page_site(crate::dfx::driftwatch::S_COW_RV);
+        op.dec_mapcount();
         // Stamp lifecycle (gnome-sigill): the faulting process no longer
         // maps the OLD frame — if it owned the text stamp, drop it, or
         // the fork peer's later LEGAL final free is refused as foreign
@@ -2587,27 +2587,27 @@ pub unsafe fn handle_cow_fault(
 
     // Set up reverse mapping for the new COW page
     {
-        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
-        let new_page = pfn_to_page_mut(new_ppn as usize);
-        if !new_page.is_null() {
-            (*new_page).set_flag(PageFlag::Anonymous);
+        use crate::mm::page_desc::PageFlag;
+        let new_page = page_desc(new_ppn as usize);
+        if let Some(np) = new_page {
+            np.set_flag(PageFlag::Anonymous);
             // SwapBacked + LRU membership: the COW copy is an ordinary
             // anonymous page and must stay reclaimable (vmscan).
-            (*new_page).set_flag(PageFlag::SwapBacked);
-            (*new_page).set_index(virt_addr as usize / (PAGE_SIZE as usize));
-            (*new_page).inc_mapcount();
+            np.set_flag(PageFlag::SwapBacked);
+            np.set_index(virt_addr as usize / (PAGE_SIZE as usize));
+            np.inc_mapcount();
         }
         // Multi-mapping bookkeeping + RSS (review 4.10/4.14): the copy is a
         // new resident page of the faulting address space (the old page
         // remains resident only for its other owners).
         if let Some(mm) = crate::sched::current().and_then(|t| t.address_space()) {
-            if !new_page.is_null() {
+            if let Some(np) = new_page {
                 crate::mm::rmap::page_record_mapping(
-                    &*new_page,
+                    np,
                     mm as *const _ as usize,
                     virt_addr as usize,
                 );
-                crate::mm::lru::page_add_anon_lru(&*new_page);
+                crate::mm::lru::page_add_anon_lru(np);
             }
             mm.add_rss(1);
         }
@@ -2617,15 +2617,17 @@ pub unsafe fn handle_cow_fault(
 }
 
 /// Check if page is a COW page
-pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
+pub fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
     let virt_addr = addr.bits();
 
     let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-    let pte2 = (*root_table).get(vpn2);
+    let Some(root_table) = PtTable::from_phys(root_ppn << PAGE_SHIFT) else {
+        return false;
+    };
+    let pte2 = root_table.get(vpn2);
 
     if !pte2.is_valid() {
         return false;
@@ -2638,8 +2640,10 @@ pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
         return false;
     }
 
-    let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-    let pte1 = (*table1).get(vpn1);
+    let Some(table1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else {
+        return false;
+    };
+    let pte1 = table1.get(vpn1);
 
     if !pte1.is_valid() {
         return false;
@@ -2648,8 +2652,10 @@ pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
         return false;
     }
 
-    let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
-    let pte0 = (*table0).get(vpn0);
+    let Some(table0) = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT) else {
+        return false;
+    };
+    let pte0 = table0.get(vpn0);
 
     if !pte0.is_valid() {
         return false;
@@ -2659,15 +2665,15 @@ pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
 }
 
 /// Check if page has required permissions
-pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bool, bool, bool, bool)> {
+pub fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bool, bool, bool, bool)> {
     let virt_addr = addr.bits();
 
     let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-    let pte2 = (*root_table).get(vpn2);
+    let root_table = PtTable::from_phys(root_ppn << PAGE_SHIFT)?;
+    let pte2 = root_table.get(vpn2);
 
     if !pte2.is_valid() {
         return None;
@@ -2686,8 +2692,8 @@ pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bo
         ));
     }
 
-    let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-    let pte1 = (*table1).get(vpn1);
+    let table1 = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT)?;
+    let pte1 = table1.get(vpn1);
 
     if !pte1.is_valid() {
         return None;
@@ -2702,8 +2708,8 @@ pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bo
         ));
     }
 
-    let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
-    let pte0 = (*table0).get(vpn0);
+    let table0 = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT)?;
+    let pte0 = table0.get(vpn0);
 
     if !pte0.is_valid() {
         return None;
