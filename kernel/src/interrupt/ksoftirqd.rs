@@ -14,9 +14,10 @@ use crate::config::MAX_CPUS;
 // Per-CPU ksoftirqd state
 // ============================================================================
 
-/// Per-CPU ksoftirqd task pointers. Set once during init; read-only thereafter.
-static mut KSOFTIRQD_TASK: [*mut crate::process::task::Task; MAX_CPUS] =
-    [core::ptr::null_mut(); MAX_CPUS];
+/// Per-CPU ksoftirqd task addresses (set once during init; read-only
+/// thereafter — the OnceSlot owns the publication protocol).
+static KSOFTIRQD_TASK: [crate::safety::slot::OnceSlot<usize>; MAX_CPUS] =
+    [const { crate::safety::slot::OnceSlot::new() }; MAX_CPUS];
 
 /// Per-CPU wake flag. Set by `wakeup_ksoftirqd()`, checked by ksoftirqd loop.
 static KSOFTIRQD_WAKE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
@@ -65,28 +66,17 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
         // and the wakeup would be lost — softirqs would then sit pending
         // until the next unrelated interrupt (Linux run_ksoftirqd pattern).
         if let Some(current) = crate::sched::current() {
-            // SAFETY: current is a valid task pointer from sched::current(); setting state
-            // before schedule() is safe in this kthread context.
-            unsafe {
-                (*current).set_state(
-                    crate::process::task::TaskState::new(
-                        crate::process::task::TaskState::INTERRUPTIBLE
-                    )
-                );
-            }
+            current.set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE,
+            ));
         }
 
         if crate::interrupt::softirq::has_pending_softirqs() {
             // Race with wakeup — clear state and drain instead of sleeping
             if let Some(current) = crate::sched::current() {
-                // SAFETY: same current task as above.
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(
-                            crate::process::task::TaskState::RUNNING
-                        )
-                    );
-                }
+                current.set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
                 // R33 (NEW-C2 discipline): the racing wakeup_ksoftirqd saw
                 // us INTERRUPTIBLE and may have set RUNNING + enqueued us
                 // while we are in fact still executing on this CPU. Without
@@ -126,12 +116,8 @@ pub fn wakeup_ksoftirqd() {
         return; // already flagged
     }
 
-    // SAFETY: KSOFTIRQD_TASK[cpu] was set during init; null check guards wake_up.
-    unsafe {
-        let task_ptr = KSOFTIRQD_TASK[cpu];
-        if !task_ptr.is_null() {
-            crate::process::task::Task::wake_up(task_ptr);
-        }
+    if let Some(&addr) = KSOFTIRQD_TASK[cpu].get() {
+        crate::process::task::Task::wake_up(addr as *mut crate::process::task::Task);
     }
 }
 
@@ -191,12 +177,7 @@ pub fn init() {
         );
 
         if let Some(t) = task {
-            let t_ptr = t as *mut _;
-            // SAFETY: single-threaded BSP boot context; KSOFTIRQD_TASK[cpu]
-            // has no other accessor until this loop publishes it.
-            unsafe {
-                KSOFTIRQD_TASK[cpu] = t_ptr;
-            }
+            KSOFTIRQD_TASK[cpu].publish(t as *mut _ as usize);
         } else {
             crate::pr_err!("ksoftirqd: failed to create thread for cpu {}", cpu);
         }

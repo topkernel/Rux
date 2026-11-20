@@ -1283,19 +1283,16 @@ pub fn netlink_multicast_send(sender: &Arc<NetlinkSocket>, payload: &[u8], group
 // File operations
 // ============================================================================
 
-/// Recover a strong Arc<NetlinkSocket> from a File's private_data.
-/// SAFETY: the caller must have identity-checked the File against
-/// NETLINK_OPS first.
-unsafe fn netlink_of_file(file: &File) -> Option<Arc<NetlinkSocket>> {
-    let ptr = (*file.private_data.get())?;
-    let socket_ptr = ptr as *const NetlinkSocket;
-    Arc::increment_strong_count(socket_ptr);
-    Some(Arc::from_raw(socket_ptr))
+/// Recover a strong Arc<NetlinkSocket> from a File's private_data
+/// (the shared net-family edge, INV-NETARC-1; the caller has
+/// identity-checked the File against NETLINK_OPS).
+fn netlink_of_file(file: &File) -> Option<Arc<NetlinkSocket>> {
+    crate::net::file_arc::<NetlinkSocket>(file)
 }
 
 fn netlink_file_read(file: &File, buf: &mut [u8]) -> isize {
     // SAFETY: ops identity was verified — created by netlink_socket_install.
-    let socket = match unsafe { netlink_of_file(file) } {
+    let socket = match netlink_of_file(file) {
         Some(s) => s,
         None => return -9,
     };
@@ -1309,7 +1306,7 @@ fn netlink_file_read(file: &File, buf: &mut [u8]) -> isize {
 
 fn netlink_file_write(file: &File, buf: &[u8]) -> isize {
     // SAFETY: ops identity was verified (see netlink_file_read).
-    let socket = match unsafe { netlink_of_file(file) } {
+    let socket = match netlink_of_file(file) {
         Some(s) => s,
         None => return -9,
     };
@@ -1320,22 +1317,20 @@ fn netlink_file_write(file: &File, buf: &[u8]) -> isize {
 }
 
 fn netlink_file_close(file: &File) -> i32 {
-    // SAFETY: private_data came from Arc::into_raw(Arc<NetlinkSocket>).
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
-        None => return 0,
-    };
-    unsafe { *file.private_data.get() = None; }
-    // SAFETY: reconstruct the leaked Arc so close runs and the ref drops.
-    let socket = unsafe { Arc::from_raw(ptr as *const NetlinkSocket) };
-    netlink_close(&socket);
+    // INV-NETARC-1: recover the stored Arc, run close, drop the ref.
+    if let Some(socket) = crate::net::file_arc::<NetlinkSocket>(file) {
+        netlink_close(&socket);
+        // consume the extra ref and clear the slot
+        drop(socket);
+        crate::net::take_file_arc::<NetlinkSocket>(file);
+    }
     0
 }
 
 fn netlink_file_poll(file: &File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     // SAFETY: ops identity was verified (see netlink_file_read).
-    let socket = match unsafe { netlink_of_file(file) } {
+    let socket = match netlink_of_file(file) {
         Some(s) => s,
         None => return POLLERR,
     };
@@ -1396,11 +1391,9 @@ fn netlink_socket_install(
 }
 
 fn unwind_netlink_file(file: &Arc<File>) {
-    // SAFETY: the raw pointer came from Arc::into_raw above; sole owner.
-    let ptr = unsafe { *file.private_data.get() };
-    if let Some(ptr) = ptr {
-        unsafe { drop(Arc::from_raw(ptr as *const NetlinkSocket)); }
-    }
+    // The slot holds the sole Arc reference (create failed before the
+    // fd was published): take and drop it.
+    crate::net::take_file_arc::<NetlinkSocket>(file);
 }
 
 /// socket(AF_NETLINK, type, protocol) — entry from sys_socket_create.
@@ -1446,14 +1439,14 @@ pub fn netlink_socket_from_fd(fd: usize) -> Option<Arc<NetlinkSocket>> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
     {
-        let ops = unsafe { *file.ops.get() };
+        let ops = file.get_ops();
         match ops {
             Some(ops) if core::ptr::eq(ops, &NETLINK_OPS) => {}
             _ => return None,
         }
     }
     // SAFETY: ops identity confirmed; private_data is a leaked Arc.
-    unsafe { netlink_of_file(&file) }
+    netlink_of_file(&file)
 }
 
 /// (NetlinkSocket, file O_NONBLOCK) for a fd.
@@ -1467,7 +1460,7 @@ pub fn netlink_file_of(fd: usize) -> Option<(Arc<NetlinkSocket>, bool)> {
 /// see unix_file_of_file for the amplification note.
 pub fn netlink_file_of_file(file: &Arc<File>) -> Option<(Arc<NetlinkSocket>, bool)> {
     {
-        let ops = unsafe { *file.ops.get() };
+        let ops = file.get_ops();
         match ops {
             Some(ops) if core::ptr::eq(ops, &NETLINK_OPS) => {}
             _ => return None,
@@ -1475,7 +1468,7 @@ pub fn netlink_file_of_file(file: &Arc<File>) -> Option<(Arc<NetlinkSocket>, boo
     }
     let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
     // SAFETY: ops identity confirmed above.
-    let socket = unsafe { netlink_of_file(file) }?;
+    let socket = netlink_of_file(file)?;
     Some((socket, nonblock))
 }
 
@@ -1526,6 +1519,7 @@ pub fn put_sockaddr_nl_bound_groups(
     groups: u32,
 ) {
     use crate::arch::uaccess_safe as ua;
+    use crate::arch::uaccess::access_ok;
     let mut buf = [0u8; SOCKADDR_NL_LEN];
     buf[0] = AF_NETLINK as u8;
     buf[4..8].copy_from_slice(&portid.to_le_bytes());
@@ -1650,7 +1644,8 @@ pub fn is_if_write_ioctl(request: u32) -> bool {
 /// Interface-management ioctl dispatcher. `arg` is the user pointer to an
 /// ifreq (or an ifconf for SIOCGIFCONF). Returns 0 or a negative errno.
 pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
-    use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
+    use crate::arch::uaccess_safe as ua;
+    use crate::arch::uaccess::access_ok;
 
     if arg == 0 {
         // Linux dev_ioctl: a NULL user buffer for an interface request is
@@ -1679,7 +1674,7 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
         }
         let mut rt = [0u8; RTENTRY_SIZE];
         // SAFETY: access_ok(RTENTRY_SIZE) validated; exception-table copy.
-        if unsafe { copy_from_user(rt.as_mut_ptr(), arg as *const u8, RTENTRY_SIZE) } != 0 {
+        if ua::copy_in(&mut rt, arg) != 0 {
             return -(constants::EFAULT as i64);
         }
         // L3 wiring (sec-r1): ip_rt_ioctl checks CAP_NET_ADMIN after the
@@ -1706,7 +1701,7 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
         // Output device: rt_dev names it (user pointer); default eth0.
         let mut oif = ETH0_INDEX;
         // SAFETY: checked via get_user below before any dereference.
-        let dev_ptr = unsafe { get_user::<usize>((arg + 80) as *const usize).unwrap_or(0) };
+        let dev_ptr = ua::read_user::<usize>(arg + 80).unwrap_or(0);
         if dev_ptr != 0 {
             let mut buf = [0u8; 16];
             match crate::arch::uaccess::strncpy_from_user(
@@ -1752,18 +1747,15 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
             return -(constants::EFAULT as i64);
         }
         // SAFETY: access_ok(16) validated the range; exception-table copy.
-        let len = unsafe { get_user::<i32>(arg as *const i32).unwrap_or(0) };
+        let len = ua::read_user::<i32>(arg).unwrap_or(0);
         // struct ifconf on 64-bit: { int len; pad(4); struct ifreq *req; }
-        let req_ptr = unsafe { get_user::<usize>((arg + 8) as *const usize).unwrap_or(0) };
+        let req_ptr = ua::read_user::<usize>(arg + 8).unwrap_or(0);
         if len < 0 {
             return -(constants::EINVAL as i64);
         }
         if len == 0 || req_ptr == 0 {
             // len 0: report required size.
-            // SAFETY: arg validated above.
-            unsafe {
-                let _ = put_user(arg as *mut i32, 2 * IFREQ_SIZE as i32);
-            }
+            let _ = ua::write_user(arg as usize, 2 * IFREQ_SIZE as i32);
             return 0;
         }
         let count = (len as usize / IFREQ_SIZE).min(2);
@@ -1789,14 +1781,10 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
             kbuf[base + 20..base + 24].copy_from_slice(&be);
             used += IFREQ_SIZE;
         }
-        // SAFETY: req_ptr validated with access_ok.
-        if unsafe { copy_to_user(req_ptr as *mut u8, kbuf.as_ptr(), used) } != 0 {
+        if ua::copy_out(req_ptr, &kbuf[..used]) != 0 {
             return -(constants::EFAULT as i64);
         }
-        // SAFETY: arg validated above.
-        unsafe {
-            let _ = put_user(arg as *mut i32, used as i32);
-        }
+        let _ = ua::write_user(arg as usize, used as i32);
         return 0;
     }
 
@@ -1806,7 +1794,7 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
     }
     let mut ifreq = [0u8; IFREQ_SIZE];
     // SAFETY: access_ok(IFREQ_SIZE) validated; exception-table copy.
-    if unsafe { copy_from_user(ifreq.as_mut_ptr(), arg as *const u8, IFREQ_SIZE) } != 0 {
+    if ua::copy_in(&mut ifreq, arg) != 0 {
         return -(constants::EFAULT as i64);
     }
     // L3 wiring (sec-r1): the write-side requests (SIOCSIF*) require
@@ -1828,7 +1816,7 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
 
     let put_ifreq = |ifreq: &[u8; IFREQ_SIZE]| -> i64 {
         // SAFETY: arg validated with access_ok(IFREQ_SIZE).
-        if unsafe { copy_to_user(arg as *mut u8, ifreq.as_ptr(), IFREQ_SIZE) } != 0 {
+        if ua::copy_out(arg, &ifreq[..]) != 0 {
             return -(constants::EFAULT as i64);
         }
         0

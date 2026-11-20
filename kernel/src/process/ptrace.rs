@@ -452,11 +452,9 @@ pub unsafe fn ptrace_stop(task: *mut Task, sig: i32, info: SigInfo) {
             // notifier — it unblocks a tracer parked in wait4/waitid
             // exactly like the exit path's wake_group_chldexit.
             let _ = crate::signal::send_signal(tracer_pid, Signal::SIGCHLD as i32);
-            let tr = crate::process::pid_hash::pid_hash_lookup_pinned(tracer_pid);
-            if !tr.is_null() {
-                crate::process::exit::wake_group_chldexit(tr);
-                crate::signal::signal_wake_up(tr);
-                crate::process::task::Task::task_put(tr);
+            if let Some(tr) = crate::process::task_ref::TaskRef::lookup(tracer_pid) {
+                crate::process::exit::wake_group_chldexit(&tr);
+                crate::signal::signal_wake_up(tr.as_ptr());
             }
         }
         // Park in the stop until resumed. The old code only set

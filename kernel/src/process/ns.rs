@@ -431,8 +431,7 @@ pub fn resolve_local_pid_to_global(local: u32, caller_ns: Option<&Arc<PidNamespa
         }
         Some(ns) => {
             let mut found = None;
-            crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
-                let t = &*task;
+            crate::process::pid_hash::pid_hash_for_each_task(|t| {
                 if found.is_none() && upid_in_ns(t, ns) == Some(local) {
                     found = Some(t.pid());
                 }
@@ -450,22 +449,17 @@ pub fn resolve_local_pid_to_global(local: u32, caller_ns: Option<&Arc<PidNamespa
 /// pid); anything else (descendant or sibling ns) → 0 — the task is
 /// invisible there.
 pub fn translate_sender_pid_ns(sender_global_pid: u32, receiver_ns: Option<&Arc<PidNamespace>>) -> u32 {
-    // SAFETY: pinned lookup keeps the sender Task alive across the call.
-    unsafe {
-        let sender_ptr = crate::process::pid_hash::pid_hash_lookup_pinned(sender_global_pid);
-        if sender_ptr.is_null() {
-            return sender_global_pid;
-        }
-        let sender = &*sender_ptr;
-        let out = match receiver_ns {
-            // Init-ns receiver (None slot): every task's init view is
-            // its global pid.
-            None => sender.pid(),
-            Some(r) if is_init_pid_ns(r) => sender.pid(),
-            Some(r) => upid_in_ns(sender, r).unwrap_or(0),
-        };
-        crate::process::task::Task::task_put(sender_ptr);
-        out
+    // TaskRef owns the pin (lookup_pinned/task_put paired in Drop), so
+    // the sender Task stays alive across the call.
+    let Some(sender) = crate::process::task_ref::TaskRef::lookup(sender_global_pid) else {
+        return sender_global_pid;
+    };
+    match receiver_ns {
+        // Init-ns receiver (None slot): every task's init view is
+        // its global pid.
+        None => sender.pid(),
+        Some(r) if is_init_pid_ns(r) => sender.pid(),
+        Some(r) => upid_in_ns(&sender, r).unwrap_or(0),
     }
 }
 
@@ -707,13 +701,8 @@ fn check_ns_capability(flags: u64) -> Result<(), i32> {
 
 /// Namespace half of copy_process: the child either shares the parent's
 /// namespace objects (plain Arc clone — fork default) or gets fresh ones
-/// for every CLONE_NEW* bit.
-///
-/// SAFETY: both pointers are valid tasks; `child` is not yet runnable.
-pub unsafe fn copy_namespaces(parent: *mut Task, child: *mut Task, flags: u64) -> Result<(), i32> {
-    let parent = &*parent;
-    let child = &mut *child;
-
+/// for every CLONE_NEW* bit. `child` is not yet runnable.
+pub fn copy_namespaces(parent: &Task, child: &mut Task, flags: u64) -> Result<(), i32> {
     check_ns_capability(flags & CLONE_NEWMASK)?;
 
     // --- UTS ---
@@ -839,10 +828,10 @@ pub fn unshare_namespaces(flags: u64) -> Result<(), i32> {
         return Err(-1); // EPERM
     };
 
-    // SAFETY: we are mutating the current task's own ns slots; no other
-    // CPU holds a reference through them concurrently (fork takes the
+    // We are mutating the current task's own ns slots; no other CPU
+    // holds a reference through them concurrently (fork takes the
     // parent's slots under the same task context).
-    unsafe {
+    {
         if nsflags & CLONE_NEWUTS != 0 {
             let old = task_uts_of(task);
             let ns = Arc::new(UtsNamespace::new(alloc_ns_inum()));
@@ -895,13 +884,13 @@ pub fn unshare_namespaces(flags: u64) -> Result<(), i32> {
     Ok(())
 }
 
-/// SAFETY: task is the current task pointer.
-unsafe fn task_uts_of(task: &mut Task) -> Arc<UtsNamespace> {
+/// The current task's (or the init) UTS namespace.
+fn task_uts_of(task: &Task) -> Arc<UtsNamespace> {
     task.ns_uts.clone().unwrap_or_else(init_uts_ns)
 }
 
-/// SAFETY: task is the current task pointer.
-unsafe fn task_mnt_table_of(task: &mut Task) -> Vec<MountEntry> {
+/// The current task's (or the init) mount table snapshot.
+fn task_mnt_table_of(task: &Task) -> Vec<MountEntry> {
     match task.ns_mount.as_ref() {
         Some(a) => a.mounts.lock().clone(),
         None => init_mnt_ns().mounts.lock().clone(),
@@ -1121,27 +1110,27 @@ pub fn build_ns_file(
         data: ns_file_content(&handle),
     });
 
-    // SAFETY: static FileOps; ownership of the boxed content moves to the
-    // File via set_private_data and is reclaimed in ns_file_close.
-    unsafe {
-        let file = Arc::new(crate::fs::File::new(crate::fs::FileFlags::new(flags)));
-        file.set_ops(&NS_FILE_OPS);
-        file.set_private_data(alloc::boxed::Box::into_raw(content) as *mut u8);
+    // Static FileOps; ownership of the boxed content moves to the File
+    // via set_private_data and is reclaimed in ns_file_close (the
+    // framework edge pair file_private_data_ref/_take_boxed,
+    // INV-PROC-NSFILE-1/2).
+    let file = Arc::new(crate::fs::File::new(crate::fs::FileFlags::new(flags)));
+    file.set_ops(&NS_FILE_OPS);
+    file.set_private_data(alloc::boxed::Box::into_raw(content) as *mut u8);
 
-        let mut inode = crate::fs::inode::Inode::new(
-            handle.inum(),
-            crate::fs::inode::InodeMode::new(
-                crate::fs::inode::InodeMode::S_IFREG | 0o444,
-            ),
-        );
-        inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
-        file.set_inode(Arc::new(inode));
+    let mut inode = crate::fs::inode::Inode::new(
+        handle.inum(),
+        crate::fs::inode::InodeMode::new(
+            crate::fs::inode::InodeMode::S_IFREG | 0o444,
+        ),
+    );
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+    file.set_inode(Arc::new(inode));
 
-        // Keep the namespace alive for the fd's lifetime.
-        ns_fd_register(handle);
+    // Keep the namespace alive for the fd's lifetime.
+    ns_fd_register(handle);
 
-        Ok(file)
-    }
+    Ok(file)
 }
 
 struct NsFileContent {
@@ -1149,11 +1138,9 @@ struct NsFileContent {
 }
 
 fn ns_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    // SAFETY: private_data is the NsFileContent installed by open_ns_file.
-    unsafe {
-        let data_opt = &*file.private_data.get();
-        if let Some(ptr) = *data_opt {
-            let content = &*(ptr as *const NsFileContent);
+    // private_data is the NsFileContent installed by open_ns_file.
+    match super::unsafe_edges::file_private_data_ref::<NsFileContent>(file) {
+        Some(content) => {
             let offset = file.get_pos() as usize;
             let available = content.data.len().saturating_sub(offset);
             let to_read = buf.len().min(available);
@@ -1164,20 +1151,14 @@ fn ns_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             } else {
                 0
             }
-        } else {
-            -9 // EBADF
         }
+        None => -9, // EBADF
     }
 }
 
 fn ns_file_close(file: &crate::fs::File) -> i32 {
-    // SAFETY: see ns_file_read.
-    unsafe {
-        let data_opt = &mut *file.private_data.get();
-        if let Some(ptr) = data_opt.take() {
-            let _ = alloc::boxed::Box::from_raw(ptr as *mut NsFileContent);
-        }
-    }
+    // The exactly-once reclaim of the constructor's Box (see ns_file_read).
+    drop(super::unsafe_edges::file_private_data_take_boxed::<NsFileContent>(file));
     0
 }
 
@@ -1237,16 +1218,15 @@ pub fn setns(fd: i32, nstype: u64) -> Result<(), i32> {
         return Err(crate::errno::Errno::OperationNotPermitted.as_neg_i32());
     }
 
-    // SAFETY: fd validated non-negative; get_file_fd returns an Arc clone.
+    // fd validated non-negative; get_file_fd returns an Arc clone.
     let file = crate::fs::get_file_fd(fd as usize)
         .ok_or(crate::errno::Errno::BadFileNumber.as_neg_i32())?;
 
-    // SAFETY: inode is written once at open time; read-only access here.
-    let ino = unsafe {
-        let inode_opt = &*file.inode.get();
-        inode_opt.as_ref().map(|i| i.ino)
-    }
-    .ok_or(crate::errno::Errno::BadFileNumber.as_neg_i32())?;
+    // The write-once inode cell has a safe read accessor (get_inode).
+    let ino = file
+        .get_inode()
+        .map(|i| i.ino)
+        .ok_or(crate::errno::Errno::BadFileNumber.as_neg_i32())?;
 
     let handle = ns_fd_lookup(ino)
         .ok_or(crate::errno::Errno::InvalidArgument.as_neg_i32())?;

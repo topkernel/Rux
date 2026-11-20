@@ -591,6 +591,137 @@ absents stated plainly. Each absent names what closing looks like.
 - kptr_restrict / kallsyms masking: /proc/kallsyms shows real
   addresses to every reader (posture quick row).
 
+### 5.1 The irreducibility register (D-round ledger, round 5 — 2026-11-20)
+
+The per-block proofs the <=5,000-line plan requires: for every unsafe
+family that survived the round-5 conversion, what it reads, why no safe
+shape exists, the reference kernel's counterpart, and the containment.
+Owners are named files; the blocks live there and nowhere else.
+Territory context: lane L5 converted drivers/dfx/interrupt/net from
+5,036 dual lines to ~1,900; what follows is what could NOT convert and
+why, family by family.
+
+**F1. Stale-handle task forensics** — owner
+`kernel/src/dfx/forensics_edges.rs` (INV-FOR-1/2/3) + the hunt modules'
+walkers (scribble 192L, leakorigin 190L, r83hunt 107L, treehunt 78L,
+wildwatch 190L, softirq's bracket-leak, preempt's orphan/pair scans).
+*Reads:* `*mut Task` handles captured one tick ago by a census or IRQ
+record and read NOW — the task may have exited and freed in between;
+kernel-stack qwords via captured frame pointers; seed words at guarded
+pages. *Why no safe shape exists:* the diagnostic exists BECAUSE a typed
+invariant is suspected broken; its input is a handle whose liveness no
+type can prove — a `TaskRef` acquisition would either resurrect the
+liveness claim (unsound) or refuse (and the hunt reports nothing). The
+reference's equivalents do the same: `sched_show_task` dereferences
+tasks under `tasklist_lock` without refcounts, the hung-task checker's
+`do_each_thread` reads, KASAN's quarantine walks. *Containment:* every
+read is <=16 bytes, volatile, value-only (never re-dereferenced);
+callers gated by their `rux:` cmdline flag / tracepoint, all default-OFF
+in release; zero cost when disarmed (flag check only).
+
+**F2. backtrace (139L)** — owner `kernel/src/dfx/backtrace.rs`. *Reads:*
+the caller's own frame pointer / return address (asm: `mv s0`, `mov
+rbp`, `ldr x29`), register save blocks, CSR dumps. *Why:* the frame
+chain and register file have no Rust-level representation at all — this
+IS the machine state, and the register-read asm is the only instruction
+sequence that can capture it (the module documents the rbx-clobber
+compiler hazard on the x86 side). *Reference:* `save_stack_trace` /
+`unwind_frame` — the same asm. *Containment:* panic/oops paths and
+explicit `dump_stack()` sites only; never on a measured hot path.
+
+**F3. memwatch fp-chain walks (101L, 3 arch twins)** — owner
+`kernel/src/dfx/memwatch.rs::walk_fp_chain`. *Reads:* frame-pointer
+chains through ARBITRARY tasks' kernel stacks mid-execution. *Why:* the
+chain is self-describing only in memory — each `fp` word names the next
+frame; a wrong or racing value yields garbage the walk must tolerate,
+not a type error. `KernelStackWindow` (round-4D) bounds each read to
+the task's stack region — the remaining rawness is the chain-follow
+itself. *Reference:* `save_stack_trace_tsk` under `try_to_unuse`-style
+best-effort discipline. *Containment:* `rux:memwatch` gated, cold path.
+
+**F4. pstore (60L)** — owner `kernel/src/dfx/pstore.rs`. *Reads/writes:*
+the reserved-RAM record header at a fixed physical window, EARLY in boot
+(before the allocator exists) and at panic time (when locks are
+unusable). *Why:* both ends run outside every subsystem — pre-heap boot
+and the panic path cannot take a typed handle that heap-allocates or
+locks. *Reference:* ramoops' `persistent_ram_zone` postcard headers.
+*Containment:* boot/panic-only, fixed window, header-validated.
+
+**F5. asm register/MSR/IO-port edges** — owners
+`kernel/src/drivers/intc/apic.rs` (rdmsr/wrmsr/inb/outb, KVM-pv hc),
+`gicv3.rs` (icc_* system registers), `clint.rs` (rdtime, sbi ecall),
+`taskdump.rs` (frozen-CPU gs: probe), `backtrace.rs` (F2). *Why:* the
+instruction IS the interface (MSR/CSR/port access has no Rust
+representation); the compiler must be told the exact register
+constraints. *Reference:* the whole arch layer. *Containment:* each is
+a named fn wrapping one instruction; call sites are safe.
+
+**F6. intrusive tasklet list** — owner
+`kernel/src/interrupt/tasklet.rs` (`splice_all` + `drain_tasklet_list`,
+the two audited edges after round-5 deduped the twin handlers). *Reads:*
+`TaskletStruct::list` nodes embedded in driver-owned structures,
+linked through raw `ListHead`s; the walk recovers containers by
+`offset_of!` (container_of). *Why:* the intrusive shape is the
+interface (drivers embed the node; no allocator indirection on the BH
+path); a safe iterator over raw-linked nodes cannot prove the
+container liveness the links themselves encode. *Reference:*
+`tasklet_action`'s `list_for_each` + `from_tasklet`. *Containment:*
+per-CPU lists under irqsave locks; the splice+walk edges are the only
+two blocks; the rest of the file is safe.
+
+**F7. virtio ring/DMA bottoms** — owner `kernel/src/drivers/virtio/`
+(the 3a-landed descriptor-window discipline; ~250L) +
+`safety/dma.rs`/`safety/ring.rs`. *Reads:* descriptor tables, avail/used
+rings the DEVICE writes concurrently (volatile, ordered by fences);
+io_buf pool chunks whose first 8 bytes are reinterpreted as a freelist
+link while parked. *Why:* the device is a concurrent writer the type
+system cannot see; the pool link overlays the buffer by design (the
+allocation is metadata-free). *Reference:* virtio-ring's `vring.h`
+macros. *Containment:* INV-tagged per edge (3a's contract), lock-order
+doc, per-slot locks.
+
+**F8. net staged copies + whole-table views** — owners
+`kernel/src/net/unix.rs` (write_user staged copy; park_audit = F1
+class), `tcp.rs`/`udp.rs`/`route.rs` whole-table `&'static mut` views.
+*Why (staged copies):* `set_len` on a pre-sized Vec filled by an
+exception-table copy is the one-shape zero-copy path; the safe API
+covers the common case, this is the high-throughput edge. *Why (table
+views):* the `&'static mut` hand-out predates the round; threading
+TCP_TABLE_LOCK guards through every caller is a hot-path change that
+must ride the perf gate, not a mechanical conversion — REGISTERED AS
+OWED (the witness pattern landed this round for the manager accessors;
+the table accessors follow next round). *Reference:* `local_bh_disable`-
+style discipline on the C side. *Containment:* documented contracts per
+accessor.
+
+**F9. GEM aperture + alloc edges (drm ~65L)** — owner
+`kernel/src/drivers/drm/mod.rs`. *Reads:* composer GEM buffers via
+`gem.kva` word walks (import verification sampling); two raw
+alloc/dealloc edges. *Why:* the aperture is device-shared memory sized
+by the host display protocol (not a Rust object); the alloc edge pairs
+with a Drop that releases the host resource. *Reference:* GEM object
+pages. *Containment:* DRM ioctl paths only; the walks are clamped.
+
+**F10. oops-path fault probes** — owner `kernel/src/dfx/mod.rs`
+(register_debugfs_knobs: read of a poisoned const, `csrr x0`, `ud2`).
+*Why:* these edges exist to FAULT — deliberate fault-injection knobs
+exercising the oops/trap path; "safety" here means the trap, not the
+absence of UB at the probe. *Reference:* Linux's `BUG()`/`BUG_ON`
+selftests. *Containment:* debugfs-gated, boot-diagnostic only.
+
+**Round-5 conversion receipts (what this register is the residue of):**
+blkdev fn-pointer ABI de-signed (registration is the audited edge,
+INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
+singleton that was `static mut` (virtio disks, evdev, net devices,
+softirq vectors, TCP managers, ksoftirqd, PLIC domain); MmioRegion owns
+every register window (gicv3, plic — including the asm-lw/sw style
+leftovers, hpet, pci config, virtio-gpu config, framebuffer pixels,
+ACPI tables); the net header edges (INH-BUF-3/4) own every protocol
+parse/build; `File::private_data_ptr` + `net::file_arc` (INV-NETARC-1)
+own the file-slot Arc family; the uaccess_safe API owns every
+copy_in/copy_out; dfx/sbi_debug.rs deleted (dead hunt module, zero
+consumers).
+
 ### 5.x e2fsck pre-existing findings (adjudicated 2026-11-18, fio-delalloc lane)
 
 Byte-identical e2fsck findings on clean-poweroff AND hard-kill images

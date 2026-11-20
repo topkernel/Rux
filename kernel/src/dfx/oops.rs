@@ -192,13 +192,13 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
             Some(t) => {
                 // SAFETY: current() returned a live task pointer; pid()
                 // and comm() are plain reads.
-                unsafe { ((*t).pid() as u64, (*t).comm() as &[u8]) }
+                (t.pid() as u64, t.comm() as &[u8])
             }
             None => (0, b"swapper".as_slice()),
         };
         let mut taint_buf = [0u8; 16];
         taint::taint_string(&mut taint_buf);
-        let tainted = unsafe { core::str::from_utf8_unchecked(&taint_buf) };
+        let tainted = core::str::from_utf8(&taint_buf).unwrap_or("?");
         let _ = write!(w, "CPU: {} PID: {} Comm: {} Tainted: {}\n", cpu, pid, comm_str(comm), tainted);
 
         // ---- the faulting frame (arch __show_regs rows) ----
@@ -242,7 +242,7 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
         None => panic!("Attempted to kill the idle task!"),
         Some(t) => {
             // SAFETY: current() returned a live task pointer.
-            let pid = unsafe { (*t).pid() };
+            let pid = t.pid();
             if pid == 0 {
                 panic!("Attempted to kill the idle task!");
             }

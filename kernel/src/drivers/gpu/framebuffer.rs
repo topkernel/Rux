@@ -45,8 +45,10 @@ pub mod color {
 pub struct FrameBuffer {
     /// Framebuffer information
     info: FrameBufferInfo,
-    /// Framebuffer starting pointer
-    ptr: *mut u8,
+    /// The mapped framebuffer window (round-5: the frame aperture as a
+    /// bounds-checked MmioRegion — INV-MMIO-1/2/3 cover every pixel
+    /// access; the old raw ptr + offset math is gone).
+    fb: crate::safety::mmio::MmioRegion,
 }
 
 unsafe impl Send for FrameBuffer {}
@@ -55,14 +57,15 @@ unsafe impl Sync for FrameBuffer {}
 impl FrameBuffer {
     /// Create a new Framebuffer
     ///
-    /// # Safety
-    /// `addr` must be a valid physical address, and `info` must contain correct information
-    pub unsafe fn new(addr: u64, info: FrameBufferInfo) -> Self {
-        // Map physical address to virtual address
-        // For now, assume identity mapping (physical address = virtual address)
-        let ptr = addr as *mut u8;
-
-        Self { info, ptr }
+    /// INV-MMIO-1 (the audited construction): `addr` is the framebuffer
+    /// aperture the display driver mapped (identity-mapped for now) and
+    /// `info` describes its geometry; the window covers the whole frame.
+    pub fn new(addr: u64, info: FrameBufferInfo) -> Self {
+        let len = (info.stride as u32 * info.height as u32 * 4) as usize;
+        Self {
+            info,
+            fb: crate::safety::mmio::MmioRegion::new(addr as usize, len.max(4)),
+        }
     }
 
     /// Get width
@@ -90,11 +93,8 @@ impl FrameBuffer {
             return;
         }
 
-        unsafe {
-            let offset = (y * self.stride() + x * 4) as usize;
-            let pixel_ptr = self.ptr.add(offset) as *mut u32;
-            write_volatile(pixel_ptr, color);
-        }
+        self.fb
+            .write_u32((y * self.stride() + x * 4) as usize, color);
     }
 
     /// Get pixel color
@@ -104,11 +104,7 @@ impl FrameBuffer {
             return 0;
         }
 
-        unsafe {
-            let offset = (y * self.stride() + x * 4) as usize;
-            let pixel_ptr = self.ptr.add(offset) as *const u32;
-            core::ptr::read_volatile(pixel_ptr)
-        }
+        self.fb.read_u32((y * self.stride() + x * 4) as usize)
     }
 
     /// Fill a rectangle
@@ -245,10 +241,11 @@ impl FrameBuffer {
         }
     }
 
-    /// Get framebuffer starting address
+    /// Get framebuffer starting address (escape hatch for DMA-style
+    /// bulk copies; INV-MMIO-1 covers the window).
     #[inline]
     pub fn as_ptr(&self) -> *mut u8 {
-        self.ptr
+        self.fb.base() as *mut u8
     }
 
     /// Get framebuffer information

@@ -170,8 +170,10 @@ pub fn check() {
         // nothing else to do.  A stale touch_ts on an idle CPU is
         // expected behaviour, not a lockup.
         {
-            let current = unsafe { crate::sched::sched::cpu_state(cpu).current };
-            if current.is_null() || unsafe { (*current).pid() } == 0 {
+            // The pick slot's task is another CPU's CURRENT pick — a
+            // possibly-stale handle read through the forensics edge.
+            let current = crate::sched::sched::cpu_state(cpu).current;
+            if current.is_null() || crate::dfx::forensics_edges::t_pid(current) == 0 {
                 continue;
             }
         }
@@ -204,12 +206,10 @@ pub fn check() {
             );
 
             // Print the stuck CPU's current task
-            let stuck_task = unsafe {
-                crate::sched::sched::cpu_state(cpu).current
-            };
+            let stuck_task = crate::sched::sched::cpu_state(cpu).current;
             if !stuck_task.is_null() {
-                let pid = unsafe { (*stuck_task).pid() };
-                let pc = unsafe { (*stuck_task).preempt_count() };
+                let pid = crate::dfx::forensics_edges::t_pid(stuck_task);
+                let pc = crate::dfx::forensics_edges::t_preempt_count(stuck_task);
                 let _ = write!(w, "  CPU: {} PID: {} pc={:#x}\n", cpu, pid, pc);
                 // oh-crash 92nd (IF=0 wedge, hp91h residual): the wedged
                 // CPU cannot self-report — its tick is dead, so the

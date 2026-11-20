@@ -26,7 +26,15 @@ pub(crate) static LO_STATS: SeqLock<DeviceStats> = SeqLock::new(DeviceStats {
 static LO_DEVICE_LOCK: Spinlock<()> = Spinlock::new(());
 
 /// Loopback device (protected by lock)
-static mut LO_DEVICE: Option<NetDevice> = None;
+static LO_DEVICE: crate::safety::slot::OnceSlot<NetDevice> =
+    crate::safety::slot::OnceSlot::new();
+
+/// Exclusivity witness (INV-SLOT-3): init runs under LO_DEVICE_LOCK;
+/// post-init mutation (stats under the xmit path's own backlog lock
+/// discipline) — the same serialization the raw static carried.
+struct LoPhase;
+impl crate::safety::slot::ExclusivityProof for LoPhase {}
+static LO_PHASE: LoPhase = LoPhase;
 
 /// Loopback backlog: transmitted packets are queued here and drained by
 /// ethernet_poll() instead of being delivered synchronously. The old
@@ -65,12 +73,12 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
     // shorter frames). Any later net:pkt_drop on this skb compares its
     // stated checksum against this snapshot — equal convicts a
     // build-side bug, different convicts an in-flight byte rewrite.
-    // SAFETY: guarded by the length check; read-only.
-    let (skb_data, ucsum_built) = unsafe {
+    // Guarded by the length check; the clamped safe view.
+    let (skb_data, ucsum_built) = {
         let p = skb.data as usize;
         let c = if skb.len >= 42 {
-            let bp = skb.data.add(40) as *const u16;
-            u16::from_be(core::ptr::read_volatile(bp))
+            let bytes = skb.data_slice_at(40, 2);
+            u16::from_be(u16::from_ne_bytes([bytes[0], bytes[1]]))
         } else {
             0
         };
@@ -120,12 +128,11 @@ static LOOPBACK_OPS: NetDeviceOps = NetDeviceOps {
 /// Device pointer on success, None on failure
 pub fn loopback_init() -> Option<&'static mut NetDevice> {
     let _lock = LO_DEVICE_LOCK.lock_irqsave();
-    unsafe {
-        // Check if already initialized
-        if LO_DEVICE.is_some() {
-            return LO_DEVICE.as_mut();
-        }
-
+    // Already initialized?
+    if LO_DEVICE.is_set() {
+        return LO_DEVICE.get_mut_locked(&LO_PHASE);
+    }
+    {
         // Create loopback device
         let mut device = NetDevice {
             name: [0u8; 16],
@@ -148,11 +155,10 @@ pub fn loopback_init() -> Option<&'static mut NetDevice> {
         // Set address (loopback device has no MAC address)
         device.addr_len = 0;
 
-        // Store device
-        LO_DEVICE = Some(device);
-
-        LO_DEVICE.as_mut()
+        // Publish (INV-SLOT-1/2 under the LO lock).
+        LO_DEVICE.publish(device);
     }
+    LO_DEVICE.get_mut_locked(&LO_PHASE)
 }
 
 /// Get loopback device
@@ -160,7 +166,7 @@ pub fn loopback_init() -> Option<&'static mut NetDevice> {
 /// # Returns
 /// Loopback device pointer, or None if not initialized
 pub fn get_loopback_device() -> Option<&'static mut NetDevice> {
-    unsafe { LO_DEVICE.as_mut() }
+    LO_DEVICE.get_mut_locked(&LO_PHASE)
 }
 
 /// Reset loopback device statistics

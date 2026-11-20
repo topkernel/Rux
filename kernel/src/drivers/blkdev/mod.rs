@@ -16,14 +16,18 @@ use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+/// Per-disk C-style operations table (the drivers-family ABI, round-5:
+/// the pointers are SAFE — registration is the audited edge; a driver
+/// that registers an op asserts its implementation upholds the op's
+/// documented contract, and the block layer calls it as plain Rust).
 #[repr(C)]
 pub struct BlockDeviceOps {
     /// Open block device
-    pub open: Option<unsafe fn() -> i32>,
+    pub open: Option<fn() -> i32>,
     /// Release block device
-    pub release: Option<unsafe fn() -> i32>,
+    pub release: Option<fn() -> i32>,
     /// Get geometry info
-    pub getgeo: Option<unsafe fn(&mut Geo) -> i32>,
+    pub getgeo: Option<fn(&mut Geo) -> i32>,
 }
 
 #[repr(C)]
@@ -68,24 +72,28 @@ pub struct GenDisk {
     pub block_size: u32,
     /// Block device operations
     pub ops: Option<&'static BlockDeviceOps>,
-    /// Private data
+    /// Private data (driver-owned; resolve with [`GenDisk::private`])
     pub private_data: Option<*mut u8>,
     /// Request handler function
-    pub request_fn: Option<unsafe extern "C" fn(&mut Request)>,
-    /// Async read function (device-specific async submit without blocking)
-    pub async_read_fn: Option<unsafe fn(*const GenDisk, u64, &mut [u8], *mut core::ffi::c_void) -> i32>,
+    pub request_fn: Option<fn(&mut Request)>,
+    /// Async read function (device-specific async submit without blocking).
+    /// Registration contract (INV-BLKDEV-2, the driver-registration edge):
+    /// the implementation receives the registered `&GenDisk` and must keep
+    /// `buf` a valid DMA target until the completion fires.
+    pub async_read_fn: Option<fn(&GenDisk, u64, &mut [u8], &crate::fs::io_completion::IoCompletion) -> i32>,
     /// Async write function (device-specific async submit without blocking).
-    /// The DATA buffer is the DMA SOURCE: the caller must keep it valid and
-    /// unmodified until the completion fires (the write-batch contract).
-    pub async_write_fn: Option<unsafe fn(*const GenDisk, u64, &[u8], *mut core::ffi::c_void) -> i32>,
+    /// The DATA buffer is the DMA SOURCE: the registered implementation
+    /// asserts the caller keeps it valid and unmodified until the
+    /// completion fires (the write-batch contract, INV-BLKDEV-2).
+    pub async_write_fn: Option<fn(&GenDisk, u64, &[u8], &crate::fs::io_completion::IoCompletion) -> i32>,
     /// Async scatter-gather read (one fused request over N segments whose
     /// combined length covers a contiguous sector range starting at
     /// `sector`). None on devices without SG support — callers fall back
     /// to per-segment `async_read_fn` submissions.
-    pub async_read_sg_fn: Option<unsafe fn(*const GenDisk, u64, &[DmaSeg], *mut core::ffi::c_void) -> i32>,
+    pub async_read_sg_fn: Option<fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32>,
     /// Async scatter-gather write — the fused form of `async_write_fn`;
     /// every segment is a DMA source under the same stability contract.
-    pub async_write_sg_fn: Option<unsafe fn(*const GenDisk, u64, &[DmaSeg], *mut core::ffi::c_void) -> i32>,
+    pub async_write_sg_fn: Option<fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32>,
 }
 
 unsafe impl Send for GenDisk {}
@@ -132,28 +140,55 @@ impl GenDisk {
         self.private_data = Some(data);
     }
 
+    /// Resolve the disk's private data as a shared `&T` — the ONE
+    /// audited edge for the driver-private slot (INV-BLKDEV-3).
+    ///
+    /// INV-BLKDEV-3 (private slot): `private_data`, when set at device
+    /// init before registration, points to a `T` that lives at least as
+    /// long as the registered disk (the machine's lifetime) and is not
+    /// mutated through this shared view while the disk is registered.
+    pub fn private<T>(&self) -> Option<&T> {
+        // SAFETY: INV-BLKDEV-3 — drivers store an init-time, machine-
+        // lifetime object in the slot; the shared borrow here never
+        // outlives the disk's registration.
+        self.private_data.map(|p| unsafe { &*(p as *const T) })
+    }
+
     /// Set request handler function
-    pub fn set_request_fn(&mut self, f: unsafe extern "C" fn(&mut Request)) {
+    pub fn set_request_fn(&mut self, f: fn(&mut Request)) {
         self.request_fn = Some(f);
     }
 
-    /// Set async read function (for async I/O submission without blocking)
-    pub fn set_async_read_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &mut [u8], *mut core::ffi::c_void) -> i32) {
+    /// Set async read function (for async I/O submission without blocking).
+    /// Registering `f` asserts the INV-BLKDEV-2 contract on its behalf.
+    pub fn set_async_read_fn(
+        &mut self,
+        f: fn(&GenDisk, u64, &mut [u8], &crate::fs::io_completion::IoCompletion) -> i32,
+    ) {
         self.async_read_fn = Some(f);
     }
 
     /// Set async write function (for async I/O submission without blocking)
-    pub fn set_async_write_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &[u8], *mut core::ffi::c_void) -> i32) {
+    pub fn set_async_write_fn(
+        &mut self,
+        f: fn(&GenDisk, u64, &[u8], &crate::fs::io_completion::IoCompletion) -> i32,
+    ) {
         self.async_write_fn = Some(f);
     }
 
     /// Set async SG read function (fused multi-segment requests)
-    pub fn set_async_read_sg_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &[DmaSeg], *mut core::ffi::c_void) -> i32) {
+    pub fn set_async_read_sg_fn(
+        &mut self,
+        f: fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32,
+    ) {
         self.async_read_sg_fn = Some(f);
     }
 
     /// Set async SG write function (fused multi-segment requests)
-    pub fn set_async_write_sg_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &[DmaSeg], *mut core::ffi::c_void) -> i32) {
+    pub fn set_async_write_sg_fn(
+        &mut self,
+        f: fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32,
+    ) {
         self.async_write_sg_fn = Some(f);
     }
 
@@ -177,15 +212,13 @@ pub struct Request {
     pub buffer: Vec<u8>,
     /// Block device (typed handle; see INV-BLKDEV-1 on [`get_disk`])
     pub device: &'static GenDisk,
-    /// Completion callback
-    pub end_io: Option<unsafe fn(&Request, i32)>,
-    /// Final device status (R8-M2): set by the driver before end_io fires.
-    /// submit_request returns 0 whenever a request_fn is registered, so a
-    /// device-side error used to vanish and the caller copied a ZERO
-    /// buffer as success (cached as BH_Uptodate!).
+    /// Final device status (R8-M2): set by the driver before the request
+    /// returns. submit_request returns 0 whenever a request_fn is
+    /// registered, so a device-side error used to vanish and the caller
+    /// copied a ZERO buffer as success (cached as BH_Uptodate!).
+    /// (round-5: the never-registered `end_io` callback and the
+    /// never-set `completion` token were deleted — dead ABI surface.)
     pub error: core::sync::atomic::AtomicI32,
-    /// Async I/O completion token (set by async submit paths)
-    pub completion: Option<*mut core::ffi::c_void>,
 }
 
 #[repr(C)]
@@ -261,9 +294,9 @@ impl BlockDeviceManager {
     /// Submit I/O request
     pub fn submit_request(&self, disk: &GenDisk, req: &mut Request) -> i32 {
         if let Some(request_fn) = disk.request_fn {
-            // SAFETY: the driver's fn-pointer contract — registered by the
-            // device owner, invoked on a fully-initialized Request.
-            unsafe { request_fn(req) }
+            // The registration edge (INV-BLKDEV-2) carries the contract;
+            // the call is plain Rust now.
+            request_fn(req);
             0  // Success
         } else {
             -6  // ENXIO
@@ -281,7 +314,6 @@ impl BlockDeviceManager {
 ///
 /// # Returns
 /// Ok(()) if submitted successfully, Err on failure.
-// SAFETY: disk is a valid GenDisk pointer from register_disk; completion outlives the async operation.
 /// Per-device I/O statistics (Linux's /proc/diskstats counters).
 pub mod iostat;
 
@@ -317,10 +349,9 @@ pub fn blkdev_read_async(
                     );
                 }
             }
-            // SAFETY: the driver's fn-pointer contract — disk is the
-            // registered handle; buf and completion stay live until the
-            // completion fires.
-            let ret = unsafe { async_fn(disk as *const GenDisk, sector, buf, completion as *const _ as *mut _) };
+            // The registration edge (INV-BLKDEV-2) carries the contract;
+            // the call is plain Rust now.
+            let ret = async_fn(disk, sector, buf, completion);
             let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
             iostat::note_io(major, minor, false, sectors, elapsed_ns);
@@ -356,8 +387,6 @@ static BLOCK_MANAGER: BlockDeviceManager = BlockDeviceManager::new();
 /// # Returns
 /// Ok(()) if submitted successfully, Err on failure (the caller falls back
 /// to a synchronous write — correctness is never lost, only the batching).
-// SAFETY: disk is a valid GenDisk pointer from register_disk; completion and
-// buf outlive the async operation.
 pub fn blkdev_write_async(
     disk: &'static GenDisk,
     sector: u64,
@@ -390,10 +419,9 @@ pub fn blkdev_write_async(
                     );
                 }
             }
-            // SAFETY: the driver's fn-pointer contract — disk is the
-            // registered handle; the DMA source bytes stay stable until
-            // the completion fires.
-            let ret = unsafe { async_fn(disk as *const GenDisk, sector, buf, completion as *const _ as *mut _) };
+            // The registration edge (INV-BLKDEV-2) carries the contract;
+            // the call is plain Rust now.
+            let ret = async_fn(disk, sector, buf, completion);
             let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
             iostat::note_io(major, minor, true, sectors, elapsed_ns);
@@ -421,8 +449,6 @@ pub fn blkdev_write_async(
 ///
 /// Returns Ok(()) if submitted, Err on failure (caller falls back to
 /// per-segment submissions — correctness is never lost, only the fusion).
-// SAFETY: disk is a valid GenDisk from register_disk; segments and
-// completion outlive the async operation.
 pub fn blkdev_read_async_sg(
     disk: &'static GenDisk,
     sector: u64,
@@ -450,10 +476,8 @@ pub fn blkdev_read_async_sg(
                     );
                 }
             }
-            // SAFETY: the driver's fn-pointer contract — disk is the
-            // registered handle; every segment stays a valid DMA target
-            // until the completion fires.
-            let ret = unsafe { async_fn(disk as *const GenDisk, sector, segs, completion as *const _ as *mut _) };
+            // The registration edge (INV-BLKDEV-2) carries the contract.
+            let ret = async_fn(disk, sector, segs, completion);
             let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
             iostat::note_io(major, minor, false, total, elapsed_ns);
@@ -474,8 +498,6 @@ pub fn blkdev_read_async_sg(
 ///
 /// Returns Ok(()) if submitted, Err on failure (caller falls back to
 /// per-segment submissions).
-// SAFETY: disk is a valid GenDisk from register_disk; segments stay
-// stable DMA sources and the completion outlives the operation.
 pub fn blkdev_write_async_sg(
     disk: &'static GenDisk,
     sector: u64,
@@ -503,10 +525,8 @@ pub fn blkdev_write_async_sg(
                     );
                 }
             }
-            // SAFETY: the driver's fn-pointer contract — disk is the
-            // registered handle; every segment stays a stable DMA source
-            // until the completion fires.
-            let ret = unsafe { async_fn(disk as *const GenDisk, sector, segs, completion as *const _ as *mut _) };
+            // The registration edge (INV-BLKDEV-2) carries the contract.
+            let ret = async_fn(disk, sector, segs, completion);
             let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
             iostat::note_io(major, minor, true, total, elapsed_ns);
@@ -600,8 +620,6 @@ pub fn blkdev_read(disk: &'static GenDisk, sector: u64, buf: &mut [u8]) -> Resul
         sector,
         buffer: vec![0u8; buf.len()],
         device: disk,
-        end_io: None,
-        completion: None,
         error: core::sync::atomic::AtomicI32::new(0),
     };
 
@@ -626,8 +644,6 @@ pub fn blkdev_write(disk: &'static GenDisk, sector: u64, buf: &[u8]) -> Result<u
         sector,
         buffer: buf.to_vec(),
         device: disk,
-        end_io: None,
-        completion: None,
         error: core::sync::atomic::AtomicI32::new(0),
     };
 

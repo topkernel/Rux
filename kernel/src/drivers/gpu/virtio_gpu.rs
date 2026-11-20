@@ -177,38 +177,42 @@ impl VirtioGpuDevice {
 
     /// Initialize VirtIO device
     fn init_virtio(&mut self) -> Option<()> {
-        let common_cfg = self.pci.common_cfg_bar + self.pci.common_cfg_offset as u64;
-        let isr_base = self.pci.isr_cfg_bar + self.pci.isr_cfg_offset as u64;
+        // INV-MMIO-1: the common-config and ISR windows are the BARs the
+        // PCI probe mapped for this function (MmioRegion owns the
+        // volatile words from here down — round-5).
+        let common = crate::safety::mmio::MmioRegion::new(
+            (self.pci.common_cfg_bar + self.pci.common_cfg_offset as u64) as usize,
+            0x1000,
+        );
+        let isr = crate::safety::mmio::MmioRegion::new(
+            (self.pci.isr_cfg_bar + self.pci.isr_cfg_offset as u64) as usize,
+            0x1000,
+        );
+        let _ = isr; // (read below via the same window helper)
 
         // Step 1: Reset device
-        unsafe {
-            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, 0);
-        }
+        common.write_u8(offset::DEVICE_STATUS as usize, 0);
         fence(Ordering::SeqCst);
 
         // Step 2: Set ACKNOWLEDGE
-        unsafe {
-            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, status::ACKNOWLEDGE as u8);
-        }
+        common.write_u8(offset::DEVICE_STATUS as usize, status::ACKNOWLEDGE as u8);
         fence(Ordering::SeqCst);
 
         // Step 3: Set DRIVER
-        unsafe {
-            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
-                (status::ACKNOWLEDGE | status::DRIVER) as u8);
-        }
+        common.write_u8(offset::DEVICE_STATUS as usize,
+            (status::ACKNOWLEDGE | status::DRIVER) as u8);
         fence(Ordering::SeqCst);
 
         // Step 4: Read device features
-        let device_features_low = unsafe {
-            write_volatile((common_cfg + offset::DEVICE_FEATURE_SELECT as u64) as *mut u32, 0);
+        let device_features_low = {
+            common.write_u32(offset::DEVICE_FEATURE_SELECT as usize, 0);
             fence(Ordering::SeqCst);
-            read_volatile((common_cfg + offset::DEVICE_FEATURES as u64) as *const u32)
+            common.read_u32(offset::DEVICE_FEATURES as usize)
         };
-        let device_features_high = unsafe {
-            write_volatile((common_cfg + offset::DEVICE_FEATURE_SELECT as u64) as *mut u32, 1);
+        let device_features_high = {
+            common.write_u32(offset::DEVICE_FEATURE_SELECT as usize, 1);
             fence(Ordering::SeqCst);
-            read_volatile((common_cfg + offset::DEVICE_FEATURES as u64) as *const u32)
+            common.read_u32(offset::DEVICE_FEATURES as usize)
         };
         let _ = (device_features_low, device_features_high); // suppress unused warning
 
@@ -218,30 +222,28 @@ impl VirtioGpuDevice {
         // Second word (feature_select = 1): VIRTIO_F_VERSION_1 = bit 0
 
         // Write first feature word (no GPU special features needed)
-        unsafe {
-            write_volatile((common_cfg + offset::DRIVER_FEATURE_SELECT as u64) as *mut u32, 0);
+        {
+            common.write_u32(offset::DRIVER_FEATURE_SELECT as usize, 0);
             fence(Ordering::SeqCst);
-            write_volatile((common_cfg + offset::DRIVER_FEATURES as u64) as *mut u32, 0);
+            common.write_u32(offset::DRIVER_FEATURES as usize, 0);
         }
         fence(Ordering::SeqCst);
 
         // Write second feature word (VIRTIO_F_VERSION_1 = bit 0 of word 1)
-        unsafe {
-            write_volatile((common_cfg + offset::DRIVER_FEATURE_SELECT as u64) as *mut u32, 1);
+        {
+            common.write_u32(offset::DRIVER_FEATURE_SELECT as usize, 1);
             fence(Ordering::SeqCst);
-            write_volatile((common_cfg + offset::DRIVER_FEATURES as u64) as *mut u32, 1); // bit 0 = VIRTIO_F_VERSION_1
+            common.write_u32(offset::DRIVER_FEATURES as usize, 1); // bit 0 = VIRTIO_F_VERSION_1
         }
         fence(Ordering::SeqCst);
 
         // Step 6: Set FEATURES_OK
-        unsafe {
-            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
-                (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK) as u8);
-        }
+        common.write_u8(offset::DEVICE_STATUS as usize,
+            (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK) as u8);
         fence(Ordering::SeqCst);
 
         // Step 7: Verify FEATURES_OK
-        let status_val = unsafe { read_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *const u8) };
+        let status_val = common.read_u8(offset::DEVICE_STATUS as usize);
         if (status_val & status::FEATURES_OK as u8) == 0 {
             return None;
         }
@@ -250,20 +252,14 @@ impl VirtioGpuDevice {
         // queue exists at all — the virtio-gpu spec puts absolute pointer
         // events on queue 2, and a driver that never services that queue
         // silently drops every gesture.
-        unsafe {
-            let qnum = read_volatile(
-                (common_cfg + offset::COMMON_CFG_QUEUE_NUM as u64) as *const u16
-            );
-            crate::pr_debug!("virtio-gpu: device queue count = {}", qnum);
-        }
+        let qnum = common.read_u16(offset::COMMON_CFG_QUEUE_NUM as usize);
+        crate::pr_debug!("virtio-gpu: device queue count = {}", qnum);
 
         // Step 8: Initialize control queue
-        unsafe {
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16, CTRL_QUEUE);
-        }
+        common.write_u16(offset::COMMON_CFG_QUEUE_SELECT as usize, CTRL_QUEUE);
         fence(Ordering::SeqCst);
 
-        let queue_size = unsafe { read_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16) };
+        let queue_size = common.read_u16(offset::COMMON_CFG_QUEUE_SIZE as usize);
 
         if queue_size == 0 {
             return None;
@@ -284,8 +280,8 @@ impl VirtioGpuDevice {
             queue_size,
             CTRL_QUEUE,
             self.pci.get_notify_addr(CTRL_QUEUE),
-            isr_base,
-            isr_base + 4,
+            isr.base() as u64,
+            (isr.base() + 4) as u64,
         )?;
 
         // Convert virtual addresses to physical addresses (typed
@@ -300,28 +296,22 @@ impl VirtioGpuDevice {
             crate::arch::mm::VirtAddr::new(queue.get_used_addr())
         ).0;
 
-        unsafe {
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32, desc_phys as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32, (desc_phys >> 32) as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_LO as u64) as *mut u32, avail_phys as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32, (avail_phys >> 32) as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_LO as u64) as *mut u32, used_phys as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32, (used_phys >> 32) as u32);
-        }
+        common.write_u32(offset::COMMON_CFG_QUEUE_DESC_LO as usize, desc_phys as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DESC_HI as usize, (desc_phys >> 32) as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DRIVER_LO as usize, avail_phys as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DRIVER_HI as usize, (avail_phys >> 32) as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DEVICE_LO as usize, used_phys as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DEVICE_HI as usize, (used_phys >> 32) as u32);
         fence(Ordering::SeqCst);
 
-        unsafe {
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_ENABLE as u64) as *mut u16, 1);
-        }
+        common.write_u16(offset::COMMON_CFG_QUEUE_ENABLE as usize, 1);
         fence(Ordering::SeqCst);
 
         self.ctrl_queue = Some(queue);
 
         // Step 9: Set DRIVER_OK
-        unsafe {
-            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
-                (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK) as u8);
-        }
+        common.write_u8(offset::DEVICE_STATUS as usize,
+            (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK) as u8);
         fence(Ordering::SeqCst);
 
         Some(())

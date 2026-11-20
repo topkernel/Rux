@@ -65,7 +65,8 @@ impl IrqDomain {
 static DEFAULT_DOMAIN: Spinlock<Option<&'static IrqDomain>> = Spinlock::new(None);
 
 /// Storage for the PLIC domain instance.
-static mut PLIC_DOMAIN: Option<IrqDomain> = None;
+static PLIC_DOMAIN: crate::safety::slot::OnceSlot<IrqDomain> =
+    crate::safety::slot::OnceSlot::new();
 
 /// Create a linear IRQ domain with 1:1 hwirq→virq mapping.
 ///
@@ -80,14 +81,12 @@ pub fn irq_domain_create_linear(
     host_data: usize,
     chip: Option<&'static IrqChip>,
 ) -> &'static IrqDomain {
-    // SAFETY: called once during PLIC init (before SMP); PLIC_DOMAIN is a static mut
-    // with no concurrent access; the returned reference outlives the static storage.
-    unsafe {
-        PLIC_DOMAIN = Some(IrqDomain::new(ops, size, host_data, chip));
-        let domain = PLIC_DOMAIN.as_ref().unwrap();
-        *DEFAULT_DOMAIN.lock_irqsave() = Some(domain);
-        domain
-    }
+    // Called once during PLIC init (before SMP); the OnceSlot owns the
+    // publication protocol.
+    PLIC_DOMAIN.publish(IrqDomain::new(ops, size, host_data, chip));
+    let domain = PLIC_DOMAIN.get().unwrap();
+    *DEFAULT_DOMAIN.lock_irqsave() = Some(domain);
+    domain
 }
 
 /// Get the default IRQ domain.

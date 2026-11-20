@@ -1046,12 +1046,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // (Arc clone); CLONE_NEW* bits give the child fresh ones. Fails the
         // clone with EPERM when a non-user ns was requested without
         // CAP_SYS_ADMIN. ===
-        // SAFETY: copy_namespaces derefs the two raw handles it takes; both
-        // slots are live and exclusive to this fork (parent running, child
-        // not yet enqueued).
-        if let Err(e) = unsafe {
-            crate::process::ns::copy_namespaces(current as *mut Task, child as *mut Task, args.flags)
-        } {
+        if let Err(e) =
+            crate::process::ns::copy_namespaces(current, child, args.flags)
+        {
             return unwind(task_ptr, e);
         }
 
