@@ -1101,7 +1101,7 @@ fn sweep_stale_async(
             // (userspace leak shape), or it held the slot the traced
             // StartUser needs.
             if ams46_on() && ams46_txns_contains(t.id) {
-                crate::pr_warn!(
+                crate::pr_debug!(
                     "AMS46 SWEEP-RECLAIM txn{} code={} (delivered but never freed)",
                     t.id,
                     t.code
@@ -1135,7 +1135,7 @@ fn sweep_stale_async(
                         wake_out.push(ct);
                     }
                     if ams46_on() && ams46_txns_contains(h.id) {
-                        crate::pr_warn!(
+                        crate::pr_debug!(
                             "AMS46 SWEEP slot txn{} -> txn{} (parked code-46 DELIVERED by sweep drain)",
                             t.id,
                             h.id
@@ -1220,7 +1220,7 @@ fn sweep_silent_txns(
                 // the proc todo past the 30 s silence window — the
                 // kernel-side drop shape for Gate 1.
                 if ams46_on() && ams46_txns_contains(t.id) {
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "AMS46 RETIRED(proc-todo) txn{} age={}js — DROPPED undelivered",
                         t.id,
                         now.wrapping_sub(t.enq_j)
@@ -1261,7 +1261,7 @@ fn sweep_silent_txns(
                 // leg-30B AMS46: parked past the silence window without
                 // ever being delivered — the other kernel-side drop.
                 if ams46_on() && ams46_txns_contains(t.id) {
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "AMS46 RETIRED(async-park) txn{} age={}js — DROPPED parked behind slot holder",
                         t.id,
                         now.wrapping_sub(t.enq_j)
@@ -1282,7 +1282,7 @@ fn sweep_silent_txns(
                             let tp = h.to_proc.clone();
                             let hid = h.id;
                             if ams46_on() && ams46_txns_contains(hid) {
-                                crate::pr_warn!(
+                                crate::pr_debug!(
                                     "AMS46 slot -> txn{} (retire handoff DELIVERED parked code-46)",
                                     hid
                                 );
@@ -1637,7 +1637,7 @@ fn deathcb_mark(pid: u32, tid: u32, desc: u32, cookie: u64, todo_len: usize) {
         }
     }
     if DEATHCB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
-        crate::pr_warn!(
+        crate::pr_debug!(
             "DEATHCB-OPEN pid={} tid={} desc={} cookie={:#x} proc_todo_len={}",
             pid,
             tid,
@@ -1667,7 +1667,7 @@ fn deathcb_close(pid: u32, tid: u32) {
         }
     }
     if DEATHCB_N.load(core::sync::atomic::Ordering::Relaxed) < 160 {
-        crate::pr_warn!("DEATHCB-CLOSE pid={} tid={}", pid, tid);
+        crate::pr_debug!("DEATHCB-CLOSE pid={} tid={}", pid, tid);
     }
 }
 
@@ -1883,7 +1883,7 @@ fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
     }
     static FAIL_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     if FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-        crate::pr_warn!(
+        crate::pr_debug!(
             "APPTXN-FAIL pid={} comm='{}' why={} handle={:#x} code={:#x}",
             proc.pid,
             comm,
@@ -2710,7 +2710,7 @@ fn pm<'a>(_held: &World, p: &Arc<BinderProc>) -> &'a mut BinderProc {
             static DEAD_PM_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if DEAD_PM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
-                crate::pr_warn!(
+                crate::pr_debug!(
                     "binder: access to dead proc {} (pid {}) — draining or replying to a closed service",
                     p.id,
                     p.pid
@@ -3188,7 +3188,7 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
         static OPEN_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if OPEN_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 220 {
-            crate::pr_warn!("binder-open: pid {} proc {}", pid, id);
+            crate::pr_debug!("binder-open: pid {} proc {}", pid, id);
         }
     }
     // SAFETY: private_data slot written once at open; reclaimed in
@@ -3293,7 +3293,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                             victims.push((q.pid, n));
                         }
                     }
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "binder: CLOSE proc {} pid {} owned_nodes={} foreign_refs={:?}",
                         proc.id,
                         proc.pid,
@@ -3864,7 +3864,7 @@ pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
                 if let Some(t) = proc.im(world).threads.iter().find(|t| t.tid == dying_tid) {
                     let th = t.st(world);
                     if !th.txn_stack.is_empty() || !th.todo.is_empty() {
-                        crate::pr_warn!(
+                        crate::pr_debug!(
                             "binder: THREAD-DIED-SERVICING pid {} tid {} stack={} todo={} top=txn{} from pid {} tid {}",
                             proc.pid,
                             dying_tid,
@@ -4160,7 +4160,7 @@ pub fn binder_mmap_handler(
         static MMAP_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if MMAP_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "binder-mmap: pid {} proc {} base {:#x} pages {}",
                 task.pid(),
                 proc.id,
@@ -4342,7 +4342,7 @@ pub fn binder_on_tgid_exit(tgid: u32) {
             static EXIT_PROBE_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             if EXIT_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                crate::pr_warn!(
+                crate::pr_debug!(
                     "binder: tgid {} exit reaped {} child-registered nodes",
                     tgid,
                     total_victims
@@ -5661,6 +5661,7 @@ pub fn sleep_snapshot() {
             // drops level>console BEFORE the ring, so the whole census
             // was invisible on the boots that arm rux:sleepsnap (retired dfx=sleepsnap). Switch-
             // gated path; standard boots never reach here.
+            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
             crate::pr_warn!("{}", chunk);
             rest = tail;
         }
@@ -7266,7 +7267,7 @@ pub fn bwr_park_audit() {
                                 )
                                 .is_ok()
                             {
-                                crate::pr_warn!(
+                                crate::pr_debug!(
                                     "FUXWATCH2-CHAIN word={:#x} (live contended FFRT mutex)",
                                     w2
                                 );
@@ -7614,7 +7615,7 @@ pub fn ams46_audit() {
                 let tk = crate::process::find_task_by_pid(rtid);
                 let t = tk.as_deref();
                 if t.is_none() {
-                    crate::pr_warn!("AMS46-T j={} tid={} GONE", now / 100, rtid);
+                    crate::pr_debug!("AMS46-T j={} tid={} GONE", now / 100, rtid);
                 } else {
                     let t = t.expect("checked above");
                     let state = t.state().bits() as u64;
@@ -7643,7 +7644,7 @@ pub fn ams46_audit() {
                             }
                         }
                     }
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "AMS46-T j={} tid={} state={:#x} sys={} rip={:#x} a0={:#x} calls:{}",
                         now / 100,
                         rtid,
@@ -7660,7 +7661,7 @@ pub fn ams46_audit() {
     if async_held || parked > 0 || todo_d > 0 {
         static CEN_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
         if CEN_N.fetch_add(1, Relaxed) < 240 {
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "AMS46 census j={} pid={} todo={} waiting={} thr={} node{} async={} parked={}",
                 now / 100,
                 tpid,
@@ -7803,7 +7804,7 @@ pub fn pool_census_audit() {
     snaps.sort_by(|a, b| b.todo.cmp(&a.todo));
     for s in snaps.iter().take(6) {
         crate::trace::trace_poolcensus(0, s.pid, s.todo as u64, s.max_t as u64);
-        crate::pr_warn!(
+        crate::pr_debug!(
             "POOL pid={} todo={} max={} req={} st={} thr={} w={} wwait={} wstk={} clients={}",
             s.pid,
             s.todo,
@@ -7834,14 +7835,14 @@ pub fn pool_census_audit() {
                 }
             );
         }
-        crate::pr_warn!("POOL-THR pid={}{}", detail_pid, line);
+        crate::pr_debug!("POOL-THR pid={}{}", detail_pid, line);
     }
     for (id, code, oneway, reg, from, age) in todo_items.iter() {
         // daemon_readable: would THIS proc's own waiting worker take the
         // item (work_readable_by with the daemon tgid)? False = gated to
         // a child (reg_tgid) — only the child's threads may consume it.
         let daemon_readable = *reg == 0 || *reg == detail_pid;
-        crate::pr_warn!(
+        crate::pr_debug!(
             "POOL-TODO pid={} txn{} code{} {} reg={} from={} age={}j{}",
             detail_pid,
             id,
@@ -8731,7 +8732,7 @@ pub fn stall_report() {
                 }
             }
             let chunk = core::str::from_utf8(&bytes[start..end]).unwrap_or("");
-            crate::pr_warn!("binder-stall:{}", chunk);
+            crate::pr_debug!("binder-stall:{}", chunk);
             start = end;
         }
     }
@@ -8745,6 +8746,7 @@ fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) ->
     let mut w = world_lock();
     let world = w.as_mut().unwrap();
     if world.mgr_node[proc.ctx as usize].is_some() {
+        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
         crate::pr_err!(
             "binder: BINDER_SET_CONTEXT_MGR already set (ctx {})",
             proc.ctx as u8
@@ -8775,6 +8777,7 @@ fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) ->
     // Release any handle-0 transactions parked waiting for the manager
     // (wait_for_context_manager).
     MANAGER_WAIT.wake_up_all();
+    // HOTPATH-PRINT: one-shot per-process setup/diagnostic, not per-op
     crate::pr_info!(
         "binder: proc {} (pid {}) is the context manager (ctx {}, flags {:#x})",
         proc.id,
@@ -8915,7 +8918,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 // hilogd.rd_kmsg then eats a vCPU copying it to /data.
                 let trace = crate::trace::EVENT_SYSCALLTRACE.armed();
                 if trace {
-                    crate::pr_info!("btx: GET_SENDER_INFO caller tid {}", current_tid());
+                    crate::pr_debug!("btx: GET_SENDER_INFO caller tid {}", current_tid());
                 }
                 let tid = current_tid();
                 let mut token_src = 0u32;
@@ -8940,7 +8943,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 drop(w);
                 let (t, f) = crate::ipc::access_token::token_of(token_src);
                 if trace {
-                    crate::pr_info!(
+                    crate::pr_debug!(
                         "btx: GET_SENDER_INFO sender pid {} token {:#x} ftoken {:#x}",
                         pid_out,
                         t,
@@ -8957,7 +8960,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                     static GSI_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if GSI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                        crate::pr_warn!(
+                        crate::pr_debug!(
                             "INSTGSI tid={} token_src(pid)={} pid_out={} token={:#x} ftoken={:#x}",
                             tid,
                             token_src,
@@ -9009,6 +9012,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             0
         }
         _ => {
+            // HOTPATH-PRINT: one-shot per-process setup/diagnostic, not per-op
             crate::pr_info!("binder: unhandled ioctl {:#x}", request);
             -(EINVAL as i64)
         }
@@ -9105,7 +9109,7 @@ fn binder_ioctl_write_read(
                     core::sync::atomic::AtomicUsize::new(0);
                 if WERR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 240 {
                     let first = get_user_at::<u32>(bwr.write_buffer, 0).unwrap_or(0xFFFF_FFFF);
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "AMS46-WERR pid={} tid={} rc={} firstcmd={:#x} wcons={}",
                         proc.pid,
                         thread.tid,
@@ -9201,7 +9205,7 @@ fn binder_ioctl_write_read(
                             } else {
                                 0
                             };
-                            crate::pr_warn!(
+                            crate::pr_debug!(
                                 "SYNCSEND-EARLYRET pid={} tid={} rc={} rcons={} c1={:#x} txn{} code{:#x} to pid{} enq_j={} pick_j={}",
                                 proc.pid,
                                 thread.tid,
@@ -9310,7 +9314,7 @@ fn bc_corruption_snapshot(
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
 
     let bad_va = buffer.wrapping_add(bad_off as u64);
-    crate::pr_err!(
+    crate::pr_debug!(
         "BC-FORENSICS: pid {} tid {} cmd {:#x} buffer={:#x} size={} bad_off={}",
         proc.pid,
         thread.tid,
@@ -9326,7 +9330,7 @@ fn bc_corruption_snapshot(
     for i in 0..8usize {
         head[i] = get_user_at::<u32>(buffer, i * 4).unwrap_or(0xDEAD_BEEF);
     }
-    crate::pr_err!("BC-FORENSICS: buffer[0..32] ={:08x?}", head);
+    crate::pr_debug!("BC-FORENSICS: buffer[0..32] ={:08x?}", head);
     if bad_off > 0 {
         let mut around = [0u32; 8];
         let base = bad_off.saturating_sub(16) & !3;
@@ -9338,7 +9342,7 @@ fn bc_corruption_snapshot(
                 around[i] = 0xCAFE_0000;
             }
         }
-        crate::pr_err!("BC-FORENSICS: buffer[{}..] ={:08x?}", base, around);
+        crate::pr_debug!("BC-FORENSICS: buffer[{}..] ={:08x?}", base, around);
     }
 
     // Binder-zone membership: a write buffer inside the proc's own mmap'd
@@ -9352,7 +9356,7 @@ fn bc_corruption_snapshot(
         if let Some(alloc) = proc.im(world).alloc.as_ref() {
             let lo = alloc.user_base;
             let hi = alloc.user_base + (alloc.npages * PAGE_SIZE) as u64;
-            crate::pr_err!(
+            crate::pr_debug!(
                 "BC-FORENSICS: binder mmap zone {:#x}-{:#x} bad_va_in_zone={}",
                 lo,
                 hi,
@@ -9370,14 +9374,14 @@ fn bc_corruption_snapshot(
     {
         let vmas = aspace.vma_read();
         match vmas.find(VirtAddr::new(bad_va as usize)) {
-            Some(v) => crate::pr_err!(
+            Some(v) => crate::pr_debug!(
                 "BC-FORENSICS: vma {:#x}-{:#x} flags={:#x} type={:?}",
                 v.start().as_usize(),
                 v.end().as_usize(),
                 v.flags().bits(),
                 v.vma_type()
             ),
-            None => crate::pr_err!("BC-FORENSICS: NO VMA covers {:#x}", bad_va),
+            None => crate::pr_debug!("BC-FORENSICS: NO VMA covers {:#x}", bad_va),
         }
     }
 
@@ -9389,7 +9393,7 @@ fn bc_corruption_snapshot(
         if let Some(raw) =
             crate::arch::mm::page_fault::read_pte_raw(root, crate::arch::mm::VirtAddr::new(bad_va))
         {
-            crate::pr_err!("BC-FORENSICS: raw leaf pte = {:#x}", raw);
+            crate::pr_debug!("BC-FORENSICS: raw leaf pte = {:#x}", raw);
         }
     }
 
@@ -9399,7 +9403,7 @@ fn bc_corruption_snapshot(
     match walked {
         Some((ppn, bits)) => {
             #[cfg(target_arch = "x86_64")]
-            crate::pr_err!(
+            crate::pr_debug!(
                 "BC-FORENSICS: pte(page) ppn={:#x} bits={:#x} P={} W={} U={} NX={} A={} D={}",
                 ppn,
                 bits,
@@ -9411,7 +9415,7 @@ fn bc_corruption_snapshot(
                 bits & 0x40 != 0
             );
             #[cfg(target_arch = "riscv64")]
-            crate::pr_err!(
+            crate::pr_debug!(
                 "BC-FORENSICS: pte(page) ppn={:#x} bits={:#x} V={} R={} W={} X={}",
                 ppn,
                 bits,
@@ -9422,7 +9426,7 @@ fn bc_corruption_snapshot(
             );
 
             if let Some(p) = crate::mm::page_desc(ppn as usize) {
-                crate::pr_err!(
+                crate::pr_debug!(
                     "BC-FORENSICS: page desc refcount={} mapcount={} Cow={} Anon={} SwapBacked={} OnFreelist={} Reserved={} Migrating={}",
                     p.refcount(),
                     p.mapcount(),
@@ -9439,10 +9443,10 @@ fn bc_corruption_snapshot(
                     let _ = write!(mappings, " (mm:{:#x},vpn:{:#x})", mm, vpn);
                 });
                 if !mappings.is_empty() {
-                    crate::pr_err!("BC-FORENSICS: page alt mappings:{}", mappings);
+                    crate::pr_debug!("BC-FORENSICS: page alt mappings:{}", mappings);
                 }
             } else {
-                crate::pr_err!("BC-FORENSICS: page desc NULL for ppn {:#x}", ppn);
+                crate::pr_debug!("BC-FORENSICS: page desc NULL for ppn {:#x}", ppn);
             }
 
             // Raw page contents through the direct map: is the WHOLE page
@@ -9455,11 +9459,11 @@ fn bc_corruption_snapshot(
                 // just walked, inside the kernel direct map; 16 u64 words
                 // are within the page.
                 let words = unsafe { core::slice::from_raw_parts(base, 16) };
-                crate::pr_err!("BC-FORENSICS: page[{:#x}] first 128B ={:016x?}", ppn << 12, words);
+                crate::pr_debug!("BC-FORENSICS: page[{:#x}] first 128B ={:016x?}", ppn << 12, words);
             }
         }
         None => {
-            crate::pr_err!(
+            crate::pr_debug!(
                 "BC-FORENSICS: page {:#x} NOT MAPPED in pid {}'s tables (PTE absent)",
                 page_va,
                 proc.pid
@@ -9518,7 +9522,7 @@ fn binder_thread_write(
                 // listener) or a nested sync call from a listener callback.
                 if !reply && deathcb_open(thread.tid) {
                     if DEATHCB_N.load(core::sync::atomic::Ordering::Relaxed) < 160 {
-                        crate::pr_warn!(
+                        crate::pr_debug!(
                             "DEATHCB-SEND pid={} tid={} target={} code={:#x} oneway={}",
                             proc.pid,
                             thread.tid,
@@ -9548,7 +9552,7 @@ fn binder_thread_write(
                     static AC_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if AC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1500 {
-                        crate::pr_warn!(
+                        crate::pr_debug!(
                             "ACCT-CMD pid={} tid={} cmd={:#x} reply={} h={:#x} code={:#x} oneway={} ds={} os={}",
                             proc.pid,
                             thread.tid,
@@ -9603,7 +9607,7 @@ fn binder_thread_write(
                             SC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                         };
                         if n < (if val == 32 { 60 } else { 50 }) {
-                            crate::pr_warn!(
+                            crate::pr_debug!(
                                 "STATUSCODE-REPLY pid={} tid={} code={:#x} status={}{}",
                                 proc.pid,
                                 thread.tid,
@@ -9638,7 +9642,7 @@ fn binder_thread_write(
                             hx.push(HEX[(by >> 4) as usize] as char);
                             hx.push(HEX[(by & 0xf) as usize] as char);
                         }
-                        crate::pr_info!(
+                        crate::pr_debug!(
                             "btxp: pid {} {} code {} ds {} p {}",
                             proc.pid,
                             if reply { "R" } else { "T" },
@@ -9661,7 +9665,7 @@ fn binder_thread_write(
                             core::sync::atomic::AtomicUsize::new(0);
                         if SF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
                             let why = SENDFAIL_WHY.load(core::sync::atomic::Ordering::Relaxed);
-                            crate::pr_warn!(
+                            crate::pr_debug!(
                                 "AMS46-SENDFAIL pid={} tid={} code={:#x} h={} BR={:#x} why={}-{} {}",
                                 proc.pid,
                                 thread.tid,
@@ -9674,6 +9678,7 @@ fn binder_thread_write(
                             );
                         }
                     }
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!(
                         "binder: pid {} {} failed with BR {:#x} (code {}, ds {} os {})",
                         proc.pid,
@@ -9703,7 +9708,7 @@ fn binder_thread_write(
                                     static RF_N: core::sync::atomic::AtomicUsize =
                                         core::sync::atomic::AtomicUsize::new(0);
                                     if RF_N.fetch_add(1, Relaxed) < 64 {
-                                        crate::pr_warn!(
+                                        crate::pr_debug!(
                                             "AMS46-R-FAIL pid{} code={:#x} BR={:#x} {}",
                                             proc.pid,
                                             tr.code,
@@ -9738,7 +9743,7 @@ fn binder_thread_write(
                             core::sync::atomic::AtomicUsize::new(0);
                         if WC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
                             let why = SENDFAIL_WHY.load(core::sync::atomic::Ordering::Relaxed);
-                            crate::pr_warn!(
+                            crate::pr_debug!(
                                 "RERR-PUSH site=writecmd pid={} tid={} cmd={:#x} reply={} h={:#x} code={:#x} BR={:#x} why={} todo_len_after={}",
                                 proc.pid,
                                 thread.tid,
@@ -9784,6 +9789,7 @@ fn binder_thread_write(
                             };
                             match txn {
                                 None => {
+                                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                                     crate::pr_info!(
                                         "binder: pid {} BC_FREE_BUFFER {:#x} no match or not freeable",
                                         proc.pid,
@@ -9815,7 +9821,7 @@ fn binder_thread_write(
                                                 )
                                                 < 96
                                         {
-                                            crate::pr_warn!(
+                                            crate::pr_debug!(
                                                 "AMS46 FREE txn{} code={} by pid={} held_slot={}",
                                                 t.id,
                                                 t.code,
@@ -9834,7 +9840,7 @@ fn binder_thread_write(
                                                 if ams46_on()
                                                     && ams46_txns_contains(t.id)
                                                 {
-                                                    crate::pr_warn!(
+                                                    crate::pr_debug!(
                                                         "AMS46 slot released by txn{}",
                                                         t.id
                                                     );
@@ -9859,11 +9865,12 @@ fn binder_thread_write(
                                                 None => drain_wake = Some((tp, pref)),
                                             }
                                             if ams46_on() && ams46_txns_contains(tid) {
-                                                crate::pr_warn!(
+                                                crate::pr_debug!(
                                                     "AMS46 slot -> txn{} (parked code-46 DELIVERED by drain)",
                                                     tid
                                                 );
                                             }
+                                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                                             crate::pr_info!(
                                                 "binder: oneway txn {} drained to proc {}",
                                                 tid,
@@ -9964,6 +9971,7 @@ fn binder_thread_write(
                         };
                         let Some(ridx) = ridx else {
                             drop(w);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: pid {} ref command on invalid handle {}", proc.pid, desc);
                             continue;
                         };
@@ -9986,6 +9994,7 @@ fn binder_thread_write(
                             if strong {
                                 if s == 0 {
                                     drop(w);
+                                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                                     crate::pr_info!("binder: pid {} BC_RELEASE on 0 strong refs", proc.pid);
                                     continue;
                                 }
@@ -9997,6 +10006,7 @@ fn binder_thread_write(
                             } else {
                                 if wk == 0 {
                                     drop(w);
+                                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                                     crate::pr_info!("binder: pid {} BC_DECREFS on 0 weak refs", proc.pid);
                                     continue;
                                 }
@@ -10057,6 +10067,7 @@ fn binder_thread_write(
                         .cloned();
                     let Some(node) = node else {
                         drop(w);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!(
                             "binder: pid {} BC_{}_DONE: no node {:#x}",
                             proc.pid,
@@ -10070,6 +10081,7 @@ fn binder_thread_write(
                     // the node state untouched.
                     if cookie != node.cookie {
                         drop(w);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!(
                             "binder: pid {} BC_{}_DONE cookie mismatch {:#x} != {:#x}",
                             proc.pid,
@@ -10083,6 +10095,7 @@ fn binder_thread_write(
                     if cmd == BC_ACQUIRE_DONE {
                         if !ns.pending_strong_ref {
                             drop(w);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: BC_ACQUIRE_DONE without pending acquire");
                             continue;
                         }
@@ -10091,6 +10104,7 @@ fn binder_thread_write(
                     } else {
                         if !ns.pending_weak_ref {
                             drop(w);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: BC_INCREFS_DONE without pending increfs");
                             continue;
                         }
@@ -10144,6 +10158,7 @@ fn binder_thread_write(
                         let pim = pm(world, proc).im(world);
                         let Some(ridx) = pim.refs.iter().position(|r| r.desc == target) else {
                             drop(w);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!(
                                 "binder: pid {} death command on invalid handle {}",
                                 proc.pid,
@@ -10186,6 +10201,7 @@ fn binder_thread_write(
                                     }
                                 }
                                 drop(w);
+                                // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                                 crate::pr_info!(
                                     "binder: pid {} BC_REQUEST_DEATH_NOTIFICATION already set (desc {})",
                                     proc.pid,
@@ -10251,6 +10267,7 @@ fn binder_thread_write(
                                 .unwrap_or(false);
                             if !ok {
                                 drop(w);
+                                // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                                 crate::pr_info!(
                                     "binder: pid {} BC_CLEAR_DEATH_NOTIFICATION not active or cookie mismatch (desc {})",
                                     proc.pid,
@@ -10306,6 +10323,7 @@ fn binder_thread_write(
                             .map(|r| r.desc);
                         let Some(desc) = hit else {
                             drop(w);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!(
                                 "binder: pid {} BC_DEAD_BINDER_DONE {:#x} not found",
                                 proc.pid,
@@ -10335,6 +10353,7 @@ fn binder_thread_write(
             _ => {
                 // b85 forensics: the last binder event before the samgr
                 // wedge was this print WITHOUT a pid — name the issuer.
+                // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                 crate::pr_info!(
                     "binder: pid {} tid {} unknown BC command {:#x}, stopping",
                     proc.pid,
@@ -10454,12 +10473,14 @@ fn binder_transaction(
                 let Some(t) = stack_top else {
                     sendfail_why(6);
                     *err_cmd = BR_FAILED_REPLY;
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!("binder: BC_REPLY with empty transaction stack");
                     return;
                 };
                 if t.to_tid(world) != Some(thread.tid) || !Arc::ptr_eq(&t.to_proc, proc) {
                     sendfail_why(7);
                     *err_cmd = BR_FAILED_REPLY;
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!(
                         "binder: BC_REPLY stack top not ours (to_tid={:?}, me={})",
                         t.to_tid(world),
@@ -10591,6 +10612,7 @@ fn binder_transaction(
                 let (Some(from_proc), Some(from_tid)) = (t.from_proc.clone(), t.from_tid) else {
                     sendfail_why(8);
                     *err_cmd = BR_FAILED_REPLY;
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!("binder: BC_REPLY on oneway");
                     return;
                 };
@@ -10601,6 +10623,7 @@ fn binder_transaction(
                     sendfail_why(9);
                     // goes to the originator, the replier gets
                     // SAFETY: under WORLD.
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!("binder: BC_REPLY requester dead");
                 }
                 target_thread_key = Some((from_proc, from_tid));
@@ -10636,7 +10659,7 @@ fn binder_transaction(
                         let n = P32_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         if n < 60 {
                             let (fproc, ftid) = target_thread_key.as_ref().unwrap();
-                            crate::pr_warn!(
+                            crate::pr_debug!(
                                 "POISON32-DELIVER server={}/{} -> client pid={} tid={} req_code={:#x}",
                                 proc.pid,
                                 thread.tid,
@@ -10664,6 +10687,7 @@ fn binder_transaction(
                 let Some(node) = node else {
                     sendfail_why(1);
                     *err_cmd = BR_FAILED_REPLY;
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!("binder: transaction to invalid handle {}", tr.target_handle);
                     // sc141: failed-send visibility for the launcher lane —
                     // parked children send ZERO successful transactions;
@@ -10677,6 +10701,7 @@ fn binder_transaction(
                 let Some(mgr) = mgr else {
                     sendfail_why(4);
                     *err_cmd = BR_DEAD_REPLY;
+                    // HOTPATH-PRINT: one-shot per-process setup/diagnostic, not per-op
                     crate::pr_info!("binder: no context manager installed (ctx {})", proc.ctx as u8);
                     app_txn_fail_print(proc, "no-ctxmgr", 0, tr.code as u64);
                     return;
@@ -10720,7 +10745,7 @@ fn binder_transaction(
                     static CTX_OWN_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if CTX_OWN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                        crate::pr_warn!(
+                        crate::pr_debug!(
                             "BINDER-REJECT pid={} tid={} ctxmgr-own-process code={:#x}",
                             proc.pid,
                             thread.tid,
@@ -10798,7 +10823,7 @@ fn binder_transaction(
                     static SELF_TXN_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if SELF_TXN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                        crate::pr_warn!(
+                        crate::pr_debug!(
                             "BINDER-REJECT pid={} tid={} self-transaction handle={:#x} code={:#x}",
                             proc.pid,
                             thread.tid,
@@ -11017,7 +11042,7 @@ fn binder_transaction(
             if crate::trace::EVENT_BINDERTRACE.armed()
                 && binder_probe_on()
             {
-                crate::pr_info!(
+                crate::pr_debug!(
                     "btx: #{} pid {}{} -> pid {} h{} code {} {} ds {} os {}",
                     txn_id,
                     proc.pid,
@@ -11044,7 +11069,7 @@ fn binder_transaction(
             // up on their next read).
             let swept = { sweep_stale_async(world, tp, &mut wake_ths) };
             if swept > 0 {
-                crate::pr_info!(
+                crate::pr_debug!(
                     "binder: reclaimed {} stale buffer(s) of pid {}",
                     swept,
                     tp.pid
@@ -11092,6 +11117,7 @@ fn binder_transaction(
                                 return;
                             }
                             *err_cmd = BR_FAILED_REPLY;
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!(
                                 "binder: buffer alloc failed (need {}+{}+{})",
                                 align8(data_size),
@@ -11161,6 +11187,7 @@ fn binder_transaction(
             } else {
                 *err_cmd = BR_DEAD_REPLY;
             }
+            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
             crate::pr_info!(
                 "binder: target pid {} died before payload copy — BR_DEAD_REPLY",
                 target.pid
@@ -11194,6 +11221,7 @@ fn binder_transaction(
             } else {
                 *err_cmd = BR_FAILED_REPLY;
             }
+            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
             crate::pr_info!("binder: txn data copy fault from {:#x}", tr.data_buffer);
             return;
         }
@@ -11213,6 +11241,7 @@ fn binder_transaction(
             } else {
                 *err_cmd = BR_FAILED_REPLY;
             }
+            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
             crate::pr_info!("binder: txn offsets copy fault from {:#x}", tr.data_offsets);
             return;
         }
@@ -11242,6 +11271,7 @@ fn binder_transaction(
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
             sendfail_why(15);
             *err_cmd = BR_FAILED_REPLY;
+            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
             crate::pr_info!("binder: secctx write out of sg area");
             return;
         }
@@ -11268,6 +11298,7 @@ fn binder_transaction(
                 Some(o) => o,
                 None => {
                     fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!("binder: object offset (entry {}) out of range", i);
                     return;
                 }
@@ -11275,6 +11306,7 @@ fn binder_transaction(
             let obj_end4 = obj_off.checked_add(4).filter(|&e| e <= data_size);
             if obj_end4.is_none() {
                 fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                 crate::pr_info!("binder: object offset {} out of range", obj_off);
                 return;
             }
@@ -11284,6 +11316,7 @@ fn binder_transaction(
                 Some(t) => t,
                 None => {
                     fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!("binder: object type at {} out of range", obj_off);
                     return;
                 }
@@ -11291,6 +11324,7 @@ fn binder_transaction(
             let osz = binder_object_size(ty);
             if osz == 0 || !obj_off.checked_add(osz).map_or(false, |e| e <= data_size) {
                 fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                 crate::pr_info!("binder: object type {:#x} at {} out of range", ty, obj_off);
                 return;
             }
@@ -11301,12 +11335,14 @@ fn binder_transaction(
                         Some(f) => f,
                         None => {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: fd object at {} out of range", obj_off);
                             return;
                         }
                     };
                     if !allows_fd {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!("binder: fd {} to target that does not accept fds", fd);
                         return;
                     }
@@ -11320,6 +11356,7 @@ fn binder_transaction(
                         || block.write_data_u32(obj_off + 12, 0).is_none()
                     {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!("binder: fd object write at {} out of range", obj_off);
                         return;
                     }
@@ -11329,6 +11366,7 @@ fn binder_transaction(
                         Some(o) => o,
                         None => {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: ptr object at {} out of range", obj_off);
                             return;
                         }
@@ -11336,6 +11374,7 @@ fn binder_transaction(
                     let bp_len = bp.length as usize;
                     if bp_len > sg_total - sg_used {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!("binder: sg buffer overruns buffers_size");
                         return;
                     }
@@ -11351,6 +11390,7 @@ fn binder_transaction(
                     bp2.buffer = child_user;
                     if block.write_data_obj(obj_off, bp2).is_none() {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!("binder: ptr object write at {} out of range", obj_off);
                         return;
                     }
@@ -11359,6 +11399,7 @@ fn binder_transaction(
                         // address into the parent buffer at parent_offset.
                         let Some(pw) = block.parent_window(i, bp.parent) else {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: PTR fixup parent invalid");
                             return;
                         };
@@ -11369,6 +11410,7 @@ fn binder_transaction(
                         }
                         if pw.write_u64_at(bp.parent_offset as usize, child_user).is_none() {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: PTR fixup offset out of parent");
                             return;
                         }
@@ -11379,12 +11421,14 @@ fn binder_transaction(
                         Some(o) => o,
                         None => {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: fda object at {} out of range", obj_off);
                             return;
                         }
                     };
                     if !allows_fd {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!("binder: fda to target that does not accept fds");
                         return;
                     }
@@ -11394,12 +11438,14 @@ fn binder_transaction(
                     }
                     let Some(pw) = block.parent_window(i, fda.parent) else {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!("binder: FDA parent invalid");
                         return;
                     };
                     let fd_buf_size = 4 * fda.num_fds as usize;
                     if fd_buf_size > pw.len || fda.parent_offset as usize > pw.len - fd_buf_size {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!("binder: FDA does not fit in parent buffer");
                         return;
                     }
@@ -11408,18 +11454,21 @@ fn binder_transaction(
                             Some(f) => f,
                             None => {
                                 fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                                // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                                 crate::pr_info!("binder: FDA does not fit in parent buffer");
                                 return;
                             }
                         };
                         let Some(tfd) = translate_fd_into(fd, &target) else {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: fda fd {} install into pid {} failed", fd, target.pid);
                             return;
                         };
                         installed_fds.push((target.pid, tfd));
                         if pw.set_u32(fda.parent_offset as usize + k * 4, tfd as u32).is_none() {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: FDA does not fit in parent buffer");
                             return;
                         }
@@ -11431,12 +11480,14 @@ fn binder_transaction(
                         Some(o) => o,
                         None => {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                            // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                             crate::pr_info!("binder: flat object at {} out of range", obj_off);
                             return;
                         }
                     };
                     if !translate_object(proc, obj, &target) {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!(
                             "binder: object type {:#x} handle {:#x} translate failed",
                             obj.hdr_type,
@@ -11874,7 +11925,7 @@ fn binder_transaction(
                     }
                 }
             }
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "INST-TXN txn{} {} pid{}/tid{} ('{}') -> pid{} code={:#x} oneway={} dlen={} parcel={}",
                 txn.id,
                 if reply { "REPLY" } else { "SEND" },
@@ -11906,7 +11957,7 @@ fn binder_transaction(
             if ams46_node_id() == 0 && nid != 0 {
                 AMS46_NODE_ID.store(nid, core::sync::atomic::Ordering::Relaxed);
                 AMS46_TPID.store(target.pid, core::sync::atomic::Ordering::Relaxed);
-                crate::pr_warn!("AMS46 latch node={} pid={}", nid, target.pid);
+                crate::pr_debug!("AMS46 latch node={} pid={}", nid, target.pid);
             }
             if tr.code == 46 {
                 ams46_txns_push(txn.id);
@@ -11927,7 +11978,7 @@ fn binder_transaction(
                         .iter()
                         .map(|b| alloc::format!("{:02x}", b))
                         .collect();
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "AMS46 ENQ txn{} from pid={} tid={} comm='{}' euid={} flags={:#x} dlen={} parcel={}",
                         txn.id,
                         proc.pid,
@@ -11979,7 +12030,7 @@ fn binder_transaction(
                         } else {
                             alloc::string::String::from("-")
                         };
-                        crate::pr_warn!(
+                        crate::pr_debug!(
                             "AMS46-R txn{} pid{} tid{} '{}' -> pid{} code={:#x} oneway={} dlen={} parcel={}",
                             txn.id,
                             proc.pid,
@@ -12126,7 +12177,7 @@ fn binder_transaction(
                 let prev = SACMP_RS_PID
                     .swap(proc.pid, core::sync::atomic::Ordering::Relaxed);
                 if prev != proc.pid {
-                    crate::pr_warn!("SACMP rs-latch pid={}", proc.pid);
+                    crate::pr_debug!("SACMP rs-latch pid={}", proc.pid);
                 }
                 if SACMP_RS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
                     let mut pb = [0u8; 32];
@@ -12140,7 +12191,7 @@ fn binder_transaction(
                     } else {
                         alloc::string::String::from("-")
                     };
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "SACMP-RS #{} pid={} -> pid={} code={:#x} oneway={} dlen={} parcel={}",
                         SACMP_RS_N.load(core::sync::atomic::Ordering::Relaxed),
                         proc.pid,
@@ -12244,7 +12295,7 @@ fn binder_transaction(
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
-                crate::pr_warn!(
+                crate::pr_debug!(
                     "SACMP {} code={} from pid={} comm='{}' -> pid={} dlen={} reply={}",
                     if name_hit { "name" } else { "reply" },
                     if reply {
@@ -12420,6 +12471,7 @@ fn binder_transaction(
                         th.todo.push_back(Work::TransactionComplete);
                         th.process_todo = true;
                     }
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!(
                         "binder: BC_REPLY originator thread {} gone (proc {})",
                         rtid,
@@ -12455,6 +12507,7 @@ fn binder_transaction(
                             if let Some(i) = pos {
                                 let outdated = ns.async_todo.remove(i);
                                 if let Some(old) = outdated {
+                                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                                     crate::pr_info!(
                                         "binder: txn{} supersedes outdated txn{} (TF_UPDATE_TXN, node {})",
                                         txn.id,
@@ -12473,6 +12526,7 @@ fn binder_transaction(
                         ns.async_todo.push_back(txn.clone());
                         parked = true;
                         thread.hist(world, EV_TXN_PARKED_ASYNC, txn.id as u32, ns.async_todo.len() as u32);
+                        // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                         crate::pr_info!(
                             "binder: oneway txn {} parked on node {} (queue len {})",
                             txn.id,
@@ -12484,7 +12538,7 @@ fn binder_transaction(
                         // deferred indefinitely until the slot holder's
                         // buffer is freed (or the 30 s sweeps act).
                         if ams46_on() && ams46_txns_contains(txn.id) {
-                            crate::pr_warn!(
+                            crate::pr_debug!(
                                 "AMS46 Q txn{} PARKED on node{} qlen={} (slot held by earlier oneway)",
                                 txn.id,
                                 node.id,
@@ -12497,7 +12551,7 @@ fn binder_transaction(
                             static IQP_N: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
                             if IQP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                                crate::pr_warn!(
+                                crate::pr_debug!(
                                     "INSTQ txn{} code={:#x} PARKED node{} qlen={}",
                                     txn.id,
                                     txn.code,
@@ -12582,7 +12636,7 @@ fn binder_transaction(
                     // leg-30B AMS46: the traced StartUser took the async
                     // slot and is queued for delivery.
                     if ams46_on() && ams46_txns_contains(txn.id) {
-                        crate::pr_warn!(
+                        crate::pr_debug!(
                             "AMS46 Q txn{} route={} (slot taken)",
                             txn.id,
                             txn_route_label
@@ -12613,7 +12667,7 @@ fn binder_transaction(
                                     })
                                     .count()
                             };
-                            crate::pr_warn!(
+                            crate::pr_debug!(
                                 "INSTQ txn{} code={:#x} route={} nwait={} proctodo={}",
                                 txn.id,
                                 txn.code,
@@ -12650,7 +12704,7 @@ fn binder_transaction(
                             static TXN_NO: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
                             if TXN_NO.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
-                                crate::pr_warn!(
+                                crate::pr_debug!(
                                     "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway=1 proc child={} route={}",
                                     txn.id,
                                     proc.pid,
@@ -12825,7 +12879,7 @@ fn binder_transaction(
                         static TXN_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         if TXN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
-                            crate::pr_warn!(
+                            crate::pr_debug!(
                                 "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway={} {} child={} route={}",
                                 txn.id,
                                 proc.pid,
@@ -12844,7 +12898,7 @@ fn binder_transaction(
                 // send is TF_ASYNC-shaped; a twoway variant would land
                 // here and its sender would park for the reply).
                 if ams46_on() && ams46_txns_contains(txn.id) {
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "AMS46 Q txn{} SYNC route={}",
                         txn.id,
                         txn_route_label
@@ -12871,7 +12925,7 @@ fn binder_transaction(
             static IW_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if IW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-                crate::pr_warn!(
+                crate::pr_debug!(
                     "INSTWAKE tid={} ok={} refused={}",
                     t.tid,
                     t.kick_wake_ok.load(core::sync::atomic::Ordering::Relaxed).wrapping_sub(b_ok),
@@ -13161,6 +13215,7 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
                     // Handled by the fd/sg machinery in binder_transaction
                     // BEFORE the world lock (fd-table ops never run under
                     // WORLD). Reaching here means a re-parse bug.
+                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                     crate::pr_info!("binder: object type {:#x} reached node translation", obj.hdr_type);
                     false
                 }
@@ -13458,7 +13513,7 @@ fn binder_thread_read(
                                 Some(Work::ClearDeathDone { .. }) => "cleardone",
                                 None => "-",
                             };
-                            crate::pr_warn!(
+                            crate::pr_debug!(
                                 "INSTSTRAND tid={} own_todo={} process_todo={} head={}",
                                 thread.tid,
                                 th.todo.len(),
@@ -13747,7 +13802,7 @@ fn binder_thread_read(
                             if deathcb_open(thread.tid)
                                 && DEATHCB_N.load(core::sync::atomic::Ordering::Relaxed) < 160
                             {
-                                crate::pr_warn!(
+                                crate::pr_debug!(
                                     "DEATHCB-STEAL pid={} tid={} txn{} code={:#x} reply={} from pid{} tid{} to pid{} proc_todo_len={}",
                                     proc.pid,
                                     thread.tid,
@@ -13885,7 +13940,7 @@ fn binder_thread_read(
                                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                                     .unwrap_or("")
                                     .trim_end_matches('\0');
-                                crate::pr_warn!(
+                                crate::pr_debug!(
                                     "AMS46 READ txn{} by pid={} tid={} comm='{}' code={} reply={}",
                                     t.id,
                                     proc.pid,
@@ -13913,7 +13968,7 @@ fn binder_thread_read(
                                         thread.tid,
                                         core::sync::atomic::Ordering::Relaxed,
                                     );
-                                    crate::pr_warn!(
+                                    crate::pr_debug!(
                                         "AMS46 RIPPLE window open (foundation={} sender={} reader={})",
                                         AMS46_TPID.load(core::sync::atomic::Ordering::Relaxed),
                                         fp,
@@ -14039,6 +14094,7 @@ fn binder_thread_read(
                                     core::sync::atomic::AtomicU32::new(0);
                                 use core::sync::atomic::Ordering::Relaxed;
                                 if SECCTX_DELIVERED.fetch_add(1, Relaxed) < 5 {
+                                    // HOTPATH-PRINT: protocol-error path only (malformed/failing transaction), not the happy path
                                     crate::pr_info!(
                                         "binder: BR_TRANSACTION_SECCTX -> pid {} sid '{}' code {}",
                                         proc.pid, SECCTX_SID, td.code
@@ -14141,7 +14197,7 @@ fn binder_thread_read(
                                             } else {
                                                 0
                                             };
-                                            crate::pr_warn!(
+                                            crate::pr_debug!(
                                                 "QPICK txn{} code{:#x} q={}us q2={}us q3={}us elig={} to pid={} tid{} from pid{} pick_comm='{}' disp={} idle_m={:#x} nr={}",
                                                 t.id,
                                                 t.code,
@@ -14201,7 +14257,7 @@ fn binder_thread_read(
                                         core::sync::atomic::Ordering::Relaxed,
                                     ) < 40
                                     {
-                                        crate::pr_warn!(
+                                        crate::pr_debug!(
                                             "PICK-LATE txn{} code{:#x} server pid={} tid{} from pid{} enq_j={} pick_j={} late={} enq_elig={}",
                                             t.id,
                                             t.code,
@@ -14354,7 +14410,7 @@ fn binder_thread_read(
         use core::sync::atomic::Ordering::Relaxed;
         if SPAWN_PRINTED.fetch_add(1, Relaxed) < 40 {
             crate::trace::trace_poolcensus(1, proc.pid, thread.tid as u64, POOL_SPAWN_EVENTS.load(Relaxed));
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "POOL-SPAWN pid {} tid {} carried BR_SPAWN_LOOPER (events {})",
                 proc.pid,
                 thread.tid,
@@ -14391,7 +14447,7 @@ fn binder_thread_read(
                 static STR_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if STR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "ACCT-STRANDED pid={} tid={} read returned {} bytes, own todo head [{}]",
                         proc.pid,
                         thread.tid,
@@ -14427,7 +14483,7 @@ impl BinderAlloc {
 /// mid-transition and the dump skips it (the task dump still runs).
 pub fn binder_dfx_dump() {
     let Some(mut g) = WORLD.try_lock_irqsave() else {
-        crate::pr_info!("binder-dfx: world busy, skipped");
+        crate::pr_debug!("binder-dfx: world busy, skipped");
         return;
     };
     let Some(world) = g.as_ref() else {
@@ -14436,7 +14492,7 @@ pub fn binder_dfx_dump() {
     {
         for p in &world.procs {
             let pim = p.im(world);
-            crate::pr_info!(
+            crate::pr_debug!(
                 "binder-dfx: proc {} pid {} dead={} todo={} refs={} mgr={}",
                 p.id,
                 p.pid,
@@ -14447,7 +14503,7 @@ pub fn binder_dfx_dump() {
             );
             for t in &pim.threads {
                 let th = t.st(world);
-                crate::pr_info!(
+                crate::pr_debug!(
                     "binder-dfx:   tid {} looper={:#x} todo={} process_todo={} wfpw={} stack={} deathq={}",
                     t.tid,
                     th.looper,
@@ -14466,7 +14522,7 @@ pub fn binder_dfx_dump() {
                         Work::DeadBinder { desc, cookie } => alloc::format!("dead d{} c{:#x}", desc, cookie),
                         Work::ClearDeathDone { cookie } => alloc::format!("cleardone c{:#x}", cookie),
                     };
-                    crate::pr_info!("binder-dfx:     thtodo[{}] {}", i, desc);
+                    crate::pr_debug!("binder-dfx:     thtodo[{}] {}", i, desc);
                 }
             }
             for (i, wk) in pim.todo.iter().enumerate() {
@@ -14478,7 +14534,7 @@ pub fn binder_dfx_dump() {
                     Work::DeadBinder { desc, cookie } => alloc::format!("dead d{} c{:#x}", desc, cookie),
                     Work::ClearDeathDone { cookie } => alloc::format!("cleardone c{:#x}", cookie),
                 };
-                crate::pr_info!("binder-dfx:     ptodo[{}] {}", i, desc);
+                crate::pr_debug!("binder-dfx:     ptodo[{}] {}", i, desc);
             }
         }
     }
