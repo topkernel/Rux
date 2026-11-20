@@ -714,51 +714,51 @@ c9cb12cfb96a	kernel/src/arch/x86_64/trap.rs	trap_handler	1152		GAP
 d5593d9a9066	kernel/src/arch/x86_64/trap.rs	trap_handler	1177		GAP
 ac9e69d5ef4b	kernel/src/arch/x86_64/trap.rs	trap_handler	1188	asm	GAP
 87aa57a872b6	kernel/src/arch/x86_64/trap.rs	trap_handler	1196		GAP
-ea908c50bda4	kernel/src/arch/x86_64/trap.rs	trap_handler	1321	no-preempt	GAP
-1490c617c20b	kernel/src/arch/x86_64/trap.rs	trap_handler	1335		GAP
-757f961086de	kernel/src/arch/x86_64/trap.rs	trap_handler	1413		GAP
-10c98ba0a7df	kernel/src/arch/x86_64/trap.rs	handle_timer_tick	1767	ptr-ops,no-preempt	GAP
-115aea744edc	kernel/src/arch/x86_64/trap.rs	handle_timer_tick	1882	volatile	GAP
-29ae2dafe619	kernel/src/arch/x86_64/trap.rs	handle_timer_tick	1921		GAP
-da006d838c09	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2187		GAP
-64fad44e5cf8	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2203		GAP
-a4e005cc49f0	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2215	volatile,ptr-ops	GAP
-a1dd3ee7c51f	kernel/src/arch/x86_64/trap.rs	handle_device_not_available	2367		GAP
-7e211ee73350	kernel/src/arch/x86_64/trap.rs	handle_device_not_available	2378		GAP
-6b277ab78165	kernel/src/arch/x86_64/trap.rs	handle_debug	2398		GAP
-741188635e11	kernel/src/arch/x86_64/trap.rs	handle_debug	2402		GAP
-48a46508e20f	kernel/src/arch/x86_64/trap.rs	handle_debug	2423		GAP
-5bc482370e39	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2502		GAP
-5b3c757cf607	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2524		GAP
-16cd98474391	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2627		GAP
-941045e3c644	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2636		GAP
-2d21f814919b	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2649		GAP
-ca5f7fb7030d	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2665		GAP
-f7a1791ab223	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2671	volatile,ptr-ops	GAP
-75a10c23a5d6	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2713		GAP
-9ed10f9cdd71	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2714		GAP
-ebaa2b7799bd	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2718		GAP
-a978be8de588	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2719		GAP
-0d5610ba68e4	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2755		GAP
-b30c28e798ed	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	2878	asm	GAP
-77119078ea18	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	2886		GAP
-a4987252ea93	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3034		GAP
-ac48a8658b77	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3038		GAP
-5463ff028d91	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3039		GAP
-35068f9ef501	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3056		GAP
-661b8b03788a	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	3076		GAP
-cb4f311de7c7	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	3290		GAP
-4fe87e165881	kernel/src/arch/x86_64/trap.rs	fore_read_u64	3315		GAP
-d03a72dc2829	kernel/src/arch/x86_64/trap.rs	fore_read_u64	3322	volatile,ptr-ops	GAP
-8b172084ed96	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3523		GAP
-06e926bcb2f8	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3537		GAP
-b425df4c20b7	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3547		GAP
-fd2a4308e353	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3574		GAP
-7ad0e98d1994	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3846	asm	GAP
-af35e2673ef0	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3898		GAP
-d8bf7ed8326f	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3910	volatile,ptr-ops	GAP
-678bf1164369	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3929	volatile,ptr-ops	GAP
-5ef7e669893c	kernel/src/arch/x86_64/trap.rs	x86_double_fault_dump	4088	asm	GAP
+21c4e5bfefec	kernel/src/arch/x86_64/trap.rs	trap_handler	1323	no-preempt	GAP
+f94bd2d3c1df	kernel/src/arch/x86_64/trap.rs	trap_handler	1337		GAP
+6495c4524977	kernel/src/arch/x86_64/trap.rs	trap_handler	1419		GAP
+3b2a07b70d9f	kernel/src/arch/x86_64/trap.rs	handle_timer_tick	1778	ptr-ops,no-preempt	GAP
+a6b5b16f1219	kernel/src/arch/x86_64/trap.rs	handle_timer_tick	1893	volatile	GAP
+2d273c929fa6	kernel/src/arch/x86_64/trap.rs	handle_timer_tick	1932		GAP
+7d8660b601f4	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2198		GAP
+fa90e2570783	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2214		GAP
+c66b24dbe07d	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2226	volatile,ptr-ops	GAP
+1d8560a6588e	kernel/src/arch/x86_64/trap.rs	handle_device_not_available	2391		GAP
+b793dca18fe5	kernel/src/arch/x86_64/trap.rs	handle_device_not_available	2404		GAP
+d99160e4a172	kernel/src/arch/x86_64/trap.rs	handle_debug	2424		GAP
+5a96b087cfdb	kernel/src/arch/x86_64/trap.rs	handle_debug	2428		GAP
+03fbc146ff85	kernel/src/arch/x86_64/trap.rs	handle_debug	2449		GAP
+837d67e3a929	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2528		GAP
+62cc70d16c34	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2550		GAP
+ff98c4ccb32c	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2655		GAP
+bc3731ca6681	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2664		GAP
+33737095426b	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2677		GAP
+0e854063a867	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2693		GAP
+695b6fb5f899	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2699	volatile,ptr-ops	GAP
+3ce8e61b916c	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2742		GAP
+5d5f7dc6fca2	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2743		GAP
+99b76a3359be	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2747		GAP
+44e5149b8332	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2748		GAP
+5d32773a0fa2	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2784		GAP
+410028356a7c	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	2909	asm	GAP
+30529fcded0d	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	2917		GAP
+ea1b0cf34bfe	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3073		GAP
+3c0fc24955ed	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3077		GAP
+061a505db47c	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3078		GAP
+f41ea4c6908f	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3095		GAP
+423dd33af2d1	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	3117		GAP
+c16f9cd90cdf	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	3342		GAP
+c4987a1be9c3	kernel/src/arch/x86_64/trap.rs	fore_read_u64	3370		GAP
+1a5689f39e80	kernel/src/arch/x86_64/trap.rs	fore_read_u64	3377	volatile,ptr-ops	GAP
+2c28ad341c46	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3581		GAP
+cab243d3b4c7	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3595		GAP
+93de7503ffb4	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3605		GAP
+c29156199063	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3634		GAP
+6581d8e6f81c	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3934	asm	GAP
+ee13f8cbf4de	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3986		GAP
+df789afe59fa	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3998	volatile,ptr-ops	GAP
+c9b14208ea49	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4017	volatile,ptr-ops	GAP
+80662e84a46d	kernel/src/arch/x86_64/trap.rs	x86_double_fault_dump	4179	asm	GAP
 15cce70d047a	kernel/src/arch/x86_64/uaccess.rs	__x64_futex_cmpxchg_u32	197		GAP
 4b0e9054cf80	kernel/src/arch/x86_64/uaccess.rs	futex_cmpxchg_u32_user	203		GAP
 bb597b9a43f7	kernel/src/arch/x86_64/uaccess.rs	<module>	230	ptr-ops	GAP
