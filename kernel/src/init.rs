@@ -299,7 +299,7 @@ fn load_and_setup_elf(
     let phdr_count = ElfLoader::get_program_headers(program_data)?;
     // SAFETY: program_data was validated by ElfLoader::validate above, so
     // from_bytes re-checks and returns a header view over the same buffer.
-    let ehdr = unsafe { Elf64Ehdr::from_bytes(program_data) }
+    let ehdr = Elf64Ehdr::from_bytes(program_data)
         .ok_or(ElfError::InvalidHeader)?;
 
     // A dynamic init MUST have its interpreter — never fall back to
