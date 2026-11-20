@@ -1105,10 +1105,11 @@ e3c2be809b3d	kernel/src/fs/bio.rs	publication_capture_note_dirty	3255		GAP
 96601bf5945b	kernel/src/fs/bio.rs	with_block_mut	3804		GAP
 f564bda4511a	kernel/src/fs/bio.rs	with_block_mut	3807		GAP
 e6da66fe6c49	kernel/src/fs/bio.rs	with_block_mut	3809		GAP
-6e49cbc0ab94	kernel/src/fs/bio.rs	with_block_deferred_mut	3828		GAP
-e46d3370ed1b	kernel/src/fs/bio.rs	with_block_deferred_mut	3831		GAP
-f0ebe9f1ca2b	kernel/src/fs/bio.rs	with_block_deferred_mut	3833		GAP
-22d2a14868f7	kernel/src/fs/bio.rs	with_block_deferred_mut	3835		GAP
+fb2294358ee6	kernel/src/fs/bio.rs	with_block_deferred_mut	3829		GAP
+4c9c04e4e2f8	kernel/src/fs/bio.rs	with_block_deferred_mut	3832		GAP
+8b069a42a4c1	kernel/src/fs/bio.rs	with_block_deferred_mut	3834		GAP
+6430b4b16ada	kernel/src/fs/bio.rs	with_block_deferred_mut	3836		GAP
+e743dab28817	kernel/src/fs/bio.rs	with_block	3852		GAP
 0f22f2e6f8e9	kernel/src/fs/buffer.rs	new	37	ptr-ops	GAP
 cc6bd7b2bb6b	kernel/src/fs/buffer.rs	from_bytes	51		GAP
 5725a2ec783a	kernel/src/fs/buffer.rs	new	303	ptr-ops	GAP
@@ -1172,44 +1173,40 @@ fee14f85b5d9	kernel/src/fs/ext4/extent.rs	find_block_in_external_extent	1249		GA
 2668a85e407d	kernel/src/fs/ext4/extent.rs	node_header_mut	1413	ptr-ops	GAP
 bb6a17cf6439	kernel/src/fs/ext4/extent.rs	iblock_header	1425	ptr-ops	GAP
 f07efce954ad	kernel/src/fs/ext4/extent.rs	iblock_header_mut	1431	ptr-ops	GAP
-9f92b7f471ce	kernel/src/fs/ext4/extent.rs	iblock_extent_mut	1445	ptr-ops	GAP
-22afff8941dd	kernel/src/fs/ext4/extent.rs	node_extents	1461	raw-construct,ptr-ops	GAP
-a81b04a7cb6c	kernel/src/fs/ext4/extent.rs	node_extents_mut	1476	ptr-ops	GAP
-d76f2deff602	kernel/src/fs/ext4/extent.rs	node_indices	1491	raw-construct,ptr-ops	GAP
-59777d54c0fc	kernel/src/fs/ext4/extent.rs	node_indices_mut	1506	ptr-ops	GAP
-8958bcc58704	kernel/src/fs/ext4/extent.rs	alloc_meta_block	1530		GAP
-53f4a9ea4ffb	kernel/src/fs/ext4/extent.rs	read_node	1551		GAP
-feb044d0beaa	kernel/src/fs/ext4/extent.rs	write_node	1591	ptr-ops	GAP
-801463d9bc1e	kernel/src/fs/ext4/extent.rs	write_node	1604	ptr-ops	GAP
-9c2fd1e71f62	kernel/src/fs/ext4/extent.rs	append_node	1684		GAP
-a4bedebdc88e	kernel/src/fs/ext4/extent.rs	append_node	1695		GAP
-b2a14a8fbf78	kernel/src/fs/ext4/extent.rs	append_node	1700		GAP
-a7e9644905a3	kernel/src/fs/ext4/extent.rs	append_node	1710		GAP
-2406872ebb85	kernel/src/fs/ext4/extent.rs	append_node	1729		GAP
-10f7e6df98c8	kernel/src/fs/ext4/extent.rs	ext4_ext_append	1760	raw-construct,ptr-ops	GAP
-f5b788307baa	kernel/src/fs/ext4/extent.rs	ext4_ext_append	1787		GAP
-9810365e08c6	kernel/src/fs/ext4/extent.rs	ext4_ext_append	1828	ptr-ops	GAP
-48bd6416a274	kernel/src/fs/ext4/extent.rs	ext4_ext_gather	1850		GAP
-0a60f612dd94	kernel/src/fs/ext4/extent.rs	find_covering_leaf_blk	2063		GAP
-8ffcb3cfe650	kernel/src/fs/ext4/extent.rs	find_covering_leaf_blk	2080		GAP
-b4688ef49b82	kernel/src/fs/ext4/extent.rs	find_covering_leaf_blk	2090		GAP
-09b9761040af	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2234		GAP
-359d4ca491de	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2252	ptr-ops	GAP
-d6a030eccb39	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2276		GAP
-1ed1d098c28b	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2284		GAP
-56474ca237b5	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2306	ptr-ops	GAP
-7fdd3a8fc1cb	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2312		GAP
-15907aa3619b	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2362		GAP
-5ce62a5beb97	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2370		GAP
-70fe7b12c951	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2408	ptr-ops	GAP
-a25b218144ea	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2412		GAP
-594e76892121	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2417	ptr-ops	GAP
-9eb0403f0e1e	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2502		GAP
-451aac2a9c22	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2510		GAP
-0258c7f12e95	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2533	ptr-ops	GAP
-c01840725232	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2535		GAP
-6be5afc072d3	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2553	ptr-ops	GAP
-9128e0ec97a3	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2555		GAP
+d5285d1f8948	kernel/src/fs/ext4/extent.rs	node_extents	1457	raw-construct,ptr-ops	GAP
+b7fc0bbbb530	kernel/src/fs/ext4/extent.rs	node_extents_mut	1472	ptr-ops	GAP
+e92ce2443e8b	kernel/src/fs/ext4/extent.rs	node_indices	1487	raw-construct,ptr-ops	GAP
+f1963efafbec	kernel/src/fs/ext4/extent.rs	node_indices_mut	1502	ptr-ops	GAP
+747b73e3a130	kernel/src/fs/ext4/extent.rs	read_node	1541		GAP
+7e9ec4e14751	kernel/src/fs/ext4/extent.rs	append_node	1657		GAP
+c2f690a173ef	kernel/src/fs/ext4/extent.rs	append_node	1668		GAP
+eb57cf4db40b	kernel/src/fs/ext4/extent.rs	append_node	1673		GAP
+68ea0c7bc7a5	kernel/src/fs/ext4/extent.rs	append_node	1683		GAP
+3e18cca5128e	kernel/src/fs/ext4/extent.rs	append_node	1702		GAP
+8f6c8b76795a	kernel/src/fs/ext4/extent.rs	ext4_ext_append	1733	raw-construct,ptr-ops	GAP
+e2f1a83241a4	kernel/src/fs/ext4/extent.rs	ext4_ext_append	1760		GAP
+02a135e5b268	kernel/src/fs/ext4/extent.rs	ext4_ext_append	1801	ptr-ops	GAP
+dfffe40fd13a	kernel/src/fs/ext4/extent.rs	ext4_ext_gather	1823		GAP
+2818f7f5ffaa	kernel/src/fs/ext4/extent.rs	find_covering_leaf_blk	2036		GAP
+30127a8f9a97	kernel/src/fs/ext4/extent.rs	find_covering_leaf_blk	2053		GAP
+937747ddfd47	kernel/src/fs/ext4/extent.rs	find_covering_leaf_blk	2063		GAP
+bd93b3bbdd94	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2207		GAP
+6311f572aee0	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2225	ptr-ops	GAP
+2a99d9832c41	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2249		GAP
+f47582d1711a	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2257		GAP
+23c3e39ad423	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2279	ptr-ops	GAP
+fd00f8573795	kernel/src/fs/ext4/extent.rs	ext4_ext_convert_unwritten	2285		GAP
+c2f012867ee8	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2335		GAP
+9461dd371d77	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2343		GAP
+733af9f07e4d	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2381	ptr-ops	GAP
+2b846b05da76	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2385		GAP
+1ad611992d0c	kernel/src/fs/ext4/extent.rs	ext4_ext_materialize_block	2390	ptr-ops	GAP
+08af5c549a21	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2475		GAP
+e44977e38595	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2483		GAP
+47f8da068821	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2506	ptr-ops	GAP
+96996e05afcd	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2508		GAP
+5b2429a25d01	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2526	ptr-ops	GAP
+a09148f35503	kernel/src/fs/ext4/extent.rs	ext4_ext_insert_written	2528		GAP
 1189db627190	kernel/src/fs/ext4/file.rs	put	120	ptr-ops	GAP
 7f3708cd8651	kernel/src/fs/ext4/file.rs	first_ptr	163		GAP
 cc2517d974ad	kernel/src/fs/ext4/file.rs	ext4_dio_read_batched	398		GAP

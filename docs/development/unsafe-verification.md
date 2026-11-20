@@ -19,18 +19,18 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2730**
+- unsafe regions: **2727**
 - with artifact (non-GAP): **97** (3.6%)
-- GAP: **2633**
-- by kind: block=2401, unsafe-extern=7, unsafe-fn=166, unsafe-impl=156
-- by category (regions carry 0..n tags): ptr-ops=671, asm=278, volatile=163, addr-arith=59, raw-construct=58, no-preempt=18, ffi=13, static-mut=5, layout-meta=5, transmute=4
+- GAP: **2630**
+- by kind: block=2398, unsafe-extern=7, unsafe-fn=166, unsafe-impl=156
+- by category (regions carry 0..n tags): ptr-ops=668, asm=278, volatile=163, addr-arith=59, raw-construct=58, no-preempt=18, ffi=13, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
 | arch | 781 | 7 | 774 |
-| fs | 647 | 0 | 647 |
+| fs | 644 | 0 | 644 |
 | mm | 234 | 7 | 227 |
 | sync | 159 | 11 | 148 |
 | dfx | 129 | 6 | 123 |
@@ -1131,7 +1131,7 @@ census id is accounted for here.
 
 ## fs
 
-### kernel/src/fs/bio.rs (58)
+### kernel/src/fs/bio.rs (59)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -1189,10 +1189,11 @@ census id is accounted for here.
 | 3804 | with_block_mut | block | - | GAP | `96601bf5945b` |
 | 3807 | with_block_mut | block | - | GAP | `f564bda4511a` |
 | 3809 | with_block_mut | block | - | GAP | `e6da66fe6c49` |
-| 3828 | with_block_deferred_mut | block | - | GAP | `6e49cbc0ab94` |
-| 3831 | with_block_deferred_mut | block | - | GAP | `e46d3370ed1b` |
-| 3833 | with_block_deferred_mut | block | - | GAP | `f0ebe9f1ca2b` |
-| 3835 | with_block_deferred_mut | block | - | GAP | `22d2a14868f7` |
+| 3829 | with_block_deferred_mut | block | - | GAP | `fb2294358ee6` |
+| 3832 | with_block_deferred_mut | block | - | GAP | `4c9c04e4e2f8` |
+| 3834 | with_block_deferred_mut | block | - | GAP | `8b069a42a4c1` |
+| 3836 | with_block_deferred_mut | block | - | GAP | `6430b4b16ada` |
+| 3852 | with_block | block | - | GAP | `e743dab28817` |
 
 ### kernel/src/fs/buffer.rs (8)
 
@@ -1291,7 +1292,7 @@ census id is accounted for here.
 |------|----|------|------------|----------|----|
 | 153 | next | block | - | GAP | `f9a763be93ec` |
 
-### kernel/src/fs/ext4/extent.rs (49)
+### kernel/src/fs/ext4/extent.rs (45)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -1306,44 +1307,40 @@ census id is accounted for here.
 | 1413 | node_header_mut | block | ptr-ops | GAP | `2668a85e407d` |
 | 1425 | iblock_header | block | ptr-ops | GAP | `bb6a17cf6439` |
 | 1431 | iblock_header_mut | block | ptr-ops | GAP | `f07efce954ad` |
-| 1445 | iblock_extent_mut | block | ptr-ops | GAP | `9f92b7f471ce` |
-| 1461 | node_extents | block | raw-construct,ptr-ops | GAP | `22afff8941dd` |
-| 1476 | node_extents_mut | block | ptr-ops | GAP | `a81b04a7cb6c` |
-| 1491 | node_indices | block | raw-construct,ptr-ops | GAP | `d76f2deff602` |
-| 1506 | node_indices_mut | block | ptr-ops | GAP | `59777d54c0fc` |
-| 1530 | alloc_meta_block | block | - | GAP | `8958bcc58704` |
-| 1551 | read_node | block | - | GAP | `53f4a9ea4ffb` |
-| 1591 | write_node | block | ptr-ops | GAP | `feb044d0beaa` |
-| 1604 | write_node | block | ptr-ops | GAP | `801463d9bc1e` |
-| 1684 | append_node | block | - | GAP | `9c2fd1e71f62` |
-| 1695 | append_node | block | - | GAP | `a4bedebdc88e` |
-| 1700 | append_node | block | - | GAP | `b2a14a8fbf78` |
-| 1710 | append_node | block | - | GAP | `a7e9644905a3` |
-| 1729 | append_node | block | - | GAP | `2406872ebb85` |
-| 1760 | ext4_ext_append | block | raw-construct,ptr-ops | GAP | `10f7e6df98c8` |
-| 1787 | ext4_ext_append | block | - | GAP | `f5b788307baa` |
-| 1828 | ext4_ext_append | block | ptr-ops | GAP | `9810365e08c6` |
-| 1850 | ext4_ext_gather | block | - | GAP | `48bd6416a274` |
-| 2063 | find_covering_leaf_blk | block | - | GAP | `0a60f612dd94` |
-| 2080 | find_covering_leaf_blk | block | - | GAP | `8ffcb3cfe650` |
-| 2090 | find_covering_leaf_blk | block | - | GAP | `b4688ef49b82` |
-| 2234 | ext4_ext_convert_unwritten | block | - | GAP | `09b9761040af` |
-| 2252 | ext4_ext_convert_unwritten | block | ptr-ops | GAP | `359d4ca491de` |
-| 2276 | ext4_ext_convert_unwritten | block | - | GAP | `d6a030eccb39` |
-| 2284 | ext4_ext_convert_unwritten | block | - | GAP | `1ed1d098c28b` |
-| 2306 | ext4_ext_convert_unwritten | block | ptr-ops | GAP | `56474ca237b5` |
-| 2312 | ext4_ext_convert_unwritten | block | - | GAP | `7fdd3a8fc1cb` |
-| 2362 | ext4_ext_materialize_block | block | - | GAP | `15907aa3619b` |
-| 2370 | ext4_ext_materialize_block | block | - | GAP | `5ce62a5beb97` |
-| 2408 | ext4_ext_materialize_block | block | ptr-ops | GAP | `70fe7b12c951` |
-| 2412 | ext4_ext_materialize_block | block | - | GAP | `a25b218144ea` |
-| 2417 | ext4_ext_materialize_block | block | ptr-ops | GAP | `594e76892121` |
-| 2502 | ext4_ext_insert_written | block | - | GAP | `9eb0403f0e1e` |
-| 2510 | ext4_ext_insert_written | block | - | GAP | `451aac2a9c22` |
-| 2533 | ext4_ext_insert_written | block | ptr-ops | GAP | `0258c7f12e95` |
-| 2535 | ext4_ext_insert_written | block | - | GAP | `c01840725232` |
-| 2553 | ext4_ext_insert_written | block | ptr-ops | GAP | `6be5afc072d3` |
-| 2555 | ext4_ext_insert_written | block | - | GAP | `9128e0ec97a3` |
+| 1457 | node_extents | block | raw-construct,ptr-ops | GAP | `d5285d1f8948` |
+| 1472 | node_extents_mut | block | ptr-ops | GAP | `b7fc0bbbb530` |
+| 1487 | node_indices | block | raw-construct,ptr-ops | GAP | `e92ce2443e8b` |
+| 1502 | node_indices_mut | block | ptr-ops | GAP | `f1963efafbec` |
+| 1541 | read_node | block | - | GAP | `747b73e3a130` |
+| 1657 | append_node | block | - | GAP | `7e9ec4e14751` |
+| 1668 | append_node | block | - | GAP | `c2f690a173ef` |
+| 1673 | append_node | block | - | GAP | `eb57cf4db40b` |
+| 1683 | append_node | block | - | GAP | `68ea0c7bc7a5` |
+| 1702 | append_node | block | - | GAP | `3e18cca5128e` |
+| 1733 | ext4_ext_append | block | raw-construct,ptr-ops | GAP | `8f6c8b76795a` |
+| 1760 | ext4_ext_append | block | - | GAP | `e2f1a83241a4` |
+| 1801 | ext4_ext_append | block | ptr-ops | GAP | `02a135e5b268` |
+| 1823 | ext4_ext_gather | block | - | GAP | `dfffe40fd13a` |
+| 2036 | find_covering_leaf_blk | block | - | GAP | `2818f7f5ffaa` |
+| 2053 | find_covering_leaf_blk | block | - | GAP | `30127a8f9a97` |
+| 2063 | find_covering_leaf_blk | block | - | GAP | `937747ddfd47` |
+| 2207 | ext4_ext_convert_unwritten | block | - | GAP | `bd93b3bbdd94` |
+| 2225 | ext4_ext_convert_unwritten | block | ptr-ops | GAP | `6311f572aee0` |
+| 2249 | ext4_ext_convert_unwritten | block | - | GAP | `2a99d9832c41` |
+| 2257 | ext4_ext_convert_unwritten | block | - | GAP | `f47582d1711a` |
+| 2279 | ext4_ext_convert_unwritten | block | ptr-ops | GAP | `23c3e39ad423` |
+| 2285 | ext4_ext_convert_unwritten | block | - | GAP | `fd00f8573795` |
+| 2335 | ext4_ext_materialize_block | block | - | GAP | `c2f012867ee8` |
+| 2343 | ext4_ext_materialize_block | block | - | GAP | `9461dd371d77` |
+| 2381 | ext4_ext_materialize_block | block | ptr-ops | GAP | `733af9f07e4d` |
+| 2385 | ext4_ext_materialize_block | block | - | GAP | `2b846b05da76` |
+| 2390 | ext4_ext_materialize_block | block | ptr-ops | GAP | `1ad611992d0c` |
+| 2475 | ext4_ext_insert_written | block | - | GAP | `08af5c549a21` |
+| 2483 | ext4_ext_insert_written | block | - | GAP | `e44977e38595` |
+| 2506 | ext4_ext_insert_written | block | ptr-ops | GAP | `47f8da068821` |
+| 2508 | ext4_ext_insert_written | block | - | GAP | `96996e05afcd` |
+| 2526 | ext4_ext_insert_written | block | ptr-ops | GAP | `5b2429a25d01` |
+| 2528 | ext4_ext_insert_written | block | - | GAP | `a09148f35503` |
 
 ### kernel/src/fs/ext4/file.rs (60)
 
