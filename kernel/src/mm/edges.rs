@@ -367,3 +367,35 @@ pub fn vmemmap_zero_region(virt: usize, size: usize) {
 pub fn vmemmap_map_kernel_page(vaddr: usize, paddr: usize, flags: u64) {
     crate::arch::mm::map_kernel_page(vaddr as u64, paddr as u64, flags);
 }
+
+// ---------------------------------------------------------------------------
+// INV-MM-10: the address-space switch (riscv64/x86_64 switch_mm are
+// unsafe arch primitives; the edge carries the live-root contract).
+// ---------------------------------------------------------------------------
+
+/// Activate a page-table root on the current CPU (INV-MM-10: `root_ppn`
+/// is a live user/kernel root whose kernel half is mapped — the
+/// context-switch discipline mm::switch_address_space documents).
+#[inline]
+pub fn switch_address_space(root_ppn: u64, asid: u16) {
+    #[cfg(feature = "riscv64")]
+    {
+        // SAFETY: INV-MM-10 — live root; the satp install is the
+        // audited arch primitive.
+        unsafe { crate::arch::context::switch_mm(root_ppn, asid) }
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        crate::arch::mm::asid::switch_root(root_ppn, asid);
+    }
+    #[cfg(feature = "aarch64")]
+    {
+        crate::arch::mm::write_satp(crate::arch::mm::build_satp(asid, root_ppn as usize));
+    }
+}
+
+// SAFETY: MmStruct's shared state is atomics + Spinlocks; the raw pgd
+// root crosses threads only under the Arc-pin discipline (last-Arc
+// teardown drains readers before Drop).
+unsafe impl Send for super::mm_struct::MmStruct {}
+unsafe impl Sync for super::mm_struct::MmStruct {}

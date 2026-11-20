@@ -468,8 +468,9 @@ pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
 
 /// Per-node reclaim: iterate zones that are below watermark.
 fn shrink_node(sc: &mut ScanControl) {
-    // SAFETY: called from kswapd/balance_pgdat — exclusive reclaim context.
-    let node = match unsafe { first_online_node_mut() } {
+    // Called from kswapd/balance_pgdat — exclusive reclaim context
+    // (INV-MM-1 via the edge).
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return,
     };
