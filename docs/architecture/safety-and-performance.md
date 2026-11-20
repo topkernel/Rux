@@ -1032,6 +1032,25 @@ loser-frees rule sampled at the fault sites). *Reference:* Linux's
 walk-then-install dance. *Containment:* every install under the PTE
 lock; the descriptor stores precede publication.
 
+
+## Index addendum (retag-discovered)
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-BINDER-DIAG-COMM | `ipc/binder.rs` | INV-BINDER-DIAG-COMM (unsafe-slim r3): the ONE audited raw-task comm |
+| INV-BINDER-ENTRYFRAME | `ipc/binder.rs` | INV-BINDER-ENTRYFRAME (unsafe-slim r3): the ONE audited entry-frame read |
+| INV-BINDER-PINTASK | `ipc/binder.rs` | INV-BINDER-PINTASK (unsafe-slim r3c): RAII twin of procfs's PinnedTask |
+| INV-BINDER-PRIV | `ipc/binder.rs` | INV-BINDER-PRIV (unsafe-slim r3): only binder_open installs |
+| INV-BINDER-PROBE | `ipc/binder.rs` | target's live user page tables. INV-BINDER-PROBE: read-only, the one |
+| INV-BINDER-WORLDSEC | `ipc/binder.rs` | (INV-BINDER-WORLDSEC: the table only ever holds those keys). |
+| INV-BIO-BHREF | `fs/ext4/file.rs` | INV-BIO-BHREF: bread pins the BufferHead until brelse; the |
+| INV-EXT-VIEW | `fs/ext4/mod.rs` | INV-EXT-VIEW twin for the on-disk superblock: the single cast point, |
+| INV-EXT4-ATIME | `fs/ext4/file.rs` | INV-EXT4-ATIME: the cached Ext4Inode in inode.sb is |
+| INV-EXT4-FILERES | `fs/ext4/file.rs` | INV-EXT4-FILERES (unsafe-slim r3c): the ONE audited resolution of a |
+| INV-EXT4-GLOBALFS | `fs/ext4/mod.rs` | GLOBAL_EXT4_FS stores the mount's instance (INV-EXT4-GLOBALFS); |
+| INV-EXT4-IBLOCK-HDR | `fs/ext4/file.rs` | INV-EXT4-IBLOCK-HDR: typed header view of the 60-byte root. |
+| INV-PIPE-PRIV | `ipc/binder.rs` | fd owning the Arc (same contract as fs/pipe.rs's INV-PIPE-PRIV). |
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
