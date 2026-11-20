@@ -316,7 +316,7 @@ impl Uart {
                     core::hint::spin_loop();
                 }
                 // SAFETY: COM1 THR is the standard 8250 data port.
-                unsafe { write_reg(COM1_BASE, UART_THR, c) };
+                 write_reg(COM1_BASE, UART_THR, c) ;
             }
             if if0 {
                 crate::dfx::syscost::zone_uart_pop();
@@ -478,7 +478,7 @@ pub fn early_init() {
     // the character timeout interrupt, so higher trigger levels
     // can lose short inputs.
     let base = get_uart_base();
-    unsafe {
+    
         // RESCUE any byte already sitting in RBR before the FIFO switch.
         //
         // Enabling the FIFOs (FCR bit 0, 0->1) FORCE-CLEARS the receiver:
@@ -499,7 +499,7 @@ pub fn early_init() {
             UART_RX_BUF.put(read_reg(base, UART_RBR));
         }
         write_reg(base, UART_FCR, FCR_ENABLE_FIFO);
-    }
+    
 }
 
 #[cfg(feature = "x86_64")]
@@ -508,7 +508,7 @@ pub fn early_init() {
     // baud), 8N1, enable+clear FIFOs, and raise DTR/RTS/OUT2 so the
     // serial link is live. Polling TX/RX only — no IRQ wiring here.
     // SAFETY: COM1 ports 0x3f8..0x3ff are the canonical 8250 range.
-    unsafe {
+    
         write_reg(COM1_BASE, UART_IER, 0x00); // mask interrupts for now
         write_reg(COM1_BASE, UART_LCR, 0x80); // DLAB on
         write_reg(COM1_BASE, 0x00, 0x01); // divisor low = 1 (115200)
@@ -516,7 +516,7 @@ pub fn early_init() {
         write_reg(COM1_BASE, UART_LCR, 0x03); // 8N1, DLAB off
         write_reg(COM1_BASE, UART_FCR, FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX);
         write_reg(COM1_BASE, UART_MCR, 0x0b); // DTR | RTS | OUT2
-    }
+    
 }
 
 #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
@@ -535,7 +535,7 @@ pub fn init_irq() {
     let base = get_uart_base();
     // SAFETY: base is a valid UART MMIO base address; the register accesses
     // below are safe in this single-hart, IRQs-off boot context.
-    unsafe {
+    
         // Drain bytes that accumulated in the 16-byte RX FIFO between
         // early_init() and now (the RX IRQ was not armed yet, so nothing
         // else moved them) into the ring. Without this, input sent during
@@ -553,7 +553,7 @@ pub fn init_irq() {
 
         // Read LSR to clear any pending error flags (OE, PE, FE, BI).
         let _lsr = read_reg(base, UART_LSR);
-    }
+    
 
     // Complete any stale PLIC claims for UART IRQ on all harts.
     for hart in 0..crate::config::MAX_CPUS {
@@ -586,7 +586,7 @@ pub fn init_irq() {
         while read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0 {
             // SAFETY: COM1 RBR read consumes the byte; the handler owns
             // hardware RX (see UART_IRQ_ARMED).
-            let c = unsafe { read_reg(COM1_BASE, UART_RBR) };
+            let c =  read_reg(COM1_BASE, UART_RBR) ;
             UART_RX_BUF.put(c);
             tty_isig_record(c);
             // DUMP!/Ctrl-Alt-Del magic matchers (riscv64 twin parity —
@@ -603,7 +603,7 @@ pub fn init_irq() {
 
     if crate::arch::trap::request_irq_line_named(4, "serial", uart4_irq_line) {
         // SAFETY: COM1 IER is the standard 8250 interrupt-enable port.
-        unsafe { write_reg(COM1_BASE, UART_IER, IER_RX_ENABLE) };
+         write_reg(COM1_BASE, UART_IER, IER_RX_ENABLE) ;
         UART_IRQ_ARMED.store(true, Ordering::Release);
     }
 }
@@ -616,30 +616,21 @@ pub fn init_irq() {}
 // ============================================================================
 
 #[cfg(feature = "riscv64")]
-unsafe fn write_reg(base: usize, offset: usize, val: u8) {
-    asm!(
-        "sb t1, 0(a0)",
-        in("a0") base + offset,
-        in("t1") val,
-        options(nostack, nomem)
-    );
+fn write_reg(base: usize, offset: usize, val: u8) {
+    // INV-MMIO-1: the ns16550a register file at the mapped UART base.
+    crate::safety::mmio::MmioRegion::new(base + offset, 1).write_u8(0, val);
 }
 
 #[cfg(feature = "riscv64")]
-unsafe fn read_reg(base: usize, offset: usize) -> u8 {
-    let val: u8;
-    asm!(
-        "lb t0, 0(a0)",
-        in("a0") base + offset,
-        out("t0") val,
-        options(nostack)
-    );
-    val
+fn read_reg(base: usize, offset: usize) -> u8 {
+    crate::safety::mmio::MmioRegion::new(base + offset, 1).read_u8(0)
 }
 
 #[cfg(feature = "x86_64")]
-unsafe fn write_reg(base: u16, offset: usize, val: u8) {
-    crate::arch::cpu::outb(base + offset as u16, val);
+fn write_reg(base: u16, offset: usize, val: u8) {
+    // SAFETY: `base + offset` is a valid 8250 register port (port-IO is
+    // the one instruction that can reach it).
+    unsafe { crate::arch::cpu::outb(base + offset as u16, val) }
 }
 
 #[cfg(feature = "x86_64")]
@@ -730,7 +721,7 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
 
                 // SAFETY: base is a valid UART MMIO base address; reading IIR/LSR/RBR registers
                 // is safe in IRQ handler context.
-                unsafe {
+                
                     // Check IIR to confirm interrupt source
                     let iir = read_reg(base, UART_IIR);
                     // Bit 0 = 0 means interrupt pending
@@ -759,7 +750,7 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
                         // path — see uart_rx_debug_magic).
                         uart_rx_debug_magic(c);
                     }
-                }
+                
 
         if chars_received > 0 {
             UART_READ_WAITQ.wake_up_one();
@@ -1000,13 +991,13 @@ pub fn getchar() -> Option<u8> {
             let uart_base = get_uart_base();
             // SAFETY: uart_base is a valid UART MMIO base address; polling
             // LSR/RBR is safe while no interrupt handler competes for RBR.
-            unsafe {
+            
                 let lsr = read_reg(uart_base, UART_LSR);
                 if lsr & LSR_DR != 0 {
                     let c = read_reg(uart_base, UART_RBR);
                     return process_input(c);
                 }
-            }
+            
         }
     }
 
@@ -1026,7 +1017,7 @@ pub fn getchar() -> Option<u8> {
             if read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0 {
                 // SAFETY: COM1 RBR read consumes the byte; no IRQ handler
                 // competes for RBR while the flag is clear.
-                let c = unsafe { read_reg(COM1_BASE, UART_RBR) };
+                let c =  read_reg(COM1_BASE, UART_RBR) ;
                 return process_input(c);
             }
         }
@@ -1077,10 +1068,10 @@ pub fn uart_has_data() -> bool {
     }
     let uart_base = get_uart_base();
     // SAFETY: uart_base is a valid UART MMIO base address; reading LSR is safe.
-    unsafe {
+    
         let lsr = read_reg(uart_base, UART_LSR);
         lsr & LSR_DR != 0
-    }
+    
 }
 
 #[cfg(feature = "x86_64")]
