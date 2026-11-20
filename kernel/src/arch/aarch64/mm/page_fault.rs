@@ -342,12 +342,11 @@ fn protnone_represent(
     // Write the L3 leaf: rebuild preserves the PPN (OUTPUT_ADDR field).
     // SAFETY: root_ppn is this mm's live root; marker re-checked under
     // the section.
-    if let Some(l3) = (unsafe { super::mmu_init::user_l3_table_for(root_ppn, fault_addr.bits()) }) {
+    if let Some(l3) = super::mmu_init::user_l3_table_for(root_ppn, fault_addr.bits()) {
         let idx = ((fault_addr.bits() >> PAGE_SHIFT) & 0x1FF) as usize;
-        // SAFETY: l3 from the walker; idx masked to 9 bits.
-        unsafe { (*l3).set(idx, PageTableEntry::rebuild_user_leaf(now, sw)) };
-        // SAFETY: this translation changed; drop any cached walk.
-        unsafe { super::asid::flush_tlb_page(fault_addr.bits() as usize, 0) };
+        l3.set(idx, PageTableEntry::rebuild_user_leaf(now, sw));
+        // This translation changed; drop any cached walk.
+        super::asid::flush_tlb_page(fault_addr.bits() as usize, 0);
         return MmFaultResult::Handled;
     }
     MmFaultResult::PermissionDenied

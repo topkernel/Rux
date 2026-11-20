@@ -352,103 +352,28 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
             // the whole boot). The freed-context dangers are exactly
             // top==0 and is_dead; a merely-exiting task has neither.
             if !is_static && (top == 0 || (*next).state().is_dead()) {
-                use crate::console::putchar_no_lock as putchar;
-                const M: &[u8] = b"\nSWITCHIN-DEAD-TASK task=0x";
-                for &b in M {
-                    putchar(b);
-                }
-                let mut v = next as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M2: &[u8] = b" pid=";
-                for &b in M2 {
-                    putchar(b);
-                }
+                putfrag_no_lock(b"\nSWITCHIN-DEAD-TASK task=0x");
+                puthex_no_lock(next as u64);
+                putfrag_no_lock(b" pid=");
                 // SAFETY: header read of the task we refuse to resume.
-                let mut v = unsafe { (*next).pid() } as u64;
-                for _ in 0..8 {
-                    // One NIBBLE per iteration: (v >> 28) spans bits 28-35
-                    // of the u64, so the u8 cast grabs EIGHT bits — any pid
-                    // byte >= 0xA9 then overflow-panicked the 'a'+n-10 arm
-                    // from inside the context-switch path (r41v4/v5/v6:
-                    // "attempt to add with overflow" at this line, guest
-                    // dead). Mask to 4 bits like the >>60 pointer loops.
-                    let n = ((v >> 28) as u8) & 0xF;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M3: &[u8] = b" top=0x";
-                for &b in M3 {
-                    putchar(b);
-                }
-                let mut v = top as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M4: &[u8] = b" sp=0x";
-                for &b in M4 {
-                    putchar(b);
-                }
-                let mut v = sp as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M5: &[u8] = b" dead-resume aborted\n";
-                for &b in M5 {
-                    putchar(b);
-                }
+                puthex32_no_lock(unsafe { (*next).pid() } as u64);
+                putfrag_no_lock(b" top=0x");
+                puthex_no_lock(top as u64);
+                putfrag_no_lock(b" sp=0x");
+                puthex_no_lock(sp as u64);
+                putfrag_no_lock(b" dead-resume aborted\n");
                 return 1;
             }
             if !is_static && top != 0 && !(sp > bottom && sp <= top) {
-                use crate::console::putchar_no_lock as putchar;
-                const M: &[u8] = b"\nSWITCHIN-FOREIGN-SP task=0x";
-                for &b in M {
-                    putchar(b);
-                }
-                let mut v = next as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M2: &[u8] = b" sp=0x";
-                for &b in M2 {
-                    putchar(b);
-                }
-                let mut v = sp as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M3: &[u8] = b" kstack=[0x";
-                for &b in M3 {
-                    putchar(b);
-                }
-                let mut v = bottom as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                putchar(b',');
-                let mut v = top as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M4: &[u8] = b") report-only\n";
-                for &b in M4 {
-                    putchar(b);
-                }
+                putfrag_no_lock(b"\nSWITCHIN-FOREIGN-SP task=0x");
+                puthex_no_lock(next as u64);
+                putfrag_no_lock(b" sp=0x");
+                puthex_no_lock(sp as u64);
+                putfrag_no_lock(b" kstack=[0x");
+                puthex_no_lock(bottom as u64);
+                putfrag_no_lock(b",");
+                puthex_no_lock(top as u64);
+                putfrag_no_lock(b") report-only\n");
                 // Report-only (SCRIBBLE2 lesson): the AP idles legitimately
                 // run on the static AP boot stacks (their kstack fields are
                 // never used), so a "foreign" sp here is not automatically
@@ -522,33 +447,12 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
     // stack was freed, every later user entry on this CPU lands on
     // recycled memory (the stale-rsp0 engine). Name it.
     if !task.is_null() && top == 0 {
-        use crate::console::putchar_no_lock as putchar;
-        const MSG: &[u8] = b"\nR64-NOTOP-SKIP task=0x";
-        // SAFETY: raw console write; no locks, no allocation.
-        unsafe {
-            for &b in MSG {
-                putchar(b);
-            }
-            let mut v = task as u64;
-            for _ in 0..16 {
-                let n = (v >> 60) as u8;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                v <<= 4;
-            }
-            const M2: &[u8] = b" pid=";
-            for &b in M2 {
-                putchar(b);
-            }
-            let mut v = (*task).pid() as u64;
-            for _ in 0..8 {
-                // Nibble mask — same overflow class as the dead-resume
-                // guard's pid loop (see the comment there).
-                let n = ((v >> 28) as u8) & 0xF;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                v <<= 4;
-            }
-            putchar(b'\n');
-        }
+        putfrag_no_lock(b"\nR64-NOTOP-SKIP task=0x");
+        puthex_no_lock(task as u64);
+        putfrag_no_lock(b" pid=");
+        // SAFETY: header read of the task whose rsp0 install is skipped.
+        puthex32_no_lock(unsafe { (*task).pid() } as u64);
+        putfrag_no_lock(b"\n");
         return; // keep the previous rsp0
     }
     if top != 0 && (top < HEAP_LO || top >= HEAP_HI || top & 0xF != 0) {
@@ -643,6 +547,13 @@ pub extern "C" fn get_prev_task() -> *mut Task {
 /// After `__switch_to` all locals are invalid; the incoming task is
 /// resolved through `sched::current()` (the per-CPU slot).
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // Thin contract wrapper (IRQs-off + locals-invalid-after-switch stay
+    // the caller-visible protocol); the body below is safe Rust over the
+    // audited switch edges.
+    context_switch_body(prev, next)
+}
+
+fn context_switch_body(prev: &mut Task, next: &mut Task) {
     // cctx probe (closegap lane): phase stamps in the OUTGOING frame.
     // The post-asm stamp is parked in a per-CPU slot (the switch is
     // CPU-local with IRQs off) because prev's frame freezes
@@ -660,7 +571,8 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         let st = next.pick_state();
         if st != crate::process::task::PICK_PICKED {
             crate::sched::sched::pick_trace(next as *mut Task, 8);
-            x86_switch_abort(prev, next, 0);
+            // SAFETY: the early-abort repair edge (nothing switched yet).
+            unsafe { x86_switch_abort(prev, next, 0) };
             return;
         }
     }
@@ -676,7 +588,9 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // user code.
     let fpu_dirty = !super::cpu::ts_set();
     if fpu_dirty {
-        prev.thread_mut().fpu_save_for_switch();
+        // SAFETY: prev is the running task on this CPU (its live FPU
+        // state is what fpu_save_for_switch reads).
+        unsafe { prev.thread_mut().fpu_save_for_switch() };
     }
     let cc_c1 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUSAVE_NS, cc_c0);
@@ -731,12 +645,16 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
                 }
             };
             crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
-            if asid != 0 || !super::mm::asid::pcid_enabled() {
-                write_cr3(super::mm::asid::build_satp(asid, next_ppn));
-            } else {
-                // User root without a PCID under PCID mode: untagged
-                // load (flush) — see comment above.
-                write_cr3(next_ppn << 12);
+            // SAFETY: next_ppn is the live mm root just resolved above
+            // (or the static kernel root below).
+            unsafe {
+                if asid != 0 || !super::mm::asid::pcid_enabled() {
+                    write_cr3(super::mm::asid::build_satp(asid, next_ppn));
+                } else {
+                    // User root without a PCID under PCID mode: untagged
+                    // load (flush) — see comment above.
+                    write_cr3(next_ppn << 12);
+                }
             }
         }
     } else {
@@ -757,7 +675,8 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
                     }
                 }
             }
-            write_cr3(super::mm::asid::build_satp(0, kernel_ppn));
+            // SAFETY: static kernel root.
+            unsafe { write_cr3(super::mm::asid::build_satp(0, kernel_ppn)) };
         }
     }
     let cc_c2 = crate::dfx::cctx::now();
@@ -787,25 +706,26 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let fs_next = next.thread().fs_base;
     let gs_next = next.thread().gs_base;
     if super::cpu::fsgsbase_enabled() {
-        // SAFETY: CR4.FSGSBASE armed (gates this branch); bases are
-        // canonical per-task values.
-        unsafe {
-            if fs_next != fs_prev {
-                super::cpu::wrfsbase(fs_next);
-            }
-            if gs_next != gs_prev {
-                // Write the SHADOW (KERNEL_GS_BASE), not the live
-                // percpu GS.base: swapgs exchanges them, WRGSBASE
-                // writes the (now live) shadow slot, swapgs restores
-                // the kernel's percpu view. Three native instructions.
+        if fs_next != fs_prev {
+            // SAFETY: CR4.FSGSBASE armed (gates this branch); fs_next is
+            // the incoming task's cached canonical base.
+            unsafe { super::cpu::wrfsbase(fs_next) };
+        }
+        if gs_next != gs_prev {
+            // Write the SHADOW (KERNEL_GS_BASE), not the live percpu
+            // GS.base: swapgs exchanges them, WRGSBASE writes the (now
+            // live) shadow slot, swapgs restores the kernel's percpu
+            // view. Three native instructions.
+            // SAFETY: FSGSBASE armed; gs_next is a cached canonical base.
+            unsafe {
                 core::arch::asm!(
                     "swapgs",
                     "wrgsbase {}",
                     "swapgs",
                     in(reg) gs_next,
                     options(nostack, preserves_flags)
-                );
-            }
+                )
+            };
         }
     } else {
         if fs_next != fs_prev {
@@ -825,7 +745,9 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // WARNING: after this call all locals are INVALID (callee-saved
     // registers and rsp belong to the incoming task).
     crate::dfx::cctx::SW_STAMP[cpu_of()].store(cc_c3, core::sync::atomic::Ordering::Relaxed);
-    __switch_to(prev, next);
+    // SAFETY: the scheduler's switch protocol (IRQs off; both tasks valid
+    // pick targets) — the one register/stack switch edge.
+    unsafe { __switch_to(prev, next) };
 
     // cctx: the incoming task closes the asm bracket parked by the
     // outgoing task on this CPU (IRQs stayed off across the switch).
@@ -845,8 +767,7 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // ping-pong workloads (the scheduler-family benches) never pay the
     // xrstor at all.
     let cc_c4 = crate::dfx::cctx::now();
-    // SAFETY: single CR0 bit set (see stts); no register clobber.
-    unsafe { super::cpu::stts() };
+    super::cpu::stts();
     crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUREST_NS, cc_c4);
 }
 
@@ -855,6 +776,51 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 #[inline]
 fn cpu_of() -> usize {
     crate::arch::cpu_id() as usize
+}
+
+// ============================================================================
+// Raw-uart bounded reporters (the publish/abort guards' printers)
+//
+// The switch-path guards print through putchar_no_lock (no locks, no
+// allocation — the switch may run with IRQs off on a foreign stack).
+// Every one of them used to carry its own nibble loop; this is the one
+// shared pair (context-publish discipline, unsafe-slim round 5 lane L3).
+// ============================================================================
+
+/// One line fragment: bytes straight to the raw UART.
+#[inline]
+fn putfrag_no_lock(msg: &[u8]) {
+    use crate::console::putchar_no_lock as putchar;
+    for &b in msg {
+        putchar(b);
+    }
+}
+
+/// `v` as hex (no 0x, fixed 16 nibbles) straight to the raw UART.
+#[inline]
+fn puthex_no_lock(v: u64) {
+    use crate::console::putchar_no_lock as putchar;
+    let mut sh: i32 = 64;
+    while sh > 0 {
+        sh -= 4;
+        let nb = ((v >> sh) & 0xF) as u8;
+        putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+    }
+}
+
+/// `v` as hex, fixed 8 nibbles.
+#[inline]
+fn puthex32_no_lock(v: u64) {
+    use crate::console::putchar_no_lock as putchar;
+    let mut v = v;
+    for _ in 0..8 {
+        // One NIBBLE per iteration — mask to 4 bits (the r41v4 overflow
+        // class: any byte >= 0xA9 overflow-panicked the 'a'+n-10 arm from
+        // inside the context-switch path).
+        let n = ((v >> 28) as u8) & 0xF;
+        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        v <<= 4;
+    }
 }
 
 /// R56-heal: switch-in abort repair (x86_64 twin of riscv_switch_abort).

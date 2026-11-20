@@ -13,6 +13,7 @@
 use core::arch::asm;
 
 use super::memory_layout::*;
+use super::unsafe_edges::PtTable;
 use super::mmu_init::{map_page, get_page_table_virt, ROOT_PAGE_TABLE};
 use super::mm_ops::{alloc_user_phys_page, is_cow_page, check_pte_permissions, PageTableWalker};
 use super::pagetable::*;
@@ -197,7 +198,7 @@ fn try_expand_stack(
     // pte_counts_as_mapped) — a restored kernel PTE must not be mistaken
     // for the winner's mapping here, or this path "Handles" forever
     // against it while the user instruction keeps refaulting.
-    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+    if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
         .map_or(false, |(_ppn, bits)| {
             pte_counts_as_mapped(bits, fault_addr.bits() as u64)
         })
@@ -387,13 +388,13 @@ pub fn handle_mm_fault(
     // which sees no R/W/X and kills the task without consulting the
     // covering VMA. Markers now fall through to the VMA layer, which
     // re-presents the leaf when the VMA grants the access.
-    let already_mapped = unsafe {
+    let already_mapped = 
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).map_or(false, |(_ppn, bits)| {
             !(pte_counts_as_mapped(bits, fault_addr.bits() as u64)
               && (bits & (PageTableEntry::R | PageTableEntry::W | PageTableEntry::X)) == 0
               && (bits & PageTableEntry::V) != 0)
         })
-    };
+    ;
 
     // If not mapped, check for a swap entry in the PTE (V=0 but non-zero bits)
     if !already_mapped {
@@ -441,7 +442,7 @@ pub fn handle_mm_fault(
     if already_mapped {
         // Check COW
         // SAFETY: root_ppn is a valid page table root. is_cow_page only reads the PTE.
-        if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
+        if is_write &&  is_cow_page(root_ppn, fault_addr)  {
             crate::pr_debug!("pagefault: cow at {:#x}", fault_addr.bits());
             return MmFaultResult::CowPending;
         }
@@ -449,7 +450,7 @@ pub fn handle_mm_fault(
         // Check if page permissions meet access requirements
         // SAFETY: root_ppn is a valid page table root. check_pte_permissions only reads PTEs.
         if let Some((has_read, has_write, has_exec, pte_is_user)) =
-            unsafe { check_pte_permissions(root_ppn, fault_addr) } {
+             check_pte_permissions(root_ppn, fault_addr)  {
             // Verify permissions
             let perm_ok = (!is_write || has_write)
                 && (!is_read || has_read)
@@ -911,7 +912,7 @@ pub fn handle_mm_fault(
     // pte_counts_as_mapped) — a restored kernel PTE must not be mistaken
     // for the winner's mapping here, or this path "Handles" forever
     // against it while the user instruction keeps refaulting.
-    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+    if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
         .map_or(false, |(_ppn, bits)| {
             pte_counts_as_mapped(bits, fault_addr.bits() as u64)
         })
@@ -1192,7 +1193,7 @@ fn anon_faultaround_forward(
     let mut va = from_page;
     while va < window_end {
         // Stop at the first already-mapped page (see the doc comment).
-        if unsafe { PageTableWalker::walk(root_ppn, va as u64) }
+        if  PageTableWalker::walk(root_ppn, va as u64) 
             .map_or(false, |(_p, bits)| pte_counts_as_mapped(bits, va as u64))
         {
             return;
@@ -1207,7 +1208,7 @@ fn anon_faultaround_forward(
         let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock_irqsave();
         // R7-C3 twin: re-check under the lock — a CLONE_VM sibling may
         // have installed the page between the lock-free walk and here.
-        if unsafe { PageTableWalker::walk(root_ppn, va as u64) }
+        if  PageTableWalker::walk(root_ppn, va as u64) 
             .map_or(false, |(_p, bits)| pte_counts_as_mapped(bits, va as u64))
         {
             drop(_pte_guard);
@@ -1350,24 +1351,23 @@ pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
     let vpn1 = (vaddr.bits() >> 21) & 0x1FF;
     let vpn0 = (vaddr.bits() >> 12) & 0x1FF;
 
-    // SAFETY: root_ppn is a valid root page table PPN. get_page_table_virt returns
-    // valid kernel-virtual pointers. Only reads PTEs, including the leaf even if V=0.
-    unsafe {
-        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-        let pte2 = (*root_table).get(vpn2 as usize);
+    // Typed walk; only reads PTEs, including the leaf even if V=0.
+    {
+        let root_table = PtTable::from_phys(root_ppn << PAGE_SHIFT)?;
+        let pte2 = root_table.get(vpn2 as usize);
         if !pte2.is_valid() { return None; }
         // Superpage leaves (PERF: 2MB MMIO L1 leaves / 1GB L2 framebuffer):
         // return the leaf itself — never a swap/migration entry, and its
         // PPN must not be followed as a table pointer.
         if pte2.is_leaf() { return Some(pte2.bits()); }
 
-        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-        let pte1 = (*table1).get(vpn1 as usize);
+        let table1 = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT)?;
+        let pte1 = table1.get(vpn1 as usize);
         if !pte1.is_valid() { return None; }
         if pte1.is_leaf() { return Some(pte1.bits()); }
 
-        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
-        let pte0 = (*table0).get(vpn0 as usize);
+        let table0 = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT)?;
+        let pte0 = table0.get(vpn0 as usize);
 
         let raw = pte0.bits();
         if raw == 0 { return None; }
@@ -1489,7 +1489,7 @@ fn handle_swap_fault(
     // safe; the swap slot is freed by the winner.
     // E8-MM: device-window-hole rule applies here too (see
     // pte_counts_as_mapped).
-    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+    if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
         .map_or(false, |(_ppn, bits)| {
             pte_counts_as_mapped(bits, fault_addr.bits() as u64)
         })

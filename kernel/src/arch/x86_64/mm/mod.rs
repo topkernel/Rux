@@ -14,6 +14,9 @@ pub use pagetable::*;
 pub mod mmu_init;
 pub use mmu_init::*;
 
+pub mod unsafe_edges;
+pub use unsafe_edges::*;
+
 pub mod mm_ops;
 pub use mm_ops::*;
 

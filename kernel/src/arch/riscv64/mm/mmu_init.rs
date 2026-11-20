@@ -15,6 +15,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use super::memory_layout::*;
+use super::unsafe_edges::PtTable;
 use super::pagetable::*;
 use crate::mm::{MmStruct, alloc_pages, free_pages, GfpFlags};
 use crate::mm::page_desc::MAX_PAGES;
@@ -44,9 +45,10 @@ pub static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
 /// Get the physical page number of the root page table.
 /// ROOT_PAGE_TABLE is at KERNEL_LINK_ADDR (virtual), so we must convert to physical.
 #[inline]
-pub unsafe fn root_page_table_ppn() -> u64 {
+pub fn root_page_table_ppn() -> u64 {
     let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
-    let root_phys = root_virt.wrapping_sub(KERNEL_MAP.va_kernel_pa_offset as u64);
+    // SAFETY: boot section, single CPU.
+    let root_phys = root_virt.wrapping_sub(unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64);
     root_phys / PAGE_SIZE
 }
 
@@ -138,26 +140,28 @@ fn is_frame_allocator_ready() -> bool {
 /// - Early: static arrays (identity mapped)
 /// - Fixmap: memblock allocation (linear mapped)
 /// - Late: buddy allocator (linear mapped)
-pub unsafe fn alloc_page_table() -> Option<u64> {
+pub fn alloc_page_table() -> Option<u64> {
     let stage = get_alloc_stage();
     match stage {
         AllocStage::Early => {
             // Early boot: use static arrays in BSS (at KERNEL_LINK_ADDR)
             // Convert virtual address to physical: phys = virt - va_kernel_pa_offset
-            let offset = KERNEL_MAP.va_kernel_pa_offset as u64;
+            // SAFETY: single-CPU boot section; each pool slot is claimed
+            // exclusively by its fetch_add (INV-RE-ZP).
+            let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
             let pmd_idx = EARLY_PMD_NEXT.fetch_add(1, Ordering::AcqRel);
             if pmd_idx < NUM_EARLY_PMD {
-                let table_virt = &EARLY_PMD[pmd_idx] as *const PageTable as u64;
+                let table_virt = unsafe { &raw const EARLY_PMD[pmd_idx] as u64 };
                 let table_phys = table_virt.wrapping_sub(offset);
-                core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize);
+                unsafe { core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize) };
                 return Some(table_phys);
             }
 
             let pte_idx = EARLY_PTE_NEXT.fetch_add(1, Ordering::AcqRel);
             if pte_idx < NUM_EARLY_PTE {
-                let table_virt = &EARLY_PTE[pte_idx] as *const PageTable as u64;
+                let table_virt = unsafe { &raw const EARLY_PTE[pte_idx] as u64 };
                 let table_phys = table_virt.wrapping_sub(offset);
-                core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize);
+                unsafe { core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize) };
                 return Some(table_phys);
             }
 
@@ -173,14 +177,17 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
 
             // Use linear mapping (must be available at this point)
             let virt_addr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-            core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize);
+            // SAFETY: fresh exclusive memblock frame.
+            unsafe { core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize) };
             Some(phys_addr as u64)
         }
         AllocStage::Late => {
             // Late stage: use zone allocator
             use crate::mm::zone::ZoneType;
 
-            let phys_addr = if let Some(node) = crate::mm::pglist::first_online_node_mut() {
+            // SAFETY: node-table mutation is the zone allocator's own
+            // discipline (bring-up / zone-locked paths).
+            let phys_addr = if let Some(node) = unsafe { crate::mm::pglist::first_online_node_mut() } {
                 if let Some(zone) = node.zone_mut(ZoneType::ZoneNormal) {
                     if zone.is_initialized() {
                         let mut pfn_opt = zone.alloc_pages(0);
@@ -226,13 +233,10 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
                         }
                         match pfn_opt {
                             Some(pfn) => {
-                                let page = crate::mm::page_desc::pfn_to_page_mut(pfn);
-                                if !page.is_null() {
-                                    unsafe {
-                                        (*page).set_refcount(1);
-                                        (*page).set_order(0);
-                                        (*page).set_flag(crate::mm::page_desc::PageFlag::Referenced);
-                                    }
+                                if let Some(page) = crate::mm::page_desc::page_desc(pfn) {
+                                    page.set_refcount(1);
+                                    page.set_order(0);
+                                    page.set_flag(crate::mm::page_desc::PageFlag::Referenced);
                                 }
                                 crate::mm::zone::pfn_to_phys(pfn) as u64
                             }
@@ -259,11 +263,14 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             if crate::dfx::memwatch::armed() {
                 let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
                     [0; crate::dfx::memwatch::SITE_FRAMES];
-                let mw_s0: u64;
-                unsafe {
-                    core::arch::asm!("mv {s}, s0", s = out(reg) mw_s0, options(nomem, nostack));
-                    crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
-                }
+                // SAFETY: register-only read of s0; the chain walk is the
+                // dfx stack-forensics edge.
+                let mw_s0: u64 = unsafe {
+                    let v;
+                    core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
+                    v
+                };
+                unsafe { crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames) };
                 crate::dfx::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
             }
 
@@ -271,7 +278,8 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             PT_LEDGER.stamp(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid());
 
             let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
-            core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize);
+            // SAFETY: fresh exclusive zone frame.
+            unsafe { core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize) };
             Some(phys_addr)
         }
     }
@@ -302,7 +310,7 @@ pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
     }
 }
 
-unsafe fn free_page_table_checked(phys_addr: u64, site: &str) {
+fn free_page_table_checked(phys_addr: u64, site: &str) {
     if get_alloc_stage() == AllocStage::Late {
         stamp_kernel_tree_boot();
         if !PT_LEDGER.take_returns(phys_addr >> PAGE_SHIFT) {
@@ -326,7 +334,7 @@ static BOOT_TREE_STAMPED: core::sync::atomic::AtomicBool = core::sync::atomic::A
 /// frames (observed: the 0x8cf62+ consecutive "no live stamp" double-free
 /// block). Called from the teardown path (PTE_MODIFY_LOCK held) before any
 /// table bookkeeping.
-unsafe fn stamp_kernel_tree_boot() {
+fn stamp_kernel_tree_boot() {
     use core::sync::atomic::Ordering;
     use crate::mm::phys_valid;
     if BOOT_TREE_STAMPED.load(Ordering::Acquire) {
@@ -349,9 +357,11 @@ unsafe fn stamp_kernel_tree_boot() {
     // baseline leak: ~100KB per exec, 2GB gone in ~21 min under load;
     // memwatch evidence: fut_calls=618, fut_tables=0).
     let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
-    let root_phys = root_virt.wrapping_sub(KERNEL_MAP.va_kernel_pa_offset as u64);
+    // SAFETY: boot section, single CPU.
+    let root_phys = root_virt.wrapping_sub(unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64);
+    let root_static = PtTable::static_root();
     for vpn2 in 0..512usize {
-        let pte2 = ROOT_PAGE_TABLE.get(vpn2);
+        let pte2 = root_static.get(vpn2);
         if !pte2.is_valid() || pte2.is_leaf() {
             continue;
         }
@@ -360,9 +370,9 @@ unsafe fn stamp_kernel_tree_boot() {
             continue;
         }
         PT_LEDGER.stamp_boot(pte2.ppn());
-        let t1 = get_page_table_virt(t1_phys);
+        let Some(t1) = PtTable::from_phys(t1_phys) else { continue };
         for vpn1 in 0..512usize {
-            let pte1 = (*t1).get(vpn1);
+            let pte1 = t1.get(vpn1);
             if !pte1.is_valid() || pte1.is_leaf() {
                 continue;
             }
@@ -376,7 +386,7 @@ unsafe fn stamp_kernel_tree_boot() {
 }
 
 /// Free a page table (only valid for late stage allocations)
-unsafe fn free_page_table(phys_addr: u64) {
+fn free_page_table(phys_addr: u64) {
     if get_alloc_stage() != AllocStage::Late {
         return;
     }
@@ -389,10 +399,11 @@ unsafe fn free_page_table(phys_addr: u64) {
     // Check if it's from early static region
     // Early tables live in BSS at KERNEL_LINK_ADDR; convert VA→PA using
     // va_kernel_pa_offset (same pattern as alloc_page_table).
-    let offset = KERNEL_MAP.va_kernel_pa_offset as u64;
-    let early_pmd_start = (&EARLY_PMD as *const _ as u64).wrapping_sub(offset);
+    // SAFETY: KERNEL_MAP is set before any Late-stage free can run.
+    let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+    let early_pmd_start = (&raw const EARLY_PMD as u64).wrapping_sub(offset);
     let early_pmd_end = early_pmd_start + (NUM_EARLY_PMD * PAGE_SIZE as usize) as u64;
-    let early_pte_start = (&EARLY_PTE as *const _ as u64).wrapping_sub(offset);
+    let early_pte_start = (&raw const EARLY_PTE as u64).wrapping_sub(offset);
     let early_pte_end = early_pte_start + (NUM_EARLY_PTE * PAGE_SIZE as usize) as u64;
 
     if (phys_addr >= early_pmd_start && phys_addr < early_pmd_end) ||
@@ -993,20 +1004,17 @@ pub(crate) fn textfree_owner_maps(owner_pid: u32, pfn: usize) -> usize {
 ///     zeroed-text SIGILL mechanism (recycling a live text page). Refuse
 ///     (leak) and print the frame's lifecycle from the event ring.
 /// Returns true when the frame was returned to the allocator.
-pub(crate) unsafe fn release_user_leaf(
-    page: *mut crate::mm::page_desc::Page,
+pub(crate) fn release_user_leaf(
+    page: &crate::mm::page_desc::Page,
     pfn: usize,
     va: usize,
 ) -> bool {
     use crate::mm::page_desc::PageFlag;
-    if page.is_null() {
-        return false;
-    }
     let stamp = crate::mm::page_desc::text_stamp_get(pfn);
-    if (*page).is_mapped() {
-        crate::mm::rmap::page_remove_rmap(&*page);
+    if page.is_mapped() {
+        crate::mm::rmap::page_remove_rmap(page);
     }
-    let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_RV);
+    let new_ref = page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_RV);
     let dying = crate::process::current_pid() as u32;
     if stamp.is_some() {
         crate::mm::page_desc::text_stamp_note(pfn, dying, 'T', new_ref);
@@ -1026,17 +1034,22 @@ pub(crate) unsafe fn release_user_leaf(
             && crate::trace::EVENT_MMFORENSICS.armed()
         {
             // Who is the owner right now?
-            let owner_task = crate::sched::find_task_by_pid(owner_pid);
-            let owner_found =
-                !owner_task.is_null() && (*owner_task).pid() == owner_pid;
-            let (maps, root) = if owner_found {
-                let root = (*owner_task)
-                    .address_space()
-                    .map(|mm| mm.root_ppn())
-                    .unwrap_or(0);
-                (owner_maps_pfn(root, pfn), root)
-            } else {
-                ((0, [0usize; 4]), 0)
+            // SAFETY: the scheduler's task-table raw-pointer lookups
+            // (diagnostic report path only) — same pattern as
+            // task_pid_alive below.
+            let (owner_found, maps, root) = unsafe {
+                let owner_task = crate::sched::find_task_by_pid(owner_pid);
+                let owner_found =
+                    !owner_task.is_null() && (*owner_task).pid() == owner_pid;
+                if owner_found {
+                    let root = (*owner_task)
+                        .address_space()
+                        .map(|mm| mm.root_ppn())
+                        .unwrap_or(0);
+                    (true, owner_maps_pfn(root, pfn), root)
+                } else {
+                    (false, (0, [0usize; 4]), 0)
+                }
             };
             // Unified adjudication: the stamp owner testifies when it can;
             // whenever it cannot (gone, or maps the frame nowhere), scan
@@ -1055,9 +1068,10 @@ pub(crate) unsafe fn release_user_leaf(
                     if (*t).pid() == dying {
                         return;
                     }
-                    // SAFETY: diagnostic read-only pid + mm-root access on
-                    // the rare report path (same pattern as task_pid_alive).
-                    let root = unsafe { (*t).address_space() }
+                    // Diagnostic read-only pid + mm-root access on the
+                    // rare report path (same pattern as task_pid_alive).
+                    let root = t
+                        .address_space()
                         .map(|mm| mm.root_ppn())
                         .unwrap_or(0);
                     if root != 0 {
@@ -1098,12 +1112,12 @@ pub(crate) unsafe fn release_user_leaf(
                 // REAL foreign free: leak + full evidence.
                 crate::mm::page_desc::text_stamp_note(pfn, dying, 'R', 0);
                 let (rc, mc, cow, anon, lru, freelist) = (
-                    (*page).refcount(),
-                    (*page).mapcount(),
-                    (*page).test_flag(PageFlag::Cow),
-                    (*page).test_flag(PageFlag::Anonymous),
-                    (*page).test_flag(PageFlag::Lru),
-                    (*page).test_flag(PageFlag::OnFreelist),
+                    page.refcount(),
+                    page.mapcount(),
+                    page.test_flag(PageFlag::Cow),
+                    page.test_flag(PageFlag::Anonymous),
+                    page.test_flag(PageFlag::Lru),
+                    page.test_flag(PageFlag::OnFreelist),
                 );
                 crate::pr_err!(
                     "TEXTFREE-REAL pfn={:#x} dying={} dying_va={:#x} owner={} stamp_va={:#x} owner_found={} owner_root={:#x} maps_pfn={}x first_vas={:#x},{:#x} other_mapper={}@{:#x} — free REFUSED (leak); page rc={} mc={} cow={} anon={} lru={} freelist={}",
@@ -1147,7 +1161,7 @@ pub(crate) unsafe fn release_user_leaf(
     // wire a live cache frame back into the zone (the RAW-FREE double
     // hand). Leak + name it instead (x86_64 twin: the per-site
     // pcache_leaf_phantom_zero_put guards).
-    if (*page).page_type() == crate::mm::page_desc::PageType::PageCache {
+    if page.page_type() == crate::mm::page_desc::PageType::PageCache {
         crate::mm::page_alloc::pcache_leaf_phantom_zero_put(pfn << 12, "rv-release-user-leaf");
         return false;
     }
@@ -1166,7 +1180,7 @@ pub(crate) unsafe fn release_user_leaf(
 // churn points (fork, exit) compile identically.
 pub fn pt_pending_drain() {}
 
-pub unsafe fn free_user_page_tables(
+pub fn free_user_page_tables(
     pte: &crate::mm::mm_struct::PteLock,
     root_ppn: u64,
     // (sysmm-2x lane) VMA range snapshot bounding the leaf scans —
@@ -1174,7 +1188,7 @@ pub unsafe fn free_user_page_tables(
     // riscv64 walk keeps its full scans and ignores the list.
     _vma_ranges: &[(u64, u64)],
 ) {
-    use crate::mm::{pfn_to_page, pfn_to_page_mut, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
+    use crate::mm::{page_desc, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
     crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Double-teardown detector: the same root walked twice means two
     // MmStructs ended up owning one page-table tree — the second walk
@@ -1230,11 +1244,16 @@ pub unsafe fn free_user_page_tables(
     let _pte_guard = pte.lock_irqsave();
 
     let root_phys = root_ppn << PAGE_SHIFT;
-    let root_table = get_page_table_virt(root_phys);
+    // Dying-mm root: a guard miss is corruption — free the root frame
+    // itself and return (the containment the inline guard gave).
+    let Some(root_table) = PtTable::from_phys(root_phys) else {
+        free_page_table_checked(root_phys, "root");
+        return;
+    };
 
     // Walk and free all levels (only user space: VPN2 0-255)
     for vpn2 in 0..256 {
-        let pte2 = (*root_table).get(vpn2);
+        let pte2 = root_table.get(vpn2);
         if !pte2.is_valid() {
             continue;
         }
@@ -1258,10 +1277,9 @@ pub unsafe fn free_user_page_tables(
                 continue;
             }
             let pfn = phys_to_pfn(phys_addr as usize);
-            let page = pfn_to_page(pfn);
-            if !page.is_null() {
+            if let Some(page) = page_desc(pfn) {
                 // SIGILL-stamp adjudicated release (gnome-sigill)
-                release_user_leaf(page as *mut _, pfn, vpn2 << 30);
+                release_user_leaf(page, pfn, vpn2 << 30);
             }
             continue;
         }
@@ -1285,10 +1303,10 @@ pub unsafe fn free_user_page_tables(
             continue;
         }
 
-        let table1 = get_page_table_virt(table1_phys);
+        let Some(table1) = PtTable::from_phys(table1_phys) else { continue };
 
         for vpn1 in 0..512 {
-            let pte1 = (*table1).get(vpn1);
+            let pte1 = table1.get(vpn1);
             if !pte1.is_valid() {
                 continue;
             }
@@ -1306,10 +1324,9 @@ pub unsafe fn free_user_page_tables(
                     continue;
                 }
                 let pfn = phys_to_pfn(phys_addr as usize);
-                let page = pfn_to_page(pfn);
-                if !page.is_null() {
+                if let Some(page) = page_desc(pfn) {
                     // SIGILL-stamp adjudicated release (gnome-sigill)
-                    release_user_leaf(page as *mut _, pfn, (vpn2 << 30) | (vpn1 << 21));
+                    release_user_leaf(page, pfn, (vpn2 << 30) | (vpn1 << 21));
                 }
                 continue;
             }
@@ -1321,10 +1338,10 @@ pub unsafe fn free_user_page_tables(
                 continue;
             }
 
-            let table0 = get_page_table_virt(table0_phys);
+            let Some(table0) = PtTable::from_phys(table0_phys) else { continue };
 
             for vpn0 in 0..512 {
-                let pte0 = (*table0).get(vpn0);
+                let pte0 = table0.get(vpn0);
 
                 // Swap entry (V=0 leaf with the swap signature): the page
                 // lives on the swap device — free the slot. Without this,
@@ -1351,15 +1368,15 @@ pub unsafe fn free_user_page_tables(
                     continue;
                 }
                 let pfn = phys_to_pfn(phys_addr as usize);
-                let page = pfn_to_page(pfn);
 
-                if page.is_null() || !phys_valid(phys_addr as usize) || phys_addr < 0x80000000 {
+                if !phys_valid(phys_addr as usize) || phys_addr < 0x80000000 {
                     continue;
                 }
+                let Some(page) = page_desc(pfn) else { continue };
 
                 // SIGILL-stamp adjudicated release (gnome-sigill)
                 release_user_leaf(
-                    page as *mut _,
+                    page,
                     pfn,
                     (vpn2 << 30) | (vpn1 << 21) | (vpn0 << 12),
                 );
@@ -1524,7 +1541,7 @@ fn pt_alloc_fail(level: &str, va: u64) {
 /// policy: user demand faults convert this to MmFaultResult::OutOfMemory,
 /// i.e. SIGKILL/OOM-kill, instead of the old kernel panic; see the
 /// fake-OOM family notes in alloc_page_table).
-unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
 
@@ -1542,11 +1559,13 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
             core::sync::atomic::AtomicUsize::new(0);
         if POLLUTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
             let mut frames: [u64; 8] = [0; 8];
-            let s0: u64;
-            unsafe {
-                core::arch::asm!("mv {s}, s0", s = out(reg) s0, options(nomem, nostack));
-                crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
-            }
+            // SAFETY: register-only s0 read + the dfx chain-walk edge.
+            let s0: u64 = unsafe {
+                let v;
+                core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
+                v
+            };
+            unsafe { crate::dfx::memwatch::walk_fp_chain(s0, &mut frames) };
             crate::dfx::taskdump::taskdump_raw_line(b"KROOT-POLLUTE va=0x");
             let mut sh: i32 = 64;
             while sh > 0 {
@@ -1570,9 +1589,10 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     }
 
     // Get root page table (L2)
-    let root_table_addr = root_ppn << PAGE_SHIFT;
-    let root_table = get_page_table_virt(root_table_addr);
-    let root = &mut *root_table;
+    let Some(root) = PtTable::from_phys(root_ppn << PAGE_SHIFT) else {
+        pt_alloc_fail("ROOT", virt_addr);
+        return false;
+    };
 
     // Level 2 -> Level 1
     let pte2 = root.get(vpn2);
@@ -1590,8 +1610,10 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
 
     // Level 1 -> Level 0
     let table1_phys = ppn1 << PAGE_SHIFT;
-    let table1 = get_page_table_virt(table1_phys);
-    let table1_ref = &mut *table1;
+    let Some(table1_ref) = PtTable::from_phys(table1_phys) else {
+        pt_alloc_fail("L1", virt_addr);
+        return false;
+    };
     let mut pte1 = table1_ref.get(vpn1);
     // E8-MM: a 2MB megapage leaf cannot host a 4K entry as-is — its PPN
     // names a frame, not a table. The old behavior REFUSED the map
@@ -1614,7 +1636,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     // (U=0) leaf entries only, skipping any user pages mapped here.
     if pte1.is_valid() && pte1.is_leaf() {
         if let Some(l0_phys) = alloc_page_table() {
-            let l0 = get_page_table_virt(l0_phys);
+            let Some(l0) = PtTable::from_phys(l0_phys) else { return false };
             // 4K-granule PPN of the 2MB-aligned base: ppn_for_2mb_page
             // returns the 2MB-granule number (base >> 21 — the unit test
             // caught the first version using it as 4K-granule: every
@@ -1626,7 +1648,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
             // and drop the leaf's PPN field entirely.
             let flag_bits = (pte1.bits() & 0x3FF) | (pte1.bits() & 0xC000_0000_0000_0000);
             for k in 0..512u64 {
-                (*l0).set(k as usize, PageTableEntry::from_bits(((base_ppn + k) << 10) | flag_bits));
+                l0.set(k as usize, PageTableEntry::from_bits(((base_ppn + k) << 10) | flag_bits));
             }
             // Single-word swap: a concurrent walker sees either the leaf
             // or a fully populated table — both translate all 512 pages
@@ -1658,8 +1680,10 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
 
     // Level 0 -> Physical page
     let table0_phys = ppn0 << PAGE_SHIFT;
-    let table0 = get_page_table_virt(table0_phys);
-    let table0_ref = &mut *table0;
+    let Some(table0_ref) = PtTable::from_phys(table0_phys) else {
+        pt_alloc_fail("L0", virt_addr);
+        return false;
+    };
     let ppn: u64 = phys_addr >> PAGE_SHIFT;
     let pte_bits: u64 = (ppn << 10) | flags;
 
@@ -1680,17 +1704,18 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
 /// allocation failure). User demand-fault callers convert this to
 /// MmFaultResult::OutOfMemory (SIGKILL of the faulting task — Linux
 /// pagefault-OOM semantics) instead of the former kernel panic.
-pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+pub fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
     let ok = map_page_noflush(root_ppn, virt, phys, flags);
 
     // Flush TLB (single-page callers — page faults, mremap, io_uring —
     // need the new translation visible before the retrying access).
-    asm!("sfence.vma");
+    // SAFETY: TLB fence (memory-safe in any context).
+    unsafe { asm!("sfence.vma") };
     ok
 }
 
 /// Map a region with identity mapping
-pub(crate) unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
+pub(crate) fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
     let virt_start = VirtAddr::new(start);
     let phys_start = PhysAddr::new(start);
     let virt_end = VirtAddr::new(start + size);
@@ -1705,16 +1730,17 @@ pub(crate) unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64
         virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
     }
     // One fence for the whole region (batch aggregation).
-    asm!("sfence.vma zero, zero", options(nomem, nostack));
+    // SAFETY: TLB fence.
+    unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
 }
 
 /// Map a 2MB huge page using PMD leaf entry
-unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
+fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
     let vpn2 = (virt >> 30) & 0x1FF;
     let vpn1 = (virt >> 21) & 0x1FF;
 
     // Get root page table (L2)
-    let root = &mut ROOT_PAGE_TABLE;
+    let root = PtTable::static_root();
 
     // Level 2 -> Level 1
     let pte2 = root.get(vpn2);
@@ -1724,7 +1750,8 @@ unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
         let table_phys = alloc_page_table().expect("map_pmd_huge_page: failed to allocate L1 page table");
         let ppn = table_phys >> PAGE_SHIFT;
         root.set(vpn2, PageTableEntry::new_table(ppn));
-        asm!("sfence.vma zero, zero", options(nomem, nostack));
+        // SAFETY: TLB fence (memory-safe for any context).
+        unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
         ppn
     };
 
@@ -1752,8 +1779,10 @@ unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
     let entry_bits = (ppn2 << 28) | (ppn1_val << 19) | flags;
 
     let table1_phys = ppn1 << PAGE_SHIFT;
-    let table1 = get_page_table_virt(table1_phys);
-    (*table1).set(vpn1, PageTableEntry::from_bits(entry_bits));
+    let Some(table1) = PtTable::from_phys(table1_phys) else {
+        panic!("map_pmd_huge_page: bad L1 table link");
+    };
+    table1.set(vpn1, PageTableEntry::from_bits(entry_bits));
 }
 
 /// Map a kernel virtual page to a physical page WITHOUT flushing the TLB.
@@ -1761,18 +1790,24 @@ unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
 /// Internal batch primitive — see map_page_noflush. Region callers fence
 /// once after their loop via map_kernel_region. Returns false when a
 /// table allocation failed (failible map path, fake-OOM family).
-unsafe fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
+fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
     let vpn2 = ((virt >> 30) & 0x1FF) as usize;
     let vpn1 = ((virt >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt >> 12) & 0x1FF) as usize;
 
     // Get root page table from current satp
-    let satp: u64;
-    asm!("csrr {}, satp", out(reg) satp);
+    // SAFETY: CSR read (register-only).
+    let satp: u64 = unsafe {
+        let v;
+        asm!("csrr {}, satp", out(reg) v);
+        v
+    };
     let root_ppn = satp & 0xFFFFFFFFFFFFF;
     let root_phys = root_ppn << PAGE_SHIFT;
-    let root = get_page_table_virt(root_phys) as *mut PageTable;
-    let root = &mut *root;
+    let Some(root) = PtTable::from_phys(root_phys) else {
+        pt_alloc_fail("kernel ROOT", virt);
+        return false;
+    };
 
     // Level 2 -> Level 1
     let pte2 = root.get(vpn2);
@@ -1785,14 +1820,17 @@ unsafe fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
         };
         let ppn = table_phys >> PAGE_SHIFT;
         root.set(vpn2, PageTableEntry::new_table(ppn));
-        asm!("sfence.vma zero, zero", options(nomem, nostack));
+        // SAFETY: TLB fence.
+        unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
         ppn
     };
 
     // Level 1 -> Level 0
     let table1_phys = ppn1 << PAGE_SHIFT;
-    let table1 = get_page_table_virt(table1_phys);
-    let table1_ref = &mut *table1;
+    let Some(table1_ref) = PtTable::from_phys(table1_phys) else {
+        pt_alloc_fail("kernel L1", virt);
+        return false;
+    };
     let pte1 = table1_ref.get(vpn1);
     let ppn0 = if pte1.is_valid() {
         pte1.ppn()
@@ -1803,14 +1841,17 @@ unsafe fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
         };
         let ppn = table_phys >> PAGE_SHIFT;
         table1_ref.set(vpn1, PageTableEntry::new_table(ppn));
-        asm!("sfence.vma zero, zero", options(nomem, nostack));
+        // SAFETY: TLB fence.
+        unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
         ppn
     };
 
     // Level 0 -> Physical page
     let table0_phys = ppn0 << PAGE_SHIFT;
-    let table0 = get_page_table_virt(table0_phys);
-    let table0_ref = &mut *table0;
+    let Some(table0_ref) = PtTable::from_phys(table0_phys) else {
+        pt_alloc_fail("kernel L0", virt);
+        return false;
+    };
     let ppn: u64 = phys >> PAGE_SHIFT;
     let pte_bits: u64 = (ppn << 10) | flags;
 
@@ -1824,9 +1865,10 @@ unsafe fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
 /// Returns false when the mapping could not be installed; boot-time
 /// callers treat that as fatal, runtime ioremap-class callers should fail
 /// their request.
-pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) -> bool {
+pub fn map_kernel_page(virt: u64, phys: u64, flags: u64) -> bool {
     let ok = map_kernel_page_noflush(virt, phys, flags);
-    asm!("sfence.vma zero, zero", options(nomem, nostack));
+    // SAFETY: TLB fence.
+    unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
     ok
 }
 
@@ -1845,7 +1887,7 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) -> bool {
 /// walks them per exit — measured ~85ms per fork+exit under TCG). With
 /// L1 leaves the same windows cost ~132 PTEs and zero L0 tables.
 /// Unaligned head/tail pages still map at 4KB granularity.
-pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
+pub fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
     use crate::arch::mm::memory_layout::PMD_SIZE;
 
     let mut v = virt;
@@ -1865,7 +1907,8 @@ pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
             p += PAGE_SIZE;
         }
     }
-    asm!("sfence.vma zero, zero", options(nomem, nostack));
+    // SAFETY: TLB fence.
+    unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
 }
 
 /// Map a kernel device region using 2MB megapage leaf entries where the
@@ -1879,7 +1922,7 @@ pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
 /// Must only be used for device memory that is mapped once at boot and
 /// never re-mapped at 4K granularity later (map_page cannot descend below
 /// an L1 leaf).
-pub unsafe fn map_kernel_region_huge(virt: u64, size: u64, flags: u64) {
+pub fn map_kernel_region_huge(virt: u64, size: u64, flags: u64) {
     const PMD: u64 = 0x20_0000;
     let mut v = virt;
     let end = virt + size;
@@ -1898,7 +1941,8 @@ pub unsafe fn map_kernel_region_huge(virt: u64, size: u64, flags: u64) {
         map_kernel_page_noflush(v, v, flags);
         v += PAGE_SIZE;
     }
-    asm!("sfence.vma zero, zero", options(nomem, nostack));
+    // SAFETY: TLB fence.
+    unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
 }
 
 /// Map device memory page to user space

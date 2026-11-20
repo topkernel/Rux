@@ -108,16 +108,18 @@ pub fn ts_set() -> bool {
     read_cr0() & CR0_TS != 0
 }
 
-/// Clear CR0.TS (claim the live FPU for the current task).
+/// Clear CR0.TS (claim the live FPU for the current task). Memory-safe
+/// for any caller: one control-bit clear, no mode bits touched.
 #[inline]
-pub unsafe fn clts() {
+pub fn clts() {
     // SAFETY: single-bit clear, mode bits preserved.
     unsafe { core::arch::asm!("clts", options(nomem, nostack, preserves_flags)) };
 }
 
 /// Set CR0.TS (drop the live FPU; next FP instruction traps #NM).
+/// Memory-safe for any caller: one control-bit set, no mode bits touched.
 #[inline]
-pub unsafe fn stts() {
+pub fn stts() {
     // SAFETY: single-bit set, mode bits preserved.
     unsafe { write_cr0(read_cr0() | CR0_TS) };
 }
@@ -190,11 +192,10 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
 /// With CR4.PCIDE=1 this invalidates only the entry cached under the
 /// CURRENT PCID (callers flushing a non-current address space use
 /// `invpcid` with an explicit PCID — see mm/asid.rs).
-///
-/// # Safety
-/// Caller must ensure the address is canonical.
+/// Memory-safe for any address value: the worst a non-canonical or
+/// unmapped argument does is invalidate nothing.
 #[inline]
-pub unsafe fn invlpg(addr: u64) {
+pub fn invlpg(addr: u64) {
     unsafe { core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
 }
 

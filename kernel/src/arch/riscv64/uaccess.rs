@@ -123,7 +123,9 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 
     // Delegate to assembly implementation which has exception table entries
     // for fault-safe user memory access.
-    let uncopied = __copy_to_user(to, from, n);
+    // SAFETY: exception-table copy — a fault on `to` jumps to the fixup
+    // and returns the remaining count instead of faulting the kernel.
+    let uncopied = unsafe { __copy_to_user(to, from, n) };
     if uncopied == 0 {
         return 0;
     }
@@ -134,8 +136,8 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     // fault the range in for write and retry once, like Linux's
     // fault_in_pages_writeable + copy retry (NEW2 root cause).
     if fault_in_write(to, n) {
-        let uncopied2 = __copy_to_user(to, from, n);
-        return uncopied2;
+        // SAFETY: exception-table retry after resolution.
+        return unsafe { __copy_to_user(to, from, n) };
     }
     uncopied
 }
@@ -144,7 +146,7 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 /// mapping), best-effort: returns true if at least the first page got
 /// resolved. Only handles resolvable cases; genuinely bad ranges still
 /// return false so callers report EFAULT.
-unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
+fn fault_in_write(start: *mut u8, len: usize) -> bool {
     use crate::mm::page::VirtAddr as PageVirtAddr;
     use crate::arch::mm::memory_layout::VirtAddr as ArchVirtAddr;
 
