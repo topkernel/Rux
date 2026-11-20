@@ -19,19 +19,19 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **3311**
+- unsafe regions: **3304**
 - with artifact (non-GAP): **74** (2.2%)
-- GAP: **3237**
-- by kind: block=2965, unsafe-extern=10, unsafe-fn=180, unsafe-impl=156
-- by category (regions carry 0..n tags): ptr-ops=839, asm=260, volatile=200, raw-construct=68, addr-arith=62, no-preempt=22, ffi=17, static-mut=5, layout-meta=5, transmute=4
+- GAP: **3230**
+- by kind: block=2959, unsafe-extern=10, unsafe-fn=179, unsafe-impl=156
+- by category (regions carry 0..n tags): ptr-ops=834, asm=260, volatile=200, raw-construct=66, addr-arith=62, no-preempt=22, ffi=17, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
 | arch | 770 | 7 | 763 |
-| fs | 652 | 0 | 652 |
-| syscall | 478 | 0 | 478 |
+| fs | 646 | 0 | 646 |
+| syscall | 477 | 0 | 477 |
 | mm | 234 | 6 | 228 |
 | sync | 223 | 0 | 223 |
 | sched | 171 | 0 | 171 |
@@ -1442,30 +1442,24 @@ census id is accounted for here.
 | 87 | init_journal | block | ptr-ops | GAP | `401f21cbfcda` |
 | 131 | init_journal | block | raw-construct,ptr-ops | GAP | `5f05f142d3f9` |
 
-### kernel/src/fs/ext4/mod.rs (20)
+### kernel/src/fs/ext4/mod.rs (14)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 136 | superblock_on_disk | block | ptr-ops | GAP | `9742cad3de92` |
-| 195 | <module> | unsafe-impl | - | GAP | `60c726e77a82` |
-| 198 | <module> | unsafe-impl | - | GAP | `9c830519f658` |
-| 499 | init | block | ptr-ops | GAP | `3c245716e4bd` |
-| 651 | read_inode | block | ptr-ops | GAP | `e61bdb21a394` |
-| 923 | read_symlink_target | block | raw-construct,ptr-ops | GAP | `34264478656a` |
-| 1091 | ext4_kill_sb | block | ptr-ops | GAP | `e9a77403f9ff` |
-| 1136 | read_file_internal | block | - | GAP | `349994afacc4` |
-| 1266 | read_symlink_target | block | raw-construct,ptr-ops | GAP | `d7dfd0dc839c` |
-| 1356 | ext4_instance_from_id | block | - | GAP | `34920ecd0360` |
-| 1716 | unmount_ext4 | block | - | GAP | `fba4717c64e0` |
-| 3163 | ext4_destroy_inode | block | ptr-ops | GAP | `927a248696e8` |
-| 3257 | <module> | unsafe-fn | - | GAP | `358425615606` |
-| 3489 | mounted_ext4_fs | block | - | GAP | `abc4e39b02a1` |
-| 3497 | get_ext4_fs_from_inode | block | ptr-ops | GAP | `c405e8ef8e33` |
-| 3530 | sb_inode_of | block | ptr-ops | GAP | `c72c1b8bca9f` |
-| 3540 | sb_inode_of_mut | block | ptr-ops | GAP | `147807aca61c` |
-| 3846 | create_vfs_inode_in | block | ptr-ops | GAP | `f79a400cc4f4` |
-| 4006 | mount_loop_instance | block | - | GAP | `b87a478a4baa` |
-| 4070 | mount_loop_instance | block | - | GAP | `930c43d92a34` |
+| 193 | <module> | unsafe-impl | - | GAP | `d3f26b52e901` |
+| 196 | <module> | unsafe-impl | - | GAP | `3c0805b5c3c4` |
+| 1076 | ext4_kill_sb | block | ptr-ops | GAP | `815913ca9852` |
+| 1121 | read_file_internal | block | - | GAP | `51613a144536` |
+| 1339 | ext4_instance_from_id | block | - | GAP | `82a9f64746b3` |
+| 1699 | unmount_ext4 | block | - | GAP | `f5a29d7f4d74` |
+| 3146 | ext4_destroy_inode | block | ptr-ops | GAP | `61aba69c3ce4` |
+| 3472 | mounted_ext4_fs | block | - | GAP | `0f7ef50e0a65` |
+| 3481 | get_ext4_fs_from_inode | block | ptr-ops | GAP | `3804c2b51694` |
+| 3512 | sb_inode_of | block | ptr-ops | GAP | `1638d9e321f2` |
+| 3522 | sb_inode_of_mut | block | ptr-ops | GAP | `050f2ba0aab9` |
+| 3828 | create_vfs_inode_in | block | ptr-ops | GAP | `ba0856256f07` |
+| 3988 | mount_loop_instance | block | - | GAP | `0805b7df7e7d` |
+| 4052 | mount_loop_instance | block | - | GAP | `8382a1178c36` |
 
 ### kernel/src/fs/ext4/namei.rs (40)
 
@@ -2049,7 +2043,7 @@ census id is accounted for here.
 
 ## syscall
 
-### kernel/src/syscall/file.rs (65)
+### kernel/src/syscall/file.rs (64)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -2103,7 +2097,6 @@ census id is accounted for here.
 | 6237 | sys_open_by_handle_at | block | - | GAP | `37306f1c9160` |
 | 6242 | sys_open_by_handle_at | block | ptr-ops | GAP | `bfbf4a6c0ee0` |
 | 6269 | sys_open_by_handle_at | block | ptr-ops | GAP | `f646eb3377e5` |
-| 6279 | sys_open_by_handle_at | block | - | GAP | `5f571c4a825c` |
 | 6316 | sys_open_by_handle_at | block | - | GAP | `bec5651afd9e` |
 | 6386 | sys_copy_file_range | block | - | GAP | `ca89aed90160` |
 | 6595 | sys_preadv2 | block | - | GAP | `a594680abc52` |

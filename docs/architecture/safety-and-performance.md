@@ -470,6 +470,53 @@ GNOME Shell desktop; unmodified OpenHarmony with 135+ services; three
 architectures from one tree. Speed did not cost compatibility; safety
 did not cost speed.
 
+
+### Primitive INV index (the literal registry — gate-verified)
+
+Every `INV:<id>` artifact row in the sidecar must resolve here. One
+line per id; the contract lives in the owning module.
+
+- **INV-BLKDEV-1** — GenDisk registry + driver ABI (drivers/blkdev, L5)
+- **INV-CBYTES-1** — CopyBytes byte-image family (kernel/src/safety/bytes.rs)
+- **INV-CBYTES-2** — CopyBytes byte-image family (kernel/src/safety/bytes.rs)
+- **INV-DMA-1** — DmaBlock device-shared carve (kernel/src/safety/dma.rs)
+- **INV-DMA-2** — DmaBlock device-shared carve (kernel/src/safety/dma.rs)
+- **INV-DMA-3** — DmaBlock device-shared carve (kernel/src/safety/dma.rs)
+- **INV-FOR-1** — hunt-era forensics edges (kernel/src/dfx/forensics_edges.rs, L5)
+- **INV-FOR-2** — hunt-era forensics edges (kernel/src/dfx/forensics_edges.rs, L5)
+- **INV-FOR-3** — hunt-era forensics edges (kernel/src/dfx/forensics_edges.rs, L5)
+- **INV-KPTR-1** — KPtr owned allocation (kernel/src/safety/ptr.rs)
+- **INV-KPTR-2** — KPtr owned allocation (kernel/src/safety/ptr.rs)
+- **INV-KPTR-3** — KPtr owned allocation (kernel/src/safety/ptr.rs)
+- **INV-KPTR-4** — KPtr owned allocation (kernel/src/safety/ptr.rs)
+- **INV-KPTR-5** — KPtr owned allocation (kernel/src/safety/ptr.rs)
+- **INV-LOCK-5** — primitive contract (see owning module)
+- **INV-LOCK-7** — primitive contract (see owning module)
+- **INV-MMIO-1** — MmioRegion register windows (kernel/src/safety/mmio.rs)
+- **INV-MMIO-2** — MmioRegion register windows (kernel/src/safety/mmio.rs)
+- **INV-MMIO-3** — MmioRegion register windows (kernel/src/safety/mmio.rs)
+- **INV-NETARC-1** — socket-file Arc recovery (net/mod.rs, L5)
+- **INV-PCP-1** — primitive contract (see owning module)
+- **INV-RING-1** — SpscRing lock-free ring (kernel/src/safety/ring.rs)
+- **INV-RING-3** — SpscRing lock-free ring (kernel/src/safety/ring.rs)
+- **INV-SAFECALL-1** — safe_call discipline (kernel/src/safety/call.rs)
+- **INV-SAFECAST-1** — primitive contract (see owning module)
+- **INV-SCE-1** — sched framework edges (kernel/src/sched/edges.rs, L1)
+- **INV-SCE-2** — sched framework edges (kernel/src/sched/edges.rs, L1)
+- **INV-SCE-3** — sched framework edges (kernel/src/sched/edges.rs, L1)
+- **INV-SCE-4** — sched framework edges (kernel/src/sched/edges.rs, L1)
+- **INV-SCE-5** — sched framework edges (kernel/src/sched/edges.rs, L1)
+- **INV-SCE-6** — sched framework edges (kernel/src/sched/edges.rs, L1)
+- **INV-SCE-7** — sched framework edges (kernel/src/sched/edges.rs, L1)
+- **INV-SCE-8** — sched framework edges (kernel/src/sched/edges.rs, L1)
+- **INV-SCE-9** — sched framework edges (kernel/src/sched/edges.rs, L1)
+- **INV-SLOT-1** — OnceSlot publish-once singletons (kernel/src/safety/slot.rs)
+- **INV-SREF-1** — StaticRef machine-lifetime storage (kernel/src/safety/ptr.rs)
+- **INV-SY-1** — sync framework edges (kernel/src/sync/edges.rs, L1)
+- **INV-SY-3** — sync framework edges (kernel/src/sync/edges.rs, L1)
+- **INV-UACCESS-1** — UserPtr family (arch/uaccess_safe.rs)
+- **INV-WINDOW-1** — KernelStackWindow stack reads (kernel/src/safety/frame.rs)
+
 ## 5. Honest gaps register v1 (what the reference kernel carries that Rux does not YET)
 Credibility ordering: by-construction answers first (where the
 reference needs tooling because the language cannot provide the
