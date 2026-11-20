@@ -5711,6 +5711,11 @@ pub mod task_offsets {
     // stale again.
     pub const TASK_CHILDREN: usize = core::mem::offset_of!(Task, children);
     pub const TASK_SIBLING: usize = core::mem::offset_of!(Task, sibling);
+    // KP-RING diag (x86 trap printer): raw offsets of the thread-group
+    // ring fields (private to Task; offset_of! inside the module is legal).
+    pub const TASK_GROUP_LEADER: usize = core::mem::offset_of!(Task, group_leader);
+    pub const TASK_NEXT_THREAD: usize = core::mem::offset_of!(Task, next_thread);
+    pub const TASK_NR_THREADS: usize = core::mem::offset_of!(Task, nr_threads);
 
     // oh-crash 98th (SPINLOCK-STUCK holder hunt): the DEADLOCK face's
     // wedge locks sit at page-aligned bases + 0x6dc/0xadc/0xedc inside

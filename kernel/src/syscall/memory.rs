@@ -6,6 +6,8 @@
 //!
 //! Includes: brk, mmap, mmap_framebuffer, munmap, mprotect, msync, mremap, madvise, mincore, mlock, munlock
 
+#![forbid(unsafe_code)]
+
 use super::*;
 use super::SyscallArgs;
 use crate::arch::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageTableEntry, VirtAddr};
@@ -501,6 +503,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             core::sync::atomic::AtomicU32::new(0);
         let n = SHARED_FILE_MMAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 32 {
+            // HOTPATH-PRINT: shared-file mmap tap; oh_hunt_prints_on gate + SHARED_FILE_MMAPS<32 budget
             crate::pr_warn!(
                 "mmap[{}] pid {} len={:#x} flags={:#x} fd={} off={:#x}",
                 n,
@@ -781,10 +784,9 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                 // the SIGBUS spawned a hung processdump, and its SIGALRM
                 // exit left the whole boot graph frozen. Userspace handles
                 // a clean ENODEV; it cannot handle the delayed SIGBUS.
-                // SAFETY: inode is write-once and the File Arc keeps it alive.
-                let inode_opt = unsafe { &*file.inode.get() };
-                let is_dir = inode_opt
-                    .as_ref()
+                // Inode is write-once; the File Arc keeps it alive.
+                let is_dir = file
+                    .get_inode()
                     .map(|i| i.mode.is_directory())
                     .unwrap_or(false);
                 if is_dir {
@@ -832,6 +834,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                                 .unwrap_or("")
                                 .trim_end_matches('\0');
+                            // HOTPATH-PRINT: RLIMIT_AS ENOMEM path only; budget NR<20
                             crate::pr_warn!(
                                 "mmap-enomem: RLIMIT_AS comm='{}' len={:#x} total_vm={:#x} limit={:#x}",
                                 comm,
@@ -939,9 +942,9 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // size 0). LTP mmap10 mmaps /dev/zero and forks
                     // writers into it.
                     if vma_type == VmaType::FileBacked && fd >= 0 {
-                        // SAFETY: the File Arc keeps the write-once inode alive.
+                        // The File Arc keeps the write-once inode alive.
                         let is_zero_dev = crate::fs::file::get_file_fd(fd as usize)
-                            .and_then(|f| unsafe { &*f.inode.get() }.as_ref().map(|i| {
+                            .and_then(|f| f.get_inode().map(|i| {
                                 i.mode.is_char_device()
                                     && i.rdev == crate::fs::dev_t::DEV_ZERO.to_user_dev()
                             }))
@@ -1011,9 +1014,11 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 Err(_) => return mmap_error::ENOMEM,
                             };
                             let root = address_space.root_ppn();
-                            // SAFETY: root is the task's page-table root;
-                            // info.addr..+len is the linear-mapped framebuffer.
-                            unsafe {
+                            // Root is the task's page-table root;
+                            // info.addr..+len is the linear-mapped framebuffer
+                            // (map_user_region and MM_CTX.store are safe fns
+                            // — the old unsafe wrapper was vestigial).
+                            {
                                 crate::arch::mm::mm_ops::MM_CTX.store(
                                     2,
                                     core::sync::atomic::Ordering::Relaxed,
@@ -1058,6 +1063,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     // oh-svc T1 attribution tap (known-gap 4):
                                     // rux:ohhunt (retired dfx=ohhunt) gates it.
                                     if crate::trace::EVENT_OHHUNT.armed() {
+                                        // HOTPATH-PRINT: drm mmap resolve-fail; EVENT_OHHUNT tracepoint gate
                                         crate::pr_warn!(
                                             "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
                                             fd,
@@ -1096,6 +1102,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                         if n < 20
                                             && crate::trace::EVENT_OHHUNT.armed()
                                         {
+                                            // HOTPATH-PRINT: drm mmap placement-ENOMEM; PEMAP_N<20 budget + EVENT_OHHUNT gate
                                             crate::pr_warn!(
                                                 "drm: mmap placement-ENOMEM pid={} fd={} len={:#x} err={}",
                                                 crate::process::current_pid(),
@@ -1108,10 +1115,11 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     }
                                 };
                                 let root = address_space.root_ppn();
-                                // SAFETY: root is the task's page-table
-                                // root; phys..+len is the GEM object's
-                                // linear-mapped backing store.
-                                unsafe {
+                                // Root is the task's page-table root;
+                                // phys..+len is the GEM object's
+                                // linear-mapped backing store (safe fns —
+                                // vestigial wrapper removed).
+                                {
                                     crate::arch::mm::mm_ops::MM_CTX.store(
                                         2,
                                         core::sync::atomic::Ordering::Relaxed,
@@ -1181,9 +1189,8 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     if vma_type == VmaType::FileBacked && fd >= 0 {
                         let unmappable = crate::fs::file::get_file_fd(fd as usize)
                                 .map(|f| {
-                                    // SAFETY: File Arc keeps the write-once inode alive.
-                                    let inode_opt = unsafe { &*f.inode.get() };
-                                    match inode_opt.as_ref() {
+                                    // File Arc keeps the write-once inode alive.
+                                    match f.get_inode() {
                                         None => true, // bare anon_inode
                                         Some(inode) => {
                                             // Char devices, fifos and
@@ -1201,6 +1208,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             let ops_tag = crate::fs::file::get_file_fd(fd as usize)
                                 .and_then(|f| f.get_ops().map(|o| o as *const _ as usize))
                                 .unwrap_or(0);
+                            // HOTPATH-PRINT: unmappable-fd ENODEV path only (device/fifo/socket, once per bad mmap)
                             crate::pr_info!(
                                 "MMAP-ENODEV pid {} fd {} len {:#x} prot {:#x} flags {:#x} ops {:#x} path {}",
                                 crate::process::current_pid(),
@@ -1209,11 +1217,9 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 prot_flags,
                                 map_flags,
                                 ops_tag,
-                                unsafe {
-                                    crate::fs::file::get_file_fd(fd as usize)
-                                        .map(|f| f.path())
-                                        .unwrap_or_default()
-                                },
+                                crate::fs::file::get_file_fd(fd as usize)
+                                    .map(|f| f.path())
+                                    .unwrap_or_default(),
                             );
                             return mmap_error::ENODEV;
                         }
@@ -1232,15 +1238,12 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         Ok(mapped_addr) => {
 // For file-backed mappings, store fd and file size in VMA for demand paging
                             if map_flags & map::MAP_ANONYMOUS == 0 && fd >= 0 {
-                                // Get file size from stat
-                                // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File;
-                                // inode access via UnsafeCell is safe as we hold &File.
-                                let file_sz = unsafe {
-                                    crate::fs::get_file_fd(fd as usize).and_then(|file| {
-                                        let inode_opt = &*file.inode.get();
-                                        inode_opt.as_ref().map(|inode| inode.get_size())
-                                    }).unwrap_or(0)
-                                };
+                                // Get file size from stat: fd is a valid
+                                // file descriptor; the File Arc keeps the
+                                // write-once inode alive.
+                                let file_sz = crate::fs::get_file_fd(fd as usize)
+                                    .and_then(|file| file.get_inode().map(|inode| inode.get_size()))
+                                    .unwrap_or(0);
 
                                 if let Some(vma) = address_space.vma_write().find_mut(mapped_addr) {
                                     vma.set_file_fd(fd);
@@ -1324,7 +1327,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     // the caller's page-table root. Map+book-
                                     // keeping under the PTE lock, matching the
                                     // demand-fault discipline.
-                                    unsafe {
+                                    {
                                         let _pte_guard =
                                             crate::arch::mm::mm_ops::pte_lock_for(
                                                 address_space,
@@ -1334,7 +1337,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                             3,
                                             core::sync::atomic::Ordering::Relaxed,
                                         );
-                                        crate::arch::mm::map_user_page(
+                                        super::edges::arch_map_user_page(
                                             root_ppn,
                                             crate::arch::mm::memory_layout::VirtAddr::new(
                                                 (mapped_addr.as_usize()
@@ -1353,21 +1356,23 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                         // page. No anon-LRU: like SysV shm
                                         // pages, these have no private rmap
                                         // walk to reverse.
-                                        let page = crate::mm::page_desc::pfn_to_page_mut(
-                                            crate::mm::phys_to_pfn(phys),
-                                        );
-                                        if !page.is_null() {
-                                            (*page).set_flag(
+                                        // Page bookkeeping through the
+                                        // INV-SYSC-8 desc edge (fresh
+                                        // frame, exclusively owned).
+                                        if let Some(page) =
+                                            super::edges::page_desc_of(crate::mm::phys_to_pfn(phys))
+                                        {
+                                            page.set_flag(
                                                 crate::mm::page_desc::PageFlag::Anonymous,
                                             );
-                                            (*page).set_index(
+                                            page.set_index(
                                                 (mapped_addr.as_usize()
                                                     + i * crate::mm::page::PAGE_SIZE)
                                                     / crate::mm::page::PAGE_SIZE,
                                             );
-                                            (*page).inc_mapcount();
+                                            page.inc_mapcount();
                                             crate::mm::rmap::page_record_mapping(
-                                                &*page,
+                                                page,
                                                 (&address_space) as *const _ as usize,
                                                 mapped_addr.as_usize()
                                                     + i * crate::mm::page::PAGE_SIZE,
@@ -1385,9 +1390,11 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     return mmap_error::ENOMEM;
                                 }
                                 address_space.add_rss(npages as u64);
-                                // SAFETY: sfence.vma is valid in S-mode; the
-                                // new PTEs need a flush before first use.
-                                unsafe { crate::arch::mm::asid::flush_tlb_all(); }
+                                // sfence.vma is valid in S-mode; the new
+                                // PTEs need a flush before first use (the
+                                // old unsafe wrapper was vestigial —
+                                // flush_tlb_all is a safe fn).
+                                crate::arch::mm::asid::flush_tlb_all();
                             }
 
                             // b91-b92 forensics: attribute big anonymous
@@ -1412,6 +1419,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 && map_flags & map::MAP_ANONYMOUS != 0
                                 && actual_length >= 0x4000_0000;
                             if big_reserve {
+                                // HOTPATH-PRINT: PROTNONE-MAP big-reserve arm; >=1GB anon PROT_NONE filter (rare by construction)
                                 crate::pr_info!(
                                     "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
                                     crate::process::current_pid(),
@@ -1425,6 +1433,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     && actual_length >= 0x10_0000
                                     && !big_reserve
                                 {
+                                    // HOTPATH-PRINT: PROTNONE-MAP trace; EVENT_SYSCALLTRACE gate + >=1MB anon PROT_NONE filter
                                     crate::pr_info!(
                                         "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
                                         crate::process::current_pid(),
@@ -1433,6 +1442,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     );
                                 }
                                 if map_flags & map::MAP_FIXED != 0 {
+                                    // HOTPATH-PRINT: FIXED-MAP trace; EVENT_SYSCALLTRACE gate
                                     crate::pr_info!(
                                         "FIXED-MAP pid {} addr {:#x} len {:#x} prot {:#x} fd {}",
                                         crate::process::current_pid(),
@@ -1454,6 +1464,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 && !big_reserve
                             {
                                 vmap_budget_line(|| {
+                                    // HOTPATH-PRINT: PROTNONE-MAP-S trace; EVENT_VMAP gate + <1MB filter + vmap_budget_line 600-line cap
                                     crate::pr_info!(
                                         "PROTNONE-MAP-S pid {} addr {:#x} len {:#x}",
                                         crate::process::current_pid(),
@@ -1528,6 +1539,7 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
     // cap); the b91/b92 hunts re-arm with rux:vmap (retired dfx=vmap).
     if length >= 0x8_0000 {
         vmap_budget_line(|| {
+            // HOTPATH-PRINT: BIGMUNMAP report; >=512KB filter + vmap_budget_line 600-line cap
             crate::pr_info!(
                 "BIGMUNMAP pid {} addr {:#x} len {:#x}",
                 crate::process::current_pid(),
@@ -1608,6 +1620,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // the shadow's tmp before mremap) are entry/exit traced only under
     // rux:syscalltrace (retired dfx=syscalltrace) (two lines per call, same gating as MREMAP).
     if ret != 0 {
+        // HOTPATH-PRINT: mprotect failure path only (rare, CFI-shadow hunt)
         crate::pr_info!(
             "MPROTECT-FAIL pid {} addr {:#x} len {:#x} prot {:#x} -> {}",
             crate::process::current_pid(),
@@ -1628,6 +1641,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     } else if crate::trace::EVENT_SYSCALLTRACE.armed()
         && (args[2] as u32) & 0x6 == 0
     {
+        // HOTPATH-PRINT: MPROTECT-R trace; EVENT_SYSCALLTRACE gate + PROT_READ-only filter
         crate::pr_info!(
             "MPROTECT-R pid {} addr {:#x} len {:#x} prot {:#x}",
             crate::process::current_pid(),
@@ -1679,12 +1693,14 @@ fn mprotect_fail_forensics(addr: usize, length: usize) {
             gap_at = Some(covered_to);
         }
         match gap_at {
+            // HOTPATH-PRINT: mprotect fail forensics; called only from the ret!=0 arm (1630)
             Some(g) => crate::pr_info!(
                 "MPROTECT-FOR: range GAP at {:#x} (wanted {:#x}..{:#x})",
                 g,
                 addr,
                 end
             ),
+            // HOTPATH-PRINT: mprotect fail forensics; called only from the ret!=0 arm (1630)
             None => crate::pr_info!(
                 "MPROTECT-FOR: range COVERED (flags/perm class) {:#x}..{:#x}",
                 addr,
@@ -1702,9 +1718,11 @@ fn mprotect_fail_forensics(addr: usize, length: usize) {
                 continue;
             }
             if shown >= 6 {
+                // HOTPATH-PRINT: mprotect fail forensics; 6-row cap inside the failure-only report
                 crate::pr_info!("MPROTECT-FOR: ... (capped)");
                 break;
             }
+            // HOTPATH-PRINT: mprotect fail forensics; 6-row cap, failure-only report
             crate::pr_info!(
                 "MPROTECT-FOR: vma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                 vs,
@@ -1745,6 +1763,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     // b91-b93 hunts re-arm with rux:vmap (retired dfx=vmap).
     if prot & 0x2 != 0 {
         vmap_budget_line(|| {
+            // HOTPATH-PRINT: MPROTECT-RW report; PROT_WRITE filter + vmap_budget_line 600-line cap
             crate::pr_info!(
                 "MPROTECT-RW pid {} addr {:#x} len {:#x}",
                 crate::process::current_pid(),
@@ -1763,6 +1782,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     // line budget dies in pid-1 startup before any guard of interest.
     if prot == 0 && length <= 0x10_0000 {
         vmap_budget_line(|| {
+            // HOTPATH-PRINT: MPROTECT-DN report; PROT_NONE + <=1MB filter + vmap_budget_line cap
             crate::pr_info!(
                 "MPROTECT-DN pid {} addr {:#x} len {:#x} prot {:#x}",
                 crate::process::current_pid(),
@@ -1849,6 +1869,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                     // dlopen loop printed one line per load. Joins the
                     // rux:vmap (retired dfx=vmap) budget family.
                     vmap_budget_line(|| {
+                        // HOTPATH-PRINT: MPROTECT-CFI report; RELRO-finalize filter + vmap_budget_line cap
                         crate::pr_info!(
                             "MPROTECT-CFI pid {} addr {:#x} len {:#x} prot {:#x}",
                             crate::process::current_pid(),
@@ -2045,17 +2066,16 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 // rip == fault_addr in gnome-shell). The arch helper does
                 // the correct PML4→PUD→PMD→PT walk, P/preserve-PPN/NX
                 // semantics, PROT_NONE markers, and per-page invlpg.
-                // SAFETY: root_ppn is the current task's live user
-                // page-table root; the helper only rewrites existing
-                // non-swap leaf PTEs, under the PTE lock held above.
-                unsafe {
-                    crate::arch::mm::mm_ops::mprotect_pte_range(
-                        root_ppn,
-                        (start_page * PAGE_SIZE as usize) as u64,
-                        num_pages as u64,
-                        prot & 0x7,
-                    );
-                }
+                // root_ppn is the current task's live user page-table
+                // root; the helper only rewrites existing non-swap leaf
+                // PTEs, under the PTE lock held above (safe fn — the old
+                // wrapper was vestigial).
+                crate::arch::mm::mm_ops::mprotect_pte_range(
+                    root_ppn,
+                    (start_page * PAGE_SIZE as usize) as u64,
+                    num_pages as u64,
+                    prot & 0x7,
+                );
             }
 
             #[cfg(target_arch = "aarch64")]
@@ -2065,115 +2085,36 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 // the new prot (PPN + COW/PCACHE software bits preserved),
                 // with prot==0 installing the hardware-denied PROT_NONE
                 // marker the fault path re-presents.
-                // SAFETY: root_ppn is the current task's live user
-                // page-table root; the helper only rewrites existing
-                // user leaves, under the PTE lock held above.
-                unsafe {
-                    crate::arch::mm::mm_ops::mprotect_pte_range(
-                        root_ppn,
-                        (start_page * PAGE_SIZE as usize) as u64,
-                        num_pages as u64,
-                        prot & 0x7,
-                    );
-                }
+                // root_ppn is the current task's live user page-table
+                // root; the helper only rewrites existing user leaves,
+                // under the PTE lock held above (safe fn — vestigial
+                // wrapper removed).
+                crate::arch::mm::mm_ops::mprotect_pte_range(
+                    root_ppn,
+                    (start_page * PAGE_SIZE as usize) as u64,
+                    num_pages as u64,
+                    prot & 0x7,
+                );
             }
 
             #[cfg(target_arch = "riscv64")]
             for i in 0..num_pages {
                 let virt = ((start_page + i) * PAGE_SIZE as usize) as u64;
-                // SAFETY: root_ppn is a valid page table root; we traverse 3-level Sv39 page
-                // tables via linear mapping and only modify valid leaf PTEs.
-                unsafe {
-                    let virt_addr = VirtAddr(virt);
-
-                    // Extract virtual page numbers
-                    let vpn2 = virt_addr.vpn(2) as usize;
-                    let vpn1 = virt_addr.vpn(1) as usize;
-                    let vpn0 = virt_addr.vpn(0) as usize;
-
-                    // Access page table using linear mapping
-                    let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-
-                    let pte2 = (*root_table).get(vpn2);
-                    if !pte2.is_valid() {
-                        continue;  // Page not mapped, skip
-                    }
-
-                    let ppn1 = pte2.ppn();
-                    let table1 = get_page_table_virt(ppn1 << PAGE_SHIFT);
-                    let pte1 = (*table1).get(vpn1);
-                    if !pte1.is_valid() {
-                        continue;  // Page not mapped, skip
-                    }
-
-                    let ppn0 = pte1.ppn();
-                    let table0 = get_page_table_virt(ppn0 << PAGE_SHIFT);
-                    let pte0 = (*table0).get(vpn0);
-
-                    if pte0.is_valid() {
-                        // Preserve PPN and any COW software bit (bit 8):
-                        // clearing COW here let two processes that share a
-                        // forked page write straight through after
-                        // mprotect(PROT_WRITE), bypassing the COW copy
-                        // (review MM-H7). Also never raise W on a page
-                        // whose COW bit is set — the write fault path owns
-                        // the copy.
-                        //
-                        // PCACHE (RSW bit 9, riscv64
-                        // filemap_fault port): a mapping-ownership bit,
-                        // preserved like COW — dropping it would leak the
-                        // page-cache pin forever (frame unevictable). A
-                        // PRIVATE cache-backed leaf NEVER gains W in place:
-                        // the frame is shared with the page cache, so a
-                        // W-upgrade diverts the first write through COW
-                        // (Linux writenotify; x86_64 mprotect_pte_range
-                        // twin). A SHARED cache leaf (PCACHE with no COW —
-                        // cow_flags::pte_is_shared_cache; Sv39 has no third
-                        // software bit) keeps W in place — its stores must
-                        // land in the cache frame (session 25), and gaining
-                        // W here (an RO-faulted shared leaf being upgraded)
-                        // is a W-install: mark the cache page dirty so the
-                        // later msync/fsync persists such stores.
-                        let ppn = pte0.ppn();
-                        let cow_bit =
-                            pte0.bits() & crate::arch::mm::mm_ops::cow_flags::COW;
-                        let pcache_bit =
-                            pte0.bits() & crate::arch::mm::mm_ops::cow_flags::PCACHE;
-                        let mut flags = new_flags;
-                        if cow_bit != 0 {
-                            flags |= cow_bit;
-                            flags &= !PageTableEntry::W; // defer W to COW fault
-                        }
-                        if pcache_bit != 0 {
-                            flags |= pcache_bit;
-                            if flags & PageTableEntry::W != 0 {
-                                if crate::arch::mm::mm_ops::cow_flags::pte_is_shared_cache(
-                                    pte0.bits(),
-                                ) {
-                                    crate::fs::page_cache::get_page_cache()
-                                        .mark_dirty_pfn(ppn as usize);
-                                } else {
-                                    flags |= crate::arch::mm::mm_ops::cow_flags::COW;
-                                    flags &= !PageTableEntry::W;
-                                }
-                            }
-                        }
-                        let new_pte = PageTableEntry::from_bits((ppn << 10) | flags);
-                        (*table0).set(vpn0, new_pte);
-                    }
-                }
+                // The Sv39 leaf rewrite (COW/PCACHE-preserving) lives in
+                // the INV-SYSC-8 edge; the PTE lock held above covers
+                // the whole loop.
+                super::edges::mprotect_rewrite_leaf_sv39(root_ppn, virt, new_flags);
             }
 
             // Flush TLB after updating PTE permissions (still under the
             // PTE lock so no stale entry survives the section).
-            // SAFETY: sfence.vma is a valid RISC-V instruction; required after PTE modification.
             if mp2 {
                 crate::dfx::mmprof::add(crate::dfx::mmprof::MP_PTE, mp_t_pte);
             }
             let mp_t_tlb = if mp2 { crate::dfx::mmprof::now() } else { 0 };
-            unsafe {
-                crate::arch::mm::asid::flush_tlb_all();
-            }
+            // sfence.vma — flush_tlb_all is a safe fn (vestigial wrapper
+            // removed).
+            crate::arch::mm::asid::flush_tlb_all();
             if mp2 {
                 crate::dfx::mmprof::add(crate::dfx::mmprof::MP_TLB, mp_t_tlb);
             }
@@ -2500,7 +2441,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                 let off_hi = v_off + (span_hi - vma_start);
                 if off_hi > off_lo {
                     // SAFETY: inode cell written at open time, read-only.
-                    if let Some(vinode) = unsafe { &*file.inode.get() }.as_ref() {
+                    if let Some(vinode) = file.get_inode() {
                         crate::fs::ext4::file::ext4_flush_dirty_inode(
                             vinode,
                             (off_lo / PAGE_SIZE) as u64,
@@ -2514,68 +2455,29 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
             // a MAP_SHARED mapping holds beyond the file's end are
             // silently dropped at msync (LTP mmap01 greps for a pattern
             // written past EOF and requires it to stay out of the file).
-            let file_size = unsafe {
-                (*file.inode.get()).as_ref().map(|i| i.get_size()).unwrap_or(0)
-            };
+            let file_size = file.get_inode().map(|i| i.get_size()).unwrap_or(0);
             let mut cursor = span_lo;
             while cursor < span_hi {
-                // SAFETY: root_ppn is a valid page-table root; the walk
-                // only reads PTEs, the write path uses the kernel's
-                // linear map of the physical page.
-                unsafe {
-                    let vpn = [
-                        (cursor >> 12) & 0x1FF,
-                        (cursor >> 21) & 0x1FF,
-                        (cursor >> 30) & 0x1FF,
-                    ];
-                    let mut pte_virt =
-                        get_page_table_virt(root_ppn << PAGE_SHIFT) as *const PageTableEntry;
-                    let mut phys: Option<u64> = None;
-                    for level in (0..3usize).rev() {
-                        let pte = &*pte_virt.add(vpn[level]);
-                        if !pte.is_valid() {
-                            break;
-                        }
-                        // PCACHE leaves (SHARED ext4, session 25): their
-                        // writeback state is the page cache's dirty bit —
-                        // flushed by ext4_flush_dirty_pages above. Writing
-                        // the frame here as well would be redundant I/O
-                        // through the slow path.
-                        if pte.bits()
-                            & crate::arch::mm::mm_ops::cow_flags::PCACHE
-                            != 0
-                        {
-                            break;
-                        }
-                        let is_leaf = pte.is_readable() || pte.is_writable() || pte.is_executable();
-                        if level == 0 || is_leaf {
-                            if pte.is_writable() {
-                                phys = Some(pte.ppn() << PAGE_SHIFT);
-                            }
-                            break;
-                        }
-                        pte_virt = get_page_table_virt(pte.ppn() << PAGE_SHIFT) as *const PageTableEntry;
-                    }
-                    if let Some(p) = phys {
-                        // Clamped whole-page writeback from the kernel
-                        // linear map: nothing past EOF (see i_size clamp
-                        // above), full pages otherwise.
-                        let page_phys = p;
-                        let file_off = (v_off + (cursor - vma_start)) as u64;
-                        if file_off >= file_size {
-                            cursor += PAGE_SIZE as usize;
-                            continue;
-                        }
+                // Resolve the writable frame through the INV-SYSC-8 walk
+                // edge (read-only Sv39 walk under this PTE section;
+                // PCACHE leaves skipped — the cache's dirty path owns
+                // them).
+                if let Some(page_phys) =
+                    super::edges::pt_walk_writable_phys(root_ppn, cursor as u64)
+                {
+                    // Clamped whole-page writeback from the kernel
+                    // linear map: nothing past EOF (see i_size clamp
+                    // above), full pages otherwise.
+                    let file_off = (v_off + (cursor - vma_start)) as u64;
+                    if file_off < file_size {
                         let n = core::cmp::min(
                             PAGE_SIZE as u64,
                             file_size - file_off,
                         ) as usize;
-                        let kva = crate::arch::mm::phys_to_virt(
-                            crate::arch::mm::memory_layout::PhysAddr(page_phys),
-                        );
-                        let _ = file.write_at(
+                        let _ = super::edges::file_write_page(
+                            &file,
                             file_off,
-                            kva.as_usize() as *const u8,
+                            page_phys,
                             n,
                         );
                     }
@@ -2591,7 +2493,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
             // no-op when nothing was dirtied).
             {
                 // SAFETY: inode cell written at open time, read-only.
-                if let Some(vinode) = unsafe { &*file.inode.get() }.as_ref() {
+                if let Some(vinode) = file.get_inode() {
                     let off_lo = v_off + (span_lo - vma_start);
                     let off_hi = v_off + (span_hi - vma_start);
                     if off_hi > off_lo {
@@ -2638,17 +2540,15 @@ fn vma_file_by_range(
 /// # Safety
 /// Caller must ensure both old and new ranges are valid, page-aligned, and
 /// the old range is mapped.
-unsafe fn copy_old_to_new_pages(
+fn copy_old_to_new_pages(
     mm: &crate::mm::AddressSpace,
     old_addr: usize,
     new_addr: usize,
     size: usize,
 ) {
-    use crate::arch::mm::{
-        PAGE_SIZE, PAGE_SHIFT, PhysAddr, VirtAddr, map_page, phys_to_virt, PageTableEntry,
-    };
+    use crate::arch::mm::{PAGE_SIZE, PAGE_SHIFT, PhysAddr, VirtAddr, PageTableEntry};
     use crate::mm::page_alloc::alloc_page;
-    use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+    use crate::mm::page_desc::PageFlag;
     use crate::mm::zone::GfpFlags;
 
     let root_ppn = mm.root_ppn();
@@ -2663,9 +2563,8 @@ unsafe fn copy_old_to_new_pages(
         let new_virt = (new_addr + offset) as u64;
 
         // Walk old page table to get the source physical page
-        if let Some((old_ppn, old_bits)) = crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, old_virt) {
+        if let Some((old_ppn, old_bits)) = crate::sync::edges::pt_walk(root_ppn, old_virt) {
             let old_phys = old_ppn << PAGE_SHIFT;
-            let old_kvaddr = phys_to_virt(PhysAddr::new(old_phys)).bits() as *const u8;
 
             // DESTINATION-PRESENT: the destination range was created by
             // mmap in this same syscall, so a present leaf can only be a
@@ -2680,10 +2579,11 @@ unsafe fn copy_old_to_new_pages(
             // fresh frame OVER a live leaf without dropping its
             // refcount/rmap; the teardown below is the fix for exactly
             // that.)
-            if crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, new_virt).is_some() {
+            if crate::sync::edges::pt_walk(root_ppn, new_virt).is_some() {
                 static DST_HIT_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if DST_HIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                    // HOTPATH-PRINT: mremap dst-replace forensics; budget DST_HIT_N<24, racing-leaf path only
                     crate::pr_info!(
                         "MREMAP-DST-REPLACE pid={} va={:#x} src={:#x} — replacing racing leaf",
                         crate::process::current_pid(),
@@ -2691,9 +2591,9 @@ unsafe fn copy_old_to_new_pages(
                         old_virt
                     );
                 }
-                // SAFETY: PTE_MODIFY_LOCK is held (see above) and `mm` is
-                // the current task's address space.
-                unsafe { mm.unmap_one_user_leaf_locked(new_virt as usize) };
+                // PTE lock is held (see above) and `mm` is the current
+                // task's address space (INV-SYSC-8 unmap arm).
+                super::edges::unmap_user_leaf_locked(mm, new_virt as usize);
             }
 
             // Eagerly allocate + map the destination page (see comment above)
@@ -2706,31 +2606,35 @@ unsafe fn copy_old_to_new_pages(
             let perms = old_bits & (PageTableEntry::R | PageTableEntry::W | PageTableEntry::X);
             let pte_flags = PageTableEntry::V | PageTableEntry::U
                 | PageTableEntry::A | PageTableEntry::D | perms;
-            map_page(root_ppn, VirtAddr::new(new_virt), PhysAddr::new(new_phys as u64), pte_flags);
+            super::edges::arch_map_page(
+                root_ppn,
+                VirtAddr::new(new_virt),
+                PhysAddr::new(new_phys as u64),
+                pte_flags,
+            );
 
-            let new_kvaddr = phys_to_virt(PhysAddr::new(new_phys as u64)).bits() as *mut u8;
-            // SAFETY: both addresses are kernel linear-mapping views of
-            // distinct physical pages; PAGE_SIZE is the allocation size.
-            core::ptr::copy_nonoverlapping(old_kvaddr, new_kvaddr, PAGE_SIZE as usize);
+            // Copy the page contents through the linear map (INV-SYSC-8
+            // copy arm: old frame pinned by the walk's refcount, new
+            // frame exclusively owned).
+            super::edges::copy_page_linear(old_phys, new_phys as u64);
 
             // rmap/mapcount bookkeeping, same as the anonymous fault path
-            let page = pfn_to_page_mut(new_phys >> PAGE_SHIFT);
-            if !page.is_null() {
-                // SAFETY: freshly allocated page exclusively owned here.
-                (*page).set_flag(PageFlag::Anonymous);
+            // (INV-SYSC-8 desc arm: the frame is exclusively owned here).
+            if let Some(page) = super::edges::page_desc_of(new_phys >> PAGE_SHIFT) {
+                page.set_flag(PageFlag::Anonymous);
                 // SwapBacked + LRU membership: keep the moved page
                 // reclaimable via swap-out (vmscan).
-                (*page).set_flag(PageFlag::SwapBacked);
-                (*page).set_index(new_virt as usize / (PAGE_SIZE as usize));
-                (*page).inc_mapcount();
+                page.set_flag(PageFlag::SwapBacked);
+                page.set_index(new_virt as usize / (PAGE_SIZE as usize));
+                page.inc_mapcount();
                 if crate::sched::current().and_then(|t| t.address_space()).is_some() {
                     crate::mm::rmap::page_record_mapping(
-                        &*page,
+                        page,
                         mm as *const _ as usize,
                         new_virt as usize,
                     );
                 }
-                crate::mm::lru::page_add_anon_lru(&*page);
+                crate::mm::lru::page_add_anon_lru(page);
             }
         }
         offset += PAGE_SIZE as usize;
@@ -2812,6 +2716,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
     // Failure returns are rare and always interesting (CFI-shadow hunt):
     // log ungated, success only under rux:syscalltrace (retired dfx=syscalltrace).
     if ret < 0 {
+        // HOTPATH-PRINT: mremap failure path only (rare, CFI-shadow hunt)
         crate::pr_info!(
             "MREMAP-FAIL pid {} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x} -> {}",
             crate::process::current_pid(),
@@ -2825,10 +2730,12 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
             .map(|t| { (*t).comm() }.to_vec())
             .unwrap_or_default();
         let comm = core::str::from_utf8(&comm_bytes).unwrap_or("?");
+        // HOTPATH-PRINT: MREMAP-ENTER trace; EVENT_SYSCALLTRACE gate
         crate::pr_info!(
             "MREMAP-ENTER pid={} comm={} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x}",
             pid, comm, args[0], args[1], args[2], args[3], args[4]
         );
+        // HOTPATH-PRINT: MREMAP-EXIT trace; EVENT_SYSCALLTRACE gate
         crate::pr_info!("MREMAP-EXIT pid={} -> {:#x}", pid, ret);
     }
     ret
@@ -2931,6 +2838,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         static MRC_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if MRC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+            // HOTPATH-PRINT: MREMAP-CFI presence sample; budget MRC_N<60, CFI-shadow shape filter
             crate::pr_info!(
                 "MREMAP-CFI pid {} old {:#x} len {:#x} -> new {:#x} ({})",
                 crate::process::current_pid(),
@@ -3039,9 +2947,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                     );
                     // Copy pages from old to new
                     let copy_size = old_size_aligned.min(new_size_aligned);
-                    unsafe {
-                        copy_old_to_new_pages(address_space, old_addr, new_addr_arg, copy_size);
-                    }
+                    copy_old_to_new_pages(address_space, old_addr, new_addr_arg, copy_size);
                     // Unmap old mapping
                     let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
                     new_addr.as_usize() as i64
@@ -3154,14 +3060,12 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                     let copy_size = old_size_aligned.min(new_size_aligned);
                     // SAFETY: both old_addr and new_addr_val are page-aligned user addresses.
                     // copy_old_to_new_pages copies PTE contents (physical page data).
-                    unsafe {
-                        copy_old_to_new_pages(
-                            address_space,
-                            old_addr,
-                            new_addr_val,
-                            copy_size,
-                        );
-                    }
+                    copy_old_to_new_pages(
+                        address_space,
+                        old_addr,
+                        new_addr_val,
+                        copy_size,
+                    );
                     // Unmap old mapping
                     let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
                     new_mapping_addr.as_usize() as i64
@@ -3545,11 +3449,10 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
     for i in 0..page_count {
         let page_addr = addr + i * PAGE_SIZE;
 
-        // SAFETY: read-only inspection of the task's own page tables.
-        let mut page_in_memory = unsafe {
-            crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, page_addr as u64)
-        }
-        .is_some();
+        // Read-only inspection of the task's own page tables
+        // (INV-SY-1 walk edge).
+        let mut page_in_memory =
+            crate::sync::edges::pt_walk(root_ppn, page_addr as u64).is_some();
 
         if !page_in_memory {
             // File-backed? consult the page cache for the (fs,ino,off).
@@ -3562,7 +3465,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
                         if let Some(ft) = crate::sched::get_current_fdtable() {
                             if let Some(file) = ft.get_file(fd as usize) {
                                 // SAFETY: inode written once at open.
-                                if let Some(inode) = unsafe { (*file.inode.get()).as_ref() } {
+                                if let Some(inode) = file.get_inode() {
                                     let voff = vma.offset() as u64
                                         + (page_addr - vma.start().as_usize()) as u64;
                                     let idx = voff / crate::mm::page::PAGE_SIZE as u64;
@@ -3594,12 +3497,10 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
         // probes with mincore, so any allocator-heavy program hit this.
         // A store that fails (vec page unmapped — LTP mincore01
         // setup2) must surface as EFAULT, not be swallowed.
-        if !unsafe {
-            crate::arch::uaccess::put_user(
-                vec_ptr.add(i),
-                if page_in_memory { 1u8 } else { 0u8 },
-            )
-        } {
+        if !crate::arch::uaccess_safe::write_user(
+            (vec_ptr as usize) + i,
+            if page_in_memory { 1u8 } else { 0u8 },
+        ) {
             vec_ok = false;
         }
     }
@@ -3795,12 +3696,10 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
         for (seg_start, seg_end, anon_or_shm) in prefault_spans {
             let mut p = seg_start & !(crate::mm::page::PAGE_SIZE - 1);
             while p < seg_end {
-                // SAFETY: PageTableWalker::walk is a read-only inspection
-                // of the task's own page tables.
-                let present = unsafe {
-                    crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, p as u64)
-                }
-                .is_some();
+                // Read-only inspection of the task's own page tables
+                // (INV-SY-1 walk edge).
+                let present =
+                    crate::sync::edges::pt_walk(root_ppn, p as u64).is_some();
                 if !present {
                     // Populate fault type per mapping kind (the reference
                     // prefaults with FOLL_WRITE semantics on writable
@@ -3812,21 +3711,21 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
                     // the fault-around arm maps the PAGE-CACHE frame
                     // (cross-mapper mincore residency, LTP mincore04)
                     // without dirtying writable mappings.
-                    // SAFETY: handle_mm_fault operates on the current
-                    // task's address space, same as the trap path.
-                    unsafe {
-                        if let Some(mm) = (*current_task).address_space() {
-                            let flags = if anon_or_shm {
-                                crate::arch::mm::FaultFlags::WRITE
-                            } else {
-                                crate::arch::mm::FaultFlags::READ
-                            };
-                            let _ = crate::arch::mm::handle_mm_fault(
-                                &mm,
-                                crate::arch::mm::VirtAddr::new(p as u64),
-                                flags,
-                            );
-                        }
+                    // handle_mm_fault operates on the current task's
+                    // address space, same as the trap path (safe fn;
+                    // current_task is a reference — the old wrapper was
+                    // vestigial).
+                    if let Some(mm) = current_task.address_space() {
+                        let flags = if anon_or_shm {
+                            crate::arch::mm::FaultFlags::WRITE
+                        } else {
+                            crate::arch::mm::FaultFlags::READ
+                        };
+                        let _ = crate::arch::mm::handle_mm_fault(
+                            &mm,
+                            crate::arch::mm::VirtAddr::new(p as u64),
+                            flags,
+                        );
                     }
                 }
                 p += crate::mm::page::PAGE_SIZE;
@@ -4127,12 +4026,10 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> i64 {
         return -errno::EFAULT as i64;
     }
 
-    // SAFETY: mode_ptr validated with access_ok(4); put_user is the
+    // mode_ptr validated with access_ok(4); write_user is the
     // exception-table copy path.
-    unsafe {
-        // MPOL_DEFAULT = 0
-        let _ = crate::arch::uaccess::put_user(mode_ptr, 0i32);
-    }
+    // MPOL_DEFAULT = 0
+    let _ = crate::arch::uaccess_safe::write_user(mode_ptr as usize, 0i32);
 
     // Fill nodemask with all nodes
     if !nodemask_ptr.is_null() && maxnode > 0 {
@@ -4140,11 +4037,10 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> i64 {
             return -errno::EFAULT as i64;
         }
         let nwords = (maxnode + core::mem::size_of::<usize>() * 8 - 1) / (core::mem::size_of::<usize>() * 8);
-        // SAFETY: nodemask_ptr validated with access_ok; nwords bounded by maxnode.
-        unsafe {
-            for i in 0..nwords {
-                let _ = crate::arch::uaccess::put_user(nodemask_ptr.add(i), usize::MAX);
-            }
+        // nodemask_ptr validated with access_ok; nwords bounded by maxnode.
+        for i in 0..nwords {
+            let _ =
+                crate::arch::uaccess_safe::write_user((nodemask_ptr as usize) + i, usize::MAX);
         }
     }
 
@@ -4244,9 +4140,10 @@ pub fn sys_fadvise64(args: [u64; 6]) -> i64 {
         return -errno::EINVAL as i64;
     }
 
-    // SAFETY: get_file_fd returns a shared Arc<File> or None; only the
-    // ops identity is inspected, no mutation.
-    unsafe {
+    // get_file_fd returns a shared Arc<File> or None; only the ops
+    // identity is inspected, no mutation (safe fns — the old wrapper
+    // was vestigial).
+    {
         let file = match crate::fs::file::get_file_fd(fd as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
@@ -4260,7 +4157,7 @@ pub fn sys_fadvise64(args: [u64; 6]) -> i64 {
         if is_pipe {
             return -errno::ESPIPE as i64;
         }
-        if let Some(inode) = (*file.inode.get()).as_ref() {
+        if let Some(inode) = file.get_inode() {
             if inode.mode.is_fifo() {
                 return -errno::ESPIPE as i64;
             }

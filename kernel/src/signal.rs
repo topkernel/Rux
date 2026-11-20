@@ -3817,14 +3817,15 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
     // init (or the immediate-reboot cascade) runs here.
     crate::syscall::process::cad_deliver_pending();
 
-    // SAFETY: regs is passed from trap handler; sched::current() returns the running task.
-    unsafe {
+    // regs is the trap handler's frame pointer (the one frame edge
+    // lives inside do_signal); sched::current() returns a typed &mut.
+    {
         if regs.is_null() {
             return;
         }
 
         if let Some(current) = sched::current() {
-            let pending = (*current).pending().get_all();
+            let pending = current.pending().get_all();
             // If there are pending signals, process them
             if pending != 0 {
                 do_signal(regs);
@@ -3881,15 +3882,13 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
 pub fn fatal_signal_pending() -> bool {
     use crate::sched;
 
-    // SAFETY: sched::current() returns the running task's valid pointer.
-    unsafe {
-        if let Some(current) = sched::current() {
-            let pending = (*current).pending.get_all();
-            const SIGKILL_BIT: u64 = 1 << 8; // signal 9
-            (pending & !(*current).sigmask & SIGKILL_BIT) != 0
-        } else {
-            false
-        }
+    // sched::current() returns a typed &mut Task reference.
+    if let Some(current) = sched::current() {
+        let pending = current.pending.get_all();
+        const SIGKILL_BIT: u64 = 1 << 8; // signal 9
+        (pending & !current.sigmask & SIGKILL_BIT) != 0
+    } else {
+        false
     }
 }
 
@@ -3910,26 +3909,24 @@ pub fn fatal_signal_pending() -> bool {
 pub fn signal_pending() -> bool {
     use crate::sched;
 
-    // SAFETY: sched::current() returns the running task's valid pointer.
-    unsafe {
-        if let Some(current) = sched::current() {
-            // Get pending signals
-            let pending_signals = (*current).pending.get_all();
+    // sched::current() returns a typed &mut Task reference.
+    if let Some(current) = sched::current() {
+        // Get pending signals
+        let pending_signals = current.pending.get_all();
 
-            // If no pending signals, return false directly
-            if pending_signals == 0 {
-                return false;
-            }
-
-            // Check for unmasked signals
-            // sigmask contains blocked signals
-            let blocked_signals = (*current).sigmask;
-
-            // If there are pending unmasked signals, return true
-            (pending_signals & !blocked_signals) != 0
-        } else {
-            false
+        // If no pending signals, return false directly
+        if pending_signals == 0 {
+            return false;
         }
+
+        // Check for unmasked signals
+        // sigmask contains blocked signals
+        let blocked_signals = current.sigmask;
+
+        // If there are pending unmasked signals, return true
+        (pending_signals & !blocked_signals) != 0
+    } else {
+        false
     }
 }
 

@@ -929,6 +929,15 @@ impl File {
         unsafe { self.write_at(offset, buf.as_ptr(), buf.len()) }
     }
 
+    /// Safe lseek(2) dispatch for `#![forbid(unsafe_code)]` syscall
+    /// files (same rationale as the slice-typed I/O entries above):
+    /// the raw-pointer-free dispatch over the write-once ops cell.
+    pub fn lseek_op(&self, offset: isize, whence: i32) -> isize {
+        // SAFETY: the only unsafe inside lseek() is the write-once ops
+        // cell read (see get_ops); this entry adds no raw pointers.
+        unsafe { self.lseek(offset, whence) }
+    }
+
     /// Close file
     pub unsafe fn close(&mut self) -> i32 {
         if let Some(ops) = *self.ops.get() {

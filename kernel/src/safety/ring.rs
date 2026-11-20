@@ -57,6 +57,11 @@ impl<T: Copy, const N: usize> SpscRing<T, N> {
     /// Const constructor for `static` use (the one audited edge:
     /// INV-RING-3).
     pub const fn new() -> Self {
+        // INV-RING-1 enforced, not just documented: a non-power-of-two
+        // N makes MASK 0 and the ring silently drops EVERYTHING (the
+        // Miri-audit finding — logical defect, no in-tree tripper).
+        // const-evaluated: a bad N fails the build, never a boot.
+        assert!(N.is_power_of_two(), "SpscRing: N must be a power of two (INV-RING-1)");
         Self {
             slots: UnsafeCell::new([const {
                 UnsafeCell::new(MaybeUninit::zeroed())

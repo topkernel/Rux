@@ -82,8 +82,22 @@ pub(crate) fn t_preempt_count(task: *const Task) -> i32 {
 /// is TREATED AS DATA, never dereferenced further by these edges.
 pub(crate) fn raw_qword(addr: u64) -> u64 {
     // SAFETY: INV-FOR-2 — single volatile read of mapped-or-guarded
-    // memory; the value is only printed or compared.
+    // memory; the value is only printed or compared. addr MUST be
+    // 8-aligned (a misaligned u64 volatile read is UB — the compiler's
+    // alignment check panics in debug builds).
+    debug_assert!(addr % 8 == 0, "raw_qword: misaligned u64 read at {:#x}", addr);
     unsafe { core::ptr::read_volatile(addr as usize as *const u64) }
+}
+
+/// One volatile u32 at an arbitrary captured address — the width-correct
+/// twin of raw_qword for 4-mod-8 field offsets (u32 Task fields sit at
+/// 4-aligned, not 8-aligned, offsets after the layout drift).
+///
+/// SAFETY: INV-FOR-2 — single aligned volatile read of mapped-or-guarded
+/// memory; the value is only printed or compared.
+pub(crate) fn raw_u32(addr: u64) -> u32 {
+    debug_assert!(addr % 4 == 0, "raw_u32: misaligned u32 read at {:#x}", addr);
+    unsafe { core::ptr::read_volatile(addr as usize as *const u32) }
 }
 
 /// View a captured `&'static Location` key (the panic-location tables

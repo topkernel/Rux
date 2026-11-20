@@ -58,7 +58,12 @@ fn verify_multicast_bit() {
     assert!(eth_is_multicast_addr(&addr));
 }
 
-/// INV-ETH-K4: classification is mutually exclusive.
+/// INV-ETH-K4: unicast excludes multicast/broadcast, and broadcast refines
+/// (implies) multicast. The original phrasing "classification is mutually
+/// exclusive" contradicted this module's own K1 (broadcast IS multicast) —
+/// for ETH_BROADCAST the sum is 2 and the assert can never hold. Birth
+/// defect latent since fa84eaeb5 (the sweep only reached it after the errno
+/// grinder).
 #[kani::proof]
 fn verify_classification_exclusive() {
     let a0: u8 = kani::any();
@@ -71,5 +76,6 @@ fn verify_classification_exclusive() {
     let is_bc = eth_is_broadcast_addr(&addr) as u8;
     let is_mc = eth_is_multicast_addr(&addr) as u8;
     let is_uc = eth_is_valid_unicast_addr(&addr) as u8;
-    assert!(is_bc + is_mc + is_uc <= 1);
+    assert!(is_uc + is_mc <= 1);  // valid unicast and multicast never co-occur
+    assert!(is_bc <= is_mc);      // broadcast is a multicast refinement
 }

@@ -22,6 +22,8 @@
 //! 2. Reserved regions are added for kernel, initrd, dtb, etc.
 //! 3. Frame allocator is initialized from available memory (memory - reserved)
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -526,6 +528,15 @@ impl MemBlock {
 // `memblock()` (shared ref) is safe to call.
 static mut MEMBLOCK: MemBlock = MemBlock::new();
 
+/// Raw pointer to the memblock static — the ONLY bridge the
+/// mm::edges (INV-MM-3) use to reach it; never called from elsewhere
+/// (forming the pointer is inert; the borrow discipline lives in
+/// edges::memblock_ref/memblock_mut).
+#[allow(static_mut_refs)]
+pub(super) fn memblock_raw() -> *mut MemBlock {
+    &raw mut MEMBLOCK
+}
+
 /// Init guard for MEMBLOCK — ensures init() runs exactly once.
 static MEMBLOCK_INIT: AtomicBool = AtomicBool::new(false);
 
@@ -534,62 +545,53 @@ pub fn memblock_init() {
     // Use compare_exchange so that even if two early-boot callers race, only
     // one proceeds with initialization.
     if MEMBLOCK_INIT.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-        // SAFETY: called only during early boot (single-threaded), before any
-        // concurrent access to MEMBLOCK.
-        unsafe {
-            MEMBLOCK.init();
-        }
+        // Early boot (single-threaded), before any concurrent access to
+        // MEMBLOCK (INV-MM-3 exclusive arm).
+        super::edges::memblock_mut().init();
     }
 }
 
 /// Add memory region
 pub fn memblock_add(base: usize, size: usize) -> Result<(), ()> {
-    // SAFETY: called only during early boot before concurrent access.
-    unsafe {
-        MEMBLOCK.add_memory(base, size)
-    }
+    // Early boot before concurrent access (INV-MM-3 exclusive arm).
+    super::edges::memblock_mut().add_memory(base, size)
 }
 
 /// Reserve memory region
 pub fn memblock_reserve(base: usize, size: usize) -> Result<(), ()> {
-    // SAFETY: called only during early boot before concurrent access.
-    unsafe {
-        MEMBLOCK.reserve(base, size)
-    }
+    // Early boot before concurrent access (INV-MM-3 exclusive arm).
+    super::edges::memblock_mut().reserve(base, size)
 }
 
 /// Reserve memory region with NOMAP
 pub fn memblock_reserve_nomap(base: usize, size: usize) -> Result<(), ()> {
-    // SAFETY: called only during early boot before concurrent access.
-    unsafe {
-        MEMBLOCK.reserve_nomap(base, size)
-    }
+    // Early boot before concurrent access (INV-MM-3 exclusive arm).
+    super::edges::memblock_mut().reserve_nomap(base, size)
 }
 
 /// Get available region for frame allocator
 pub fn memblock_get_available_region() -> Option<MemBlockRegion> {
-    // SAFETY: read-only access; MEMBLOCK is initialized before this is called.
-    unsafe {
-        MEMBLOCK.get_available_region()
-    }
+    // Read-only access; MEMBLOCK is initialized before this is called
+    // (INV-MM-3 shared arm).
+    super::edges::memblock_ref().get_available_region()
 }
 
 /// Get total memory size
 pub fn memblock_total_memory() -> usize {
-    // SAFETY: read-only access; MEMBLOCK is initialized before this is called.
-    unsafe { MEMBLOCK.total_memory() }
+    // Read-only access (INV-MM-3 shared arm).
+    super::edges::memblock_ref().total_memory()
 }
 
 /// Get available memory size
 pub fn memblock_available_memory() -> usize {
-    // SAFETY: read-only access; MEMBLOCK is initialized before this is called.
-    unsafe { MEMBLOCK.available_memory() }
+    // Read-only access (INV-MM-3 shared arm).
+    super::edges::memblock_ref().available_memory()
 }
 
 /// Check if address is reserved
 pub fn memblock_is_reserved(addr: usize) -> bool {
-    // SAFETY: read-only access; MEMBLOCK is initialized before this is called.
-    unsafe { MEMBLOCK.is_reserved(addr) }
+    // Read-only access (INV-MM-3 shared arm).
+    super::edges::memblock_ref().is_reserved(addr)
 }
 
 /// Iterate over free memory ranges (memory - reserved)
@@ -597,20 +599,20 @@ pub fn memblock_for_each_free_range<F>(min_addr: usize, max_addr: usize, f: F)
 where
     F: FnMut(usize, usize),
 {
-    // SAFETY: read-only iteration over regions; called during boot or init.
-    unsafe { MEMBLOCK.for_each_free_range(min_addr, max_addr, f) }
+    // Read-only iteration over regions (INV-MM-3 shared arm).
+    super::edges::memblock_ref().for_each_free_range(min_addr, max_addr, f)
 }
 
 /// Find free region in range
 pub fn memblock_find_in_range(size: usize, min_addr: usize, max_addr: usize) -> Option<usize> {
-    // SAFETY: read-only query; MEMBLOCK is initialized before this is called.
-    unsafe { MEMBLOCK.find_in_range(size, min_addr, max_addr) }
+    // Read-only query (INV-MM-3 shared arm).
+    super::edges::memblock_ref().find_in_range(size, min_addr, max_addr)
 }
 
 /// Dump memblock state
 pub fn memblock_dump() {
-    // SAFETY: read-only access for diagnostics; MEMBLOCK is initialized.
-    unsafe { MEMBLOCK.dump() }
+    // Read-only access for diagnostics (INV-MM-3 shared arm).
+    super::edges::memblock_ref().dump()
 }
 
 /// Get reference to memblock (for reading).
@@ -620,9 +622,9 @@ pub fn memblock_dump() {
 /// After the scheduler starts this is safe to call from any context because
 /// MEMBLOCK is no longer mutated.
 pub fn memblock() -> &'static MemBlock {
-    // SAFETY: MEMBLOCK is initialized before any call to this function.
-    // After early boot the data is effectively immutable.
-    unsafe { &MEMBLOCK }
+    // MEMBLOCK is initialized before any call to this function; after
+    // early boot the data is effectively immutable (INV-MM-3).
+    super::edges::memblock_ref()
 }
 
 /// Get mutable reference to memblock (for initialization).
@@ -631,19 +633,19 @@ pub fn memblock() -> &'static MemBlock {
 /// Must only be called during early boot before the scheduler starts.
 /// The caller must ensure no other thread can access MEMBLOCK concurrently.
 pub fn memblock_mut() -> &'static mut MemBlock {
-    // SAFETY: caller must ensure exclusive access (only during early boot,
-    // before scheduler starts).
-    unsafe { &mut MEMBLOCK }
+    // Exclusive access only during early boot (INV-MM-3 exclusive arm).
+    super::edges::memblock_mut()
 }
 
 /// Allocate a physical page from memblock.
 /// Physical memory allocation from memblock.
 /// Returns physical address of allocated page, or None if allocation fails.
 pub fn memblock_phys_alloc() -> Option<usize> {
-    // SAFETY: called only during early boot (single-threaded).
-    unsafe {
+    // Early boot (single-threaded) — INV-MM-3 exclusive arm.
+    {
+        let mb = super::edges::memblock_mut();
         // Find a free page in available memory
-        let phys = MEMBLOCK.find_in_range(PAGE_SIZE, 0, usize::MAX)?;
+        let phys = mb.find_in_range(PAGE_SIZE, 0, usize::MAX)?;
         // SCRIBBLE HUNT: the kernel image occupies the low ~12MB; a page
         // handed out from there becomes a live page table over .text
         // (the x86 text-scribbler). Catch it red-handed.
@@ -654,7 +656,7 @@ pub fn memblock_phys_alloc() -> Option<usize> {
             );
         }
         // Reserve it
-        MEMBLOCK.reserve(phys, PAGE_SIZE).ok()?;
+        mb.reserve(phys, PAGE_SIZE).ok()?;
         Some(phys)
     }
 }

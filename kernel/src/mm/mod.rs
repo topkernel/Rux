@@ -6,6 +6,7 @@
 //! Memory Management Module
 
 pub mod buddy_allocator;
+pub mod edges;
 pub mod allocator;
 pub mod layout;
 pub mod page;

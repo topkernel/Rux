@@ -52,6 +52,22 @@ impl MmioRegion {
     }
 
     fn check(&self, off: usize, width: usize, what: &str) -> usize {
+        // INV-MMIO alignment enforced: the SAFETY contract relied on
+        // "every window Rux maps is naturally aligned" as an unforced
+        // precondition — Miri caught that a misaligned base + read_u32
+        // is UB (no in-tree tripper: real MMIO bases are page-aligned).
+        // The assert turns the documented contract into a checked one.
+        debug_assert!(
+            // wrapping_add: alignment is a modulo property, and `off`
+            // may be ANY usize here (the window check below rejects
+            // the huge ones AFTER this line) — the Layer-2.2 Kani
+            // proof convicted the plain `self.base + off` as an
+            // overflow path in the checker itself (off near
+            // usize::MAX before the guard ran).
+            (self.base.wrapping_add(off)) % width == 0,
+            "MMIO {} misaligned: base={:#x} off={:#x} width={}",
+            what, self.base, off, width
+        );
         let end = off.checked_add(width);
         match end {
             Some(e) if e <= self.len => self.base + off,
