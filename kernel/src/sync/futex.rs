@@ -229,11 +229,11 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
             if FWW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 256 {
                 let cur = crate::sched::current();
                 let (tid2, tgid2, comm) = match cur {
-                    Some(t) => unsafe {
+                    Some(t) => {
                         (
-                            (*t).pid(),
-                            (*t).tgid() as u32,
-                            core::str::from_utf8((*t).comm().as_slice()).unwrap_or(""),
+                            t.pid(),
+                            t.tgid() as u32,
+                            core::str::from_utf8(t.comm().as_slice()).unwrap_or(""),
                         )
                     },
                     None => (0, 0, ""),
@@ -253,7 +253,7 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
         }
     }
     let (tid, tgid) = match crate::sched::current() {
-        Some(t) => unsafe { ((*t).pid(), (*t).tgid() as u32) },
+        Some(t) => { (t.pid(), t.tgid() as u32) },
         None => (0, 0),
     };
     let r = crate::arch::cpu_id() as usize % FUXW_NRINGS;
@@ -414,7 +414,7 @@ fn resolve_futex_phys(uaddr: usize) -> usize {
             None => return 0,
         };
         // SAFETY: read-only page-table walk of the current address space.
-        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, u as u64) } {
+        match crate::sync::edges::pt_walk(root, u as u64) {
             Some((ppn, bits)) => {
                 // Present + user leaf only (device-window leaves and kernel
                 // mappings are not futex words).
@@ -512,8 +512,8 @@ impl FutexKey {
                     .map(|t| t.pid())
                     .unwrap_or(0);
                 let comm = crate::sched::current()
-                    .map(|t| unsafe {
-                        alloc::string::String::from((*t).comm_str())
+                    .map(|t| {
+                        alloc::string::String::from(t.comm_str())
                     })
                     .unwrap_or_else(|| alloc::string::String::from("?"));
                 crate::pr_warn!(
@@ -847,7 +847,7 @@ pub fn ffrt_chain_walk(
     let mgr = aspace.vma_try_read()?;
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the parked task's mm.
-        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+        match crate::sync::edges::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
@@ -1106,7 +1106,7 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string:
     let mgr = aspace.vma_try_read()?;
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the parked task's mm.
-        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+        match crate::sync::edges::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
@@ -1439,7 +1439,7 @@ pub fn fuxwatch_retire_page(page: u64) {
             continue;
         }
         // SAFETY: read-only diagnostic walk of an armed root.
-        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+        match crate::sync::edges::pt_walk(root, va) {
             // Present + user + W-clear = a page WE armed (the arm round
             // wrote 0x1); restore RW.
             Some((_, bits)) if bits & 0x1 != 0 && bits & 0x4 != 0 && bits & 0x2 == 0 => {
@@ -1634,9 +1634,7 @@ pub fn fuxwatch_arm_round() {
             if si == 1 && !ok2 {
                 continue;
             }
-            let ok = unsafe {
-                crate::arch::mm::mm_ops::PageTableWalker::walk(root, wa)
-            }
+            let ok = crate::sync::edges::pt_walk(root, wa)
             .map(|(_, bits)| bits & 0x2 != 0)
             .unwrap_or(false);
             if ok {
@@ -1945,7 +1943,7 @@ pub fn fuxw_word_shape(task: *mut crate::process::Task, uaddr: u64) -> Option<al
     let mgr = aspace.vma_try_read()?;
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the parked task's mm.
-        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+        match crate::sync::edges::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
@@ -2029,7 +2027,7 @@ pub fn deep_ufw(task: *mut crate::process::Task) -> Option<alloc::string::String
     let root = aspace.root_ppn();
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the parked task's mm.
-        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+        match crate::sync::edges::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
@@ -2075,7 +2073,7 @@ pub fn fuxwatch_read_word(root_ppn: u64) -> u32 {
         return 0xffff_ffff;
     }
     // SAFETY: read-only walk of the current mm.
-    match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, addr) } {
+    match crate::sync::edges::pt_walk(root_ppn, addr) {
         Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
             let kv = crate::arch::mm::memory_layout::phys_to_virt(
                 crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (addr & 0xfff)),
@@ -2125,7 +2123,7 @@ pub fn fuxwatch_page_watched(page: u64) -> bool {
 /// old value before).
 pub fn fuxwatch_read_word_at(root_ppn: u64, addr: u64) -> u32 {
     // SAFETY: read-only walk of the current mm.
-    match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, addr) } {
+    match crate::sync::edges::pt_walk(root_ppn, addr) {
         Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
             let kv = crate::arch::mm::memory_layout::phys_to_virt(
                 crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (addr & 0xfff)),
@@ -2156,7 +2154,7 @@ pub fn fuxwatch2_addr() -> u64 {
 /// 61st: single-word read through a task's page tables (walker-only,
 /// diagnostic). Shared by the region scan's M3 shape test.
 fn rd_word(root: u64, va: u64) -> Option<u64> {
-    match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+    match crate::sync::edges::pt_walk(root, va) {
         Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
             let kv = crate::arch::mm::memory_layout::phys_to_virt(
                 crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
@@ -2277,9 +2275,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                 while va < chunk_top && hits < 12 {
                 // SAFETY: walker read of the frozen user region.
                 let Some(w) = (|| {
-                    match unsafe {
-                        crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
-                    } {
+                    match crate::sync::edges::pt_walk(root, va) {
                         Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                             let kv = crate::arch::mm::memory_layout::phys_to_virt(
                                 crate::arch::mm::memory_layout::PhysAddr::new(
@@ -2324,9 +2320,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                     for k in -128i64..72 {
                         let fa = (va as i64 + 8 * k - 0x40) as u64;
                         let Some(x) = (|| {
-                            match unsafe {
-                                crate::arch::mm::mm_ops::PageTableWalker::walk(root, fa)
-                            } {
+                            match crate::sync::edges::pt_walk(root, fa) {
                                 Some((ppn2, bits2))
                                     if bits2 & 1 != 0 && bits2 & 0x4 != 0 && ppn2 != 0 =>
                                 {
@@ -2492,7 +2486,7 @@ pub fn oh67_poll_decode(
     let root = aspace.root_ppn();
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the task's mm.
-        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+        match crate::sync::edges::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
@@ -2566,7 +2560,7 @@ pub fn oh67_m2_decode() -> alloc::string::String {
         let root = aspace.root_ppn();
         let rd = |va: u64| -> Option<u64> {
             // SAFETY: read-only page-table walk of this task's mm.
-            match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+            match crate::sync::edges::pt_walk(root, va) {
                 Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                     let kv = crate::arch::mm::memory_layout::phys_to_virt(
                         crate::arch::mm::memory_layout::PhysAddr::new(
@@ -4575,9 +4569,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
             // SAFETY: walker read of the parked task's frozen user
             // stack page.
             let Some(w) = (|| {
-                match unsafe {
-                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, usp + 8 * wi)
-                } {
+                match crate::sync::edges::pt_walk(root, usp + 8 * wi) {
                     Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                         let kv = crate::arch::mm::memory_layout::phys_to_virt(
                             crate::arch::mm::memory_layout::PhysAddr::new(
@@ -4638,9 +4630,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
                     for k in 0..96u64 {
                         let fa = usp + 8 * k;
                         let Some(x) = (|| {
-                            match unsafe {
-                                crate::arch::mm::mm_ops::PageTableWalker::walk(root2, fa)
-                            } {
+                            match crate::sync::edges::pt_walk(root2, fa) {
                                 Some((ppn2, bits2))
                                     if bits2 & 1 != 0 && bits2 & 0x4 != 0 && ppn2 != 0 =>
                                 {
@@ -5062,12 +5052,10 @@ pub fn futex_stuck_census() {
                         // change (lost-wake class).
                         if s.uvma_ok && s.uaddr <= u64::MAX as usize - 4 {
                             let root = aspace.root_ppn();
-                            if let Some((ppn, bits)) = unsafe {
-                                crate::arch::mm::mm_ops::PageTableWalker::walk(
+                            if let Some((ppn, bits)) = crate::sync::edges::pt_walk(
                                     root,
                                     s.uaddr as u64,
-                                )
-                            } {
+                                ) {
                                 if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 {
                                     let kv = crate::arch::mm::memory_layout::phys_to_virt(
                                         crate::arch::mm::memory_layout::PhysAddr::new(
@@ -5103,9 +5091,7 @@ pub fn futex_stuck_census() {
                                 // waiter's page tables; the timespec was
                                 // copied in by futex_parse_timeout before
                                 // the park, so the page is resident.
-                                match unsafe {
-                                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
-                                } {
+                                match crate::sync::edges::pt_walk(root, va) {
                                     Some((ppn, bits))
                                         if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 =>
                                     {
@@ -5151,11 +5137,9 @@ pub fn futex_stuck_census() {
                                 }
                                 // SAFETY: root_ppn of the pinned task's
                                 // live mm; walk is read-only.
-                                if let Some((ppn, bits)) = unsafe {
-                                    crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                if let Some((ppn, bits)) = crate::sync::edges::pt_walk(
                                         root, va,
-                                    )
-                                } {
+                                    ) {
                                     if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 {
                                         let kv = crate::arch::mm::memory_layout::phys_to_virt(
                                             crate::arch::mm::memory_layout::PhysAddr::new(
@@ -5238,9 +5222,7 @@ pub fn futex_stuck_census() {
                             let mut ok = true;
                             for wi in 0..8usize {
                                 let va = pw_base + 8 * (wi as u64);
-                                match unsafe {
-                                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
-                                } {
+                                match crate::sync::edges::pt_walk(root, va) {
                                     Some((ppn, bits))
                                         if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 =>
                                     {
@@ -5268,9 +5250,7 @@ pub fn futex_stuck_census() {
                             let mut ok = true;
                             for wi in 0..6usize {
                                 let va = ub.wrapping_sub(0x28) + 8 * (wi as u64);
-                                match unsafe {
-                                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
-                                } {
+                                match crate::sync::edges::pt_walk(root, va) {
                                     Some((ppn, bits))
                                         if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 =>
                                     {
@@ -5430,9 +5410,7 @@ pub fn futex_stuck_census() {
                             // SAFETY: read-only AddressSpace accessor on
                             // the pinned waiter.
                             let rd = |va: u64| -> Option<u64> {
-                                match unsafe {
-                                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
-                                } {
+                                match crate::sync::edges::pt_walk(root, va) {
                                     Some((ppn, bits))
                                         if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 =>
                                     {
@@ -6895,8 +6873,8 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             core::sync::atomic::AtomicU32::new(0);
         let n = MISS0_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 240 {
-            let waker = crate::sched::current().map(|t| unsafe {
-                ((*t).pid(), (*t).tgid() as u32)
+            let waker = crate::sched::current().map(|t| {
+                (t.pid(), t.tgid() as u32)
             });
             crate::pr_warn!("FUXW-MISS0 #{} uaddr={:#x} waker={:?}", n, uaddr, waker);
         } else {
@@ -8280,7 +8258,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 [const { core::sync::atomic::AtomicBool::new(false) }; CTDE_SLOTS];
             if let Some(t) = crate::sched::current() {
                 // SAFETY: read-only pid/tgid of the current task.
-                let (tid, tgid) = unsafe { ((*t).pid() as u32, (*t).tgid() as u32) };
+                let (tid, tgid) = { (t.pid() as u32, t.tgid() as u32) };
                 let now = crate::drivers::timer::get_jiffies() as u32;
                 let mut slot = usize::MAX;
                 let mut fire = false;
@@ -8333,7 +8311,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
                 if c < RWFRZ_WATCH_BUDGET.load(core::sync::atomic::Ordering::Relaxed) {
                     let (tid, tgid) = match crate::sched::current() {
-                        Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
+                        Some(t) => { (t.pid(), t.tgid()) },
                         None => (0, 0),
                     };
                     crate::pr_warn!(
@@ -8704,7 +8682,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
                 if c < RWFRZ_WATCH_BUDGET.load(core::sync::atomic::Ordering::Relaxed) {
                     let (tid, tgid) = match crate::sched::current() {
-                        Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
+                        Some(t) => { (t.pid(), t.tgid()) },
                         None => (0, 0),
                     };
                     crate::pr_warn!(
@@ -9254,16 +9232,16 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     Some(top) => {
                                         #[cfg(feature = "x86_64")]
                                         {
-                                            unsafe {
+                                            {
                                                 let regs = crate::sched::edges::pt_regs_at_top(top);
-                                                (*regs).rsp as usize
+                                                regs.rsp as usize
                                             }
                                         }
                                         #[cfg(feature = "riscv64")]
                                         {
-                                            unsafe {
+                                            {
                                                 let regs = crate::sched::edges::pt_regs_at_top(top);
-                                                (*regs).sp as usize
+                                                regs.sp as usize
                                             }
                                         }
                                         #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
@@ -10272,7 +10250,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         #[cfg(feature = "x86_64")]
         let (sys, a0, rsp) = {
             let regs = crate::sched::edges::pt_regs_at_top(top);
-            unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
+            { (regs.orig_rax, regs.rdi, regs.rsp) }
         };
         #[cfg(not(feature = "x86_64"))]
         let (sys, a0, rsp) = (0u64, 0u64, 0u64);
@@ -10398,7 +10376,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             #[cfg(feature = "x86_64")]
             let (sys, a0, rsp) = {
                 let regs = crate::sched::edges::pt_regs_at_top(top);
-                unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
+                { (regs.orig_rax, regs.rdi, regs.rsp) }
             };
             #[cfg(not(feature = "x86_64"))]
             let (sys, a0, rsp) = (0u64, 0u64, 0u64);
@@ -10623,7 +10601,7 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
         #[cfg(feature = "x86_64")]
         let (sys, a0, rsp) = {
             let regs = crate::sched::edges::pt_regs_at_top(top);
-            unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
+            { (regs.orig_rax, regs.rdi, regs.rsp) }
         };
         #[cfg(not(feature = "x86_64"))]
         let (sys, a0, rsp) = (0u64, 0u64, 0u64);
@@ -10962,7 +10940,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
             };
             let regs = crate::sched::edges::pt_regs_at_top(top);
             let (sys, a0, rip) =
-                unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rip) };
+                { (regs.orig_rax, regs.rdi, regs.rip) };
             let ripoff = match word_off(rip) {
                 Some((m, o)) => alloc::format!("v{}+{:#x}", m, o),
                 None => alloc::string::String::from("?"),
@@ -11382,9 +11360,9 @@ fn apppark_rets(task: *const Task) {
         return;
     };
     #[cfg(feature = "x86_64")]
-    let rsp = unsafe {
+    let rsp = {
         let regs = crate::sched::edges::pt_regs_at_top(top);
-        (*regs).rsp as usize
+        regs.rsp as usize
     };
     #[cfg(not(feature = "x86_64"))]
     let rsp = 0usize;
@@ -11519,13 +11497,13 @@ fn rwfz_stack_frames(
     let (rsp, rip) = {
         let regs = crate::sched::edges::pt_regs_at_top(top);
         // SAFETY: diagnostic read of this task's entry frame.
-        unsafe { ((*regs).rsp, (*regs).rip) }
+        { (regs.rsp, regs.rip) }
     };
     #[cfg(feature = "riscv64")]
     let (rsp, rip) = {
         let regs = crate::sched::edges::pt_regs_at_top(top);
         // SAFETY: same contract, riscv64.
-        unsafe { ((*regs).sp, (*regs).epc) }
+        { (regs.sp, regs.epc) }
     };
     #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
     let (rsp, rip) = (0u64, 0u64);
@@ -12517,13 +12495,13 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
         let (sys, a0) = {
             let regs = crate::sched::edges::pt_regs_at_top(top);
             // SAFETY: diagnostic read of this task's entry frame.
-            unsafe { ((*regs).orig_rax, (*regs).rdi) }
+            { (regs.orig_rax, regs.rdi) }
         };
         #[cfg(feature = "riscv64")]
         let (sys, a0) = {
             let regs = crate::sched::edges::pt_regs_at_top(top);
             // SAFETY: same contract, riscv64.
-            unsafe { ((*regs).a7, (*regs).a0) }
+            { (regs.a7, regs.a0) }
         };
         #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
         let (sys, a0) = (0u64, 0u64);
@@ -12650,13 +12628,13 @@ pub(crate) fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
         let (rip, sys, a0) = {
             let regs = crate::sched::edges::pt_regs_at_top(top);
             // SAFETY: diagnostic read of this task's entry frame.
-            unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi) }
+            { (regs.rip, regs.orig_rax, regs.rdi) }
         };
         #[cfg(feature = "riscv64")]
         let (rip, sys, a0) = {
             let regs = crate::sched::edges::pt_regs_at_top(top);
             // SAFETY: same contract, riscv64.
-            unsafe { ((*regs).epc, (*regs).a7, (*regs).a0) }
+            { (regs.epc, regs.a7, regs.a0) }
         };
         #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
         let (rip, sys, a0) = (0u64, 0u64, 0u64);
