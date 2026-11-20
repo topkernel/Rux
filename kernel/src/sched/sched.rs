@@ -744,12 +744,15 @@ pub fn emit_grq_reports(reports: &[GrqPendingReport]) {
         let comm = core::str::from_utf8(&r.comm[..cl]).unwrap_or("?");
         match r.kind {
             GRQ_RPT_COUNTER_RESYNC => {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                 crate::pr_warn!("STRAND-COUNTER-RESYNC cfs was={} now={}", r.a, r.b);
             }
             GRQ_RPT_SHOUT_RETIRED => {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                 crate::pr_warn!("SWOUT-STALE-RETIRED cpu={} pid={}", r.a, r.b);
             }
             GRQ_RPT_STRAND_ID => {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                 crate::pr_warn!(
                     "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true ago={}",
                     r.a,
@@ -761,6 +764,7 @@ pub fn emit_grq_reports(reports: &[GrqPendingReport]) {
                 );
             }
             GRQ_RPT_STRAND_ID_NOTRACE => {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                 crate::pr_warn!(
                     "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true trace=none",
                     r.a,
@@ -1661,6 +1665,7 @@ pub fn member_release_stale_ownership(member: *mut Task) -> bool {
     // above, so release-then-report cannot change the outcome.
     drop(guard);
     if n < 8 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
         crate::pr_warn!(
             "FDM-STALE-RELEASE pid={} claim={} pk={} st={:#x} tcpu={} slot={:#x} swout={:#x}",
             pid,
@@ -2033,6 +2038,7 @@ fn process_deferred_exit_pid(packed: i64) {
         static EN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if EN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
             crate::pr_info!(
                 "EXITNOTIFY: child={} parent={}",
                 child_pid, parent_pid
@@ -2771,6 +2777,7 @@ pub fn init() {
     }
 
     if boot_cpu >= MAX_CPUS {
+        // HOTPATH-PRINT: boot-time one-shot (init error path, fires before the scheduler runs).
         println!("sched: init: invalid cpu_id {}", boot_cpu);
         return;
     }
@@ -2795,7 +2802,8 @@ pub fn init() {
             if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
                 (*idle_ptr).thread_mut().sp = stack_top as u64;
             } else {
-                println!("sched: failed to allocate kernel stack for idle task cpu {}", cpu);
+                // HOTPATH-PRINT: boot-time one-shot (init allocation failure).
+            println!("sched: failed to allocate kernel stack for idle task cpu {}", cpu);
             }
 
             (*idle_ptr).set_ti_cpu(cpu as i32);
@@ -3531,6 +3539,7 @@ pub fn schedule() {
         let n = ATOMIC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 24 {
             let loc = core::panic::Location::caller();
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
             crate::pr_err!(
                 "SCHEDULE-ATOMIC (reference __schedule_bug parity) caller={}:{} pid={} pc={:#x} in_softirq={} in_irq={}",
                 loc.file(),
@@ -3760,6 +3769,7 @@ pub fn schedule_dead_never_returns() {
                 {
                     let n = TERM_ENGAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 8 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
                         crate::pr_warn!(
                             "TERM-DESCHED engaged pid={} pc={:#x}",
                             (*cur).pid(),
@@ -3805,6 +3815,7 @@ pub fn schedule_dead_never_returns() {
                     // count-producer hunt (F1 lane), then clear.
                     let n = TERM_RETRY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 4 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
                         crate::pr_warn!(
                             "TERM-DESCHED pid={} leaked preempt_count={:#x} cleared for final switch (round {})",
                             (*cur).pid(),
@@ -3873,6 +3884,7 @@ pub fn schedule_dead_never_returns() {
                         drop(g);
                         (l, nrr)
                     };
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "TERM-DESCHED stuck pid={} rounds={} state={:#x} pc={:#x} claim={} linked={} nr_running={} rip_paced",
                         crate::sched::edges::task_shared(cur).pid(),
@@ -6836,6 +6848,7 @@ pub fn wake_up_enqueue_opt(
                 // the GRQ freely.
                 drop(grq_guard);
                 if w3_print_refused {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-RUNWAKE-REFUSED pid={} state={:#x} linked={} curr_on={} on_cpu={} pk={} cpu={}",
                         w3_pid,
@@ -6848,6 +6861,7 @@ pub fn wake_up_enqueue_opt(
                     );
                     // nanosleep-loss lane: the same refusal with the
                     // linkage/ownership anatomy (see the capture above).
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-ANATOMY pid={} qword={:#x} on_rq={} key={:#x}/{} cfs_nr={} tree_total={} head={:?} stashovf={} skipall={}",
                         w3_pid,
@@ -6861,6 +6875,7 @@ pub fn wake_up_enqueue_opt(
                         crate::sched::fair::pick_giveups().0,
                         crate::sched::fair::pick_giveups().1
                     );
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-CTX pid={} preempt={:#x} ra={:#x} sp={:#x} pt={:?} sw={:?}",
                         w3_pid,
@@ -6885,6 +6900,7 @@ pub fn wake_up_enqueue_opt(
                             }
                             true
                         });
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                         crate::pr_warn!(
                             "W3-USER pid={} frame_ok={} uf={:?}",
                             w3_pid,
@@ -6894,6 +6910,7 @@ pub fn wake_up_enqueue_opt(
                         let k = (*task).timed_sleep_kind.load(core::sync::atomic::Ordering::Relaxed);
                         let d = (*task).timed_sleep_deadline.load(core::sync::atomic::Ordering::Relaxed);
                         let n = crate::drivers::timer::read_time();
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                         crate::pr_warn!(
                             "W3-TSL pid={} kind={} deadline={} now={} delta_ms={} dur_ms={} timer_id={} sigpend={:#x} sigmask={:#x}",
                             w3_pid,
@@ -6952,11 +6969,13 @@ pub fn wake_up_enqueue_opt(
                                 task,
                                 crate::drivers::timer::get_jiffies(),
                             );
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                             crate::pr_warn!("{}", buf);
                         }
                     }
                 }
                 if w3_fz_ready {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-FROZEN-EXEC-SLOT pid={} naming_cpu={} exec={:#x} frozen for {}jif pk={} on_cpu={} retaddr={:#x}",
                         w3_pid,
@@ -6967,6 +6986,7 @@ pub fn wake_up_enqueue_opt(
                         w3_on_cpu,
                         w3_fz_retaddr,
                     );
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-FROZEN-EXEC-STK pid={} sp={:#x} w={:#x} {:#x} {:#x} {:#x}",
                         w3_pid,
@@ -8758,6 +8778,7 @@ pub fn scheduler_tick() {
             if crate::trace::EVENT_WWCENSUS.armed()
                 && (stale_reset > 0 || owned_claim > 0 || oncpu_marked > 0)
             {
+        // HOTPATH-PRINT: switch-gated (cmdline/tracepoint arm above); zero cost when off.
                 crate::pr_info!(
                     "CLAIM-CENSUS linked={} reset={} owned_claim={} oncpu={} oncpu_pids={:?} owned_pids={:?}",
                     linked,
@@ -11618,6 +11639,7 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
         }
     }
     if let Some((cpu, pid, claim, pk, rq)) = report {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
         crate::pr_warn!(
             "SWITCH-ABORT-RELINK cpu={} pid={} claim={} pk={} rq={}",
             cpu,
@@ -12058,6 +12080,7 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
     static HEAL_N: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
     if HEAL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
         crate::pr_warn!(
             "SLOT-LIE-HEALED cpu={} pid={} prev_writer_tag={}",
             cpu,
@@ -12335,6 +12358,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
         static PR_N: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         if PR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
             crate::pr_warn!(
                 "PHANTOM-RELINK n={} pid={} pc={:#x}",
                 healed,

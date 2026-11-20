@@ -79,6 +79,7 @@ static FXDV_CNT: [core::sync::atomic::AtomicUsize; FXDV_RINGSZ] =
 pub fn fxdv_latch_devmgr(pid: u32) {
     let prev = FXDV_PID.swap(pid, core::sync::atomic::Ordering::Relaxed);
     if prev != pid {
+        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
         crate::pr_warn!("FXDV latch devmgr pid={}", pid);
     }
 }
@@ -239,6 +240,7 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
                     None => (0, 0, ""),
                 };
                 let comm = comm.trim_end_matches('\0');
+                // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                 crate::pr_warn!(
                     "FUXWATCH-WAKE j={} tid={} tgid={} comm='{}' op={} uaddr={:#x} ret={}",
                     crate::drivers::timer::get_jiffies(),
@@ -290,6 +292,7 @@ const FXRS_BUDGET: usize = 4000;
 pub fn fxrs_latch(tgid: u32) {
     let prev = FXRS_TGID.swap(tgid, core::sync::atomic::Ordering::Relaxed);
     if prev != tgid {
+        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
         crate::pr_warn!("FXRS latch render_service tgid={}", tgid);
     }
 }
@@ -516,6 +519,7 @@ impl FutexKey {
                         alloc::string::String::from(t.comm_str())
                     })
                     .unwrap_or_else(|| alloc::string::String::from("?"));
+                // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                 crate::pr_warn!(
                     "FXK #{} pid={}({}) uaddr={:#x} phys={:#x} shared={} object={}",
                     n,
@@ -1020,6 +1024,7 @@ pub fn ffrt_chain_walk(
                                     )
                                     .ok();
                             }
+                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!(
                                 "FUXWATCH-LOCKHEAD l={:#x} head={:#x} tid={} pid={}",
                                 wl,
@@ -1454,6 +1459,7 @@ pub fn fuxwatch_retire_page(page: u64) {
     drop(g);
     if touched > 0 {
         crate::arch::x86_64::mm::asid::flush_tlb_all();
+        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
         crate::pr_warn!("FUXWATCH-RETIRE page={:#x} restored W in {} mms", va, touched);
     }
 }
@@ -1509,6 +1515,7 @@ pub fn fuxwatch_parse() {
             if let Ok(addr) = u64::from_str_radix(a, 16) {
                 if addr > 0x1000 {
                     RWFRZ_WATCH[0].store(addr as usize, core::sync::atomic::Ordering::Relaxed);
+                    // HOTPATH-PRINT: switch/cmdline-gated (off by default).
                     crate::pr_warn!("rwfrzwatch armed {:#x}", addr);
                 }
             }
@@ -1518,6 +1525,7 @@ pub fn fuxwatch_parse() {
         if let Ok(b) = v.parse::<usize>() {
             if b > 0 && b <= 200000 {
                 RWFRZ_WATCH_BUDGET.store(b, core::sync::atomic::Ordering::Relaxed);
+                // HOTPATH-PRINT: switch/cmdline-gated (off by default).
                 crate::pr_warn!("rwfrzbudget {}", b);
             }
         }
@@ -1537,6 +1545,7 @@ pub fn fuxwatch_parse() {
         if a > 0x1000 {
             FUXWATCH_ADDR.store(a, core::sync::atomic::Ordering::Relaxed);
             FUXWATCH_DELAY_S.store(delay, core::sync::atomic::Ordering::Relaxed);
+            // HOTPATH-PRINT: switch/cmdline-gated (off by default).
             crate::pr_warn!("fuxwatch armed target={:#x} delay={}s", a, delay);
             // sc58: the arm rounds run in the censusd kthread, which was
             // only spawned lazily on the first DEFERRED print — ohc73/74
@@ -1560,6 +1569,7 @@ fn fuxwatch2_parse() {
     if let Some(a) = addr {
         if a > 0x1000 {
             FUXWATCH2_ADDR.store(a, core::sync::atomic::Ordering::Relaxed);
+            // HOTPATH-PRINT: switch/cmdline-gated (off by default).
             crate::pr_warn!("fuxwatch2 armed target={:#x}", a);
             // sc58: censusd must exist for the arm rounds (see slot 1).
             crate::dfx::taskdump::ensure_defer_thread();
@@ -1768,6 +1778,7 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
         static RETIRED: core::sync::atomic::AtomicBool =
             core::sync::atomic::AtomicBool::new(false);
         if !RETIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
             crate::pr_warn!("FUXWATCH budget reached — retiring watch");
             fuxwatch_retire_all();
         }
@@ -1784,6 +1795,7 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
             core::sync::atomic::AtomicUsize::new(0);
         let p = PG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if p < 900 {
+            // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
             crate::pr_warn!(
                 "FW-PG #{} tid={} addr={:#x} rip={:#x} old={:#x}",
                 p,
@@ -1804,6 +1816,7 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     let wtgid = crate::sched::current()
         .map(|t| crate::sched::edges::task_shared(t).tgid() as u32)
         .unwrap_or(0);
+    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
     crate::pr_warn!("FW tid={} tgid={} rip={:#x} old={} n={} addr={:#x}{}", tid, wtgid, rip, old_word, n, fault_addr, if which2 { " w2" } else { "" });
     // 62nd: latch the owner-of-record on every successful 0->1
     // acquire-class write (the fast-path CAS or the xchg that wins
@@ -5339,6 +5352,7 @@ pub fn futex_stuck_census() {
                                         i + 1 == p || i == p + 1 || i == p
                                     });
                                     if (r.anon_big || near_park) && arena_n < 24 {
+                                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                         crate::pr_warn!(
                                             "ARENA-VMAS pid={} {:x}-{:x} sz={:#x} park{}",
                                             s.tgid,
@@ -5350,6 +5364,7 @@ pub fn futex_stuck_census() {
                                         arena_n += 1;
                                     }
                                     if r.exec_fb && exec_n < 48 {
+                                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                         crate::pr_warn!(
                                             "ARENA-EXEC pid={} {:x}-{:x} off={:#x} fd={}",
                                             s.tgid,
@@ -5816,6 +5831,7 @@ pub fn futex_stuck_census() {
         } else {
             "live=?"
         };
+        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
         crate::pr_warn!(
             "FUX-STUCK{} tgid={} tid={} ({}) uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} {}={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
             if is_fresh { "-FRESH" } else { "" },
@@ -6011,6 +6027,7 @@ pub fn futex_stuck_census() {
                 for &wv in g.rep_chn_head_win.iter() {
                     let _ = write!(win_s, "{:#x} ", wv);
                 }
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "FUX-CHAIN-HEAD tid={} head={:#x} win:{}",
                     g.rep_tid,
@@ -6099,6 +6116,7 @@ pub fn futex_stuck_census() {
                         .compare_exchange(0, w2, Relaxed, Relaxed)
                         .is_ok()
                     {
+                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                         crate::pr_warn!(
                             "FUXWATCH2-AUTO word={:#x} tid={} park={}s",
                             w2,
@@ -6135,6 +6153,7 @@ pub fn futex_stuck_census() {
                 }
             }
             if picks.is_empty() || CTX_LINES.load(Relaxed) > 420 {
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "FUXW-SUM pool={}/{} last_full_j={} (no dump targets)",
                     pool_used,
@@ -6180,6 +6199,7 @@ pub fn futex_stuck_census() {
                     }
                 }
                 snap.sort_by_key(|e| e.j);
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "FUXW-SUM pool={}/{} last_full_j={} ring={} oldest={} newest={}",
                     pool_used,
@@ -6216,11 +6236,13 @@ pub fn futex_stuck_census() {
                         in_win.len(),
                         ever_word
                     );
+                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!("{}", hdr);
                     for e in in_win.iter().take(12) {
                         if CTX_LINES.fetch_add(1, Relaxed) > 420 {
                             break;
                         }
+                        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                         crate::pr_warn!(
                             "FUXW j={} tid={} tgid={} op={} uaddr={:#x} ret={}",
                             e.j,
@@ -6432,6 +6454,7 @@ pub fn futex_stuck_census() {
                         }
                         let _ = write!(prev_s, " {:#x}", a);
                     }
+                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!(
                         "FUX-CHAIN tid={} node={:#x} task={:#x} wt={} hops:{} prev:{}",
                         g.rep_tid,
@@ -6446,6 +6469,7 @@ pub fn futex_stuck_census() {
                         for &wv in g.rep_chn_head_win.iter() {
                             let _ = write!(win_s, "{:#x} ", wv);
                         }
+                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                         crate::pr_warn!(
                             "FUX-CHAIN-HEAD tid={} head={:#x} win:{}",
                             g.rep_tid,
@@ -6456,6 +6480,7 @@ pub fn futex_stuck_census() {
                 }
             }
             if graph_lines > 0 {
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "FUX-GRAPH-SUM samgr_pid={} groups={} (burst {})",
                     samgr_pid,
@@ -6690,6 +6715,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                         // SAFETY: read-only comm/pid of a waiter still
                         // linked in this bucket under our lock.
                         unsafe {
+                            // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                             crate::pr_warn!(
                                 "FUTEX-WAKE-THEFT waker mm={:#x} consumed waiter mm={:#x} uaddr={:#x} waiter tid {}",
                                 mm,
@@ -6816,6 +6842,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                     // SAFETY: the task is linked in this bucket under our
                     // lock; cannot be freed while we hold it.
                     let tk = crate::sched::edges::task_shared(task);
+                    // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                     crate::pr_warn!(
                         "FUXW-WOKE uaddr={:#x} woken tid={} tgid={} state={:#x}",
                         uaddr,
@@ -6854,6 +6881,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             let waker = crate::sched::current().map(|t| {
                 (t.pid(), t.tgid() as u32)
             });
+            // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
             crate::pr_warn!("FUXW-MISS0 #{} uaddr={:#x} waker={:?}", n, uaddr, waker);
         } else {
             MISS0_DUP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -6924,6 +6952,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                         // wake shows waiter-phys != waker-phys with the same
                         // uaddr: the phys-keyed bucket moved and the wake
                         // scanned the waker's bucket only.
+                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                         crate::pr_warn!(
                             "futex-wake-miss: uaddr={:#x} waker pid {} key(mm={:#x},shared={},phys={:#x}) found waiter pid-key mm={:#x} phys={:#x} bucket {} waiter-comm {}",
                             uaddr,
@@ -7095,6 +7124,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 static PARK_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if PARK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+                    // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                     crate::pr_warn!(
                         "FUXW-PARK uaddr={:#x} tid={} tgid={} val={:#x}",
                         uaddr,
@@ -7379,6 +7409,7 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
             // Unreachable while the invariants hold (we held the bucket
             // the waiter itself says it is linked into): surface it
             // rather than silently leaking the slot, but do not spin.
+            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!(
                 "futex-remove-miss: slot {} bucket {} not in chain",
                 target_idx,
@@ -8252,6 +8283,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                     }
                 }
                 if fire {
+                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!(
                         "CTD-EARLY tgid={} tid={} word=0x3fbf13e6a8 val={:#x} (held >=2s — full decode now)",
                         tgid,
@@ -8278,6 +8310,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         Some(t) => { (t.pid(), t.tgid()) },
                         None => (0, 0),
                     };
+                    // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                     crate::pr_warn!(
                         "RWFRZ-WATCH #{} tid={} tgid={} op={} uaddr={:#x} val={:#x} jif={}",
                         c,
@@ -8378,10 +8411,12 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 if s1 == 0 {
                     FUXWATCH_ADDR.store(uaddr as u64, Relaxed);
                     crate::dfx::taskdump::ensure_defer_thread();
+                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!("FXDV-ARM slot1={:#x} jif={}", uaddr, crate::drivers::timer::get_jiffies());
                 } else if (s1 as usize) != uaddr && FUXWATCH2_ADDR.load(Relaxed) == 0 {
                     FUXWATCH2_ADDR.store(uaddr as u64, Relaxed);
                     crate::dfx::taskdump::ensure_defer_thread();
+                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!("FXDV-ARM slot2={:#x} jif={}", uaddr, crate::drivers::timer::get_jiffies());
                 }
                 // 70th (ohw86): birth-curve sampler — on every traced devmgr
@@ -8401,6 +8436,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                                 let prev = LAST1[k].load(Relaxed);
                                 if w != prev {
                                     LAST1[k].store(w, Relaxed);
+                                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!(
                                         "FXDV-CURVE word{:+#x} {:#x} -> {:#x} jif={} tid={}",
                                         if k == 0 { 0 } else { 0x94 },
@@ -8426,6 +8462,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                             FXDV_CNT[addr_idx].load(Relaxed)
                         };
                         if c < 8 || c % 32 == 0 {
+                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!(
                                 "FXDV-WORD tid={} uaddr={:#x} word={:#x} want={:#x} jif={}",
                                 crate::sched::edges::task_shared(t).pid(),
@@ -8451,6 +8488,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         FXDV_CNT[addr_idx].fetch_add(1, Relaxed)
                     };
                     if c < 12 || c % 16 == 0 {
+                        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                         crate::pr_warn!(
                             "FXDV #{} tid={} op={} uaddr={:#x} val={:#x} jif={}",
                             n,
@@ -8500,6 +8538,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             use core::sync::atomic::Ordering::Relaxed as R2;
             let n = FXDV2_N.fetch_add(1, R2);
             if n < 500 {
+                // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                 crate::pr_warn!(
                     "FXDV2 #{} tgid={} tid={} op={} uaddr={:#x} val={:#x} jif={}",
                     n,
@@ -8649,6 +8688,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         Some(t) => { (t.pid(), t.tgid()) },
                         None => (0, 0),
                     };
+                    // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                     crate::pr_warn!(
                         "RWFRZ-WATCH-RET #{} tid={} tgid={} op={} uaddr={:#x} val={:#x} ret={} jif={}",
                         c,
@@ -8718,6 +8758,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
+                    // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                     crate::pr_warn!(
                         "SAMWAKE tid={} comm='{}' cmd={} uaddr={:#x} val={} ret={}",
                         tid,
@@ -8815,6 +8856,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         .unwrap_or("")
                         .trim_end_matches('\0');
                     crate::trace::trace_parkdump(0, tk.pid(), uaddr as u64, val as u64);
+                    // HOTPATH-PRINT: switch/cmdline-gated (off by default).
                     crate::pr_warn!(
                         "RWFRZ-PARK #{} tid {} comm='{}' uaddr={:#x} val={:#x} (writer parking on {} readers)",
                         n,
@@ -8884,6 +8926,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         && crate::trace::EVENT_PARKDUMP.armed()
                     {
                         crate::trace::trace_parkdump(1, tk.pid(), uaddr as u64, val as u64);
+                        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                         crate::pr_warn!(
                             "APP-PARK #{} tid {} comm='{}' uaddr={:#x} val={:#x} op={:#x}",
                             n,
@@ -8911,6 +8954,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     let _ = write!(s2, " {}", v);
                                 }
                             }
+                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!("{}", s2);
                         }
                         // sc138 (Session Q): the FILTERED init ring — the
@@ -8937,6 +8981,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 if v != 0 {
                                     if shown % 128 == 0 {
                                         if !chunk.is_empty() {
+                                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                             crate::pr_warn!("{}", chunk);
                                         }
                                         chunk = alloc::string::String::new();
@@ -8947,6 +8992,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 }
                             }
                             if !chunk.is_empty() {
+                                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                 crate::pr_warn!("{}", chunk);
                             }
                             // newest 96 with a0
@@ -8960,6 +9006,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     let _ = write!(s3, " {}@{:#x}", v, a0);
                                 }
                             }
+                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!("{}", s3);
                             // sc143: the birth window (fork-exit onward),
                             // immune to loop churn.
@@ -8972,6 +9019,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     let _ = write!(s4, " {}@{:#x}", v, a0);
                                 }
                             }
+                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!("{}", s4);
                         }
                         // sc125 (Session P): the pre-park FAILING-syscall
@@ -9002,6 +9050,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     );
                                 }
                             }
+                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!("{}", s);
                         }
                         // SAFETY: t is the current task, in its own syscall.
@@ -9066,6 +9115,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                         vm.file_size() as usize,
                                         path
                                     );
+                                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!("{}", v);
                                 }
                             }
@@ -9170,6 +9220,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                         probe_file_path(&f),
                                         kind
                                     );
+                                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!("{}", v);
                                     shown += 1;
                                     if shown >= 16 {
@@ -9268,6 +9319,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                                 );
                                             }
                                         }
+                                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                         crate::pr_warn!("{}", v);
                                     }
                                 }
@@ -9278,6 +9330,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             // strncpy stopped at the abstract NUL).
                             if n == 0 {
                                 for line in crate::net::unix::registry_snapshot() {
+                                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!("{}", line);
                                 }
                             }
@@ -9336,6 +9389,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                 let tid = crate::sched::current()
                     .map(|t| t.pid())
                     .unwrap_or(0);
+                // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                 crate::pr_warn!(
                     "stkfutex: tid {} op={:#x} uaddr={:#x} val={:#x} comm='{}'",
                     tid,
@@ -9346,6 +9400,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                 );
                 let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
                 rwfz_op_log(uaddr, op, val, r);
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!("stkfutex: tid {} -> {}", tid, r);
                 return r;
             }
@@ -9468,6 +9523,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                     } else {
                         (0, 0)
                     };
+                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!(
                         "FTWAIT #{} tid {} comm='{}' uaddr={:#x} val={:#x} op={:#x} ts={}{}.{:09}s",
                         n,
@@ -9497,6 +9553,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 let _ = write!(s2, " {}", v);
                             }
                         }
+                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                         crate::pr_warn!("{}", s2);
                         let fcur = tk.last_fails_cur.load(Relaxed);
                         let mut s3 = alloc::string::String::new();
@@ -9509,10 +9566,12 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 let _ = write!(s3, " nr{}=-{} a0={:#x}", v & 0xffff, v >> 16, a0);
                             }
                         }
+                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                         crate::pr_warn!("{}", s3);
                     }
                     let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
                     rwfz_op_log(uaddr, op, val, r);
+                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!("FTWAIT #{} -> ret={}", n, r);
                     return r;
                 }
@@ -9635,6 +9694,7 @@ pub fn note_task_unlink(pid: u32, tgid: u32) {
                 .unwrap_or("")
                 .trim_end_matches('\0');
             let word = crate::sync::edges::read_u32_via_task(t, uaddr);
+            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!(
                 "RWFRZ: EXIT-WORD tid {} comm='{}' word={:#x}",
                 pid,
@@ -9659,8 +9719,10 @@ fn exit_ring_dump_tgid(tgid: u32) {
     }
     drop(g);
     if s.is_empty() {
+        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
         crate::pr_warn!("RWFRZ: exit ring has NO exits for tgid {} — readers did not die by task unlink", tgid);
     } else {
+        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
         crate::pr_warn!("RWFRZ: exit ring for tgid {}:{}", tgid, s);
     }
 }
@@ -9709,6 +9771,7 @@ pub fn kill_dump_tgid(tgid: u32) {
         let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
         let _ = write!(hdr, " [{}:{}]", tk.pid(), comm);
     }
+    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
     crate::pr_warn!("{}", hdr);
     for &t in threads.iter() {
         // Park word: this task's live (unwoken) entry in the waiter pool.
@@ -9730,6 +9793,7 @@ pub fn kill_dump_tgid(tgid: u32) {
         match parked {
             Some((uaddr, bitset)) => {
                 let word = crate::sync::edges::read_u32_via_task(t, uaddr);
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "KILLDUMP: tid {} comm='{}' parked uaddr={:#x} bitset={:#x} word={:#x}",
                     tk.pid(),
@@ -9740,6 +9804,7 @@ pub fn kill_dump_tgid(tgid: u32) {
                 );
             }
             None => {
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "KILLDUMP: tid {} comm='{}' NOT on a futex (blocked in another syscall or runnable)",
                     tk.pid(),
@@ -9762,6 +9827,7 @@ pub fn kill_dump_tgid(tgid: u32) {
         // dump, frame walk) for such tasks; the header line already
         // counted them, so say why their lines are missing.
         let Some(_top) = tk.kernel_stack_top_checked() else {
+            // HOTPATH-PRINT: census/forensic emitter (1 Hz heartbeat- or wedge-gated caller; cold path).
             crate::pr_warn!(
                 "KILLDUMP: tid {} stack-freed (exited mid-census; entry-frame/wedge/frame-walk skipped)",
                 tk.pid()
@@ -9775,6 +9841,7 @@ pub fn kill_dump_tgid(tgid: u32) {
                 let regs = crate::sched::edges::pt_regs_at_top(top);
                 // SAFETY: diagnostic read of this task's entry frame.
                 let r = regs;
+                // HOTPATH-PRINT: census/forensic emitter (1 Hz heartbeat- or wedge-gated caller; cold path).
                 crate::pr_warn!(
                     "KILLDUMP: tid {} syscall nr={:#x} rdi={:#x} rsi={:#x} rdx={:#x} r10={:#x}",
                     tk.pid(),
@@ -9799,6 +9866,7 @@ pub fn kill_dump_tgid(tgid: u32) {
                     }
                 }
                 if !fdnote.is_empty() {
+                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!("KILLDUMP: tid {} {}", tk.pid(), fdnote);
                 }
                 // sc97 wedge forensics: the sc96 kills put the launcher
@@ -9870,6 +9938,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
         }
         None => "n/a",
     };
+    // HOTPATH-PRINT: census/forensic emitter (1 Hz heartbeat- or wedge-gated caller; cold path).
     crate::pr_warn!(
         "KILLDUMP: tid {} state={:#x} on_cpu={} cfs_linked={} pick_state={} cpu={} utime={}t stime={}t",
         tk.pid(),
@@ -9899,6 +9968,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
             }
         };
         let us = if mhz > 0 { cycles / mhz } else { 0 };
+        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
         crate::pr_warn!(
             "KILLDUMP: demand-fault reads={} misses={} fillmisses={} cyc={} (~{}us avg={}us)",
             reads,
@@ -9915,6 +9985,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                 let comm_str = core::str::from_utf8(comm)
                     .unwrap_or("")
                     .trim_end_matches('\0');
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "KILLDUMP: stime-page(FOCUS) comm='{}' rip_page={:#x} ticks={}",
                     comm_str,
@@ -9927,6 +9998,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                 let comm_str = core::str::from_utf8(comm)
                     .unwrap_or("")
                     .trim_end_matches('\0');
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "KILLDUMP: stime-page comm='{}' rip_page={:#x} ticks={}",
                     comm_str,
@@ -9951,6 +10023,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                 let _ = write!(line, " [{}:{}:{}]", fd, kd_fd_type(&f), f.path());
             }
         }
+        // HOTPATH-PRINT: census/forensic emitter (1 Hz heartbeat- or wedge-gated caller; cold path).
         crate::pr_warn!("{}", line);
     }
     // The syscall's primary fd (rdi for read/write/writev/ioctl-family).
@@ -9962,6 +10035,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
         {
             if let Some(f) = tk.try_fdtable().and_then(|fdt| fdt.get_file(fd as usize)) {
                 let ty = kd_fd_type(&f);
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "KILLDUMP: tid {} fd{} type={} flags={:#x}",
                     tk.pid(),
@@ -9976,6 +10050,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                             let pipe_ptr = unsafe { *f.private_data.get() }
                                 .map(|p| p as usize)
                                 .unwrap_or(0);
+                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!(
                                 "KILLDUMP: tid {} pipe fill={}/{} rclosed={} wclosed={} ptr={:#x}",
                                 tk.pid(),
@@ -10030,6 +10105,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                                     }
                                 });
                                 let holders = holders_cell.into_inner();
+                                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                 crate::pr_warn!(
                                     "KILLDUMP: tid {} pipe holders:{}",
                                     tk.pid(),
@@ -10043,6 +10119,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                             let (qb, qt, cap, ql) = us.diag_snapshot();
                             let peer = us.dgram_peer.lock().clone();
                             let bound = us.bound_name.lock().clone();
+                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!(
                                 "KILLDUMP: tid {} unix kind={:?} bound={:?} dgram_peer={:?} queued={}B truesize={} sndbuf={} qlen={}",
                                 tk.pid(),
@@ -10090,6 +10167,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                             txt.push('.');
                         }
                     }
+                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!(
                         "KILLDUMP: tid {} iov{} base={:#x} len={} head='{}'",
                         tk.pid(),
@@ -10104,6 +10182,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
         2 => {
             // open(2): pathname at args[0]
             let p = crate::sync::edges::read_cstr_via_task(t, args[0] as usize, 96);
+            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!("KILLDUMP: tid {} open path='{}'", tk.pid(), p);
         }
         165 => {
@@ -10111,6 +10190,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
             let s = crate::sync::edges::read_cstr_via_task(t, args[0] as usize, 96);
             let tg = crate::sync::edges::read_cstr_via_task(t, args[1] as usize, 96);
             let ft = crate::sync::edges::read_cstr_via_task(t, args[2] as usize, 32);
+            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!(
                 "KILLDUMP: tid {} mount src='{}' tgt='{}' fstype='{}'",
                 tk.pid(),
@@ -10146,6 +10226,7 @@ fn rwfz_op_log(uaddr: usize, op: i32, val: u32, result: i64) {
     let tid = crate::sched::current()
         .map(|t| t.pid() as u64)
         .unwrap_or(0);
+    // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
     crate::pr_warn!(
         "RWFRZ-OP #{} {} tid {} val={:#x} ret={}",
         n,
@@ -11387,6 +11468,7 @@ fn apppark_rets(task: *const Task) {
     if found == 0 {
         let _ = write!(out, " none");
     }
+    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
     crate::pr_warn!("{}", out);
 }
 
@@ -11761,6 +11843,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         let last = BEAT.load(core::sync::atomic::Ordering::Relaxed);
         if now.saturating_sub(last) >= 60 * hz {
             BEAT.store(now, core::sync::atomic::Ordering::Relaxed);
+            // HOTPATH-PRINT: switch/cmdline-gated (off by default).
             crate::pr_warn!("RWFRZ: scan alive at {}s", now / hz);
         }
     }
@@ -11803,6 +11886,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                     (cs.pid(), cs.state().bits())
                 }
                         };
+                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                         crate::pr_warn!(
                             "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (was {}, d{:+}) wtid={} wstate={:#x}",
                             c.uaddr,
@@ -11860,6 +11944,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                 };
                                 #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
                                 let (urip, uop, uval) = (0u64, 0i64, 0u32);
+                                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                 crate::pr_warn!(
                                     "RWFRZ-WAITER tid={} comm='{}' tgid={} leader='{}' unrip={:#x} unrop={} unval={:#x}",
                                     sample_tid,
@@ -11919,6 +12004,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                     }
                                 }
                                 if !words.is_empty() {
+                                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!(
                                         "RWFRZ-MEM{} uaddr={:#x} tgid={}:{}",
                                         row,
@@ -11949,6 +12035,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                 for w in RWFRZ_WATCH.iter() {
                                     if w.load(core::sync::atomic::Ordering::Relaxed) == 0 {
                                         w.store(c.uaddr, core::sync::atomic::Ordering::Relaxed);
+                                        // HOTPATH-PRINT: census/forensic emitter (1 Hz heartbeat- or wedge-gated caller; cold path).
                                         crate::pr_warn!(
                                             "RWFRZ-WATCH-LATCH uaddr={:#x} tgid {} (stable 60s, readers={})",
                                             c.uaddr,
@@ -12025,6 +12112,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                 {
                                     exit_ring_dump_tgid(c.tgid);
                                     let n = rwfz_dump_tgid(c.tgid, 32, true);
+                                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!(
                                         "RWFRZ: GBC-FROZEN tgid {} uaddr={:#x} word={:#x} — dumped {} tasks",
                                         c.tgid,
@@ -12074,6 +12162,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                         if *hn < 8 {
                             *hn += 1;
                         }
+                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                         crate::pr_warn!(
                             "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (first seen)",
                             c.uaddr,
@@ -12095,6 +12184,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                 for w in RWFRZ_WATCH.iter() {
                                     if w.load(core::sync::atomic::Ordering::Relaxed) == 0 {
                                         w.store(c.uaddr, core::sync::atomic::Ordering::Relaxed);
+                                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                         crate::pr_warn!(
                                             "RWFRZ-WATCH-EARLY uaddr={:#x} tgid {} word={:#x}",
                                             c.uaddr,
@@ -12121,6 +12211,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                 {
                                     exit_ring_dump_tgid(c.tgid);
                                     let n = rwfz_dump_tgid(c.tgid, 32, true);
+                                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!(
                                         "RWFRZ: GBC-EARLY tgid {} uaddr={:#x} word={:#x} — dumped {} tasks",
                                         c.tgid,
@@ -12183,6 +12274,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         RWFRZ_DUMPED.store(false, core::sync::atomic::Ordering::Relaxed);
         RWFRZ_OPLOG.store(0, core::sync::atomic::Ordering::Relaxed);
         adopted = true;
+        // HOTPATH-PRINT: census/forensic emitter (1 Hz heartbeat- or wedge-gated caller; cold path).
         crate::pr_warn!(
             "RWFRZ: watching uaddr={:#x} mm={:#x} tgid {} waiters={} word={:#x} readers={}",
             c.uaddr,
@@ -12227,6 +12319,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         for &(off, t, n, u) in fam.iter() {
             if off != 0 && n >= 4 && !armed {
                 armed = true;
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "RWFRZ-OFFFAM offset={:#x} tgid={} words={} sample={:#x} (same-offset park family)",
                     off,
@@ -12278,6 +12371,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         for i in 0..*prev_n {
             let tid = prev[i];
             if tid != 0 && !seen[..k].contains(&tid) {
+                // HOTPATH-PRINT: census/forensic emitter (1 Hz heartbeat- or wedge-gated caller; cold path).
                 crate::pr_warn!(
                     "RWFRZ: TID-VANISHED tgid {} tid {} (reader-exit window; word={:#x})",
                     census_tgid,
@@ -12288,6 +12382,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         }
         for s in seen[..k].iter() {
             if !prev[..*prev_n].contains(s) {
+                // HOTPATH-PRINT: census/forensic emitter (1 Hz heartbeat- or wedge-gated caller; cold path).
                 crate::pr_warn!("RWFRZ: TID-NEW tgid {} tid {}", census_tgid, s);
             }
         }
@@ -12312,6 +12407,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         if v != prev {
             RWFRZ_LASTVAL.store(v, core::sync::atomic::Ordering::Relaxed);
             RWFRZ_LASTVAL_AT.store(now, core::sync::atomic::Ordering::Relaxed);
+            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!(
                 "RWFRZ: word delta {:#x} -> {:#x} (readers {} -> {}) at {}s",
                 prev,
@@ -12333,6 +12429,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                     .find(|c| c.uaddr == uaddr && c.mm == mm)
                     .map(|c| c.n)
                     .unwrap_or(0);
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "RWFRZ: word stuck {:#x} readers={} kernel_waiters={} tgid {} age {}s",
                     v,
@@ -12371,6 +12468,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                 break;
             }
         }
+        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
         crate::pr_warn!(
             "RWFRZ: FROZEN tgid {} uaddr={:#x} word={:#x} readers={} waiters_bit={} nb+4={:#x} nb+8={:#x} nb+12={:#x} nb+16={:#x} age {}s — full tgid dump",
             tgid,
@@ -12387,6 +12485,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         exit_ring_dump_tgid(tgid);
         // 71st: priority ring — this is THE founder-evidence dump.
         let n = rwfz_dump_tgid(tgid, 32, true);
+        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
         crate::pr_warn!("RWFRZ: tgid {} enumerated {} tasks", tgid, n);
         rwfz_neighbor_dump(tgid, uaddr);
         // sc82: the freeze correlates with OTHER processes showing the
@@ -12408,6 +12507,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
             };
             let r = v & 0x7fffffff;
             if v & 0x80000000 != 0 && r >= 8 && r < 0x40000000 {
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "RWFRZ: EXTRA-FROZEN tgid {} uaddr={:#x} word={:#x} readers={} waiters={} — same-shape dump",
                     c.tgid,
@@ -12418,6 +12518,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                 );
                 exit_ring_dump_tgid(c.tgid);
                 let en = rwfz_dump_tgid(c.tgid, 16, false);
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!("RWFRZ: EXTRA tgid {} enumerated {} tasks", c.tgid, en);
                 rwfz_neighbor_dump(c.tgid, c.uaddr);
                 extra += 1;
@@ -12477,6 +12578,7 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
+            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!(
                 "RWFRZ: NBR-PARK tgid {} tid {} comm='{}' parked on frozen-{:#x} (a0={:#x}) — recursion-holder candidate, deep stack",
                 tgid,
@@ -12495,6 +12597,7 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
             let wp4 = crate::sync::edges::read_u32_via_task(t, a0 as usize + 4).unwrap_or(0);
             let wm4 = crate::sync::edges::read_u32_via_task(t, a0 as usize - 4).unwrap_or(0);
             let wp8 = crate::sync::edges::read_u32_via_task(t, a0 as usize + 8).unwrap_or(0);
+            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!(
                 "RWFRZ: NBR-WORD a0={:#x} word={:#x} +4={:#x} +8={:#x} -4={:#x}",
                 a0,
@@ -12549,12 +12652,14 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
                     let _ = write!(line, " {}:{}", i, v);
                     n += 1;
                     if n % 8 == 0 {
+                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                         crate::pr_warn!("RWFRZ: NBR-RAW{}", line);
                         line.clear();
                     }
                 }
             }
             if !line.is_empty() {
+                // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!("RWFRZ: NBR-RAW{}", line);
             }
             // SAFETY: t is a live Task from the pid-hash walk.
