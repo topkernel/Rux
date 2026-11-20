@@ -849,15 +849,11 @@ fn user_callchain(fp: u64, out: &mut [u64; MAX_CALLCHAIN]) -> usize {
     while n < MAX_CALLCHAIN {
         // SAFETY: get_user faults into the extable fixup and returns
         // None instead of panicking.
-        let next = match unsafe {
-            crate::arch::uaccess::get_user(bp as *const u64)
-        } {
+        let next = match crate::arch::uaccess_safe::read_user::<u64>(bp as usize) {
             Some(v) => v,
             None => break,
         };
-        let ret = match unsafe {
-            crate::arch::uaccess::get_user((bp + 8) as *const u64)
-        } {
+        let ret = match crate::arch::uaccess_safe::read_user::<u64>((bp + 8) as usize) {
             Some(v) => v,
             None => break,
         };
@@ -1253,16 +1249,15 @@ fn read_value(ev: &PerfEvent) -> u64 {
                 CTXSW[ev.target_cpu as usize % crate::config::MAX_CPUS].load(Ordering::Relaxed)
             } else {
                 // task-scoped: nvcsw+nivcsw of the target task
-                match unsafe {
-                    crate::process::pid_hash::pid_hash_lookup_pinned(ev.target_tid)
-                } {
+                match crate::process::pid_hash::pid_hash_lookup_pinned(ev.target_tid) {
                     t if !t.is_null() => {
+                        // SAFETY: the pinned lookup took a reference —
+                        // liveness proven for this block; put drops it.
                         let v = unsafe {
                             ((*t).nvcsw.load(Ordering::Relaxed)
                                 + (*t).nivcsw.load(Ordering::Relaxed)) as u64
                         };
-                        // SAFETY: pinned lookup took a reference.
-                        unsafe { crate::process::task::Task::task_put(t) };
+                        crate::process::task::Task::task_put(t);
                         v
                     }
                     _ => 0,
@@ -1275,16 +1270,14 @@ fn read_value(ev: &PerfEvent) -> u64 {
             } else {
                 // task-scoped: per-task major+minor faults (ru_minflt+
                 // ru_majflt equivalent; the Task counters).
-                match unsafe {
-                    crate::process::pid_hash::pid_hash_lookup_pinned(ev.target_tid)
-                } {
+                match crate::process::pid_hash::pid_hash_lookup_pinned(ev.target_tid) {
                     t if !t.is_null() => {
+                        // SAFETY: as the ctxsw arm (pinned reference).
                         let v = unsafe {
                             ((*t).min_flt.load(Ordering::Relaxed)
                                 + (*t).maj_flt.load(Ordering::Relaxed)) as u64
                         };
-                        // SAFETY: pinned lookup took a reference.
-                        unsafe { crate::process::task::Task::task_put(t) };
+                        crate::process::task::Task::task_put(t);
                         v
                     }
                     _ => 0,
@@ -1985,14 +1978,17 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         };
         // Existence + permission (same real uid or root, the
         // reference's perf permission rule simplified to uid).
-        // SAFETY: pinned lookup keeps the Task alive across the check.
-        unsafe {
+        // The pinned lookup keeps the Task alive across the check.
+        {
             let target = crate::process::pid_hash::pid_hash_lookup_pinned(tid);
             if target.is_null() {
                 return -(crate::errno::constants::ESRCH as i64);
             }
             let ok = if let Some(me) = crate::sched::current() {
-                (*target).cred().uid == (*me).cred().uid || (*me).cred().uid == 0
+                // SAFETY: target's pin (the lookup above) proves liveness;
+                // me is the safe current() handle.
+                let ok = unsafe { (*target).cred().uid == me.cred().uid || me.cred().uid == 0 };
+                ok
             } else {
                 false
             };

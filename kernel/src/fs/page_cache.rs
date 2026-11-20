@@ -2312,6 +2312,10 @@ impl PageCache {
         // through the exception table inside the primitive — any address
         // is sound to pass, and the uncopied tail of the frame is
         // zero-filled by the primitive.
+        // (The insert-family's user->physpage copies stay on the raw
+        // exception-table primitive: the DIO hot path is perf-gated and a
+        // slice-building conversion would add an unsafe per site for no
+        // soundness gain — documented in the register's F-family.)
         let uncopied = unsafe {
             crate::arch::uaccess::copy_from_user(
                 phys_to_virt_ptr(phys_addr),
