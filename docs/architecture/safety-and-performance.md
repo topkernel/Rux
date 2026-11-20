@@ -809,6 +809,63 @@ radix/XArray slots + page->mapping — C's whole-tree equivalent.
 *Containment:* all under the per-inode table locks; the copy edges are
 the only writers before publication.
 
+**F14. console TX asm stores + x86 port-IO** — owner
+`kernel/src/console.rs`. *What stays raw:* the riscv `sb`/aarch64 `str`
+asm stores in putc/puts_batch (and uart_data_ready's `ldr`) — deliberate
+per-byte MMIO store instructions with `nostack, nomem`, kept because the
+console row is its own measured fleet (the riscv per-byte batch comment);
+the x86 8250 `outb`/`inb` register pair and the `rep outsb` string-IO
+burst (port-IO has no MmioRegion shape — the instruction IS the only
+access path). *Why no safe shape exists:* port-IO instructions have no
+typed region primitive; the asm stores pre-date and deliberately bypass
+the region API for the measured TX path. *Reference:* Linux 8250's
+`outb`/`iowrite8` pairs. *Containment:* console-only, TX path, called
+under the printk lock or early-boot single-CPU. Everything else in the
+file rides MmioRegion (INV-MMIO-1/2/3): read_reg/write_reg (MMIO
+arches), the PL011 FR/DR/ICR/IMSC reads+writes and getchar's pre-arm
+DR poll (UR-L4b conversion).
+
+**F15. intrusive ListHead primitive** — owner `kernel/src/list.rs`
+(the Linux `list_head` port: task tree, runqueue, device lists — 10
+users). *Shape:* the unsafe fns ARE the primitive's surface (add/del/
+move/for_each over embedded raw links); each carries its per-method
+Safety contract. *Why no safe shape exists:* the links live inside
+arbitrary embedding types and the list protocol's invariants (unlink
+ordering under the owner's lock) are exactly what the callers enforce
+per use site — a container_of/typed-handle redesign is the same class
+as F11/F13's intrusive caches (their registry rows explain why that
+lands with its own measurement, not in a conversion lane).
+*Reference:* Linux `include/linux/list.h` — the identical shape with
+zero contracts. *Containment:* never exported past kernel/; callers
+hold the embedding structure's lock.
+
+**F16. SBI ecall + boot stack asm** — owners `kernel/src/sbi.rs`,
+`kernel/src/main.rs`. *What stays raw:* the two SBI ecall asm blocks
+(system-reset, send-IPI) — the `ecall` instruction is the ONLY path to
+the RISC-V firmware ABI; and main.rs's x86_64 boot stack-switch `asm!`
+(the context-entry primitive; see boot_edges.rs's module doc — F12's
+sibling). *Why no safe shape exists:* firmware-call and stack-switch
+instructions have no Rust-level abstraction in-tree; wrapping them in
+a "safe" fn would only hide the edge, not type it.
+*Reference:* Linux's `sbi_ecall` asm + `cpu_startup_entry` handoff.
+*Containment:* sbi.rs riscv-only, reset/IPI only; main.rs runs once at
+boot entry.
+
+**F17. binder buffer block-views** — owner `kernel/src/ipc/binder.rs`.
+*Shape:* r3c's consolidated view primitives — INV-BINDER-BLOCKVIEW
+(the ONE raw window over the mmap'd binder buffer: bounds-checked
+slice/word/POD views), INV-BINDER-STAGE-POD (bytewise view of Copy
+values), INV-BINDER-HELD (token-checked accessors) — plus the narrow
+call sites beneath them. Every access goes through the bounds-checked
+view methods; no raw `.add()` escapes the primitive.
+*Why no safe shape exists:* the binder buffer is one mmap'd arena
+shared with user binder threads, sized by the protocol — the same
+device-window relationship as MmioRegion, but with the r3c view API
+already measured in place (SLOW-TXN families are gated on it).
+*Reference:* Android's flat_binder_object walks over the same arena.
+*Containment:* ipc/binder.rs only; world lock discipline per the
+guarded-domain notes.
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
