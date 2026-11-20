@@ -98,11 +98,11 @@
           <tr><td>ipc/ (binder · SysV · MQ)</td><td class="num">22,109</td><td class="num">6.1%</td><td>inter-process communication</td></tr>
           <tr><td>net/ (TCP/IP · unix · netlink)</td><td class="num">20,637</td><td class="num">5.7%</td><td>network stack</td></tr>
           <tr><td>mm/</td><td class="num">20,126</td><td class="num">5.6%</td><td>memory management</td></tr>
-          <tr><td>others (top-level files · interrupt · timer · perf · io_uring · safety · security · module)</td><td class="num">25,561</td><td class="num">7.1%</td><td>infrastructure and security modules</td></tr>
+          <tr><td>others (top-level files · interrupt · timer · perf · io_uring · safety · security · module)</td><td class="num">~25K</td><td class="num">4.6%</td><td>infrastructure and security modules</td></tr>
         </tbody>
       </table>
     </div>
-    <p>The layering model (<code>docs/architecture/kernel-layers.md</code>): the Framework layer (arch/mm primitives/interrupt/virtio core/trace) allows <code>unsafe</code> with per-block <code>// SAFETY:</code> comments; the service layer targets 100% <code>forbid(unsafe_code)</code> (47 files already forbid it at compile time, 56 more contain none); the syscall entry is the capsule boundary, validating and translating user pointers in one place.</p>
+    <p>The layering model (<code>docs/architecture/kernel-layers.md</code>): the Framework layer (arch/mm primitives/interrupt/virtio core/trace) allows <code>unsafe</code> with per-block <code>// SAFETY:</code> comments; the service layer targets 100% <code>forbid(unsafe_code)</code> (171 modules compile-time forbidden under the CI ratchet; 89 service files contain none); the syscall entry is the capsule boundary, validating and translating user pointers in one place.</p>
 
     <div class="mod-anchor" id="sched"></div>
     <h2><span class="anchor">§1</span>Scheduler (kernel/src/sched/) · <a href="scheduler.html">deep-dive →</a></h2>
@@ -266,7 +266,7 @@
     <p>Thesis: <b>security checks happen at compile time and vanish from the fast paths — the fast design and the safe design are the same design.</b> Source: <code>docs/architecture/safety-and-performance.md</code>.</p>
     <ul>
       <li><b>Bug taxonomy v1</b> (3,358 deduplicated commits adjudicated one by one): of 33 memory-corruption defects, <b>23 live in explicit unsafe blocks/arch assembly</b> and <b>10 in safe code</b> — all ownership/refcount/lock-protocol classes safe Rust does not type-check today; <b>zero</b> pointer-expression defects (OOB/iterator invalidation/wild-pointer arithmetic/format strings) in safe code. 6 of 33 were caught by review before any boot.</li>
-      <li><b>The unsafe surface is enumerated and contracted</b>: 7.1% of lines (14.0% on the dual series); 47 service files compile-time forbid(unsafe_code), 63 more already unsafe-free; SAFETY comments cover 63%; 164 Kani harnesses prove the core unsafe code for all inputs.</li>
+      <li><b>The unsafe surface is enumerated and contracted</b>: 3.8% of lines (4.6% on the dual series); 171 modules compile-time forbid(unsafe_code) under the CI ratchet, 89 service files already unsafe-free; SAFETY comments cover 69%; 164 Kani harnesses prove the core unsafe code for all inputs.</li>
       <li><b>Every performance row is paired with its safety sentence</b>: e.g. the switch path carries typed per-CPU storage + keyed locks; lmbench/Geekbench numbers and the census-adjudicated structure share a table; the cost side (futex wake→run ~10 ms behind a running task, tick-quantized) is recorded as-is.</li>
       <li><b>The honest gap register v1</b>: KASLR (no boot entropy source), kernel text/rodata W^X tightening, compiler stack protectors, KASAN-style poisoning breadth, KCSAN watchpoints, kallsyms masking — each with what closing it looks like.</li>
     </ul>
