@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """faultlat3_boot.py — page-fault latency under the OH-style mixture.
 

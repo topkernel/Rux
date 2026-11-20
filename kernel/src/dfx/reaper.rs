@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Reaper forensics — the OH launcher/systemui app-cycle death hunt
 //! (wake-history TASK §110, the waitid leg of the reaper probe).
 //!

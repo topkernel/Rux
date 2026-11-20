@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! sgid_mode — unit tests for the VFS create-mode rules behind LTP creat09
 //! (CVE-2018-13405): mode_strip_sgid() / prepare_create_mode() semantics
 //! mirroring Linux fs/namei.c vfs_prepare_mode() and fs/inode.c

@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Process-tree invariant validator (rux:treehunt (retired dfx=treehunt)).
 //!
 //! Leg-29A root-cause hunt for the E8-REPAR "unlinked snapshot" family:

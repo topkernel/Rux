@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """bindmkdir_boot.py — boot the Rux kernel (riscv64) with the bind+chroot
 mkdir probe as init and report the verdict.

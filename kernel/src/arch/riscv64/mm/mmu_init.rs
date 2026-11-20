@@ -285,30 +285,8 @@ pub fn alloc_page_table() -> Option<u64> {
     }
 }
 
-/// Get virtual address for accessing a page table given its physical address
-#[inline]
-pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
-    match get_alloc_stage() {
-        AllocStage::Early => {
-            // Early stage: EARLY_PMD/PTE are static arrays in BSS (at KERNEL_LINK_ADDR).
-            // alloc_page_table returns their physical addresses.
-            // Convert using va_kernel_pa_offset (= KERNEL_LINK_ADDR - KERNEL_PHYS).
-            let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
-            let virt_addr = phys_addr.wrapping_add(offset);
-            virt_addr as *mut PageTable
-        }
-        AllocStage::Fixmap => {
-            // Linear mapping should be available at this point
-            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
-            virt_addr.bits() as *mut PageTable
-        }
-        AllocStage::Late => {
-            // Use linear mapping after buddy allocator is ready
-            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
-            virt_addr.bits() as *mut PageTable
-        }
-    }
-}
+/// The phys→table conversion edge lives in the framework module now.
+pub use super::unsafe_edges::get_page_table_virt;
 
 fn free_page_table_checked(phys_addr: u64, site: &str) {
     if get_alloc_stage() == AllocStage::Late {

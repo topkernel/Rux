@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Process-lane framework edges — the audited unsafe boundary
 //! (industrial-reduction round, lane L2, 2026-11-20).
 //!

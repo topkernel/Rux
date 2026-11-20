@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Loop-device ioctl errno semantics and FS_IOC chattr-flag gating.
 //!
 //! Covers the r10 "device acquisition" family kernel fixes:

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """make-report.py — turn the two lmbench result files into the
 comparison table in docs/test/lmbench-report.md.

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """Run the in-kernel unit-test boot and watch for pass/fail/timeout."""
 import os, subprocess, sys, time, select

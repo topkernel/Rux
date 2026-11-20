@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """cowint_boot.py — boot the x86_64 Rux kernel with the cow_int probe as
 init and judge COW/fork CONTENT integrity (oh-crash lane, 50th agent).

@@ -345,7 +345,7 @@ pub const PT_GNU_STACK: u32 = 0x6474_e551;
 
 impl Elf64Ehdr {
     /// Parse ELF header from byte buffer
-    pub unsafe fn from_bytes(data: &[u8]) -> Option<Elf64Ehdr> {
+    pub fn from_bytes(data: &[u8]) -> Option<Elf64Ehdr> {
         // Check minimum length
         if data.len() < size_of::<Elf64Ehdr>() {
             return None;
@@ -387,8 +387,8 @@ impl Elf64Ehdr {
             return None;
         }
 
-        // Use read_unaligned to avoid alignment issues
-        Some(ptr::read_unaligned(data.as_ptr() as *const Elf64Ehdr))
+        // The unaligned header read rides CopyBytes (INV-CBYTES-2).
+        crate::safety::bytes::from_bytes::<Elf64Ehdr>(data)
     }
 
     /// Check if ELF type is executable (ET_EXEC or ET_DYN for shared objects/PIE)
@@ -419,7 +419,7 @@ impl Elf64Ehdr {
     }
 
     /// Get program headers
-    pub unsafe fn get_program_headers(&self, data: &[u8]) -> Result<usize, ElfError> {
+    pub fn get_program_headers(&self, data: &[u8]) -> Result<usize, ElfError> {
         // Only return program header count, avoid heap allocation
         let phdr_end = (self.e_phoff as usize)
             .checked_add((self.e_phnum as usize).wrapping_mul(size_of::<Elf64Phdr>()))
@@ -430,7 +430,7 @@ impl Elf64Ehdr {
     }
 
     /// Get single program header
-    pub unsafe fn get_program_header(&self, data: &[u8], index: usize) -> Option<Elf64Phdr> {
+    pub fn get_program_header(&self, data: &[u8], index: usize) -> Option<Elf64Phdr> {
         if index >= self.e_phnum as usize {
             return None;
         }
@@ -443,8 +443,8 @@ impl Elf64Ehdr {
         if phdr_end > data.len() {
             return None;
         }
-        let phdr_start = data.as_ptr().add(phdr_off) as *const Elf64Phdr;
-        Some(ptr::read_unaligned(phdr_start))
+        // The unaligned entry read rides CopyBytes (INV-CBYTES-2).
+        crate::safety::bytes::read_at::<Elf64Phdr>(data, phdr_off)
     }
 }
 
@@ -494,7 +494,7 @@ impl ElfLoader {
             return Err(ElfError::InvalidFormat);
         }
 
-        let ehdr = unsafe { Elf64Ehdr::from_bytes(data) }
+        let ehdr = Elf64Ehdr::from_bytes(data)
             .ok_or(ElfError::InvalidHeader)?;
 
         if !ehdr.is_executable() {
@@ -515,16 +515,16 @@ impl ElfLoader {
 
     /// Get entry point address
     pub fn get_entry(data: &[u8]) -> Result<u64, ElfError> {
-        let ehdr = unsafe { Elf64Ehdr::from_bytes(data) }
+        let ehdr = Elf64Ehdr::from_bytes(data)
             .ok_or(ElfError::InvalidHeader)?;
         Ok(ehdr.e_entry)
     }
 
     /// Get program headers
     pub fn get_program_headers(data: &[u8]) -> Result<usize, ElfError> {
-        let ehdr = unsafe { Elf64Ehdr::from_bytes(data) }
+        let ehdr = Elf64Ehdr::from_bytes(data)
             .ok_or(ElfError::InvalidHeader)?;
-        unsafe { ehdr.get_program_headers(data) }
+        ehdr.get_program_headers(data)
     }
 
     /// Load ELF file into memory
@@ -536,7 +536,7 @@ impl ElfLoader {
     ///
     /// # Returns
     /// Load info on success, error on failure
-    pub unsafe fn load(data: &[u8], base_addr: u64) -> Result<ElfLoadInfo<'_>, ElfError> {
+    pub fn load(data: &[u8], base_addr: u64) -> Result<ElfLoadInfo<'_>, ElfError> {
         // Validate ELF file
         Self::validate(data)?;
 
@@ -584,10 +584,7 @@ impl ElfLoader {
                         }
 
                         if len > 0 {
-                            interp_path = Some(core::slice::from_raw_parts(
-                                data.as_ptr().add(offset),
-                                len,
-                            ));
+                            interp_path = Some(&data[offset..offset + len]);
                         }
                     }
                 }
@@ -624,7 +621,7 @@ impl ElfLoader {
     /// - `data`: ELF file data
     /// - `phdr`: Program header
     /// - `base_addr`: Load base address
-    unsafe fn load_segment(data: &[u8], phdr: &Elf64Phdr, base_addr: u64) -> Result<(), ElfError> {
+    fn load_segment(data: &[u8], phdr: &Elf64Phdr, base_addr: u64) -> Result<(), ElfError> {
         let offset = phdr.p_offset as usize;
         let filesz = phdr.p_filesz as usize;
         let memsz = phdr.p_memsz as usize;
@@ -634,22 +631,24 @@ impl ElfLoader {
         offset.checked_add(filesz).filter(|&end| end <= data.len())
             .ok_or(ElfError::InvalidSegment)?;
 
-        // Copy segment data to memory
-        if filesz > 0 {
-            let src = data.as_ptr().add(offset);
-            let dst = vaddr as *mut u8;
+        // SAFETY: INV-ELF-SEG — vaddr..vaddr+memsz is the destination span
+        // the caller's address-space setup mapped for this PT_LOAD (the
+        // exec path maps before loading); the file span was bounds-checked
+        // above.
+        unsafe {
+            // Copy segment data to memory
+            if filesz > 0 {
+                let src = data.as_ptr().add(offset);
+                let dst = vaddr as *mut u8;
+                core::ptr::copy_nonoverlapping(src, dst, filesz);
+            }
 
-            // Copy data from file
-            core::ptr::copy_nonoverlapping(src, dst, filesz);
-        }
-
-        // Zero BSS segment (p_memsz > p_filesz portion)
-        if memsz > filesz {
-            let bss_start = vaddr.checked_add(filesz as u64).ok_or(ElfError::InvalidSegment)?;
-            let bss_size = memsz - filesz;
-
-            // Zero BSS segment
-            core::ptr::write_bytes(bss_start as *mut u8, 0, bss_size);
+            // Zero BSS segment (p_memsz > p_filesz portion)
+            if memsz > filesz {
+                let bss_start = vaddr.checked_add(filesz as u64).ok_or(ElfError::InvalidSegment)?;
+                let bss_size = memsz - filesz;
+                core::ptr::write_bytes(bss_start as *mut u8, 0, bss_size);
+            }
         }
 
         Ok(())
@@ -657,11 +656,11 @@ impl ElfLoader {
 
     /// Get interpreter path (if exists)
     pub fn get_interpreter(data: &[u8]) -> Option<&[u8]> {
-        let ehdr = unsafe { Elf64Ehdr::from_bytes(data) }?;
+        let ehdr = Elf64Ehdr::from_bytes(data)?;
         let phdr_count = Self::get_program_headers(data).ok()?;
 
         for i in 0..phdr_count {
-            let phdr = unsafe { ehdr.get_program_header(data, i) }?;
+            let phdr = ehdr.get_program_header(data, i)?;
             if phdr.p_type == ElfPtType::PT_INTERP as u32 {
                 let offset = phdr.p_offset as usize;
                 let size = phdr.p_filesz as usize;
@@ -670,14 +669,14 @@ impl ElfLoader {
                     // Find null terminator
                     let mut len = 0;
                     for i in 0..size {
-                        if unsafe { *data.as_ptr().add(offset + i) } == 0 {
+                        if data[offset + i] == 0 {
                             len = i;
                             break;
                         }
                     }
 
                     if len > 0 {
-                        return Some(unsafe { core::slice::from_raw_parts(data.as_ptr().add(offset), len) });
+                        return Some(&data[offset..offset + len]);
                     }
                 }
             }

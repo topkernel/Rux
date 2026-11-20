@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """decode_probe_boot.py — boot the decode oracle (probe as init).
 

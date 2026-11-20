@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Minimal selinuxfs — OpenHarmony Phase 1 insurance (S2).
 //!
 //! OH's first-stage init mounts selinuxfs at /sys/fs/selinux and libselinux

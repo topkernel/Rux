@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! ext4 htree (hashed directory index) lookup — read-only parity port.
 //!
 //! Reference: the kernel's fs/ext4/namei.c dx_probe / ext4_dx_find_entry /

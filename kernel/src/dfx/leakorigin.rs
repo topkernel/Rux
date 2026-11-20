@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Leak-origin probe (rux:leakhunt (retired dfx=leakhunt)) — names the acquire site of a leaked
 //! PREEMPT_OFFSET (and, since s14, of a stranded HARDIRQ_OFFSET — the
 //! pc=0x10000/0x10001 incumbent face of the fleet's four-faced wedge

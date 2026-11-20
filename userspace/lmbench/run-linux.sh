@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # run-linux.sh — the reference column: the SAME static lmbench binaries
 # executed natively on the host (the reference kernel), one case at a

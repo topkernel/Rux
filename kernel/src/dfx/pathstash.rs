@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Per-task last-open path stash for TXN-HANG (rux:txnhunt (retired dfx=txnhunt)).
 //!
 //! Leg-28 item 2: sc303's TXN-HANG showed storage_daemon parked

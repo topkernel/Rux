@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! VT (virtual terminal) layer — /dev/tty0 master + /dev/tty1..ttyN
 //! console devices, Linux `include/uapi/linux/vt.h` / `kd.h` ABI.
 //!

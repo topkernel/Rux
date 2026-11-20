@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 """Repo-root resolver for scripts/test drivers (move-immune).
 
 Every driver used to compute the repo root by counting dirname

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """binder4_boot.py — boot the x86_64 Rux kernel with the binder S4
 from-walk / wake-eligibility probe as init and report the verdict.

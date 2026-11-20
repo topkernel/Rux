@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """tgsig_boot.py — boot the rt_tgsigqueueinfo parity probe (tgsig.c).
 

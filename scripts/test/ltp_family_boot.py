@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """ltp_family_boot.py — boot the LTP riscv image (init=/bin/sh) and run
 the given LTP cases one at a time over serial, waiting for the shell

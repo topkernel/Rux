@@ -20,6 +20,7 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
+use super::unsafe_edges::PtTable;
 use super::fixmap;
 use super::memory_layout::*;
 use super::pagetable::{PageTable, PageTableEntry, Satp};
@@ -53,22 +54,27 @@ extern "C" {
 /// # Safety
 /// Early boot, single hart, MMU on with the boot tables live; called
 /// once from init() before any Rust-side kernel mapping is built.
-unsafe fn adopt_boot_ttbr1() {
+fn adopt_boot_ttbr1() {
+    // Copy all 512 L0 entries (all-but-511 are zero on the boot
+    // root; copying verbatim keeps the two roots identical).
+    // SAFETY: single-CPU boot section; the static roots are exclusively
+    // owned here.
     unsafe {
-        // Copy all 512 L0 entries (all-but-511 are zero on the boot
-        // root; copying verbatim keeps the two roots identical).
         let src = (&raw const kern_l0) as *const u8;
         let dst = (&raw mut ROOT_PAGE_TABLE) as *mut u8;
         core::ptr::copy_nonoverlapping(src, dst, core::mem::size_of::<PageTable>());
-        let root_pa = root_page_table_ppn() << PAGE_SHIFT;
+    }
+    let root_pa = root_page_table_ppn() << PAGE_SHIFT;
+    // SAFETY: install the freshly copied root (register write + barrier).
+    unsafe {
         asm!(
             "msr ttbr1_el1, {t}",
             "isb",
             t = in(reg) root_pa,
             options(nostack)
         );
-        crate::arch::cpu::local_flush_tlb_all();
     }
+    crate::arch::cpu::local_flush_tlb_all();
 }
 
 /// Get the physical page number of the kernel root table
@@ -271,19 +277,8 @@ fn free_page_table_checked(phys_addr: u64, site: &str) -> bool {
 ///
 /// # Safety
 /// The frame must be a page-table allocated by this module.
-pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
-    match get_alloc_stage() {
-        AllocStage::Early => {
-            // Static pools live in the image; convert via the image offset
-            let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
-            (phys_addr.wrapping_add(offset)) as *mut PageTable
-        }
-        AllocStage::Fixmap | AllocStage::Late => {
-            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
-            virt_addr.bits() as *mut PageTable
-        }
-    }
-}
+/// The phys→table conversion edge lives in the framework module now.
+pub use super::unsafe_edges::get_page_table_virt;
 
 // ==================== PT ledger (dfx instrumentation) ====================
 //
@@ -309,7 +304,7 @@ pub fn register_fork_root(_root_ppn: u64, _owner_pid: u32) {}
 // churn points (fork, exit) compile identically.
 pub fn pt_pending_drain() {}
 
-pub unsafe fn free_user_page_tables(
+pub fn free_user_page_tables(
     lock: &crate::mm::mm_struct::PteLock,
     root_ppn: u64,
     // (sysmm-2x lane) VMA range snapshot bounding the leaf scans —
@@ -328,11 +323,11 @@ pub unsafe fn free_user_page_tables(
     if !phys_valid(root_phys as usize) {
         return;
     }
-    let root_table = get_page_table_virt(root_phys);
+    let Some(root_table) = PtTable::from_phys(root_phys) else { return };
 
     // L0: all 512 slots are user slots in a TTBR0 tree
     for l0 in 0..512usize {
-        let e0 = (*root_table).get(l0);
+        let e0 = root_table.get(l0);
         if !e0.is_valid() || !e0.is_table() {
             continue; // user trees never host L0 blocks
         }
@@ -340,9 +335,9 @@ pub unsafe fn free_user_page_tables(
         if !phys_valid(t1_phys as usize) || t1_phys == root_phys {
             continue;
         }
-        let t1 = get_page_table_virt(t1_phys);
+        let Some(t1) = PtTable::from_phys(t1_phys) else { continue };
         for l1 in 0..512usize {
-            let e1 = (*t1).get(l1);
+            let e1 = t1.get(l1);
             if !e1.is_valid() {
                 continue;
             }
@@ -359,9 +354,9 @@ pub unsafe fn free_user_page_tables(
             if !phys_valid(t2_phys as usize) || t2_phys == root_phys {
                 continue;
             }
-            let t2 = get_page_table_virt(t2_phys);
+            let Some(t2) = PtTable::from_phys(t2_phys) else { continue };
             for l2 in 0..512usize {
-                let e2 = (*t2).get(l2);
+                let e2 = t2.get(l2);
                 if !e2.is_valid() {
                     continue;
                 }
@@ -376,9 +371,9 @@ pub unsafe fn free_user_page_tables(
                 if !phys_valid(t3_phys as usize) || t3_phys == root_phys {
                     continue;
                 }
-                let t3 = get_page_table_virt(t3_phys);
+                let Some(t3) = PtTable::from_phys(t3_phys) else { continue };
                 for l3 in 0..512usize {
-                    let e3 = (*t3).get(l3);
+                    let e3 = t3.get(l3);
                     if !e3.is_valid() {
                         continue; // holes and swap markers (none today)
                     }
@@ -407,8 +402,8 @@ pub unsafe fn free_user_page_tables(
 /// adjudication — aarch64's fault paths create no text stamps). Foreign
 /// frames (boot-reserved, kernel-heap, framebuffer) are skipped: their
 /// owner releases them through its own path.
-unsafe fn release_user_leaf_mm(entry: PageTableEntry) {
-    use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid};
+fn release_user_leaf_mm(entry: PageTableEntry) {
+    use crate::mm::{page_desc, phys_to_pfn, phys_valid};
 
     if !entry.is_user() {
         return; // not this mm's page (defensive; user trees are U-only)
@@ -425,16 +420,12 @@ unsafe fn release_user_leaf_mm(entry: PageTableEntry) {
         return;
     }
     let pfn = phys_to_pfn(phys as usize);
-    let page = pfn_to_page(pfn);
-    if page.is_null() {
-        return;
-    }
-    // SAFETY: descriptor of a leaf frame this mm mapped until this walk.
-    unsafe {
-        if (*page).is_mapped() {
-            crate::mm::rmap::page_remove_rmap(&*page);
+    // Descriptor of a leaf frame this mm mapped until this walk.
+    if let Some(page) = page_desc(pfn) {
+        if page.is_mapped() {
+            crate::mm::rmap::page_remove_rmap(page);
         }
-        (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_RV);
+        page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_RV);
     }
 }
 
@@ -447,7 +438,7 @@ unsafe fn release_user_leaf_mm(entry: PageTableEntry) {
 ///
 /// # Safety
 /// root_ppn must be a valid user root; va page-aligned.
-pub unsafe fn set_user_leaf_flags(root_ppn: u64, va: u64, sw_flags: u64) {
+pub fn set_user_leaf_flags(root_ppn: u64, va: u64, sw_flags: u64) {
     let l3 = match user_l3_table_for(root_ppn, va) {
         Some(p) => p,
         None => return,
@@ -628,28 +619,28 @@ pub const KERN_DEVICE_FLAGS: u64 = PageTableEntry::V
 /// # Safety
 /// Kernel mappings are built during single-threaded boot or under
 /// PTE_MODIFY_LOCK.
-unsafe fn kernel_table_for(virt: u64, leaf_level: u8) -> Option<u64> {
-    unsafe {
-        debug_assert!((1..=3).contains(&leaf_level));
-        let mut table_phys = root_page_table_ppn() << PAGE_SHIFT;
+fn kernel_table_for(virt: u64, leaf_level: u8) -> Option<u64> {
+    debug_assert!((1..=3).contains(&leaf_level));
+    let mut table_phys = root_page_table_ppn() << PAGE_SHIFT;
+    let mut table = PtTable::from_phys(table_phys)?;
 
-        // Descend L0 → L1 → L2, stopping at the requested level.
-        for cur in 0..leaf_level {
-            let shift = PAGE_SHIFT + 9 * (3 - cur as u64);
-            let idx = ((virt >> shift) & 0x1FF) as usize;
-            let table = get_page_table_virt(table_phys);
-            let entry = (*table).get(idx);
-            let next_phys = if entry.is_valid() {
-                entry.ppn() << PAGE_SHIFT
-            } else {
-                let np = alloc_page_table()?;
-                (*table).set(idx, PageTableEntry::new_table(np >> PAGE_SHIFT));
-                np
-            };
-            table_phys = next_phys;
-        }
-        Some(table_phys)
+    // Descend L0 → L1 → L2, stopping at the requested level.
+    for cur in 0..leaf_level {
+        let shift = PAGE_SHIFT + 9 * (3 - cur as u64);
+        let idx = ((virt >> shift) & 0x1FF) as usize;
+        let entry = table.get(idx);
+        let next_phys = if entry.is_valid() {
+            entry.ppn() << PAGE_SHIFT
+        } else {
+            let np = alloc_page_table()?;
+            table.set(idx, PageTableEntry::new_table(np >> PAGE_SHIFT));
+            np
+        };
+        table_phys = next_phys;
+        table = PtTable::from_phys(next_phys)?;
     }
+    // The PHYSICAL address (callers re-derive handles from it).
+    Some(table_phys)
 }
 
 /// Map one 4KB kernel page (L3 leaf) WITHOUT a TLB flush (batch primitive)
@@ -657,27 +648,25 @@ unsafe fn kernel_table_for(virt: u64, leaf_level: u8) -> Option<u64> {
 /// # Safety
 /// Kernel mapping context (boot or PTE_MODIFY_LOCK); `flags` is a Rux
 /// software permission mask.
-pub unsafe fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
-    unsafe {
-        let l3_phys = match kernel_table_for(virt, 3) {
-            Some(p) => p,
-            None => return false,
-        };
-        let l3 = get_page_table_virt(l3_phys);
-        let idx = ((virt >> PAGE_SHIFT) & 0x1FF) as usize;
-        let entry = PageTableEntry::new_page_kernel_flags(phys >> PAGE_SHIFT, flags);
-        (*l3).set(idx, entry);
-        PT_LEDGER.live.fetch_add(1, Ordering::Relaxed);
-        true
-    }
+pub fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
+    let l3_phys = match kernel_table_for(virt, 3) {
+        Some(p) => p,
+        None => return false,
+    };
+    let Some(l3) = PtTable::from_phys(l3_phys) else { return false };
+    let idx = ((virt >> PAGE_SHIFT) & 0x1FF) as usize;
+    let entry = PageTableEntry::new_page_kernel_flags(phys >> PAGE_SHIFT, flags);
+    l3.set(idx, entry);
+    PT_LEDGER.live.fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 /// Map one 4KB kernel page with a TLB flush
 ///
 /// # Safety
 /// See map_kernel_page_noflush.
-pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) -> bool {
-    let ok = unsafe { map_kernel_page_noflush(virt, phys, flags) };
+pub fn map_kernel_page(virt: u64, phys: u64, flags: u64) -> bool {
+    let ok = map_kernel_page_noflush(virt, phys, flags);
     if ok {
         crate::arch::cpu::local_flush_tlb_all();
     }
@@ -688,8 +677,8 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) -> bool {
 ///
 /// # Safety
 /// See map_kernel_page_noflush.
-pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
-    unsafe {
+pub fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
+    {
         let mut v = virt;
         let mut p = phys;
         let end = virt + size;
@@ -706,55 +695,49 @@ pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
 ///
 /// # Safety
 /// `phys` must be 2MB-aligned; kernel mapping context.
-pub unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
-    unsafe {
-        assert!(phys % (2 * 1024 * 1024) == 0, "phys must be 2MB aligned");
-        let l2_phys = kernel_table_for(virt as u64, 2).expect("map_pmd_huge_page: table alloc failed");
-        let l2 = get_page_table_virt(l2_phys);
-        let idx = ((virt >> PMD_SHIFT) & 0x1FF) as usize;
-        let entry = PageTableEntry::new_block_kernel_flags(
-            (phys >> PAGE_SHIFT) as u64,
-            flags,
-        );
-        (*l2).set(idx, entry);
-    }
+pub fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
+    assert!(phys % (2 * 1024 * 1024) == 0, "phys must be 2MB aligned");
+    let l2_phys = kernel_table_for(virt as u64, 2).expect("map_pmd_huge_page: table alloc failed");
+    let l2 = PtTable::from_phys(l2_phys).expect("map_pmd_huge_page: bad L2 link");
+    let idx = ((virt >> PMD_SHIFT) & 0x1FF) as usize;
+    let entry = PageTableEntry::new_block_kernel_flags(
+        (phys >> PAGE_SHIFT) as u64,
+        flags,
+    );
+    l2.set(idx, entry);
 }
 
 /// Map a 1GB L1 block (kernel half)
 ///
 /// # Safety
 /// `phys` must be 1GB-aligned; kernel mapping context.
-unsafe fn map_pud_huge_page(virt: usize, phys: usize, flags: u64) {
-    unsafe {
-        assert!(phys % (1 << 30) == 0, "phys must be 1GB aligned");
-        // 1GB block descriptors live at L1, indexed by VA[38:30] —
-        // descend one level from the L0 root first. (An earlier draft
-        // wrote the block into the ROOT table at the L1 index: the MMU
-        // indexes L0 with VA[47:39], so the entry was both in the wrong
-        // slot and misinterpreted as a table pointer.)
-        let l1_phys = kernel_table_for(virt as u64, 1).expect("map_pud_huge_page: table alloc failed");
-        let l1 = get_page_table_virt(l1_phys);
-        let idx = ((virt >> PUD_SHIFT) & 0x1FF) as usize;
-        let entry = PageTableEntry::new_block_kernel_flags(
-            (phys >> PAGE_SHIFT) as u64,
-            flags,
-        );
-        (*l1).set(idx, entry);
-    }
+fn map_pud_huge_page(virt: usize, phys: usize, flags: u64) {
+    assert!(phys % (1 << 30) == 0, "phys must be 1GB aligned");
+    // 1GB block descriptors live at L1, indexed by VA[38:30] —
+    // descend one level from the L0 root first. (An earlier draft
+    // wrote the block into the ROOT table at the L1 index: the MMU
+    // indexes L0 with VA[47:39], so the entry was both in the wrong
+    // slot and misinterpreted as a table pointer.)
+    let l1_phys = kernel_table_for(virt as u64, 1).expect("map_pud_huge_page: table alloc failed");
+    let l1 = PtTable::from_phys(l1_phys).expect("map_pud_huge_page: bad L1 link");
+    let idx = ((virt >> PUD_SHIFT) & 0x1FF) as usize;
+    let entry = PageTableEntry::new_block_kernel_flags(
+        (phys >> PAGE_SHIFT) as u64,
+        flags,
+    );
+    l1.set(idx, entry);
 }
 
 /// Map a device page (kernel RW, Device-nGnRE memory type)
 ///
 /// # Safety
 /// Kernel mapping context; `virt` must be kernel-half.
-pub unsafe fn map_device_page(virt: usize, phys: usize, _flags: u64) {
-    unsafe {
-        let l3_phys = kernel_table_for(virt as u64, 3).expect("map_device_page: table alloc failed");
-        let l3 = get_page_table_virt(l3_phys);
-        let idx = ((virt >> PAGE_SHIFT) & 0x1FF) as usize;
-        (*l3).set(idx, PageTableEntry::new_page_device((phys >> PAGE_SHIFT) as u64));
-        crate::arch::cpu::local_flush_tlb_all();
-    }
+pub fn map_device_page(virt: usize, phys: usize, _flags: u64) {
+    let l3_phys = kernel_table_for(virt as u64, 3).expect("map_device_page: table alloc failed");
+    let l3 = PtTable::from_phys(l3_phys).expect("map_device_page: bad L3 link");
+    let idx = ((virt >> PAGE_SHIFT) & 0x1FF) as usize;
+    l3.set(idx, PageTableEntry::new_page_device((phys >> PAGE_SHIFT) as u64));
+    crate::arch::cpu::local_flush_tlb_all();
 }
 
 /// Best block size for a linear-map segment (1GB / 2MB / 4KB)
@@ -825,40 +808,48 @@ pub fn init() {
 /// invalidation so cores that walked through the window as secondaries
 /// drop their cached low-VA translations too.
 pub fn teardown_early_identity_map() {
+    // 1. Kill the table contents: L0[0] (the [0, 512GB) subtree
+    //    pointer — the whole identity window) and both L1 blocks
+    //    (phys 0 device, phys 1GB RAM). Image .bss tables, written
+    //    once here from the boot core after every consumer is gone;
+    //    volatile so the stores are not reordered away against the
+    //    barrier below.
+    // SAFETY: static boot tables, exclusive boot-core ownership.
     unsafe {
-        // 1. Kill the table contents: L0[0] (the [0, 512GB) subtree
-        //    pointer — the whole identity window) and both L1 blocks
-        //    (phys 0 device, phys 1GB RAM).
         let l0 = (&raw const idmap_l0) as *mut PageTable;
         let l1 = (&raw const idmap_l1) as *mut PageTable;
-        // SAFETY: image .bss tables, written once here from the boot core
-        // after every consumer is gone; volatile so the stores are not
-        // reordered away against the barrier below.
         (*l0).set(0, PageTableEntry::new());
         (*l1).set(0, PageTableEntry::new());
         (*l1).set(1, PageTableEntry::new());
+    }
 
-        // 2. Make the zeroing visible before anyone can observe it.
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+    // 2. Make the zeroing visible before anyone can observe it.
+    // SAFETY: barrier (memory-safe in any context).
+    unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
 
-        // 3. Park this core's TTBR0 on the kernel root, ASID 0 — the
-        //    exact state context_switch installs for a kernel thread
-        //    (ROOT_PAGE_TABLE's low L0 slots are all zero, so user VAs
-        //    fault at level 0). The ASID lives in TTBR0[63:48]
-        //    (TCR_EL1.A1 = 0; CONTEXTIDR does not tag entries — see
-        //    context.rs switch_mm), and root_pa carries ASID 0.
-        let root_pa = root_page_table_ppn() << PAGE_SHIFT;
+    // 3. Park this core's TTBR0 on the kernel root, ASID 0 — the
+    //    exact state context_switch installs for a kernel thread
+    //    (ROOT_PAGE_TABLE's low L0 slots are all zero, so user VAs
+    //    fault at level 0). The ASID lives in TTBR0[63:48]
+    //    (TCR_EL1.A1 = 0; CONTEXTIDR does not tag entries — see
+    //    context.rs switch_mm), and root_pa carries ASID 0.
+    let root_pa = root_page_table_ppn() << PAGE_SHIFT;
+    // SAFETY: install the live kernel root (register write + barrier).
+    unsafe {
         core::arch::asm!(
             "msr ttbr0_el1, {t}",
             "isb",
             t = in(reg) root_pa,
             options(nostack)
         );
+    }
 
-        // 4. Broadcast invalidation (inner-shareable): the boot core and
-        //    every secondary stub fetched through ASID-0 identity
-        //    translations; vmalle1is clears both halves on every PE and
-        //    they refill from the live tables (one-time boot cost).
+    // 4. Broadcast invalidation (inner-shareable): the boot core and
+    //    every secondary stub fetched through ASID-0 identity
+    //    translations; vmalle1is clears both halves on every PE and
+    //    they refill from the live tables (one-time boot cost).
+    // SAFETY: TLB invalidation broadcast (memory-safe in any context).
+    unsafe {
         core::arch::asm!(
             "tlbi vmalle1is",
             "dsb sy",
@@ -871,8 +862,9 @@ pub fn teardown_early_identity_map() {
 /// Build the linear mapping over the memblock regions (called from the
 /// generic boot path with the DTB-parsed regions)
 pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
-    unsafe {
-        KERNEL_MAP.va_pa_offset = VA_PA_OFFSET;
+    // SAFETY: single-CPU boot section; no concurrent reader exists.
+    unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET };
+    {
 
         for region in memory_regions {
             let phys_start = region.base;
@@ -905,7 +897,7 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
 /// [PCIE_ECAM_BASE, +PCIE_ECAM_SIZE) at ECAM_ALIAS_BASE), with
 /// Device-nGnRE attributes.
 pub fn setup_device_mappings() {
-    unsafe {
+    {
         // Device windows as (first phys, alias VA base, total size); both
         // map 2MB device blocks at L2.
         const WINDOWS: [(usize, usize, usize); 2] = [
@@ -927,10 +919,10 @@ pub fn setup_device_mappings() {
                     Some(p) => p,
                     None => break,
                 };
-                let l2 = get_page_table_virt(l2_phys);
+                let Some(l2) = PtTable::from_phys(l2_phys) else { break };
                 let idx = ((va >> PMD_SHIFT) & 0x1FF) as usize;
                 let entry = PageTableEntry::new_block_device((pa >> PAGE_SHIFT) as u64);
-                (*l2).set(idx, entry);
+                l2.set(idx, entry);
                 installed += 1;
                 pa += 2 << 20;
             }

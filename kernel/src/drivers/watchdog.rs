@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! /dev/watchdog — minimal Linux-parity soft watchdog character device.
 //!
 //! Consumers on the OH image:

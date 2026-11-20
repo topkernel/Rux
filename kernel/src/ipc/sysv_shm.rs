@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! System V Shared Memory
 //!
 //! Implements shmget, shmctl, shmat, shmdt following the Linux kernel design.

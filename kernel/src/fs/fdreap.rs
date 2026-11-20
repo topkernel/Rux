@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Post-grace reclamation of fd-table slot occupants — the deferred
 //! `file_free_rcu` shape for the lock-free slot array.
 //!

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """subreap_boot.py — boot the x86_64 Rux kernel with subreap_churn as
 init (musl static binary) and judge the E8-REPAR "unlinked snapshot"

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 # arena_boot.py — boot the x86_64 kernel with the FFRT-arena probe as
 # init and report the verdict (arena-mmap lane, TASK 110.7 item 2).

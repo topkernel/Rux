@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! pidfd — file descriptors that name a process (reference pidfd_open /
 //! pidfd_send_signal / pidfd_getfd semantics).
 //!

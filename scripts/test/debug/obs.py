@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/python3.10
 # obs.py - poll /proc for process lifecycle (comm/state/ppid) without
 # sleeping (time.sleep is broken on this kernel - EFAULT). Busy-polls

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # Print the active build platform (Linux-style: .config wins over the
 # shipped default in Kernel.toml). Used by the Makefile to pick the cargo

@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Allocator class-lock holder watch (rux:allocwatch (retired dfx=allocwatch)).
 //!
 //! The OH dark-boot family (2026-11-02 decodes, lb234/235/241/243/244):

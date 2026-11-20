@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """inet_peek_boot.py — boot the Rux kernel (x86_64) with the
 inet_peek probe as init and judge the review-func network.rs round

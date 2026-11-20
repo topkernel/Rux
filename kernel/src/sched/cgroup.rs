@@ -304,7 +304,7 @@ impl CgroupNode {
         let mut count = self.tasks.lock_irqsave().len();
         for c in children {
             // SAFETY: Arc-derived references; nodes are never freed.
-            count += unsafe { &*Arc::as_ptr(&c) }.subtree_task_count();
+            count += crate::sched::edges::cgroup_node_ref(Arc::as_ptr(&c) as *mut _).unwrap().subtree_task_count();
         }
         count
     }
@@ -442,7 +442,7 @@ pub fn task_cgroup(task: *const Task) -> Option<&'static CgroupNode> {
     // SAFETY (one adopt edge): callers pass a live task (fork/exit hook,
     // find_task_by_pid result) — TaskBorrow's short-read contract; the
     // DEAD-cgroup_ptr containment below tolerates a stale payload.
-    let tk = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task as *mut Task) }?;
+    let tk = crate::sched::edges::task_borrow(task as *mut Task)?;
     let ptr = tk.cgroup_ptr();
     if ptr.is_null() {
         return None;
@@ -476,7 +476,7 @@ pub fn task_cgroup(task: *const Task) -> Option<&'static CgroupNode> {
         }
     }
     // SAFETY: see contract above.
-    Some(unsafe { &*ptr })
+    crate::sched::edges::cgroup_node_ref(ptr)
 }
 
 /// Attach a task to a cgroup (sets cgroup_ptr and records the pid).
@@ -492,7 +492,7 @@ fn attach_task(node: &CgroupNode, task: *mut Task, pid: u32) {
     // SAFETY (one adopt edge): exclusive task handle from the caller
     // (fork/exit hook or pinned lookup); the node pointer stays valid
     // forever (nodes are never freed), so no refcount is needed.
-    if let Some(mut tk) = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) } {
+    if let Some(mut tk) = crate::sched::edges::task_borrow(task) {
         tk.set_cgroup_ptr(node as *const CgroupNode as *mut CgroupNode);
     }
 }
@@ -513,7 +513,7 @@ fn detach_task(node: &CgroupNode, pid: u32) {
 pub fn attach_init_to_root(task: *mut Task) {
     if let Some(root) = cgroup_root() {
         // SAFETY (one adopt edge): the boot init task handle (live).
-        let pid = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) }
+        let pid = crate::sched::edges::task_borrow(task)
             .map(|t| t.pid())
             .unwrap_or(1);
         attach_task(&root, task, pid);
@@ -559,7 +559,7 @@ pub fn cgroup_on_fork(parent: *mut Task, child: *mut Task) -> Result<(), i32> {
 
     // SAFETY (one adopt edge): the fork hook's just-built child (live,
     // pre-enqueue — exclusive by construction).
-    let child_pid = unsafe { crate::process::task_ref::TaskBorrow::from_raw(child) }
+    let child_pid = crate::sched::edges::task_borrow(child)
         .map(|t| t.pid())
         .ok_or(crate::errno::Errno::TryAgain.as_neg_i32())?;
     attach_task(node, child, child_pid);
@@ -580,7 +580,7 @@ pub fn cgroup_attach_pid(node: &Arc<CgroupNode>, pid: u32) -> Result<(), i32> {
     // new chain is charged without a limit check — Linux memcg migration
     // moves charges and cannot fail the cgroup.procs write here).
     // SAFETY (one adopt edge): live task handle for this context.
-    let charged = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) }
+    let charged = crate::sched::edges::task_borrow(task)
         .map(|t| t.cgroup_mem_charged())
         .unwrap_or(0);
 
@@ -611,17 +611,17 @@ pub fn cgroup_exit(task: *mut Task) {
         Some(n) => n,
         None => return,
     };
-    let pid = unsafe { (*task).pid() };
+    let pid = crate::sched::edges::task_shared(task).pid();
     detach_task(node, pid);
 
     // SAFETY (one adopt edge): live task handle for this context.
-    let charged = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) }
+    let charged = crate::sched::edges::task_borrow(task)
         .map(|t| t.cgroup_mem_charged())
         .unwrap_or(0);
     if charged > 0 {
         uncharge_bytes(node, charged);
         // SAFETY: task is the exiting task; ledger reset is defensive.
-        unsafe { (*task).sub_cgroup_mem_charged(charged) };
+        crate::sched::edges::task_shared(task).sub_cgroup_mem_charged(charged);
     }
 }
 
@@ -811,7 +811,7 @@ pub fn cgroup_memory_charge(bytes: usize) -> bool {
         Some(node) => {
             if charge_bytes(node, bytes) {
                 // SAFETY: current is this CPU's running task.
-                unsafe { (*current).add_cgroup_mem_charged(bytes) };
+                crate::sched::edges::task_shared(current).add_cgroup_mem_charged(bytes);
                 true
             } else {
                 false
@@ -832,7 +832,7 @@ pub fn cgroup_memory_uncharge(bytes: usize) {
         Some(node) => {
             uncharge_bytes(node, bytes as u64);
             // SAFETY: current is this CPU's running task.
-            unsafe { (*current).sub_cgroup_mem_charged(bytes as u64) };
+            crate::sched::edges::task_shared(current).sub_cgroup_mem_charged(bytes as u64);
         }
         None => {}
     }

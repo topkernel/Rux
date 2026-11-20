@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Small-object packing layer over the kernel heap buddy (SLUB-style).
 //!
 //! alloc-crash r12-16 root cause: the kernel heap's minimum block is one

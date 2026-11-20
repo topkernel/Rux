@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """Build a Linux-protocol bzImage from the linked x86_64 kernel ELF.
 

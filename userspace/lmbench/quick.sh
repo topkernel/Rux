@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # quick.sh — the 3-minute benchmark answer (user rule, 2026-11-02).
 #

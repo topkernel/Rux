@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """dbusdrv.py - boot the gnome image with a minimal D-Bus test chain
 (no Xorg, no GNOME), harvest RSLT: lines from serial, stop on

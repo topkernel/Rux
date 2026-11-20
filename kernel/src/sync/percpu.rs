@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Typed per-CPU storage (rust-design-headroom §3, divergence D-7).
 //!
 //! The mainstream approach this replaces is a `static mut` array

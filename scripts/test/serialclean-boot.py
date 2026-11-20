@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """serialclean-boot.py — scripted serial-log boot check (serial-clean agent).
 

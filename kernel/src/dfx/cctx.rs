@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Context-switch / wake / IPC-syscall cost anatomy (closegap lane,
 //! cmdline `cctx=1`).
 //!

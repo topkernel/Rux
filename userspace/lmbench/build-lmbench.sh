@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # build-lmbench.sh — compile the lmbench core benchmarks as static musl
 # binaries for the Rux guest (x86_64). One invocation builds every

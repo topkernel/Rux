@@ -8,6 +8,7 @@
 //! Handle various exceptions and interrupts
 
 use core::arch::asm;
+use super::unsafe_edges::SavedFrame;
 use crate::process::task::TaskState;
 use riscv::register::sie;
 use crate::fs::procfs::interrupts;
@@ -195,19 +196,23 @@ pub fn enable_external_interrupt() {
 /// Called by trap.S with PtRegs pointer
 #[no_mangle]
 pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
-    // SAFETY: regs points to a valid PtRegs on the kernel stack, allocated by trap_entry
-    // in trap.S. The pointer remains valid for the duration of this handler.
-    unsafe {
-        // Save and swap PtRegs pointer (used for fork/exec).
-        // When interrupts are enabled during syscalls (like Linux), a timer
-        // interrupt can nest inside a syscall.  Without save/restore, the
-        // inner trap_handler would overwrite CURRENT_PT_REGS with its own
-        // pt_regs and then clear it to 0 on return, causing the outer
-        // syscall's fork/exec to see current_pt_regs() == NULL.
+    // The frame edge: ONE audited reference formation per entry
+    // (INV-RE-FRAME-1/2 in unsafe_edges.rs). Everything below is safe
+    // Rust over the typed handle.
+    let mut frame = unsafe { SavedFrame::<'static>::from_trap(regs) };
+
+    // Save and swap PtRegs pointer (used for fork/exec).
+    // When interrupts are enabled during syscalls (like Linux), a timer
+    // interrupt can nest inside a syscall.  Without save/restore, the
+    // inner trap_handler would overwrite CURRENT_PT_REGS with its own
+    // pt_regs and then clear it to 0 on return, causing the outer
+    // syscall's fork/exec to see current_pt_regs() == NULL.
+    {
         let prev_pt_regs = CURRENT_PT_REGS[cpu_id].load(core::sync::atomic::Ordering::Relaxed);
         CURRENT_PT_REGS[cpu_id].store(regs as u64, core::sync::atomic::Ordering::Relaxed);
 
-        let regs_ref = &mut *regs;
+        // Scoped dispatch on the frame (regs_ref: the live &mut PtRegs).
+        let regs_ref = &mut *frame;
         let cause = Cause::from_cause(regs_ref.cause);
 
         // Skip WFI instruction when interrupted in kernel mode.
@@ -234,7 +239,9 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
             };
             if regs_ref.epc >= lo && regs_ref.epc < hi {
                 const WFI_INSN: u32 = 0x10500073;
-                let insn = core::ptr::read_volatile(regs_ref.epc as *const u32);
+                // SAFETY: epc is bounds-checked inside [_stext, _etext]
+                // (mapped kernel text); a 4-byte aligned instruction read.
+                let insn = unsafe { core::ptr::read_volatile(regs_ref.epc as *const u32) };
                 if insn == WFI_INSN {
                     regs_ref.epc += 4;
                 }
@@ -461,8 +468,11 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                             if fp < 0xffffffd600000000 || fp > 0xffffffd700000000 {
                                 break;
                             }
-                            let next = core::ptr::read_volatile(fp as *const usize);
-                            let ra = core::ptr::read_volatile((fp + 8) as *const usize);
+                            // SAFETY: fp is inside the current task's kernel
+                        // stack (the frame-pointer walk's bound discipline).
+                        let next = unsafe { core::ptr::read_volatile(fp as *const usize) };
+                            // SAFETY: same in-stack bounds as the fp read above.
+                        let ra = unsafe { core::ptr::read_volatile((fp + 8) as *const usize) };
                             let _ = write!(w, "  fp={:#x} ra={:#x}\n", fp, ra);
                             if ra < 0xffffffff80000000 || next <= fp {
                                 break;
@@ -524,7 +534,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
     // load. (Coroutine note: after an in-handler schedule() this tail
     // runs in the incoming task's own frozen frame with its own regs, so
     // the check validates whichever task actually returns to user.)
-    if unsafe { (*regs).user_mode() } {
+    if frame.user_mode() {
         // Return-to-user is a quiescent state (rcu.rs): report it here so
         // syscall-heavy CPUs complete grace periods without waiting for
         // their scheduler tick. Fast-pathed on RCU_WAITERS (one load).

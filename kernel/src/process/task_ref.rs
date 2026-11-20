@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Typed task handles — the raw-`*mut Task` consolidation of the
 //! unsafe-slim round (2026-11-19).
 //!

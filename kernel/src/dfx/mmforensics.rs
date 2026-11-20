@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! mmforensics: deep frame-tracking capture at double-tracking events.
 //!

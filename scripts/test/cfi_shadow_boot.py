@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 # cfi_shadow_boot.py — boot the x86_64 kernel with the musl CFI shadow
 # probe as init (drm_probe_boot.py shape) and report the verdict.

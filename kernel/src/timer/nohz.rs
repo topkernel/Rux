@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! NOHZ — the reference kernel/time/tick-sched.c machinery (CONFIG_NO_HZ_
 //! COMMON + CONFIG_NO_HZ_FULL), function-for-function. Structural mapping
 //! (Rux divergences are of the reference's own concepts onto this tree,

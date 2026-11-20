@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Buddy-meta shadow scan (rux:metawatch (retired dfx=metawatch)) — wildwrite-hunt line.
 //!
 //! The unified-engine hypothesis (session 4-12 archives) gives the wild

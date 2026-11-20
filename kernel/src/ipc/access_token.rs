@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! access_tokenid — the OpenHarmony per-process access-token registry
 //! (`/dev/access_token_id`, drivers/accesstokenid in the OH kernel).
 //!

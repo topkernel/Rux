@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Inter-Process Communication (IPC)
 //!
 //! This module implements System V IPC (semaphores, message queues, shared memory)

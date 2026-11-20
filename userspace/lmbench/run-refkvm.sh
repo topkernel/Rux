@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # run-refkvm.sh — the fair-rig reference column: the host's generic
 # distro kernel (the SAME kernel binary the native reference column

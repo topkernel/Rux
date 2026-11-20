@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! rux:unixrd (retired dfx=unixrd) — AF_UNIX hot-path per-op phase anatomy probe (39th lane).
 //!
 //! The hilogd storm measures recvmsg 28-58 us / recvfrom 9 us / writev

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """monostat_boot.py — CLOCK_MONOTONIC stability under KVM (timer-lane hunt).
 

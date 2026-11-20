@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Boot-provenance framework edges (industrial-reduction lane L2).
 //!
 //! `main.rs`'s remaining unsafe was the boot-provenance family the

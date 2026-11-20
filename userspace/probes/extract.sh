@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # Restore guest test-case sources from the archive (user rule 2026-11-02:
 # test cases are archived under userspace/ as tarball + extraction script

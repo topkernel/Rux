@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! IPC core infrastructure
 //!
 //! Provides the central IPC object registry (ipc_ids), permission checking,
