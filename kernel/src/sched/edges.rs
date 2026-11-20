@@ -945,3 +945,80 @@ impl RbTimeline {
         }
     }
 }
+
+/// Shared view of a stored GRQ pointer (INV-SCE-3 twin for the lock
+/// guard's held `*const GlobalRunQueue`): the guard's construction
+/// passed the ready gate; read-only access through the guard.
+#[inline]
+pub fn grq_ptr_shared(p: *const GlobalRunQueue) -> &'static GlobalRunQueue {
+    // SAFETY: INV-SCE-3 — the guard holds the initialized GRQ.
+    unsafe { &*p }
+}
+
+/// Mutable view of a stored GRQ pointer (INV-SCE-3 twin): mutation is
+/// serialized by the guard's own lock.
+#[inline]
+pub fn grq_ptr_mut(p: *const GlobalRunQueue) -> &'static mut GlobalRunQueue {
+    // SAFETY: INV-SCE-3 — same gate; the caller holds the lock.
+    unsafe { &mut *(p as *mut GlobalRunQueue) }
+}
+
+// ---------------------------------------------------------------------------
+// INV-SCE-10: the per-CPU scheduler slots
+// ---------------------------------------------------------------------------
+
+/// The per-CPU scheduler state array (INV-SCE-10): each slot's `idle`
+/// is written once at CPU bring-up; `current` is written by this CPU's
+/// own pick/heal paths (GRQ-held or the IRQs-off switch window) and
+/// read cross-Cpu by heal scans that accept mid-flight values.
+static mut PER_CPU: [super::sched::PerCpuState; crate::config::MAX_CPUS] =
+    [const { super::sched::PerCpuState::new() }; crate::config::MAX_CPUS];
+
+/// Shared view of cpu's slot (INV-SCE-10 read side).
+#[inline]
+pub fn per_cpu_shared(cpu: usize) -> &'static super::sched::PerCpuState {
+    debug_assert!(cpu < crate::config::MAX_CPUS);
+    // SAFETY: INV-SCE-10 — indexed by the hardware cpu id; the boot
+    // path initialized every slot before scheduling began.
+    unsafe { &PER_CPU[cpu.min(crate::config::MAX_CPUS - 1)] }
+}
+
+/// Mutable view of cpu's slot (INV-SCE-10 write side: this CPU's own
+/// writes, or the GRQ-held heal paths).
+#[inline]
+pub fn per_cpu_mut(cpu: usize) -> &'static mut super::sched::PerCpuState {
+    debug_assert!(cpu < crate::config::MAX_CPUS);
+    // SAFETY: INV-SCE-10 — same init story; exclusion from the caller's
+    // cpu-ownership or GRQ discipline.
+    unsafe { &mut PER_CPU[cpu.min(crate::config::MAX_CPUS - 1)] }
+}
+
+// ---------------------------------------------------------------------------
+// INV-SCE-4 companion: the secondary-boot idle-task table
+// ---------------------------------------------------------------------------
+
+/// The idle-task pointer table boot.S reads at secondary bring-up
+/// (INV-SCE-4 companion): published once by the BSP init loop, then
+/// read-only.
+#[no_mangle]
+static mut __secondary_idle_tasks: [usize; crate::config::MAX_CPUS] =
+    [0; crate::config::MAX_CPUS];
+
+/// Publish cpu's idle-task pointer (BSP init loop only).
+pub fn secondary_idle_publish(cpu: usize, ptr: usize) {
+    // SAFETY: INV-SCE-4 — single BSP writer, pre-secondaries.
+    unsafe { __secondary_idle_tasks[cpu] = ptr }
+}
+
+/// The table's base address (boot.S linkage reads it by symbol; the
+/// physmap base math must match the linker script).
+pub fn secondary_idle_table_base() -> usize {
+    // SAFETY: address-of only.
+    unsafe { core::ptr::addr_of!(__secondary_idle_tasks) as usize }
+}
+
+/// Read cpu's published idle-task pointer (aarch64 bring-up path).
+pub fn secondary_idle_task(cpu: usize) -> usize {
+    // SAFETY: INV-SCE-4 — published before any secondary reads it.
+    unsafe { __secondary_idle_tasks[cpu] }
+}

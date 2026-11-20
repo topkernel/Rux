@@ -557,6 +557,75 @@ fn phys_to_virt_ptr(phys: usize) -> *mut u8 {
     phys_to_virt(PhysAddr::new(phys as u64)).0 as *mut u8
 }
 
+// ==================== Round-5 named page-fill edges ====================
+//
+// The insert/writeback family's one shared shape: copying bytes into
+// the LINEAR MAP of a physical page frame. INV-PC-PAGECOPY: the frame
+// is zone-allocated (the caller owns it exclusively until published)
+// and the span stays inside PAGE_SIZE by construction at every caller.
+
+/// Copy `src` into the frame at `phys_addr` and zero the tail (the
+/// fill-a-fresh-frame shape: min(src.len(), PAGE_SIZE) bytes land, the
+/// rest of the frame zeroes).
+#[inline]
+fn fill_page_from(phys_addr: usize, src: &[u8]) {
+    // SAFETY: INV-PC-PAGECOPY — phys_addr names this call's private
+    // frame; the linear map covers PAGE_SIZE bytes from it.
+    unsafe {
+        let dst = phys_to_virt_ptr(phys_addr);
+        let copy_len = core::cmp::min(src.len(), PAGE_SIZE);
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, copy_len);
+        if copy_len < PAGE_SIZE {
+            core::ptr::write_bytes(dst.add(copy_len), 0, PAGE_SIZE - copy_len);
+        }
+    }
+}
+
+/// Copy a whole frame from another frame (frame-to-frame revive/refresh).
+#[inline]
+fn copy_page_page(dst_phys: usize, src_phys: usize, copy_len: usize) {
+    // SAFETY: INV-PC-PAGECOPY — both frames are zone-allocated and
+    // privately owned by this call; len bounded by the caller.
+    unsafe {
+        let dst = phys_to_virt_ptr(dst_phys);
+        let frame_src = phys_to_virt_ptr(src_phys) as *const u8;
+        if copy_len > 0 {
+            core::ptr::copy_nonoverlapping(frame_src, dst, copy_len);
+        }
+        if copy_len < PAGE_SIZE {
+            core::ptr::write_bytes(dst.add(copy_len), 0, PAGE_SIZE - copy_len);
+        }
+    }
+}
+
+/// Copy `n` bytes at kernel `src` into the frame at `pfn`, offset `off`
+/// (the partial-span writeback shape). INV-PC-PAGECOPY: off+n <= PAGE_SIZE.
+#[inline]
+fn copy_into_page(pfn: u64, off: usize, src: *const u8, n: usize) {
+    // SAFETY: INV-PC-PAGECOPY — the span is inside one frame by
+    // construction at every caller (the cursor arithmetic asserts it).
+    unsafe {
+        let dst = phys_to_virt_ptr(pfn_to_phys(pfn as usize));
+        core::ptr::copy_nonoverlapping(src, dst.add(off), n);
+    }
+}
+
+/// Exception-table user->frame copy (the DIO insert path). Returns the
+/// uncopied tail on fault. INV-PC-PAGECOPY + the uaccess extable
+/// primitive's own contract (any user address is sound to pass).
+#[inline]
+fn copy_user_into_page(pfn: u64, off: usize, user_addr: usize, n: usize) -> usize {
+    // SAFETY: INV-PC-PAGECOPY — the frame is this call's private
+    // destination; the user source rides the exception-table primitive.
+    unsafe {
+        crate::arch::uaccess::copy_from_user(
+            phys_to_virt_ptr(pfn_to_phys(pfn as usize)).add(off),
+            user_addr as *const u8,
+            n,
+        )
+    }
+}
+
 impl PageCache {
     /// Create a new empty page cache.
     pub const fn new() -> Self {
@@ -1618,16 +1687,7 @@ impl PageCache {
                 // cover every byte (the cursor asserts it).
                 let mut done = 0usize;
                 pins.for_each_piece(src_skip, n, |src, l| {
-                    // SAFETY: dst is the linear map of the entry's frame
-                    // (PAGE_SIZE writable bytes); page_in_frame + done + l
-                    // <= PAGE_SIZE by construction.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src as *const u8,
-                            dst.add(page_in_frame + done),
-                            l,
-                        );
-                    };
+                    copy_into_page(page.pfn as u64, (page_in_frame + done) as usize, src as *const u8, l);
                     done += l;
                     true
                 });
@@ -1698,17 +1758,13 @@ impl PageCache {
                     continue;
                 }
                 let src_skip = (page_off - file_off) as usize;
-                let dst = phys_to_virt_ptr(pfn_to_phys(page.pfn));
                 let n = (page_end - page_off) as usize;
-                // SAFETY: dst is the linear map of the entry's frame (PAGE_SIZE
-                // writable bytes); page_off%PAGE + n <= PAGE_SIZE by construction.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        data.as_ptr().add(src_skip),
-                        dst.add((page_off % PAGE_SIZE as u64) as usize),
-                        n,
-                    );
-                }
+                copy_into_page(
+                    page.pfn as u64,
+                    (page_off % PAGE_SIZE as u64) as usize,
+                    data[src_skip..src_skip + n].as_ptr(),
+                    n,
+                );
             }
         }
         drop(entry);
@@ -2307,18 +2363,9 @@ impl PageCache {
             return DirtyUserOutcome::Contention;
         }
         let copy_len = core::cmp::min(len, PAGE_SIZE);
-        // SAFETY: the fresh zone frame is a valid PAGE_SIZE kernel
-        // destination; the user side is access_ok-checked and faults
-        // through the exception table inside the primitive — any address
-        // is sound to pass, and the uncopied tail of the frame is
-        // zero-filled by the primitive.
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_from_user(
-                phys_to_virt_ptr(phys_addr),
-                user_src as *const u8,
-                copy_len,
-            )
-        };
+        // The named user->frame edge (INV-PC-PAGECOPY + the extable
+        // primitive's contract: faults return the uncopied tail).
+        let uncopied = copy_user_into_page((phys_addr >> 12) as u64, 0, user_src, copy_len);
         if uncopied > 0 {
             // No byte of this page becomes visible; the frame was never
             // stamped or published, so a plain free suffices.
@@ -2385,22 +2432,8 @@ impl PageCache {
                         let stale = g.get_mut(&page_index).expect("contains_key");
                         stale.invalidated = false;
                         let pfn = stale.pfn;
-                        // SAFETY: pfn is this entry's zone frame; phys is
-                        // this call's private pre-filled frame.
-                        unsafe {
-                            let dst = phys_to_virt_ptr(pfn_to_phys(pfn));
-                            let frame_src = phys_to_virt_ptr(phys_addr) as *const u8;
-                            if copy_len > 0 {
-                                core::ptr::copy_nonoverlapping(frame_src, dst, copy_len);
-                            }
-                            if copy_len < PAGE_SIZE {
-                                core::ptr::write_bytes(
-                                    dst.add(copy_len),
-                                    0,
-                                    PAGE_SIZE - copy_len,
-                                );
-                            }
-                        }
+                        // Frame-to-frame revive (the named edge owns the copy).
+                        copy_page_page(pfn_to_phys(pfn), phys_addr as usize, copy_len);
                         dirty_account_transition(stale, true);
                         fresh_unused = true; // data landed; frame freed below
                     } else {
@@ -2597,20 +2630,8 @@ impl PageCache {
                         let stale = g.get_mut(&page_index).expect("contains_key");
                         stale.invalidated = false;
                         let pfn = stale.pfn;
-                        // SAFETY: pfn is this entry's zone-allocated
-                        // frame; the linear map covers PAGE_SIZE bytes.
-                        unsafe {
-                            let dst = phys_to_virt_ptr(pfn_to_phys(pfn));
-                            let copy_len = core::cmp::min(data.len(), PAGE_SIZE);
-                            core::ptr::copy_nonoverlapping(data.as_ptr(), dst, copy_len);
-                            if copy_len < PAGE_SIZE {
-                                core::ptr::write_bytes(
-                                    dst.add(copy_len),
-                                    0,
-                                    PAGE_SIZE - copy_len,
-                                );
-                            }
-                        }
+                        // Fill the revived frame (the named edge).
+                        fill_page_from(pfn_to_phys(pfn), data);
                         // `dirty` is always touched through atomic ops
                         // (leg-54 note): the revived frame carries
                         // exactly this insert's content — clean for a
@@ -2641,15 +2662,8 @@ impl PageCache {
                         lru::page_add_file_lru_young(pd);
                     }
 
-                    // Copy data into the physical page via linear mapping
-                    unsafe {
-                        let dst = phys_to_virt_ptr(phys_addr);
-                        let copy_len = core::cmp::min(data.len(), PAGE_SIZE);
-                        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, copy_len);
-                        if copy_len < PAGE_SIZE {
-                            core::ptr::write_bytes(dst.add(copy_len), 0, PAGE_SIZE - copy_len);
-                        }
-                    }
+                    // Fill the fresh frame (the named edge).
+                    fill_page_from(phys_addr as usize, data);
 
                     g.insert(
                         page_index,
@@ -2895,16 +2909,7 @@ impl PageCache {
                 let copy_len = core::cmp::min(PAGE_SIZE, fill.len() - src_off);
                 match fill {
                     BatchFill::Slice(buf) => {
-                        // SAFETY: phys is a valid page frame from the zone
-                        // allocator; the linear mapping covers all RAM.
-                        unsafe {
-                            let dst = phys_to_virt_ptr(phys);
-                            core::ptr::copy_nonoverlapping(
-                                buf.as_ptr().add(src_off),
-                                dst,
-                                copy_len,
-                            );
-                        }
+                        copy_into_page((phys >> 12) as u64, 0, buf[src_off..src_off + copy_len].as_ptr(), copy_len);
                     }
                     BatchFill::User { ptr, .. } => {
                         // SAFETY: dst is the fresh zone frame (a valid
@@ -2915,14 +2920,9 @@ impl PageCache {
                         // of dst is zero-filled by the primitive.
                         // (A movnti non-temporal variant measured 10x
                         // WORSE under this KVM rig — see BUFW-2X.md — so
-                        // the regular rep movsb stays.)
-                        let uncopied = unsafe {
-                            crate::arch::uaccess::copy_from_user(
-                                phys_to_virt_ptr(phys),
-                                (ptr + src_off) as *const u8,
-                                copy_len,
-                            )
-                        };
+                        // the regular rep movsb stays — now inside the
+                        // named user->frame edge.)
+                        let uncopied = copy_user_into_page((phys >> 12) as u64, 0, ptr + src_off, copy_len);
                         if uncopied > 0 {
                             // FAULT: the page's bytes must not become
                             // visible — a partially-copied frame installed
@@ -3087,25 +3087,7 @@ impl PageCache {
                                         // PAGE_SIZE bytes and copy_len <=
                                         // it; phys is this batch's private
                                         // pre-filled frame.
-                                        unsafe {
-                                            let dst = phys_to_virt_ptr(pfn_to_phys(dup_pfn));
-                                            let frame_src =
-                                                phys_to_virt_ptr(phys) as *const u8;
-                                            if copy_len > 0 {
-                                                core::ptr::copy_nonoverlapping(
-                                                    frame_src,
-                                                    dst,
-                                                    copy_len,
-                                                );
-                                            }
-                                            if copy_len < PAGE_SIZE {
-                                                core::ptr::write_bytes(
-                                                    dst.add(copy_len),
-                                                    0,
-                                                    PAGE_SIZE - copy_len,
-                                                );
-                                            }
-                                        }
+                                        copy_page_page(pfn_to_phys(dup_pfn), phys as usize, copy_len);
                                         dirty_account_transition(stale, true);
                                     }
                                     // The pre-marked cache identity is
@@ -3170,28 +3152,8 @@ impl PageCache {
                                 let stale = e.get_mut();
                                 stale.invalidated = false;
                                 let revive_pfn = stale.pfn;
-                                // SAFETY: revive_pfn is this entry's zone
-                                // frame; the linear map covers PAGE_SIZE
-                                // bytes and copy_len <= PAGE_SIZE; phys is
-                                // this batch's private pre-filled frame.
-                                unsafe {
-                                    let dst = phys_to_virt_ptr(pfn_to_phys(revive_pfn));
-                                    let frame_src = phys_to_virt_ptr(phys) as *const u8;
-                                    if copy_len > 0 {
-                                        core::ptr::copy_nonoverlapping(
-                                            frame_src,
-                                            dst,
-                                            copy_len,
-                                        );
-                                    }
-                                    if copy_len < PAGE_SIZE {
-                                        core::ptr::write_bytes(
-                                            dst.add(copy_len),
-                                            0,
-                                            PAGE_SIZE - copy_len,
-                                        );
-                                    }
-                                }
+                                // Frame revive (the named edge).
+                                copy_page_page(pfn_to_phys(revive_pfn), phys as usize, copy_len);
                                 // Read-path batch: the revived frame now
                                 // matches disk — clean; the dirty batch's
                                 // revive carries this batch's bytes, so it

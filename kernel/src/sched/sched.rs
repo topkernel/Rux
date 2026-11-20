@@ -588,7 +588,7 @@ impl<'a> GrqGuard<'a> {
         // ahead of the word (the orphaned-word producer).
         grq_site_mark_at(cpu, 0);
         // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
-        unsafe { (*self.grq).lock.unlock() };
+        crate::sched::edges::grq_ptr_mut(self.grq).lock.unlock();
         core::mem::forget(self);
         flags
     }
@@ -598,14 +598,14 @@ impl core::ops::Deref for GrqGuard<'_> {
     type Target = GlobalRunQueue;
     fn deref(&self) -> &Self::Target {
         // SAFETY: we hold the GRQ lock via this guard, so shared access is valid.
-        unsafe { &*self.grq }
+        crate::sched::edges::grq_ptr_shared(self.grq)
     }
 }
 
 impl core::ops::DerefMut for GrqGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: we hold the GRQ lock via this guard, so exclusive access is guaranteed.
-        unsafe { &mut *self.grq }
+        crate::sched::edges::grq_ptr_mut(self.grq)
     }
 }
 
@@ -622,7 +622,7 @@ impl Drop for GrqGuard<'_> {
         // grq-source-fix: site-clear + the single word store below —
         // no separate tracker step (see lock_irqsave_site).
         grq_site_mark_at(cpu, 0);
-        unsafe { (*self.grq).lock.unlock() };
+        crate::sched::edges::grq_ptr_mut(self.grq).lock.unlock();
         crate::arch::cpu::restore_irq(self.flags);
     }
 }
@@ -637,21 +637,21 @@ impl core::ops::Deref for GrqPlainGuard<'_> {
     type Target = GlobalRunQueue;
     fn deref(&self) -> &Self::Target {
         // SAFETY: we hold the GRQ lock via this guard, so shared access is valid.
-        unsafe { &*self.grq }
+        crate::sched::edges::grq_ptr_shared(self.grq)
     }
 }
 
 impl core::ops::DerefMut for GrqPlainGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: we hold the GRQ lock via this guard, so exclusive access is guaranteed.
-        unsafe { &mut *self.grq }
+        crate::sched::edges::grq_ptr_mut(self.grq)
     }
 }
 
 impl Drop for GrqPlainGuard<'_> {
     fn drop(&mut self) {
         // SAFETY: we hold the GRQ lock via this guard; Drop runs exactly once.
-        unsafe { (*self.grq).lock.unlock() };
+        crate::sched::edges::grq_ptr_mut(self.grq).lock.unlock();
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
@@ -671,7 +671,7 @@ pub struct PerCpuState {
 }
 
 impl PerCpuState {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             current: core::ptr::null_mut(),
             idle: core::ptr::null_mut(),
@@ -1353,7 +1353,10 @@ pub fn try_grq_lock() -> Option<GrqGuard<'static>> {
 }
 
 /// Per-CPU state array (indexed by cpu_id)
-static mut PER_CPU: [PerCpuState; MAX_CPUS] = [const { PerCpuState::new() }; MAX_CPUS];
+// PER_CPU moved into crate::sched::edges (INV-SCE-10): the per-CPU
+// scheduler slots, indexed by the hardware cpu id, written by this
+// cpu (init) and read cross-cpu under the GRQ / RCU disciplines the
+// accessors document.
 
 /// Per-CPU RQ initialization flags
 static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
@@ -1720,7 +1723,7 @@ pub fn stale_mark_confirm(task: *mut Task, pid: u32, threshold: u64) -> bool {
 }
 
 /// Per-CPU reschedule flags
-static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
+static NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
 
 /// Per-CPU polling-idle flags (closegap lane): set while the idle loop
 /// is inside its pre-halt poll window. `resched_cpu` reads this and
@@ -2146,7 +2149,9 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
 /// Written once by sched::init() on the boot CPU, read by secondary_start in
 /// assembly before any C code runs.  0 means not yet initialized.
 #[no_mangle]
-static mut __secondary_idle_tasks: [usize; MAX_CPUS] = [0; MAX_CPUS];
+// __secondary_idle_tasks moved into crate::sched::edges (INV-SCE-4
+// companion): published once by the BSP init loop, consumed read-only
+// by boot.S on secondary bring-up.
 
 // ==================== Reschedule Flags ====================
 
@@ -2570,7 +2575,7 @@ pub fn idle_task_ptr(cpu: usize) -> usize {
     if cpu < MAX_CPUS {
         // SAFETY: written once by init() before secondaries start; read
         // only by the matching CPU's bring-up.
-        unsafe { __secondary_idle_tasks[cpu] }
+        crate::sched::edges::secondary_idle_task(cpu)
     } else {
         0
     }
@@ -2646,32 +2651,30 @@ fn this_cpu() -> &'static PerCpuState {
         if id >= MAX_CPUS {
             panic!("this_cpu: cpu_id {} >= MAX_CPUS {}", id, MAX_CPUS);
         }
-        &PER_CPU[id]
+        crate::sched::edges::per_cpu_shared(id)
     }
 }
 
 /// Get per-CPU state for the current CPU (mutable).
 #[inline]
 fn this_cpu_mut() -> &'static mut PerCpuState {
-    // SAFETY: cpu_id is clamped to [0, MAX_CPUS-1]; only the current CPU mutates its own slot.
-    unsafe {
-        let cpu_id = crate::arch::cpu_id() as u64 as usize;
-        &mut PER_CPU[cpu_id.min(MAX_CPUS - 1)]
-    }
+    // INV-SCE-10: this CPU mutates its own slot.
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    crate::sched::edges::per_cpu_mut(cpu_id)
 }
 
 /// Get per-CPU state for a specific CPU.
 #[inline]
 pub fn cpu_state(cpu_id: usize) -> &'static PerCpuState {
     // SAFETY: cpu_id is clamped to [0, MAX_CPUS-1]; PER_CPU is a static array.
-    unsafe { &PER_CPU[cpu_id.min(MAX_CPUS - 1)] }
+    crate::sched::edges::per_cpu_shared(cpu_id)
 }
 
 /// Get per-CPU state for a specific CPU (mutable).
 #[inline]
 fn cpu_state_mut(cpu_id: usize) -> &'static mut PerCpuState {
     // SAFETY: cpu_id is clamped to [0, MAX_CPUS-1]; caller must ensure no aliasing.
-    unsafe { &mut PER_CPU[cpu_id.min(MAX_CPUS - 1)] }
+    crate::sched::edges::per_cpu_mut(cpu_id)
 }
 
 /// Check if a CPU is online (has been assigned an idle task).
@@ -2804,7 +2807,7 @@ pub fn init() {
             (*idle_ptr).set_ti_cpu(cpu as i32);
 
             // Store pointer for assembly secondary_start
-            __secondary_idle_tasks[cpu] = idle_ptr as usize;
+            crate::sched::edges::secondary_idle_publish(cpu, idle_ptr as usize);
 
             if cpu == boot_cpu {
                 clear_trap_scratch();
@@ -6884,7 +6887,7 @@ pub fn wake_up_enqueue_opt(
                             // kernel-stack entry frame region.
                             unsafe {
                                 for k in 0..21 {
-                                    uf[k] = core::ptr::read_volatile(base.add(k));
+                                    uf[k] = crate::sync::edges::read_volatile_u64((base as usize) + 8 * k);
                                 }
                             }
                             true
@@ -7661,7 +7664,7 @@ pub fn monopolist_census(now_j: u64) {
         let tjif = crate::interrupt::preempt::TICK_ENTRY_JIF[c].load(Relaxed);
         // SAFETY: NEED_RESCHED is an AtomicBool array sized MAX_CPUS;
         // static mut access is single-word atomic reads here.
-        let nrs = unsafe { NEED_RESCHED[c].load(Acquire) } as u8;
+        let nrs = NEED_RESCHED[c].load(Acquire) as u8;
         let mode = if tcs & 3 == 3 { 'U' } else { 'K' };
         let stamp_age = now_j.saturating_sub(tjif);
         let _ = write!(
