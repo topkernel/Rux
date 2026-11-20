@@ -1,7 +1,7 @@
 # Rux Kernel Project Makefile
 # Provides quick access from project root directory
 
-.PHONY: all build clean run test debug help smp user rootfs gui verify miri kani
+.PHONY: all build clean run test debug help smp user rootfs gui verify miri kani perf-gate
 .PHONY: toybox mrsh sdk ltp ubuntu-image ubuntu-run
 
 # ---- Ubuntu native desktop (udesk) ----
@@ -167,8 +167,11 @@ verify:
 	@echo "=== Step 2/3: Unsafe verification gate ==="
 	@python3 scripts/unsafe_gate.py --check
 	@echo ""
-	@echo "=== Step 3/3: Run verification tests ==="
+	@echo "=== Step 3/4: Run verification tests ==="
 	@cd kernel/verify && cargo test --target x86_64-unknown-linux-gnu
+	@echo ""
+	@echo "=== Step 4/4: Performance gate (Tier 1, quiet syscost boot) ==="
+	@bash scripts/perf-gate.sh --tiers 1 --kernel target/x86_64-unknown-none/release/bzImage
 	@echo ""
 	@echo "=== All verify steps passed ==="
 
@@ -269,3 +272,10 @@ help:
 	@echo "  scripts/    - Host-side scripts"
 	@echo "  docs/      - Documentation"
 
+# perf-gate: the tiered performance merge gate (AGENTS.md policy
+# 2026-10-25). TIERS=1 default here is the standing check; hot-path
+# changes run `make perf-gate TIERS=1,2` (pbench median battery).
+# Logs under /tmp/perf-gate (RUN_BASE). Baseline constants mirror
+# docs/development/perf-gate-baseline.md — refresh in the same commit.
+perf-gate:
+	@bash scripts/perf-gate.sh --tiers $(TIERS) --kernel target/x86_64-unknown-none/release/bzImage
