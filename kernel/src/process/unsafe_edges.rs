@@ -82,6 +82,19 @@ pub fn borrow_task_mut<'a>(p: *mut Task) -> &'a mut Task {
 /// `Task` and every field-inclusion error class the offset_of ladder
 /// carried (sc130/R9-1/R68a: fields silently missing from the hand list)
 /// is impossible: the compiler checks the value's completeness.
+///
+/// INV-PROC-PLACE-2 (self-reference rule, added by the slim4-fix lane
+/// 2026-11-20): the placed value must NOT carry addresses of itself.
+/// Build-then-place copies the struct to the slot, so a self-referential
+/// field initialized inside the constructor (ListHead::init() pointing
+/// children/sibling/rt_run_list at the TEMPORARY's own address) dangles
+/// at the dead temporary after the copy — every empty-list head then
+/// dereferences freed stack memory on the next list op (the Round-B fio
+/// null-walk corruption family). Constructors re-anchor self-referential
+/// fields IN PLACE after placement (see new_task_at/new_idle_at); a
+/// future constructor that forgets the re-anchor reintroduces the class.
+/// The compiler cannot check this rule — it is carried by review and the
+/// constructor comments.
 #[inline]
 pub fn place_task(ptr: *mut Task, task: Task) {
     debug_assert!(!ptr.is_null());
