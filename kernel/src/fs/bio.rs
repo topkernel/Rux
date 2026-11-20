@@ -1200,9 +1200,9 @@ impl BlockCache {
         // Phase 2: Sync without holding any lock
         let mut first_error: i32 = 0;
         for bh in &dirty_list {
-            // SAFETY: bh pointers were collected under bucket locks above
-            // and had their refcount incremented (pin); valid BufferHeads.
-            if let Err(e) = unsafe { (**bh).sync() } {
+            // bh pointers were collected under bucket locks above and
+            // had their refcount incremented (INV-BIO-PIN: valid, pinned).
+            if let Err(e) = bh_pinned(&(*bh)).sync() {
                 if first_error == 0 {
                     first_error = e;
                 }
@@ -1260,7 +1260,7 @@ impl BlockCache {
         for bh in &dirty_list {
             // SAFETY: collected under bucket locks with a refcount pin;
             // valid BufferHeads.
-            if let Err(e) = unsafe { (**bh).sync() } {
+            if let Err(e) = bh_pinned(&(*bh)).sync() {
                 if first_error == 0 {
                     first_error = e;
                 }
@@ -1380,7 +1380,8 @@ impl Drop for BlockCache {
 use core::sync::atomic::AtomicBool;
 
 static CACHE_INIT: AtomicBool = AtomicBool::new(false);
-static mut BLOCK_CACHE: Option<BlockCache> = None;
+static BLOCK_CACHE: crate::safety::slot::OnceSlot<BlockCache> =
+    crate::safety::slot::OnceSlot::new();
 static CACHE_INIT_LOCK: Spinlock<()> = Spinlock::new(());
 
 pub fn get_block_cache() -> &'static BlockCache {
@@ -1402,16 +1403,17 @@ pub fn get_block_cache() -> &'static BlockCache {
             // entries the old 64 buckets averaged 128-long chains, making
             // every bread/get/peek walk tens of pointers.
             let cache = BlockCache::new(2048, 8192, 4096);
-            // SAFETY: we hold the lock and CACHE_INIT is false, so no other
-            // CPU can access BLOCK_CACHE concurrently.
-            unsafe { BLOCK_CACHE = Some(cache); }
-            // Release ordering ensures BLOCK_CACHE write is visible before
+            // INV-SLOT-1/2: the OnceSlot owns the publication protocol
+            // the hand-rolled static-mut + flag pair carried.
+            BLOCK_CACHE.publish(cache);
+            // Release ordering ensures the publication is visible before
             // CACHE_INIT becomes true.
             CACHE_INIT.store(true, Ordering::Release);
         }
     }
-    // SAFETY: CACHE_INIT is true, BLOCK_CACHE was written before the store.
-    unsafe { BLOCK_CACHE.as_ref().unwrap_unchecked() }
+    BLOCK_CACHE
+        .get()
+        .expect("block cache used before init_block_cache()")
 }
 
 /// Read a block from cache (or disk if not cached)
@@ -1427,41 +1429,50 @@ pub fn get_block_cache() -> &'static BlockCache {
 // family the sibling lane is landing.)
 // ============================================================================
 
+/// THE pinned-handle edge: adopt a bread-family buffer handle as a
+/// shared view. INV-BIO-PIN: `bh` came from bread/bread_async/getblk
+/// (non-null, the caller's refcount pin holds it until brelse) and the
+/// borrow lives only as long as the caller's handle borrow.
+#[inline]
+fn bh_pinned<'a>(bh: &'a *mut BufferHead) -> &'a BufferHead {
+    // SAFETY: INV-BIO-PIN — pinned by the caller's refcount; non-null
+    // by the bread family's construction.
+    unsafe { &**bh }
+}
+
 /// Shared view of a pinned buffer's data block.
 pub fn bh_data<'a>(bh: &'a *mut BufferHead) -> &'a [u8] {
-    // SAFETY: bread-family contract — non-null, pinned until brelse; the
-    // borrow outlives only the caller's handle borrow.
-    unsafe { &(*(*bh)).b_data }
+    &bh_pinned(bh).b_data
 }
 
 /// Exclusive view of a pinned buffer's data block (read-modify-write).
 pub fn bh_data_mut<'a>(bh: &'a *mut BufferHead) -> &'a mut [u8] {
-    // SAFETY: as bh_data; exclusive borrow of the caller's handle.
-    unsafe { &mut (*(*bh)).b_data }
+    // SAFETY: INV-BIO-PIN — the caller's pin holds the buffer; every
+    // call site's `bh` local is a uniquely-held *mut (the metadata
+    // read-modify-write discipline), so the &mut window aliases no live
+    // shared borrow. (Kept as the one documented mut edge rather than
+    // rippling &mut through dozens of ext4 call sites this round.)
+    unsafe { &mut (**bh).b_data }
 }
 
 /// Block number of a pinned buffer (metadata loops).
 pub fn bh_blocknr(bh: &*mut BufferHead) -> u64 {
-    // SAFETY: as bh_data.
-    unsafe { (*(*bh)).b_blocknr }
+    bh_pinned(bh).b_blocknr
 }
 
 /// State-bit set on a pinned buffer (dirty marking).
 pub fn bh_set_state_bit(bh: &*mut BufferHead, bit: u8) {
-    // SAFETY: as bh_data.
-    unsafe { (*(*bh)).set_state_bit(bit) }
+    bh_pinned(bh).set_state_bit(bit)
 }
 
 /// State-bit clear on a pinned buffer.
 pub fn bh_clear_state_bit(bh: &*mut BufferHead, bit: u8) {
-    // SAFETY: as bh_data.
-    unsafe { (*(*bh)).clear_state_bit(bit) }
+    bh_pinned(bh).clear_state_bit(bit)
 }
 
 /// Dirty query on a pinned buffer.
 pub fn bh_is_dirty(bh: &*mut BufferHead) -> bool {
-    // SAFETY: as bh_data.
-    unsafe { (*(*bh)).is_dirty() }
+    bh_pinned(bh).is_dirty()
 }
 
 pub fn bread(device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
@@ -1544,12 +1555,15 @@ pub fn invalidate_device(device: &blkdev::GenDisk) {
 /// churn starved the timer softirq into ALLOCTHROW panics on other
 /// CPUs). Bound the wait: after WAIT_DEADLINE_JIFFIES, give up and
 /// report -EIO so the syscall unwinds and the task stays killable.
-unsafe fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
+fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
     const WAIT_DEADLINE_JIFFIES: u64 = crate::drivers::timer::msecs_to_jiffies(10_000);
     let mut slept = 0u32;
     let deadline = crate::drivers::timer::get_jiffies().saturating_add(WAIT_DEADLINE_JIFFIES);
     loop {
-        let state = (*bh).get_state();
+        // SAFETY: INV-BIO-PIN — the owner's reference pins the buffer
+        // across this wait (the module doc above).
+        let bh_ref: &BufferHead = unsafe { &*bh };
+        let state = bh_ref.get_state();
         if !state.test(BufferState::BH_Req) {
             return if state.test(BufferState::BH_Uptodate) { 0 } else { -5 };
         }
@@ -1557,7 +1571,7 @@ unsafe fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
             if crate::drivers::timer::get_jiffies() >= deadline {
                 crate::pr_err!(
                     "bio: buffer io wait timeout block={} — reporting EIO (wedge fix)",
-                    (*bh).b_blocknr
+                    bh_ref.b_blocknr
                 );
                 return -5;
             }
@@ -1788,7 +1802,7 @@ pub fn bread_async(
                     let _ = unsafe { Box::from_raw(entry_ptr) };
                 }
                 // SAFETY: existing_bh was pinned in the dup walk above.
-                let settle = unsafe { wait_buffer_io_done(existing_bh) };
+                let settle = wait_buffer_io_done(existing_bh);
                 // Re-settle the completion as an INTERNAL signal carrying the
                 // existing buffer's settled status: the token on it names OUR
                 // redundant buffer, but the caller's bread_wait() will check
@@ -2067,7 +2081,7 @@ pub fn bread_async_multi(
 /// # Safety
 /// `bh` must come from `bread_async_multi`, exactly once, and its I/O must
 /// have completed.
-pub unsafe fn bfree_multi(bh: *mut BufferHead) {
+pub fn bfree_multi(bh: *mut BufferHead) {
     if bh.is_null() {
         return;
     }
@@ -2214,13 +2228,18 @@ impl WriteSource {
     fn as_slice(&self) -> &[u8] {
         match self {
             WriteSource::Owned(b) => b,
-            WriteSource::Borrowed { ptr, len } => unsafe {
-                if *len == 0 {
-                    &[]
-                } else {
-                    core::slice::from_raw_parts(*ptr, *len)
+            WriteSource::Borrowed { ptr, len } => {
+                // SAFETY: the Borrowed variant's contract — `ptr..ptr+len`
+                // names the caller's live, unmodified DMA source for the
+                // submission window (the write-batch discipline).
+                unsafe {
+                    if *len == 0 {
+                        &[]
+                    } else {
+                        core::slice::from_raw_parts(*ptr, *len)
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -2748,7 +2767,7 @@ pub fn sync_dirty_blocks_batched(
         for (i, &bh) in pinned.iter().enumerate() {
             if batch.status(i) == 0 {
                 // SAFETY: bh is pinned (bread below); device-acked write.
-                unsafe { (*bh).clear_state_bit(BufferState::BH_Dirty) };
+                bh_pinned(&bh).clear_state_bit(BufferState::BH_Dirty);
             }
             // SAFETY: pin balanced by bread below.
             get_block_cache().put(bh);
@@ -2777,7 +2796,7 @@ pub fn sync_dirty_blocks_batched(
         {
             // SAFETY: pinned by bread above.
             if force_dirty {
-                unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
+                bh_pinned(&bh).set_state_bit(BufferState::BH_Dirty);
             }
             // SAFETY: same pin.
             if !unsafe { (*bh).is_dirty() } {
@@ -2797,13 +2816,13 @@ pub fn sync_dirty_blocks_batched(
         // bh is pinned and its bytes are caller-stabilized; the span
         // drains before this function returns.
         // SAFETY: pinned; b_data read spans the drain window.
-        let submitted = unsafe { batch.submit_ref(device, blk * spb, &(*bh).b_data) };
+        let submitted = batch.submit_ref(device, blk * spb, &bh_pinned(&bh).b_data);
         if submitted {
             pinned.push(bh);
         } else {
             drain(&mut batch, &mut pinned, &mut first_err);
             // SAFETY: same pinned window.
-            let retried = unsafe { batch.submit_ref(device, blk * spb, &(*bh).b_data) };
+            let retried = batch.submit_ref(device, blk * spb, &bh_pinned(&bh).b_data);
             if retried {
                 pinned.push(bh);
             } else {
@@ -2833,8 +2852,8 @@ pub fn sync_dirty_blocks_batched(
 /// transaction to commit; sync(2) writes the whole cache), and
 /// buffer-cache eviction (dirty victims are synced before reuse).
 pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
-    // SAFETY: get_current_handle reads the current task's handle slot and
-    // is null-safe when no task context exists (interrupt/early boot).
+    // get_current_handle reads the current task's handle slot (an
+    // ext4/namei unsafe fn — L4 territory; null-safe outside task ctx).
     let journal_active = unsafe {
         crate::fs::ext4::namei::get_current_handle().is_some()
     };
@@ -2848,9 +2867,10 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     // THIS block's constraints first (per-block closure — the journal
     // commit's write-through path and every inline metadata sync come
     // through here, so the guard must not drain the world's backlog).
-    // SAFETY: bh is a raw pointer returned by bread().
-    unsafe {
-        let bh_ref = &*bh;
+    // bh is a raw pointer returned by bread() (INV-BIO-PIN).
+    {
+        // SAFETY: pinned by the caller's refcount; read-only.
+        let bh_ref: &BufferHead = unsafe { &*bh };
         if let Some(dev) = bh_ref.b_device {
             let (mj, mi) = dev_key(dev);
             if publication_constrained(mj, mi, bh_ref.b_blocknr) {
