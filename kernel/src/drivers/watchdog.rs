@@ -97,37 +97,25 @@ pub fn watchdog_file_ioctl(
     if !is_watchdog_file(file) {
         return None;
     }
-    Some(unsafe { watchdog_ioctl(request, arg) })
+    Some(watchdog_ioctl(request, arg))
 }
 
 // ---- ioctls --------------------------------------------------------------
 
-/// Copy one int in from userspace.
-///
-/// # Safety
-/// `arg` must be a userspace pointer with 4 readable bytes.
-unsafe fn get_int(arg: usize) -> Option<i32> {
-    let mut b = [0u8; 4];
-    if crate::arch::uaccess::copy_from_user(b.as_mut_ptr(), arg as *const u8, 4) != 0 {
-        return None;
-    }
-    Some(i32::from_ne_bytes(b))
+/// Copy one int in from userspace (safe uaccess twin, round-5).
+fn get_int(arg: usize) -> Option<i32> {
+    crate::arch::uaccess_safe::read_user::<i32>(arg)
 }
 
 /// Copy one int out to userspace.
-///
-/// # Safety
-/// `arg` must be a userspace pointer with 4 writable bytes.
-unsafe fn put_int(arg: usize, v: i32) -> i64 {
-    if crate::arch::uaccess::copy_to_user(arg as *mut u8, v.to_ne_bytes().as_ptr(), 4) != 0 {
+fn put_int(arg: usize, v: i32) -> i64 {
+    if !crate::arch::uaccess_safe::write_user(arg, v) {
         return -14; // EFAULT
     }
     0
 }
 
-/// # Safety
-/// `arg` semantics per request (uapi pointer or ignored).
-unsafe fn watchdog_ioctl(request: u32, arg: usize) -> i64 {
+fn watchdog_ioctl(request: u32, arg: usize) -> i64 {
     match request {
         WDIOC_GETSUPPORT => {
             // struct watchdog_info: options, firmware_version, identity[32]
@@ -136,7 +124,7 @@ unsafe fn watchdog_ioctl(request: u32, arg: usize) -> i64 {
             // firmware_version stays 0
             let n = IDENTITY.len().min(31);
             wi[8..8 + n].copy_from_slice(&IDENTITY[..n]);
-            if crate::arch::uaccess::copy_to_user(arg as *mut u8, wi.as_ptr(), 40) != 0 {
+            if crate::arch::uaccess_safe::copy_out(arg, &wi) != 0 {
                 return -14; // EFAULT
             }
             0

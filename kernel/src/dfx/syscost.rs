@@ -703,13 +703,10 @@ pub fn open_cli_segment(cpu: usize) -> Option<(&'static str, u32, u64)> {
     if key == 0 {
         return Some(("(site-key-0)", 0, age));
     }
-    // SAFETY: keys are &'static Location references stored at open time
-    // by the disable hook on this kernel's own code (same read the
-    // heartbeat's rest-site table uses).
-    let (file, line) = unsafe {
-        let l = &*(key as *const core::panic::Location<'static>);
-        (l.file(), l.line())
-    };
+    // Keys are &'static Location references stored at open time by the
+    // disable hook on this kernel's own code (INV-FOR-3 edge).
+    let l = crate::dfx::forensics_edges::location(key as usize);
+    let (file, line) = (l.file(), l.line());
     Some((file, line, age))
 }
 
@@ -817,7 +814,7 @@ fn pr_slot() -> Option<&'static PrSlot> {
         *b"<irq>\0\0\0\0\0\0\0\0\0\0\0"
     } else {
         match crate::sched::current() {
-            Some(t) => unsafe { *(*t).comm() },
+            Some(t) => *t.comm(),
             None => *b"<nointask>\0\0\0\0\0\0",
         }
     };
@@ -962,12 +959,10 @@ fn recv_describe(fd: usize, out: &[AtomicU8; 96]) {
             if nonblock { " O_NONBLOCK" } else { "" }
         );
     } else if let Some(file) = crate::fs::get_file_fd(fd) {
-        let ops = unsafe { (*file.ops.get()).map(|p| p as *const _ as u64).unwrap_or(0) };
-        let path = unsafe {
-            match &*file.dentry.get() {
-                Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
-                None => alloc::string::String::from("<no-dentry>"),
-            }
+        let ops = file.get_ops().map(|p| p as *const _ as u64).unwrap_or(0);
+        let path = match file.get_dentry() {
+            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            None => alloc::string::String::from("<no-dentry>"),
         };
         s = alloc::format!("ops={:#x} path={}", ops, path);
     } else {
@@ -987,7 +982,7 @@ pub fn recv_census(nr: usize, fd: usize, flags: i32, ret: i64) {
         return;
     }
     let comm: [u8; 16] = match crate::sched::current() {
-        Some(t) => unsafe { *(*t).comm() },
+        Some(t) => *t.comm(),
         None => return,
     };
     let comm0 = u64::from_le_bytes(comm[..8].try_into().unwrap());
@@ -1043,7 +1038,7 @@ pub fn recv_census(nr: usize, fd: usize, flags: i32, ret: i64) {
         s.ops.store(
             cur_file
                 .as_ref()
-                .and_then(|f| unsafe { (*f.ops.get()).map(|p| p as *const _ as u64) })
+                .and_then(|f| f.get_ops().map(|p| p as *const _ as u64))
                 .unwrap_or(0),
             Relaxed,
         );
@@ -1084,7 +1079,7 @@ pub fn note_read_fail(fd: usize, ret: i64) {
         return;
     }
     let comm: [u8; 16] = match crate::sched::current() {
-        Some(t) => unsafe { *(*t).comm() },
+        Some(t) => *t.comm(),
         None => return,
     };
     let comm0 = u64::from_le_bytes(comm[..8].try_into().unwrap());
@@ -1118,15 +1113,13 @@ pub fn note_read_fail(fd: usize, ret: i64) {
                     Relaxed,
                 );
                 RD_FAIL[i].ops.store(
-                    unsafe { (*file.ops.get()).map(|p| p as *const _ as u64).unwrap_or(0) },
+                    file.get_ops().map(|p| p as *const _ as u64).unwrap_or(0),
                     Relaxed,
                 );
-                let path = unsafe {
-                    match &*file.dentry.get() {
-                        Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
-                        None => alloc::string::String::from("<no-dentry>"),
-                    }
-                };
+                let path = match file.get_dentry() {
+            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            None => alloc::string::String::from("<no-dentry>"),
+        };
                 let mut k = 0;
                 for &b in path.as_bytes() {
                     if k >= 96 {
@@ -1213,7 +1206,7 @@ pub fn note_errno(nr: usize, ret: i64, a0: u64, a1: u64) {
     // the next call).
     let comm: [u8; 16] = match crate::sched::current() {
         // SAFETY: current task; comm is a fixed-size field.
-        Some(t) => unsafe { *(*t).comm() },
+        Some(t) => *t.comm(),
         None => [0; 16],
     };
     // Which argument is the path (x86_64-generic table: open/stat family
@@ -1259,7 +1252,7 @@ pub fn note_read_data(file: &crate::fs::File, n: usize, fd: usize) {
     }
     let comm: [u8; 16] = match crate::sched::current() {
         // SAFETY: current task; comm is a fixed-size field.
-        Some(t) => unsafe { *(*t).comm() },
+        Some(t) => *t.comm(),
         None => return,
     };
     let comm0 = u64::from_le_bytes(comm[..8].try_into().unwrap());
@@ -1302,15 +1295,13 @@ pub fn note_read_data(file: &crate::fs::File, n: usize, fd: usize) {
     s.file_id.store(file.file_id, Relaxed);
     s.fd.store(fd as u64, Relaxed);
     s.ops.store(
-        unsafe { (*file.ops.get()).map(|p| p as *const _ as u64).unwrap_or(0) },
+        file.get_ops().map(|p| p as *const _ as u64).unwrap_or(0),
         Relaxed,
     );
-    let path = unsafe {
-        match &*file.dentry.get() {
+    let path = match file.get_dentry() {
             Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
             None => alloc::string::String::from("<no-dentry>"),
-        }
-    };
+        };
     for j in 0..96 {
         s.path[j].store(0, Relaxed);
     }
@@ -1366,7 +1357,7 @@ pub fn note_read_eof(file: &crate::fs::File) {
     }
     let comm: [u8; 16] = match crate::sched::current() {
         // SAFETY: current task; comm is a fixed-size field.
-        Some(t) => unsafe { *(*t).comm() },
+        Some(t) => *t.comm(),
         None => return,
     };
     // Keyed by COMM ONLY (pa7 lesson: init alone opened 8 different
@@ -1392,12 +1383,10 @@ pub fn note_read_eof(file: &crate::fs::File) {
                 EOF_SPIN[i].comm[j].store(comm[j], Relaxed);
             }
             // Reader-relative path (same shape as /proc/<pid>/fd/N).
-            let path = unsafe {
-                match &*file.dentry.get() {
-                    Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
-                    None => alloc::string::String::from("<no-dentry>"),
-                }
-            };
+            let path = match file.get_dentry() {
+            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            None => alloc::string::String::from("<no-dentry>"),
+        };
             let mut k = 0;
             for &b in path.as_bytes() {
                 if k >= 96 {
@@ -1420,7 +1409,7 @@ pub fn note_read_eagain(file: &crate::fs::File) {
     use core::sync::atomic::Ordering::Relaxed;
     let comm: [u8; 16] = match crate::sched::current() {
         // SAFETY: current task; comm is a fixed-size field.
-        Some(t) => unsafe { *(*t).comm() },
+        Some(t) => *t.comm(),
         None => return,
     };
     for i in 0..EAGAIN_SPIN.len() {
@@ -1435,12 +1424,10 @@ pub fn note_read_eagain(file: &crate::fs::File) {
             for j in 0..16 {
                 EAGAIN_SPIN[i].comm[j].store(comm[j], Relaxed);
             }
-            let path = unsafe {
-                match &*file.dentry.get() {
-                    Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
-                    None => alloc::string::String::from("<no-dentry>"),
-                }
-            };
+            let path = match file.get_dentry() {
+            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            None => alloc::string::String::from("<no-dentry>"),
+        };
             let mut k = 0;
             for &b in path.as_bytes() {
                 if k >= 96 {
@@ -1496,8 +1483,7 @@ fn flood_account(nr: usize) {
         None => return,
     };
     let comm: &[u8; 16] = match crate::sched::current() {
-        // SAFETY: current task; comm is a fixed-size field.
-        Some(t) => unsafe { (*t).comm() },
+        Some(t) => t.comm(),
         None => return,
     };
     let tab = &FLOOD[f];
@@ -1560,8 +1546,7 @@ pub fn exit(nr: usize, t0: Option<u64>) {
         SLOW[i].nr.store(nr as u64, Ordering::Relaxed);
         SLOW[i].cyc.store(dt, Ordering::Relaxed);
         if let Some(t) = crate::sched::current() {
-            // SAFETY: current task; comm is a fixed-size field.
-            let c = unsafe { (*t).comm() };
+            let c = *t.comm();
             for j in 0..16 {
                 SLOW[i].comm[j].store(c[j], Ordering::Relaxed);
             }
@@ -1974,12 +1959,9 @@ pub fn dump() {
             }
             let key = REST_SITES[i].loc.load(Ordering::Relaxed);
             let n = REST_SITES[i].n.load(Ordering::Relaxed).max(1);
-            // SAFETY: keys are &'static Location references stored at
-            // open time by the disable hook on this kernel's own code.
-            let (file, line) = unsafe {
-                let l = &*(key as *const core::panic::Location<'static>);
-                (l.file(), l.line())
-            };
+            // INV-FOR-3 edge.
+            let l = crate::dfx::forensics_edges::location(key as usize);
+            let (file, line) = (l.file(), l.line());
             crate::pr_warn!(
                 "SYSCOST t={}s rest-site {:2}: {}:{} n={} tot={}ms avg={}ns max={}us",
                 secs,

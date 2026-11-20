@@ -129,9 +129,8 @@ fn push_phdr(out: &mut Vec<u8>, p: &Elf64Phdr) {
 ///   112 pr_reg (elf_gregset_t: 32 × u64 = 256)
 ///   368 pr_fpvalid (i32) + 4 pad                      -> descsz 376
 ///
-/// # Safety
 /// `task` is the current, dying task; its trap frame is quiescent.
-unsafe fn build_prstatus(task: *mut Task, sig: i32) -> Vec<u8> {
+fn build_prstatus(task: &Task, sig: i32) -> Vec<u8> {
     let mut d = Vec::with_capacity(376);
     push_u32(&mut d, sig as u32); // si_signo
     push_u32(&mut d, 0); // si_code
@@ -139,25 +138,20 @@ unsafe fn build_prstatus(task: *mut Task, sig: i32) -> Vec<u8> {
     push_u32(&mut d, sig as u32); // pr_cursig (i16 + 2 pad)
     push_u64(&mut d, 0); // pr_sigpend
     push_u64(&mut d, 0); // pr_sighold
-    // SAFETY: pid/ppid/pgid/sid accessors on a valid task.
-    unsafe {
-        push_u32(&mut d, (*task).pid());
-        push_u32(&mut d, (*task).ppid());
-        push_u32(&mut d, (*task).pgid());
-        push_u32(&mut d, (*task).sid());
-    }
+    push_u32(&mut d, task.pid());
+    push_u32(&mut d, task.ppid());
+    push_u32(&mut d, task.pgid());
+    push_u32(&mut d, task.sid());
     // No CPU accounting yet: four zeroed timevals (64 bytes).
     for _ in 0..64 {
         d.push(0);
     }
     // pr_reg: the first 32 words of PtRegs are exactly the RISC-V
-    // user_regs_struct (pc, ra, sp, ..., t6).
-    // SAFETY: pt_regs() returns the saved trap frame or null.
-    let regs = unsafe { (*task).pt_regs() };
-    if !regs.is_null() {
-        // SAFETY: 256 bytes of GP registers at the frame head.
-        let src = unsafe { core::slice::from_raw_parts(regs as *const u8, 256) };
-        d.extend_from_slice(src);
+    // user_regs_struct (pc, ra, sp, ..., t6). pt_regs_ref is the
+    // round-4 typed read view of the task's own trap frame.
+    if let Some(regs) = task.pt_regs_ref() {
+        let bytes = crate::safety::bytes::bytes_of(regs);
+        d.extend_from_slice(&bytes[..core::cmp::min(256, bytes.len())]);
     } else {
         d.extend_from_slice(&[0u8; 256]);
     }
@@ -180,9 +174,8 @@ unsafe fn build_prstatus(task: *mut Task, sig: i32) -> Vec<u8> {
 ///   40  pr_fname[16]
 ///   56  pr_psargs[80]                                 -> descsz 136
 ///
-/// # Safety
 /// `task` is the current, dying task.
-unsafe fn build_prpsinfo(task: *mut Task) -> Vec<u8> {
+fn build_prpsinfo(task: &Task) -> Vec<u8> {
     let mut d = Vec::with_capacity(136);
     // pr_state/pr_sname/pr_zomb/pr_nice + alignment pad.
     d.push(4);
@@ -191,27 +184,22 @@ unsafe fn build_prpsinfo(task: *mut Task) -> Vec<u8> {
     d.push(0);
     push_u32(&mut d, 0); // align pr_flag to 8
     push_u64(&mut d, 0); // pr_flag
-    // SAFETY: cred accessors on a valid task.
-    unsafe {
-        let cred = (*task).cred();
-        push_u32(&mut d, cred.uid);
-        push_u32(&mut d, cred.gid);
-        push_u32(&mut d, (*task).pid());
-        push_u32(&mut d, (*task).ppid());
-        push_u32(&mut d, (*task).pgid());
-        push_u32(&mut d, (*task).sid());
-    }
-    // pr_fname[16] (offset 40).
-    // SAFETY: comm is a NUL-terminated 16-byte field.
-    let comm = unsafe { (*task).comm() };
+    let cred = task.cred();
+    push_u32(&mut d, cred.uid);
+    push_u32(&mut d, cred.gid);
+    push_u32(&mut d, task.pid());
+    push_u32(&mut d, task.ppid());
+    push_u32(&mut d, task.pgid());
+    push_u32(&mut d, task.sid());
+    // pr_fname[16] (offset 40): comm is a NUL-terminated 16-byte field.
+    let comm = task.comm();
     let name_len = comm.iter().position(|&b| b == 0).unwrap_or(16);
     d.extend_from_slice(&comm[..name_len]);
     while d.len() < 56 {
         d.push(0);
     }
     // pr_psargs[80]: the executable path, truncated.
-    // SAFETY: exe_path accessor on a valid task.
-    let exe = unsafe { (*task).get_exe_path() };
+    let exe = task.get_exe_path();
     let args_len = exe.len().min(79);
     d.extend_from_slice(&exe[..args_len]);
     while d.len() < 136 {
@@ -228,26 +216,19 @@ unsafe fn build_prpsinfo(task: *mut Task) -> Vec<u8> {
 /// number, %u uid, %g gid, %h hostname, %% literal '%'. Unknown
 /// specifiers pass through unchanged, as in Linux.
 ///
-/// # Safety
 /// `task` is the current, dying task.
-unsafe fn expand_core_pattern(task: *mut Task, sig: i32) -> Vec<u8> {
+fn expand_core_pattern(task: &Task, sig: i32) -> Vec<u8> {
     use alloc::string::ToString;
 
     let pattern = crate::fs::procfs::sysctl::CORE_PATTERN
         .lock()
         .as_bytes()
         .to_vec();
-    // SAFETY: comm is a NUL-terminated 16-byte field of the valid task.
-    let comm: &[u8] = unsafe {
-        let c = (*task).comm();
-        let n = c.iter().position(|&b| b == 0).unwrap_or(c.len());
-        &c[..n]
-    };
-    // SAFETY: cred accessor on a valid task.
-    let (uid, gid) = unsafe {
-        let cred = (*task).cred();
-        (cred.uid, cred.gid)
-    };
+    // comm is a NUL-terminated 16-byte field of the valid task.
+    let c = task.comm();
+    let comm: &[u8] = &c[..c.iter().position(|&b| b == 0).unwrap_or(c.len())];
+    let cred = task.cred();
+    let (uid, gid) = (cred.uid, cred.gid);
     let hostname = crate::process::ns::current_uts_ns().get_hostname();
 
     let mut out = Vec::with_capacity(pattern.len() + 24);
@@ -261,10 +242,7 @@ unsafe fn expand_core_pattern(task: *mut Task, sig: i32) -> Vec<u8> {
         }
         // A trailing lone '%' is kept verbatim.
         match pattern[i + 1] {
-            b'p' => {
-                // SAFETY: pid accessor on a valid task.
-                out.extend_from_slice(unsafe { (*task).pid().to_string() }.as_bytes())
-            }
+            b'p' => out.extend_from_slice(task.pid().to_string().as_bytes()),
             b'e' => out.extend_from_slice(comm),
             b's' => out.extend_from_slice(sig.to_string().as_bytes()),
             b'u' => out.extend_from_slice(uid.to_string().as_bytes()),
@@ -287,51 +265,11 @@ unsafe fn expand_core_pattern(task: *mut Task, sig: i32) -> Vec<u8> {
 }
 
 // ==================== memory reader ====================
-
-/// Read target user memory through its page tables into `out`
-/// (page-granular; non-present pages read as zeros so a whole VMA can be
-/// covered by one PT_LOAD).
-///
-/// The walk goes through the arch walker
-/// (`arch::mm::mm_ops::PageTableWalker`). An earlier hand-rolled SV39
-/// walk ran on every arch: on x86_64 it misread x86 PTEs (phys at PTE
-/// bits 51:12 read through the SV39 lens) into off-machine physical
-/// addresses and the memcpy below faulted in kernel mode — LTP r21
-/// kill11 KERNPANIC `do_coredump -> memcpy`, 3/3 deterministic. The
-/// arch walkers also root-guard against stale mm roots, which this
-/// hand-rolled copy lacked.
-///
-/// # Safety
-/// `root_ppn` is a valid page-table root PPN of the dumped mm.
-unsafe fn dump_read(mm: &crate::mm::mm_struct::MmStruct, va: u64, out: &mut [u8]) {
-    use crate::arch::mm::mm_ops::PageTableWalker;
-    use crate::arch::mm::{phys_to_virt, PhysAddr};
-
-    for b in out.iter_mut() {
-        *b = 0;
-    }
-    // (fork-frag lane) walk under the mm PTE lock: x86_64 munmap can
-    // unlink+defer-free emptied leaf tables of live mms, and this walk
-    // dereferences PMD-resolved leaf tables — the lock serializes it
-    // against any same-mm munmap (a dying multithreaded process could
-    // still have a thread in munmap).
-    let _pte_guard = mm.pte_lock().lock();
-    let root_ppn = mm.root_ppn();
-    // SAFETY: root_ppn belongs to the pinned mm; the walker bounds-checks
-    // the root and every intermediate entry against machine memory.
-    let (ppn, _) = match unsafe { PageTableWalker::walk(root_ppn, va) } {
-        Some(r) => r,
-        None => return, // non-present page: zero-filled PT_LOAD content
-    };
-    // The arch walkers fold huge-leaf offsets in: `ppn` is the 4 KiB
-    // frame containing `va`.
-    let off = (va & 0xFFF) as usize;
-    let copy = core::cmp::min(out.len(), 4096 - off);
-    // SAFETY: kernel linear map of a present user page.
-    let src = phys_to_virt(PhysAddr::new((ppn << 12) + off as u64)).0 as *const u8;
-    // SAFETY: bounded copy from the linear-mapped user page.
-    unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), copy) };
-}
+// The page-table walk + linear-map copy lives in the framework module
+// (`process::unsafe_edges::dump_read_page`, INV-PROC-COREDUMP-1): the
+// hand-rolled SV39 walk this file used to carry misread x86 PTEs on
+// x86_64 builds (LTP r21 kill11 KERNPANIC), so the edge stays on the
+// arch walker, in the audited boundary.
 
 // ==================== main entry ====================
 
@@ -342,30 +280,25 @@ unsafe fn dump_read(mm: &crate::mm::mm_struct::MmStruct, va: u64, out: &mut [u8]
 /// Returns true when a core file was created (truncation counts — Linux
 /// sets WCOREDUMP even for RLIMIT-truncated dumps).
 ///
-/// # Safety
 /// `task` is the current task in its exit path (fdtable + mm still alive).
-pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
+pub fn do_coredump(task: &Task, sig: i32) -> bool {
     use crate::fs::vfs::file_open;
     use crate::mm::mm_struct::MmFlags;
 
     // Gate 1: dumpability — SUID_DUMP_DISABLE (setuid binaries, prctl)
     // suppresses the dump.
-    // SAFETY: fields of the valid current task.
-    unsafe {
-        if (*task).dumpable == 0 {
-            return false;
-        }
-        // Gate 2: RLIMIT_CORE == 0 disables dumping entirely.
-        let (rlim_cur, _) = (*task).rlimit(rlimit_res::CORE);
-        if rlim_cur == 0 {
-            return false;
-        }
+    if task.dumpable == 0 {
+        return false;
+    }
+    // Gate 2: RLIMIT_CORE == 0 disables dumping entirely.
+    let (rlim_cur, _) = task.rlimit(rlimit_res::CORE);
+    if rlim_cur == 0 {
+        return false;
     }
 
-    // The mm must still be there (we are at the top of do_exit).
-    // SAFETY: address_space_arc() clones the Arc, keeping the mm alive.
-    let mm = unsafe { (*task).address_space_arc() };
-    let mm = match mm {
+    // The mm must still be there (we are at the top of do_exit);
+    // address_space_arc() clones the Arc, keeping the mm alive.
+    let mm = match task.address_space_arc() {
         Some(m) => m,
         None => return false,
     };
@@ -401,11 +334,8 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
 
     // Notes.
     let mut notes: Vec<u8> = Vec::new();
-    // SAFETY: task is current and dying.
-    unsafe {
-        push_note(&mut notes, NT_PRSTATUS, &build_prstatus(task, sig));
-        push_note(&mut notes, NT_PRPSINFO, &build_prpsinfo(task));
-    }
+    push_note(&mut notes, NT_PRSTATUS, &build_prstatus(task, sig));
+    push_note(&mut notes, NT_PRPSINFO, &build_prpsinfo(task));
     // NT_AUXV: the exec-time auxiliary vector snapshotted in the mm —
     // lets debuggers locate the interpreter/vDSO/entry without walking
     // the dying thread's (possibly clobbered) stack.
@@ -424,7 +354,7 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
     let phnum = 1 + segs.len();
     let note_off = 64 + phnum * 56;
     let mut data_off = (note_off + notes.len() + CHUNK - 1) & !(CHUNK - 1);
-    let budget: u64 = unsafe { (*task).rlimit(rlimit_res::CORE) }.0;
+    let budget: u64 = task.rlimit(rlimit_res::CORE).0;
     if budget == 0 {
         return false;
     }
@@ -455,13 +385,12 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
     // ---- Open the core file (core_pattern, default "core.%p") ----
     // Absolute patterns name the dump directly; relative ones land in the
     // dying task's cwd, with /core as the no-cwd fallback.
-    // SAFETY: task is current and dying.
-    let name = unsafe { expand_core_pattern(task, sig) };
+    let name = expand_core_pattern(task, sig);
     let name_str = alloc::string::String::from_utf8_lossy(&name).into_owned();
     let path = if name_str.starts_with('/') {
         name_str
     } else {
-        let cwd = unsafe { (*task).get_cwd() };
+        let cwd = task.get_cwd();
         let cwd_str = alloc::string::String::from_utf8_lossy(&cwd).into_owned();
         if cwd_str.is_empty() {
             alloc::format!("/{}", name_str)
@@ -479,9 +408,8 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
     };
     // Take our own Arc reference and immediately free the fd slot so the
     // dying task's fd table is not perturbed.
-    // SAFETY: fd was just installed in the current task's fdtable.
     let file = crate::fs::get_file_fd(fd);
-    if let Some(fdt) = unsafe { (*task).try_fdtable() } {
+    if let Some(fdt) = task.try_fdtable() {
         let _ = fdt.close_fd(fd);
     }
     let file = match file {
@@ -509,11 +437,9 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
         e_shnum: 0,
         e_shstrndx: 0,
     };
-    // SAFETY: ehdr is repr(C) with 64-byte size (asserted by ELF layout).
-    unsafe {
-        let p = &ehdr as *const Elf64Ehdr as *const u8;
-        head.extend_from_slice(core::slice::from_raw_parts(p, core::mem::size_of::<Elf64Ehdr>()));
-    }
+    // ehdr is repr(C) with 64-byte size (asserted by ELF layout); the
+    // CopyBytes primitive owns the value->bytes view.
+    head.extend_from_slice(crate::safety::bytes::bytes_of(&ehdr));
     // PT_NOTE right after the phdr table.
     push_phdr(
         &mut head,
@@ -550,11 +476,9 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
     }
     head.extend_from_slice(&notes);
 
-    // SAFETY: write_at on the regular inode-backed file we just created.
-    unsafe {
-        if file.write_at(0, head.as_ptr(), head.len()) < 0 {
-            return false;
-        }
+    // write_at_slice on the regular inode-backed file we just created.
+    if file.write_at_slice(0, &head) < 0 {
+        return false;
     }
 
     let mut page_buf = [0u8; CHUNK];
@@ -563,10 +487,9 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
         while written < *filesz {
             let va = vaddr + written;
             let chunk = core::cmp::min(CHUNK, (*filesz - written) as usize);
-            // SAFETY: mm is the pinned target mm.
-            unsafe { dump_read(&mm, va, &mut page_buf[..chunk]) };
-            // SAFETY: write_at on the created file.
-            let n = unsafe { file.write_at(off + written, page_buf.as_ptr(), chunk) };
+            // The framework read edge (INV-PROC-COREDUMP-1): mm is pinned.
+            super::unsafe_edges::dump_read_page(&mm, va, &mut page_buf[..chunk]);
+            let n = file.write_at_slice(off + written, &page_buf[..chunk]);
             if n < 0 {
                 // I/O failure mid-dump: keep what was written (Linux-like
                 // best-effort) and stop streaming.
@@ -576,9 +499,7 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
         }
     }
 
-    // SAFETY: task is valid; set the WCOREDUMP bookkeeping bit.
-    unsafe {
-        (*task).set_core_dumped();
-    }
+    // Set the WCOREDUMP bookkeeping bit.
+    task.set_core_dumped();
     true
 }

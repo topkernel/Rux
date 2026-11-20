@@ -79,17 +79,18 @@ fn icmpv6_send(
     };
 
     {
-        let ptr = skb.skb_put(total as u32).ok_or(())?;
-        // SAFETY: skb_put reserved exactly `total` bytes at ptr.
-        unsafe {
-            let hdr = &mut *(ptr as *mut Icmpv6Hdr);
+        skb.skb_put_data(body).map_err(|_| ())?;
+        skb.put_hdr::<Icmpv6Hdr>(|hdr| {
             hdr.typ = typ;
             hdr.code = code;
             hdr.check = 0;
-            core::ptr::copy_nonoverlapping(body.as_ptr(), ptr.add(ICMPV6_HDR_LEN), body.len());
-
-            let seg = core::slice::from_raw_parts(ptr, total);
-            hdr.check = transport_checksum6(src, dst, super::next_header::ICMPV6, seg).to_be();
+        })
+        .ok_or(())?;
+        // The whole built message, borrow-tied view for the checksum.
+        let seg = skb.data_all();
+        let csum = transport_checksum6(src, dst, super::next_header::ICMPV6, seg).to_be();
+        if let Some(hdr) = skb.hdr_mut::<Icmpv6Hdr>() {
+            hdr.check = csum;
         }
     }
 
@@ -101,10 +102,9 @@ pub fn icmpv6_rcv(skb: &crate::net::buffer::SkBuff, src: &Ipv6Addr, dst: &Ipv6Ad
     if (skb.len as usize) < ICMPV6_HDR_LEN {
         return;
     }
-    // SAFETY: length checked above; skb.data covers skb.len valid bytes.
-    let seg = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
-    // SAFETY: seg has at least ICMPV6_HDR_LEN bytes.
-    let hdr = unsafe { &*(seg.as_ptr() as *const Icmpv6Hdr) };
+    // Length checked above; the clamped safe view + shared header edge.
+    let seg = skb.data_all();
+    let Some(hdr) = crate::net::buffer::hdr_view::<Icmpv6Hdr>(seg) else { return };
 
     // Checksum is mandatory in ICMPv6 — a mismatched message is dropped.
     if transport_checksum6(src, dst, super::next_header::ICMPV6, seg) != 0 {

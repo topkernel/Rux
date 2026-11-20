@@ -203,9 +203,7 @@ impl TcpHdr {
             return None;
         }
 
-        // SAFETY: data has at least TCP_MIN_HLEN bytes; unaligned read of
-        // a Copy POD header, no reference formed.
-        unsafe { Some(core::ptr::read_unaligned(data.as_ptr() as *const TcpHdr)) }
+        crate::safety::bytes::from_bytes::<TcpHdr>(data)
     }
 
     /// Get data offset (in 32-bit words)
@@ -2962,10 +2960,9 @@ impl TcpConnectionManager {
         // gb1: the on-wire header (options included) — checksum-verified
         // upstream and handed to handle_packet for option parsing; the
         // by-value copy above is only good for its scalar fields.
-        // SAFETY: tcp_parse_packet validated header_len <= skb.len.
-        let wire_hdr: &'static [u8] = unsafe {
-            core::slice::from_raw_parts(skb.data, tcp_hdr.header_len())
-        };
+        // tcp_parse_packet validated header_len <= skb.len; the
+        // clamped safe view replaces the invented-'static slice.
+        let wire_hdr: &[u8] = skb.data_slice(tcp_hdr.header_len() as u32);
 
         let src_port = TcpPort::from_be(tcp_hdr.source);
         let dest_port = TcpPort::from_be(tcp_hdr.dest);
@@ -3133,10 +3130,9 @@ impl TcpConnectionManager {
             None => return Ok(None),
         };
         // gb1: wire header for option parsing (see handle_tcp_packet).
-        // SAFETY: tcp_parse_packet validated header_len <= skb.len.
-        let wire_hdr: &'static [u8] = unsafe {
-            core::slice::from_raw_parts(skb.data, tcp_hdr.header_len())
-        };
+        // tcp_parse_packet validated header_len <= skb.len; the
+        // clamped safe view replaces the invented-'static slice.
+        let wire_hdr: &[u8] = skb.data_slice(tcp_hdr.header_len() as u32);
 
         let src_port = TcpPort::from_be(tcp_hdr.source);
         let dest_port = TcpPort::from_be(tcp_hdr.dest);
@@ -3244,7 +3240,8 @@ impl TcpConnectionManager {
 const MAX_BACKLOG_PER_LISTEN: usize = 64;
 
 /// Global TCP connection manager
-static mut TCP_CONNECTION_MANAGER: core::mem::MaybeUninit<TcpConnectionManager> = core::mem::MaybeUninit::<TcpConnectionManager>::uninit();
+static TCP_CONNECTION_MANAGER: crate::safety::slot::OnceSlot<TcpConnectionManager> =
+    crate::safety::slot::OnceSlot::new();
 
 /// Guards against double-init and use-before-init.
 static TCP_MANAGER_INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -3255,19 +3252,25 @@ pub fn init_tcp_manager() {
     if TCP_MANAGER_INITIALIZED.swap(true, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    // SAFETY: First and only write thanks to the AtomicBool guard above.
-    unsafe {
-        TCP_CONNECTION_MANAGER.write(TcpConnectionManager::new());
-    }
+    TCP_CONNECTION_MANAGER.publish(TcpConnectionManager::new());
 }
 
 /// Get TCP connection manager
-pub fn get_tcp_manager() -> &'static mut TcpConnectionManager {
-    if !TCP_MANAGER_INITIALIZED.load(core::sync::atomic::Ordering::Acquire) {
-        panic!("TCP connection manager used before init_tcp_manager()");
-    }
-    // SAFETY: init_tcp_manager() has completed (verified by the AtomicBool above).
-    unsafe { TCP_CONNECTION_MANAGER.assume_init_mut() }
+pub fn get_tcp_manager() -> &'static TcpConnectionManager {
+    TCP_CONNECTION_MANAGER
+        .get()
+        .expect("TCP connection manager used before init_tcp_manager()")
+}
+
+/// Mutable manager access — PROVEN exclusive by a live TCP_TABLE_LOCK
+/// guard (INV-SLOT-3; every mutation of the manager's Vecs runs under
+/// this lock, which the handler entries take before calling in).
+pub fn get_tcp_manager_locked(
+    _proof: &crate::sync::spinlock::SpinlockIrqGuard<'static, ()>,
+) -> &'static mut TcpConnectionManager {
+    TCP_CONNECTION_MANAGER
+        .get_mut_locked(_proof)
+        .expect("TCP connection manager used before init_tcp_manager()")
 }
 
 /// Global TCP socket table
@@ -4190,58 +4193,39 @@ pub fn tcp_build_packet(
     let opt_len = opts.wire_len(is_syn);
     let hdr_len = TCP_MIN_HLEN + opt_len;
 
-    // Allocate space for TCP header
-    let ptr = skb.skb_push(hdr_len as u32).ok_or(())?;
+    // Options sit AFTER the fixed header on the wire — push them first,
+    // then the 20-byte header lands in front (the shared build edges).
+    let mut opt_buf = [0u8; 24];
+    if opt_len > 0 {
+        let _ = opts.encode(&mut opt_buf[..opt_len], is_syn);
+        skb.push_bytes(&opt_buf[..opt_len]).ok_or(())?;
+    }
 
-    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
-    // hdr_len bytes; writing fields of repr(C) TcpHdr is well-defined.
-    unsafe {
-        let tcp_hdr = &mut *(ptr as *mut TcpHdr);
-
-        // Source port
+    skb.push_hdr::<TcpHdr>(|tcp_hdr| {
         tcp_hdr.source = source.to_be();
-
-        // Destination port
         tcp_hdr.dest = dest.to_be();
-
-        // Sequence number
         tcp_hdr.seq = seq.to_be();
-
-        // Acknowledgment number
         tcp_hdr.ack_seq = ack_seq.to_be();
-
         // Data offset (20 bytes = 5 32-bit words, plus options)
         tcp_hdr.set_dof(5 + (opt_len / 4) as u8);
-
-        // Window size
         tcp_hdr.set_window(window);
-
-        // Flags
         tcp_hdr.flags = (flags & 0xFF) as u8;
-
         // Checksum (set to 0 first, calculate later)
         tcp_hdr.check = 0;
-
-        // Urgent pointer
         tcp_hdr.urg_ptr = 0;
+    })
+    .ok_or(())?;
 
-        // P2: serialize the option bytes after the fixed header.
-        if opt_len > 0 {
-            let opt_bytes = core::slice::from_raw_parts_mut(ptr.add(TCP_MIN_HLEN), opt_len);
-            let _ = opts.encode(opt_bytes, is_syn);
-        }
-
-        // Compute TCP checksum (RFC 793). The field is big-endian on the
-        // wire — store the network-order value (review NEW: missing .to_be()
-        // byte-swapped every outbound segment's checksum). gb1: sum the
-        // header straight from the buffer (options already serialized, the
-        // check field still zero) — see tcp_checksum for the wire-bytes
-        // contract.
-        let data_ptr = ptr.add(hdr_len);
-        let data_len = (skb.len as usize).saturating_sub(hdr_len);
-        let data_slice = core::slice::from_raw_parts(data_ptr as *const u8, data_len);
-        let wire_hdr = core::slice::from_raw_parts(ptr as *const u8, hdr_len as usize);
-        tcp_hdr.check = tcp_checksum(src_ip, dest_ip, wire_hdr, data_slice).to_be();
+    // Compute TCP checksum (RFC 793) over the wire bytes: header
+    // (options already serialized, check field still zero) + data —
+    // the borrow-tied view of the whole built segment. The field is
+    // big-endian on the wire (review NEW: missing .to_be() byte-swapped
+    // every outbound segment's checksum).
+    let whole = skb.data_all();
+    let (wire_hdr, data_slice) = whole.split_at(hdr_len as usize);
+    let check = tcp_checksum(src_ip, dest_ip, wire_hdr, data_slice).to_be();
+    if let Some(tcp_hdr) = skb.hdr_mut::<TcpHdr>() {
+        tcp_hdr.check = check;
     }
 
     Ok(())
@@ -4267,13 +4251,14 @@ pub fn tcp_build_packet6(
     let opt_len = opts.wire_len(is_syn);
     let hdr_len = TCP_MIN_HLEN + opt_len;
 
-    let ptr = skb.skb_push(hdr_len as u32).ok_or(())?;
+    // Options first, then the fixed header in front (shared edges).
+    let mut opt_buf = [0u8; 24];
+    if opt_len > 0 {
+        let _ = opts.encode(&mut opt_buf[..opt_len], is_syn);
+        skb.push_bytes(&opt_buf[..opt_len]).ok_or(())?;
+    }
 
-    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
-    // hdr_len bytes; writing fields of repr(C) TcpHdr is well-defined.
-    unsafe {
-        let tcp_hdr = &mut *(ptr as *mut TcpHdr);
-
+    skb.push_hdr::<TcpHdr>(|tcp_hdr| {
         tcp_hdr.source = source.to_be();
         tcp_hdr.dest = dest.to_be();
         tcp_hdr.seq = seq.to_be();
@@ -4283,24 +4268,22 @@ pub fn tcp_build_packet6(
         tcp_hdr.flags = (flags & 0xFF) as u8;
         tcp_hdr.check = 0;
         tcp_hdr.urg_ptr = 0;
+    })
+    .ok_or(())?;
 
-        if opt_len > 0 {
-            let opt_bytes = core::slice::from_raw_parts_mut(ptr.add(TCP_MIN_HLEN), opt_len);
-            let _ = opts.encode(opt_bytes, is_syn);
-        }
-
-        let data_len = (skb.len as usize).saturating_sub(hdr_len);
-        let mut csum = crate::net::ipv6::transport_checksum6(
-            src_ip6,
-            dest_ip6,
-            crate::net::ipv6::next_header::TCP,
-            // The checksum covers header + data with the field zeroed; the
-            // header is fully built above except check (already 0).
-            core::slice::from_raw_parts(ptr as *const u8, hdr_len + data_len),
-        );
-        if csum == 0 {
-            csum = 0xFFFF;
-        }
+    // The checksum covers header + data with the field zeroed (the
+    // borrow-tied view of the whole built segment).
+    let whole = skb.data_all();
+    let mut csum = crate::net::ipv6::transport_checksum6(
+        src_ip6,
+        dest_ip6,
+        crate::net::ipv6::next_header::TCP,
+        whole,
+    );
+    if csum == 0 {
+        csum = 0xFFFF;
+    }
+    if let Some(tcp_hdr) = skb.hdr_mut::<TcpHdr>() {
         tcp_hdr.check = csum.to_be();
     }
 
@@ -4316,15 +4299,14 @@ pub fn tcp_build_packet6(
 /// TCP header reference, or None if parsing fails
 ///
 /// Helper: get TCP payload as slice with checked arithmetic to avoid underflow.
-fn tcp_payload_slice(skb: &SkBuff, header_len: usize) -> Option<&'static [u8]> {
+fn tcp_payload_slice(skb: &SkBuff, header_len: usize) -> Option<&[u8]> {
     let payload_len = (skb.len as usize).checked_sub(header_len)?;
-    // SAFETY: header_len is validated by tcp_parse_packet; payload_len is now >= 0.
-    unsafe { Some(core::slice::from_raw_parts(skb.data.add(header_len), payload_len)) }
+    // The clamped safe view (header_len validated by tcp_parse_packet).
+    Some(skb.data_slice_at(header_len as u32, payload_len as u32))
 }
 
 pub fn tcp_parse_packet(skb: &SkBuff) -> Option<TcpHdr> {
-    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
+    let data = skb.data_all();
 
     if data.len() < TCP_MIN_HLEN {
         return None;
@@ -4385,7 +4367,7 @@ pub fn tcp_parse_mss(opts: &[u8]) -> Option<u16> {
 /// from memory following a `TcpHdr` (see tcp_parse_mss's note: the
 /// header travels by value since the finding-8 fix, so the bytes after
 /// the copy are NOT the packet's options).
-fn tcp_option_slice(skb: &SkBuff, header_len: usize) -> &'static [u8] {
+fn tcp_option_slice(skb: &SkBuff, header_len: usize) -> &[u8] {
     if header_len <= TCP_MIN_HLEN || header_len > TCP_MAX_HLEN {
         return &[];
     }
@@ -4393,15 +4375,9 @@ fn tcp_option_slice(skb: &SkBuff, header_len: usize) -> &'static [u8] {
     if hlen <= TCP_MIN_HLEN {
         return &[];
     }
-    // SAFETY: skb.data and skb.len describe a valid byte range in the
-    // skb buffer; tcp_parse_packet validated header_len against the
-    // packet length before the caller stored it in the header's dof.
-    unsafe {
-        core::slice::from_raw_parts(
-            skb.data.add(TCP_MIN_HLEN),
-            hlen - TCP_MIN_HLEN,
-        )
-    }
+    // tcp_parse_packet validated header_len against the packet length
+    // before the caller stored it in the header's dof; clamped view.
+    skb.data_slice_at(TCP_MIN_HLEN as u32, (hlen - TCP_MIN_HLEN) as u32)
 }
 
 /// P2: parse the window-scale option (kind 3, len 3) from a SYN.
@@ -4489,7 +4465,6 @@ pub static TCP_RX_CSUM_ERRORS: AtomicU32 = AtomicU32::new(0);
 /// ethernet_send → virtio xmit (a 10M+50M-iteration completion spin,
 /// seconds per packet under tcg) inline under TCP_TABLE_LOCK.
 pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
-    let manager = get_tcp_manager();
 
     // W3: verify the TCP checksum BEFORE any state-machine processing —
     // UDP already validated, TCP accepted bit-flipped segments as valid
@@ -4503,11 +4478,8 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         let payload = tcp_payload_slice(skb, tcp_hdr.header_len()).unwrap_or(&[]);
         // gb1: verify against the WIRE header bytes — tcp_parse_packet
         // returns a by-value copy, and checksumming the copy read option
-        // bytes from the stack (see tcp_checksum). skb.data points at the
-        // TCP header; tcp_parse_packet validated header_len <= skb.len.
-        let wire_hdr = unsafe {
-            core::slice::from_raw_parts(skb.data, tcp_hdr.header_len())
-        };
+        // bytes from the stack (see tcp_checksum). The clamped safe view.
+        let wire_hdr = skb.data_slice(tcp_hdr.header_len() as u32);
         if tcp_checksum(src_ip.to_be(), dest_ip.to_be(), wire_hdr, payload) != 0 {
             TCP_RX_CSUM_ERRORS.fetch_add(1, Ordering::Relaxed);
             return Ok(()); // silently drop (counted)
@@ -4530,6 +4502,7 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         // R21-N1: RX path mutates the shared table (states, buffers, slot
         // frees) — serialized against syscalls and the timer tick.
         let _table_g = TCP_TABLE_LOCK.lock_irqsave();
+        let manager = get_tcp_manager_locked(&_table_g);
 
         match manager.handle_tcp_packet(skb, src_ip, dest_ip, &mut tx) {
             Ok(w) => wake = w,
@@ -4646,7 +4619,6 @@ pub fn tcp_rcv6(
     src6: &crate::net::ipv6::Ipv6Addr,
     dest6: &crate::net::ipv6::Ipv6Addr,
 ) -> Result<(), ()> {
-    let manager = get_tcp_manager();
 
     let tcp_hdr = match tcp_parse_packet(skb) {
         Some(h) => h,
@@ -4657,11 +4629,8 @@ pub fn tcp_rcv6(
         // over header+data INCLUDING the stored checksum) sums to zero.
         let payload = tcp_payload_slice(skb, tcp_hdr.header_len()).unwrap_or(&[]);
         let total = tcp_hdr.header_len() + payload.len();
-        // SAFETY: tcp_parse_packet validated header_len <= skb.len; the
-        // payload slice bounds the rest.
-        let seg = unsafe {
-            core::slice::from_raw_parts(skb.data as *const u8, total)
-        };
+        // Clamped safe view of the whole segment.
+        let seg = skb.data_slice(total as u32);
         if crate::net::ipv6::transport_checksum6(
             src6,
             dest6,
@@ -4680,7 +4649,7 @@ pub fn tcp_rcv6(
 
     {
         let _table_g = TCP_TABLE_LOCK.lock_irqsave();
-        match manager.handle_tcp_packet6(skb, src6, dest6, &mut tx) {
+        match get_tcp_manager_locked(&_table_g).handle_tcp_packet6(skb, src6, dest6, &mut tx) {
             Ok(w) => wake = w,
             Err(()) => {
                 if !tcp_hdr.rst() && !crate::net::ipv6::is_multicast(dest6) {

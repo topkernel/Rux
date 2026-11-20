@@ -312,19 +312,20 @@ impl TcpTimerManager {
 }
 
 /// Global TCP timer manager
-static mut TCP_TIMER_MANAGER: core::mem::MaybeUninit<TcpTimerManager> =
-    core::mem::MaybeUninit::uninit();
+static TCP_TIMER_MANAGER: crate::safety::slot::OnceSlot<TcpTimerManager> =
+    crate::safety::slot::OnceSlot::new();
 
 /// Initialize TCP timer manager
 pub fn init_tcp_timer_manager() {
-    unsafe {
-        TCP_TIMER_MANAGER.write(TcpTimerManager::new());
-    }
+    TCP_TIMER_MANAGER.publish(TcpTimerManager::new());
 }
 
-/// Get TCP timer manager
-pub fn get_tcp_timer_manager() -> &'static mut TcpTimerManager {
-    unsafe { TCP_TIMER_MANAGER.assume_init_mut() }
+/// Get TCP timer manager (round-5: the OnceSlot owns the publication
+/// protocol the MaybeUninit hand-rolled).
+pub fn get_tcp_timer_manager() -> &'static TcpTimerManager {
+    TCP_TIMER_MANAGER
+        .get()
+        .expect("TCP timer manager used before init_tcp_timer_manager()")
 }
 
 /// TCP timer tick - called from Timer softirq (bottom half)
@@ -387,7 +388,12 @@ pub fn tcp_timer_tick() {
     // and RX on the 4-CPU kernel).
     {
         let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
-        manager.tick(table, &mut tx);
+        // The timer manager's own state mutates under the SAME table
+        // lock (round-5: the witness-proven exclusive view).
+        let manager_mut = TCP_TIMER_MANAGER
+            .get_mut_locked(&_g)
+            .expect("TCP timer manager used before init_tcp_timer_manager()");
+        manager_mut.tick(table, &mut tx);
     }
 
     // Emit outside the lock — no re-entry hazard: emitted packets go to

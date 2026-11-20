@@ -378,7 +378,7 @@ pub struct Ipv6Hdr {
 
 impl Ipv6Hdr {
     /// Parse from bytes (at least IPV6_HDR_LEN)
-    pub fn from_bytes(data: &[u8]) -> Option<&'static Self> {
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
         if data.len() < IPV6_HDR_LEN {
             return None;
         }
@@ -452,11 +452,14 @@ pub fn ipv6_push_header(
 /// Receive and dispatch an IPv6 packet (called from ethernet_rcv with the
 /// Ethernet header already pulled).
 pub fn ipv6_rcv(skb: &mut SkBuff) -> Result<(), ()> {
-    // SAFETY: skb.data/skb.len describe the packet's valid byte range.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
-    let hdr = match Ipv6Hdr::from_bytes(data) {
-        Some(h) => h,
-        None => return Ok(()),
+    // Copy the base header out by value (the skb is trimmed below while
+    // the parsed fields stay needed — round-5 borrow discipline).
+    let hdr: Ipv6Hdr = {
+        let data = skb.data_all();
+        match Ipv6Hdr::from_bytes(data) {
+            Some(h) => *h,
+            None => return Ok(()),
+        }
     };
 
     // RFC 8200: Payload Length counts the bytes AFTER the 40-byte base

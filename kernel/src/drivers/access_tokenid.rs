@@ -71,13 +71,14 @@ pub fn tokenid_file_ioctl(
     if !is_tokenid_file(file) {
         return None;
     }
-    Some(unsafe { tokenid_ioctl(request, arg) })
+    Some(tokenid_ioctl(request, arg))
 }
 
-/// SAFETY: `arg` is the raw syscall argument; the u64 payload pointer is
-/// validated through uaccess before dereference.
-unsafe fn tokenid_ioctl(request: u32, arg: usize) -> i64 {
-    use crate::arch::uaccess::{access_ok, get_user, put_user};
+/// `arg` is the raw syscall argument; the u64 payload pointer is
+/// validated through uaccess before dereference (safe API, round-5).
+fn tokenid_ioctl(request: u32, arg: usize) -> i64 {
+    use crate::arch::uaccess::access_ok;
+    use crate::arch::uaccess_safe as ua;
 
     const EINVAL: i64 = 22;
     const ENOTTY: i64 = 25;
@@ -93,8 +94,7 @@ unsafe fn tokenid_ioctl(request: u32, arg: usize) -> i64 {
     // u64 first for every command, even GETs).
     let mut value: u64 = 0;
     if request == ACCESS_TOKENID_SET_TOKENID || request == ACCESS_TOKENID_SET_FTOKENID {
-        // SAFETY: arg validated for 8 readable bytes.
-        match get_user(arg as *const u64) {
+        match ua::read_user::<u64>(arg) {
             Some(v) => value = v,
             None => return -EFAULT,
         }
@@ -116,8 +116,7 @@ unsafe fn tokenid_ioctl(request: u32, arg: usize) -> i64 {
             } else {
                 task.access_token()
             };
-            // SAFETY: arg validated for 8 writable bytes.
-            if !put_user(arg as *mut u64, v) {
+            if !ua::write_user(arg, v) {
                 return -EFAULT;
             }
             0
@@ -134,8 +133,7 @@ unsafe fn tokenid_ioctl(request: u32, arg: usize) -> i64 {
             0
         }
         ACCESS_TOKENID_GET_FTOKENID => {
-            // SAFETY: arg validated for 8 writable bytes.
-            if !put_user(arg as *mut u64, task.access_ftoken()) {
+            if !ua::write_user(arg, task.access_ftoken()) {
                 return -EFAULT;
             }
             0

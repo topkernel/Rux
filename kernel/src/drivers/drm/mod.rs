@@ -679,14 +679,12 @@ fn prime_write(_file: &crate::fs::file::File, _buf: &[u8]) -> isize {
 
 /// Close: drop the Arc<GemObject> the export stashed in private_data.
 fn prime_close(file: &crate::fs::file::File) -> i32 {
-    // SAFETY: private_data was installed by prime_handle_to_fd as
+    // private_data was installed by prime_handle_to_fd as
     // Box<Arc<GemObject>>; reconstruct and drop it once here.
-    unsafe {
-        let cell = file.private_data.get();
-        if let Some(ptr) = *cell {
-            *cell = None;
-            drop(alloc::boxed::Box::from_raw(ptr as *mut Arc<GemObject>));
-        }
+    if let Some(ptr) = file.private_data_ptr() {
+        file.clear_private_data();
+        // SAFETY: the Box<Arc<GemObject>> the export stored (sole ref).
+        drop(unsafe { alloc::boxed::Box::from_raw(ptr as *mut Arc<GemObject>) });
     }
     0
 }
@@ -778,15 +776,12 @@ pub fn drm_file_stat(file: &crate::fs::file::File, stat: &mut crate::fs::Stat) -
 }
 
 /// GEM object backing a prime fd.
-// SAFETY: private_data holds a Box<Arc<GemObject>> installed at export.
 fn prime_file_gem(file: &crate::fs::file::File) -> Option<Arc<GemObject>> {
-    unsafe {
-        let cell = file.private_data.get();
-        match *cell {
-            Some(ptr) => Some((*(ptr as *const Arc<GemObject>)).clone()),
-            None => None,
-        }
-    }
+    // private_data holds a Box<Arc<GemObject>> installed at export (the
+    // one audited deref is the clone).
+    let ptr = file.private_data_ptr()?;
+    // SAFETY: Box<Arc<GemObject>> stored by the export path.
+    Some(unsafe { (*(ptr as *const Arc<GemObject>)).clone() })
 }
 
 // ============================================================================
@@ -804,11 +799,7 @@ fn copy_in<const N: usize>(arg: usize, size: usize) -> Option<[u8; N]> {
     if !crate::arch::uaccess::access_ok(arg, n) {
         return None;
     }
-    // SAFETY: buf is a local; arg validated by access_ok.
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), arg as *const u8, n)
-    } != 0
-    {
+    if crate::arch::uaccess_safe::copy_in(&mut buf[..n], arg) != 0 {
         return None;
     }
     Some(buf)
@@ -823,8 +814,17 @@ fn copy_out<const N: usize>(arg: usize, buf: &[u8; N], size: usize) -> bool {
     if !crate::arch::uaccess::access_ok(arg, n) {
         return false;
     }
-    // SAFETY: buf is initialized for n bytes; arg validated.
-    unsafe { crate::arch::uaccess::copy_to_user(arg as *mut u8, buf.as_ptr(), n) == 0 }
+    crate::arch::uaccess_safe::copy_out(arg, &buf[..n]) == 0
+}
+
+/// Byte-image view of a u32 id array for the copy_out path (the u32
+/// arrays are plain ids; the byte relabeling is layout-only).
+mod bytemod {
+    pub fn u32_slice_as_bytes(v: &[u32]) -> &[u8] {
+        // SAFETY: [u32] and its byte image have identical size/align
+        // requirements; the relabel borrows v's own lifetime.
+        unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) }
+    }
 }
 
 fn rdu32(b: &[u8], off: usize) -> u32 {
@@ -1070,9 +1070,9 @@ fn virtgpu_getparam(arg: usize) -> i64 {
 
 /// Read a lone u32 ioctl argument (RMFB, GEM_CLOSE, DESTROY_DUMB...).
 fn rdu32_or(arg: usize) -> u32 {
-    match crate::arch::uaccess::access_ok(arg, 4).then(|| unsafe {
-        crate::arch::uaccess::get_user(arg as *const u32)
-    }) {
+    match crate::arch::uaccess::access_ok(arg, 4)
+        .then(|| crate::arch::uaccess_safe::read_user::<u32>(arg))
+    {
         Some(Some(v)) => v,
         _ => 0,
     }
@@ -1107,7 +1107,7 @@ fn drm_version(arg: usize) -> i64 {
             return -14;
         }
         // SAFETY: name_ptr validated.
-        if unsafe { crate::arch::uaccess::copy_to_user(name_ptr as *mut u8, name.as_ptr(), n) } != 0 {
+        if crate::arch::uaccess_safe::copy_out(name_ptr, &name[..n]) != 0 {
             return -14;
         }
     }
@@ -1116,7 +1116,7 @@ fn drm_version(arg: usize) -> i64 {
         if !crate::arch::uaccess::access_ok(date_ptr, n) {
             return -14;
         }
-        if unsafe { crate::arch::uaccess::copy_to_user(date_ptr as *mut u8, date.as_ptr(), n) } != 0 {
+        if crate::arch::uaccess_safe::copy_out(date_ptr, &date[..n]) != 0 {
             return -14;
         }
     }
@@ -1125,7 +1125,7 @@ fn drm_version(arg: usize) -> i64 {
         if !crate::arch::uaccess::access_ok(desc_ptr, n) {
             return -14;
         }
-        if unsafe { crate::arch::uaccess::copy_to_user(desc_ptr as *mut u8, desc.as_ptr(), n) } != 0 {
+        if crate::arch::uaccess_safe::copy_out(desc_ptr, &desc[..n]) != 0 {
             return -14;
         }
     }
@@ -1185,11 +1185,10 @@ fn get_resources(arg: usize) -> i64 {
         if !crate::arch::uaccess::access_ok(crtc_ptr, n * 4) {
             return -14;
         }
-        // SAFETY: ptr validated.
-        if unsafe {
-            crate::arch::uaccess::copy_to_user(crtc_ptr as *mut u8, crtcs.as_ptr() as *const u8, n * 4)
-        } != 0
-        {
+        if crate::arch::uaccess_safe::copy_out(
+            crtc_ptr,
+            crate::safety::bytes::bytes_of(&crtcs)[..n * 4].as_ref(),
+        ) != 0 {
             return -14;
         }
     }
@@ -1198,10 +1197,8 @@ fn get_resources(arg: usize) -> i64 {
         if !crate::arch::uaccess::access_ok(conn_ptr, n * 4) {
             return -14;
         }
-        if unsafe {
-            crate::arch::uaccess::copy_to_user(conn_ptr as *mut u8, connectors.as_ptr() as *const u8, n * 4)
-        } != 0
-        {
+        let conn_bytes: &[u8] = bytemod::u32_slice_as_bytes(&connectors[..n]);
+        if crate::arch::uaccess_safe::copy_out(conn_ptr, conn_bytes) != 0 {
             return -14;
         }
     }
@@ -1210,10 +1207,8 @@ fn get_resources(arg: usize) -> i64 {
         if !crate::arch::uaccess::access_ok(enc_ptr, n * 4) {
             return -14;
         }
-        if unsafe {
-            crate::arch::uaccess::copy_to_user(enc_ptr as *mut u8, encoders.as_ptr() as *const u8, n * 4)
-        } != 0
-        {
+        let enc_bytes: &[u8] = bytemod::u32_slice_as_bytes(&encoders[..n]);
+        if crate::arch::uaccess_safe::copy_out(enc_ptr, enc_bytes) != 0 {
             return -14;
         }
     }
@@ -1240,14 +1235,7 @@ fn get_crtc(arg: usize) -> i64 {
     wru32(&mut b, 16, 0); // fb_id
     wru32(&mut b, 28, 0); // gamma_size
     wru32(&mut b, 32, 1); // mode_valid
-    // SAFETY: mode is a plain struct; the destination range is inside b.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &mode as *const DrmModeInfo as *const u8,
-            b.as_mut_ptr().add(36),
-            core::mem::size_of::<DrmModeInfo>(),
-        );
-    }
+    let _ = crate::safety::bytes::write_at(&mut b, 36, mode);
     if !copy_out(arg, &b, 104) {
         return -14;
     }
@@ -1307,10 +1295,8 @@ fn get_connector(arg: usize) -> i64 {
             return -14;
         }
         // SAFETY: ptr validated.
-        if unsafe {
-            crate::arch::uaccess::copy_to_user(enc_ptr as *mut u8, encoders.as_ptr() as *const u8, n * 4)
-        } != 0
-        {
+        let enc_bytes: &[u8] = bytemod::u32_slice_as_bytes(&encoders[..n]);
+        if crate::arch::uaccess_safe::copy_out(enc_ptr, enc_bytes) != 0 {
             return -14;
         }
     }
@@ -1320,15 +1306,10 @@ fn get_connector(arg: usize) -> i64 {
         if !crate::arch::uaccess::access_ok(modes_ptr, n * MODEINFO_SZ) {
             return -14;
         }
-        if unsafe {
-            crate::arch::uaccess::copy_to_user(
-                modes_ptr as *mut u8,
-                &mode as *const DrmModeInfo as *const u8,
-                n * MODEINFO_SZ,
-            )
-        } != 0
-        {
-            return -14;
+        for i in 0..n {
+            if crate::arch::uaccess_safe::copy_out_t(modes_ptr + i * MODEINFO_SZ, &mode) != 0 {
+                return -14;
+            }
         }
     }
 
@@ -1359,11 +1340,7 @@ fn get_plane_resources(arg: usize) -> i64 {
         if !crate::arch::uaccess::access_ok(ptr, 4) {
             return -14;
         }
-        // SAFETY: ptr validated.
-        if unsafe {
-            crate::arch::uaccess::copy_to_user(ptr as *mut u8, planes.as_ptr() as *const u8, 4)
-        } != 0
-        {
+        if crate::arch::uaccess_safe::copy_out(ptr, bytemod::u32_slice_as_bytes(&planes[..1])) != 0 {
             return -14;
         }
     }
@@ -1401,14 +1378,7 @@ fn get_plane(arg: usize) -> i64 {
             return -14;
         }
         // SAFETY: ptr validated.
-        if unsafe {
-            crate::arch::uaccess::copy_to_user(
-                ptr as *mut u8,
-                PLANE_FORMATS.as_ptr() as *const u8,
-                PLANE_FORMATS.len() * 4,
-            )
-        } != 0
-        {
+        if crate::arch::uaccess_safe::copy_out(ptr, bytemod::u32_slice_as_bytes(PLANE_FORMATS.as_slice())) != 0 {
             return -14;
         }
     }
@@ -1466,18 +1436,10 @@ fn obj_get_properties(arg: usize) -> i64 {
         }
         for i in 0..n {
             let pid = props[i].prop_id.to_ne_bytes();
-            // SAFETY: pointers validated above.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user((props_ptr as *mut u8).add(i * 4), pid.as_ptr(), 4)
-            } != 0
-            {
+            if !crate::arch::uaccess_safe::write_user(props_ptr + i * 4, props[i].prop_id) {
                 return -14;
             }
-            let val = props[i].value.to_ne_bytes();
-            if unsafe {
-                crate::arch::uaccess::copy_to_user((values_ptr as *mut u8).add(i * 8), val.as_ptr(), 8)
-            } != 0
-            {
+            if !crate::arch::uaccess_safe::write_user(values_ptr + i * 8, props[i].value) {
                 return -14;
             }
         }
@@ -1523,15 +1485,7 @@ fn get_property(arg: usize) -> i64 {
             return -14;
         }
         for (i, v) in vals.iter().enumerate() {
-            // SAFETY: pointer validated above.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    (values_ptr as *mut u8).add(i * 8),
-                    v.to_ne_bytes().as_ptr(),
-                    8,
-                )
-            } != 0
-            {
+            if !crate::arch::uaccess_safe::write_user(values_ptr + i * 8, *v) {
                 return -14;
             }
         }
@@ -1545,11 +1499,7 @@ fn get_property(arg: usize) -> i64 {
             rec[..8].copy_from_slice(&ev.to_ne_bytes());
             let en = ename.len().min(31);
             rec[8..8 + en].copy_from_slice(&ename.as_bytes()[..en]);
-            // SAFETY: pointer validated above.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user((enums_ptr as *mut u8).add(i * 40), rec.as_ptr(), 40)
-            } != 0
-            {
+            if crate::arch::uaccess_safe::copy_out(enums_ptr + i * 40, &rec) != 0 {
                 return -14;
             }
         }
@@ -1609,7 +1559,7 @@ fn create_prop_blob(arg: usize) -> i64 {
             return -14;
         }
         // SAFETY: data validated; buf is len bytes.
-        if unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), data as *const u8, len) } != 0 {
+        if crate::arch::uaccess_safe::copy_in(&mut buf[..len], data) != 0 {
             return -14;
         }
     }
@@ -1653,10 +1603,7 @@ fn get_prop_blob(arg: usize) -> i64 {
                 drop(st);
                 return -14;
             }
-            // SAFETY: data_ptr validated.
-            let ret = unsafe {
-                crate::arch::uaccess::copy_to_user(data_ptr as *mut u8, v.as_ptr(), v.len())
-            };
+            let ret = crate::arch::uaccess_safe::copy_out(data_ptr, v.as_slice());
             drop(st);
             if ret != 0 {
                 return -14;
@@ -2252,20 +2199,17 @@ fn mode_atomic(arg: usize) -> i64 {
     let mut objs = [0u32; MAX_OBJS];
     let mut counts = [0u32; MAX_OBJS];
     let mut total = 0usize;
-    // SAFETY: pointers validated above.
-    unsafe {
-        for i in 0..count_objs {
-            let mut tmp = [0u8; 4];
-            if crate::arch::uaccess::copy_from_user(tmp.as_mut_ptr(), (objs_ptr as *const u8).add(i * 4), 4) != 0 {
-                return -14;
-            }
-            objs[i] = u32::from_ne_bytes(tmp);
-            if crate::arch::uaccess::copy_from_user(tmp.as_mut_ptr(), (counts_ptr as *const u8).add(i * 4), 4) != 0 {
-                return -14;
-            }
-            counts[i] = u32::from_ne_bytes(tmp);
-            total += counts[i] as usize;
-        }
+    // Pointers validated above; the safe scalar reader.
+    for i in 0..count_objs {
+        let Some(o) = crate::arch::uaccess_safe::read_user::<u32>(objs_ptr + i * 4) else {
+            return -14;
+        };
+        let Some(c) = crate::arch::uaccess_safe::read_user::<u32>(counts_ptr + i * 4) else {
+            return -14;
+        };
+        objs[i] = o;
+        counts[i] = c;
+        total += c as usize;
     }
     if total > MAX_PROPS {
         return -7;
@@ -2278,20 +2222,16 @@ fn mode_atomic(arg: usize) -> i64 {
     }
     let mut props = [0u32; MAX_PROPS];
     let mut values = [0u64; MAX_PROPS];
-    // SAFETY: pointers validated above.
-    unsafe {
-        for i in 0..total {
-            let mut tmp4 = [0u8; 4];
-            if crate::arch::uaccess::copy_from_user(tmp4.as_mut_ptr(), (props_ptr as *const u8).add(i * 4), 4) != 0 {
-                return -14;
-            }
-            props[i] = u32::from_ne_bytes(tmp4);
-            let mut tmp8 = [0u8; 8];
-            if crate::arch::uaccess::copy_from_user(tmp8.as_mut_ptr(), (values_ptr as *const u8).add(i * 8), 8) != 0 {
-                return -14;
-            }
-            values[i] = u64::from_ne_bytes(tmp8);
-        }
+    // Pointers validated above; the safe scalar reader.
+    for i in 0..total {
+        let Some(p) = crate::arch::uaccess_safe::read_user::<u32>(props_ptr + i * 4) else {
+            return -14;
+        };
+        props[i] = p;
+        let Some(v) = crate::arch::uaccess_safe::read_user::<u64>(values_ptr + i * 8) else {
+            return -14;
+        };
+        values[i] = v;
     }
 
     // Walk the flattened arrays tracking the object each property
@@ -2391,11 +2331,11 @@ fn sleep_until_ns(deadline_ns: u64) -> bool {
         return true;
     }
     let current = match crate::sched::current() {
-        Some(t) => t as *mut crate::process::task::Task,
+        Some(t) => t,
         None => return true,
     };
-    // SAFETY: current is this task's own pointer (kfbflush discipline).
-    let my_pid = unsafe { (*current).pid() };
+    // current() is this task's own safe handle (kfbflush discipline).
+    let my_pid = current.pid();
     const NS_PER_JIFFY: u64 = 1_000_000_000 / (crate::config::KERNEL_HZ as u64);
 
     loop {
@@ -2410,16 +2350,10 @@ fn sleep_until_ns(deadline_ns: u64) -> bool {
             crate::drivers::timer::get_jiffies() + remaining / NS_PER_JIFFY + 1;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
         if timer_id != 0 {
-            // SAFETY: current is this task's own pointer.
-            unsafe {
-                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-            }
+            current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
             if crate::drivers::timer::get_jiffies() >= target {
-                // SAFETY: current is this task's own pointer.
-                unsafe {
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
-                    crate::sched::dequeue_task(&*current);
-                }
+                current.set_state(TaskState::new(TaskState::RUNNING));
+                crate::sched::dequeue_task(current);
                 crate::timer::del_timer(timer_id);
             } else {
                 crate::arch::cpu::restore_irq(true);

@@ -173,7 +173,7 @@ pub fn bump_comm() {
     let Some(t) = crate::sched::current() else {
         return;
     };
-    let comm: [u8; 16] = unsafe { *(*t).comm() };
+    let comm: [u8; 16] = *t.comm();
     // fast path: present slot
     for slot in COMMS.iter() {
         let mut cur = [0u8; 16];
@@ -270,18 +270,15 @@ extern "C" fn mmprof_dump_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // Sleep MMPROF_DUMP_SECS of jiffies (nanosleep discipline:
         // one-shot wakeup timer + INTERRUPTIBLE schedule).
         let current = match crate::sched::current() {
-            Some(t) => t as *mut Task,
+            Some(t) => t,
             None => return 0, // no task context
         };
-        // SAFETY: current is the running task's pointer (we are it).
-        let pid = unsafe { (*current).pid() };
+        // current() is the safe handle to the running task (we are it).
+        let pid = current.pid();
         let wake_at = crate::drivers::timer::get_jiffies()
             + MMPROF_DUMP_SECS * crate::config::KERNEL_HZ as u64;
         let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
-        // SAFETY: setting our own task's state.
-        unsafe {
-            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        }
+        current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         // Re-arm IRQs so the timer tick reaches this CPU (R54).
         crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();

@@ -124,6 +124,7 @@ mod errno;
 mod net;
 mod cmdline;
 mod init;
+mod boot_edges;
 mod initrd;
 mod syscall;
 mod interrupt;
@@ -217,32 +218,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     // offline (addr2line over the built ELF; values outside kernel text are
     // simply ignored there). 16 frames cover syscall → vfs → driver → alloc.
     taskdump_raw_line(b" rawframes:");
-    unsafe {
-        let mut fp = crate::dfx::backtrace::current_frame_pointer();
-        for _ in 0..16 {
-            // plausible_fp: readable-kernel-memory only — a stale slot
-            // holding a canonical-but-unmapped value (guard region) must
-            // terminate the walk, not fault it (see memwatch::plausible_fp).
-            if !(fp >= 0x8000_0000_0000_0000
-                && fp & 7 == 0
-                && crate::dfx::memwatch::plausible_fp(fp))
-            {
-                break;
-            }
-            let ra = core::ptr::read_volatile((fp - 8) as *const u64);
-            let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
-            taskdump_raw_line(b" ");
-            taskdump_raw_line(format_hex(ra).as_bytes());
-            if !(next & 7 == 0
-                && next > fp
-                && next < 0xffff_ffff_ffff_f000
-                && crate::dfx::memwatch::plausible_fp(next))
-            {
-                break;
-            }
-            fp = next;
-        }
-    }
+    boot_edges::rawframes_line();
     taskdump_raw_line(b"\n");
 
     // Scope the blast radius: process-context failures kill the offending
@@ -277,19 +253,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
 /// 16-hex-digit formatting into a fixed buffer (no allocator — usable on
 /// the exhausted-heap path above; `format!` is NOT).
 fn format_hex(v: u64) -> &'static str {
-    static mut BUF: [u8; 19] = [b'0'; 19];
-    // SAFETY: single-panicking-CPU path; the UART line below is emitted
-    // before any other CPU can reach this code (they are stopped in the
-    // panic handler shortly after).
-    unsafe {
-        BUF[0] = b'0';
-        BUF[1] = b'x';
-        for i in 0..16 {
-            let nib = (v >> ((15 - i) * 4)) & 0xF;
-            BUF[2 + i] = if nib < 10 { b'0' + nib as u8 } else { b'a' + (nib - 10) as u8 };
-        }
-        core::str::from_utf8_unchecked(&BUF)
-    }
+    boot_edges::panic_hex(v)
 }
 
 
@@ -305,29 +269,23 @@ pub fn rust_main_tail() -> ! {
     // BTreeMap corruption.
     #[cfg(feature = "riscv64")]
     {
-        extern "C" {
-            static _end: u8;
-        }
-        // SAFETY: only the symbol's address is read.
-        let image_end_va = unsafe { core::ptr::addr_of!(_end) as usize };
+        let image_end_va = boot_edges::image_end_va();
         let image_end_phys = image_end_va - 0xffff_ffff_8000_0000 + 0x8020_0000;
         if image_end_phys > KERNEL_HEAP_PHYS {
-            unsafe {
-                use crate::console::putchar;
-                const MSG: &[u8] = b"\nFATAL: kernel image end 0x";
-                for &b in MSG { putchar(b); }
-                let mut v = image_end_phys as u64;
-                let mut buf = [0u8; 16];
-                let mut n = 0;
-                while v > 0 && n < 16 {
-                    let d = (v & 0xF) as u8;
-                    buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
-                    v >>= 4; n += 1;
-                }
-                for i in (0..n).rev() { putchar(buf[i]); }
-                const MSG2: &[u8] = b" overlaps heap base - enlarge KERNEL_RESERVE_SIZE/KERNEL_HEAP_PHYS\n";
-                for &b in MSG2 { putchar(b); }
+            use crate::console::putchar;
+            const MSG: &[u8] = b"\nFATAL: kernel image end 0x";
+            for &b in MSG { putchar(b); }
+            let mut v = image_end_phys as u64;
+            let mut buf = [0u8; 16];
+            let mut n = 0;
+            while v > 0 && n < 16 {
+                let d = (v & 0xF) as u8;
+                buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+                v >>= 4; n += 1;
             }
+            for i in (0..n).rev() { putchar(buf[i]); }
+            const MSG2: &[u8] = b" overlaps heap base - enlarge KERNEL_RESERVE_SIZE/KERNEL_HEAP_PHYS\n";
+            for &b in MSG2 { putchar(b); }
             loop { crate::arch::cpu::wfi(); }
         }
     }
@@ -458,14 +416,14 @@ pub fn rust_main_tail() -> ! {
                 let dtb_virt = arch::mm::phys_to_virt(
                     arch::mm::PhysAddr::new(dtb_phys)
                 ).bits();
-                unsafe { cmdline::parse_memory_regions(dtb_virt) }
+                cmdline::parse_memory_regions(dtb_virt)
             };
             // aarch64: dtb_pointer holds the embedded blob's LINKED VA —
             // walk it directly; phys_to_virt would mistranslate.
             #[cfg(feature = "aarch64")]
             let memory_regions = {
                 let dtb_virt = arch::boot::get_dtb_pointer();
-                unsafe { cmdline::parse_memory_regions(dtb_virt) }
+                cmdline::parse_memory_regions(dtb_virt)
             };
             #[cfg(feature = "x86_64")]
             let memory_regions = x86_boot_memory_regions();
@@ -1387,25 +1345,9 @@ const KERNEL_PHYS_LOAD_ADDR: usize = 0x4008_0000; // RAM base + text_offset
 /// into a Vec.
 #[cfg(feature = "x86_64")]
 fn x86_boot_memory_regions() -> &'static [cmdline::MemoryRegion] {
-    static mut REGIONS: [cmdline::MemoryRegion; 64] =
-        [cmdline::MemoryRegion { base: 0, size: 0 }; 64];
-    let mut n = 0usize;
-    for r in arch::boot::boot_memory_regions() {
-        if !r.usable || n >= 64 {
-            continue;
-        }
-        // SAFETY: single-threaded early boot; the array is written once
-        // before any reference to it escapes.
-        unsafe {
-            REGIONS[n] = cmdline::MemoryRegion {
-                base: r.start as usize,
-                size: (r.end - r.start) as usize,
-            };
-        }
-        n += 1;
-    }
-    // SAFETY: the first n entries were just initialized.
-    unsafe { &REGIONS[..n] }
+    // The static table and its early-boot fill live in the framework
+    // module (INV-BOOT-REGIONS-1).
+    boot_edges::regions_from_arch_boot()
 }
 
 /// x86_64 boot diagnostic: print the e820 map the kernel seeded from.
@@ -1516,10 +1458,7 @@ pub extern "C" fn rust_main() -> ! {
     // Set va_pa_offset so phys_to_virt() works for subsequent initialization
     // This must be done before any code that uses phys_to_virt() or
     // accesses physical memory via linear mapping
-    unsafe {
-        arch::mm::memory_layout::KERNEL_MAP.va_pa_offset =
-            arch::mm::VA_PA_OFFSET;
-    }
+    boot_edges::set_va_pa_offset();
 
     // ===== Setup linear mapping BEFORE heap (heap needs phys_to_virt) =====
     // paging_init approach:
@@ -1537,13 +1476,13 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "riscv64")]
         let dtb_phys = arch::boot::get_dtb_pointer();
         #[cfg(feature = "riscv64")]
-        let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
+        let memory_regions = cmdline::parse_memory_regions(dtb_phys);
         // aarch64: QEMU passes the DTB in x0; the same generic FDT parser
         // walks /memory (cmdline.rs is arch-neutral).
         #[cfg(feature = "aarch64")]
         let dtb_phys = arch::boot::get_dtb_pointer();
         #[cfg(feature = "aarch64")]
-        let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
+        let memory_regions = cmdline::parse_memory_regions(dtb_phys);
         // Prime the V-extension capability from the same DTB (vext.rs):
         // misa is not S-mode readable, so the ISA string is the source.
         #[cfg(feature = "riscv64")]
@@ -1569,7 +1508,7 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(any(feature = "riscv64", feature = "aarch64"))]
         {
             let dtb_phys = arch::boot::get_dtb_pointer();
-            if let Some((start, end)) = unsafe { cmdline::parse_initrd_region(dtb_phys) } {
+            if let Some((start, end)) = cmdline::parse_initrd_region(dtb_phys) {
                 let size = end - start;
                 if mm::memblock_reserve(start, size).is_ok() {
                     // No print here — the heap does not exist yet (the
@@ -1580,19 +1519,11 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // x86_64 twin: QEMU's linuxboot ROM fills the boot_params zero page
-        // at 0x10000 — ramdisk_image @ +0x218, ramdisk_size @ +0x21C.
+        // at 0x10000 — ramdisk_image @ +0x218, ramdisk_size @ +0x21C
+        // (INV-BOOT-ZEROPAGE-1 in the framework module).
         #[cfg(feature = "x86_64")]
         {
-            // SAFETY: the zero page is plain RAM written by the ROM before
-            // the kernel entry; volatile reads, no writes.
-            let bp = 0x10000usize as *const u8;
-            let image = unsafe {
-                u32::from(core::ptr::read_volatile(bp.add(0x218) as *const u32)) as usize
-            };
-            let size = unsafe {
-                u32::from(core::ptr::read_volatile(bp.add(0x21C) as *const u32)) as usize
-            };
-            if image != 0 && size != 0 {
+            if let Some((image, size)) = boot_edges::zeropage_initrd_hint() {
                 let end = image + size;
                 if mm::memblock_reserve(image, size).is_ok() {
                     initrd::set_region(image, end);

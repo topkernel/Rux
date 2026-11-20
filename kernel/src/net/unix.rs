@@ -1478,8 +1478,8 @@ fn create_socket_node(
     // O_WRONLY|O_CREAT|O_EXCL — the transient fd is closed immediately.
     match crate::fs::file_open(path, 0o1 | 0o100 | 0o200 | 0o1000, 0o777) {
         Ok(fd) => {
-            // SAFETY: fd is a valid open descriptor from file_open above.
-            let inode = unsafe {
+            // fd is a valid open descriptor from file_open above.
+            let inode = {
                 let file = match crate::fs::get_file_fd(fd) {
                     Some(f) => f,
                     None => {
@@ -1487,7 +1487,7 @@ fn create_socket_node(
                         return Err(-5); // EIO
                     }
                 };
-                match (*file.inode.get()).as_ref() {
+                match file.get_inode() {
                     Some(i) => i.clone(),
                     None => {
                         crate::fs::close_file_fd(fd);
@@ -3172,16 +3172,9 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
 /// Contract: the caller must have identity-checked the File against
 /// UNIX_SOCKET_OPS first (unix_socket_from_fd / unix_file_of do).
 fn unix_of_file(file: &File) -> Option<Arc<UnixSocket>> {
-    // SAFETY: ops identity checked by the caller; private_data holds an
-    // Arc<UnixSocket> installed at socket creation (kept alive by the
-    // file). This is the one consolidated Arc revival.
-    unsafe {
-        let ptr = *file.private_data.get();
-        let ptr = ptr?;
-        let socket_ptr = ptr as *const UnixSocket;
-        Arc::increment_strong_count(socket_ptr);
-        Some(Arc::from_raw(socket_ptr))
-    }
+    // Ops identity checked by the caller; the shared net-family edge
+    // (INV-NETARC-1) does the Arc revival.
+    crate::net::file_arc::<UnixSocket>(file)
 }
 
 /// sc97 KILLDUMP support: identity-checked reconstruction for a File
@@ -3324,11 +3317,15 @@ pub fn oh67_unix_ready(file: &File) -> Option<(String, usize, usize, bool, usize
     if !is_unix_file(file) {
         return None;
     }
-    // SAFETY: UNIX_SOCKET_OPS files carry an Arc<UnixSocket> in
-    // private_data, installed at creation.
-    let ptr = unsafe { *file.private_data.get() }?;
-    // SAFETY: ptr is a valid Arc<UnixSocket> set at file creation.
-    let sk = unsafe { &*(ptr as *const UnixSocket) };
+    // UNIX_SOCKET_OPS files carry an Arc<UnixSocket> in private_data,
+    // installed at creation; private() is the audited resolver.
+    let sk: &UnixSocket = file
+        .private_data_ptr()
+        .map(|p| {
+            // SAFETY: UNIX_SOCKET_OPS files carry an Arc<UnixSocket>
+            // installed at creation (file-lifetime; read-only here).
+            unsafe { &*(p as *const UnixSocket) }
+        })?;
     let name = sk
         .bound_name
         .lock()
@@ -3432,12 +3429,9 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
                     crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
-                // SAFETY: dst validated with access_ok(count) by the
-                // caller; r.len <= stage <= count.
-                if unsafe {
-                    crate::arch::uaccess::copy_to_user(dst, kbuf.as_ptr(), r.len)
-                } != 0
-                {
+                // dst was access_ok-validated by the caller;
+                // r.len <= stage <= count.
+                if crate::arch::uaccess_safe::copy_out(dst as usize, &kbuf[..r.len]) != 0 {
                     return -14; // EFAULT
                 }
                 r.len as isize
@@ -3448,7 +3442,7 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
 
     let mut bounce = [0u8; READ_BOUNCE];
     let mut total: usize = 0;
-    let mut user_ptr = dst;
+    let mut user_ptr = dst as usize;
     let mut remaining = count;
     loop {
         let chunk = remaining.min(READ_BOUNCE);
@@ -3481,22 +3475,19 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
                     crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
-                // SAFETY: user_ptr stays within the access_ok-validated
+                // user_ptr stays within the access_ok-validated
                 // [dst, dst+count) window; only the n bytes unix_recv
                 // wrote are read out of the bounce.
-                if unsafe {
-                    crate::arch::uaccess::copy_to_user(user_ptr, bounce.as_ptr(), n)
-                } != 0
-                {
+                if crate::arch::uaccess_safe::copy_out(user_ptr, &bounce[..n]) != 0 {
                     // Partial fault: report what already landed (POSIX
                     // partial-read semantics), like the generic path.
                     return if total > 0 { total as isize } else { -14 };
                 }
                 total += n;
                 remaining -= n;
-                // SAFETY: bounded offset arithmetic — user_ptr + n stays
-                // within the count-wide window that began at dst.
-                user_ptr = unsafe { user_ptr.add(n) };
+                // Bounded offset arithmetic — stays within the
+                // count-wide window that began at dst.
+                user_ptr += n;
                 if !matches!(socket.kind, UnixKind::Stream) {
                     break; // one record per read(2)
                 }
@@ -3538,7 +3529,7 @@ fn unix_recv_stream_user(
     deadline: Option<u64>,
 ) -> isize {
     use crate::arch::uaccess::copy_to_user;
-    let mut user_ptr = dst;
+    let mut user_ptr = dst as usize;
     let mut remaining = count;
     let mut total: usize = 0;
     let mut files: Vec<Arc<File>> = Vec::new();
@@ -3576,11 +3567,10 @@ fn unix_recv_stream_user(
                 seg.cred = None;
             }
             let take = seg.data.len().min(remaining);
-            // SAFETY: user_ptr stays inside the access_ok-validated
-            // [dst, dst+count) window; exactly `take` bytes are read out
-            // of the popped (owned) segment.
-            let uncopied =
-                unsafe { copy_to_user(user_ptr, seg.data.as_ptr(), take) };
+            // user_ptr stays inside the access_ok-validated
+            // [dst, dst+count) window; exactly `take` bytes are read
+            // out of the popped (owned) segment.
+            let uncopied = crate::arch::uaccess_safe::copy_out(user_ptr, &seg.data[..take]);
             if uncopied > 0 {
                 let good = take - uncopied;
                 total += good;
@@ -3594,8 +3584,8 @@ fn unix_recv_stream_user(
             }
             total += take;
             remaining -= take;
-            // SAFETY: bounded offset arithmetic within the count window.
-            user_ptr = unsafe { user_ptr.add(take) };
+            // Bounded offset arithmetic within the count window.
+            user_ptr += take;
             if take < seg.data.len() {
                 // Buffer filled mid-segment: remainder stays queued (fds
                 // already taken — delivered, first-touch semantics).
@@ -3683,18 +3673,12 @@ fn push_back_remainder(
 }
 
 fn unix_file_close(file: &File) -> i32 {
-    // SAFETY: private_data was installed from Arc::into_raw(Arc<UnixSocket>)
-    // and this is the final close of the description.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
-        None => return 0,
-    };
-    unsafe { *file.private_data.get() = None; }
-    // Reconstruct the leaked Arc so close-side effects run and the
-    // reference drops here.
-    // SAFETY: ptr came from Arc::into_raw in unix_socket_install.
-    let socket = unsafe { Arc::from_raw(ptr as *const UnixSocket) };
-    unix_close(&socket);
+    // INV-NETARC-1: recover the stored Arc, run close, drop the ref.
+    if let Some(socket) = crate::net::file_arc::<UnixSocket>(file) {
+        unix_close(&socket);
+        drop(socket);
+        crate::net::take_file_arc::<UnixSocket>(file);
+    }
     0
 }
 
@@ -3890,12 +3874,9 @@ fn unix_socket_install(
 
 /// Release the raw Arc<UnixSocket> stashed in a failed File.
 fn unwind_unix_file(file: &Arc<File>) {
-    // SAFETY: the raw pointer came from Arc::into_raw above; we are the
-    // sole owner (no ops ran, the File is about to drop).
-    let ptr = unsafe { *file.private_data.get() };
-    if let Some(ptr) = ptr {
-        unsafe { drop(Arc::from_raw(ptr as *const UnixSocket)); }
-    }
+    // The slot holds the sole Arc reference (create failed before the
+    // fd was published): take and drop it (INV-NETARC-1).
+    crate::net::take_file_arc::<UnixSocket>(file);
 }
 
 /// socket(AF_UNIX, type, protocol) — entry from sys_socket_create.
@@ -3975,7 +3956,7 @@ pub fn unix_socket_from_fd(fd: usize) -> Option<Arc<UnixSocket>> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
     {
-        let ops = unsafe { *file.ops.get() };
+        let ops = file.get_ops();
         match ops {
             Some(ops) if core::ptr::eq(ops, &UNIX_SOCKET_OPS) => {}
             _ => return None,
@@ -4002,7 +3983,7 @@ pub fn unix_file_of(fd: usize) -> Option<(Arc<UnixSocket>, bool)> {
 /// callers. Same identity check, same (socket, nonblock) product.
 pub fn unix_file_of_file(file: &Arc<File>) -> Option<(Arc<UnixSocket>, bool)> {
     {
-        let ops = unsafe { *file.ops.get() };
+        let ops = file.get_ops();
         match ops {
             Some(ops) if core::ptr::eq(ops, &UNIX_SOCKET_OPS) => {}
             _ => return None,

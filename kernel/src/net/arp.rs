@@ -95,16 +95,12 @@ impl ArpPacket {
     pub const LEN: usize = core::mem::size_of::<ArpPacket>();
 
     /// Create ARP packet from byte slice
-    pub fn from_bytes(data: &[u8]) -> Option<&'static Self> {
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
         if data.len() < Self::LEN {
             return None;
         }
 
-        // SAFETY: data has at least ArpPacket::LEN bytes; lifetime is 'static
-        // because it aliases skb data which lives until packet is freed.
-        unsafe {
-            Some(&*(data.as_ptr() as *const ArpPacket))
-        }
+        crate::net::buffer::hdr_view::<ArpPacket>(data)
     }
 
     /// Check if this is an ARP request
@@ -513,27 +509,18 @@ pub fn arp_build_request(
     sender_ip: u32,
     target_ip: u32,
 ) -> Result<(), ()> {
-    let ptr = skb.skb_put(ArpPacket::LEN as u32).ok_or(())?;
-
-    // SAFETY: skb_put returned a valid pointer of at least ArpPacket::LEN bytes;
-    // writing fields of repr(C) ArpPacket is well-defined.
-    unsafe {
-        let arp_pkt = &mut *(ptr as *mut ArpPacket);
-
+    skb.put_hdr::<ArpPacket>(|arp_pkt| {
         arp_pkt.hdr.ar_hrd = (ArpHrd::ARPHRD_ETHER as u16).to_be();
         arp_pkt.hdr.ar_pro = (ArpPro::ARPPROTO_IP as u16).to_be();
         arp_pkt.hdr.ar_hln = ETH_ALEN as u8;
         arp_pkt.hdr.ar_pln = 4;
         arp_pkt.hdr.ar_op = (ArpOp::ARPOP_REQUEST as u16).to_be();
-
         arp_pkt.ar_sha = sender_mac;
         arp_pkt.ar_sip = sender_ip;
-
         arp_pkt.ar_tha = [0; ETH_ALEN];
         arp_pkt.ar_tip = target_ip;
-    }
-
-    Ok(())
+    })
+    .ok_or(())
 }
 
 /// Build ARP reply packet
@@ -551,27 +538,18 @@ pub fn arp_build_reply(
     target_mac: [u8; ETH_ALEN],
     target_ip: u32,
 ) -> Result<(), ()> {
-    let ptr = skb.skb_put(ArpPacket::LEN as u32).ok_or(())?;
-
-    // SAFETY: skb_put returned a valid pointer of at least ArpPacket::LEN bytes;
-    // writing fields of repr(C) ArpPacket is well-defined.
-    unsafe {
-        let arp_pkt = &mut *(ptr as *mut ArpPacket);
-
+    skb.put_hdr::<ArpPacket>(|arp_pkt| {
         arp_pkt.hdr.ar_hrd = (ArpHrd::ARPHRD_ETHER as u16).to_be();
         arp_pkt.hdr.ar_pro = (ArpPro::ARPPROTO_IP as u16).to_be();
         arp_pkt.hdr.ar_hln = ETH_ALEN as u8;
         arp_pkt.hdr.ar_pln = 4;
         arp_pkt.hdr.ar_op = (ArpOp::ARPOP_REPLY as u16).to_be();
-
         arp_pkt.ar_sha = sender_mac;
         arp_pkt.ar_sip = sender_ip;
-
         arp_pkt.ar_tha = target_mac;
         arp_pkt.ar_tip = target_ip;
-    }
-
-    Ok(())
+    })
+    .ok_or(())
 }
 
 /// Receive and process ARP packet
@@ -583,8 +561,7 @@ pub fn arp_build_reply(
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
 pub fn arp_rcv(skb: &SkBuff, eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(), ()> {
-    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
+    let data = skb.data_all();
 
     let arp_pkt = ArpPacket::from_bytes(data).ok_or(())?;
 

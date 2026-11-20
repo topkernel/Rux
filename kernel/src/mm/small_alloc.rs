@@ -500,7 +500,7 @@ fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
     }
 
     // 2. Create a fresh page from the buddy (raw — no GlobalAlloc recursion).
-    let page = unsafe { crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.alloc_page_raw() } as usize;
+    let page = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.alloc_page_raw() as usize;
     if page == 0 {
         return core::ptr::null_mut();
     }
@@ -800,9 +800,7 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
     cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     let mut i = 0usize;
     while i < nret {
-        unsafe {
-            crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.free_page_raw(ret[i] as *mut u8)
-        };
+        crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.free_page_raw(ret[i] as *mut u8);
         i += 1;
     }
 }

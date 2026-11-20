@@ -1099,6 +1099,12 @@ pub struct SpinlockIrqGuard<'a, T: ?Sized> {
     flags: bool,
 }
 
+// D-11 typed-lock-key (round-5): a live irqsave guard proves the holder
+// owns this lock's critical section — OnceSlot::get_mut_locked accepts
+// it as the exclusivity witness (the audited assertion lives at the
+// slot site, which names THIS lock as the mutation governor).
+impl<T: ?Sized> crate::safety::slot::ExclusivityProof for SpinlockIrqGuard<'_, T> {}
+
 // SAFETY: SpinlockIrqGuard exists only while the lock is held, so the
 // guarded data cannot be accessed concurrently.
 unsafe impl<T: ?Sized + Send> Send for SpinlockIrqGuard<'_, T> {}
