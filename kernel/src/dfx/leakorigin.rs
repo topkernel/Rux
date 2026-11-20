@@ -493,7 +493,7 @@ pub fn note_release(task: *mut crate::process::Task) {
     let site = slot.osite.load(Ordering::Acquire) as *const Location;
     if !site.is_null() {
         // SAFETY: stored from a &'static Location (see note_acquire).
-        let loc = unsafe { &*site };
+        let loc = crate::dfx::forensics_edges::location_ref(site);
         for &c in b" osite=" {
             putchar(c);
         }
@@ -730,7 +730,7 @@ pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
     }
     putd(unsafe { (*task).pid() } as u64);
     // SAFETY: stored from a &'static Location (see note_hardirq_acquire).
-    let loc = unsafe { &*site };
+    let loc = crate::dfx::forensics_edges::location_ref(site);
     for &c in b" hsite=" {
         putchar(c);
     }
@@ -809,7 +809,7 @@ pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::Task) {
         putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
     }
     // SAFETY: stored from a &'static Location (see note_softirq_acquire).
-    let loc = unsafe { &*site };
+    let loc = crate::dfx::forensics_edges::location_ref(site);
     for &c in b" ssite=" {
         putchar(c);
     }
@@ -1000,7 +1000,7 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
     let site = slot.osite.load(Ordering::Acquire) as *const Location;
     if !site.is_null() {
         // SAFETY: stored from a &'static Location (see note_acquire).
-        let loc = unsafe { &*site };
+        let loc = crate::dfx::forensics_edges::location_ref(site);
         for &c in b" osite=" {
             putchar(c);
         }
@@ -1094,7 +1094,7 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
     let site = slot.site.load(Ordering::Acquire) as *const Location;
     if slot.task.load(Ordering::Acquire) == task as usize && !site.is_null() {
         // SAFETY: stored from a &'static Location (see site_of).
-        let loc = unsafe { &*site };
+        let loc = crate::dfx::forensics_edges::location_ref(site);
         for &c in b" site=" {
             putchar(c);
         }
@@ -1113,7 +1113,7 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
     let hsite = slot.hsite.load(Ordering::Acquire) as *const Location;
     if slot.task.load(Ordering::Acquire) == task as usize && !hsite.is_null() {
         // SAFETY: stored from a &'static Location (see note_hardirq_acquire).
-        let loc = unsafe { &*hsite };
+        let loc = crate::dfx::forensics_edges::location_ref(hsite);
         for &c in b" hsite=" {
             putchar(c);
         }
@@ -1133,7 +1133,7 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
     let ssite = slot.ssite.load(Ordering::Acquire) as *const Location;
     if slot.task.load(Ordering::Acquire) == task as usize && !ssite.is_null() {
         // SAFETY: stored from a &'static Location (see note_softirq_acquire).
-        let loc = unsafe { &*ssite };
+        let loc = crate::dfx::forensics_edges::location_ref(ssite);
         for &c in b" ssite=" {
             putchar(c);
         }
@@ -1162,7 +1162,7 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
         let osite = slot.osite.load(Ordering::Acquire) as *const Location;
         if !osite.is_null() {
             // SAFETY: stored from a &'static Location (see note_acquire).
-            let loc = unsafe { &*osite };
+            let loc = crate::dfx::forensics_edges::location_ref(osite);
             for &c in b" osite=" {
                 putchar(c);
             }

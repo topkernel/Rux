@@ -43,7 +43,7 @@ pub fn warn(file: &str, line: u32, condition: &str) {
     // Taint string
     let mut taint_buf = [0u8; 16];
     taint::taint_string(&mut taint_buf);
-    let taint_str = unsafe { core::str::from_utf8_unchecked(&taint_buf) };
+    let taint_str = core::str::from_utf8(&taint_buf).unwrap_or("?");
     let _ = write!(w, "Tainted: {}\n", taint_str);
 
     // End marker

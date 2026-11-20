@@ -103,14 +103,15 @@ fn may_report(addr: u64) -> bool {
     false
 }
 
-/// Raw volatile reads of the Task header (diagnostic only).
+/// Raw volatile reads of the Task header (diagnostic only; the shared
+/// forensics raw-word edge — INV-FOR-2).
 #[inline]
-unsafe fn rq64(task: *mut Task, off: usize) -> u64 {
-    core::ptr::read_volatile((task as usize + off) as *const u64)
+fn rq64(task: *mut Task, off: usize) -> u64 {
+    crate::dfx::forensics_edges::raw_qword(task as u64 + off as u64)
 }
 #[inline]
-unsafe fn rq32(task: *mut Task, off: usize) -> u32 {
-    core::ptr::read_volatile((task as usize + off) as *const u32)
+fn rq32(task: *mut Task, off: usize) -> u32 {
+    crate::dfx::forensics_edges::raw_qword(task as u64 + off as u64) as u32
 }
 
 /// The single reporting path: gates on the dedup ring, prints the victim
@@ -413,7 +414,7 @@ pub fn sched_tick_audit() {
     // (1) Current task's own header, every tick. Cheap: 3 volatile reads.
     if let Some(cur) = crate::sched::current() {
         let t = cur as *mut Task;
-        let ksp = unsafe { rq64(t, offs::TI_KERNEL_SP) };
+        let ksp = rq64(t, offs::TI_KERNEL_SP);
         if ksp != 0 && (ksp as i64) >= 0 {
             let mut bad = NO_FIELDS;
             bad[0] = (b"ti_kernel_sp(user-half)", ksp);
@@ -580,7 +581,7 @@ pub extern "C" fn r84_ksp_trap(site: u64, val: u64, tp: u64, sepc: u64) {
     phex(crate::drivers::timer::read_time());
     if tp >= 0x8000_0000_0000_0000 {
         // SAFETY: diagnostic pid read of the (validated kernel-half) task.
-        let pid = unsafe { rq32(tp as *mut Task, offs::TASK_PID) };
+        let pid = rq32(tp as *mut Task, offs::TASK_PID);
         pmsg(b" pid=");
         pdec(pid as u64);
     }
