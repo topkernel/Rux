@@ -1812,14 +1812,14 @@ e21862b2c335	kernel/src/list.rs	<module>	156		GAP
 9f331e6c8d28	kernel/src/list.rs	<module>	194		GAP
 e4c86270ea95	kernel/src/list.rs	offset	218		GAP
 819b2db7fb66	kernel/src/main.rs	rust_main	1705	asm	GAP
-e3852ddce358	kernel/src/mm/buddy_allocator.rs	<module>	171		GAP
-0b4f426290a1	kernel/src/mm/buddy_allocator.rs	<module>	172		GAP
-8251aca7f194	kernel/src/mm/buddy_allocator.rs	get	185		GAP
-f7152978803b	kernel/src/mm/buddy_allocator.rs	get_mut	192		GAP
-1adf52d3e5f5	kernel/src/mm/buddy_allocator.rs	<module>	221		GAP
-cdf3c93455ea	kernel/src/mm/buddy_allocator.rs	<module>	222		GAP
-dc3de42b7b06	kernel/src/mm/buddy_allocator.rs	buddy_block_span	254		GAP
-6e43ed0707d0	kernel/src/mm/buddy_allocator.rs	fill_interior_order	406	ptr-ops	GAP
+e3852ddce358	kernel/src/mm/buddy_allocator.rs	<module>	171		INV:INV-HEAP-3
+0b4f426290a1	kernel/src/mm/buddy_allocator.rs	<module>	172		INV:INV-HEAP-3
+8251aca7f194	kernel/src/mm/buddy_allocator.rs	get	185		INV:INV-HEAP-3
+f7152978803b	kernel/src/mm/buddy_allocator.rs	get_mut	192		INV:INV-HEAP-3
+1adf52d3e5f5	kernel/src/mm/buddy_allocator.rs	<module>	221		INV:INV-HEAP-3
+cdf3c93455ea	kernel/src/mm/buddy_allocator.rs	<module>	222		INV:INV-HEAP-3
+dc3de42b7b06	kernel/src/mm/buddy_allocator.rs	buddy_block_span	254		INV:INV-HEAP-3
+6e43ed0707d0	kernel/src/mm/buddy_allocator.rs	fill_interior_order	406	ptr-ops	INV:INV-HEAP-3
 0421b3d5739a	kernel/src/mm/buddy_allocator.rs	<module>	736	ptr-ops	GAP
 68e2498702fa	kernel/src/mm/buddy_allocator.rs	<module>	737		GAP
 9366718bc12c	kernel/src/mm/buddy_allocator.rs	alloc	822		GAP
@@ -1828,13 +1828,13 @@ dc3de42b7b06	kernel/src/mm/buddy_allocator.rs	buddy_block_span	254		GAP
 ea248ba4dc84	kernel/src/mm/buddy_allocator.rs	<module>	875		GAP
 3e53ee80d971	kernel/src/mm/buddy_allocator.rs	trace_kmalloc_at	915		GAP
 c0911b6ece20	kernel/src/mm/buddy_allocator.rs	trace_kfree_at	940		GAP
-44ba1b9b3274	kernel/src/mm/buddy_allocator.rs	<module>	1315		GAP
-301367c75601	kernel/src/mm/buddy_allocator.rs	<module>	1316		GAP
-eeb256bd2220	kernel/src/mm/buddy_allocator.rs	meta_audit_inner	1345		GAP
-0b070ca5fc36	kernel/src/mm/buddy_allocator.rs	<module>	1655		GAP
-83018ee10f34	kernel/src/mm/buddy_allocator.rs	<module>	1682		GAP
-c697e7116541	kernel/src/mm/buddy_allocator.rs	<module>	1683		GAP
-65e0ec16ef78	kernel/src/mm/buddy_allocator.rs	<module>	1712		GAP
+44ba1b9b3274	kernel/src/mm/buddy_allocator.rs	<module>	1315		INV:INV-HEAP-3
+301367c75601	kernel/src/mm/buddy_allocator.rs	<module>	1316		INV:INV-HEAP-3
+eeb256bd2220	kernel/src/mm/buddy_allocator.rs	meta_audit_inner	1345		INV:INV-HEAP-3
+0b070ca5fc36	kernel/src/mm/buddy_allocator.rs	<module>	1655		INV:INV-HEAP-3
+83018ee10f34	kernel/src/mm/buddy_allocator.rs	<module>	1682		INV:INV-HEAP-3
+c697e7116541	kernel/src/mm/buddy_allocator.rs	<module>	1683		INV:INV-HEAP-3
+65e0ec16ef78	kernel/src/mm/buddy_allocator.rs	<module>	1712		INV:INV-HEAP-3
 7bc16fbea4ce	kernel/src/mm/compact.rs	<module>	84		GAP
 945153dbca30	kernel/src/mm/compact.rs	<module>	124	addr-arith	GAP
 f32b50a41a9e	kernel/src/mm/compact.rs	<module>	175	addr-arith	GAP
@@ -1847,16 +1847,16 @@ ca268388ca5e	kernel/src/mm/compact.rs	<module>	383	ptr-ops	GAP
 b9d7ae35d09c	kernel/src/mm/deferred_free.rs	try_defer	140		GAP
 1c8986e1fcfd	kernel/src/mm/deferred_free.rs	drain	193		GAP
 ce8426843e9b	kernel/src/mm/deferred_free.rs	drain	222	ptr-ops	GAP
-5748890f4710	kernel/src/mm/gup.rs	copy_into_pinned	217	ptr-ops	GAP
-5519cfa4398e	kernel/src/mm/gup.rs	copy_from_pinned	232	ptr-ops	GAP
-e4e853a2e3b1	kernel/src/mm/gup.rs	unpin	257		GAP
+5748890f4710	kernel/src/mm/gup.rs	copy_into_pinned	217	ptr-ops	INV:INV-LOCK-7
+5519cfa4398e	kernel/src/mm/gup.rs	copy_from_pinned	232	ptr-ops	INV:INV-LOCK-7
+e4e853a2e3b1	kernel/src/mm/gup.rs	unpin	257		INV:INV-LOCK-7
 7e1dc4a6d3d2	kernel/src/mm/gup.rs	pin_user_pages	315		GAP
 3aa4610514e2	kernel/src/mm/gup.rs	pin_user_pages	328		GAP
 7a49ee753e7e	kernel/src/mm/gup.rs	pin_user_pages	334		GAP
 db44a1c4d407	kernel/src/mm/gup.rs	pin_one_faulted	388		INV:INV-LOCK-7
-523b258882ef	kernel/src/mm/gup.rs	pin_one_faulted	418		GAP
-e84f90cb1248	kernel/src/mm/gup.rs	pin_one_faulted	420		GAP
-1abc96137dc9	kernel/src/mm/gup.rs	pin_one_faulted	426		GAP
+523b258882ef	kernel/src/mm/gup.rs	pin_one_faulted	418		INV:INV-LOCK-7
+e84f90cb1248	kernel/src/mm/gup.rs	pin_one_faulted	420		INV:INV-LOCK-7
+1abc96137dc9	kernel/src/mm/gup.rs	pin_one_faulted	426		INV:INV-LOCK-7
 c6c8f30796bc	kernel/src/mm/kswapd.rs	kswapd_fn	75		GAP
 0aa083ee2723	kernel/src/mm/kswapd.rs	kswapd_fn	126		GAP
 2e84a5044887	kernel/src/mm/kswapd.rs	kswapd_fn	163		GAP
@@ -1906,7 +1906,7 @@ adafb407d223	kernel/src/mm/memblock.rs	memblock_available_memory	586		GAP
 789e361494cf	kernel/src/mm/memblock.rs	memblock	625		GAP
 cde9811a58c7	kernel/src/mm/memblock.rs	memblock_mut	636		GAP
 66e7a724f1d9	kernel/src/mm/memblock.rs	memblock_phys_alloc	644		GAP
-4ec7550f68f1	kernel/src/mm/mm_struct.rs	<module>	381		GAP
+4ec7550f68f1	kernel/src/mm/mm_struct.rs	<module>	381		INV:INV-LOCK-7
 f1e49b27b0db	kernel/src/mm/mm_struct.rs	<module>	470		GAP
 e6d0755c5338	kernel/src/mm/mm_struct.rs	<module>	480		GAP
 b22a4bf9fee8	kernel/src/mm/mm_struct.rs	<module>	485		GAP
@@ -1914,13 +1914,13 @@ a7efea7c5647	kernel/src/mm/mm_struct.rs	<module>	490		GAP
 8709c9822f6c	kernel/src/mm/mm_struct.rs	<module>	1304		GAP
 fb53d9e8a24d	kernel/src/mm/mm_struct.rs	<module>	1305		GAP
 7f2432c6eb5c	kernel/src/mm/mm_struct.rs	drop	1466		INV:INV-LOCK-7
-27e3787f7109	kernel/src/mm/mod.rs	<module>	121	addr-arith	GAP
-72141b09cbc8	kernel/src/mm/mod.rs	alloc_and_map_user_table	130	addr-arith	GAP
-94e1311a6e81	kernel/src/mm/mod.rs	alloc_and_map_user_table	135	addr-arith	GAP
-e84ea9ceb342	kernel/src/mm/mod.rs	<module>	144	addr-arith	GAP
-9ce79743ef84	kernel/src/mm/mod.rs	alloc_and_map_user_memory	153	addr-arith	GAP
-35294ffffdfe	kernel/src/mm/mod.rs	alloc_and_map_user_memory	158	addr-arith	GAP
-05eab2388c76	kernel/src/mm/mod.rs	<module>	175		GAP
+27e3787f7109	kernel/src/mm/mod.rs	<module>	121	addr-arith	INV:INV-PCP-3
+72141b09cbc8	kernel/src/mm/mod.rs	alloc_and_map_user_table	130	addr-arith	INV:INV-PCP-3
+94e1311a6e81	kernel/src/mm/mod.rs	alloc_and_map_user_table	135	addr-arith	INV:INV-PCP-3
+e84ea9ceb342	kernel/src/mm/mod.rs	<module>	144	addr-arith	INV:INV-PCP-3
+9ce79743ef84	kernel/src/mm/mod.rs	alloc_and_map_user_memory	153	addr-arith	INV:INV-PCP-3
+35294ffffdfe	kernel/src/mm/mod.rs	alloc_and_map_user_memory	158	addr-arith	INV:INV-PCP-3
+05eab2388c76	kernel/src/mm/mod.rs	<module>	175		INV:INV-PCP-3
 f28bb13f3727	kernel/src/mm/oom_kill.rs	select_bad_process	160		GAP
 c0400a9641ce	kernel/src/mm/oom_kill.rs	fault_oom_kill_or_retry	493		GAP
 587da749b353	kernel/src/mm/oom_kill.rs	kernel_fault_oom_kill	537		GAP
@@ -1955,17 +1955,17 @@ f9997d86a967	kernel/src/mm/page_desc.rs	init_mem_map	1097		GAP
 475720bda04d	kernel/src/mm/page_desc.rs	page_desc_stats	1288		GAP
 a5b62be832a9	kernel/src/mm/page_desc.rs	<module>	1325	addr-arith	GAP
 8913e8641d67	kernel/src/mm/page_desc.rs	<module>	1334	static-mut,addr-arith	GAP
-41db5142e8ce	kernel/src/mm/page_desc.rs	page_desc	1357		GAP
-06639334b2da	kernel/src/mm/pcp.rs	<module>	79		GAP
-54cd7fdd2619	kernel/src/mm/pcp.rs	with_row	107		GAP
-90ad27e09810	kernel/src/mm/pcp.rs	with_row	108		GAP
+41db5142e8ce	kernel/src/mm/page_desc.rs	page_desc	1357		INV:INV-FRAME-1
+06639334b2da	kernel/src/mm/pcp.rs	<module>	79		INV:INV-PCP-3
+54cd7fdd2619	kernel/src/mm/pcp.rs	with_row	107		INV:INV-PCP-3
+90ad27e09810	kernel/src/mm/pcp.rs	with_row	108		INV:INV-PCP-3
 82f867bb8530	kernel/src/mm/pcp.rs	free_order0	247	addr-arith	INV:INV-PCP-1
-527638e08124	kernel/src/mm/pcp.rs	cached_pages_total	409		GAP
-839179cacb1a	kernel/src/mm/pcp.rs	cached_pages_total	410		GAP
-bc9cbf37217c	kernel/src/mm/pcp.rs	cached_pages_per_cpu	420		GAP
-003dfe46ec88	kernel/src/mm/pcp.rs	cached_pages_per_cpu	421		GAP
-382d6ef89358	kernel/src/mm/pcp.rs	forensics_scan_rows	438		GAP
-2fceb4188517	kernel/src/mm/pcp.rs	forensics_scan_rows	439		GAP
+527638e08124	kernel/src/mm/pcp.rs	cached_pages_total	409		INV:INV-PCP-3
+839179cacb1a	kernel/src/mm/pcp.rs	cached_pages_total	410		INV:INV-PCP-3
+bc9cbf37217c	kernel/src/mm/pcp.rs	cached_pages_per_cpu	420		INV:INV-PCP-3
+003dfe46ec88	kernel/src/mm/pcp.rs	cached_pages_per_cpu	421		INV:INV-PCP-3
+382d6ef89358	kernel/src/mm/pcp.rs	forensics_scan_rows	438		INV:INV-PCP-3
+2fceb4188517	kernel/src/mm/pcp.rs	forensics_scan_rows	439		INV:INV-PCP-3
 4993ac67d608	kernel/src/mm/pglist.rs	<module>	246		GAP
 66d48669f293	kernel/src/mm/pglist.rs	node_data	263		GAP
 c48d4facc055	kernel/src/mm/pglist.rs	node_data_mut	276		GAP
@@ -2003,7 +2003,7 @@ c8d81d1f77f1	kernel/src/mm/small_alloc.rs	census_peek3	1022	volatile,ptr-ops	GAP
 72bb0388811c	kernel/src/mm/swap.rs	swap_dev	151		INV:INV-SREF-1
 5f8b002a0b2e	kernel/src/mm/swap.rs	swap_page_slice_mut	163	ptr-ops,addr-arith	INV:INV-SAFECALL-1
 8f68caf02334	kernel/src/mm/swap.rs	swap_page_slice	173	raw-construct,ptr-ops,addr-arith	INV:INV-SAFECALL-1
-6bf4017e6c0d	kernel/src/mm/swap.rs	swap_activate	322	ptr-ops	GAP
+6bf4017e6c0d	kernel/src/mm/swap.rs	swap_activate	322	ptr-ops	INV:INV-BLKDEV-1
 019b97a64429	kernel/src/mm/swap.rs	get_swap_disk	565	ptr-ops	INV:INV-BLKDEV-1
 a8799ee7dd99	kernel/src/mm/vdso.rs	<module>	81	ptr-ops	GAP
 133b391868db	kernel/src/mm/vdso.rs	vdso_seq	82	ptr-ops	GAP
@@ -2033,19 +2033,19 @@ d52d87a663a3	kernel/src/mm/vmemmap.rs	vmemmap_to_pfn	68		GAP
 0afe51233abd	kernel/src/mm/vmemmap.rs	init_vmemmap	191		GAP
 f92beccd3da8	kernel/src/mm/vmemmap.rs	vmemmap_stats	214		GAP
 444207622d17	kernel/src/mm/vmscan.rs	shrink_node	472		GAP
-c55708540569	kernel/src/mm/zone.rs	alloc_pages_order0_batch	416		GAP
-3183b66dafe2	kernel/src/mm/zone.rs	alloc_pages_order0_batch	438		GAP
-b527fe9a0c98	kernel/src/mm/zone.rs	alloc_pages_order0_batch	482		GAP
+c55708540569	kernel/src/mm/zone.rs	alloc_pages_order0_batch	416		INV:INV-PCP-2
+3183b66dafe2	kernel/src/mm/zone.rs	alloc_pages_order0_batch	438		INV:INV-PCP-2
+b527fe9a0c98	kernel/src/mm/zone.rs	alloc_pages_order0_batch	482		INV:INV-PCP-2
 cd5ed29c1209	kernel/src/mm/zone.rs	alloc_from_order	655		GAP
 8cf1a80ee532	kernel/src/mm/zone.rs	free_pages	743		GAP
-62e2ca693f2e	kernel/src/mm/zone.rs	is_buddy_free	895		GAP
-a98dc55a2685	kernel/src/mm/zone.rs	add_to_free_list	918		GAP
-efa223106007	kernel/src/mm/zone.rs	remove_from_free_list	970		GAP
-6ab6b09add15	kernel/src/mm/zone.rs	remove_from_free_list	988		GAP
-65c2eef14450	kernel/src/mm/zone.rs	remove_from_free_list	996		GAP
-536c3bdc0cf1	kernel/src/mm/zone.rs	remove_from_free_list	999		GAP
-e3587d750a66	kernel/src/mm/zone.rs	remove_from_free_list	1011		GAP
-b80e5e73b3bd	kernel/src/mm/zone.rs	forensic_free_report	1062		GAP
+62e2ca693f2e	kernel/src/mm/zone.rs	is_buddy_free	895		INV:INV-REF-2
+a98dc55a2685	kernel/src/mm/zone.rs	add_to_free_list	918		INV:INV-BUDDY-1
+efa223106007	kernel/src/mm/zone.rs	remove_from_free_list	970		INV:INV-BUDDY-1
+6ab6b09add15	kernel/src/mm/zone.rs	remove_from_free_list	988		INV:INV-BUDDY-1
+65c2eef14450	kernel/src/mm/zone.rs	remove_from_free_list	996		INV:INV-BUDDY-1
+536c3bdc0cf1	kernel/src/mm/zone.rs	remove_from_free_list	999		INV:INV-BUDDY-1
+e3587d750a66	kernel/src/mm/zone.rs	remove_from_free_list	1011		INV:INV-BUDDY-1
+b80e5e73b3bd	kernel/src/mm/zone.rs	forensic_free_report	1062		INV:INV-BUDDY-1
 52943d9a2124	kernel/src/module/mod.rs	sys_init_module_impl	367	ptr-ops	GAP
 b4bc10a3f4ca	kernel/src/module/mod.rs	sys_finit_module_impl	404		GAP
 86c8618086f5	kernel/src/module/mod.rs	sys_finit_module_impl	417		GAP
@@ -2130,13 +2130,13 @@ ef7599c1dde3	kernel/src/perf/mod.rs	perf_close	1415	ptr-ops	GAP
 2e0a07b2fab3	kernel/src/perf/mod.rs	perf_close	1418		GAP
 a1c3a4951cbe	kernel/src/perf/mod.rs	perf_mmap_handler	1517		GAP
 480e1ffe3a94	kernel/src/perf/mod.rs	perf_mmap_handler	1530	ptr-ops	GAP
-6d7d6ad91c98	kernel/src/perf/mod.rs	perf_mmap_handler	1644		GAP
-3c987dcbbdb8	kernel/src/perf/mod.rs	perf_mmap_handler	1658		GAP
-7bfb00bab2a9	kernel/src/perf/mod.rs	perf_mmap_handler	1671	volatile,ptr-ops	GAP
-290dfd3ec768	kernel/src/perf/mod.rs	perf_ioctl	1769	ptr-ops	GAP
-972e0da27d63	kernel/src/perf/mod.rs	perf_ioctl	1782	ptr-ops	GAP
-440d4101930a	kernel/src/perf/mod.rs	sys_perf_event_open	1838	ptr-ops	GAP
-df20e0fc055c	kernel/src/perf/mod.rs	sys_perf_event_open	1850	ptr-ops	GAP
+6d7d6ad91c98	kernel/src/perf/mod.rs	perf_mmap_handler	1644		INV:INV-LOCK-7
+3c987dcbbdb8	kernel/src/perf/mod.rs	perf_mmap_handler	1658		INV:INV-LOCK-7
+7bfb00bab2a9	kernel/src/perf/mod.rs	perf_mmap_handler	1671	volatile,ptr-ops	INV:INV-LOCK-7
+290dfd3ec768	kernel/src/perf/mod.rs	perf_ioctl	1769	ptr-ops	INV:INV-LOCK-7
+972e0da27d63	kernel/src/perf/mod.rs	perf_ioctl	1782	ptr-ops	INV:INV-LOCK-7
+440d4101930a	kernel/src/perf/mod.rs	sys_perf_event_open	1838	ptr-ops	INV:INV-LOCK-7
+df20e0fc055c	kernel/src/perf/mod.rs	sys_perf_event_open	1850	ptr-ops	INV:INV-LOCK-7
 6c857708b9b1	kernel/src/perf/mod.rs	sys_perf_event_open	1973		GAP
 094020d4efd4	kernel/src/perf/mod.rs	sys_perf_event_open	1990		GAP
 06533387ad28	kernel/src/perf/mod.rs	sys_perf_event_open	2075		GAP
@@ -2150,83 +2150,83 @@ df20e0fc055c	kernel/src/perf/mod.rs	sys_perf_event_open	1850	ptr-ops	GAP
 920eda9dbc8d	kernel/src/process/mod.rs	set_user_tls	81		GAP
 a30a9396b22d	kernel/src/process/mod.rs	current_pgid	111		GAP
 517b3d54632b	kernel/src/process/mod.rs	find_task_by_pid	132		GAP
-933975afa1e8	kernel/src/process/ptrace.rs	sys_ptrace	368	ptr-ops	GAP
+933975afa1e8	kernel/src/process/ptrace.rs	sys_ptrace	368	ptr-ops	INV:INV-PROC-BORROW-1
 f5770d9b6724	kernel/src/process/task_ref.rs	<module>	73		GAP
 5f376decb96e	kernel/src/process/task_ref.rs	deref	86		GAP
 8630f74181c8	kernel/src/process/task_ref.rs	deref_mut	96		GAP
-8c9d5e0e842c	kernel/src/process/task_ref.rs	deref	152		GAP
-39ea3279d04f	kernel/src/process/task_ref.rs	deref_mut	160		GAP
-2beaa1051168	kernel/src/process/unsafe_edges.rs	borrow_task	55		GAP
-7e183034b210	kernel/src/process/unsafe_edges.rs	borrow_task_mut	72		GAP
-36403cdf6b01	kernel/src/process/unsafe_edges.rs	place_task	107		GAP
-8e8d1c42bc8b	kernel/src/process/unsafe_edges.rs	dump_read_page	148		GAP
-ba65a672fa36	kernel/src/process/unsafe_edges.rs	dump_read_page	159	ptr-ops	GAP
-1147a3c17197	kernel/src/process/unsafe_edges.rs	file_private_data_ref	174		GAP
-86fb980532dc	kernel/src/process/unsafe_edges.rs	file_private_data_ref	175	ptr-ops	GAP
-a94702b4b993	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	189		GAP
-3774c99e046d	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	190	ptr-ops	GAP
-385f00f307fe	kernel/src/process/unsafe_edges.rs	file_private_data_mut	205		GAP
-ddee7370ee00	kernel/src/process/unsafe_edges.rs	file_private_data_mut	206	ptr-ops	GAP
-41a8a08b0b04	kernel/src/process/unsafe_edges.rs	read_volatile_u64	220	volatile	GAP
-3c7f08d81c6d	kernel/src/process/unsafe_edges.rs	journal_handle	260		GAP
-1d94bb694ccf	kernel/src/process/unsafe_edges.rs	free_fork_pt_regs	293	ptr-ops	GAP
-3062450165aa	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	307		GAP
-10d8ef2c67ca	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	312		GAP
-98a3e7c1abfd	kernel/src/process/unsafe_edges.rs	apppark_rets	326		GAP
-eb2fd87de2a4	kernel/src/process/unsafe_edges.rs	freelist_next	342	ptr-ops	GAP
-0ded137a1bf7	kernel/src/process/unsafe_edges.rs	freelist_link	352	ptr-ops	GAP
-d02eb769553f	kernel/src/process/unsafe_edges.rs	heap_alloc	365		GAP
-6e87c1081799	kernel/src/process/unsafe_edges.rs	heap_dealloc	375		GAP
-0d0e795c349d	kernel/src/process/unsafe_edges.rs	slot_ptr	385		GAP
-ff4401390877	kernel/src/process/unsafe_edges.rs	zero_bytes	396	ptr-ops	GAP
-ef68ded79fde	kernel/src/process/unsafe_edges.rs	write_volatile_u64	406	volatile	GAP
-2828b414db40	kernel/src/process/unsafe_edges.rs	<module>	414		GAP
-6e8f4d9333ce	kernel/src/process/unsafe_edges.rs	<module>	418		GAP
-3c4ccb2eadfd	kernel/src/process/unsafe_edges.rs	read_volatile_u32	427	volatile	GAP
-f1b293baa4e9	kernel/src/process/unsafe_edges.rs	borrow_active_mm	442		GAP
-1762475263ac	kernel/src/process/unsafe_edges.rs	list_add_tail	461		GAP
-48184db70775	kernel/src/process/unsafe_edges.rs	list_del	471		GAP
-4ed158931f22	kernel/src/process/unsafe_edges.rs	list_for_each	485		GAP
-822b6eba798f	kernel/src/process/unsafe_edges.rs	store_pick_qword	505	ptr-ops	GAP
-6b064e1e0d4f	kernel/src/process/unsafe_edges.rs	paint_bytes	518	ptr-ops	GAP
-7437025be7de	kernel/src/process/unsafe_edges.rs	frame_mut	538		GAP
-d1beac49d19f	kernel/src/process/unsafe_edges.rs	frame_ref	550		GAP
-6c8bb22e03b1	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	576		GAP
-67d89785af7d	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	587	ptr-ops	GAP
-e8cffbc0099e	kernel/src/process/unsafe_edges.rs	exec_phdr_at	608		GAP
-90f9b4ccb70d	kernel/src/process/unsafe_edges.rs	exec_ehdr_from	618		GAP
-b995def5afac	kernel/src/process/unsafe_edges.rs	exec_map_user_range	630		GAP
-929fc69fb04b	kernel/src/process/unsafe_edges.rs	exec_map_user_region_static	649		GAP
-3f544658a0fc	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	660		GAP
-a803f084862e	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	665	volatile,ptr-ops	GAP
-f39d729d3457	kernel/src/process/unsafe_edges.rs	exec_free_user_page_trees	679		GAP
-25d807f5ab9b	kernel/src/process/unsafe_edges.rs	exec_write_sigtramp	697	volatile,ptr-ops	GAP
-7bf24c370af4	kernel/src/process/unsafe_edges.rs	exec_mm_new_user	711		GAP
-c940b94f6b0c	kernel/src/process/unsafe_edges.rs	exec_switch_address_space	724		GAP
+8c9d5e0e842c	kernel/src/process/task_ref.rs	deref	152		INV:INV-TASKREF-1
+39ea3279d04f	kernel/src/process/task_ref.rs	deref_mut	160		INV:INV-TASKREF-1
+2beaa1051168	kernel/src/process/unsafe_edges.rs	borrow_task	55		INV:INV-PROC-BORROW-1
+7e183034b210	kernel/src/process/unsafe_edges.rs	borrow_task_mut	72		INV:INV-PROC-BORROW-1
+36403cdf6b01	kernel/src/process/unsafe_edges.rs	place_task	107		INV:INV-PROC-PLACE-2
+8e8d1c42bc8b	kernel/src/process/unsafe_edges.rs	dump_read_page	148		INV:INV-PROC-COREDUMP-1
+ba65a672fa36	kernel/src/process/unsafe_edges.rs	dump_read_page	159	ptr-ops	INV:INV-PROC-COREDUMP-1
+1147a3c17197	kernel/src/process/unsafe_edges.rs	file_private_data_ref	174		INV:INV-PROC-NSFILE-1
+86fb980532dc	kernel/src/process/unsafe_edges.rs	file_private_data_ref	175	ptr-ops	INV:INV-PROC-NSFILE-1
+a94702b4b993	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	189		INV:INV-PROC-NSFILE-2
+3774c99e046d	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	190	ptr-ops	INV:INV-PROC-NSFILE-2
+385f00f307fe	kernel/src/process/unsafe_edges.rs	file_private_data_mut	205		INV:INV-PROC-NSFILE-1
+ddee7370ee00	kernel/src/process/unsafe_edges.rs	file_private_data_mut	206	ptr-ops	INV:INV-PROC-NSFILE-1
+41a8a08b0b04	kernel/src/process/unsafe_edges.rs	read_volatile_u64	220	volatile	INV:INV-PROC-DIAG-1
+3c7f08d81c6d	kernel/src/process/unsafe_edges.rs	journal_handle	260		INV:INV-PROC-JOURNAL-1
+1d94bb694ccf	kernel/src/process/unsafe_edges.rs	free_fork_pt_regs	293	ptr-ops	INV:INV-PROC-PTREGS-FREE-1
+3062450165aa	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	307		INV:INV-PROC-ROOTSWITCH-1
+10d8ef2c67ca	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	312		INV:INV-PROC-ROOTSWITCH-1
+98a3e7c1abfd	kernel/src/process/unsafe_edges.rs	apppark_rets	326		INV:INV-PROC-APPPARK-1
+eb2fd87de2a4	kernel/src/process/unsafe_edges.rs	freelist_next	342	ptr-ops	INV:INV-PROC-KSTACK-1
+0ded137a1bf7	kernel/src/process/unsafe_edges.rs	freelist_link	352	ptr-ops	INV:INV-PROC-KSTACK-1
+d02eb769553f	kernel/src/process/unsafe_edges.rs	heap_alloc	365		INV:INV-PROC-KSTACK-2
+6e87c1081799	kernel/src/process/unsafe_edges.rs	heap_dealloc	375		INV:INV-PROC-KSTACK-2
+0d0e795c349d	kernel/src/process/unsafe_edges.rs	slot_ptr	385		INV:INV-PROC-KSTACK-3
+ff4401390877	kernel/src/process/unsafe_edges.rs	zero_bytes	396	ptr-ops	INV:INV-PROC-KSTACK-3
+ef68ded79fde	kernel/src/process/unsafe_edges.rs	write_volatile_u64	406	volatile	INV:INV-PROC-DIAG-1
+2828b414db40	kernel/src/process/unsafe_edges.rs	<module>	414		INV:INV-PROC-DIAG-1
+6e8f4d9333ce	kernel/src/process/unsafe_edges.rs	<module>	418		INV:INV-PROC-DIAG-1
+3c4ccb2eadfd	kernel/src/process/unsafe_edges.rs	read_volatile_u32	427	volatile	INV:INV-PROC-DIAG-1
+f1b293baa4e9	kernel/src/process/unsafe_edges.rs	borrow_active_mm	442		INV:INV-PROC-ACTIVEMM-1
+1762475263ac	kernel/src/process/unsafe_edges.rs	list_add_tail	461		INV:INV-PROC-LIST-1
+48184db70775	kernel/src/process/unsafe_edges.rs	list_del	471		INV:INV-PROC-LIST-1
+4ed158931f22	kernel/src/process/unsafe_edges.rs	list_for_each	485		INV:INV-PROC-LIST-1
+822b6eba798f	kernel/src/process/unsafe_edges.rs	store_pick_qword	505	ptr-ops	INV:INV-PROC-PICKQWORD-1
+6b064e1e0d4f	kernel/src/process/unsafe_edges.rs	paint_bytes	518	ptr-ops	INV:INV-PROC-KSTACK-3
+7437025be7de	kernel/src/process/unsafe_edges.rs	frame_mut	538		INV:INV-PROC-FRAME-1
+d1beac49d19f	kernel/src/process/unsafe_edges.rs	frame_ref	550		INV:INV-PROC-FRAME-1
+6c8bb22e03b1	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	576		INV:INV-PROC-EXEC-COPY-1
+67d89785af7d	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	587	ptr-ops	INV:INV-PROC-EXEC-COPY-1
+e8cffbc0099e	kernel/src/process/unsafe_edges.rs	exec_phdr_at	608		INV:INV-PROC-EXEC-ELF-1
+90f9b4ccb70d	kernel/src/process/unsafe_edges.rs	exec_ehdr_from	618		INV:INV-PROC-EXEC-ELF-1
+b995def5afac	kernel/src/process/unsafe_edges.rs	exec_map_user_range	630		INV:INV-PROC-EXEC-MAP-1
+929fc69fb04b	kernel/src/process/unsafe_edges.rs	exec_map_user_region_static	649		INV:INV-PROC-EXEC-VDSO-1
+3f544658a0fc	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	660		INV:INV-PROC-EXEC-PROBE-1
+a803f084862e	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	665	volatile,ptr-ops	INV:INV-PROC-EXEC-PROBE-1
+f39d729d3457	kernel/src/process/unsafe_edges.rs	exec_free_user_page_trees	679		INV:INV-PROC-EXEC-FREETREE-1
+25d807f5ab9b	kernel/src/process/unsafe_edges.rs	exec_write_sigtramp	697	volatile,ptr-ops	INV:INV-PROC-EXEC-TRAMP-1
+7bf24c370af4	kernel/src/process/unsafe_edges.rs	exec_mm_new_user	711		INV:INV-PROC-EXEC-MMNEW-1
+c940b94f6b0c	kernel/src/process/unsafe_edges.rs	exec_switch_address_space	724		INV:INV-PROC-EXEC-SWITCH-1
 831485264349	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	759		INV:INV-LOCK-7
 6a30b6029d54	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	806		INV:INV-LOCK-7
 9723e8f16564	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	865		INV:INV-LOCK-7
-cf4c67d02243	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	885		GAP
-2e9278a615ed	kernel/src/process/unsafe_edges.rs	fork_save_parent_vstate	896		GAP
-39e6cfb8b8c0	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	907		GAP
-a6250429c1af	kernel/src/process/unsafe_edges.rs	fork_fpu_save_for_switch	916		GAP
-208dd9fdb7da	kernel/src/process/unsafe_edges.rs	fork_pt_walk	927		GAP
-684f00c51d3f	kernel/src/process/unsafe_edges.rs	fork_handle_cow_fault	940		GAP
-09e94e53b793	kernel/src/process/unsafe_edges.rs	fork_write_child_tid	960	volatile,ptr-ops	GAP
-4cee5568a23f	kernel/src/process/unsafe_edges.rs	read_user_tp_register	973	asm	GAP
-0350894860da	kernel/src/process/unsafe_edges.rs	page_refcount	993		GAP
-78d5c319d12b	kernel/src/process/unsafe_edges.rs	<module>	1003		GAP
-12b9c3709dc9	kernel/src/process/unsafe_edges.rs	<module>	1005		GAP
-12d1c383cdb4	kernel/src/process/unsafe_edges.rs	pid_hash_unlink_store	1024		GAP
-d2366331527d	kernel/src/process/unsafe_edges.rs	ptrace_translate	1044		GAP
-6c09c427c25c	kernel/src/process/unsafe_edges.rs	ptrace_read_word	1055	volatile,ptr-ops	GAP
-ac6d68bb3f5a	kernel/src/process/unsafe_edges.rs	ptrace_write_word	1066	volatile,ptr-ops	GAP
-53e23106a0b4	kernel/src/process/unsafe_edges.rs	ptrace_copy_chunk	1079	ptr-ops	GAP
-2a7dda623929	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1097	asm	GAP
-78380edea3f7	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1113	asm	GAP
-ee1148570389	kernel/src/process/unsafe_edges.rs	ptrace_read_gregset	1138	ptr-ops	GAP
-29b8b715f524	kernel/src/process/unsafe_edges.rs	ptrace_write_gregset	1156	ptr-ops	GAP
-176d2c1dccb8	kernel/src/process/unsafe_edges.rs	zeroed_siginfo	1171		GAP
+cf4c67d02243	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	885		INV:INV-PROC-FORK-FPU-1
+2e9278a615ed	kernel/src/process/unsafe_edges.rs	fork_save_parent_vstate	896		INV:INV-PROC-FORK-FPU-1
+39e6cfb8b8c0	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	907		INV:INV-PROC-FORK-FPU-1
+a6250429c1af	kernel/src/process/unsafe_edges.rs	fork_fpu_save_for_switch	916		INV:INV-PROC-FORK-FPU-1
+208dd9fdb7da	kernel/src/process/unsafe_edges.rs	fork_pt_walk	927		INV:INV-PROC-FORK-WALK-1
+684f00c51d3f	kernel/src/process/unsafe_edges.rs	fork_handle_cow_fault	940		INV:INV-PROC-FORK-COW-1
+09e94e53b793	kernel/src/process/unsafe_edges.rs	fork_write_child_tid	960	volatile,ptr-ops	INV:INV-PROC-FORK-TIDWRITE-1
+4cee5568a23f	kernel/src/process/unsafe_edges.rs	read_user_tp_register	973	asm	INV:INV-PROC-DIAG-1
+0350894860da	kernel/src/process/unsafe_edges.rs	page_refcount	993		INV:INV-PROC-DIAG-1
+78d5c319d12b	kernel/src/process/unsafe_edges.rs	<module>	1003		INV:INV-PROC-DIAG-1
+12b9c3709dc9	kernel/src/process/unsafe_edges.rs	<module>	1005		INV:INV-PROC-DIAG-1
+12d1c383cdb4	kernel/src/process/unsafe_edges.rs	pid_hash_unlink_store	1024		INV:INV-PROC-PIDHASH-1
+d2366331527d	kernel/src/process/unsafe_edges.rs	ptrace_translate	1044		INV:INV-PROC-PTRACE-WALK-1
+6c09c427c25c	kernel/src/process/unsafe_edges.rs	ptrace_read_word	1055	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
+ac6d68bb3f5a	kernel/src/process/unsafe_edges.rs	ptrace_write_word	1066	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
+53e23106a0b4	kernel/src/process/unsafe_edges.rs	ptrace_copy_chunk	1079	ptr-ops	INV:INV-PROC-PTRACE-MEM-1
+2a7dda623929	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1097	asm	INV:INV-PROC-PTRACE-ICOH-1
+78380edea3f7	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1113	asm	INV:INV-PROC-PTRACE-ICOH-1
+ee1148570389	kernel/src/process/unsafe_edges.rs	ptrace_read_gregset	1138	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
+29b8b715f524	kernel/src/process/unsafe_edges.rs	ptrace_write_gregset	1156	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
+176d2c1dccb8	kernel/src/process/unsafe_edges.rs	zeroed_siginfo	1171		INV:INV-PROC-DIAG-1
 e9ebe794b07b	kernel/src/safety/bytes.rs	bytes_of	43	raw-construct,ptr-ops	INV:INV-CBYTES-1
 5db301ab0d64	kernel/src/safety/bytes.rs	bytes_of_mut	52	ptr-ops	INV:INV-CBYTES-1
 ee1f13fde206	kernel/src/safety/bytes.rs	from_bytes	65	ptr-ops	INV:INV-CBYTES-2
@@ -2287,105 +2287,105 @@ a50ea5c53c87	kernel/src/sched/edges.rs	idle_task_storage_base	62		INV:INV-SCE-4
 2ad3bb3da641	kernel/src/sched/edges.rs	task_shared	108		INV:INV-SCE-2
 fa3b76f68ad4	kernel/src/sched/edges.rs	grq_stage	151		INV:INV-SCE-3
 22078b8a52a4	kernel/src/sched/edges.rs	grq_ref	169		INV:INV-SCE-3
-ec40cba843be	kernel/src/sched/edges.rs	grq_mut	182		GAP
-53337919fcf7	kernel/src/sched/edges.rs	task_poison_pair_volatile	194	volatile,ptr-ops	GAP
-716941c1718c	kernel/src/sched/edges.rs	task_pid_volatile	215	volatile,ptr-ops	GAP
-34e0aee0808e	kernel/src/sched/edges.rs	task_ownership_qword	232	volatile,ptr-ops	GAP
-84617545fdce	kernel/src/sched/edges.rs	arch_context_switch	254		GAP
-15375f365466	kernel/src/sched/edges.rs	task_borrow	264		GAP
-4eaf0d7dbee6	kernel/src/sched/edges.rs	cgroup_node_ref	279		GAP
-653233d4b7b9	kernel/src/sched/edges.rs	pt_regs_at_top	294	ptr-ops	GAP
-705134ce96ee	kernel/src/sched/edges.rs	list_next	311		GAP
-6ad46682055d	kernel/src/sched/edges.rs	task_of_rt_list	320	ptr-ops	GAP
-a7a2c8a8ce88	kernel/src/sched/edges.rs	rt_list_add	329		GAP
-9bd1eeee2728	kernel/src/sched/edges.rs	rt_list_add_tail	337		GAP
-029b4b3229e1	kernel/src/sched/edges.rs	rt_list_del	345		GAP
-8672e583aa1f	kernel/src/sched/edges.rs	rt_list_linked	355	ptr-ops	GAP
-ff42ddeb6e80	kernel/src/sched/edges.rs	linked_at	451		GAP
-1a36c144a157	kernel/src/sched/edges.rs	detach_at	462		GAP
-6d2935dcc061	kernel/src/sched/edges.rs	rb_nil	495		GAP
-b5888fc508d1	kernel/src/sched/edges.rs	node_of_task	505	ptr-ops	GAP
-d309937134aa	kernel/src/sched/edges.rs	task_of_node	513	ptr-ops	GAP
-ad80f69ed7c0	kernel/src/sched/edges.rs	node_key	522	ptr-ops	GAP
-e4edd18a12ac	kernel/src/sched/edges.rs	node_key	523		GAP
-11ac57082e02	kernel/src/sched/edges.rs	subtree_min	573		GAP
-374aea00d125	kernel/src/sched/edges.rs	next	588		GAP
-e94e1238a42f	kernel/src/sched/edges.rs	next	590		GAP
-8351992a0563	kernel/src/sched/edges.rs	next	593		GAP
-4af4f285dce8	kernel/src/sched/edges.rs	next	594		GAP
-e342bc371bfd	kernel/src/sched/edges.rs	next	596		GAP
-15a1834f2454	kernel/src/sched/edges.rs	rotate_left	608		GAP
-a0f6e324ee1b	kernel/src/sched/edges.rs	rotate_left	609		GAP
-29d780c887e9	kernel/src/sched/edges.rs	rotate_left	610		GAP
-d00131e8dad6	kernel/src/sched/edges.rs	rotate_left	611		GAP
-a04c4a9c203d	kernel/src/sched/edges.rs	rotate_left	613		GAP
-2ae49f41fda2	kernel/src/sched/edges.rs	rotate_left	614		GAP
-83cca63cb025	kernel/src/sched/edges.rs	rotate_left	617		GAP
-308c3067549d	kernel/src/sched/edges.rs	rotate_left	618		GAP
-69b970b15922	kernel/src/sched/edges.rs	rotate_left	620		GAP
-9d74304d3afc	kernel/src/sched/edges.rs	rotate_left	622		GAP
-93f240cc3a98	kernel/src/sched/edges.rs	rotate_left	623		GAP
-4921037c1e0c	kernel/src/sched/edges.rs	rotate_right	629		GAP
-81c448ceb019	kernel/src/sched/edges.rs	rotate_right	630		GAP
-9d8d9312aefc	kernel/src/sched/edges.rs	rotate_right	631		GAP
-13b2cd4248cf	kernel/src/sched/edges.rs	rotate_right	632		GAP
-b7fcee255c65	kernel/src/sched/edges.rs	rotate_right	634		GAP
-9836db36835a	kernel/src/sched/edges.rs	rotate_right	635		GAP
-72388cdd9030	kernel/src/sched/edges.rs	rotate_right	638		GAP
-68704189dcaf	kernel/src/sched/edges.rs	rotate_right	639		GAP
-9e386b60903d	kernel/src/sched/edges.rs	rotate_right	641		GAP
-f75e7fd043d0	kernel/src/sched/edges.rs	rotate_right	643		GAP
-22f92146b667	kernel/src/sched/edges.rs	rotate_right	644		GAP
-e2513327807e	kernel/src/sched/edges.rs	insert	657		GAP
-fdd0118d6fd5	kernel/src/sched/edges.rs	insert	664		GAP
-6342791ebdd7	kernel/src/sched/edges.rs	insert	665		GAP
-d6d3f4171df5	kernel/src/sched/edges.rs	insert	667		GAP
-38d82aca8884	kernel/src/sched/edges.rs	insert	677		GAP
-51100af6fb18	kernel/src/sched/edges.rs	insert	678		GAP
-c0d22071e001	kernel/src/sched/edges.rs	insert	680		GAP
-9ebda23729fb	kernel/src/sched/edges.rs	insert	683		GAP
-2435641133d9	kernel/src/sched/edges.rs	insert	684		GAP
-8862429fbc22	kernel/src/sched/edges.rs	insert	685		GAP
-5e6aacb97e33	kernel/src/sched/edges.rs	insert	687		GAP
-d3b49669982a	kernel/src/sched/edges.rs	insert	689		GAP
-699107a88dbf	kernel/src/sched/edges.rs	insert	690		GAP
-7088006fc4e7	kernel/src/sched/edges.rs	insert_fixup	702		GAP
+ec40cba843be	kernel/src/sched/edges.rs	grq_mut	182		INV:INV-SCE-3
+53337919fcf7	kernel/src/sched/edges.rs	task_poison_pair_volatile	194	volatile,ptr-ops	INV:INV-TL-2
+716941c1718c	kernel/src/sched/edges.rs	task_pid_volatile	215	volatile,ptr-ops	INV:INV-SCE-2
+34e0aee0808e	kernel/src/sched/edges.rs	task_ownership_qword	232	volatile,ptr-ops	INV:INV-SCE-2
+84617545fdce	kernel/src/sched/edges.rs	arch_context_switch	254		INV:INV-SCE-5
+15375f365466	kernel/src/sched/edges.rs	task_borrow	264		INV:INV-SCE-2
+4eaf0d7dbee6	kernel/src/sched/edges.rs	cgroup_node_ref	279		INV:INV-SCE-9
+653233d4b7b9	kernel/src/sched/edges.rs	pt_regs_at_top	294	ptr-ops	INV:INV-SCE-9
+705134ce96ee	kernel/src/sched/edges.rs	list_next	311		INV:INV-SCE-7
+6ad46682055d	kernel/src/sched/edges.rs	task_of_rt_list	320	ptr-ops	INV:INV-SCE-7
+a7a2c8a8ce88	kernel/src/sched/edges.rs	rt_list_add	329		INV:INV-SCE-7
+9bd1eeee2728	kernel/src/sched/edges.rs	rt_list_add_tail	337		INV:INV-SCE-7
+029b4b3229e1	kernel/src/sched/edges.rs	rt_list_del	345		INV:INV-SCE-7
+8672e583aa1f	kernel/src/sched/edges.rs	rt_list_linked	355	ptr-ops	INV:INV-SCE-7
+ff42ddeb6e80	kernel/src/sched/edges.rs	linked_at	451		INV:INV-SCE-6
+1a36c144a157	kernel/src/sched/edges.rs	detach_at	462		INV:INV-SCE-6
+6d2935dcc061	kernel/src/sched/edges.rs	rb_nil	495		INV:INV-SCE-6
+b5888fc508d1	kernel/src/sched/edges.rs	node_of_task	505	ptr-ops	INV:INV-SCE-6
+d309937134aa	kernel/src/sched/edges.rs	task_of_node	513	ptr-ops	INV:INV-SCE-6
+ad80f69ed7c0	kernel/src/sched/edges.rs	node_key	522	ptr-ops	INV:INV-SCE-6
+e4edd18a12ac	kernel/src/sched/edges.rs	node_key	523		INV:INV-SCE-6
+11ac57082e02	kernel/src/sched/edges.rs	subtree_min	573		INV:INV-SCE-6
+374aea00d125	kernel/src/sched/edges.rs	next	588		INV:INV-SCE-6
+e94e1238a42f	kernel/src/sched/edges.rs	next	590		INV:INV-SCE-6
+8351992a0563	kernel/src/sched/edges.rs	next	593		INV:INV-SCE-6
+4af4f285dce8	kernel/src/sched/edges.rs	next	594		INV:INV-SCE-6
+e342bc371bfd	kernel/src/sched/edges.rs	next	596		INV:INV-SCE-6
+15a1834f2454	kernel/src/sched/edges.rs	rotate_left	608		INV:INV-SCE-6
+a0f6e324ee1b	kernel/src/sched/edges.rs	rotate_left	609		INV:INV-SCE-6
+29d780c887e9	kernel/src/sched/edges.rs	rotate_left	610		INV:INV-SCE-6
+d00131e8dad6	kernel/src/sched/edges.rs	rotate_left	611		INV:INV-SCE-6
+a04c4a9c203d	kernel/src/sched/edges.rs	rotate_left	613		INV:INV-SCE-6
+2ae49f41fda2	kernel/src/sched/edges.rs	rotate_left	614		INV:INV-SCE-6
+83cca63cb025	kernel/src/sched/edges.rs	rotate_left	617		INV:INV-SCE-6
+308c3067549d	kernel/src/sched/edges.rs	rotate_left	618		INV:INV-SCE-6
+69b970b15922	kernel/src/sched/edges.rs	rotate_left	620		INV:INV-SCE-6
+9d74304d3afc	kernel/src/sched/edges.rs	rotate_left	622		INV:INV-SCE-6
+93f240cc3a98	kernel/src/sched/edges.rs	rotate_left	623		INV:INV-SCE-6
+4921037c1e0c	kernel/src/sched/edges.rs	rotate_right	629		INV:INV-SCE-6
+81c448ceb019	kernel/src/sched/edges.rs	rotate_right	630		INV:INV-SCE-6
+9d8d9312aefc	kernel/src/sched/edges.rs	rotate_right	631		INV:INV-SCE-6
+13b2cd4248cf	kernel/src/sched/edges.rs	rotate_right	632		INV:INV-SCE-6
+b7fcee255c65	kernel/src/sched/edges.rs	rotate_right	634		INV:INV-SCE-6
+9836db36835a	kernel/src/sched/edges.rs	rotate_right	635		INV:INV-SCE-6
+72388cdd9030	kernel/src/sched/edges.rs	rotate_right	638		INV:INV-SCE-6
+68704189dcaf	kernel/src/sched/edges.rs	rotate_right	639		INV:INV-SCE-6
+9e386b60903d	kernel/src/sched/edges.rs	rotate_right	641		INV:INV-SCE-6
+f75e7fd043d0	kernel/src/sched/edges.rs	rotate_right	643		INV:INV-SCE-6
+22f92146b667	kernel/src/sched/edges.rs	rotate_right	644		INV:INV-SCE-6
+e2513327807e	kernel/src/sched/edges.rs	insert	657		INV:INV-SCE-6
+fdd0118d6fd5	kernel/src/sched/edges.rs	insert	664		INV:INV-SCE-6
+6342791ebdd7	kernel/src/sched/edges.rs	insert	665		INV:INV-SCE-6
+d6d3f4171df5	kernel/src/sched/edges.rs	insert	667		INV:INV-SCE-6
+38d82aca8884	kernel/src/sched/edges.rs	insert	677		INV:INV-SCE-6
+51100af6fb18	kernel/src/sched/edges.rs	insert	678		INV:INV-SCE-6
+c0d22071e001	kernel/src/sched/edges.rs	insert	680		INV:INV-SCE-6
+9ebda23729fb	kernel/src/sched/edges.rs	insert	683		INV:INV-SCE-6
+2435641133d9	kernel/src/sched/edges.rs	insert	684		INV:INV-SCE-6
+8862429fbc22	kernel/src/sched/edges.rs	insert	685		INV:INV-SCE-6
+5e6aacb97e33	kernel/src/sched/edges.rs	insert	687		INV:INV-SCE-6
+d3b49669982a	kernel/src/sched/edges.rs	insert	689		INV:INV-SCE-6
+699107a88dbf	kernel/src/sched/edges.rs	insert	690		INV:INV-SCE-6
+7088006fc4e7	kernel/src/sched/edges.rs	insert_fixup	702		INV:INV-SCE-6
 027784ef5a88	kernel/src/sched/edges.rs	erase	750		GAP
 c272d1e93359	kernel/src/sched/edges.rs	erase	753		GAP
 43073b1dc8d8	kernel/src/sched/edges.rs	erase	768		GAP
 5a437aa33b35	kernel/src/sched/edges.rs	kid	878		GAP
 43b639127f32	kernel/src/sched/edges.rs	erase_fixup	885		GAP
-6cce8216ba14	kernel/src/sched/edges.rs	grq_ptr_shared	992		GAP
-00b021556ee2	kernel/src/sched/edges.rs	grq_ptr_mut	1000	ptr-ops	GAP
-facc2953af68	kernel/src/sched/edges.rs	per_cpu_shared	1020		GAP
-3bbcfc63a25b	kernel/src/sched/edges.rs	per_cpu_mut	1030		GAP
-68cc9e7777f1	kernel/src/sched/edges.rs	secondary_idle_publish	1047		GAP
-744236bec087	kernel/src/sched/edges.rs	secondary_idle_table_base	1054		GAP
-3d07b347491c	kernel/src/sched/edges.rs	secondary_idle_task	1060		GAP
-2a410d9d924c	kernel/src/sched/fair.rs	<module>	3231		GAP
-21af558e2b05	kernel/src/sched/fair.rs	<module>	3232		GAP
+6cce8216ba14	kernel/src/sched/edges.rs	grq_ptr_shared	992		INV:INV-SCE-3
+00b021556ee2	kernel/src/sched/edges.rs	grq_ptr_mut	1000	ptr-ops	INV:INV-SCE-3
+facc2953af68	kernel/src/sched/edges.rs	per_cpu_shared	1020		INV:INV-SCE-10
+3bbcfc63a25b	kernel/src/sched/edges.rs	per_cpu_mut	1030		INV:INV-SCE-10
+68cc9e7777f1	kernel/src/sched/edges.rs	secondary_idle_publish	1047		INV:INV-SCE-4
+744236bec087	kernel/src/sched/edges.rs	secondary_idle_table_base	1054		INV:INV-SCE-4
+3d07b347491c	kernel/src/sched/edges.rs	secondary_idle_task	1060		INV:INV-SCE-4
+2a410d9d924c	kernel/src/sched/fair.rs	<module>	3231		INV:INV-SCE-6
+21af558e2b05	kernel/src/sched/fair.rs	<module>	3232		INV:INV-SCE-6
 828a6d4903f6	kernel/src/sched/rt.rs	<module>	649		GAP
 0030893faa67	kernel/src/sched/rt.rs	<module>	650		GAP
 e6dd4f64b434	kernel/src/sched/sched.rs	<module>	92		GAP
-6b03a27aa0d1	kernel/src/sched/sched.rs	grq_current_fp	870	asm	GAP
-1252ff9dd71b	kernel/src/sched/sched.rs	grq_current_fp	875	asm	GAP
-67198bf76c96	kernel/src/sched/sched.rs	grq_current_fp	880	asm	GAP
+6b03a27aa0d1	kernel/src/sched/sched.rs	grq_current_fp	870	asm	INV:INV-SCE-3
+1252ff9dd71b	kernel/src/sched/sched.rs	grq_current_fp	875	asm	INV:INV-SCE-3
+67198bf76c96	kernel/src/sched/sched.rs	grq_current_fp	880	asm	INV:INV-SCE-3
 1655fbe36cd9	kernel/src/sched/sched.rs	grq_dump_holder	1040		GAP
-fe384533c354	kernel/src/sched/sched.rs	clear_trap_scratch	2794	asm	GAP
-26fb9240ce7c	kernel/src/sched/sched.rs	init	2827		GAP
-542b2668ed38	kernel/src/sched/sched.rs	alloc_task_slot	2982	ptr-ops	GAP
-53dde0caafe3	kernel/src/sched/sched.rs	alloc_task_slot	2992	ptr-ops	GAP
-4f083827414f	kernel/src/sched/sched.rs	alloc_task_slot	2999		GAP
+fe384533c354	kernel/src/sched/sched.rs	clear_trap_scratch	2794	asm	INV:INV-SCE-10
+26fb9240ce7c	kernel/src/sched/sched.rs	init	2827		INV:INV-SCE-4
+542b2668ed38	kernel/src/sched/sched.rs	alloc_task_slot	2982	ptr-ops	INV:INV-TL-1
+53dde0caafe3	kernel/src/sched/sched.rs	alloc_task_slot	2992	ptr-ops	INV:INV-TL-1
+4f083827414f	kernel/src/sched/sched.rs	alloc_task_slot	2999		INV:INV-TL-1
 127bf8ec354c	kernel/src/sched/sched.rs	free_task_slot	3295		GAP
-e8b25c5aac18	kernel/src/sched/sched.rs	free_task_slot	3411		GAP
-498f9909193f	kernel/src/sched/sched.rs	free_task_slot	3424	volatile,ptr-ops	GAP
-a324ab08baf4	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6569	volatile,ptr-ops,no-preempt	GAP
+e8b25c5aac18	kernel/src/sched/sched.rs	free_task_slot	3411		INV:INV-TL-2
+498f9909193f	kernel/src/sched/sched.rs	free_task_slot	3424	volatile,ptr-ops	INV:INV-TL-2
+a324ab08baf4	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6569	volatile,ptr-ops,no-preempt	INV:INV-LOCK-5
 8552679b58a5	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6969		GAP
 b96baff3fc21	kernel/src/sched/sched.rs	monopolist_census	7787	ptr-ops	GAP
 62f64107a4ee	kernel/src/sched/sched.rs	scheduler_tick	9134		GAP
 fab5cc4dd9bc	kernel/src/sched/sched.rs	scheduler_tick	10026	volatile,ptr-ops	GAP
 e5ffa95de467	kernel/src/sched/sched.rs	scheduler_tick	10076		GAP
-7c94cf3683f9	kernel/src/sched/sched.rs	current	10716		GAP
+7c94cf3683f9	kernel/src/sched/sched.rs	current	10716		INV:INV-SCE-3
 57d711b6bd64	kernel/src/sched/sched.rs	harvest_print_parked	11203	volatile,ptr-ops	GAP
 73fe927e5d61	kernel/src/sched/sched.rs	task_is_dying	11300		GAP
 57e1d14fc8c8	kernel/src/sched/sched.rs	idle_guard_sp	12470	asm	GAP
@@ -2393,9 +2393,9 @@ efa12116b83b	kernel/src/sched/sched.rs	idle_guard_sp	12477	asm	GAP
 c2181e83c32e	kernel/src/sched/sched.rs	idle_guard_sp	12484	asm	GAP
 554f094f895c	kernel/src/sched/side_edges.rs	<module>	19		GAP
 97eb38a1a9b4	kernel/src/sched/side_edges.rs	<module>	21		GAP
-d69da70f77a6	kernel/src/sched/side_edges.rs	evring_slot_mut	39		GAP
-af1821333b3f	kernel/src/sched/side_edges.rs	evring_slot_ref	54		GAP
-780af0b958e7	kernel/src/sched/side_edges.rs	<module>	60		GAP
+d69da70f77a6	kernel/src/sched/side_edges.rs	evring_slot_mut	39		INV:INV-SCHED-EVRING-1
+af1821333b3f	kernel/src/sched/side_edges.rs	evring_slot_ref	54		INV:INV-SCHED-EVRING-1
+780af0b958e7	kernel/src/sched/side_edges.rs	<module>	60		INV:INV-SCHED-EVRING-1
 1c2b2e900fe7	kernel/src/security/cap_lsm.rs	call	33		GAP
 5b0b1fc918ad	kernel/src/security/cap_lsm.rs	call	45		GAP
 d1bfa3942a3b	kernel/src/security/lsm.rs	register_lsm	116		GAP
@@ -2429,13 +2429,13 @@ f907cd9932e3	kernel/src/sync/edges.rs	pt_walk	135		INV:INV-SY-1
 3485ca29d839	kernel/src/sync/edges.rs	read_volatile_u32	152	volatile,ptr-ops	INV:INV-SY-1
 bece1bbf3315	kernel/src/sync/edges.rs	copy_from_user_bytes	161	ptr-ops	INV:INV-SY-3
 8473a937c0a6	kernel/src/sync/edges.rs	word_write	168	ptr-ops	INV:INV-SY-3
-99d70416781b	kernel/src/sync/futex.rs	<module>	650		GAP
-78d463ab537d	kernel/src/sync/futex.rs	<module>	651		GAP
+99d70416781b	kernel/src/sync/futex.rs	<module>	650		INV:INV-SCE-2
+78d463ab537d	kernel/src/sync/futex.rs	<module>	651		INV:INV-SCE-2
 8227750a892e	kernel/src/sync/futex_pi.rs	<module>	184		GAP
 c0fe2ea3ac83	kernel/src/sync/futex_pi.rs	<module>	185		GAP
-ea23d00f7ead	kernel/src/sync/lockkey.rs	<module>	132		GAP
-2cd6304dbf95	kernel/src/sync/lockkey.rs	<module>	244		GAP
-1e3c1e7f195a	kernel/src/sync/lockkey.rs	drop	334		GAP
+ea23d00f7ead	kernel/src/sync/lockkey.rs	<module>	132		INV:INV-LOCK-6
+2cd6304dbf95	kernel/src/sync/lockkey.rs	<module>	244		INV:INV-LOCK-6
+1e3c1e7f195a	kernel/src/sync/lockkey.rs	drop	334		INV:INV-LOCK-6
 21cacfa8ea97	kernel/src/sync/mutex.rs	locked_owner_alive_wait	84		GAP
 e84bbeffe5dc	kernel/src/sync/mutex.rs	optimistic_probe	319		GAP
 ef93d6f0ec34	kernel/src/sync/mutex.rs	release	840	ptr-ops	GAP
@@ -2480,8 +2480,8 @@ c0b14a58a494	kernel/src/sync/rwlock.rs	deref	486		GAP
 1f251ed7a585	kernel/src/sync/rwlock.rs	<module>	506		GAP
 23a86a52c036	kernel/src/sync/rwlock.rs	deref	513		GAP
 16cfcc7a80ce	kernel/src/sync/rwlock.rs	deref_mut	521		GAP
-fe4ded0dde94	kernel/src/sync/rwsem.rs	<module>	214		GAP
-d3fa7f61bf60	kernel/src/sync/rwsem.rs	<module>	215		GAP
+fe4ded0dde94	kernel/src/sync/rwsem.rs	<module>	214		INV:INV-LOCK-7
+d3fa7f61bf60	kernel/src/sync/rwsem.rs	<module>	215		INV:INV-LOCK-7
 f72c1c4a4f94	kernel/src/sync/rwsem.rs	spin_on_owner	654		GAP
 53c620b60829	kernel/src/sync/rwsem.rs	down_read_slowpath	865		GAP
 5805ec7bb4e5	kernel/src/sync/rwsem.rs	down_read_slowpath	873		GAP
@@ -2509,44 +2509,44 @@ b146d0999911	kernel/src/sync/seqlock.rs	read_inner	204	volatile	GAP
 a8db3417a452	kernel/src/sync/seqlock.rs	<module>	228		GAP
 86b07acf0926	kernel/src/sync/seqlock.rs	deref	234		GAP
 688d83a7ce3c	kernel/src/sync/seqlock.rs	deref_mut	241		GAP
-1f031e0f2e3e	kernel/src/sync/spinlock.rs	caller_return_address	175	asm	GAP
-0daf773d8013	kernel/src/sync/spinlock.rs	caller_return_address	181	asm	GAP
-105ea35a616f	kernel/src/sync/spinlock.rs	deadlock_warn	482		GAP
-c34c8b611189	kernel/src/sync/spinlock.rs	deadlock_warn	486		GAP
-e15cf21fb041	kernel/src/sync/spinlock.rs	deadlock_warn	491		GAP
-ae4b8ca7262c	kernel/src/sync/spinlock.rs	deadlock_warn	499		GAP
-fd72616a6be6	kernel/src/sync/spinlock.rs	deadlock_warn	505		GAP
-e0357cea4efb	kernel/src/sync/spinlock.rs	deadlock_warn	512		GAP
-2dcbccc28dd2	kernel/src/sync/spinlock.rs	deadlock_warn	524		GAP
-82d95087efd6	kernel/src/sync/spinlock.rs	deadlock_warn	526		GAP
-2209ee6af7c1	kernel/src/sync/spinlock.rs	deadlock_warn	532		GAP
-52cfcb26ef2b	kernel/src/sync/spinlock.rs	deadlock_warn	553		GAP
-c23d954a962d	kernel/src/sync/spinlock.rs	deadlock_warn	556		GAP
-9a0a004f8c8d	kernel/src/sync/spinlock.rs	deadlock_warn	561		GAP
-7b497293477b	kernel/src/sync/spinlock.rs	deadlock_warn	567		GAP
-cb0bdfec7bb2	kernel/src/sync/spinlock.rs	deadlock_warn	576		GAP
-52240e62cd93	kernel/src/sync/spinlock.rs	deadlock_warn	579		GAP
-6b75bc808ab0	kernel/src/sync/spinlock.rs	deadlock_warn	582		GAP
-e4b62164aa89	kernel/src/sync/spinlock.rs	deadlock_warn	586		GAP
-41d333cffe9a	kernel/src/sync/spinlock.rs	deadlock_warn	587		GAP
-b36ffe81b927	kernel/src/sync/spinlock.rs	deadlock_warn	594		GAP
-6d3cc7c1b9a7	kernel/src/sync/spinlock.rs	deadlock_warn	599		GAP
-f096c54a2911	kernel/src/sync/spinlock.rs	deadlock_warn	601		GAP
-5e072084fb72	kernel/src/sync/spinlock.rs	deadlock_warn	605		GAP
-90e1d50eebf9	kernel/src/sync/spinlock.rs	deadlock_warn	616		GAP
-22970a865e5e	kernel/src/sync/spinlock.rs	deadlock_warn	624		GAP
-b1dc223129ce	kernel/src/sync/spinlock.rs	deadlock_warn	629		GAP
-d740c48689e9	kernel/src/sync/spinlock.rs	deadlock_warn	634		GAP
-28d3be385c3f	kernel/src/sync/spinlock.rs	deadlock_warn	639		GAP
-c01ee22d48d6	kernel/src/sync/spinlock.rs	deadlock_warn	644		GAP
-b947b34b7e54	kernel/src/sync/spinlock.rs	deadlock_warn	656		GAP
-e262228d2e24	kernel/src/sync/spinlock.rs	deadlock_warn	661		GAP
-4f309a2a3246	kernel/src/sync/spinlock.rs	deadlock_warn	666		GAP
-c8c5d8e9027d	kernel/src/sync/spinlock.rs	deadlock_warn	672	ptr-ops	GAP
-c666d7678a0f	kernel/src/sync/spinlock.rs	deadlock_warn	675		GAP
-9dad5641794a	kernel/src/sync/spinlock.rs	deadlock_warn	678		GAP
-f82b95a5832c	kernel/src/sync/spinlock.rs	deadlock_warn	689		GAP
-c4a630101884	kernel/src/sync/spinlock.rs	deadlock_warn	694		GAP
+1f031e0f2e3e	kernel/src/sync/spinlock.rs	caller_return_address	175	asm	INV:INV-LOCK-6
+0daf773d8013	kernel/src/sync/spinlock.rs	caller_return_address	181	asm	INV:INV-LOCK-6
+105ea35a616f	kernel/src/sync/spinlock.rs	deadlock_warn	482		INV:INV-LOCK-1
+c34c8b611189	kernel/src/sync/spinlock.rs	deadlock_warn	486		INV:INV-LOCK-1
+e15cf21fb041	kernel/src/sync/spinlock.rs	deadlock_warn	491		INV:INV-LOCK-1
+ae4b8ca7262c	kernel/src/sync/spinlock.rs	deadlock_warn	499		INV:INV-LOCK-1
+fd72616a6be6	kernel/src/sync/spinlock.rs	deadlock_warn	505		INV:INV-LOCK-1
+e0357cea4efb	kernel/src/sync/spinlock.rs	deadlock_warn	512		INV:INV-LOCK-1
+2dcbccc28dd2	kernel/src/sync/spinlock.rs	deadlock_warn	524		INV:INV-LOCK-1
+82d95087efd6	kernel/src/sync/spinlock.rs	deadlock_warn	526		INV:INV-LOCK-1
+2209ee6af7c1	kernel/src/sync/spinlock.rs	deadlock_warn	532		INV:INV-LOCK-1
+52cfcb26ef2b	kernel/src/sync/spinlock.rs	deadlock_warn	553		INV:INV-LOCK-1
+c23d954a962d	kernel/src/sync/spinlock.rs	deadlock_warn	556		INV:INV-LOCK-1
+9a0a004f8c8d	kernel/src/sync/spinlock.rs	deadlock_warn	561		INV:INV-LOCK-1
+7b497293477b	kernel/src/sync/spinlock.rs	deadlock_warn	567		INV:INV-LOCK-1
+cb0bdfec7bb2	kernel/src/sync/spinlock.rs	deadlock_warn	576		INV:INV-LOCK-1
+52240e62cd93	kernel/src/sync/spinlock.rs	deadlock_warn	579		INV:INV-LOCK-1
+6b75bc808ab0	kernel/src/sync/spinlock.rs	deadlock_warn	582		INV:INV-LOCK-1
+e4b62164aa89	kernel/src/sync/spinlock.rs	deadlock_warn	586		INV:INV-LOCK-1
+41d333cffe9a	kernel/src/sync/spinlock.rs	deadlock_warn	587		INV:INV-LOCK-1
+b36ffe81b927	kernel/src/sync/spinlock.rs	deadlock_warn	594		INV:INV-LOCK-1
+6d3cc7c1b9a7	kernel/src/sync/spinlock.rs	deadlock_warn	599		INV:INV-LOCK-1
+f096c54a2911	kernel/src/sync/spinlock.rs	deadlock_warn	601		INV:INV-LOCK-1
+5e072084fb72	kernel/src/sync/spinlock.rs	deadlock_warn	605		INV:INV-LOCK-1
+90e1d50eebf9	kernel/src/sync/spinlock.rs	deadlock_warn	616		INV:INV-LOCK-1
+22970a865e5e	kernel/src/sync/spinlock.rs	deadlock_warn	624		INV:INV-LOCK-1
+b1dc223129ce	kernel/src/sync/spinlock.rs	deadlock_warn	629		INV:INV-LOCK-1
+d740c48689e9	kernel/src/sync/spinlock.rs	deadlock_warn	634		INV:INV-LOCK-1
+28d3be385c3f	kernel/src/sync/spinlock.rs	deadlock_warn	639		INV:INV-LOCK-1
+c01ee22d48d6	kernel/src/sync/spinlock.rs	deadlock_warn	644		INV:INV-LOCK-1
+b947b34b7e54	kernel/src/sync/spinlock.rs	deadlock_warn	656		INV:INV-LOCK-1
+e262228d2e24	kernel/src/sync/spinlock.rs	deadlock_warn	661		INV:INV-LOCK-1
+4f309a2a3246	kernel/src/sync/spinlock.rs	deadlock_warn	666		INV:INV-LOCK-1
+c8c5d8e9027d	kernel/src/sync/spinlock.rs	deadlock_warn	672	ptr-ops	INV:INV-LOCK-1
+c666d7678a0f	kernel/src/sync/spinlock.rs	deadlock_warn	675		INV:INV-LOCK-1
+9dad5641794a	kernel/src/sync/spinlock.rs	deadlock_warn	678		INV:INV-LOCK-1
+f82b95a5832c	kernel/src/sync/spinlock.rs	deadlock_warn	689		INV:INV-LOCK-1
+c4a630101884	kernel/src/sync/spinlock.rs	deadlock_warn	694		INV:INV-LOCK-1
 c1dc8a6fc27a	kernel/src/sync/spinlock.rs	deadlock_warn	699		GAP
 21bb00027619	kernel/src/sync/spinlock.rs	deadlock_warn	704		GAP
 e283d3349dd1	kernel/src/sync/spinlock.rs	deadlock_warn	710	ptr-ops	GAP
