@@ -327,9 +327,10 @@ fn dl_ns_to_jiffies(delta_ns: u64) -> u64 {
 /// The single BTreeMap insert here is the same order of allocation the
 /// class-queue inserts already perform under this lock.
 fn arm_dl_replenish_timer(task: *mut Task) {
-    // SAFETY: callers pass a validated, poison-checked Task pointer.
-    unsafe {
-        let dl = (*task).dl_entity();
+    // INV-SCE-2: callers pass a validated, poison-checked Task pointer.
+    {
+        let task = crate::sched::edges::task_shared(task);
+        let dl = task.dl_entity();
         // Already armed and still pending (timer ids are one-shot)?
         let cur = dl.replenish_timer.load(core::sync::atomic::Ordering::Acquire);
         if cur != 0 && crate::timer::timer_pending(cur) {
@@ -339,7 +340,7 @@ fn arm_dl_replenish_timer(task: *mut Task) {
         let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
         let delta_ns = deadline.saturating_sub(now);
         let expires = crate::drivers::timer::get_jiffies() + dl_ns_to_jiffies(delta_ns);
-        let id = crate::timer::add_timer_wakeup(expires, (*task).pid());
+        let id = crate::timer::add_timer_wakeup(expires, task.pid());
         if id != 0 {
             dl.replenish_timer.store(id, core::sync::atomic::Ordering::Release);
         }
@@ -2243,24 +2244,19 @@ pub fn sched_can_stop_tick() -> bool {
 
 #[inline]
 pub fn set_need_resched() {
-    // SAFETY: cpu_id is bounds-checked against MAX_CPUS; only the current CPU
-    // writes its own NEED_RESCHED entry (AtomicBool).
-    unsafe {
-        let cpu_id = crate::arch::cpu_id() as u64 as usize;
-        if cpu_id < MAX_CPUS {
-            NEED_RESCHED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
-        }
+    // The static is a plain Sync array of AtomicBool (unsafe-slim wave 5):
+    // only the current CPU writes its own entry.
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    if cpu_id < MAX_CPUS {
+        NEED_RESCHED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
     }
 }
 
 #[inline]
 fn clear_need_resched() {
-    // SAFETY: cpu_id is bounds-checked; only the current CPU clears its own flag.
-    unsafe {
-        let cpu_id = crate::arch::cpu_id() as u64 as usize;
-        if cpu_id < MAX_CPUS {
-            NEED_RESCHED[cpu_id].store(false, core::sync::atomic::Ordering::Release);
-        }
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    if cpu_id < MAX_CPUS {
+        NEED_RESCHED[cpu_id].store(false, core::sync::atomic::Ordering::Release);
     }
 }
 
