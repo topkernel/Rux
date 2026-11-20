@@ -569,7 +569,6 @@ impl File {
         // where no shared reader can race the cell.
         unsafe { (*self.private_data.get()).take() }
     }
-    }
 
     /// Get close-on-exec flag
     pub fn get_cloexec(&self) -> bool {

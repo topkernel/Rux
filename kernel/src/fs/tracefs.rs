@@ -606,12 +606,13 @@ pub struct TraceFsFileContent {
 /// returns 0 ("nothing new now"), which poll loops treat as
 /// EAGAIN-equivalent.
 fn tracefs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    // SAFETY: private_data was installed by tracefs_open under this File.
-    let Some(ptr) = file.private_data_ptr() else {
-        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
+    // The snapshot box is this description's private data
+    // (INV-FS-FILEPRIV-1, the mut twin: streaming refill mutates it,
+    // serialized by the description's own read sequence).
+    let content = match crate::fs::unsafe_edges::file_privdata_ref_mut::<TraceFsFileContent>(file) {
+        Some(c) => c,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
-    // SAFETY: pointer provenance is Box::into_raw in tracefs_open.
-    let content = unsafe { &mut *(ptr as *mut TraceFsFileContent) };
     let offset = file.get_pos() as usize;
     if content.streaming && offset >= content.data.len() {
         // Refill: drain the generator into the live batch. The inode
@@ -640,7 +641,7 @@ fn tracefs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 /// write: dispatch to the file's store handler.
 fn tracefs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
-    // SAFETY: inode pointer set at open; read-only access here.
+    // The inode cell is write-once at open (File::get_inode).
     let inode = match file.get_inode().cloned() {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
@@ -665,12 +666,11 @@ fn tracefs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 
 /// lseek within the snapshot.
 fn tracefs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
-    // SAFETY: see tracefs_file_read.
-    let Some(ptr) = file.private_data_ptr() else {
-        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
+    // See the read op above (INV-FS-FILEPRIV-1).
+    let content = match crate::fs::unsafe_edges::file_privdata_ref::<TraceFsFileContent>(file) {
+        Some(c) => c,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
-    // SAFETY: pointer provenance is Box::into_raw in tracefs_open.
-    let content = unsafe { &*(ptr as *const TraceFsFileContent) };
     let file_size = content.data.len() as isize;
     let new_offset = match whence {
         0 => offset,
@@ -687,14 +687,9 @@ fn tracefs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isi
 
 /// close: free the content snapshot.
 fn tracefs_file_close(file: &crate::fs::File) -> i32 {
-    // SAFETY: see tracefs_file_read; null-out first to close the race window.
-    let ptr = file.private_data_ptr();
-    file.clear_private_data();
-    if let Some(ptr) = ptr {
-        // SAFETY: provenance is Box::into_raw in tracefs_open.
-        // SAFETY: the Box<TraceFsFileContent> the open path stored (sole ref).
-        drop(unsafe { Box::from_raw(ptr as *mut TraceFsFileContent) });
-    }
+    // The take empties the cell first (no UAF window); the Box reclaim
+    // rides the framework edge (INV-FS-FILEPRIV-1).
+    drop(crate::fs::unsafe_edges::file_privdata_take::<TraceFsFileContent>(file));
     0
 }
 

@@ -193,17 +193,13 @@ fn memfd_setattr(inode: &Inode, attr: u32, arg1: u64, _arg2: u64) -> i32 {
 
 /// Read the seal set of a memfd inode (0 for non-sealable memfds too).
 fn inode_seals(inode: &Inode) -> u32 {
-    // SAFETY: private_data for a memfd inode is a Box<MemfdState> installed
-    // at creation (before the inode was published through the fd table) and
+    // private_data for a memfd inode is a Box<MemfdState> installed at
+    // creation (before the inode was published through the fd table) and
     // only freed by destroy_inode when the last Arc drops — while we hold
-    // one, the pointer is valid.
-    unsafe {
-        match inode.private_data {
-            Some(p) => (*(p as *const MemfdState))
-                .seals
-                .load(core::sync::atomic::Ordering::Acquire),
-            None => 0,
-        }
+    // one, the pointer is valid (INV-FS-PRIVDATA-1, the framework edge).
+    match crate::fs::unsafe_edges::privdata_ref::<MemfdState>(inode) {
+        Some(state) => state.seals.load(core::sync::atomic::Ordering::Acquire),
+        None => 0,
     }
 }
 
@@ -334,14 +330,12 @@ fn memfd_file_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 fn memfd_file_write(file: &File, buf: &[u8]) -> isize {
-    // F_SEAL_WRITE blocks write(2) with EPERM (memfd_create(2)).
-    // SAFETY: inode cell written once at open; read-only here.
-    let seals = unsafe {
-        (*file.inode.get())
-            .as_ref()
-            .map(|ino| inode_seals(ino))
-            .unwrap_or(0)
-    };
+    // F_SEAL_WRITE blocks write(2) with EPERM (memfd_create(2)). The
+    // inode cell is write-once at open (File::get_inode discipline).
+    let seals = file
+        .get_inode()
+        .map(|ino| inode_seals(ino))
+        .unwrap_or(0);
     if seals & F_SEAL_WRITE != 0 {
         return -(errno::constants::EPERM as isize);
     }
@@ -371,8 +365,8 @@ pub static MEMFD_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::
 
 /// The inode of a memfd File, or None.
 fn file_memfd_inode(file: &File) -> Option<Arc<Inode>> {
-    // SAFETY: inode cell written once at open time; read-only here.
-    let inode = unsafe { (*file.inode.get()).clone() }?;
+    // The inode cell is write-once at open time (File::get_inode).
+    let inode = file.get_inode().cloned()?;
     if inode.fs_id == FS_ID_MEMFD {
         Some(inode)
     } else {
@@ -438,13 +432,11 @@ pub fn add_seals(file: &File, seals: u32) -> Result<(), i32> {
         return Err(-(errno::constants::EINVAL as i32));
     }
 
-    // SAFETY: private_data is the MemfdState Box owned by this memfd inode
-    // (see inode_seals).
-    let state = unsafe {
-        match inode.private_data {
-            Some(p) => &*(p as *const MemfdState),
-            None => return Err(-(errno::constants::EINVAL as i32)),
-        }
+    // private_data is the MemfdState Box owned by this memfd inode
+    // (INV-FS-PRIVDATA-1, the framework edge; see inode_seals).
+    let state = match crate::fs::unsafe_edges::privdata_ref::<MemfdState>(&inode) {
+        Some(state) => state,
+        None => return Err(-(errno::constants::EINVAL as i32)),
     };
 
     if !state.allow_sealing {

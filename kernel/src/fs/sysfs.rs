@@ -1959,12 +1959,7 @@ fn sysfs_kill_sb(sb: *mut SuperBlock) {
 
 /// Get the sysfs superblock (if initialized).
 pub fn get_sysfs_sb() -> Option<&'static SysfsSuperBlock> {
-    let ptr = GLOBAL_SYSFS_SB.load(Ordering::Acquire);
-    if ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { &*ptr })
-    }
+    crate::fs::unsafe_edges::static_ref(GLOBAL_SYSFS_SB.load(Ordering::Acquire))
 }
 
 /// Initialize sysfs: register the filesystem type and build the KObject
@@ -1998,11 +1993,8 @@ pub fn init_sysfs() -> Result<(), i32> {
 /// rootfs and record a VfsMount.
 pub fn mount_sysfs() -> Result<(), i32> {
     // Create /sys directory in rootfs (ignore error if it exists).
-    if let Some(rootfs_sb) = crate::fs::rootfs::get_rootfs_sb() {
-        // SAFETY: pointer comes from the global rootfs instance.
-        unsafe {
-            let _ = (*rootfs_sb).create_dir("/sys", 0o755);
-        }
+    if let Some(rootfs_sb) = crate::fs::rootfs::get_rootfs_sb_ref() {
+        let _ = rootfs_sb.create_dir("/sys", 0o755);
     }
 
     if get_sysfs_sb().is_none() {
@@ -2401,12 +2393,10 @@ pub struct SysfsFileContent {
 /// read: serve from the open-time snapshot at the file position.
 fn sysfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data was installed by sysfs_open under this File.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
+    let content = match crate::fs::unsafe_edges::file_privdata_ref::<SysfsFileContent>(file) {
+        Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
-    // SAFETY: pointer provenance is Box::into_raw in sysfs_open.
-    let content = unsafe { &*(ptr as *const SysfsFileContent) };
     let offset = file.get_pos() as usize;
     let available = content.data.len().saturating_sub(offset);
     let to_read = buf.len().min(available);
@@ -2451,12 +2441,10 @@ fn sysfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 /// lseek within the snapshot.
 fn sysfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
     // SAFETY: see sysfs_file_read.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
+    let content = match crate::fs::unsafe_edges::file_privdata_ref::<SysfsFileContent>(file) {
+        Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
-    // SAFETY: pointer provenance is Box::into_raw in sysfs_open.
-    let content = unsafe { &*(ptr as *const SysfsFileContent) };
     let file_size = content.data.len() as isize;
     let new_offset = match whence {
         0 => offset,
@@ -2473,12 +2461,9 @@ fn sysfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize
 
 /// close: free the content snapshot.
 fn sysfs_file_close(file: &crate::fs::File) -> i32 {
-    // SAFETY: see sysfs_file_read; null-out first to close the race window.
-    let ptr = unsafe { (*file.private_data.get()).take() };
-    if let Some(ptr) = ptr {
-        // SAFETY: provenance is Box::into_raw in sysfs_open.
-        drop(unsafe { Box::from_raw(ptr as *mut SysfsFileContent) });
-    }
+    // The take empties the cell first (no UAF window); the Box reclaim
+    // rides the framework edge (INV-FS-FILEPRIV-1).
+    drop(crate::fs::unsafe_edges::file_privdata_take::<SysfsFileContent>(file));
     0
 }
 

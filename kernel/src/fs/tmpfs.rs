@@ -944,9 +944,9 @@ fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>,
     if node.find_child(name).is_some() {
         return Err(errno::Errno::FileExists);
     }
-    let sb = node.sb as *const TmpfsSuperBlock;
-    // SAFETY: sb is a leaked mount-lifetime superblock.
-    let sb = unsafe { &*sb };
+    // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
+    // provenance; resolved through the framework edge).
+    let sb = crate::fs::unsafe_edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
 
     let file = sb.new_node(name.to_vec(), TmpfsType::RegularFile);
     // Honor the caller's permission bits (umask is applied by the VFS layer).
@@ -964,9 +964,9 @@ fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, 
     if node.find_child(name).is_some() {
         return Err(errno::Errno::FileExists);
     }
-    let sb = node.sb as *const TmpfsSuperBlock;
-    // SAFETY: sb is a leaked mount-lifetime superblock.
-    let sb = unsafe { &*sb };
+    // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
+    // provenance; resolved through the framework edge).
+    let sb = crate::fs::unsafe_edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
 
     let d = sb.new_node(name.to_vec(), TmpfsType::Directory);
     *d.mode.lock() = InodeMode::S_IFDIR | (mode.bits() & 0o7777);
@@ -983,9 +983,9 @@ fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, 
     if node.find_child(name).is_some() {
         return Err(errno::Errno::FileExists);
     }
-    let sb = node.sb as *const TmpfsSuperBlock;
-    // SAFETY: sb is a leaked mount-lifetime superblock.
-    let sb = unsafe { &*sb };
+    // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
+    // provenance; resolved through the framework edge).
+    let sb = crate::fs::unsafe_edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
 
     let link = sb.new_node(name.to_vec(), TmpfsType::SymbolicLink);
     // SAFETY: link is exclusively owned here (not yet in the tree).
@@ -1025,9 +1025,9 @@ fn tmpfs_mknod(
     }
     let ftype = if ftype == 0 { InodeMode::S_IFREG } else { ftype };
 
-    let sb = node.sb as *const TmpfsSuperBlock;
-    // SAFETY: sb is a leaked mount-lifetime superblock.
-    let sb = unsafe { &*sb };
+    // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
+    // provenance; resolved through the framework edge).
+    let sb = crate::fs::unsafe_edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
 
     // Device nodes are stored as RegularFile nodes whose MODE word carries
     // the type (the same representation the ATTR_MODE retype path uses for
