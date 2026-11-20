@@ -743,6 +743,25 @@ is CREATING (the same reason main.rs's boot provenance is F-family).
 *Containment:* runs once, BSP, IRQs off; the ELF parse itself rides
 CopyBytes (from_bytes is safe since round-5 batch 9).
 
+**F13. page-cache frame fills + intrusive hash chains** — owner
+`kernel/src/fs/page_cache.rs`. Round-5 split: the nine copy-into-frame
+sites (insert/insert_ext/insert_batch_ext/insert_dirty_user fills and
+revives, writeback partial spans, the DIO user->frame copies) are now
+SAFE calls over FOUR named edges — fill_page_from / copy_page_page /
+copy_into_page / copy_user_into_page (INV-PC-PAGECOPY: the frame is
+this call's private zone allocation and the span stays inside
+PAGE_SIZE; the user variant rides the exception-table primitive).
+What stays raw: (a) the bucket chains' `(*p).key` walks and the
+Arc::from_raw revival in get/claim — the same intrusive-cache protocol
+class as F11's bio (lock-scoped relinks; the Arc discipline IS the
+table's ownership), (b) shared_file_fault's zero-fill + install (the
+fault path fills a bounce frame then publishes under the table lock —
+one coherent publish edge), (c) the &*p entry adoptions in the walk
+helpers (INV-PC-CLAIM's claim protocol). *Reference:* the page cache's
+radix/XArray slots + page->mapping — C's whole-tree equivalent.
+*Containment:* all under the per-inode table locks; the copy edges are
+the only writers before publication.
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
