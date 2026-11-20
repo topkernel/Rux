@@ -409,3 +409,44 @@ pub fn compact_copy_page(src_pfn: usize, dst_pfn: usize) {
     // window holds the source and the claim owns the destination.
     unsafe { super::page_desc::copy_page_contents(src_pfn, dst_pfn) }
 }
+
+// ---------------------------------------------------------------------------
+// INV-MM-11: the kernel-layout OnceCell pair (init-guarded static).
+// ---------------------------------------------------------------------------
+
+/// Write the kernel layout (INV-MM-11 init arm: the compare_exchange
+/// winner in the single boot pass).
+#[inline]
+pub fn kernel_layout_write(layout: super::layout::KernelMemoryLayout) {
+    // SAFETY: INV-MM-11 — first and only write, guarded by the caller's
+    // compare_exchange.
+    unsafe { super::layout::KERNEL_LAYOUT.write(layout); }
+}
+
+/// The initialized kernel layout (INV-MM-11 shared arm: the init flag's
+/// Acquire load pairs with the write's completion).
+#[inline]
+pub fn kernel_layout_ref() -> &'static super::layout::KernelMemoryLayout {
+    // SAFETY: INV-MM-11 — the flag proves initialization completed.
+    unsafe { super::layout::KERNEL_LAYOUT.assume_init_ref() }
+}
+
+// ---------------------------------------------------------------------------
+// INV-MM-12: the pglist NODE_DATA boot static.
+// ---------------------------------------------------------------------------
+
+/// Write node 0 (INV-MM-12 init arm: early boot, single-threaded, before
+/// any other NODE_DATA access).
+#[inline]
+pub fn node_data_init() {
+    // SAFETY: INV-MM-12 — the boot-window store the unsafe fn's contract
+    // names.
+    // SAFETY: INV-MM-12 — the boot-window store the unsafe fn's
+    // contract names.
+    unsafe { super::pglist::NODE_DATA[0] = Some(super::pglist::PglistData::new(0)) }
+}
+
+// SAFETY: VmaManager's shared state is the lock-guarded VMA tree plus
+// atomics (start_brk/brk) — every mutable access runs under its lock.
+unsafe impl Send for super::vma::VmaManager {}
+unsafe impl Sync for super::vma::VmaManager {}
