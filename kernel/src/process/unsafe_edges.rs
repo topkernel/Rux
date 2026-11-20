@@ -961,3 +961,170 @@ pub fn page_refcount(pg: *mut crate::mm::page_desc::Page) -> Option<i32> {
 unsafe impl Send for crate::process::wait::WaitQueueHead {}
 // SAFETY: same lock discipline across CPUs.
 unsafe impl Sync for crate::process::wait::WaitQueueHead {}
+
+// ---- pid-hash chain edges -----------------------------------------------
+// The bucket chains are raw singly-linked Task lists whose link words
+// alias the bucket-head AtomicPtr on the first hop; every mutation
+// runs under the per-bucket irqsave lock.
+
+/// The RCU-style unlink store through a previous link slot.
+///
+/// INV-PROC-PIDHASH-1: the caller holds the bucket's irqsave lock (the
+/// only writer); `prev_link` aliases either the bucket-head AtomicPtr
+/// or a chained task's plain `pid_hash_next` word — the single-writer
+/// store under the lock is the documented protocol, and concurrent RCU
+/// readers observe either the old or the new aligned word, never a
+/// torn one.
+#[inline]
+pub fn pid_hash_unlink_store(prev_link: *mut *mut Task, next: *mut Task) {
+    // SAFETY: INV-PROC-PIDHASH-1 — bucket-lock-held single-writer store
+    // to an aligned link word.
+    unsafe { *prev_link = next }
+}
+
+// ---- ptrace edges --------------------------------------------------------
+// The debugger's target-memory access family: page-table translate
+// under the target mm's PTE lock, linear-map word/chunk moves, the
+// icache coherence sequence, and the gregset frame copies.
+
+/// Walk the TARGET mm's page table for `va` (under its PTE lock).
+///
+/// INV-PROC-PTRACE-WALK-1: `mm` is the pinned target mm whose root the
+/// walk uses; the lock serializes against same-mm munmap leaf-table
+/// unlinks (INV-LOCK-7 — the walker dereferences PMD-resolved leaf
+/// tables). Returns (phys, page_len) or None when unmapped.
+pub fn ptrace_translate(mm: &crate::mm::mm_struct::MmStruct, va: u64) -> Option<(u64, u64)> {
+    use crate::arch::mm::mm_ops::PageTableWalker;
+    let root_ppn = mm.root_ppn();
+    let _pte_guard = mm.pte_lock().lock();
+    // SAFETY: INV-PROC-PTRACE-WALK-1 — pinned target root; the walker
+    // bounds-checks every entry.
+    let (ppn, _) = unsafe { PageTableWalker::walk(root_ppn, va) }?;
+    Some((ppn << 12, 4096))
+}
+
+/// Volatile u64 read from the kernel linear map of a target user page.
+///
+/// INV-PROC-PTRACE-MEM-1: `kva` was resolved by [`ptrace_translate`]
+/// for an in-page, word-aligned offset of the pinned target.
+#[inline]
+pub fn ptrace_read_word(kva: usize) -> u64 {
+    // SAFETY: INV-PROC-PTRACE-MEM-1 — resolved in-page linear address.
+    unsafe { core::ptr::read_volatile(kva as *const u64) }
+}
+
+/// Volatile u64 write into the kernel linear map of a target user page
+/// (the POKETEXT path — bypasses the target PTE write permission by
+/// design, exactly what a debugger needs for R+X text).
+///
+/// INV-PROC-PTRACE-MEM-1 (write arm).
+#[inline]
+pub fn ptrace_write_word(kva: usize, value: u64) {
+    // SAFETY: INV-PROC-PTRACE-MEM-1 — resolved in-page linear address.
+    unsafe { core::ptr::write_volatile(kva as *mut u64, value) }
+}
+
+/// One chunk copy between a kernel buffer and the linear map of a
+/// target user page (process_vm_readv/writev core).
+///
+/// INV-PROC-PTRACE-MEM-1 (chunk arm): `lin` is the resolved in-page
+/// linear address; `kbuf..kbuf+chunk` is the caller's kernel buffer;
+/// the two ranges cannot overlap (user mapping vs kernel buffer).
+#[inline]
+pub fn ptrace_copy_chunk(lin: *mut u8, kbuf: *mut u8, chunk: usize, to_remote: bool) {
+    // SAFETY: INV-PROC-PTRACE-MEM-1 — disjoint resolved ranges, chunk
+    // bounded by the page remainder.
+    unsafe {
+        if to_remote {
+            core::ptr::copy_nonoverlapping(kbuf as *const u8, lin, chunk);
+        } else {
+            core::ptr::copy_nonoverlapping(lin as *const u8, kbuf, chunk);
+        }
+    }
+}
+
+/// Make a text write coherent before subsequent execution.
+///
+/// INV-PROC-PTRACE-ICOH-1: the standard per-arch text-write coherence
+/// sequence (fence/sfence.vma/fence.i; dc cvau/ic ivau/dsb/isb; x86 is
+/// cache-coherent) — register operands only.
+#[inline]
+pub fn ptrace_flush_icache(addr: u64) {
+    #[cfg(feature = "riscv64")]
+    // SAFETY: INV-PROC-PTRACE-ICOH-1 — the riscv sequence.
+    unsafe {
+        core::arch::asm!(
+            "fence rw, rw",
+            "sfence.vma {0}, zero",
+            "fence.i",
+            in(reg) addr,
+            options(nostack, preserves_flags)
+        );
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        let _ = addr;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(feature = "aarch64")]
+    // SAFETY: INV-PROC-PTRACE-ICOH-1 — the arm64 sequence.
+    unsafe {
+        core::arch::asm!(
+            "dc cvau, {0}",
+            "ic ivau, {0}",
+            "dsb ish",
+            "isb",
+            in(reg) addr,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Copy the tracee's gregset (32 u64 GP words) out of its saved trap
+/// frame.
+///
+/// INV-PROC-PTRACE-GREG-1: `regs` is the pinned-and-stopped target's
+/// live trap frame (quiescent while stopped); the first 256 bytes are
+/// the 32 general-purpose words (the user_regs_struct layout).
+#[inline]
+pub fn ptrace_read_gregset(regs: *mut crate::arch::pt_regs::PtRegs, out: &mut [u8]) -> bool {
+    if regs.is_null() {
+        return false;
+    }
+    // SAFETY: INV-PROC-PTRACE-GREG-1 — quiescent frame, fixed 256-byte
+    // head copy.
+    unsafe {
+        core::ptr::copy_nonoverlapping(regs as *const u8, out.as_mut_ptr(), 256);
+    }
+    true
+}
+
+/// Write the gregset back into the tracee's trap frame.
+///
+/// INV-PROC-PTRACE-GREG-1 (write arm): only GP words written; the
+/// target is pinned and stopped.
+#[inline]
+pub fn ptrace_write_gregset(regs: *mut crate::arch::pt_regs::PtRegs, from: &[u8]) -> bool {
+    if regs.is_null() {
+        return false;
+    }
+    let n = from.len().min(256);
+    // SAFETY: INV-PROC-PTRACE-GREG-1 — quiescent frame, GP-word head
+    // write.
+    unsafe {
+        core::ptr::copy_nonoverlapping(from.as_ptr(), regs as *mut u8, n);
+    }
+    true
+}
+
+/// Zeroed `SigInfo` for the SETSIGINFO read-in path.
+///
+/// INV-PROC-DIAG-1 (zeroed arm): SigInfo is a plain-C layout of integer
+/// words; an all-zero image is a valid (if uninformative) siginfo — the
+/// same construction the reference kernel's copy_from_user target uses.
+#[inline]
+pub fn zeroed_siginfo() -> crate::signal::SigInfo {
+    // SAFETY: INV-PROC-DIAG-1 — all-zero bit pattern is valid for the
+    // integer-only C layout.
+    unsafe { core::mem::zeroed() }
+}
