@@ -6878,15 +6878,9 @@ pub fn wake_up_enqueue_opt(
                                 w3_fz_sp = sp as u64;
                                 w3_fz_w[0] =
                                     crate::sync::edges::read_volatile_u64(sp as usize);
-                                w3_fz_w[1] = unsafe {
-                                    core::ptr::read_volatile((sp as *const u64).add(1))
-                                };
-                                w3_fz_w[2] = unsafe {
-                                    core::ptr::read_volatile((sp as *const u64).add(2))
-                                };
-                                w3_fz_w[3] = unsafe {
-                                    core::ptr::read_volatile((sp as *const u64).add(3))
-                                };
+                                w3_fz_w[1] = crate::sync::edges::read_volatile_u64((sp as usize) + 8);
+                                w3_fz_w[2] = crate::sync::edges::read_volatile_u64((sp as usize) + 16);
+                                w3_fz_w[3] = crate::sync::edges::read_volatile_u64((sp as usize) + 24);
                                 w3_fz_ready = true;
                             }
                             break;
@@ -7726,7 +7720,7 @@ pub fn monopolist_census(now_j: u64) {
             continue;
         }
         // SAFETY: revalidated above (non-null, non-idle, pid != 0).
-        let cur = unsafe { &*cpu_state(c).current };
+        let cur = crate::sched::edges::task_shared(cpu_state(c).current);
         let se = cur.sched_entity();
         let act_ms = se
             .sum_exec_runtime
@@ -9347,11 +9341,11 @@ pub fn scheduler_tick() {
                             // preserving them (clear_base keeps ALL hardirq
                             // bits, so a 0x10101-style heal used to leave
                             // the 0x10000 monopoly standing).
-                            unsafe {
+                            {
                                 if h_stale {
-                                    (*cur).ti_preempt_count_keep_tick_nesting();
+                                    crate::sched::edges::task_shared(cur).ti_preempt_count_keep_tick_nesting();
                                 } else {
-                                    (*cur).ti_preempt_count_clear_base();
+                                    crate::sched::edges::task_shared(cur).ti_preempt_count_clear_base();
                                 }
                             }
                             // "Actually preempt" (launcher perf wall): the
@@ -9813,7 +9807,7 @@ pub fn scheduler_tick() {
                         if bad0 == 0 {
                             s.bad_since.store(now, core::sync::atomic::Ordering::Relaxed);
                         } else if now.wrapping_sub(bad0) >= 400 {
-                            unsafe { (**task).ti_preempt_count_zero(); }
+                            { crate::sched::edges::task_shared(*task).ti_preempt_count_zero(); }
                             s.bad_since.store(0, core::sync::atomic::Ordering::Relaxed);
                             use crate::dfx::taskdump::putc_brief as putchar;
                             fn ph(v: u64) {
@@ -10022,7 +10016,8 @@ pub fn scheduler_tick() {
     // First-hit-only reporting; the fix is stack-size/depth work (r19).
     if let Some(t) = crate::sched::current() {
         unsafe {
-            let bottom = (*t).kernel_stack_bottom();
+            let t = crate::sched::edges::task_shared(t);
+            let bottom = t.kernel_stack_bottom();
             if bottom != 0 {
                 let v = core::ptr::read_volatile(bottom as *const u64);
                 static REPORTED: core::sync::atomic::AtomicBool =
@@ -10577,11 +10572,11 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
     // __schedule-tail retire site; a dying task the newborn replaced
     // would otherwise wait for a tail that never runs).
     if !_prev.is_null() {
-        unsafe {
-            (*_prev)
-                .terminal_switch_done
-                .store(true, core::sync::atomic::Ordering::Release);
-        }
+        // INV-SCE-2: the newborn's context is by definition not prev's
+        // (the R11 terminal-release positive-knowledge store).
+        crate::sched::edges::task_shared(_prev)
+            .terminal_switch_done
+            .store(true, core::sync::atomic::Ordering::Release);
     }
     // r11: and retire the pick generation that switched us in — the
     // newborn is the materialization of this CPU's current generation
@@ -11652,8 +11647,12 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
         // hold unlinked it and published its marks, and the abort repairs
         // the slot before this runs — under this GRQ hold the picture
         // below cannot move (no pick, no wake, no steal can interleave).
-        unsafe {
-            if (*next).pid() == 0 || (*next).pid() == TASK_POISON {
+        {
+            // INV-SCE-2: next was this CPU's just-aborted pick (see the
+            // comment above — the GRQ hold freezes the picture).
+            let next_t = crate::sched::edges::task_shared(next);
+            let np = next_t.pid();
+            if np == 0 || np == TASK_POISON {
                 return; // idle is never marked; poison is not ours to fix
             }
             // Only OUR OWN publication is repairable here: the marks must
@@ -11661,9 +11660,7 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
             // that revoked the pick released the marks (claim=-1) and
             // re-linked the task already; a foreign owner never carries
             // our claim.
-            let whole = core::ptr::read_volatile(
-                core::ptr::addr_of!((*next).ti_on_cpu) as *const u64,
-            );
+            let whole = crate::sched::edges::task_ownership_qword(next);
             let oncpu = (whole & 0xFF) != 0;
             let claim = (whole >> 32) as i32;
             if !oncpu || claim != cpu as i32 {
@@ -11680,7 +11677,7 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
             if task_is_dying(next) {
                 return;
             }
-            let linked = match (*next).policy() {
+            let linked = match next_t.policy() {
                 SchedPolicy::Fifo | SchedPolicy::Rr => g.rt_rq.is_linked(next),
                 SchedPolicy::Deadline => g.dl_rq.is_linked(next),
                 SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
@@ -11690,17 +11687,17 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
             if linked {
                 return; // a racing wake already re-linked it: not an orphan
             }
-            cpus_allowed = (*next).cpus_allowed();
-            let pk = (*next).pick_state();
+            cpus_allowed = next_t.cpus_allowed();
+            let pk = next_t.pick_state();
             // Explicitly not-own: the exact store __switch_to would have
             // made for a switch-out that will never happen.
-            (*next).release_pick_ownership();
+            next_t.release_pick_ownership();
             let rq = enqueue_task_locked(&mut g, crate::sched::edges::task_mut(next));
             static SWABORT_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             let n = SWABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 8 {
-                report = Some((cpu, (*next).pid(), claim, pk, rq as u8));
+                report = Some((cpu, np, claim, pk, rq as u8));
             }
         }
     }
@@ -12264,8 +12261,8 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
             // SAFETY: the pin taken in the walk holds the page alive
             // through this section; every field read below is under the
             // GRQ (the same serialization the wake path relies on).
-            unsafe {
-                let tk = &*task;
+            {
+                let tk = crate::sched::edges::task_shared(task);
                 // Re-verify everything under the lock: the task may have
                 // parked, exited, been picked or linked since the walk.
                 if tk.pid() == 0 || tk.pid() == u32::MAX {
@@ -12328,9 +12325,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                     // The qword: clear when it names an owner this
                     // sweep just proved absent (the `owned` scan ran
                     // under the same GRQ hold).
-                    let q = core::ptr::read_volatile(
-                        core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
-                    );
+                    let q = crate::sched::edges::task_ownership_qword(task);
                     let q_oncpu = (q & 0xFF) != 0;
                     let q_claim = (q >> 32) as i32;
                     if q_oncpu || q_claim != -1 {
@@ -12369,9 +12364,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                             None => (u64::MAX, false),
                         };
                         if ago > 200 && npending < 8 {
-                            let q = core::ptr::read_volatile(
-                                core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
-                            );
+                            let q = crate::sched::edges::task_ownership_qword(task);
                             let cb = tk.comm();
                             let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
                             let mut comm = [0u8; 16];
@@ -12397,7 +12390,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                 // Same insert pair as wake_up_enqueue_opt: plain insert,
                 // then the R41 stale-flag heal if the insert refused.
                 let ok = enqueue_task_locked(&mut *g, crate::sched::edges::task_mut(task))
-                    || ensure_linked_locked(&mut *g, &mut *task);
+                    || ensure_linked_locked(&mut *g, crate::sched::edges::task_mut(task));
                 if ok {
                     healed += 1;
                     if report_pid == 0 {
@@ -12559,7 +12552,7 @@ pub fn cpu_idle_loop() -> ! {
         // R56d (own-slot resync) remain active on both arches.
         #[cfg(feature = "riscv64")]
         {
-            unsafe { harvest_orphan_tasks(cpu_id); }
+            harvest_orphan_tasks(cpu_id);
             // R83 (R74 producer hunt): header audit on the same cadence —
             // names the scribbled task within ~4 jiffies of the write,
             // instead of at its next (fatal) schedule.
@@ -12789,7 +12782,7 @@ pub fn cpu_idle_loop() -> ! {
             // strand heartbeat reading phase=4 with idle bit CLEAR is the
             // lost-mark shape directly).
             WW_IDLE_PHASE[cpu_id].store(4, core::sync::atomic::Ordering::Release);
-            unsafe { crate::arch::cpu::wfi(); }
+            crate::arch::cpu::wfi();
             // WW_IDLE_PHASE 5: WFI returned, idle accounting + mark clear.
             WW_IDLE_PHASE[cpu_id].store(5, core::sync::atomic::Ordering::Release);
             crate::fs::procfs::uptime::account_idle_cycles(
