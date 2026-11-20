@@ -98,6 +98,18 @@ impl DerefMut for TaskBorrow {
 /// `lookup` takes the pin; `Drop` releases it with `task_put` (the
 /// last put frees the task slot). Valid across scheduling points and
 /// cross-CPU wake/notify paths.
+///
+/// INV-TASKREF-1 (pin exclusivity, added by the slim4-fix lane
+/// 2026-11-20): the handle owns its pin EXCLUSIVELY. Callers must NOT
+/// call `task_put` on `as_ptr()` while the handle is alive — Drop
+/// releases the same pin, so a manual put is a double release: the
+/// receiver's `task_refcnt` erodes by one per call and `free_task_slot`
+/// eventually fires on a task still linked in the pid hash, its
+/// parent's child list, and the timer/runqueue structures (the slim4
+/// fio-corruption regression: signal receivers freed early, wait4
+/// walking a pid=0xdeadbeef page). A raw consumer that must release
+/// the pin itself takes ownership with [`TaskRef::into_raw`] (which
+/// `forget`s the handle and its Drop).
 pub struct TaskRef(NonNull<Task>);
 
 impl TaskRef {
