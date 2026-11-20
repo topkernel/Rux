@@ -159,3 +159,11 @@ pub fn copy_from_user_bytes(dst: *mut u8, src: usize, len: usize) -> bool {
     // copy_from_user is fault-isolated.
     unsafe { crate::arch::uaccess::copy_from_user(dst, src as *const u8, len) == 0 }
 }
+
+/// Store the futex user word unconditionally (INV-SY-3): the
+/// fault-isolated put; returns true when the write landed.
+pub fn word_write(uaddr: usize, value: u32) -> bool {
+    // SAFETY: INV-SY-3 — validated futex user pointer.
+    unsafe { crate::arch::uaccess::put_user(uaddr as *mut u32, value) }
+}
+

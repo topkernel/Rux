@@ -527,7 +527,7 @@ fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
 
     // SAFETY: current is this CPU's current task, paused inside the tick.
     unsafe {
-        let policy = (*current).policy();
+        let policy = crate::sched::edges::task_shared(current).policy();
         if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
             let used = RT_TIME_USED[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
             if used >= RT_RUNTIME_JIFFIES
@@ -744,12 +744,15 @@ pub fn emit_grq_reports(reports: &[GrqPendingReport]) {
         let comm = core::str::from_utf8(&r.comm[..cl]).unwrap_or("?");
         match r.kind {
             GRQ_RPT_COUNTER_RESYNC => {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                 crate::pr_warn!("STRAND-COUNTER-RESYNC cfs was={} now={}", r.a, r.b);
             }
             GRQ_RPT_SHOUT_RETIRED => {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                 crate::pr_warn!("SWOUT-STALE-RETIRED cpu={} pid={}", r.a, r.b);
             }
             GRQ_RPT_STRAND_ID => {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                 crate::pr_warn!(
                     "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true ago={}",
                     r.a,
@@ -761,6 +764,7 @@ pub fn emit_grq_reports(reports: &[GrqPendingReport]) {
                 );
             }
             GRQ_RPT_STRAND_ID_NOTRACE => {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                 crate::pr_warn!(
                     "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true trace=none",
                     r.a,
@@ -946,7 +950,7 @@ pub fn grq_dump_holder(why: &str) {
     // word to read; the site stamps alone still name the participants.
     let holder = if crate::sched::edges::grq_is_ready() {
         // SAFETY: GRQ_READY checked; read-only lock word access.
-        unsafe { grq() }.lock.holder_cpu()
+        grq().lock.holder_cpu()
     } else {
         None
     };
@@ -977,7 +981,7 @@ pub fn grq_dump_holder(why: &str) {
         let holds = holder == Some(cpu);
         let acq = GRQ_ACQ_JIF[cpu].load(core::sync::atomic::Ordering::Relaxed);
         let age = now.wrapping_sub(acq);
-        let cur = unsafe { crate::sched::sched::cpu_state(cpu).current };
+        let cur = crate::sched::sched::cpu_state(cpu).current;
         grq_raw_puts(b"GRQ-HOLDER cpu=");
         grq_raw_putdec(cpu as u64);
         grq_raw_puts(b" role=");
@@ -1039,7 +1043,7 @@ pub fn grq_dump_holder(why: &str) {
             // (an IRQ-interrupted frame's pt_regs + the interrupted
             // return addresses), symbolizable offline. The holder is
             // wedged, so the reads are consistent.
-            let cur = unsafe { crate::sched::sched::cpu_state(cpu).current };
+            let cur = crate::sched::sched::cpu_state(cpu).current;
             if !cur.is_null() {
                 let top = crate::sched::edges::task_shared(cur).kernel_stack_top();
                 if top != 0 {
@@ -1049,9 +1053,7 @@ pub fn grq_dump_holder(why: &str) {
                         off -= 8;
                         // SAFETY: the holder's own kernel stack, in-bounds
                         // by construction (top - off within the 16K stack).
-                        let v = unsafe {
-                            core::ptr::read_volatile((top - off) as *const u64)
-                        };
+                        let v = crate::sync::edges::read_volatile_u64(top - off);
                         grq_raw_puts(b"GRQ-BT   @-");
                         grq_raw_putdec(off as u64);
                         grq_raw_puts(b" 0x");
@@ -1129,7 +1131,7 @@ pub fn grq_held_here() -> bool {
     }
     let cpu = crate::arch::cpu_id() as usize;
     // SAFETY: GRQ_READY checked; read-only lock word access.
-    unsafe { grq() }.lock.held_by(cpu)
+    grq().lock.held_by(cpu)
 }
 
 /// Initialize the global run queue (called once during boot).
@@ -1663,6 +1665,7 @@ pub fn member_release_stale_ownership(member: *mut Task) -> bool {
     // above, so release-then-report cannot change the outcome.
     drop(guard);
     if n < 8 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
         crate::pr_warn!(
             "FDM-STALE-RELEASE pid={} claim={} pk={} st={:#x} tcpu={} slot={:#x} swout={:#x}",
             pid,
@@ -2035,6 +2038,7 @@ fn process_deferred_exit_pid(packed: i64) {
         static EN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if EN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
             crate::pr_info!(
                 "EXITNOTIFY: child={} parent={}",
                 child_pid, parent_pid
@@ -2773,6 +2777,7 @@ pub fn init() {
     }
 
     if boot_cpu >= MAX_CPUS {
+        // HOTPATH-PRINT: boot-time one-shot (init error path, fires before the scheduler runs).
         println!("sched: init: invalid cpu_id {}", boot_cpu);
         return;
     }
@@ -2797,7 +2802,8 @@ pub fn init() {
             if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
                 (*idle_ptr).thread_mut().sp = stack_top as u64;
             } else {
-                println!("sched: failed to allocate kernel stack for idle task cpu {}", cpu);
+                // HOTPATH-PRINT: boot-time one-shot (init allocation failure).
+            println!("sched: failed to allocate kernel stack for idle task cpu {}", cpu);
             }
 
             (*idle_ptr).set_ti_cpu(cpu as i32);
@@ -3533,6 +3539,7 @@ pub fn schedule() {
         let n = ATOMIC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 24 {
             let loc = core::panic::Location::caller();
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
             crate::pr_err!(
                 "SCHEDULE-ATOMIC (reference __schedule_bug parity) caller={}:{} pid={} pc={:#x} in_softirq={} in_irq={}",
                 loc.file(),
@@ -3600,9 +3607,7 @@ pub fn schedule() {
     }
     // SAFETY: __schedule() manipulates raw task pointers and calls context_switch;
     // must be called from kernel context with valid current task pointer.
-    unsafe {
-        __schedule();
-    }
+    __schedule();
     if let Some(cur) = current() {
         cur.clear_ti_flag(IN_SCHED);
     }
@@ -3658,7 +3663,7 @@ pub fn terminal_release_grq_if_held() {
     // SAFETY: GRQ_READY checked. held_by reads the word read-only; only
     // this cpu's own acquire/release writes this cpu's ownership into
     // it, so a `true` here is stable until our own release below.
-    if !unsafe { grq() }.lock.held_by(cpu) {
+    if !grq().lock.held_by(cpu) {
         return;
     }
     static GRQFORCE_N: core::sync::atomic::AtomicU32 =
@@ -3686,7 +3691,7 @@ pub fn terminal_release_grq_if_held() {
     //
     // SAFETY: grq() returns the initialized GRQ (GRQ_READY checked
     // above); the word names THIS cpu as the holder (held_by).
-    unsafe { grq().lock.force_unlock_terminal() };
+    grq().lock.force_unlock_terminal();
     if n < 8 {
         let pid = crate::sched::current()
             .map(|t| crate::sched::edges::task_shared(t).pid())
@@ -3764,6 +3769,7 @@ pub fn schedule_dead_never_returns() {
                 {
                     let n = TERM_ENGAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 8 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
                         crate::pr_warn!(
                             "TERM-DESCHED engaged pid={} pc={:#x}",
                             (*cur).pid(),
@@ -3809,6 +3815,7 @@ pub fn schedule_dead_never_returns() {
                     // count-producer hunt (F1 lane), then clear.
                     let n = TERM_RETRY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 4 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
                         crate::pr_warn!(
                             "TERM-DESCHED pid={} leaked preempt_count={:#x} cleared for final switch (round {})",
                             (*cur).pid(),
@@ -3877,6 +3884,7 @@ pub fn schedule_dead_never_returns() {
                         drop(g);
                         (l, nrr)
                     };
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "TERM-DESCHED stuck pid={} rounds={} state={:#x} pc={:#x} claim={} linked={} nr_running={} rip_paced",
                         crate::sched::edges::task_shared(cur).pid(),
@@ -6840,6 +6848,7 @@ pub fn wake_up_enqueue_opt(
                 // the GRQ freely.
                 drop(grq_guard);
                 if w3_print_refused {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-RUNWAKE-REFUSED pid={} state={:#x} linked={} curr_on={} on_cpu={} pk={} cpu={}",
                         w3_pid,
@@ -6852,6 +6861,7 @@ pub fn wake_up_enqueue_opt(
                     );
                     // nanosleep-loss lane: the same refusal with the
                     // linkage/ownership anatomy (see the capture above).
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-ANATOMY pid={} qword={:#x} on_rq={} key={:#x}/{} cfs_nr={} tree_total={} head={:?} stashovf={} skipall={}",
                         w3_pid,
@@ -6865,6 +6875,7 @@ pub fn wake_up_enqueue_opt(
                         crate::sched::fair::pick_giveups().0,
                         crate::sched::fair::pick_giveups().1
                     );
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-CTX pid={} preempt={:#x} ra={:#x} sp={:#x} pt={:?} sw={:?}",
                         w3_pid,
@@ -6889,6 +6900,7 @@ pub fn wake_up_enqueue_opt(
                             }
                             true
                         });
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                         crate::pr_warn!(
                             "W3-USER pid={} frame_ok={} uf={:?}",
                             w3_pid,
@@ -6898,6 +6910,7 @@ pub fn wake_up_enqueue_opt(
                         let k = (*task).timed_sleep_kind.load(core::sync::atomic::Ordering::Relaxed);
                         let d = (*task).timed_sleep_deadline.load(core::sync::atomic::Ordering::Relaxed);
                         let n = crate::drivers::timer::read_time();
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                         crate::pr_warn!(
                             "W3-TSL pid={} kind={} deadline={} now={} delta_ms={} dur_ms={} timer_id={} sigpend={:#x} sigmask={:#x}",
                             w3_pid,
@@ -6956,11 +6969,13 @@ pub fn wake_up_enqueue_opt(
                                 task,
                                 crate::drivers::timer::get_jiffies(),
                             );
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                             crate::pr_warn!("{}", buf);
                         }
                     }
                 }
                 if w3_fz_ready {
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-FROZEN-EXEC-SLOT pid={} naming_cpu={} exec={:#x} frozen for {}jif pk={} on_cpu={} retaddr={:#x}",
                         w3_pid,
@@ -6971,6 +6986,7 @@ pub fn wake_up_enqueue_opt(
                         w3_on_cpu,
                         w3_fz_retaddr,
                     );
+        // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                     crate::pr_warn!(
                         "W3-FROZEN-EXEC-STK pid={} sp={:#x} w={:#x} {:#x} {:#x} {:#x}",
                         w3_pid,
@@ -8762,6 +8778,7 @@ pub fn scheduler_tick() {
             if crate::trace::EVENT_WWCENSUS.armed()
                 && (stale_reset > 0 || owned_claim > 0 || oncpu_marked > 0)
             {
+        // HOTPATH-PRINT: switch-gated (cmdline/tracepoint arm above); zero cost when off.
                 crate::pr_info!(
                     "CLAIM-CENSUS linked={} reset={} owned_claim={} oncpu={} oncpu_pids={:?} owned_pids={:?}",
                     linked,
@@ -10115,13 +10132,13 @@ pub fn scheduler_tick() {
                 / 1_000_000_000;
             if hard != u64::MAX && secs >= hard {
                 let _ = crate::signal::send_signal(
-                    (*current).pid() as u32,
+                    crate::sched::edges::task_shared(current).pid() as u32,
                     crate::signal::Signal::SIGKILL as i32,
                 );
-            } else if soft != u64::MAX && secs >= soft && secs > (*current).cpu_time_last_sigxcpu() {
+            } else if soft != u64::MAX && secs >= soft && secs > crate::sched::edges::task_shared(current).cpu_time_last_sigxcpu() {
                 (*current).set_cpu_time_last_sigxcpu(secs);
                 let _ = crate::signal::send_signal(
-                    (*current).pid() as u32,
+                    crate::sched::edges::task_shared(current).pid() as u32,
                     crate::signal::Signal::SIGXCPU as i32,
                 );
             }
@@ -10136,7 +10153,7 @@ pub fn scheduler_tick() {
     // RLIMIT_CPU / posix-timer precedent (send_signal from tick context).
     // A one-shot (interval==0) disarms after firing.
     unsafe {
-        let se = (*current).sched_entity();
+        let se = crate::sched::edges::task_shared(current).sched_entity();
         let now = se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
         let virt_deadline = (*current).itimer_virt[0].load(core::sync::atomic::Ordering::Acquire);
         if virt_deadline != 0 && now >= virt_deadline {
@@ -10145,7 +10162,7 @@ pub fn scheduler_tick() {
             let next = if interval != 0 { now + interval } else { 0 };
             (*current).itimer_virt[0].store(next, core::sync::atomic::Ordering::Release);
             let _ = crate::signal::send_signal(
-                (*current).pid() as u32,
+                crate::sched::edges::task_shared(current).pid() as u32,
                 crate::signal::Signal::SIGVTALRM as i32,
             );
         }
@@ -10156,7 +10173,7 @@ pub fn scheduler_tick() {
             let next = if interval != 0 { now + interval } else { 0 };
             (*current).itimer_prof[0].store(next, core::sync::atomic::Ordering::Release);
             let _ = crate::signal::send_signal(
-                (*current).pid() as u32,
+                crate::sched::edges::task_shared(current).pid() as u32,
                 crate::signal::Signal::SIGPROF as i32,
             );
         }
@@ -10178,7 +10195,7 @@ pub fn scheduler_tick() {
                     pt.cputime_deadline_ns.store(next, core::sync::atomic::Ordering::Release);
                     if pt.sigev_notify != 1 && pt.sigev_signo > 0 {
                         let _ = crate::signal::send_signal(
-                            (*current).pid() as u32,
+                            crate::sched::edges::task_shared(current).pid() as u32,
                             pt.sigev_signo,
                         );
                     }
@@ -10203,10 +10220,11 @@ pub fn scheduler_tick() {
         set_need_resched();
     }
 
-    // SAFETY: current is this_cpu().current, a valid Task pointer set during CPU init;
-    // null check above; we only touch fields appropriate for the current CPU's task.
-    unsafe {
-        let policy = (*current).policy();
+    // current is this_cpu().current, a valid Task pointer set during CPU
+    // init; null check above; fields of the current CPU's task (INV-SCE-2).
+    {
+        let current = crate::sched::edges::task_shared(current);
+        let policy = current.policy();
 
         match policy {
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
@@ -10221,10 +10239,10 @@ pub fn scheduler_tick() {
                     // R20-6: see __schedule — only the CPU whose task owns
                     // the single cfs_rq.curr slot charges through it; every
                     // CPU charges its own current task exactly once.
-                    if grq_guard.cfs_rq.get_curr() == current {
+                    if grq_guard.cfs_rq.get_curr() == core::ptr::from_ref(current) as *mut Task {
                         grq_guard.cfs_rq.update_curr(now);
                     } else {
-                        let se = (*current).sched_entity();
+                        let se = crate::sched::edges::task_shared(current).sched_entity();
                         let delta = se.update_exec_runtime(now);
                         if delta > 0 {
                             se.update_vruntime(delta);
@@ -10256,7 +10274,7 @@ pub fn scheduler_tick() {
                     // `timeline_count + 1 > 1` = `timeline_count > 0`
                     // here — at least one OTHER queued CFS task.
                     if grq_guard.cfs_rq.nr_running() > 0 {
-                        let se = (*current).sched_entity();
+                        let se = crate::sched::edges::task_shared(current).sched_entity();
                         let slice_ns = grq_guard.cfs_rq.sched_slice(se);
                         let sum =
                             se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
@@ -10274,7 +10292,7 @@ pub fn scheduler_tick() {
                 }
             }
             SchedPolicy::Rr => {
-                let rt_entity = (*current).rt_entity();
+                let rt_entity = crate::sched::edges::task_shared(current).rt_entity();
                 let remaining = rt_entity.dec_time_slice();
                 if remaining == 0 {
                     rt_entity.reset_time_slice();
@@ -10292,7 +10310,7 @@ pub fn scheduler_tick() {
                     //      resume a zombie.
                     // current is paused on THIS CPU inside the IRQ, so the
                     // state read is race-free.
-                    if (*current).state() == TaskState::new(TaskState::RUNNING) {
+                    if crate::sched::edges::task_shared(current).state() == TaskState::new(TaskState::RUNNING) {
                         let mut grq_guard = grq().lock_irqsave_site(grq_site(GRQ_CALLER_TICK, GRQ_STEP_TRY));
                         // R39: propagate the insert result and pair the
                         // grq.nr_running count. The rotation links a RUNNING
@@ -10301,7 +10319,7 @@ pub fn scheduler_tick() {
                         // there never fires) — every RR rotation leaked one
                         // count from the atomic, drift that any future
                         // reader of grq.nr_running would inherit.
-                        if grq_guard.rt_rq.enqueue(current, false) {
+                        if grq_guard.rt_rq.enqueue(core::ptr::from_ref(current) as *mut Task, false) {
                             grq_guard.nr_running.fetch_add(
                                 1,
                                 core::sync::atomic::Ordering::Relaxed,
@@ -10317,14 +10335,14 @@ pub fn scheduler_tick() {
             }
             SchedPolicy::Deadline => {
                 let now = crate::sched::fair::sched_clock();
-                let dl_entity = (*current).dl_entity();
+                let dl_entity = crate::sched::edges::task_shared(current).dl_entity();
                 let delta = now - dl_entity.exec_start.load(core::sync::atomic::Ordering::Relaxed);
                 dl_entity.exec_start.store(now, core::sync::atomic::Ordering::Release);
                 if !dl_entity.consume_runtime(delta) {
                     // Batch 8 (CBS): budget exhausted — throttle (state left
                     // INTERRUPTIBLE, replenish timer armed at the deadline)
                     // and leave the CPU to lower classes.
-                    dl_throttle(&mut *current);
+                    dl_throttle(crate::sched::edges::task_mut(core::ptr::from_ref(current) as *mut Task));
                     set_need_resched();
                 }
             }
@@ -11621,6 +11639,7 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
         }
     }
     if let Some((cpu, pid, claim, pk, rq)) = report {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
         crate::pr_warn!(
             "SWITCH-ABORT-RELINK cpu={} pid={} claim={} pk={} rq={}",
             cpu,
@@ -12061,6 +12080,7 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
     static HEAL_N: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
     if HEAL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
         crate::pr_warn!(
             "SLOT-LIE-HEALED cpu={} pid={} prev_writer_tag={}",
             cpu,
@@ -12338,6 +12358,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
         static PR_N: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         if PR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+        // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
             crate::pr_warn!(
                 "PHANTOM-RELINK n={} pid={} pc={:#x}",
                 healed,
