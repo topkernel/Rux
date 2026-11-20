@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 # uafault_boot.py — boot the kernel (x86_64 default) with the uafault
 # probe as init and report the verdict for the bad-user-pointer EFAULT
 # contract (x86_64 SMAP + dropped bootstrap identity map, commits

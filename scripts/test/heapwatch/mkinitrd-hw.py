@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Pack a minimal initrd containing ONLY the heapwatch probe.
 
 Avoids mkinitrd.py's freestanding /init build (host gcc emits libcalls

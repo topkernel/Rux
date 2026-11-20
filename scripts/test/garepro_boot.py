@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """garepro_boot.py — boot the x86_64 Rux kernel with a freeze probe as
 init, stream serial, report a verdict. Two probes:
 

@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """pbench_boot.py — quiet-boot the Rux x86_64 kernel with the P1-P7
 microbench probe (test/pbench.c, perf-report.md section 8.2) as init and
 collect the PBENCH result lines.

@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # oh-wedge-verdict.sh — adjudicate one OH wedge-rate A/B roll serial log
 # (test/stressng/oh-wedge-ab-x86.sh output) into the OH lane's outcome
 # classes. Classes per the 27th close wedge table:

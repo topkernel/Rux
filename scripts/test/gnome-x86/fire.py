@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """fire.py — headless ignition driver for the x86_64 GNOME Ubuntu image.
 
 Boots work/gnome-x86.img under QEMU q35 with the serial console on a unix

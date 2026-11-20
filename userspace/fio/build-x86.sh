@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # build-x86.sh — static-musl fio for the qa-suites lane (x86_64 guest).
 #
 # Source of truth: fio-3.36.tar.gz + libaio_0.3.113.orig.tar.gz (both

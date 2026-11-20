@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """ghost-crashloop.py — ext4 "ghost empty file after crash" reproducer.
 
 Per cycle, on a private copy of the shared rootfs image:

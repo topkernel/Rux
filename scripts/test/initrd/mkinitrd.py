@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Build the Rux initrd boot-test image (OH Phase 1 prereq).
 
 Stages a tiny initramfs (freestanding /init + /bin/hello + symlink +

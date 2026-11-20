@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """monkey.py — parallel random-workload stress for the Rux kernel.
 
 Boots N QEMU instances in parallel on private copies of the musl rootfs,

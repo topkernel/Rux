@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """brksegv_boot.py — boot the x86_64 Rux kernel with the brksegv_churn
 probe as init and judge the do_exit-hang / preempt-count-leak fix
 (PREEMPT-HEAL round 3e: pure-HARDIRQ phantom levels join the heal).

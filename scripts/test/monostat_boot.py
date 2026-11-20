@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """monostat_boot.py — CLOCK_MONOTONIC stability under KVM (timer-lane hunt).
 
 Builds the monostat probe (static musl), puts it on a small ext4 image,

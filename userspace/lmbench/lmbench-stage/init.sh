@@ -1,7 +1,7 @@
+#!/bin/sh
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/sh
 cd /test
 echo LMBENCH START
 echo "LMBENCH RUN lat_syscall null"

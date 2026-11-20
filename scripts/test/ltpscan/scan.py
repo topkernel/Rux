@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """LTP chunked scan driver for the Rux kernel (riscv64).
 
 Boots QEMU per chunk of tests, runs each LTP binary as PID-1's child with a

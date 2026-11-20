@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Generate the kernel review coverage map.
 
 The map is the bookkeeping for the line-by-line review: every source

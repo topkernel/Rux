@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """sleep_probe_boot.py — boot the sleep-precision probe as init (no OH,
 musl libc only). Fast oracle for the vsync-worker usleep question."""
 import argparse

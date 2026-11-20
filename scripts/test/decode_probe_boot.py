@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """decode_probe_boot.py — boot the decode oracle (probe as init).
 
 Stages the OH lib2d_graphics dependency closure (flat, /lib) plus the

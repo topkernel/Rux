@@ -1,7 +1,7 @@
+#!/usr/bin/python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/python3
 # dbuswire.py - minimal D-Bus wire-protocol peer/caller for Rux kernel
 # testing. Pure stdlib: no python-dbus, no glib. Modes:
 #   serve : connect, RequestName, reply to every method call

@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Test-layout gate: every kernel unit test lives under kernel/src/tests/.
 
 Enforces the test-layout policy (user directive, 2026-11-19):
