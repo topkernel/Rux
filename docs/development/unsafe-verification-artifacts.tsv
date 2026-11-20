@@ -1109,6 +1109,10 @@ e3c2be809b3d	kernel/src/fs/bio.rs	publication_capture_note_dirty	3255		GAP
 96601bf5945b	kernel/src/fs/bio.rs	with_block_mut	3804		GAP
 f564bda4511a	kernel/src/fs/bio.rs	with_block_mut	3807		GAP
 e6da66fe6c49	kernel/src/fs/bio.rs	with_block_mut	3809		GAP
+6e49cbc0ab94	kernel/src/fs/bio.rs	with_block_deferred_mut	3828		GAP
+e46d3370ed1b	kernel/src/fs/bio.rs	with_block_deferred_mut	3831		GAP
+f0ebe9f1ca2b	kernel/src/fs/bio.rs	with_block_deferred_mut	3833		GAP
+22d2a14868f7	kernel/src/fs/bio.rs	with_block_deferred_mut	3835		GAP
 0f22f2e6f8e9	kernel/src/fs/buffer.rs	new	37	ptr-ops	GAP
 cc6bd7b2bb6b	kernel/src/fs/buffer.rs	from_bytes	51		GAP
 5725a2ec783a	kernel/src/fs/buffer.rs	new	303	ptr-ops	GAP
@@ -1158,13 +1162,8 @@ a6939aabaa15	kernel/src/fs/devfs/mod.rs	shared_fault_file_page	1978		GAP
 081cc32cee29	kernel/src/fs/devfs/mod.rs	shared_write_off	2096	ptr-ops	GAP
 32b843792a2a	kernel/src/fs/elf.rs	load_segment	638	ptr-ops	GAP
 4c2c9927bbc3	kernel/src/fs/ext4/allocator.rs	read_block_bitmap	380		GAP
-0cbcc341f1cf	kernel/src/fs/ext4/allocator.rs	update_group_desc_free_blocks	436	volatile,ptr-ops	GAP
-422f4928c5c6	kernel/src/fs/ext4/allocator.rs	update_superblock_free_blocks	483	volatile,ptr-ops	GAP
-83115b4465e2	kernel/src/fs/ext4/allocator.rs	read_inode_bitmap	898		GAP
-3b2a4286566b	kernel/src/fs/ext4/allocator.rs	update_group_desc_free_inodes	961	volatile,ptr-ops	GAP
-b87cf4b855de	kernel/src/fs/ext4/allocator.rs	refresh_bg_itable_unused	1034		GAP
-64a2813e14d2	kernel/src/fs/ext4/allocator.rs	refresh_bg_itable_unused	1076	volatile,ptr-ops	GAP
-2da37b803b52	kernel/src/fs/ext4/allocator.rs	update_superblock_free_inodes	1111	volatile,ptr-ops	GAP
+8347f074993e	kernel/src/fs/ext4/allocator.rs	read_inode_bitmap	855		GAP
+38cd4b3868bf	kernel/src/fs/ext4/allocator.rs	refresh_bg_itable_unused	966		GAP
 f9a763be93ec	kernel/src/fs/ext4/dir.rs	next	153		GAP
 8afa18bb6258	kernel/src/fs/ext4/extent.rs	i_block_bytes	100	raw-construct,ptr-ops	GAP
 e41755bfaa99	kernel/src/fs/ext4/extent.rs	i_block_bytes_mut	107	ptr-ops	GAP
@@ -2186,82 +2185,82 @@ f5770d9b6724	kernel/src/process/task_ref.rs	<module>	73		GAP
 39ea3279d04f	kernel/src/process/task_ref.rs	deref_mut	160		GAP
 2beaa1051168	kernel/src/process/unsafe_edges.rs	borrow_task	55		GAP
 7e183034b210	kernel/src/process/unsafe_edges.rs	borrow_task_mut	72		GAP
-6bd9da02631d	kernel/src/process/unsafe_edges.rs	place_task	105		GAP
-eff42a0be9fc	kernel/src/process/unsafe_edges.rs	dump_read_page	139		GAP
-d488fa14a0cb	kernel/src/process/unsafe_edges.rs	dump_read_page	150	ptr-ops	GAP
-c555c6a7b194	kernel/src/process/unsafe_edges.rs	file_private_data_ref	165		GAP
-1aec3dcfe25a	kernel/src/process/unsafe_edges.rs	file_private_data_ref	166	ptr-ops	GAP
-5acfa3548395	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	180		GAP
-d6499b1e4d50	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	181	ptr-ops	GAP
-462480ce527a	kernel/src/process/unsafe_edges.rs	file_private_data_mut	196		GAP
-0decb18bda2b	kernel/src/process/unsafe_edges.rs	file_private_data_mut	197	ptr-ops	GAP
-499d2d0dbbcd	kernel/src/process/unsafe_edges.rs	read_volatile_u64	211	volatile	GAP
-4c08e0293bff	kernel/src/process/unsafe_edges.rs	journal_handle	251		GAP
-30e4d9058b91	kernel/src/process/unsafe_edges.rs	free_fork_pt_regs	284	ptr-ops	GAP
-a7b9e25a0fe3	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	298		GAP
-af9d0bedd8ea	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	303		GAP
-38cb21584a69	kernel/src/process/unsafe_edges.rs	apppark_rets	317		GAP
-ff127be98951	kernel/src/process/unsafe_edges.rs	freelist_next	333	ptr-ops	GAP
-3e07bcaa9002	kernel/src/process/unsafe_edges.rs	freelist_link	343	ptr-ops	GAP
-15f1b4803aa2	kernel/src/process/unsafe_edges.rs	heap_alloc	356		GAP
-749775574955	kernel/src/process/unsafe_edges.rs	heap_dealloc	366		GAP
-4fb9f718b639	kernel/src/process/unsafe_edges.rs	slot_ptr	376		GAP
-207d3e1573db	kernel/src/process/unsafe_edges.rs	zero_bytes	387	ptr-ops	GAP
-005298b9ee73	kernel/src/process/unsafe_edges.rs	write_volatile_u64	397	volatile	GAP
-fdb15dd17706	kernel/src/process/unsafe_edges.rs	<module>	405		GAP
-06709e4a45d3	kernel/src/process/unsafe_edges.rs	<module>	409		GAP
-79c32c2b54dc	kernel/src/process/unsafe_edges.rs	read_volatile_u32	418	volatile	GAP
-be9426f8df25	kernel/src/process/unsafe_edges.rs	borrow_active_mm	433		GAP
-e17f65bb862b	kernel/src/process/unsafe_edges.rs	list_add_tail	452		GAP
-d4110f0c746e	kernel/src/process/unsafe_edges.rs	list_del	462		GAP
-275b19dfe844	kernel/src/process/unsafe_edges.rs	list_for_each	476		GAP
-c2f338897e44	kernel/src/process/unsafe_edges.rs	store_pick_qword	496	ptr-ops	GAP
-620b2c62ccdc	kernel/src/process/unsafe_edges.rs	paint_bytes	509	ptr-ops	GAP
-9019b4be1be9	kernel/src/process/unsafe_edges.rs	frame_mut	529		GAP
-6c0627d9290c	kernel/src/process/unsafe_edges.rs	frame_ref	541		GAP
-bf3f5ddb8654	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	567		GAP
-4f1bf37e2fe5	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	578	ptr-ops	GAP
-713a14719e72	kernel/src/process/unsafe_edges.rs	exec_phdr_at	599		GAP
-60bddb3b1cca	kernel/src/process/unsafe_edges.rs	exec_ehdr_from	609		GAP
-303d3310ecbe	kernel/src/process/unsafe_edges.rs	exec_map_user_range	621		GAP
-5845f881d030	kernel/src/process/unsafe_edges.rs	exec_map_user_region_static	640		GAP
-f9294442f893	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	651		GAP
-2000c9e66c93	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	656	volatile,ptr-ops	GAP
-5a553f926727	kernel/src/process/unsafe_edges.rs	exec_free_user_page_trees	670		GAP
-c0be1997ab3c	kernel/src/process/unsafe_edges.rs	exec_write_sigtramp	688	volatile,ptr-ops	GAP
-c6e9c73dd16e	kernel/src/process/unsafe_edges.rs	exec_mm_new_user	702		GAP
-8b66f21c03e0	kernel/src/process/unsafe_edges.rs	exec_switch_address_space	715		GAP
-6028ccae10d8	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	750		GAP
-33243f3783e3	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	797		GAP
-f89947507dc4	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	856		GAP
-2020df098d2c	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	876		GAP
-0a1266b8381f	kernel/src/process/unsafe_edges.rs	fork_save_parent_vstate	887		GAP
-23c01acb47c1	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	898		GAP
-aa7928742500	kernel/src/process/unsafe_edges.rs	fork_fpu_save_for_switch	907		GAP
-44ec9b853fc8	kernel/src/process/unsafe_edges.rs	fork_pt_walk	918		GAP
-75a8e5bbfe9d	kernel/src/process/unsafe_edges.rs	fork_handle_cow_fault	931		GAP
-6b6b5b73523f	kernel/src/process/unsafe_edges.rs	fork_write_child_tid	951	volatile,ptr-ops	GAP
-1d4733a29d08	kernel/src/process/unsafe_edges.rs	read_user_tp_register	964	asm	GAP
-24e577536294	kernel/src/process/unsafe_edges.rs	page_refcount	984		GAP
-b128013597f3	kernel/src/process/unsafe_edges.rs	<module>	994		GAP
-71ea6e69ba62	kernel/src/process/unsafe_edges.rs	<module>	996		GAP
-58809015db4e	kernel/src/process/unsafe_edges.rs	pid_hash_unlink_store	1015		GAP
-ad69ce49f9e5	kernel/src/process/unsafe_edges.rs	ptrace_translate	1035		GAP
-9c5966a17cb4	kernel/src/process/unsafe_edges.rs	ptrace_read_word	1046	volatile,ptr-ops	GAP
-fd954ad11bc2	kernel/src/process/unsafe_edges.rs	ptrace_write_word	1057	volatile,ptr-ops	GAP
-9d5f847f9547	kernel/src/process/unsafe_edges.rs	ptrace_copy_chunk	1070	ptr-ops	GAP
-faafeadd79d1	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1088	asm	GAP
-f8b51d48f092	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1104	asm	GAP
-e37a5c329886	kernel/src/process/unsafe_edges.rs	ptrace_read_gregset	1129	ptr-ops	GAP
-eb5fbceda67e	kernel/src/process/unsafe_edges.rs	ptrace_write_gregset	1147	ptr-ops	GAP
-239b8c07c639	kernel/src/process/unsafe_edges.rs	zeroed_siginfo	1162		GAP
+36403cdf6b01	kernel/src/process/unsafe_edges.rs	place_task	107		GAP
+8e8d1c42bc8b	kernel/src/process/unsafe_edges.rs	dump_read_page	148		GAP
+ba65a672fa36	kernel/src/process/unsafe_edges.rs	dump_read_page	159	ptr-ops	GAP
+1147a3c17197	kernel/src/process/unsafe_edges.rs	file_private_data_ref	174		GAP
+86fb980532dc	kernel/src/process/unsafe_edges.rs	file_private_data_ref	175	ptr-ops	GAP
+a94702b4b993	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	189		GAP
+3774c99e046d	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	190	ptr-ops	GAP
+385f00f307fe	kernel/src/process/unsafe_edges.rs	file_private_data_mut	205		GAP
+ddee7370ee00	kernel/src/process/unsafe_edges.rs	file_private_data_mut	206	ptr-ops	GAP
+41a8a08b0b04	kernel/src/process/unsafe_edges.rs	read_volatile_u64	220	volatile	GAP
+3c7f08d81c6d	kernel/src/process/unsafe_edges.rs	journal_handle	260		GAP
+1d94bb694ccf	kernel/src/process/unsafe_edges.rs	free_fork_pt_regs	293	ptr-ops	GAP
+3062450165aa	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	307		GAP
+10d8ef2c67ca	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	312		GAP
+98a3e7c1abfd	kernel/src/process/unsafe_edges.rs	apppark_rets	326		GAP
+eb2fd87de2a4	kernel/src/process/unsafe_edges.rs	freelist_next	342	ptr-ops	GAP
+0ded137a1bf7	kernel/src/process/unsafe_edges.rs	freelist_link	352	ptr-ops	GAP
+d02eb769553f	kernel/src/process/unsafe_edges.rs	heap_alloc	365		GAP
+6e87c1081799	kernel/src/process/unsafe_edges.rs	heap_dealloc	375		GAP
+0d0e795c349d	kernel/src/process/unsafe_edges.rs	slot_ptr	385		GAP
+ff4401390877	kernel/src/process/unsafe_edges.rs	zero_bytes	396	ptr-ops	GAP
+ef68ded79fde	kernel/src/process/unsafe_edges.rs	write_volatile_u64	406	volatile	GAP
+2828b414db40	kernel/src/process/unsafe_edges.rs	<module>	414		GAP
+6e8f4d9333ce	kernel/src/process/unsafe_edges.rs	<module>	418		GAP
+3c4ccb2eadfd	kernel/src/process/unsafe_edges.rs	read_volatile_u32	427	volatile	GAP
+f1b293baa4e9	kernel/src/process/unsafe_edges.rs	borrow_active_mm	442		GAP
+1762475263ac	kernel/src/process/unsafe_edges.rs	list_add_tail	461		GAP
+48184db70775	kernel/src/process/unsafe_edges.rs	list_del	471		GAP
+4ed158931f22	kernel/src/process/unsafe_edges.rs	list_for_each	485		GAP
+822b6eba798f	kernel/src/process/unsafe_edges.rs	store_pick_qword	505	ptr-ops	GAP
+6b064e1e0d4f	kernel/src/process/unsafe_edges.rs	paint_bytes	518	ptr-ops	GAP
+7437025be7de	kernel/src/process/unsafe_edges.rs	frame_mut	538		GAP
+d1beac49d19f	kernel/src/process/unsafe_edges.rs	frame_ref	550		GAP
+6c8bb22e03b1	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	576		GAP
+67d89785af7d	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	587	ptr-ops	GAP
+e8cffbc0099e	kernel/src/process/unsafe_edges.rs	exec_phdr_at	608		GAP
+90f9b4ccb70d	kernel/src/process/unsafe_edges.rs	exec_ehdr_from	618		GAP
+b995def5afac	kernel/src/process/unsafe_edges.rs	exec_map_user_range	630		GAP
+929fc69fb04b	kernel/src/process/unsafe_edges.rs	exec_map_user_region_static	649		GAP
+3f544658a0fc	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	660		GAP
+a803f084862e	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	665	volatile,ptr-ops	GAP
+f39d729d3457	kernel/src/process/unsafe_edges.rs	exec_free_user_page_trees	679		GAP
+25d807f5ab9b	kernel/src/process/unsafe_edges.rs	exec_write_sigtramp	697	volatile,ptr-ops	GAP
+7bf24c370af4	kernel/src/process/unsafe_edges.rs	exec_mm_new_user	711		GAP
+c940b94f6b0c	kernel/src/process/unsafe_edges.rs	exec_switch_address_space	724		GAP
+831485264349	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	759		INV:INV-LOCK-7
+6a30b6029d54	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	806		INV:INV-LOCK-7
+9723e8f16564	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	865		INV:INV-LOCK-7
+cf4c67d02243	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	885		GAP
+2e9278a615ed	kernel/src/process/unsafe_edges.rs	fork_save_parent_vstate	896		GAP
+39e6cfb8b8c0	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	907		GAP
+a6250429c1af	kernel/src/process/unsafe_edges.rs	fork_fpu_save_for_switch	916		GAP
+208dd9fdb7da	kernel/src/process/unsafe_edges.rs	fork_pt_walk	927		GAP
+684f00c51d3f	kernel/src/process/unsafe_edges.rs	fork_handle_cow_fault	940		GAP
+09e94e53b793	kernel/src/process/unsafe_edges.rs	fork_write_child_tid	960	volatile,ptr-ops	GAP
+4cee5568a23f	kernel/src/process/unsafe_edges.rs	read_user_tp_register	973	asm	GAP
+0350894860da	kernel/src/process/unsafe_edges.rs	page_refcount	993		GAP
+78d5c319d12b	kernel/src/process/unsafe_edges.rs	<module>	1003		GAP
+12b9c3709dc9	kernel/src/process/unsafe_edges.rs	<module>	1005		GAP
+12d1c383cdb4	kernel/src/process/unsafe_edges.rs	pid_hash_unlink_store	1024		GAP
+d2366331527d	kernel/src/process/unsafe_edges.rs	ptrace_translate	1044		GAP
+6c09c427c25c	kernel/src/process/unsafe_edges.rs	ptrace_read_word	1055	volatile,ptr-ops	GAP
+ac6d68bb3f5a	kernel/src/process/unsafe_edges.rs	ptrace_write_word	1066	volatile,ptr-ops	GAP
+53e23106a0b4	kernel/src/process/unsafe_edges.rs	ptrace_copy_chunk	1079	ptr-ops	GAP
+2a7dda623929	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1097	asm	GAP
+78380edea3f7	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1113	asm	GAP
+ee1148570389	kernel/src/process/unsafe_edges.rs	ptrace_read_gregset	1138	ptr-ops	GAP
+29b8b715f524	kernel/src/process/unsafe_edges.rs	ptrace_write_gregset	1156	ptr-ops	GAP
+176d2c1dccb8	kernel/src/process/unsafe_edges.rs	zeroed_siginfo	1171		GAP
 e9ebe794b07b	kernel/src/safety/bytes.rs	bytes_of	43	raw-construct,ptr-ops	INV:INV-CBYTES-1
 5db301ab0d64	kernel/src/safety/bytes.rs	bytes_of_mut	52	ptr-ops	INV:INV-CBYTES-1
 ee1f13fde206	kernel/src/safety/bytes.rs	from_bytes	65	ptr-ops	INV:INV-CBYTES-2
 10ab0a12da22	kernel/src/safety/bytes.rs	read_at	76	ptr-ops	INV:INV-CBYTES-2
 03820be49519	kernel/src/safety/bytes.rs	write_at	88	ptr-ops	INV:INV-CBYTES-2
-cde3760bd577	kernel/src/safety/bytes.rs	bytes_of_slice	103	raw-construct,ptr-ops	GAP
-b92fddeb81f6	kernel/src/safety/bytes.rs	bytes_of_slice_mut	113	ptr-ops	GAP
+cde3760bd577	kernel/src/safety/bytes.rs	bytes_of_slice	103	raw-construct,ptr-ops	INV:INV-CBYTES-1
+b92fddeb81f6	kernel/src/safety/bytes.rs	bytes_of_slice_mut	113	ptr-ops	INV:INV-CBYTES-1
 c9630bcedbda	kernel/src/safety/call.rs	safety_cast	109		INV:INV-SAFECAST-1
 c42f1426d8fc	kernel/src/safety/dma.rs	new	61		INV:INV-DMA-1
 6f057209725f	kernel/src/safety/dma.rs	carve_array	111	ptr-ops	INV:INV-DMA-2
@@ -2394,71 +2393,42 @@ d19d53f0da58	kernel/src/sched/edges.rs	secondary_idle_table_base	1017		GAP
 0030893faa67	kernel/src/sched/rt.rs	<module>	650		GAP
 e6dd4f64b434	kernel/src/sched/sched.rs	<module>	92		GAP
 517582e73a07	kernel/src/sched/sched.rs	rt_wedge_dump_tick	435		GAP
-df73999a64bd	kernel/src/sched/sched.rs	rt_bandwidth_tick	529		GAP
-c9364598695e	kernel/src/sched/sched.rs	grq_current_fp	852	asm	GAP
-478904419d63	kernel/src/sched/sched.rs	grq_current_fp	857	asm	GAP
-0b7338726146	kernel/src/sched/sched.rs	grq_current_fp	862	asm	GAP
-ea50a430d9ff	kernel/src/sched/sched.rs	grq_dump_holder	1022	ptr-ops	GAP
-820747a9b943	kernel/src/sched/sched.rs	process_deferred_exit_notify_cpu	2114		GAP
-460096fc2d0e	kernel/src/sched/sched.rs	need_resched	2167		GAP
-afdfd46997cd	kernel/src/sched/sched.rs	resched_cpu	2277		GAP
-e5e6c9f66ee5	kernel/src/sched/sched.rs	preempt_check_wake	2407		GAP
-f7b5cfa3a7c4	kernel/src/sched/sched.rs	ww_sched_snapshot	2554	no-preempt	GAP
-616e54918d45	kernel/src/sched/sched.rs	this_cpu	2649		GAP
-936b15be2bb4	kernel/src/sched/sched.rs	init_secondary	2730		GAP
-b81e40825e03	kernel/src/sched/sched.rs	clear_trap_scratch	2763	asm	GAP
-f55a9965e69b	kernel/src/sched/sched.rs	init	2796		GAP
-6544b87ee36d	kernel/src/sched/sched.rs	alloc_task_slot	2936	ptr-ops	GAP
-a44e862a9676	kernel/src/sched/sched.rs	alloc_task_slot	2946	ptr-ops	GAP
-844dab6851a9	kernel/src/sched/sched.rs	alloc_task_slot	2953		GAP
-b8cd47b8539e	kernel/src/sched/sched.rs	free_task_slot	3231		GAP
-cb137867687b	kernel/src/sched/sched.rs	free_task_slot	3342		GAP
-2cd78d442e1d	kernel/src/sched/sched.rs	free_task_slot	3349	volatile,ptr-ops	GAP
-fff0ad64adaf	kernel/src/sched/sched.rs	schedule_dead_never_returns	3759	no-preempt	GAP
-502072ef31f8	kernel/src/sched/sched.rs	schedule_dead_never_returns	3871		GAP
-e3aa37a761a5	kernel/src/sched/sched.rs	steer_task_cpu	6063		GAP
-5377e334b43f	kernel/src/sched/sched.rs	w2_refusal_census	6431		GAP
-be2e56fd285b	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6490	volatile,ptr-ops,no-preempt	GAP
-7ace32f6ff3e	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6815	volatile,ptr-ops	GAP
-276bae7239b3	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6818	volatile,ptr-ops	GAP
-b8fdfed35dc0	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6821	volatile,ptr-ops	GAP
-2b60115f7db5	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6896		GAP
-b6151eb1aca0	kernel/src/sched/sched.rs	monopolist_census	7663		GAP
-80305530f081	kernel/src/sched/sched.rs	monopolist_census	7714	volatile,ptr-ops	GAP
-ff95257eeca7	kernel/src/sched/sched.rs	runq_strand_census	7876	ptr-ops	GAP
-e8f37e4c8010	kernel/src/sched/sched.rs	scheduler_tick	8844	volatile,ptr-ops	GAP
-60a391eef983	kernel/src/sched/sched.rs	scheduler_tick	9066		GAP
-aaf522fd7fb6	kernel/src/sched/sched.rs	scheduler_tick	9284		GAP
-c4c5fd283335	kernel/src/sched/sched.rs	scheduler_tick	9750		GAP
-36d210f5c07e	kernel/src/sched/sched.rs	scheduler_tick	9768		GAP
-db05fb624b8b	kernel/src/sched/sched.rs	scheduler_tick	9804		GAP
-5fd9eb2327db	kernel/src/sched/sched.rs	scheduler_tick	9853		GAP
-bcad696d7b48	kernel/src/sched/sched.rs	scheduler_tick	9863		GAP
-c0b8630ada7c	kernel/src/sched/sched.rs	scheduler_tick	9868		GAP
-415754173e4b	kernel/src/sched/sched.rs	scheduler_tick	9958	volatile,ptr-ops	GAP
-84e55c7fc699	kernel/src/sched/sched.rs	scheduler_tick	10007		GAP
-71d005b02fe1	kernel/src/sched/sched.rs	scheduler_tick	10056	volatile,ptr-ops	GAP
-a94c339082a0	kernel/src/sched/sched.rs	scheduler_tick	10124		GAP
-69fb4da58768	kernel/src/sched/sched.rs	scheduler_tick	10155		GAP
-ccdcbe66ff2c	kernel/src/sched/sched.rs	schedule_tail	10514		GAP
-136ed8061524	kernel/src/sched/sched.rs	current	10650		GAP
-3886984fda6e	kernel/src/sched/sched.rs	r56_print_msg	11053		GAP
-21a09faa7daa	kernel/src/sched/sched.rs	r56_print_pid	11085		GAP
-1e1eb6fb0e1b	kernel/src/sched/sched.rs	harvest_print_parked	11137	volatile,ptr-ops	GAP
-9a8abbfbe24c	kernel/src/sched/sched.rs	task_is_dying	11234		GAP
-202b39d07934	kernel/src/sched/sched.rs	harvest_relink	11272		GAP
-8e628c631466	kernel/src/sched/sched.rs	republish_current_after_abort	11519		GAP
-aedf8545df17	kernel/src/sched/sched.rs	abort_next_release_orphans	11589	volatile,ptr-ops	GAP
-b976e2e0d542	kernel/src/sched/sched.rs	lp_idle_lie_report	11926	no-preempt	GAP
-af9434fc5690	kernel/src/sched/sched.rs	idle_heal_own_slot	12035		GAP
-8f4220b5825e	kernel/src/sched/sched.rs	relink_unlinked_running_phantoms	12201	volatile,ptr-ops,no-preempt	GAP
-bf799c1fe293	kernel/src/sched/sched.rs	idle_guard_sp	12398	asm	GAP
-98a80c0de352	kernel/src/sched/sched.rs	idle_guard_sp	12405	asm	GAP
-a399cc03c0b7	kernel/src/sched/sched.rs	idle_guard_sp	12412	asm	GAP
-c7828cfba299	kernel/src/sched/sched.rs	cpu_idle_loop	12488		GAP
-c36808a4f6ef	kernel/src/sched/sched.rs	cpu_idle_loop	12515		GAP
-bccc80b77d5f	kernel/src/sched/sched.rs	cpu_idle_loop	12572		GAP
-cf2124d6016d	kernel/src/sched/sched.rs	cpu_idle_loop	12718		GAP
+c3c6c12efc0d	kernel/src/sched/sched.rs	grq_current_fp	866	asm	GAP
+acb95fd04c9d	kernel/src/sched/sched.rs	grq_current_fp	871	asm	GAP
+b5e96acab7e4	kernel/src/sched/sched.rs	grq_current_fp	876	asm	GAP
+33f73b725637	kernel/src/sched/sched.rs	grq_dump_holder	1036	ptr-ops	GAP
+1b389050584f	kernel/src/sched/sched.rs	process_deferred_exit_notify_cpu	2128		GAP
+a0929d3fc2f9	kernel/src/sched/sched.rs	ww_sched_snapshot	2569	no-preempt	GAP
+b1f18aa573d6	kernel/src/sched/sched.rs	clear_trap_scratch	2787	asm	GAP
+dbf2f1ac73b8	kernel/src/sched/sched.rs	init	2820		GAP
+61af4fd56033	kernel/src/sched/sched.rs	alloc_task_slot	2975	ptr-ops	GAP
+acf44de3f975	kernel/src/sched/sched.rs	alloc_task_slot	2985	ptr-ops	GAP
+8b3e5aff7224	kernel/src/sched/sched.rs	alloc_task_slot	2992		GAP
+65f80709909f	kernel/src/sched/sched.rs	free_task_slot	3288		GAP
+b6d56dac2b6a	kernel/src/sched/sched.rs	free_task_slot	3404		GAP
+1d46bccc0787	kernel/src/sched/sched.rs	free_task_slot	3417	volatile,ptr-ops	GAP
+1453ce856bba	kernel/src/sched/sched.rs	schedule_dead_never_returns	3827	no-preempt	GAP
+88835fd20733	kernel/src/sched/sched.rs	schedule_dead_never_returns	3939		GAP
+1da981a77eab	kernel/src/sched/sched.rs	steer_task_cpu	6131		GAP
+500409ef783f	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6558	volatile,ptr-ops,no-preempt	GAP
+81bb30364557	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6958		GAP
+d519a1f18956	kernel/src/sched/sched.rs	monopolist_census	7776	volatile,ptr-ops	GAP
+aa5448738817	kernel/src/sched/sched.rs	scheduler_tick	8906	volatile,ptr-ops	GAP
+185307e1663d	kernel/src/sched/sched.rs	scheduler_tick	9128		GAP
+729e3e7046f7	kernel/src/sched/sched.rs	scheduler_tick	10020	volatile,ptr-ops	GAP
+0724b8335572	kernel/src/sched/sched.rs	scheduler_tick	10070		GAP
+7775126255fc	kernel/src/sched/sched.rs	scheduler_tick	10119	volatile,ptr-ops	GAP
+bbf05cb0ca6a	kernel/src/sched/sched.rs	scheduler_tick	10187		GAP
+2d3045abd427	kernel/src/sched/sched.rs	scheduler_tick	10218		GAP
+b2355b6b17a6	kernel/src/sched/sched.rs	current	10713		GAP
+dfad815446e6	kernel/src/sched/sched.rs	harvest_print_parked	11200	volatile,ptr-ops	GAP
+67ea08285ada	kernel/src/sched/sched.rs	task_is_dying	11297		GAP
+bb8250f4b089	kernel/src/sched/sched.rs	harvest_relink	11335		GAP
+4cbe949ca3a9	kernel/src/sched/sched.rs	republish_current_after_abort	11582		GAP
+761aa90f0faa	kernel/src/sched/sched.rs	lp_idle_lie_report	11991	no-preempt	GAP
+b5fc6c5b5e4e	kernel/src/sched/sched.rs	idle_guard_sp	12467	asm	GAP
+eab09629fed3	kernel/src/sched/sched.rs	idle_guard_sp	12474	asm	GAP
+d20fcdcc6cce	kernel/src/sched/sched.rs	idle_guard_sp	12481	asm	GAP
 554f094f895c	kernel/src/sched/side_edges.rs	<module>	19		GAP
 97eb38a1a9b4	kernel/src/sched/side_edges.rs	<module>	21		GAP
 d69da70f77a6	kernel/src/sched/side_edges.rs	evring_slot_mut	39		GAP
@@ -2498,35 +2468,10 @@ d701c1527edc	kernel/src/sync/edges.rs	read_u32_via_task	96		INV:INV-SY-1
 f907cd9932e3	kernel/src/sync/edges.rs	pt_walk	135		INV:INV-SY-1
 1669803819c6	kernel/src/sync/edges.rs	read_volatile_u64	145	volatile,ptr-ops	INV:INV-SY-1
 3485ca29d839	kernel/src/sync/edges.rs	read_volatile_u32	152	volatile,ptr-ops	INV:INV-SY-1
-4fe20a5024f8	kernel/src/sync/edges.rs	copy_from_user_bytes	160	ptr-ops	INV:INV-SY-3
-76dc7578516e	kernel/src/sync/edges.rs	word_write	167	ptr-ops	GAP
-bd128558cef7	kernel/src/sync/futex.rs	resolve_futex_phys	447		GAP
-f269d25086a6	kernel/src/sync/futex.rs	task_futex_mm_id	568		GAP
-3092322753f6	kernel/src/sync/futex.rs	<module>	649		GAP
-051e07955aff	kernel/src/sync/futex.rs	<module>	650		GAP
-612785ff1607	kernel/src/sync/futex.rs	ffrt_chain_walk	829	ptr-ops	GAP
-3b65644df050	kernel/src/sync/futex.rs	ffrt_chain_walk	835	ptr-ops	GAP
-98b2ced79a0a	kernel/src/sync/futex.rs	ffrt_chain_walk	841	ptr-ops	GAP
-9c9ee50abd44	kernel/src/sync/futex.rs	ffrt_mutex_scan	1089	ptr-ops	GAP
-c10544e035cd	kernel/src/sync/futex.rs	ffrt_mutex_scan	1095	ptr-ops	GAP
-3cbbca73a454	kernel/src/sync/futex.rs	ffrt_mutex_scan	1101	ptr-ops	GAP
-924670c23c7c	kernel/src/sync/futex.rs	fuxwatch_arm_round	1675		GAP
-55946672ce17	kernel/src/sync/futex.rs	ffrt_lock_holder_scan	4551	ptr-ops	GAP
-2a059fbe47ab	kernel/src/sync/futex.rs	ffrt_lock_holder_scan	4557	ptr-ops	GAP
-fe051f0c7f52	kernel/src/sync/futex.rs	ffrt_lock_holder_scan	4563	ptr-ops	GAP
-92f61c6bc8c4	kernel/src/sync/futex.rs	pool_full_backoff	6568		GAP
-d6a785971673	kernel/src/sync/futex.rs	futex_wake_in_mm	6717		GAP
-bf2a6223aecd	kernel/src/sync/futex.rs	futex_wait_timeout	7032	ptr-ops	GAP
-db22368432d7	kernel/src/sync/futex.rs	futex_wait_timeout	7161		GAP
-8ea82b7b469c	kernel/src/sync/futex.rs	futex_parse_timeout_ns	7561	ptr-ops	GAP
-a5d94e1f5322	kernel/src/sync/futex.rs	futex_wake_op	8042	ptr-ops	GAP
-7f437956c2d7	kernel/src/sync/futex.rs	futex_wake_op	8066	ptr-ops	GAP
-67db81a874ef	kernel/src/sync/futex.rs	do_futex	8618	ptr-ops	GAP
-793b09623b11	kernel/src/sync/futex.rs	sys_futex_handler	9508	ptr-ops	GAP
-c7a238af9550	kernel/src/sync/futex.rs	kill_dump_wedge	10050		GAP
-c10c380032e5	kernel/src/sync/futex.rs	kill_dump_wedge	10085		GAP
-e4dbd0243aa1	kernel/src/sync/futex.rs	freeze_scan	11938		GAP
-531c77fe020b	kernel/src/sync/futex.rs	freeze_scan	11942		GAP
+bece1bbf3315	kernel/src/sync/edges.rs	copy_from_user_bytes	161	ptr-ops	INV:INV-SY-3
+8473a937c0a6	kernel/src/sync/edges.rs	word_write	168	ptr-ops	INV:INV-SY-3
+99d70416781b	kernel/src/sync/futex.rs	<module>	650		GAP
+78d463ab537d	kernel/src/sync/futex.rs	<module>	651		GAP
 8227750a892e	kernel/src/sync/futex_pi.rs	<module>	184		GAP
 c0fe2ea3ac83	kernel/src/sync/futex_pi.rs	<module>	185		GAP
 ea23d00f7ead	kernel/src/sync/lockkey.rs	<module>	132		GAP
