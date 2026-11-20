@@ -7,6 +7,7 @@
 //! This module implements the RISC-V 64-bit system call interface, organized by functionality
 
 pub mod dispatch;
+pub mod edges;
 pub mod io;
 pub mod process;
 pub mod memory;
