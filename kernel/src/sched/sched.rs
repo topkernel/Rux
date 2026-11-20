@@ -9130,7 +9130,7 @@ pub fn scheduler_tick() {
                                     let pr = crate::arch::trap::current_pt_regs()
                                         as *const PtRegs;
                                     if !pr.is_null() {
-                                        ph(unsafe { (*pr).instruction_pointer() });
+                                        ph(crate::sched::edges::current_trap_ip());
                                     }
                                 }
                                 // pctick: the interrupted task's own count
@@ -10072,7 +10072,7 @@ pub fn scheduler_tick() {
                         use crate::arch::pt_regs::PtRegs;
                         let pr = current_pt_regs() as *const PtRegs;
                         if !pr.is_null() {
-                            let e = unsafe { (*pr).instruction_pointer() };
+                            let e = crate::sched::edges::current_trap_ip();
                             let mut sh = 64;
                             while sh > 0 { sh -= 4; let nb = ((e >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
                         }
@@ -10706,14 +10706,9 @@ where
 }
 
 pub fn current() -> Option<&'static mut Task> {
-    let tp = crate::arch::cpu::get_thread_id() as *mut Task;
-    if tp.is_null() || (tp as usize) < 0x80000000 {
-        None
-    } else {
-        // SAFETY: tp is the tp register set by context_switch to a valid Task pointer;
-        // null and low-address checks above; this CPU has exclusive mutable access to its current task.
-        unsafe { Some(&mut *tp) }
-    }
+    // INV-SCE-11: the tp-register derivation lives in the edges
+    // framework; this is its public face.
+    crate::sched::edges::current_task_mut()
 }
 
 pub fn get_current_pid() -> u32 {
