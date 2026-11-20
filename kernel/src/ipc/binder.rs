@@ -7428,7 +7428,7 @@ pub fn bwr_park_audit() {
                         // with a live waiter now qualifies; the
                         // park-standing gate above does the filtering.
                         if let Some(v) =
-                            unsafe { crate::sync::futex::read_park_word_via_task(task_raw, a0 as u64) }
+                            crate::sync::futex::read_park_word_via_task(task_raw, a0 as u64)
                         {
                             let readers = v & 0x7fff_ffff;
                             if readers >= 1 && readers < 0x4000_0000 {

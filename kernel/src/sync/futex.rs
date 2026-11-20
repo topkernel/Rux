@@ -8482,7 +8482,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         static LAST1: [core::sync::atomic::AtomicU32; 2] =
                             [const { core::sync::atomic::AtomicU32::new(u32::MAX) }; 2];
                         for (k, wa) in [base, base.wrapping_add(0x94)].iter().enumerate() {
-                            if let Some(w) = unsafe { read_u32_via_task(t, *wa) } {
+                            if let Some(w) = crate::sync::edges::read_u32_via_task(t, *wa) {
                                 let prev = LAST1[k].load(Relaxed);
                                 if w != prev {
                                     LAST1[k].store(w, Relaxed);
@@ -8504,7 +8504,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 // the waiter's own expected val beside it decides
                 // stale-marker vs racing-writer vs kernel stomp.
                 if let Some(t) = crate::sched::current() {
-                    if let Some(w) = unsafe { read_u32_via_task(t, uaddr) } {
+                    if let Some(w) = crate::sync::edges::read_u32_via_task(t, uaddr) {
                         let c = if addr_idx == usize::MAX {
                             0
                         } else {
@@ -8926,7 +8926,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         }
                     }
                     // SAFETY: t is the current task, in its own syscall.
-                    unsafe { rwfz_stack_frames(t, "park", 12, 64, false) };
+                    rwfz_stack_frames(t, "park", 12, 64, false);
                 }
             }
         }
@@ -9090,9 +9090,9 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             crate::pr_warn!("{}", s);
                         }
                         // SAFETY: t is the current task, in its own syscall.
-                        unsafe { rwfz_stack_frames(t, "apppark", 12, 96, false) };
+                        rwfz_stack_frames(t, "apppark", 12, 96, false);
                         // sc139: the call-site-validated caller chain.
-                        unsafe { apppark_rets(t) };
+                        apppark_rets(t);
                         // sc136 (Session Q): the park chain's caller frame
                         // (raw ustack slot[12] 0x7ff0816ff8a8 family) sits
                         // in a lib VMA never printed by the frames scan
@@ -9307,10 +9307,10 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 if rsp != 0 {
                                     let rd64 = |va: usize| -> Option<u64> {
                                         let lo = unsafe {
-                                            read_u32_via_task(t, va)
+                                            crate::sync::edges::read_u32_via_task(t, va)
                                         }?;
                                         let hi = unsafe {
-                                            read_u32_via_task(t, va + 4)
+                                            crate::sync::edges::read_u32_via_task(t, va + 4)
                                         }?;
                                         Some(lo as u64 | ((hi as u64) << 32))
                                     };
@@ -9729,7 +9729,7 @@ pub fn note_task_unlink(pid: u32, tgid: u32) {
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            let word = unsafe { read_u32_via_task(t, uaddr) };
+            let word = crate::sync::edges::read_u32_via_task(t, uaddr);
             crate::pr_warn!(
                 "RWFRZ: EXIT-WORD tid {} comm='{}' word={:#x}",
                 pid,
@@ -9824,7 +9824,7 @@ pub fn kill_dump_tgid(tgid: u32) {
         let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
         match parked {
             Some((uaddr, bitset)) => {
-                let word = unsafe { read_u32_via_task(t, uaddr) };
+                let word = crate::sync::edges::read_u32_via_task(t, uaddr);
                 crate::pr_warn!(
                     "KILLDUMP: tid {} comm='{}' parked uaddr={:#x} bitset={:#x} word={:#x}",
                     tk.pid(),
@@ -9905,10 +9905,10 @@ pub fn kill_dump_tgid(tgid: u32) {
                 // (iovec layout + payload head, path/fstype strings); and
                 // print the task run state so "parked" vs "runnable"
                 // (slow exit path) can be told apart.
-                unsafe { kill_dump_wedge(tk, t, r.orig_rax, [r.rdi, r.rsi, r.rdx]) };
+                kill_dump_wedge(tk, t, r.orig_rax, [r.rdi, r.rsi, r.rdx]);
             }
         }
-        unsafe { rwfz_stack_frames(t, "KILLDUMP", 10, 96, false) };
+        rwfz_stack_frames(t, "KILLDUMP", 10, 96, false);
     }
     // sc244: release the pins taken at collection (may free the last
     // references of the concurrently-dying threads — schedulable
@@ -9951,8 +9951,9 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
 }
 
 /// sc97: deep dump of the wedged syscall's fd and user arguments.
-/// SAFETY: `t` is the live Task whose entry frame the args came from.
-unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
+/// `t` is the live Task whose entry frame the args came from (INV-SCE-2
+/// derivation; `tk` is its shared reference).
+fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
     use core::fmt::Write;
     // sc97 discriminator: RUNNING-state at SIGKILL time means the entry
     // frame's syscall may be STALE (task is executing userspace — e.g. a
@@ -10165,7 +10166,7 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
             // raw buffer for write.
             if nr == 20 {
                 let mut iovs = alloc::vec![0u8; 3 * 16];
-                let n = unsafe { read_bytes_via_task(t, args[1] as usize, &mut iovs) };
+                let n = unsafe { crate::sync::edges::read_bytes_via_task(t, args[1] as usize, &mut iovs) };
                 for i in 0..3 {
                     if n < (i + 1) * 16 {
                         break;
@@ -10173,7 +10174,7 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                     let base = u64::from_le_bytes(iovs[i * 16..i * 16 + 8].try_into().unwrap());
                     let len = u64::from_le_bytes(iovs[i * 16 + 8..i * 16 + 16].try_into().unwrap());
                     let mut head = alloc::vec![0u8; 48];
-                    let hn = unsafe { read_bytes_via_task(t, base as usize, &mut head) };
+                    let hn = unsafe { crate::sync::edges::read_bytes_via_task(t, base as usize, &mut head) };
                     let mut txt = alloc::string::String::new();
                     for &b in &head[..hn] {
                         if b == 0 {
@@ -10198,14 +10199,14 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
         }
         2 => {
             // open(2): pathname at args[0]
-            let p = unsafe { read_cstr_via_task(t, args[0] as usize, 96) };
+            let p = unsafe { crate::sync::edges::read_cstr_via_task(t, args[0] as usize, 96) };
             crate::pr_warn!("KILLDUMP: tid {} open path='{}'", tk.pid(), p);
         }
         165 => {
             // mount(2): source/target/fstype at args[0..2]
-            let s = unsafe { read_cstr_via_task(t, args[0] as usize, 96) };
-            let tg = unsafe { read_cstr_via_task(t, args[1] as usize, 96) };
-            let ft = unsafe { read_cstr_via_task(t, args[2] as usize, 32) };
+            let s = unsafe { crate::sync::edges::read_cstr_via_task(t, args[0] as usize, 96) };
+            let tg = unsafe { crate::sync::edges::read_cstr_via_task(t, args[1] as usize, 96) };
+            let ft = unsafe { crate::sync::edges::read_cstr_via_task(t, args[2] as usize, 32) };
             crate::pr_warn!(
                 "KILLDUMP: tid {} mount src='{}' tgt='{}' fstype='{}'",
                 tk.pid(),
@@ -10251,88 +10252,20 @@ fn rwfz_op_log(uaddr: usize, op: i32, val: u32, result: i64) {
     );
 }
 
-/// Read up to `buf.len()` bytes in `task`'s user address space via its
-/// page tables, stopping at the first unmapped page (KILLDUMP sc97:
-/// iovec arrays, path strings, log payload heads of the wedged task).
-/// Returns how many bytes were actually read.
-/// SAFETY: `task` must be a live Task; read-only diagnostic walk.
-unsafe fn read_bytes_via_task(task: *const Task, va: usize, buf: &mut [u8]) -> usize {
-    let tk = unsafe { &*task };
-    let aspace = match tk.address_space() {
-        Some(a) => a,
-        None => return 0,
-    };
-    let root = aspace.root_ppn();
-    let mut done = 0usize;
-    while done < buf.len() {
-        let cur = va + done;
-        let (ppn, _) = match unsafe {
-            crate::arch::mm::mm_ops::PageTableWalker::walk(root, cur as u64)
-        } {
-            Some(p) => p,
-            None => break,
-        };
-        let pa = (ppn as usize) << 12;
-        let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64))
-            .bits() as usize
-            + (cur & 0xfff);
-        let chunk = core::cmp::min(buf.len() - done, 0x1000 - (cur & 0xfff));
-        for i in 0..chunk {
-            buf[done + i] = unsafe { core::ptr::read_volatile((kv + i) as *const u8) };
-        }
-        done += chunk;
-    }
-    done
-}
-
-/// Printable snapshot of a NUL-terminated user string in `task`'s space.
-/// SAFETY: same contract as read_bytes_via_task.
-unsafe fn read_cstr_via_task(task: *const Task, va: usize, max: usize) -> alloc::string::String {
-    if va == 0 {
-        return alloc::string::String::from("(null)");
-    }
-    let mut raw = alloc::vec![0u8; max];
-    let n = unsafe { read_bytes_via_task(task, va, &mut raw) };
-    let end = raw[..n].iter().position(|&b| b == 0).unwrap_or(n);
-    let mut s = alloc::string::String::new();
-    for &b in &raw[..end] {
-        if (0x20..0x7f).contains(&b) {
-            s.push(b as char);
-        } else {
-            s.push('.');
-        }
-    }
-    s
-}
-
-/// Read one u32 in `task`'s user address space via its page tables
-/// (khungtaskd's get_user would read through the wrong mm).
-/// SAFETY: `task` must be a live Task; read-only diagnostic walk.
-unsafe fn read_u32_via_task(task: *const Task, va: usize) -> Option<u32> {
-    let tk = unsafe { &*task };
-    let aspace = tk.address_space()?;
-    let root = aspace.root_ppn();
-    let (ppn, _) =
-        unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va as u64)? };
-    let pa = (ppn as usize) << 12;
-    let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64)).bits()
-        as usize
-        + (va & 0xfff);
-    Some(unsafe { core::ptr::read_volatile(kv as *const u32) })
-}
-
 /// 81st: read the parked word's CURRENT value through the parked
 /// task's page tables (shape test for the frozen-rwlock class).
-/// SAFETY: `task` must be live; read-only diagnostic walk.
-pub unsafe fn read_park_word_via_task(
-    task: *mut crate::process::Task,
-    word: u64,
-) -> Option<u32> {
+/// INV-SY-1 in crate::sync::edges owns the read; kept here as the
+/// pub face binder's diagnostic uses.
+pub fn read_park_word_via_task(task: *mut crate::process::Task, word: u64) -> Option<u32> {
     if task.is_null() || word < 0x1000 {
         return None;
     }
-    read_u32_via_task(task as *const Task, word as usize)
+    crate::sync::edges::read_u32_via_task(task as *const Task, word as usize)
 }
+
+// The cross-task user-memory diagnostic readers (read_bytes_via_task,
+// read_cstr_via_task, read_u32_via_task) moved into crate::sync::edges
+// (INV-SY-1).
 
 /// 81st: reader-identity scan for a FROZEN rwlock word. The 68th-era
 /// freeze dump needed waiters>=3 to adopt (our freezes carry 1-2 waiters:
@@ -10407,8 +10340,8 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             if va & 0xfff > 0xff8 {
                 continue; // page-cross split — skip
             }
-            let lo = unsafe { read_u32_via_task(t, va as usize) }.unwrap_or(0) as u64
-                | ((unsafe { read_u32_via_task(t, va as usize + 4) }.unwrap_or(0) as u64) << 32);
+            let lo = crate::sync::edges::read_u32_via_task(t, va as usize).unwrap_or(0) as u64
+                | ((crate::sync::edges::read_u32_via_task(t, va as usize + 4).unwrap_or(0) as u64) << 32);
             let near = lo >= word.saturating_sub(0x400)
                 && lo < word + 0x20
                 && (lo & 3) == (word & 3);
@@ -10442,7 +10375,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         );
         if sys == FUTEX_SYSNO && a0 != 0 {
             // what this reader is blocked on, plus its wait word's shape
-            let w0 = unsafe { read_u32_via_task(t, a0 as usize) }.unwrap_or(0);
+            let w0 = crate::sync::edges::read_u32_via_task(t, a0 as usize).unwrap_or(0);
             let _ = writeln!(w, "    parkword={:#x} val={:#x}", a0 as u64, w0);
         }
     });
@@ -10525,8 +10458,8 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
                 if va & 0xfff > 0xff8 {
                     continue; // page-cross split — skip
                 }
-                let lo = unsafe { read_u32_via_task(t, va as usize) }.unwrap_or(0) as u64
-                    | ((unsafe { read_u32_via_task(t, va as usize + 4) }.unwrap_or(0) as u64) << 32);
+                let lo = crate::sync::edges::read_u32_via_task(t, va as usize).unwrap_or(0) as u64
+                    | ((crate::sync::edges::read_u32_via_task(t, va as usize + 4).unwrap_or(0) as u64) << 32);
                 let cls = musl.map(|a| musl_off_class(a, lo)).unwrap_or(0);
                 if cls == 1 {
                     if nw < 3 {
@@ -10753,8 +10686,8 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
             if va & 0xfff > 0xff8 {
                 continue; // page-cross split — skip
             }
-            let lo = unsafe { read_u32_via_task(t, va as usize) }.unwrap_or(0) as u64
-                | ((unsafe { read_u32_via_task(t, va as usize + 4) }.unwrap_or(0) as u64) << 32);
+            let lo = crate::sync::edges::read_u32_via_task(t, va as usize).unwrap_or(0) as u64
+                | ((crate::sync::edges::read_u32_via_task(t, va as usize + 4).unwrap_or(0) as u64) << 32);
             let cls = musl.map(|a| musl_off_class(a, lo)).unwrap_or(0);
             if cls == 1 {
                 if nw < 3 {
@@ -11475,16 +11408,16 @@ fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
 /// Public shim for the exit-path forensics (process/exit.rs): walk the
 /// DYING thread's user stack — its frames are intact at do_exit time.
 /// SAFETY: caller guarantees `task` is the current, still-live task.
-pub unsafe fn apppark_rets_public(task: *const Task) {
-    unsafe { apppark_rets(task) }
+pub fn apppark_rets_public(task: *const Task) {
+    apppark_rets(task)
 }
 
 /// IMMEDIATELY BEFORE it decode as a call instruction — `E8 rel32`
 /// (v-5) or `FF D0-D7` call-reg (v-2) — the cheap x86-64 signature of
 /// a real return address. Slots surviving that check are the real
 /// frames. SAFETY: `task` live; diagnostic reads through its tables.
-unsafe fn apppark_rets(task: *const Task) {
-    let tk = unsafe { &*task };
+fn apppark_rets(task: *const Task) {
+    let tk = crate::sched::edges::task_shared(task);
     // Stack-freed guard (KILLDUMP census race class): nothing to walk
     // without a live stack.
     let Some(top) = tk.kernel_stack_top_checked() else {
@@ -11510,8 +11443,8 @@ unsafe fn apppark_rets(task: *const Task) {
         if va & 0xfff > 0xff8 {
             return None;
         }
-        let lo = unsafe { read_u32_via_task(task, va)? };
-        let hi = unsafe { read_u32_via_task(task, va + 4)? };
+        let lo = crate::sync::edges::read_u32_via_task(task, va)?;
+        let hi = crate::sync::edges::read_u32_via_task(task, va + 4)?;
         Some(lo as u64 | ((hi as u64) << 32))
     };
     use core::fmt::Write;
@@ -11609,14 +11542,14 @@ fn rwfz_emit(s: &str) {
 /// stack window (64 for per-task dumps; the recursion holder needs 256 —
 /// its 16-deep chain with OH frame sizes sits ~1-2 KiB above rsp).
 /// SAFETY: diagnostic walk of `task`'s tables; `task` live.
-unsafe fn rwfz_stack_frames(
+fn rwfz_stack_frames(
     task: *const Task,
     label: &str,
     max_frames: u64,
     scan_slots: u64,
     prio: bool,
 ) {
-    let tk = unsafe { &*task };
+    let tk = crate::sched::edges::task_shared(task);
     // Stack-freed guard (same class as the KILLDUMP census skip above):
     // rwfz_stack_frames runs on FOREIGN tasks that may have exited and
     // freed their kernel stack — a stackless top is KERNEL_STACK_SIZE and
@@ -11672,8 +11605,8 @@ unsafe fn rwfz_stack_frames(
         if va & 0xfff > 0xff8 {
             return None;
         }
-        let lo = unsafe { read_u32_via_task(task, va as usize)? };
-        let hi = unsafe { read_u32_via_task(task, (va + 4) as usize)? };
+        let lo = crate::sync::edges::read_u32_via_task(task, va as usize)?;
+        let hi = crate::sync::edges::read_u32_via_task(task, (va + 4) as usize)?;
         Some(lo as u64 | ((hi as u64) << 32))
     };
     // The RIP itself first — the futex park site names the primitive
@@ -11941,7 +11874,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     // ---- adopt / refresh the watched word ----
     let mut adopted = false;
     for c in waiter_clusters(1) {
-        let v = match unsafe { read_u32_via_task(c.sample, c.uaddr) } {
+        let v = match crate::sync::edges::read_u32_via_task(c.sample, c.uaddr) {
             Some(v) => v,
             None => continue,
         };
@@ -12071,7 +12004,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                         break;
                                     }
                                     let va = base + idx * 4;
-                                    match unsafe { read_u32_via_task(c.sample, va) } {
+                                    match crate::sync::edges::read_u32_via_task(c.sample, va) {
                                         Some(wv) => {
                                             let _ = write!(
                                                 words,
@@ -12473,7 +12406,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     let mut word_now: Option<u32> = None;
     for c in waiter_clusters(1) {
         if c.uaddr == uaddr && c.mm == RWFRZ_MM.load(core::sync::atomic::Ordering::Relaxed) {
-            word_now = unsafe { read_u32_via_task(c.sample, c.uaddr) };
+            word_now = crate::sync::edges::read_u32_via_task(c.sample, c.uaddr);
             break;
         }
     }
@@ -12534,10 +12467,10 @@ pub fn freeze_scan(now: u64, hz: u64) {
         for c in waiter_clusters(1) {
             if c.uaddr == uaddr && c.mm == mm {
                 nb = (
-                    unsafe { read_u32_via_task(c.sample, uaddr + 4) }.unwrap_or(0),
-                    unsafe { read_u32_via_task(c.sample, uaddr + 8) }.unwrap_or(0),
-                    unsafe { read_u32_via_task(c.sample, uaddr + 12) }.unwrap_or(0),
-                    unsafe { read_u32_via_task(c.sample, uaddr + 16) }.unwrap_or(0),
+                    crate::sync::edges::read_u32_via_task(c.sample, uaddr + 4).unwrap_or(0),
+                    crate::sync::edges::read_u32_via_task(c.sample, uaddr + 8).unwrap_or(0),
+                    crate::sync::edges::read_u32_via_task(c.sample, uaddr + 12).unwrap_or(0),
+                    crate::sync::edges::read_u32_via_task(c.sample, uaddr + 16).unwrap_or(0),
                 );
                 break;
             }
@@ -12573,7 +12506,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
             if c.tgid == tgid || c.n < 1 {
                 continue;
             }
-            let v = match unsafe { read_u32_via_task(c.sample, c.uaddr) } {
+            let v = match crate::sync::edges::read_u32_via_task(c.sample, c.uaddr) {
                 Some(v) => v,
                 None => continue,
             };
@@ -12666,10 +12599,10 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
             // __state_ we see the writer bit. The frozen word itself is
             // 0x80000010-shaped, but this sibling lock's shape was never
             // captured (sc89/sc90 dumps only read the frozen word).
-            let w0 = unsafe { read_u32_via_task(t, a0 as usize) }.unwrap_or(0);
-            let wp4 = unsafe { read_u32_via_task(t, a0 as usize + 4) }.unwrap_or(0);
-            let wm4 = unsafe { read_u32_via_task(t, a0 as usize - 4) }.unwrap_or(0);
-            let wp8 = unsafe { read_u32_via_task(t, a0 as usize + 8) }.unwrap_or(0);
+            let w0 = crate::sync::edges::read_u32_via_task(t, a0 as usize).unwrap_or(0);
+            let wp4 = crate::sync::edges::read_u32_via_task(t, a0 as usize + 4).unwrap_or(0);
+            let wm4 = crate::sync::edges::read_u32_via_task(t, a0 as usize - 4).unwrap_or(0);
+            let wp8 = crate::sync::edges::read_u32_via_task(t, a0 as usize + 8).unwrap_or(0);
             crate::pr_warn!(
                 "RWFRZ: NBR-WORD a0={:#x} word={:#x} +4={:#x} +8={:#x} -4={:#x}",
                 a0,
@@ -12715,10 +12648,10 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
             let mut line = alloc::string::String::new();
             let mut n = 0u32;
             for i in 0..256u64 {
-                let Some(v) = (unsafe { read_u32_via_task(t, (sp + 8 * i) as usize) })
+                let Some(v) = (crate::sync::edges::read_u32_via_task(t, (sp + 8 * i) as usize))
                     .map(|lo| lo as u64)
                     .and_then(|lo| {
-                        (unsafe { read_u32_via_task(t, (sp + 8 * i + 4) as usize) })
+                        (crate::sync::edges::read_u32_via_task(t, (sp + 8 * i + 4) as usize))
                             .map(|hi| lo | ((hi as u64) << 32))
                     })
                 else {

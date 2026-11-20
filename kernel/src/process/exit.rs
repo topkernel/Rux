@@ -1716,7 +1716,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     // SAFETY: current is the calling task; read-only walk
                     // of its own user stack (the frames are intact at
                     // do_exit time).
-                    unsafe { crate::sync::futex::apppark_rets_public(current) };
+                    crate::sync::futex::apppark_rets_public(current);
                 }
             }
         }
