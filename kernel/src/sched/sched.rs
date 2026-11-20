@@ -3128,12 +3128,12 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     {
         // SAFETY: pre-poison header reads; the caller owns the final
         // reference.
-        unsafe {
-            let oncpu = (*task_ptr).on_cpu();
-            let claim = (*task_ptr)
+        {
+            let tp = crate::sched::edges::task_shared(task_ptr);
+            let oncpu = tp.on_cpu(); let claim = tp
                 .running_on_cpu
                 .load(core::sync::atomic::Ordering::Acquire);
-            if (oncpu || claim != -1) && (*task_ptr).pid() != 0 {
+            if (oncpu || claim != -1) && tp.pid() != 0 {
                 static FREEC_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if FREEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
@@ -3159,7 +3159,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                     for &b in M {
                         putchar(b);
                     }
-                    pdec3((*task_ptr).pid() as u64);
+                    pdec3(tp.pid() as u64);
                     const M2: &[u8] = b" oncpu=";
                     for &b in M2 {
                         putchar(b);
