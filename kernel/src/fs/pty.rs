@@ -356,14 +356,43 @@ pub fn slave_open(file: &File, minor: u32) -> i32 {
 
 /// Borrow the PtyPair behind a master/slave File (None after close).
 fn pair_of(file: &File) -> Option<&'static PtyPair> {
-    // SAFETY: private_data is either null or an Arc::into_raw(PtyPair)
-    // installed by ptmx_open/slave_open; the Arc ref held by the File keeps
-    // it alive.
-    let ptr = unsafe { *file.private_data.get() }? as *const PtyPair;
+    // private_data is either null or an Arc::into_raw(PtyPair) installed
+    // by ptmx_open/slave_open; the Arc ref held by the File keeps it
+    // alive (the one audited deref below).
+    let ptr = file.private_data_ptr()? as *const PtyPair;
     if ptr.is_null() {
         return None;
     }
+    // SAFETY: the File's own Arc reference pins the pair.
     Some(unsafe { &*ptr })
+}
+
+/// Clone the File's PtyPair Arc without consuming the slot's reference
+/// (the close/TIOCGPTPASS revival edge, same shape as net's INV-NETARC-1).
+fn pair_arc(file: &File) -> Option<Arc<PtyPair>> {
+    let ptr = file.private_data_ptr()? as *const PtyPair;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: ptr is a live Arc::into_raw value (file-lifetime); the
+    // increment balances the from_raw below.
+    unsafe {
+        Arc::increment_strong_count(ptr);
+        Some(Arc::from_raw(ptr))
+    }
+}
+
+/// Take the File's PtyPair Arc out of the slot (close paths — the last
+/// user of this open file description).
+fn take_pair_arc(file: &File) -> Option<()> {
+    let ptr = file.private_data_ptr()? as *const PtyPair;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: consuming the slot's sole Arc reference.
+    unsafe { drop(Arc::from_raw(ptr)) };
+    file.clear_private_data();
+    Some(())
 }
 
 fn nonblock(file: &File) -> bool {
@@ -481,10 +510,8 @@ fn ptmx_poll(file: &File, events: u16) -> u16 {
 }
 
 fn ptmx_close(file: &File) -> i32 {
-    // SAFETY: private_data.get() reads our own Arc::into_raw pointer.
-    if let Some(ptr) = unsafe { file.private_data.get().replace(None) } {
-        // Reconstruct the Arc installed by ptmx_open, dropping one ref.
-        let pair = unsafe { Arc::from_raw(ptr as *const PtyPair) };
+    if let Some(pair) = pair_arc(file) {
+        take_pair_arc(file);
 
         if pair.master_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last master description closed.
@@ -646,10 +673,8 @@ fn pty_slave_poll(file: &File, events: u16) -> u16 {
 }
 
 fn pty_slave_close(file: &File) -> i32 {
-    // SAFETY: private_data.get() reads our own Arc::into_raw pointer.
-    if let Some(ptr) = unsafe { file.private_data.get().replace(None) } {
-        // Reconstruct the Arc installed by slave_open, dropping one ref.
-        let pair = unsafe { Arc::from_raw(ptr as *const PtyPair) };
+    if let Some(pair) = pair_arc(file) {
+        take_pair_arc(file);
 
         if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last slave description closed.
@@ -700,260 +725,250 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
 
     // SAFETY: user pointers are access_ok-validated before each copy; kernel
     // buffers are stack arrays of the exact request size.
-    unsafe {
-        match request {
-            TCGETS => {
-                // Kernel-ABI termios = 36 bytes (c_cc[19]); the 52-byte
-                // wire copy overflowed glibc tcgetattr's stack buffer.
-                if arg == 0 || !access_ok(arg, TERMIOS_KERNEL_SIZE) {
-                    return Some(-(EFAULT as i64));
-                }
-                let tio = pair.tty.get_termios();
-                let mut kbuf = [0u8; TERMIOS_KERNEL_SIZE];
-                termios_to_kernel_bytes(&tio, &mut kbuf);
-                if copy_to_user(arg as *mut u8, kbuf.as_ptr(), TERMIOS_KERNEL_SIZE) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                Some(0)
-            }
-            TCSETS | TCSETSW | TCSETSF => {
-                if arg == 0 || !access_ok(arg, TERMIOS_KERNEL_SIZE) {
-                    return Some(-(EFAULT as i64));
-                }
-                let mut kbuf = [0u8; TERMIOS_KERNEL_SIZE];
-                if copy_from_user(kbuf.as_mut_ptr(), arg as *const u8, TERMIOS_KERNEL_SIZE) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                if request == TCSETSF {
-                    pair.tty.flush_input();
-                }
-                pair.tty.set_termios(termios_from_kernel_bytes(&kbuf));
-                Some(0)
-            }
-            TCGETA => {
-                if arg == 0 || !access_ok(arg, TERMIO_USER_SIZE) {
-                    return Some(-(EFAULT as i64));
-                }
-                let tio = pair.tty.get_termios();
-                let mut kbuf = [0u8; TERMIO_USER_SIZE];
-                termios_to_termio_bytes(&tio, &mut kbuf);
-                if copy_to_user(arg as *mut u8, kbuf.as_ptr(), TERMIO_USER_SIZE) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                Some(0)
-            }
-            TCSETA | TCSETAW | TCSETAF => {
-                if arg == 0 || !access_ok(arg, TERMIO_USER_SIZE) {
-                    return Some(-(EFAULT as i64));
-                }
-                let mut kbuf = [0u8; TERMIO_USER_SIZE];
-                if copy_from_user(kbuf.as_mut_ptr(), arg as *const u8, TERMIO_USER_SIZE) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                let base = pair.tty.get_termios();
-                let tio = termios_from_termio_bytes(&kbuf, &base);
-                if request == TCSETAF {
-                    pair.tty.flush_input();
-                }
-                pair.tty.set_termios(tio);
-                Some(0)
-            }
-            TIOCGWINSZ => {
-                if arg == 0 || !access_ok(arg, 8) {
-                    return Some(-(EFAULT as i64));
-                }
-                let ws = pair.tty.get_winsize().to_le_bytes();
-                if copy_to_user(arg as *mut u8, ws.as_ptr(), 8) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                Some(0)
-            }
-            TIOCSWINSZ => {
-                if arg == 0 || !access_ok(arg, 8) {
-                    return Some(-(EFAULT as i64));
-                }
-                let mut kbuf = [0u8; 8];
-                if copy_from_user(kbuf.as_mut_ptr(), arg as *const u8, 8) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                let ws = crate::fs::tty::WinSize::from_le_bytes(&kbuf);
-                if pair.tty.set_winsize(ws) {
-                    // Notify the foreground process group, like Linux.
-                    pair.tty.send_sigwinch();
-                }
-                Some(0)
-            }
-            TIOCGPGRP => {
-                if arg == 0 || !access_ok(arg, 4) {
-                    return Some(-(EFAULT as i64));
-                }
-                let pgid = pair.tty.fg_pgrp.load(Ordering::Acquire);
-                // No foreground pgrp ever set: report the CALLER's process
-                // group as foreground. Rux has no ctty-acquisition on open
-                // (where Linux sets fg_pgrp to the acquiring session
-                // leader's pgrp), and this is the same net effect for the
-                // first shell on the tty. Both alternatives spin real
-                // shells in their "am I in the foreground?" loops, which
-                // never see their own pgrp: success-with-0 (old behavior)
-                // looped dash's setjobctl forever; ENOTTY loops mrsh
-                // (4c81598 shell/job.c checks tcgetpgrp == getpgrp() with
-                // no -1 handling, 100% CPU since boot as init).
-                let pgid = if pgid == 0 {
-                    crate::process::current_pgid()
-                } else {
-                    pgid
-                };
-                if copy_to_user(arg as *mut u8, pgid.to_le_bytes().as_ptr(), 4) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                Some(0)
-            }
-            TIOCSPGRP => {
-                if arg == 0 || !access_ok(arg, 4) {
-                    return Some(-(EFAULT as i64));
-                }
-                let mut kbuf = [0u8; 4];
-                if copy_from_user(kbuf.as_mut_ptr(), arg as *const u8, 4) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                let pgid = u32::from_le_bytes(kbuf);
-                pair.tty.fg_pgrp.store(pgid, Ordering::Release);
-                Some(0)
-            }
-            TIOCGPTN if is_master => {
-                if arg == 0 || !access_ok(arg, 4) {
-                    return Some(-(EFAULT as i64));
-                }
-                if copy_to_user(arg as *mut u8, pair.index.to_le_bytes().as_ptr(), 4) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                Some(0)
-            }
-            // unlockpt: kernel-side ptys are never locked — report unlocked.
-            TIOCSPTLCK => {
-                if arg != 0 && !access_ok(arg, 4) {
-                    return Some(-(EFAULT as i64));
-                }
-                let mut v: [u8; 4] = [0; 4];
-                if arg != 0 {
-                    // SAFETY: length-checked copy_from_user into a local.
-                    if unsafe {
-                        crate::arch::uaccess::copy_from_user(
-                            v.as_mut_ptr(),
-                            arg as *const u8,
-                            4,
-                        )
-                    } != 0
-                    {
-                        return Some(-(EFAULT as i64));
-                    }
-                }
-                let lock = i32::from_le_bytes(v) != 0;
-                if let Some(pair) = pair_of(file) {
-                    pair.locked.store(lock, Ordering::Release);
-                }
-                Some(0)
-            }
-            // TIOCGPTPEER: open the slave of this master's pair and return
-            // its fd as the ioctl result (Linux devpts pty_open_peer). This
-            // is how glibc >= 2.28's openpty() acquires the slave — it never
-            // calls open("/dev/pts/N") itself. Before this was implemented,
-            // the request fell into the console ioctl fallback, which
-            // "simplified" every unknown 'T' ioctl to success(0): openpty
-            // then believed fd 0 was the slave. fd 0 was really the console
-            // (or whatever lived there), so every shell spawned through
-            // openpty — xterm's interactive child included — wired stdio to
-            // the wrong file: bash hung silently on the console, dash spun
-            // in its tcsetpgrp retry loop, and bare `xterm` could never run
-            // a working shell.
-            TIOCGPTPEER if is_master => {
-                use crate::fs::file::{get_file_fd_install, File, FileFlags};
 
-                const O_RDWR: u32 = 0o2;
-                const O_NONBLOCK: u32 = 0o4000;
-                const O_CLOEXEC: u32 = 0o2000000;
-
-                if pair.master_closed.load(Ordering::Acquire) {
-                    return Some(-(crate::errno::Errno::IOError.as_neg_i32() as i64));
-                }
-                // An owning Arc for the File's private_data (pair_of lends
-                // a &static; the close op reconstructs the Arc from the raw
-                // pointer, so this must be a real counted reference).
-                let pair_arc = match PTY_TABLE.lock_irqsave().get(&pair.index).cloned() {
-                    Some(p) => p,
-                    None => {
-                        return Some(-(crate::errno::Errno::IOError.as_neg_i32() as i64))
-                    }
-                };
-                // Slave descriptions are O_RDWR regardless of `arg`; Linux
-                // honors only O_NONBLOCK | O_CLOEXEC from the caller.
-                let flags = O_RDWR | (arg as u32 & (O_NONBLOCK | O_CLOEXEC));
-                let file = Arc::new(File::new(FileFlags::new(flags)));
-                file.set_ops(&PTY_SLAVE_OPS);
-                // Attach the /dev/pts/N devfs inode when it can be resolved
-                // so fstat/ttyname on the peer fd report the real device
-                // identity (rdev 136:N) instead of the anonymous-file
-                // fallback. Best-effort: the pair lives in PTY_TABLE, so a
-                // lookup miss here is benign.
-                if let Ok(vp) = crate::fs::vfs::path_lookup(
-                    &format!("/dev/pts/{}", pair.index),
-                    0,
-                ) {
-                    if let Some(inode) = vp.inode {
-                        file.set_inode(inode);
-                        if let Some(d) = vp.dentry {
-                            file.set_dentry(d);
-                        }
-                    }
-                }
-                // Reopen-after-last-close discipline identical to slave_open.
-                if pair.slave_refs.fetch_add(1, Ordering::AcqRel) == 0 {
-                    pair.slave_closed.store(false, Ordering::Release);
-                }
-                file.set_private_data(Arc::into_raw(pair_arc) as *mut u8);
-
-                match get_file_fd_install(Arc::clone(&file)) {
-                    Some(fd) => {
-                        if flags & O_CLOEXEC != 0 {
-                            if let Some(fdtable) = crate::sched::get_current_fdtable() {
-                                fdtable.set_fd_cloexec(fd, true);
-                            }
-                        }
-                        Some(fd as i64)
-                    }
-                    None => {
-                        // Install failed. Reclaim the Arc ref stashed in
-                        // private_data (no fd owns the File, so its close op
-                        // would never run to consume it) and undo the
-                        // slave_refs bump with the same last-close
-                        // discipline as pty_slave_close.
-                        // SAFETY: we exclusively own `file`; private_data
-                        // holds the Arc::into_raw pointer we just installed.
-                        if let Some(ptr) = unsafe { (*file.private_data.get()).take() } {
-                            drop(unsafe { Arc::from_raw(ptr as *const PtyPair) });
-                        }
-                        if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
-                            pair.slave_closed.store(true, Ordering::Release);
-                        }
-                        Some(-(crate::errno::Errno::TooManyOpenFiles.as_neg_i32() as i64))
-                    }
-                }
+    match request {
+        TCGETS => {
+            // Kernel-ABI termios = 36 bytes (c_cc[19]); the 52-byte
+            // wire copy overflowed glibc tcgetattr's stack buffer.
+            if arg == 0 || !access_ok(arg, TERMIOS_KERNEL_SIZE) {
+                return Some(-(EFAULT as i64));
             }
-            FIONREAD => {
-                if arg == 0 || !access_ok(arg, 4) {
-                    return Some(-(EFAULT as i64));
-                }
-                let count: u32 = if is_master {
-                    pair.master_rx_len() as u32
-                } else {
-                    pair.tty.fionread_count() as u32
-                };
-                if copy_to_user(arg as *mut u8, count.to_le_bytes().as_ptr(), 4) > 0 {
-                    return Some(-(EFAULT as i64));
-                }
-                Some(0)
+            let tio = pair.tty.get_termios();
+            let mut kbuf = [0u8; TERMIOS_KERNEL_SIZE];
+            termios_to_kernel_bytes(&tio, &mut kbuf);
+            if crate::arch::uaccess_safe::copy_out(arg, &kbuf) > 0 {
+                return Some(-(EFAULT as i64));
             }
-            _ => None, // FIONBIO and unknown requests → generic path
+            Some(0)
         }
+        TCSETS | TCSETSW | TCSETSF => {
+            if arg == 0 || !access_ok(arg, TERMIOS_KERNEL_SIZE) {
+                return Some(-(EFAULT as i64));
+            }
+            let mut kbuf = [0u8; TERMIOS_KERNEL_SIZE];
+            if crate::arch::uaccess_safe::copy_in(&mut kbuf[..TERMIOS_KERNEL_SIZE], arg) > 0 {
+                return Some(-(EFAULT as i64));
+            }
+            if request == TCSETSF {
+                pair.tty.flush_input();
+            }
+            pair.tty.set_termios(termios_from_kernel_bytes(&kbuf));
+            Some(0)
+        }
+        TCGETA => {
+            if arg == 0 || !access_ok(arg, TERMIO_USER_SIZE) {
+                return Some(-(EFAULT as i64));
+            }
+            let tio = pair.tty.get_termios();
+            let mut kbuf = [0u8; TERMIO_USER_SIZE];
+            termios_to_termio_bytes(&tio, &mut kbuf);
+            if crate::arch::uaccess_safe::copy_out(arg, &kbuf[..TERMIO_USER_SIZE]) > 0 {
+                return Some(-(EFAULT as i64));
+            }
+            Some(0)
+        }
+        TCSETA | TCSETAW | TCSETAF => {
+            if arg == 0 || !access_ok(arg, TERMIO_USER_SIZE) {
+                return Some(-(EFAULT as i64));
+            }
+            let mut kbuf = [0u8; TERMIO_USER_SIZE];
+            if crate::arch::uaccess_safe::copy_in(&mut kbuf[..TERMIO_USER_SIZE], arg) > 0 {
+                return Some(-(EFAULT as i64));
+            }
+            let base = pair.tty.get_termios();
+            let tio = termios_from_termio_bytes(&kbuf, &base);
+            if request == TCSETAF {
+                pair.tty.flush_input();
+            }
+            pair.tty.set_termios(tio);
+            Some(0)
+        }
+        TIOCGWINSZ => {
+            if arg == 0 || !access_ok(arg, 8) {
+                return Some(-(EFAULT as i64));
+            }
+            let ws = pair.tty.get_winsize().to_le_bytes();
+            if crate::arch::uaccess_safe::copy_out(arg, &ws[..8]) > 0 {
+                return Some(-(EFAULT as i64));
+            }
+            Some(0)
+        }
+        TIOCSWINSZ => {
+            if arg == 0 || !access_ok(arg, 8) {
+                return Some(-(EFAULT as i64));
+            }
+            let mut kbuf = [0u8; 8];
+            if crate::arch::uaccess_safe::copy_in(&mut kbuf[..8], arg) > 0 {
+                return Some(-(EFAULT as i64));
+            }
+            let ws = crate::fs::tty::WinSize::from_le_bytes(&kbuf);
+            if pair.tty.set_winsize(ws) {
+                // Notify the foreground process group, like Linux.
+                pair.tty.send_sigwinch();
+            }
+            Some(0)
+        }
+        TIOCGPGRP => {
+            if arg == 0 || !access_ok(arg, 4) {
+                return Some(-(EFAULT as i64));
+            }
+            let pgid = pair.tty.fg_pgrp.load(Ordering::Acquire);
+            // No foreground pgrp ever set: report the CALLER's process
+            // group as foreground. Rux has no ctty-acquisition on open
+            // (where Linux sets fg_pgrp to the acquiring session
+            // leader's pgrp), and this is the same net effect for the
+            // first shell on the tty. Both alternatives spin real
+            // shells in their "am I in the foreground?" loops, which
+            // never see their own pgrp: success-with-0 (old behavior)
+            // looped dash's setjobctl forever; ENOTTY loops mrsh
+            // (4c81598 shell/job.c checks tcgetpgrp == getpgrp() with
+            // no -1 handling, 100% CPU since boot as init).
+            let pgid = if pgid == 0 {
+                crate::process::current_pgid()
+            } else {
+                pgid
+            };
+            if !crate::arch::uaccess_safe::write_user(arg, pgid) {
+                return Some(-(EFAULT as i64));
+            }
+            Some(0)
+        }
+        TIOCSPGRP => {
+            if arg == 0 || !access_ok(arg, 4) {
+                return Some(-(EFAULT as i64));
+            }
+            let mut kbuf = [0u8; 4];
+            if crate::arch::uaccess_safe::copy_in(&mut kbuf[..4], arg) > 0 {
+                return Some(-(EFAULT as i64));
+            }
+            let pgid = u32::from_le_bytes(kbuf);
+            pair.tty.fg_pgrp.store(pgid, Ordering::Release);
+            Some(0)
+        }
+        TIOCGPTN if is_master => {
+            if arg == 0 || !access_ok(arg, 4) {
+                return Some(-(EFAULT as i64));
+            }
+            if !crate::arch::uaccess_safe::write_user(arg, pair.index) {
+                return Some(-(EFAULT as i64));
+            }
+            Some(0)
+        }
+        // unlockpt: kernel-side ptys are never locked — report unlocked.
+        TIOCSPTLCK => {
+            if arg != 0 && !access_ok(arg, 4) {
+                return Some(-(EFAULT as i64));
+            }
+            let mut v: [u8; 4] = [0; 4];
+            if arg != 0 {
+                if crate::arch::uaccess_safe::copy_in(&mut v, arg) != 0 {
+                    return Some(-(EFAULT as i64));
+                }
+            }
+            let lock = i32::from_le_bytes(v) != 0;
+            if let Some(pair) = pair_of(file) {
+                pair.locked.store(lock, Ordering::Release);
+            }
+            Some(0)
+        }
+        // TIOCGPTPEER: open the slave of this master's pair and return
+        // its fd as the ioctl result (Linux devpts pty_open_peer). This
+        // is how glibc >= 2.28's openpty() acquires the slave — it never
+        // calls open("/dev/pts/N") itself. Before this was implemented,
+        // the request fell into the console ioctl fallback, which
+        // "simplified" every unknown 'T' ioctl to success(0): openpty
+        // then believed fd 0 was the slave. fd 0 was really the console
+        // (or whatever lived there), so every shell spawned through
+        // openpty — xterm's interactive child included — wired stdio to
+        // the wrong file: bash hung silently on the console, dash spun
+        // in its tcsetpgrp retry loop, and bare `xterm` could never run
+        // a working shell.
+        TIOCGPTPEER if is_master => {
+            use crate::fs::file::{get_file_fd_install, File, FileFlags};
+
+            const O_RDWR: u32 = 0o2;
+            const O_NONBLOCK: u32 = 0o4000;
+            const O_CLOEXEC: u32 = 0o2000000;
+
+            if pair.master_closed.load(Ordering::Acquire) {
+                return Some(-(crate::errno::Errno::IOError.as_neg_i32() as i64));
+            }
+            // An owning Arc for the File's private_data (pair_of lends
+            // a &static; the close op reconstructs the Arc from the raw
+            // pointer, so this must be a real counted reference).
+            let pair_arc = match PTY_TABLE.lock_irqsave().get(&pair.index).cloned() {
+                Some(p) => p,
+                None => {
+                    return Some(-(crate::errno::Errno::IOError.as_neg_i32() as i64))
+                }
+            };
+            // Slave descriptions are O_RDWR regardless of `arg`; Linux
+            // honors only O_NONBLOCK | O_CLOEXEC from the caller.
+            let flags = O_RDWR | (arg as u32 & (O_NONBLOCK | O_CLOEXEC));
+            let file = Arc::new(File::new(FileFlags::new(flags)));
+            file.set_ops(&PTY_SLAVE_OPS);
+            // Attach the /dev/pts/N devfs inode when it can be resolved
+            // so fstat/ttyname on the peer fd report the real device
+            // identity (rdev 136:N) instead of the anonymous-file
+            // fallback. Best-effort: the pair lives in PTY_TABLE, so a
+            // lookup miss here is benign.
+            if let Ok(vp) = crate::fs::vfs::path_lookup(
+                &format!("/dev/pts/{}", pair.index),
+                0,
+            ) {
+                if let Some(inode) = vp.inode {
+                    file.set_inode(inode);
+                    if let Some(d) = vp.dentry {
+                        file.set_dentry(d);
+                    }
+                }
+            }
+            // Reopen-after-last-close discipline identical to slave_open.
+            if pair.slave_refs.fetch_add(1, Ordering::AcqRel) == 0 {
+                pair.slave_closed.store(false, Ordering::Release);
+            }
+            file.set_private_data(Arc::into_raw(pair_arc) as *mut u8);
+
+            match get_file_fd_install(Arc::clone(&file)) {
+                Some(fd) => {
+                    if flags & O_CLOEXEC != 0 {
+                        if let Some(fdtable) = crate::sched::get_current_fdtable() {
+                            fdtable.set_fd_cloexec(fd, true);
+                        }
+                    }
+                    Some(fd as i64)
+                }
+                None => {
+                    // Install failed. Reclaim the Arc ref stashed in
+                    // private_data (no fd owns the File, so its close op
+                    // would never run to consume it) and undo the
+                    // slave_refs bump with the same last-close
+                    // discipline as pty_slave_close.
+                    // SAFETY: we exclusively own `file`; private_data
+                    // holds the Arc::into_raw pointer we just installed.
+                    take_pair_arc(&file);
+                    if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
+                        pair.slave_closed.store(true, Ordering::Release);
+                    }
+                    Some(-(crate::errno::Errno::TooManyOpenFiles.as_neg_i32() as i64))
+                }
+            }
+        }
+        FIONREAD => {
+            if arg == 0 || !access_ok(arg, 4) {
+                return Some(-(EFAULT as i64));
+            }
+            let count: u32 = if is_master {
+                pair.master_rx_len() as u32
+            } else {
+                pair.tty.fionread_count() as u32
+            };
+            if !crate::arch::uaccess_safe::write_user(arg, count) {
+                return Some(-(EFAULT as i64));
+            }
+            Some(0)
+        }
+        _ => None, // FIONBIO and unknown requests → generic path
     }
+
 }
