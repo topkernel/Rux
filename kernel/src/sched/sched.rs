@@ -527,7 +527,7 @@ fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
 
     // SAFETY: current is this CPU's current task, paused inside the tick.
     unsafe {
-        let policy = (*current).policy();
+        let policy = crate::sched::edges::task_shared(current).policy();
         if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
             let used = RT_TIME_USED[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
             if used >= RT_RUNTIME_JIFFIES
@@ -946,7 +946,7 @@ pub fn grq_dump_holder(why: &str) {
     // word to read; the site stamps alone still name the participants.
     let holder = if crate::sched::edges::grq_is_ready() {
         // SAFETY: GRQ_READY checked; read-only lock word access.
-        unsafe { grq() }.lock.holder_cpu()
+        grq().lock.holder_cpu()
     } else {
         None
     };
@@ -977,7 +977,7 @@ pub fn grq_dump_holder(why: &str) {
         let holds = holder == Some(cpu);
         let acq = GRQ_ACQ_JIF[cpu].load(core::sync::atomic::Ordering::Relaxed);
         let age = now.wrapping_sub(acq);
-        let cur = unsafe { crate::sched::sched::cpu_state(cpu).current };
+        let cur = crate::sched::sched::cpu_state(cpu).current;
         grq_raw_puts(b"GRQ-HOLDER cpu=");
         grq_raw_putdec(cpu as u64);
         grq_raw_puts(b" role=");
@@ -1039,7 +1039,7 @@ pub fn grq_dump_holder(why: &str) {
             // (an IRQ-interrupted frame's pt_regs + the interrupted
             // return addresses), symbolizable offline. The holder is
             // wedged, so the reads are consistent.
-            let cur = unsafe { crate::sched::sched::cpu_state(cpu).current };
+            let cur = crate::sched::sched::cpu_state(cpu).current;
             if !cur.is_null() {
                 let top = crate::sched::edges::task_shared(cur).kernel_stack_top();
                 if top != 0 {
@@ -1049,9 +1049,7 @@ pub fn grq_dump_holder(why: &str) {
                         off -= 8;
                         // SAFETY: the holder's own kernel stack, in-bounds
                         // by construction (top - off within the 16K stack).
-                        let v = unsafe {
-                            core::ptr::read_volatile((top - off) as *const u64)
-                        };
+                        let v = crate::sync::edges::read_volatile_u64(top - off);
                         grq_raw_puts(b"GRQ-BT   @-");
                         grq_raw_putdec(off as u64);
                         grq_raw_puts(b" 0x");
@@ -1129,7 +1127,7 @@ pub fn grq_held_here() -> bool {
     }
     let cpu = crate::arch::cpu_id() as usize;
     // SAFETY: GRQ_READY checked; read-only lock word access.
-    unsafe { grq() }.lock.held_by(cpu)
+    grq().lock.held_by(cpu)
 }
 
 /// Initialize the global run queue (called once during boot).
@@ -3600,9 +3598,7 @@ pub fn schedule() {
     }
     // SAFETY: __schedule() manipulates raw task pointers and calls context_switch;
     // must be called from kernel context with valid current task pointer.
-    unsafe {
-        __schedule();
-    }
+    __schedule();
     if let Some(cur) = current() {
         cur.clear_ti_flag(IN_SCHED);
     }
@@ -3658,7 +3654,7 @@ pub fn terminal_release_grq_if_held() {
     // SAFETY: GRQ_READY checked. held_by reads the word read-only; only
     // this cpu's own acquire/release writes this cpu's ownership into
     // it, so a `true` here is stable until our own release below.
-    if !unsafe { grq() }.lock.held_by(cpu) {
+    if !grq().lock.held_by(cpu) {
         return;
     }
     static GRQFORCE_N: core::sync::atomic::AtomicU32 =
@@ -3686,7 +3682,7 @@ pub fn terminal_release_grq_if_held() {
     //
     // SAFETY: grq() returns the initialized GRQ (GRQ_READY checked
     // above); the word names THIS cpu as the holder (held_by).
-    unsafe { grq().lock.force_unlock_terminal() };
+    grq().lock.force_unlock_terminal();
     if n < 8 {
         let pid = crate::sched::current()
             .map(|t| crate::sched::edges::task_shared(t).pid())
@@ -10115,13 +10111,13 @@ pub fn scheduler_tick() {
                 / 1_000_000_000;
             if hard != u64::MAX && secs >= hard {
                 let _ = crate::signal::send_signal(
-                    (*current).pid() as u32,
+                    crate::sched::edges::task_shared(current).pid() as u32,
                     crate::signal::Signal::SIGKILL as i32,
                 );
-            } else if soft != u64::MAX && secs >= soft && secs > (*current).cpu_time_last_sigxcpu() {
+            } else if soft != u64::MAX && secs >= soft && secs > crate::sched::edges::task_shared(current).cpu_time_last_sigxcpu() {
                 (*current).set_cpu_time_last_sigxcpu(secs);
                 let _ = crate::signal::send_signal(
-                    (*current).pid() as u32,
+                    crate::sched::edges::task_shared(current).pid() as u32,
                     crate::signal::Signal::SIGXCPU as i32,
                 );
             }
@@ -10136,7 +10132,7 @@ pub fn scheduler_tick() {
     // RLIMIT_CPU / posix-timer precedent (send_signal from tick context).
     // A one-shot (interval==0) disarms after firing.
     unsafe {
-        let se = (*current).sched_entity();
+        let se = crate::sched::edges::task_shared(current).sched_entity();
         let now = se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
         let virt_deadline = (*current).itimer_virt[0].load(core::sync::atomic::Ordering::Acquire);
         if virt_deadline != 0 && now >= virt_deadline {
@@ -10145,7 +10141,7 @@ pub fn scheduler_tick() {
             let next = if interval != 0 { now + interval } else { 0 };
             (*current).itimer_virt[0].store(next, core::sync::atomic::Ordering::Release);
             let _ = crate::signal::send_signal(
-                (*current).pid() as u32,
+                crate::sched::edges::task_shared(current).pid() as u32,
                 crate::signal::Signal::SIGVTALRM as i32,
             );
         }
@@ -10156,7 +10152,7 @@ pub fn scheduler_tick() {
             let next = if interval != 0 { now + interval } else { 0 };
             (*current).itimer_prof[0].store(next, core::sync::atomic::Ordering::Release);
             let _ = crate::signal::send_signal(
-                (*current).pid() as u32,
+                crate::sched::edges::task_shared(current).pid() as u32,
                 crate::signal::Signal::SIGPROF as i32,
             );
         }
@@ -10178,7 +10174,7 @@ pub fn scheduler_tick() {
                     pt.cputime_deadline_ns.store(next, core::sync::atomic::Ordering::Release);
                     if pt.sigev_notify != 1 && pt.sigev_signo > 0 {
                         let _ = crate::signal::send_signal(
-                            (*current).pid() as u32,
+                            crate::sched::edges::task_shared(current).pid() as u32,
                             pt.sigev_signo,
                         );
                     }
@@ -10203,10 +10199,11 @@ pub fn scheduler_tick() {
         set_need_resched();
     }
 
-    // SAFETY: current is this_cpu().current, a valid Task pointer set during CPU init;
-    // null check above; we only touch fields appropriate for the current CPU's task.
-    unsafe {
-        let policy = (*current).policy();
+    // current is this_cpu().current, a valid Task pointer set during CPU
+    // init; null check above; fields of the current CPU's task (INV-SCE-2).
+    {
+        let current = crate::sched::edges::task_shared(current);
+        let policy = current.policy();
 
         match policy {
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
@@ -10221,10 +10218,10 @@ pub fn scheduler_tick() {
                     // R20-6: see __schedule — only the CPU whose task owns
                     // the single cfs_rq.curr slot charges through it; every
                     // CPU charges its own current task exactly once.
-                    if grq_guard.cfs_rq.get_curr() == current {
+                    if grq_guard.cfs_rq.get_curr() == core::ptr::from_ref(current) as *mut Task {
                         grq_guard.cfs_rq.update_curr(now);
                     } else {
-                        let se = (*current).sched_entity();
+                        let se = crate::sched::edges::task_shared(current).sched_entity();
                         let delta = se.update_exec_runtime(now);
                         if delta > 0 {
                             se.update_vruntime(delta);
@@ -10256,7 +10253,7 @@ pub fn scheduler_tick() {
                     // `timeline_count + 1 > 1` = `timeline_count > 0`
                     // here — at least one OTHER queued CFS task.
                     if grq_guard.cfs_rq.nr_running() > 0 {
-                        let se = (*current).sched_entity();
+                        let se = crate::sched::edges::task_shared(current).sched_entity();
                         let slice_ns = grq_guard.cfs_rq.sched_slice(se);
                         let sum =
                             se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
@@ -10274,7 +10271,7 @@ pub fn scheduler_tick() {
                 }
             }
             SchedPolicy::Rr => {
-                let rt_entity = (*current).rt_entity();
+                let rt_entity = crate::sched::edges::task_shared(current).rt_entity();
                 let remaining = rt_entity.dec_time_slice();
                 if remaining == 0 {
                     rt_entity.reset_time_slice();
@@ -10292,7 +10289,7 @@ pub fn scheduler_tick() {
                     //      resume a zombie.
                     // current is paused on THIS CPU inside the IRQ, so the
                     // state read is race-free.
-                    if (*current).state() == TaskState::new(TaskState::RUNNING) {
+                    if crate::sched::edges::task_shared(current).state() == TaskState::new(TaskState::RUNNING) {
                         let mut grq_guard = grq().lock_irqsave_site(grq_site(GRQ_CALLER_TICK, GRQ_STEP_TRY));
                         // R39: propagate the insert result and pair the
                         // grq.nr_running count. The rotation links a RUNNING
@@ -10301,7 +10298,7 @@ pub fn scheduler_tick() {
                         // there never fires) — every RR rotation leaked one
                         // count from the atomic, drift that any future
                         // reader of grq.nr_running would inherit.
-                        if grq_guard.rt_rq.enqueue(current, false) {
+                        if grq_guard.rt_rq.enqueue(core::ptr::from_ref(current) as *mut Task, false) {
                             grq_guard.nr_running.fetch_add(
                                 1,
                                 core::sync::atomic::Ordering::Relaxed,
@@ -10317,14 +10314,14 @@ pub fn scheduler_tick() {
             }
             SchedPolicy::Deadline => {
                 let now = crate::sched::fair::sched_clock();
-                let dl_entity = (*current).dl_entity();
+                let dl_entity = crate::sched::edges::task_shared(current).dl_entity();
                 let delta = now - dl_entity.exec_start.load(core::sync::atomic::Ordering::Relaxed);
                 dl_entity.exec_start.store(now, core::sync::atomic::Ordering::Release);
                 if !dl_entity.consume_runtime(delta) {
                     // Batch 8 (CBS): budget exhausted — throttle (state left
                     // INTERRUPTIBLE, replenish timer armed at the deadline)
                     // and leave the CPU to lower classes.
-                    dl_throttle(&mut *current);
+                    dl_throttle(crate::sched::edges::task_mut(core::ptr::from_ref(current) as *mut Task));
                     set_need_resched();
                 }
             }
