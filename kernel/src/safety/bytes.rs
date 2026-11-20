@@ -88,3 +88,27 @@ pub fn write_at<T: Copy>(buf: &mut [u8], off: usize, val: T) -> Option<()> {
     unsafe { core::ptr::write_unaligned(buf.as_mut_ptr().add(off) as *mut T, val) };
     Some(())
 }
+
+/// View a whole `[T: Copy]` slice as its byte image (INV-CBYTES-1 slice
+/// arm: a slice of `T` is `len()` elements at `size_of::<T>()` stride,
+/// so its byte image is exactly `len() * size_of::<T>()` contiguous
+/// bytes starting at the slice — the same argument the hand-rolled
+/// `from_raw_parts(v.as_ptr() as *const u8, n * size_of::<T>())` sites
+/// made per site; uaccess batch copies over `[PollFd]`/`[T]` buffers).
+#[inline]
+pub fn bytes_of_slice<T: Copy>(v: &[T]) -> &[u8] {
+    let n = v.len().checked_mul(size_of::<T>()).expect("slice byte length overflow");
+    // SAFETY: INV-CBYTES-1 — the slice is live for the borrow and its
+    // byte image is exactly n bytes; the view re-labels the same memory.
+    unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, n) }
+}
+
+/// View a whole `[T: Copy]` slice as its mutable byte image
+/// (INV-CBYTES-1/3 slice arm; the exclusive twin of `bytes_of_slice`).
+#[inline]
+pub fn bytes_of_slice_mut<T: Copy>(v: &mut [T]) -> &mut [u8] {
+    let n = v.len().checked_mul(size_of::<T>()).expect("slice byte length overflow");
+    // SAFETY: INV-CBYTES-1/3 — same re-labeling as bytes_of_slice, made
+    // exclusive by &mut [T].
+    unsafe { core::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, n) }
+}
