@@ -11,5 +11,5 @@ kernel/src/mm/page_alloc.rs 34
 kernel/src/mm/pglist.rs 19
 kernel/src/signal.rs 15
 kernel/src/sched/sched.rs 0
-kernel/src/arch/riscv64/trap.rs 23
+kernel/src/arch/riscv64/trap.rs 0
 kernel/src/arch/x86_64/trap.rs 0

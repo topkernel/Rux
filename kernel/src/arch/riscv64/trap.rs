@@ -630,6 +630,7 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
                     };
                     KP_ARMED.store(v, core::sync::atomic::Ordering::Relaxed);
                     if v == 2 {
+                        // HOTPATH-PRINT: preempt-leak report — one-shot latch above
                         crate::pr_info!(
                             "sched: kernel-preempt armed by cmdline (cpu={})",
                             crate::arch::cpu_id()
@@ -1027,6 +1028,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
             .map(|t| unsafe { ((*t).pid(), (*t).comm()) })
             .unwrap_or((0, &EMPTY_COMM));
         let comm_len = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+        // HOTPATH-PRINT: fault-path — see the gate/one-shot context above
         crate::pr_info!(
             "trap: user SIGILL pid={} comm={:?} epc={:#x} insn16={:#06x} fs={:#x}",
             pid,
@@ -1080,6 +1082,7 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
     let mm = match mm {
         Some(m) => m,
         None => {
+            // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
             crate::pr_info!("SIGILL-FORENSIC pid={} no-mm", pid);
             return;
         }
@@ -1121,6 +1124,7 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
             ));
         }
     }
+    // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
     crate::pr_info!(
         "SIGILL-FORENSIC pid={} epc={:#x} page={:#x} vmas={}",
         pid, epc, page, rows.len()
@@ -1133,6 +1137,7 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
         } else {
             alloc::string::String::new()
         };
+        // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
         crate::pr_info!(
             "  VMA {:#x}-{:#x} {} {} {}{}",
             s, e, perms, ty,
@@ -1141,6 +1146,7 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
         );
     }
     if !rows.iter().any(|r| r.4) {
+        // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
         crate::pr_info!("SIGILL-FORENSIC: epc NOT COVERED by any VMA");
     }
 
@@ -1172,6 +1178,7 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
         }
         level -= 1;
     }
+    // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
     crate::pr_info!("SIGILL-FORENSIC epc-page PTE @{:#x} = {:#x}", pte_addr, pte);
     // SIGILL-stamp report: is the epc frame one the file-fill path stamped
     // (a genuine text page), and for whom?
@@ -1179,12 +1186,14 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
         let pfn = ((pte >> 10) & 0xFFF_FFFF_FFFF) as usize;
         match crate::mm::page_desc::text_stamp_get(pfn) {
             Some((owner_pid, owner_va)) => {
+                // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
                 crate::pr_info!(
                     "SIGILL-FORENSIC epc-frame STAMPED pfn={:#x} owner_pid={} owner_va={:#x}",
                     pfn, owner_pid, owner_va
                 );
             }
             None => {
+                // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
                 crate::pr_info!(
                     "SIGILL-FORENSIC epc-frame NOT stamped pfn={:#x} (never a file-fill page, or stamp lost)",
                     pfn
@@ -1209,6 +1218,7 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
         for (i, w) in words.iter_mut().enumerate() {
             *w = core::ptr::read_volatile(p64.add(i));
         }
+        // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
         crate::pr_info!(
             "SIGILL-FORENSIC page[0..8]: {:016x} {:016x} {:016x} {:016x} {:016x} {:016x} {:016x} {:016x}",
             words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]
@@ -1218,6 +1228,7 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
         for (i, w) in w2.iter_mut().enumerate() {
             *w = core::ptr::read_volatile(p64.add(off_words + i));
         }
+        // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
         crate::pr_info!(
             "SIGILL-FORENSIC epc-16..+24: {:016x} {:016x} {:016x} {:016x} {:016x}",
             w2[0], w2[1], w2[2], w2[3], w2[4]
@@ -1230,6 +1241,7 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
             for (i, w) in w8.iter_mut().enumerate() {
                 *w = core::ptr::read_volatile(p64.add(row * 8 + i));
             }
+            // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
             crate::pr_info!(
                 "FDP{:03x}: {:016x} {:016x} {:016x} {:016x} {:016x} {:016x} {:016x} {:016x}",
                 row, w8[0], w8[1], w8[2], w8[3], w8[4], w8[5], w8[6], w8[7]
@@ -1321,6 +1333,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                 return;
             }
         }
+        // HOTPATH-PRINT: fault-path — see context above
         crate::pr_info!(
             "UBRK: comm={} epc={:#x} ra={:#x}",
             comm_now,
@@ -1489,10 +1502,15 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
-                crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
+                                // HOTPATH-PRINT: budget-gated (SEGV, 8/boot) — per user SIGSEGV fault; the death dump below carries the forensics
+                static SEGV_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
                     fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
                     crate::sched::get_current_pid(),
                     "user");
+                }
                 // User-fault VMA forensics: name the mappings the fault
                 // address and epc fall in. The GNOME bring-up had
                 // recurring shell deaths at a fixed address deep inside
@@ -1507,6 +1525,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                         for a in [fault_addr, regs.epc] {
                             match mm.find_vma(
                                 crate::mm::VirtAddr::new(a as usize)) {
+                                // HOTPATH-PRINT: fault-path — budgeted/one-shot above
                                 None => crate::pr_err!(
                                     "  segv vma[{:#x}]: unmapped", a),
                                 Some(v) => {
@@ -1562,6 +1581,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                                     } else {
                                         alloc::string::String::from("anon")
                                     };
+                                    // HOTPATH-PRINT: fault-path — budgeted/one-shot above
                                     crate::pr_err!(
                                         "  segv vma[{:#x}]: {:x}-{:x} {} off={:#x} {} origin={}{}",
                                         a, v.start().as_usize(),
@@ -1580,10 +1600,15 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // the thread-only exit orphaned the dead thread's locks.
                 crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
-                crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
+                                // HOTPATH-PRINT: budget-gated (SEGV, 8/boot) — per user SIGSEGV fault; the death dump below carries the forensics
+                static SEGV_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
                     fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
                     crate::sched::get_current_pid(),
                     "kernel");
+                }
             }
         }
         MmFaultResult::PermissionDenied => {
@@ -1610,12 +1635,22 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
-                crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
+                                // HOTPATH-PRINT: budget-gated (PDENY, 8/boot) — W^X/probing workloads hit this per store; the signal delivery is the event
+                static PDENY_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if PDENY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
+                }
                 let _ = crate::signal::send_signal_with_info_directed(pid, acc_info);
                 // huks-wedge lane (hw5): group death (Linux do_group_exit).
                 crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
-                crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
+                                // HOTPATH-PRINT: budget-gated (PDENY, 8/boot) — W^X/probing workloads hit this per store; the signal delivery is the event
+                static PDENY_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if PDENY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
+                }
             }
         }
         MmFaultResult::BusError => {
@@ -1636,18 +1671,33 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                     ),
                 );
                 if !sigbus_has_handler() {
-                    crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
+                                        // HOTPATH-PRINT: budget-gated (PASTEOF, 8/boot) — past-EOF probes hit this per access
+                    static PASTEOF_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    if PASTEOF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
+                    }
                     // huks-wedge lane (hw5): group death (Linux do_group_exit).
                     crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
             } else {
-                crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
+                                // HOTPATH-PRINT: budget-gated (PASTEOF, 8/boot) — past-EOF probes hit this per access
+                static PASTEOF_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if PASTEOF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
+                }
             }
         }
         MmFaultResult::OutOfMemory => {
-            crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
+                        // HOTPATH-PRINT: budget-gated (PFOOM, 8/boot) — a looping OOM app fires this per fault; the kill is the event
+            static PFOOM_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if PFOOM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
+            }
             // FORENSIC (r74): an SBI-direct line printk cannot lose. The
             // r72-fire family's 570s gnome-shell-cal kill left NO trace in
             // any serial — either printk was wedged on a lock the stuck
@@ -1982,6 +2032,7 @@ fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
 fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
     crate::pr_debug!("trap: unknown exception {:?}, epc={:#x}, badaddr={:#x}",
         cause, regs.epc, regs.badaddr);
+    // HOTPATH-PRINT: fatal-path — once per unknown-cause trap
     crate::pr_err!("trap: Unknown exception: {:?}, epc={:#x}, badaddr={:#x}",
         cause, regs.epc, regs.badaddr);
 
