@@ -261,7 +261,6 @@ STATUS = {
     "kernel/src/trace/mod.rs": ("done", "written by this review (tracepoint core)"),
     "kernel/src/arch/aarch64/boot.rs": ("done", "DTB-pointer extern + get_dtb_pointer; boot.S publishes the pointer pre-MMU and re-publishes post-MMU"),
     "kernel/src/arch/aarch64/boot/boot.S": ("fixed", "read end to end (this review): EL2 drop, early TTBR0/TTBR1 tables, MAIR/TCR, secondary_start PSCI path; stray 'str x0, [x1]' stored the vector-table base into dtb_pointer (latent — the post-MMU re-publish repaired it before any consumer), store removed"),
-    "kernel/src/arch/aarch64/dtb_blob.S": ("done", "7-line .incbin of the QEMU virt DTB"),
     "kernel/src/arch/aarch64/trap.S": ("done", "read end to end: VBAR vectors, TRAP_BODY save protocol, SPSR-based EL0/EL1 sp select, FPSIMD capture/restore, exit loop preempt gate, restore_and_eret slot map, ret_from_fork trampolines"),
     "kernel/src/drivers/timer/aarch64.rs": ("todo", ""),
     "kernel/src/arch/aarch64/context.rs": ("part", "switch_mm/TTBR0/ASID paths, context_switch step order, R56 switch_abort twin — mirrors riscv64"),
