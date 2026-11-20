@@ -2064,13 +2064,9 @@ impl Task {
         );
         Self::register_slot_deferred_sizes();
         crate::process::unsafe_edges::place_task(ptr, task);
-        // Re-anchor the self-referential list heads at the placed
-        // address — same rationale as new_task_at (the constructor
-        // temporary's self-pointers die with the temporary).
-        let t = crate::process::unsafe_edges::borrow_task_mut(ptr);
-        t.children.init();
-        t.sibling.init();
-        t.rt_run_list.init();
+        // INV-PROC-PLACE-2: the self-referential list heads are
+        // re-anchored inside place_task (the single placement choke
+        // point) — nothing constructor-side needed here.
     }
 
     /// Slot-size registrations shared by both constructors.
@@ -2128,26 +2124,18 @@ impl Task {
         task.time_slice = HZ;
         Self::register_slot_deferred_sizes();
         crate::process::unsafe_edges::place_task(ptr, task);
-
-        // Re-anchor the self-referential list heads AT THE PLACED ADDRESS.
-        // Task::new initializes children/sibling/rt_run_list with init(),
-        // which points each head at ITSELF — the address of the
-        // constructor's TEMPORARY value on the caller's stack. The
-        // build-then-place discipline copies the struct to the slot and
-        // the temporary dies: every empty-list self-pointer then dangles
-        // at a dead stack address. The old offset_of ladder initialized
-        // these heads IN PLACE at the final address; the Round-B
-        // placement-new rewrite (beeb17524) lost that, and every later
-        // list op dereferenced the stale temp — add_tail wrote through
-        // head.prev (a wild write into reused stack memory) and the
-        // task-tree walks visited the temp as a list node (the fio
-        // null-walk / user-range-node corruption family; freed-while-
-        // linked fallout). group_leader/next_thread are exempt: the
-        // deltas above write the FINAL slot address explicitly.
-        let t = crate::process::unsafe_edges::borrow_task_mut(ptr);
-        t.children.init();
-        t.sibling.init();
-        t.rt_run_list.init();
+        // INV-PROC-PLACE-2 (the beeb17524 lesson, enforced at the edge):
+        // Task::new's ListHead::init() self-points children/sibling/
+        // rt_run_list at the CONSTRUCTOR TEMPORARY's stack address, and
+        // build-then-place kills that temporary — the old offset_of
+        // ladder initialized these heads IN PLACE at the final address;
+        // the Round-B rewrite silently lost it and every later list op
+        // dereferenced stale stack memory (the fio null-walk / user-
+        // range-node corruption family). The re-anchor now lives INSIDE
+        // place_task (the single placement choke point), so no
+        // constructor route can forget it. group_leader/next_thread
+        // above write the FINAL slot address explicitly, which is its
+        // own correct anchor.
 
         // Allocate kernel stack
         let t = crate::process::unsafe_edges::borrow_task_mut(ptr);
