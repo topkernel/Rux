@@ -934,19 +934,43 @@ fn checksum_ok(vaddr: usize, len: usize) -> bool {
 }
 
 /// Volatile 32-bit read from a linear-mapped physical address.
+///
+/// ACPI/BIOS tables place fields at BYTE granularity (the real-mode
+/// EBDA segment word at 0x40E is 2-mod-4), so this helper must tolerate
+/// unaligned phys — it reads RAM through the linear map, NOT a device
+/// MMIO window, and the MmioRegion alignment assert (Miri's UB
+/// contract for DEVICE windows) does not apply here. Compose from two
+/// u16 volatiles: keeps every access naturally aligned (no UB on any
+/// target), identical little-endian result on x86_64/riscv64/aarch64.
 fn read_phys_u32(phys: usize) -> u32 {
-    let va = crate::arch::mm::memory_layout::phys_to_virt(
+    let lo = crate::safety::mmio::MmioRegion::new(
+        phys_to_lin(phys),
+        2,
+    )
+    .read_u16(0) as u32;
+    let hi = crate::safety::mmio::MmioRegion::new(
+        phys_to_lin(phys + 2),
+        2,
+    )
+    .read_u16(0) as u32;
+    lo | (hi << 16)
+}
+
+/// The linear-map VA of a physical address (the apic.rs local alias).
+fn phys_to_lin(phys: usize) -> usize {
+    crate::arch::mm::memory_layout::phys_to_virt(
         crate::arch::mm::memory_layout::PhysAddr::new(phys as u64),
-    );
-    crate::safety::mmio::MmioRegion::new(va.as_usize(), 4).read_u32(0)
+    )
+    .as_usize()
 }
 
 /// Volatile 64-bit read from a linear-mapped physical address.
 fn read_phys_u64(phys: usize) -> u64 {
-    let va = crate::arch::mm::memory_layout::phys_to_virt(
-        crate::arch::mm::memory_layout::PhysAddr::new(phys as u64),
-    );
-    crate::safety::mmio::MmioRegion::new(va.as_usize(), 8).read_u64(0)
+    // Same unaligned-tolerant composition as read_phys_u32 (ACPI/BIOS
+    // fields are byte-granular): two aligned u32 volatiles.
+    let lo = read_phys_u32(phys) as u64;
+    let hi = read_phys_u32(phys + 4) as u64;
+    lo | (hi << 32)
 }
 
 /// Map the ACPI table scan windows into the linear map.  The firmware
