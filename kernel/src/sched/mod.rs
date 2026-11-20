@@ -28,6 +28,7 @@ pub mod idle;
 pub mod fair;
 pub mod cgroup;
 pub mod wakewatch;
+pub mod side_edges;
 pub mod stats;
 
 pub use sched::{

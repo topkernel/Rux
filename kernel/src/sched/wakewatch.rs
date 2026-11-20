@@ -153,7 +153,7 @@ pub fn note_wake(task: *mut crate::process::Task) {
     // s16: wake-time tie-mass, only on census boots (O(nr) timeline
     // walk; note_wake is hot).
     if crate::trace::EVENT_WWCENSUS.armed() {
-        let vr = unsafe { (*task).sched_entity().get_vruntime() };
+        let vr = crate::process::unsafe_edges::borrow_task(task).sched_entity().get_vruntime();
         slot.wtie.store(
             crate::sched::sched::ww_cfs_tie_mass_vr(vr),
             Ordering::Release,
@@ -194,7 +194,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     DELTA_SUM_TICKS.fetch_add(delta, Ordering::Relaxed);
     // rt-r4: RT-class pick deltas (avg + µs max) — see RT_PICK_N.
     if matches!(
-        unsafe { (*task).policy() },
+        crate::process::unsafe_edges::borrow_task(task).policy(),
         crate::process::task::SchedPolicy::Fifo | crate::process::task::SchedPolicy::Rr
     ) {
         RT_PICK_N.fetch_add(1, Ordering::Relaxed);
@@ -234,7 +234,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             }
             let us = delta * 1_000_000 / TIMER_CLOCK_FREQ_HZ;
             // SAFETY: read-only pid of the picked task (GRQ held pins it).
-            let pid = unsafe { (*task).pid() as u64 };
+            let pid = crate::process::unsafe_edges::borrow_task(task).pid() as u64;
             for &b in b"\nCYC-PICK-LATE us=" { putchar(b); }
             ph(us);
             for &b in b" pid=0x" { putchar(b); }
@@ -282,7 +282,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     if print_budget_ok() && probe_prints_on() {
         // SAFETY: diagnostic reads of stable Task fields; the task is
         // being picked (GRQ held pins it).
-        let pid = unsafe { (*task).pid() };
+        let pid = crate::process::unsafe_edges::borrow_task(task).pid();
         ww_msg(b"WAKE-STRANDED pid=");
         ww_u64(pid as u64);
         ww_msg(b" cpu=");
@@ -290,7 +290,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         ww_msg(b" strand=");
         ww_u64(ms);
         ww_msg(b"ms policy=");
-        ww_u64(unsafe { (*task).policy() as u64 });
+        ww_u64(crate::process::unsafe_edges::borrow_task(task).policy() as u64);
         // Monster-strand forensics (launcher perf gate round 3): name
         // each CPU's incumbent and its CURRENT-activation run length so
         // the report answers "what was the CPU doing instead" directly —
@@ -307,11 +307,11 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             }
             // SAFETY: init-time valid slot pointer; scalar field reads
             // tolerate a concurrent switch (diagnostic only).
-            unsafe {
-                ww_u64((*cur).pid() as u64);
+            {
+                ww_u64(crate::process::unsafe_edges::borrow_task(cur).pid() as u64);
                 ww_msg(b"/p");
-                ww_u64((*cur).policy() as u64);
-                let se = (*cur).sched_entity();
+                ww_u64(crate::process::unsafe_edges::borrow_task(cur).policy() as u64);
+                let se = crate::process::unsafe_edges::borrow_task(cur).sched_entity();
                 let act_ns = se
                     .sum_exec_runtime
                     .load(core::sync::atomic::Ordering::Relaxed)
@@ -330,7 +330,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                 // 1 = a leaked PREEMPT_OFFSET (spinlock guard), 0x100 =
                 // a leaked bh, 0x4000000 = a leaked PREEMPT_ACTIVE.
                 ww_msg(b"/pc=");
-                ww_u64((*cur).preempt_count() as u32 as u64);
+                ww_u64(crate::process::unsafe_edges::borrow_task(cur).preempt_count() as u32 as u64);
                 ww_msg(b")");
             }
             // leg-24 leakhunt v3: the slot incumbent can be a stale
@@ -347,10 +347,10 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                     ww_msg(b"nil");
                 } else {
                     // SAFETY: diagnostic reads of stable Task fields.
-                    unsafe {
-                        ww_u64((*tp).pid() as u64);
+                    {
+                        ww_u64(crate::process::unsafe_edges::borrow_task(tp).pid() as u64);
                         ww_msg(b"/pc=");
-                        ww_u64((*tp).preempt_count() as u32 as u64);
+                        ww_u64(crate::process::unsafe_edges::borrow_task(tp).preempt_count() as u32 as u64);
                     }
                 }
             }
@@ -630,8 +630,10 @@ pub fn stallwatch_tick() {
     let _skipped = crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
         // for_each_task pins the task (per-bucket lock); reads are of
         // stable fields. The side-table helpers take raw identity.
+        // The try-walk pins the task (per-bucket lock); the side-table
+        // helpers take raw identity.
         let t = t as *const crate::process::Task as *mut crate::process::Task;
-        let tk = unsafe { &*t };
+        let tk = crate::process::unsafe_edges::borrow_task(t);
         let comm = core::str::from_utf8(&tk.comm()[..]).unwrap_or("");
         let comm = comm.trim_end_matches('\0');
         // sc160: widen to the launcher cohort — sc159's appspawn children

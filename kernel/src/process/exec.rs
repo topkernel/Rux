@@ -34,241 +34,6 @@ const ZERO_NEW: ZeroEntry = ZeroEntry::new();
 pub static STACKZERO_RING: [ZeroEntry; 128] = [ZERO_NEW; 128];
 pub static STACKZERO_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// Kernel-side write into a freshly mapped USER address range, resolving
-/// each page through the page tables. The image mapping may span multiple
-/// buddy blocks (alloc_and_map_to_user_table chunks big requests), so
-/// physical contiguity must NOT be assumed.
-///
-/// Returns false when a page of the range has no mapping (the caller
-/// treats that as ENOMEM — the range was just mapped, so a miss is a
-/// kernel bug, not a malformed binary).
-///
-/// # Safety
-/// `root_ppn` must be a valid user page-table root whose range
-/// [vaddr, vaddr+src.len()) is fully mapped and exclusively owned by this
-/// in-construction address space.
-unsafe fn copy_user_image(root_ppn: u64, vaddr: u64, src: &[u8]) -> bool {
-    use crate::arch::mm::mm_ops::PageTableWalker;
-    use crate::arch::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
-
-    let mut done = 0usize;
-    while done < src.len() {
-        let va = vaddr + done as u64;
-        let in_page = (va as usize) & (PAGE_SIZE as usize - 1);
-        let Some((ppn, pte)) = PageTableWalker::walk(root_ppn, va) else {
-            return false;
-        };
-        if pte & 1 == 0 {
-            return false;
-        }
-        let chunk = core::cmp::min(src.len() - done, PAGE_SIZE as usize - in_page);
-        let kva = phys_to_virt(PhysAddr::new(ppn << PAGE_SHIFT)).bits() as usize + in_page;
-        // SAFETY: kva is the linear-map address of a page-table-resolved
-        // frame of this address space; chunk is bounded by the page.
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr().add(done), kva as *mut u8, chunk);
-        }
-        done += chunk;
-    }
-    true
-}
-
-/// One audited edge for the ELF program-header lookups on this file's
-/// bytes (fs/elf.rs owns the table contract). Every call site iterates a
-/// loop bounded by the header's `e_phnum` (or by `phdr_count`, derived
-/// from it on the exec path), so the index precondition is discharged
-/// here once instead of at eight scattered unsafe blocks.
-#[inline]
-fn phdr_at(
-    ehdr: &crate::fs::elf::Elf64Ehdr,
-    data: &[u8],
-    index: usize,
-) -> Option<crate::fs::elf::Elf64Phdr> {
-    // SAFETY: ehdr/data come from a validated ELF image and index <
-    // e_phnum at every call site.
-    unsafe { ehdr.get_program_header(data, index) }
-}
-
-/// One audited edge for the ELF-header validation of a file slice.
-#[inline]
-fn ehdr_from(data: &[u8]) -> Option<crate::fs::elf::Elf64Ehdr> {
-    // SAFETY: from_bytes validates magic/layout internally; the result is
-    // None for malformed images.
-    unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(data) }
-}
-
-/// One audited edge for the fresh-tree mapping allocator (mm/mod.rs):
-/// map [va, va+len) into the loader's freshly created, still-unpublished
-/// user tree with the given user PTE flags. Returns the block's physical
-/// base (never to be used for linear writes — the chunked allocator may
-/// split the range; content installation goes through the walker).
-#[inline]
-fn map_user_range(root: u64, va: u64, len: u64, flags: u64) -> Option<u64> {
-    // SAFETY: root is a freshly allocated page-table root owned by this
-    // loader; va/len describe a user range nothing else has mapped; flags
-    // are valid user PTE bits (call sites pass V|U|RW or V|U|RX shapes).
-    unsafe { crate::mm::alloc_and_map_user_table(root, va, len, flags) }
-}
-
-/// Debug readback of one user word through the page-table walk (the
-/// READBACK/DIVERGE probes). Returns (word, leaf ppn); None = unmapped.
-fn probe_read_u64(root: u64, va: u64) -> Option<(u64, u64)> {
-    use crate::arch::mm::mm_ops::PageTableWalker;
-    // SAFETY: root is the exec loader's fresh tree and va a range it just
-    // mapped; walk is the arch's unsafe backend with the root/va contract
-    // discharged by the loader's ownership of the tree.
-    let (ppn, _) = unsafe { PageTableWalker::walk(root, va)? };
-    let kva = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(
-        ppn as u64 * 4096,
-    ))
-    .bits() as usize;
-    // SAFETY: the linear-map byte of the frame resolved above, within the
-    // same page as va.
-    let word = unsafe {
-        core::ptr::read_volatile((kva + (va & 0xFFF) as usize) as *const u64)
-    };
-    Some((word, ppn))
-}
-
-/// Tighten the leaf PTE permission bits of every present leaf covering
-/// [seg_start, seg_end) in the fresh, still-unpublished user tree
-/// (INV-LOCK-7: no MmStruct owns it yet, so no TLB entries can exist).
-/// PPNs are preserved — permission bits only. `seg_exec=false` sets NX
-/// on the arches that express non-exec via an NX alias.
-///
-/// One audited edge replacing the four hand-rolled per-level walks that
-/// used to live inline in the main-image and interpreter tightening
-/// loops (same walk, same invariants, one place).
-fn set_leaf_flags_range(root: u64, seg_start: u64, seg_end: u64, seg_flags: u64, seg_exec: bool) {
-    // seg_exec only carries meaning on arches that express non-exec via
-    // an NX alias (x86_64); the riscv64 PTE layout has no NX bit.
-    #[cfg(not(feature = "x86_64"))]
-    let _ = seg_exec;
-    #[cfg(feature = "riscv64")]
-    {
-        let mut vaddr = seg_start;
-        while vaddr < seg_end {
-            let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
-            let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
-            let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
-            // SAFETY: the walk descends the fresh tree's own tables
-            // (root allocated by this loader, unpublished — INV-LOCK-7);
-            // each level's validity is checked before descending and only
-            // the leaf permission bits are rewritten (PPN preserved).
-            unsafe {
-                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
-                    root << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte2 = (*root_table).get(vpn2);
-                if !pte2.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
-                    pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte1 = (*table1).get(vpn1);
-                if !pte1.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
-                    pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let old_pte = (*table0).get(vpn0);
-                if !old_pte.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
-                (*table0).set(
-                    vpn0,
-                    crate::arch::mm::PageTableEntry::from_bits(new_bits),
-                );
-            }
-            vaddr += crate::arch::mm::PAGE_SIZE as u64;
-        }
-    }
-    #[cfg(feature = "x86_64")]
-    {
-        let mut vaddr = seg_start;
-        while vaddr < seg_end {
-            // 4-level x86_64 walk (PML4/PDPT/PD/PT)
-            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
-            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
-            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
-            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
-            // SAFETY: the walk descends the fresh tree's own tables
-            // (root allocated by this loader, unpublished — INV-LOCK-7);
-            // each level's validity is checked before descending and only
-            // the leaf permission bits are rewritten (PPN preserved).
-            unsafe {
-                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
-                    root << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte4 = (*root_table).get(i4);
-                if !pte4.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table3 = crate::arch::mm::mmu_init::get_page_table_virt(
-                    pte4.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte3 = (*table3).get(i3);
-                if !pte3.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table2 = crate::arch::mm::mmu_init::get_page_table_virt(
-                    pte3.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte2 = (*table2).get(i2);
-                if !pte2.is_valid() || pte2.is_leaf() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
-                    pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let old_pte = (*table1).get(i1);
-                if !old_pte.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                // x86 permission bits: clear W|U|NX, then set from the
-                // semantic aliases (V=P, W=RW, U=US; R/X are no-ops —
-                // non-exec is expressed via NX).
-                let clear =
-                    crate::arch::mm::PageTableEntry::W
-                        | crate::arch::mm::PageTableEntry::U
-                        | crate::arch::mm::PageTableEntry::NX;
-                let mut new_bits = (old_pte.bits() & !clear) | seg_flags;
-                if !seg_exec {
-                    new_bits |= crate::arch::mm::PageTableEntry::NX;
-                }
-                (*table1).set(
-                    i1,
-                    crate::arch::mm::PageTableEntry::from_bits(new_bits),
-                );
-            }
-            vaddr += crate::arch::mm::PAGE_SIZE as u64;
-        }
-    }
-    #[cfg(feature = "aarch64")]
-    {
-        let mut vaddr = seg_start;
-        while vaddr < seg_end {
-            // SAFETY: user_ppn is the freshly created user root (unpublished
-            // — INV-LOCK-7); the arch helper rewrites only present L3
-            // leaves' permission bits, preserving the output address.
-            unsafe {
-                crate::arch::mm::mmu_init::set_user_leaf_flags(root, vaddr, seg_flags);
-            }
-            vaddr += crate::arch::mm::PAGE_SIZE as u64;
-        }
-    }
-}
-
 /// Execute ELF loading (execve internal function)
 ///
 /// This function will:
@@ -388,7 +153,7 @@ pub(crate) fn do_execve_elf(
     for i in 0..phdr_count {
         // SAFETY: program_data is a valid ELF file slice and i < phdr_count is bounded
         // by the ELF header's e_phnum, so the program header index is in range.
-        let phdr = phdr_at(ehdr, program_data, i)
+        let phdr = crate::process::unsafe_edges::exec_phdr_at(ehdr, program_data, i)
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
 
         // W^X (sec-r1, L4): PT_GNU_STACK decides the stack's executability
@@ -496,17 +261,9 @@ pub(crate) fn do_execve_elf(
     struct UserAddrSpaceGuard(u64);
     impl Drop for UserAddrSpaceGuard {
         fn drop(&mut self) {
-            // SAFETY: user_ppn was allocated by create_user_address_space;
-            // on error path, free all page tables to avoid physical page
-            // leaks. FRESH_TREE_PTE_LOCK: this tree is unpublished (no
-            // MmStruct owns it yet), no mm-side writers exist (INV-LOCK-7).
-            unsafe {
-                crate::arch::mm::mmu_init::free_user_page_tables(
-                    &crate::mm::mm_struct::FRESH_TREE_PTE_LOCK,
-                    self.0,
-                    &[],
-                );
-            }
+            // user_ppn was allocated by create_user_address_space; on
+            // error path, free all page tables (INV-PROC-EXEC-FREETREE-1).
+            crate::process::unsafe_edges::exec_free_user_page_trees(self.0);
         }
     }
     let _guard = UserAddrSpaceGuard(user_ppn);
@@ -537,7 +294,7 @@ pub(crate) fn do_execve_elf(
     // loader below walks the page tables page by page.
     let image_start = virt_start + exec_load_bias;
     let _image_phys_base =
-        map_user_range(user_ppn, image_start, total_size, flags)
+        crate::process::unsafe_edges::exec_map_user_range(user_ppn, image_start, total_size, flags)
             .ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
     if ec2_on { ec2_map = crate::arch::cpu::read_time(); }
 
@@ -557,7 +314,7 @@ pub(crate) fn do_execve_elf(
     let stack_top = user_end;
     let stack_bottom = stack_top - initial_stack_size;
     let _stack_phys_base =
-        map_user_range(user_ppn, stack_bottom, initial_stack_size, stack_flags)
+        crate::process::unsafe_edges::exec_map_user_range(user_ppn, stack_bottom, initial_stack_size, stack_flags)
             .ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
     // NOTE (abi-review session 1): no explicit zeroing here. BOTH arch
@@ -587,7 +344,7 @@ pub(crate) fn do_execve_elf(
         // user_ppn is a fresh user page-table root; RX U flags are valid
         // PTE bits. The returned frame is freshly allocated and
         // exclusively owned by this address space.
-        let tp = map_user_range(
+        let tp = crate::process::unsafe_edges::exec_map_user_range(
             user_ppn,
             crate::signal::SIGTRAMP_BASE,
             4096,
@@ -596,10 +353,7 @@ pub(crate) fn do_execve_elf(
         );
         if let Some(tp) = tp {
             let kva = phys_to_virt(PhysAddr::new(tp)).bits() as usize;
-            unsafe {
-                core::ptr::write_volatile(kva as *mut u32, 0x08b0_0893);
-                core::ptr::write_volatile((kva + 4) as *mut u32, 0x0000_0073);
-            }
+            crate::process::unsafe_edges::exec_write_sigtramp(kva, 0x08b0_0893, 0x0000_0073);
         }
     }
     // aarch64 twin of the same trampoline page: arm64 glibc/musl normally
@@ -614,7 +368,7 @@ pub(crate) fn do_execve_elf(
         // flags are the same contract the stack/image mappings above pass.
         // The returned frame is freshly allocated and exclusively owned by
         // this address space.
-        let tp = map_user_range(
+        let tp = crate::process::unsafe_edges::exec_map_user_range(
             user_ppn,
             crate::signal::SIGTRAMP_BASE,
             4096,
@@ -623,10 +377,7 @@ pub(crate) fn do_execve_elf(
         );
         if let Some(tp) = tp {
             let kva = phys_to_virt(PhysAddr::new(tp)).bits() as usize;
-            unsafe {
-                core::ptr::write_volatile(kva as *mut u32, 0xD280_1168);
-                core::ptr::write_volatile((kva + 4) as *mut u32, 0xD400_0001);
-            }
+            crate::process::unsafe_edges::exec_write_sigtramp(kva, 0xD280_1168, 0xD400_0001);
         }
     }
 
@@ -634,7 +385,7 @@ pub(crate) fn do_execve_elf(
     if ec2_on { ec2_stack = crate::arch::cpu::read_time(); }
     for i in 0..phdr_count {
         // SAFETY: Same as above — i < phdr_count and program_data is a valid ELF slice.
-        let phdr = phdr_at(ehdr, program_data, i)
+        let phdr = crate::process::unsafe_edges::exec_phdr_at(ehdr, program_data, i)
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
 
         if phdr.is_load() {
@@ -664,7 +415,7 @@ pub(crate) fn do_execve_elf(
             // Copy file data page by page.
             if file_size > 0 {
                 let src = &program_data[offset..offset + file_size as usize];
-                if !unsafe { copy_user_image(user_ppn, virt_addr, src) } {
+                if !crate::process::unsafe_edges::exec_copy_user_image(user_ppn, virt_addr, src) {
                     return Err(crate::errno::Errno::OutOfMemory.as_neg_i32());
                 }
             }
@@ -680,7 +431,7 @@ pub(crate) fn do_execve_elf(
     // Initial mapping was RW (no X); now set exact R/W/X from program headers.
     if ec2_on { ec2_copy = crate::arch::cpu::read_time(); }
     for i in 0..phdr_count {
-        let phdr = phdr_at(ehdr, program_data, i)
+        let phdr = crate::process::unsafe_edges::exec_phdr_at(ehdr, program_data, i)
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
 
         if phdr.is_load() && phdr.p_memsz > 0 {
@@ -696,7 +447,7 @@ pub(crate) fn do_execve_elf(
             // Walk page table for each page in the segment and update PTE
             // flags (typed helper; the fresh-tree contract and the
             // permission-only rewrite live in set_leaf_flags_range).
-            set_leaf_flags_range(user_ppn, seg_start, seg_end, seg_flags,
+            crate::process::unsafe_edges::exec_set_leaf_flags_range(user_ppn, seg_start, seg_end, seg_flags,
                 phdr.is_executable());
         }
     }
@@ -719,27 +470,25 @@ pub(crate) fn do_execve_elf(
     // snapshot, both of which interpolate correctly from rdcycle.
     {
         let (data_paddr, code_paddr) = crate::mm::vdso::vdso_pages_phys();
-        // SAFETY: user_ppn is the freshly created page-table root; the
-        // physical frames are the aligned 4 KiB vDSO statics; flags are
-        // valid user PTE bits.
-        unsafe {
-            crate::arch::mm::mm_ops::map_user_region(
-                user_ppn,
-                crate::mm::vdso::VDSO_BASE,
-                data_paddr,
-                4096,
-                PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
-                    | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D,
-            );
-            crate::arch::mm::mm_ops::map_user_region(
-                user_ppn,
-                crate::mm::vdso::VDSO_BASE + 4096,
-                code_paddr,
-                4096,
-                PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
-                    | PageTableEntry::X | PageTableEntry::A,
-            );
-        }
+        // user_ppn is the freshly created page-table root; the physical
+        // frames are the aligned 4 KiB vDSO statics
+        // (INV-PROC-EXEC-VDSO-1).
+        crate::process::unsafe_edges::exec_map_user_region_static(
+            user_ppn,
+            crate::mm::vdso::VDSO_BASE,
+            data_paddr,
+            4096,
+            PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
+                | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D,
+        );
+        crate::process::unsafe_edges::exec_map_user_region_static(
+            user_ppn,
+            crate::mm::vdso::VDSO_BASE + 4096,
+            code_paddr,
+            4096,
+            PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
+                | PageTableEntry::X | PageTableEntry::A,
+        );
     }
 
     }
@@ -764,22 +513,20 @@ pub(crate) fn do_execve_elf(
         // process corrupt the syscall-side clock (the reference maps
         // vvar RO for the same reason). The kernel writes through its
         // own image mapping.
-        unsafe {
-            crate::arch::mm::mm_ops::map_user_region(
-                user_ppn,
-                crate::mm::vdso::VDSO_BASE,
-                data_paddr,
-                4096,
-                PageTableEntry::P | PageTableEntry::US | PageTableEntry::A,
-            );
-            crate::arch::mm::mm_ops::map_user_region(
-                user_ppn,
-                crate::mm::vdso::VDSO_BASE + 4096,
-                code_paddr,
-                4096,
-                PageTableEntry::P | PageTableEntry::US | PageTableEntry::A,
-            );
-        }
+        crate::process::unsafe_edges::exec_map_user_region_static(
+            user_ppn,
+            crate::mm::vdso::VDSO_BASE,
+            data_paddr,
+            4096,
+            PageTableEntry::P | PageTableEntry::US | PageTableEntry::A,
+        );
+        crate::process::unsafe_edges::exec_map_user_region_static(
+            user_ppn,
+            crate::mm::vdso::VDSO_BASE + 4096,
+            code_paddr,
+            4096,
+            PageTableEntry::P | PageTableEntry::US | PageTableEntry::A,
+        );
     }
 
     // Load interpreter (dynamic linker) if present
@@ -787,14 +534,14 @@ pub(crate) fn do_execve_elf(
     let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {        let interp_base: u64 = INTERP_BASE as u64;  // mmap_start - 16MB
 
         // SAFETY: interp_bytes is a validated ELF interpreter file loaded earlier.
-        let interp_ehdr = ehdr_from(interp_bytes)
+        let interp_ehdr = crate::process::unsafe_edges::exec_ehdr_from(interp_bytes)
             .ok_or(crate::errno::Errno::ExecFormatError.as_neg_i32())?;
 
         let mut interp_min_vaddr: u64 = u64::MAX;
         let mut interp_max_vaddr: u64 = 0;
         for i in 0..interp_ehdr.e_phnum as usize {
             // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
-            if let Some(phdr) = phdr_at(&interp_ehdr, interp_bytes, i) {
+            if let Some(phdr) = crate::process::unsafe_edges::exec_phdr_at(&interp_ehdr, interp_bytes, i) {
                 if phdr.is_load() {
                     if phdr.p_vaddr < interp_min_vaddr { interp_min_vaddr = phdr.p_vaddr; }
                     if let Some(end) = phdr.p_vaddr.checked_add(phdr.p_memsz) {
@@ -814,14 +561,14 @@ pub(crate) fn do_execve_elf(
         // page-table walk, never through a phys base (abi-review session 2:
         // this retires ElfLoader::load_dynamic_to, whose linear
         // dest_kva + (p_vaddr - min) writes assumed a single block).
-        let _interp_phys = map_user_range(user_ppn, interp_base, interp_size, flags)
+        let _interp_phys = crate::process::unsafe_edges::exec_map_user_range(user_ppn, interp_base, interp_size, flags)
             .ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
         // Copy each PT_LOAD through the walker. BSS needs no explicit
         // zeroing: the allocator pre-zeroes every mapped page.
         for i in 0..interp_ehdr.e_phnum as usize {
             // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
-            if let Some(phdr) = phdr_at(&interp_ehdr, interp_bytes, i) {
+            if let Some(phdr) = crate::process::unsafe_edges::exec_phdr_at(&interp_ehdr, interp_bytes, i) {
                 if phdr.is_load() && phdr.p_filesz > 0 {
                     let offset = phdr.p_offset as usize;
                     let filesz = phdr.p_filesz as usize;
@@ -831,9 +578,11 @@ pub(crate) fn do_execve_elf(
                     let dst = interp_base + (phdr.p_vaddr - interp_min_vaddr);
                     // SAFETY: user_ppn is this fresh address space's root;
                     // dst lies inside the freshly mapped interp range.
-                    if !unsafe {
-                        copy_user_image(user_ppn, dst, &interp_bytes[offset..offset + filesz])
-                    } {
+                    if !crate::process::unsafe_edges::exec_copy_user_image(
+                        user_ppn,
+                        dst,
+                        &interp_bytes[offset..offset + filesz],
+                    ) {
                         return Err(crate::errno::Errno::OutOfMemory.as_neg_i32());
                     }
                 }
@@ -858,7 +607,7 @@ pub(crate) fn do_execve_elf(
             let mut src_off = None;
             for i in 0..interp_ehdr.e_phnum as usize {
                 // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
-                if let Some(ph) = phdr_at(&interp_ehdr, interp_bytes, i) {
+                if let Some(ph) = crate::process::unsafe_edges::exec_phdr_at(&interp_ehdr, interp_bytes, i) {
                     if ph.is_load()
                         && interp_ehdr.e_entry >= ph.p_vaddr
                         && interp_ehdr.e_entry + 8 <= ph.p_vaddr + ph.p_filesz
@@ -872,7 +621,7 @@ pub(crate) fn do_execve_elf(
                 let mut wb = [0u8; 8];
                 wb.copy_from_slice(&interp_bytes[src_off..src_off + 8]);
                 let want = u64::from_le_bytes(wb);
-                match probe_read_u64(user_ppn, entry_va) {
+                match crate::process::unsafe_edges::exec_probe_read_u64(user_ppn, entry_va) {
                     Some((ptev, ppn)) => {
                         if ptev != want {
                             crate::pr_err!(
@@ -888,7 +637,7 @@ pub(crate) fn do_execve_elf(
 
         // Tighten PTE permissions for interpreter segments.
         for i in 0..interp_ehdr.e_phnum as usize {
-            if let Some(phdr) = phdr_at(&interp_ehdr, interp_bytes, i) {
+            if let Some(phdr) = crate::process::unsafe_edges::exec_phdr_at(&interp_ehdr, interp_bytes, i) {
                 if phdr.is_load() && phdr.p_memsz > 0 {
                     let seg_start = interp_base + phdr.p_vaddr - interp_min_vaddr;
                     let seg_end = (seg_start + phdr.p_memsz + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
@@ -901,7 +650,7 @@ pub(crate) fn do_execve_elf(
                     // Tighten the segment's leaf permissions through the
                     // typed fresh-tree helper (same contract as the
                     // main-image pass; interpreter tree, still unpublished).
-                    set_leaf_flags_range(user_ppn, seg_start, seg_end,
+                    crate::process::unsafe_edges::exec_set_leaf_flags_range(user_ppn, seg_start, seg_end,
                         seg_flags, phdr.is_executable());
                 }
             }
@@ -1013,7 +762,7 @@ pub(crate) fn do_execve_elf(
         for i in 0..ehdr.e_phnum as usize {
             // SAFETY: get_program_header bounds-checks e_phoff/idx against
             // program_data (Wave 1 central check).
-            if let Some(ph) = phdr_at(ehdr, program_data, i) {
+            if let Some(ph) = crate::process::unsafe_edges::exec_phdr_at(ehdr, program_data, i) {
                 if ph.p_type == crate::fs::elf::ElfPtType::PT_PHDR as u32 {
                     found = Some(exec_load_bias + ph.p_vaddr);
                     break;
@@ -1171,7 +920,7 @@ pub(crate) fn do_execve_elf(
     // SAFETY: user_ppn is this fresh address space's root and
     // [adjusted_stack_top, adjusted_stack_top + args_buf.len()) lies
     // inside the freshly mapped stack region.
-    if !unsafe { copy_user_image(user_ppn, adjusted_stack_top, &args_buf) } {
+    if !crate::process::unsafe_edges::exec_copy_user_image(user_ppn, adjusted_stack_top, &args_buf) {
         return Err(crate::errno::Errno::OutOfMemory.as_neg_i32());
     }
 
@@ -1182,7 +931,7 @@ pub(crate) fn do_execve_elf(
         wb.copy_from_slice(&args_buf[byte_off..byte_off + 8]);
         let want = u64::from_le_bytes(wb);
         let vaddr = adjusted_stack_top + byte_off as u64;
-        match probe_read_u64(user_ppn, vaddr) {
+        match crate::process::unsafe_edges::exec_probe_read_u64(user_ppn, vaddr) {
             Some((v, ppn)) => {
                 if v != want {
                     crate::pr_err!(
@@ -1204,7 +953,7 @@ pub(crate) fn do_execve_elf(
     // Create new address space structure
     // SAFETY: user_ppn is a freshly allocated page table root with no prior users.
     if ec2_on { ec2_fill = crate::arch::cpu::read_time(); }
-    let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
+    let new_addr_space = crate::process::unsafe_edges::exec_mm_new_user(user_ppn);
 
     // OWNERSHIP TRANSFER (pcachewedge lane, 2026-11-15): from here the
     // MmStruct owns user_ppn — its Drop tears the tree down exactly once.
@@ -1325,7 +1074,7 @@ pub(crate) fn do_execve_elf(
         let mut first_exec_set = false;
         for i in 0..phdr_count {
             // SAFETY: i < phdr_count and program_data is a valid ELF file slice.
-            if let Some(phdr) = phdr_at(ehdr, program_data, i) {
+            if let Some(phdr) = crate::process::unsafe_edges::exec_phdr_at(ehdr, program_data, i) {
                 if phdr.is_load() {
                     let seg_start = exec_load_bias + phdr.p_vaddr;
                     let seg_end = seg_start + phdr.p_memsz;
@@ -1413,13 +1162,13 @@ pub(crate) fn do_execve_elf(
         if let Some(interp_bytes) = interp_data {
             let interp_base: u64 = 0x3FBF000000u64;
             // SAFETY: interp_bytes was already validated as a valid ELF file above.
-            let interp_ehdr = ehdr_from(interp_bytes)
+            let interp_ehdr = crate::process::unsafe_edges::exec_ehdr_from(interp_bytes)
                 .ok_or(crate::errno::Errno::ExecFormatError.as_neg_i32())?;
             let mut interp_min: u64 = u64::MAX;
             let mut interp_max: u64 = 0;
             for i in 0..interp_ehdr.e_phnum as usize {
                 // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
-                if let Some(phdr) = phdr_at(&interp_ehdr, interp_bytes, i) {
+                if let Some(phdr) = crate::process::unsafe_edges::exec_phdr_at(&interp_ehdr, interp_bytes, i) {
                     if phdr.is_load() {
                         if phdr.p_vaddr < interp_min { interp_min = phdr.p_vaddr; }
                         if let Some(end) = phdr.p_vaddr.checked_add(phdr.p_memsz) {
@@ -1449,7 +1198,7 @@ pub(crate) fn do_execve_elf(
                 let mut added_any = false;
                 for i in 0..interp_ehdr.e_phnum as usize {
                     // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
-                    if let Some(phdr) = phdr_at(&interp_ehdr, interp_bytes, i) {
+                    if let Some(phdr) = crate::process::unsafe_edges::exec_phdr_at(&interp_ehdr, interp_bytes, i) {
                         if !phdr.is_load() || phdr.p_memsz == 0 {
                             continue;
                         }
@@ -1571,10 +1320,10 @@ pub(crate) fn do_execve_elf(
         // 10s soft-lockups, task-list damage, do_wait children-list panics).
         // The exit path (exit_mm) already switches satp before dropping;
         // exec must too.
-        // SAFETY: user_ppn is the new image's page-table root with the
-        // kernel half mapped (create_user_address_space links it); the
-        // ASID was drawn above.
-        unsafe { crate::mm::switch_address_space(user_ppn, new_asid) };
+        // user_ppn is the new image's page-table root with the kernel
+        // half mapped; the ASID was drawn above
+        // (INV-PROC-EXEC-SWITCH-1).
+        crate::process::unsafe_edges::exec_switch_address_space(user_ppn, new_asid);
 
         // Set new address space (this will drop old Arc if no other
         // references — with satp already on the new root, freeing the old
@@ -1678,7 +1427,7 @@ pub(crate) fn do_execve_elf(
         }
 
         {
-            if let Some((gp, _)) = probe_read_u64(user_ppn, 0x17208) {
+            if let Some((gp, _)) = crate::process::unsafe_edges::exec_probe_read_u64(user_ppn, 0x17208) {
                 LAST_GOT_PPN.store(gp, core::sync::atomic::Ordering::Relaxed);
             }
         }

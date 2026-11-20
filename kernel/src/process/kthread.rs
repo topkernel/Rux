@@ -62,9 +62,9 @@ pub fn kernel_thread_create(
 ) -> Option<&'static mut Task> {
     // 1. Allocate a task slot (includes kernel stack allocation)
     let task_ptr = sched::alloc_task_slot()?;
-    // SAFETY: alloc_task_slot returns a valid, properly aligned pointer to a
-    // zeroed Task struct with an associated kernel stack.
-    let task = unsafe { &mut *task_ptr };
+    // alloc_task_slot returns a valid, properly aligned slot with an
+    // associated kernel stack (INV-PROC-BORROW-1's pre-enqueue arm).
+    let task = crate::process::unsafe_edges::borrow_task_mut(task_ptr);
 
     // 2. Mark as kernel thread
     task.set_ti_flag(task::task_flags::TaskFlags::PF_KTHREAD.bits());
@@ -91,20 +91,16 @@ pub fn kernel_thread_create(
     // an otherwise identical binary with this length patched
     // 0x6e40 -> 0xa8 went 6/6 corrupt to 6/6 clean). Cast to *mut u8 so
     // the count reads as bytes.
-    unsafe {
-        core::ptr::write_bytes(
-            pt_regs_ptr as *mut u8, 0u8,
-            core::mem::size_of::<crate::arch::pt_regs::PtRegs>(),
-        );
-    }
+    crate::process::unsafe_edges::zero_bytes(
+        pt_regs_ptr as *mut u8,
+        core::mem::size_of::<crate::arch::pt_regs::PtRegs>(),
+    );
 
     // 4b. Mark the frame supervisor-mode so the return path stays in
     //     kernel mode (kernel threads never enter user mode)
-    // SAFETY: pt_regs_ptr was just zeroed above and points to valid memory
-    // on the kernel stack.
-    unsafe {
-        (*pt_regs_ptr).mark_kernel_frame();
-    }
+    // pt_regs_ptr was just zeroed above and points to valid memory on
+    // the kernel stack (INV-PROC-FRAME-1's write arm).
+    crate::process::unsafe_edges::frame_mut(pt_regs_ptr).mark_kernel_frame();
 
     // 5. Set up thread context for ret_from_fork_kernel_asm
     //    - thread.ra = entry point
@@ -194,7 +190,7 @@ pub fn kernel_thread_create(
     // SAFETY: task_ptr still points to the valid Task allocated above;
     // the task is NOT enqueued — callers finish setup (e.g. bind), then
     // make it runnable via kthread_enqueue.
-    Some(unsafe { &mut *task_ptr })
+    Some(crate::process::unsafe_edges::borrow_task_mut(task_ptr))
 }
 
 /// Enqueue a kthread created by [`kernel_thread_create`].
@@ -218,12 +214,12 @@ pub fn kthread_enqueue(task: &'static mut Task) -> Option<&'static mut Task> {
             let mut map = KTHREAD_MAP.lock();
             map.remove(&pid);
         }
-        // SAFETY: task_ptr was returned by alloc_task_slot and never
-        // enqueued; unwind mirrors the fork.rs failure paths (hash first,
-        // then the stack — R7-B3/R33-pre discipline).
-        unsafe {
+        // task_ptr was returned by alloc_task_slot and never enqueued;
+        // unwind mirrors the fork.rs failure paths (hash first, then the
+        // stack — R7-B3/R33-pre discipline).
+        {
             crate::process::pid_hash::pid_hash_remove(pid);
-            (*task_ptr).free_kernel_stack();
+            crate::process::unsafe_edges::borrow_task_mut(task_ptr).free_kernel_stack();
             crate::process::pid::free_pid(pid);
             crate::sched::free_task_slot(task_ptr);
         }
@@ -231,7 +227,7 @@ pub fn kthread_enqueue(task: &'static mut Task) -> Option<&'static mut Task> {
     }
     // SAFETY: task_ptr still points to the valid Task; the enqueue consumed
     // the mutable borrow but the allocation persists.
-    Some(unsafe { &mut *task_ptr })
+    Some(crate::process::unsafe_edges::borrow_task_mut(task_ptr))
 }
 
 /// Create a kernel thread and enqueue it (the historical single-call form).

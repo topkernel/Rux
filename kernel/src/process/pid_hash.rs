@@ -110,17 +110,18 @@ pub fn init() {
 ///
 /// Called from `alloc_task_slot()` / idle init after task construction.
 pub fn pid_hash_insert(task: *mut Task) {
-    // SAFETY: task is a valid pointer to a Task that was just constructed and is not
-    /// yet visible to other CPUs (called before enqueue_task).
-    let pid = unsafe { (*task).pid() };
+    // task is a valid pointer to a Task that was just constructed and
+    /// not yet visible to other CPUs (called before enqueue_task).
+    let pid = crate::process::unsafe_edges::borrow_task(task).pid();
     let idx = bucket_index(pid);
 
     let flags = lock_bucket(idx);
-    // Prepend to chain (LIFO — O(1) insert).
-    // SAFETY: We hold the bucket lock, and task is valid and not yet in any chain.
-    unsafe {
+    // Prepend to chain (LIFO — O(1) insert): bucket lock held, task
+    // valid and not yet in any chain (INV-PROC-BORROW-1).
+    {
+        let t = crate::process::unsafe_edges::borrow_task_mut(task);
         let old_head = BUCKET_HEAD[idx].load(Ordering::Relaxed);
-        (*task).pid_hash_next = old_head;
+        t.pid_hash_next = old_head;
         BUCKET_HEAD[idx].store(task, Ordering::Release);
     }
     unlock_bucket(idx, flags);
@@ -134,27 +135,33 @@ pub fn pid_hash_remove(pid: u32) {
     let idx = bucket_index(pid);
 
     let flags = lock_bucket(idx);
-    // SAFETY: We hold the bucket lock. The chain traversal uses Release/Acquire ordering
-    // so no concurrent modifications can occur. Only the removed node's next pointer is
-    // written, which is safe for concurrent RCU readers.
-    unsafe {
+    // Bucket lock held; the chain traversal uses Release/Acquire
+    // ordering so no concurrent modifications can occur. Only the
+    // removed node's next pointer is written (INV-PROC-PIDHASH-1).
+    {
         let mut prev: *mut *mut Task = &BUCKET_HEAD[idx] as *const AtomicPtr<Task> as *mut *mut Task;
         let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
         while !curr.is_null() {
-            if (*curr).pid() == pid {
+            if crate::process::unsafe_edges::borrow_task(curr).pid() == pid {
                 // sc82 forensics: record the unlink (thread OR leader) in
                 // the global exit ring — the rwlock-freeze dump replays a
                 // frozen tgid's deaths. No behavior change.
-                crate::sync::futex::note_task_unlink(pid, (*curr).tgid() as u32);
+                crate::sync::futex::note_task_unlink(
+                    pid,
+                    crate::process::unsafe_edges::borrow_task(curr).tgid() as u32,
+                );
                 // Unlink: write *prev = curr->next.  This only touches the
                 // _previous_ node's next pointer (or the bucket head), not
                 // the removed node itself — safe for concurrent RCU readers
                 // who may already be at `curr`.
-                *prev = (*curr).pid_hash_next;
+                crate::process::unsafe_edges::pid_hash_unlink_store(
+                    prev,
+                    crate::process::unsafe_edges::borrow_task(curr).pid_hash_next,
+                );
                 break;
             }
-            prev = &mut (*curr).pid_hash_next;
-            curr = (*curr).pid_hash_next;
+            prev = &mut crate::process::unsafe_edges::borrow_task_mut(curr).pid_hash_next;
+            curr = crate::process::unsafe_edges::borrow_task(curr).pid_hash_next;
         }
     }
     unlock_bucket(idx, flags);
@@ -174,7 +181,9 @@ pub fn pid_hash_remove(pid: u32) {
 pub fn pid_hash_lookup_pinned(pid: u32) -> *mut Task {
     let t = pid_hash_lookup(pid);
     if !t.is_null() {
-        unsafe { (*t).task_refcnt.fetch_add(1, Ordering::AcqRel); }
+        crate::process::unsafe_edges::borrow_task(t)
+            .task_refcnt
+            .fetch_add(1, Ordering::AcqRel);
     }
     t
 }
@@ -183,18 +192,20 @@ pub fn pid_hash_lookup(pid: u32) -> *mut Task {
     rcu::rcu_read_lock();
 
     let idx = bucket_index(pid);
-    // SAFETY: We are in an RCU read-side critical section. The bucket head is loaded
-    // with Acquire ordering. Any task found remains valid until after rcu_read_unlock()
-    // plus a grace period (caller must not free it during the RCU read side).
-    let result = unsafe {
+    // We are in an RCU read-side critical section. The bucket head is
+    // loaded with Acquire ordering; any task found remains valid until
+    // after rcu_read_unlock() plus a grace period
+    // (INV-PROC-BORROW-1's RCU arm).
+    let result = {
         let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
         let mut found: *mut Task = ptr::null_mut();
         while !curr.is_null() {
-            if (*curr).pid() == pid {
+            let t = crate::process::unsafe_edges::borrow_task(curr);
+            if t.pid() == pid {
                 found = curr;
                 break;
             }
-            curr = (*curr).pid_hash_next;
+            curr = t.pid_hash_next;
         }
         found
     };
@@ -219,11 +230,12 @@ where
         // shared reference for the callback's duration is sound. The
         // callback must not yield the CPU (the bucket lock is
         /// irq-save spin) nor retain the reference past its return.
-        unsafe {
+        {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() {
-                f(&*curr);
-                curr = (*curr).pid_hash_next;
+                let t = crate::process::unsafe_edges::borrow_task(curr);
+                f(t);
+                curr = t.pid_hash_next;
             }
         }
         unlock_bucket(i, flags);
@@ -249,11 +261,12 @@ where
         // modify the chain; tasks unlinked by a stalled holder are simply
         // missed by this snapshot; nodes are live, fully constructed
         // Tasks (same contract as pid_hash_for_each_task).
-        unsafe {
+        {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() {
-                f(&*curr);
-                curr = (*curr).pid_hash_next;
+                let t = crate::process::unsafe_edges::borrow_task(curr);
+                f(t);
+                curr = t.pid_hash_next;
             }
         }
         unlock_bucket(i, irq);
@@ -280,12 +293,13 @@ pub fn pid_hash_collect_all() -> alloc::vec::Vec<u32> {
 
     for i in 0..PID_HASH_BUCKETS {
         let flags = lock_bucket(i);
-        // SAFETY: We hold the bucket lock so the chain cannot be modified concurrently.
-        unsafe {
+        // Bucket lock held so the chain cannot be modified concurrently.
+        {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() {
-                pids.push((*curr).pid());
-                curr = (*curr).pid_hash_next;
+                let t = crate::process::unsafe_edges::borrow_task(curr);
+                pids.push(t.pid());
+                curr = t.pid_hash_next;
             }
         }
         unlock_bucket(i, flags);
