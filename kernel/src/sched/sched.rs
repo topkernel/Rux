@@ -3840,8 +3840,8 @@ pub fn schedule_dead_never_returns() {
         // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
                         crate::pr_warn!(
                             "TERM-DESCHED engaged pid={} pc={:#x}",
-                            (*cur).pid(),
-                            (*cur).preempt_count()
+                            crate::sched::edges::task_shared(cur).pid(),
+                            crate::sched::edges::task_shared(cur).preempt_count()
                         );
                     }
                 }
@@ -3936,8 +3936,9 @@ pub fn schedule_dead_never_returns() {
                     // under the GRQ at power-of-two rounds, cold path.
                     let linked = {
                         let g = grq().lock_irqsave();
-                        let l = unsafe {
-                            match (*cur).policy() {
+                        let l = {
+                            let cur_t = crate::sched::edges::task_shared(cur);
+                            match cur_t.policy() {
                                 crate::process::task::SchedPolicy::Fifo
                                 | crate::process::task::SchedPolicy::Rr => {
                                     g.rt_rq.is_linked(cur)
