@@ -97,3 +97,51 @@ pub(crate) fn static_ref_unchecked<T>(p: *mut T) -> &'static T {
     // SAFETY: INV-FS-GLOBALSB-1; the caller checked non-null.
     unsafe { &*p }
 }
+
+/// The Arc twin of `file_privdata_ref` (INV-FS-FILEPRIV-1): a shared
+/// view of the Arc-stashed object. The File's own reference keeps the
+/// object alive for the returned borrow's lifetime.
+pub(crate) fn file_privdata_arc_ref<T>(file: &File) -> Option<&T> {
+    // SAFETY: INV-FS-FILEPRIV-1 (write-once cell) + the Arc the File
+    // holds pins the object (the close-path take below is the only
+    // drop site and runs with no shared borrow alive).
+    let p = unsafe { *file.private_data.get() }?;
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: type claim per INV-FS-FILEPRIV-1 (ops-table fs match).
+    Some(unsafe { &*(p as *const T) })
+}
+
+/// The Arc twin of `file_privdata_take` (INV-FS-FILEPRIV-1): reclaim
+/// the Arc<T> the open hook stashed via `Arc::into_raw`, handing back
+/// the owning Arc so the caller's drop decrements it. Close-path only.
+pub(crate) fn file_privdata_arc_take<T>(file: &File) -> Option<alloc::sync::Arc<T>> {
+    // SAFETY: INV-FS-FILEPRIV-1: the take is the close-path reclaim;
+    // no shared reader can race the cell there. Exactly-once: the take
+    // empties the slot.
+    let p = unsafe { (*file.private_data.get()).take() }?;
+    // SAFETY: the value was installed by Arc::into_raw in the same
+    // filesystem's open hook (type claim: the ops-table fs match).
+    Some(unsafe { alloc::sync::Arc::from_raw(p as *const T) })
+}
+
+/// The mutable twin of `file_privdata_ref` (INV-FS-FILEPRIV-1): an
+/// exclusive view of the File-private object, for the release-time or
+/// rewind-time mutations. The caller must hold the open file
+/// description's serialization (io_lock / the FS's own single-reader
+/// gate) — the pre-edge code performed the same mutation through the
+/// raw pointer under the same conditions; this edge adds no new
+/// guarantee and takes none away.
+pub(crate) fn file_privdata_ref_mut<T>(file: &File) -> Option<&mut T> {
+    // SAFETY: INV-FS-FILEPRIV-1 (write-once cell) — the value itself
+    // is exclusively owned by this open file description; the caller
+    // holds the description's serialization (see doc).
+    let p = unsafe { *file.private_data.get() }?;
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: type claim per INV-FS-FILEPRIV-1; exclusivity per the
+    // caller's serialization.
+    Some(unsafe { &mut *(p as *mut T) })
+}

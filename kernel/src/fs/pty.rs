@@ -355,16 +355,11 @@ pub fn slave_open(file: &File, minor: u32) -> i32 {
 // ============================================================================
 
 /// Borrow the PtyPair behind a master/slave File (None after close).
-fn pair_of(file: &File) -> Option<&'static PtyPair> {
+fn pair_of<'a>(file: &'a File) -> Option<&'a PtyPair> {
     // private_data is either null or an Arc::into_raw(PtyPair) installed
     // by ptmx_open/slave_open; the Arc ref held by the File keeps it
-    // alive (the one audited deref below).
-    let ptr = file.private_data_ptr()? as *const PtyPair;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: the File's own Arc reference pins the pair.
-    Some(unsafe { &*ptr })
+    // alive (INV-FS-FILEPRIV-1, the framework edge).
+    crate::fs::unsafe_edges::file_privdata_arc_ref::<PtyPair>(file)
 }
 
 /// Clone the File's PtyPair Arc without consuming the slot's reference
@@ -510,8 +505,9 @@ fn ptmx_poll(file: &File, events: u16) -> u16 {
 }
 
 fn ptmx_close(file: &File) -> i32 {
-    if let Some(pair) = pair_arc(file) {
-        take_pair_arc(file);
+    // Reclaim the Arc installed by ptmx_open (INV-FS-FILEPRIV-1),
+    // dropping one ref.
+    if let Some(pair) = crate::fs::unsafe_edges::file_privdata_arc_take::<PtyPair>(file) {
 
         if pair.master_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last master description closed.
@@ -673,8 +669,9 @@ fn pty_slave_poll(file: &File, events: u16) -> u16 {
 }
 
 fn pty_slave_close(file: &File) -> i32 {
-    if let Some(pair) = pair_arc(file) {
-        take_pair_arc(file);
+    // Reclaim the Arc installed by slave_open (INV-FS-FILEPRIV-1),
+    // dropping one ref.
+    if let Some(pair) = crate::fs::unsafe_edges::file_privdata_arc_take::<PtyPair>(file) {
 
         if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last slave description closed.
@@ -708,6 +705,26 @@ pub static PTY_SLAVE_OPS: FileOps = FileOps::builder()
 /// Returns Some(ret) when `file` is a pty end and the request was handled
 /// (or is a pty-specific stub); returns None when the file is not a pty or
 /// the request must fall through to the generic handler (FIONBIO, ...).
+
+/// pty's uaccess edges (unsafe-slim L4): thin safe wrappers over the
+/// arch copy pair. Sound because the arch copies are exception-table
+/// guarded — ANY user address is sound to try (a fault returns the
+/// uncopied count instead of faulting); the access_ok pre-checks in
+/// each ioctl arm stay as the fast-path validation.
+#[inline]
+fn copy_out(arg: usize, buf: &[u8]) -> bool {
+    // SAFETY: exception-table copy; `arg` was access_ok-validated by
+    // the caller arm; returns true on fault (uncopied > 0).
+    unsafe { crate::arch::uaccess::copy_to_user(arg as *mut u8, buf.as_ptr(), buf.len()) > 0 }
+}
+
+#[inline]
+fn copy_in(arg: usize, buf: &mut [u8]) -> bool {
+    // SAFETY: exception-table copy into a kernel buffer of exactly
+    // buf.len(); returns true on fault.
+    unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), arg as *const u8, buf.len()) > 0 }
+}
+
 pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
     use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user};
     use crate::errno::constants::EFAULT;
@@ -725,7 +742,6 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
 
     // SAFETY: user pointers are access_ok-validated before each copy; kernel
     // buffers are stack arrays of the exact request size.
-
     match request {
         TCGETS => {
             // Kernel-ABI termios = 36 bytes (c_cc[19]); the 52-byte
@@ -736,7 +752,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             let tio = pair.tty.get_termios();
             let mut kbuf = [0u8; TERMIOS_KERNEL_SIZE];
             termios_to_kernel_bytes(&tio, &mut kbuf);
-            if crate::arch::uaccess_safe::copy_out(arg, &kbuf) > 0 {
+            if copy_out(arg, &kbuf) {
                 return Some(-(EFAULT as i64));
             }
             Some(0)
@@ -746,7 +762,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                 return Some(-(EFAULT as i64));
             }
             let mut kbuf = [0u8; TERMIOS_KERNEL_SIZE];
-            if crate::arch::uaccess_safe::copy_in(&mut kbuf[..TERMIOS_KERNEL_SIZE], arg) > 0 {
+            if copy_in(arg, &mut kbuf) {
                 return Some(-(EFAULT as i64));
             }
             if request == TCSETSF {
@@ -762,7 +778,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             let tio = pair.tty.get_termios();
             let mut kbuf = [0u8; TERMIO_USER_SIZE];
             termios_to_termio_bytes(&tio, &mut kbuf);
-            if crate::arch::uaccess_safe::copy_out(arg, &kbuf[..TERMIO_USER_SIZE]) > 0 {
+            if copy_out(arg, &kbuf) {
                 return Some(-(EFAULT as i64));
             }
             Some(0)
@@ -772,7 +788,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                 return Some(-(EFAULT as i64));
             }
             let mut kbuf = [0u8; TERMIO_USER_SIZE];
-            if crate::arch::uaccess_safe::copy_in(&mut kbuf[..TERMIO_USER_SIZE], arg) > 0 {
+            if copy_in(arg, &mut kbuf) {
                 return Some(-(EFAULT as i64));
             }
             let base = pair.tty.get_termios();
@@ -788,7 +804,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                 return Some(-(EFAULT as i64));
             }
             let ws = pair.tty.get_winsize().to_le_bytes();
-            if crate::arch::uaccess_safe::copy_out(arg, &ws[..8]) > 0 {
+            if copy_out(arg, &ws) {
                 return Some(-(EFAULT as i64));
             }
             Some(0)
@@ -798,7 +814,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                 return Some(-(EFAULT as i64));
             }
             let mut kbuf = [0u8; 8];
-            if crate::arch::uaccess_safe::copy_in(&mut kbuf[..8], arg) > 0 {
+            if copy_in(arg, &mut kbuf) {
                 return Some(-(EFAULT as i64));
             }
             let ws = crate::fs::tty::WinSize::from_le_bytes(&kbuf);
@@ -828,7 +844,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             } else {
                 pgid
             };
-            if !crate::arch::uaccess_safe::write_user(arg, pgid) {
+            if copy_out(arg, &pgid.to_le_bytes()) {
                 return Some(-(EFAULT as i64));
             }
             Some(0)
@@ -838,7 +854,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                 return Some(-(EFAULT as i64));
             }
             let mut kbuf = [0u8; 4];
-            if crate::arch::uaccess_safe::copy_in(&mut kbuf[..4], arg) > 0 {
+            if copy_in(arg, &mut kbuf) {
                 return Some(-(EFAULT as i64));
             }
             let pgid = u32::from_le_bytes(kbuf);
@@ -849,7 +865,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             if arg == 0 || !access_ok(arg, 4) {
                 return Some(-(EFAULT as i64));
             }
-            if !crate::arch::uaccess_safe::write_user(arg, pair.index) {
+            if copy_out(arg, &pair.index.to_le_bytes()) {
                 return Some(-(EFAULT as i64));
             }
             Some(0)
@@ -861,7 +877,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             }
             let mut v: [u8; 4] = [0; 4];
             if arg != 0 {
-                if crate::arch::uaccess_safe::copy_in(&mut v, arg) != 0 {
+                if copy_in(arg, &mut v) {
                     return Some(-(EFAULT as i64));
                 }
             }
@@ -946,7 +962,9 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                     // discipline as pty_slave_close.
                     // SAFETY: we exclusively own `file`; private_data
                     // holds the Arc::into_raw pointer we just installed.
-                    take_pair_arc(&file);
+                    if let Some(ptr) = unsafe { (*file.private_data.get()).take() } {
+                        drop(unsafe { Arc::from_raw(ptr as *const PtyPair) });
+                    }
                     if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
                         pair.slave_closed.store(true, Ordering::Release);
                     }
@@ -963,7 +981,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             } else {
                 pair.tty.fionread_count() as u32
             };
-            if !crate::arch::uaccess_safe::write_user(arg, count) {
+            if copy_out(arg, &count.to_le_bytes()) {
                 return Some(-(EFAULT as i64));
             }
             Some(0)

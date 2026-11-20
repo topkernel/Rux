@@ -1240,12 +1240,7 @@ fn procfs_kill_sb(sb: *mut SuperBlock) {
 
 /// Get ProcFS superblock
 pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
-    let ptr = GLOBAL_PROCFS_SB.load(Ordering::Acquire);
-    if ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { &*ptr })
-    }
+    crate::fs::unsafe_edges::static_ref(GLOBAL_PROCFS_SB.load(Ordering::Acquire))
 }
 
 /// Rewind-regeneration hook for the procfs MOUNT TABLES served through
@@ -1458,11 +1453,10 @@ pub fn init_procfs() -> Result<(), i32> {
     let procfs_sb = alloc::boxed::Box::new(ProcFSSuperBlock::new());
     let procfs_sb_ptr = alloc::boxed::Box::into_raw(procfs_sb) as *mut ProcFSSuperBlock;
 
-    // 3. Initialize default files
-    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
-    unsafe {
-        (*procfs_sb_ptr).init_default_files();
-    }
+    // 3. Initialize default files (the box is alive in hand; the raw
+    // word below is only its address).
+    let sb_ref = crate::fs::unsafe_edges::static_ref_unchecked(procfs_sb_ptr);
+    sb_ref.init_default_files();
 
     // 4. Store global pointer
     GLOBAL_PROCFS_SB.store(procfs_sb_ptr, Ordering::Release);
@@ -1479,9 +1473,8 @@ pub fn mount_procfs() -> Result<(), i32> {
     };
 
     // Try to create /proc directory in RootFS (ignore error if already exists)
-    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
-    unsafe {
-        let _ = (*rootfs_sb).create_dir("/proc", 0o755);
+    if let Some(sb) = crate::fs::rootfs::get_rootfs_sb_ref() {
+        let _ = sb.create_dir("/proc", 0o755);
     }
 
     // Create mount point
@@ -1736,9 +1729,8 @@ fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
                     crate::process::find_task_by_pid(pid as u32)
                 };
                 if let Some(t) = target {
-                    // SAFETY: task pointer is valid.
-                    let uid = unsafe { (*t).cred().uid };
-                    stat.st_uid = uid;
+                    // find_task_by_pid returns a typed reference.
+                    stat.st_uid = t.cred().uid;
                 }
             }
         }
@@ -2091,8 +2083,8 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
             crate::process::find_task_by_pid((parent.ino / 10000) as u32)
         };
         if let Some(t) = target {
-            // SAFETY: find_task_by_pid/current_task return a valid task.
-            let uid = unsafe { (*t).cred().uid };
+            // find_task_by_pid returns a typed reference.
+            let uid = t.cred().uid;
             inode.uid.store(uid, core::sync::atomic::Ordering::Release);
         }
         return Ok(Arc::new(inode));
@@ -2182,24 +2174,21 @@ pub struct ProcfsFileContent {
 
 /// ProcFS file read operation
 fn procfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
-    unsafe {
-        let data_opt = &*file.private_data.get();
-        if let Some(content_ptr) = *data_opt {
-            let content = &*(content_ptr as *const ProcfsFileContent);
-            let offset = file.get_pos() as usize;
-            let available = content.data.len().saturating_sub(offset);
-            let to_read = buf.len().min(available);
-            if to_read > 0 {
-                buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
-                file.set_pos((offset + to_read) as u64);
-                to_read as isize
-            } else {
-                0
-            }
+    // The content box is this description's private data
+    // (INV-FS-FILEPRIV-1, the framework edge).
+    if let Some(content) = crate::fs::unsafe_edges::file_privdata_ref::<ProcfsFileContent>(file) {
+        let offset = file.get_pos() as usize;
+        let available = content.data.len().saturating_sub(offset);
+        let to_read = buf.len().min(available);
+        if to_read > 0 {
+            buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
+            file.set_pos((offset + to_read) as u64);
+            to_read as isize
         } else {
-            -9  // EBADF
+            0
         }
+    } else {
+        -9 // EBADF
     }
 }
 
@@ -2207,18 +2196,16 @@ fn procfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 /// /proc/[pid]/oom_score_adj. Everything else stays EINVAL — procfs has no
 /// other writable nodes.
 fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
-    // SAFETY: inode is written once at open time; read-only access here.
-    let inode_opt = unsafe { (*file.inode.get()).clone() };
-    let inode = match inode_opt {
+    // The inode cell is write-once at open (File::get_inode discipline);
+    // the node rides inode.private_data (INV-FS-PRIVDATA-1).
+    let inode = match file.get_inode().cloned() {
         Some(i) => i,
         None => return -22, // EINVAL
     };
-    // procfs file inodes carry a ProcFSNode pointer in private_data.
-    let node_ptr = match inode.private_data {
-        Some(p) => p,
+    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(&inode) {
+        Some(n) => n,
         None => return -22,
     };
-    let node = unsafe { &*(node_ptr as *const ProcFSNode) };
 
     // /proc/[pid]/oom_score_adj: store the adjustment on the task (Linux
     // semantics: decimal i32 in [-1000, 1000]; out-of-range/undecodable is
@@ -2300,11 +2287,11 @@ fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 
 /// ProcFS file lseek operation
 fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
-    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
-    unsafe {
-        let data_opt = &*file.private_data.get();
-        if let Some(content_ptr) = *data_opt {
-            let content = &mut *(content_ptr as *mut ProcfsFileContent);
+    // The content box is this description's private data
+    // (INV-FS-FILEPRIV-1, mut twin: lseek and read on one description
+    // are serialized the same way the pre-edge direct store was).
+    if let Some(content) = crate::fs::unsafe_edges::file_privdata_ref_mut::<ProcfsFileContent>(file) {
+        {
             let file_size = content.data.len() as isize;
             let new_offset = match whence {
                 0 => offset,
@@ -2346,26 +2333,18 @@ fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
             }
             file.set_pos(new_offset as u64);
             new_offset
-        } else {
-            -9
         }
+    } else {
+        -9
     }
 }
 
 /// ProcFS file close operation
 fn procfs_file_close(file: &crate::fs::File) -> i32 {
-    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
-    unsafe {
-        let data_opt = &*file.private_data.get();
-        if let Some(content_ptr) = *data_opt {
-            // Null out pointer first to prevent use-after-free by concurrent readers
-            *file.private_data.get() = None;
-            // SAFETY: the Box<ProcfsFileContent> procfs_open stored (close
-            // is the last user of this open file description).
-            let _ = unsafe { alloc::boxed::Box::from_raw(content_ptr as *mut ProcfsFileContent) };
-        }
-        0
-    }
+    // The take empties the cell first (no use-after-free window); the
+    // Box reclaim rides the framework edge (INV-FS-FILEPRIV-1).
+    drop(crate::fs::unsafe_edges::file_privdata_take::<ProcfsFileContent>(file));
+    0
 }
 
 /// ProcFS setattr: ATTR_SIZE is a no-op (O_TRUNC on `echo x > file` must
@@ -2621,8 +2600,7 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::Vfs
         use crate::fs::inode::file_type;
         let pid_val = (inode.ino / 10000) as u32;
         let mut tids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
-        crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
-            let t = &*t;
+        crate::process::pid_hash::pid_hash_for_each_task(|t| {
             if t.tgid() == pid_val {
                 tids.push(t.pid() as u64);
             }
@@ -2929,8 +2907,9 @@ fn generate_vmallocinfo() -> alloc::vec::Vec<u8> {
 fn partitions_generate() -> alloc::vec::Vec<u8> {
     let mut out = alloc::string::String::from("major minor  #blocks  name\n\n");
     if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
-        // SAFETY: get_pci_gen_disk returns a valid GenDisk pointer.
-        let cap = unsafe { (*disk).capacity.load(core::sync::atomic::Ordering::Acquire) };
+        // get_pci_gen_disk returns the registration-published GenDisk
+        // reference (its own safe accessor shape).
+        let cap = disk.capacity.load(core::sync::atomic::Ordering::Acquire);
         out.push_str(&alloc::format!(
             " 254     0 {:>10} vda\n",
             cap / 2 // sectors -> KiB blocks

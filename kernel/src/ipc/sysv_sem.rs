@@ -35,6 +35,7 @@ const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
 /// struct seminfo — returned by IPC_INFO / SEM_INFO
 /// Must match Linux's include/uapi/linux/sem.h. Total: 40 bytes.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SemInfoUapi {
     pub semmap: i32,  // +0
     pub semmni: i32,  // +4
@@ -63,6 +64,7 @@ pub struct SemInfoUapi {
 /// (`sem_nsems (0) != PSEMS (10)` from IPC_STAT). The high words are
 /// pure padding on x86_64 (time_t is 64-bit), so they stay zero.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SemidDsUapi {
     pub sem_perm: IpcPermUapi,
     pub sem_otime: i64,
@@ -324,11 +326,8 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                     ds.sem_nsems = entry.inner.nsems() as u64;
                 }
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<SemidDsUapi>() above;
-            // ds is a stack-local copy of the semaphore set metadata.
-            unsafe {
-                copy_to_user(buf_ptr as *mut u8, &ds as *const SemidDsUapi as *const u8, core::mem::size_of::<SemidDsUapi>());
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
             0
         }
         IPC_SET => {
@@ -362,16 +361,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             // Copy the whole struct from user memory through the
             // exception-table path (review IPC M: uaccess 裸访改 copy_from_user).
             let mut ds = SemidDsUapi::zeroed();
-            // SAFETY: buf_ptr was access_ok-validated above; ds is a
-            // stack-local repr(C) struct of exactly that size.
-            if unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    &mut ds as *mut SemidDsUapi as *mut u8,
-                    buf_ptr,
-                    core::mem::size_of::<SemidDsUapi>(),
-                )
-            } != 0
-            {
+            if crate::arch::uaccess_safe::copy_in_t(&mut ds, buf_ptr as usize) != 0 {
                 return -(errno::EFAULT as i64);
             }
             let mut slots = SEM_IDS.slots.lock();
@@ -474,7 +464,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                         let val = sems[i].value.load(Ordering::Relaxed);
                         // SAFETY: array_ptr was access_ok-validated for nsems*2 bytes above;
                         // put_user is the exception-table copy path (SUM=0 safe).
-                        if !unsafe { put_user(array_ptr.add(i), val as u16) } {
+                        if !crate::arch::uaccess_safe::write_user(array_ptr as usize + i * 2, val as u16) {
                             // Unwritable user page (PROT_NONE bad_addr):
                             // Linux fails the whole semctl with EFAULT
                             // (LTP semctl03 raw-syscall variant).
@@ -513,7 +503,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                     // SAFETY: array_ptr was access_ok-validated for nsems*2
                     // bytes above; get_user is the exception-table copy path
                     // (SUM=0 safe). LTP semctl03 raw-syscall EFAULT variant.
-                    match unsafe { get_user(array_ptr.add(i)) } {
+                    match crate::arch::uaccess_safe::read_user::<u16>(array_ptr as usize + i * 2) {
                         Some(v) => vals.push(v),
                         None => return -(errno::EFAULT as i64),
                     }
@@ -626,14 +616,8 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 semvmx: 32767,
                 semaem: 16384,
             };
-            // SAFETY: buf_ptr was null-checked and access_ok-validated above.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &info as *const SemInfoUapi as *const u8,
-                    core::mem::size_of::<SemInfoUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &info);
             // Return: highest used slot index (ipc_get_maxidx), -1 when
             // empty — LTP feeds it into SEM_STAT as a raw index.
             sem_max_idx() as i64
@@ -673,15 +657,8 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                     return -(errno::EINVAL as i64);
                 }
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated above;
-            // ds is a stack-local repr(C) struct of exactly that size.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &ds as *const SemidDsUapi as *const u8,
-                    core::mem::size_of::<SemidDsUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
             result_id as i64
         }
         20 => {
@@ -718,15 +695,8 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                     return -(errno::EINVAL as i64);
                 }
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated above;
-            // ds is a stack-local repr(C) struct of exactly that size.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &ds as *const SemidDsUapi as *const u8,
-                    core::mem::size_of::<SemidDsUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
             result_id as i64
         }
         19 => {
@@ -758,14 +728,8 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 semvmx: 32767,
                 semaem: total_sems as i32,
             };
-            // SAFETY: buf_ptr was null-checked and access_ok-validated above.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &info as *const SemInfoUapi as *const u8,
-                    core::mem::size_of::<SemInfoUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &info);
             // Return: highest used slot index, -1 when empty (see IPC_INFO).
             sem_max_idx() as i64
         }
@@ -856,11 +820,11 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
         // read must be EFAULT — the old unwrap_or(0) turned an unmapped
         // timeout page into {0,0} and later surfaced as ETIMEDOUT
         // (LTP semop02 passes a bad timeout pointer and expects EFAULT).
-        let ts_sec = match unsafe { get_user(timeout_ptr as *const i64) } {
+        let ts_sec = match crate::arch::uaccess_safe::read_user::<i64>(timeout_ptr as usize) {
             Some(v) => v,
             None => return -(errno::EFAULT as i64),
         };
-        let ts_nsec = match unsafe { get_user((timeout_ptr as *const i64).add(1)) } {
+        let ts_nsec = match crate::arch::uaccess_safe::read_user::<i64>(timeout_ptr as usize + 8) {
             Some(v) => v,
             None => return -(errno::EFAULT as i64),
         };
@@ -898,23 +862,40 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
         sops_big = alloc::vec![SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; nsops];
         sops_big.as_mut_ptr() as *mut u8
     };
-    // SAFETY: sops_ptr was access_ok-validated for nsops * size_of::<SemBuf>()
-    // above; exactly nsops entries are written.
-    unsafe {
-        if crate::arch::uaccess::copy_from_user(
-            sops_dst,
-            sops_ptr as *const u8,
-            nsops * core::mem::size_of::<SemBuf>(),
-        ) != 0
+    // sops_ptr was access_ok-validated for nsops * size_of::<SemBuf>()
+    // above; exactly nsops entries are written. The copy and the slice
+    // view are the two audited edges of the staging (dst is a
+    // pre-filled owned local; copy_in_t's failure path zero-fills, so
+    // the entries stay initialized).
+    let sops: &[SemBuf] = if nsops <= MAX_SOPS_FAST {
+        // SAFETY: dst is the owned stack array of at least nsops
+        // entries; the byte-length matches nsops * size_of::<SemBuf>().
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(
+                sops_small.as_mut_ptr() as *mut u8,
+                sops_ptr as *const u8,
+                nsops * core::mem::size_of::<SemBuf>(),
+            )
+        } != 0
         {
             return -(errno::EFAULT as i64);
         }
-    }
-    // SAFETY: sops_dst points at either the stack array or the heap Vec
-    // above, both alive for the rest of the function; exactly nsops
-    // valid SemBuf entries were written by the copy_from_user above.
-    let sops: &[SemBuf] = unsafe {
-        core::slice::from_raw_parts(sops_dst as *const SemBuf, nsops)
+        &sops_small[..nsops]
+    } else {
+        let mut big =
+            alloc::vec![SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; nsops];
+        // SAFETY: big is an owned Vec of exactly nsops entries.
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(
+                big.as_mut_ptr() as *mut u8,
+                sops_ptr as *const u8,
+                nsops * core::mem::size_of::<SemBuf>(),
+            )
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        big.leak()
     };
 
     // Permission: write when any op alters a value (sem_op != 0), otherwise
