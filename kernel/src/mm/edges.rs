@@ -295,3 +295,75 @@ pub fn page_slice(virt_addr: usize) -> &'static [u8] {
     // SAFETY: INV-MM-7 — as page_slice_mut, shared.
     unsafe { core::slice::from_raw_parts(virt_addr as *const u8, crate::mm::page::PAGE_SIZE) }
 }
+
+// ---------------------------------------------------------------------------
+// INV-MM-8: the deferred-free pool. `POOL` is a static-mut ring guarded
+// by POOL_LOCK (irqsave); the drain's dealloc routing is the same
+// region dispatch buddy_allocator::dealloc_direct performs.
+// ---------------------------------------------------------------------------
+
+/// The deferred-free pool ring, mutably (INV-MM-8: caller holds
+/// POOL_LOCK).
+#[inline]
+pub fn defer_pool_mut() -> &'static mut [super::deferred_free::Entry; super::deferred_free::POOL_CAP] {
+    // SAFETY: INV-MM-8 — the lock is held; the static-mut ring has no
+    // other accessor.
+    unsafe { &mut *core::ptr::addr_of_mut!(super::deferred_free::POOL) }
+}
+
+/// Route one drained entry's dealloc by region (INV-MM-8 drain arm:
+/// kfree for slab-resident pointers, the untracked buddy dealloc for
+/// heap pointers — never the intercepted GlobalAlloc path, so a drained
+/// entry cannot be re-deferred).
+#[inline]
+pub fn defer_dealloc(ptr: usize, layout: core::alloc::Layout) {
+    let in_slab = crate::mm::slab::slab_region()
+        .map(|(s, e)| ptr >= s && ptr < e)
+        .unwrap_or(false);
+    if in_slab {
+        crate::mm::kfree(ptr as *mut u8);
+    } else {
+        crate::mm::buddy_allocator::dealloc_untracked_pub(ptr as *mut u8, layout);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// INV-MM-9: the vmemmap boot static + init writes. `VMEMMAP_STATS` is a
+// static-mut written once by init_vmemmap() (guarded by VMEMMAP_INIT)
+// and only read afterwards; the init-path region zeroing and kernel-page
+// mappings run in the single-threaded boot window.
+// ---------------------------------------------------------------------------
+
+/// The vmemmap stats static, shared (INV-MM-9: post-init read-only).
+#[inline]
+pub fn vmemmap_stats_read() -> super::vmemmap::VmemmapStats {
+    // SAFETY: INV-MM-9 — initialized before any call; Copy plain read.
+    unsafe { super::vmemmap::VMEMMAP_STATS }
+}
+
+/// The vmemmap stats static, mutable (INV-MM-9 init arm: the
+/// VMEMMAP_INIT-guarded single write).
+#[inline]
+pub fn vmemmap_stats_write(v: super::vmemmap::VmemmapStats) {
+    // SAFETY: INV-MM-9 — init window; no concurrent readers until
+    /// init_vmemmap() returns.
+    unsafe { super::vmemmap::VMEMMAP_STATS = v }
+}
+
+/// Zero the freshly reserved vmemmap region (INV-MM-9 init arm:
+/// single-threaded boot; `size` is the exact reservation).
+#[inline]
+pub fn vmemmap_zero_region(virt: usize, size: usize) {
+    // SAFETY: INV-MM-9 — boot window; the region came from
+    // memblock_find_in_range and is page-backed by the mapping loop
+    // that follows.
+    unsafe { core::ptr::write_bytes(virt as *mut u8, 0, size) }
+}
+
+/// One kernel-page mapping of the vmemmap region (INV-MM-9 init arm;
+/// map_kernel_page is a safe fn on every arch — this edge exists to
+/// carry the boot-window discipline in one place).
+#[inline]
+pub fn vmemmap_map_kernel_page(vaddr: usize, paddr: usize, flags: u64) {
+    crate::arch::mm::map_kernel_page(vaddr as u64, paddr as u64, flags);
+}

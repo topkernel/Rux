@@ -13,6 +13,8 @@
 //! - Dynamically mapped based on actual physical memory
 //! - O(1) PFN to page conversion via simple arithmetic
 
+#![forbid(unsafe_code)]
+
 use core::ptr;
 
 use super::PAGE_SIZE;
@@ -31,7 +33,7 @@ pub const PAGES_PER_VMEMMAP_PAGE: usize = PAGE_SIZE / STRUCT_PAGE_SIZE;
 static VMEMMAP_INIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// vmemmap statistics
-static mut VMEMMAP_STATS: VmemmapStats = VmemmapStats {
+pub(super) static mut VMEMMAP_STATS: VmemmapStats = VmemmapStats {
     initialized: false,
     vmemmap_base: VMEMMAP_START,
     start_pfn: 0,
@@ -50,10 +52,10 @@ static mut VMEMMAP_STATS: VmemmapStats = VmemmapStats {
 /// the managed base, yielding a wild descriptor address — clamp instead.
 #[inline]
 pub fn pfn_to_vmemmap(pfn: usize) -> usize {
-    // SAFETY: VMEMMAP_STATS is initialized by init_vmemmap() before any
-    // pfn_to_vmemmap() call; start_pfn is a plain usize field (no mutation
-    // concurrent with vmemmap reads).
-    let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
+    // VMEMMAP_STATS is initialized by init_vmemmap() before any
+    // pfn_to_vmemmap() call; start_pfn is a plain usize field (no
+    // mutation concurrent with vmemmap reads) — INV-MM-9.
+    let start_pfn = super::edges::vmemmap_stats_read().start_pfn;
     VMEMMAP_START + pfn.saturating_sub(start_pfn) * STRUCT_PAGE_SIZE
 }
 
@@ -64,8 +66,9 @@ pub fn pfn_to_vmemmap(pfn: usize) -> usize {
 /// Clamped on the low side, mirroring pfn_to_vmemmap (review 4.20).
 #[inline]
 pub fn vmemmap_to_pfn(vaddr: usize) -> usize {
-    // SAFETY: same as pfn_to_vmemmap — VMEMMAP_STATS is initialized before use.
-    let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
+    // Same as pfn_to_vmemmap — VMEMMAP_STATS is initialized before use
+    // (INV-MM-9).
+    let start_pfn = super::edges::vmemmap_stats_read().start_pfn;
     let vaddr = vaddr.clamp(VMEMMAP_START, usize::MAX - STRUCT_PAGE_SIZE + 1);
     start_pfn + vaddr.saturating_sub(VMEMMAP_START) / STRUCT_PAGE_SIZE
 }
@@ -160,11 +163,10 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
         let mut w = crate::dfx::backtrace::ConsoleWriter::new();
         use core::fmt::Write;
     }
-    // SAFETY: vmemmap_virt points to the reserved physical region returned by
-    // memblock_find_in_range; vmemmap_size is the exact allocation size.
-    unsafe {
-        ptr::write_bytes(vmemmap_virt.bits() as *mut u8, 0, vmemmap_size);
-    }
+    // vmemmap_virt points to the reserved physical region returned by
+    // memblock_find_in_range; vmemmap_size is the exact allocation
+    // size (INV-MM-9 init arm).
+    super::edges::vmemmap_zero_region(vmemmap_virt.bits() as usize, vmemmap_size);
 
     // Map each vmemmap page
     let flags = PageTableEntry::V | PageTableEntry::R |
@@ -175,28 +177,25 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
         let vaddr = vmemmap_start + i * PAGE_SIZE;
         let paddr = vmemmap_phys + i * PAGE_SIZE;
 
-        // SAFETY: vaddr is within [VMEMMAP_START, VMEMMAP_END) (checked above);
-        // paddr is the reserved physical page from memblock.
-        unsafe {
-            map_kernel_page(vaddr as u64, paddr as u64, flags);
-        }
+        // vaddr is within [VMEMMAP_START, VMEMMAP_END) (checked
+        // above); paddr is the reserved physical page from memblock
+        // (INV-MM-9 init arm).
+        super::edges::vmemmap_map_kernel_page(vaddr, paddr, flags);
     }
 
     // Final TLB flush after all mappings - MUST flush before accessing!
     crate::arch::mm::flush_tlb_all();
 
-    // Store statistics
-    // SAFETY: VMEMMAP_INIT guard ensures single initialization; no concurrent
-    // readers until init_vmemmap() returns.
-    unsafe {
-        VMEMMAP_STATS = VmemmapStats {
-            initialized: true,
-            vmemmap_base: VMEMMAP_START,
-            start_pfn,
-            nr_pages: effective_nr_pages,
-            vmemmap_pages,
-        };
-    }
+    // Store statistics: the VMEMMAP_INIT guard ensures single
+    // initialization; no concurrent readers until init_vmemmap()
+    // returns (INV-MM-9 init arm).
+    super::edges::vmemmap_stats_write(VmemmapStats {
+        initialized: true,
+        vmemmap_base: VMEMMAP_START,
+        start_pfn,
+        nr_pages: effective_nr_pages,
+        vmemmap_pages,
+    });
 
     // Publish the runtime descriptor count (fake-OOM fix): every later
     // bounds check (pfn_to_page, phys_valid, forensic scans) uses this
@@ -209,9 +208,10 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
 
 /// Get vmemmap statistics
 pub fn vmemmap_stats() -> VmemmapStats {
-    // SAFETY: VMEMMAP_STATS is initialized before any call to this function;
-    // VmemmapStats is Copy, so this is a plain read of a static.
-    unsafe { VMEMMAP_STATS }
+    // VMEMMAP_STATS is initialized before any call to this function;
+    // VmemmapStats is Copy, so this is a plain read of a static
+    // (INV-MM-9).
+    super::edges::vmemmap_stats_read()
 }
 
 /// vmemmap statistics
