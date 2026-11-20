@@ -2392,43 +2392,41 @@ d19d53f0da58	kernel/src/sched/edges.rs	secondary_idle_table_base	1017		GAP
 828a6d4903f6	kernel/src/sched/rt.rs	<module>	649		GAP
 0030893faa67	kernel/src/sched/rt.rs	<module>	650		GAP
 e6dd4f64b434	kernel/src/sched/sched.rs	<module>	92		GAP
-517582e73a07	kernel/src/sched/sched.rs	rt_wedge_dump_tick	435		GAP
-c3c6c12efc0d	kernel/src/sched/sched.rs	grq_current_fp	866	asm	GAP
-acb95fd04c9d	kernel/src/sched/sched.rs	grq_current_fp	871	asm	GAP
-b5e96acab7e4	kernel/src/sched/sched.rs	grq_current_fp	876	asm	GAP
-33f73b725637	kernel/src/sched/sched.rs	grq_dump_holder	1036	ptr-ops	GAP
-1b389050584f	kernel/src/sched/sched.rs	process_deferred_exit_notify_cpu	2128		GAP
-a0929d3fc2f9	kernel/src/sched/sched.rs	ww_sched_snapshot	2569	no-preempt	GAP
-b1f18aa573d6	kernel/src/sched/sched.rs	clear_trap_scratch	2787	asm	GAP
-dbf2f1ac73b8	kernel/src/sched/sched.rs	init	2820		GAP
-61af4fd56033	kernel/src/sched/sched.rs	alloc_task_slot	2975	ptr-ops	GAP
-acf44de3f975	kernel/src/sched/sched.rs	alloc_task_slot	2985	ptr-ops	GAP
-8b3e5aff7224	kernel/src/sched/sched.rs	alloc_task_slot	2992		GAP
-65f80709909f	kernel/src/sched/sched.rs	free_task_slot	3288		GAP
-b6d56dac2b6a	kernel/src/sched/sched.rs	free_task_slot	3404		GAP
-1d46bccc0787	kernel/src/sched/sched.rs	free_task_slot	3417	volatile,ptr-ops	GAP
-1453ce856bba	kernel/src/sched/sched.rs	schedule_dead_never_returns	3827	no-preempt	GAP
-88835fd20733	kernel/src/sched/sched.rs	schedule_dead_never_returns	3939		GAP
-1da981a77eab	kernel/src/sched/sched.rs	steer_task_cpu	6131		GAP
-500409ef783f	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6558	volatile,ptr-ops,no-preempt	GAP
-81bb30364557	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6958		GAP
-d519a1f18956	kernel/src/sched/sched.rs	monopolist_census	7776	volatile,ptr-ops	GAP
-aa5448738817	kernel/src/sched/sched.rs	scheduler_tick	8906	volatile,ptr-ops	GAP
-185307e1663d	kernel/src/sched/sched.rs	scheduler_tick	9128		GAP
-729e3e7046f7	kernel/src/sched/sched.rs	scheduler_tick	10020	volatile,ptr-ops	GAP
-0724b8335572	kernel/src/sched/sched.rs	scheduler_tick	10070		GAP
-7775126255fc	kernel/src/sched/sched.rs	scheduler_tick	10119	volatile,ptr-ops	GAP
-bbf05cb0ca6a	kernel/src/sched/sched.rs	scheduler_tick	10187		GAP
-2d3045abd427	kernel/src/sched/sched.rs	scheduler_tick	10218		GAP
-b2355b6b17a6	kernel/src/sched/sched.rs	current	10713		GAP
-dfad815446e6	kernel/src/sched/sched.rs	harvest_print_parked	11200	volatile,ptr-ops	GAP
-67ea08285ada	kernel/src/sched/sched.rs	task_is_dying	11297		GAP
-bb8250f4b089	kernel/src/sched/sched.rs	harvest_relink	11335		GAP
-4cbe949ca3a9	kernel/src/sched/sched.rs	republish_current_after_abort	11582		GAP
-761aa90f0faa	kernel/src/sched/sched.rs	lp_idle_lie_report	11991	no-preempt	GAP
-b5fc6c5b5e4e	kernel/src/sched/sched.rs	idle_guard_sp	12467	asm	GAP
-eab09629fed3	kernel/src/sched/sched.rs	idle_guard_sp	12474	asm	GAP
-d20fcdcc6cce	kernel/src/sched/sched.rs	idle_guard_sp	12481	asm	GAP
+6b03a27aa0d1	kernel/src/sched/sched.rs	grq_current_fp	870	asm	GAP
+1252ff9dd71b	kernel/src/sched/sched.rs	grq_current_fp	875	asm	GAP
+67198bf76c96	kernel/src/sched/sched.rs	grq_current_fp	880	asm	GAP
+a628e485e3e3	kernel/src/sched/sched.rs	grq_dump_holder	1040	ptr-ops	GAP
+f55424256ead	kernel/src/sched/sched.rs	process_deferred_exit_notify_cpu	2132		GAP
+a00980542659	kernel/src/sched/sched.rs	ww_sched_snapshot	2573	no-preempt	GAP
+82ea5cc83dd9	kernel/src/sched/sched.rs	clear_trap_scratch	2791	asm	GAP
+07492b3e9500	kernel/src/sched/sched.rs	init	2824		GAP
+9e432cb20676	kernel/src/sched/sched.rs	alloc_task_slot	2979	ptr-ops	GAP
+c7b5972c5e38	kernel/src/sched/sched.rs	alloc_task_slot	2989	ptr-ops	GAP
+9e8bebef7efa	kernel/src/sched/sched.rs	alloc_task_slot	2996		GAP
+24669db6af65	kernel/src/sched/sched.rs	free_task_slot	3292		GAP
+b5b4eba27301	kernel/src/sched/sched.rs	free_task_slot	3408		GAP
+d0cedb14a4a4	kernel/src/sched/sched.rs	free_task_slot	3421	volatile,ptr-ops	GAP
+46be1b4052c6	kernel/src/sched/sched.rs	schedule_dead_never_returns	3831	no-preempt	GAP
+0392d0bea4a5	kernel/src/sched/sched.rs	steer_task_cpu	6136		GAP
+6e1fc69b5a3f	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6563	volatile,ptr-ops,no-preempt	GAP
+32cb0b22a839	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6963		GAP
+6ffe56b41275	kernel/src/sched/sched.rs	monopolist_census	7781	volatile,ptr-ops	GAP
+d48d3d7bc93c	kernel/src/sched/sched.rs	scheduler_tick	8911	volatile,ptr-ops	GAP
+feb06e8c5503	kernel/src/sched/sched.rs	scheduler_tick	9133		GAP
+01c382c5e106	kernel/src/sched/sched.rs	scheduler_tick	10025	volatile,ptr-ops	GAP
+d69093cd978a	kernel/src/sched/sched.rs	scheduler_tick	10075		GAP
+b06f45da3b30	kernel/src/sched/sched.rs	scheduler_tick	10124	volatile,ptr-ops	GAP
+8d32af21fef4	kernel/src/sched/sched.rs	scheduler_tick	10192		GAP
+73ad701b557f	kernel/src/sched/sched.rs	scheduler_tick	10223		GAP
+2a3cd91d39de	kernel/src/sched/sched.rs	current	10718		GAP
+62774b8975c7	kernel/src/sched/sched.rs	harvest_print_parked	11205	volatile,ptr-ops	GAP
+88752c610f39	kernel/src/sched/sched.rs	task_is_dying	11302		GAP
+b8ff729d60ca	kernel/src/sched/sched.rs	harvest_relink	11340		GAP
+9f64c91a74e1	kernel/src/sched/sched.rs	republish_current_after_abort	11587		GAP
+2cd0ca8db704	kernel/src/sched/sched.rs	lp_idle_lie_report	11996	no-preempt	GAP
+82789fad0c91	kernel/src/sched/sched.rs	idle_guard_sp	12472	asm	GAP
+cbbc2372ae56	kernel/src/sched/sched.rs	idle_guard_sp	12479	asm	GAP
+73da00007000	kernel/src/sched/sched.rs	idle_guard_sp	12486	asm	GAP
 554f094f895c	kernel/src/sched/side_edges.rs	<module>	19		GAP
 97eb38a1a9b4	kernel/src/sched/side_edges.rs	<module>	21		GAP
 d69da70f77a6	kernel/src/sched/side_edges.rs	evring_slot_mut	39		GAP
