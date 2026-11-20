@@ -821,8 +821,6 @@ b4769c9a1282	kernel/src/dfx/forensics_edges.rs	t_pid	60		INV:INV-FOR-1
 e6a1b1de63fa	kernel/src/dfx/forensics_edges.rs	raw_qword	86	volatile,ptr-ops	INV:INV-FOR-2
 a2a298aa3c8b	kernel/src/dfx/forensics_edges.rs	location	98	ptr-ops	INV:INV-FOR-3
 ebd6d070393b	kernel/src/dfx/forensics_edges.rs	location_ref	106		INV:INV-FOR-3
-c0aa70321689	kernel/src/dfx/hilogcensus.rs	unix_send_pre	252		INV:F18
-c220abd6f8c4	kernel/src/dfx/hilogcensus.rs	kmsg_write	355		INV:F18
 aea7aab5e2de	kernel/src/dfx/hung_task.rs	report_hung_task	221	ptr-ops	INV:F18
 2aaca19a612a	kernel/src/dfx/leakorigin.rs	note_acquire	192	volatile,ptr-ops	INV:F1
 b44859cd4a9c	kernel/src/dfx/leakorigin.rs	note_acquire	237		INV:F1
@@ -1847,6 +1845,11 @@ ca268388ca5e	kernel/src/mm/compact.rs	<module>	383	ptr-ops	GAP
 b9d7ae35d09c	kernel/src/mm/deferred_free.rs	try_defer	140		GAP
 1c8986e1fcfd	kernel/src/mm/deferred_free.rs	drain	193		GAP
 ce8426843e9b	kernel/src/mm/deferred_free.rs	drain	222	ptr-ops	GAP
+1be557c9e0db	kernel/src/mm/edges.rs	first_node_mut	40		GAP
+413a1d0a235b	kernel/src/mm/edges.rs	page_of	61		GAP
+d67719c68613	kernel/src/mm/edges.rs	page_ref_of	74		GAP
+91c346b4a68e	kernel/src/mm/edges.rs	memblock_ref	92		GAP
+b55792b07a9b	kernel/src/mm/edges.rs	memblock_mut	101		GAP
 5748890f4710	kernel/src/mm/gup.rs	copy_into_pinned	217	ptr-ops	INV:INV-LOCK-7
 5519cfa4398e	kernel/src/mm/gup.rs	copy_from_pinned	232	ptr-ops	INV:INV-LOCK-7
 e4e853a2e3b1	kernel/src/mm/gup.rs	unpin	257		INV:INV-LOCK-7
@@ -1866,46 +1869,6 @@ c6c8f30796bc	kernel/src/mm/kswapd.rs	kswapd_fn	75		GAP
 5a848172155b	kernel/src/mm/kswapd.rs	wakeup_kswapd	260		GAP
 790c1e485cca	kernel/src/mm/layout.rs	kernel_layout_init	301		GAP
 3dd990fc3503	kernel/src/mm/layout.rs	kernel_layout	316		GAP
-eb33b288134e	kernel/src/mm/lru.rs	<module>	38		GAP
-902def155832	kernel/src/mm/lru.rs	<module>	98	ptr-ops,addr-arith	GAP
-dd685bad5d91	kernel/src/mm/lru.rs	<module>	138	ptr-ops,addr-arith	GAP
-7bbdcf379ef7	kernel/src/mm/lru.rs	lru_add_page	181		GAP
-8b31e48aebae	kernel/src/mm/lru.rs	lru_add_page	190		GAP
-1be5b22e224b	kernel/src/mm/lru.rs	lru_del_page	201		GAP
-c8628fc34e21	kernel/src/mm/lru.rs	lru_del_page	219		GAP
-3962bb748d06	kernel/src/mm/lru.rs	lru_move_to_tail	232		GAP
-86d5c180e9e3	kernel/src/mm/lru.rs	lru_move_to_tail	240		GAP
-e2bf04f47a83	kernel/src/mm/lru.rs	lru_move_to_head	260		GAP
-aa8e34068273	kernel/src/mm/lru.rs	lru_move_to_head	267		GAP
-a200f1bc278f	kernel/src/mm/lru.rs	lru_page_total	344		GAP
-5067245c31eb	kernel/src/mm/lru.rs	page_add_anon_lru	372		GAP
-b2d01628bb9d	kernel/src/mm/lru.rs	page_add_anon_lru	378		GAP
-cfb20a1146b7	kernel/src/mm/lru.rs	page_add_file_lru_batch	396		GAP
-800352cdd588	kernel/src/mm/lru.rs	page_add_file_lru_batch	408		GAP
-6cf6aceee4aa	kernel/src/mm/lru.rs	page_add_file_lru_young	435		GAP
-ae6c22e65fcb	kernel/src/mm/lru.rs	page_add_file_lru_young	441		GAP
-f3dd6ec56166	kernel/src/mm/lru.rs	page_add_file_lru_young_batch	455		GAP
-0fb92df69a02	kernel/src/mm/lru.rs	page_add_file_lru_young_batch	467		GAP
-d5cb9fca3a7d	kernel/src/mm/lru.rs	lru_demote_active_file_oldest	504		GAP
-d8058d9d2604	kernel/src/mm/lru.rs	lru_demote_active_file_oldest	516		GAP
-04be4ff3c4d2	kernel/src/mm/lru.rs	lru_demote_active_file_oldest	525		GAP
-ac76aa99375b	kernel/src/mm/lru.rs	lru_tail	551		GAP
-d579837284f3	kernel/src/mm/lru.rs	lru_collect_cold	571		GAP
-b07710e3a334	kernel/src/mm/lru.rs	lru_collect_cold	582		GAP
-3f78241eae16	kernel/src/mm/memblock.rs	memblock_init	539		GAP
-b8174bca04b0	kernel/src/mm/memblock.rs	memblock_add	548		GAP
-4f7faa377c33	kernel/src/mm/memblock.rs	memblock_reserve	556		GAP
-b88abcca7be4	kernel/src/mm/memblock.rs	memblock_reserve_nomap	564		GAP
-02fe73f2d3ea	kernel/src/mm/memblock.rs	memblock_get_available_region	572		GAP
-ca03f2e8cec8	kernel/src/mm/memblock.rs	memblock_total_memory	580		GAP
-adafb407d223	kernel/src/mm/memblock.rs	memblock_available_memory	586		GAP
-25c95fa6952d	kernel/src/mm/memblock.rs	memblock_is_reserved	592		GAP
-7705eace9566	kernel/src/mm/memblock.rs	memblock_for_each_free_range	601		GAP
-2f447b916254	kernel/src/mm/memblock.rs	memblock_find_in_range	607		GAP
-6d3e73d553db	kernel/src/mm/memblock.rs	memblock_dump	613		GAP
-789e361494cf	kernel/src/mm/memblock.rs	memblock	625		GAP
-cde9811a58c7	kernel/src/mm/memblock.rs	memblock_mut	636		GAP
-66e7a724f1d9	kernel/src/mm/memblock.rs	memblock_phys_alloc	644		GAP
 4ec7550f68f1	kernel/src/mm/mm_struct.rs	<module>	381		INV:INV-LOCK-7
 f1e49b27b0db	kernel/src/mm/mm_struct.rs	<module>	470		GAP
 e6d0755c5338	kernel/src/mm/mm_struct.rs	<module>	480		GAP
@@ -1914,13 +1877,13 @@ a7efea7c5647	kernel/src/mm/mm_struct.rs	<module>	490		GAP
 8709c9822f6c	kernel/src/mm/mm_struct.rs	<module>	1304		GAP
 fb53d9e8a24d	kernel/src/mm/mm_struct.rs	<module>	1305		GAP
 7f2432c6eb5c	kernel/src/mm/mm_struct.rs	drop	1466		INV:INV-LOCK-7
-27e3787f7109	kernel/src/mm/mod.rs	<module>	121	addr-arith	INV:INV-PCP-3
-72141b09cbc8	kernel/src/mm/mod.rs	alloc_and_map_user_table	130	addr-arith	INV:INV-PCP-3
-94e1311a6e81	kernel/src/mm/mod.rs	alloc_and_map_user_table	135	addr-arith	INV:INV-PCP-3
-e84ea9ceb342	kernel/src/mm/mod.rs	<module>	144	addr-arith	INV:INV-PCP-3
-9ce79743ef84	kernel/src/mm/mod.rs	alloc_and_map_user_memory	153	addr-arith	INV:INV-PCP-3
-35294ffffdfe	kernel/src/mm/mod.rs	alloc_and_map_user_memory	158	addr-arith	INV:INV-PCP-3
-05eab2388c76	kernel/src/mm/mod.rs	<module>	175		INV:INV-PCP-3
+154b1ed0e2b2	kernel/src/mm/mod.rs	<module>	122	addr-arith	GAP
+6ab4133adc5c	kernel/src/mm/mod.rs	alloc_and_map_user_table	131	addr-arith	GAP
+7d48efa3ffb2	kernel/src/mm/mod.rs	alloc_and_map_user_table	136	addr-arith	GAP
+0252cc69d174	kernel/src/mm/mod.rs	<module>	145	addr-arith	GAP
+0f4d4b987803	kernel/src/mm/mod.rs	alloc_and_map_user_memory	154	addr-arith	GAP
+b819d78fde1b	kernel/src/mm/mod.rs	alloc_and_map_user_memory	159	addr-arith	GAP
+ee271fc276c6	kernel/src/mm/mod.rs	<module>	176		GAP
 f28bb13f3727	kernel/src/mm/oom_kill.rs	select_bad_process	160		GAP
 c0400a9641ce	kernel/src/mm/oom_kill.rs	fault_oom_kill_or_retry	493		GAP
 587da749b353	kernel/src/mm/oom_kill.rs	kernel_fault_oom_kill	537		GAP

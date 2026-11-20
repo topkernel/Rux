@@ -19,11 +19,11 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2721**
-- with artifact (non-GAP): **1462** (53.7%)
-- GAP: **1259**
-- by kind: block=2392, unsafe-extern=7, unsafe-fn=166, unsafe-impl=156
-- by category (regions carry 0..n tags): ptr-ops=667, asm=278, volatile=162, addr-arith=59, raw-construct=58, no-preempt=16, ffi=13, static-mut=5, layout-meta=5, transmute=4
+- unsafe regions: **2684**
+- with artifact (non-GAP): **1453** (54.1%)
+- GAP: **1231**
+- by kind: block=2358, unsafe-extern=7, unsafe-fn=163, unsafe-impl=156
+- by category (regions carry 0..n tags): ptr-ops=665, asm=278, volatile=162, raw-construct=58, addr-arith=57, no-preempt=16, ffi=13, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
 
@@ -31,9 +31,9 @@ census id is accounted for here.
 |-----------|---------|---------|-----|
 | arch | 781 | 722 | 59 |
 | fs | 644 | 212 | 432 |
-| mm | 234 | 58 | 176 |
+| mm | 199 | 51 | 148 |
 | sync | 159 | 56 | 103 |
-| dfx | 129 | 129 | 0 |
+| dfx | 127 | 127 | 0 |
 | drivers | 120 | 8 | 112 |
 | sched | 117 | 93 | 24 |
 | tests | 105 | 1 | 104 |
@@ -2102,6 +2102,16 @@ census id is accounted for here.
 | 193 | drain | block | - | GAP | `1c8986e1fcfd` |
 | 222 | drain | block | ptr-ops | GAP | `ce8426843e9b` |
 
+### kernel/src/mm/edges.rs (5)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 40 | first_node_mut | block | - | GAP | `1be557c9e0db` |
+| 61 | page_of | block | - | GAP | `413a1d0a235b` |
+| 74 | page_ref_of | block | - | GAP | `d67719c68613` |
+| 92 | memblock_ref | block | - | GAP | `91c346b4a68e` |
+| 101 | memblock_mut | block | - | GAP | `b55792b07a9b` |
+
 ### kernel/src/mm/gup.rs (10)
 
 | line | fn | kind | categories | artifact | id |
@@ -2136,56 +2146,6 @@ census id is accounted for here.
 | 301 | kernel_layout_init | block | - | GAP | `790c1e485cca` |
 | 316 | kernel_layout | block | - | GAP | `3dd990fc3503` |
 
-### kernel/src/mm/lru.rs (26)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 38 | <module> | unsafe-fn | - | GAP | `eb33b288134e` |
-| 98 | <module> | unsafe-fn | ptr-ops,addr-arith | GAP | `902def155832` |
-| 138 | <module> | unsafe-fn | ptr-ops,addr-arith | GAP | `dd685bad5d91` |
-| 181 | lru_add_page | block | - | GAP | `7bbdcf379ef7` |
-| 190 | lru_add_page | block | - | GAP | `8b31e48aebae` |
-| 201 | lru_del_page | block | - | GAP | `1be5b22e224b` |
-| 219 | lru_del_page | block | - | GAP | `c8628fc34e21` |
-| 232 | lru_move_to_tail | block | - | GAP | `3962bb748d06` |
-| 240 | lru_move_to_tail | block | - | GAP | `86d5c180e9e3` |
-| 260 | lru_move_to_head | block | - | GAP | `e2bf04f47a83` |
-| 267 | lru_move_to_head | block | - | GAP | `aa8e34068273` |
-| 344 | lru_page_total | block | - | GAP | `a200f1bc278f` |
-| 372 | page_add_anon_lru | block | - | GAP | `5067245c31eb` |
-| 378 | page_add_anon_lru | block | - | GAP | `b2d01628bb9d` |
-| 396 | page_add_file_lru_batch | block | - | GAP | `cfb20a1146b7` |
-| 408 | page_add_file_lru_batch | block | - | GAP | `800352cdd588` |
-| 435 | page_add_file_lru_young | block | - | GAP | `6cf6aceee4aa` |
-| 441 | page_add_file_lru_young | block | - | GAP | `ae6c22e65fcb` |
-| 455 | page_add_file_lru_young_batch | block | - | GAP | `f3dd6ec56166` |
-| 467 | page_add_file_lru_young_batch | block | - | GAP | `0fb92df69a02` |
-| 504 | lru_demote_active_file_oldest | block | - | GAP | `d5cb9fca3a7d` |
-| 516 | lru_demote_active_file_oldest | block | - | GAP | `d8058d9d2604` |
-| 525 | lru_demote_active_file_oldest | block | - | GAP | `04be4ff3c4d2` |
-| 551 | lru_tail | block | - | GAP | `ac76aa99375b` |
-| 571 | lru_collect_cold | block | - | GAP | `d579837284f3` |
-| 582 | lru_collect_cold | block | - | GAP | `b07710e3a334` |
-
-### kernel/src/mm/memblock.rs (14)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 539 | memblock_init | block | - | GAP | `3f78241eae16` |
-| 548 | memblock_add | block | - | GAP | `b8174bca04b0` |
-| 556 | memblock_reserve | block | - | GAP | `4f7faa377c33` |
-| 564 | memblock_reserve_nomap | block | - | GAP | `b88abcca7be4` |
-| 572 | memblock_get_available_region | block | - | GAP | `02fe73f2d3ea` |
-| 580 | memblock_total_memory | block | - | GAP | `ca03f2e8cec8` |
-| 586 | memblock_available_memory | block | - | GAP | `adafb407d223` |
-| 592 | memblock_is_reserved | block | - | GAP | `25c95fa6952d` |
-| 601 | memblock_for_each_free_range | block | - | GAP | `7705eace9566` |
-| 607 | memblock_find_in_range | block | - | GAP | `2f447b916254` |
-| 613 | memblock_dump | block | - | GAP | `6d3e73d553db` |
-| 625 | memblock | block | - | GAP | `789e361494cf` |
-| 636 | memblock_mut | block | - | GAP | `cde9811a58c7` |
-| 644 | memblock_phys_alloc | block | - | GAP | `66e7a724f1d9` |
-
 ### kernel/src/mm/mm_struct.rs (8)
 
 | line | fn | kind | categories | artifact | id |
@@ -2203,13 +2163,13 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 121 | <module> | unsafe-fn | addr-arith | INV:INV-PCP-3 | `27e3787f7109` |
-| 130 | alloc_and_map_user_table | block | addr-arith | INV:INV-PCP-3 | `72141b09cbc8` |
-| 135 | alloc_and_map_user_table | block | addr-arith | INV:INV-PCP-3 | `94e1311a6e81` |
-| 144 | <module> | unsafe-fn | addr-arith | INV:INV-PCP-3 | `e84ea9ceb342` |
-| 153 | alloc_and_map_user_memory | block | addr-arith | INV:INV-PCP-3 | `9ce79743ef84` |
-| 158 | alloc_and_map_user_memory | block | addr-arith | INV:INV-PCP-3 | `35294ffffdfe` |
-| 175 | <module> | unsafe-fn | - | INV:INV-PCP-3 | `05eab2388c76` |
+| 122 | <module> | unsafe-fn | addr-arith | GAP | `154b1ed0e2b2` |
+| 131 | alloc_and_map_user_table | block | addr-arith | GAP | `6ab4133adc5c` |
+| 136 | alloc_and_map_user_table | block | addr-arith | GAP | `7d48efa3ffb2` |
+| 145 | <module> | unsafe-fn | addr-arith | GAP | `0252cc69d174` |
+| 154 | alloc_and_map_user_memory | block | addr-arith | GAP | `0f4d4b987803` |
+| 159 | alloc_and_map_user_memory | block | addr-arith | GAP | `b819d78fde1b` |
+| 176 | <module> | unsafe-fn | - | GAP | `ee271fc276c6` |
 
 ### kernel/src/mm/oom_kill.rs (4)
 
@@ -2652,13 +2612,6 @@ census id is accounted for here.
 | 86 | raw_qword | block | volatile,ptr-ops | INV:INV-FOR-2 | `e6a1b1de63fa` |
 | 98 | location | block | ptr-ops | INV:INV-FOR-3 | `a2a298aa3c8b` |
 | 106 | location_ref | block | - | INV:INV-FOR-3 | `ebd6d070393b` |
-
-### kernel/src/dfx/hilogcensus.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 252 | unix_send_pre | block | - | INV:F18 | `c0aa70321689` |
-| 355 | kmsg_write | block | - | INV:F18 | `c220abd6f8c4` |
 
 ### kernel/src/dfx/hung_task.rs (1)
 
