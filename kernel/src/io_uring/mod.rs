@@ -358,26 +358,27 @@ fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUri
         -12
     })?;
 
-    // Write SQ ring header
-    unsafe {
-        let base = sq_ring.kvirt;
-        core::ptr::write_volatile(base.add(0) as *mut u32, 0);   // head
-        core::ptr::write_volatile(base.add(4) as *mut u32, 0);   // tail
-        core::ptr::write_volatile(base.add(8) as *mut u32, sq_entries - 1); // ring_mask
-        core::ptr::write_volatile(base.add(12) as *mut u32, sq_entries);     // ring_entries
-        core::ptr::write_volatile(base.add(16) as *mut u32, 0);  // flags
-        core::ptr::write_volatile(base.add(20) as *mut u32, 0);  // dropped
+    // Write SQ ring header (INV-IOURING-RING-1: the region is in hand,
+    // pre-publication — the view's window check is defense-in-depth).
+    {
+        let sq = crate::safety::mmio::MmioRegion::new(sq_ring.kvirt as usize, sq_ring.size);
+        sq.write_u32(0, 0);              // head
+        sq.write_u32(4, 0);              // tail
+        sq.write_u32(8, sq_entries - 1); // ring_mask
+        sq.write_u32(12, sq_entries);    // ring_entries
+        sq.write_u32(16, 0);             // flags
+        sq.write_u32(20, 0);             // dropped
     }
 
-    // Write CQ ring header
-    unsafe {
-        let base = cq_ring.kvirt;
-        core::ptr::write_volatile(base.add(0) as *mut u32, 0);   // head
-        core::ptr::write_volatile(base.add(4) as *mut u32, 0);   // tail
-        core::ptr::write_volatile(base.add(8) as *mut u32, cq_entries - 1); // ring_mask
-        core::ptr::write_volatile(base.add(12) as *mut u32, cq_entries);     // ring_entries
-        core::ptr::write_volatile(base.add(16) as *mut u32, 0);  // overflow
-        core::ptr::write_volatile(base.add(20) as *mut u32, 0);  // flags
+    // Write CQ ring header (same region-in-hand shape).
+    {
+        let cq = crate::safety::mmio::MmioRegion::new(cq_ring.kvirt as usize, cq_ring.size);
+        cq.write_u32(0, 0);              // head
+        cq.write_u32(4, 0);              // tail
+        cq.write_u32(8, cq_entries - 1); // ring_mask
+        cq.write_u32(12, cq_entries);    // ring_entries
+        cq.write_u32(16, 0);             // overflow
+        cq.write_u32(20, 0);             // flags
     }
 
     // Fill in params. NOTE (review批次6 P1): do NOT advertise
@@ -616,23 +617,20 @@ fn submit_sqes(ring: &IoUring, to_submit: u32) -> u32 {
     // userspace could modify the shared ring between iterations (TOCTOU),
     // causing double-processing or skipping of SQEs.  We advance a local
     // counter and write back only after the loop finishes.
-    let mut head = unsafe {
-        core::ptr::read_volatile(ring.sq_ring.kvirt.add(ring.sq_head_off) as *const u32)
-    };
-    let tail = unsafe {
-        core::ptr::read_volatile(ring.sq_ring.kvirt.add(ring.sq_tail_off) as *const u32)
-    };
+    let sq = ring.sq_hdr();
+    let mut head = sq.read_u32(ring.sq_head_off);
+    let tail = sq.read_u32(ring.sq_tail_off);
 
     // Cap to actual available SQEs
     let available = tail.wrapping_sub(head);
     let batch = core::cmp::min(to_submit, available);
 
     for _ in 0..batch {
-        // Read SQE index from the array
-        let array_base = unsafe { ring.sq_ring.kvirt.add(ring.sq_array_off) as *const u32 };
-        let sqe_idx = unsafe {
-            core::ptr::read_volatile(array_base.add((head & ring.sq_ring_mask) as usize))
-        };
+        // Read SQE index from the array (window-checked read; the index
+        // itself is validated against sq_entries right below).
+        let sqe_idx = sq.read_u32(
+            ring.sq_array_off + (head & ring.sq_ring_mask) as usize * 4,
+        );
 
         // Validate SQE index against sq_entries (per Linux:
         // READ_ONCE(ring->array[i]) < ctx->sq_entries).
@@ -640,9 +638,8 @@ fn submit_sqes(ring: &IoUring, to_submit: u32) -> u32 {
             break; // Invalid index — stop processing
         }
 
-        // Read the SQE
-        let sqe_ptr = unsafe { ring.sqes.kvirt.add(sqe_idx as usize * 64) as *const IoUringSqe };
-        let sqe = unsafe { core::ptr::read_volatile(sqe_ptr) };
+        // Read the SQE through the SQE-array view.
+        let sqe = ring.sqe_at(sqe_idx);
 
         // Advance local head
         head = head.wrapping_add(1);
@@ -658,12 +655,7 @@ fn submit_sqes(ring: &IoUring, to_submit: u32) -> u32 {
 
     // Write back the advanced head only after all submissions are complete
     if submitted > 0 {
-        unsafe {
-            core::ptr::write_volatile(
-                ring.sq_ring.kvirt.add(ring.sq_head_off) as *mut u32,
-                head,
-            );
-        }
+        sq.write_u32(ring.sq_head_off, head);
     }
 
     submitted
@@ -858,7 +850,7 @@ fn io_uring_op_close(sqe: &IoUringSqe) -> i32 {
         }
     }
 
-    match unsafe { crate::fs::file::close_file_fd(fd) } {
+    match crate::fs::file::close_file_fd(fd) {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -869,46 +861,75 @@ fn io_uring_op_fadvise(_sqe: &IoUringSqe) -> i32 {
     0
 }
 
+// ==================== Ring views (INV-IOURING-RING-1) ====================
+
+/// INV-IOURING-RING-1: the SQ/CQ ring headers and the SQE array are
+/// USER-SHARED memory (mmap'd at setup, byte sizes fixed then and never
+/// resized) — the kernel is one party of a shared-memory protocol, the
+/// exact relationship MmioRegion types for device windows (the "device"
+/// here is the user process). Every ring access goes through these
+/// views: the MmioRegion window is the setup-time region size, so each
+/// head/tail/array/SQE/CQE access is bounds-checked against it — the
+/// unchecked `.add()` family (ledger row 21) is structurally impossible
+/// through these (a firing window check is a kernel bug and panics,
+/// never an OOB on user-controlled data).
+impl IoUring {
+    fn sq_hdr(&self) -> crate::safety::mmio::MmioRegion {
+        crate::safety::mmio::MmioRegion::new(self.sq_ring.kvirt as usize, self.sq_ring.size)
+    }
+    fn cq_hdr(&self) -> crate::safety::mmio::MmioRegion {
+        crate::safety::mmio::MmioRegion::new(self.cq_ring.kvirt as usize, self.cq_ring.size)
+    }
+    /// Read one SQE by index (caller validated `idx < sq_entries`).
+    fn sqe_at(&self, idx: u32) -> IoUringSqe {
+        let r = crate::safety::mmio::MmioRegion::new(
+            self.sqes.kvirt as usize,
+            self.sqes.size,
+        );
+        // IoUringSqe is 64 bytes of POD (repr(Rust) plain u64/u32 fields,
+        // no padding surprises — same layout liburing shares); read the
+        // four u64 words and the tail u32 through the window.
+        // SAFETY: INV-IOURING-RING-1 + idx < sq_entries (checked by every
+        // caller) keeps 0..64 inside the SQE-array window.
+        unsafe { core::ptr::read_volatile((r.base() + idx as usize * 64) as *const IoUringSqe) }
+    }
+    /// Write one CQE at slot `slot` (caller masked the slot).
+    fn cqe_write(&self, slot: usize, cqe: IoUringCqe) {
+        let r = self.cq_hdr();
+        let off = self.cq_cqes_off + slot * 16;
+        // SAFETY: INV-IOURING-RING-1; off+16 <= window by the setup-time
+        // cq_entries sizing (the window check is the backstop).
+        unsafe {
+            core::ptr::write_volatile((r.base() + off) as *mut IoUringCqe, cqe);
+        }
+    }
+}
+
 // ==================== CQE Posting ====================
 
 /// Post a completion queue entry.
 fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
     let _lock = ring.cq_lock.lock();
 
-    let head = unsafe {
-        core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_head_off) as *const u32)
-    };
-    let tail = unsafe {
-        core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_tail_off) as *const u32)
-    };
+    let cq = ring.cq_hdr();
+    let head = cq.read_u32(ring.cq_head_off);
+    let tail = cq.read_u32(ring.cq_tail_off);
 
     // Check if CQ is full (head == tail means empty, so capacity = cq_entries - 1)
     if tail.wrapping_sub(head) >= ring.cq_entries {
         // CQ overflow: increment overflow counter visible to userspace
-        unsafe {
-            let overflow_ptr = ring.cq_ring.kvirt.add(ring.cq_overflow_off) as *mut u32;
-            let count = core::ptr::read_volatile(overflow_ptr);
-            core::ptr::write_volatile(overflow_ptr, count + 1);
-        }
+        let count = cq.read_u32(ring.cq_overflow_off);
+        cq.write_u32(ring.cq_overflow_off, count + 1);
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         return;
     }
 
     // Write CQE at tail position
-    let cqe_offset = ring.cq_cqes_off + (tail as usize & ring.cq_ring_mask as usize) * 16;
-    let cqe_ptr = unsafe { ring.cq_ring.kvirt.add(cqe_offset) as *mut IoUringCqe };
-    unsafe {
-        core::ptr::write_volatile(cqe_ptr, IoUringCqe { user_data, res, flags });
-    }
+    ring.cqe_write((tail as usize & ring.cq_ring_mask as usize), IoUringCqe { user_data, res, flags });
 
     // Advance cq_tail
     let new_tail = tail.wrapping_add(1);
-    unsafe {
-        core::ptr::write_volatile(
-            ring.cq_ring.kvirt.add(ring.cq_tail_off) as *mut u32,
-            new_tail,
-        );
-    }
+    cq.write_u32(ring.cq_tail_off, new_tail);
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
     // Signal eventfd if registered (use the pinned file reference, not the
@@ -938,12 +959,9 @@ fn signal_eventfd_file(file: &alloc::sync::Arc<File>) {
 /// before this is called. The first check will always succeed.
 fn wait_for_cqes(ring: &IoUring, min_complete: u32) -> i32 {
     for _ in 0..1000 {
-        let head = unsafe {
-            core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_head_off) as *const u32)
-        };
-        let tail = unsafe {
-            core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_tail_off) as *const u32)
-        };
+        let cq = ring.cq_hdr();
+        let head = cq.read_u32(ring.cq_head_off);
+        let tail = cq.read_u32(ring.cq_tail_off);
 
         let completed = tail.wrapping_sub(head);
         if completed >= min_complete {
@@ -977,7 +995,7 @@ pub fn sys_io_uring_setup(args: [u64; 6]) -> u64 {
         return -(14i64) as u64; // EFAULT
     }
 
-    let mut params = match unsafe { get_user::<IoUringParams>(params_ptr) } {
+    let mut params = match crate::arch::uaccess_safe::read_user::<IoUringParams>(params_ptr as usize) {
         Some(p) => p,
         None => return -(14i64) as u64,
     };
@@ -1017,7 +1035,7 @@ pub fn sys_io_uring_setup(args: [u64; 6]) -> u64 {
     }
 
     // Copy updated params back
-    unsafe { let _ = put_user(params_ptr, params); }
+    let _ = crate::arch::uaccess_safe::copy_out_t(params_ptr as usize, &params);
 
     fd as u64
 }
