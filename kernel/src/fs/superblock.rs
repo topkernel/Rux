@@ -148,14 +148,19 @@ impl<'a> FsContext<'a> {
     }
 }
 
+/// The mount-callback table (round-5, L5): the pointers are SAFE fns —
+/// registration is the audited edge (the same de-sign the FileOps table
+/// already carries; the `extern "C"` was cargo cult — no C caller
+/// exists). The `*mut SuperBlock` handle keeps its documented raw
+/// contract until the mount layer adopts typed handles.
 #[repr(C)]
 pub struct FileSystemType {
     /// Filesystem name
     pub name: &'static str,
     /// Get superblock (called on mount)
-    pub mount: Option<unsafe extern "C" fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
+    pub mount: Option<fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
     /// Kill superblock (called on unmount)
-    pub kill_sb: Option<unsafe extern "C" fn(*mut SuperBlock)>,
+    pub kill_sb: Option<fn(*mut SuperBlock)>,
     /// Filesystem flags
     pub fs_flags: u64,
 }
@@ -164,8 +169,8 @@ impl FileSystemType {
     /// Create new filesystem type
     pub const fn new(
         name: &'static str,
-        mount: Option<unsafe extern "C" fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
-        kill_sb: Option<unsafe extern "C" fn(*mut SuperBlock)>,
+        mount: Option<fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
+        kill_sb: Option<fn(*mut SuperBlock)>,
         fs_flags: u64,
     ) -> Self {
         Self {
@@ -178,7 +183,7 @@ impl FileSystemType {
 
     /// Mount filesystem
     ///
-    pub unsafe fn mount_fs(
+    pub fn mount_fs(
         &self,
         source: Option<&str>,
         target: Option<&str>,
@@ -187,7 +192,7 @@ impl FileSystemType {
         // Create mount context
         let fc = FsContext::new(source, target, flags);
 
-        // Call filesystem-specific mount function
+        // Call filesystem-specific mount function (registration edge)
         if let Some(mount_fn) = self.mount {
             mount_fn(&fc)
         } else {
@@ -196,8 +201,7 @@ impl FileSystemType {
     }
 
     /// Unmount filesystem
-    ///
-    pub unsafe fn kill_super(&self, sb: *mut SuperBlock) {
+    pub fn kill_super(&self, sb: *mut SuperBlock) {
         if let Some(kill_fn) = self.kill_sb {
             kill_fn(sb);
         }
@@ -284,7 +288,7 @@ pub fn get_fs_type(name: &str) -> Option<&'static FileSystemType> {
     FS_REGISTRY.get(name)
 }
 
-pub unsafe fn do_mount(
+pub fn do_mount(
     dev_name: Option<&str>,
     dir_name: Option<&str>,
     type_name: &str,
@@ -304,7 +308,7 @@ pub unsafe fn do_mount(
     crate::fs::mount::do_mount("none", target, type_name, flags, None)
 }
 
-pub unsafe fn do_umount(target: &str, _flags: u64) -> Result<(), i32> {
+pub fn do_umount(target: &str, _flags: u64) -> Result<(), i32> {
     use crate::fs::ext4;
 
     // Currently only support unmounting ext4 (mounted at root "/")
