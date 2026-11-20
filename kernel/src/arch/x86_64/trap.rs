@@ -4059,6 +4059,83 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     crate::console::uart_putc_raw(b);
                 }
             }
+            // KP-RING (the sys_wait4+892 NULL children-walk hunt, 2026-11-21):
+            // the faulting task's thread-group ring + each member's
+            // children list head/first-node, one line per member, all
+            // through the volatile-read primitives (no deref of a poisoned
+            // page can fault — the reads ride the same contract as the
+            // staleness screens). The one-shot latch is the KP_DUMP_ENTERED
+            // latch above; this only ever runs on a dying kernel, so the
+            // print volume argument does not apply. Names the free-while-
+            // ring-linked producer offline: a member whose children.next
+            // is NULL/0 is a page that was zeroed after init — the face.
+            {
+                use crate::process::task::task_offsets;
+                let cur_task: *mut u8 = match crate::sched::current() {
+                    Some(c) => (c as *mut crate::process::task::Task) as *mut u8,
+                    None => core::ptr::null_mut(),
+                };
+                fn kp_read64(p: *const u8) -> u64 {
+                    if p.is_null() { return 0; }
+                    // SAFETY: kernel linear-map diagnostic read, same
+                    // contract as the kp-stk scan above (bounded by the
+                    // KP_DUMP_ENTERED latch; the page is mapped or the
+                    // latch stops the recursion).
+                    unsafe { core::ptr::read_volatile(p as *const u64) }
+                }
+                fn kp_read32(p: *const u8) -> u32 {
+                    if p.is_null() { return 0; }
+                    unsafe { core::ptr::read_volatile(p as *const u32) }
+                }
+                let ring_base: usize = cur_task as usize;
+                if ring_base == 0 {
+                    for &b in b"kp-ring: no current task\n" { crate::console::uart_putc_raw(b); }
+                }
+                if ring_base != 0 {
+                    // cur = the faulting task: walk the ring from its
+                    // group leader. All offsets compile-time (offset_of
+                    // would be nicer but this module is pre-Task-import;
+                    // the exported constants are the maintained truth).
+                                        // Thread-group fields: group_leader/next_thread — the
+                    // walk heals NULL, so read RAW via offset_of here.
+                    const OFF_LEADER: usize = task_offsets::TASK_GROUP_LEADER;
+                    const OFF_NEXT: usize = task_offsets::TASK_NEXT_THREAD;
+                    const OFF_NR: usize = task_offsets::TASK_NR_THREADS;
+                    let leader_p = kp_read64((ring_base + OFF_LEADER) as *const u8) as usize;
+                    let leader = if leader_p == 0 || leader_p == ring_base { ring_base } else { leader_p };
+                    for &b in b"kp-ring: task=0x" { crate::console::uart_putc_raw(b); }
+                    kp_put_hex(ring_base as u64);
+                    for &b in b" nr=" { crate::console::uart_putc_raw(b); }
+                    kp_put_hex(kp_read32((ring_base + OFF_NR) as *const u8) as u64);
+                    crate::console::uart_putc_raw(b'\n');
+                    let mut m = leader;
+                    let mut guard = 0u32;
+                    while m != 0 && guard < 24 {
+                        let pid = kp_read32(unsafe { (m as *const u8).add(task_offsets::TASK_PID) } ) as u64;
+                        let st = kp_read32(unsafe { (m as *const u8).add(task_offsets::TASK_STATE) } ) as u64;
+                        let child_next = kp_read64(unsafe { (m as *const u8).add(task_offsets::TASK_CHILDREN) } );
+                        let child_prev = kp_read64(unsafe { (m as *const u8).add(task_offsets::TASK_CHILDREN + 8) } );
+                        let sib_next = kp_read64(unsafe { (m as *const u8).add(task_offsets::TASK_SIBLING) } );
+                        for &b in b"kp-ring m=" { crate::console::uart_putc_raw(b); }
+                        kp_put_hex(m as u64);
+                        for &b in b" pid=" { crate::console::uart_putc_raw(b); }
+                        kp_put_hex(pid);
+                        for &b in b" st=" { crate::console::uart_putc_raw(b); }
+                        kp_put_hex(st);
+                        for &b in b" ch.nx=" { crate::console::uart_putc_raw(b); }
+                        kp_put_hex(child_next);
+                        for &b in b" ch.pv=" { crate::console::uart_putc_raw(b); }
+                        kp_put_hex(child_prev);
+                        for &b in b" sb.nx=" { crate::console::uart_putc_raw(b); }
+                        kp_put_hex(sib_next);
+                        crate::console::uart_putc_raw(b'\n');
+                        let nx = kp_read64(unsafe { (m as *const u8).add(OFF_NEXT) }) as usize;
+                        if nx == 0 || nx == m || nx == leader { break; }
+                        m = nx;
+                        guard += 1;
+                    }
+                }
+            }
             // The old terminal was an unconditional hlt loop — every
             // kernel page fault with no fixup entry died with the whole
             // machine, captured into nothing. The Oops policy (Tranche

@@ -171,12 +171,39 @@ sporadically. Expansion, in value order:
    access" (every register access in bounds). Acceptance: harnesses
    committed with the proofs passing; the INV rows in the ledger gain a
    "machine-checked" column.
-3. **Verus evaluation (one pilot, then decide).** The Atmosphere datapoint
+3. **Verus evaluation (one pilot, then decide) — PILOT COMPLETE
+   2026-11-21, verdict recorded below.** The Atmosphere datapoint
    (3.32:1 proof-to-code ratio, 20-second verification) says full
    deduction over a shrunk TCB module is feasible. Pilot: MmioRegion's
-   bounds invariant in Verus. If the proof cost stays in the promised
-   class, extend to KPtr's lifetime discipline; if not, Kani-bounded
-   remains the bar and the pilot's findings are recorded.
+   bounds invariant in Verus.
+
+   **PILOT RESULT (kernel/safety-tests/verus/pilot_mmio.rs; Verus
+   0.2026.11.02 prebuilt + rustup 1.99.1 toolchain, ~10 min setup,
+   no source build):** 4 proofs verified, 0 errors, 1.9 s — an order
+   under the 20 s pitch. Three theorems over a spec twin of
+   check()'s arithmetic: T1 no-OOB (admitted access spans lie inside
+   the window, unbounded inputs), T2 wrapping-add alignment closure
+   (the conviction-#1 fix's justification: 2^64 % w == 0 for
+   power-of-two widths — a lemma Kani CANNOT check, being bounded),
+   T3 admit-closure (addr reconstructs off). Ratio: 74 proof-file
+   lines to ~12 lines of mirrored impl arithmetic ≈ 6:1 raw, ≈ 3.7:1
+   counting only theorem+spec lines — the Atmosphere class.
+
+   **VERDICT: Kani-bounded stays the standing bar; Verus is adopted
+   NARROWLY, for the unbounded-arithmetic lemma class** (modulo/wrap
+   identities, bound derivations — properties that hold for ALL
+   inputs, where a bounded checker can only sample). The raw-memory
+   layer (volatile derefs) stays with Kani/Miri — Verus has no
+   executable model for it, and forcing it would distort the impl
+   (evaluation question 1: avoided by the spec-twin scope; the
+   twin↔impl correspondence is by line-mirroring and is the pilot's
+   honest weakness — a follow-up stitch would be a Kani harness
+   asserting twin/impl agreement on symbolic inputs). Composition
+   (question 3): complementary, not fighting — the two tools own
+   disjoint property classes over the same primitive. KPtr's
+   lifetime discipline: NOT extended this round — it is heap-liveness
+   (Kani's memory model already owns exactly-once); the Verus-shaped
+   share would be the layout-identity lemma, queued as optional.
 
 ## Layer 3 — Hardware: a runtime backstop for what static analysis cannot see (OPEN)
 

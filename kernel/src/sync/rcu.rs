@@ -108,7 +108,11 @@ pub fn rcu_read_unlock() {
 /// - `head` must remain valid until the callback executes.
 /// - `head.func` must be a valid function pointer.
 /// - `head.list` must have been initialized via `init()`.
-pub unsafe fn call_rcu(head: *mut RcuHead) {
+/// Queue `head`'s callback for the post-grace free (the reference's
+/// `__call_rcu`). Takes the RcuHead by reference — the caller's
+/// init-before-use contract is the type's own (init() writes
+/// `initialized`), so the guard below is a plain field read.
+pub fn call_rcu(head: &mut RcuHead) {
     let cpu = crate::arch::cpu_id() as usize;
     if cpu >= MAX_CPUS {
         return;
@@ -116,15 +120,19 @@ pub unsafe fn call_rcu(head: *mut RcuHead) {
 
     // Guard against uninitialized RcuHead — if init() was never called,
     // add_tail would corrupt the list.
-    if !(*head).initialized {
+    if !head.initialized {
         return;
     }
 
     lock_cb_list(cpu);
-    // SAFETY: head is a valid pointer (caller contract).  We hold cb_list lock
-    // for this CPU, so RCU_CBS[cpu] is not accessed concurrently.  head.list
-    // was initialised via init() (caller contract).
-    (*head).list.add_tail(&mut RCU_CBS[cpu]);
+    // SAFETY: the cb_list lock is held for this CPU, so RCU_CBS[cpu] is
+    // not accessed concurrently; head.list was initialised via init()
+    // (the RcuHead protocol) and the intrusive rewire is the list's own
+    // audited operation (the reference's blist_add_tail counterpart) —
+    // it mutates THIS node's links, hence &mut in the signature.
+    unsafe {
+        head.list.add_tail(&mut RCU_CBS[cpu]);
+    }
     unlock_cb_list(cpu);
 
     // Raise softirq so callbacks get processed promptly.

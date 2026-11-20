@@ -651,7 +651,7 @@ impl RwSemaphore {
                 pinned = pid_hash_lookup_pinned(pid);
             }
             if pinned.is_null()
-                || !unsafe { (*pinned).ti_on_cpu.load(Ordering::Acquire) }
+                || !crate::sched::edges::task_shared(pinned).ti_on_cpu.load(Ordering::Acquire)
             {
                 state = OwnerState::Nonspinnable;
                 break;
@@ -862,7 +862,7 @@ impl RwSemaphore {
                 self.set_reader_owned(crate::process::current_pid());
                 // A concurrent grant's wake may have enqueued us
                 // while we never slept — undo (no-op otherwise).
-                crate::sched::dequeue_task(unsafe { &*cur });
+                crate::sched::dequeue_task(crate::sched::edges::task_shared(cur));
                 return;
             }
 
@@ -870,8 +870,8 @@ impl RwSemaphore {
             // UNINTERRUPTIBLE BEFORE the final grant check under
             // wait_lock, so a racing grant's wake_up_process lands on
             // a sleeping-state task.
-            unsafe {
-                (*cur).set_state(crate::process::task::TaskState::new(
+            {
+                crate::sched::edges::task_shared(cur).set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::UNINTERRUPTIBLE,
                 ));
             }
@@ -889,7 +889,7 @@ impl RwSemaphore {
                 crate::pr_err!(
                     "RWSEM-STALL-R {} waiter={} waited={}j count={:#x} owner={:#x} queued={} (reader parked without grant)",
                     self.name,
-                    unsafe { (*cur).pid() },
+                    crate::sched::edges::task_shared(cur).pid(),
                     crate::drivers::timer::get_jiffies().wrapping_sub(first_park),
                     count,
                     owner,
@@ -897,13 +897,13 @@ impl RwSemaphore {
                 );
             }
             if granted_now {
-                unsafe {
-                    (*cur).set_state(crate::process::task::TaskState::new(
+                {
+                    crate::sched::edges::task_shared(cur).set_state(crate::process::task::TaskState::new(
                         crate::process::task::TaskState::RUNNING,
                     ));
                 }
                 self.set_reader_owned(crate::process::current_pid());
-                crate::sched::dequeue_task(unsafe { &*cur });
+                crate::sched::dequeue_task(crate::sched::edges::task_shared(cur));
                 return;
             }
 
@@ -995,13 +995,13 @@ impl RwSemaphore {
             if acquired {
                 // try_write_lock removed our entry and published us
                 // as owner. Undo a concurrent wake's enqueue if any.
-                crate::sched::dequeue_task(unsafe { &*cur });
+                crate::sched::dequeue_task(crate::sched::edges::task_shared(cur));
                 return;
             }
 
             // State-first + re-check, then sleep.
-            unsafe {
-                (*cur).set_state(crate::process::task::TaskState::new(
+            {
+                crate::sched::edges::task_shared(cur).set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::UNINTERRUPTIBLE,
                 ));
             }
@@ -1026,7 +1026,7 @@ impl RwSemaphore {
                     if t.is_null() {
                         false
                     } else {
-                        let alive = !unsafe { (*t).state() }.is_dead();
+                        let alive = !crate::sched::edges::task_shared(t).state().is_dead();
                         task_put(t);
                         alive
                     }
@@ -1036,7 +1036,7 @@ impl RwSemaphore {
                 crate::pr_err!(
                     "RWSEM-STALL-W {} waiter={} waited={}j count={:#x} owner={} alive={} queued={} (writer parked without grant)",
                     self.name,
-                    unsafe { (*cur).pid() },
+                    crate::sched::edges::task_shared(cur).pid(),
                     crate::drivers::timer::get_jiffies().wrapping_sub(first_park),
                     count,
                     owner_pid,
@@ -1045,12 +1045,12 @@ impl RwSemaphore {
                 );
             }
             if acquired_now {
-                unsafe {
-                    (*cur).set_state(crate::process::task::TaskState::new(
+                {
+                    crate::sched::edges::task_shared(cur).set_state(crate::process::task::TaskState::new(
                         crate::process::task::TaskState::RUNNING,
                     ));
                 }
-                crate::sched::dequeue_task(unsafe { &*cur });
+                crate::sched::dequeue_task(crate::sched::edges::task_shared(cur));
                 return;
             }
 
@@ -1102,7 +1102,7 @@ fn owner_pid_on_cpu(pid: u32) -> bool {
     if t.is_null() {
         return false;
     }
-    let on = unsafe { (*t).ti_on_cpu.load(Ordering::Acquire) };
+    let on = crate::sched::edges::task_shared(t).ti_on_cpu.load(Ordering::Acquire);
     task_put(t);
     on
 }

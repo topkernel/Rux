@@ -44,14 +44,22 @@ fn verify_ordering() {
     assert_eq!(a < b, id_a < id_b);
 }
 
-/// INV-SCHEDCLASS-K3: enqueue/dequeue flags are distinct powers of 2.
+/// INV-SCHEDCLASS-K3: enqueue flags and dequeue flags are each distinct
+/// powers of 2 WITHIN their family. The two families are separate masks and
+/// legitimately share values (ENQUEUE_WAKEUP == DEQUEUE_SLEEP == 0x0001,
+/// mirroring Linux's sched.h) — the original harness wrongly asserted
+/// cross-family distinctness, which can never hold. Birth defect latent
+/// since fa84eaeb5 (the sweep only reached it after the errno grinder).
 #[kani::proof]
 fn verify_flags_distinct() {
-    let flags = [ENQUEUE_WAKEUP, ENQUEUE_HEAD, DEQUEUE_SLEEP, DEQUEUE_SAVE];
-    let mut seen = 0i32;
-    for &f in &flags {
-        assert!(f > 0 && (f & (f - 1)) == 0);
-        assert_eq!(seen & f, 0);
-        seen |= f;
+    let enqueue_flags = [ENQUEUE_WAKEUP, ENQUEUE_HEAD];
+    let dequeue_flags = [DEQUEUE_SLEEP, DEQUEUE_SAVE];
+    for flags in [&enqueue_flags, &dequeue_flags] {
+        let mut seen = 0i32;
+        for &f in flags.iter() {
+            assert!(f > 0 && (f & (f - 1)) == 0);
+            assert_eq!(seen & f, 0);
+            seen |= f;
+        }
     }
 }
