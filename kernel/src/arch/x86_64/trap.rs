@@ -30,6 +30,7 @@
 //! the untouched fast path (trap.S trap_exit_syscall; rcx/r11 mirror
 //! checks) and IRETQ everywhere else — the Linux discipline.
 
+use super::unsafe_edges::SavedFrame;
 use super::cpu::{inb, outb, rdmsr, wrmsr};
 use crate::arch::pt_regs::{Cause, PtRegs, PT_REGS_SIZE};
 use crate::sync::spinlock::Spinlock;
@@ -1187,18 +1188,21 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
             }
         }
     }
-    // SAFETY: regs points to a valid PtRegs built by a trap.S stub; the
-    // pointer stays valid for the duration of this handler.
-    unsafe {
-        // Save and swap PtRegs pointer. Nesting save/restore mirrors
-        // the riscv64 twin: a timer IRQ landing inside a deeper trap
-        // must not clobber the outer pointer. SYSCALL entries SKIP the
-        // pair (three atomics on the hottest path in the kernel): fork
-        // and exec derive the frame from task.pt_regs() (the canonical
-        // outermost user frame at rsp0-168), so the slot has no
-        // production reader for syscall frames — only the diagnostic
-        // readers (taskdump, wakewatch cross-CPU rip), which are served
-        // by the IRQ/exception stores and already document their races.
+    // The frame edge: ONE audited reference formation per entry
+    // (INV-XE-FRAME-1/2 in unsafe_edges.rs). Everything below is safe
+    // Rust over the typed handle.
+    let mut frame = unsafe { SavedFrame::<'static>::from_trap(regs) };
+
+    // Save and swap PtRegs pointer. Nesting save/restore mirrors
+    // the riscv64 twin: a timer IRQ landing inside a deeper trap
+    // must not clobber the outer pointer. SYSCALL entries SKIP the
+    // pair (three atomics on the hottest path in the kernel): fork
+    // and exec derive the frame from task.pt_regs() (the canonical
+    // outermost user frame at rsp0-168), so the slot has no
+    // production reader for syscall frames — only the diagnostic
+    // readers (taskdump, wakewatch cross-CPU rip), which are served
+    // by the IRQ/exception stores and already document their races.
+    {
         let syscall_vec = vector == SYSCALL_VECTOR;
         let prev_pt_regs = if syscall_vec {
             0
@@ -1209,7 +1213,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
             CURRENT_PT_REGS[cpu_id].store(regs as u64, core::sync::atomic::Ordering::Relaxed);
         }
 
-        let regs_ref = &mut *regs;
+        // Scoped dispatch on the frame (regs_ref: the live &mut PtRegs).
+        let regs_ref = &mut *frame;
 
         // OH bring-up: kernel-mode IPI/timer entries (0xE0-0xE5) are
         // routine events — printing every one flooded the emulated UART
@@ -1520,7 +1525,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
     // load. (Coroutine note: after an in-handler schedule() this tail
     // runs in the incoming task's own frozen frame with its own regs, so
     // the check validates whichever task actually returns to user.)
-    if unsafe { (*regs).user_mode() } {
+    if frame.user_mode() {
         // Return-to-user quiescent state (rcu.rs; see the riscv64 twin).
         crate::sync::rcu::rcu_note_context_switch();
         crate::dfx::leakorigin::check_user_return();
