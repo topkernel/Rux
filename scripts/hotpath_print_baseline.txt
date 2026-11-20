@@ -2,14 +2,14 @@
 # of UN-annotated pr_err/pr_warn/pr_info/pr_notice/println/print
 # sites allowed per hot-path file. Regenerate with --update after
 # removing prints (never after adding one without a review).
-kernel/src/sync/futex.rs 105
+kernel/src/arch/riscv64/trap.rs 23
+kernel/src/arch/x86_64/trap.rs 0
 kernel/src/ipc/binder.rs 0
-kernel/src/syscall/process.rs 47
-kernel/src/syscall/file.rs 35
-kernel/src/syscall/memory.rs 24
 kernel/src/mm/page_alloc.rs 34
 kernel/src/mm/pglist.rs 19
+kernel/src/sched/sched.rs 0
 kernel/src/signal.rs 15
-kernel/src/sched/sched.rs 24
-kernel/src/arch/riscv64/trap.rs 23
-kernel/src/arch/x86_64/trap.rs 43
+kernel/src/sync/futex.rs 0
+kernel/src/syscall/file.rs 35
+kernel/src/syscall/memory.rs 24
+kernel/src/syscall/process.rs 47

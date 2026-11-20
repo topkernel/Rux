@@ -117,6 +117,20 @@ def forbid_ratchet_check(failures):
                             f"— removal needs a visible registry edit")
 
 
+def hotpath_print_ratchet(failures):
+    """Hot-path print ratchet (the no-print rule's enforcement arm):
+    scripts/hotpath_print_check.py fails when un-annotated print sites
+    grow past the committed baseline. Frozen at the 2026-11-20 merge
+    state; owners' cleanup batches ratchet it DOWN (never up)."""
+    import subprocess as _sp
+    r = _sp.run(["python3", str(Path(__file__).resolve().parent
+                / "hotpath_print_check.py")],
+                capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if line.startswith("hotpath_print_check: FAIL"):
+            failures.append(line)
+
+
 def root_hygiene_check(failures):
     """Repo-root hygiene (user rule, violated repeatedly): no loose
     UNTRACKED files at the repo root — scratch scripts/logs/probe
@@ -146,6 +160,7 @@ def main():
 
     forbid_ratchet_check(failures)
     root_hygiene_check(failures)
+    hotpath_print_ratchet(failures)
 
     if args.check:
         regions = full_census()

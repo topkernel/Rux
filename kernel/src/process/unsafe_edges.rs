@@ -82,6 +82,21 @@ pub fn borrow_task_mut<'a>(p: *mut Task) -> &'a mut Task {
 /// `Task` and every field-inclusion error class the offset_of ladder
 /// carried (sc130/R9-1/R68a: fields silently missing from the hand list)
 /// is impossible: the compiler checks the value's completeness.
+///
+/// INV-PROC-PLACE-2 (self-reference rule, added by the slim4-fix lane
+/// 2026-11-20, hardened same day): the placed value must NOT carry
+/// addresses of itself. Build-then-place copies the struct to the slot,
+/// so a self-referential field initialized inside the constructor
+/// (ListHead::init() pointing children/sibling/rt_run_list at the
+/// TEMPORARY's own address) dangles at the dead temporary after the
+/// copy — every empty-list head then dereferences freed stack memory on
+/// the next list op (the Round-B fio null-walk corruption family,
+/// convicted beeb17524). The re-anchor is ENFORCED HERE, at the single
+/// placement choke point: every constructor route goes through this
+/// edge, so the rule holds by construction and a future constructor
+/// cannot forget it. Self-referential fields that a delta legitimately
+/// overwrites with a FINAL address (group_leader/next_thread) are
+/// simply re-set after placement, which also re-anchors them.
 #[inline]
 pub fn place_task(ptr: *mut Task, task: Task) {
     debug_assert!(!ptr.is_null());
@@ -90,6 +105,13 @@ pub fn place_task(ptr: *mut Task, task: Task) {
     // Task-sized-and-larger slot; `write` places the value without
     // dropping the (uninitialized) destination.
     unsafe { core::ptr::write(ptr, task) }
+    // INV-PROC-PLACE-2: re-anchor the self-referential list heads AT
+    // THE PLACED ADDRESS (init() is idempotent; the constructor-side
+    // anchors were redundant once the edge owns the rule).
+    let t = borrow_task_mut(ptr);
+    t.children.init();
+    t.sibling.init();
+    t.rt_run_list.init();
 }
 
 /// Read one page of target user memory through its page tables into

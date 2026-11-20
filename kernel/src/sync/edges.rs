@@ -153,9 +153,18 @@ pub fn read_volatile_u32(addr: usize) -> u32 {
 }
 
 /// copy_from_user with a byte count (INV-SY-3): fault-isolated user
-/// read into kernel memory; returns bytes copied.
-pub fn copy_from_user_bytes(dst: *mut u8, src: usize, len: usize) -> bool {
+/// read into kernel memory; returns the bytes NOT copied (Linux
+/// convention — 0 means full success).
+pub fn copy_from_user_bytes(dst: *mut u8, src: usize, len: usize) -> usize {
     // SAFETY: INV-SY-3 — the futex syscall's validated user pointer;
     // copy_from_user is fault-isolated.
-    unsafe { crate::arch::uaccess::copy_from_user(dst, src as *const u8, len) == 0 }
+    unsafe { crate::arch::uaccess::copy_from_user(dst, src as *const u8, len) }
 }
+
+/// Store the futex user word unconditionally (INV-SY-3): the
+/// fault-isolated put; returns true when the write landed.
+pub fn word_write(uaddr: usize, value: u32) -> bool {
+    // SAFETY: INV-SY-3 — validated futex user pointer.
+    unsafe { crate::arch::uaccess::put_user(uaddr as *mut u32, value) }
+}
+

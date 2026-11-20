@@ -1271,6 +1271,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                 vec::NMI => {
                     // No NMI source is configured on this board (no PMU/
                     // perfctr wiring); a stray NMI is worth one line.
+                    // HOTPATH-PRINT: unreachable per-hit — no NMI source
+                    // exists on this board; one line per stray NMI.
                     crate::pr_warn!("trap: unexpected NMI at rip={:#x}", regs_ref.rip);
                 }
 
@@ -1336,6 +1338,10 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                                         let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
                                         let comm =
                                             core::str::from_utf8(&cb[..cl]).unwrap_or("?");
+                                        // HOTPATH-PRINT: budget-gated —
+                                        // one-shot at 50 consecutive
+                                        // monopolist ticks (MONO_TICKS
+                                        // latch above).
                                         crate::pr_warn!(
                                             "MONOPOLIST-TICK pid={} ({}) preempt={} cpu={} last_rip={:#x} — remote bt follows",
                                             pid,
@@ -1414,6 +1420,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                             if !t.is_null() {
                                 crate::sched::sched::ww_watch_add(t);
                                 WW_P1_DONE.store(true, core::sync::atomic::Ordering::Release);
+                                // HOTPATH-PRINT: timer-tick one-shot/budgeted above
                                 crate::pr_warn!(
                                     "WW-P1-WATCH-ADD task={:#x} landed at jiffies={}",
                                     t as usize,
@@ -1430,6 +1437,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                             && crate::trace::EVENT_SCHEDTRACE.armed()
                             && !PS_DONE2.swap(true, core::sync::atomic::Ordering::AcqRel)
                         {
+                            // HOTPATH-PRINT: one-shot at 240s
+                            // (PS_DONE2 latch above).
                             crate::pr_warn!("=== SECOND DUMP (240s trend) ===");
                             crate::syscall::misc::param_stall_dump();
                         }
@@ -1691,7 +1700,8 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
                     if crate::cmdline::get_param("kpreempt").as_deref()
                         == Some("1")
                     {
-                        crate::pr_info!(
+                        // HOTPATH-PRINT: budget-gated (the budget/guard above).
+        crate::pr_info!(
                             "sched: kernel-preempt armed by cmdline (cpu={})",
                             crate::arch::cpu_id()
                         );
@@ -1727,6 +1737,7 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     static FIRED: core::sync::atomic::AtomicBool =
         core::sync::atomic::AtomicBool::new(false);
     if !FIRED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        // HOTPATH-PRINT: preempt-leak report — one-shot latch above
         crate::pr_info!(
             "sched: kernel-preempt enabled (first IRQ-exit switch, cpu={})",
             crate::arch::cpu_id()
@@ -2225,6 +2236,12 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
                     }
                 }
             }
+            // HOTPATH-PRINT: budget-gated (8/boot) — SIGILL-probing
+            // media/JIT workloads fault repeatedly; the signal delivery
+            // carries the rest.
+            static UD_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if UD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
             crate::pr_info!(
                 "trap: #UD at rip={:#x} pid {} comm {} bytes {}",
                 regs.rip,
@@ -2232,6 +2249,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
                 comm,
                 hex
             );
+            }
         }
         if sigill_has_handler() && !sigsegv_blocked_current() {
             let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGILL as i32);
@@ -2271,9 +2289,15 @@ fn sigill_has_handler() -> bool {
 fn handle_general_protection(regs: &mut PtRegs) {
     // OH bring-up: name the faulting task — b85's repeating user #GP at
     // ld.so+0xba256 could not be attributed to any pid.
-    crate::pr_info!("trap: #GP at rip={:#x}, mode={}, pid {}",
-        regs.rip, if regs.user_mode() { "user" } else { "kernel" },
-        crate::process::current_pid());
+    // HOTPATH-PRINT: budget-gated (8/boot) — user #GP fires per
+    // protection fault; the SIGSEGV delivery is the event.
+    static GP_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    if GP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+        crate::pr_info!("trap: #GP at rip={:#x}, mode={}, pid {}",
+            regs.rip, if regs.user_mode() { "user" } else { "kernel" },
+            crate::process::current_pid());
+    }
 
     if regs.user_mode() {
         // hp88 hunt (TASK 87.11): during hiperf record sampling processes
@@ -2372,6 +2396,8 @@ fn handle_device_not_available() {
     }
     // No current task (early boot / idle context) took an FP trap:
     // re-enable the FPU defensively instead of looping on #NM.
+    // HOTPATH-PRINT: rare self-heal arm — fires only when the #NM
+    // handler finds no current task; re-runs fpu_init and returns.
     crate::pr_warn!("trap: #NM with no current task — re-running fpu_init");
     // SAFETY: fpu_init only flips CR0/CR4 feature bits and zeroes the
     // live FPU state; the caller was not using it (#NM proves that).
@@ -2593,6 +2619,8 @@ fn sigfpe_has_handler() -> bool {
 /// mallocng get_meta #GP dereferences a metadata pointer read from the
 /// heap — this shows what the surrounding heap words contain (perf-
 /// record-shaped bytes would name the corrupting writer directly).
+// HOTPATH-PRINT (whole fn): fatal-path forensics — called once from
+// the #GP death report, bounded by the task's exit.
 fn gp_regmem_dump(regs: &PtRegs) {
     use core::fmt::Write;
     let Some(tk) = crate::sched::current() else { return };
@@ -2685,6 +2713,7 @@ fn gp_regmem_dump(regs: &PtRegs) {
                         }
                     }
                 }
+                // HOTPATH-PRINT: fatal-path forensics — once per #GP death report
                 crate::pr_err!("{}", line);
             }
         }
@@ -2845,6 +2874,8 @@ pub fn segv_hist_age(tid: u32) -> Option<(u64, u64)> {
 /// Diagnostic only: every read is checked through the page-table walk.
 static USEGV_FOR_ENTERED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+// HOTPATH-PRINT (whole fn): fatal-path forensics — one dump per user
+// SIGSEGV death; the sending task exits immediately after.
 fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     // R13 (fr13's silent death): a re-entrancy latch for the forensic
     // path itself. The full-decode body probes userspace memory and
@@ -2941,6 +2972,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6
         };
         if over {
+            // HOTPATH-PRINT: fatal-path forensics — once per user SIGSEGV death
             crate::pr_err!(
                 "USEGV-L pid={} comm='{}' rip={:#x} cr2={:#x} {}",
                 pid,
@@ -2962,19 +2994,23 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         }
     }
     if let Some((proc_id, owner_pid, base, size)) = binder_hit.as_ref() {
+        // HOTPATH-PRINT: fatal-path forensics — once per user SIGSEGV death
         crate::pr_err!(
             "USEGV-FOR: cr2 {:#x} INSIDE BINDER BUFFER of proc {} (owner pid {}) base {:#x} size {:#x} — stale daemon mapping dropped at fork (DONTFORK)",
             fault_addr, proc_id, owner_pid, base, size
         );
     }
+    // HOTPATH-PRINT: fatal-path forensics — once per user SIGSEGV death
     crate::pr_err!(
         "USEGV-FOR: pid={} comm='{}' rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
         pid, comm, regs.rip, fault_addr, regs.rsp, regs.rbp
     );
+    // HOTPATH-PRINT: fatal-path forensics — once per user SIGSEGV death
     crate::pr_err!(
         "USEGV-FOR: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x}",
         regs.rax, regs.rbx, regs.rcx, regs.rdx, regs.rsi, regs.rdi
     );
+    // HOTPATH-PRINT: fatal-path forensics — once per user SIGSEGV death
     crate::pr_err!(
         "USEGV-FOR: r8={:#x} r9={:#x} r10={:#x} r11={:#x} r12={:#x} r13={:#x} r14={:#x} r15={:#x}",
         regs.r8, regs.r9, regs.r10, regs.r11, regs.r12, regs.r13, regs.r14, regs.r15
@@ -3017,6 +3053,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             tk.last_syscall_a0.load(Relaxed),
             tk.last_syscall_a1.load(Relaxed)
         );
+        // HOTPATH-PRINT: fatal-path forensics — once per user SIGSEGV death
         crate::pr_err!("{}", s);
     }
 
@@ -3028,7 +3065,9 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     // nobody ever touched it (userspace stale chain) names the culprit
     // in one boot. Encoding in Task::mm_ops (dispatch.rs writer).
     {
-        fn dump_mm_ops(tag: &str, t: *const crate::process::task::Task) {
+        // HOTPATH-PRINT (whole fn): fatal-path forensics — one bounded dump
+// per user SIGSEGV death (capped event counts inline).
+fn dump_mm_ops(tag: &str, t: *const crate::process::task::Task) {
             use core::sync::atomic::Ordering::Relaxed;
             const N: usize = 16;
             let cur = unsafe { (*t).mm_ops_cur.load(Relaxed) };
@@ -3055,6 +3094,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 };
                 let pid = unsafe { (*t).pid() };
                 if shown < 12 {
+                    // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                     crate::pr_err!(
                         "USEGV-FOR: mm[{tag} pid={}] {} addr={:#x} len={:#x} prot/arg2={:#x} rc={}",
                         pid, name, addr, len, prot, rc
@@ -3063,6 +3103,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 shown += 1;
             }
             if shown > 12 {
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 crate::pr_err!("USEGV-FOR: mm[{tag}] ... {}/16 events (capped)", shown);
             }
         }
@@ -3081,9 +3122,11 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 }
             });
             if sibs > 6 {
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 crate::pr_err!("USEGV-FOR: mm[sib] ... {}/{} siblings shown", 6, sibs);
             }
             if skipped > 0 {
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 crate::pr_err!("USEGV-FOR: mm[sib] {} pid-hash buckets skipped (try-walk)", skipped);
             }
         }
@@ -3099,6 +3142,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         // would name a clobbered stack). Print-path only.
         for &probe in &[regs.rip, fault_addr, regs.rax, regs.rsp] {
             match vmas.find(crate::mm::page::VirtAddr::new(probe as usize)) {
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 Some(v) => crate::pr_err!(
                     "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     probe,
@@ -3111,6 +3155,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     v.origin().creator_name(),
                     if v.origin().is_forked() { "+FORK" } else { "" }
                 ),
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 None => crate::pr_err!("USEGV-FOR: vma({:#x}) = NONE", probe),
             }
         }
@@ -3127,6 +3172,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 let path = crate::fs::file::get_file_fd(fd as usize)
                     .map(|f| f.path())
                     .unwrap_or_else(|| alloc::string::String::from("?"));
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 crate::pr_err!(
                     "USEGV-FOR: ripfile {} voff {:#x}",
                     path,
@@ -3186,6 +3232,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                         }
                         va += 8;
                     }
+                    // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                     crate::pr_err!("{}", line);
                 }
             }
@@ -3207,6 +3254,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 }
             }
             if ok {
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 crate::pr_err!(
                     "USEGV-FOR: ripbytes {:02x?}",
                     bytes
@@ -3229,9 +3277,11 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     continue;
                 }
                 if shown >= 12 {
+                    // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                     crate::pr_err!("USEGV-FOR: nearvma ... (capped)");
                     break;
                 }
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 crate::pr_err!(
                     "USEGV-FOR: nearvma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     v.start().as_usize(),
@@ -3264,9 +3314,11 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     continue;
                 }
                 if shown >= 24 {
+                    // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                     crate::pr_err!("USEGV-FOR: adjvma ... (capped)");
                     break;
                 }
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 crate::pr_err!(
                     "USEGV-FOR: adjvma {:#x}-{:#x} sz={:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     v.start().as_usize(),
@@ -3296,6 +3348,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     && (regs.rsp as u64) >= ss_sp
                     && (regs.rsp as u64) < ss_sp.saturating_add(ss_size);
                 let cr2_in = ss_on && fault_addr >= ss_sp && fault_addr < ss_sp.saturating_add(ss_size);
+                // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 crate::pr_err!(
                     "USEGV-FOR: altstack on={} sp={:#x} sz={:#x} rsp_in={} cr2_in={}",
                     ss_on as u8,
@@ -3310,7 +3363,9 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
 
     // Stack words (return-address chain): read through the page-table
     // walk so a bad/absent rsp cannot take the kernel down.
-    fn fore_read_u64(root_ppn: u64, va: u64) -> Option<u64> {
+    // HOTPATH-PRINT (whole fn): fatal-path forensics — bounded stack reads
+// for the SIGSEGV death report.
+fn fore_read_u64(root_ppn: u64, va: u64) -> Option<u64> {
         // SAFETY: read-only page-table walk on a live root.
         let phys = unsafe {
             crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, va & !0xfff)?
@@ -3333,6 +3388,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             use core::fmt::Write;
             let _ = write!(line, " {}:{}", i, val);
         }
+        // HOTPATH-PRINT: fatal-path forensics — bounded stack read for the death report
         crate::pr_err!("USEGV-FOR: stack@rsp:{}", line);
         // leg-31B: name the VMA (+origin) behind each stack word that
         // looks like a user code pointer — the faulting frame's return
@@ -3379,6 +3435,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                                     v.file_fd()
                                 );
                             }
+                            // HOTPATH-PRINT: fatal-path forensics — bounded stack read for the death report
                             crate::pr_err!(
                                 "USEGV-FOR: stkva[{}] {:#x} = {:#x}-{:#x} r-x off={:#x}{} origin={}{}",
                                 i,
@@ -3409,6 +3466,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                                     }
                                 }
                             }
+                            // HOTPATH-PRINT: fatal-path forensics — bounded stack read for the death report
                             crate::pr_err!("{}", cb);
                         }
                     }
@@ -3556,6 +3614,8 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     super::mm::asid::flush_tlb_page(fault_addr);
                     static LEAK_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
+                    // HOTPATH-PRINT: budget-gated (20/boot) — the futex
+                    // watch fires per access to the watched word.
                     if LEAK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
                         crate::pr_warn!(
                             "FUXWATCH-LEAK-FIX tid={} rip={:#x} addr={:#x} W restored, unlogged",
@@ -3594,6 +3654,8 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // via a budgeted line, retried with W present.
                 static KFW_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
+                // HOTPATH-PRINT: budget-gated (40/boot) — see LEAK-FIX
+                // above.
                 if KFW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
                     crate::pr_warn!(
                         "FUXWATCH-KWRITE tid={} rip={:#x} addr={:#x} exact={} old={:#x}",
@@ -3623,6 +3685,12 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // Page handled, re-execute instruction
         }
         MmFaultResult::Segfault => {
+            // HOTPATH-PRINT: budget-gated (8/boot) — one line per user
+            // SIGSEGV fault otherwise; the per-task death report below
+            // carries the full forensics.
+            static SEGV_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
             crate::pr_err!(
                 "pagefault: Segfault at {:#x}, rip={:#x}, rsp={:#x}, pid={}, mode={}",
                 fault_addr,
@@ -3631,6 +3699,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 crate::sched::get_current_pid(),
                 if regs.kernel_mode() { "kernel" } else { "user" }
             );
+            }
             if regs.user_mode() {
                 // Linux semantics: route user-mode faults through signal
                 // delivery (force_sig_fault) — an installed SIGSEGV
@@ -3684,8 +3753,15 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
         }
         MmFaultResult::PermissionDenied => {
-            crate::pr_err!("pagefault: Permission denied at {:#x}, rip={:#x}, pid={}",
+            // HOTPATH-PRINT: budget-gated (8/boot) — W^X/probing workloads hit
+    // this per store; the SIGSEGV delivery (not this line) is the
+    // observable event.
+    static PDENY_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    if PDENY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+    crate::pr_err!("pagefault: Permission denied at {:#x}, rip={:#x}, pid={}",
                 fault_addr, regs.rip, crate::sched::get_current_pid());
+    }
             if regs.user_mode() {
                 // Handler-first routing like Segfault (PROT_NONE access);
                 // likewise force-default a blocked SIGSEGV. si_code is
@@ -3721,7 +3797,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
         }
         MmFaultResult::BusError => {
-            crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
+            // HOTPATH-PRINT: budget-gated (8/boot) — apps probing past EOF hit
+    // this per access.
+    static EOF_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    if EOF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+    crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
+    }
             if regs.user_mode() {
                 // Handler-first routing like Segfault: LTP mmap13 installs
                 // a SIGBUS handler and must catch it; the default action
@@ -3760,7 +3842,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
         }
         MmFaultResult::OutOfMemory => {
-            crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
+            // HOTPATH-PRINT: budget-gated (8/boot) — a looping OOM app fires
+    // this per fault; the kill itself is the event.
+    static OOM_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    if OOM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+    crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
+    }
             crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
             if regs.user_mode() {
                 // fake-OOM family: Linux pagefault_out_of_memory parity —
@@ -4039,7 +4127,10 @@ fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
 
 /// Handle unknown exception (port of the twin's handler).
 fn handle_unknown_exception(regs: &mut PtRegs, vector: u64) {
+    // HOTPATH-PRINT (whole fn): fatal-path forensics — one report per
+    // unknown-vector trap, then the task dies (no repeat per process).
     let cause = Cause::from_cause(vector);
+    // HOTPATH-PRINT: fatal-path — once per unknown-vector trap (task dies).
     crate::pr_err!(
         "trap: Unknown exception {:?} (vector {:#x}), rip={:#x}",
         cause,
@@ -4250,7 +4341,9 @@ fn utime_sample_rip(rip: u64, comm: &[u8; 16]) {
 /// Periodic report (rux:ripsample (retired dfx=ripsample)): the launcher's user-rip histogram
 /// + utime/stime split + the kernel-mode focus table. Self-throttled
 /// to one print every 60 s.
-pub fn utime_ripsample_report() {
+pub // HOTPATH-PRINT (whole fn): one-shot diagnostic report (armed by the
+// ripsample boot param; prints once at report time).
+fn utime_ripsample_report() {
     use core::sync::atomic::Ordering::Relaxed;
     if !crate::trace::EVENT_RIPSAMPLE.armed() {
         return;
@@ -4263,11 +4356,13 @@ pub fn utime_ripsample_report() {
     LAST.store(j, Relaxed);
     let u = UTIME_LAUNCHER_TICKS.load(Relaxed);
     let s = STIME_LAUNCHER_TICKS.load(Relaxed);
+    // HOTPATH-PRINT: one-shot report (armed by ripsample boot param)
     crate::pr_warn!("RIPSAMPLE: launcher utime={} stime={}", u, s);
     for i in 0..UTIME_SLOTS {
         let p = UTIME_HIST[i].page.load(Relaxed);
         let c = UTIME_HIST[i].count.load(Relaxed);
         if p != 0 && c > 0 {
+            // HOTPATH-PRINT: one-shot report (armed by ripsample boot param)
             crate::pr_warn!("RIPSAMPLE: u-page={:#x} n={}", p, c);
         }
     }
@@ -4280,6 +4375,7 @@ pub fn utime_ripsample_report() {
                 comm[jx] = STIME_FOCUS[i].comm[jx].load(Relaxed);
             }
             let name = core::str::from_utf8(&comm[..]).unwrap_or("").trim_end_matches('\0');
+            // HOTPATH-PRINT: one-shot report (armed by ripsample boot param)
             crate::pr_warn!("RIPSAMPLE: k-page={:#x} n={} comm={}", p, c, name);
         }
     }

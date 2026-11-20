@@ -2064,6 +2064,9 @@ impl Task {
         );
         Self::register_slot_deferred_sizes();
         crate::process::unsafe_edges::place_task(ptr, task);
+        // INV-PROC-PLACE-2: the self-referential list heads are
+        // re-anchored inside place_task (the single placement choke
+        // point) — nothing constructor-side needed here.
     }
 
     /// Slot-size registrations shared by both constructors.
@@ -2121,6 +2124,18 @@ impl Task {
         task.time_slice = HZ;
         Self::register_slot_deferred_sizes();
         crate::process::unsafe_edges::place_task(ptr, task);
+        // INV-PROC-PLACE-2 (the beeb17524 lesson, enforced at the edge):
+        // Task::new's ListHead::init() self-points children/sibling/
+        // rt_run_list at the CONSTRUCTOR TEMPORARY's stack address, and
+        // build-then-place kills that temporary — the old offset_of
+        // ladder initialized these heads IN PLACE at the final address;
+        // the Round-B rewrite silently lost it and every later list op
+        // dereferenced stale stack memory (the fio null-walk / user-
+        // range-node corruption family). The re-anchor now lives INSIDE
+        // place_task (the single placement choke point), so no
+        // constructor route can forget it. group_leader/next_thread
+        // above write the FINAL slot address explicitly, which is its
+        // own correct anchor.
 
         // Allocate kernel stack
         let t = crate::process::unsafe_edges::borrow_task_mut(ptr);
