@@ -402,31 +402,22 @@ impl<'a> BlockAllocator<'a> {
     /// replay is still suppressed by the deletion paths' revoke records.
     /// Outside a handle the inline sync path is unchanged.
     fn write_block_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
-        // SAFETY: bh is from bio::bread; b_data is block_size bytes; bitmap fits within.
-        unsafe {
-            let bh = bio::bread(self.fs.device, bitmap_block)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            (*bh).b_data.copy_from_slice(bitmap);
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-            }
-            let sync_res = bio::sync_dirty_buffer(bh);
-            bio::brelse(bh);
-            sync_res?;
-            // metadata_csum: the block bitmap's checksum rides in the
-            // group descriptor — refresh it (and bg_checksum) after the
-            // bitmap bytes are out, or the cook lineage's next e2fsck
-            // flags the mismatch.
-            if self.fs.metadata_csum {
-                let size = (self.fs.blocks_per_group as usize) / 8;
-                let c = super::csum::bitmap_csum(self.fs.csum_seed, bitmap, size);
-                if let Some(g) = group_of_bitmap(self.fs, bitmap_block, false) {
-                    let _ = set_bitmap_csum_in_gd(self.fs, g, false, c);
-                }
-            }
+        bio::with_block_mut(self.fs.device, bitmap_block, |data, _| {
+            data.copy_from_slice(bitmap);
             Ok(())
+        })?;
+        // metadata_csum: the block bitmap's checksum rides in the
+        // group descriptor — refresh it (and bg_checksum) after the
+        // bitmap bytes are out, or the cook lineage's next e2fsck
+        // flags the mismatch.
+        if self.fs.metadata_csum {
+            let size = (self.fs.blocks_per_group as usize) / 8;
+            let c = super::csum::bitmap_csum(self.fs.csum_seed, bitmap, size);
+            if let Some(g) = group_of_bitmap(self.fs, bitmap_block, false) {
+                let _ = set_bitmap_csum_in_gd(self.fs, g, false, c);
+            }
         }
+        Ok(())
     }
 
     /// JOURNAL DISCIPLINE: registered with the current handle like
@@ -581,25 +572,17 @@ pub(crate) fn set_bitmap_csum_in_gd(
         )
     };
 
-    // SAFETY: desc_offset + desc_size is within the 4K block; the fields
-    // written above are within desc_size when the bounds checks passed.
-    unsafe {
-        let bh = bio::bread(fs.device, desc_block)
-            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-        let data = &mut (*bh).b_data;
+    // desc_offset + desc_size is within the 4K block; the fields
+    // written are within desc_size when the bounds checks passed.
+    bio::with_block_mut(fs.device, desc_block, |data, _| {
         let d = &mut data[desc_offset..desc_offset + group_desc_size];
         d[lo_off..lo_off + 2].copy_from_slice(&((csum & 0xFFFF) as u16).to_le_bytes());
         if group_desc_size >= hi_off + 2 {
             d[hi_off..hi_off + 2].copy_from_slice(&((csum >> 16) as u16).to_le_bytes());
         }
         super::csum::group_desc_csum_set(fs.csum_seed, group_idx as u32, d);
-        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-        }
-        bio::brelse(bh);
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Find a free bit in a block bitmap (single block, order=0).
@@ -928,36 +911,20 @@ impl<'a> InodeAllocator<'a> {
     /// Write back inode bitmap. JOURNAL DISCIPLINE: registered with the
     /// current handle (family b fix — see write_block_bitmap).
     fn write_inode_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
-        // SAFETY: bh from bio::bread; b_data is block_size bytes; bitmap fits within.
-        unsafe {
-            let bh = bio::bread(self.fs.device, bitmap_block)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-            let data = &mut (*bh).b_data;
+        bio::with_block_mut(self.fs.device, bitmap_block, |data, _| {
             data.copy_from_slice(bitmap);
-
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-            }
-            let sync_res = bio::sync_dirty_buffer(bh);
-
-            bio::brelse(bh);
-
-            sync_res?;
-
-            // metadata_csum: inode bitmap csum lives in the group
-            // descriptor (see write_block_bitmap).
-            if self.fs.metadata_csum {
-                let size = (self.fs.inodes_per_group as usize) / 8;
-                let c = super::csum::bitmap_csum(self.fs.csum_seed, bitmap, size);
-                if let Some(g) = group_of_bitmap(self.fs, bitmap_block, true) {
-                    let _ = set_bitmap_csum_in_gd(self.fs, g, true, c);
-                }
-            }
-
             Ok(())
+        })?;
+        // metadata_csum: inode bitmap csum lives in the group
+        // descriptor (see write_block_bitmap).
+        if self.fs.metadata_csum {
+            let size = (self.fs.inodes_per_group as usize) / 8;
+            let c = super::csum::bitmap_csum(self.fs.csum_seed, bitmap, size);
+            if let Some(g) = group_of_bitmap(self.fs, bitmap_block, true) {
+                let _ = set_bitmap_csum_in_gd(self.fs, g, true, c);
+            }
         }
+        Ok(())
     }
 
     /// Mark inode as used

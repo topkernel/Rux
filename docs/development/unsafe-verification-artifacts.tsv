@@ -1105,6 +1105,10 @@ ddd9726f361e	kernel/src/fs/bio.rs	sync_dirty_buffer	2883		GAP
 e3c2be809b3d	kernel/src/fs/bio.rs	publication_capture_note_dirty	3255		GAP
 3f5712883513	kernel/src/fs/bio.rs	publication_capture_note_dirty	3267		GAP
 07205edf7377	kernel/src/fs/bio.rs	sync_block_ordered	3752		GAP
+697d772d180a	kernel/src/fs/bio.rs	with_block_mut	3801		GAP
+96601bf5945b	kernel/src/fs/bio.rs	with_block_mut	3804		GAP
+f564bda4511a	kernel/src/fs/bio.rs	with_block_mut	3807		GAP
+e6da66fe6c49	kernel/src/fs/bio.rs	with_block_mut	3809		GAP
 0f22f2e6f8e9	kernel/src/fs/buffer.rs	new	37	ptr-ops	GAP
 cc6bd7b2bb6b	kernel/src/fs/buffer.rs	from_bytes	51		GAP
 5725a2ec783a	kernel/src/fs/buffer.rs	new	303	ptr-ops	GAP
@@ -1154,16 +1158,13 @@ a6939aabaa15	kernel/src/fs/devfs/mod.rs	shared_fault_file_page	1978		GAP
 081cc32cee29	kernel/src/fs/devfs/mod.rs	shared_write_off	2096	ptr-ops	GAP
 32b843792a2a	kernel/src/fs/elf.rs	load_segment	638	ptr-ops	GAP
 4c2c9927bbc3	kernel/src/fs/ext4/allocator.rs	read_block_bitmap	380		GAP
-2bd68407d5ab	kernel/src/fs/ext4/allocator.rs	write_block_bitmap	406	ptr-ops	GAP
-40acda980bb3	kernel/src/fs/ext4/allocator.rs	update_group_desc_free_blocks	445	volatile,ptr-ops	GAP
-b5f5b7167379	kernel/src/fs/ext4/allocator.rs	update_superblock_free_blocks	492	volatile,ptr-ops	GAP
-0a67dbb7ed1c	kernel/src/fs/ext4/allocator.rs	set_bitmap_csum_in_gd	586	ptr-ops	GAP
-c159cdb20fab	kernel/src/fs/ext4/allocator.rs	read_inode_bitmap	915		GAP
-0985cb34dfe6	kernel/src/fs/ext4/allocator.rs	write_inode_bitmap	932	ptr-ops	GAP
-45a88bca4936	kernel/src/fs/ext4/allocator.rs	update_group_desc_free_inodes	994	volatile,ptr-ops	GAP
-365e908c6d40	kernel/src/fs/ext4/allocator.rs	refresh_bg_itable_unused	1067		GAP
-7923b2185e8a	kernel/src/fs/ext4/allocator.rs	refresh_bg_itable_unused	1109	volatile,ptr-ops	GAP
-82a65baa61bc	kernel/src/fs/ext4/allocator.rs	update_superblock_free_inodes	1144	volatile,ptr-ops	GAP
+0cbcc341f1cf	kernel/src/fs/ext4/allocator.rs	update_group_desc_free_blocks	436	volatile,ptr-ops	GAP
+422f4928c5c6	kernel/src/fs/ext4/allocator.rs	update_superblock_free_blocks	483	volatile,ptr-ops	GAP
+83115b4465e2	kernel/src/fs/ext4/allocator.rs	read_inode_bitmap	898		GAP
+3b2a4286566b	kernel/src/fs/ext4/allocator.rs	update_group_desc_free_inodes	961	volatile,ptr-ops	GAP
+b87cf4b855de	kernel/src/fs/ext4/allocator.rs	refresh_bg_itable_unused	1034		GAP
+64a2813e14d2	kernel/src/fs/ext4/allocator.rs	refresh_bg_itable_unused	1076	volatile,ptr-ops	GAP
+2da37b803b52	kernel/src/fs/ext4/allocator.rs	update_superblock_free_inodes	1111	volatile,ptr-ops	GAP
 f9a763be93ec	kernel/src/fs/ext4/dir.rs	next	153		GAP
 8afa18bb6258	kernel/src/fs/ext4/extent.rs	i_block_bytes	100	raw-construct,ptr-ops	GAP
 e41755bfaa99	kernel/src/fs/ext4/extent.rs	i_block_bytes_mut	107	ptr-ops	GAP

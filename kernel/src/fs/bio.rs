@@ -3782,3 +3782,34 @@ impl BlockCache {
         None
     }
 }
+
+// ==================== Block-update protocol edge (round-5, L5) ====================
+
+/// The ext4 metadata block-update protocol as ONE audited edge: bread →
+/// typed &mut view → caller mutation → mark dirty → (journal tag if a
+/// handle is active) → sync → brelse. INV-BIO-BLOCKUPD: `f` receives the
+/// block's data (exactly b_size bytes) and the raw handle for the
+/// journal tag; the protocol completes (sync+brelse) on every path.
+pub(crate) fn with_block_mut<T>(
+    device: &'static crate::drivers::blkdev::GenDisk,
+    blocknr: u64,
+    f: impl FnOnce(&mut [u8], *mut BufferHead) -> Result<T, i32>,
+) -> Result<T, i32> {
+    let bh = bread(device, blocknr).ok_or(crate::errno::Errno::IOError.as_neg_i32())?;
+    // SAFETY: INV-BIO-PIN — bread pinned the buffer; the &mut window
+    // rides this function's exclusive scope (no other holder).
+    let data: &mut [u8] = unsafe { &mut (*bh).b_data };
+    let out = f(data, bh);
+    // SAFETY: as bh_set_state_bit (INV-BIO-PIN).
+    unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
+    // SAFETY: get_current_handle is the task-local journal resolver
+    // (null-safe); the handle pins its transaction.
+    if let Some(handle) = unsafe { crate::fs::ext4::namei::get_current_handle() } {
+        // SAFETY: as above.
+        unsafe { let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh); }
+    }
+    let sync_res = sync_dirty_buffer(bh);
+    brelse(bh);
+    sync_res?;
+    out
+}
