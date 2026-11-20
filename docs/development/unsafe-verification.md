@@ -19,11 +19,11 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **3311**
-- with artifact (non-GAP): **74** (2.2%)
-- GAP: **3237**
-- by kind: block=2965, unsafe-extern=10, unsafe-fn=180, unsafe-impl=156
-- by category (regions carry 0..n tags): ptr-ops=839, asm=260, volatile=200, raw-construct=68, addr-arith=62, no-preempt=22, ffi=17, static-mut=5, layout-meta=5, transmute=4
+- unsafe regions: **3281**
+- with artifact (non-GAP): **74** (2.3%)
+- GAP: **3207**
+- by kind: block=2935, unsafe-extern=10, unsafe-fn=180, unsafe-impl=156
+- by category (regions carry 0..n tags): ptr-ops=837, asm=260, volatile=200, raw-construct=68, addr-arith=62, no-preempt=22, ffi=17, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
 
@@ -33,8 +33,8 @@ census id is accounted for here.
 | fs | 652 | 0 | 652 |
 | syscall | 478 | 0 | 478 |
 | mm | 234 | 6 | 228 |
-| sync | 223 | 0 | 223 |
-| sched | 171 | 0 | 171 |
+| sync | 198 | 0 | 198 |
+| sched | 166 | 0 | 166 |
 | dfx | 129 | 6 | 123 |
 | drivers | 120 | 8 | 112 |
 | tests | 105 | 1 | 104 |
@@ -2930,7 +2930,7 @@ census id is accounted for here.
 | 152 | read_volatile_u32 | block | volatile,ptr-ops | GAP | `3485ca29d839` |
 | 160 | copy_from_user_bytes | block | ptr-ops | GAP | `4fe20a5024f8` |
 
-### kernel/src/sync/futex.rs (67)
+### kernel/src/sync/futex.rs (42)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -2938,9 +2938,6 @@ census id is accounted for here.
 | 564 | task_futex_mm_id | block | - | GAP | `f177ea7c7e1f` |
 | 645 | <module> | unsafe-impl | - | GAP | `2c47284457a1` |
 | 646 | <module> | unsafe-impl | - | GAP | `f4674f9e3e68` |
-| 774 | waiters_of_tgid | block | - | GAP | `21aeb70c3ab5` |
-| 777 | waiters_of_tgid | block | - | GAP | `8b1692a816e9` |
-| 780 | waiters_of_tgid | block | - | GAP | `39333f96035e` |
 | 825 | ffrt_chain_walk | block | ptr-ops | GAP | `16a577c6ae4d` |
 | 831 | ffrt_chain_walk | block | ptr-ops | GAP | `25a05150919b` |
 | 837 | ffrt_chain_walk | block | ptr-ops | GAP | `da7db602cc62` |
@@ -2949,7 +2946,6 @@ census id is accounted for here.
 | 1096 | ffrt_mutex_scan | block | ptr-ops | GAP | `8e94891a2251` |
 | 1448 | fuxwatch_retire_page | block | - | GAP | `90078b701928` |
 | 1667 | fuxwatch_arm_round | block | - | GAP | `4182f031b066` |
-| 1900 | fuxw_owner_park_state | block | - | GAP | `d73105be094b` |
 | 2286 | ffrt_lock_region_scan | block | volatile,ptr-ops | GAP | `f2d0a11a7d3f` |
 | 2333 | ffrt_lock_region_scan | block | volatile,ptr-ops | GAP | `656b2cf8d21b` |
 | 4544 | ffrt_lock_holder_scan | block | ptr-ops | GAP | `96fc8780225c` |
@@ -2972,35 +2968,14 @@ census id is accounted for here.
 | 7358 | remove_waiter | block | - | GAP | `0d650de04d12` |
 | 7389 | remove_waiter | block | - | GAP | `a8c8134b5150` |
 | 7566 | futex_parse_timeout_ns | block | ptr-ops | GAP | `fff1633060a3` |
-| 7799 | futex_requeue | block | - | GAP | `389bb2f3b336` |
-| 7954 | futex_requeue | block | - | GAP | `f228371ea473` |
 | 8047 | futex_wake_op | block | ptr-ops | GAP | `c3d62bf01da3` |
 | 8071 | futex_wake_op | block | ptr-ops | GAP | `6ec5c10c26e2` |
-| 8206 | do_futex | block | - | GAP | `733604a86432` |
 | 8615 | do_futex | block | ptr-ops | GAP | `266a535d4cec` |
-| 9254 | sys_futex_handler | block | - | GAP | `2108c98700a2` |
-| 9257 | sys_futex_handler | block | - | GAP | `1d6b570f930b` |
-| 9493 | sys_futex_handler | block | ptr-ops | GAP | `b0dc05186fc8` |
-| 9670 | note_task_unlink | block | - | GAP | `6b1f987c38e7` |
-| 10016 | kill_dump_wedge | block | - | GAP | `43a8e0b59822` |
-| 10050 | kill_dump_wedge | block | - | GAP | `25a397a91dd3` |
-| 10113 | kill_dump_wedge | block | ptr-ops | GAP | `796c38c46dff` |
-| 10121 | kill_dump_wedge | block | ptr-ops | GAP | `de9ea63797b7` |
-| 10146 | kill_dump_wedge | block | - | GAP | `0720834e0717` |
-| 10151 | kill_dump_wedge | block | - | GAP | `6ecd218686fb` |
-| 10152 | kill_dump_wedge | block | - | GAP | `4f547cb8be64` |
-| 10153 | kill_dump_wedge | block | - | GAP | `3381f9f78c24` |
-| 11733 | waiter_clusters | block | - | GAP | `e6e3b4aa9632` |
-| 11841 | freeze_scan | block | - | GAP | `d90ec625faaf` |
-| 11871 | freeze_scan | block | - | GAP | `785be4c33c11` |
-| 11878 | freeze_scan | block | - | GAP | `83d5c7e52e27` |
-| 11891 | freeze_scan | block | - | GAP | `874723af853b` |
-| 11895 | freeze_scan | block | - | GAP | `7ed029754aa8` |
-| 12079 | freeze_scan | block | - | GAP | `4915d7e4fc0b` |
-| 12169 | freeze_scan | block | - | GAP | `2b65399126a2` |
-| 12605 | rwfz_neighbor_dump | block | - | GAP | `538873e9fec0` |
-| 12606 | rwfz_neighbor_dump | block | - | GAP | `147281239ca5` |
-| 12658 | rwfz_dump_tgid | block | - | GAP | `62ac9a587db9` |
+| 9489 | sys_futex_handler | block | ptr-ops | GAP | `1a9a4330d41e` |
+| 10012 | kill_dump_wedge | block | - | GAP | `467c73114f02` |
+| 10046 | kill_dump_wedge | block | - | GAP | `7ad08129853d` |
+| 11890 | freeze_scan | block | - | GAP | `b1fc80309df2` |
+| 11894 | freeze_scan | block | - | GAP | `677de6f9ba9f` |
 
 ### kernel/src/sync/futex_pi.rs (2)
 
@@ -3300,91 +3275,86 @@ census id is accounted for here.
 | 649 | <module> | unsafe-impl | - | GAP | `828a6d4903f6` |
 | 650 | <module> | unsafe-impl | - | GAP | `0030893faa67` |
 
-### kernel/src/sched/sched.rs (81)
+### kernel/src/sched/sched.rs (76)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 92 | <module> | unsafe-impl | - | GAP | `e6dd4f64b434` |
-| 331 | arm_dl_replenish_timer | block | - | GAP | `8243eae28f91` |
-| 434 | rt_wedge_dump_tick | block | - | GAP | `1fd6ba7d9f46` |
-| 528 | rt_bandwidth_tick | block | - | GAP | `a924d01a1782` |
-| 847 | grq_current_fp | block | asm | GAP | `88ea5cd80b42` |
-| 852 | grq_current_fp | block | asm | GAP | `854b7e927029` |
-| 857 | grq_current_fp | block | asm | GAP | `55caccc4c1bd` |
-| 948 | grq_dump_holder | block | - | GAP | `ee587959e155` |
-| 979 | grq_dump_holder | block | - | GAP | `68d9ac3f3ecc` |
-| 1017 | grq_dump_holder | block | ptr-ops | GAP | `532c9923194a` |
-| 1041 | grq_dump_holder | block | - | GAP | `7e0f17f80ee1` |
-| 1051 | grq_dump_holder | block | volatile,ptr-ops | GAP | `df1e7f1bbc4e` |
-| 1131 | grq_held_here | block | - | GAP | `5b98788d60d2` |
-| 2109 | process_deferred_exit_notify_cpu | block | - | GAP | `4949566843d4` |
-| 2162 | need_resched | block | - | GAP | `afc96d20d717` |
-| 2248 | set_need_resched | block | - | GAP | `2a11baca69d3` |
-| 2259 | clear_need_resched | block | - | GAP | `37010fe11aa7` |
-| 2277 | resched_cpu | block | - | GAP | `afdfd46997cd` |
-| 2407 | preempt_check_wake | block | - | GAP | `8fbe6c11d7cd` |
-| 2554 | ww_sched_snapshot | block | no-preempt | GAP | `f7b5cfa3a7c4` |
-| 2649 | this_cpu | block | - | GAP | `616e54918d45` |
-| 2730 | init_secondary | block | - | GAP | `936b15be2bb4` |
-| 2763 | clear_trap_scratch | block | asm | GAP | `b81e40825e03` |
-| 2795 | init | block | - | GAP | `a73a0cadb3b6` |
-| 2934 | alloc_task_slot | block | ptr-ops | GAP | `008fa47e86ce` |
-| 2944 | alloc_task_slot | block | ptr-ops | GAP | `d2e961ad104f` |
-| 2951 | alloc_task_slot | block | - | GAP | `6669065626ed` |
-| 3135 | free_task_slot | block | - | GAP | `0a61532501bd` |
-| 3229 | free_task_slot | block | - | GAP | `fcb273fe1822` |
-| 3340 | free_task_slot | block | - | GAP | `bccef39d9443` |
-| 3347 | free_task_slot | block | volatile,ptr-ops | GAP | `a037a38e2cf3` |
-| 3445 | preempt_check_wake_sync | block | - | GAP | `5324a03e4d41` |
-| 3606 | schedule | block | - | GAP | `5d2b8ef7b9eb` |
-| 3664 | terminal_release_grq_if_held | block | - | GAP | `84a92654917e` |
-| 3692 | terminal_release_grq_if_held | block | - | GAP | `a9ab57901317` |
-| 3757 | schedule_dead_never_returns | block | no-preempt | GAP | `17ce5c5f9f96` |
-| 3867 | schedule_dead_never_returns | block | - | GAP | `63024cb0513b` |
-| 6058 | steer_task_cpu | block | - | GAP | `633690ead479` |
-| 6426 | w2_refusal_census | block | - | GAP | `f4fbbbbc6faf` |
-| 6485 | wake_up_enqueue_opt | block | volatile,ptr-ops,no-preempt | GAP | `9c5f3d260e8c` |
+| 435 | rt_wedge_dump_tick | block | - | GAP | `517582e73a07` |
+| 529 | rt_bandwidth_tick | block | - | GAP | `6bfd57c3400a` |
+| 848 | grq_current_fp | block | asm | GAP | `4e1722e81a77` |
+| 853 | grq_current_fp | block | asm | GAP | `a7854b2a9599` |
+| 858 | grq_current_fp | block | asm | GAP | `6a8d79bb5093` |
+| 949 | grq_dump_holder | block | - | GAP | `21856c46535f` |
+| 980 | grq_dump_holder | block | - | GAP | `3402bd3034c4` |
+| 1018 | grq_dump_holder | block | ptr-ops | GAP | `1dadbe75d6d8` |
+| 1042 | grq_dump_holder | block | - | GAP | `2e3143869dd2` |
+| 1052 | grq_dump_holder | block | volatile,ptr-ops | GAP | `dcf58673162c` |
+| 1132 | grq_held_here | block | - | GAP | `153f5090a260` |
+| 2110 | process_deferred_exit_notify_cpu | block | - | GAP | `926dcfc3418c` |
+| 2163 | need_resched | block | - | GAP | `f2832f5ef120` |
+| 2273 | resched_cpu | block | - | GAP | `1ac0d0b004e1` |
+| 2403 | preempt_check_wake | block | - | GAP | `dfbc605c2406` |
+| 2550 | ww_sched_snapshot | block | no-preempt | GAP | `ffd758c5bca3` |
+| 2645 | this_cpu | block | - | GAP | `66491a207f57` |
+| 2726 | init_secondary | block | - | GAP | `f56af5568f03` |
+| 2759 | clear_trap_scratch | block | asm | GAP | `7000a0bb160f` |
+| 2791 | init | block | - | GAP | `a09c55304ce9` |
+| 2930 | alloc_task_slot | block | ptr-ops | GAP | `e04dddb41fd2` |
+| 2940 | alloc_task_slot | block | ptr-ops | GAP | `8e670a2d56b9` |
+| 2947 | alloc_task_slot | block | - | GAP | `06923953e0d9` |
+| 3225 | free_task_slot | block | - | GAP | `12335aabfddc` |
+| 3336 | free_task_slot | block | - | GAP | `487f8df5529f` |
+| 3343 | free_task_slot | block | volatile,ptr-ops | GAP | `724abb1b8074` |
+| 3603 | schedule | block | - | GAP | `15696aa081c9` |
+| 3661 | terminal_release_grq_if_held | block | - | GAP | `2740e5dea71d` |
+| 3689 | terminal_release_grq_if_held | block | - | GAP | `b3f7b32407de` |
+| 3754 | schedule_dead_never_returns | block | no-preempt | GAP | `3fccaec340ca` |
+| 3864 | schedule_dead_never_returns | block | - | GAP | `dac69b829d82` |
+| 6055 | steer_task_cpu | block | - | GAP | `ca7a19dc876f` |
+| 6423 | w2_refusal_census | block | - | GAP | `554bfb1267c0` |
+| 6482 | wake_up_enqueue_opt | block | volatile,ptr-ops,no-preempt | GAP | `2ed64268c622` |
+| 6807 | wake_up_enqueue_opt | block | volatile,ptr-ops | GAP | `d7af6fd5db9a` |
 | 6810 | wake_up_enqueue_opt | block | volatile,ptr-ops | GAP | `490f07fb44c6` |
 | 6813 | wake_up_enqueue_opt | block | volatile,ptr-ops | GAP | `5f1143458147` |
-| 6816 | wake_up_enqueue_opt | block | volatile,ptr-ops | GAP | `a06c69f06109` |
-| 6888 | wake_up_enqueue_opt | block | - | GAP | `adf9e4c21418` |
-| 7650 | monopolist_census | block | - | GAP | `eea85539a3a0` |
-| 7701 | monopolist_census | block | volatile,ptr-ops | GAP | `8c1faebd17dc` |
-| 7863 | runq_strand_census | block | ptr-ops | GAP | `de770e017cc7` |
-| 8830 | scheduler_tick | block | volatile,ptr-ops | GAP | `7bb486944144` |
-| 9052 | scheduler_tick | block | - | GAP | `f9e4b9ac2a15` |
-| 9270 | scheduler_tick | block | - | GAP | `f525ed80d658` |
-| 9736 | scheduler_tick | block | - | GAP | `32aef5c1ce0d` |
-| 9754 | scheduler_tick | block | - | GAP | `1a126f79d953` |
-| 9790 | scheduler_tick | block | - | GAP | `e27bcbcac3ad` |
-| 9839 | scheduler_tick | block | - | GAP | `04b38192efee` |
-| 9849 | scheduler_tick | block | - | GAP | `d4c05c315ae4` |
-| 9854 | scheduler_tick | block | - | GAP | `ca8cc3a78419` |
-| 9944 | scheduler_tick | block | volatile,ptr-ops | GAP | `685e482912e7` |
-| 9993 | scheduler_tick | block | - | GAP | `ee096267b8d9` |
-| 10042 | scheduler_tick | block | volatile,ptr-ops | GAP | `df7800670ddd` |
-| 10110 | scheduler_tick | block | - | GAP | `d882fcd88d84` |
-| 10141 | scheduler_tick | block | - | GAP | `35079dd47ec6` |
-| 10211 | scheduler_tick | block | - | GAP | `7b3b3bc6ba09` |
-| 10499 | schedule_tail | block | - | GAP | `7cec545c5ec5` |
-| 10635 | current | block | - | GAP | `aa763d4c5131` |
-| 11038 | r56_print_msg | block | - | GAP | `22716d09a4ae` |
-| 11070 | r56_print_pid | block | - | GAP | `de38641522ab` |
-| 11122 | harvest_print_parked | block | volatile,ptr-ops | GAP | `30b43538fef9` |
-| 11219 | task_is_dying | block | - | GAP | `d484c1229a93` |
-| 11257 | harvest_relink | block | - | GAP | `c878e341ebd5` |
-| 11504 | republish_current_after_abort | block | - | GAP | `3b72bca74e80` |
-| 11574 | abort_next_release_orphans | block | volatile,ptr-ops | GAP | `b970b4b93751` |
-| 11910 | lp_idle_lie_report | block | no-preempt | GAP | `5fdab02f91d7` |
-| 12019 | idle_heal_own_slot | block | - | GAP | `a1e43f2cd4fd` |
-| 12184 | relink_unlinked_running_phantoms | block | volatile,ptr-ops,no-preempt | GAP | `cb8c0d01ea91` |
-| 12380 | idle_guard_sp | block | asm | GAP | `7835b8238ba6` |
-| 12387 | idle_guard_sp | block | asm | GAP | `2f06e2486c6b` |
-| 12394 | idle_guard_sp | block | asm | GAP | `1f43877f0e64` |
-| 12470 | cpu_idle_loop | block | - | GAP | `7005c7e686d1` |
-| 12497 | cpu_idle_loop | block | - | GAP | `427866b38004` |
-| 12554 | cpu_idle_loop | block | - | GAP | `76304a1eb453` |
-| 12700 | cpu_idle_loop | block | - | GAP | `f63dd9411fc7` |
+| 6885 | wake_up_enqueue_opt | block | - | GAP | `fb4a41f152b5` |
+| 7647 | monopolist_census | block | - | GAP | `dd77455749a5` |
+| 7698 | monopolist_census | block | volatile,ptr-ops | GAP | `6b9379635e9d` |
+| 7860 | runq_strand_census | block | ptr-ops | GAP | `b1eacfb1c44e` |
+| 8827 | scheduler_tick | block | volatile,ptr-ops | GAP | `d3301f9da0a5` |
+| 9049 | scheduler_tick | block | - | GAP | `a3e7caafd035` |
+| 9267 | scheduler_tick | block | - | GAP | `b51d2dba9e99` |
+| 9733 | scheduler_tick | block | - | GAP | `8d182a943361` |
+| 9751 | scheduler_tick | block | - | GAP | `b6ea97d38451` |
+| 9787 | scheduler_tick | block | - | GAP | `04a2cff662e9` |
+| 9836 | scheduler_tick | block | - | GAP | `5dbaa15813c1` |
+| 9846 | scheduler_tick | block | - | GAP | `89c240415e92` |
+| 9851 | scheduler_tick | block | - | GAP | `b7ed67466e33` |
+| 9941 | scheduler_tick | block | volatile,ptr-ops | GAP | `b8e61ac108c2` |
+| 9990 | scheduler_tick | block | - | GAP | `ac96295770fb` |
+| 10039 | scheduler_tick | block | volatile,ptr-ops | GAP | `58b098d93254` |
+| 10107 | scheduler_tick | block | - | GAP | `d865e92ff906` |
+| 10138 | scheduler_tick | block | - | GAP | `529fd262887b` |
+| 10208 | scheduler_tick | block | - | GAP | `2fe9324564bc` |
+| 10496 | schedule_tail | block | - | GAP | `c773e97f8ef7` |
+| 10632 | current | block | - | GAP | `d4e5d395b586` |
+| 11035 | r56_print_msg | block | - | GAP | `75bf125e73be` |
+| 11067 | r56_print_pid | block | - | GAP | `90015210274a` |
+| 11119 | harvest_print_parked | block | volatile,ptr-ops | GAP | `51a9a7cf663a` |
+| 11216 | task_is_dying | block | - | GAP | `97d4459a6727` |
+| 11254 | harvest_relink | block | - | GAP | `8f1f8490b8d1` |
+| 11501 | republish_current_after_abort | block | - | GAP | `c28d13541c02` |
+| 11571 | abort_next_release_orphans | block | volatile,ptr-ops | GAP | `b5d47707fd40` |
+| 11907 | lp_idle_lie_report | block | no-preempt | GAP | `92bbc92c14ab` |
+| 12016 | idle_heal_own_slot | block | - | GAP | `4178af45a065` |
+| 12181 | relink_unlinked_running_phantoms | block | volatile,ptr-ops,no-preempt | GAP | `91d4765ab32a` |
+| 12377 | idle_guard_sp | block | asm | GAP | `d217fa066dcb` |
+| 12384 | idle_guard_sp | block | asm | GAP | `f635de94332e` |
+| 12391 | idle_guard_sp | block | asm | GAP | `726e13d483a6` |
+| 12467 | cpu_idle_loop | block | - | GAP | `fa161833ed26` |
+| 12494 | cpu_idle_loop | block | - | GAP | `6a652698c673` |
+| 12551 | cpu_idle_loop | block | - | GAP | `75a160906641` |
+| 12697 | cpu_idle_loop | block | - | GAP | `5cc7ede30aa7` |
 
 ### kernel/src/sched/side_edges.rs (5)
 
@@ -4386,11 +4356,11 @@ census id is accounted for here.
 | 4704 | probe_u64 | block | volatile,ptr-ops | GAP | `001c4ce585aa` |
 | 4720 | entry_frame_futex_x86 | block | - | GAP | `affbdbbbdadc` |
 | 4737 | stack_word | block | volatile,ptr-ops | GAP | `3f67e4f21922` |
-| 6217 | txn_hang_audit | block | - | GAP | `394feeb8e920` |
-| 6890 | bwr_park_audit | block | - | GAP | `dd801cf9b4b5` |
-| 8063 | user_task_park_stack_w | block | - | GAP | `75ef844a976d` |
-| 9457 | bc_corruption_snapshot | block | raw-construct | GAP | `a556f8e411e0` |
-| 13022 | get | block | - | GAP | `a2da340f371b` |
+| 6218 | txn_hang_audit | block | - | GAP | `dd4b8a17a0c7` |
+| 6891 | bwr_park_audit | block | - | GAP | `949e937468eb` |
+| 8064 | user_task_park_stack_w | block | - | GAP | `a20bf887b77c` |
+| 9461 | bc_corruption_snapshot | block | raw-construct | GAP | `afec4f690353` |
+| 13076 | get | block | - | GAP | `9e76f199ab6f` |
 
 ### kernel/src/ipc/keys.rs (1)
 
