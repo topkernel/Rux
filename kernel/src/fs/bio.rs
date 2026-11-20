@@ -3813,3 +3813,27 @@ pub(crate) fn with_block_mut<T>(
     sync_res?;
     out
 }
+
+/// The DEFERRED twin of [`with_block_mut`]: same protocol minus the
+/// inline sync — the F4-R2 durability-deferred class (order-unconstrained
+/// counters: group-desc and superblock free counts; the next barrier
+/// flushes them). INV-BIO-BLOCKUPD as above.
+pub(crate) fn with_block_deferred_mut<T>(
+    device: &'static crate::drivers::blkdev::GenDisk,
+    blocknr: u64,
+    f: impl FnOnce(&mut [u8], *mut BufferHead) -> Result<T, i32>,
+) -> Result<T, i32> {
+    let bh = bread(device, blocknr).ok_or(crate::errno::Errno::IOError.as_neg_i32())?;
+    // SAFETY: INV-BIO-PIN — the &mut window rides this exclusive scope.
+    let data: &mut [u8] = unsafe { &mut (*bh).b_data };
+    let out = f(data, bh);
+    // SAFETY: as bh_set_state_bit (INV-BIO-PIN).
+    unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
+    // SAFETY: the task-local journal resolver (null-safe).
+    if let Some(handle) = unsafe { crate::fs::ext4::namei::get_current_handle() } {
+        // SAFETY: the handle pins its transaction.
+        unsafe { let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh); }
+    }
+    brelse(bh);
+    out
+}
