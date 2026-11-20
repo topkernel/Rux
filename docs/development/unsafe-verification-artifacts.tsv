@@ -2181,79 +2181,79 @@ a30a9396b22d	kernel/src/process/mod.rs	current_pgid	111		GAP
 f5770d9b6724	kernel/src/process/task_ref.rs	<module>	73		GAP
 5f376decb96e	kernel/src/process/task_ref.rs	deref	86		GAP
 8630f74181c8	kernel/src/process/task_ref.rs	deref_mut	96		GAP
-a42233c56483	kernel/src/process/task_ref.rs	deref	140		GAP
-f21ca30cdce8	kernel/src/process/task_ref.rs	deref_mut	148		GAP
+8c9d5e0e842c	kernel/src/process/task_ref.rs	deref	152		GAP
+39ea3279d04f	kernel/src/process/task_ref.rs	deref_mut	160		GAP
 2beaa1051168	kernel/src/process/unsafe_edges.rs	borrow_task	55		GAP
 7e183034b210	kernel/src/process/unsafe_edges.rs	borrow_task_mut	72		GAP
-87caaeabf7ae	kernel/src/process/unsafe_edges.rs	place_task	92		GAP
-171e35d7903c	kernel/src/process/unsafe_edges.rs	dump_read_page	126		GAP
-c90f49452d29	kernel/src/process/unsafe_edges.rs	dump_read_page	137	ptr-ops	GAP
-38b517d52360	kernel/src/process/unsafe_edges.rs	file_private_data_ref	152		GAP
-f59f0234f592	kernel/src/process/unsafe_edges.rs	file_private_data_ref	153	ptr-ops	GAP
-4ae1baa89db1	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	167		GAP
-619212639894	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	168	ptr-ops	GAP
-ec97dd8b0301	kernel/src/process/unsafe_edges.rs	file_private_data_mut	183		GAP
-264e42c2e646	kernel/src/process/unsafe_edges.rs	file_private_data_mut	184	ptr-ops	GAP
-9f7436c4a18e	kernel/src/process/unsafe_edges.rs	read_volatile_u64	198	volatile	GAP
-05fc339241c8	kernel/src/process/unsafe_edges.rs	journal_handle	238		GAP
-8f213f810b94	kernel/src/process/unsafe_edges.rs	free_fork_pt_regs	271	ptr-ops	GAP
-5844825d1616	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	285		GAP
-da07b0da0747	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	290		GAP
-747374127911	kernel/src/process/unsafe_edges.rs	apppark_rets	304		GAP
-a5eeee8be6a0	kernel/src/process/unsafe_edges.rs	freelist_next	320	ptr-ops	GAP
-7ea6e00422a9	kernel/src/process/unsafe_edges.rs	freelist_link	330	ptr-ops	GAP
-63d01e1c538b	kernel/src/process/unsafe_edges.rs	heap_alloc	343		GAP
-cea0e289f898	kernel/src/process/unsafe_edges.rs	heap_dealloc	353		GAP
-92d971bb0bad	kernel/src/process/unsafe_edges.rs	slot_ptr	363		GAP
-5df6756eba4f	kernel/src/process/unsafe_edges.rs	zero_bytes	374	ptr-ops	GAP
-d2e3a00a5de3	kernel/src/process/unsafe_edges.rs	write_volatile_u64	384	volatile	GAP
-b9fa71b1c9b1	kernel/src/process/unsafe_edges.rs	<module>	392		GAP
-c279c865e80f	kernel/src/process/unsafe_edges.rs	<module>	396		GAP
-6a0206da604b	kernel/src/process/unsafe_edges.rs	read_volatile_u32	405	volatile	GAP
-d62a79e9d02c	kernel/src/process/unsafe_edges.rs	borrow_active_mm	420		GAP
-0fd554379a62	kernel/src/process/unsafe_edges.rs	list_add_tail	439		GAP
-4ff54ff5932e	kernel/src/process/unsafe_edges.rs	list_del	449		GAP
-91f37ba5914c	kernel/src/process/unsafe_edges.rs	list_for_each	463		GAP
-96ff630fb46f	kernel/src/process/unsafe_edges.rs	store_pick_qword	483	ptr-ops	GAP
-3a77d372f338	kernel/src/process/unsafe_edges.rs	paint_bytes	496	ptr-ops	GAP
-3f8b457ec9ef	kernel/src/process/unsafe_edges.rs	frame_mut	516		GAP
-7057efcd7cc5	kernel/src/process/unsafe_edges.rs	frame_ref	528		GAP
-c8baf1e726de	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	554		GAP
-245cb5c9e70b	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	565	ptr-ops	GAP
-f4a8318b61e9	kernel/src/process/unsafe_edges.rs	exec_phdr_at	586		GAP
-da10d43f4563	kernel/src/process/unsafe_edges.rs	exec_ehdr_from	596		GAP
-054513a21729	kernel/src/process/unsafe_edges.rs	exec_map_user_range	608		GAP
-96fb4d19a3c7	kernel/src/process/unsafe_edges.rs	exec_map_user_region_static	627		GAP
-c98b887b6c35	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	638		GAP
-6aba0a7e702a	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	643	volatile,ptr-ops	GAP
-415da30ee094	kernel/src/process/unsafe_edges.rs	exec_free_user_page_trees	657		GAP
-14a69671ef89	kernel/src/process/unsafe_edges.rs	exec_write_sigtramp	675	volatile,ptr-ops	GAP
-ae1d0b85d2b6	kernel/src/process/unsafe_edges.rs	exec_mm_new_user	689		GAP
-8ce326b0afe7	kernel/src/process/unsafe_edges.rs	exec_switch_address_space	702		GAP
-ec3373272851	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	737		GAP
-7b6b9e3a2a11	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	784		GAP
-901d1498654d	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	843		GAP
-6d8653d3dfff	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	863		GAP
-6545bbcdfe21	kernel/src/process/unsafe_edges.rs	fork_save_parent_vstate	874		GAP
-7e3e6c53960c	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	885		GAP
-22b5f4175707	kernel/src/process/unsafe_edges.rs	fork_fpu_save_for_switch	894		GAP
-1e2bb982fa56	kernel/src/process/unsafe_edges.rs	fork_pt_walk	905		GAP
-85f89c3320f3	kernel/src/process/unsafe_edges.rs	fork_handle_cow_fault	918		GAP
-0d7545090bf9	kernel/src/process/unsafe_edges.rs	fork_write_child_tid	938	volatile,ptr-ops	GAP
-6c4729a4c16b	kernel/src/process/unsafe_edges.rs	read_user_tp_register	951	asm	GAP
-65d3f874fd99	kernel/src/process/unsafe_edges.rs	page_refcount	971		GAP
-c99f40b2c032	kernel/src/process/unsafe_edges.rs	<module>	981		GAP
-a5d96417d010	kernel/src/process/unsafe_edges.rs	<module>	983		GAP
-409c2ae61c9c	kernel/src/process/unsafe_edges.rs	pid_hash_unlink_store	1002		GAP
-56139beef3d1	kernel/src/process/unsafe_edges.rs	ptrace_translate	1022		GAP
-d0110fa5a902	kernel/src/process/unsafe_edges.rs	ptrace_read_word	1033	volatile,ptr-ops	GAP
-0244f0d0f4bc	kernel/src/process/unsafe_edges.rs	ptrace_write_word	1044	volatile,ptr-ops	GAP
-d2d0c889a619	kernel/src/process/unsafe_edges.rs	ptrace_copy_chunk	1057	ptr-ops	GAP
-d3a9107ad53d	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1075	asm	GAP
-7af88f74da6e	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1091	asm	GAP
-dc28eded5ce8	kernel/src/process/unsafe_edges.rs	ptrace_read_gregset	1116	ptr-ops	GAP
-7dcc1c4608dc	kernel/src/process/unsafe_edges.rs	ptrace_write_gregset	1134	ptr-ops	GAP
-d36ed1d29ca5	kernel/src/process/unsafe_edges.rs	zeroed_siginfo	1149		GAP
+6bd9da02631d	kernel/src/process/unsafe_edges.rs	place_task	105		GAP
+eff42a0be9fc	kernel/src/process/unsafe_edges.rs	dump_read_page	139		GAP
+d488fa14a0cb	kernel/src/process/unsafe_edges.rs	dump_read_page	150	ptr-ops	GAP
+c555c6a7b194	kernel/src/process/unsafe_edges.rs	file_private_data_ref	165		GAP
+1aec3dcfe25a	kernel/src/process/unsafe_edges.rs	file_private_data_ref	166	ptr-ops	GAP
+5acfa3548395	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	180		GAP
+d6499b1e4d50	kernel/src/process/unsafe_edges.rs	file_private_data_take_boxed	181	ptr-ops	GAP
+462480ce527a	kernel/src/process/unsafe_edges.rs	file_private_data_mut	196		GAP
+0decb18bda2b	kernel/src/process/unsafe_edges.rs	file_private_data_mut	197	ptr-ops	GAP
+499d2d0dbbcd	kernel/src/process/unsafe_edges.rs	read_volatile_u64	211	volatile	GAP
+4c08e0293bff	kernel/src/process/unsafe_edges.rs	journal_handle	251		GAP
+30e4d9058b91	kernel/src/process/unsafe_edges.rs	free_fork_pt_regs	284	ptr-ops	GAP
+a7b9e25a0fe3	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	298		GAP
+af9d0bedd8ea	kernel/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	303		GAP
+38cb21584a69	kernel/src/process/unsafe_edges.rs	apppark_rets	317		GAP
+ff127be98951	kernel/src/process/unsafe_edges.rs	freelist_next	333	ptr-ops	GAP
+3e07bcaa9002	kernel/src/process/unsafe_edges.rs	freelist_link	343	ptr-ops	GAP
+15f1b4803aa2	kernel/src/process/unsafe_edges.rs	heap_alloc	356		GAP
+749775574955	kernel/src/process/unsafe_edges.rs	heap_dealloc	366		GAP
+4fb9f718b639	kernel/src/process/unsafe_edges.rs	slot_ptr	376		GAP
+207d3e1573db	kernel/src/process/unsafe_edges.rs	zero_bytes	387	ptr-ops	GAP
+005298b9ee73	kernel/src/process/unsafe_edges.rs	write_volatile_u64	397	volatile	GAP
+fdb15dd17706	kernel/src/process/unsafe_edges.rs	<module>	405		GAP
+06709e4a45d3	kernel/src/process/unsafe_edges.rs	<module>	409		GAP
+79c32c2b54dc	kernel/src/process/unsafe_edges.rs	read_volatile_u32	418	volatile	GAP
+be9426f8df25	kernel/src/process/unsafe_edges.rs	borrow_active_mm	433		GAP
+e17f65bb862b	kernel/src/process/unsafe_edges.rs	list_add_tail	452		GAP
+d4110f0c746e	kernel/src/process/unsafe_edges.rs	list_del	462		GAP
+275b19dfe844	kernel/src/process/unsafe_edges.rs	list_for_each	476		GAP
+c2f338897e44	kernel/src/process/unsafe_edges.rs	store_pick_qword	496	ptr-ops	GAP
+620b2c62ccdc	kernel/src/process/unsafe_edges.rs	paint_bytes	509	ptr-ops	GAP
+9019b4be1be9	kernel/src/process/unsafe_edges.rs	frame_mut	529		GAP
+6c0627d9290c	kernel/src/process/unsafe_edges.rs	frame_ref	541		GAP
+bf3f5ddb8654	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	567		GAP
+4f1bf37e2fe5	kernel/src/process/unsafe_edges.rs	exec_copy_user_image	578	ptr-ops	GAP
+713a14719e72	kernel/src/process/unsafe_edges.rs	exec_phdr_at	599		GAP
+60bddb3b1cca	kernel/src/process/unsafe_edges.rs	exec_ehdr_from	609		GAP
+303d3310ecbe	kernel/src/process/unsafe_edges.rs	exec_map_user_range	621		GAP
+5845f881d030	kernel/src/process/unsafe_edges.rs	exec_map_user_region_static	640		GAP
+f9294442f893	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	651		GAP
+2000c9e66c93	kernel/src/process/unsafe_edges.rs	exec_probe_read_u64	656	volatile,ptr-ops	GAP
+5a553f926727	kernel/src/process/unsafe_edges.rs	exec_free_user_page_trees	670		GAP
+c0be1997ab3c	kernel/src/process/unsafe_edges.rs	exec_write_sigtramp	688	volatile,ptr-ops	GAP
+c6e9c73dd16e	kernel/src/process/unsafe_edges.rs	exec_mm_new_user	702		GAP
+8b66f21c03e0	kernel/src/process/unsafe_edges.rs	exec_switch_address_space	715		GAP
+6028ccae10d8	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	750		GAP
+33243f3783e3	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	797		GAP
+f89947507dc4	kernel/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	856		GAP
+2020df098d2c	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	876		GAP
+0a1266b8381f	kernel/src/process/unsafe_edges.rs	fork_save_parent_vstate	887		GAP
+23c01acb47c1	kernel/src/process/unsafe_edges.rs	fork_save_parent_fpu	898		GAP
+aa7928742500	kernel/src/process/unsafe_edges.rs	fork_fpu_save_for_switch	907		GAP
+44ec9b853fc8	kernel/src/process/unsafe_edges.rs	fork_pt_walk	918		GAP
+75a8e5bbfe9d	kernel/src/process/unsafe_edges.rs	fork_handle_cow_fault	931		GAP
+6b6b5b73523f	kernel/src/process/unsafe_edges.rs	fork_write_child_tid	951	volatile,ptr-ops	GAP
+1d4733a29d08	kernel/src/process/unsafe_edges.rs	read_user_tp_register	964	asm	GAP
+24e577536294	kernel/src/process/unsafe_edges.rs	page_refcount	984		GAP
+b128013597f3	kernel/src/process/unsafe_edges.rs	<module>	994		GAP
+71ea6e69ba62	kernel/src/process/unsafe_edges.rs	<module>	996		GAP
+58809015db4e	kernel/src/process/unsafe_edges.rs	pid_hash_unlink_store	1015		GAP
+ad69ce49f9e5	kernel/src/process/unsafe_edges.rs	ptrace_translate	1035		GAP
+9c5966a17cb4	kernel/src/process/unsafe_edges.rs	ptrace_read_word	1046	volatile,ptr-ops	GAP
+fd954ad11bc2	kernel/src/process/unsafe_edges.rs	ptrace_write_word	1057	volatile,ptr-ops	GAP
+9d5f847f9547	kernel/src/process/unsafe_edges.rs	ptrace_copy_chunk	1070	ptr-ops	GAP
+faafeadd79d1	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1088	asm	GAP
+f8b51d48f092	kernel/src/process/unsafe_edges.rs	ptrace_flush_icache	1104	asm	GAP
+e37a5c329886	kernel/src/process/unsafe_edges.rs	ptrace_read_gregset	1129	ptr-ops	GAP
+eb5fbceda67e	kernel/src/process/unsafe_edges.rs	ptrace_write_gregset	1147	ptr-ops	GAP
+239b8c07c639	kernel/src/process/unsafe_edges.rs	zeroed_siginfo	1162		GAP
 e9ebe794b07b	kernel/src/safety/bytes.rs	bytes_of	43	raw-construct,ptr-ops	INV:INV-CBYTES-1
 5db301ab0d64	kernel/src/safety/bytes.rs	bytes_of_mut	52	ptr-ops	INV:INV-CBYTES-1
 ee1f13fde206	kernel/src/safety/bytes.rs	from_bytes	65	ptr-ops	INV:INV-CBYTES-2
@@ -2492,11 +2492,11 @@ b1a077509734	kernel/src/signal.rs	restore_sigcontext_x86_64	2691		GAP
 8bce7348cc09	kernel/src/signal.rs	handle_default_signal	2844	ptr-ops	GAP
 16d218de9cdc	kernel/src/signal.rs	abort_reason_dump	2990		GAP
 a68e17280390	kernel/src/signal.rs	abort_reason_dump	3023		GAP
-856055736558	kernel/src/signal.rs	park_stopped_task	3766		GAP
-69fa807fa19d	kernel/src/signal.rs	check_and_deliver_signals	3826		GAP
-b3eb24710524	kernel/src/signal.rs	fatal_signal_pending	3890		GAP
-ec1e746f5d0a	kernel/src/signal.rs	signal_pending	3919		GAP
-866c530a75e7	kernel/src/signal.rs	signal_wake_up_state	3971		GAP
+9d63af90ad84	kernel/src/signal.rs	park_stopped_task	3761		GAP
+2b3754e961b5	kernel/src/signal.rs	check_and_deliver_signals	3821		GAP
+7b043f0da8f3	kernel/src/signal.rs	fatal_signal_pending	3885		GAP
+bd8654a02e37	kernel/src/signal.rs	signal_pending	3914		GAP
+1624712dc479	kernel/src/signal.rs	signal_wake_up_state	3966		GAP
 c79328b60e86	kernel/src/sync/edges.rs	read_bytes_via_task	49		INV:INV-SY-1
 4c578fcad135	kernel/src/sync/edges.rs	read_bytes_via_task	63	volatile,ptr-ops	INV:INV-SY-1
 d701c1527edc	kernel/src/sync/edges.rs	read_u32_via_task	96		INV:INV-SY-1
