@@ -144,3 +144,18 @@ pub fn read_volatile_u64(addr: usize) -> u64 {
     // SAFETY: INV-SY-1 — single volatile load of a validated address.
     unsafe { core::ptr::read_volatile(addr as *const u64) }
 }
+
+/// One volatile u32 read (INV-SY-1 diag twin of read_volatile_u64).
+#[inline]
+pub fn read_volatile_u32(addr: usize) -> u32 {
+    // SAFETY: INV-SY-1 — single volatile load of a validated address.
+    unsafe { core::ptr::read_volatile(addr as *const u32) }
+}
+
+/// copy_from_user with a byte count (INV-SY-3): fault-isolated user
+/// read into kernel memory; returns bytes copied.
+pub fn copy_from_user_bytes(dst: *mut u8, src: usize, len: usize) -> bool {
+    // SAFETY: INV-SY-3 — the futex syscall's validated user pointer;
+    // copy_from_user is fault-isolated.
+    unsafe { crate::arch::uaccess::copy_from_user(dst, src as *const u8, len) == 0 }
+}
