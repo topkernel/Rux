@@ -305,3 +305,294 @@ pub fn file_inode_set_pre_publish(
     // store races nothing and skips lease bookkeeping on purpose.
     unsafe { *file.inode.get() = Some(inode) }
 }
+
+// ---------------------------------------------------------------------------
+// INV-SYSC-8: the mmap/mremap/msync/mprotect page-table family. The
+// arch walkers/leaf rewrites are Round-D irreducibles (page-table
+// mutation); they live behind these named edges with the caller-side
+// discipline (PTE lock held, current task's own root) stated once.
+// ---------------------------------------------------------------------------
+
+/// Map one fresh page into a USER page table (map_page).
+///
+/// INV-SYSC-8 (map arm): `root_ppn` is the current task's live user
+/// root; the PTE section is held by the caller; `phys` is a freshly
+/// allocated frame exclusively owned by this path. aarch64 declares the
+/// primitive unsafe (root validity); riscv64/x86_64 are safe fns — the
+/// cfg split keeps one call site.
+#[inline]
+pub fn arch_map_page(
+    root_ppn: u64,
+    virt: crate::arch::mm::VirtAddr,
+    phys: crate::arch::mm::PhysAddr,
+    flags: u64,
+) -> bool {
+    #[cfg(feature = "aarch64")]
+    {
+        // SAFETY: INV-SYSC-8 — live user root (aarch64's only proof
+        // obligation).
+        unsafe { crate::arch::mm::map_page(root_ppn, virt, phys, flags) }
+    }
+    #[cfg(not(feature = "aarch64"))]
+    {
+        crate::arch::mm::map_page(root_ppn, virt, phys, flags)
+    }
+}
+
+/// Tear down one user leaf with rmap/refcount accounting
+/// (unmap_one_user_leaf_locked).
+///
+/// INV-SYSC-8 (unmap arm): the caller holds the mm's PTE lock and `mm`
+/// is the current task's address space — the proof aarch64's unsafe fn
+/// demands; the other arches' fns carry the same discipline in their
+/// names.
+#[inline]
+pub fn unmap_user_leaf_locked(mm: &crate::mm::AddressSpace, va: usize) -> bool {
+    #[cfg(feature = "aarch64")]
+    {
+        // SAFETY: INV-SYSC-8 — PTE lock held by the caller.
+        unsafe { mm.unmap_one_user_leaf_locked(va) }
+    }
+    #[cfg(not(feature = "aarch64"))]
+    {
+        mm.unmap_one_user_leaf_locked(va)
+    }
+}
+
+/// Copy one whole page between two physical frames through the kernel
+/// linear map (INV-SYSC-8 copy arm): both frames' liveness is held by
+/// the caller's path (PTE section + refcounts, exactly the
+/// copy_old_to_new_pages discipline).
+#[inline]
+pub fn copy_page_linear(src_phys: u64, dst_phys: u64) {
+    #[cfg(feature = "riscv64")]
+    {
+        crate::arch::mm::unsafe_edges::copy_page(src_phys, dst_phys);
+    }
+    #[cfg(not(feature = "riscv64"))]
+    {
+        let src = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(src_phys))
+            .bits() as *const u8;
+        let dst = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(dst_phys))
+            .bits() as *mut u8;
+        // SAFETY: INV-SYSC-8 — both frames are live for the call and
+        // PAGE_SIZE bytes each; the regions are distinct pages.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src,
+                dst,
+                crate::arch::mm::PAGE_SIZE as usize,
+            )
+        };
+    }
+}
+
+/// Borrow a page descriptor from the vmemmap (INV-SYSC-8 desc arm):
+/// page descriptors are machine-lifetime statics; `pfn` was validated
+/// by the allocation/walk that produced it. `None` mirrors the raw
+/// null-check the call sites performed inline.
+#[inline]
+pub fn page_desc_of(pfn: usize) -> Option<&'static mut crate::mm::page_desc::Page> {
+    let p = crate::mm::page_desc::pfn_to_page_mut(pfn);
+    if p.is_null() {
+        None
+    } else {
+        // SAFETY: INV-SYSC-8 — non-null vmemmap descriptor of a frame
+        // this path owns or holds a refcount on; machine-lifetime
+        // storage.
+        Some(unsafe { &mut *p })
+    }
+}
+
+/// Rewrite one Sv39 leaf's permission bits in place (the riscv64 arm of
+/// mprotect; x86_64/aarch64 use the safe arch mprotect_pte_range).
+///
+/// INV-SYSC-8 (mprotect arm): `root_ppn` is the current task's live
+/// user root, the caller holds the mm's PTE lock for the whole loop,
+/// and only present leaves are rewritten (non-present pages are
+/// skipped). COW/PCACHE software bits and the PPN are preserved per
+/// the MM-H7/session-25 rules the body documents.
+#[cfg(feature = "riscv64")]
+pub fn mprotect_rewrite_leaf_sv39(root_ppn: u64, virt: u64, new_flags: u64) {
+    use crate::arch::mm::mm_ops::cow_flags;
+    use crate::arch::mm::PageTableEntry;
+
+    let virt_addr = crate::arch::mm::VirtAddr(virt);
+    let vpn2 = virt_addr.vpn(2) as usize;
+    let vpn1 = virt_addr.vpn(1) as usize;
+    let vpn0 = virt_addr.vpn(0) as usize;
+
+    // The walk runs under the caller's PTE lock (INV-RE-PT live arm).
+    let root_table = match crate::arch::mm::unsafe_edges::PtTable::from_phys_live(
+        root_ppn << crate::arch::mm::PAGE_SHIFT,
+    ) {
+        Some(t) => t,
+        None => return,
+    };
+    let pte2 = root_table.get(vpn2);
+    if !pte2.is_valid() {
+        return; // Page not mapped, skip
+    }
+    let table1 = match crate::arch::mm::unsafe_edges::PtTable::from_phys_live(
+        pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+    ) {
+        Some(t) => t,
+        None => return,
+    };
+    let pte1 = table1.get(vpn1);
+    if !pte1.is_valid() {
+        return; // Page not mapped, skip
+    }
+    let table0 = match crate::arch::mm::unsafe_edges::PtTable::from_phys_live(
+        pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
+    ) {
+        Some(t) => t,
+        None => return,
+    };
+    let pte0 = table0.get(vpn0);
+    if !pte0.is_valid() {
+        return;
+    }
+
+    // Preserve PPN and any COW software bit (bit 8): clearing COW here
+    // let two processes that share a forked page write straight through
+    // after mprotect(PROT_WRITE), bypassing the COW copy (review
+    // MM-H7). Also never raise W on a page whose COW bit is set — the
+    // write fault path owns the copy.
+    //
+    // PCACHE (RSW bit 9, riscv64 filemap_fault port): a
+    // mapping-ownership bit, preserved like COW — dropping it would
+    // leak the page-cache pin forever (frame unevictable). A PRIVATE
+    // cache-backed leaf NEVER gains W in place: the frame is shared
+    // with the page cache, so a W-upgrade diverts the first write
+    // through COW (Linux writenotify; x86_64 mprotect_pte_range twin).
+    // A SHARED cache leaf (PCACHE with no COW — cow_flags::
+    // pte_is_shared_cache; Sv39 has no third software bit) keeps W in
+    // place — its stores must land in the cache frame (session 25), and
+    // gaining W here (an RO-faulted shared leaf being upgraded) is a
+    // W-install: mark the cache page dirty so the later msync/fsync
+    // persists such stores.
+    let ppn = pte0.ppn();
+    let cow_bit = pte0.bits() & cow_flags::COW;
+    let pcache_bit = pte0.bits() & cow_flags::PCACHE;
+    let mut flags = new_flags;
+    if cow_bit != 0 {
+        flags |= cow_bit;
+        flags &= !PageTableEntry::W; // defer W to COW fault
+    }
+    if pcache_bit != 0 {
+        flags |= pcache_bit;
+        if flags & PageTableEntry::W != 0 {
+            if cow_flags::pte_is_shared_cache(pte0.bits()) {
+                crate::fs::page_cache::get_page_cache().mark_dirty_pfn(ppn as usize);
+            } else {
+                flags |= cow_flags::COW;
+                flags &= !PageTableEntry::W;
+            }
+        }
+    }
+    let new_pte = PageTableEntry::from_bits((ppn << 10) | flags);
+    table0.set(vpn0, new_pte);
+}
+
+/// Resolve the WRITABLE physical frame backing `va`, if any (the msync
+/// writeback resolver).
+///
+/// INV-SYSC-8 (msync arm): `root_ppn` is the current task's live user
+/// root; the walk only READS PTEs under the caller's PTE lock. Returns
+/// the physical address of the writable leaf frame (PCACHE leaves are
+/// skipped — their writeback is the page cache's dirty path).
+pub fn pt_walk_writable_phys(root_ppn: u64, va: u64) -> Option<u64> {
+    // The Sv39-shaped walk: three levels, leaf when R/W/X present —
+    // the arch shims (`get_page_table_virt`, `PageTableEntry`) exist
+    // on every arch this file builds for, same as the raw walk this
+    // replaces.
+    let vpn = [
+        (va >> 12) & 0x1FF,
+        (va >> 21) & 0x1FF,
+        (va >> 30) & 0x1FF,
+    ];
+    let page_shift = crate::arch::mm::PAGE_SHIFT;
+    // SAFETY: INV-SYSC-8 — read-only place projection; the root frame
+    // is the caller-pinned live root and descent follows only valid
+    // entries (the same argument the raw walk made inline).
+    let mut pte_virt = unsafe {
+        crate::arch::mm::get_page_table_virt(root_ppn << page_shift)
+    } as *const crate::arch::mm::PageTableEntry;
+    let mut phys: Option<u64> = None;
+    for level in (0..3usize).rev() {
+        // SAFETY: INV-SYSC-8 — read-only place projection of a live
+        // table entry (the walk descends only valid entries).
+        let pte = unsafe { &*pte_virt.add(vpn[level] as usize) };
+        if !pte.is_valid() {
+            break;
+        }
+        // PCACHE leaves (SHARED ext4, session 25): their writeback
+        // state is the page cache's dirty bit — flushed by
+        // ext4_flush_dirty_pages above. Writing the frame here as well
+        // would be redundant I/O through the slow path.
+        if pte.bits() & crate::arch::mm::mm_ops::cow_flags::PCACHE != 0 {
+            break;
+        }
+        let is_leaf = pte.is_readable() || pte.is_writable() || pte.is_executable();
+        if level == 0 || is_leaf {
+            if pte.is_writable() {
+                phys = Some(pte.ppn() << page_shift);
+            }
+            break;
+        }
+        // SAFETY: INV-SYSC-8 — same conversion for the next-level table
+        // the valid parent entry names.
+        pte_virt = unsafe {
+            crate::arch::mm::get_page_table_virt(pte.ppn() << page_shift)
+        } as *const crate::arch::mm::PageTableEntry;
+    }
+    phys
+}
+
+/// Write one kernel-linear page (or its EOF-clamped head) out through
+/// `file`'s raw write path (the msync writeback store).
+///
+/// INV-SYSC-8 (writeback arm): `page_phys` is a present writable frame
+/// resolved by [`pt_walk_writable_phys`] under the same PTE section;
+/// `n <= PAGE_SIZE` is the EOF clamp. This is the one remaining raw
+/// source pointer — `File::write_at`'s safe slice twin cannot describe
+/// a page we do not own as a Rust slice.
+pub fn file_write_page(
+    file: &crate::fs::File,
+    file_off: u64,
+    page_phys: u64,
+    n: usize,
+) -> isize {
+    let kva = crate::arch::mm::phys_to_virt(crate::arch::mm::memory_layout::PhysAddr(
+        page_phys,
+    ));
+    // SAFETY: INV-SYSC-8 — n readable bytes of a present page through
+    // the kernel linear map (the same source the raw write_at call
+    // used).
+    unsafe { file.write_at(file_off, kva.as_usize() as *const u8, n) }
+}
+
+/// Map one fresh user page (map_user_page).
+///
+/// INV-SYSC-8 (user-map arm): the VA is page-aligned inside a VMA this
+/// path just added, `phys` is a fresh zeroed frame, and the caller
+/// holds the mm's PTE lock — the demand-fault discipline. riscv64
+/// declares the primitive unsafe; the other arches are safe fns.
+#[inline]
+pub fn arch_map_user_page(
+    root_ppn: u64,
+    virt: crate::arch::mm::memory_layout::VirtAddr,
+    phys: crate::arch::mm::memory_layout::PhysAddr,
+    flags: u64,
+) -> bool {
+    #[cfg(feature = "riscv64")]
+    {
+        // SAFETY: INV-SYSC-8 — live user root, PTE section held.
+        unsafe { crate::arch::mm::map_user_page(root_ppn, virt, phys, flags) }
+    }
+    #[cfg(not(feature = "riscv64"))]
+    {
+        crate::arch::mm::map_user_page(root_ppn, virt, phys, flags)
+    }
+}

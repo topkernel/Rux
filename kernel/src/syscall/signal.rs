@@ -6,6 +6,8 @@
 //!
 //! Includes: rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack, sigpending
 
+#![forbid(unsafe_code)]
+
 use super::*;
 
 /// sys_rt_sigprocmask - Examine and change blocked signals
@@ -260,13 +262,9 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
                 sa_restorer: old_action.sa_restorer,
                 sa_mask: old_action.sa_mask,
             };
-            // SAFETY: a byte view of a fully-initialized local struct.
-            let src = unsafe {
-                core::slice::from_raw_parts(
-                    &user_action as *const SigActionUser as *const u8,
-                    core::mem::size_of::<SigActionUser>(),
-                )
-            };
+            // A byte view of a fully-initialized local struct
+            // (INV-CBYTES-1).
+            let src = crate::safety::bytes::bytes_of(&user_action);
             let uncopied = crate::arch::uaccess_safe::UserSlice::new(
                 oldact_ptr as usize,
                 core::mem::size_of::<SigActionUser>(),
@@ -346,9 +344,9 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
         None => return -(errno::EPERM as i64),
     };
 
-    // SAFETY: current is the running task's Task pointer; sigframe_addr was set by
+    // current is the running task's reference; sigframe_addr was set by
     // signal delivery and restore_sigcontext expects a valid Task pointer.
-    unsafe {
+    {
         // Frame location follows the Linux/RISC-V contract: setup_frame
         // enters the handler with user sp == frame_addr, and the
         // 2-instruction kernel trampoline (li a7,139; ecall) never moves
@@ -470,16 +468,14 @@ pub fn sys_sigpending(args: SyscallArgs) -> i64 {
 
     // Get current process
     let current = match crate::sched::current() {
-        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
 
-    // current is the running task's Task pointer; set_ptr validated with access_ok(8).
+    // current is the running task's reference; set_ptr validated with access_ok(8).
     {
-        // SAFETY: current is the running task.
-        let cur = unsafe { &*current };
-        let pending = cur.pending.get_all();
-        let blocked = cur.sigmask;
+        let pending = current.pending.get_all();
+        let blocked = current.sigmask;
         // R7-D6: POSIX/Linux sigpending returns pending AND blocked (the
         // complement was written before — a blocked-and-pending signal
         // read as not-pending, breaking sigwait-style polling).
@@ -509,27 +505,26 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
     let ss_ptr = args[0] as *const SignalStack;
     let old_ss_ptr = args[1] as *mut SignalStack;
 
-    // Get current process
+    // Get current process (reference from sched::current()).
     let current = match crate::sched::current() {
-        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
 
-    // SAFETY: current is the running task's Task pointer; ss_ptr/old_ss_ptr validated
-    // with access_ok where non-null; all user copies go through the
-    // exception-table helpers.
-    unsafe {
+    // current is the running task's reference; ss_ptr/old_ss_ptr
+    // validated with access_ok where non-null; all user copies go
+    // through the exception-table helpers.
+    {
         // Save old signal stack configuration
         if !old_ss_ptr.is_null() {
             // Validate user pointer
             if !crate::arch::uaccess::access_ok(old_ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
                 return -(errno::EFAULT as i64);
             }
-            let old_ss = (*current).sigstack;
-            if crate::arch::uaccess::copy_to_user(
-                old_ss_ptr as *mut u8,
-                &old_ss as *const SignalStack as *const u8,
-                core::mem::size_of::<SignalStack>(),
+            let old_ss = current.sigstack;
+            if crate::arch::uaccess_safe::copy_out(
+                old_ss_ptr as usize,
+                crate::safety::bytes::bytes_of(&old_ss),
             ) != 0 {
                 return -(errno::EFAULT as i64);
             }
@@ -541,19 +536,16 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
             if !crate::arch::uaccess::access_ok(ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
                 return -(errno::EFAULT as i64);
             }
-            let mut new_ss = core::mem::MaybeUninit::<SignalStack>::zeroed();
-            if crate::arch::uaccess::copy_from_user(
-                new_ss.as_mut_ptr() as *mut u8,
-                ss_ptr as *const u8,
-                core::mem::size_of::<SignalStack>(),
-            ) != 0 {
+            // copy_in_t copies over a zero-initialized value and
+            // zero-fills the uncopied tail on fault — the MaybeUninit
+            // dance the raw copy_from_user needed is gone.
+            let mut new_ss = SignalStack { ss_sp: 0, ss_flags: 0, ss_size: 0 };
+            if crate::arch::uaccess_safe::copy_in_t(&mut new_ss, ss_ptr as usize) != 0 {
                 return -(errno::EFAULT as i64);
             }
-            // SAFETY: fully initialized by the copy above.
-            let new_ss = new_ss.assume_init();
 
             // Check if currently executing on signal stack
-            if (*current).sigstack.is_on_stack() {
+            if current.sigstack.is_on_stack() {
                 return -(errno::EBUSY as i64);  // Signal stack in use
             }
 
@@ -564,7 +556,7 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
                 }
             }
 
-            (*current).sigstack = new_ss;
+            current.sigstack = new_ss;
         }
     }
 
@@ -620,15 +612,15 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
     let new_mask = new_mask & !((1u64 << 8) | (1u64 << 18));
 
     let current = match crate::sched::current() {
-        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
 
-    // SAFETY: current is the running task's Task pointer from sched::current().
-    unsafe {
+    // current is the running task's reference from sched::current().
+    {
         // Atomically set new mask and wait
-        let old_mask = (*current).sigmask;
-        (*current).sigmask = new_mask;
+        let old_mask = current.sigmask;
+        current.sigmask = new_mask;
 
         // Sleep until a signal is delivered.
         // The race between checking pending and sleeping is resolved by
@@ -637,36 +629,36 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
         // schedule(), the wakeup will find us in INTERRUPTIBLE and skip us,
         // but the next iteration will see the pending signal.
         loop {
-            let pending = (*current).pending.get_all();
-            let blocked = (*current).sigmask;
+            let pending = current.pending.get_all();
+            let blocked = current.sigmask;
             if pending & !blocked != 0 {
                 // Signal pending. Do NOT restore the old mask here: the
                 // delivery filter on the way back to userspace must see the
                 // SUSPEND mask so the signal is actually delivered; the old
                 // mask is reinstated just before the handler runs (see
                 // check_and_deliver_signals) and again by sigreturn.
-                (*current).sigmask_restore = old_mask;
-                (*current).sigmask_restore_valid = true;
+                current.sigmask_restore = old_mask;
+                current.sigmask_restore_valid = true;
                 return -(errno::EINTR as i64);
             }
             // Set state BEFORE re-checking to close the race window.
             // If a signal arrives here, the signal delivery path will see
             // INTERRUPTIBLE and call wake_up_process(), which sets us back
             // to RUNNING before schedule() yields the CPU.
-            (*current).set_state(crate::process::task::TaskState::new(
+            current.set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::INTERRUPTIBLE
             ));
             // Re-check after setting state (signal may have arrived)
-            let pending2 = (*current).pending.get_all();
+            let pending2 = current.pending.get_all();
             if pending2 & !blocked != 0 {
                 // Signal arrived while we were preparing to sleep
-                (*current).set_state(crate::process::task::TaskState::new(
+                current.set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING
                 ));
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
-                crate::sched::dequeue_task(&*current);
-                (*current).sigmask_restore = old_mask;
-                (*current).sigmask_restore_valid = true;
+                crate::sched::dequeue_task(current);
+                current.sigmask_restore = old_mask;
+                current.sigmask_restore_valid = true;
                 return -(errno::EINTR as i64);
             }
             crate::sched::schedule();
@@ -686,32 +678,32 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
 /// mask swap: pause never touches the blocked mask.
 pub fn sys_pause(_args: SyscallArgs) -> i64 {
     let current = match crate::sched::current() {
-        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        Some(c) => c,
         None => return -(errno::EINTR as i64),
     };
 
-    // SAFETY: current is the running task's Task pointer from sched::current().
-    unsafe {
+    // current is the running task's reference from sched::current().
+    {
         loop {
-            let pending = (*current).pending.get_all();
-            let blocked = (*current).sigmask;
+            let pending = current.pending.get_all();
+            let blocked = current.sigmask;
             if pending & !blocked != 0 {
                 return -(errno::EINTR as i64);
             }
             // Set state BEFORE re-checking to close the race window (same
             // as sigsuspend): a wake-up between the check and schedule()
             // finds us INTERRUPTIBLE and leaves us RUNNING.
-            (*current).set_state(crate::process::task::TaskState::new(
+            current.set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::INTERRUPTIBLE,
             ));
             // Re-check after setting state (signal may have arrived)
-            let pending2 = (*current).pending.get_all();
+            let pending2 = current.pending.get_all();
             if pending2 & !blocked != 0 {
-                (*current).set_state(crate::process::task::TaskState::new(
+                current.set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING,
                 ));
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
-                crate::sched::dequeue_task(&*current);
+                crate::sched::dequeue_task(current);
                 return -(errno::EINTR as i64);
             }
             crate::sched::schedule();
@@ -746,7 +738,7 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
 
     // Find target task (also needed for the sig==0 permission probe)
     // find_task_by_pid returns null if tid not found; result checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(tid) };
+    let task = crate::sched::find_task_by_pid(tid);
     if task.is_null() {
         return -(errno::ESRCH as i64);
     }
@@ -755,7 +747,7 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
     // (Linux do_tkill → check_kill_permission). Task is non-null and
     // stable while referenced (syscall-context short read).
     // SAFETY: non-null checked above; short read contract.
-    if !crate::security::can_send_signal(unsafe { &*task }.cred()) {
+    if !crate::security::can_send_signal(crate::process::unsafe_edges::borrow_task(task).cred()) {
         return -(errno::EPERM as i64);
     }
 
