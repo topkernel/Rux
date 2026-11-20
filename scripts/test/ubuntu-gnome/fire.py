@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """fire.py — headless ignition driver for the riscv64 GNOME Ubuntu image.
 

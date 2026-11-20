@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Wakewatch — wake-to-run latency forensics for the vsync-starvation
 //! family (compose-content's cc13 evidence: a 16 ms usleep in the loaded
 //! OH system occasionally takes 0.5–0.7 s, plus one ~41 s dead stop per

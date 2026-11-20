@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """Coverage summarizer: per-top-module table over ALL kernel source files.
 

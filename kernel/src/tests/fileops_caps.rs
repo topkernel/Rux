@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.

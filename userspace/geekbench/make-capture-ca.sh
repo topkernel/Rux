@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # make-capture-ca.sh — one-shot CA + server certificate for the Geekbench
 # result-capture path (see build-rootfs.sh and gb-capture-server.py).

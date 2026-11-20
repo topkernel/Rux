@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # build-x86.sh — static-musl fio for the qa-suites lane (x86_64 guest).
 #

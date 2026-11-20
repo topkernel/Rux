@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # run-rux.sh — boot the Rux x86_64 kernel with Geekbench as the payload
 # and capture the full run off the serial console (Geekbench's stdout is

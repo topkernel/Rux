@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Kernel key retention service — a minimal, reference-faithful model.
 //!
 //! Implements add_key(2) / request_key(2) / keyctl(2) against a small

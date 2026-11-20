@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """run.py — drive the udev/hotplug verification boot end to end.
 

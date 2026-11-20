@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! System V Message Queues
 //!
 //! Implements msgget, msgctl, msgsnd, msgrcv following the Linux kernel design.

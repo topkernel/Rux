@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! RISC-V V extension (RVV 1.0) task support.
 //!
 //! Before this module, sstatus.VS was never written: it stays Off for

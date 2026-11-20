@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """binder_probe_boot.py — boot the Rux kernel with the Spike S1 binder
 closed-loop probe as init, stream the serial log, report the verdict.

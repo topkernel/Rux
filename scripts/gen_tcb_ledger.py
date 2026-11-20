@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """TCB ledger generator for the kernel effort.
 

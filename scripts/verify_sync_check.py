@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """Verify sync checker — compare kernel/verify copies against kernel source.
 

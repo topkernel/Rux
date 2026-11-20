@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """Pack a minimal initrd containing ONLY the heapwatch probe.
 

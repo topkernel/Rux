@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """verify.py — boot the Ubuntu GUI image under QEMU and verify it end to end.
 

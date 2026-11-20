@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """TCB ledger: per-subsystem `unsafe` accounting for the Rux kernel.
 

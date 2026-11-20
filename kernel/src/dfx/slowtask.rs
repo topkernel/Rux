@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Slow-kernel-entry audit (leg-33B, `rux:slowtask (retired dfx=slowtask)`).
 //!
 //! sc329B adjudication gap: the TXN-HANG lines name the SERVER thread of

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 # mmapfix_boot.py — boot the kernel (x86_64 default, riscv64 optional)
 # with the mmapfix probe as init and report the verdict for the

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """lmbench-median.py — aggregate N standing passes into ONE result file
 consumable by make-report.py: per case, pick the MEDIAN measurement

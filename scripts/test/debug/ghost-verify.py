@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """ghost-verify.py — normal-unmount regression + write-read loop.
 

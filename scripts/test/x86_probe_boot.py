@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """x86_probe_boot.py — boot the x86_64 Rux kernel with a test probe as
 init on a tiny private ext4 image (mkfs.ext4 -d — no root needed), stream

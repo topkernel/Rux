@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """waitloss_boot.py — boot the x86_64 Rux kernel with the waitloss probe
 as init and judge the wait4/SIGCHLD wakeup-loss family (99th, §87.8).

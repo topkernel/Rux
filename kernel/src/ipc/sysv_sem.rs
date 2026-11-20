@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! System V Semaphores
 //!
 //! Implements semget, semctl, semop, semtimedop following the Linux kernel design.

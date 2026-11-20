@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! PI futex state engine (priority-inheritance futex operations).
 //!
 //! Reference semantics (futex(2)): FUTEX_LOCK_PI / FUTEX_UNLOCK_PI /

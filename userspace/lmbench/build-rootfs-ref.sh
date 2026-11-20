@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # build-rootfs-ref.sh — build the ext4 rootfs for the reference-kernel
 # column of the lmbench fair-rig comparison (run-refkvm.sh).

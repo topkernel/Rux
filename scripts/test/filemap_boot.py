@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 # filemap_boot.py — boot the kernel (riscv64 default) with the filemap
 # probe as init and report the verdict for the MAP_PRIVATE file-fault

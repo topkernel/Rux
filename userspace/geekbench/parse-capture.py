@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """parse-capture.py — extract the Geekbench result JSON from the capture
 server log and print the score table (overall + per-workload, grouped by

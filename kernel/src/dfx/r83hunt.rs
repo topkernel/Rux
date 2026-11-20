@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! R83 (R74 slotless-double-run producer hunt): live task-header audit.
 //!
 //! The R74-SLOTLESS-TP / PREEMPT-UNDERFLOW family dies with a thread_info

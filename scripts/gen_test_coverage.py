@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """Generate the test-coverage ledger (docs/test/test-coverage.md).
 

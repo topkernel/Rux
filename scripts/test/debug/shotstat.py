@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """shotstat.py — pixel statistics for an OH boot screendump (PPM P6).
 

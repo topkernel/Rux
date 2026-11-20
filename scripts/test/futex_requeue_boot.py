@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """futex_requeue_boot.py — boot the x86_64 Rux kernel with the
 FUTEX_REQUEUE chain probe (test/futex_requeue_probe.c, musl-built) as

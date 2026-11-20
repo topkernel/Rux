@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Lost-park event ring (fix-lostpark lane).
 //!
 //! The SMP lost-park wedge (lmbench lat_sem / semop ping-pong at -smp 2)

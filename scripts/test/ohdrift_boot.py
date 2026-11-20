@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """ohdrift_boot.py — boot the OH x86_64 image on the Rux kernel and watch
 the freelist drift accumulate (freelist-drift lane).

@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """pbench_boot_rv.py — riscv64 twin of pbench_boot.py: boot the Rux
 riscv64 kernel (strong or debug ELF) with the pbench probe (or the

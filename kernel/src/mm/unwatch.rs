@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! hp89 hunt: post-hoc attribution ring for every PTE-clearing event.
 //!
 //! The mallocng-corruption signature (hp88m/hp89a/hp89c: healthy victim

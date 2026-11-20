@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/bin/bash
 # Rux OS - LTP Test Suite Build Script (x86_64, native musl)
 #

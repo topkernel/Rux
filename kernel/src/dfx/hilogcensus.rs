@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! rux:hilogcensus (retired dfx=hilogcensus) — per-caller census of the OpenHarmony log fabric
 //! (hilog-flood lane).
 //!

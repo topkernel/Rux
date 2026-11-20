@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """lostwake_boot.py — boot the x86_64 Rux kernel with the lostwake probe
 as init on a tiny private ext4 image, under KVM SMP, and grade the run.

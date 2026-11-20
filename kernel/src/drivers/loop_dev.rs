@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Loop block devices (Linux drivers/block/loop): a file-backed block
 //! device. `losetup`/LTP's tst_acquire_device bind a preallocated image
 //! file to /dev/loopN with LOOP_SET_FD; block reads/writes on the loop

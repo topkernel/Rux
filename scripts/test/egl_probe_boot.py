@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """egl_probe_boot.py — boot the Rux x86_64 kernel with the OH image's own
 EGL/GLES/KMS stack as init and report the verdict (gbm_probe pattern).

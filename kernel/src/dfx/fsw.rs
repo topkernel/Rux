@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`).
 //!
 //! Leg-18 F4 diagnosis: the ext4 metadata family measures 100-300x Linux

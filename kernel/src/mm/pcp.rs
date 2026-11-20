@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 // ==================== Per-CPU pagesets (pcp) ====================
 //
 // Order-0 frame caching per CPU, mirroring the reference kernel's

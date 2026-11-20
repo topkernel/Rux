@@ -1,3 +1,6 @@
+# MIT License
+# Copyright (c) 2026 Fei Wang
+
 #!/usr/bin/env python3
 """gnome-ledger-run.py — udesk/GNOME acceptance boot with the accounting
 ledger armed (oom-accounting lane).
