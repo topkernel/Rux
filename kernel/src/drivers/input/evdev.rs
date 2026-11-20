@@ -492,15 +492,19 @@ pub fn push_event(&self, event: InputEvent) {
 // Global evdev devices
 // ============================================================================
 
-/// Keyboard evdev device
-pub static mut EVDEV_KEYBOARD: Option<EvdevDevice> = None;
+/// Keyboard evdev device (round-5: the OnceSlot owns the init-once
+/// publication the hand-rolled static mut carried).
+pub static EVDEV_KEYBOARD: crate::safety::slot::OnceSlot<EvdevDevice> =
+    crate::safety::slot::OnceSlot::new();
 
 /// Pointer evdev device
-pub static mut EVDEV_POINTER: Option<EvdevDevice> = None;
+pub static EVDEV_POINTER: crate::safety::slot::OnceSlot<EvdevDevice> =
+    crate::safety::slot::OnceSlot::new();
 
 /// Touchscreen evdev device (event2): mirrors pointer coordinates with
 /// touch protocol for OH multimodalinput.
-pub static mut EVDEV_TOUCHSCREEN: Option<EvdevDevice> = None;
+pub static EVDEV_TOUCHSCREEN: crate::safety::slot::OnceSlot<EvdevDevice> =
+    crate::safety::slot::OnceSlot::new();
 
 // Registry accessors (INV-SREF-1 shape, unsafe-slim round 3): the
 // three device slots are written ONCE by init_evdev (single-threaded
@@ -510,30 +514,15 @@ pub static mut EVDEV_TOUCHSCREEN: Option<EvdevDevice> = None;
 // edges — call sites carry no unsafe.
 
 pub fn evdev_keyboard() -> Option<&'static EvdevDevice> {
-    // SAFETY: init-once registry (see above).
-    unsafe { EVDEV_KEYBOARD.as_ref() }
+    EVDEV_KEYBOARD.get()
 }
 pub fn evdev_pointer() -> Option<&'static EvdevDevice> {
-    // SAFETY: init-once registry.
-    unsafe { EVDEV_POINTER.as_ref() }
+    EVDEV_POINTER.get()
 }
 pub fn evdev_touchscreen() -> Option<&'static EvdevDevice> {
-    // SAFETY: init-once registry.
-    unsafe { EVDEV_TOUCHSCREEN.as_ref() }
+    EVDEV_TOUCHSCREEN.get()
 }
-pub(crate) fn evdev_keyboard_mut() -> Option<&'static mut EvdevDevice> {
-    // SAFETY: init-once registry; mutable view for the init path's
-    // capability fills before the device is reachable.
-    unsafe { EVDEV_KEYBOARD.as_mut() }
-}
-pub(crate) fn evdev_pointer_mut() -> Option<&'static mut EvdevDevice> {
-    // SAFETY: as evdev_keyboard_mut.
-    unsafe { EVDEV_POINTER.as_mut() }
-}
-pub(crate) fn evdev_touchscreen_mut() -> Option<&'static mut EvdevDevice> {
-    // SAFETY: as evdev_keyboard_mut.
-    unsafe { EVDEV_TOUCHSCREEN.as_mut() }
-}
+
 
 /// Whether a file id belongs to one of the three open evdev file
 /// descriptions (the epoll_ctl probe uses this to filter).
@@ -593,15 +582,14 @@ pub fn device_of_devno(devno: DevNo) -> Option<&'static EvdevDevice> {
 
 /// Resolve the EvdevDevice a file was opened against. Returns None for
 /// non-evdev files (caller falls through to other ioctl handlers).
-// SAFETY: EVDEV_KEYBOARD / EVDEV_POINTER are initialized by init_evdev()
-// before any file operations can occur; private_data holds a valid DevNo
-// boxed by devfs_open for as long as the file lives.
-unsafe fn device_of_file(file: &File) -> Option<&'static EvdevDevice> {
-    let ptr = match *(file.private_data.get()) {
-        Some(p) => p,
-        None => return None,
-    };
-    let devno = *(ptr as *const DevNo);
+// EVDEV_* are initialized by init_evdev() before any file operations can
+// occur; private_data holds a valid DevNo boxed by devfs_open for as long
+// as the file lives (the one audited deref is below).
+fn device_of_file(file: &File) -> Option<&'static EvdevDevice> {
+    let devno = file.private_data_ptr().map(|p| {
+        // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime).
+        unsafe { *(p as *const DevNo) }
+    })?;
     if devno == DEV_EVDEV_KEYBOARD {
         evdev_keyboard()
     } else if devno == DEV_EVDEV_POINTER {
@@ -630,11 +618,11 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
         crate::drivers::timer::get_jiffies() + crate::drivers::timer::msecs_to_jiffies(ms);
 
     let current = match crate::sched::current() {
-        Some(c) => c as *mut Task,
+        Some(c) => c,
         None => return false,
     };
-    // SAFETY: current is the running task (we are it); pid() is a const read.
-    let pid = unsafe { (*current).pid() };
+    // current() is the safe handle to the running task (we are it).
+    let pid = current.pid();
 
     // The input tasklet BH (IRQ-driven delivery) takes the INPUT_* locks
     // with IRQs disabled, so every task-context taker must too — a plain
@@ -655,22 +643,13 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
 
         // Mark INTERRUPTIBLE BEFORE the final re-check (state-first lost-
         // wakeup discipline, same as sys_nanosleep).
-        // SAFETY: current is the running task's pointer.
-        unsafe {
-            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        }
+        current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         let jiffies_now = crate::drivers::timer::get_jiffies();
         if jiffies_now >= target || crate::signal::signal_pending() {
-            // SAFETY: current is the running task's pointer.
-            unsafe {
-                (*current).set_state(TaskState::new(TaskState::RUNNING));
-            }
+            current.set_state(TaskState::new(TaskState::RUNNING));
             // A racing wake may have enqueued us while still executing —
             // take ourselves back off (NEW-C2 discipline).
-            // SAFETY: current is the running task's pointer.
-            unsafe {
-                crate::sched::dequeue_task(&*current);
-            }
+            crate::sched::dequeue_task(current);
             crate::timer::del_timer(timer_id);
             return true;
         }
@@ -685,13 +664,12 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
 
 /// Resolve the EvdevDevice AND its devfs minor a file was opened
 /// against (the minor is the input:evdev_read/evdev_open `node` field).
-// SAFETY: same contract as device_of_file.
-unsafe fn node_of_file(file: &File) -> Option<(&'static EvdevDevice, u32)> {
-    let ptr = match *(file.private_data.get()) {
-        Some(p) => p,
-        None => return None,
-    };
-    let devno = *(ptr as *const DevNo);
+// Same contract as device_of_file.
+fn node_of_file(file: &File) -> Option<(&'static EvdevDevice, u32)> {
+    let devno = file.private_data_ptr().map(|p| {
+        // SAFETY: as device_of_file (Box<DevNo>, file-lifetime).
+        unsafe { *(p as *const DevNo) }
+    })?;
     if devno == DEV_EVDEV_KEYBOARD {
         evdev_keyboard().map(|d| (d, devno.minor))
     } else if devno == DEV_EVDEV_POINTER {
@@ -714,7 +692,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data contains a valid DevNo pointer set during device
     // open; the EVDEV_* statics are initialized by init_evdev() before any
     // file operations can occur.
-    let (device, node) = match unsafe { node_of_file(file) } {
+    let (device, node) = match node_of_file(file) {
         Some(d) => d,
         None => return -9, // EBADF
     };
@@ -788,13 +766,8 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
                         );
                     }
                 }
-                // Copy event to buffer
-                let src = &event as *const InputEvent as *const u8;
-                // SAFETY: src points to a valid InputEvent on the stack; buf is
-                // guaranteed to be at least event_size bytes by the check above.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), event_size);
-                }
+                // Copy event to buffer (bounds-checked byte-image write).
+                let _ = crate::safety::bytes::write_at(buf, 0, event);
                 return event_size as isize;
             }
             None => {
@@ -866,25 +839,26 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
 fn evdev_file_close(file: &File) -> i32 {
     // Release a grab held through this fd and free the DevNo boxed by
     // devfs_open.
-    // SAFETY: private_data contains a valid DevNo pointer set during open.
-    unsafe {
-        if let Some(ptr) = *file.private_data.get() {
-            let devno = *(ptr as *const DevNo);
+    {
+        if let Some(ptr) = file.private_data_ptr() {
+            // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime).
+            let devno = unsafe { *(ptr as *const DevNo) };
             // The file description is going away — drop its epoll
             // notification registration.
             if let Some(dev) = device_of_devno(devno) {
                 dev.unregister_open_file(file.file_id);
             }
             if devno == DEV_EVDEV_KEYBOARD {
-                if let Some(ref d) = EVDEV_KEYBOARD {
+                if let Some(d) = EVDEV_KEYBOARD.get() {
                     d.grabbed.store(false, Ordering::Release);
                 }
             } else if devno == DEV_EVDEV_POINTER {
-                if let Some(ref d) = EVDEV_POINTER {
+                if let Some(d) = EVDEV_POINTER.get() {
                     d.grabbed.store(false, Ordering::Release);
                 }
             }
-            drop(Box::from_raw(ptr as *mut DevNo));
+            // SAFETY: the Box<DevNo> devfs_open stored (sole ref).
+            drop(unsafe { Box::from_raw(ptr as *mut DevNo) });
         }
     }
     0
@@ -901,7 +875,7 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
     // SAFETY: private_data contains a valid DevNo pointer set during open;
     // the EVDEV_* statics are initialized by init_evdev() before any file
     // operations can occur.
-    let device = match unsafe { device_of_file(file) } {
+    let device = match device_of_file(file) {
         Some(d) => d,
         None => return POLLERR,
     };
@@ -955,7 +929,7 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bo
     // SAFETY: dispatcher identity-checked the File against EVDEV_OPS;
     // private_data holds a DevNo installed at open and the EVDEV_* statics
     // outlive every file.
-    match unsafe { device_of_file(file) } {
+    match device_of_file(file) {
         Some(device) => {
             device
                 .poll_waitq
@@ -968,7 +942,8 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bo
                 static REG_N: AtomicU64 = AtomicU64::new(0);
                 let n = REG_N.fetch_add(1, Ordering::Relaxed);
                 if input_echo_budget(n) {
-                    // SAFETY: task is the current task parking here.
+                    // SAFETY: task is the current task parking here (the
+                    // wait-queue callback passes current's raw handle).
                     let pid = unsafe { (*task).pid() };
                     let mut l = HuntLine::new();
                     l.push(b"INPW[");
@@ -996,7 +971,7 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bo
 /// Remove a registration added by evdev_poll_wait.
 pub fn evdev_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
     // SAFETY: same contract as evdev_poll_wait.
-    if let Some(device) = unsafe { device_of_file(file) } {
+    if let Some(device) = device_of_file(file) {
         let dropped = device.poll_waitq.remove_count(task);
         if crate::trace::EVENT_EVDEV_WAKE.armed() {
             use core::sync::atomic::{AtomicU64, Ordering};
@@ -1056,7 +1031,7 @@ fn evdev_file_write(file: &File, buf: &[u8]) -> isize {
     // SAFETY: private_data contains a valid DevNo pointer set during device
     // open; the EVDEV_* statics are initialized by init_evdev() before any
     // file operations can occur.
-    let device = match unsafe { device_of_file(file) } {
+    let device = match device_of_file(file) {
         Some(d) => d,
         None => return -9, // EBADF
     };
@@ -1126,7 +1101,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
         let n = IO_N.fetch_add(1, Ordering::Relaxed);
         if n < 400 && (cmd >> 30) == 2 {
             // _IOR reads: EVIOCG* family
-            let nm: alloc::vec::Vec<u8> = unsafe { device_of_file(file) }
+            let nm: alloc::vec::Vec<u8> = device_of_file(file)
                 .map(|d| {
                     d.name
                         .iter()
@@ -1147,7 +1122,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
 
     // SAFETY: the EVDEV_* statics are initialized by init_evdev() before
     // any file operations can occur; device_of_file validates the DevNo.
-    let device = match unsafe { device_of_file(file) } {
+    let device = match device_of_file(file) {
         Some(d) => d,
         None => return Some(-9), // EBADF
     };
@@ -1164,7 +1139,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
             return -14; // EFAULT
         }
         // SAFETY: arg validated with access_ok(len); data is a kernel buffer.
-        if unsafe { copy_to_user(arg as *mut u8, data.as_ptr(), len) } > 0 {
+        if crate::arch::uaccess_safe::copy_out(arg, &data[..len]) > 0 {
             return -14; // EFAULT
         }
         0
@@ -1433,60 +1408,54 @@ fn sysfs_registration(
 
 /// Initialize evdev devices and register to devfs
 pub fn init_evdev() {
-    // SAFETY: Called once during kernel init; no concurrent access is possible.
-    unsafe {
-        // Create keyboard device
-        EVDEV_KEYBOARD = Some(EvdevDevice::new(b"VirtIO Keyboard", false));
-
-        // Create pointer device
-        EVDEV_POINTER = Some(EvdevDevice::new(b"VirtIO Tablet", true));
-
-        // Pull the capability bitmaps straight from the virtio devices'
-        // config space (what a Linux guest would register), with the
-        // previously-hardcoded bitmaps as fallback when the config read
-        // yields nothing.
-        if let Some(ref mut dev) = EVDEV_KEYBOARD {
-            fill_capabilities(dev, &super::INPUT_KEYBOARD, false);
-        }
-        if let Some(ref mut dev) = EVDEV_POINTER {
-            fill_capabilities(dev, &super::INPUT_POINTER, true);
-        }
-    }
+    // Called once during kernel init (INV-SLOT-1/2: OnceSlot owns the
+    // publication). Pull the capability bitmaps straight from the virtio
+    // devices' config space (what a Linux guest would register), with the
+    // previously-hardcoded bitmaps as fallback when the config read
+    // yields nothing.
+    EVDEV_KEYBOARD.publish_with_addr(|_| {
+        let mut dev = EvdevDevice::new(b"VirtIO Keyboard", false);
+        fill_capabilities(&mut dev, &super::INPUT_KEYBOARD, false);
+        dev
+    });
+    EVDEV_POINTER.publish_with_addr(|_| {
+        let mut dev = EvdevDevice::new(b"VirtIO Tablet", true);
+        fill_capabilities(&mut dev, &super::INPUT_POINTER, true);
+        dev
+    });
 
     // Touchscreen device: same coordinates as the pointer, but with
     // touch protocol (BTN_TOUCH + ABS_MT_POSITION_X/Y). OH's
     // multimodalinput framework only recognizes touch input from
     // devices carrying these capabilities — the launcher's swipe
     // gesture needs it.
-    unsafe {
-        let ts = EvdevDevice::new(b"VirtIO Touchscreen", true);
-        EVDEV_TOUCHSCREEN = Some(ts);
-        if let Some(ref mut dev) = EVDEV_TOUCHSCREEN {
-            // KEY bitmap: BTN_TOUCH = 0x14a, BTN_LEFT = 0x110 (keep both
-            // so single-touch and multi-touch consumers both bind).
-            let mut key_bits = [0u8; 96];
-            key_bits[0x14a / 8] |= 1 << (0x14a % 8); // BTN_TOUCH
-            key_bits[0x110 / 8] |= 1 << (0x110 % 8); // BTN_LEFT
-            dev.set_ev_bits(1, &key_bits); // EV_KEY
-            // ABS bitmap: ABS_MT_POSITION_X=0x35, ABS_MT_POSITION_Y=0x36
-            let mut abs_bits = [0u8; 96];
-            abs_bits[0x35 / 8] |= 1 << (0x35 % 8); // ABS_MT_POSITION_X
-            abs_bits[0x36 / 8] |= 1 << (0x36 % 8); // ABS_MT_POSITION_Y
-            abs_bits[0x00 / 8] |= 1 << (0x00 % 8); // ABS_X
-            abs_bits[0x01 / 8] |= 1 << (0x01 % 8); // ABS_Y
-            dev.set_ev_bits(3, &abs_bits); // EV_ABS
-            // Copy axis ranges from the pointer device. The MT axes
-            // (0x35/0x36) MUST carry the same range as ABS_X/Y: consumers
-            // (OH multimodalinput) read each axis's min/max via EVIOCGABS
-            // to map events into screen space — an MT axis with no absinfo
-            // reads as min=max=0 and every MT position clamps to (0,0),
-            // killing the swipe gesture even though the events flow.
-            dev.set_absinfo(0, 0, 32767, 0, 0, 0);  // ABS_X
-            dev.set_absinfo(1, 0, 32767, 0, 0, 0);  // ABS_Y
-            dev.set_absinfo(0x35, 0, 32767, 0, 0, 0); // ABS_MT_POSITION_X
-            dev.set_absinfo(0x36, 0, 32767, 0, 0, 0); // ABS_MT_POSITION_Y
-        }
-    }
+    EVDEV_TOUCHSCREEN.publish_with_addr(|_| {
+        let mut dev = EvdevDevice::new(b"VirtIO Touchscreen", true);
+        // KEY bitmap: BTN_TOUCH = 0x14a, BTN_LEFT = 0x110 (keep both
+        // so single-touch and multi-touch consumers both bind).
+        let mut key_bits = [0u8; 96];
+        key_bits[0x14a / 8] |= 1 << (0x14a % 8); // BTN_TOUCH
+        key_bits[0x110 / 8] |= 1 << (0x110 % 8); // BTN_LEFT
+        dev.set_ev_bits(1, &key_bits); // EV_KEY
+        // ABS bitmap: ABS_MT_POSITION_X=0x35, ABS_MT_POSITION_Y=0x36
+        let mut abs_bits = [0u8; 96];
+        abs_bits[0x35 / 8] |= 1 << (0x35 % 8); // ABS_MT_POSITION_X
+        abs_bits[0x36 / 8] |= 1 << (0x36 % 8); // ABS_MT_POSITION_Y
+        abs_bits[0x00 / 8] |= 1 << (0x00 % 8); // ABS_X
+        abs_bits[0x01 / 8] |= 1 << (0x01 % 8); // ABS_Y
+        dev.set_ev_bits(3, &abs_bits); // EV_ABS
+        // Copy axis ranges from the pointer device. The MT axes
+        // (0x35/0x36) MUST carry the same range as ABS_X/Y: consumers
+        // (OH multimodalinput) read each axis's min/max via EVIOCGABS
+        // to map events into screen space — an MT axis with no absinfo
+        // reads as min=max=0 and every MT position clamps to (0,0),
+        // killing the swipe gesture even though the events flow.
+        dev.set_absinfo(0, 0, 32767, 0, 0, 0);  // ABS_X
+        dev.set_absinfo(1, 0, 32767, 0, 0, 0);  // ABS_Y
+        dev.set_absinfo(0x35, 0, 32767, 0, 0, 0); // ABS_MT_POSITION_X
+        dev.set_absinfo(0x36, 0, 32767, 0, 0, 0); // ABS_MT_POSITION_Y
+        dev
+    });
 
     // Register device operations
     devfs::registry::register_char_device(DEV_EVDEV_KEYBOARD, &EVDEV_OPS)
@@ -1512,18 +1481,12 @@ pub fn init_evdev() {
     // the inputN uevent carries PRODUCT/NAME/EV/KEY/... which OH's libudev
     // shim and libinput need to tag the device ID_INPUT_KEYBOARD etc.;
     // DEVNAME is "input/event0" — the /dev-relative node path.
-    // SAFETY: EVDEV_KEYBOARD/EVDEV_POINTER were just initialized above and
-    // are only read here.
-    let kbd_reg = unsafe {
-        EVDEV_KEYBOARD
-            .as_ref()
-            .map(|d| sysfs_registration("input0", "event0", DEV_EVDEV_KEYBOARD, d))
-    };
-    let ptr_reg = unsafe {
-        EVDEV_POINTER
-            .as_ref()
-            .map(|d| sysfs_registration("input1", "event1", DEV_EVDEV_POINTER, d))
-    };
+    let kbd_reg = EVDEV_KEYBOARD
+        .get()
+        .map(|d| sysfs_registration("input0", "event0", DEV_EVDEV_KEYBOARD, d));
+    let ptr_reg = EVDEV_POINTER
+        .get()
+        .map(|d| sysfs_registration("input1", "event1", DEV_EVDEV_POINTER, d));
     if let Some(reg) = kbd_reg {
         crate::fs::sysfs::register_input_event(&reg);
     }
@@ -1534,11 +1497,9 @@ pub fn init_evdev() {
     // enumerates devices through /sys/class/input (ID_INPUT_TOUCHSCREEN +
     // the uevent), so a touchscreen with a /dev node but no sysfs entry
     // is invisible to multimodalinput — the swipe gesture never starts.
-    let ts_reg = unsafe {
-        EVDEV_TOUCHSCREEN
-            .as_ref()
-            .map(|d| sysfs_registration("input2", "event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, d))
-    };
+    let ts_reg = EVDEV_TOUCHSCREEN
+        .get()
+        .map(|d| sysfs_registration("input2", "event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, d));
     if let Some(reg) = ts_reg {
         crate::fs::sysfs::register_input_event(&reg);
     }
@@ -1872,7 +1833,7 @@ fn itt_i64(v: i64) {
 fn current_pid_tgid() -> (u64, u64) {
     match crate::sched::current() {
         // SAFETY: cur is the running task; pid/tgid are const reads.
-        Some(cur) => unsafe { ((*cur).pid() as u64, (*cur).tgid() as u64) },
+        Some(cur) => (cur.pid() as u64, cur.tgid() as u64),
         None => (0, 0),
     }
 }

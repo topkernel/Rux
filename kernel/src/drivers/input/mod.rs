@@ -167,22 +167,20 @@ fn virtio_input_irq_handler(_irq: u32, dev_id: usize) -> crate::interrupt::IrqRe
     if isr_bar == 0 {
         return crate::interrupt::IrqReturn::None;
     }
-    // SAFETY: isr_bar was stored from a probed device's ISR capability
-    // before this handler was registered; the volatile read is the
-    // device-side EOI.
-    let isr = unsafe { core::ptr::read_volatile(isr_bar as *const u32) };
+    // INV-MMIO-1: isr_bar was stored from a probed device's ISR
+    // capability before this handler was registered; the volatile read
+    // is the device-side EOI.
+    let isr = crate::safety::mmio::MmioRegion::new(isr_bar as usize, 4).read_u32(0);
     if isr == 0 {
         // Not ours — the shared line was raised by another function.
         return crate::interrupt::IrqReturn::None;
     }
-    // SAFETY: INPUT_BH_TASKLET is initialized by register_input_irq()
-    // before any IRQ registration that can reach this point, and a
-    // static tasklet struct lives forever.
-    unsafe {
-        crate::interrupt::tasklet::tasklet_schedule(core::ptr::addr_of_mut!(
-            INPUT_BH_TASKLET
-        ));
-    }
+    // INPUT_BH_TASKLET is initialized by register_input_irq() before
+    // any IRQ registration that can reach this point; a static tasklet
+    // struct lives forever (tasklet_schedule's documented contract).
+    crate::interrupt::tasklet::tasklet_schedule(core::ptr::addr_of_mut!(
+        INPUT_BH_TASKLET
+    ));
     crate::interrupt::IrqReturn::Handled
 }
 
@@ -191,13 +189,11 @@ fn virtio_input_irq_handler(_irq: u32, dev_id: usize) -> crate::interrupt::IrqRe
 /// only calls us when it is nonzero).
 #[cfg(feature = "x86_64")]
 fn input_intx_service() {
-    // SAFETY: INPUT_BH_TASKLET is initialized by register_input_irq()
-    // before the INTx registration that can reach this point.
-    unsafe {
-        crate::interrupt::tasklet::tasklet_schedule(core::ptr::addr_of_mut!(
-            INPUT_BH_TASKLET
-        ));
-    }
+    // INPUT_BH_TASKLET is initialized by register_input_irq() before
+    // the INTx registration that can reach this point.
+    crate::interrupt::tasklet::tasklet_schedule(core::ptr::addr_of_mut!(
+        INPUT_BH_TASKLET
+    ));
 }
 
 /// Arm the input tasklet and hook the device's interrupt line. Called
@@ -241,12 +237,9 @@ pub fn init_virtio_input() -> (usize, usize) {
     let mut keyboard_count = 0;
     let mut pointer_count = 0;
 
-    // Arm the bottom-half tasklet before any device IRQ is registered.
-    // SAFETY: single-threaded kernel-init context; the tasklet is not
-    // scheduled anywhere yet.
-    unsafe {
-        INPUT_BH_TASKLET.init(input_bh_run);
-    }
+    // Arm the bottom-half tasklet before any device IRQ is registered
+    // (single-threaded kernel-init context).
+    unsafe { INPUT_BH_TASKLET.init(input_bh_run) };
 
     // Probe VirtIO Input devices via the shared ECAM walker (0x8000 stride
     // per slot + all 8 functions). The old inline walk here enumerated

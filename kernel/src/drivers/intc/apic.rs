@@ -922,12 +922,13 @@ struct SdtHeader {
     _creator_rev: u32,
 }
 
-/// Validate the checksum over the first `len` bytes at `vaddr`.
+/// Validate the checksum over the first `len` bytes at `vaddr`
+/// (INV-MMIO-1: the linear-map table windows this module established).
 fn checksum_ok(vaddr: usize, len: usize) -> bool {
+    let region = crate::safety::mmio::MmioRegion::new(vaddr, len);
     let mut sum: u8 = 0;
     for i in 0..len {
-        // SAFETY: caller passes a mapped, readable table region.
-        sum = sum.wrapping_add(unsafe { core::ptr::read_volatile((vaddr + i) as *const u8) });
+        sum = sum.wrapping_add(region.read_u8(i));
     }
     sum == 0
 }
@@ -937,8 +938,7 @@ fn read_phys_u32(phys: usize) -> u32 {
     let va = crate::arch::mm::memory_layout::phys_to_virt(
         crate::arch::mm::memory_layout::PhysAddr::new(phys as u64),
     );
-    // SAFETY: linear-mapped RAM window.
-    unsafe { core::ptr::read_volatile(va.as_usize() as *const u32) }
+    crate::safety::mmio::MmioRegion::new(va.as_usize(), 4).read_u32(0)
 }
 
 /// Volatile 64-bit read from a linear-mapped physical address.
@@ -946,8 +946,7 @@ fn read_phys_u64(phys: usize) -> u64 {
     let va = crate::arch::mm::memory_layout::phys_to_virt(
         crate::arch::mm::memory_layout::PhysAddr::new(phys as u64),
     );
-    // SAFETY: linear-mapped RAM window.
-    unsafe { core::ptr::read_volatile(va.as_usize() as *const u64) }
+    crate::safety::mmio::MmioRegion::new(va.as_usize(), 8).read_u64(0)
 }
 
 /// Map the ACPI table scan windows into the linear map.  The firmware
@@ -1025,15 +1024,19 @@ fn find_rsdp() -> Option<usize> {
                 crate::arch::mm::memory_layout::PhysAddr::new(a as u64),
             )
             .as_usize();
-            // SAFETY: mapped candidate region.
-            let sig = unsafe { core::ptr::read_volatile(va as *const [u8; 8]) };
+            // Mapped candidate region (INV-MMIO-1).
+            let region = crate::safety::mmio::MmioRegion::new(va, 36);
+            let mut sig = [0u8; 8];
+            for (i, b) in sig.iter_mut().enumerate() {
+                *b = region.read_u8(i);
+            }
             if &sig == b"RSD PTR " {
                 let len = {
                     // Revision 0 (ACPI 1.0) checksums only the first 20
                     // bytes; later revisions use the Length field.
-                    let rev = unsafe { core::ptr::read_volatile((va + 15) as *const u8) };
+                    let rev = region.read_u8(15);
                     if rev >= 2 {
-                        let l = unsafe { core::ptr::read_volatile((va + 20) as *const u32) };
+                        let l = region.read_u32(20);
                         (l as usize).min(64)
                     } else {
                         20
@@ -1056,12 +1059,13 @@ fn find_table(rsdp_phys: usize, want: &[u8; 4]) -> Option<usize> {
         crate::arch::mm::memory_layout::PhysAddr::new(rsdp_phys as u64),
     )
     .as_usize();
-    // SAFETY: validated RSDP.
-    let rsdp = unsafe { &*(rsdp_va as *const Rsdp) };
+    // Validated RSDP (INV-MMIO-1 window over the checked structure).
+    let rsdp_region = crate::safety::mmio::MmioRegion::new(rsdp_va, core::mem::size_of::<Rsdp>());
+    let rsdp_rev = rsdp_region.read_u8(15);
 
-    let (entries_phys, entry_size, count): (usize, usize, usize) = if rsdp.revision >= 2 {
-        // SAFETY: packed field read.
-        let xsdt = unsafe { core::ptr::read_volatile(&raw const rsdp.xsdt_addr) } as usize;
+    let (entries_phys, entry_size, count): (usize, usize, usize) = if rsdp_rev >= 2 {
+        // Packed field read through the region.
+        let xsdt = rsdp_region.read_u64(24) as usize;
         if xsdt == 0 {
             return None;
         }
@@ -1077,7 +1081,7 @@ fn find_table(rsdp_phys: usize, want: &[u8; 4]) -> Option<usize> {
         (xsdt + core::mem::size_of::<SdtHeader>(), 8, (hdr_len - 36) / 8)
     } else {
         // SAFETY: packed field read.
-        let rsdt = unsafe { core::ptr::read_volatile(&raw const rsdp.rsdt_addr) } as usize;
+        let rsdt = rsdp_region.read_u32(16) as usize;
         if rsdt == 0 {
             return None;
         }
@@ -1109,8 +1113,12 @@ fn find_table(rsdp_phys: usize, want: &[u8; 4]) -> Option<usize> {
             crate::arch::mm::memory_layout::PhysAddr::new(tbl as u64),
         )
         .as_usize();
-        // SAFETY: header-sized mapped read.
-        let sig = unsafe { core::ptr::read_volatile(tbl_va as *const [u8; 4]) };
+        // Header-sized mapped read (INV-MMIO-1).
+        let region = crate::safety::mmio::MmioRegion::new(tbl_va, 4);
+        let mut sig = [0u8; 4];
+        for (i, b) in sig.iter_mut().enumerate() {
+            *b = region.read_u8(i);
+        }
         if &sig == want {
             let len = read_table_u32(tbl + 4) as usize;
             ensure_phys_mapped(tbl, len.max(64));
@@ -1157,9 +1165,13 @@ fn parse_madt(madt_phys: usize) -> usize {
     if !checksum_ok(va, hdr_len) {
         return 0;
     }
-    // SAFETY: mapped MADT.
-    let hdr = unsafe { &*(va as *const SdtHeader) };
-    if &hdr.signature != b"APIC" {
+    // Mapped MADT (INV-MMIO-1 window over the checksummed table).
+    let madt = crate::safety::mmio::MmioRegion::new(va, hdr_len);
+    let mut apic_sig = [0u8; 4];
+    for (i, b) in apic_sig.iter_mut().enumerate() {
+        *b = madt.read_u8(i);
+    }
+    if &apic_sig != b"APIC" {
         return 0;
     }
 
@@ -1171,13 +1183,8 @@ fn parse_madt(madt_phys: usize) -> usize {
     let mut off = body;
     let end = va + hdr_len;
     while off + 2 <= end && n < crate::config::MAX_CPUS {
-        // SAFETY: entry header read inside the validated table.
-        let (etype, elen) = unsafe {
-            (
-                core::ptr::read_volatile(off as *const u8),
-                core::ptr::read_volatile((off + 1) as *const u8),
-            )
-        };
+        // Entry header read inside the validated table.
+        let (etype, elen) = (madt.read_u8(off - va), madt.read_u8(off + 1 - va));
         if elen < 2 || off + elen as usize > end {
             break;
         }
@@ -1185,13 +1192,10 @@ fn parse_madt(madt_phys: usize) -> usize {
             0 => {
                 // Processor Local APIC: [u8 acpi_id][u8 apic_id][u32 flags]
                 if elen >= 8 {
-                    // SAFETY: fixed offsets inside the entry.
-                    let (apic_id, flags) = unsafe {
-                        (
-                            core::ptr::read_volatile((off + 3) as *const u8) as u32,
-                            core::ptr::read_volatile((off + 4) as *const u32),
-                        )
-                    };
+                    let (apic_id, flags) = (
+                        madt.read_u8(off + 3 - va) as u32,
+                        madt.read_u32(off + 4 - va),
+                    );
                     // bit 0 = enabled (ACPI < 5.1); bit 1 = online-capable.
                     if flags & 0x3 != 0 {
                         ids[n] = apic_id;
@@ -1202,13 +1206,10 @@ fn parse_madt(madt_phys: usize) -> usize {
             9 => {
                 // Local x2APIC: [u16 rsvd][u32 uid][u32 flags][u32 acpi_id]
                 if elen >= 16 {
-                    // SAFETY: fixed offsets inside the entry.
-                    let (uid, flags) = unsafe {
-                        (
-                            core::ptr::read_volatile((off + 4) as *const u32),
-                            core::ptr::read_volatile((off + 8) as *const u32),
-                        )
-                    };
+                    let (uid, flags) = (
+                        madt.read_u32(off + 4 - va),
+                        madt.read_u32(off + 8 - va),
+                    );
                     if flags & 0x3 != 0 {
                         ids[n] = uid;
                         n += 1;

@@ -253,7 +253,6 @@ fn r32(base: usize, off: usize) -> u32 {
     // this module computes (see init); single u32 inside that mapping.
     crate::safety::mmio::MmioRegion::new(base + off, 4).read_u32(0)
 }
-}
 
 /// 32-bit MMIO write at `base + off`.
 ///
@@ -261,7 +260,6 @@ fn r32(base: usize, off: usize) -> u32 {
 #[inline]
 fn w32(base: usize, off: usize, v: u32) {
     crate::safety::mmio::MmioRegion::new(base + off, 4).write_u32(0, v)
-}
 }
 
 /// Read the 64-bit main counter (two 32-bit halves).  The HPET-spec

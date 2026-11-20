@@ -732,32 +732,38 @@ static VIRTIO_NET_OPS: NetDeviceOps = NetDeviceOps {
 };
 
 /// Global VirtIO network device
-static mut VIRTIO_NET: Option<VirtIONetDevice> = None;
-static mut VIRTIO_NET_DEVICE: Option<NetDevice> = None;
+/// Exclusivity witness for the eth0 slots (INV-SLOT-3): publication and
+/// the register-time fill run in single-threaded boot; post-init
+/// mutation of NetDevice (stats, xmit bookkeeping) is serialized by the
+/// NetRx softirq / syscall discipline the poll and ioctl paths already
+/// document — the same serialization the raw static mut relied on.
+struct Eth0Phase;
+impl crate::safety::slot::ExclusivityProof for Eth0Phase {}
+static NO_LOCK_NEEDED: Eth0Phase = Eth0Phase;
+
+static VIRTIO_NET: crate::safety::slot::OnceSlot<VirtIONetDevice> =
+    crate::safety::slot::OnceSlot::new();
+static VIRTIO_NET_DEVICE: crate::safety::slot::OnceSlot<NetDevice> =
+    crate::safety::slot::OnceSlot::new();
 
 /// Initialize VirtIO network device
 ///
 /// # Parameters
 /// - `base_addr`: MMIO base address (QEMU virt platform typically 0x10001000)
 pub fn init(base_addr: u64) -> Result<(), &'static str> {
-    // SAFETY: Called once during kernel init; VIRTIO_NET and VIRTIO_NET_DEVICE
-    // are not accessed concurrently at this point.
-    unsafe {
-        let mut device = VirtIONetDevice::new(base_addr);
-
-        device.init()?;
-
-        publish_eth0(device);
-
-        Ok(())
-    }
+    // Called once during kernel init (INV-SLOT-1/2).
+    let mut device = VirtIONetDevice::new(base_addr);
+    device.init()?;
+    publish_eth0(device);
+    Ok(())
 }
 
 /// Publish a fully initialized VirtIONetDevice as eth0 (shared tail of the
 /// MMIO and PCI transport init paths).
 ///
-/// SAFETY: Called once during kernel init from a single thread.
-unsafe fn publish_eth0(device: VirtIONetDevice) {
+/// Called once during kernel init from a single thread (the OnceSlots
+/// own the publication protocol).
+fn publish_eth0(device: VirtIONetDevice) {
     // Get MAC address
     let mac = device.get_mac();
 
@@ -783,32 +789,28 @@ unsafe fn publish_eth0(device: VirtIONetDevice) {
     // Set MAC address
     net_device.set_address(&mac, 6);
 
-    // Store device
-    VIRTIO_NET = Some(device);
-    VIRTIO_NET_DEVICE = Some(net_device);
-
-    // Register network device
-    if let Some(ref mut dev) = VIRTIO_NET_DEVICE {
+    // Store device (INV-SLOT-1/2), then register; the pre-publication
+    // mutable fill below runs before any reader can exist.
+    VIRTIO_NET.publish(device);
+    VIRTIO_NET_DEVICE.publish_with_addr(|_| net_device);
+    if let Some(dev) = VIRTIO_NET_DEVICE.get_mut_locked(&NO_LOCK_NEEDED) {
         crate::drivers::net::register_netdevice(dev);
     }
 }
 
 /// Get VirtIO network device
 pub fn get_device() -> Option<&'static VirtIONetDevice> {
-    // SAFETY: VIRTIO_NET is initialized before any caller accesses it.
-    unsafe { VIRTIO_NET.as_ref() }
+    VIRTIO_NET.get()
 }
 
 /// Get VirtIO network device's NetDevice
 pub fn get_net_device() -> Option<&'static mut NetDevice> {
-    // SAFETY: VIRTIO_NET_DEVICE is initialized before any caller accesses it.
-    unsafe { VIRTIO_NET_DEVICE.as_mut() }
+    VIRTIO_NET_DEVICE.get_mut_locked(&NO_LOCK_NEEDED)
 }
 
 /// Get VirtIO network device's base address
 fn get_device_base_addr() -> Option<u64> {
-    // SAFETY: VIRTIO_NET is initialized before any IRQ handler is registered.
-    unsafe { VIRTIO_NET.as_ref().map(|dev| dev.base_addr) }
+    VIRTIO_NET.get().map(|dev| dev.base_addr)
 }
 
 /// VirtIO-Net interrupt handler (top half)
@@ -1049,9 +1051,8 @@ pub fn init_pci(pci_dev: &mut VirtIOPCI) -> Result<(), &'static str> {
         queue_size
     );
 
-    // SAFETY: called once during single-threaded kernel init; the device
-    // holds no concurrently accessed state yet.
-    unsafe {
+    // Called once during single-threaded kernel init (INV-SLOT-1/2).
+    {
         let mut device = VirtIONetDevice::new(0);
         device.mac = mac;
         device.mtu = mtu;

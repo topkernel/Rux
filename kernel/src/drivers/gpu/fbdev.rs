@@ -42,25 +42,19 @@ extern "C" fn kfbflush_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         // --- Periodic sleep with a real waker (khungtaskd discipline). ---
         let current = match crate::sched::current() {
-            Some(t) => t as *mut crate::process::task::Task,
+            Some(t) => t,
             None => break,
         };
-        // SAFETY: current is this kthread's own task pointer.
-        let my_pid = unsafe { (*current).pid() };
+        // current() is this kthread's own safe handle.
+        let my_pid = current.pid();
         let target = crate::drivers::timer::get_jiffies() + interval_jiffies;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
 
         if timer_id != 0 {
-            // SAFETY: current is the running task's pointer.
-            unsafe {
-                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-            }
+            current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
             if crate::drivers::timer::get_jiffies() >= target {
-                // SAFETY: current is the running task's pointer.
-                unsafe {
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
-                    crate::sched::dequeue_task(&*current);
-                }
+                current.set_state(TaskState::new(TaskState::RUNNING));
+                crate::sched::dequeue_task(current);
                 crate::timer::del_timer(timer_id);
             } else {
                 crate::arch::cpu::restore_irq(true);
@@ -438,14 +432,8 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             if !crate::arch::uaccess::access_ok(arg, core::mem::size_of::<FbFixScreeninfo>()) {
                 return -14; // EFAULT
             }
-            // SAFETY: access_ok validated the user pointer; fix is a properly initialized value.
-            unsafe {
-                let uncopied = crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    &fix as *const FbFixScreeninfo as *const u8,
-                    core::mem::size_of::<FbFixScreeninfo>(),
-                );
-                if uncopied != 0 { return -14; }
+            if crate::arch::uaccess_safe::copy_out_t(arg, &fix) != 0 {
+                return -14;
             }
             0
         }
@@ -454,14 +442,8 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             if !crate::arch::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
                 return -14; // EFAULT
             }
-            // SAFETY: access_ok validated the user pointer; var is a properly initialized value.
-            unsafe {
-                let uncopied = crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    &var as *const FbVarScreeninfo as *const u8,
-                    core::mem::size_of::<FbVarScreeninfo>(),
-                );
-                if uncopied != 0 { return -14; }
+            if crate::arch::uaccess_safe::copy_out_t(arg, &var) != 0 {
+                return -14;
             }
             0
         }
