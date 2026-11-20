@@ -248,8 +248,8 @@ pub fn unix_send_pre(gathered: &[u8]) {
         return;
     }
     let (spid, scomm): (u32, [u8; COMM]) = match crate::sched::current() {
-        // SAFETY: read-only comm/pid access on the current task.
-        Some(t) => unsafe { ((*t).pid() as u32, *(*t).comm()) },
+        // sched::current() returns a typed &mut Task reference.
+        Some(t) => (t.pid() as u32, *t.comm()),
         None => return,
     };
     let hdr = parse_hilogmsg(gathered);
@@ -351,8 +351,8 @@ pub fn kmsg_write(buf: &[u8]) {
         return;
     }
     let (spid, scomm): (u32, [u8; COMM]) = match crate::sched::current() {
-        // SAFETY: read-only comm/pid access on the current task.
-        Some(t) => unsafe { ((*t).pid() as u32, *(*t).comm()) },
+        // sched::current() returns a typed &mut Task reference.
+        Some(t) => (t.pid() as u32, *t.comm()),
         None => return,
     };
     let slot = &KMSG[(spid as usize) & (KMSG_SLOTS - 1)];
