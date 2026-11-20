@@ -327,9 +327,10 @@ fn dl_ns_to_jiffies(delta_ns: u64) -> u64 {
 /// The single BTreeMap insert here is the same order of allocation the
 /// class-queue inserts already perform under this lock.
 fn arm_dl_replenish_timer(task: *mut Task) {
-    // SAFETY: callers pass a validated, poison-checked Task pointer.
-    unsafe {
-        let dl = (*task).dl_entity();
+    // INV-SCE-2: callers pass a validated, poison-checked Task pointer.
+    {
+        let task = crate::sched::edges::task_shared(task);
+        let dl = task.dl_entity();
         // Already armed and still pending (timer ids are one-shot)?
         let cur = dl.replenish_timer.load(core::sync::atomic::Ordering::Acquire);
         if cur != 0 && crate::timer::timer_pending(cur) {
@@ -339,7 +340,7 @@ fn arm_dl_replenish_timer(task: *mut Task) {
         let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
         let delta_ns = deadline.saturating_sub(now);
         let expires = crate::drivers::timer::get_jiffies() + dl_ns_to_jiffies(delta_ns);
-        let id = crate::timer::add_timer_wakeup(expires, (*task).pid());
+        let id = crate::timer::add_timer_wakeup(expires, task.pid());
         if id != 0 {
             dl.replenish_timer.store(id, core::sync::atomic::Ordering::Release);
         }
@@ -2243,24 +2244,19 @@ pub fn sched_can_stop_tick() -> bool {
 
 #[inline]
 pub fn set_need_resched() {
-    // SAFETY: cpu_id is bounds-checked against MAX_CPUS; only the current CPU
-    // writes its own NEED_RESCHED entry (AtomicBool).
-    unsafe {
-        let cpu_id = crate::arch::cpu_id() as u64 as usize;
-        if cpu_id < MAX_CPUS {
-            NEED_RESCHED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
-        }
+    // The static is a plain Sync array of AtomicBool (unsafe-slim wave 5):
+    // only the current CPU writes its own entry.
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    if cpu_id < MAX_CPUS {
+        NEED_RESCHED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
     }
 }
 
 #[inline]
 fn clear_need_resched() {
-    // SAFETY: cpu_id is bounds-checked; only the current CPU clears its own flag.
-    unsafe {
-        let cpu_id = crate::arch::cpu_id() as u64 as usize;
-        if cpu_id < MAX_CPUS {
-            NEED_RESCHED[cpu_id].store(false, core::sync::atomic::Ordering::Release);
-        }
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    if cpu_id < MAX_CPUS {
+        NEED_RESCHED[cpu_id].store(false, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -2405,12 +2401,12 @@ pub fn preempt_check_wake(task: *mut Task) {
     // SAFETY: task is validated non-null by the caller (Task::wake_up);
     // the check fns only read per-CPU current slots and task fields.
     unsafe {
-        let allowed = (*task).cpus_allowed();
+        let allowed = crate::sched::edges::task_shared(task).cpus_allowed();
         // R3 (rt-r3): the wake ladder steered ti_cpu to select_task_rq's
         // placement BEFORE the enqueue, so ti_cpu names the rq the wakee
         // was enqueued on — the reference's check_preempt_curr target.
-        let prefer = (*task).ti_cpu();
-        match (*task).policy() {
+        let prefer = crate::sched::edges::task_shared(task).ti_cpu();
+        match crate::sched::edges::task_shared(task).policy() {
             SchedPolicy::Fifo | SchedPolicy::Rr => check_rt_preempt(task, allowed, prefer),
             SchedPolicy::Deadline => check_dl_preempt(task, allowed, prefer),
             _ => {
@@ -2433,7 +2429,7 @@ pub fn preempt_check_wake(task: *mut Task) {
                 // exists for). exec_start holds the last PICK clock; at
                 // wake, sched_clock − exec_start ≈ last run + sleep, and
                 // the last run is µs-to-ms against a 6 ms threshold.
-                let se = (*task).sched_entity();
+                let se = crate::sched::edges::task_shared(task).sched_entity();
                 let exec_start = se.exec_start.load(core::sync::atomic::Ordering::Acquire);
                 let waited = crate::sched::fair::sched_clock().saturating_sub(exec_start);
                 // RT-plan R3 (docs/development/rt-kernel-plan.md): the D-14
@@ -3132,12 +3128,12 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     {
         // SAFETY: pre-poison header reads; the caller owns the final
         // reference.
-        unsafe {
-            let oncpu = (*task_ptr).on_cpu();
-            let claim = (*task_ptr)
+        {
+            let tp = crate::sched::edges::task_shared(task_ptr);
+            let oncpu = tp.on_cpu(); let claim = tp
                 .running_on_cpu
                 .load(core::sync::atomic::Ordering::Acquire);
-            if (oncpu || claim != -1) && (*task_ptr).pid() != 0 {
+            if (oncpu || claim != -1) && tp.pid() != 0 {
                 static FREEC_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if FREEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
@@ -3163,7 +3159,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                     for &b in M {
                         putchar(b);
                     }
-                    pdec3((*task_ptr).pid() as u64);
+                    pdec3(tp.pid() as u64);
                     const M2: &[u8] = b" oncpu=";
                     for &b in M2 {
                         putchar(b);
@@ -3440,27 +3436,28 @@ pub fn preempt_check_wake_sync(task: *mut Task) {
     if task.is_null() {
         return;
     }
-    // SAFETY: task is validated non-null by the caller (Task::wake_up);
-    // reads of this CPU's current slot and both tasks' entities.
-    unsafe {
-        let allowed = (*task).cpus_allowed();
+    // Task is validated non-null by the caller (Task::wake_up); reads
+    // of this CPU's current slot and both tasks' entities (INV-SCE-2).
+    {
+        let task = crate::sched::edges::task_shared(task);
+        let allowed = task.cpus_allowed();
         let this_cpu = crate::arch::cpu_id() as usize;
         if this_cpu >= MAX_CPUS || (allowed & (1u32 << this_cpu)) == 0 {
             // Wakee may not run here — fall back to the plain policy
             // (better a correct wake than a strict stack).
-            preempt_check_wake(task);
+            preempt_check_wake(core::ptr::from_ref(task) as *mut Task);
             return;
         }
-        match (*task).policy() {
+        match task.policy() {
             SchedPolicy::Fifo | SchedPolicy::Rr => {
                 let running = cpu_state(this_cpu).current;
                 if !running.is_null() && running != cpu_state(this_cpu).idle {
-                    let r_policy = (*running).policy();
+                    let r_policy = crate::sched::edges::task_shared(running).policy();
                     if r_policy == SchedPolicy::Normal
                         || r_policy == SchedPolicy::Batch
                         || r_policy == SchedPolicy::Idle
                         || ((r_policy == SchedPolicy::Fifo || r_policy == SchedPolicy::Rr)
-                            && (*task).rt_priority() > (*running).rt_priority())
+                            && task.rt_priority() > crate::sched::edges::task_shared(running).rt_priority())
                     {
                         resched_cpu(this_cpu);
                     }
@@ -3469,12 +3466,12 @@ pub fn preempt_check_wake_sync(task: *mut Task) {
             SchedPolicy::Deadline => {
                 let running = cpu_state(this_cpu).current;
                 if !running.is_null() && running != cpu_state(this_cpu).idle {
-                    let r_policy = (*running).policy();
+                    let r_policy = crate::sched::edges::task_shared(running).policy();
                     let task_dl =
-                        (*task).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
+                        task.dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
                     if r_policy != SchedPolicy::Deadline
                         || task_dl
-                            < (*running)
+                            < crate::sched::edges::task_shared(running)
                                 .dl_entity()
                                 .deadline
                                 .load(core::sync::atomic::Ordering::Acquire)
@@ -3488,7 +3485,7 @@ pub fn preempt_check_wake_sync(task: *mut Task) {
                 if running.is_null() || running == cpu_state(this_cpu).idle {
                     return;
                 }
-                let r_policy = (*running).policy();
+                let r_policy = crate::sched::edges::task_shared(running).policy();
                 if r_policy != SchedPolicy::Normal
                     && r_policy != SchedPolicy::Batch
                     && r_policy != SchedPolicy::Idle
@@ -3496,13 +3493,13 @@ pub fn preempt_check_wake_sync(task: *mut Task) {
                     // RT/DL incumbent: CFS wakee does not preempt.
                     return;
                 }
-                if (*task).policy() == SchedPolicy::Idle {
+                if crate::sched::edges::task_shared(task).policy() == SchedPolicy::Idle {
                     return;
                 }
                 // Same comparison as check_cfs_preempt (vruntime +
                 // SCHED_MIN_GRANULARITY_NS), incumbent = the waker.
-                let se_vruntime = (*task).sched_entity().get_vruntime();
-                let curr_vruntime = (*running).sched_entity().get_vruntime();
+                let se_vruntime = crate::sched::edges::task_shared(task).sched_entity().get_vruntime();
+                let curr_vruntime = crate::sched::edges::task_shared(running).sched_entity().get_vruntime();
                 if se_vruntime < curr_vruntime {
                     let delta = curr_vruntime - se_vruntime;
                     if delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS {
@@ -6056,16 +6053,16 @@ pub fn steer_task_cpu(task: *mut Task, target: i32) {
     // GRQ lock excludes concurrent picks, so on_cpu==false here means no
     // CPU owns the task in the mark_picked_on_cpu → __switch_to window.
     unsafe {
-        if !(*task).on_cpu() {
+        if !crate::sched::edges::task_shared(task).on_cpu() {
             // The sched:sched_migrate_task tracepoint — the reference
             // records it in set_task_cpu, just before the stamp moves.
             // Marshals only behind armed().
             if crate::trace::EVENT_SCHED_MIGRATE_TASK.armed() {
                 crate::trace::trace_sched_migrate_task(
-                    &*(*task).comm(),
-                    (*task).pid() as u32,
-                    (*task).prio(),
-                    (*task).ti_cpu(),
+                    &*crate::sched::edges::task_shared(task).comm(),
+                    crate::sched::edges::task_shared(task).pid() as u32,
+                    crate::sched::edges::task_shared(task).prio(),
+                    crate::sched::edges::task_shared(task).ti_cpu(),
                     target,
                 );
             }
@@ -6424,19 +6421,19 @@ pub fn w2_refusal_census(task: *mut Task) -> W2RefusalCensus {
     }
     let grq_guard = grq().lock_irqsave();
     unsafe {
-        out.linked = match (*task).policy() {
+        out.linked = match crate::sched::edges::task_shared(task).policy() {
             SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task),
             SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task),
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
                 grq_guard.cfs_rq.is_linked(task)
             }
         };
-        let se = (*task).sched_entity();
+        let se = crate::sched::edges::task_shared(task).sched_entity();
         out.on_rq = se.on_rq.load(core::sync::atomic::Ordering::Acquire);
         out.exec_ns = se
             .sum_exec_runtime
             .load(core::sync::atomic::Ordering::Acquire);
-        out.quantum_ms = (*task).get_time_slice();
+        out.quantum_ms = crate::sched::edges::task_shared(task).get_time_slice();
         let idle_mask = grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire);
         for c in 0..MAX_CPUS {
             if cpu_state(c).current == task {
@@ -6483,7 +6480,7 @@ pub fn wake_up_enqueue_opt(
     // pid-hash lookup); the GRQ lock is held across the state transition so
     // the re-check and the enqueue are one atomic step.
     unsafe {
-        let st = (*task).state();
+        let st = crate::sched::edges::task_shared(task).state();
         // PID-0 tasks (per-CPU idles, the boot init's idle) are RUNNING by
         // design and are owned by their own cpu's idle loop — no wake path
         // ever legitimately targets one. The idle task of an OFFLINE cpu
@@ -6492,7 +6489,7 @@ pub fn wake_up_enqueue_opt(
         // onto the CFS timeline (unit-test capture:
         // "R46-RUNNING-PHANTOM healed pid=0x0 ... cpu=3" on a 2-cpu boot)
         // only for the pick-side PID-0 gates to drop it again. Refuse.
-        if (*task).pid() == 0 {
+        if crate::sched::edges::task_shared(task).pid() == 0 {
             return false;
         }
         if !(st.is_sleeping() || st.contains(TaskState::STOPPED)) {
@@ -6544,7 +6541,7 @@ pub fn wake_up_enqueue_opt(
             // cleared BEFORE the re-link below, or the freshly linked task
             // remains unpickable (the pick skip treats a queued on_cpu
             // task as "context not saved yet").
-            let linked = match (*task).policy() {
+            let linked = match crate::sched::edges::task_shared(task).policy() {
                 SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task),
                 SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task),
                 SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
@@ -6620,7 +6617,7 @@ pub fn wake_up_enqueue_opt(
             // transient. Clear the stale mark so the pick-skip protocol
             // cannot veto it, and let the insert below link it.
             {
-                let pk = (*task).pick_state();
+                let pk = crate::sched::edges::task_shared(task).pick_state();
                 let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
                 let mid_sw = task_is_mid_switch_out(task);
                 if !linked
@@ -6628,9 +6625,9 @@ pub fn wake_up_enqueue_opt(
                     && !curr_on
                     && !mid_sw
                     && claim == -1
-                    && !(*task).on_cpu()
+                    && !crate::sched::edges::task_shared(task).on_cpu()
                 {
-                    (*task).release_pick_ownership();
+                    crate::sched::edges::task_shared(task).release_pick_ownership();
                     (*task).ti_pick_state.store(
                         crate::process::task::PICK_PICKED,
                         core::sync::atomic::Ordering::Release,
@@ -6638,7 +6635,7 @@ pub fn wake_up_enqueue_opt(
                     // Rule 1 (grq-lock-1st): event ring, not the console.
                     crate::sched::sched_ev::sched_ev(
                         crate::sched::sched_ev::EV_R119_STALE_LIVE,
-                        (*task).pid(),
+                        crate::sched::edges::task_shared(task).pid(),
                         0,
                         0,
                     );
@@ -6687,11 +6684,11 @@ pub fn wake_up_enqueue_opt(
                     w3_print_refused =
                         W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400;
                 }
-                let w3_pid = (*task).pid();
+                let w3_pid = crate::sched::edges::task_shared(task).pid();
                 let w3_st_bits = st.bits();
-                let w3_on_cpu = (*task).on_cpu();
-                let w3_pk = (*task).pick_state();
-                let w3_cpu = (*task).ti_cpu();
+                let w3_on_cpu = crate::sched::edges::task_shared(task).on_cpu();
+                let w3_pk = crate::sched::edges::task_shared(task).pick_state();
+                let w3_cpu = crate::sched::edges::task_shared(task).ti_cpu();
                 // nanosleep-loss lane (hunt instrument, printed after the
                 // guard drop below): the linked-true refusal is the freeze's
                 // visible face — capture the ownership qword, the stored
@@ -6713,7 +6710,7 @@ pub fn wake_up_enqueue_opt(
                 // nanosleep-loss lane: the victim's preempt_count and saved
                 // kernel context (switch-out retaddr + first stack words)
                 // — names the loop a spin-shaped freeze sits in.
-                let w3_pc = (*task).preempt_count();
+                let w3_pc = crate::sched::edges::task_shared(task).preempt_count();
                 #[cfg(feature = "x86_64")]
                 let (w3_ra, w3_sp, w3_w) = {
                     let sp = (*task).thread.sp as *const u64;
@@ -6881,7 +6878,7 @@ pub fn wake_up_enqueue_opt(
                         // user trap frame at stack_top-168: dump the frame
                         // words (userspace rip/cs/rfl/rsp/ss live there)
                         let mut uf = [0u64; 21];
-                        let okf = (*task).get_kernel_stack().map_or(false, |top| {
+                        let okf = crate::sched::edges::task_shared(task).get_kernel_stack().map_or(false, |top| {
                             let base = (top as usize).saturating_sub(168) as *const u64;
                             // SAFETY: diagnostic read of the task's own
                             // kernel-stack entry frame region.
@@ -7027,7 +7024,7 @@ pub fn wake_up_enqueue_opt(
             // the actual resume); the difference is solely whether the
             // mark survives until the publish.
             let mid_switch_out = task_is_mid_switch_out(task);
-            if !mid_switch_out && (*task).on_cpu() {
+            if !mid_switch_out && crate::sched::edges::task_shared(task).on_cpu() {
                 // R74 (false-orphan double-run): the pick-state machine is
                 // AUTHORITATIVE while on_cpu is set — on_cpu/claim are
                 // published together at pick time (publish_pick_ownership)
@@ -7045,7 +7042,7 @@ pub fn wake_up_enqueue_opt(
                 // executing somewhere — refuse; PICKED must be revoked so
                 // a starved-but-live picker aborts at its affirm CAS; only
                 // then may the orphaned mark be cleared.
-                let ps = (*task).pick_state();
+                let ps = crate::sched::edges::task_shared(task).pick_state();
                 if ps == crate::process::task::PICK_LIVE {
                     // R80 (LIVE-phantom heal, the v1-r1 Xorg capture): we
                     // are holding the GRQ with the task RUNNING ∧ unlinked ∧
@@ -7076,7 +7073,7 @@ pub fn wake_up_enqueue_opt(
                     // keeps its slot naming it for the whole affirm window.
                     if !orphan_watch_confirm(
                         task,
-                        (*task).pid(),
+                        crate::sched::edges::task_shared(task).pid(),
                         crate::drivers::timer::get_jiffies(),
                         50,
                     ) {
@@ -7090,13 +7087,13 @@ pub fn wake_up_enqueue_opt(
                     // Rule 1 (grq-lock-1st): event ring, not the console.
                     crate::sched::sched_ev::sched_ev(
                         crate::sched::sched_ev::EV_R80_LIVE_PHANTOM,
-                        (*task).pid(),
+                        crate::sched::edges::task_shared(task).pid(),
                         0,
                         0,
                     );
                     // Fall through to the release + insert below.
                 } else if ps == crate::process::task::PICK_PICKED
-                    && !(*task).revoke_pending_pick()
+                    && !crate::sched::edges::task_shared(task).revoke_pending_pick()
                 {
                     // The picker affirmed LIVE under us (it is resuming
                     // the task right now) — not healable.
@@ -7106,7 +7103,7 @@ pub fn wake_up_enqueue_opt(
                 // (a = the stale ownership qword being cleared).
                 crate::sched::sched_ev::sched_ev(
                     crate::sched::sched_ev::EV_R49_ONCPU_ORPHAN,
-                    (*task).pid(),
+                    crate::sched::edges::task_shared(task).pid(),
                     core::ptr::read_volatile(
                         core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
                     ),
@@ -7120,7 +7117,7 @@ pub fn wake_up_enqueue_opt(
                 // {false, foreign-claim}, the protocol-impossible linked
                 // state the pick-side stale-claim reset was invented for;
                 // with a live claimer that reset double-ran the task (r74a).
-                (*task).release_pick_ownership();
+                crate::sched::edges::task_shared(task).release_pick_ownership();
             }
             // Rule 1 (grq-lock-1st): the R46 heal record — event ring,
             // not the console. a = the stale ownership qword, b = the
@@ -7128,11 +7125,11 @@ pub fn wake_up_enqueue_opt(
             // in-line stack-words dump is gone with the print).
             crate::sched::sched_ev::sched_ev(
                 crate::sched::sched_ev::EV_R46_RUNNING_PHANTOM,
-                (*task).pid(),
+                crate::sched::edges::task_shared(task).pid(),
                 core::ptr::read_volatile(
                     core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
                 ),
-                (*task).thread().sp as u64,
+                crate::sched::edges::task_shared(task).thread().sp as u64,
             );
             // Fall through: enqueue_task_locked links the task (its
             // set_state(RUNNING) is a no-op re-write; nr_running pairs with
@@ -7189,10 +7186,10 @@ pub fn wake_up_enqueue_opt(
         // contract under IRQs-off).
         if crate::trace::EVENT_SCHED_WAKING.armed() {
             crate::trace::trace_sched_waking(
-                (*task).comm(),
-                (*task).pid(),
-                (*task).prio(),
-                (*task).ti_cpu(),
+                crate::sched::edges::task_shared(task).comm(),
+                crate::sched::edges::task_shared(task).pid(),
+                crate::sched::edges::task_shared(task).prio(),
+                crate::sched::edges::task_shared(task).ti_cpu(),
             );
         }
         //
@@ -7228,9 +7225,9 @@ pub fn wake_up_enqueue_opt(
         // (concomitant) from a genuinely lost one.
         let mut lp_observed = false;
         {
-            let pc = (*task).preempt_count();
+            let pc = crate::sched::edges::task_shared(task).preempt_count();
             if pc != 0 {
-                let exiting = (*task).ti_flags()
+                let exiting = crate::sched::edges::task_shared(task).ti_flags()
                     & crate::process::task::task_flags::TaskFlags::PF_EXITING
                         .bits()
                     != 0;
@@ -7287,7 +7284,7 @@ pub fn wake_up_enqueue_opt(
                     }
                 }
                 if !exiting && !mid_switch && !curr_on {
-                    (*task).ti_preempt_count_zero();
+                    crate::sched::edges::task_shared(task).ti_preempt_count_zero();
                     static WH_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     if WH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
@@ -7309,7 +7306,7 @@ pub fn wake_up_enqueue_opt(
                         for &b in M {
                             putchar(b);
                         }
-                        ph((*task).pid() as u64);
+                        ph(crate::sched::edges::task_shared(task).pid() as u64);
                         const M2: &[u8] = b" was=";
                         for &b in M2 {
                             putchar(b);
@@ -7357,7 +7354,7 @@ pub fn wake_up_enqueue_opt(
                             for &b in M {
                                 putchar2(b);
                             }
-                            pd2((*task).pid() as u64);
+                            pd2(crate::sched::edges::task_shared(task).pid() as u64);
                             const M2: &[u8] = b" last12=";
                             for &b in M2 {
                                 putchar2(b);
@@ -7416,7 +7413,7 @@ pub fn wake_up_enqueue_opt(
                         for &b in M {
                             putchar(b);
                         }
-                        pdec((*task).pid() as u64);
+                        pdec(crate::sched::edges::task_shared(task).pid() as u64);
                         const R1: &[u8] = b" why=";
                         for &b in R1 {
                             putchar(b);
@@ -7476,7 +7473,7 @@ pub fn wake_up_enqueue_opt(
                             }
                             crate::sched::sched_ev::sched_ev(
                                 crate::sched::sched_ev::EV_LP_WAKE_SKIP_EMPTY,
-                                (*task).pid(),
+                                crate::sched::edges::task_shared(task).pid(),
                                 a,
                                 core::ptr::read_volatile(
                                     core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
@@ -7503,7 +7500,7 @@ pub fn wake_up_enqueue_opt(
             // event ring carries it; the tick drain prints it.
             crate::sched::sched_ev::sched_ev(
                 crate::sched::sched_ev::EV_W2_ENQ_HEAL_REFUSED,
-                (*task).pid(),
+                crate::sched::edges::task_shared(task).pid(),
                 0,
                 0,
             );
@@ -7524,7 +7521,7 @@ pub fn wake_up_enqueue_opt(
             // woken 0/1 — the LP verdict).
             crate::sched::sched_ev::sched_ev(
                 crate::sched::sched_ev::EV_LP_WAKE_OUTCOME,
-                (*task).pid(),
+                crate::sched::edges::task_shared(task).pid(),
                 woken as u64,
                 0,
             );
@@ -7538,10 +7535,10 @@ pub fn wake_up_enqueue_opt(
         // GRQ is held; record() takes no locks.
         if woken && crate::trace::EVENT_SCHED_WAKEUP.armed() {
             crate::trace::trace_sched_wakeup(
-                (*task).comm(),
-                (*task).pid(),
-                (*task).prio(),
-                (*task).ti_cpu(),
+                crate::sched::edges::task_shared(task).comm(),
+                crate::sched::edges::task_shared(task).pid(),
+                crate::sched::edges::task_shared(task).prio(),
+                crate::sched::edges::task_shared(task).ti_cpu(),
             );
         }
         woken
@@ -11125,7 +11122,7 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
         pdec(pid as u64);
         const O: &[u8] = b" o=";
         for &b in O { putchar(b); }
-        putchar(b'0' + (*task).on_cpu() as u8);
+        putchar(b'0' + crate::sched::edges::task_shared(task).on_cpu() as u8);
         let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
         const C: &[u8] = b" cl=";
         for &b in C { putchar(b); }
@@ -11133,14 +11130,14 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
         pdec((claim as i64).unsigned_abs() as u64);
         const P: &[u8] = b" pk=";
         for &b in P { putchar(b); }
-        pdec((*task).pick_state() as u64);
+        pdec(crate::sched::edges::task_shared(task).pick_state() as u64);
         const T: &[u8] = b" ti_cpu=";
         for &b in T { putchar(b); }
-        pdec((*task).ti_cpu() as i64 as u64);
-        let thsp = (*task).thread().sp;
+        pdec(crate::sched::edges::task_shared(task).ti_cpu() as i64 as u64);
+        let thsp = crate::sched::edges::task_shared(task).thread().sp;
         const K: &[u8] = b" ksp=0x";
         for &b in K { putchar(b); }
-        phex((*task).ti_kernel_sp());
+        phex(crate::sched::edges::task_shared(task).ti_kernel_sp());
         if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
             const S: &[u8] = b" stk=0x";
             for &b in S { putchar(b); }
@@ -11217,7 +11214,7 @@ fn task_is_dying(task: *mut Task) -> bool {
         return true;
     }
     unsafe {
-        if (*task).ti_flags() & TaskFlags::PF_EXITING.bits() != 0 {
+        if crate::sched::edges::task_shared(task).ti_flags() & TaskFlags::PF_EXITING.bits() != 0 {
             return true;
         }
         (*task)
@@ -11255,16 +11252,16 @@ pub fn harvest_relink(task: *mut Task) -> bool {
         // task pointers that the bucket lock pins in the table; all state
         // transitions below run under the GRQ lock.
         unsafe {
-            let pid = (*task).pid();
+            let pid = crate::sched::edges::task_shared(task).pid();
             if pid == 0 || pid == TASK_POISON {
                 return false;
             }
-            let st = (*task).state();
+            let st = crate::sched::edges::task_shared(task).state();
             if !st.is_running() {
                 return false;
             }
-            cpus_allowed = (*task).cpus_allowed();
-            let linked = match (*task).policy() {
+            cpus_allowed = crate::sched::edges::task_shared(task).cpus_allowed();
+            let linked = match crate::sched::edges::task_shared(task).policy() {
                 SchedPolicy::Fifo | SchedPolicy::Rr => g.rt_rq.is_linked(task),
                 SchedPolicy::Deadline => g.dl_rq.is_linked(task),
                 SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
@@ -11273,7 +11270,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
             };
 
             // (a) queued but unpickable: orphaned on_cpu mark.
-            if linked && (*task).on_cpu() && !task_is_mid_switch_out(task) {
+            if linked && crate::sched::edges::task_shared(task).on_cpu() && !task_is_mid_switch_out(task) {
                 // No live owner may exist: mid switch-out is excluded by the
                 // SWITCHING_OUT check above and a fast-path re-pick keeps
                 // the switching CPU's slot naming the task — the caller's
@@ -11285,7 +11282,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                 // running task: the m25 double-run shape). A PICKED pick
                 // must be REVOKED first so a starved-but-live picker's
                 // switch-in aborts at the affirm CAS instead of resuming.
-                let st = (*task).pick_state();
+                let st = crate::sched::edges::task_shared(task).pick_state();
                 if st == PICK_LIVE {
                     // R80 (LIVE-on-linked stale-mark heal): under the GRQ we
                     // hold, a LINKED task with on_cpu set and NO
@@ -11335,7 +11332,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         // the watch instead).
                         return false;
                     }
-                    (*task).release_pick_ownership();
+                    crate::sched::edges::task_shared(task).release_pick_ownership();
                     // Rule 1 (grq-lock-1st): event ring, not the console.
                     crate::sched::sched_ev::sched_ev(
                         crate::sched::sched_ev::EV_R80_LIVE_MARK,
@@ -11354,12 +11351,12 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                     );
                     outcome = true;
                 } else {
-                    if st == PICK_PICKED && !(*task).revoke_pending_pick() {
+                    if st == PICK_PICKED && !crate::sched::edges::task_shared(task).revoke_pending_pick() {
                         // Lost the race against the picker's affirm CAS — the
                         // task just went LIVE; not healable.
                         return false;
                     }
-                    (*task).release_pick_ownership();
+                    crate::sched::edges::task_shared(task).release_pick_ownership();
                         // Rule 1 (grq-lock-1st): event ring, not the console.
                         crate::sched::sched_ev::sched_ev(
                             crate::sched::sched_ev::EV_R56_QUEUED_MARK,
@@ -11398,7 +11395,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                 // pb_7 adjudication capture that motivated the lifecycle
                 // pin). sw = bitmask of naming CPUs still mid-switch; rq=1
                 // means the re-link took.
-                let _pre_state = (*task).pick_state();
+                let _pre_state = crate::sched::edges::task_shared(task).pick_state();
                 let mut _sw_mask: u32 = 0;
                 for c in 0..MAX_CPUS {
                     if cpu_state(c).current == task
@@ -11422,7 +11419,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                 if task_is_dying(task) {
                     return false;
                 }
-                if !(*task).revoke_pending_pick() {
+                if !crate::sched::edges::task_shared(task).revoke_pending_pick() {
                     // LIVE (genuinely running — leave it alone) or an
                     // already-consumed REVOKED marker (a previous heal
                     // pass owns the recovery).
@@ -11457,7 +11454,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                 // __switch_to sees claim != my-cpu and aborts the resume
                 // (riscv_switch_abort / x86_switch_abort repair the slot
                 // and page table), so this steal cannot double-run it.
-                (*task).release_pick_ownership();
+                crate::sched::edges::task_shared(task).release_pick_ownership();
                 outcome = enqueue_task_locked(&mut g, crate::sched::edges::task_mut(task));
                 // R56-STEAL diagnostics tail: st/sw/rq on ONE line.
                 // Rule 1 (grq-lock-1st): event ring, not the console
@@ -12251,7 +12248,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                     let q_oncpu = (q & 0xFF) != 0;
                     let q_claim = (q >> 32) as i32;
                     if q_oncpu || q_claim != -1 {
-                        (*task).release_pick_ownership();
+                        crate::sched::edges::task_shared(task).release_pick_ownership();
                     }
                 }
                 let mut owned = false;
