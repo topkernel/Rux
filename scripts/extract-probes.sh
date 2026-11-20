@@ -20,7 +20,10 @@ if [ ! -x toolchain/x86_64-rux-linux-musl/bin/musl-gcc ]; then
     tar -xzf toolchain/x86_64-rux-linux-musl.tar.gz
 fi
 
-# Guest-side probe sources: test/*.c, run/*.c, userspace smoke tests
+# Guest-side probe sources: test/*.c, run/*.c (round-5 infra re-pack:
+# 196 sources — 131 recovered from git history, 41 from live lane
+# worktrees, 20 run/ probes, the 4 pi_*.c moved under test/ so
+# extraction no longer litters the repo root).
 if [ ! -f test/pbench.c ]; then
     echo "extract-probes: restoring C probe sources ..."
     tar -xzf userspace/probes/probes.tar.gz
