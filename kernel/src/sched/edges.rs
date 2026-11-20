@@ -213,6 +213,93 @@ pub fn arch_context_switch(prev: &mut Task, next: &mut Task) {
     unsafe { crate::arch::context::context_switch(prev, next) }
 }
 
+/// Adopt a validated raw task handle as a [TaskBorrow]
+/// (`process::task_ref`'s audited adoption edge, INV-SCE-2 contract):
+/// syscall-context short read/write, no yield, no store.
+#[inline]
+pub fn task_borrow(p: *mut Task) -> Option<crate::process::task_ref::TaskBorrow> {
+    // SAFETY: INV-SCE-2 — the callers' cgroup walkers hold the same
+    // borrow proofs the pre-consolidation call sites documented.
+    unsafe { crate::process::task_ref::TaskBorrow::from_raw(p) }
+}
+
+/// Derive a shared CgroupNode reference from a RANGE-CHECKED raw node
+/// pointer (INV-SCE-8): the caller validated the address against the
+/// heap/slab regions (task_cgroup's DEAD-containment) or holds an Arc
+/// to the node (the subtree walk). The reference is read-only.
+#[inline]
+pub fn cgroup_node_ref(
+    ptr: *mut super::cgroup::CgroupNode,
+) -> Option<&'static super::cgroup::CgroupNode> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: INV-SCE-8 — range-checked/Arc-pinned node.
+    Some(unsafe { &*ptr })
+}
+
+// ---------------------------------------------------------------------------
+// INV-SCE-7: the RT priority lists' intrusive links
+// ---------------------------------------------------------------------------
+
+/// Next link of a GRQ-held intrusive list head/node (INV-SCE-7): the
+/// RT runqueues' rings are only ever rewired under the GRQ; readers
+/// hold the same lock (or walk a diagnostic snapshot).
+#[inline]
+pub fn list_next(node: *mut crate::list::ListHead) -> *mut crate::list::ListHead {
+    debug_assert!(!node.is_null());
+    // SAFETY: INV-SCE-7 — GRQ-held linkage; a bounded walk reads it.
+    unsafe { (*node).next }
+}
+
+/// Container-of: the Task whose embedded `rt_run_list` is `pos`
+/// (INV-SCE-7). Pure address arithmetic.
+#[inline]
+pub fn task_of_rt_list(pos: *mut crate::list::ListHead) -> *mut Task {
+    let offset = core::mem::offset_of!(Task, rt_run_list);
+    // SAFETY: pure pointer arithmetic, no dereference.
+    unsafe { (pos as *mut u8).sub(offset) as *mut Task }
+}
+
+/// Link `task`'s RT node at a priority-list head (INV-SCE-7 write:
+/// GRQ-held rewire).
+#[inline]
+pub fn rt_list_add(task: *mut Task, head: *mut crate::list::ListHead) {
+    let t = task_mut(task);
+    // SAFETY: INV-SCE-7 — the intrusive add under the GRQ.
+    unsafe { t.rt_run_list.add(head) }
+}
+
+/// Tail variant of [rt_list_add].
+#[inline]
+pub fn rt_list_add_tail(task: *mut Task, head: *mut crate::list::ListHead) {
+    let t = task_mut(task);
+    // SAFETY: INV-SCE-7.
+    unsafe { t.rt_run_list.add_tail(head) }
+}
+
+/// Unlink `task`'s RT node (INV-SCE-7 write).
+#[inline]
+pub fn rt_list_del(task: *mut Task) {
+    let t = task_mut(task);
+    // SAFETY: INV-SCE-7.
+    unsafe { t.rt_run_list.del() }
+}
+
+/// Is `task`'s embedded RT list node linked (INV-SCE-7 read)? A freed
+/// or never-enqueued node is self-linked/unset.
+#[inline]
+pub fn rt_list_linked(task: *mut Task) -> bool {
+    debug_assert!(!task.is_null());
+    // SAFETY: INV-SCE-7 — only the embedded node's link words are read,
+    // under the caller's GRQ hold.
+    unsafe {
+        let node = core::ptr::addr_of!((*task).rt_run_list);
+        let next = (*task).rt_run_list.next;
+        !next.is_null() && next != node as *mut crate::list::ListHead
+    }
+}
+
 // ---------------------------------------------------------------------------
 // INV-SCE-6: the CFS timeline engine (moved from fair.rs, round L1)
 // ---------------------------------------------------------------------------
