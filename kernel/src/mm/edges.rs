@@ -74,3 +74,29 @@ pub fn page_ref_of(pfn: usize) -> Option<&'static Page> {
         Some(unsafe { &*p })
     }
 }
+
+// ---------------------------------------------------------------------------
+// INV-MM-3: the memblock early-boot static. `MEMBLOCK` is a `static mut`
+// singleton written only before the scheduler starts (init/add/reserve/
+// find+reserve, single-threaded boot) and read-only afterwards; the
+// accessors below move the raw-static discipline here once.
+// ---------------------------------------------------------------------------
+
+/// Shared borrow of the initialized memblock (INV-MM-3 shared arm: after
+/// early boot the data is effectively immutable; before that, the caller
+/// runs in the single-threaded boot window).
+#[inline]
+pub fn memblock_ref() -> &'static super::memblock::MemBlock {
+    // SAFETY: INV-MM-3 — MEMBLOCK is initialized (memblock_init ran)
+    // before any call reaches here; post-boot it is never mutated.
+    unsafe { &*super::memblock::memblock_raw() }
+}
+
+/// Mutable borrow of the memblock (INV-MM-3 exclusive arm: early boot
+/// only, before the scheduler starts — no concurrent access exists).
+#[inline]
+pub fn memblock_mut() -> &'static mut super::memblock::MemBlock {
+    // SAFETY: INV-MM-3 — single-threaded boot window; the caller is the
+    // boot path that owns MEMBLOCK exclusively.
+    unsafe { &mut *super::memblock::memblock_raw() }
+}
