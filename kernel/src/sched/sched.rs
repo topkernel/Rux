@@ -985,7 +985,7 @@ pub fn grq_dump_holder(why: &str) {
         if cur.is_null() {
             grq_raw_puts(b"none");
         } else {
-            grq_raw_putdec(unsafe { (*cur).pid() } as u64);
+            grq_raw_putdec(crate::sched::edges::task_shared(cur).pid() as u64);
         }
         grq_raw_puts(b" site=");
         grq_raw_puts(grq_site_name(site).as_bytes());
@@ -1040,7 +1040,7 @@ pub fn grq_dump_holder(why: &str) {
             // wedged, so the reads are consistent.
             let cur = unsafe { crate::sched::sched::cpu_state(cpu).current };
             if !cur.is_null() {
-                let top = unsafe { (*cur).kernel_stack_top() };
+                let top = crate::sched::edges::task_shared(cur).kernel_stack_top();
                 if top != 0 {
                     grq_raw_puts(b" top-raw:\n");
                     let mut off = 168 + 16 * 8; // below the pt_regs anchor
@@ -1859,7 +1859,7 @@ fn pick_gen_publish(cpu: usize, task: *mut Task) {
     let g = PICK_GEN[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     PICK_GEN_TASK[cpu].store(task as u64, core::sync::atomic::Ordering::Relaxed);
     PICK_GEN_PID[cpu].store(
-        if task.is_null() { 0 } else { unsafe { (*task).pid() } },
+        if task.is_null() { 0 } else { crate::sched::edges::task_shared(task).pid() },
         core::sync::atomic::Ordering::Relaxed,
     );
     PICK_GEN_JIF[cpu].store(
@@ -2485,7 +2485,7 @@ pub fn sched_hist_ring(task: &Task, kind: u64, why: u64, aux: u64) {
 pub fn sched_hist_refuse(task: *mut Task, skip_reason: u32, cpu: usize) {
     // SAFETY: caller (pick_next_cpu) holds the GRQ and the pointer came
     // from the timeline; only this task's diagnostic fields are touched.
-    let t = unsafe { &*task };
+    let t = crate::sched::edges::task_shared(task);
     t.pick_visit_n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if let Some(w) = t.pick_refuse_why.get((skip_reason as usize).saturating_sub(1)) {
         w.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -2503,7 +2503,7 @@ pub fn sched_hist_refuse(task: *mut Task, skip_reason: u32, cpu: usize) {
 /// heal re-insert — GRQ held at every caller).
 pub fn sched_hist_link(task: *mut Task) {
     // SAFETY: callers hold the GRQ; diagnostic fields only.
-    let t = unsafe { &*task };
+    let t = crate::sched::edges::task_shared(task);
     t.wake_n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     t.wake_last_jif
         .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
@@ -2516,7 +2516,7 @@ pub fn sched_hist_link(task: *mut Task) {
 /// close the link→pick wait window.
 pub fn sched_hist_pick(task: *mut Task, cpu: usize) {
     // SAFETY: callers hold the GRQ; diagnostic fields only.
-    let t = unsafe { &*task };
+    let t = crate::sched::edges::task_shared(task);
     t.pick_n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     t.pick_last_jif
         .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
@@ -2598,7 +2598,7 @@ pub fn ww_cfs_geometry(task: *mut Task) -> (u64, u64, u64) {
 /// held by the caller.
 pub fn ww_cfs_tie_mass(task: *mut Task) -> u64 {
     // SAFETY: scalar sched-entity read of the task being picked (GRQ held).
-    let vr = unsafe { (*task).sched_entity().get_vruntime() };
+    let vr = crate::sched::edges::task_shared(task).sched_entity().get_vruntime();
     ww_cfs_tie_mass_vr(vr)
 }
 
@@ -3057,7 +3057,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 for &b in M {
                     putchar(b);
                 }
-                pdec_fts(unsafe { (*task_ptr).pid() } as u64);
+                pdec_fts(crate::sched::edges::task_shared(task_ptr).pid() as u64);
                 const M2: &[u8] = b" cpu=";
                 for &b in M2 {
                     putchar(b);
@@ -3084,7 +3084,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 for &b in M {
                     putchar(b);
                 }
-                let mut v = unsafe { (*task_ptr).pid() } as u64;
+                let mut v = crate::sched::edges::task_shared(task_ptr).pid() as u64;
                 {
                     let mut buf = [0u8; 10];
                     let mut n = 0;
@@ -3248,7 +3248,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 // b = how many class queues it was unlinked from).
                 crate::sched::sched_ev::sched_ev(
                     crate::sched::sched_ev::EV_FREED_WHILE_LINKED,
-                    unsafe { (*task_ptr).pid() },
+                    crate::sched::edges::task_shared(task_ptr).pid(),
                     task_ptr as usize as u64,
                     unlinked as u64,
                 );
@@ -3267,13 +3267,13 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         if crate::trace::EVENT_SCRIBBLE.armed() {
             if let Some(grq_guard) = try_grq_lock() {
                 use core::sync::atomic::Ordering as O;
-                let policy = unsafe { (*task_ptr).policy() };
+                let policy = crate::sched::edges::task_shared(task_ptr).policy();
                 let linked = match policy {
                     SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task_ptr),
                     SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task_ptr),
                     _ => grq_guard.cfs_rq.is_linked(task_ptr),
                 };
-                let flagged = unsafe { (*task_ptr).pid() } == TASK_POISON;
+                let flagged = crate::sched::edges::task_shared(task_ptr).pid() == TASK_POISON;
                 if linked || flagged {
                     use crate::dfx::taskdump::putc_brief as putchar;
                     const MSG: &[u8] = b"\nFREED-WHILE-LINKED task=0x";
@@ -3295,7 +3295,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                     for &b in M3 {
                         putchar(b);
                     }
-                    let p = unsafe { (*task_ptr).pid() } as usize;
+                    let p = crate::sched::edges::task_shared(task_ptr).pid() as usize;
                     for sh in (0..8u32).rev() {
                         let n = ((p >> (sh * 4)) & 0xF) as u8;
                         putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
@@ -3686,7 +3686,7 @@ pub fn terminal_release_grq_if_held() {
     unsafe { grq().lock.force_unlock_terminal() };
     if n < 8 {
         let pid = crate::sched::current()
-            .map(|t| unsafe { (*t).pid() })
+            .map(|t| crate::sched::edges::task_shared(t).pid())
             .unwrap_or(0);
         grq_raw_puts(b"TERM-GRQ-FORCE pid=");
         grq_raw_putdec(pid as u64);
@@ -3845,11 +3845,9 @@ pub fn schedule_dead_never_returns() {
             // or a pick that keeps resolving us. Budget: log2 rounds.
             if rounds.is_power_of_two() && rounds <= 4096 {
                 if let Some(cur) = current() {
-                    let st = unsafe { (*cur).state() };
-                    let pc = unsafe { (*cur).preempt_count() };
-                    let claim = unsafe {
-                        (*cur).running_on_cpu.load(core::sync::atomic::Ordering::Acquire)
-                    };
+                    let st = crate::sched::edges::task_shared(cur).state();
+                    let pc = crate::sched::edges::task_shared(cur).preempt_count();
+                    let claim = crate::sched::edges::task_shared(cur).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
                     // R13 (the liveness stall discriminator): is the pacing
                     // DEAD task still LINKED in its class tree? linked=true
                     // on a DEAD+dequeued task means a RE-LINKER exists (a
@@ -3878,7 +3876,7 @@ pub fn schedule_dead_never_returns() {
                     };
                     crate::pr_warn!(
                         "TERM-DESCHED stuck pid={} rounds={} state={:#x} pc={:#x} claim={} linked={} nr_running={} rip_paced",
-                        unsafe { (*cur).pid() },
+                        crate::sched::edges::task_shared(cur).pid(),
                         rounds,
                         st.bits(),
                         pc,
@@ -6242,7 +6240,7 @@ pub fn ww_record(task: *mut Task, code: u32) {
             for &b in M {
                 putchar(b);
             }
-            let v = unsafe { (*task).pid() } as u64;
+            let v = crate::sched::edges::task_shared(task).pid() as u64;
             let mut sh = 64;
             while sh > 0 {
                 sh -= 4;
@@ -6700,11 +6698,9 @@ pub fn wake_up_enqueue_opt(
                         core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
                     )
                 };
-                let w3_onrq = unsafe {
-                    (*task).sched_entity().on_rq.load(core::sync::atomic::Ordering::Relaxed)
-                };
+                let w3_onrq = crate::sched::edges::task_shared(task).sched_entity().on_rq.load(core::sync::atomic::Ordering::Relaxed);
                 let (w3_key_vr, w3_key_id) =
-                    match unsafe { (*task).sched_entity().timeline_key() } {
+                    match crate::sched::edges::task_shared(task).sched_entity().timeline_key() {
                         Some(k) => (k.vruntime, k.task_id),
                         None => (u64::MAX, u64::MAX),
                     };
@@ -7632,7 +7628,7 @@ pub fn monopolist_census(now_j: u64) {
         } else {
             // SAFETY: per-CPU current is a valid task or idle (idle
             // excluded above); diagnostic reads only.
-            let cur = unsafe { &*cur };
+            let cur = crate::sched::edges::task_shared(cur);
             if cur.pid() == 0 {
                 0
             } else {
@@ -8060,7 +8056,7 @@ pub fn runq_strand_census(now_j: u64) {
                     continue;
                 }
                 // SAFETY: per-CPU current is a valid task or idle.
-                let cur = unsafe { &*cur };
+                let cur = crate::sched::edges::task_shared(cur);
                 let se = cur.sched_entity();
                 let act_ms = se
                     .sum_exec_runtime
@@ -8136,7 +8132,7 @@ pub fn ffrt_wait_census() {
             return;
         }
         // SAFETY: diagnostic reads under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         let comm = tk.comm();
         if comm[..7] != *b"OS_FFRT" {
             return;
@@ -8290,7 +8286,7 @@ pub fn grq_diag_cpu_currents() -> [(
             } else {
                 // SAFETY: per-CPU current is null or a valid Task set by the
                 // scheduler; read-only pid access for diagnostics.
-                unsafe { (*cur).pid() }
+                crate::sched::edges::task_shared(cur).pid()
             },
             g_diag_idle_bit(c),
             cur,
@@ -8563,7 +8559,7 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
     };
 
     let mut grq_guard = grq().lock_irqsave();
-    let old_policy = unsafe { (*task).policy() };
+    let old_policy = crate::sched::edges::task_shared(task).policy();
 
     // Whether the task is actually linked on a class run queue. The RUNNING
     // state is NOT sufficient: a task picked by another CPU is dequeued at
@@ -8576,7 +8572,7 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
     // it stranded asleep with its timer cancelled.
     let mut was_throttled = false;
     if old_policy == SchedPolicy::Deadline {
-        let dl = unsafe { (*task).dl_entity() };
+        let dl = crate::sched::edges::task_shared(task).dl_entity();
         was_throttled = dl.dl_throttled.load(core::sync::atomic::Ordering::Acquire);
         if was_throttled {
             // Cancel the replenish timer — the new class owns the wake now.
@@ -8590,13 +8586,13 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
     let linked = was_throttled
         || match old_policy {
             SchedPolicy::Fifo | SchedPolicy::Rr => {
-                unsafe { (*task).rt_entity().is_on_rq() }
+                crate::sched::edges::task_shared(task).rt_entity().is_on_rq()
             }
             SchedPolicy::Deadline => {
-                unsafe { (*task).dl_entity().is_on_rq() }
+                crate::sched::edges::task_shared(task).dl_entity().is_on_rq()
             }
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-                unsafe { (*task).sched_entity().is_on_rq() }
+                crate::sched::edges::task_shared(task).sched_entity().is_on_rq()
             }
         };
 
@@ -8625,11 +8621,9 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
     }
 
     // SAFETY: exclusive access under the GRQ lock.
-    let old_rt_prio = unsafe { (*task).rt_priority() };
-    unsafe {
-        (*task).set_rt_priority(rt_prio);
-        (*task).set_policy(new_policy);
-    }
+    let old_rt_prio = crate::sched::edges::task_shared(task).rt_priority();
+    crate::sched::edges::task_mut(task).set_rt_priority(rt_prio);
+        crate::sched::edges::task_mut(task).set_policy(new_policy);
 
     // timer-gap lane (pinned-RT wedge, part 2 — the deterministic leg):
     // a RUNNING task's own setscheduler never touches the queues (it is
@@ -8658,7 +8652,7 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
             && matches!(new_policy, SchedPolicy::Fifo | SchedPolicy::Rr)
             && rt_prio < old_rt_prio
             && grq_guard.rt_rq.highest_linked_user_prio(
-                unsafe { (*task).cpus_allowed() },
+                crate::sched::edges::task_shared(task).cpus_allowed(),
                 rt_prio,
             );
         let demoted = class_rank(new_policy) < class_rank(old_policy);
@@ -8673,15 +8667,11 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
         // expects the lock to be held.
         enqueue_task_locked(&mut *grq_guard, crate::sched::edges::task_mut(task));
         // Cross-CPU preemption checks mirror enqueue_task.
-        let policy = unsafe { (*task).policy() };
+        let policy = crate::sched::edges::task_shared(task).policy();
         if policy == SchedPolicy::Fifo || policy == SchedPolicy::Rr {
-            check_rt_preempt(task, unsafe { (*task).cpus_allowed() }, unsafe {
-                (*task).ti_cpu()
-            });
+            check_rt_preempt(task, crate::sched::edges::task_shared(task).cpus_allowed(), crate::sched::edges::task_shared(task).ti_cpu());
         } else if policy == SchedPolicy::Deadline {
-            check_dl_preempt(task, unsafe { (*task).cpus_allowed() }, unsafe {
-                (*task).ti_cpu()
-            });
+            check_dl_preempt(task, crate::sched::edges::task_shared(task).cpus_allowed(), crate::sched::edges::task_shared(task).ti_cpu());
         }
     }
 }
@@ -8855,7 +8845,7 @@ pub fn scheduler_tick() {
                 // Subtract exactly the tick's one level before any
                 // adjudication; a task's own leaked hardirq level still
                 // shows as a residue (and h_extra reads >= 1 level).
-                let pc = unsafe { (*cur).preempt_count() }
+                let pc = crate::sched::edges::task_shared(cur).preempt_count()
                     .saturating_sub(crate::interrupt::preempt::HARDIRQ_OFFSET);
                 // Per-field consecutive-PRESENT run counters (phantom-bits
                 // r2/3, stress-port r3 2026-11-02): a field's phantomness
@@ -8896,13 +8886,11 @@ pub fn scheduler_tick() {
                 {
                     let h_extra_now = (pc & crate::interrupt::preempt::HARDIRQ_MASK)
                         >= crate::interrupt::preempt::HARDIRQ_OFFSET;
-                    unsafe {
-                        (*cur).ti_pc_present_runs_tick(
+                    crate::sched::edges::task_shared(cur).ti_pc_present_runs_tick(
                             pc & crate::interrupt::preempt::PREEMPT_MASK != 0,
                             pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0,
                             h_extra_now,
                         );
-                    }
                 }
                 if pc != 0 {
                     let now = crate::drivers::timer::get_jiffies();
@@ -8981,13 +8969,13 @@ pub fn scheduler_tick() {
                     // than one observation") is inherently not stale.
                     let stale_200 = |run: u64| run >= 200;
                     let p_stale = p_set && {
-                        stale_200(unsafe { (*cur).ti_pc_pirq_present_run() })
+                        stale_200(crate::sched::edges::task_shared(cur).ti_pc_pirq_present_run())
                     };
                     let s_stale = s_set && {
-                        stale_200(unsafe { (*cur).ti_pc_sirq_present_run() })
+                        stale_200(crate::sched::edges::task_shared(cur).ti_pc_sirq_present_run())
                     };
                     let h_stale = h_extra && {
-                        stale_200(unsafe { (*cur).ti_pc_hirq_present_run() })
+                        stale_200(crate::sched::edges::task_shared(cur).ti_pc_hirq_present_run())
                     };
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
                     w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
@@ -9032,7 +9020,7 @@ pub fn scheduler_tick() {
                                 for &b in M2 {
                                     putchar(b);
                                 }
-                                ph(unsafe { (*cur).pid() } as u64);
+                                ph(crate::sched::edges::task_shared(cur).pid() as u64);
                                 const M3: &[u8] = b" pc=";
                                 for &b in M3 {
                                     putchar(b);
@@ -9207,7 +9195,7 @@ pub fn scheduler_tick() {
                                 for &b in M2 {
                                     putchar(b);
                                 }
-                                ph(unsafe { (*cur).pid() } as u64);
+                                ph(crate::sched::edges::task_shared(cur).pid() as u64);
                                 const M3: &[u8] = b" pc=";
                                 for &b in M3 {
                                     putchar(b);
@@ -9325,7 +9313,7 @@ pub fn scheduler_tick() {
                             for &b in M2 {
                                 putchar(b);
                             }
-                            ph(unsafe { (*cur).pid() } as u64);
+                            ph(crate::sched::edges::task_shared(cur).pid() as u64);
                             const M3: &[u8] = b" was=";
                             for &b in M3 {
                                 putchar(b);
@@ -9345,17 +9333,17 @@ pub fn scheduler_tick() {
                             for &b in M4B {
                                 putchar(b);
                             }
-                            ph(unsafe { (*cur).ti_pc_pirq_present_run() });
+                            ph(crate::sched::edges::task_shared(cur).ti_pc_pirq_present_run());
                             const M4C: &[u8] = b" srun=";
                             for &b in M4C {
                                 putchar(b);
                             }
-                            ph(unsafe { (*cur).ti_pc_sirq_present_run() });
+                            ph(crate::sched::edges::task_shared(cur).ti_pc_sirq_present_run());
                             const M4D: &[u8] = b" hrun=";
                             for &b in M4D {
                                 putchar(b);
                             }
-                            ph(unsafe { (*cur).ti_pc_hirq_present_run() });
+                            ph(crate::sched::edges::task_shared(cur).ti_pc_hirq_present_run());
                             // CARRIER-HEAL (123rd): name the healed
                             // carrier at fire time with the tick-entry
                             // snapshots (already refreshed every tick on
@@ -9431,9 +9419,7 @@ pub fn scheduler_tick() {
                         // refused candidate cannot fall through to this
                         // leg.)
                         else if base == 0 && h_stale {
-                            unsafe {
-                                (*cur).ti_preempt_count_keep_tick_nesting();
-                            }
+                            crate::sched::edges::task_shared(cur).ti_preempt_count_keep_tick_nesting();
                             set_need_resched();
                             w.task.store(0, core::sync::atomic::Ordering::Relaxed);
                             w.first.store(0, core::sync::atomic::Ordering::Relaxed);
@@ -9459,7 +9445,7 @@ pub fn scheduler_tick() {
                             for &b in M2 {
                                 putchar(b);
                             }
-                            ph(unsafe { (*cur).pid() } as u64);
+                            ph(crate::sched::edges::task_shared(cur).pid() as u64);
                             const M3: &[u8] = b" was=";
                             for &b in M3 {
                                 putchar(b);
@@ -9988,7 +9974,7 @@ pub fn scheduler_tick() {
                     const M6: &[u8] = b" ks=0x";
                     for &b in M6 { putchar(b); }
                     {
-                        let ks = match unsafe { (*t).get_kernel_stack() } { Some(p) => p as usize, None => 0 };
+                        let ks = match crate::sched::edges::task_shared(t).get_kernel_stack() { Some(p) => p as usize, None => 0 };
                         let mut sh = 64;
                         while sh > 0 { sh -= 4; let nb = ((ks >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
                     }
@@ -10656,7 +10642,7 @@ pub fn get_current_pid() -> u32 {
         0
     } else {
         // SAFETY: tp is the current task pointer from tp register; null and address checks above.
-        unsafe { (*tp).pid() }
+        crate::sched::edges::task_shared(tp).pid()
     }
 }
 
@@ -10666,7 +10652,7 @@ pub fn get_current_ppid() -> u32 {
         0
     } else {
         // SAFETY: tp is the current task pointer from tp register; null and address checks above.
-        unsafe { (*tp).ppid() }
+        crate::sched::edges::task_shared(tp).ppid()
     }
 }
 
@@ -10759,7 +10745,7 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
     // SAFETY: read-only sched-entity word; the task is pinned by the
     // caller's context (wake path holds the GRQ, harvester holds the
     // bucket lock).
-    let exec = unsafe { (*task).sched_entity().sum_exec_runtime.load(Ordering::Relaxed) };
+    let exec = crate::sched::edges::task_shared(task).sched_entity().sum_exec_runtime.load(Ordering::Relaxed);
     let mut free_idx: usize = usize::MAX;
     let mut oldest_idx = 0usize;
     let mut oldest_at = u64::MAX;
@@ -10888,9 +10874,7 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
                     // grows) — accepted because releasing under a live
                     // claimer is the observed box-killer; a wedge never
                     // executes a second hart on one stack.
-                    let claim = unsafe {
-                        (*task).running_on_cpu.load(Ordering::Acquire)
-                    };
+                    let claim = crate::sched::edges::task_shared(task).running_on_cpu.load(Ordering::Acquire);
                     if claim >= 0 && (claim as usize) < MAX_CPUS {
                         let c = claim as usize;
                         let tick_ms = cpu_tick_stale_ms(c);
@@ -12024,11 +12008,11 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
     {
         let _g = grq().lock_irqsave();
         let curr = cpu_state(cpu).current;
-        if curr.is_null() || curr == idle_task || unsafe { (*curr).pid() == 0 } {
+        if curr.is_null() || curr == idle_task || crate::sched::edges::task_shared(curr).pid() == 0 {
             return core::ptr::null_mut();
         }
         prev_tag = SLOT_WRITER[cpu].load(core::sync::atomic::Ordering::Relaxed);
-        victim_pid = unsafe { (*curr).pid() };
+        victim_pid = crate::sched::edges::task_shared(curr).pid();
         // Pin the page before dropping the slot's implicit pin; if the
         // page is at its last refcount (exiting), still rewrite the
         // stale name but do not hand a dead page to the wake path.
@@ -12518,7 +12502,7 @@ pub fn cpu_idle_loop() -> ! {
         let is_idle = {
             let pcpu = this_cpu();
             let curr = pcpu.current;
-            !curr.is_null() && unsafe { (*curr).pid() == 0 }
+            !curr.is_null() && crate::sched::edges::task_shared(curr).pid() == 0
         };
 
         // tick_nohz_idle_enter: back in the idle section (schedule
@@ -12559,7 +12543,7 @@ pub fn cpu_idle_loop() -> ! {
                 is_idle = {
                     let pcpu = this_cpu();
                     let curr = pcpu.current;
-                    !curr.is_null() && unsafe { (*curr).pid() == 0 }
+                    !curr.is_null() && crate::sched::edges::task_shared(curr).pid() == 0
                 };
                 // Requeue outside the heal's GRQ section (probe-lock
                 // discipline): the pin keeps the page alive; the R46
