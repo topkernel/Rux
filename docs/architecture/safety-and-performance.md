@@ -1051,6 +1051,45 @@ lock; the descriptor stores precede publication.
 | INV-EXT4-IBLOCK-HDR | `fs/ext4/file.rs` | INV-EXT4-IBLOCK-HDR: typed header view of the 60-byte root. |
 | INV-PIPE-PRIV | `ipc/binder.rs` | fd owning the Arc (same contract as fs/pipe.rs's INV-PIPE-PRIV). |
 
+**F17. binder buffer block-views** — owner `kernel/src/ipc/binder.rs`.
+*Shape:* r3c's consolidated view primitives — INV-BINDER-BLOCKVIEW
+(the ONE raw window over the mmap'd binder buffer: bounds-checked
+slice/word/POD views), INV-BINDER-STAGE-POD (bytewise view of Copy
+values), INV-BINDER-HELD (token-checked accessors) — plus the narrow
+call sites beneath them. Every access goes through the bounds-checked
+view methods; no raw `.add()` escapes the primitive.
+*Why no safe shape exists:* the binder buffer is one mmap'd arena
+shared with user binder threads, sized by the protocol — the same
+device-window relationship as MmioRegion, but with the r3c view API
+already measured in place (SLOW-TXN families are gated on it).
+*Reference:* Android's flat_binder_object walks over the same arena.
+*Containment:* ipc/binder.rs only; world lock discipline per the
+guarded-domain notes.
+
+**F18. mm-forensics page-descriptor walkers** — owners
+`kernel/src/dfx/mmforensics.rs` (note_ref, capture_frame), 
+`kernel/src/dfx/ledger.rs` (the census walks), and
+`kernel/src/dfx/pathstash.rs` (per-tid static slot table).
+*Reads:* raw `*const Page` descriptors across the whole mapped vmemmap
+span (refcount/flags/type/mapping/index — value-only, never
+re-dereferenced), exactly like F1's stale-task reads but for PAGE
+descriptors; pathstash's static SLOTS are written per-tid exclusively
+(publication ordered via tid/len atomics — the slowtask-SLOTS
+discipline twin). *Why no safe shape exists:* these instruments exist
+to report on descriptors whose invariants are SUSPECTED broken (the
+wild-write/fake-OOM hunt lines) — a typed handle would presume the
+invariant under investigation. *Reference:* Linux's
+`dump_page`/page-type census walkers (the same untyped descriptor
+reads). *Containment:* gated by rux:mmforensics / the census flag,
+default-off, value-only reads <= one descriptor at a time.
+
+Also under this row's neighborhood (already-per-site-documented
+residue): taskdump's %gs:PC_MAGIC read is F5-class (asm register
+edge); its CURRENT_PT_REGS frame read is the one-frame-edge
+discipline; slowtask's `audit` call is the single-auditor CAS
+contract; oops.rs's putchar_no_lock is the panic-path console twin
+(F4-adjacent).
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
