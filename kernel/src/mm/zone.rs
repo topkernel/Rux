@@ -25,6 +25,8 @@
 //! - **INV-BUDDY-5**: The buddy of a free page is either free (same order),
 //!   allocated, or outside the zone boundaries — never free at a different order.
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
@@ -411,11 +413,15 @@ impl Zone {
                     head = FREE_LIST_NULL;
                     break;
                 }
-                // SAFETY: head came from the order-0 free list under the
-                // zone lock; descriptor access is exclusive here.
-                let (rc, linked, next) = unsafe {
-                    ((*page).refcount(), (*page).test_flag(PageFlag::OnFreelist), (*page).next_free())
-                };
+                // head came from the order-0 free list under the zone
+                // lock; descriptor access is exclusive here
+                // (INV-MM-2 locked-chain arm).
+                let p = super::edges::page_ref_of(head).unwrap();
+                let (rc, linked, next) = (
+                    p.refcount(),
+                    p.test_flag(PageFlag::OnFreelist),
+                    p.next_free(),
+                );
                 // SEED-ALLOC-BAD-POP twin (fake-OOM family): a popped block
                 // must be refcount==0 and carry OnFreelist — same forensic
                 // as alloc_from_order, kept per page.
@@ -435,12 +441,13 @@ impl Zone {
                 // concurrent free path treat these pages as buddies and
                 // corrupt the free lists. One pass — flags, mapcount,
                 // refcount, order, and the stale next_free severed.
-                unsafe {
-                    (*page).clear_all_flags();
-                    (*page).reset_mapcount();
-                    (*page).set_refcount(1);
-                    (*page).set_order(0);
-                    (*page).set_next_free(FREE_LIST_NULL);
+                {
+                    let p = super::edges::page_of(head).unwrap();
+                    p.clear_all_flags();
+                    p.reset_mapcount();
+                    p.set_refcount(1);
+                    p.set_order(0);
+                    p.set_next_free(FREE_LIST_NULL);
                 }
                 out[got] = head;
                 if bulk < BULK_PFNS_MAX {
@@ -477,11 +484,13 @@ impl Zone {
                     let block = self.free_area[shard_order].free_list.load(Ordering::Acquire);
                     let page = pfn_to_page(block);
                     if !page.is_null() {
-                        // SAFETY: block came from the shard_order free
-                        // list under the zone lock.
-                        let (rc, linked) = unsafe {
-                            ((*page).refcount(), (*page).test_flag(PageFlag::OnFreelist))
-                        };
+                        // block came from the shard_order free list
+                        // under the zone lock (INV-MM-2).
+                        let p = super::edges::page_ref_of(block).unwrap();
+                        let (rc, linked) = (
+                            p.refcount(),
+                            p.test_flag(PageFlag::OnFreelist),
+                        );
                         if rc != 0 || !linked {
                             if SEED_ALARMS.fetch_add(1, Ordering::Relaxed) < 8 {
                                 crate::pr_err!(
@@ -649,12 +658,13 @@ impl Zone {
         // the head is not actually linked (counter/list desync). Either is
         // a primary corruption event — print the first few.
         {
-            let page = pfn_to_page(head);
-            if !page.is_null() {
-                // SAFETY: read-only descriptor access under the zone lock.
-                let (rc, linked) = unsafe {
-                    ((*page).refcount(), (*page).test_flag(PageFlag::OnFreelist))
-                };
+            // Read-only descriptor access under the zone lock
+            // (INV-MM-2 locked-chain arm).
+            if let Some(p) = super::edges::page_ref_of(head) {
+                let (rc, linked) = (
+                    p.refcount(),
+                    p.test_flag(PageFlag::OnFreelist),
+                );
                 if rc != 0 || !linked {
                     if SEED_ALARMS.fetch_add(1, Ordering::Relaxed) < 8 {
                         crate::pr_err!(
@@ -739,10 +749,11 @@ impl Zone {
                     crate::process::current_pid()
                 );
                 let mut frames: [u64; 10] = [0; 10];
-                // SAFETY: reads the frame-pointer chain of the current stack.
-                unsafe {
+                // Reads the frame-pointer chain of the current stack
+                // (INV-MM-2 diag arm: this CPU's own stack).
+                {
                     let s0 = crate::dfx::backtrace::current_frame_pointer();
-                    crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+                    super::edges::walk_fp_chain(s0, &mut frames);
                 }
                 for f in frames.iter() {
                     if *f == 0 {
@@ -884,24 +895,22 @@ impl Zone {
             return false;
         }
 
-        let page = pfn_to_page(buddy_pfn);
-        if page.is_null() {
-            return false;
-        }
-
-        // SAFETY: page is non-null (checked above); buddy_pfn is within zone
-        // range.  Read-only access — zone lock is held so the descriptor's
-        // linked-state is stable.
-        unsafe {
+        // buddy_pfn is within zone range; read-only access — the zone
+        // lock is held so the descriptor's linked-state is stable
+        // (INV-MM-2 locked-chain arm).
+        match super::edges::page_ref_of(buddy_pfn) {
             // A buddy is only suitable for merging if ALL of:
             // 1. refcount == 0 (free)
             // 2. OnFreelist is set (authoritative linked-state bit)
             // 3. order matches the free-list order being merged at
             // 4. not a reserved page
-            (*page).refcount() == 0
-                && (*page).test_flag(PageFlag::OnFreelist)
-                && (*page).order() == order as u8
-                && !(*page).test_flag(PageFlag::Reserved)
+            Some(page) => {
+                page.refcount() == 0
+                    && page.test_flag(PageFlag::OnFreelist)
+                    && page.order() == order as u8
+                    && !page.test_flag(PageFlag::Reserved)
+            }
+            None => false,
         }
     }
 
@@ -913,9 +922,8 @@ impl Zone {
         {
             let count = 1usize << order;
             for i in 0..count {
-                let pg = pfn_to_page_mut(pfn + i);
-                if !pg.is_null() {
-                    unsafe { (*pg).set_refcount(0); }
+                if let Some(pg) = super::edges::page_of(pfn + i) {
+                    pg.set_refcount(0);
                 }
             }
         }
@@ -962,12 +970,10 @@ impl Zone {
         if head == pfn {
             // Removing head, get next from Page descriptor
             let next = {
-                let page = pfn_to_page(pfn);
-                if page.is_null() {
-                    FREE_LIST_NULL
-                } else {
-                    // SAFETY: page is non-null, lock is held, pfn is from free list.
-                    unsafe { (*page).next_free() }
+                // pfn is from the free list, lock held (INV-MM-2).
+                match super::edges::page_ref_of(pfn) {
+                    Some(page) => page.next_free(),
+                    None => FREE_LIST_NULL,
                 }
             };
             self.free_area[order].free_list.store(next, Ordering::Release);
@@ -979,24 +985,19 @@ impl Zone {
                     break;
                 }
 
-                let prev_page = pfn_to_page(prev);
-                if prev_page.is_null() {
+                // prev_page from the chain, lock held (INV-MM-2).
+                let Some(prev_page) = super::edges::page_of(prev) else {
                     break;
-                }
+                };
 
-                // SAFETY: prev_page is non-null (checked above), lock is held.
-                let next = unsafe { (*prev_page).next_free() };
+                let next = prev_page.next_free();
                 if next == pfn {
                     // Found it, update prev's next pointer
-                    let target_page = pfn_to_page(pfn);
-                    let new_next = if target_page.is_null() {
-                        FREE_LIST_NULL
-                    } else {
-                        // SAFETY: target_page is non-null, lock is held.
-                        unsafe { (*target_page).next_free() }
+                    let new_next = match super::edges::page_ref_of(pfn) {
+                        Some(target) => target.next_free(),
+                        None => FREE_LIST_NULL,
                     };
-                    // SAFETY: prev_page is non-null, lock is held.
-                    unsafe { (*prev_page).set_next_free(new_next); }
+                    prev_page.set_next_free(new_next);
                     break;
                 }
                 prev = next;
@@ -1006,9 +1007,8 @@ impl Zone {
         self.free_area[order].dec_free();
         // R15-6: the removed page leaves the freelist — clear the
         // authoritative linked bit.
-        let rp = pfn_to_page_mut(pfn);
-        if !rp.is_null() {
-            unsafe { (*rp).clear_flag(PageFlag::OnFreelist); }
+        if let Some(rp) = super::edges::page_of(pfn) {
+            rp.clear_flag(PageFlag::OnFreelist);
         }
     }
 
@@ -1054,12 +1054,12 @@ impl Zone {
                 if guard > 4_000_000 {
                     break; // runaway/cyclic chain
                 }
-                let page = pfn_to_page(cur);
-                if page.is_null() {
+                // Read-only descriptor access on the diagnostic path
+                // (INV-MM-2 chain arm).
+                let Some(page) = super::edges::page_ref_of(cur) else {
                     break;
-                }
-                // SAFETY: read-only descriptor access on the diagnostic path.
-                let next = unsafe { (*page).next_free() };
+                };
+                let next = page.next_free();
                 if next == cur {
                     break; // self-loop
                 }

@@ -100,3 +100,13 @@ pub fn memblock_mut() -> &'static mut super::memblock::MemBlock {
     // boot path that owns MEMBLOCK exclusively.
     unsafe { &mut *super::memblock::memblock_raw() }
 }
+
+/// Walk the CURRENT stack's frame-pointer chain into `frames` (INV-MM-2
+/// diag arm: this CPU's own stack, bounded by the callee's guard).
+#[inline]
+pub fn walk_fp_chain(s0: u64, frames: &mut [u64; 10]) {
+    // SAFETY: INV-MM-2 diag arm — the walker is the audited
+    // frame-pointer reader; s0 came from current_frame_pointer() on
+    // this CPU's stack.
+    unsafe { crate::dfx::memwatch::walk_fp_chain(s0, frames) }
+}
