@@ -2193,15 +2193,15 @@ a962016216a8	kernel/src/safety/dma.rs	write_volatile_at	193	volatile,ptr-ops	GAP
 659b3650d6c9	kernel/src/safety/dma.rs	write_volatile	252	volatile	GAP
 723f7b3904bf	kernel/src/safety/dma.rs	deref	262		GAP
 86666b7241dc	kernel/src/safety/dma.rs	deref_mut	270		GAP
-d688422537f4	kernel/src/safety/frame.rs	read_u64	65	volatile,ptr-ops	INV:INV-WINDOW-1
-ea4995f06791	kernel/src/safety/mmio.rs	read_u8	69	volatile	INV:INV-MMIO-1
-d0de44c2de3f	kernel/src/safety/mmio.rs	read_u16	77	volatile	INV:INV-MMIO-1
-6a9f2a61ee05	kernel/src/safety/mmio.rs	read_u32	88	volatile	INV:INV-MMIO-3
-4559055d9466	kernel/src/safety/mmio.rs	read_u64	96	volatile	INV:INV-MMIO-1
-e258ce79d370	kernel/src/safety/mmio.rs	write_u8	105	volatile	INV:INV-MMIO-1
-9d3261e2105d	kernel/src/safety/mmio.rs	write_u16	113	volatile	INV:INV-MMIO-1
-0e83f52511df	kernel/src/safety/mmio.rs	write_u32	121	volatile	INV:INV-MMIO-1
-f747d0d8b738	kernel/src/safety/mmio.rs	write_u64	129	volatile	INV:INV-MMIO-1
+6f6b5de8ba55	kernel/src/safety/frame.rs	read_u64	73	volatile,ptr-ops	GAP
+dcd9a439ae40	kernel/src/safety/mmio.rs	read_u8	85	volatile	GAP
+b49a939242c1	kernel/src/safety/mmio.rs	read_u16	93	volatile	GAP
+4d0636462a74	kernel/src/safety/mmio.rs	read_u32	104	volatile	GAP
+b0913461bd1d	kernel/src/safety/mmio.rs	read_u64	112	volatile	GAP
+84781de53ea3	kernel/src/safety/mmio.rs	write_u8	121	volatile	GAP
+8a0095befa6e	kernel/src/safety/mmio.rs	write_u16	129	volatile	GAP
+73199259c924	kernel/src/safety/mmio.rs	write_u32	137	volatile	GAP
+442cc2d6b991	kernel/src/safety/mmio.rs	write_u64	145	volatile	GAP
 3e73fab377d8	kernel/src/safety/ptr.rs	new	68	ptr-ops	INV:INV-KPTR-1
 5f9e5b3edf42	kernel/src/safety/ptr.rs	new	72		INV:INV-KPTR-1
 699339226c6c	kernel/src/safety/ptr.rs	read_volatile	100	volatile	INV:INV-KPTR-5
@@ -2217,9 +2217,9 @@ bcbb91e2da7a	kernel/src/safety/ptr.rs	<module>	176		INV:INV-KPTR-2
 bcbc4136a6b9	kernel/src/safety/ptr.rs	get	229		INV:INV-SREF-1
 6d2bdbf5929a	kernel/src/safety/ring.rs	<module>	53		INV:INV-RING-1
 448bfc145b8b	kernel/src/safety/ring.rs	<module>	54		GAP
-5e94b7df4c16	kernel/src/safety/ring.rs	put	85		INV:INV-RING-1
-2ec91902077c	kernel/src/safety/ring.rs	get	106	ptr-ops	INV:INV-RING-3
-067a57fcb74a	kernel/src/safety/ring.rs	get	107	volatile,ptr-ops	INV:INV-RING-3
+3e9ad91942c9	kernel/src/safety/ring.rs	put	90		GAP
+6de4708f56a1	kernel/src/safety/ring.rs	get	111	ptr-ops	GAP
+3e84c149c350	kernel/src/safety/ring.rs	get	112	volatile,ptr-ops	GAP
 2f5a1b70f46e	kernel/src/safety/slot.rs	<module>	48		INV:INV-SLOT-1
 40b495dbacb8	kernel/src/safety/slot.rs	<module>	49		GAP
 5dfa44f2d375	kernel/src/safety/slot.rs	publish_with_addr	78		INV:INV-SLOT-1
@@ -2318,7 +2318,6 @@ e6dd4f64b434	kernel/src/sched/sched.rs	<module>	92		GAP
 6b03a27aa0d1	kernel/src/sched/sched.rs	grq_current_fp	870	asm	INV:INV-SCE-3
 1252ff9dd71b	kernel/src/sched/sched.rs	grq_current_fp	875	asm	INV:INV-SCE-3
 67198bf76c96	kernel/src/sched/sched.rs	grq_current_fp	880	asm	INV:INV-SCE-3
-1655fbe36cd9	kernel/src/sched/sched.rs	grq_dump_holder	1040		GAP
 fe384533c354	kernel/src/sched/sched.rs	clear_trap_scratch	2794	asm	INV:INV-SCE-10
 26fb9240ce7c	kernel/src/sched/sched.rs	init	2827		INV:INV-SCE-4
 542b2668ed38	kernel/src/sched/sched.rs	alloc_task_slot	2982	ptr-ops	INV:INV-TL-1
@@ -2326,13 +2325,10 @@ fe384533c354	kernel/src/sched/sched.rs	clear_trap_scratch	2794	asm	INV:INV-SCE-1
 4f083827414f	kernel/src/sched/sched.rs	alloc_task_slot	2999		INV:INV-TL-1
 e8b25c5aac18	kernel/src/sched/sched.rs	free_task_slot	3411		INV:INV-TL-2
 498f9909193f	kernel/src/sched/sched.rs	free_task_slot	3424	volatile,ptr-ops	INV:INV-TL-2
-17045829a0f8	kernel/src/sched/sched.rs	wake_up_enqueue_opt	6974		GAP
-81f0d1ebe6e9	kernel/src/sched/sched.rs	monopolist_census	7786	ptr-ops	GAP
 feb06e8c5503	kernel/src/sched/sched.rs	scheduler_tick	9133		GAP
 01c382c5e106	kernel/src/sched/sched.rs	scheduler_tick	10025	volatile,ptr-ops	GAP
 d69093cd978a	kernel/src/sched/sched.rs	scheduler_tick	10075		GAP
 4e0784914e92	kernel/src/sched/sched.rs	current	10715		GAP
-29649d880cc4	kernel/src/sched/sched.rs	harvest_print_parked	11202	ptr-ops	GAP
 dec590df2860	kernel/src/sched/sched.rs	idle_guard_sp	12466	asm	GAP
 f31df5399803	kernel/src/sched/sched.rs	idle_guard_sp	12473	asm	GAP
 6f68eaadb328	kernel/src/sched/sched.rs	idle_guard_sp	12480	asm	GAP

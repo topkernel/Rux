@@ -19,11 +19,11 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2666**
-- with artifact (non-GAP): **1434** (53.8%)
-- GAP: **1232**
-- by kind: block=2340, unsafe-extern=7, unsafe-fn=163, unsafe-impl=156
-- by category (regions carry 0..n tags): ptr-ops=665, asm=278, volatile=160, raw-construct=58, addr-arith=57, no-preempt=15, ffi=13, static-mut=5, layout-meta=5, transmute=4
+- unsafe regions: **2662**
+- with artifact (non-GAP): **1422** (53.4%)
+- GAP: **1240**
+- by kind: block=2336, unsafe-extern=7, unsafe-fn=163, unsafe-impl=156
+- by category (regions carry 0..n tags): ptr-ops=663, asm=278, volatile=160, raw-construct=58, addr-arith=57, no-preempt=15, ffi=13, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
 
@@ -35,13 +35,13 @@ census id is accounted for here.
 | sync | 159 | 56 | 103 |
 | dfx | 127 | 127 | 0 |
 | drivers | 120 | 8 | 112 |
-| sched | 114 | 91 | 23 |
+| sched | 110 | 91 | 19 |
 | tests | 105 | 1 | 104 |
 | process | 80 | 72 | 8 |
 | ipc | 67 | 54 | 13 |
 | <top> | 61 | 0 | 61 |
 | net | 53 | 2 | 51 |
-| safety | 50 | 42 | 8 |
+| safety | 50 | 30 | 20 |
 | perf | 40 | 7 | 33 |
 | syscall | 27 | 0 | 27 |
 | io_uring | 19 | 0 | 19 |
@@ -3117,7 +3117,7 @@ census id is accounted for here.
 | 649 | <module> | unsafe-impl | - | GAP | `828a6d4903f6` |
 | 650 | <module> | unsafe-impl | - | GAP | `0030893faa67` |
 
-### kernel/src/sched/sched.rs (22)
+### kernel/src/sched/sched.rs (18)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -3125,7 +3125,6 @@ census id is accounted for here.
 | 870 | grq_current_fp | block | asm | INV:INV-SCE-3 | `6b03a27aa0d1` |
 | 875 | grq_current_fp | block | asm | INV:INV-SCE-3 | `1252ff9dd71b` |
 | 880 | grq_current_fp | block | asm | INV:INV-SCE-3 | `67198bf76c96` |
-| 1040 | grq_dump_holder | block | - | GAP | `1655fbe36cd9` |
 | 2794 | clear_trap_scratch | block | asm | INV:INV-SCE-10 | `fe384533c354` |
 | 2827 | init | block | - | INV:INV-SCE-4 | `26fb9240ce7c` |
 | 2982 | alloc_task_slot | block | ptr-ops | INV:INV-TL-1 | `542b2668ed38` |
@@ -3133,13 +3132,10 @@ census id is accounted for here.
 | 2999 | alloc_task_slot | block | - | INV:INV-TL-1 | `4f083827414f` |
 | 3411 | free_task_slot | block | - | INV:INV-TL-2 | `e8b25c5aac18` |
 | 3424 | free_task_slot | block | volatile,ptr-ops | INV:INV-TL-2 | `498f9909193f` |
-| 6974 | wake_up_enqueue_opt | block | - | GAP | `17045829a0f8` |
-| 7786 | monopolist_census | block | ptr-ops | GAP | `81f0d1ebe6e9` |
 | 9133 | scheduler_tick | block | - | GAP | `feb06e8c5503` |
 | 10025 | scheduler_tick | block | volatile,ptr-ops | GAP | `01c382c5e106` |
 | 10075 | scheduler_tick | block | - | GAP | `d69093cd978a` |
 | 10715 | current | block | - | GAP | `4e0784914e92` |
-| 11202 | harvest_print_parked | block | ptr-ops | GAP | `29649d880cc4` |
 | 12466 | idle_guard_sp | block | asm | GAP | `dec590df2860` |
 | 12473 | idle_guard_sp | block | asm | GAP | `f31df5399803` |
 | 12480 | idle_guard_sp | block | asm | GAP | `6f68eaadb328` |
@@ -3864,20 +3860,20 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 65 | read_u64 | block | volatile,ptr-ops | INV:INV-WINDOW-1 | `d688422537f4` |
+| 73 | read_u64 | block | volatile,ptr-ops | GAP | `6f6b5de8ba55` |
 
 ### kernel/src/safety/mmio.rs (8)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 69 | read_u8 | block | volatile | INV:INV-MMIO-1 | `ea4995f06791` |
-| 77 | read_u16 | block | volatile | INV:INV-MMIO-1 | `d0de44c2de3f` |
-| 88 | read_u32 | block | volatile | INV:INV-MMIO-3 | `6a9f2a61ee05` |
-| 96 | read_u64 | block | volatile | INV:INV-MMIO-1 | `4559055d9466` |
-| 105 | write_u8 | block | volatile | INV:INV-MMIO-1 | `e258ce79d370` |
-| 113 | write_u16 | block | volatile | INV:INV-MMIO-1 | `9d3261e2105d` |
-| 121 | write_u32 | block | volatile | INV:INV-MMIO-1 | `0e83f52511df` |
-| 129 | write_u64 | block | volatile | INV:INV-MMIO-1 | `f747d0d8b738` |
+| 85 | read_u8 | block | volatile | GAP | `dcd9a439ae40` |
+| 93 | read_u16 | block | volatile | GAP | `b49a939242c1` |
+| 104 | read_u32 | block | volatile | GAP | `4d0636462a74` |
+| 112 | read_u64 | block | volatile | GAP | `b0913461bd1d` |
+| 121 | write_u8 | block | volatile | GAP | `84781de53ea3` |
+| 129 | write_u16 | block | volatile | GAP | `8a0095befa6e` |
+| 137 | write_u32 | block | volatile | GAP | `73199259c924` |
+| 145 | write_u64 | block | volatile | GAP | `442cc2d6b991` |
 
 ### kernel/src/safety/ptr.rs (13)
 
@@ -3903,9 +3899,9 @@ census id is accounted for here.
 |------|----|------|------------|----------|----|
 | 53 | <module> | unsafe-impl | - | INV:INV-RING-1 | `6d2bdbf5929a` |
 | 54 | <module> | unsafe-impl | - | GAP | `448bfc145b8b` |
-| 85 | put | block | - | INV:INV-RING-1 | `5e94b7df4c16` |
-| 106 | get | block | ptr-ops | INV:INV-RING-3 | `2ec91902077c` |
-| 107 | get | block | volatile,ptr-ops | INV:INV-RING-3 | `067a57fcb74a` |
+| 90 | put | block | - | GAP | `3e9ad91942c9` |
+| 111 | get | block | ptr-ops | GAP | `6de4708f56a1` |
+| 112 | get | block | volatile,ptr-ops | GAP | `3e84c149c350` |
 
 ### kernel/src/safety/slot.rs (5)
 

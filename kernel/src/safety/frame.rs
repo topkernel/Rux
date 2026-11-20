@@ -57,7 +57,15 @@ impl KernelStackWindow {
     /// when the address is outside the window or misaligned.
     #[inline]
     pub fn read_u64(&self, addr: usize) -> Option<u64> {
-        if addr < self.base || addr + 8 > self.top || addr & 7 != 0 {
+        // checked_add (Layer-2.2 Kani conviction #2): a hostile addr
+        // near usize::MAX made the OLD `addr + 8` overflow inside this
+        // guard BEFORE the refusal — the bounds check itself was
+        // UB-prone for the very inputs it exists to reject.
+        let end = match addr.checked_add(8) {
+            Some(e) => e,
+            None => return None,
+        };
+        if addr < self.base || end > self.top || addr & 7 != 0 {
             return None;
         }
         // SAFETY: INV-WINDOW-1/2 — bounds and alignment checked above;
