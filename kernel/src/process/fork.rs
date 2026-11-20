@@ -122,20 +122,19 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         // is the currently running task, distinct from the child.)
         if let Some(parent_task) = crate::sched::current() {
             #[cfg(feature = "riscv64")]
-            unsafe {
-                // SAFETY: save_fpu/save_vstate read+store the currently
-                // running task's live register image (contract: called on
-                // the live current task — parent_task is sched::current(),
-                // in syscall context). The child-side copies are plain
+            {
+                // save_fpu reads+stores the currently running task's live
+                // register image (INV-PROC-FORK-FPU-1: current task,
+                // syscall context). The child-side copies are plain
                 // struct operations.
-                parent_task.thread_mut().save_fpu();
+                crate::process::unsafe_edges::fork_save_parent_fpu(parent_task);
                 let pfpu = parent_task.thread().fpu;
                 let ct = task.thread_mut();
                 ct.fpu.copy_from_slice(&pfpu);
                 ct.mark_fpu_clean();
                 // Vector state inherits the same way (POSIX: the
                 // child observes the parent's vector values).
-                parent_task.thread_mut().save_vstate();
+                crate::process::unsafe_edges::fork_save_parent_vstate(parent_task);
                 let pvs = parent_task.thread().vstate_valid;
                 let pvcsrs = parent_task.thread().vcsrs;
                 let pvregs = parent_task.thread().vregs;
@@ -155,12 +154,9 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
                 // would trap anyway. The child still receives the
                 // clean initial image (mark_fpu_clean), unchanged.
                 if !crate::arch::cpu::ts_set() {
-                    // SAFETY: fpu_save_for_switch xsave's into this task's
-                    // own image; TS is clear, so the live registers belong
-                    // to parent_task (the current task).
-                    unsafe {
-                        parent_task.thread_mut().fpu_save_for_switch();
-                    }
+                    // fpu_save_for_switch xsave's into this task's own
+                    // image; TS is clear (INV-PROC-FORK-FPU-1).
+                    crate::process::unsafe_edges::fork_save_parent_fpu(parent_task);
                 }
                 let pfpu = parent_task.thread().fpu;
                 let ct = task.thread_mut();
@@ -223,15 +219,8 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         // outside __switch_to), so the live read IS the current value.
         #[cfg(feature = "aarch64")]
         {
-            let live_tp: u64;
-            // SAFETY: pure register read; no memory or flags effects.
-            unsafe {
-                core::arch::asm!(
-                    "mrs {}, tpidr_el0",
-                    out(reg) live_tp,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
+            let live_tp: u64 =
+                crate::process::unsafe_edges::read_user_tp_register();
             task.thread_mut().tp_value = live_tp;
         }
 
@@ -524,7 +513,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // typed exclusive reference here; pointer-taking APIs receive
         // `child as *mut Task`, and enqueue_task takes the exclusive
         // borrow back (after it, reads go through one shared re-borrow).
-        let child: &'static mut Task = unsafe { &mut *task_ptr };
+        let child: &'static mut Task = crate::process::unsafe_edges::borrow_task_mut(task_ptr);
         let pid = child.pid();
         if fp {
             crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_ALLOC, fp_t_alloc);
@@ -542,15 +531,16 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // no borrow of `current` — the parent is mutated later (vfork park).
         let parent_handle = current as *mut Task;
         let unwind = |slot: *mut Task, err: i32| -> Result<Pid, i32> {
-            // SAFETY: slot is the exclusively-owned child slot (no other
-            // CPU can observe it before enqueue) and parent_handle is the
-            // live parent task; the five ops run in the R33-pre order on
-            // live slots.
-            unsafe {
-                (*parent_handle).remove_child(slot);
-                crate::process::pid_hash::pid_hash_remove((*slot).pid());
-                (*slot).free_kernel_stack();
-                crate::process::pid::free_pid((*slot).pid());
+            // slot is the exclusively-owned child slot (no other CPU can
+            // observe it before enqueue) and parent_handle is the live
+            // parent task; the five ops run in the R33-pre order on live
+            // slots (INV-PROC-BORROW-1).
+            {
+                crate::process::unsafe_edges::borrow_task(parent_handle).remove_child(slot);
+                let slot_pid = crate::process::unsafe_edges::borrow_task(slot).pid();
+                crate::process::pid_hash::pid_hash_remove(slot_pid);
+                crate::process::unsafe_edges::borrow_task_mut(slot).free_kernel_stack();
+                crate::process::pid::free_pid(slot_pid);
                 crate::sched::free_task_slot(slot);
             }
             Err(err)
@@ -567,10 +557,11 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 // wait for it — the grandparent reaps it (LTP clone08's
                 // CLONE_PARENT case).
                 let grandparent = current.parent_ptr().unwrap_or(current as *const Task);
-                // SAFETY: the parent link is fixed at construction time and
-                // the grandparent slot is live (R33-pre: children are
+                // The parent link is fixed at construction time and the
+                // grandparent slot is live (R33-pre: children are
                 // unlinked before their slot is freed).
-                unsafe { (*grandparent).add_child(child as *mut Task) };
+                crate::process::unsafe_edges::borrow_task(grandparent as *mut Task)
+                    .add_child(child as *mut Task);
             } else {
                 current.add_child(child as *mut Task);
             }
@@ -712,39 +703,33 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
             // Break COW (if the leaf is still RO+COW) through the arch's
             // own walker. Retry is fine: a sibling already resolved it.
-            // SAFETY: the arch walk/COW backend requires caller guarantees
-            // that hold here: child_root is the child's fresh root ppn and
-            // va is a validated user pointer (access_ok-equivalent, the
-            // child's CLONE_CHILD_SETTID argument).
-            let cow = unsafe {
-                crate::arch::mm::mm_ops::handle_cow_fault(
-                    &child_mm,
-                    child_root,
-                    ArchVirtAddr::new(va),
-                )
-            };
+            // The arch walk/COW backend's guarantees hold here:
+            // child_root is the child's fresh root ppn and va is a
+            // validated user pointer (INV-PROC-FORK-COW-1).
+            let cow = crate::process::unsafe_edges::fork_handle_cow_fault(
+                &child_mm,
+                child_root,
+                va,
+            );
             match cow {
                 crate::arch::mm::mm_ops::CowFaultResult::Resolved
                 | crate::arch::mm::mm_ops::CowFaultResult::Retry => {}
                 crate::arch::mm::mm_ops::CowFaultResult::OutOfMemory => return false,
             }
 
-            // Re-walk and write through the linear map.
-            // SAFETY: walk is the arch's unsafe page-table backend; the
-            // root/va contract is discharged above.
-            let walk = unsafe { PageTableWalker::walk(child_root, va) };
+            // Re-walk and write through the linear map
+            // (INV-PROC-FORK-WALK-1).
+            let walk = crate::process::unsafe_edges::fork_pt_walk(child_root, va);
             match walk {
                 Some((ppn, _bits)) => {
                     let base = phys_to_virt(PhysAddr((ppn << 12) as u64));
-                    // SAFETY: the linear-map byte at (ppn, va offset) is
-                    // the child's page holding child_tid; the child has
-                    // never run, so no concurrent writer exists.
-                    unsafe {
-                        core::ptr::write_volatile(
-                            (base.as_usize() + (va & 0xfff) as usize) as *mut i32,
-                            tid,
-                        );
-                    }
+                    // The linear-map byte at (ppn, va offset) is the
+                    // child's page holding child_tid
+                    // (INV-PROC-FORK-TIDWRITE-1).
+                    crate::process::unsafe_edges::fork_write_child_tid(
+                        base.as_usize() + (va & 0xfff) as usize,
+                        tid,
+                    );
                     // The child has never run, so no TLB can hold a stale
                     // entry; fence for ordering only.
                     crate::arch::cpu::dsb();
@@ -815,9 +800,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                             let child_arc = alloc::sync::Arc::new(child_as);
                             let p_root = parent_as.root_ppn();
                             let c_root = child_arc.root_ppn();                            for va in [0x1c8000u64, 0x1c9000, 0x100000] {
-                                unsafe {
-                                    let p = crate::arch::mm::mm_ops::PageTableWalker::walk(p_root, va);
-                                    let c = crate::arch::mm::mm_ops::PageTableWalker::walk(c_root, va);
+                                {
+                                    let p = crate::process::unsafe_edges::fork_pt_walk(p_root, va);
+                                    let c = crate::process::unsafe_edges::fork_pt_walk(c_root, va);
                                     taskdump_raw_line(b"FTX-COWCHK parent=");
                                     taskdump_dec(current.pid() as u64);
                                     taskdump_raw_line(b" child=");
@@ -835,7 +820,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                                     taskdump_raw_line(b" refcnt=");
                                     let rf = p.and_then(|x| {
                                         let pg = crate::mm::page_desc::pfn_to_page(x.0 as usize);
-                                        if pg.is_null() { None } else { Some(unsafe { (*pg).refcount() }) }
+                                        crate::process::unsafe_edges::page_refcount(pg)
                                     });
                                     taskdump_dec(rf.unwrap_or(-1i32) as i64 as u64);
                                     taskdump_raw_line(b"\n");
@@ -940,10 +925,10 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // === CLONE_THREAD: join the parent's thread group ===
         if is_thread {
             let leader = current.group_leader_ptr();
-            // SAFETY: leader's ring is well-formed (invariant maintained by
-            // thread_group_join/leave); the child slot is fully constructed
-            // and not yet runnable.
-            unsafe { (*leader).thread_group_join(child as *mut Task) };
+            // Leader's ring is well-formed (the join/leave invariant); the
+            // child slot is fully constructed and not yet runnable.
+            crate::process::unsafe_edges::borrow_task_mut(leader)
+                .thread_group_join(child as *mut Task);
         }
         // else: tgid = pid, single-member self-ring (already set at construction)
 
@@ -1104,13 +1089,13 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             );
             if is_thread {
                 // Not a children-list member; undo the ring join instead.
-                // SAFETY: the slot was refused at enqueue — ownership is
-                // back with this fork path; it never left the hash, the
-                // ring join above is the only linkage to undo, and no
-                // other CPU can observe it.
-                unsafe {
+                // The slot was refused at enqueue — ownership is back with
+                // this fork path; it never left the hash, the ring join
+                // above is the only linkage to undo, and no other CPU can
+                // observe it (INV-PROC-BORROW-1).
+                {
                     Task::thread_group_leave(task_ptr);
-                    (*task_ptr).free_kernel_stack();
+                    crate::process::unsafe_edges::borrow_task_mut(task_ptr).free_kernel_stack();
                     crate::process::pid::free_pid(pid);
                     crate::sched::free_task_slot(task_ptr);
                 }
@@ -1123,7 +1108,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // Post-enqueue: the scheduler holds the exclusive borrow; the
         // remaining reads (trace rows, vfork bookkeeping) go through ONE
         // shared re-borrow of the live slot.
-        let child_ref: &Task = unsafe { &*task_ptr };
+        let child_ref: &Task = crate::process::unsafe_edges::borrow_task(task_ptr);
 
         // The sched:sched_process_fork and sched:sched_wakeup_new
         // tracepoints: the child is fully built and linked, exactly the

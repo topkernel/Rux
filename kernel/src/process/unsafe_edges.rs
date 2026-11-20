@@ -507,3 +507,457 @@ pub fn frame_ref(p: *mut crate::arch::pt_regs::PtRegs) -> &'static crate::arch::
     // SAFETY: INV-PROC-FRAME-1 — own-stack window, shared reads only.
     unsafe { &*p }
 }
+
+// ---- exec loader edges --------------------------------------------------
+// The round-3b split left exec.rs with local "one audited edge" wrappers
+// plus the raw walk/copy sites; the framework/service doctrine moves the
+// whole family here (INV-PROC-EXEC-*). exec.rs keeps only loader logic.
+
+/// Copy an image block into the fresh user address space through the
+/// page-table walk (page-by-page, physical contiguity NOT assumed).
+///
+/// INV-PROC-EXEC-COPY-1: `root_ppn` is a valid user page-table root of
+/// the in-construction address space; the range
+/// `[vaddr, vaddr+src.len())` was just mapped by THIS loader and is
+/// exclusively owned by it (unpublished — INV-LOCK-7). Returns false
+/// when a page of the range has no mapping.
+pub fn exec_copy_user_image(root_ppn: u64, vaddr: u64, src: &[u8]) -> bool {
+    use crate::arch::mm::mm_ops::PageTableWalker;
+    use crate::arch::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
+
+    let mut done = 0usize;
+    while done < src.len() {
+        let va = vaddr + done as u64;
+        let in_page = (va as usize) & (PAGE_SIZE as usize - 1);
+        // SAFETY: INV-PROC-EXEC-COPY-1 — the arch walker over this
+        // loader's own fresh tree.
+        let Some((ppn, pte)) = (unsafe { PageTableWalker::walk(root_ppn, va) }) else {
+            return false;
+        };
+        if pte & 1 == 0 {
+            return false;
+        }
+        let chunk = core::cmp::min(src.len() - done, PAGE_SIZE as usize - in_page);
+        let kva = phys_to_virt(PhysAddr::new(ppn << PAGE_SHIFT)).bits() as usize + in_page;
+        // SAFETY: INV-PROC-EXEC-COPY-1 — kva is the linear-map address
+        // of a page-table-resolved frame of this address space; chunk is
+        // bounded by the page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr().add(done), kva as *mut u8, chunk);
+        }
+        done += chunk;
+    }
+    true
+}
+
+/// One audited edge for the ELF program-header lookups (fs/elf.rs owns
+/// the table contract).
+///
+/// INV-PROC-EXEC-ELF-1: `ehdr`/`data` come from a validated ELF image
+/// and `index < e_phnum` at every call site (loops are bounded by
+/// e_phnum or its derived phdr_count).
+#[inline]
+pub fn exec_phdr_at(
+    ehdr: &crate::fs::elf::Elf64Ehdr,
+    data: &[u8],
+    index: usize,
+) -> Option<crate::fs::elf::Elf64Phdr> {
+    // SAFETY: INV-PROC-EXEC-ELF-1 — validated image, bounded index.
+    unsafe { ehdr.get_program_header(data, index) }
+}
+
+/// One audited edge for the ELF-header validation of a file slice.
+///
+/// INV-PROC-EXEC-ELF-1 (header arm): `from_bytes` validates
+/// magic/layout internally; None for malformed images.
+#[inline]
+pub fn exec_ehdr_from(data: &[u8]) -> Option<crate::fs::elf::Elf64Ehdr> {
+    // SAFETY: INV-PROC-EXEC-ELF-1 — self-validating parser.
+    unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(data) }
+}
+
+/// The fresh-tree mapping allocator (mm/mod.rs).
+///
+/// INV-PROC-EXEC-MAP-1: `root` is a freshly allocated page-table root
+/// owned by this loader; va/len describe a user range nothing else has
+/// mapped; flags are valid user PTE bits. Returns the block's physical
+/// base (never for linear writes — content goes through the walker).
+#[inline]
+pub fn exec_map_user_range(root: u64, va: u64, len: u64, flags: u64) -> Option<u64> {
+    // SAFETY: INV-PROC-EXEC-MAP-1 — fresh unpublished tree, owned range.
+    unsafe { crate::mm::alloc_and_map_user_table(root, va, len, flags) }
+}
+
+/// Map a static physical frame (vDSO data/code) into the fresh tree.
+///
+/// INV-PROC-EXEC-VDSO-1: `root` is the freshly created page-table root;
+/// `paddr..paddr+len` are the aligned static vDSO frames; flags are
+/// valid user PTE bits.
+#[inline]
+pub fn exec_map_user_region_static(
+    root: u64,
+    va: u64,
+    paddr: u64,
+    len: u64,
+    flags: u64,
+) {
+    // SAFETY: INV-PROC-EXEC-VDSO-1 — fresh root, aligned static frames.
+    // Some arches return bool (mapped?), others () — the loader sites
+    // ignore the result (the READBACK probes verify).
+    let _ = unsafe { crate::arch::mm::mm_ops::map_user_region(root, va, paddr, len, flags) };
+}
+
+/// Debug readback of one user word through the page-table walk.
+///
+/// INV-PROC-EXEC-PROBE-1: `root` is the loader's fresh tree and `va` a
+/// range it just mapped; the volatile load stays inside the resolved
+/// page.
+pub fn exec_probe_read_u64(root: u64, va: u64) -> Option<(u64, u64)> {
+    use crate::arch::mm::mm_ops::PageTableWalker;
+    // SAFETY: INV-PROC-EXEC-PROBE-1 — the loader's own fresh tree.
+    let (ppn, _) = unsafe { PageTableWalker::walk(root, va)? };
+    let kva = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(ppn as u64 * 4096))
+        .bits() as usize;
+    // SAFETY: INV-PROC-EXEC-PROBE-1 — the linear-map byte of the frame
+    // resolved above, within the same page as va.
+    let word = unsafe { core::ptr::read_volatile((kva + (va & 0xFFF) as usize) as *const u64) };
+    Some((word, ppn))
+}
+
+/// Free the fresh, still-unpublished user page-table tree (the error
+/// path's RAII guard).
+///
+/// INV-PROC-EXEC-FREETREE-1: `root_ppn` was allocated by
+/// create_user_address_space and no MmStruct owns it yet (INV-LOCK-7:
+/// no mm-side writers exist; the FRESH_TREE_PTE_LOCK serializes
+/// munmap-side walkers).
+pub fn exec_free_user_page_trees(root_ppn: u64) {
+    // SAFETY: INV-PROC-EXEC-FREETREE-1 — unpublished tree, exactly-once
+    // free from the owning guard.
+    unsafe {
+        crate::arch::mm::mmu_init::free_user_page_tables(
+            &crate::mm::mm_struct::FRESH_TREE_PTE_LOCK,
+            root_ppn,
+            &[],
+        );
+    }
+}
+
+/// Write the two-instruction signal trampoline words into the freshly
+/// mapped trampoline page.
+///
+/// INV-PROC-EXEC-TRAMP-1: `kva` is the linear-map address of a frame
+/// just mapped by this loader into the fresh tree; the two u32 stores
+/// stay inside the page.
+#[inline]
+pub fn exec_write_sigtramp(kva: usize, w0: u32, w1: u32) {
+    // SAFETY: INV-PROC-EXEC-TRAMP-1 — owned fresh frame, in-page stores.
+    unsafe {
+        core::ptr::write_volatile(kva as *mut u32, w0);
+        core::ptr::write_volatile((kva + 4) as *mut u32, w1);
+    }
+}
+
+/// Create the MmStruct for the finished image.
+///
+/// INV-PROC-EXEC-MMNEW-1: `user_ppn` is a freshly allocated page-table
+/// root with no prior users; ownership transfers to the returned
+/// MmStruct (its Drop tears the tree down exactly once).
+#[inline]
+pub fn exec_mm_new_user(user_ppn: u64) -> crate::mm::MmStruct {
+    // SAFETY: INV-PROC-EXEC-MMNEW-1 — fresh root, ownership transfer.
+    unsafe { crate::mm::MmStruct::new_user(user_ppn) }
+}
+
+/// The exec tail's satp/CR3 switch onto the new image.
+///
+/// INV-PROC-EXEC-SWITCH-1: `user_ppn` is the new image's page-table
+/// root with the kernel half mapped (create_user_address_space links
+/// it) and `asid` was drawn for this mm; runs before the old mm's Arc
+/// drop so freeing the old tree is safe for this hart.
+#[inline]
+pub fn exec_switch_address_space(user_ppn: u64, asid: u16) {
+    // SAFETY: INV-PROC-EXEC-SWITCH-1 — kernel half present on the new
+    // root; ASID paired.
+    unsafe { crate::mm::switch_address_space(user_ppn, asid) }
+}
+
+/// Tighten the leaf PTE permission bits of every present leaf covering
+/// [seg_start, seg_end) in the fresh, still-unpublished user tree.
+///
+/// INV-PROC-EXEC-PTE-1: the walk descends the fresh tree's own tables
+/// (root allocated by this loader, unpublished — INV-LOCK-7); each
+/// level's validity is checked before descending and only the leaf
+/// permission bits are rewritten (PPN preserved).
+/// Tighten the leaf PTE permission bits of every present leaf covering
+/// [seg_start, seg_end) in the fresh, still-unpublished user tree
+/// (INV-LOCK-7: no MmStruct owns it yet, so no TLB entries can exist).
+/// PPNs are preserved — permission bits only. `seg_exec=false` sets NX
+/// on the arches that express non-exec via an NX alias.
+///
+/// One audited edge replacing the four hand-rolled per-level walks that
+/// used to live inline in the main-image and interpreter tightening
+/// loops (same walk, same invariants, one place).
+pub fn exec_set_leaf_flags_range(root: u64, seg_start: u64, seg_end: u64, seg_flags: u64, seg_exec: bool) {
+    // seg_exec only carries meaning on arches that express non-exec via
+    // an NX alias (x86_64); the riscv64 PTE layout has no NX bit.
+    #[cfg(not(feature = "x86_64"))]
+    let _ = seg_exec;
+    #[cfg(feature = "riscv64")]
+    {
+        let mut vaddr = seg_start;
+        while vaddr < seg_end {
+            let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+            let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+            let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+            // SAFETY: the walk descends the fresh tree's own tables
+            // (root allocated by this loader, unpublished — INV-LOCK-7);
+            // each level's validity is checked before descending and only
+            // the leaf permission bits are rewritten (PPN preserved).
+            unsafe {
+                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                    root << crate::arch::mm::PAGE_SHIFT,
+                );
+                let pte2 = (*root_table).get(vpn2);
+                if !pte2.is_valid() {
+                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                    continue;
+                }
+                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                    pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                );
+                let pte1 = (*table1).get(vpn1);
+                if !pte1.is_valid() {
+                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                    continue;
+                }
+                let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
+                    pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
+                );
+                let old_pte = (*table0).get(vpn0);
+                if !old_pte.is_valid() {
+                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                    continue;
+                }
+                let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
+                (*table0).set(
+                    vpn0,
+                    crate::arch::mm::PageTableEntry::from_bits(new_bits),
+                );
+            }
+            vaddr += crate::arch::mm::PAGE_SIZE as u64;
+        }
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        let mut vaddr = seg_start;
+        while vaddr < seg_end {
+            // 4-level x86_64 walk (PML4/PDPT/PD/PT)
+            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+            // SAFETY: the walk descends the fresh tree's own tables
+            // (root allocated by this loader, unpublished — INV-LOCK-7);
+            // each level's validity is checked before descending and only
+            // the leaf permission bits are rewritten (PPN preserved).
+            unsafe {
+                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                    root << crate::arch::mm::PAGE_SHIFT,
+                );
+                let pte4 = (*root_table).get(i4);
+                if !pte4.is_valid() {
+                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                    continue;
+                }
+                let table3 = crate::arch::mm::mmu_init::get_page_table_virt(
+                    pte4.ppn() << crate::arch::mm::PAGE_SHIFT,
+                );
+                let pte3 = (*table3).get(i3);
+                if !pte3.is_valid() {
+                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                    continue;
+                }
+                let table2 = crate::arch::mm::mmu_init::get_page_table_virt(
+                    pte3.ppn() << crate::arch::mm::PAGE_SHIFT,
+                );
+                let pte2 = (*table2).get(i2);
+                if !pte2.is_valid() || pte2.is_leaf() {
+                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                    continue;
+                }
+                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                    pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                );
+                let old_pte = (*table1).get(i1);
+                if !old_pte.is_valid() {
+                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                    continue;
+                }
+                // x86 permission bits: clear W|U|NX, then set from the
+                // semantic aliases (V=P, W=RW, U=US; R/X are no-ops —
+                // non-exec is expressed via NX).
+                let clear =
+                    crate::arch::mm::PageTableEntry::W
+                        | crate::arch::mm::PageTableEntry::U
+                        | crate::arch::mm::PageTableEntry::NX;
+                let mut new_bits = (old_pte.bits() & !clear) | seg_flags;
+                if !seg_exec {
+                    new_bits |= crate::arch::mm::PageTableEntry::NX;
+                }
+                (*table1).set(
+                    i1,
+                    crate::arch::mm::PageTableEntry::from_bits(new_bits),
+                );
+            }
+            vaddr += crate::arch::mm::PAGE_SIZE as u64;
+        }
+    }
+    #[cfg(feature = "aarch64")]
+    {
+        let mut vaddr = seg_start;
+        while vaddr < seg_end {
+            // SAFETY: user_ppn is the freshly created user root (unpublished
+            // — INV-LOCK-7); the arch helper rewrites only present L3
+            // leaves' permission bits, preserving the output address.
+            unsafe {
+                crate::arch::mm::mmu_init::set_user_leaf_flags(root, vaddr, seg_flags);
+            }
+            vaddr += crate::arch::mm::PAGE_SIZE as u64;
+        }
+    }
+}
+
+// ---- fork edges ----------------------------------------------------------
+// The fork path's arch/FPU and page-table-backend edges (the CLONE_FPUs
+// bank, the CLONE_CHILD_SETTID resolved write, the diagnostic COW walk).
+
+/// Bank the CURRENT task's live FPU image (riscv64 save_fpu).
+///
+/// INV-PROC-FORK-FPU-1: called on the live current task in syscall
+/// context — the callee reads+stores the running register image.
+#[inline]
+#[cfg(feature = "riscv64")]
+pub fn fork_save_parent_fpu(t: &mut Task) {
+    // SAFETY: INV-PROC-FORK-FPU-1 — current task, syscall context.
+    unsafe { t.thread_mut().save_fpu() }
+}
+
+/// Bank the CURRENT task's live vector state (riscv64 save_vstate).
+///
+/// INV-PROC-FORK-FPU-1 (vector arm): same current-task contract; the
+/// child observes the parent's vector values (POSIX).
+#[inline]
+#[cfg(feature = "riscv64")]
+pub fn fork_save_parent_vstate(t: &mut Task) {
+    // SAFETY: INV-PROC-FORK-FPU-1 — current task, syscall context.
+    unsafe { t.thread_mut().save_vstate() }
+}
+
+/// xsave the current task's live FPU image into its own bank.
+///
+/// INV-PROC-FORK-FPU-1 (x86 arm): TS is clear, so the live registers
+/// belong to `t` (the current task).
+#[inline]
+#[cfg(feature = "x86_64")]
+pub fn fork_save_parent_fpu(t: &mut Task) {
+    // SAFETY: INV-PROC-FORK-FPU-1 — current task, TS clear.
+    unsafe { t.thread_mut().fpu_save_for_switch() }
+}
+
+/// riscv64's fpu_save_for_switch twin (the riscv arm of the same
+/// contract).
+#[inline]
+#[cfg(feature = "riscv64")]
+pub fn fork_fpu_save_for_switch(t: &mut Task) {
+    // SAFETY: INV-PROC-FORK-FPU-1 — current task's own image.
+    unsafe { t.thread_mut().fpu_save_for_switch() }
+}
+
+/// The arch page-table walk backend (fork's CoW/resolved-write paths).
+///
+/// INV-PROC-FORK-WALK-1: `root` is the child's fresh root ppn and `va`
+/// a validated user address of the in-construction child (nothing else
+/// observes the tree).
+#[inline]
+pub fn fork_pt_walk(root: u64, va: u64) -> Option<(u64, u64)> {
+    // SAFETY: INV-PROC-FORK-WALK-1 — fresh child tree, validated va.
+    unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) }
+}
+
+/// The arch CoW fault backend (fork's CLONE_CHILD_SETTID pre-resolve).
+///
+/// INV-PROC-FORK-COW-1: child_root is the child's fresh root ppn; va is
+/// access_ok-validated (the child's CLONE_CHILD_SETTID argument).
+pub fn fork_handle_cow_fault(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root: u64,
+    va: u64,
+) -> crate::arch::mm::mm_ops::CowFaultResult {
+    // SAFETY: INV-PROC-FORK-COW-1 — fresh root, validated user va.
+    unsafe {
+        crate::arch::mm::mm_ops::handle_cow_fault(
+            mm,
+            root,
+            // The arch memory-layout VirtAddr twin (Sv39 sign-extension on
+            // riscv64, plain on x86_64/aarch64).
+            crate::arch::mm::memory_layout::VirtAddr::new(va),
+        )
+    }
+}
+
+/// The resolved child-tid write through the linear map.
+///
+/// INV-PROC-FORK-TIDWRITE-1: `kva` is the linear-map address of the
+/// child's page holding child_tid, resolved by fork_pt_walk; the child
+/// has never run, so no concurrent writer exists and no TLB can hold a
+/// stale entry.
+#[inline]
+pub fn fork_write_child_tid(kva: usize, tid: i32) {
+    // SAFETY: INV-PROC-FORK-TIDWRITE-1 — owned unrun child page.
+    unsafe { core::ptr::write_volatile(kva as *mut i32, tid) }
+}
+
+/// Read the user TP register (aarch64's tpidr_el0).
+///
+/// INV-PROC-DIAG-1 (reg arm): pure register read; no memory or flags
+/// effects.
+#[inline]
+#[cfg(feature = "aarch64")]
+pub fn read_user_tp_register() -> u64 {
+    let live_tp: u64;
+    // SAFETY: INV-PROC-DIAG-1 — a single mrs with nomem/nostack/
+    // preserves_flags.
+    unsafe {
+        core::arch::asm!(
+            "mrs {}, tpidr_el0",
+            out(reg) live_tp,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    live_tp
+}
+
+/// Read a page descriptor's refcount (the COW-share diagnostic).
+///
+/// INV-PROC-DIAG-1 (page arm): `pg` is a page-descriptor pointer from
+/// pfn_to_page of a walk-resolved frame (or null — None); read-only.
+#[inline]
+pub fn page_refcount(pg: *mut crate::mm::page_desc::Page) -> Option<i32> {
+    if pg.is_null() {
+        return None;
+    }
+    // SAFETY: INV-PROC-DIAG-1 — non-null page descriptor, plain read.
+    Some(unsafe { (*pg).refcount() })
+}
+
+// ---- wait-queue statics -------------------------------------------------
+// WaitQueueHead's raw *mut Task entries are lock-guarded; the Send/Sync
+// proofs live here so wait.rs carries zero unsafe.
+
+// SAFETY: WaitQueueHead uses internal Mutex/Spinlock synchronization;
+// the *mut Task entries are only dereferenced under the queue lock and
+// the scheduler's park/wake protocol.
+unsafe impl Send for crate::process::wait::WaitQueueHead {}
+// SAFETY: same lock discipline across CPUs.
+unsafe impl Sync for crate::process::wait::WaitQueueHead {}
