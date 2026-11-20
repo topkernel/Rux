@@ -889,6 +889,230 @@ discipline; slowtask's `audit` call is the single-auditor CAS
 contract; oops.rs's putchar_no_lock is the panic-path console twin
 (F4-adjacent).
 
+# INV index — code-resident contracts (Round D step 1)
+
+
+Every INV id below is DEFINED at its owner site in kernel/src (the
+comment carries the full contract; this index is the gate-resolvable
+registry so `INV:<id>` artifacts verify). Round-D retags cite these
+ids; the full text lives at the owner line.
+
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-AE-COPY-1 | `arch/aarch64/mm/unsafe_edges.rs` | Copy one page between two linear-map addresses (INV-AE-COPY-1): both |
+| INV-AE-PT-1 | `arch/aarch64/mm/unsafe_edges.rs` | ! - **INV-AE-PT-1 (liveness)** — [`PtTable`] is only constructed from a |
+| INV-AE-PT-2 | `arch/aarch64/mm/unsafe_edges.rs` | ! - **INV-AE-PT-2 (bounds)** — accessors take any `usize` index and |
+| INV-AE-PT-3 | `arch/aarch64/mm/unsafe_edges.rs` | ! - **INV-AE-PT-3 (aliasing)** — tables are shared across CPUs; `get` |
+| INV-AE-PT-4 | `arch/aarch64/mm/unsafe_edges.rs` | ! - **INV-AE-PT-4 (stage discipline)** — construction routes through |
+| INV-BLKDEV-3 | `drivers/blkdev/mod.rs` | audited edge for the driver-private slot (INV-BLKDEV-3). |
+| INV-BOOT-PANICBUF-1 | `boot_edges.rs` | INV-BOOT-PANICBUF-1: the single-panicking-CPU path — the UART line |
+| INV-BOOT-RAWFRAMES-1 | `boot_edges.rs` | INV-BOOT-RAWFRAMES-1: diagnostic read-only walk of the current |
+| INV-BOOT-REGIONS-1 | `main.rs` | module (INV-BOOT-REGIONS-1). |
+| INV-BOOT-SETUP-1 | `boot_edges.rs` | INV-BOOT-SETUP-1: `rust_main` runs this exactly once, before any |
+| INV-BOOT-SYM-1 | `boot_edges.rs` | INV-BOOT-SYM-1: only the symbol's ADDRESS is read — the linker |
+| INV-BOOT-ZEROPAGE-1 | `main.rs` | (INV-BOOT-ZEROPAGE-1 in the framework module). |
+| INV-BUDDY-1 | `mm/buddy_allocator.rs` | ! The same INV-BUDDY-1 through INV-BUDDY-5 invariants from `zone.rs` apply, |
+| INV-BUDDY-2 | `mm/zone.rs` | ! - **INV-BUDDY-2**: A page's `private` order field matches the order of the |
+| INV-BUDDY-3 | `mm/zone.rs` | ! - **INV-BUDDY-3**: Each order's free list forms a valid singly-linked list |
+| INV-BUDDY-4 | `mm/zone.rs` | ! - **INV-BUDDY-4**: `free_count[order]` matches the actual list length for |
+| INV-BUDDY-5 | `mm/buddy_allocator.rs` | ! The same INV-BUDDY-1 through INV-BUDDY-5 invariants from `zone.rs` apply, |
+| INV-COW-1 | `arch/aarch64/mm/page_fault.rs` | deferred through COW per INV-COW-1); otherwise the access is a real |
+| INV-COW-2 | `arch/riscv64/mm/mm_ops.rs` | ! - **INV-COW-2**: When the COW bit is set, the page's `_refcount >= 2` |
+| INV-COW-3 | `arch/aarch64/mm/mm_ops.rs` | Handle copy-on-write page fault (INV-COW-3/4; twin contract): |
+| INV-COW-4 | `arch/aarch64/mm/mm_ops.rs` | Shared: install the private copy (INV-COW-4). The page came from |
+| INV-COW-5 | `arch/aarch64/mm/mm_ops.rs` | INV-COW-5: downgrade BOTH parent and |
+| INV-CS-1 | `arch/riscv64/context.rs` | ! - **INV-CS-1**: `__switch_to` saves and restores all callee-saved registers |
+| INV-CS-2 | `arch/riscv64/context.rs` | ! - **INV-CS-2**: FPU state (if `Fs != Off`) is saved/restored via |
+| INV-CS-3 | `arch/riscv64/context.rs` | ! - **INV-CS-3**: The MMU (satp) is switched via `switch_mm()` **before** |
+| INV-CS-4 | `arch/riscv64/context.rs` | ! - **INV-CS-4**: `__switch_to` does NOT enable SIE (interrupts). The caller |
+| INV-CS-5 | `arch/riscv64/context.rs` | ! - **INV-CS-5**: After `__switch_to`, the previous task's stack pointer |
+| INV-DFXWALK-1 | `dfx/mod.rs` | for the dfx family; INV-DFXWALK-1: `root` is the diagnosed task's own |
+| INV-EXT4-SBRES-1 | `fs/ext4/file.rs` | The cached Ext4Inode box behind inode.sb (INV-EXT4-SBRES-1), |
+| INV-FDT-1 | `cmdline.rs` | (INV-FDT-1): boot.S maps the bootloader-provided DTB blob at its |
+| INV-FRAME-1 | `ipc/binder.rs` | INV-FRAME-1 typed descriptor (out-of-range -> None). |
+| INV-FS-FILEPRIV-1 | `io_uring/mod.rs` | (the cell discipline's close-path take, INV-FS-FILEPRIV-1), then we |
+| INV-FS-GLOBALSB-1 | `printk.rs` | GLOBAL) — resolved through the framework edge (INV-FS-GLOBALSB-1 |
+| INV-FS-PRIVDATA-1 | `fs/unsafe_edges.rs` | INV-FS-PRIVDATA-1: `inode.private_data`, when `Some(p)`, is a raw |
+| INV-HEAP-1 | `dfx/metawatch.rs` | ! cross-checks INV-HEAP-1/2/3. Pass 1 is lock-free (transient |
+| INV-HEAP-2 | `mm/buddy_allocator.rs` | ! - **INV-HEAP-2**: `free_lists[order]` is either `EMPTY_LIST` or a valid |
+| INV-HEAP-3 | `mm/buddy_allocator.rs` | ! - **INV-HEAP-3** (session 5, wedge fix): the per-page FREE bit lives in |
+| INV-IOURING-RING-1 | `io_uring/mod.rs` | Write SQ ring header (INV-IOURING-RING-1: the region is in hand, |
+| INV-LIST-1 | `list.rs` | ! INV-LIST-1 (F15-registered primitive, safety-and-performance.md): |
+| INV-MEMFILE-1 | `fs/vfs.rs` | INV-MEMFILE-1 (unsafe-slim r3): open_mem_file stores an OWNED |
+| INV-PCP-2 | `mm/mod.rs` | (INV-PCP-1), zone-counter parity (INV-PCP-2) and irq-off same-CPU |
+| INV-PCP-3 | `mm/mod.rs` | exclusivity (INV-PCP-3); see that module's header for the invariants. |
+| INV-PROC-ACTIVEMM-1 | `process/unsafe_edges.rs` | INV-PROC-ACTIVEMM-1: `mm_ptr` names an AddressSpace whose owning |
+| INV-PROC-APPPARK-1 | `process/unsafe_edges.rs` | INV-PROC-APPPARK-1: `t` is the current, still-live dying task (the |
+| INV-PROC-BORROW-1 | `process/ptrace.rs` | task is current (INV-PROC-BORROW-1's current-task arm). |
+| INV-PROC-COREDUMP-1 | `process/unsafe_edges.rs` | ! * [`dump_read_page`] — INV-PROC-COREDUMP-1: page-table walk + one |
+| INV-PROC-DIAG-1 | `process/unsafe_edges.rs` | INV-PROC-DIAG-1: bounded, read-only forensics of a possibly-racing |
+| INV-PROC-EXEC-COPY-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-COPY-1: `root_ppn` is a valid user page-table root of |
+| INV-PROC-EXEC-ELF-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-ELF-1: `ehdr`/`data` come from a validated ELF image |
+| INV-PROC-EXEC-FREETREE-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-FREETREE-1: `root_ppn` was allocated by |
+| INV-PROC-EXEC-MAP-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-MAP-1: `root` is a freshly allocated page-table root |
+| INV-PROC-EXEC-MMNEW-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-MMNEW-1: `user_ppn` is a freshly allocated page-table |
+| INV-PROC-EXEC-PROBE-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-PROBE-1: `root` is the loader's fresh tree and `va` a |
+| INV-PROC-EXEC-PTE-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-PTE-1: the walk descends the fresh tree's own tables |
+| INV-PROC-EXEC-SWITCH-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-SWITCH-1: `user_ppn` is the new image's page-table |
+| INV-PROC-EXEC-TRAMP-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-TRAMP-1: `kva` is the linear-map address of a frame |
+| INV-PROC-EXEC-VDSO-1 | `process/unsafe_edges.rs` | INV-PROC-EXEC-VDSO-1: `root` is the freshly created page-table root; |
+| INV-PROC-FORK-COW-1 | `process/unsafe_edges.rs` | INV-PROC-FORK-COW-1: child_root is the child's fresh root ppn; va is |
+| INV-PROC-FORK-FPU-1 | `process/unsafe_edges.rs` | INV-PROC-FORK-FPU-1: called on the live current task in syscall |
+| INV-PROC-FORK-TIDWRITE-1 | `process/unsafe_edges.rs` | INV-PROC-FORK-TIDWRITE-1: `kva` is the linear-map address of the |
+| INV-PROC-FORK-WALK-1 | `process/unsafe_edges.rs` | INV-PROC-FORK-WALK-1: `root` is the child's fresh root ppn and `va` |
+| INV-PROC-FRAME-1 | `process/ptrace.rs` | (INV-PROC-FRAME-1's read arm). |
+| INV-PROC-JOURNAL-1 | `process/unsafe_edges.rs` | INV-PROC-JOURNAL-1: the slot is written only by the task itself |
+| INV-PROC-KSTACK-1 | `process/unsafe_edges.rs` | INV-PROC-KSTACK-1: `entry` is a dead stack bottom previously linked |
+| INV-PROC-KSTACK-2 | `process/unsafe_edges.rs` | INV-PROC-KSTACK-2: `layout` is a valid nonzero layout the caller |
+| INV-PROC-KSTACK-3 | `process/unsafe_edges.rs` | INV-PROC-KSTACK-3: `base + off` stays inside the caller's live |
+| INV-PROC-LIST-1 | `process/unsafe_edges.rs` | INV-PROC-LIST-1: the caller holds PROCESS_TREE_LOCK (or owns both |
+| INV-PROC-NSFILE-1 | `process/unsafe_edges.rs` | INV-PROC-NSFILE-1: the slot was populated by this file type's |
+| INV-PROC-NSFILE-2 | `process/unsafe_edges.rs` | INV-PROC-NSFILE-2: the exactly-once reclaim edge for the close path |
+| INV-PROC-PICKQWORD-1 | `process/unsafe_edges.rs` | INV-PROC-PICKQWORD-1: `addr` is the aligned address of the task's |
+| INV-PROC-PIDHASH-1 | `process/unsafe_edges.rs` | INV-PROC-PIDHASH-1: the caller holds the bucket's irqsave lock (the |
+| INV-PROC-PLACE-1 | `process/unsafe_edges.rs` | ! * [`place_task`] — INV-PROC-PLACE-1: placement-new of a whole `Task` |
+| INV-PROC-PLACE-2 | `process/unsafe_edges.rs` | INV-PROC-PLACE-2 (self-reference rule, added by the slim4-fix lane |
+| INV-PROC-PTRACE-GREG-1 | `process/ptrace.rs` | (INV-PROC-PTRACE-GREG-1/MEM-1). |
+| INV-PROC-PTRACE-ICOH-1 | `process/unsafe_edges.rs` | INV-PROC-PTRACE-ICOH-1: the standard per-arch text-write coherence |
+| INV-PROC-PTRACE-MEM-1 | `process/ptrace.rs` | (INV-PROC-PTRACE-MEM-1). |
+| INV-PROC-PTRACE-WALK-1 | `process/unsafe_edges.rs` | INV-PROC-PTRACE-WALK-1: `mm` is the pinned target mm whose root the |
+| INV-PROC-PTRD-1 | `process/unsafe_edges.rs` | INV-PROC-PTRD-1: `pr` is a shared read view of a live task's own |
+| INV-PROC-PTREGS-FREE-1 | `process/unsafe_edges.rs` | INV-PROC-PTREGS-FREE-1: the pointer came from the fork path's |
+| INV-PROC-ROOTSWITCH-1 | `process/unsafe_edges.rs` | INV-PROC-ROOTSWITCH-1: reads the boot-time root-table constant and, |
+| INV-RE-COPY-1 | `arch/riscv64/mm/unsafe_edges.rs` | Copy one page between two linear-map addresses (INV-RE-COPY-1): both |
+| INV-REF-1 | `mm/page_desc.rs` | ! - **INV-REF-1**: `_refcount` must never be negative. |
+| INV-REF-2 | `mm/page_desc.rs` | ! - **INV-REF-2**: `_refcount == 0` ⟺ page is on a buddy free list (or otherwise free). |
+| INV-REF-3 | `mm/page_desc.rs` | ! - **INV-REF-3**: `_refcount > 0` ⟺ page is in use by at least one owner. |
+| INV-REF-4 | `mm/page_desc.rs` | ! - **INV-REF-4**: `_mapcount == -1` (PAGE_MAPCOUNT_BIAS) ⟺ page is not mapped |
+| INV-REF-5 | `mm/page_desc.rs` | ! - **INV-REF-5**: `_mapcount > -1` ⟺ page is mapped in `(_mapcount + 1)` page tables. |
+| INV-REF-6 | `mm/page_desc.rs` | ! - **INV-REF-6**: If `Cow` flag is set ⟹ `_refcount >= 2` AND the PTE `W` bit is clear. |
+| INV-RE-FRAME-1 | `arch/riscv64/unsafe_edges.rs` | ! - **INV-RE-FRAME-1 (origin)** — [`SavedFrame`] is constructed only |
+| INV-RE-FRAME-2 | `arch/riscv64/unsafe_edges.rs` | ! - **INV-RE-FRAME-2 (liveness)** — the frame lives on the interrupted |
+| INV-RE-FRAME-3 | `arch/riscv64/unsafe_edges.rs` | ! - **INV-RE-FRAME-3 (aliasing)** — exactly one &mut frame handle |
+| INV-RE-PT-1 | `arch/riscv64/mm/unsafe_edges.rs` | ! - **INV-RE-PT-1 (liveness)** — [`PtTable`] is only constructed from a |
+| INV-RE-PT-2 | `arch/riscv64/mm/unsafe_edges.rs` | ! - **INV-RE-PT-2 (bounds)** — accessors take any `usize` index and |
+| INV-RE-PT-3 | `arch/riscv64/mm/unsafe_edges.rs` | ! - **INV-RE-PT-3 (aliasing)** — tables are shared across harts; `get` |
+| INV-RE-PT-4 | `arch/riscv64/mm/unsafe_edges.rs` | ! - **INV-RE-PT-4 (stage discipline)** — construction routes through |
+| INV-SCE-10 | `sched/sched.rs` | PER_CPU moved into crate::sched::edges (INV-SCE-10): the per-CPU |
+| INV-SCHED-EVRING-1 | `sched/side_edges.rs` | INV-SCHED-EVRING-1: `slot` is the modulo-bounded index of a unique |
+| INV-SLOT-2 | `safety/slot.rs` | ! * **INV-SLOT-2 (barrier)** — publish stores with `Release`; `get` |
+| INV-SLOT-3 | `safety/slot.rs` | ! * **INV-SLOT-3 (exclusive mut access)** — `get_mut_locked` requires |
+| INV-SY-2 | `sync/edges.rs` | ! - INV-SY-2 `entry_frame_*` — the task's trap frame at the top of |
+| INV-SYSC-1 | `syscall/misc.rs` | (INV-SYSC-1 via edges::list_*). |
+| INV-SYSC-2 | `syscall/file.rs` | non-null (INV-SYSC-2 reachability arm). |
+| INV-SYSC-3 | `syscall/edges.rs` | ! - INV-SYSC-3 (current-task park/unwind) — the repeated |
+| INV-SYSC-4 | `syscall/edges.rs` | Arch reset edges (INV-SYSC-4: the reboot/panic ladder's port I/O and |
+| INV-SYSC-5 | `syscall/edges.rs` | INV-SYSC-5: the caller has verified the File's ops identity |
+| INV-SYSC-7 | `syscall/file.rs` | read/write lease on the inode — INV-SYSC-7 pre-publish arm. |
+| INV-SYSC-8 | `syscall/edges.rs` | INV-SYSC-8: the mmap/mremap/msync/mprotect page-table family. The |
+| INV-TASKREF-1 | `process/task_ref.rs` | INV-TASKREF-1 (pin exclusivity, added by the slim4-fix lane |
+| INV-TL-1 | `sched/sched.rs` | Slot take (INV-TL-1): the ownership-take half of the task-page |
+| INV-TL-2 | `sched/sched.rs` | Slot release (INV-TL-2): the terminal-release half of the |
+| INV-TRACERING-1 | `trace/mod.rs` | interior mutability is behind the slot protocol (INV-TRACERING-1). |
+| INV-VFSOPS-1 | `fs/vfs.rs` | INV-VFSOPS-1 dispatchers (best-effort clone |
+| INV-VMA-1 | `mm/vma.rs` | ! - **INV-VMA-1**: No two VMAs in the same address space overlap |
+| INV-VMA-2 | `mm/vma.rs` | ! - **INV-VMA-2**: VMAs are sorted by start address, enforced by the BTreeMap key. |
+| INV-VMA-3 | `mm/vma.rs` | ! - **INV-VMA-3**: `max_end` (if maintained) equals `max(end)` across all VMAs |
+| INV-VMA-4 | `arch/x86_64/mm/page_fault.rs` | Window bounds: VMA end (INV-VMA-4), then EOF — a |
+| INV-XE-COPY-1 | `arch/x86_64/mm/unsafe_edges.rs` | Copy one page between two linear-map addresses (INV-XE-COPY-1): both |
+| INV-XE-FRAME-1 | `arch/x86_64/unsafe_edges.rs` | ! - **INV-XE-FRAME-1 (origin)** — [`SavedFrame`] is constructed only |
+| INV-XE-FRAME-2 | `arch/x86_64/unsafe_edges.rs` | ! - **INV-XE-FRAME-2 (liveness)** — the frame lives on the interrupted |
+| INV-XE-FRAME-3 | `arch/x86_64/unsafe_edges.rs` | ! - **INV-XE-FRAME-3 (aliasing)** — exactly one &mut frame handle |
+| INV-XE-PT-1 | `arch/x86_64/mm/unsafe_edges.rs` | ! - **INV-XE-PT-1 (liveness)** — [`PtTable`] is only constructed from a |
+| INV-XE-PT-2 | `arch/x86_64/mm/unsafe_edges.rs` | ! - **INV-XE-PT-2 (bounds)** — accessors take any `usize` index and |
+| INV-XE-PT-3 | `arch/x86_64/mm/unsafe_edges.rs` | ! - **INV-XE-PT-3 (aliasing)** — tables are shared across CPUs; `get` |
+| INV-XE-PT-4 | `arch/x86_64/mm/unsafe_edges.rs` | ! - **INV-XE-PT-4 (stage discipline)** — construction routes through |
+
+**F19. arch trap entry/exit + context switch + IPI asm** — owners
+`kernel/src/arch/*/trap.rs`, `thread.rs`, `context.rs`, `process.rs`
+(arch twins), `mm_ops.rs` (switch/TLB flush parts), `ipi.rs`,
+`exception.rs` walkers, `asid.rs`, `fixmap.rs`. *What stays raw:* the
+entry/exit stubs and `ret_from_fork` trampolines (asm by definition),
+FPU/xstate save-restore spans, satp/CR3 switch + TLB ops, IPI
+send/receive (the only cross-CPU doorbell), the frame-pointer walks
+the trap printer runs on the interrupted frame. *Why no safe shape
+exists:* these ARE the machine's context manipulation — the plan's
+Round-D floor names them ("context switch, the interrupt entry — must
+be hand-written in every kernel"); a safe wrapper would only relocate
+the asm, not type it. *Reference:* Linux's `entry.S`/`__switch_to`/
+`smp_call_function` — identical asm with zero contracts.
+*Containment:* entry paths run with IRQs off on the taken CPU; the
+IPI/TLB edges hold the sending CPU's ordering (fence/ipi discipline
+per arch).
+
+**F20. page-table walk/map protocol (boot init + fault path)** —
+owners `kernel/src/arch/*/mm/mmu_init.rs` (boot-time table build —
+before the typed PtTable wrappers exist), `page_fault.rs` (the
+demand-fault protocol: PTE-locked walk + map_user_page install +
+page-descriptor flag set on the exclusively-owned page),
+`pagetable.rs` runtime edges. *Why no safe shape exists:* the walk/map
+pair is the page-table protocol itself — the AE/RE/XE-PT INVs own the
+table ACCESSOR discipline at their edges; these rows are the
+lock-scoped INSTALL protocol on top (the R7-C3 race re-check, the
+loser-frees rule sampled at the fault sites). *Reference:* Linux's
+`handle_mm_fault`/`_pte_alloc_map_lock` — the same locked
+walk-then-install dance. *Containment:* every install under the PTE
+lock; the descriptor stores precede publication.
+
+
+## Index addendum (retag-discovered)
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-BINDER-DIAG-COMM | `ipc/binder.rs` | INV-BINDER-DIAG-COMM (unsafe-slim r3): the ONE audited raw-task comm |
+| INV-BINDER-ENTRYFRAME | `ipc/binder.rs` | INV-BINDER-ENTRYFRAME (unsafe-slim r3): the ONE audited entry-frame read |
+| INV-BINDER-PINTASK | `ipc/binder.rs` | INV-BINDER-PINTASK (unsafe-slim r3c): RAII twin of procfs's PinnedTask |
+| INV-BINDER-PRIV | `ipc/binder.rs` | INV-BINDER-PRIV (unsafe-slim r3): only binder_open installs |
+| INV-BINDER-PROBE | `ipc/binder.rs` | target's live user page tables. INV-BINDER-PROBE: read-only, the one |
+| INV-BINDER-WORLDSEC | `ipc/binder.rs` | (INV-BINDER-WORLDSEC: the table only ever holds those keys). |
+| INV-BIO-BHREF | `fs/ext4/file.rs` | INV-BIO-BHREF: bread pins the BufferHead until brelse; the |
+| INV-EXT-VIEW | `fs/ext4/mod.rs` | INV-EXT-VIEW twin for the on-disk superblock: the single cast point, |
+| INV-EXT4-ATIME | `fs/ext4/file.rs` | INV-EXT4-ATIME: the cached Ext4Inode in inode.sb is |
+| INV-EXT4-FILERES | `fs/ext4/file.rs` | INV-EXT4-FILERES (unsafe-slim r3c): the ONE audited resolution of a |
+| INV-EXT4-GLOBALFS | `fs/ext4/mod.rs` | GLOBAL_EXT4_FS stores the mount's instance (INV-EXT4-GLOBALFS); |
+| INV-EXT4-IBLOCK-HDR | `fs/ext4/file.rs` | INV-EXT4-IBLOCK-HDR: typed header view of the 60-byte root. |
+| INV-PIPE-PRIV | `ipc/binder.rs` | fd owning the Arc (same contract as fs/pipe.rs's INV-PIPE-PRIV). |
+
+**F17. binder buffer block-views** — owner `kernel/src/ipc/binder.rs`.
+*Shape:* r3c's consolidated view primitives — INV-BINDER-BLOCKVIEW
+(the ONE raw window over the mmap'd binder buffer: bounds-checked
+slice/word/POD views), INV-BINDER-STAGE-POD (bytewise view of Copy
+values), INV-BINDER-HELD (token-checked accessors) — plus the narrow
+call sites beneath them. Every access goes through the bounds-checked
+view methods; no raw `.add()` escapes the primitive.
+*Why no safe shape exists:* the binder buffer is one mmap'd arena
+shared with user binder threads, sized by the protocol — the same
+device-window relationship as MmioRegion, but with the r3c view API
+already measured in place (SLOW-TXN families are gated on it).
+*Reference:* Android's flat_binder_object walks over the same arena.
+*Containment:* ipc/binder.rs only; world lock discipline per the
+guarded-domain notes.
+
+**F18. mm-forensics page-descriptor walkers** — owners
+`kernel/src/dfx/mmforensics.rs` (note_ref, capture_frame), 
+`kernel/src/dfx/ledger.rs` (the census walks), and
+`kernel/src/dfx/pathstash.rs` (per-tid static slot table).
+*Reads:* raw `*const Page` descriptors across the whole mapped vmemmap
+span (refcount/flags/type/mapping/index — value-only, never
+re-dereferenced), exactly like F1's stale-task reads but for PAGE
+descriptors; pathstash's static SLOTS are written per-tid exclusively
+(publication ordered via tid/len atomics — the slowtask-SLOTS
+discipline twin). *Why no safe shape exists:* these instruments exist
+to report on descriptors whose invariants are SUSPECTED broken (the
+wild-write/fake-OOM hunt lines) — a typed handle would presume the
+invariant under investigation. *Reference:* Linux's
+`dump_page`/page-type census walkers (the same untyped descriptor
+reads). *Containment:* gated by rux:mmforensics / the census flag,
+default-off, value-only reads <= one descriptor at a time.
+
+Also under this row's neighborhood (already-per-site-documented
+residue): taskdump's %gs:PC_MAGIC read is F5-class (asm register
+edge); its CURRENT_PT_REGS frame read is the one-frame-edge
+discipline; slowtask's `audit` call is the single-auditor CAS
+contract; oops.rs's putchar_no_lock is the panic-path console twin
+(F4-adjacent).
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
