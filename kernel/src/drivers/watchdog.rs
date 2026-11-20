@@ -21,6 +21,7 @@
 //!
 //! Device number: misc 10:130 (Linux WATCHDOG_MINOR).
 
+#![forbid(unsafe_code)]
 use crate::fs::dev_t::{DevNo, MISC_MAJOR};
 use core::sync::atomic::{AtomicU32, Ordering};
 

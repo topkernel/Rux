@@ -34,6 +34,7 @@
 //! task is marked `core_dumped`, which wait4 encodes as WCOREDUMP (0x80)
 //! in the wstatus word.
 
+#![forbid(unsafe_code)]
 use crate::fs::elf::{Elf64Ehdr, Elf64Phdr};
 use crate::fs::file::FileFlags;
 use crate::process::task::{rlimit_res, Task};

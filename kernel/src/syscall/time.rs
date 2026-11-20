@@ -6,6 +6,7 @@
 //!
 //! Includes: gettimeofday, clock_gettime, nanosleep, clock_getres, clock_nanosleep
 
+#![forbid(unsafe_code)]
 use super::*;
 
 /// clock_gettime clock IDs

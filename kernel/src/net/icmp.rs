@@ -4,6 +4,7 @@
 //!
 //! ICMP Protocol (RFC 792)
 
+#![forbid(unsafe_code)]
 use crate::net::buffer::SkBuff;
 use crate::net::ipv4::checksum::ip_checksum;
 

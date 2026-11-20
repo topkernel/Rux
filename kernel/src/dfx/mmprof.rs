@@ -24,6 +24,7 @@
 //! Dump: periodic (timer heartbeat, every MMPROF_DUMP_SECS) + the
 //! shutdown cascade. Lines: MMPROF <name> n= avg=us max=us.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 // ---- phase slots ----

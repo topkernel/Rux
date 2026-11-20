@@ -37,6 +37,7 @@
 //! - Overhead per wake: two atomic stores + one hash. Per pick: one
 //!   atomic load on the happy path.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::TIMER_CLOCK_FREQ_HZ;

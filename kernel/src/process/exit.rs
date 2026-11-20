@@ -14,6 +14,7 @@
 //! - release_task: Reap zombie child resources (incl. exited group members)
 //! - do_wait / do_wait_nonblock / do_waitid: wait for child state change
 
+#![forbid(unsafe_code)]
 use crate::errno;
 use crate::process::task::{Pid, Task, TaskState};
 

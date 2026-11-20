@@ -5,6 +5,7 @@
 
 //! Task Control Block
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::ptr;
 use crate::sync::spinlock::Spinlock;

@@ -7,6 +7,7 @@
 //!
 //! Implements framebuffer device interface
 
+#![forbid(unsafe_code)]
 use super::FrameBufferInfo;
 
 use core::sync::atomic::{AtomicBool, Ordering};

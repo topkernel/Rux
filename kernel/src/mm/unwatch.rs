@@ -24,6 +24,7 @@
 //! tail at fault time; correlating the victim VAs/PFNs against the
 //! entries names the clearing path in one corrupting boot.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Event kinds.
