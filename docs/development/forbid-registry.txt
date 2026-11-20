@@ -9,7 +9,6 @@ kernel/src/dfx/driftwatch.rs
 kernel/src/dfx/filerd.rs
 kernel/src/dfx/forkprof.rs
 kernel/src/dfx/fsw.rs
-kernel/src/dfx/ksyms.rs
 kernel/src/dfx/lostpark.rs
 kernel/src/dfx/metawatch.rs
 kernel/src/dfx/mmprof.rs

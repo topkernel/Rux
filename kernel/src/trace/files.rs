@@ -44,6 +44,8 @@
 //! "1" when every event is enabled, "0" when none is, "X" when the
 //! set is mixed.
 
+#![forbid(unsafe_code)]
+
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]

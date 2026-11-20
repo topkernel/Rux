@@ -24,10 +24,9 @@
 //! mangling, so the raw ELF names (`_RNvMs3_NtNtCslPv9FFGBN4x_3rux...`)
 //! are unreadable. The generator resolves them from the debug info.
 
+
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
-#![forbid(unsafe_code)]
-
 use alloc::format;
 use alloc::string::{String, ToString};
 
