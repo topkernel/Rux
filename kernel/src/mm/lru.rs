@@ -17,11 +17,13 @@
 //! PFN 0 is used as the sentinel for "no page" (valid PFNs start at
 //! MIN_PFN which is >> 0 on RISC-V).
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::page_desc::{Page, PageFlag, pfn_to_page_mut, page_to_pfn};
-use super::pglist::{first_online_node_mut, NR_LRU_LISTS};
+use super::page_desc::{Page, PageFlag, page_to_pfn};
+use super::pglist::NR_LRU_LISTS;
 
 /// Sentinel PFN value meaning "no page" (end of list).
 const LRU_NONE: usize = 0;
@@ -35,7 +37,7 @@ const LRU_NONE: usize = 0;
 ///
 /// # Safety
 /// `page` must be linked on list `lru` of `node`'s LRU arrays.
-unsafe fn unlink_locked(
+fn unlink_locked(
     node: &super::pglist::PglistData,
     page: &Page,
     lru: usize,
@@ -44,9 +46,8 @@ unsafe fn unlink_locked(
     let next = page.lru_next();
 
     if prev != LRU_NONE {
-        let prev_page = pfn_to_page_mut(prev);
-        if !prev_page.is_null() {
-            (*prev_page).set_lru_next(next);
+        if let Some(prev_page) = super::edges::page_of(prev) {
+            prev_page.set_lru_next(next);
         }
     } else {
         // Page was the head
@@ -54,9 +55,8 @@ unsafe fn unlink_locked(
     }
 
     if next != LRU_NONE {
-        let next_page = pfn_to_page_mut(next);
-        if !next_page.is_null() {
-            (*next_page).set_lru_prev(prev);
+        if let Some(next_page) = super::edges::page_of(next) {
+            next_page.set_lru_prev(prev);
         }
     } else {
         // Page was the tail
@@ -95,7 +95,7 @@ unsafe fn unlink_locked(
 ///
 /// # Safety
 /// `page` must not currently be linked on any list.
-unsafe fn link_tail_locked(
+fn link_tail_locked(
     node: &super::pglist::PglistData,
     page: &Page,
     lru: usize,
@@ -111,9 +111,8 @@ unsafe fn link_tail_locked(
 
     if tail != LRU_NONE {
         // Link old tail → new page
-        let tail_page = pfn_to_page_mut(tail);
-        if !tail_page.is_null() {
-            (*tail_page).set_lru_next(pfn);
+        if let Some(tail_page) = super::edges::page_of(tail) {
+            tail_page.set_lru_next(pfn);
         }
         page.set_lru_prev(tail);
         node.lru_tails[lru].store(pfn, core::sync::atomic::Ordering::Relaxed);
@@ -135,7 +134,7 @@ unsafe fn link_tail_locked(
 ///
 /// # Safety
 /// `page` must not currently be linked on any list.
-unsafe fn link_head_locked(
+fn link_head_locked(
     node: &super::pglist::PglistData,
     page: &Page,
     lru: usize,
@@ -151,9 +150,8 @@ unsafe fn link_head_locked(
 
     if head != LRU_NONE {
         // Link old head → new page
-        let head_page = pfn_to_page_mut(head);
-        if !head_page.is_null() {
-            (*head_page).set_lru_prev(pfn);
+        if let Some(head_page) = super::edges::page_of(head) {
+            head_page.set_lru_prev(pfn);
         }
         page.set_lru_next(head);
         node.lru_heads[lru].store(pfn, core::sync::atomic::Ordering::Relaxed);
@@ -178,27 +176,25 @@ fn page_clear_lru_bits(page: &Page) {
 /// The tail is the least-recently-used end; kswapd scans from here.
 pub fn lru_add_page(page: &Page, lru_type: usize) {
     // SAFETY: called with lru_lock held — exclusive node access.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return,
     };
 
     let _guard = node.lru_lock.lock();
 
-    // SAFETY: page is not linked (checked via Lru flag below) and the lock
-    // is held for the whole link.
-    unsafe {
-        if !page.test_flag(PageFlag::Lru) {
-            link_tail_locked(node, page, lru_type);
-            page.set_flag(PageFlag::Lru);
-        }
+    // Page is not linked (checked via the Lru flag) and the lock is
+    // held for the whole link.
+    if !page.test_flag(PageFlag::Lru) {
+        link_tail_locked(node, page, lru_type);
+        page.set_flag(PageFlag::Lru);
     }
 }
 
 /// Remove a page from its LRU list — O(1) via lru_prev (review 4.11).
 pub fn lru_del_page(page: &Page) {
     // SAFETY: called with lru_lock held — exclusive node access.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -215,10 +211,8 @@ pub fn lru_del_page(page: &Page) {
         return;
     }
 
-    // SAFETY: page carries the Lru flag and a valid list index; lock held.
-    unsafe {
-        unlink_locked(node, page, lru);
-    }
+    // Page carries the Lru flag and a valid list index; lock held.
+    unlink_locked(node, page, lru);
 
     page.clear_flag(PageFlag::Lru);
     page.clear_lru_list();
@@ -229,25 +223,23 @@ pub fn lru_del_page(page: &Page) {
 /// Acquires the LRU lock once for both the unlink and the relink.
 pub fn lru_move_to_tail(page: &Page, new_lru: usize) {
     // SAFETY: called with lru_lock held — exclusive node access.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return,
     };
 
     let _guard = node.lru_lock.lock();
 
-    // SAFETY: unlink only when the page really is linked; lock held.
-    unsafe {
-        if page.test_flag(PageFlag::Lru) {
-            let lru = page.lru_list();
-            if lru < NR_LRU_LISTS {
-                unlink_locked(node, page, lru);
-                page.clear_flag(PageFlag::Lru);
-                page.clear_lru_list();
-            }
+    // Unlink only when the page really is linked; lock held.
+    if page.test_flag(PageFlag::Lru) {
+        let lru = page.lru_list();
+        if lru < NR_LRU_LISTS {
+            unlink_locked(node, page, lru);
+            page.clear_flag(PageFlag::Lru);
+            page.clear_lru_list();
         }
-        link_tail_locked(node, page, new_lru);
     }
+    link_tail_locked(node, page, new_lru);
     page.set_flag(PageFlag::Lru);
 }
 
@@ -257,23 +249,21 @@ pub fn lru_move_to_tail(page: &Page, new_lru: usize) {
 /// Acquires the LRU lock once for both the unlink and the relink.
 pub fn lru_move_to_head(page: &Page, new_lru: usize) {
     // SAFETY: called with lru_lock held — exclusive node access.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return,
     };
 
     let _guard = node.lru_lock.lock();
-    // SAFETY: unlink only when the page really is linked; lock held.
-    unsafe {
-        if page.test_flag(PageFlag::Lru) {
-            let lru = page.lru_list();
-            if lru < NR_LRU_LISTS {
-                unlink_locked(node, page, lru);
-                page_clear_lru_bits(page);
-            }
+    // Unlink only when the page really is linked; lock held.
+    if page.test_flag(PageFlag::Lru) {
+        let lru = page.lru_list();
+        if lru < NR_LRU_LISTS {
+            unlink_locked(node, page, lru);
+            page_clear_lru_bits(page);
         }
-        link_head_locked(node, page, new_lru);
     }
+    link_head_locked(node, page, new_lru);
     page.set_flag(PageFlag::Lru);
 }
 
@@ -341,7 +331,7 @@ pub fn page_evictable(page: &Page) -> bool {
 /// Get the total number of pages across all LRU lists.
 pub fn lru_page_total() -> usize {
     // SAFETY: read-only LRU statistics — no concurrent mutation concern.
-    match unsafe { first_online_node_mut() } {
+    match super::edges::first_node_mut() {
         Some(node) => {
             let mut total = 0usize;
             for lru in 0..NR_LRU_LISTS {
@@ -369,17 +359,15 @@ pub fn lru_page_total() -> usize {
 /// link_head_locked, whose doc spells out head-young/tail-old).
 pub fn page_add_anon_lru(page: &Page) {
     // SAFETY: same node-access discipline as lru_add_page.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return,
     };
     let _guard = node.lru_lock.lock();
-    // SAFETY: page is not linked (Lru flag checked) and the lock is held.
-    unsafe {
-        if !page.test_flag(PageFlag::Lru) {
-            link_head_locked(node, page, super::pglist::LRU_INACTIVE_ANON);
-            page.set_flag(PageFlag::Lru);
-        }
+    // Page is not linked (Lru flag checked) and the lock is held.
+    if !page.test_flag(PageFlag::Lru) {
+        link_head_locked(node, page, super::pglist::LRU_INACTIVE_ANON);
+        page.set_flag(PageFlag::Lru);
     }
 }
 
@@ -393,7 +381,7 @@ pub fn page_add_file_lru(page: &Page) {
 /// where per-page lock/unlock dominated the insert cost under TCG).
 pub fn page_add_file_lru_batch(pages: &[*mut Page]) {
     // SAFETY: same node-access discipline as lru_add_page.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -402,11 +390,13 @@ pub fn page_add_file_lru_batch(pages: &[*mut Page]) {
         if page_ptr.is_null() {
             continue;
         }
-        // SAFETY: caller owns these frames (fresh allocations); the lock is
+        // Caller owns these frames (fresh allocations); the lock is
         // held for the whole batch, and the Lru-flag check keeps double
-        // links impossible — same contract as lru_add_page.
-        unsafe {
-            let page = &**page_ptr;
+        // links impossible — same contract as lru_add_page
+        // (INV-MM-2 owned-frame arm).
+        if let Some(page) = super::edges::page_ref_of(
+            super::page_desc::page_to_pfn(*page_ptr)
+        ) {
             if !page.test_flag(PageFlag::Lru) {
                 link_tail_locked(node, page, super::pglist::LRU_INACTIVE_FILE);
                 page.set_flag(PageFlag::Lru);
@@ -432,17 +422,15 @@ pub fn page_add_file_lru_batch(pages: &[*mut Page]) {
 /// Link `page` at the HEAD (young end) of LRU_INACTIVE_FILE.
 pub fn page_add_file_lru_young(page: &Page) {
     // SAFETY: same node-access discipline as lru_add_page.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return,
     };
     let _guard = node.lru_lock.lock();
-    // SAFETY: page is not linked (Lru flag checked) and the lock is held.
-    unsafe {
-        if !page.test_flag(PageFlag::Lru) {
-            link_head_locked(node, page, super::pglist::LRU_INACTIVE_FILE);
-            page.set_flag(PageFlag::Lru);
-        }
+    // Page is not linked (Lru flag checked) and the lock is held.
+    if !page.test_flag(PageFlag::Lru) {
+        link_head_locked(node, page, super::pglist::LRU_INACTIVE_FILE);
+        page.set_flag(PageFlag::Lru);
     }
 }
 
@@ -452,7 +440,7 @@ pub fn page_add_file_lru_young(page: &Page) {
 /// the head (youngest) and the first element is the oldest of the batch.
 pub fn page_add_file_lru_young_batch(pages: &[*mut Page]) {
     // SAFETY: same node-access discipline as lru_add_page.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -461,11 +449,12 @@ pub fn page_add_file_lru_young_batch(pages: &[*mut Page]) {
         if page_ptr.is_null() {
             continue;
         }
-        // SAFETY: caller owns these frames (fresh allocations); the Lru
-        // flag check keeps double links impossible — same contract as
-        // page_add_file_lru_batch.
-        unsafe {
-            let page = &**page_ptr;
+        // Caller owns these frames (fresh allocations); the Lru flag
+        // check keeps double links impossible — same contract as
+        // page_add_file_lru_batch (INV-MM-2 owned-frame arm).
+        if let Some(page) = super::edges::page_ref_of(
+            super::page_desc::page_to_pfn(*page_ptr)
+        ) {
             if !page.test_flag(PageFlag::Lru) {
                 link_head_locked(node, page, super::pglist::LRU_INACTIVE_FILE);
                 page.set_flag(PageFlag::Lru);
@@ -501,7 +490,7 @@ pub fn lru_demote_active_file_oldest(nr: usize) -> usize {
         return 0;
     }
     // SAFETY: same node-access discipline as lru_collect_cold.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return 0,
     };
@@ -510,19 +499,19 @@ pub fn lru_demote_active_file_oldest(nr: usize) -> usize {
     let mut cur = node.lru_tails[super::pglist::LRU_ACTIVE_FILE]
         .load(core::sync::atomic::Ordering::Relaxed);
     while cur != LRU_NONE && demoted < nr {
-        // SAFETY: cur comes from the (locked) list chain.
-        let p = match pfn_to_page_mut(cur) {
-            p if p.is_null() => break,
-            p => unsafe { &*p },
+        // cur comes from the (locked) list chain (INV-MM-2 chain arm).
+        let p = match super::edges::page_ref_of(cur) {
+            Some(p) => p,
+            None => break,
         };
         let prev = p.lru_prev(); // toward the head = toward younger
         if p.test_flag(PageFlag::Unevictable) {
             cur = prev;
             continue;
         }
-        // SAFETY: page is linked on the ACTIVE list; the lock is held for
-        // the unlink+relink (unlink_locked/link_head_locked contract).
-        unsafe {
+        // Page is linked on the ACTIVE list; the lock is held for the
+        // unlink+relink (the link/unlink contracts).
+        {
             let lru = p.lru_list();
             if lru < NR_LRU_LISTS {
                 unlink_locked(node, p, lru);
@@ -548,7 +537,7 @@ pub fn page_remove_lru(page: &Page) {
 /// Returns 0 if the list is empty.
 pub fn lru_tail(lru_type: usize) -> usize {
     // SAFETY: read-only LRU access — no concurrent mutation concern.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return 0,
     };
@@ -568,7 +557,7 @@ pub fn lru_collect_cold(lru_type: usize, nr: usize) -> Vec<usize> {
     let mut out = Vec::new();
 
     // SAFETY: node access is for reading; the lock guards the walk.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return out,
     };
@@ -578,13 +567,11 @@ pub fn lru_collect_cold(lru_type: usize, nr: usize) -> Vec<usize> {
     let mut cur = node.lru_tails[lru_type].load(core::sync::atomic::Ordering::Relaxed);
     while cur != LRU_NONE && out.len() < nr {
         out.push(cur);
-        // SAFETY: cur comes from the (locked) list chain; read-only access.
-        unsafe {
-            let p = pfn_to_page_mut(cur);
-            if p.is_null() {
-                break;
-            }
-            cur = (*p).lru_prev();
+        // cur comes from the (locked) list chain; read-only access
+        // (INV-MM-2 chain arm).
+        match super::edges::page_ref_of(cur) {
+            Some(p) => cur = p.lru_prev(),
+            None => break,
         }
     }
 
