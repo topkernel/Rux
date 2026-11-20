@@ -10,7 +10,7 @@ Subsystems are implemented by AI agents under human architecture review and merg
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](#quickstart)
 [![Tests](https://img.shields.io/badge/tests-LTP%201%2C139%20%2B%20suite%201%2C584-brightgreen.svg)](#testing)
-[![Code](https://img.shields.io/badge/code-~419%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-~421%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
 Reports & documentation: **<https://topkernel.github.io/Rux/>** (中文 / EN)
 
@@ -65,7 +65,7 @@ This is not "an assistant filling in a few lines." It places AI where subsystems
 
 ## Safety: the itemized bill, not the slogan
 
-**The surface.** `kernel/src` is 362,762 lines. Measured by the in-tree ledger script:
+**The surface.** The kernel tree (`kernel/`) is 421,180 lines ([structure](docs/architecture/structure.md)); the ledger below counts `kernel/src` Rust at 362,762 lines on its own basis (non-blank, generated files excluded) — the shares use that basis:
 
 | Series | Lines | Share |
 |---|---:|---:|

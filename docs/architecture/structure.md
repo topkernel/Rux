@@ -6,11 +6,11 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-11-20 (statistics; narrative from the 2026-09 sweep)
+**Last Updated**: 2026-11-21 (statistics; narrative from the 2026-09 sweep)
 
 ### Overall Statistics
 
-*Statistics recounted 2026-11-20 on main @ 1689270d8. Counting method:
+*Statistics recounted 2026-11-21 on main. Counting method:
 tracked files under `kernel/` via `git ls-files 'kernel/*'`, lines via
 `wc -l` — keep this convention so the next refresh stays comparable.
 The module narrative below the tables dates from the earlier sweep and
@@ -20,7 +20,7 @@ the tables win.*
 | Metric | Value |
 |--------|-------|
 | **Total Source Files** | 679 (kernel/: Rust + per-arch assembly + the verify crate) |
-| **Total Lines of Code** | **419,958 lines (408,864 Rust)** |
+| **Total Lines of Code** | **421,180 lines** |
 | **Architectures** | riscv64 (primary) · x86_64 (q35) · aarch64 (virt) |
 
 ### Module Code Distribution
