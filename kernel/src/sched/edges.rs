@@ -182,6 +182,43 @@ pub fn grq_mut() -> &'static mut GlobalRunQueue {
     unsafe { GRQ.assume_init_mut() }
 }
 
+/// Volatile read of the poison PAIR (pid + state at their
+/// compile-time offsets — INV-TL-2 diag twin): the freed-page check's
+/// two words in one audited edge. Either word reading TASK_POISON
+/// identifies the page as freed (the R47 discipline's read side).
+#[inline]
+pub fn task_poison_pair_volatile(t: *const Task) -> (u32, u32) {
+    debug_assert!(!t.is_null());
+    // SAFETY: INV-TL-2 diag — the two volatile loads at the fixed
+    // offsets; the caller's walk keeps the page mapped.
+    unsafe {
+        let pid = core::ptr::read_volatile(
+            (t as *const u8).add(crate::process::task::TASK_PID) as *const u32,
+        );
+        let state = core::ptr::read_volatile(
+            (t as *const u8).add(crate::process::task::TASK_STATE) as *const u32,
+        );
+        (pid, state)
+    }
+}
+
+/// Volatile read of a task's pid word (INV-SCE-2 diag twin, the R47
+/// poison check): one volatile u32 load at the compile-time TASK_PID
+/// offset — reads past a logically-freed page's header on purpose
+/// (the poison IS the data being read).
+#[inline]
+pub fn task_pid_volatile(t: *const Task) -> u32 {
+    debug_assert!(!t.is_null());
+    // SAFETY: INV-SCE-2 diag — the volatile load at the fixed offset
+    // the R47 discipline defines; the caller's walk/pin keeps the
+    // page mapped.
+    unsafe {
+        core::ptr::read_volatile(
+            (t as *const u8).add(crate::process::task::TASK_PID) as *const u32,
+        )
+    }
+}
+
 /// Diagnostic read of the packed ownership qword `{ti_on_cpu, claim}`
 /// (INV-SCE-2 diag twin): one volatile 8-byte read of the two adjacent
 /// task fields, mirroring ownership_pickable's decode. Same liveness

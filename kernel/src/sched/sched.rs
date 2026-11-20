@@ -2129,7 +2129,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
     if !parent.is_null() {
         // SAFETY: parent was obtained from pid_hash_lookup and is a valid Task
         // pointer (PID hash table entries are not freed until release_task).
-        unsafe {
+        {
             // Migrate a SLEEPING parent to the current CPU before waking it:
             // wake_up → select_task_rq reads ti_cpu, so steering it here
             // lets this CPU's idle task pick it up immediately.
@@ -2570,7 +2570,7 @@ pub fn ww_sched_snapshot() -> [u64; 10] {
         // SAFETY: bounded NEED_RESCHED read; cpu_state(c) slots are
         // init-time valid pointers (may race a concurrent switch — the
         // values are diagnostic only).
-        unsafe {
+        {
             if c < 2 {
                 out[3] |= (NEED_RESCHED[c].load(core::sync::atomic::Ordering::Acquire) as u64) << c;
                 let cur = cpu_state(c).current;
@@ -3880,7 +3880,7 @@ pub fn schedule_dead_never_returns() {
                     core::sync::atomic::Ordering::Release,
                 );
                 (*cur).release_pick_ownership();
-                let pc = (*cur).preempt_count();
+                let pc = crate::sched::edges::task_shared(cur).preempt_count();
                 if pc != 0 {
                     // Leaked bits protect nothing on a task that will
                     // never run again. Name them once per boot for the
@@ -3890,7 +3890,7 @@ pub fn schedule_dead_never_returns() {
         // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
                         crate::pr_warn!(
                             "TERM-DESCHED pid={} leaked preempt_count={:#x} cleared for final switch (round {})",
-                            (*cur).pid(),
+                            crate::sched::edges::task_shared(cur).pid(),
                             pc,
                             rounds
                         );
@@ -8908,12 +8908,7 @@ pub fn scheduler_tick() {
             // must not feed the leak window (see the TICK-GHOST gate at
             // this tick's tail for the capture story). One volatile pid
             // read; poison fails the compare.
-            let cur = if !cur.is_null() && unsafe {
-                core::ptr::read_volatile(
-                    (cur as *const u8)
-                        .add(crate::process::task::task_offsets::TASK_PID) as *const u32,
-                ) == TASK_POISON
-            } {
+            let cur = if !cur.is_null() && crate::sched::edges::task_pid_volatile(cur) == TASK_POISON {
                 core::ptr::null_mut()
             } else {
                 cur
@@ -10121,15 +10116,8 @@ pub fn scheduler_tick() {
         // SAFETY: read at compile-time Task offsets in the kernel
         // linear map (same contract as the R127 screen / poison probe
         // — cannot fault).
-        let ghost = unsafe {
-            let pid = core::ptr::read_volatile(
-                (current as *const u8)
-                    .add(crate::process::task::task_offsets::TASK_PID) as *const u32,
-            );
-            let state = core::ptr::read_volatile(
-                (current as *const u8)
-                    .add(crate::process::task::task_offsets::TASK_STATE) as *const u32,
-            );
+        let ghost = {
+            let (pid, state) = crate::sched::edges::task_poison_pair_volatile(current);
             pid == TASK_POISON || state == TASK_POISON
         };
         if ghost {
@@ -10189,11 +10177,14 @@ pub fn scheduler_tick() {
     // context follows the posix-timer precedent (timer.rs softirq calls
     // send_signal directly). Kernel threads and idle carry RLIM_INFINITY
     // and skip the check entirely.
-    unsafe {
+    {
+        // INV-SCE-2: the rlimit cgroup-tick check reads the current
+        // task's own fields.
+        let current_t = crate::sched::edges::task_shared(current);
         let (soft, hard) =
-            (*current).rlimit(crate::process::task::rlimit_res::CPU);
+            current_t.rlimit(crate::process::task::rlimit_res::CPU);
         if soft != u64::MAX || hard != u64::MAX {
-            let secs = (*current)
+            let secs = current_t
                 .sched_entity()
                 .sum_exec_runtime
                 .load(core::sync::atomic::Ordering::Acquire)
@@ -10204,7 +10195,7 @@ pub fn scheduler_tick() {
                     crate::signal::Signal::SIGKILL as i32,
                 );
             } else if soft != u64::MAX && secs >= soft && secs > crate::sched::edges::task_shared(current).cpu_time_last_sigxcpu() {
-                (*current).set_cpu_time_last_sigxcpu(secs);
+                current_t.set_cpu_time_last_sigxcpu(secs);
                 let _ = crate::signal::send_signal(
                     crate::sched::edges::task_shared(current).pid() as u32,
                     crate::signal::Signal::SIGXCPU as i32,
@@ -12004,17 +11995,17 @@ fn lp_idle_lie_report(cpu: usize) {
         for &b in M2 {
             putchar(b);
         }
-        pdec((*curr).pid() as u64);
+        pdec(crate::sched::edges::task_shared(curr).pid() as u64);
         const M3: &[u8] = b" st=0x";
         for &b in M3 {
             putchar(b);
         }
-        phex((*curr).state().bits() as u64);
+        phex(crate::sched::edges::task_shared(curr).state().bits() as u64);
         const M4: &[u8] = b" pc=0x";
         for &b in M4 {
             putchar(b);
         }
-        phex((*curr).preempt_count() as u64);
+        phex(crate::sched::edges::task_shared(curr).preempt_count() as u64);
         const M5: &[u8] = b" oncpu=";
         for &b in M5 {
             putchar(b);
@@ -12033,7 +12024,7 @@ fn lp_idle_lie_report(cpu: usize) {
         for &b in M7 {
             putchar(b);
         }
-        pdec((*curr).pick_state() as u64);
+        pdec(crate::sched::edges::task_shared(curr).pick_state() as u64);
         const M8: &[u8] = b" onrq=";
         for &b in M8 {
             putchar(b);
