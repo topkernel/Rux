@@ -1037,7 +1037,7 @@ pub fn grq_dump_holder(why: &str) {
             // two frame-word reads are the standard unwind operation on a
             // live kernel stack.
             let (ret, next) =
-                unsafe { (
+                { (
                 crate::sync::edges::read_volatile_u64((fp + 8) as usize),
                 crate::sync::edges::read_volatile_u64(fp as usize),
             ) };
@@ -6971,7 +6971,7 @@ pub fn wake_up_enqueue_opt(
                             let base = (top as usize).saturating_sub(168) as *const u64;
                             // SAFETY: diagnostic read of the task's own
                             // kernel-stack entry frame region.
-                            unsafe {
+                            {
                                 for k in 0..21 {
                                     uf[k] = crate::sync::edges::read_volatile_u64((base as usize) + 8 * k);
                                 }
@@ -7783,7 +7783,7 @@ pub fn monopolist_census(now_j: u64) {
                 // SAFETY: entry-frame read of this task's pinned
                 // kernel-stack pages (kernel_stack_top_checked
                 // contract); diagnostic reads only.
-                unsafe {
+                {
                     let mut p = (base as *const u64).wrapping_sub(1);
                     for _ in 0..64 {
                         if kept >= 14 {
@@ -11199,7 +11199,7 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
             putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
         }
     }
-    unsafe {
+    {
         const M: &[u8] = b"  ORPHAN-CTX pid=";
         for &b in M { putchar(b); }
         pdec(pid as u64);
