@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # Rux kernel interactive configuration menu
 # Generates build/.config file (similar to Linux kernel)
 
