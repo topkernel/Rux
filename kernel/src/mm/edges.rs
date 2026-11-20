@@ -234,3 +234,23 @@ pub fn pcp_row_ref_peek(c: usize) -> &'static super::pcp::PcpPageset {
     let row = unsafe { &*core::ptr::addr_of!(super::pcp::PCP_ROWS[c]) }.0.get();
     unsafe { &*row }
 }
+
+/// Copy `n` bytes between a pinned user frame's kernel alias and a
+/// kernel buffer (INV-MM-6 pinned-alias arm: the pin keeps the frame
+/// alive; the alias covers at least the piece length handed out by the
+/// piece iterator).
+#[inline]
+pub fn copy_kva(dst: *mut u8, src: &[u8]) {
+    // SAFETY: INV-MM-6 — dst is a live pinned-frame alias; src's slice
+    // proves its own bytes; the pieces never overlap.
+    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) }
+}
+
+/// The gather twin: copy from a pinned frame's kernel alias into a
+/// kernel buffer slice (INV-MM-6 pinned-alias arm).
+#[inline]
+pub fn copy_kva_from(dst: &mut [u8], src: *const u8) {
+    // SAFETY: INV-MM-6 — src is a live pinned-frame alias for
+    // dst.len() bytes; the pieces never overlap.
+    unsafe { core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len()) }
+}
