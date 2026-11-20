@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Side-file framework edges for the scheduler's non-core modules
 //! (industrial-reduction lane L2, coordination chunk, 2026-11-20).
 //!

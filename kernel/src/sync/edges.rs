@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! The sync subsystem's audited unsafe edges (framework zone).
 //!
 //! unsafe-slim round L1 (2026-11-20), framekernel doctrine: the sync
