@@ -51,3 +51,11 @@ pub mod ptr;
 pub mod ring;
 #[path = "../../src/safety/slot.rs"]
 pub mod slot;
+
+#[path = "../../src/safety/dma.rs"]
+pub mod dma;
+#[path = "../../src/safety/frame.rs"]
+pub mod frame;
+
+#[cfg(kani)]
+mod kani;

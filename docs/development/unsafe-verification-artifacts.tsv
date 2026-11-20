@@ -826,9 +826,10 @@ a6377feb5891	kernel/src/dfx/forensics_edges.rs	adopt_task	53		INV:INV-FOR-1
 b4769c9a1282	kernel/src/dfx/forensics_edges.rs	t_pid	60		INV:INV-FOR-1
 902aa587de1b	kernel/src/dfx/forensics_edges.rs	t_comm	67		INV:INV-FOR-1
 8038df2f2c2b	kernel/src/dfx/forensics_edges.rs	t_preempt_count	73	no-preempt	INV:INV-FOR-1
-e6a1b1de63fa	kernel/src/dfx/forensics_edges.rs	raw_qword	86	volatile,ptr-ops	INV:INV-FOR-2
-a2a298aa3c8b	kernel/src/dfx/forensics_edges.rs	location	98	ptr-ops	INV:INV-FOR-3
-ebd6d070393b	kernel/src/dfx/forensics_edges.rs	location_ref	106		INV:INV-FOR-3
+9cee82c595fe	kernel/src/dfx/forensics_edges.rs	raw_qword	89	volatile,ptr-ops	GAP
+884c6c215aa6	kernel/src/dfx/forensics_edges.rs	raw_u32	100	volatile,ptr-ops	GAP
+a22c28a3f0f4	kernel/src/dfx/forensics_edges.rs	location	112	ptr-ops	GAP
+64f58474bda3	kernel/src/dfx/forensics_edges.rs	location_ref	120		GAP
 aea7aab5e2de	kernel/src/dfx/hung_task.rs	report_hung_task	221	ptr-ops	INV:F18
 2aaca19a612a	kernel/src/dfx/leakorigin.rs	note_acquire	192	volatile,ptr-ops	INV:F1
 b44859cd4a9c	kernel/src/dfx/leakorigin.rs	note_acquire	237		INV:F1
@@ -871,23 +872,23 @@ ab7b9d31eac4	kernel/src/dfx/pstore.rs	early_scan	175	ptr-ops	INV:F4
 0522136544e0	kernel/src/dfx/pstore.rs	read_record	227	ptr-ops	INV:F4
 c58189780761	kernel/src/dfx/pstore.rs	read_record	229	raw-construct	INV:F4
 a2974e2902d0	kernel/src/dfx/pstore.rs	write_record	300	volatile,ptr-ops	INV:F4
-426eb5f72757	kernel/src/dfx/r83hunt.rs	report	145		INV:F1
-b8dcb177f2f9	kernel/src/dfx/r83hunt.rs	report	147		INV:F1
-31977580ae10	kernel/src/dfx/r83hunt.rs	report	156		INV:F1
-af915f48731e	kernel/src/dfx/r83hunt.rs	report	184		INV:F1
-77ccd8d79b13	kernel/src/dfx/r83hunt.rs	text_range	202	ptr-ops	INV:F1
-6939bb89ce6d	kernel/src/dfx/r83hunt.rs	<module>	220		INV:F1
-53da8a9d2d1a	kernel/src/dfx/r83hunt.rs	audit_tick	289		INV:F1
-af98aeee75fb	kernel/src/dfx/r83hunt.rs	watch_snap	314		INV:F1
-06055e15ade0	kernel/src/dfx/r83hunt.rs	waitwatch_report	343		INV:F1
-b3358e437e5d	kernel/src/dfx/r83hunt.rs	waitwatch_report	376		INV:F1
-c0d95cd23c44	kernel/src/dfx/r83hunt.rs	waitwatch_report	383		INV:F1
-eb0ffdf69c2e	kernel/src/dfx/r83hunt.rs	sched_tick_audit	444		INV:F1
-22222f4ae116	kernel/src/dfx/r83hunt.rs	magic_scan	504	volatile,ptr-ops	INV:F1
-a7d9b5cd4281	kernel/src/dfx/r83hunt.rs	magic_report	545	volatile,ptr-ops	INV:F1
-9c1c47281362	kernel/src/dfx/r83hunt.rs	word_in_cmdline	625	raw-construct,ptr-ops	INV:F1
-2ab0720a870c	kernel/src/dfx/r83hunt.rs	stack_foreign_scan	637		INV:F1
-7a83a252cec5	kernel/src/dfx/r83hunt.rs	stack_foreign_scan	652	volatile,ptr-ops	INV:F1
+f08635404cae	kernel/src/dfx/r83hunt.rs	report	149		GAP
+6aa593ae7569	kernel/src/dfx/r83hunt.rs	report	151		GAP
+b418dc1f38fa	kernel/src/dfx/r83hunt.rs	report	160		GAP
+2a7901a5dba2	kernel/src/dfx/r83hunt.rs	report	188		GAP
+7e956842c3cc	kernel/src/dfx/r83hunt.rs	text_range	206	ptr-ops	GAP
+f28015f9bb8b	kernel/src/dfx/r83hunt.rs	<module>	224		GAP
+7dc7238c7304	kernel/src/dfx/r83hunt.rs	audit_tick	293		GAP
+dfb8d28bc822	kernel/src/dfx/r83hunt.rs	watch_snap	318		GAP
+6276266a6a1e	kernel/src/dfx/r83hunt.rs	waitwatch_report	347		GAP
+c9f97af3ec82	kernel/src/dfx/r83hunt.rs	waitwatch_report	380		GAP
+c14fcf0555d8	kernel/src/dfx/r83hunt.rs	waitwatch_report	387		GAP
+b6bcfd2b4f3d	kernel/src/dfx/r83hunt.rs	sched_tick_audit	448		GAP
+5bb49e82d60a	kernel/src/dfx/r83hunt.rs	magic_scan	508	volatile,ptr-ops	GAP
+5c06418d7135	kernel/src/dfx/r83hunt.rs	magic_report	549	volatile,ptr-ops	GAP
+8c717db2ea8b	kernel/src/dfx/r83hunt.rs	word_in_cmdline	629	raw-construct,ptr-ops	GAP
+6574c25cdae4	kernel/src/dfx/r83hunt.rs	stack_foreign_scan	641		GAP
+76cf572950e9	kernel/src/dfx/r83hunt.rs	stack_foreign_scan	656	volatile,ptr-ops	GAP
 b2c278550e87	kernel/src/dfx/scribble.rs	audit_frames	228	volatile,ptr-ops	INV:F1
 79d8bdd8ebfc	kernel/src/dfx/scribble.rs	task_plausible	394		INV:F1
 96d7dfc3eddb	kernel/src/dfx/scribble.rs	double_seed	441		INV:F1
@@ -2201,15 +2202,15 @@ a962016216a8	kernel/src/safety/dma.rs	write_volatile_at	193	volatile,ptr-ops	GAP
 659b3650d6c9	kernel/src/safety/dma.rs	write_volatile	252	volatile	GAP
 723f7b3904bf	kernel/src/safety/dma.rs	deref	262		GAP
 86666b7241dc	kernel/src/safety/dma.rs	deref_mut	270		GAP
-d688422537f4	kernel/src/safety/frame.rs	read_u64	65	volatile,ptr-ops	INV:INV-WINDOW-1
-bf3014b1799d	kernel/src/safety/mmio.rs	read_u8	79	volatile	GAP
-82fa4b7566f3	kernel/src/safety/mmio.rs	read_u16	87	volatile	GAP
-b209e8e0bde0	kernel/src/safety/mmio.rs	read_u32	98	volatile	GAP
-df0d6f23f112	kernel/src/safety/mmio.rs	read_u64	106	volatile	GAP
-f7cb520b9ca0	kernel/src/safety/mmio.rs	write_u8	115	volatile	GAP
-7c0fd7349e1a	kernel/src/safety/mmio.rs	write_u16	123	volatile	GAP
-b2dfdeb5e507	kernel/src/safety/mmio.rs	write_u32	131	volatile	GAP
-ca399efdd72d	kernel/src/safety/mmio.rs	write_u64	139	volatile	GAP
+6f6b5de8ba55	kernel/src/safety/frame.rs	read_u64	73	volatile,ptr-ops	GAP
+dcd9a439ae40	kernel/src/safety/mmio.rs	read_u8	85	volatile	GAP
+b49a939242c1	kernel/src/safety/mmio.rs	read_u16	93	volatile	GAP
+4d0636462a74	kernel/src/safety/mmio.rs	read_u32	104	volatile	GAP
+b0913461bd1d	kernel/src/safety/mmio.rs	read_u64	112	volatile	GAP
+84781de53ea3	kernel/src/safety/mmio.rs	write_u8	121	volatile	GAP
+8a0095befa6e	kernel/src/safety/mmio.rs	write_u16	129	volatile	GAP
+73199259c924	kernel/src/safety/mmio.rs	write_u32	137	volatile	GAP
+442cc2d6b991	kernel/src/safety/mmio.rs	write_u64	145	volatile	GAP
 3e73fab377d8	kernel/src/safety/ptr.rs	new	68	ptr-ops	INV:INV-KPTR-1
 5f9e5b3edf42	kernel/src/safety/ptr.rs	new	72		INV:INV-KPTR-1
 699339226c6c	kernel/src/safety/ptr.rs	read_volatile	100	volatile	INV:INV-KPTR-5

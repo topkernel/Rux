@@ -1132,6 +1132,33 @@ Non-hatches verified: everything else in kernel/src/safety/ is either
 typed-safe surface or pub(crate); frame.rs/dma.rs windows are
 constructed through their INV'd ctors.
 
+**Layer 2.2 machine-checked rows (Kani, 2026-11-21)** — the two
+riskiest INV families now carry bounded proofs (harnesses:
+kernel/safety-tests/src/kani.rs, `cargo kani` 12/12 green):
+
+- **INV-KPTR-1/2/4 (exactly-once free, layout lock)** — machine-
+  checked: the new->use->Drop lifecycle, the into_raw->from_raw
+  re-adoption (exactly one dealloc), and the leak arm (zero
+  deallocs, not UB) all verify UB-free for symbolic values; a
+  dealloc-layout drift or double free fails the proof.
+- **INV-MMIO-1/2/3 (no OOB window)** — machine-checked: for EVERY
+  offset value, each accessor (u8/u32/u64, read+write) either
+  accesses inside the declared window or reaches the designed
+  check() panic; no path performs an OOB access.
+- **INV-DMA-2/3 + INV-WINDOW-1/2/3 (the Miri-excluded families)** —
+  bounded proofs added: DmaBlock carve/volatile lifecycle and
+  KernelStackWindow read_u64's Some-only-in-window discipline.
+
+Two Kani convictions fixed in the same change (the proofs doing
+their job on the checker infrastructure itself):
+1. MmioRegion::check's alignment debug_assert computed `base + off`
+   with raw addition — off near usize::MAX overflowed the CHECKER
+   before the window guard ran (wrapping_add now; alignment is a
+   modulo property).
+2. KernelStackWindow::read_u64's guard computed `addr + 8` raw —
+   same class, the guard was UB-prone for the very addresses it
+   exists to reject (checked_add now).
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once

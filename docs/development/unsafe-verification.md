@@ -19,11 +19,11 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2616**
-- with artifact (non-GAP): **1326** (50.7%)
-- GAP: **1290**
-- by kind: block=2291, unsafe-extern=7, unsafe-fn=162, unsafe-impl=156
-- by category (regions carry 0..n tags): ptr-ops=671, asm=278, volatile=162, raw-construct=58, addr-arith=57, no-preempt=15, ffi=13, static-mut=5, layout-meta=5, transmute=4
+- unsafe regions: **2617**
+- with artifact (non-GAP): **1305** (49.9%)
+- GAP: **1312**
+- by kind: block=2292, unsafe-extern=7, unsafe-fn=162, unsafe-impl=156
+- by category (regions carry 0..n tags): ptr-ops=672, asm=278, volatile=163, raw-construct=58, addr-arith=57, no-preempt=15, ffi=13, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
 
@@ -32,7 +32,7 @@ census id is accounted for here.
 | arch | 789 | 721 | 68 |
 | fs | 644 | 212 | 432 |
 | mm | 184 | 40 | 144 |
-| dfx | 127 | 127 | 0 |
+| dfx | 128 | 107 | 21 |
 | drivers | 120 | 8 | 112 |
 | sched | 109 | 25 | 84 |
 | sync | 106 | 26 | 80 |
@@ -41,7 +41,7 @@ census id is accounted for here.
 | ipc | 67 | 54 | 13 |
 | <top> | 61 | 0 | 61 |
 | net | 53 | 2 | 51 |
-| safety | 50 | 31 | 19 |
+| safety | 50 | 30 | 20 |
 | perf | 40 | 7 | 33 |
 | syscall | 27 | 0 | 27 |
 | io_uring | 19 | 0 | 19 |
@@ -2368,7 +2368,7 @@ census id is accounted for here.
 | 427 | dump_csrs | block | asm | INV:F2 | `cf2ff2f5a608` |
 | 458 | dump_csrs | block | asm | INV:F2 | `72acf0a4c823` |
 
-### kernel/src/dfx/forensics_edges.rs (7)
+### kernel/src/dfx/forensics_edges.rs (8)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -2376,9 +2376,10 @@ census id is accounted for here.
 | 60 | t_pid | block | - | INV:INV-FOR-1 | `b4769c9a1282` |
 | 67 | t_comm | block | - | INV:INV-FOR-1 | `902aa587de1b` |
 | 73 | t_preempt_count | block | no-preempt | INV:INV-FOR-1 | `8038df2f2c2b` |
-| 86 | raw_qword | block | volatile,ptr-ops | INV:INV-FOR-2 | `e6a1b1de63fa` |
-| 98 | location | block | ptr-ops | INV:INV-FOR-3 | `a2a298aa3c8b` |
-| 106 | location_ref | block | - | INV:INV-FOR-3 | `ebd6d070393b` |
+| 89 | raw_qword | block | volatile,ptr-ops | GAP | `9cee82c595fe` |
+| 100 | raw_u32 | block | volatile,ptr-ops | GAP | `884c6c215aa6` |
+| 112 | location | block | ptr-ops | GAP | `a22c28a3f0f4` |
+| 120 | location_ref | block | - | GAP | `64f58474bda3` |
 
 ### kernel/src/dfx/hung_task.rs (1)
 
@@ -2471,23 +2472,23 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 145 | report | block | - | INV:F1 | `426eb5f72757` |
-| 147 | report | block | - | INV:F1 | `b8dcb177f2f9` |
-| 156 | report | block | - | INV:F1 | `31977580ae10` |
-| 184 | report | block | - | INV:F1 | `af915f48731e` |
-| 202 | text_range | block | ptr-ops | INV:F1 | `77ccd8d79b13` |
-| 220 | <module> | unsafe-fn | - | INV:F1 | `6939bb89ce6d` |
-| 289 | audit_tick | block | - | INV:F1 | `53da8a9d2d1a` |
-| 314 | watch_snap | block | - | INV:F1 | `af98aeee75fb` |
-| 343 | waitwatch_report | block | - | INV:F1 | `06055e15ade0` |
-| 376 | waitwatch_report | block | - | INV:F1 | `b3358e437e5d` |
-| 383 | waitwatch_report | block | - | INV:F1 | `c0d95cd23c44` |
-| 444 | sched_tick_audit | block | - | INV:F1 | `eb0ffdf69c2e` |
-| 504 | magic_scan | block | volatile,ptr-ops | INV:F1 | `22222f4ae116` |
-| 545 | magic_report | block | volatile,ptr-ops | INV:F1 | `a7d9b5cd4281` |
-| 625 | word_in_cmdline | block | raw-construct,ptr-ops | INV:F1 | `9c1c47281362` |
-| 637 | stack_foreign_scan | block | - | INV:F1 | `2ab0720a870c` |
-| 652 | stack_foreign_scan | block | volatile,ptr-ops | INV:F1 | `7a83a252cec5` |
+| 149 | report | block | - | GAP | `f08635404cae` |
+| 151 | report | block | - | GAP | `6aa593ae7569` |
+| 160 | report | block | - | GAP | `b418dc1f38fa` |
+| 188 | report | block | - | GAP | `2a7901a5dba2` |
+| 206 | text_range | block | ptr-ops | GAP | `7e956842c3cc` |
+| 224 | <module> | unsafe-fn | - | GAP | `f28015f9bb8b` |
+| 293 | audit_tick | block | - | GAP | `7dc7238c7304` |
+| 318 | watch_snap | block | - | GAP | `dfb8d28bc822` |
+| 347 | waitwatch_report | block | - | GAP | `6276266a6a1e` |
+| 380 | waitwatch_report | block | - | GAP | `c9f97af3ec82` |
+| 387 | waitwatch_report | block | - | GAP | `c14fcf0555d8` |
+| 448 | sched_tick_audit | block | - | GAP | `b6bcfd2b4f3d` |
+| 508 | magic_scan | block | volatile,ptr-ops | GAP | `5bb49e82d60a` |
+| 549 | magic_report | block | volatile,ptr-ops | GAP | `5c06418d7135` |
+| 629 | word_in_cmdline | block | raw-construct,ptr-ops | GAP | `8c717db2ea8b` |
+| 641 | stack_foreign_scan | block | - | GAP | `6574c25cdae4` |
+| 656 | stack_foreign_scan | block | volatile,ptr-ops | GAP | `76cf572950e9` |
 
 ### kernel/src/dfx/scribble.rs (31)
 
@@ -3814,20 +3815,20 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 65 | read_u64 | block | volatile,ptr-ops | INV:INV-WINDOW-1 | `d688422537f4` |
+| 73 | read_u64 | block | volatile,ptr-ops | GAP | `6f6b5de8ba55` |
 
 ### kernel/src/safety/mmio.rs (8)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 79 | read_u8 | block | volatile | GAP | `bf3014b1799d` |
-| 87 | read_u16 | block | volatile | GAP | `82fa4b7566f3` |
-| 98 | read_u32 | block | volatile | GAP | `b209e8e0bde0` |
-| 106 | read_u64 | block | volatile | GAP | `df0d6f23f112` |
-| 115 | write_u8 | block | volatile | GAP | `f7cb520b9ca0` |
-| 123 | write_u16 | block | volatile | GAP | `7c0fd7349e1a` |
-| 131 | write_u32 | block | volatile | GAP | `b2dfdeb5e507` |
-| 139 | write_u64 | block | volatile | GAP | `ca399efdd72d` |
+| 85 | read_u8 | block | volatile | GAP | `dcd9a439ae40` |
+| 93 | read_u16 | block | volatile | GAP | `b49a939242c1` |
+| 104 | read_u32 | block | volatile | GAP | `4d0636462a74` |
+| 112 | read_u64 | block | volatile | GAP | `b0913461bd1d` |
+| 121 | write_u8 | block | volatile | GAP | `84781de53ea3` |
+| 129 | write_u16 | block | volatile | GAP | `8a0095befa6e` |
+| 137 | write_u32 | block | volatile | GAP | `73199259c924` |
+| 145 | write_u64 | block | volatile | GAP | `442cc2d6b991` |
 
 ### kernel/src/safety/ptr.rs (13)
 
