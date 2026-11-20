@@ -3242,18 +3242,17 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
         }
     }
 
-    // SAFETY: pid_hash_lookup_pinned returns a valid Task pointer or null;
-    // null is checked below. R15-6: PINNED — synchronize_rcu() is a no-op
-    // (RCU_GEN never advances; only rcu_softirq_handler bumps it and the
-    // Rcu softirq is never raised), so an unpinned lookup could hand back
-    // a Task that release_task() freed and the buddy already reused. The
-    // wake below would then enqueue a dead page into the runqueue
-    // (on_rq on the freed page reads false) — the S-R illegal-instruction
-    // engine. The pin keeps the Task alive until task_put below.
     // PINNED lookup (R15-6): synchronize_rcu() is a no-op (RCU_GEN never
     // advances; only the Rcu softirq bumps it and is never raised), so an
     // unpinned lookup could hand back a Task that release_task() freed and
-    // the buddy already reused. TaskRef owns the pin until task_put below.
+    // the buddy already reused. The wake below would then enqueue a dead
+    // page into the runqueue (on_rq on the freed page reads false) — the
+    // S-R illegal-instruction engine. TaskRef owns the pin for this whole
+    // scope and releases it ONCE in its Drop; a manual task_put here as
+    // well double-released the receiver's refcount (pin -1, Drop -1) and
+    // free_task_slot fired on a task still linked in the pid hash and its
+    // parent's child list — the slim4 fio-corruption regression (freed
+    // task read as pid=0xdeadbeef in pid-1's wait4 walk).
     let task_ref = match crate::process::task_ref::TaskRef::from_pinned(
         crate::process::pid_hash::pid_hash_lookup_pinned(pid),
     ) {
@@ -3261,11 +3260,7 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
         None => return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32()),
     };
 
-    let result = send_signal_locked(&*task_ref, pid, sig, group);
-
-    // Release the pin taken by the lookup above.
-    crate::process::task::Task::task_put(task_ref.as_ptr());
-    result
+    send_signal_locked(&*task_ref, pid, sig, group)
 }
 
 /// Signal-sending core, operating on a PINNED task pointer.
@@ -3727,16 +3722,16 @@ fn send_signal_with_info_g(pid: u32, info: SigInfo, group: i32) -> Result<(), i3
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
     // PINNED lookup (R15-6, same contract as send_signal_g): TaskRef
-    // owns the pin until task_put below.
+    // owns the pin and releases it once in Drop — NO manual task_put
+    // (the double release was the slim4 fio-corruption regression;
+    // see send_signal_g).
     let task_ref = match crate::process::task_ref::TaskRef::from_pinned(
         crate::process::pid_hash::pid_hash_lookup_pinned(pid),
     ) {
         Some(t) => t,
         None => return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32()),
     };
-    let result = send_signal_locked_info(&*task_ref, sig, Some(info), group);
-    crate::process::task::Task::task_put(task_ref.as_ptr());
-    result
+    send_signal_locked_info(&*task_ref, sig, Some(info), group)
 }
 
 /// Send a signal to all processes in a given process group.
