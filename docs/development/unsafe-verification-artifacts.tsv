@@ -2114,11 +2114,11 @@ df20e0fc055c	kernel/src/perf/mod.rs	sys_perf_event_open	1850	ptr-ops	INV:INV-LOC
 a30a9396b22d	kernel/src/process/mod.rs	current_pgid	111		GAP
 517b3d54632b	kernel/src/process/mod.rs	find_task_by_pid	132		GAP
 933975afa1e8	kernel/src/process/ptrace.rs	sys_ptrace	368	ptr-ops	INV:INV-PROC-BORROW-1
-f5770d9b6724	kernel/src/process/task_ref.rs	<module>	73		GAP
-5f376decb96e	kernel/src/process/task_ref.rs	deref	86		GAP
-8630f74181c8	kernel/src/process/task_ref.rs	deref_mut	96		GAP
-8c9d5e0e842c	kernel/src/process/task_ref.rs	deref	152		INV:INV-TASKREF-1
-39ea3279d04f	kernel/src/process/task_ref.rs	deref_mut	160		INV:INV-TASKREF-1
+b4a45dfecc65	kernel/src/process/task_ref.rs	<module>	78		GAP
+66f9b55e364b	kernel/src/process/task_ref.rs	deref	91		GAP
+d205ba0b4367	kernel/src/process/task_ref.rs	deref_mut	101		GAP
+4a7d2d54e167	kernel/src/process/task_ref.rs	deref	158		GAP
+8ebb43e27f18	kernel/src/process/task_ref.rs	deref_mut	166		GAP
 2beaa1051168	kernel/src/process/unsafe_edges.rs	borrow_task	55		INV:INV-PROC-BORROW-1
 7e183034b210	kernel/src/process/unsafe_edges.rs	borrow_task_mut	72		INV:INV-PROC-BORROW-1
 36403cdf6b01	kernel/src/process/unsafe_edges.rs	place_task	107		INV:INV-PROC-PLACE-2
@@ -2204,10 +2204,10 @@ c42f1426d8fc	kernel/src/safety/dma.rs	new	61		INV:INV-DMA-1
 9eb9b5f818fe	kernel/src/safety/dma.rs	read_volatile_at	182	volatile,ptr-ops	INV:INV-DMA-1
 a962016216a8	kernel/src/safety/dma.rs	write_volatile_at	193	volatile,ptr-ops	GAP
 60ac02e498ca	kernel/src/safety/dma.rs	drop	201		INV:INV-DMA-1
-de1100521e66	kernel/src/safety/dma.rs	read_volatile	241	volatile	INV:INV-DMA-2
-fcee3c7825f9	kernel/src/safety/dma.rs	write_volatile	251	volatile	INV:INV-DMA-2
-bec96ca1d959	kernel/src/safety/dma.rs	deref	261		INV:INV-DMA-2
-b4a7ba1c5133	kernel/src/safety/dma.rs	deref_mut	269		INV:INV-DMA-2
+441206c99e86	kernel/src/safety/dma.rs	read_volatile	242	volatile	GAP
+659b3650d6c9	kernel/src/safety/dma.rs	write_volatile	252	volatile	GAP
+723f7b3904bf	kernel/src/safety/dma.rs	deref	262		GAP
+86666b7241dc	kernel/src/safety/dma.rs	deref_mut	270		GAP
 d688422537f4	kernel/src/safety/frame.rs	read_u64	65	volatile,ptr-ops	INV:INV-WINDOW-1
 ea4995f06791	kernel/src/safety/mmio.rs	read_u8	69	volatile	INV:INV-MMIO-1
 d0de44c2de3f	kernel/src/safety/mmio.rs	read_u16	77	volatile	INV:INV-MMIO-1

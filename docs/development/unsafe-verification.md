@@ -20,8 +20,8 @@ census id is accounted for here.
 ## Totals
 
 - unsafe regions: **2684**
-- with artifact (non-GAP): **1453** (54.1%)
-- GAP: **1231**
+- with artifact (non-GAP): **1447** (53.9%)
+- GAP: **1237**
 - by kind: block=2358, unsafe-extern=7, unsafe-fn=163, unsafe-impl=156
 - by category (regions carry 0..n tags): ptr-ops=665, asm=278, volatile=162, raw-construct=58, addr-arith=57, no-preempt=16, ffi=13, static-mut=5, layout-meta=5, transmute=4
 
@@ -37,11 +37,11 @@ census id is accounted for here.
 | drivers | 120 | 8 | 112 |
 | sched | 117 | 93 | 24 |
 | tests | 105 | 1 | 104 |
-| process | 80 | 74 | 6 |
+| process | 80 | 72 | 8 |
 | ipc | 67 | 54 | 13 |
 | <top> | 61 | 0 | 61 |
 | net | 53 | 2 | 51 |
-| safety | 50 | 46 | 4 |
+| safety | 50 | 42 | 8 |
 | perf | 40 | 7 | 33 |
 | syscall | 27 | 0 | 27 |
 | io_uring | 19 | 0 | 19 |
@@ -3444,11 +3444,11 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 73 | <module> | unsafe-fn | - | GAP | `f5770d9b6724` |
-| 86 | deref | block | - | GAP | `5f376decb96e` |
-| 96 | deref_mut | block | - | GAP | `8630f74181c8` |
-| 152 | deref | block | - | INV:INV-TASKREF-1 | `8c9d5e0e842c` |
-| 160 | deref_mut | block | - | INV:INV-TASKREF-1 | `39ea3279d04f` |
+| 78 | <module> | unsafe-fn | - | GAP | `b4a45dfecc65` |
+| 91 | deref | block | - | GAP | `66f9b55e364b` |
+| 101 | deref_mut | block | - | GAP | `d205ba0b4367` |
+| 158 | deref | block | - | GAP | `4a7d2d54e167` |
+| 166 | deref_mut | block | - | GAP | `8ebb43e27f18` |
 
 ### kernel/src/process/unsafe_edges.rs (71)
 
@@ -3883,10 +3883,10 @@ census id is accounted for here.
 | 182 | read_volatile_at | block | volatile,ptr-ops | INV:INV-DMA-1 | `9eb9b5f818fe` |
 | 193 | write_volatile_at | block | volatile,ptr-ops | GAP | `a962016216a8` |
 | 201 | drop | block | - | INV:INV-DMA-1 | `60ac02e498ca` |
-| 241 | read_volatile | block | volatile | INV:INV-DMA-2 | `de1100521e66` |
-| 251 | write_volatile | block | volatile | INV:INV-DMA-2 | `fcee3c7825f9` |
-| 261 | deref | block | - | INV:INV-DMA-2 | `bec96ca1d959` |
-| 269 | deref_mut | block | - | INV:INV-DMA-2 | `b4a7ba1c5133` |
+| 242 | read_volatile | block | volatile | GAP | `441206c99e86` |
+| 252 | write_volatile | block | volatile | GAP | `659b3650d6c9` |
+| 262 | deref | block | - | GAP | `723f7b3904bf` |
+| 270 | deref_mut | block | - | GAP | `86666b7241dc` |
 
 ### kernel/src/safety/frame.rs (1)
 
