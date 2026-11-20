@@ -843,22 +843,36 @@ pub static GRQ_SITE_FP: [core::sync::atomic::AtomicU64; MAX_CPUS] =
 pub static GRQ_ACQ_JIF: [core::sync::atomic::AtomicU64; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
 
-/// Read the current frame pointer (rbp on x86_64, s0 on riscv64).
+/// Read the current frame pointer (rbp on x86_64, s0 on riscv64,
+/// x29 on aarch64).
+///
+/// IRREDUCIBLE F-ROW (F-REG-1): there is no safe shape for reading a
+/// CPU register — Rust exposes no intrinsic for rbp/s0/x29 and the
+/// register file is outside the language's memory model. The reference
+/// kernel reaches the same value in C via
+/// `__builtin_frame_address(0)` (gcc lowers it to the identical
+/// `mov rbp` / `mv s0` / `mov x29`), used by its frame-pointer
+/// stackwalker (`arch/arm64/kernel/stacktrace.c`, x86
+/// `dumpstack.c`'s fp path); this read feeds the GRQ crime-scene
+/// backtrace, the same consumer. Contract: read-only, `nomem` +
+/// `nostack` + `preserves_flags` — no memory, stack or flag effect,
+/// so the only soundness requirement is that the output register is
+/// written, which the operand enforces.
 #[inline(always)]
 fn grq_current_fp() -> u64 {
     let fp: u64;
     #[cfg(feature = "x86_64")]
-    // SAFETY: reading the frame-pointer register is side-effect free.
+    // F-REG-1 (x86_64): mov rbp — the reference's __builtin_frame_address(0).
     unsafe {
         core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
     }
     #[cfg(feature = "riscv64")]
-    // SAFETY: reading the frame-pointer register is side-effect free.
+    // F-REG-1 (riscv64): mv s0 — same lowered builtin.
     unsafe {
         core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
     }
     #[cfg(feature = "aarch64")]
-    // SAFETY: reading the frame-pointer register is side-effect free.
+    // F-REG-1 (aarch64): mov x29 — same lowered builtin.
     unsafe {
         core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
     }
@@ -2756,10 +2770,18 @@ pub fn init_secondary(cpu_id: usize) {
 
 /// Clear the trap-entry scratch register (riscv64 `sscratch`; no-op
 /// elsewhere — x86_64 keeps per-CPU state in memory, not a scratch reg).
+///
+/// IRREDUCIBLE F-ROW (F-REG-3): CSR state has no safe Rust access —
+/// the reference's `arch/riscv/kernel/entry.S` writes the same
+/// `csrw sscratch, zero` on the usermode-entry paths (the scratch
+/// register holds the kernel tp across user execution; zeroing here
+/// establishes the boot-time convention before the first userspace
+/// entry). Contract: a CSR write with no memory effect; the one-shot
+/// boot ordering is guaranteed by the caller (init, pre-scheduler).
 #[inline]
 fn clear_trap_scratch() {
     #[cfg(feature = "riscv64")]
-    // SAFETY: writing 0 to sscratch is the standard usermode-entry setup.
+    // F-REG-3 (riscv64): csrw sscratch, zero — entry.S usermode-entry setup.
     unsafe {
         core::arch::asm!("csrw sscratch, zero");
     }
@@ -2929,10 +2951,25 @@ pub fn task_page_is_owned(ptr: *const u8) -> bool {
     }
 }
 
+/// Slot take (INV-TL-1): the ownership-take half of the task-page
+/// lifecycle. Pairing audit — the page becomes a Task only through
+/// this sequence, all inside one function with no yield point:
+/// alloc (raw bytes, uninitialized) -> pid take (its failure deallocs
+/// the SAME layout back — pre-init, no observer can hold the pointer)
+/// -> new_task_at in-place init (its failure routes through
+/// free_task_slot so the page leaves POISONED, never raw — the R48
+/// note below) -> pid_hash_insert (the first publish; before it, no
+/// other CPU can name this page). IN_TASK_ALLOC is a diagnostic flag
+/// for the buddy's free-side audit, NOT an ownership tracker (no
+/// second authority — the poison words themselves are the only
+/// freed-state truth).
 pub fn alloc_task_slot() -> Option<*mut Task> {
     let layout = core::alloc::Layout::new::<Task>();
     IN_TASK_ALLOC.store(true, core::sync::atomic::Ordering::Release);
-    // SAFETY: Layout is non-zero (Task is sized); null check follows immediately.
+    // SAFETY (INV-TL-1): Layout is non-zero (Task is sized); the raw
+    // allocator has no safe wrapper that preserves the Task slot's
+    // raw-pointer identity (Round-B typed-handle conversion pending);
+    // null check follows immediately.
     let task_ptr = unsafe { alloc::alloc::alloc(layout) } as *mut Task;
     IN_TASK_ALLOC.store(false, core::sync::atomic::Ordering::Release);
     if task_ptr.is_null() {
@@ -2991,6 +3028,24 @@ static FREED_RING_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::At
 /// R12-4: poison marker written into a freed Task's state/pid words.
 pub const TASK_POISON: u32 = 0xDEAD_BEEF;
 
+/// Slot release (INV-TL-2): the terminal-release half of the
+/// lifecycle — the family the sc191 v2 fix and the R63
+/// terminal_switch_done protocol hang off. The single-atomic-window
+/// discipline: between the last observer's release (the callers'
+/// task_put / terminal_switch_done handshake proves no CPU still
+/// runs or can still reach the task) and the dealloc below there is
+/// ONE window with ONE writer (this CPU); the steps inside it are
+/// strictly ordered — wakewatch stamp invalidation (phantom-strand
+/// guard), drop_in_place (field destructors; the Arc fields were
+/// already released to None by the exit paths), the R12-4 ring
+/// record, the R47 positional poison of state+pid (the ONLY
+/// freed-state authority — R15-6/R33/R41/R47 guards read it), the
+/// R83 header paint, task_page_unmark, and the dealloc. NO second
+/// tracker: IN_TASK_FREE is the buddy audit's diagnostic flag, not
+/// ownership. No safe shape exists for this sequence: it writes
+/// through a pointer that is logically dead (the poison/paint) —
+/// by definition outside the language's model — and runs the
+/// destructor for the last reference the type system cannot see.
 pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
@@ -3339,6 +3394,11 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // must not inherit the old occupant's stamp (phantom-strand
         // guard, see wakewatch::note_task_freed).
         crate::sched::wakewatch::note_task_freed(task_ptr);
+        // SAFETY (INV-TL-2): drop_in_place runs the field destructors
+        // for the page's last type-system-invisible reference; the
+        // call-site audit (the comment block above) proves every path
+        // here operates on a FULLY initialized task (new_task_at's only
+        // failure return precedes any Drop-bearing field).
         unsafe {
             core::ptr::drop_in_place(task_ptr);
         }
@@ -3346,6 +3406,12 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // linked child" or wild-pointer wake then shows this exact marker
         // instead of anonymous zeros, proving (or ruling out) the
         // freed-while-referenced family at first sight.
+        // SAFETY (INV-TL-2, the poison window): every write below goes
+        // through a pointer the type system already considers dead —
+        // that is the POINT of the poison discipline (the R47/R12-4
+        // guards read these words to refuse stale wakes). Volatile
+        // stores at the compile-time offsets; the paint loop bounds
+        // itself to 0x100 bytes; the dealloc closes the window.
         unsafe {
             let slot = task_ptr as *mut u8;
             let h = FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
@@ -12391,24 +12457,32 @@ pub fn cpu_idle_loop() -> ! {
     // overflows into the neighboring allocations).
     static IDLE_SP_FLOOR: [core::sync::atomic::AtomicU64; MAX_CPUS] =
         [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+    // IRREDUCIBLE F-ROW (F-REG-2) for all three arch arms below: the
+    // live stack pointer has no safe read — the reference kernel keeps
+    // a `current_stack_pointer` definition per arch for exactly this
+    // (arch/x86/include/asm/stacktrace.h, riscv/entry.S's sp, arm64's
+    // current_stack_pointer global); Rust's equivalent is this asm!
+    // read. Consumer: the idle-stack-overflow guard (same shape as the
+    // reference's TASK_SIZE-bounded stack check). Contract: read-only,
+    // nomem + nostack; the output operand is the only effect.
     #[cfg(feature = "x86_64")]
     fn idle_guard_sp() -> usize {
         let sp: usize;
-        // SAFETY: reading rsp is side-effect free.
+        // F-REG-2 (x86_64): mov rsp.
         unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack)) };
         sp
     }
     #[cfg(feature = "riscv64")]
     fn idle_guard_sp() -> usize {
         let sp: usize;
-        // SAFETY: reading sp is side-effect free.
+        // F-REG-2 (riscv64): mv sp.
         unsafe { core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack)) };
         sp
     }
     #[cfg(feature = "aarch64")]
     fn idle_guard_sp() -> usize {
         let sp: usize;
-        // SAFETY: reading sp is side-effect free.
+        // F-REG-2 (aarch64): mov sp.
         unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack)) };
         sp
     }
