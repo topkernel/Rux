@@ -89,7 +89,7 @@
       <li><b>事件类型</b>:CPU_CLOCK / TASK_CLOCK / PAGE_FAULTS / CONTEXT_SWITCHES;计数与采样双模式。</li>
       <li><b>采样模式</b>:mmap 环输出记录,字段序 ID/IDENTIFIER/IP/TID/TIME/ID/STREAM_ID/CPU/PERIOD/CALLCHAIN 与 Linux 一致;sideband 记录 COMM/FORK/EXIT/MMAP2/LOST;ioctl 集;<code>/proc/sys/kernel/perf_event_paranoid</code> 门(默认 2)。</li>
       <li><b>采样粒度(登记的分歧)</b>:软件采样骑 tick —— <code>sample_period</code> 低于一个 tick(100 Hz 下 10 ms)时聚合为 tick 率采样;Linux 的 per-event hrtimer swevent 为后续项。做热点概貌(秒级窗口)足够;做逐调用精确剖析不足 —— 用途边界如实。</li>
-      <li><b>验证方式</b>:以 Linux 自身的 profiler 对本 ABI 构建,暴露合成测试未覆盖的对齐缺口(inherit 语义、环 fd O_RDWR、MISC cpumode 字节序),随后交付战役热点表(80,961 → 244,516 样本,内核 1-5 / 用户 2-16+ 帧链)—— ABI 验证以真实消费方为准。</li>
+      <li><b>验证方式</b>:以 Linux 自身的 profiler 对本 ABI 构建,暴露合成测试未覆盖的对齐缺口(inherit 语义、环 fd O_RDWR、MISC cpumode 字节序),随后交付热点采样表(80,961 → 244,516 样本,内核 1-5 / 用户 2-16+ 帧链)—— ABI 验证以真实消费方为准。</li>
     </ul>
     <h3>用法</h3>
     <pre><code><span class="c"># guest 内(perf_event_paranoid=2 默认:同进程组计数 + 本用户采样)</span>

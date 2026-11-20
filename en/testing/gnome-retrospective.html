@@ -86,7 +86,7 @@
     <div class="callout"><b>Status:</b> both §3 root causes fixed and verified; the three stacked mechanisms of §8 fixed (10 of 11 post-fix boots reach a shell); the deep-water trim item and two producer hunts remain open.</div>
 
     <h2 id="accept"><span class="anchor">§1</span>What "works" meant concretely</h2>
-    <p>The x86 GNOME milestone (99% non-black frame, 17-minute stable session) was accepted at main@4ed009ac by the gnome-x86 work lane: per-boot manual verification with the work lane's fire.py driver. It was a <b>campaign acceptance, not a standing gate</b> — after the work lane demobilized, nothing in the recurring test surface booted the GNOME desktop again.</p>
+    <p>The x86 GNOME milestone (99% non-black frame, 17-minute stable session) was accepted at main@4ed009ac by the gnome-x86 work lane: per-boot manual verification with the work lane's fire.py driver. It was a <b>one-off acceptance, not a standing gate</b> — after the work lane demobilized, nothing in the recurring test surface booted the GNOME desktop again.</p>
 
     <h2 id="window"><span class="anchor">§2</span>The regression window</h2>
     <div class="tbl-wrap">
@@ -104,7 +104,7 @@
     <h2 id="roots"><span class="anchor">§3</span>Confirmed root causes (both performance reworks)</h2>
     <h3>3.1 munmap chunked surgery — two-sided races</h3>
     <ul>
-      <li><b>Origin</b>: the OH campaign's 132 µs munmap-convoy fix replaced the single VMA-write-lock hold with per-256KB chunks, re-deriving the VMA tree after each chunk guard drop.</li>
+      <li><b>Origin</b>: the OH debugging round's 132 µs munmap-convoy fix replaced the single VMA-write-lock hold with per-256KB chunks, re-deriving the VMA tree after each chunk guard drop.</li>
       <li><b>Hole</b>: between guards, a same-mm racing mmap legally landed in the transient tree hole inside the still-processed range; the next chunk treated the fresh VMA as an unprocessed piece of the current munmap and deleted it (vma=NONE faults), and the deferred zap cleared fresh PTEs (face B).</li>
       <li><b>Fix</b> (main@5b4a4bc7): <b>detach-all-then-zap</b> — one guard detaches every piece; ≤4 MB ranges (the whole malloc/arena class) zap inside the guard. Reproducer: 2/3 boots crashed → 3/3 clean (12,000 checks per boot).</li>
     </ul>
@@ -124,7 +124,7 @@
           <tr><td>make test</td><td>in-kernel unit suite, no userspace FS load</td></tr>
           <tr><td>pbench / syscost</td><td>microbenchmarks measure speed, not content correctness</td></tr>
           <tr><td>OH image boot</td><td>OHOS uses musl (different allocator behavior); the OH work lane's own image-side failures masked mm-class crashes</td></tr>
-          <tr><td>GNOME boot</td><td>campaign-only; demobilized with the work lane</td></tr>
+          <tr><td>GNOME boot</td><td>that round only; demobilized with the work lane</td></tr>
         </tbody>
       </table>
     </div>

@@ -83,7 +83,7 @@
     <h1>CI pipeline (make ci)</h1>
     <div class="sub">One-key full regression: build → suites → image → boot regressions + benchmarks → full LTP → stress loop — unattended, no LLM required · implemented in userspace/ci/ (2026-11-10)</div>
 
-    <div class="callout"><b>What it is:</b> anyone (or any timer) runs <code>make ci</code> at the repository root for one complete test pass; the daily campaign (<code>daily-stress.sh</code>) drives the same phases in a loop. All artifacts land in <code>run/ci-*.log</code> and <code>userspace/ci/&lt;date&gt;/</code>; a KERNPANIC detected in any phase writes an ALERT and halts the pipeline — the one condition that warrants human intervention.</div>
+    <div class="callout"><b>What it is:</b> anyone (or any timer) runs <code>make ci</code> at the repository root for one complete test pass; the daily stress run (<code>daily-stress.sh</code>) drives the same phases in a loop. All artifacts land in <code>run/ci-*.log</code> and <code>userspace/ci/&lt;date&gt;/</code>; a KERNPANIC detected in any phase writes an ALERT and halts the pipeline — the one condition that warrants human intervention.</div>
 
     <h2 id="phases"><span class="anchor">§1</span>The six phases</h2>
     <div class="tbl-wrap">

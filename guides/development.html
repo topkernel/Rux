@@ -114,7 +114,7 @@
       <table>
         <thead><tr><th>层级</th><th>适用</th><th>额外要求</th></tr></thead>
         <tbody>
-          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>syscost 安静启动:普查带内、tick ≥99.5/s、零新增 panic/OOM、系统调用量 ±10%、单次平均 ±20% 或更优</td></tr>
+          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>syscost 安静启动:普查值在基线区间内、tick ≥99.5/s、零新增 panic/OOM、系统调用量 ±10%、单次平均 ±20% 或更优</td></tr>
           <tr><td><b>Tier 2</b></td><td>热路径:mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>加一次 pbench 启动:P1–P7 中位数全部在基线 ±20% 内或更优</td></tr>
           <tr><td><b>Tier 3</b></td><td>分配器或 IRQ 路径</td><td>再加 IF=0 中断关闭份额测量(EFLAGS 对探针)</td></tr>
         </tbody>

@@ -89,7 +89,7 @@
       <li><b>Ubuntu 24.04 完整桌面</b>:systemd 255 到 multi-user + graphical 目标、串口登录达成(dev-ttyS0 找到、getty 启动、提示符可达);gdm.service 与 systemd-logind 干净启动(90 秒超时根因 EROFS 已修);<code>make ubuntu-run</code> 默认启动完整 24.04 桌面 —— 收尾面:greeter 渲染(脱困 convoy 家族后链路已就绪)。</li>
       <li><b>OpenHarmony launcher → 桌面</b>:/data 挂载与 SystemUI 锁屏已达成,继续向完整 launcher 主屏推进。</li>
       <li><b>LTP 通过率最大化</b>:当前预期 1139/1869(2026-11-16 官方确认轮 1138 + tgkill03 修复),持续清 FAIL/CRASH/TIMEOUT 面。</li>
-      <li><b>调试手段对齐Linux 内核</b>:tracepoint 框架扩张中(lock/tcp/input 族 + PSI + 日志控制);深水区 lockdep/RCU-stall/blktrace/perf-probes/kdump。</li>
+      <li><b>调试手段对齐Linux 内核</b>:tracepoint 框架扩张中(lock/tcp/input 族 + PSI + 日志控制);深层项 lockdep/RCU-stall/blktrace/perf-probes/kdump。</li>
     </ul>
 
     <h2 id="timeline"><span class="anchor">§2</span>里程碑时间线</h2>
@@ -154,7 +154,7 @@
     <h2 id="beyond"><span class="anchor">§3</span>后续方向</h2>
     <ul>
       <li>LTP 持续爬坡(TIMEOUT 类按最高优先级处理);</li>
-      <li>可观测性深水区:lockdep 类、RCU-stall、blktrace、perf-probes、kdump;</li>
+      <li>可观测性深层项:lockdep 类、RCU-stall、blktrace、perf-probes、kdump;</li>
       <li>安全缺口登记册逐项闭合(KASLR、text/rodata W^X、栈保护等);</li>
       <li>aarch64 LTP 起步;btrfs 支持评估。</li>
     </ul>

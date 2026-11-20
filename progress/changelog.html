@@ -96,7 +96,7 @@
       <li><b>尾修轮并入 main(b3eb4b16e)</b>:keyctl 负例模型、mount API 负例族(fsconfig/fspick/mount_setattr/move_mount)与 splice06 共 11 项在修复内核上隔离验证通过 —— 当前预期 <b>1133/1869</b>(60.6%)。</li>
       <li><b>LTP 官方确认轮(scan3)并入 main</b>:官方校正 <b>1138/1869</b>(60.9%,main @ fecf6dd9f)—— 17 项预期增益全部兑现(审计轮随轮修复 3 + 尾修 11 + ltp-tail2 3),唯一真实损失 tgkill03 根因定位(procfs 已退出线程的 pid-dentry 缓存永不失效,access() 对死 tid 永远成功)并以 <b>pid-dentry 失效重验</b>修复(878e3d9f9,验证 8/8)—— 修复并入后当前预期 <b>1139/1869</b>;分布 PASS=1138 / TCONF=434 / FAIL=233 / CRASH=31 / EXECFAIL=17 / TIMEOUT=12 / WARN=4。</li>
       <li><b>Ubuntu 24.04:串口登录达成 + gdm 干净启动</b>:dev-ttyS0 找到、getty 启动、登录提示符可达(newmount2/ttydev 链);gdm.service 与 systemd-logind 不再吃 90 秒超时 —— 根因是命名空间 bind 只读重挂载把 EROFS 泄漏给共享根文件系统(3e37fd83a,随工作分支待并入),DRM SETCRTC vdisplay 读错槽位一单词 bug 同轮修复(b86ff11a3);<code>make ubuntu-run</code> 默认启动完整 24.04 桌面(用户指令 2026-11-16);收尾面仅剩 greeter 渲染(convoy 家族)。</li>
-      <li><b>22.04 GNOME 桌面 5/5 稳定性验证</b>:上一战役后 188 个提交的 main @ 1553b75ac 上,战役全套判据(shell 就绪 5 s、桌面成帧 9.1 s、Super 键交互、零 panic/OOM/SIGSEGV)5/5 全绿(gnome-regress 工作分支)。</li>
+      <li><b>22.04 GNOME 桌面 5/5 稳定性验证</b>:上一轮调试后 188 个提交的 main @ 1553b75ac 上,全套成功判据(shell 就绪 5 s、桌面成帧 9.1 s、Super 键交互、零 panic/OOM/SIGSEGV)5/5 全绿(gnome-regress 工作分支)。</li>
       <li><b>make test 复点</b>:riscv64 <b>1328/1328</b> 全绿(2026-11-16 门禁运行;x86_64 1263 / aarch64 1119 维持 2026-11-01 口径)。</li>
       <li>代码规模复点(main 2e5667a6b,git ls-files):kernel/ <b>626 文件 · 392,245 行 Rust · 398,905 行总计</b>;kernel/src 456 文件 · 369,486 行。</li>
     </ul>
@@ -172,7 +172,7 @@
     <h2 id="n1014"><span class="anchor">2026-10-07 ~ 10-28</span></h2>
     <ul>
       <li>x86_64 平台入 main(10-07);GNOME Shell 上屏(10-14)→ 完整成帧 ×3 boots(10-27)→ 键入式对话逐像素验证(10-28)。</li>
-      <li>OpenHarmony bootanimation 上屏(10-24);LTP riscv64 线 801 → 945 → 1028(10-31 收官)。</li>
+      <li>OpenHarmony bootanimation 上屏(10-24);LTP riscv64 线 801 → 945 → 1028(10-31 收尾)。</li>
       <li>调度停滞终结:自旋前关抢占确认为根因,WAKE-STRANDED 233→31;调度事件普查/heal 上线。</li>
       <li>RVV 支持主线化:V 扩展惰性使能 + 每任务 vstate。</li>
     </ul>

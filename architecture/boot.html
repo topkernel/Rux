@@ -136,7 +136,7 @@
     <ul>
       <li><b>机制</b>:设备 MMIO 一律经内核侧别名窗(两个静态窗 + 动态 ioremap 竞技场,IOREMAP_ARENA 256GB)访问;bootstrap 恒等映射于 boot 栈切换后 UNLINK —— <b>运行期无任何低恒等窗</b>;固件放置的低 MMIO(RTC 页 0x101000 等)亦映射入竞技场。</li>
       <li><b>ioremap_bar_kernel</b>:固定窗先查(不消耗竞技场);重注册检查(两能力共享一 BAR);新块 2MB 对齐、原子前推 DYN_BAR_CURSOR;DYN_BARS 登记表(满则该 BAR 留恒等回退并告警 "user-CR3 MMIO on it will KERNPANIC");USER_MMS_EXIST 守卫在用户 mm 存在后映射时告警(既有用户 CR3 看不到新竞技场链接);调用契约 = 单线程启动上下文(PCI 探测)。</li>
-      <li><b>优势</b>:任一 CR3 下统一的 MMIO 纪律 —— 陷阱上下文的设备访问在用户页表下不可故障;uaccess 契约无恒等洞(低用户地址的 copy_from_user 故障而非读物理内存 —— prlimit64 EFAULT 缺口由此闭合)。兼容性:x86_64 套件 1194/1194(含此前红的 EFAULT 行);守卫 = PF-NOCTX 与 SMAP-VIOL 信标静默。</li>
+      <li><b>优势</b>:任一 CR3 下统一的 MMIO 纪律 —— 陷阱上下文的设备访问在用户页表下不可故障;uaccess 契约无恒等映射暴露(低用户地址的 copy_from_user 故障而非读物理内存 —— prlimit64 EFAULT 缺口由此闭合)。兼容性:x86_64 套件 1194/1194(含此前红的 EFAULT 行);守卫 = PF-NOCTX 与 SMAP-VIOL 信标静默。</li>
     </ul>
 
     <h2 id="config"><span class="anchor">§8</span>Kernel.toml 配置系统</h2>

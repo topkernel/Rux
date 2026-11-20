@@ -36,7 +36,7 @@
     <div>
       <span class="chip acc"><span class="dot o"></span>Built end-to-end by AI agents · humans review and merge</span>
       <h1>A Linux ABI-compatible kernel<br><span class="grad">written from scratch in Rust</span></h1>
-      <p class="lede">Every subsystem of Rux — scheduler, memory management, ext4, binder, the network stack and the verification framework — was implemented by AI agents; humans set goals, review and merge. <b>Unmodified Ubuntu 22.04</b> boots to a GNOME Shell desktop (stability-verified 5/5 boots), <b>unmodified Ubuntu 24.04</b> reaches the graphical targets through systemd 255 with serial login, and <b>unmodified OpenHarmony</b> boots all 135+ services — no patches, no rebuilds, no configuration changes.</p>
+      <p class="lede">Every subsystem of Rux — scheduler, memory management, ext4, binder, the network stack and the verification framework — was implemented by AI agents; humans set goals, review and merge. <b>Unmodified Ubuntu 22.04</b> boots to a GNOME Shell desktop (stability-verified across 5 of 5 system starts), <b>unmodified Ubuntu 24.04</b> reaches the graphical targets through systemd 255 with serial login, and <b>unmodified OpenHarmony</b> boots all 135+ services — no patches, no rebuilds, no configuration changes.</p>
       <div class="hero-badges">
         <span class="chip">Rust no_std</span>
         <span class="chip">POSIX compatible</span>
@@ -248,7 +248,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Stability &amp; stress</h3>
-        <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; the 22.04 GNOME desktop stability-verified 5/5 boots on main 188+ commits past the previous campaign (shell up 5 s, desktop frame 9.1 s, zero panics/OOM/SIGSEGV); a standing 11-QEMU concurrent stress cluster (randomized/fuzz/memstorm); the riscv64 boot-parameter matrix smp{2,4,6,8} × mem{1,2,4,8}G is clean in all sixteen cells (previously several panic/hang cells).</p>
+        <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; the 22.04 GNOME desktop stability-verified across 5 of 5 system starts on main 188+ commits past the previous round (shell up 5 s, desktop frame 9.1 s, zero panics/OOM/SIGSEGV); a standing 11-QEMU concurrent stress cluster (randomized/fuzz/memstorm); the riscv64 boot-parameter matrix smp{2,4,6,8} × mem{1,2,4,8}G is clean in all sixteen cells (previously several panic/hang cells).</p>
         <div class="nums">make test <b>1584/1584</b> · boot matrix <b>16/16</b> · GNOME <b>5/5</b></div>
         <a class="more" href="testing/stability.html">Stability →</a>
       </div>

@@ -112,7 +112,7 @@
 
     <h2 id="ai"><span class="anchor">§3</span>AI-written code is an engineering method, not a slogan</h2>
     <p>I expect this one to be contested, so let me be precise: Rux's subsystems — scheduler, memory management, ext4, binder, the network stack, the verification harness — and all of the code, documentation and this site were written by AI. The human role is goal-setting, review and merge.</p>
-    <p>The working model: parallel agents, each with its own git worktree and branch, with the main session reviewing and merging; several merge rounds a day, each preceded by a full regression pass. About <b>200 worktrees</b> are live at the moment. Merging has exactly one gate (AGENTS.md): three-architecture build, the full in-kernel suite, tiered performance gates and data-integrity batteries — a change lands with all of them or not at all.</p>
+    <p>The working model: parallel agents, each with its own git worktree and branch, with the main session reviewing and merging; several merge rounds a day, each preceded by a full regression pass. About <b>200 worktrees</b> are live at the moment. Merging has exactly one gate (AGENTS.md): three-architecture build, the full in-kernel suite, tiered performance gates and data-integrity checks — a change lands with all of them or not at all.</p>
     <p>This is not "an assistant filling in a few lines". It puts AI where subsystems get implemented and keeps the human at architecture review and the merge gate. Whether that model holds at 400,000 lines is still under observation. So far it has produced a complete kernel that boots a desktop from a real distribution.</p>
 
     <h2 id="safety"><span class="anchor">§4</span>Safety: not "Rust is safe", but the itemized bill</h2>
@@ -161,7 +161,7 @@
     <ul>
       <li>LTP: 1,139 of 1,869 pass; several hundred still fail. TIMEOUT cases are adjudicated one by one, and every failure that is not ours stays on record</li>
       <li>lmbench: 13 rows trail, the largest at 22–26×; 1 MiB direct write sits at 0.75–0.83×. Each row carries a measured decomposition of the gap</li>
-      <li>The unsafe surface: 14.0% still depends on human review; the campaign targets ≤5,000 unsafe lines (≤1%) with a per-block irreducibility proof (docs/development/unsafe-5000-plan.md)</li>
+      <li>The unsafe surface: 14.0% still depends on human review; the reduction target is ≤5,000 unsafe lines (≤1%) with a per-block irreducibility proof (docs/development/unsafe-5000-plan.md)</li>
       <li>Kani covers the core unsafe code, not every key path; loom and SPIN cover the concurrency primitives</li>
       <li>Whether the AI working model holds at 400,000 lines is under observation, not settled</li>
       <li>The 29 registered divergences need their compatibility evidence kept current</li>

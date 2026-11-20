@@ -102,7 +102,7 @@
         <div class="nums">逐项数据见 <a href="geekbench.html">Geekbench 页</a> · 测试平台注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
-    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(null/read/write/stat/open 1.2–2.5×)。campaign 随役修复的 5 个正确性 bug 见 §2 表后清单。</div>
+    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(null/read/write/stat/open 1.2–2.5×)。同期修复的 5 个正确性 bug 见 §2 表后清单。</div>
 
         <h2 id="suites"><span class="anchor">§2</span>套件地图(每套件一页)</h2>
     <div class="tbl-wrap">
@@ -131,7 +131,7 @@
       <table>
         <thead><tr><th>层级</th><th>适用</th><th>要求</th></tr></thead>
         <tbody>
-          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>syscost 安静启动:普查带内、tick ≥99.5/s、零新增 panic/OOM、系统调用量 ±10%、单次平均 ±20% 或更优</td></tr>
+          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>syscost 安静启动:普查值在基线区间内、tick ≥99.5/s、零新增 panic/OOM、系统调用量 ±10%、单次平均 ±20% 或更优</td></tr>
           <tr><td><b>Tier 2</b></td><td>热路径:mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>加一次 pbench 启动:P1–P7 中位数 ±20% 内或更优</td></tr>
           <tr><td><b>Tier 3</b></td><td>分配器或 IRQ 路径</td><td>加 IF=0 中断关闭份额实测(EFLAGS 对探针 if0 v3,官方测量非代理)</td></tr>
         </tbody>
@@ -155,7 +155,7 @@
     <p style="font-size:13px;color:var(--text-3)">注:调度域锁内为精确探针口径(树操作 ~20–30 ns + D-1 记账),锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(Linux 的 per-rq 锁同样交税);IF=0 段均值为调用点口径、含获取等待(样本数 630 万),futex 唤醒→运行为 quiet 负载口径。</p>
     <div class="callout"><b>总原则:</b>任何可能影响性能的子系统都必须处于门禁测量范围之内 —— 如果现有工具测不了它,应为其新增 debug 观测工具(默认关闭)。测量是变更的组成部分,而非事后补充。</div>
 
-    <h2 id="campaigns"><span class="anchor">§5</span>已落地的性能优化(同机同加速 A/B 实测)</h2>
+    <h2 id="optimizations"><span class="anchor">§5</span>已落地的性能优化(同机同加速 A/B 实测)</h2>
     <p>以下优化均以同机同加速 A/B 测量归因,收益与代价同表记录(详见 <code>docs/architecture/rust-native-register.md</code>):</p>
     <div class="tbl-wrap">
       <table>
@@ -172,15 +172,15 @@
           <tr><td>small_alloc magazine</td><td>per-CPU magazine(深度 16)+ 位图路由</td><td>类锁分段每次启动 <b>2500 万→1970 万→600 万</b>;REST 占机 9.2%→0.1–1.2%</td></tr>
           <tr><td>GRQ 持锁</td><td>0.7ms 粒度约束 churn + pick 路径精简(分段测量定位)</td><td>临界区 <b>≈60 ns</b>(生产)/75–80 ns(最小括号);锁等待段 70–84 ns = KVM 跨 vCPU locked 指令税</td></tr>
           <tr><td>unix 带宽</td><td>unix 暂存消除</td><td>bw_unix 2.6→<b>42.9 GB/s</b></td></tr>
-          <tr><td>缺页路径(campaign r6)</td><td>后错 fault 窗口 + 连续 put_range + PCACHE_RO 别名协议 + 批量 pin 释放 + munmap 单次 TLB flush</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs(累计 16.1×)</b>,对 Linux 转为领先 2.26–2.45×</td></tr>
-          <tr><td>hook-call 税与 path_memo(campaign r5/r7)</td><td>1331 处 cli/sti 内联快门 + path_memo/lease 门</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%;open 累计 −15.2%、stat −4.6%,read 转为领先</td></tr>
-          <tr><td>逐字 memo 哈希 + 仅能力 DAC 快径(campaign r10)</td><td>word-at-a-time 哈希;DAC 检查仅走能力位</td><td>open −5.2%、stat −10%</td></tr>
-          <tr><td>fd 表位图清扫(campaign r11)</td><td>fork 拷贝与 exit 释放改位图扫描;ptrace 被跟踪计数门</td><td>fork 拷贝 910→574 ns、exit 释放 4491→825 ns、premm 4635→757 ns;exit 体 17.9→7.3 µs;exec 三态锚定持平</td></tr>
-          <tr><td>fork 双稳态根因(campaign r12–14)</td><td>冻结取证链:UART 打印风暴批量化 → stale-rsp0 UAF 修复</td><td>挂起 3/6→1/6;fork 进入 1.02–1.05× 持平带;随役修复 call_rcu 契约与唤醒监视器反转</td></tr>
+          <tr><td>缺页路径(r6)</td><td>后错 fault 窗口 + 连续 put_range + PCACHE_RO 别名协议 + 批量 pin 释放 + munmap 单次 TLB flush</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs(累计 16.1×)</b>,对 Linux 转为领先 2.26–2.45×</td></tr>
+          <tr><td>hook-call 税与 path_memo(r5/r7)</td><td>1331 处 cli/sti 内联快门 + path_memo/lease 门</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%;open 累计 −15.2%、stat −4.6%,read 转为领先</td></tr>
+          <tr><td>逐字 memo 哈希 + 仅能力 DAC 快径(r10)</td><td>word-at-a-time 哈希;DAC 检查仅走能力位</td><td>open −5.2%、stat −10%</td></tr>
+          <tr><td>fd 表位图清扫(r11)</td><td>fork 拷贝与 exit 释放改位图扫描;ptrace 被跟踪计数门</td><td>fork 拷贝 910→574 ns、exit 释放 4491→825 ns、premm 4635→757 ns;exit 体 17.9→7.3 µs;exec 三态锚定持平</td></tr>
+          <tr><td>fork 双稳态根因(r12–14)</td><td>冻结取证链:UART 打印风暴批量化 → stale-rsp0 UAF 修复</td><td>挂起 3/6→1/6;fork 进入 1.02–1.05× 持平带;随役修复 call_rcu 契约与唤醒监视器反转</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">注:刷盘行数字为 128MB mtest06 形状(x86_64 KVM),fsync 对 campaign 前累计 ~3.8×;mmap2 TIMEOUT→PASS、fsx -N10000 PASS、pbench fs 在基准范围内。path_memo/lease 门 = 每 inode open_count 替代全局 BTreeMap 锁、读侧 seqlock 无锁化。File-pool 假说被 PC3 相位解剖否定(fil=19/ins=24 ns)。stale-rsp0 UAF 修复经六腿门禁验证。</p>
+    <p style="font-size:13px;color:var(--text-3)">注:刷盘行数字为 128MB mtest06 形状(x86_64 KVM),fsync 相对该轮之前累计 ~3.8×;mmap2 TIMEOUT→PASS、fsx -N10000 PASS、pbench fs 在基准范围内。path_memo/lease 门 = 每 inode open_count 替代全局 BTreeMap 锁、读侧 seqlock 无锁化。File-pool 假说被 PC3 相位解剖否定(fil=19/ins=24 ns)。stale-rsp0 UAF 修复经六腿门禁验证。</p>
 
     <h2 id="queue"><span class="anchor">§6</span>优化队列(开放差距,按优先序)</h2>
     <ul>

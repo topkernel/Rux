@@ -80,7 +80,7 @@
   </aside>
 
   <article class="doc-main">
-    <h1>Stress testing (the standing stress-fleet cluster)</h1>
+    <h1>Stress testing (the standing stress cluster)</h1>
     <div class="sub">High load + randomized testing across a concurrent QEMU cluster, catching every anomaly class — design doc docs/test/stress-fleet.md</div>
 
     <p>The standing stress cluster targets: wild writes (armed capture on the hunt chains), panics/hangs, leaks, fake-OOM recurrences, scheduler pathologies, perf-under-load drift (vs <code>docs/development/perf-gate-baseline.md</code>), and data corruption. Probes live in <code>test/stressng</code> and <code>test/cowrace</code>.</p>
@@ -101,11 +101,11 @@
     </div>
     <ul>
       <li><b>Round mechanics</b>: 1,800 s per round, serial to file, a classification line (decisive CRITICAL &gt; WARN &gt; WEDGE &gt; clean); <b>wedge rule</b>: no serial growth for ≥300 s → kill, mark WEDGE, keep the tail.</li>
-      <li><b>Host budget discipline</b>: adaptive fleet size, a hard floor of ≥10 GB free host memory (checked via <code>free</code> before every launch/ramp); QEMU launches niced +10; shared images only <code>-snapshot</code>/<code>snapshot=on</code> + <code>file.locking=off</code>; writable images are private reflink copies.</li>
+      <li><b>Host budget discipline</b>: adaptive cluster size, a hard floor of ≥10 GB free host memory (checked via <code>free</code> before every launch/ramp); QEMU launches niced +10; shared images only <code>-snapshot</code>/<code>snapshot=on</code> + <code>file.locking=off</code>; writable images are private reflink copies.</li>
       <li><b>Standing shape: 2 chains + 9 members = 11 QEMUs</b>, guarded by a 30-minute central sweeper.</li>
     </ul>
 
-    <h2 id="closed"><span class="anchor">§2</span>Root-caused classes (fleet wins)</h2>
+    <h2 id="closed"><span class="anchor">§2</span>Root-caused classes (cluster wins)</h2>
     <ul>
       <li><b>The SIGILL family (kernel bug, fixed)</b>: read_counter() read the time CSR with the write-flavored form <code>csrrw a0, time, zero</code> — the whole instruction is illegal-instruction-prone; the mount hammer loop hit it within ~100 s on every build (toolchain zcb exonerated by paired trials). Fixed with the canonical read form <code>csrr</code>.</li>
       <li><b>Seven user-length round-up overflows (fixed)</b>: fsfuzz r172 drove madvise length=−1 into <code>attempt to add with overflow</code> (syscall/memory.rs); all seven user-length round-ups (madvise/mprotect/msync/mremap/mincore/mlock/munlock) gained wrap checks (EINVAL, Linux end-wrap semantics); post-fix the deterministic seed stream ran 150 s+ with zero panics (v4 died within 60 s).</li>
@@ -120,7 +120,7 @@
       <li><b>monkey-b / memstorm instance status</b>: monkey-b x86 rounds all WARN with zero critical flags, margin growth 141–178 MB within criterion; memstorm r34 PREEMPT-UNDERFLOW=8 (the trio family band 6–10), beats 86 vs the 91–97 band — under continued observation before adjudication.</li>
     </ul>
 
-    <h2 id="queue"><span class="anchor">§4</span>Fleet queue</h2>
+    <h2 id="queue"><span class="anchor">§4</span>Cluster queue</h2>
     <ul>
       <li>fsfuzz accumulation; a closure round once the fix class reaches main;</li>
       <li>the kswapd deep-drain leg handed to mm/perf;</li>

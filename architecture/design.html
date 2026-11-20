@@ -205,7 +205,7 @@
       <li><b>virtio-net 锁序(INV-LOCK-6)</b>:{rx|tx}_queue → stats 单向;曾有 poll 持 stats 跨 refill 的 AB-BA(看门狗双 CPU 互旋,确认为根因)。</li>
       <li><b>gpu/drm</b>:framebuffer 核心 + virtio-gpu + DRM/PRIME(GEM_CLOSE 共享 keep 语义修复);GNOME 与 OH 的显示路径由它承托。</li>
       <li><b>intc</b>:PLIC/CLINT(riscv64)、APIC(x86_64)、GICv3(aarch64);<b>pci</b>:ECAM 枚举。</li>
-      <li><b>设备 MMIO 纪律(D-17)</b>:一切经内核侧 MMIO 别名区,bootstrap 恒等映射在 boot 栈切换后 UNLINK —— 运行期无低恒等窗,uaccess 无恒等洞。</li>
+      <li><b>设备 MMIO 纪律(D-17)</b>:一切经内核侧 MMIO 别名区,bootstrap 恒等映射在 boot 栈切换后 UNLINK —— 运行期无低恒等窗,uaccess 无恒等映射暴露。</li>
     </ul>
 
     <!-- ================= 可观测性 ================= -->
@@ -252,7 +252,7 @@
           <tr><td><b>D-14</b></td><td><b>实测等待唤醒抢占门</b>:≥6 ms 窗才 poke 忙 CPU。74B unix 流 275 µs→~2.5 µs,p5 族 10–18×。代价:亚 6ms 乒乓唤醒延迟受切片届期约束。</td></tr>
           <tr><td><b>D-15</b></td><td><b>单声明 tracepoint 表</b>:一行 = 事件全貌,armed() 单分支禁用路径,typed 实参 = 编译错;tracefs 逐字节对齐。代价:10 u64 槽/记录上限。</td></tr>
           <tr><td><b>D-16</b></td><td><b>延迟释放定时器环</b>:16384 项 + 1500 ms 墙钟排水(覆盖 QSBR 看不见的未记账借用)。重审条件:借用 RcuHead 化即删环。</td></tr>
-          <tr><td><b>D-17</b></td><td><b>内核侧设备地址别名区(arena)</b>:运行期无恒等 MMIO 窗,uaccess 无恒等洞(坏用户指针 fault 而非读物理内存)。守卫:PF-NOCTX/SMAP-VIOL 信标静默。</td></tr>
+          <tr><td><b>D-17</b></td><td><b>内核侧设备地址别名区(arena)</b>:运行期无恒等 MMIO 窗,uaccess 无恒等映射暴露(坏用户指针 fault 而非读物理内存)。守卫:PF-NOCTX/SMAP-VIOL 信标静默。</td></tr>
           <tr><td><b>D-18</b></td><td><b>SMAP 以 pushfq EFLAGS.AC 序列启用</b>:STAC/CLAC 在 TCG 无条件 #UD(配对实验确证);括号 ~55 ns,硬件与 TCG 双可启动。</td></tr>
           <tr><td><b>D-19</b></td><td><b>类型化定时器轮</b>:时钟域不可混比,periodic 需 NonZeroU64,WakeArmed/WakeSpent 作用域守卫。六类历史 bug 成为编译错;同一测试平台 A/B:定时器 arm 锁 924→697 ns、nanosleep 772.6→662.7 ms、p2_ctxsw 12.198 vs 15.400 µs。</td></tr>
           <tr><td><b>D-20</b></td><td><b>写者侧脏页回写水位(空闲比例标记,无全局脏页记账)</b>:Normal zone 空闲页数低于受管页一半(zone_below_dirty_writeback_mark)时,缓冲写者自行冲刷本 inode 脏区间并执行系统级恢复(writeback_recover:先释放已净页,全表轮转收集脏 inode 逐个冲刷,直接淘汰已冲刷页)。与 Linux 的差异:Linux 按 per-BDI 脏页阈值/balance_dirty_pages 的脏页比例节流,Rux 不维护 per-BDI 记账,以 zone 空闲比例作标记 —— <b>约束的是纪律而非常量</b>。消除延迟分配脏页气球楔死(24.3 万脏页涨至 RAM 规模、zone 排空);LTP fallocate05/06 三次全新启动 RC=0;riscv64 make test 1584/1584。代价:无 per-BDI 精度,多盘负载下水位粒度粗于 Linux。注:PSI(/proc/pressure)不在主线,登记于调试对齐恢复队列。</td></tr>
@@ -265,7 +265,7 @@
     <p>命题:外部参照兼容,内部<b>不是 C→Rust 翻译</b> —— 正确性与速度来自类型系统、所有权或Linux 内核没有的内部架构。每条带本仓库仪器测得的数字(无实测证据的条目只是占位,单列 G 区)。</p>
     <ul>
       <li><b>类型系统使 bug 类 = 编译错</b>:D-19 六类误用被 rustc 捕获;S-1 并发原语模型检查(loom 交错 + Kani 证 INV-M1..M5)启用头 90 秒即抓到一个真实 pid-0 递归 bug;D-11 锁键、D-7 CpuLocal、WalkClaim 无锁 dcache(stat 0.643→0.423 µs)。</li>
-      <li><b>safe-by-construction 即优化</b>:D-1 单结构取证(OH 战役调度 bug 族实际靠它找到);叶子表直走 unmap(vm-op 族 15→5 s/CPU-min);负向查找缓存(negative memo)(oracle 475k/963k/0)。</li>
+      <li><b>safe-by-construction 即优化</b>:D-1 单结构取证(OH 调试轮次的调度缺陷族实际靠它找到);叶子表直走 unmap(vm-op 族 15→5 s/CPU-min);负向查找缓存(negative memo)(oracle 475k/963k/0)。</li>
       <li><b>语义分歧靠 diff Linux 树发现、靠采纳其行为修复</b>(根因而非症状):execve ETXTBSY、SysV IPC 按 namespace、共享 futex 键解析到物理字、tmpfs MAP_SHARED 经页缓存一致、binder poll 三条件、O_DIRECT 读先冲脏页缓存、SYSRET TF|RF 回退、用户态可写字符串全查 UTF-8。</li>
       <li><b>安全性质(C 内核靠工具租的类)</b>:构造性内存安全 + SMAP/CR0.WP/无恒等窗/用户态 W^X/seccomp/能力模型 + panic 面设计化(每实例收编 + 回归测试)。</li>
       <li><b>重设计落地的性能(同一测试平台 A/B)</b>:lmbench 四行领先(lat_ctx 3.4×、lat_pipe 2.6×、exec 1.39×、fstat 1.19×)、切换 −58%、p5 族 −90~93%、fs 元数据族 −65~−88%;Geekbench 多核 7504(4-CPU 绑核)。</li>

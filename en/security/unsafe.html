@@ -131,7 +131,7 @@
     </table></div>
     <p>Service-token hotspots: fs 612, syscall 478, sync 450, sched 391, process 342, fs/ext4 310, mm 241, net 147.</p>
 
-    <h2 id="forbid"><span class="anchor">§4</span>The forbid campaign and the shrink roadmap</h2>
+    <h2 id="forbid"><span class="anchor">§4</span>The forbid effort and the shrink roadmap</h2>
     <ul>
       <li>Session 1 (2026-10-29): 113 files carry <code>#![forbid(unsafe_code)]</code> (46 service); Session 2 (2026-10-31): the first named shrink target, syscall/io.rs — 69 tokens → 0.</li>
       <li>Targets (recorded in security-design.md): forbid files 47 → 90, unsafe-bearing service files 123 → 60 (a two-quarter window).</li>
@@ -147,7 +147,7 @@
       <li><b>The budget argument</b>: the monotone-down rule on the 14.0% dual series + every newly added unsafe requiring a commit-body explanation of "why safe code was not possible" — TCB growth is constrained by process, not convention.</li>
     </ul>
 
-    <div class="callout">Reproduce: python3 scripts/gen_tcb_ledger.py --markdown (the layered token basis); python3 scripts/tcb_ledger.py (the line basis). Canonical: docs/architecture/kernel-layers.md (the rules + forbid campaign), docs/development/tcb-ledger.md (the generated ledger). Related: <a href="formal.html">formal verification</a> (Kani proving unsafe), <a href="taxonomy.html">defect taxonomy</a> (the residency evidence).</div>
+    <div class="callout">Reproduce: python3 scripts/gen_tcb_ledger.py --markdown (the layered token basis); python3 scripts/tcb_ledger.py (the line basis). Canonical: docs/architecture/kernel-layers.md (the rules + forbid effort), docs/development/tcb-ledger.md (the generated ledger). Related: <a href="formal.html">formal verification</a> (Kani proving unsafe), <a href="taxonomy.html">defect taxonomy</a> (the residency evidence).</div>
   </article>
 </div>
 </main>

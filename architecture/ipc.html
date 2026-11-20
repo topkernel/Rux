@@ -122,7 +122,7 @@
       <li><b>抽象命名空间</b>:sun_path[0] == 0 即抽象名 —— 地址即名字,无文件系统节点,/proc/net/unix 以 @name 呈现;autobind "\0%05x" 对齐;UNIX_PATH_MAX=108。</li>
       <li><b>SCM_RIGHTS fd 传递 + SCM_CREDENTIALS</b>:cmsg 载荷随 UnixSeg.files/cred 传输,由首个触及该段的 recv 消费。</li>
       <li><b>Weak 对端模型</b>:对端链两侧均为 Weak —— fd 是唯一强属主,"对端关闭"即 Weak::upgrade 失败;引用环在该表示下不可构成,成对 socket 泄漏类问题不存在。</li>
-      <li><b>单锁发送路径</b>:每 socket 的 recv_queue/accept_queue/state/eof 为独立自旋锁;发送者仅取目标 recv_queue 一把锁 —— 两 socket 间无 AB-BA 可能。</li>
+      <li><b>单锁发送路径</b>:每 socket 的 recv_queue/accept_queue/state/eof 为独立自旋锁;发送者仅持有目标 recv_queue 的一处锁 —— 两 socket 间无 AB-BA 可能。</li>
       <li><b>等待纪律</b>:W3 等待队列形态(prepare_to_wait → 复查 → schedule → finish_wait);poll 语义:监听者仅报 POLLIN 不报 POLLHUP;对端关闭且有未读数据 = POLLHUP|POLLIN。</li>
     </ul>
 

@@ -89,7 +89,7 @@
       <li><b>Event types</b>: CPU_CLOCK / TASK_CLOCK / PAGE_FAULTS / CONTEXT_SWITCHES; counting and sampling modes.</li>
       <li><b>Sampling mode</b>: an mmap ring emits records with the field order ID/IDENTIFIER/IP/TID/TIME/ID/STREAM_ID/CPU/PERIOD/CALLCHAIN matching Linux; sideband records COMM/FORK/EXIT/MMAP2/LOST; the ioctl set; the <code>/proc/sys/kernel/perf_event_paranoid</code> gate (default 2).</li>
       <li><b>Sampling granularity (a recorded divergence)</b>: software sampling rides the tick — a <code>sample_period</code> below one tick (10 ms at 100 Hz) coalesces to tick-rate samples; Linux's per-event hrtimer swevent is the follow-up. Sufficient for hotspot profiles (second-scale windows); insufficient for per-call precise profiling — the use boundary is stated as such.</li>
-      <li><b>How it was validated</b>: building Linux's own profiler against this ABI exposed parity gaps no synthetic test had covered (inherit semantics, ring-fd O_RDWR, MISC cpumode byte order), then delivered the campaign's hotspot tables (80,961 → 244,516 samples, kernel 1-5 / user 2-16+ frame chains) — an ABI is validated by a real consumer.</li>
+      <li><b>How it was validated</b>: building Linux's own profiler against this ABI exposed parity gaps no synthetic test had covered (inherit semantics, ring-fd O_RDWR, MISC cpumode byte order), then delivered the hotspot sampling tables (80,961 → 244,516 samples, kernel 1-5 / user 2-16+ frame chains) — an ABI is validated by a real consumer.</li>
     </ul>
     <h3>Usage</h3>
     <pre><code><span class="c"># inside the guest (perf_event_paranoid=2 default: same-process-group counting + own-user sampling)</span>

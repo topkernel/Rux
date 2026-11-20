@@ -101,7 +101,7 @@
         <div class="nums">per-workload on the <a href="geekbench.html">Geekbench page</a> · test platform note: Linux side is the host 4-CPU pin (taskset, topology-matched)</div>
       </div>
     </div>
-    <div class="callout"><b>Gap structure:</b> the leads cover scheduler/wakeup (context switch, pipe, semaphore), IPC bandwidth (unix, pipe) and memory bandwidth; the remaining gaps concentrate in syscall entry and path resolution (null/read/write/stat/open at 1.2–2.5×). Under the older Linux-side window the historic campaign had scored fork/exec at parity; the 2026-11-16 same-test platform re-measure puts them in the 1.08–1.19× band (the Linux switch family is measurement-window-sensitive — ratios are only meaningful within one session). The 5 correctness bugs the campaign found and fixed are listed after the §2 tables.</div>
+    <div class="callout"><b>Gap structure:</b> the leads cover scheduler/wakeup (context switch, pipe, semaphore), IPC bandwidth (unix, pipe) and memory bandwidth; the remaining gaps concentrate in syscall entry and path resolution (null/read/write/stat/open at 1.2–2.5×). Under the older Linux-side window the earlier round had scored fork/exec at parity; the 2026-11-16 same-test platform re-measure puts them in the 1.08–1.19× band (the Linux switch family is measurement-window-sensitive — ratios are only meaningful within one session). The 5 correctness bugs the same round found and fixed are listed after the §2 tables.</div>
 
         <h2 id="suites"><span class="anchor">§2</span>The suite map (one page per suite)</h2>
     <div class="tbl-wrap">
@@ -130,7 +130,7 @@
       <table>
         <thead><tr><th>Tier</th><th>Applies to</th><th>Requirement</th></tr></thead>
         <tbody>
-          <tr><td><b>Tier 1</b></td><td>All kernel changes</td><td>One quiet syscost boot: census in band, ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, per-op averages ±20% or better</td></tr>
+          <tr><td><b>Tier 1</b></td><td>All kernel changes</td><td>One quiet syscost boot: census within the baseline band, ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, per-op averages ±20% or better</td></tr>
           <tr><td><b>Tier 2</b></td><td>Hot paths: mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>Plus one pbench boot: P1–P7 medians within ±20% or better</td></tr>
           <tr><td><b>Tier 3</b></td><td>Allocator or IRQ paths</td><td>Plus an IF=0 measurement (EFLAGS-pair probe if0 v3, official — no proxy)</td></tr>
         </tbody>
@@ -171,15 +171,15 @@
           <tr><td>small_alloc magazine</td><td>per-CPU magazine (depth 16) + bitmap routing</td><td>class-lock sections <b>25M→19.7M→6.0M</b>/boot; REST share 9.2%→0.1–1.2%</td></tr>
           <tr><td>GRQ hold</td><td>0.7 ms granularity pins churn + slimmer pick path (segment-measured)</td><td>critical section <b>≈60 ns</b> (production) / 75–80 ns (minimal bracket); the 70–84 ns lock-wait segment = the KVM cross-vCPU locked-instruction tax</td></tr>
           <tr><td>unix bandwidth</td><td>unix staging eliminated</td><td>bw_unix 2.6→<b>42.9 GB/s</b></td></tr>
-          <tr><td>Page-fault path (campaign r6)</td><td>backward-fault window + contiguous put_range + PCACHE_RO alias protocol + batched pin release + single TLB flush per munmap</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs (16.1× total)</b>, now 2.26–2.45× ahead of Linux</td></tr>
-          <tr><td>Hook-call tax &amp; path_memo (campaign r5/r7)</td><td>1,331 cli/sti outlined calls inlined + path_memo/lease gates</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%; open −15.2% cumulative, stat −4.6%, read flipped ahead</td></tr>
+          <tr><td>Page-fault path (r6)</td><td>backward-fault window + contiguous put_range + PCACHE_RO alias protocol + batched pin release + single TLB flush per munmap</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs (16.1× total)</b>, now 2.26–2.45× ahead of Linux</td></tr>
+          <tr><td>Hook-call tax &amp; path_memo (r5/r7)</td><td>1,331 cli/sti outlined calls inlined + path_memo/lease gates</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%; open −15.2% cumulative, stat −4.6%, read flipped ahead</td></tr>
           <tr><td>Word-at-a-time memo hash + capability-only DAC fast path (r10)</td><td>word-at-a-time hashing; DAC checks take the capability bit only</td><td>open −5.2%, stat −10%</td></tr>
           <tr><td>fd-table bitmap sweeps (r11)</td><td>fork copy and exit drop as bitmap scans; a ptrace tracee-count gate</td><td>fork copy 910→574 ns, exit drop 4491→825 ns, premm 4635→757 ns; exit body 17.9→7.3 µs; exec three-state anchored at parity</td></tr>
           <tr><td>Fork bistability root cause (r12–14)</td><td>freeze-forensics chain: a batched UART print storm → the stale-rsp0-at-free UAF fixed</td><td>hangs 3/6→1/6; fork into the 1.02–1.05× parity band; the call_rcu contract and a wake-monitor inversion fixed alongside</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">Notes: the flush-row figures are the 128 MB mtest06 shape (x86_64 KVM), fsync ~3.8× cumulative vs pre-campaign; mmap2 TIMEOUT→PASS, fsx -N10000 PASS, pbench fs within the allowed band. The path_memo/lease gates = per-inode open_count replacing the global BTreeMap lock, reader-side seqlock lock-free. The File-pool hypothesis was refuted by PC3 phase anatomy (fil=19/ins=24 ns). The stale-rsp0 UAF fix is six-leg gated.</p>
+    <p style="font-size:13px;color:var(--text-3)">Notes: the flush-row figures are the 128 MB mtest06 shape (x86_64 KVM), fsync ~3.8× cumulative vs the pre-round baseline; mmap2 TIMEOUT→PASS, fsx -N10000 PASS, pbench fs within the allowed band. The path_memo/lease gates = per-inode open_count replacing the global BTreeMap lock, reader-side seqlock lock-free. The File-pool hypothesis was refuted by PC3 phase anatomy (fil=19/ins=24 ns). The stale-rsp0 UAF fix is six-leg gated.</p>
 
     <h2 id="queue"><span class="anchor">§6</span>Optimization queue (open gaps, priority order)</h2>
     <ul>

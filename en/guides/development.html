@@ -114,7 +114,7 @@
       <table>
         <thead><tr><th>Tier</th><th>Applies to</th><th>Extra requirement</th></tr></thead>
         <tbody>
-          <tr><td><b>Tier 1</b></td><td>all kernel changes</td><td>one quiet syscost boot: census in band, ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, per-op averages ±20% or better</td></tr>
+          <tr><td><b>Tier 1</b></td><td>all kernel changes</td><td>one quiet syscost boot: census within the baseline band, ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, per-op averages ±20% or better</td></tr>
           <tr><td><b>Tier 2</b></td><td>hot paths: mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>plus one pbench boot: P1–P7 medians within ±20% or better</td></tr>
           <tr><td><b>Tier 3</b></td><td>allocator or IRQ paths</td><td>plus an IF=0 measurement (the EFLAGS-pair probe)</td></tr>
         </tbody>

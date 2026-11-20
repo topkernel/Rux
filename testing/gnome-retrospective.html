@@ -83,10 +83,10 @@
     <h1>回溯报告:GNOME 桌面回归</h1>
     <div class="sub">2026-11-06 · 范围:x86_64 GNOME 启动,main@4ed009ac(10-31 验收)→ main@264b6961(11-06)· 原文 docs/test/gnome-regression-retrospective.md(英文)</div>
 
-    <div class="callout"><b>结论状态:</b>§3 的两个根因已修复并验证;§8 的三层叠加机制均已修复(11 次启动 10 次 shell 就绪);深水项(trim 面)与两项生产者排查仍开放。</div>
+    <div class="callout"><b>结论状态:</b>§3 的两个根因已修复并验证;§8 的三层叠加机制均已修复(11 次启动 10 次 shell 就绪);深层项(trim 面)与两项生产者排查仍开放。</div>
 
     <h2 id="accept"><span class="anchor">§1</span>"能跑"当时的验收口径</h2>
-    <p>x86 GNOME 里程碑(99% 非黑帧、17 分钟稳定会话)在 main@4ed009ac 由 gnome-x86 工作树验收:每次启动用该线的 fire.py 驱动做人工核验。那是<b>一次性战役验收,不是常设门禁</b> —— 该工作树收线后,常备测试面里没有任何一项再启动 GNOME 桌面。</p>
+    <p>x86 GNOME 里程碑(99% 非黑帧、17 分钟稳定会话)在 main@4ed009ac 由 gnome-x86 工作树验收:每次启动用该线的 fire.py 驱动做人工核验。那是<b>一次性验收,不是常设门禁</b> —— 该工作树撤除后,常备测试面里没有任何一项再启动 GNOME 桌面。</p>
 
     <h2 id="window"><span class="anchor">§2</span>回归窗口</h2>
     <div class="tbl-wrap">
@@ -99,19 +99,19 @@
         </tbody>
       </table>
     </div>
-    <p>桌面负载在它的工作树收线当天就退出了测试面。此后每一次落地都只对 LTP、make test、pbench、syscost 和 OH 镜像把关 —— 这些项没有一个会启动 gnome-shell。</p>
+    <p>桌面负载在它的工作树撤除当天就退出了测试面。此后每一次落地都只对 LTP、make test、pbench、syscost 和 OH 镜像把关 —— 这些项没有一个会启动 gnome-shell。</p>
 
     <h2 id="roots"><span class="anchor">§3</span>已确认根因(两个,均为性能改造引入)</h2>
     <h3>3.1 munmap 分块手术 —— 两侧竞态</h3>
     <ul>
-      <li><b>起源</b>:OH 战役的 132 µs munmap 车队修复,把单次 VMA 写锁持有替换为按 256KB 分块、每块放锁后重建 VMA 树。</li>
-      <li><b>洞</b>:在锁间隙里,同 mm 的并发 mmap 合法地落在仍处理区间的瞬时树洞中;下一个分块把新 VMA 当作当前 munmap 未处理的部分删除(vma=NONE 缺页),延迟 zap 又清掉新 PTE(B 侧)。</li>
-      <li><b>修复</b>(main@5b4a4bc7):<b>先全摘链再 zap</b> —— 一把锁内摘除全部片段;≤4 MB 区间(malloc/arena 全类)在锁内完成 zap。复现器:修复前 2/3 次启动崩溃 → 修复后 3/3 干净(每次启动 12,000 项检查)。</li>
+      <li><b>起源</b>:OH 调试轮次的 132 µs munmap 并发测试修复,把单次 VMA 写锁持有替换为按 256KB 分块、每块放锁后重建 VMA 树。</li>
+      <li><b>缺陷</b>:在锁间隙里,同 mm 的并发 mmap 合法地落在仍处理区间的瞬时空隙中;下一个分块把新 VMA 当作当前 munmap 未处理的部分删除(vma=NONE 缺页),延迟 zap 又清掉新 PTE(B 侧)。</li>
+      <li><b>修复</b>(main@5b4a4bc7):<b>先全摘链再 zap</b> —— 单锁内摘除全部片段;≤4 MB 区间(malloc/arena 全类)在锁内完成 zap。复现器:修复前 2/3 次启动崩溃 → 修复后 3/3 干净(每次启动 12,000 项检查)。</li>
     </ul>
     <h3>3.2 ext4 异步批量读填 —— 跨文件页缓存投毒</h3>
     <ul>
       <li><b>起源</b>:lmbench 读吞吐优化(bw_file_rd 50× 归因)把读路径改成异步批量 DMA,带 ReadDst::Discard 缓存预热。</li>
-      <li><b>洞</b>:完成/缓冲复用归属错位 —— 在新文件的缓存键下供出了上一个读请求的缓冲字节。实测:/bin/bzip2 的 mmap 页携带 /bin/bzexe 的脚本字节,而同一 fd 的 pread 返回正确数据。下游:ld.so 读到垃圾 .dynsym → "undefined symbol" 且符号名为空 → 惰性绑定 NULL+8 → gnome-shell 每次启动死在 fontconfig 初始化。</li>
+      <li><b>缺陷</b>:完成/缓冲复用归属错位 —— 在新文件的缓存键下供出了上一个读请求的缓冲字节。实测:/bin/bzip2 的 mmap 页携带 /bin/bzexe 的脚本字节,而同一 fd 的 pread 返回正确数据。下游:ld.so 读到垃圾 .dynsym → "undefined symbol" 且符号名为空 → 惰性绑定 NULL+8 → gnome-shell 每次启动死在 fontconfig 初始化。</li>
       <li><b>修复</b>(已入 main):临时门禁禁用异步提交 —— 同步逐块路径的归属是精确的。冷文件探针:3/3 次启动零错配。异步归属 bug 本身已单独开出工作分支(cache-poison,完整证据包)。</li>
     </ul>
 
@@ -124,11 +124,11 @@
           <tr><td>make test</td><td>内核内单元套件,无用户态文件系统负载</td></tr>
           <tr><td>pbench / syscost</td><td>微基准量速度,不量内容正确性</td></tr>
           <tr><td>OH 镜像启动</td><td>OHOS 用 musl(分配器行为不同);OH 线自己的镜像侧故障掩盖了 mm 类崩溃</td></tr>
-          <tr><td>GNOME 启动</td><td>战役专属;随工作树一起收线</td></tr>
+          <tr><td>GNOME 启动</td><td>该轮专属;随工作树一起撤除</td></tr>
         </tbody>
       </table>
     </div>
-    <div class="callout"><b>根模式:</b>每一把被拆掉的锁、每一批被合并的 I/O 都对微基准和 LTP 验证过。唯一会行使 glibc 动态链接器、堆裁剪与 GObject 生命周期的负载 —— 一个真实桌面 —— 从常备测试面里消失了。回归不是一个事件;它是横跨 2,825 个提交的静默累积,在有人再次运行 <code>make ubuntu-run</code> 的第一时间暴露。</div>
+    <div class="callout"><b>根模式:</b>每一处被拆掉的锁、每一批被合并的 I/O 都对微基准和 LTP 验证过。唯一会行使 glibc 动态链接器、堆裁剪与 GObject 生命周期的负载 —— 一个真实桌面 —— 从常备测试面里消失了。回归不是一个事件;它是横跨 2,825 个提交的静默累积,在有人再次运行 <code>make ubuntu-run</code> 的第一时间暴露。</div>
 
     <h2 id="factors"><span class="anchor">§5</span>叠加因素(诚实清单)</h2>
     <ol>
@@ -143,7 +143,7 @@
 
     <h2 id="open"><span class="anchor">§7</span>开放项</h2>
     <ol>
-      <li><b>trim 面(深水区)</b>:glibc systrim 收回一块内核也认为空闲的堆,随后活指针走进其中 —— 元数据在 trim 之前已被销毁。所有内核侧假说都被探针证据排除(分配器布局、brk/VMA 一致性、COW、mremap、真实压力下的 swap 往返、fault-around 纪律、madvise 边界、rmap/LRU)。trim 隔离区观测器(main@f8ffce15,启动参数 <code>trimq=1</code>)已捕获首次触碰及完整上下文:trim 后 0–2 jiffy 内 gobject 代码在 1.15 MB 收回区间内的两次 READ。下一步:命中点的帧内容转储(区分零填与别名)+ 用户态 malloc interposer。</li>
+      <li><b>trim 面(深层项)</b>:glibc systrim 收回一块内核也认为空闲的堆,随后活指针走进其中 —— 元数据在 trim 之前已被销毁。所有内核侧假说都被探针证据排除(分配器布局、brk/VMA 一致性、COW、mremap、真实压力下的 swap 往返、fault-around 纪律、madvise 边界、rmap/LRU)。trim 隔离区观测器(main@f8ffce15,启动参数 <code>trimq=1</code>)已捕获首次触碰及完整上下文:trim 后 0–2 jiffy 内 gobject 代码在 1.15 MB 收回区间内的两次 READ。下一步:命中点的帧内容转储(区分零填与别名)+ 用户态 malloc interposer。</li>
       <li><b>第 7 轮早期启动停滞</b>:对 GNOME 启动二分 perf-gap-hunt 第 7 轮合并。</li>
       <li><b>fdreap close 停滞洪泛</b>:近期每次启动的晚段都有(55–129 行/启动);独立成线。</li>
     </ol>

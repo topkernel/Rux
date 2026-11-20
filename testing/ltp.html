@@ -112,7 +112,7 @@
     <div class="trend-x">
       <span>r1</span><span>r2</span><span>r3</span><span>r9</span><span>r14</span><span>r15</span><span>r20</span><span>r21</span><span>r23</span><span>r27</span><span>11-15</span><span>11-16</span>
     </div>
-    <p style="font-size:12.5px;color:var(--text-3)">r1–r10(riscv64·TCG,旧机)→ r14–r20(同机收官,r20=1028)→ r21 起 x86_64+KVM 标准测试平台(r21 首轮 1010 → r27 审计 1093 → 2026-11-15 审计轮 1122 → 2026-11-16 官方确认轮 1138;tgkill03 修复并入后当前预期 1139)。中间轮次回撤多为宿主负载噪声,经隔离复跑裁决回收。</p>
+    <p style="font-size:12.5px;color:var(--text-3)">r1–r10(riscv64·TCG,旧机)→ r14–r20(同机收尾,r20=1028)→ r21 起 x86_64+KVM 标准测试平台(r21 首轮 1010 → r27 审计 1093 → 2026-11-15 审计轮 1122 → 2026-11-16 官方确认轮 1138;tgkill03 修复并入后当前预期 1139)。中间轮次回撤多为宿主负载噪声,经隔离复跑裁决回收。</p>
 
     <h2 id="method"><span class="anchor">§2</span>方法学</h2>
     <ul>
@@ -128,7 +128,7 @@
         <thead><tr><th>测试平台</th><th>最新</th><th>说明</th></tr></thead>
         <tbody>
           <tr><td>x86_64 + KVM(标准测试平台)</td><td class="num">2026-11-16 scan3 官方 = 1138/1869;tgkill03 修复后当前预期 1139/1869</td><td>2026-11-01 起为标准测试平台;r21 首轮 1010,r27 审计 1093,11-15 审计 1122</td></tr>
-          <tr><td>riscv64 · TCG</td><td class="num">r20 = 1028/1869</td><td>2026-10-31 收官轮;r14=945 → r15=1005(do_exit 修复)</td></tr>
+          <tr><td>riscv64 · TCG</td><td class="num">r20 = 1028/1869</td><td>2026-10-31 收尾轮;r14=945 → r15=1005(do_exit 修复)</td></tr>
         </tbody>
       </table>
     </div>

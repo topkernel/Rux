@@ -86,7 +86,7 @@
     <h2 id="position"><span class="anchor">§1</span>设计定位:单一全局运行队列</h2>
     <p>Rux 调度子系统的核心结构是<b>由全部 CPU 共享的单颗全局运行队列(Global Run Queue, GRQ)</b>(设计分歧 <a href="design.html#d1">D-1</a>):不存在 per-CPU 运行队列,不存在负载均衡器,不存在任务偷取。空闲 CPU 经 IPI 唤醒后<b>按需从全局队列取任务</b> —— 就绪集在结构上即均衡,负载不均衡及其引发的一整类公平性缺陷在该设计下不可表达。</p>
     <p>该取舍面向<b>桌面、移动与嵌入式级核数</b>:当前平台以 MAX_CPUS=8 构建(<code>kernel/src/config.rs</code>),目标工作负载为数十至数百任务的图形会话与服务网格,而非数百核服务器。在此规模下,per-CPU 队列加负载均衡所引入的三类额外复杂度 —— 迁移决策、均衡器启发式、均衡不完备导致的公平性缺陷 —— 均为纯成本;GRQ 的两项已知代价(高核数下的争用上限、缓存局部性损失)已登记于分歧条目,并显式记录重审触发条件:当测量表明持锁进入争用受限形态时重新评估。</p>
-    <p>相对于 per-CPU 设计的关键差异是<b>可取证性</b>:调度序具有唯一事实源,唤醒/拣选/搁浅的全部观测仪器(§8)仅需推理单一结构。OpenHarmony 战役期间的调度缺陷族(丢失唤醒、幻影抢占计数、陈旧拣选声明)均在该单一结构上定位 —— 这属于设计目标而非偶然。</p>
+    <p>相对于 per-CPU 设计的关键差异是<b>可取证性</b>:调度序具有唯一事实源,唤醒/拣选/停滞的全部观测仪器(§8)仅需推理单一结构。OpenHarmony 调试轮次的调度缺陷族(丢失唤醒、幻影抢占计数、陈旧拣选声明)均在该单一结构上定位 —— 这属于设计目标而非偶然。</p>
     <div class="callout"><b>该设计属于有意的历史重采纳,而非发明。</b>单一全局派发队列是前 SMP 经典 UNIX 的原生形态(Bach,《The Design of the UNIX Operating System》,1986)。Rux 在小核数场景重新采纳该形态,并以现代观测手段将其成本约束在实测基准范围内:用户裁定(2026-10-28)在 4 核、持锁时间呈体积耦合而非争用受限的实测条件下,per-CPU 队列化属于过度工程;维持 GRQ,后续工作限于持锁段瘦身,不变更队列模型。</div>
     <h3>成本约束的实测依据</h3>
     <ul>
@@ -178,7 +178,7 @@
     <h2 id="instruments"><span class="anchor">§8</span>观测仪器与门禁带</h2>
     <p>调度域观测自成体系,各仪器的用法见<a href="../debugging/index.html">调试指南</a>:</p>
     <ul>
-      <li><b>wakewatch</b>:唤醒→运行延迟取证。1024 槽旁表(以 Task 指针哈希,不触碰任务结构布局),将"应运行未运行"判别为四类:WAKE-STRANDED(唤醒及时但未获拣选,输出受害任务、延迟时长、拣选 CPU)/ TIMER-LATE-FIRE(定时器超期触发)/ WAKE-REFUSED / 进程内丢失;WW5 分档计数 N250/N500/N750;搁浅阈值 1000 ms(因打印位于 IF=0 语境消耗 LIFECYCLE_TIMEOUT 预算而调高)。</li>
+      <li><b>wakewatch</b>:唤醒→运行延迟取证。1024 槽旁表(以 Task 指针哈希,不触碰任务结构布局),将"应运行未运行"判别为四类:WAKE-STRANDED(唤醒及时但未获拣选,输出受害任务、延迟时长、拣选 CPU)/ TIMER-LATE-FIRE(定时器超期触发)/ WAKE-REFUSED / 进程内丢失;WW5 分档计数 N250/N500/N750;停滞阈值 1000 ms(因打印位于 IF=0 语境消耗 LIFECYCLE_TIMEOUT 预算而调高)。</li>
       <li><b>调度事件普查</b>(启动期调度事件的计数器):TERM-DESCHED 8±2(DEAD 任务终末去调度循环,打印预算 n&lt;8)、WAKE-REFUSED 32±4(W3 唤醒拒绝普查,预算 32)。两条普查在每次合格静默启动上<b>精确一致</b>(8/32),作为调度域的形状签名纳入性能门。</li>
       <li><b>cctx 分段</b>:唤醒侧 WK_N/WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS;切换侧 CW_FPUSAVE/CW_MM/CW_MSR/CW_ASM/CW_FPUREST;调度侧 SCH_PRE/LOCKWAIT/ACCT/DEQREQ/PICK/PUB —— 任何切换或唤醒回归均可定位至段。</li>
       <li><b>门禁带</b>(调度域):GRQ 平均持锁 2786 ns、调度事件普查 8±2/32±4、p2_ctxsw ±20%、p5 行带;GRQ pick/放置的任何改动须通过 release-strong pbench 启动验证。</li>
