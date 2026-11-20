@@ -233,6 +233,45 @@ pub fn task_ownership_qword(t: *const Task) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// INV-SCE-11: the trap frame + the tp register
+// ---------------------------------------------------------------------------
+
+/// The interrupted kernel RIP (INV-SCE-11): the instruction pointer of
+/// the trap frame the arch layer derives from the tp register /
+/// per-CPU state — the reference's `instruction_pointer(regs)` on the
+/// current frame. Diagnostic read (the RIP names a poll loop, not a
+/// data structure).
+#[inline]
+pub fn current_trap_ip() -> u64 {
+    let pr = crate::arch::trap::current_pt_regs() as *const crate::arch::pt_regs::PtRegs;
+    if pr.is_null() {
+        return 0;
+    }
+    // SAFETY: INV-SCE-11 — the fixed-offset trap-frame window (the same
+    // layout contract pt_regs_ref documents), derived by the arch trap
+    // layer.
+    unsafe { (*pr).instruction_pointer() }
+}
+
+/// The executing task (INV-SCE-11): the hardware tp register IS the
+/// per-CPU current-task pointer — the one derivation the whole kernel
+/// is built on ([`crate::sched::sched::current`]'s engine). Null and
+/// low-address checks mirror the register's boot states (0 before the
+/// first context switch; sub-kernel addresses name not-yet-task state).
+#[inline]
+pub fn current_task_mut() -> Option<&'static mut Task> {
+    let tp = crate::arch::cpu::get_thread_id() as *mut Task;
+    if tp.is_null() || (tp as usize) < 0x80000000 {
+        None
+    } else {
+        // SAFETY: INV-SCE-11 — tp is set by context_switch to a valid
+        // Task pointer; this CPU has exclusive mutable access to its
+        // current task.
+        Some(unsafe { &mut *tp })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // INV-SCE-5: the machine context switch
 // ---------------------------------------------------------------------------
 
