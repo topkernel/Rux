@@ -526,7 +526,7 @@ fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
     }
 
     // SAFETY: current is this CPU's current task, paused inside the tick.
-    unsafe {
+    {
         let policy = crate::sched::edges::task_shared(current).policy();
         if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
             let used = RT_TIME_USED[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
@@ -2418,7 +2418,7 @@ pub fn preempt_check_wake(task: *mut Task) {
     }
     // SAFETY: task is validated non-null by the caller (Task::wake_up);
     // the check fns only read per-CPU current slots and task fields.
-    unsafe {
+    {
         let allowed = crate::sched::edges::task_shared(task).cpus_allowed();
         // R3 (rt-r3): the wake ladder steered ti_cpu to select_task_rq's
         // placement BEFORE the enqueue, so ti_cpu names the rq the wakee
@@ -2660,7 +2660,7 @@ pub fn ww_stalled_cpu_state(cpu: usize) -> (u64, u64, u64) {
 #[inline]
 fn this_cpu() -> &'static PerCpuState {
     // SAFETY: cpu_id is bounds-checked against MAX_CPUS; each CPU only reads its own slot.
-    unsafe {
+    {
         let id = crate::arch::cpu_id() as u64 as usize;
         if id >= MAX_CPUS {
             panic!("this_cpu: cpu_id {} >= MAX_CPUS {}", id, MAX_CPUS);
@@ -2741,7 +2741,7 @@ pub fn init_secondary(cpu_id: usize) {
 
     // tp was already set to the idle task pointer by boot.S (loaded from
     // __secondary_idle_tasks).  Just register with the per-CPU state.
-    unsafe {
+    {
         let idle_ptr = crate::sched::edges::idle_task_ptr(cpu_id);
 
         // Verify the current-task pointer matches the pre-created idle task
@@ -6494,7 +6494,7 @@ pub fn w2_refusal_census(task: *mut Task) -> W2RefusalCensus {
         return out;
     }
     let grq_guard = grq().lock_irqsave();
-    unsafe {
+    {
         out.linked = match crate::sched::edges::task_shared(task).policy() {
             SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task),
             SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task),
@@ -7939,7 +7939,7 @@ pub fn runq_strand_census(now_j: u64) {
         LINES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         printed += 1;
         // SAFETY: task was validated by phase A this burst.
-        let tk = unsafe { &*(task as *mut Task) };
+        let tk = crate::sched::edges::task_shared(task as *mut Task);
         let linked = match grq_diag_cfs_linked(task as *mut crate::process::task::Task) {
             Some(v) => v as u8,
             None => 2,
@@ -9831,7 +9831,7 @@ pub fn scheduler_tick() {
                             for &b in M {
                                 putchar(b);
                             }
-                            ph(unsafe { (**task).pid() } as u64);
+                            ph(crate::sched::edges::task_shared(*task).pid() as u64);
                             const M2: &[u8] = b" was=";
                             for &b in M2 {
                                 putchar(b);
@@ -9867,7 +9867,7 @@ pub fn scheduler_tick() {
                     for &b in M {
                         putchar(b);
                     }
-                    ph(unsafe { (**task).pid() } as u64);
+                    ph(crate::sched::edges::task_shared(*task).pid() as u64);
                     const M2: &[u8] = b" pc=";
                     for &b in M2 {
                         putchar(b);
@@ -9916,7 +9916,7 @@ pub fn scheduler_tick() {
                     for &b in M {
                         putchar(b);
                     }
-                    ph(unsafe { (**task).pid() } as u64);
+                    ph(crate::sched::edges::task_shared(*task).pid() as u64);
                     const M2: &[u8] = b" pc=";
                     for &b in M2 {
                         putchar(b);
@@ -9926,12 +9926,12 @@ pub fn scheduler_tick() {
                     for &b in M3 {
                         putchar(b);
                     }
-                    ph(unsafe { (**task).state().bits() } as u64);
+                    ph(crate::sched::edges::task_shared(*task).state().bits() as u64);
                     const M4: &[u8] = b" tcpu=";
                     for &b in M4 {
                         putchar(b);
                     }
-                    ph(unsafe { (**task).ti_cpu() } as u32 as u64);
+                    ph(crate::sched::edges::task_shared(*task).ti_cpu() as u32 as u64);
                     const M4b: &[u8] = b" tpexec=";
                     for &b in M4b {
                         putchar(b);
@@ -11116,7 +11116,7 @@ fn r56_print_msg(msg: &[u8]) {
     // R34 discipline: callers may hold the GRQ and/or a PID-hash bucket
     // lock here — SBI/direct console writes only.
     for &b in msg {
-        unsafe { crate::dfx::taskdump::putc_brief(b); }
+        crate::dfx::taskdump::putc_brief(b)
     }
 }
 
@@ -11148,7 +11148,7 @@ fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
         }
     }
     for i in (0..n).rev() {
-        unsafe { crate::dfx::taskdump::putc_brief(buf[i]); }
+        crate::dfx::taskdump::putc_brief(buf[i])
     }
     r56_print_msg(suffix);
 }
@@ -12098,7 +12098,7 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
         // Pin the page before dropping the slot's implicit pin; if the
         // page is at its last refcount (exiting), still rewrite the
         // stale name but do not hand a dead page to the wake path.
-        if !unsafe { crate::process::task::Task::try_pin(curr) } {
+        if !crate::process::task::Task::try_pin(curr) {
             cpu_state_mut(cpu).current = idle_task;
             slot_tag_write(cpu, SLOT_W_IDLE_HEAL, idle_task);
             // r11: the provably-stale name's generation is superseded.
@@ -12586,7 +12586,7 @@ pub fn cpu_idle_loop() -> ! {
         // full_update_tick path (the reference's idle loop brackets its
         // idle section with the same enter/exit pair).
         crate::timer::nohz::tick_nohz_idle_exit();
-        unsafe {
+        {
             schedule();
         }
 
@@ -12643,7 +12643,7 @@ pub fn cpu_idle_loop() -> ! {
                 // under its own lock and refuses a task that exited
                 // under the pin.
                 wake_up_enqueue(victim);
-                unsafe { crate::process::task::Task::task_put(victim) };
+                crate::process::task::Task::task_put(victim);
             }
         }
 
