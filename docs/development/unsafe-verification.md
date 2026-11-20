@@ -19,11 +19,11 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2684**
-- with artifact (non-GAP): **1453** (54.1%)
-- GAP: **1231**
-- by kind: block=2358, unsafe-extern=7, unsafe-fn=163, unsafe-impl=156
-- by category (regions carry 0..n tags): ptr-ops=665, asm=278, volatile=162, raw-construct=58, addr-arith=57, no-preempt=16, ffi=13, static-mut=5, layout-meta=5, transmute=4
+- unsafe regions: **2666**
+- with artifact (non-GAP): **1440** (54.0%)
+- GAP: **1226**
+- by kind: block=2340, unsafe-extern=7, unsafe-fn=163, unsafe-impl=156
+- by category (regions carry 0..n tags): ptr-ops=665, asm=278, volatile=160, raw-construct=58, addr-arith=57, no-preempt=15, ffi=13, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
 
@@ -31,11 +31,11 @@ census id is accounted for here.
 |-----------|---------|---------|-----|
 | arch | 781 | 722 | 59 |
 | fs | 644 | 212 | 432 |
-| mm | 199 | 51 | 148 |
+| mm | 184 | 40 | 144 |
 | sync | 159 | 56 | 103 |
 | dfx | 127 | 127 | 0 |
 | drivers | 120 | 8 | 112 |
-| sched | 117 | 93 | 24 |
+| sched | 114 | 91 | 23 |
 | tests | 105 | 1 | 104 |
 | process | 80 | 74 | 6 |
 | ipc | 67 | 54 | 13 |
@@ -2102,7 +2102,7 @@ census id is accounted for here.
 | 193 | drain | block | - | GAP | `1c8986e1fcfd` |
 | 222 | drain | block | ptr-ops | GAP | `ce8426843e9b` |
 
-### kernel/src/mm/edges.rs (5)
+### kernel/src/mm/edges.rs (15)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -2110,7 +2110,17 @@ census id is accounted for here.
 | 61 | page_of | block | - | GAP | `413a1d0a235b` |
 | 74 | page_ref_of | block | - | GAP | `d67719c68613` |
 | 92 | memblock_ref | block | - | GAP | `91c346b4a68e` |
-| 101 | memblock_mut | block | - | GAP | `b55792b07a9b` |
+| 101 | memblock_mut | block | - | GAP | `785cc95c444c` |
+| 111 | walk_fp_chain | block | - | GAP | `8b1aec44a764` |
+| 127 | slab_read_freelist_link | block | ptr-ops | GAP | `815c3d06f0d4` |
+| 135 | slab_write_freelist_link | block | ptr-ops | GAP | `57834e312fe1` |
+| 144 | slab_header_mut | block | ptr-ops | GAP | `a226d562aaa6` |
+| 152 | slab_header_cache_idx | block | ptr-ops | GAP | `5cf595ad7126` |
+| 161 | slab_pages_init | block | - | GAP | `a4a96c2d4a96` |
+| 171 | slab_pages | block | - | GAP | `b19ec242b4c3` |
+| 179 | slab_zero | block | ptr-ops | GAP | `06969c74677b` |
+| 187 | <module> | unsafe-impl | - | GAP | `0f4b9e81afc9` |
+| 191 | <module> | unsafe-impl | - | GAP | `d2b8949fc14d` |
 
 ### kernel/src/mm/gup.rs (10)
 
@@ -2257,23 +2267,6 @@ census id is accounted for here.
 | 417 | try_to_unmap_inner | block | - | GAP | `91e9f880699f` |
 | 437 | try_to_unmap_inner | block | - | GAP | `fecba8da3775` |
 
-### kernel/src/mm/slab.rs (12)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 202 | alloc_from_slab | block | ptr-ops | GAP | `f48d5598a6fe` |
-| 293 | free | block | ptr-ops | GAP | `ae0db92605fc` |
-| 348 | create_slab | block | - | GAP | `7d0944e9fb31` |
-| 357 | create_slab | block | - | GAP | `3c15b17a5b8c` |
-| 442 | <module> | unsafe-impl | - | GAP | `f12afe3624c7` |
-| 483 | get_header_mut | block | ptr-ops | GAP | `565e9499b66f` |
-| 543 | <module> | unsafe-impl | - | GAP | `fd875e5c49a6` |
-| 574 | init | block | - | GAP | `d9cad6ccdbe6` |
-| 589 | pages | block | - | GAP | `79342dc08b9b` |
-| 653 | kmalloc | block | - | GAP | `80f1f7d825f5` |
-| 680 | kfree | block | - | GAP | `1075787eccdb` |
-| 714 | kzalloc | block | ptr-ops | GAP | `f8e1560f8829` |
-
 ### kernel/src/mm/small_alloc.rs (11)
 
 | line | fn | kind | categories | artifact | id |
@@ -2347,24 +2340,6 @@ census id is accounted for here.
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 472 | shrink_node | block | - | GAP | `444207622d17` |
-
-### kernel/src/mm/zone.rs (13)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 416 | alloc_pages_order0_batch | block | - | INV:INV-PCP-2 | `c55708540569` |
-| 438 | alloc_pages_order0_batch | block | - | INV:INV-PCP-2 | `3183b66dafe2` |
-| 482 | alloc_pages_order0_batch | block | - | INV:INV-PCP-2 | `b527fe9a0c98` |
-| 655 | alloc_from_order | block | - | GAP | `cd5ed29c1209` |
-| 743 | free_pages | block | - | GAP | `8cf1a80ee532` |
-| 895 | is_buddy_free | block | - | INV:INV-REF-2 | `62e2ca693f2e` |
-| 918 | add_to_free_list | block | - | INV:INV-BUDDY-1 | `a98dc55a2685` |
-| 970 | remove_from_free_list | block | - | INV:INV-BUDDY-1 | `efa223106007` |
-| 988 | remove_from_free_list | block | - | INV:INV-BUDDY-1 | `6ab6b09add15` |
-| 996 | remove_from_free_list | block | - | INV:INV-BUDDY-1 | `65c2eef14450` |
-| 999 | remove_from_free_list | block | - | INV:INV-BUDDY-1 | `536c3bdc0cf1` |
-| 1011 | remove_from_free_list | block | - | INV:INV-BUDDY-1 | `e3587d750a66` |
-| 1062 | forensic_free_report | block | - | INV:INV-BUDDY-1 | `b80e5e73b3bd` |
 
 ## sync
 
@@ -3142,7 +3117,7 @@ census id is accounted for here.
 | 649 | <module> | unsafe-impl | - | GAP | `828a6d4903f6` |
 | 650 | <module> | unsafe-impl | - | GAP | `0030893faa67` |
 
-### kernel/src/sched/sched.rs (25)
+### kernel/src/sched/sched.rs (22)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -3156,21 +3131,18 @@ census id is accounted for here.
 | 2982 | alloc_task_slot | block | ptr-ops | INV:INV-TL-1 | `542b2668ed38` |
 | 2992 | alloc_task_slot | block | ptr-ops | INV:INV-TL-1 | `53dde0caafe3` |
 | 2999 | alloc_task_slot | block | - | INV:INV-TL-1 | `4f083827414f` |
-| 3295 | free_task_slot | block | - | GAP | `127bf8ec354c` |
 | 3411 | free_task_slot | block | - | INV:INV-TL-2 | `e8b25c5aac18` |
 | 3424 | free_task_slot | block | volatile,ptr-ops | INV:INV-TL-2 | `498f9909193f` |
-| 6569 | wake_up_enqueue_opt | block | volatile,ptr-ops,no-preempt | INV:INV-LOCK-5 | `a324ab08baf4` |
-| 6969 | wake_up_enqueue_opt | block | - | GAP | `8552679b58a5` |
-| 7787 | monopolist_census | block | ptr-ops | GAP | `b96baff3fc21` |
-| 9134 | scheduler_tick | block | - | GAP | `62f64107a4ee` |
-| 10026 | scheduler_tick | block | volatile,ptr-ops | GAP | `fab5cc4dd9bc` |
-| 10076 | scheduler_tick | block | - | GAP | `e5ffa95de467` |
-| 10716 | current | block | - | INV:INV-SCE-3 | `7c94cf3683f9` |
-| 11203 | harvest_print_parked | block | volatile,ptr-ops | GAP | `57d711b6bd64` |
-| 11300 | task_is_dying | block | - | GAP | `73fe927e5d61` |
-| 12470 | idle_guard_sp | block | asm | GAP | `57e1d14fc8c8` |
-| 12477 | idle_guard_sp | block | asm | GAP | `efa12116b83b` |
-| 12484 | idle_guard_sp | block | asm | GAP | `c2181e83c32e` |
+| 6974 | wake_up_enqueue_opt | block | - | GAP | `17045829a0f8` |
+| 7786 | monopolist_census | block | ptr-ops | GAP | `81f0d1ebe6e9` |
+| 9133 | scheduler_tick | block | - | GAP | `feb06e8c5503` |
+| 10025 | scheduler_tick | block | volatile,ptr-ops | GAP | `01c382c5e106` |
+| 10075 | scheduler_tick | block | - | GAP | `d69093cd978a` |
+| 10715 | current | block | - | GAP | `4e0784914e92` |
+| 11202 | harvest_print_parked | block | ptr-ops | GAP | `29649d880cc4` |
+| 12466 | idle_guard_sp | block | asm | GAP | `dec590df2860` |
+| 12473 | idle_guard_sp | block | asm | GAP | `f31df5399803` |
+| 12480 | idle_guard_sp | block | asm | GAP | `6f68eaadb328` |
 
 ### kernel/src/sched/side_edges.rs (5)
 
