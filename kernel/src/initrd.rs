@@ -109,11 +109,8 @@ pub fn load() -> Result<CpioStats, &'static str> {
         CpioSource::Borrowed(raw)
     };
 
-    let sb = crate::fs::rootfs::get_rootfs_sb()
-        .ok_or("rootfs not initialized")?;
-    // SAFETY: the superblock pointer is published by init_rootfs and
-    // lives for the rest of the boot.
-    let sb: &RootFSSuperBlock = unsafe { &*sb };
+    // The global-sb typed view (INV-FS-GLOBALSB-1 through the edge).
+    let sb = crate::fs::rootfs::get_rootfs_sb_ref().ok_or("rootfs not initialized")?;
 
     let stats = unpack_newc(cpio.as_slice(), sb)?;
     INITRD_LOADED.store(true, Ordering::Release);
