@@ -237,9 +237,9 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if uncopied == 0 {
         return 0;
     }
-    // SAFETY: best-effort COW/demand resolution on the user range.
-    if unsafe { fault_in_write(to, n) } {
-        // SAFETY: retry the copy after resolution.
+    // Best-effort COW/demand resolution on the user range.
+    if fault_in_write(to, n) {
+        // SAFETY: exception-table retry after resolution.
         return unsafe { __x64_copy_to_user(to, from, n) };
     }
     uncopied
@@ -290,9 +290,9 @@ pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
     if uncleared == 0 {
         return 0;
     }
-    // SAFETY: best-effort COW/demand resolution on the user range.
-    if unsafe { fault_in_write(to, n) } {
-        // SAFETY: retry the clear after resolution.
+    // Best-effort COW/demand resolution on the user range.
+    if fault_in_write(to, n) {
+        // SAFETY: exception-table retry after resolution.
         return unsafe { __x64_clear_user(to, n) };
     }
     uncleared
@@ -306,7 +306,7 @@ pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
 /// supervisor uaccess write to a COW/read-only page faults instead of
 /// silently piercing the protection (F1b), so the copy layer needs an
 /// explicit resolve-and-retry for the pages the trap path could not fix.
-unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
+fn fault_in_write(start: *mut u8, len: usize) -> bool {
     use crate::arch::mm::PageTableEntry;
     use crate::arch::mm::mm_ops::PageTableWalker;
 
@@ -337,13 +337,11 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
             }
             // Valid but read-only: COW? (x86_64 COW software bit 9)
             if bits & (1 << 9) != 0 {
-                match unsafe {
-                    crate::arch::mm::mm_ops::handle_cow_fault(
-                        addr_space,
-                        root_ppn,
-                        crate::arch::mm::VirtAddr::new(page as u64),
-                    )
-                } {
+                match crate::arch::mm::mm_ops::handle_cow_fault(
+                    addr_space,
+                    root_ppn,
+                    crate::arch::mm::VirtAddr::new(page as u64),
+                ) {
                     // Retry = a sibling thread resolved the COW (or the
                     // mapping changed) between our check and the locked
                     // re-walk — the following write either succeeds or
@@ -372,13 +370,11 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
                 // handle_cow_fault resolves it
                 // Leg-15 pace: tick after return (pte_lock released).
                 let cow_j0 = crate::drivers::timer::get_jiffies();
-                let cow_res = unsafe {
-                    crate::arch::mm::mm_ops::handle_cow_fault(
-                        addr_space,
-                        root_ppn,
-                        crate::arch::mm::VirtAddr::new(page as u64),
-                    )
-                };
+                let cow_res = crate::arch::mm::mm_ops::handle_cow_fault(
+                    addr_space,
+                    root_ppn,
+                    crate::arch::mm::VirtAddr::new(page as u64),
+                );
                 crate::dfx::schb::note_cow(cow_j0);
                 match cow_res {
                     crate::arch::mm::CowFaultResult::Resolved
