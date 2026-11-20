@@ -121,10 +121,19 @@ impl BuddyAllocator {
 }
 
 /// INV-BUDDY-K1: size_to_order always returns <= MAX_ORDER
+///
+/// Domain: sizes whose page-round-up cannot overflow — `size + PAGE_SIZE - 1`
+/// wraps only for size > usize::MAX - PAGE_SIZE + 1 (16 EiB-scale), which no
+/// caller can reach: heap sizes are physical-memory-bounded and layout sizes
+/// are <= isize::MAX by the GlobalAlloc contract. Birth defect (latent since
+/// fa84eaeb5, invisible until the sweep got past the errno grinder): the
+/// unbounded `kani::any()` domain included the wrap edge and CBMC reported
+/// "attempt to add with overflow" instead of the ordering property.
 #[kani::proof]
 fn verify_size_to_order_bounds() {
     let size: usize = kani::any();
     kani::assume(size > 0);  // meaningful sizes only
+    kani::assume(size <= usize::MAX - PAGE_SIZE);  // `size + PAGE_SIZE - 1` is left-associated: the intermediate sum must not wrap
     let order = heap_size_to_order(size);
     assert!(order <= MAX_ORDER);
 }
