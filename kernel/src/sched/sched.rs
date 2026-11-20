@@ -1634,15 +1634,17 @@ pub fn member_release_stale_ownership(member: *mut Task) -> bool {
     // SAFETY: the member is DEAD and unlinked (the caller's dead-list
     // invariant); no picker can touch it, and the GRQ hold above excludes
     // every in-flight switch-out, so the qword write races nothing.
-    let (pid, claim, pk, st, tcpu, slot, swout, n) = unsafe {
-        let pid = (*member).pid();
-        let claim = (*member).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
-        let pk = (*member).ti_pick_state.load(core::sync::atomic::Ordering::Acquire);
-        let st = (*member).state().bits();
-        let tcpu = (*member).ti_cpu() as u32;
-        let slot = owner_slot_mask(member);
-        let swout = switching_out_mask(member);
-        (*member).release_pick_ownership();
+    let (pid, claim, pk, st, tcpu, slot, swout, n) = {
+        // INV-SCE-2: the caller's dead-list invariant pins the member.
+        let member = crate::sched::edges::task_shared(member);
+        let pid = member.pid();
+        let claim = member.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+        let pk = member.ti_pick_state.load(core::sync::atomic::Ordering::Acquire);
+        let st = member.state().bits();
+        let tcpu = member.ti_cpu() as u32;
+        let slot = owner_slot_mask(core::ptr::from_ref(member) as *mut _);
+        let swout = switching_out_mask(core::ptr::from_ref(member) as *mut _);
+        member.release_pick_ownership();
         static FDM_STALE_SEEN: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         let n = FDM_STALE_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1995,15 +1997,16 @@ fn build_sigchld_info(child_pid: u32) -> Option<(crate::signal::SigInfo, u8)> {
     if child.is_null() {
         return None;
     }
-    // SAFETY: child is pinned (refcount held); only read-only field access.
-    let (info, exit_sig) = unsafe {
+    // Child is pinned (refcount held); INV-SCE-2 reads.
+    let (info, exit_sig) = {
+        let child = crate::sched::edges::task_shared(child);
         let i = crate::signal::SigInfo::child_exit(
-            (*child).pid(),
-            (*child).cred().uid,
-            (*child).exit_code(),
-            (*child).core_dumped(),
+            child.pid(),
+            child.cred().uid,
+            child.exit_code(),
+            child.core_dumped(),
         );
-        (i, (*child).get_exit_signal())
+        (i, child.get_exit_signal())
     };
     crate::process::task::Task::task_put(child);
     Some((info, exit_sig))
@@ -2581,8 +2584,8 @@ pub fn ww_cfs_geometry(task: *mut Task) -> (u64, u64, u64) {
     let g = grq();
     // SAFETY: scalar sched-entity read of the task being picked (GRQ
     // held); queue walk of the leftmost key only.
-    unsafe {
-        let vr = (*task).sched_entity().get_vruntime();
+    {
+        let vr = crate::sched::edges::task_shared(task).sched_entity().get_vruntime();
         let minv = g.cfs_rq.get_min_vruntime();
         let leftv = g
             .cfs_rq
@@ -2623,10 +2626,10 @@ pub fn ww_stalled_cpu_state(cpu: usize) -> (u64, u64, u64) {
     // SAFETY: init-time valid slot pointer; reads of stable Task fields
     // (pid, preempt_count) are diagnostic-only and tolerate a concurrent
     // switch (worst case a torn-but-bounded value).
-    unsafe {
+    {
         (
-            (*cur).pid() as u64,
-            (*cur).preempt_count() as u64,
+            crate::sched::edges::task_shared(cur).pid() as u64,
+            crate::sched::edges::task_shared(cur).preempt_count() as u64,
             crate::arch::trap::pt_regs_rip_for_cpu(cpu),
         )
     }
@@ -3183,15 +3186,15 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // SAFETY: task_ptr is non-null and still a valid Task — the
         // caller's last task_put guarantees this call owns the final
         // reference, so no concurrent reader can be freeing it too.
-        unsafe {
-            let words = crate::trace::comm_to_words(&*(*task_ptr).comm());
+        {
+            let words = crate::trace::comm_to_words(crate::sched::edges::task_shared(task_ptr).comm());
             crate::trace::record(
                 &crate::trace::EVENT_SCHED_PROCESS_FREE,
                 [
                     words[0],
                     words[1],
-                    (*task_ptr).pid() as u64,
-                    (*task_ptr).prio() as u64,
+                    crate::sched::edges::task_shared(task_ptr).pid() as u64,
+                    crate::sched::edges::task_shared(task_ptr).prio() as u64,
                     0,
                     0,
                     0,
@@ -6693,11 +6696,7 @@ pub fn wake_up_enqueue_opt(
                 // boot adjudicates "node in tree but skipped" (vr position
                 // + wall) against "stale key, node unreachable" (the walk
                 // never lists the pid).
-                let w3_qword = unsafe {
-                    core::ptr::read_volatile(
-                        core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
-                    )
-                };
+                let w3_qword = crate::sched::edges::task_ownership_qword(task);
                 let w3_onrq = crate::sched::edges::task_shared(task).sched_entity().on_rq.load(core::sync::atomic::Ordering::Relaxed);
                 let (w3_key_vr, w3_key_id) =
                     match crate::sched::edges::task_shared(task).sched_entity().timeline_key() {
@@ -6804,7 +6803,7 @@ pub fn wake_up_enqueue_opt(
                                 }
                                 w3_fz_sp = sp as u64;
                                 w3_fz_w[0] =
-                                    unsafe { core::ptr::read_volatile(sp as *const u64) };
+                                    crate::sync::edges::read_volatile_u64(sp as usize);
                                 w3_fz_w[1] = unsafe {
                                     core::ptr::read_volatile((sp as *const u64).add(1))
                                 };
@@ -10535,13 +10534,11 @@ pub fn sched_renice_locked(task: &mut Task, niceval: i32) {
 
 /// R25-6: load_weight rebalance for an in-tree reweight (GRQ-locked caller).
 pub fn grq_cfs_adjust(old_w: u64, new_w: u64) {
-    // Operate on the GRQ's CFS class — the caller holds the GRQ lock.
-    // (Access via the same unsafe pattern the file uses for GRQ.)
-    unsafe {
-        let g = grq() as *const GlobalRunQueue as *mut GlobalRunQueue;
-        (*g).cfs_rq.load_weight.fetch_add(new_w, core::sync::atomic::Ordering::AcqRel);
-        (*g).cfs_rq.load_weight.fetch_sub(old_w, core::sync::atomic::Ordering::AcqRel);
-    }
+    // Operate on the GRQ's CFS class — the caller holds the GRQ lock
+    // (INV-SCE-3 mutation side; interior-mutable atomics need no &mut).
+    let g = grq();
+    g.cfs_rq.load_weight.fetch_add(new_w, core::sync::atomic::Ordering::AcqRel);
+    g.cfs_rq.load_weight.fetch_sub(old_w, core::sync::atomic::Ordering::AcqRel);
 }
 
 pub fn yield_cpu() {

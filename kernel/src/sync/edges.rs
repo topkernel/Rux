@@ -127,3 +127,20 @@ pub fn word_cas(uaddr: usize, expect: u32, new: u32) -> Option<u32> {
     }
     Some(cur)
 }
+
+/// Walk a (foreign) task's page tables (INV-SY-1 walk edge): read-only
+/// translation; `root` is the aspace's root_ppn of a live task.
+pub fn pt_walk(root: u64, va: u64) -> Option<(u64, u64)> {
+    // SAFETY: INV-SY-1 — the page-table walk is read-only.
+    unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) }
+}
+
+/// One volatile u64 read of an address the caller has validated
+/// (INV-SY-1 diag): kernel-stack windows, translated user pages.
+/// Volatile by contract — the data may be written concurrently by the
+/// owning CPU; readers take what they see.
+#[inline]
+pub fn read_volatile_u64(addr: usize) -> u64 {
+    // SAFETY: INV-SY-1 — single volatile load of a validated address.
+    unsafe { core::ptr::read_volatile(addr as *const u64) }
+}
