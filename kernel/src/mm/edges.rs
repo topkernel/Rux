@@ -189,3 +189,48 @@ unsafe impl Sync for super::slab::SlabPages {}
 // SAFETY: all SlabAllocator fields are individually Sync (per-cache
 // Spinlocks, the SlabPages pair above, an AtomicUsize gate).
 unsafe impl Sync for super::slab::SlabAllocator {}
+
+// ---------------------------------------------------------------------------
+// INV-MM-5: the per-CPU page-cache rows. `PcpRow` is an UnsafeCell whose
+// mutable access is confined to the owning CPU inside its irq-off window
+// (INV-PCP-3: nested same-CPU entry is serialized by the disabled IRQs);
+// cross-CPU readers only ever PEEK (raw loads of count/list through the
+// raw pointer, moment-stale by design).
+// ---------------------------------------------------------------------------
+
+// SAFETY: cross-CPU access never forms a reference (peeks only);
+// mutable access is confined to the owning CPU's irq-off window.
+unsafe impl Sync for super::pcp::PcpRow {}
+
+/// Run `f` with this CPU's row, mutably (INV-MM-5 exclusive arm: the
+/// caller disabled interrupts on THIS CPU — the only CPU that may touch
+/// the row — so the &mut is exclusive).
+#[inline]
+pub fn pcp_row_exclusive<R>(
+    c: usize,
+    f: impl FnOnce(&mut super::pcp::PcpPageset) -> R,
+) -> R {
+    // SAFETY: INV-MM-5 — per-CPU row, IRQs off on this CPU (the
+    // with_row caller's discipline).
+    let row = unsafe { &*core::ptr::addr_of!(super::pcp::PCP_ROWS[c]) }.0.get();
+    f(unsafe { &mut *row })
+}
+
+/// Peek row `c`'s cached count (INV-MM-5 peek arm: raw load, no
+/// reference formed; moment-stale is acceptable for diagnostics).
+#[inline]
+pub fn pcp_row_count_peek(c: usize) -> usize {
+    // SAFETY: INV-MM-5 — raw usize load through the row pointer.
+    let row = unsafe { &*core::ptr::addr_of!(super::pcp::PCP_ROWS[c]) }.0.get();
+    unsafe { (*row).count }
+}
+
+/// Peek a shared view of row `c` for forensic scans (INV-MM-5 peek
+/// arm: read-only walk of count/list; racy by design).
+#[inline]
+pub fn pcp_row_ref_peek(c: usize) -> &'static super::pcp::PcpPageset {
+    // SAFETY: INV-MM-5 — read-only borrow for the scan body; no
+    /// reference escapes the caller.
+    let row = unsafe { &*core::ptr::addr_of!(super::pcp::PCP_ROWS[c]) }.0.get();
+    unsafe { &*row }
+}
