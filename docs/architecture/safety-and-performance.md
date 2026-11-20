@@ -1001,6 +1001,37 @@ ids; the full text lives at the owner line.
 | INV-XE-PT-3 | `arch/x86_64/mm/unsafe_edges.rs` | ! - **INV-XE-PT-3 (aliasing)** — tables are shared across CPUs; `get` |
 | INV-XE-PT-4 | `arch/x86_64/mm/unsafe_edges.rs` | ! - **INV-XE-PT-4 (stage discipline)** — construction routes through |
 
+**F19. arch trap entry/exit + context switch + IPI asm** — owners
+`kernel/src/arch/*/trap.rs`, `thread.rs`, `context.rs`, `process.rs`
+(arch twins), `mm_ops.rs` (switch/TLB flush parts), `ipi.rs`,
+`exception.rs` walkers, `asid.rs`, `fixmap.rs`. *What stays raw:* the
+entry/exit stubs and `ret_from_fork` trampolines (asm by definition),
+FPU/xstate save-restore spans, satp/CR3 switch + TLB ops, IPI
+send/receive (the only cross-CPU doorbell), the frame-pointer walks
+the trap printer runs on the interrupted frame. *Why no safe shape
+exists:* these ARE the machine's context manipulation — the plan's
+Round-D floor names them ("context switch, the interrupt entry — must
+be hand-written in every kernel"); a safe wrapper would only relocate
+the asm, not type it. *Reference:* Linux's `entry.S`/`__switch_to`/
+`smp_call_function` — identical asm with zero contracts.
+*Containment:* entry paths run with IRQs off on the taken CPU; the
+IPI/TLB edges hold the sending CPU's ordering (fence/ipi discipline
+per arch).
+
+**F20. page-table walk/map protocol (boot init + fault path)** —
+owners `kernel/src/arch/*/mm/mmu_init.rs` (boot-time table build —
+before the typed PtTable wrappers exist), `page_fault.rs` (the
+demand-fault protocol: PTE-locked walk + map_user_page install +
+page-descriptor flag set on the exclusively-owned page),
+`pagetable.rs` runtime edges. *Why no safe shape exists:* the walk/map
+pair is the page-table protocol itself — the AE/RE/XE-PT INVs own the
+table ACCESSOR discipline at their edges; these rows are the
+lock-scoped INSTALL protocol on top (the R7-C3 race re-check, the
+loser-frees rule sampled at the fault sites). *Reference:* Linux's
+`handle_mm_fault`/`_pte_alloc_map_lock` — the same locked
+walk-then-install dance. *Containment:* every install under the PTE
+lock; the descriptor stores precede publication.
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
