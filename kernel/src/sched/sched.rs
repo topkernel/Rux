@@ -6878,15 +6878,9 @@ pub fn wake_up_enqueue_opt(
                                 w3_fz_sp = sp as u64;
                                 w3_fz_w[0] =
                                     crate::sync::edges::read_volatile_u64(sp as usize);
-                                w3_fz_w[1] = unsafe {
-                                    core::ptr::read_volatile((sp as *const u64).add(1))
-                                };
-                                w3_fz_w[2] = unsafe {
-                                    core::ptr::read_volatile((sp as *const u64).add(2))
-                                };
-                                w3_fz_w[3] = unsafe {
-                                    core::ptr::read_volatile((sp as *const u64).add(3))
-                                };
+                                w3_fz_w[1] = crate::sync::edges::read_volatile_u64((sp as usize) + 8);
+                                w3_fz_w[2] = crate::sync::edges::read_volatile_u64((sp as usize) + 16);
+                                w3_fz_w[3] = crate::sync::edges::read_volatile_u64((sp as usize) + 24);
                                 w3_fz_ready = true;
                             }
                             break;
@@ -10022,7 +10016,8 @@ pub fn scheduler_tick() {
     // First-hit-only reporting; the fix is stack-size/depth work (r19).
     if let Some(t) = crate::sched::current() {
         unsafe {
-            let bottom = (*t).kernel_stack_bottom();
+            let t = crate::sched::edges::task_shared(t);
+            let bottom = t.kernel_stack_bottom();
             if bottom != 0 {
                 let v = core::ptr::read_volatile(bottom as *const u64);
                 static REPORTED: core::sync::atomic::AtomicBool =
@@ -12559,7 +12554,7 @@ pub fn cpu_idle_loop() -> ! {
         // R56d (own-slot resync) remain active on both arches.
         #[cfg(feature = "riscv64")]
         {
-            unsafe { harvest_orphan_tasks(cpu_id); }
+            harvest_orphan_tasks(cpu_id);
             // R83 (R74 producer hunt): header audit on the same cadence —
             // names the scribbled task within ~4 jiffies of the write,
             // instead of at its next (fatal) schedule.
@@ -12789,7 +12784,7 @@ pub fn cpu_idle_loop() -> ! {
             // strand heartbeat reading phase=4 with idle bit CLEAR is the
             // lost-mark shape directly).
             WW_IDLE_PHASE[cpu_id].store(4, core::sync::atomic::Ordering::Release);
-            unsafe { crate::arch::cpu::wfi(); }
+            crate::arch::cpu::wfi();
             // WW_IDLE_PHASE 5: WFI returned, idle accounting + mark clear.
             WW_IDLE_PHASE[cpu_id].store(5, core::sync::atomic::Ordering::Release);
             crate::fs::procfs::uptime::account_idle_cycles(
