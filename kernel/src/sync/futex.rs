@@ -217,7 +217,7 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
         let w1_tgid = FUXWATCH1_TGID.load(core::sync::atomic::Ordering::Relaxed);
         let cur0 = crate::sched::current();
         let cur0_tgid = match cur0 {
-            Some(t) => unsafe { (*t).tgid() as u32 },
+            Some(t) => crate::sched::edges::task_shared(t).tgid() as u32,
             None => 0,
         };
         let m1 = uaddr == w1 && (w1_tgid == 0 || cur0_tgid == w1_tgid);
@@ -409,7 +409,7 @@ fn resolve_futex_phys(uaddr: usize) -> usize {
 
     let walk = |u: usize| -> usize {
         // SAFETY: read-only AddressSpace accessor on the current task.
-        let root = match unsafe { (*task).address_space() } {
+        let root = match crate::sched::edges::task_shared(task).address_space() {
             Some(mm) => mm.root_ppn(),
             None => return 0,
         };
@@ -473,7 +473,7 @@ impl FutexKey {
             None => return false,
         };
         // SAFETY: read-only AddressSpace accessor on the current task.
-        let mm = match unsafe { (*task).address_space() } {
+        let mm = match crate::sched::edges::task_shared(task).address_space() {
             Some(m) => m,
             None => return false,
         };
@@ -586,7 +586,7 @@ fn current_futex_mm_id() -> usize {
 #[cfg(feature = "dfx-futex-trace")]
 fn ftx_trace(tag: &[u8], uaddr: usize, a: u64, b: u64) {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
-    let pid = crate::sched::current().map(|t| unsafe { (*t).pid() as u64 }).unwrap_or(0);
+    let pid = crate::sched::current().map(|t| crate::sched::edges::task_shared(t).pid() as u64).unwrap_or(0);
     taskdump_raw_line(b"FTX ");
     taskdump_raw_line(tag);
     taskdump_raw_line(b" pid=");
@@ -819,7 +819,7 @@ pub fn ffrt_chain_walk(
     // SAFETY: diagnostic reads of the parked task under the
     // for_each/try contract; the task is pinned by the caller's pid
     // lookup and parked in the futex this walk decodes.
-    let tk = unsafe { &*task };
+    let tk = crate::sched::edges::task_shared(task);
     let top = tk.kernel_stack_top_checked()?;
     #[cfg(feature = "x86_64")]
     let usp = unsafe {
@@ -1078,7 +1078,7 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string:
     // SAFETY: diagnostic reads of the parked task under the
     // for_each/try contract; the task is pinned by the caller's pid
     // lookup and parked in the futex this scan decodes.
-    let tk = unsafe { &*task };
+    let tk = crate::sched::edges::task_shared(task);
     let top = tk.kernel_stack_top_checked()?;
     #[cfg(feature = "x86_64")]
     let usp = unsafe {
@@ -1589,7 +1589,7 @@ pub fn fuxwatch_arm_round() {
     }
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         // 81st: a park-latched slot-1 word is watched in its OWN tgid
         // only (see FUXWATCH1_TGID) — the same VA in every other mm is
         // a different object. hw1 (huks-wedge): the restriction is now
@@ -1806,7 +1806,7 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     // attribute a write (ohw115: param_watcher's counter and samgr's
     // mutex shared 0x7ff000499a50).
     let wtgid = crate::sched::current()
-        .map(|t| unsafe { (*t).tgid() as u32 })
+        .map(|t| crate::sched::edges::task_shared(t).tgid() as u32)
         .unwrap_or(0);
     crate::pr_warn!("FW tid={} tgid={} rip={:#x} old={} n={} addr={:#x}{}", tid, wtgid, rip, old_word, n, fault_addr, if which2 { " w2" } else { "" });
     // 62nd: latch the owner-of-record on every successful 0->1
@@ -1936,7 +1936,7 @@ pub fn fuxw_word_shape(task: *mut crate::process::Task, uaddr: u64) -> Option<al
     }
     // SAFETY: diagnostic reads of the parked task under the caller's
     // pid-lookup pin; stack-top check only.
-    let tk = unsafe { &*task };
+    let tk = crate::sched::edges::task_shared(task);
     if tk.kernel_stack_top_checked().is_none() {
         return None;
     }
@@ -2002,25 +2002,25 @@ pub fn deep_ufw(task: *mut crate::process::Task) -> Option<alloc::string::String
     }
     // SAFETY: diagnostic reads of the parked task under the caller's
     // pid-lookup pin; the derefs touch only the stack-top check.
-    let tk = unsafe { &*task };
+    let tk = crate::sched::edges::task_shared(task);
     let top = tk.kernel_stack_top_checked()?;
     #[cfg(feature = "x86_64")]
-    let (urbp, ursp) = unsafe {
-        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::x86_64::pt_regs::PtRegs;
-        ((*regs).rbp as u64, (*regs).rsp as u64)
+    let (urbp, ursp) = {
+        // INV-SCE-9: the entry frame at the stack top.
+        let regs = crate::sched::edges::pt_regs_at_top(top);
+        (regs.rbp as u64, regs.rsp as u64)
     };
     #[cfg(feature = "riscv64")]
-    let (urbp, ursp) = unsafe {
-        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::riscv64::pt_regs::PtRegs;
-        ((*regs).s0 as u64, (*regs).sp as u64)
+    let (urbp, ursp) = {
+        // INV-SCE-9: the entry frame at the stack top.
+        let regs = crate::sched::edges::pt_regs_at_top(top);
+        (regs.s0 as u64, regs.sp as u64)
     };
     #[cfg(feature = "aarch64")]
-    let (urbp, ursp) = unsafe {
-        let regs = (top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::aarch64::pt_regs::PtRegs;
-        ((*regs).regs[29] as u64, (*regs).sp as u64)
+    let (urbp, ursp) = {
+        // INV-SCE-9: the entry frame at the stack top.
+        let regs = crate::sched::edges::pt_regs_at_top(top);
+        (regs.regs[29] as u64, regs.sp as u64)
     };
     if ursp == 0 {
         return None;
@@ -2228,7 +2228,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
             return;
         }
         // SAFETY: diagnostic reads under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -2485,7 +2485,7 @@ pub fn oh67_poll_decode(
     }
     // SAFETY: diagnostic reads of the audited task under the census
     // contract (the task is pinned by the caller's iteration).
-    let tk = unsafe { &*task };
+    let tk = crate::sched::edges::task_shared(task);
     let Some(aspace) = tk.address_space() else {
         return alloc::string::String::new();
     };
@@ -2556,7 +2556,7 @@ pub fn oh67_m2_decode() -> alloc::string::String {
     let mut done = false;
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic read-only walk under the for_each contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         if done || tk.tgid() as u32 != tgid {
             return;
         }
@@ -2847,7 +2847,7 @@ pub fn oh68_latch_owner_task(tid: u32) {
         // SAFETY: current-task accessor in the FW fault path (the same
         // use the trap path itself makes right above this latch's
         // caller).
-        let tk = unsafe { &*tsk };
+        let tk = crate::sched::edges::task_shared(tsk);
         let Some(aspace) = tk.address_space() else {
             return;
         };
@@ -2907,7 +2907,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
             return;
         }
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -2938,7 +2938,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
                 return;
             }
             // SAFETY: diagnostic read under the for_each_task contract.
-            let tk = unsafe { &*task };
+            let tk = crate::sched::edges::task_shared(task);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -2990,7 +2990,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
             return;
         }
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -3187,7 +3187,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
                                 return;
                             }
                             // SAFETY: diagnostic read under for_each.
-                            let tk = unsafe { &*task };
+                            let tk = crate::sched::edges::task_shared(task);
                             if tk.tgid() as u32 != tgid {
                                 return;
                             }
@@ -3702,7 +3702,7 @@ pub fn sqwalk_slice() {
     let mut regions: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         if root != 0 || tk.tgid() as u32 != tgid {
             return;
         }
@@ -3844,7 +3844,7 @@ pub fn sqwalk_slice() {
                             let hit = rcur;
                             crate::sched::for_each_task_try(|t| {
                                 // SAFETY: diagnostic read, pt_regs only.
-                                let tk = unsafe { &*t };
+                                let tk = crate::sched::edges::task_shared(t);
                                 if tk.tgid() as u32 != tgid {
                                     return;
                                 }
@@ -3854,11 +3854,8 @@ pub fn sqwalk_slice() {
                                 };
                                 #[cfg(feature = "x86_64")]
                                 let rsp = {
-                                    let regs = (top.wrapping_sub(
-                                        crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                                    ))
-                                        as *const crate::arch::x86_64::pt_regs::PtRegs;
-                                    unsafe { (*regs).rsp }
+                                    let regs = crate::sched::edges::pt_regs_at_top(top);
+                                    regs.rsp
                                 };
                                 #[cfg(not(feature = "x86_64"))]
                                 let rsp = 0u64;
@@ -3870,11 +3867,8 @@ pub fn sqwalk_slice() {
                                 {
                                     #[cfg(feature = "x86_64")]
                                     let (sys, a0) = {
-                                        let regs = (top.wrapping_sub(
-                                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                                        ))
-                                            as *const crate::arch::x86_64::pt_regs::PtRegs;
-                                        (unsafe { (*regs).orig_rax }, unsafe { (*regs).rdi })
+                                        let regs = crate::sched::edges::pt_regs_at_top(top);
+                                        (regs.orig_rax, regs.rdi)
                                     };
                                     #[cfg(not(feature = "x86_64"))]
                                     let (sys, a0) = (0u64, 0u64);
@@ -4398,7 +4392,7 @@ pub fn ffrt_mutex_heap_map(tgid: u32, known_lock: u64) -> alloc::string::String 
     let mut root: u64 = 0;
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         if tk.tgid() as u32 != tgid || sig != 0 {
             return;
         }
@@ -4433,7 +4427,7 @@ pub fn ffrt_mutex_heap_map(tgid: u32, known_lock: u64) -> alloc::string::String 
     let mut finished = true;
     crate::sched::for_each_task_try(|task| {
         // SAFETY: walker-only reads of the tgid's frozen mm.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -4545,7 +4539,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
     let hi = lock + 0x28;
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic reads under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -4984,7 +4978,7 @@ pub fn futex_stuck_census() {
             if core::ptr::eq(s.task, task) {
                 // SAFETY: diagnostic reads under the for_each_task
                 // contract (task pinned in its pid-hash bucket).
-                let tk = unsafe { &*task };
+                let tk = crate::sched::edges::task_shared(task);
                 s.tgid = tk.tgid() as u32;
                 s.tid = tk.pid();
                 s.comm.copy_from_slice(tk.comm());
@@ -4992,12 +4986,7 @@ pub fn futex_stuck_census() {
                 if let Some(top) = tk.kernel_stack_top_checked() {
                     #[cfg(feature = "x86_64")]
                     {
-                        let regs = (top.wrapping_sub(
-                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                        // SAFETY: entry-frame read of this task's pinned
-                        // kernel-stack pages.
-                        let r = unsafe { &*regs };
+                        let r = crate::sched::edges::pt_regs_at_top(top);
                         s.sys = r.orig_rax as u64;
                         s.epc = r.rip as u64;
                         // futex(uaddr, op, val, timeout, ...): rsi/rdx/r10.
@@ -5008,12 +4997,7 @@ pub fn futex_stuck_census() {
                     }
                     #[cfg(feature = "riscv64")]
                     {
-                        let regs = (top.wrapping_sub(
-                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                        // SAFETY: entry-frame read of this task's pinned
-                        // kernel-stack pages.
-                        let r = unsafe { &*regs };
+                        let r = crate::sched::edges::pt_regs_at_top(top);
                         s.sys = r.a7 as u64;
                         s.epc = r.epc as u64;
                         s.fop = r.a1;
@@ -5023,12 +5007,7 @@ pub fn futex_stuck_census() {
                     }
                     #[cfg(feature = "aarch64")]
                     {
-                        let regs = (top.wrapping_sub(
-                            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
-                        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
-                        // SAFETY: entry-frame read of this task's pinned
-                        // kernel-stack pages.
-                        let r = unsafe { &*regs };
+                        let r = crate::sched::edges::pt_regs_at_top(top);
                         s.sys = r.syscallno as u64;
                         s.epc = r.pc as u64;
                         s.fop = r.regs[1];
@@ -5617,7 +5596,7 @@ pub fn futex_stuck_census() {
     // a skipped bucket only under-counts that tgid's histogram this burst.
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic reads under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         let tgid = tk.tgid() as u32;
         if !stuck.iter().any(|s| s.tgid == tgid) {
             return;
@@ -6334,7 +6313,7 @@ pub fn futex_stuck_census() {
             crate::sched::for_each_task_try(|task| {
                 // SAFETY: diagnostic reads under the for_each_task
                 // contract.
-                let tk = unsafe { &*task };
+                let tk = crate::sched::edges::task_shared(task);
                 // 60th: cap 24 -> 40 — samgr's libffrt/libipc mappings
                 // sort AFTER the first 24 file VMAs, and the wedge frame
                 // chain (TXN-HANG-BWR ffrt-chain uret addrs) lands in
@@ -6385,7 +6364,7 @@ pub fn futex_stuck_census() {
                 crate::sched::for_each_task_try(|task| {
                     // SAFETY: diagnostic reads under the for_each_task
                     // contract.
-                    let tk = unsafe { &*task };
+                    let tk = crate::sched::edges::task_shared(task);
                     if tk.tgid() as u32 != samgr_pid {
                         return;
                     }
@@ -6583,7 +6562,7 @@ fn pool_full_backoff() {
         None => return,
     };
     let target = crate::drivers::timer::get_jiffies() + 1;
-    let pid = unsafe { (*current).pid() };
+    let pid = crate::sched::edges::task_shared(current).pid();
     // arch-s5: typed one-shot guard — the scope-exit Drop cancels the
     // registration (the old explicit trailing del_timer).
     let Some(wake) = crate::timer::WakeArmed::arm_jiffy(target, pid) else {
@@ -6596,14 +6575,10 @@ fn pool_full_backoff() {
         // Mark INTERRUPTIBLE BEFORE the final re-check (state-first
         // lost-wakeup discipline, same as sys_nanosleep).
         // SAFETY: current is the running task's pointer.
-        unsafe {
-            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        }
+        crate::sched::edges::task_shared(current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         if crate::drivers::timer::get_jiffies() >= target {
             // SAFETY: current is the running task's pointer.
-            unsafe {
-                (*current).set_state(TaskState::new(TaskState::RUNNING));
-            }
+            crate::sched::edges::task_shared(current).set_state(TaskState::new(TaskState::RUNNING));
             // A racing wake may have enqueued us while still executing —
             // take ourselves back off (NEW-C2 discipline).
             // SAFETY: current is the running task's pointer.
@@ -6884,7 +6859,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                 if WOKE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
                     // SAFETY: the task is linked in this bucket under our
                     // lock; cannot be freed while we hold it.
-                    let tk = unsafe { &*task };
+                    let tk = crate::sched::edges::task_shared(task);
                     crate::pr_warn!(
                         "FUXW-WOKE uaddr={:#x} woken tid={} tgid={} state={:#x}",
                         uaddr,
@@ -6951,7 +6926,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         if let Some(t) = crate::sched::current() {
             // SAFETY: sched::current() yields the current task for the
             // duration of this syscall.
-            waker_pid = unsafe { (*t).pid() };
+            waker_pid = crate::sched::edges::task_shared(t).pid();
         }
         for (bi, b) in HASH_HEADS.iter().enumerate() {
             let mut h = b.lock_irqsave();
@@ -6977,7 +6952,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                         if !task.is_null() {
                             // SAFETY: the task is linked in the bucket; it
                             // cannot be freed while we hold the lock.
-                            let c = unsafe { (*task).comm() };
+                            let c = crate::sched::edges::task_shared(task).comm();
                             wcomm.copy_from_slice(c);
                         }
                         let name = core::str::from_utf8(
@@ -7491,7 +7466,7 @@ pub fn futex_cleanup(task: *mut Task) {
     // ~90us block under TCG).
     // SAFETY: do_exit calls this in the task's own context; no other CPU
     // stores the flag for this task concurrently.
-    if !unsafe { (*task).futex_wait_enqueued.load(core::sync::atomic::Ordering::Acquire) } {
+    if !crate::sched::edges::task_shared(task).futex_wait_enqueued.load(core::sync::atomic::Ordering::Acquire) {
         return;
     }
 
@@ -7551,9 +7526,7 @@ pub fn futex_cleanup(task: *mut Task) {
     // task — the flag is now false for good (this is the task's own exit
     // context; no new wait can start).
     // SAFETY: same context argument as the load above.
-    unsafe {
-        (*task).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
-    }
+    crate::sched::edges::task_shared(task).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
     Task::wake_up(task);
 }
 
@@ -8181,7 +8154,7 @@ pub fn dfx_dump_futex_state(uaddr: usize, parked_pid: u32) {
         taskdump_dec(i as u64);
         if !t.is_null() {
             taskdump_raw_line(b" pid=");
-            taskdump_dec(unsafe { (*t).pid() as u64 });
+            taskdump_dec(crate::sched::edges::task_shared(t).pid() as u64);
         }
         taskdump_raw_line(b" u=");
         taskdump_dec(ua as u64);
@@ -8249,12 +8222,12 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         {
             if let Some(t) = crate::sched::current() {
                 // SAFETY: read-only tgid of the current task.
-                let tgid = unsafe { (*t).tgid() as u32 };
+                let tgid = crate::sched::edges::task_shared(t).tgid() as u32;
                 // SAFETY: pid-hash lookup of the tgid leader; read-only
                 // comm read.
                 let lead = unsafe { crate::sched::find_task_by_pid(tgid) };
                 if !lead.is_null()
-                    && unsafe { (*lead).comm() }.starts_with(b"udisksd")
+                    && crate::sched::edges::task_shared(lead).comm().starts_with(b"udisksd")
                 {
                     let _ = RWFRZ_EXIT_WATCH_TGID.compare_exchange(
                         0,
@@ -8412,19 +8385,19 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     {
         use core::sync::atomic::Ordering::Relaxed;
         let cur_tgid =
-            crate::sched::current().map(|t| unsafe { (*t).tgid() as u32 });
+            crate::sched::current().map(|t| crate::sched::edges::task_shared(t).tgid() as u32);
         // sc185: the SA-5100 parcel latch never fired in sc184 (zero FXDV
         // lines), so also latch by process name — the first futex from any
         // thread of "hdf_devmgr" latches its tgid. The parcel matcher stays
         // (earlier latch = earlier coverage), this is the backstop.
         if FXDV_PID.load(Relaxed) == 0 {
             if let Some(t) = crate::sched::current() {
-                let comm = unsafe { (*t).comm() };
+                let comm = crate::sched::edges::task_shared(t).comm();
                 let name = core::str::from_utf8(&comm[..])
                     .unwrap_or("")
                     .trim_end_matches('\0');
                 if name == "hdf_devmgr" {
-                    fxdv_latch_devmgr(unsafe { (*t).tgid() as u32 });
+                    fxdv_latch_devmgr(crate::sched::edges::task_shared(t).tgid() as u32);
                 }
             }
         }
@@ -8492,7 +8465,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                                         prev,
                                         w,
                                         crate::drivers::timer::get_jiffies(),
-                                        unsafe { (*t).pid() }
+                                        crate::sched::edges::task_shared(t).pid()
                                     );
                                 }
                             }
@@ -8513,7 +8486,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         if c < 8 || c % 32 == 0 {
                             crate::pr_warn!(
                                 "FXDV-WORD tid={} uaddr={:#x} word={:#x} want={:#x} jif={}",
-                                unsafe { (*t).pid() },
+                                crate::sched::edges::task_shared(t).pid(),
                                 uaddr,
                                 w,
                                 val,
@@ -8607,7 +8580,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
 
     #[cfg(feature = "dfx-futex-trace")]
     {
-        let pid = crate::sched::current().map(|t| unsafe { (*t).pid() as u64 }).unwrap_or(0);
+        let pid = crate::sched::current().map(|t| crate::sched::edges::task_shared(t).pid() as u64).unwrap_or(0);
         use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX ENTER pid=");
         taskdump_dec(pid);
@@ -8786,7 +8759,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         let sp = crate::ipc::binder::binder_sareg_samgr_pid();
         if sp != 0 {
             let mine = crate::sched::current()
-                .map(|t| unsafe { (*t).tgid() == sp })
+                .map(|t| crate::sched::edges::task_shared(t).tgid() == sp)
                 .unwrap_or(false);
             if mine
                 && crate::trace::EVENT_TXNHANG.armed()
@@ -8862,7 +8835,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             // free one) and take one unit of its 3-dump budget.
             use core::sync::atomic::Ordering::Relaxed;
             let cur_tgid = crate::sched::current()
-                .map(|t| unsafe { (*t).tgid() as u32 })
+                .map(|t| crate::sched::edges::task_shared(t).tgid() as u32)
                 .unwrap_or(0);
             let mut tslot = usize::MAX;
             for i in 0..8 {
@@ -8894,7 +8867,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                 && crate::trace::EVENT_PARKDUMP.armed()
             {
                 if let Some(t) = crate::sched::current() {
-                    let tk = unsafe { &*t };
+                    let tk = crate::sched::edges::task_shared(t);
                     let comm = tk.comm();
                     let name = core::str::from_utf8(&comm[..])
                         .unwrap_or("")
@@ -8947,7 +8920,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
         if uaddr >= 0x7ffffffd0000 && uaddr < 0x7ffffffff000 {
             if let Some(t) = crate::sched::current() {
-                let tk = unsafe { &*t };
+                let tk = crate::sched::edges::task_shared(t);
                 let comm = core::str::from_utf8(&tk.comm()[..])
                     .unwrap_or("")
                     .trim_end_matches('\0');
@@ -9282,20 +9255,14 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                         #[cfg(feature = "x86_64")]
                                         {
                                             unsafe {
-                                                let regs = (top.wrapping_sub(
-                                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                                                ))
-                                                    as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                                let regs = crate::sched::edges::pt_regs_at_top(top);
                                                 (*regs).rsp as usize
                                             }
                                         }
                                         #[cfg(feature = "riscv64")]
                                         {
                                             unsafe {
-                                                let regs = (top.wrapping_sub(
-                                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                                                ))
-                                                    as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                                let regs = crate::sched::edges::pt_regs_at_top(top);
                                                 (*regs).sp as usize
                                             }
                                         }
@@ -9466,7 +9433,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             )
         {
             let mine = crate::sched::current()
-                .map(|t| unsafe { (*t).tgid() == lt })
+                .map(|t| crate::sched::edges::task_shared(t).tgid() == lt)
                 .unwrap_or(false);
             if mine || word_hit {
                 let n = FXRS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -9535,7 +9502,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
         && crate::trace::EVENT_FUTEX_MISS.armed()
     {
         if let Some(t) = crate::sched::current() {
-            let tk = unsafe { &*t };
+            let tk = crate::sched::edges::task_shared(t);
             let comm = core::str::from_utf8(&tk.comm()[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
@@ -9724,7 +9691,7 @@ pub fn note_task_unlink(pid: u32, tgid: u32) {
     if uaddr != 0 && tgid == RWFRZ_TGID.load(core::sync::atomic::Ordering::Relaxed) {
         let t = unsafe { crate::sched::find_task_by_pid(pid) };
         if !t.is_null() {
-            let tk = unsafe { &*t };
+            let tk = crate::sched::edges::task_shared(t);
             let comm = tk.comm();
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
@@ -9800,7 +9767,7 @@ pub fn kill_dump_tgid(tgid: u32) {
     let mut hdr = alloc::string::String::new();
     let _ = write!(hdr, "KILLDUMP: tgid {} threads={}", tgid, threads.len());
     for &t in threads.iter() {
-        let tk = unsafe { &*t };
+        let tk = crate::sched::edges::task_shared(t);
         let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
         let _ = write!(hdr, " [{}:{}]", tk.pid(), comm);
     }
@@ -9820,7 +9787,7 @@ pub fn kill_dump_tgid(tgid: u32) {
                 break;
             }
         }
-        let tk = unsafe { &*t };
+        let tk = crate::sched::edges::task_shared(t);
         let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
         match parked {
             Some((uaddr, bitset)) => {
@@ -9867,10 +9834,9 @@ pub fn kill_dump_tgid(tgid: u32) {
             let top = _top;
             #[cfg(feature = "x86_64")]
             {
-                let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
-                    as *const crate::arch::x86_64::pt_regs::PtRegs;
+                let regs = crate::sched::edges::pt_regs_at_top(top);
                 // SAFETY: diagnostic read of this task's entry frame.
-                let r = unsafe { &*regs };
+                let r = regs;
                 crate::pr_warn!(
                     "KILLDUMP: tid {} syscall nr={:#x} rdi={:#x} rsi={:#x} rdx={:#x} r10={:#x}",
                     tk.pid(),
@@ -10089,7 +10055,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                                 let holders_cell =
                                     core::cell::RefCell::new(alloc::string::String::new());
                                 crate::sched::for_each_task(|ht| {
-                                    let hk = unsafe { &*ht };
+                                    let hk = crate::sched::edges::task_shared(ht);
                                     if hk.pid() == 0 {
                                         return;
                                     }
@@ -10296,7 +10262,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         }
         // SAFETY: pid-hash walk contract; reads confined to pt-regs and
         // the task's own user pages.
-        let tk = unsafe { &*t };
+        let tk = crate::sched::edges::task_shared(t);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -10305,9 +10271,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         };
         #[cfg(feature = "x86_64")]
         let (sys, a0, rsp) = {
-            let regs = (top.wrapping_sub(
-                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            let regs = crate::sched::edges::pt_regs_at_top(top);
             unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
         };
         #[cfg(not(feature = "x86_64"))]
@@ -10420,7 +10384,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             }
             // SAFETY: pid-hash walk contract; reads confined to pt-regs
             // and the task's own user pages.
-            let tk = unsafe { &*t };
+            let tk = crate::sched::edges::task_shared(t);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -10433,9 +10397,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             // E0433 on `crate::arch::x86_64`. Same gating as the twin.
             #[cfg(feature = "x86_64")]
             let (sys, a0, rsp) = {
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                let regs = crate::sched::edges::pt_regs_at_top(top);
                 unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
             };
             #[cfg(not(feature = "x86_64"))]
@@ -10578,7 +10540,7 @@ pub fn musl_anchor(tgid: u32) -> Option<(u64, u64)> {
             return;
         }
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = unsafe { &*task };
+        let tk = crate::sched::edges::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -10651,7 +10613,7 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
         }
         // SAFETY: pid-hash walk contract; reads confined to pt-regs and
         // the task's own user pages.
-        let tk = unsafe { &*t };
+        let tk = crate::sched::edges::task_shared(t);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -10660,9 +10622,7 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
         };
         #[cfg(feature = "x86_64")]
         let (sys, a0, rsp) = {
-            let regs = (top.wrapping_sub(
-                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            let regs = crate::sched::edges::pt_regs_at_top(top);
             unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
         };
         #[cfg(not(feature = "x86_64"))]
@@ -10868,7 +10828,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
                 return;
             }
             // SAFETY: diagnostic read under the for_each_task contract.
-            let tk = unsafe { &*task };
+            let tk = crate::sched::edges::task_shared(task);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -10895,7 +10855,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
                 return;
             }
             // SAFETY: diagnostic read under the for_each_task contract.
-            let tk = unsafe { &*task };
+            let tk = crate::sched::edges::task_shared(task);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -10987,7 +10947,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
             }
             // SAFETY: diagnostic read under the for_each_task contract;
             // reads confined to pt-regs, TLS and the task's own pages.
-            let tk = unsafe { &*task };
+            let tk = crate::sched::edges::task_shared(task);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -11000,9 +10960,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
             let Some(top) = tk.kernel_stack_top_checked() else {
                 return;
             };
-            let regs = (top.wrapping_sub(
-                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            let regs = crate::sched::edges::pt_regs_at_top(top);
             let (sys, a0, rip) =
                 unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rip) };
             let ripoff = match word_off(rip) {
@@ -11425,8 +11383,7 @@ fn apppark_rets(task: *const Task) {
     };
     #[cfg(feature = "x86_64")]
     let rsp = unsafe {
-        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        let regs = crate::sched::edges::pt_regs_at_top(top);
         (*regs).rsp as usize
     };
     #[cfg(not(feature = "x86_64"))]
@@ -11560,15 +11517,13 @@ fn rwfz_stack_frames(
     };
     #[cfg(feature = "x86_64")]
     let (rsp, rip) = {
-        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        let regs = crate::sched::edges::pt_regs_at_top(top);
         // SAFETY: diagnostic read of this task's entry frame.
         unsafe { ((*regs).rsp, (*regs).rip) }
     };
     #[cfg(feature = "riscv64")]
     let (rsp, rip) = {
-        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::riscv64::pt_regs::PtRegs;
+        let regs = crate::sched::edges::pt_regs_at_top(top);
         // SAFETY: same contract, riscv64.
         unsafe { ((*regs).sp, (*regs).epc) }
     };
@@ -11795,14 +11750,14 @@ fn waiter_clusters(min: usize) -> alloc::vec::Vec<WordCluster> {
                 match slot.as_ref() {
                     Some(w) if !w.task.is_null() => {
                         let t = w.task;
-                        let pid = unsafe { (*t).pid() };
+                        let pid = crate::sched::edges::task_shared(t).pid();
                         let live = core::ptr::eq(
                             unsafe { crate::sched::find_task_by_pid(pid) },
                             t,
                         );
                         if live {
                             (
-                                Some((w.key.uaddr, w.key.mm, unsafe { (*t).tgid() as u32 }, t)),
+                                Some((w.key.uaddr, w.key.mm, crate::sched::edges::task_shared(t).tgid() as u32, t)),
                                 w.next,
                             )
                         } else {
@@ -11948,7 +11903,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                             } else {
                                 // SAFETY: read-only comm of the tgid leader
                                 // found by pid-hash lookup.
-                                let lb = unsafe { (*lead).comm() };
+                                let lb = crate::sched::edges::task_shared(lead).comm();
                                 let ll = lb.iter().position(|&b| b == 0).unwrap_or(16);
                                 core::str::from_utf8(&lb[..ll]).unwrap_or("?")
                             };
@@ -12356,7 +12311,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         crate::sched::for_each_task(|t| {
             // SAFETY: callback runs under the pid-hash bucket lock (same
             // contract as sleep_snapshot); reads confined to pid fields.
-            let tk = unsafe { &*t };
+            let tk = crate::sched::edges::task_shared(t);
             let idx = {
                 let mut b = seen_cell.borrow_mut();
                 if tk.tgid() as u32 == census_tgid && b.0 < 64 {
@@ -12549,7 +12504,7 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
     crate::sched::for_each_task(|t| {
         // SAFETY: same contract as rwfz_dump_tgid (pid-hash walk, reads
         // confined to the pt-regs entry frame).
-        let tk = unsafe { &*t };
+        let tk = crate::sched::edges::task_shared(t);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -12560,17 +12515,13 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
         };
         #[cfg(feature = "x86_64")]
         let (sys, a0) = {
-            let regs = (top.wrapping_sub(
-                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            let regs = crate::sched::edges::pt_regs_at_top(top);
             // SAFETY: diagnostic read of this task's entry frame.
             unsafe { ((*regs).orig_rax, (*regs).rdi) }
         };
         #[cfg(feature = "riscv64")]
         let (sys, a0) = {
-            let regs = (top.wrapping_sub(
-                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+            let regs = crate::sched::edges::pt_regs_at_top(top);
             // SAFETY: same contract, riscv64.
             unsafe { ((*regs).a7, (*regs).a0) }
         };
@@ -12623,22 +12574,18 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
                 // `top` is the guarded value from the closure head
                 // (kernel_stack_top_checked) — never raw here.
                 #[cfg(feature = "x86_64")]
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                let regs = crate::sched::edges::pt_regs_at_top(top);
                 #[cfg(feature = "riscv64")]
-                let regs = (top.wrapping_sub(
-                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                let regs = crate::sched::edges::pt_regs_at_top(top);
                 // SAFETY: diagnostic read of this task's entry frame.
                 #[cfg(feature = "x86_64")]
                 {
-                    unsafe { (*regs).rsp }
+                    regs.rsp
                 }
                 // SAFETY: same contract, riscv64.
                 #[cfg(feature = "riscv64")]
                 {
-                    unsafe { (*regs).sp }
+                    regs.sp
                 }
                 #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
                 {
@@ -12689,7 +12636,7 @@ pub(crate) fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
     let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
     crate::sched::for_each_task(|t| {
         // SAFETY: same contract as sleep_snapshot.
-        let tk = unsafe { &*t };
+        let tk = crate::sched::edges::task_shared(t);
         if tk.tgid() as u32 != tgid || count_cell.get() >= max_tasks {
             return;
         }
@@ -12701,17 +12648,13 @@ pub(crate) fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
         };
         #[cfg(feature = "x86_64")]
         let (rip, sys, a0) = {
-            let regs = (top.wrapping_sub(
-                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            let regs = crate::sched::edges::pt_regs_at_top(top);
             // SAFETY: diagnostic read of this task's entry frame.
             unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi) }
         };
         #[cfg(feature = "riscv64")]
         let (rip, sys, a0) = {
-            let regs = (top.wrapping_sub(
-                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+            let regs = crate::sched::edges::pt_regs_at_top(top);
             // SAFETY: same contract, riscv64.
             unsafe { ((*regs).epc, (*regs).a7, (*regs).a0) }
         };

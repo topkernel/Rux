@@ -238,6 +238,24 @@ pub fn cgroup_node_ref(
     Some(unsafe { &*ptr })
 }
 
+/// The trap frame at the top of a kernel-stack window (INV-SCE-9):
+/// `top` came from `Task::kernel_stack_top_checked()` on a live task
+/// (walker pin / census caller); the PtRegs-sized window below the top
+/// is that task's entry frame — the same layout contract
+/// `Task::pt_regs_ref` exposes. Diagnostic reads; the frame may be
+/// mid-flight if the task runs concurrently (same contract as every
+/// raw read this edge replaces).
+#[inline]
+pub fn pt_regs_at_top(top: usize) -> &'static crate::arch::pt_regs::PtRegs {
+    debug_assert!(top > core::mem::size_of::<crate::arch::pt_regs::PtRegs>());
+    // SAFETY: INV-SCE-9 — the fixed-offset window in a live task's
+    // kernel stack (allocated with the task slot).
+    unsafe {
+        &*((top.wrapping_sub(core::mem::size_of::<crate::arch::pt_regs::PtRegs>()))
+            as *const crate::arch::pt_regs::PtRegs)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // INV-SCE-7: the RT priority lists' intrusive links
 // ---------------------------------------------------------------------------
