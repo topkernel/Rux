@@ -42,6 +42,8 @@
 //! cleanly under the boot driver, so the periodic line is the evidence
 //! channel.
 
+#![forbid(unsafe_code)]
+
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
