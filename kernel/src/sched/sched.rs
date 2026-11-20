@@ -843,22 +843,36 @@ pub static GRQ_SITE_FP: [core::sync::atomic::AtomicU64; MAX_CPUS] =
 pub static GRQ_ACQ_JIF: [core::sync::atomic::AtomicU64; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
 
-/// Read the current frame pointer (rbp on x86_64, s0 on riscv64).
+/// Read the current frame pointer (rbp on x86_64, s0 on riscv64,
+/// x29 on aarch64).
+///
+/// IRREDUCIBLE F-ROW (F-REG-1): there is no safe shape for reading a
+/// CPU register — Rust exposes no intrinsic for rbp/s0/x29 and the
+/// register file is outside the language's memory model. The reference
+/// kernel reaches the same value in C via
+/// `__builtin_frame_address(0)` (gcc lowers it to the identical
+/// `mov rbp` / `mv s0` / `mov x29`), used by its frame-pointer
+/// stackwalker (`arch/arm64/kernel/stacktrace.c`, x86
+/// `dumpstack.c`'s fp path); this read feeds the GRQ crime-scene
+/// backtrace, the same consumer. Contract: read-only, `nomem` +
+/// `nostack` + `preserves_flags` — no memory, stack or flag effect,
+/// so the only soundness requirement is that the output register is
+/// written, which the operand enforces.
 #[inline(always)]
 fn grq_current_fp() -> u64 {
     let fp: u64;
     #[cfg(feature = "x86_64")]
-    // SAFETY: reading the frame-pointer register is side-effect free.
+    // F-REG-1 (x86_64): mov rbp — the reference's __builtin_frame_address(0).
     unsafe {
         core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
     }
     #[cfg(feature = "riscv64")]
-    // SAFETY: reading the frame-pointer register is side-effect free.
+    // F-REG-1 (riscv64): mv s0 — same lowered builtin.
     unsafe {
         core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
     }
     #[cfg(feature = "aarch64")]
-    // SAFETY: reading the frame-pointer register is side-effect free.
+    // F-REG-1 (aarch64): mov x29 — same lowered builtin.
     unsafe {
         core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
     }
@@ -2756,10 +2770,18 @@ pub fn init_secondary(cpu_id: usize) {
 
 /// Clear the trap-entry scratch register (riscv64 `sscratch`; no-op
 /// elsewhere — x86_64 keeps per-CPU state in memory, not a scratch reg).
+///
+/// IRREDUCIBLE F-ROW (F-REG-3): CSR state has no safe Rust access —
+/// the reference's `arch/riscv/kernel/entry.S` writes the same
+/// `csrw sscratch, zero` on the usermode-entry paths (the scratch
+/// register holds the kernel tp across user execution; zeroing here
+/// establishes the boot-time convention before the first userspace
+/// entry). Contract: a CSR write with no memory effect; the one-shot
+/// boot ordering is guaranteed by the caller (init, pre-scheduler).
 #[inline]
 fn clear_trap_scratch() {
     #[cfg(feature = "riscv64")]
-    // SAFETY: writing 0 to sscratch is the standard usermode-entry setup.
+    // F-REG-3 (riscv64): csrw sscratch, zero — entry.S usermode-entry setup.
     unsafe {
         core::arch::asm!("csrw sscratch, zero");
     }
@@ -12391,24 +12413,32 @@ pub fn cpu_idle_loop() -> ! {
     // overflows into the neighboring allocations).
     static IDLE_SP_FLOOR: [core::sync::atomic::AtomicU64; MAX_CPUS] =
         [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+    // IRREDUCIBLE F-ROW (F-REG-2) for all three arch arms below: the
+    // live stack pointer has no safe read — the reference kernel keeps
+    // a `current_stack_pointer` definition per arch for exactly this
+    // (arch/x86/include/asm/stacktrace.h, riscv/entry.S's sp, arm64's
+    // current_stack_pointer global); Rust's equivalent is this asm!
+    // read. Consumer: the idle-stack-overflow guard (same shape as the
+    // reference's TASK_SIZE-bounded stack check). Contract: read-only,
+    // nomem + nostack; the output operand is the only effect.
     #[cfg(feature = "x86_64")]
     fn idle_guard_sp() -> usize {
         let sp: usize;
-        // SAFETY: reading rsp is side-effect free.
+        // F-REG-2 (x86_64): mov rsp.
         unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack)) };
         sp
     }
     #[cfg(feature = "riscv64")]
     fn idle_guard_sp() -> usize {
         let sp: usize;
-        // SAFETY: reading sp is side-effect free.
+        // F-REG-2 (riscv64): mv sp.
         unsafe { core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack)) };
         sp
     }
     #[cfg(feature = "aarch64")]
     fn idle_guard_sp() -> usize {
         let sp: usize;
-        // SAFETY: reading sp is side-effect free.
+        // F-REG-2 (aarch64): mov sp.
         unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack)) };
         sp
     }
