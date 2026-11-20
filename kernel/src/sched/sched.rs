@@ -432,10 +432,14 @@ fn rt_wedge_dump_tick(cpu: usize) {
     }
     // SAFETY: read-only diagnostics under the GRQ lock; all task
     // pointers come from the RT lists (linked tasks cannot be freed).
-    unsafe {
+    {
         let g = grq().lock_irqsave();
         let slot = cpu_state(0).current;
-        let slot_pid = if slot.is_null() { u32::MAX } else { (*slot).pid() };
+        let slot_pid = if slot.is_null() {
+                u32::MAX
+            } else {
+                crate::sched::edges::task_shared(slot).pid()
+            };
         let idle_bit = (grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire) & 1) != 0;
         let nr = g.nr_running.load(core::sync::atomic::Ordering::Acquire);
         let rt_nr = g.rt_rq.nr_running();
@@ -473,19 +477,19 @@ fn rt_wedge_dump_tick(cpu: usize) {
                     }
                     printed += 1;
                     for &b in b"  RTQ pid=0x" { putchar(b); }
-                    ph((*t).pid() as u64);
+                    ph(crate::sched::edges::task_shared(t).pid() as u64);
                     for &b in b" p=" { putchar(b); }
                     ph(prio as u64);
                     for &b in b" mask=" { putchar(b); }
-                    ph((*t).cpus_allowed() as u64);
+                    ph(crate::sched::edges::task_shared(t).cpus_allowed() as u64);
                     for &b in b" st=0x" { putchar(b); }
-                    ph((*t).state().bits() as u64);
+                    ph(crate::sched::edges::task_shared(t).state().bits() as u64);
                     for &b in b" oncpu=" { putchar(b); }
-                    ph((*t).on_cpu() as u64);
+                    ph(crate::sched::edges::task_shared(t).on_cpu() as u64);
                     for &b in b" claim=" { putchar(b); }
-                    ph((*t).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed) as u64);
+                    ph(crate::sched::edges::task_shared(t).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed) as u64);
                     for &b in b" pk=" { putchar(b); }
-                    ph((*t).pick_state() as u64);
+                    ph(crate::sched::edges::task_shared(t).pick_state() as u64);
                     putchar(b'\n');
                 });
             }
@@ -3840,8 +3844,8 @@ pub fn schedule_dead_never_returns() {
         // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above); polled-UART cost bounded by the budget.
                         crate::pr_warn!(
                             "TERM-DESCHED engaged pid={} pc={:#x}",
-                            (*cur).pid(),
-                            (*cur).preempt_count()
+                            crate::sched::edges::task_shared(cur).pid(),
+                            crate::sched::edges::task_shared(cur).preempt_count()
                         );
                     }
                 }
@@ -3936,8 +3940,9 @@ pub fn schedule_dead_never_returns() {
                     // under the GRQ at power-of-two rounds, cold path.
                     let linked = {
                         let g = grq().lock_irqsave();
-                        let l = unsafe {
-                            match (*cur).policy() {
+                        let l = {
+                            let cur_t = crate::sched::edges::task_shared(cur);
+                            match cur_t.policy() {
                                 crate::process::task::SchedPolicy::Fifo
                                 | crate::process::task::SchedPolicy::Rr => {
                                     g.rt_rq.is_linked(cur)
@@ -10031,7 +10036,7 @@ pub fn scheduler_tick() {
                     use crate::console::putchar;
                     const MSG: &[u8] = b"TICK-CANARY pid=";
                     for &b in MSG { putchar(b); }
-                    let pid = (*t).pid();
+                    let pid = crate::sched::edges::task_shared(t).pid();
                     let mut vv = pid as usize;
                     if vv == 0 { putchar(b'0'); }
                     let mut dd = [0u8; 10]; let mut kk = 0;
