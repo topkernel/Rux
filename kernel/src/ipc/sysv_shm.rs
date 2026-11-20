@@ -28,7 +28,10 @@ const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
 
 /// struct shmid64_ds — returned by IPC_STAT, IPC_SET
 /// Must match asm-generic/shmbuf.h for RV64. Total: 112 bytes.
+/// All-POD u64/i64/u32 fields (uapi wire shape) — Copy for the typed
+/// uaccess capsule.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct ShmidDsUapi {
     pub shm_perm: IpcPermUapi,
     pub shm_segsz: u64,
@@ -431,15 +434,10 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                     ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
                 }
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<ShmidDsUapi>() above;
-            // ds is a stack-local copy of the shared memory segment metadata.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &ds as *const ShmidDsUapi as *const u8,
-                    core::mem::size_of::<ShmidDsUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule (the user
+            // side was access_ok-validated above; the kernel side is
+            // proven by &ds).
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
             0
         }
         IPC_SET => {
@@ -484,16 +482,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                 __unused4: 0,
                 __unused5: 0,
             };
-            // SAFETY: buf_ptr was access_ok-validated above; ds is a
-            // stack-local repr(C) struct of exactly that size.
-            if unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    &mut ds as *mut ShmidDsUapi as *mut u8,
-                    buf_ptr,
-                    core::mem::size_of::<ShmidDsUapi>(),
-                )
-            } != 0
-            {
+            if crate::arch::uaccess_safe::copy_in_t(&mut ds, buf_ptr as usize) != 0 {
                 return -(errno::EFAULT as i64);
             }
             let mut slots = SHM_IDS.slots.lock();
@@ -514,14 +503,14 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for 48 bytes above;
             // clear_user/put_user are the exception-table copy paths (SUM=0 safe).
-            unsafe { clear_user(buf_ptr, 48) };
+            let _ = crate::arch::uaccess_safe::clear_user(buf_ptr as usize, 48);
             // Live limits — the same values /proc/sys/kernel/{shmmax,
             // shmmni,shmall} reports (shmctl03 asserts the equality).
-            let _ = unsafe { put_user(buf_ptr as *mut u64, shm_ctlmax()) };
-            let _ = unsafe { put_user(buf_ptr.add(8) as *mut u64, 1u64) };
-            let _ = unsafe { put_user(buf_ptr.add(16) as *mut u64, shm_ctlni()) };
-            let _ = unsafe { put_user(buf_ptr.add(24) as *mut u64, 4096u64) };
-    let _ = unsafe { put_user(buf_ptr.add(32) as *mut u64, shm_ctlall()) };
+            let _ = crate::arch::uaccess_safe::write_user(buf_ptr as usize, shm_ctlmax() as u64);
+            let _ = crate::arch::uaccess_safe::write_user(buf_ptr as usize + 8, 1u64);
+            let _ = crate::arch::uaccess_safe::write_user(buf_ptr as usize + 16, shm_ctlni() as u64);
+            let _ = crate::arch::uaccess_safe::write_user(buf_ptr as usize + 24, 4096u64);
+    let _ = crate::arch::uaccess_safe::write_user(buf_ptr as usize + 32, shm_ctlall() as u64);
     // Return: highest used slot index (reference shmctl_ipc_info returns
     // ipc_get_maxidx, clamped to >= 0 when the table is empty). The old
     // count() return could undershoot maxidx after an RMID left holes,
@@ -614,15 +603,10 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                     return -(errno::EINVAL as i64);
                 }
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<ShmidDsUapi>() above;
-            // ds is a stack-local copy of the shared memory segment metadata.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &ds as *const ShmidDsUapi as *const u8,
-                    core::mem::size_of::<ShmidDsUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule (the user
+            // side was access_ok-validated above; the kernel side is
+            // proven by &ds).
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
             result_id as i64
         }
         14 => {
@@ -634,9 +618,9 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for 64 bytes above;
             // clear_user/put_user are the exception-table copy paths (SUM=0 safe).
-            unsafe { clear_user(buf_ptr, 64) };
+            let _ = crate::arch::uaccess_safe::clear_user(buf_ptr as usize, 64);
             // used_ids (offset 0)
-            let _ = unsafe { put_user(buf_ptr as *mut u64, SHM_IDS.count() as u64) };
+            let _ = crate::arch::uaccess_safe::write_user(buf_ptr as usize, SHM_IDS.count() as u64);
             // shm_tot (offset 8) — total shared memory pages
             let mut total_pages: u64 = 0;
             {
@@ -650,7 +634,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                     }
                 }
             }
-            let _ = unsafe { put_user(buf_ptr.add(8) as *mut u64, total_pages) };
+            let _ = crate::arch::uaccess_safe::write_user(buf_ptr as usize + 8, total_pages);
             // shm_rss (offset 16), shm_swp (offset 24) — no swap support, 0
             // swap_attempts (offset 32), swap_successes (offset 40) — 0
             // shm_tot is already written; remaining fields stay 0
@@ -704,15 +688,8 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                 }
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for
-            // size_of::<ShmidDsUapi>() above; ds is a stack-local copy of the
-            // segment metadata.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &ds as *const ShmidDsUapi as *const u8,
-                    core::mem::size_of::<ShmidDsUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
             result_id as i64
         }
         _ => -(errno::EINVAL as i64),

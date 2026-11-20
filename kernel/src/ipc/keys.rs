@@ -271,32 +271,26 @@ fn possessed_by(serial: u32, cred: &Cred) -> bool {
 /// callers.
 fn current_cred() -> Cred {
     match crate::sched::current() {
-        Some(t) => {
-            // SAFETY: sched::current() returns the running task.
-            unsafe { (*t).cred().clone() }
-        }
+        Some(t) => t.cred().clone(),
         None => Cred::new_init(),
     }
 }
 
 fn set_session_slot(serial: u32) {
     if let Some(t) = crate::sched::current() {
-        // SAFETY: sched::current() returns the running task.
-        unsafe { (*t).cred_mut().session_keyring = Some(serial) }
+        t.cred_mut().session_keyring = Some(serial);
     }
 }
 
 fn set_thread_slot(serial: u32) {
     if let Some(t) = crate::sched::current() {
-        // SAFETY: sched::current() returns the running task.
-        unsafe { (*t).cred_mut().thread_keyring = Some(serial) }
+        t.cred_mut().thread_keyring = Some(serial);
     }
 }
 
 fn set_process_slot(serial: u32) {
     if let Some(t) = crate::sched::current() {
-        // SAFETY: sched::current() returns the running task.
-        unsafe { (*t).cred_mut().process_keyring = Some(serial) }
+        t.cred_mut().process_keyring = Some(serial);
     }
 }
 
@@ -304,8 +298,7 @@ fn set_process_slot(serial: u32) {
 /// exec (reference exec_keys()); process and session keyrings persist.
 pub fn exec_clear_thread_keyring() {
     if let Some(t) = crate::sched::current() {
-        // SAFETY: sched::current() returns the running task.
-        unsafe { (*t).cred_mut().thread_keyring = None }
+        t.cred_mut().thread_keyring = None;
     }
 }
 
@@ -554,7 +547,7 @@ fn read_payload(ptr: u64, plen: usize) -> Result<Vec<u8>, i32> {
     let mut v = alloc::vec![0u8; plen];
     // SAFETY: v holds plen bytes; ptr was access_ok-checked and
     // copy_from_user is the exception-table path.
-    if unsafe { copy_from_user(v.as_mut_ptr(), ptr as *const u8, plen) } != 0 {
+    if crate::arch::uaccess_safe::copy_in(&mut v, ptr as usize) != 0 {
         return Err(errno::EFAULT);
     }
     Ok(v)
@@ -567,7 +560,7 @@ fn copy_out_sized(buf: u64, buflen: u64, data: &[u8]) -> i64 {
         let n = (buflen as usize).min(data.len());
         // SAFETY: n bytes to a validated user buffer via the
         // exception-table path.
-        unsafe { copy_to_user(buf as *mut u8, data.as_ptr(), n) };
+        let _ = crate::arch::uaccess_safe::copy_out(buf as usize, &data[..n]);
     }
     data.len() as i64
 }
@@ -1251,7 +1244,7 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
             }
             if let Some(t) = crate::sched::current() {
                 // SAFETY: sched::current() returns the running task.
-                unsafe { (*t).cred_mut().reqkey_defl = option }
+                t.cred_mut().reqkey_defl = option;
             }
             old as i64
         }

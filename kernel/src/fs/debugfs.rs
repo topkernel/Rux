@@ -332,14 +332,10 @@ pub struct DebugFsEntryData {
     pub node: Arc<DebugFsNode>,
 }
 
-/// Recover the entry data from an inode (private_data came from the
-/// iget/create_root_inode path — the one audited deref below).
-fn entry_of(inode: &Inode) -> Option<&'static DebugFsEntryData> {
-    inode.private_data.map(|p| {
-        // SAFETY: iget/create_root_inode stored the entry
-        // (inode-lifetime); read-only view.
-        unsafe { &*(p as *const DebugFsEntryData) }
-    })
+/// Recover the entry data from an inode.
+/// SAFETY: private_data must have come from debugfs_iget/create_root_inode.
+fn entry_of<'a>(inode: &'a Inode) -> Option<&'a DebugFsEntryData> {
+    crate::fs::unsafe_edges::privdata_ref::<DebugFsEntryData>(inode)
 }
 
 /// Resolve a child of `dir`.
@@ -353,7 +349,7 @@ fn resolve_child(dir: &DebugFsNode, name: &[u8]) -> Option<Arc<DebugFsNode>> {
 
 /// debugfs lookup: child inode number.
 /// SAFETY: VFS callback contract.
-unsafe fn debugfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+fn debugfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let entry = entry_of(dir).ok_or(errno::Errno::NotADirectory)?;
     match resolve_child(&entry.node, name) {
         Some(child) => Ok(child.ino),
@@ -363,7 +359,7 @@ unsafe fn debugfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> 
 
 /// debugfs iget: instantiate the VFS Inode for a resolved child.
 /// SAFETY: VFS callback contract.
-unsafe fn debugfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+fn debugfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
     let parent_entry = entry_of(parent).ok_or(errno::Errno::NotADirectory)?;
     let node = resolve_child(&parent_entry.node, name)
         .ok_or(errno::Errno::NoSuchFileOrDirectory)?;
@@ -384,7 +380,7 @@ unsafe fn debugfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inod
 
 /// debugfs getattr.
 /// SAFETY: VFS callback contract.
-unsafe fn debugfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+fn debugfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     let entry = match entry_of(inode) {
         Some(e) => e,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -417,7 +413,7 @@ unsafe fn debugfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 /// value and the newline as separate write() calls, so O_TRUNC must not
 /// fail); everything else is EPERM — the tree is kernel-owned.
 /// SAFETY: VFS callback contract.
-unsafe fn debugfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i32 {
+fn debugfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i32 {
     if attr == crate::fs::inode::setattr_attr::ATTR_SIZE {
         return 0;
     }
@@ -426,7 +422,7 @@ unsafe fn debugfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> 
 
 /// debugfs readdir: the child entries of a directory.
 /// SAFETY: VFS callback contract.
-unsafe fn debugfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
+fn debugfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
     let entry = entry_of(inode)?;
     if !entry.node.is_dir {
         return None;
@@ -451,7 +447,7 @@ unsafe fn debugfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 /// debugfs open: snapshot the file content into file-private storage
 /// (the generator runs here, so every open sees the live value).
 /// SAFETY: VFS callback contract.
-unsafe fn debugfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
+fn debugfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if !inode.mode.is_regular_file() {
         return 0;
     }
@@ -470,7 +466,7 @@ unsafe fn debugfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
 
 /// debugfs get_file_ops.
 /// SAFETY: VFS callback contract.
-unsafe fn debugfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+fn debugfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&DEBUGFS_FILE_OPS)
     } else if inode.mode.is_directory() {
@@ -482,9 +478,11 @@ unsafe fn debugfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file
 
 /// debugfs destroy_inode: reclaim the leaked Box<DebugFsEntryData>.
 /// SAFETY: VFS callback contract; Drop-time hook.
-unsafe fn debugfs_destroy_inode(inode: &mut Inode) {
+fn debugfs_destroy_inode(inode: &mut Inode) {
     if let Some(ptr) = inode.private_data.take() {
-        drop(Box::from_raw(ptr as *mut DebugFsEntryData));
+        // SAFETY: the Box was leaked by into_raw at inode creation
+        // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
+        drop(unsafe { Box::from_raw(ptr as *mut DebugFsEntryData) });
     }
 }
 
@@ -524,12 +522,12 @@ pub struct DebugFsFileContent {
 
 /// read: serve from the open-time snapshot at the file position.
 fn debugfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    // SAFETY: private_data was installed by debugfs_open under this File.
-    let Some(ptr) = file.private_data_ptr() else {
-        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
+    // The snapshot box is this description's private data
+    // (INV-FS-FILEPRIV-1, the framework edge).
+    let content = match crate::fs::unsafe_edges::file_privdata_ref::<DebugFsFileContent>(file) {
+        Some(c) => c,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
-    // SAFETY: pointer provenance is Box::into_raw in debugfs_open.
-    let content = unsafe { &*(ptr as *const DebugFsFileContent) };
     let offset = file.get_pos() as usize;
     let available = content.data.len().saturating_sub(offset);
     let to_read = buf.len().min(available);
@@ -544,7 +542,7 @@ fn debugfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 /// write: dispatch to the file's store handler.
 fn debugfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
-    // SAFETY: inode pointer set at open; read-only access here.
+    // The inode cell is write-once at open (File::get_inode).
     let inode = match file.get_inode().cloned() {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
@@ -569,12 +567,11 @@ fn debugfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 
 /// lseek within the snapshot.
 fn debugfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
-    // SAFETY: see debugfs_file_read.
-    let Some(ptr) = file.private_data_ptr() else {
-        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
+    // See the read op above (INV-FS-FILEPRIV-1).
+    let content = match crate::fs::unsafe_edges::file_privdata_ref::<DebugFsFileContent>(file) {
+        Some(c) => c,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
-    // SAFETY: pointer provenance is Box::into_raw in debugfs_open.
-    let content = unsafe { &*(ptr as *const DebugFsFileContent) };
     let file_size = content.data.len() as isize;
     let new_offset = match whence {
         0 => offset,
@@ -591,14 +588,9 @@ fn debugfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isi
 
 /// close: free the content snapshot.
 fn debugfs_file_close(file: &crate::fs::File) -> i32 {
-    // SAFETY: see debugfs_file_read; null-out first to close the race window.
-    let ptr = file.private_data_ptr();
-    file.clear_private_data();
-    if let Some(ptr) = ptr {
-        // SAFETY: provenance is Box::into_raw in debugfs_open.
-        // SAFETY: the Box<DebugFsFileContent> the open path stored (sole ref).
-        drop(unsafe { Box::from_raw(ptr as *mut DebugFsFileContent) });
-    }
+    // The take empties the cell first (no UAF window); the Box reclaim
+    // rides the framework edge (INV-FS-FILEPRIV-1).
+    drop(crate::fs::unsafe_edges::file_privdata_take::<DebugFsFileContent>(file));
     0
 }
 

@@ -77,8 +77,10 @@ pub const IPC_IDS_MAX: usize = 32768;
 
 /// struct ipc64_perm — userspace-visible IPC permission structure.
 /// Must match Linux's asm-generic/ipcbuf.h exactly for RV64.
-/// Total: 48 bytes.
+/// Total: 48 bytes. All-POD wire fields — Copy for the typed uaccess
+/// capsule.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct IpcPermUapi {
     pub key: i32,
     pub uid: u32,

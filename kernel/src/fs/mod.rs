@@ -6,6 +6,7 @@
 //! Virtual File System (VFS)
 
 pub mod file;
+pub mod unsafe_edges;
 pub mod fdreap;
 pub mod inode;
 pub mod dentry;
