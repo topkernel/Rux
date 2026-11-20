@@ -2301,14 +2301,15 @@ pub fn init() {
         MMU_INITIALIZED.store(true, Ordering::Release);
 
         // Record the real image size for /proc-style consumers.
+        let image_size = (kernel_image_phys_end() - KERNEL_ENTRY) as usize;
         // SAFETY: single-CPU boot section; no concurrent reader exists.
-        unsafe { KERNEL_MAP.size = (kernel_image_phys_end() - KERNEL_ENTRY) as usize };
+        unsafe { KERNEL_MAP.size = image_size };
 
         println!(
             "mm: switched CR3 to real PML4 (phys {:#x}), image {:#x}-{:#x}",
             root_phys,
             kernel_virt,
-            kernel_virt + crate::mm::layout::kernel_layout().phys_size as u64
+            kernel_virt + image_size as u64
         );
 
         // Arm PCID now: CR3 holds the clean (low bits 0) static root.
