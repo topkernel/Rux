@@ -1445,9 +1445,7 @@ pub fn fuxwatch_retire_page(page: u64) {
             Some((_, bits)) if bits & 0x1 != 0 && bits & 0x4 != 0 && bits & 0x2 == 0 => {
                 // SAFETY: same live root the arm round modified; one
                 // page, RW.
-                unsafe {
-                    crate::arch::mm::mm_ops::mprotect_pte_range(root, va, 1, 0x3);
-                }
+                crate::arch::mm::mm_ops::mprotect_pte_range(root, va, 1, 0x3);
                 touched += 1;
             }
             _ => {}
@@ -2283,9 +2281,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                                 ),
                             );
                             // SAFETY: linear-mapped RAM word.
-                            Some(unsafe {
-                                core::ptr::read_volatile(kv.as_usize() as *const u64)
-                            })
+                            Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
                         }
                         _ => None,
                     }
@@ -2330,9 +2326,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                                         ),
                                     );
                                     // SAFETY: linear-mapped RAM word.
-                                    Some(unsafe {
-                                        core::ptr::read_volatile(kv2.as_usize() as *const u64)
-                                    })
+                                    Some(crate::sync::edges::read_volatile_u64(kv2.as_usize()))
                                 }
                                 _ => None,
                             }
@@ -4640,9 +4634,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
                                         ),
                                     );
                                     // SAFETY: linear-mapped RAM word.
-                                    Some(unsafe {
-                                        core::ptr::read_volatile(kv2.as_usize() as *const u64)
-                                    })
+                                    Some(crate::sync::edges::read_volatile_u64(kv2.as_usize()))
                                 }
                                 _ => None,
                             }
@@ -5064,9 +5056,7 @@ pub fn futex_stuck_census() {
                                     );
                                     // SAFETY: linear-mapped RAM word; the
                                     // waiter parked on it this syscall.
-                                    let w32 = unsafe {
-                                        core::ptr::read_volatile(kv.as_usize() as *const u32)
-                                    };
+                                    let w32 = crate::sync::edges::read_volatile_u32(kv.as_usize());
                                     s.live = w32 as u64;
                                     s.live_ok = true;
                                 }
@@ -5101,9 +5091,7 @@ pub fn futex_stuck_census() {
                                             ),
                                         );
                                         // SAFETY: linear-mapped RAM word.
-                                        words[wi] = unsafe {
-                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
-                                        };
+                                        words[wi] = crate::sync::edges::read_volatile_u64(kv.as_usize());
                                     }
                                     _ => {
                                         ok = false;
@@ -5147,9 +5135,7 @@ pub fn futex_stuck_census() {
                                             ),
                                         );
                                         // SAFETY: linear-mapped RAM word.
-                                        let w = unsafe {
-                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
-                                        };
+                                        let w = crate::sync::edges::read_volatile_u64(kv.as_usize());
                                         if let Some(vma) =
                                             mgr.find(VirtAddr::new(w as usize))
                                         {
@@ -5233,9 +5219,7 @@ pub fn futex_stuck_census() {
                                         );
                                         // SAFETY: linear-mapped RAM word on
                                         // the parked waiter's own page.
-                                        s.pw0[wi] = unsafe {
-                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
-                                        };
+                                        s.pw0[wi] = crate::sync::edges::read_volatile_u64(kv.as_usize());
                                     }
                                     _ => {
                                         ok = false;
@@ -5261,9 +5245,7 @@ pub fn futex_stuck_census() {
                                         );
                                         // SAFETY: linear-mapped RAM word on
                                         // the parked waiter's own page.
-                                        s.pwu[wi] = unsafe {
-                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
-                                        };
+                                        s.pwu[wi] = crate::sync::edges::read_volatile_u64(kv.as_usize());
                                     }
                                     _ => {
                                         ok = false;
@@ -5420,9 +5402,7 @@ pub fn futex_stuck_census() {
                                             ),
                                         );
                                         // SAFETY: linear-mapped RAM word.
-                                        Some(unsafe {
-                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
-                                        })
+                                        Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
                                     }
                                     _ => None,
                                 }
@@ -6566,9 +6546,7 @@ fn pool_full_backoff() {
             break;
         }
         // SAFETY: schedule() operates on the current task.
-        unsafe {
-            crate::sched::schedule();
-        }
+        crate::sched::schedule();
     }
     drop(wake);
 }
@@ -7105,11 +7083,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // futex_cleanup gates its 512-bucket scan on it. We still hold the
         // bucket lock; the flag is only read by this task's own exit path,
         // so a plain store suffices.
-        unsafe {
-            (*current)
-                .futex_wait_enqueued
-                .store(true, core::sync::atomic::Ordering::Release);
-        }
+        crate::sched::edges::task_shared(current).futex_wait_enqueued.store(true, core::sync::atomic::Ordering::Release);
 
         // oh67: name WHO parks on the watched lock words (the frozen-mutex
         // wedge: a waiter parked on M2.l that tid343-class unlocks keep
@@ -7291,11 +7265,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                     FUX_POOL_USED.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
                     // Residency flag (see Task::futex_wait_enqueued): the
                     // waker's unlink left the flag set for us to clear here.
-                    unsafe {
-                        (*current)
-                            .futex_wait_enqueued
-                            .store(false, core::sync::atomic::Ordering::Release);
-                    }
+                    crate::sched::edges::task_shared(current).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
                 }
             }
         }
@@ -7355,10 +7325,7 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                 // chain (see Task::futex_wait_enqueued).
                 if let Some(w) = slot.as_ref() {
                     if !w.task.is_null() {
-                        unsafe {
-                            (*w.task).futex_wait_enqueued
-                                .store(false, core::sync::atomic::Ordering::Release);
-                        }
+                        crate::sched::edges::task_shared(w.task).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
                     }
                 }
                 n
@@ -7386,10 +7353,7 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                     let n = target_slot.as_ref().and_then(|w| w.next);
                     if let Some(w) = target_slot.as_ref() {
                         if !w.task.is_null() {
-                            unsafe {
-                                (*w.task).futex_wait_enqueued
-                                    .store(false, core::sync::atomic::Ordering::Release);
-                            }
+                            crate::sched::edges::task_shared(w.task).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
                         }
                     }
                     n
