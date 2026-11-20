@@ -19,18 +19,18 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **3285**
+- unsafe regions: **3286**
 - with artifact (non-GAP): **110** (3.3%)
-- GAP: **3175**
-- by kind: block=2955, unsafe-extern=7, unsafe-fn=167, unsafe-impl=156
-- by category (regions carry 0..n tags): ptr-ops=831, asm=278, volatile=199, raw-construct=66, addr-arith=62, no-preempt=21, ffi=13, static-mut=5, layout-meta=5, transmute=4
+- GAP: **3176**
+- by kind: block=2956, unsafe-extern=7, unsafe-fn=167, unsafe-impl=156
+- by category (regions carry 0..n tags): ptr-ops=828, asm=278, volatile=199, raw-construct=66, addr-arith=62, no-preempt=21, ffi=13, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
 | arch | 781 | 7 | 774 |
-| fs | 646 | 0 | 646 |
+| fs | 647 | 0 | 647 |
 | syscall | 477 | 0 | 477 |
 | mm | 234 | 7 | 227 |
 | sync | 198 | 10 | 188 |
@@ -1131,7 +1131,7 @@ census id is accounted for here.
 
 ## fs
 
-### kernel/src/fs/bio.rs (50)
+### kernel/src/fs/bio.rs (54)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -1185,6 +1185,10 @@ census id is accounted for here.
 | 3255 | publication_capture_note_dirty | block | - | GAP | `e3c2be809b3d` |
 | 3267 | publication_capture_note_dirty | block | - | GAP | `3f5712883513` |
 | 3752 | sync_block_ordered | block | - | GAP | `07205edf7377` |
+| 3801 | with_block_mut | block | - | GAP | `697d772d180a` |
+| 3804 | with_block_mut | block | - | GAP | `96601bf5945b` |
+| 3807 | with_block_mut | block | - | GAP | `f564bda4511a` |
+| 3809 | with_block_mut | block | - | GAP | `e6da66fe6c49` |
 
 ### kernel/src/fs/buffer.rs (8)
 
@@ -1269,21 +1273,18 @@ census id is accounted for here.
 |------|----|------|------------|----------|----|
 | 638 | load_segment | block | ptr-ops | GAP | `32b843792a2a` |
 
-### kernel/src/fs/ext4/allocator.rs (11)
+### kernel/src/fs/ext4/allocator.rs (8)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 380 | read_block_bitmap | block | - | GAP | `4c2c9927bbc3` |
-| 406 | write_block_bitmap | block | ptr-ops | GAP | `2bd68407d5ab` |
-| 445 | update_group_desc_free_blocks | block | volatile,ptr-ops | GAP | `40acda980bb3` |
-| 492 | update_superblock_free_blocks | block | volatile,ptr-ops | GAP | `b5f5b7167379` |
-| 586 | set_bitmap_csum_in_gd | block | ptr-ops | GAP | `0a67dbb7ed1c` |
-| 915 | read_inode_bitmap | block | - | GAP | `c159cdb20fab` |
-| 932 | write_inode_bitmap | block | ptr-ops | GAP | `0985cb34dfe6` |
-| 994 | update_group_desc_free_inodes | block | volatile,ptr-ops | GAP | `45a88bca4936` |
-| 1067 | refresh_bg_itable_unused | block | - | GAP | `365e908c6d40` |
-| 1109 | refresh_bg_itable_unused | block | volatile,ptr-ops | GAP | `7923b2185e8a` |
-| 1144 | update_superblock_free_inodes | block | volatile,ptr-ops | GAP | `82a65baa61bc` |
+| 436 | update_group_desc_free_blocks | block | volatile,ptr-ops | GAP | `0cbcc341f1cf` |
+| 483 | update_superblock_free_blocks | block | volatile,ptr-ops | GAP | `422f4928c5c6` |
+| 898 | read_inode_bitmap | block | - | GAP | `83115b4465e2` |
+| 961 | update_group_desc_free_inodes | block | volatile,ptr-ops | GAP | `3b2a4286566b` |
+| 1034 | refresh_bg_itable_unused | block | - | GAP | `b87cf4b855de` |
+| 1076 | refresh_bg_itable_unused | block | volatile,ptr-ops | GAP | `64a2813e14d2` |
+| 1111 | update_superblock_free_inodes | block | volatile,ptr-ops | GAP | `2da37b803b52` |
 
 ### kernel/src/fs/ext4/dir.rs (1)
 
