@@ -117,17 +117,17 @@
 
     <h2 id="safety"><span class="anchor">§4</span>Safety: not "Rust is safe", but the itemized bill</h2>
     <p>"Rust is safe" is a sentence everyone has heard too often. What is actually worth knowing is: what has gone wrong inside unsafe code, and how I manage it.</p>
-    <p><b>How large the unsafe surface is.</b> <code>kernel/src</code> is 361,875 lines. Measured by the in-tree ledger script:</p>
+    <p><b>How large the unsafe surface is.</b> <code>kernel/src</code> is 362,762 lines. Measured by the in-tree ledger script:</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Series</th><th>Lines</th><th>Share</th></tr></thead>
       <tbody>
-        <tr><td><code>unsafe { … }</code> block bodies</td><td class="num">25,769</td><td class="num">7.1%</td></tr>
-        <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> bodies</td><td class="num">27,097</td><td class="num">7.5%</td></tr>
-        <tr><td><b>dual series — the honest total</b></td><td class="num"><b>50,630</b></td><td class="num"><b>14.0%</b></td></tr>
+        <tr><td><code>unsafe { … }</code> block bodies</td><td class="num">13,623</td><td class="num">3.8%</td></tr>
+        <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> bodies</td><td class="num">3,517</td><td class="num">1.0%</td></tr>
+        <tr><td><b>dual series — the honest total</b></td><td class="num"><b>16,712</b></td><td class="num"><b>4.6%</b></td></tr>
       </tbody>
     </table></div>
-    <p>In the layered view, <code>kernel/src</code> carries 5,224 unsafe tokens, of which <b>3,166 sit outside the Framework layer</b> — that is the reduction target (47 files already carry <code>#![forbid(unsafe_code)]</code>, and 63 more have no unsafe left at all). 63% of unsafe constructs carry a written <code>// SAFETY:</code> contract, and CI fails when a region appears in the tree without a ledger entry.</p>
-    <p><b>The defect history.</b> <b>33</b> memory-corruption-class bugs over Rux's whole history, each adjudicated individually: <b>23</b> had the defect inside unsafe code or assembly, <b>10</b> were in safe code — and every one of those ten is an ownership, refcount, lock-protocol or stack-depth decision. The classes that dominate the CVE history of C kernels — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are <b>zero</b> in safe code. Six of the 33 were caught in review before any boot ran them.</p>
+    <p>In the layered view, <code>kernel/src</code> carries 2,863 unsafe tokens, of which <b>1,322 sit outside the Framework layer</b> (the service tier). 171 modules carry <code>#![forbid(unsafe_code)]</code> — compiler-enforced zero-unsafe, ratcheted by CI so the set only grows; 89 service files hold no unsafe at all. 69% of unsafe constructs carry a written <code>// SAFETY:</code> contract, and CI fails when a region appears in the tree without a ledger entry.</p>
+    <p><b>The defect history.</b> <b>35</b> memory-corruption-class bugs over Rux's whole history, each adjudicated individually: <b>23</b> had the defect inside unsafe code or assembly, <b>12</b> were in safe code — and every one of those twelve is an ownership, refcount, lock-protocol or stack-depth decision (the reduction campaign contributed two: a manual refcount release kept beside an RAII handle, and a self-referential list head left pointing at a dead constructor temporary — both caught by the data-integrity battery, both fixed at the protocol level). The classes that dominate the CVE history of C kernels — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are <b>zero</b> in safe code. Six of the 35 were caught in review before any boot ran them.</p>
     <p><b>Formal verification.</b> 164 Kani harnesses discharge the core unsafe code for all inputs; 1,184 host-side tests; loom enumerates the interleavings of the mutex, PI-chain and timer primitives; 4 SPIN models; Miri nightly.</p>
     <div class="callout">"I am 90% safe Rust" is not the claim. The claim is: here is exactly what the remaining unsafe surface is, where it concentrates, and which tool watches it. That is auditable safety, not a slogan. See the <a href="../security/index.html">security overview</a> and the <a href="../security/taxonomy.html">defect taxonomy</a>.</div>
 
@@ -161,7 +161,7 @@
     <ul>
       <li>LTP: 1,139 of 1,869 pass; several hundred still fail. TIMEOUT cases are adjudicated one by one, and every failure that is not ours stays on record</li>
       <li>lmbench: 13 rows trail, the largest at 22–26×; 1 MiB direct write sits at 0.75–0.83×. Each row carries a measured decomposition of the gap</li>
-      <li>The unsafe surface: 14.0% still depends on human review; the reduction target is ≤5,000 unsafe lines (≤1%) with a per-block irreducibility proof (docs/development/unsafe-5000-plan.md)</li>
+      <li>The unsafe surface: 4.6% (16,712 lines) still depends on human review; the reduction target is ≤5,000 unsafe lines (≤1%) with a per-block irreducibility proof (docs/development/unsafe-5000-plan.md)</li>
       <li>Kani covers the core unsafe code, not every key path; loom and SPIN cover the concurrency primitives</li>
       <li>Whether the AI working model holds at 400,000 lines is under observation, not settled</li>
       <li>The 29 registered divergences need their compatibility evidence kept current</li>

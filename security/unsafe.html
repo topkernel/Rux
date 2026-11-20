@@ -94,7 +94,7 @@
       <thead><tr><th>层</th><th>内容</th><th>unsafe 政策</th></tr></thead>
       <tbody>
         <tr><td><b>Framework</b></td><td>硬件/特权 TCB:trap 入口、页表、上下文切换、裸 MMIO/DMA、uaccess、底层同步原语(arch/、mm/、interrupt/、virtio·intc·timer·pci 核心、console/printk/sbi/main/init 等)</td><td>允许 unsafe;每个块须携带 <code>// SAFETY:</code> 不变量注释,覆盖率入台账</td></tr>
-        <tr><td><b>service</b></td><td>全部面向用户态的层(syscall、fs、ipc、net、process、sched 上层、cgroup、procfs…)</td><td><code>#![forbid(unsafe_code)]</code> 为目标态(当前 47 文件编译期禁止 + 63 文件已无 unsafe)</td></tr>
+        <tr><td><b>service</b></td><td>全部面向用户态的层(syscall、fs、ipc、net、process、sched 上层、cgroup、procfs…)</td><td><code>#![forbid(unsafe_code)]</code> 为目标态(当前 171 个模块编译期禁止,service 层 89 个文件已无 unsafe)</td></tr>
         <tr><td><b>diagnostics</b></td><td>dfx/ 取证仪、裸内存工具</td><td>单独统计 —— 诊断工具的 churn 不得藏进 Framework 桶</td></tr>
         <tr><td><b>test</b></td><td>测试代码</td><td>不入头条口径</td></tr>
       </tbody>
@@ -109,33 +109,33 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>目录</th><th class="num">unsafe 行</th><th class="num">unsafe 密度</th><th>说明</th></tr></thead>
       <tbody>
-        <tr><td>全内核</td><td class="num">25,769 / 361,875 行(376 文件,4,331 个 unsafe 块);双口径 50,630 行(含 unsafe fn/impl 体)</td><td class="num"><b>7.1%</b>(双口径 <b>14.0%</b>)</td><td>预算规则:该百分比只降不升,升须逐发布说明</td></tr>
-        <tr><td>fs</td><td class="num">3,978</td><td class="num">5.2%</td><td>ext4 与页缓存构成预算的主要部分</td></tr>
-        <tr><td>syscall</td><td class="num">1,962</td><td class="num">4.8%</td><td>胶囊边界层</td></tr>
-        <tr><td>process / drivers</td><td class="num">1,777 / 1,189</td><td class="num">9.5% / 4.5%</td><td>process 已完成 typed-handle 转换(round 3b)</td></tr>
-        <tr><td>sched</td><td class="num">4,610</td><td class="num">22.4%</td><td>GRQ/切换路径</td></tr>
-        <tr><td>mm</td><td class="num">805</td><td class="num">4.0%</td><td>分配器内部 unsafe 内聚于原语</td></tr>
-        <tr><td>sync</td><td class="num">860</td><td class="num"><b>4.1%</b></td><td>目标形态的实例:每原语一个小 unsafe 核心,safe API 在上</td></tr>
+        <tr><td>全内核</td><td class="num">13,623 / 362,762 行(391 文件,2,424 个 unsafe 块);双口径 16,712 行(含 unsafe fn/impl 体)</td><td class="num"><b>3.8%</b>(双口径 <b>4.6%</b>)</td><td>预算规则:该百分比只降不升,升须逐发布说明</td></tr>
+        <tr><td>fs</td><td class="num">2,391</td><td class="num">3.1%</td><td>ext4 与页缓存构成预算的主要部分</td></tr>
+        <tr><td>syscall</td><td class="num">971</td><td class="num">2.4%</td><td>胶囊边界层</td></tr>
+        <tr><td>process / drivers</td><td class="num">218 / 400</td><td class="num">1.2% / 1.5%</td><td>process 已完成 typed-handle 转换(round 3b)</td></tr>
+        <tr><td>sched</td><td class="num">2,303</td><td class="num">10.9%</td><td>GRQ/切换路径</td></tr>
+        <tr><td>mm</td><td class="num">801</td><td class="num">4.0%</td><td>分配器内部 unsafe 内聚于原语</td></tr>
+        <tr><td>sync</td><td class="num">196</td><td class="num"><b>0.9%</b></td><td>目标形态的实例:每原语一个小 unsafe 核心,safe API 在上</td></tr>
       </tbody>
     </table></div>
-    <p>口径说明:双口径(块体 + <code>unsafe fn</code>/<code>impl</code> 体)是诚实总数,块体口径保留作趋势连续性;2026-11-20 起台账只统计 git 跟踪的源文件,陈旧生成物不再稀释分母。外部参照:Asterinas(USENIX ATC'25,同类 Rust 内核)按同类口径报告内存安全 TCB ~14% —— 本内核块体口径 7.1% 低于该参照,双口径 14.0% 与之持平,参照点未按双口径公布。</p>
+    <p>口径说明:双口径(块体 + <code>unsafe fn</code>/<code>impl</code> 体)是诚实总数,块体口径保留作趋势连续性;2026-11-20 起台账只统计 git 跟踪的源文件,陈旧生成物不再稀释分母。外部参照:Asterinas(USENIX ATC'25,同类 Rust 内核)按同类口径报告内存安全 TCB ~14%(参照点未按双口径公布)。</p>
     <h3>token 口径(scripts/gen_tcb_ledger.py,分层规则表与 kernel-layers.md 同源)</h3>
     <div class="tbl-wrap"><table>
       <thead><tr><th>桶</th><th class="num">unsafe token</th><th>说明</th></tr></thead>
       <tbody>
-        <tr><td>service</td><td class="num">3,166</td><td>收缩目标所在(基线 10-29:3,085;forbid 文件 0 → 47)</td></tr>
-        <tr><td>Framework</td><td class="num">1,484</td><td>逐块 SAFETY 注释覆盖 3,261/5,210 = <b>63%</b></td></tr>
-        <tr><td>diagnostics</td><td class="num">225</td><td>dfx 仪</td></tr>
+        <tr><td>service</td><td class="num">1,322</td><td>收缩目标所在;forbid 78 个 service 文件由 CI 棘轮保证只增不减</td></tr>
+        <tr><td>Framework</td><td class="num">1,144</td><td>逐块 SAFETY 注释覆盖(全构造口径)1,968/2,857 = <b>69%</b></td></tr>
+        <tr><td>diagnostics</td><td class="num">129</td><td>dfx 仪</td></tr>
         <tr><td>test</td><td class="num">105</td><td>不入头条</td></tr>
       </tbody>
     </table></div>
-    <p>service token 热点:fs 612、syscall 478、sync 450、sched 391、process 342、fs/ext4 310、mm 241、net 147。</p>
+    <p>service token 热点:fs 362、fs/ext4 197、sched 128、syscall 121、process 80。</p>
 
     <h2 id="forbid"><span class="anchor">§4</span>forbid 推广与收缩路线</h2>
     <ul>
-      <li>第一轮(2026-10-29):113 文件带 <code>#![forbid(unsafe_code)]</code>(46 service);第二轮(2026-10-31):首个具名收缩目标 syscall/io.rs —— 69 token → 0。</li>
-      <li>目标(登记于 security-design.md):forbid 文件 47 → 90,带 unsafe 的 service 文件 123 → 60(两个季度窗口)。</li>
-      <li>SAFETY 注释覆盖 64% → <b>95%</b>(class 2-3 块)为目标。</li>
+      <li>当前:171 个模块带 <code>#![forbid(unsafe_code)]</code>(service 层 78),CI 棘轮保证集合只增不减(摘属性即构建失败,scripts/unsafe_gate.py)。</li>
+      <li>目标(登记于 unsafe-5000-plan.md Layer 1):每个 service crate 达到 crate 级 forbid;带 unsafe 的 service 文件 122 → 全部清零或归入具名边模块。</li>
+      <li>SAFETY 注释覆盖(全构造口径)69%,目标 95%(class 2-3 块)。</li>
       <li>分级审计计划:class 1(带检查的访问器读)→ class 3(裸指针 + 手写不变量);台账头条将增加 <b>"service 层 class-3 token 数"</b> —— 真正预测现场缺陷的量。审计覆盖门:scripts/review_coverage.py --check 在树内出现台账未登记文件时使构建失败。</li>
     </ul>
 
@@ -144,7 +144,7 @@
       <li><b>类消除论证</b>(对照 C 内核 CVE 史):越界写(bounds-checked slice)、Arc 属主的 use-after-free/double-free、类型化共享态数据竞争(Send/Sync)、迭代器失效(borrowck)、格式串注入(typed formatting)—— 这些主导类别在 safe 代码中<b>不可表达</b>;缺陷分类学的 0 例指针表达式缺陷是同一条论证的实证面(见 <a href="taxonomy.html">分类学</a>)。</li>
       <li><b>密度论证</b>:sync 目录 2.8% 的 unsafe 密度是分层设计的活样本 —— unsafe 面积与原语复杂度成正比、与 API 面积无关。</li>
       <li><b>配对论证</b>:每个 Framework 原语配 (a) Kani harness,(b) proptest,(c) Framework 收缩后 Verus 函数规约(登记的下一步,先做页标志/引用计数代数);RustBelt 作为信任锚引用而非构建依赖。</li>
-      <li><b>预算论证</b>:14.0%(双口径)的单调下降规则 + 每处新增 unsafe 须在 commit body 说明"为什么 safe 不可能"—— TCB 增长被流程约束而非约定约束。</li>
+      <li><b>预算论证</b>:4.6%(双口径)的单调下降规则 + 每处新增 unsafe 须在 commit body 说明"为什么 safe 不可能"—— TCB 增长被流程约束而非约定约束。</li>
     </ul>
 
     <div class="callout">复现:python3 scripts/gen_tcb_ledger.py --markdown(分层 token 口径);python3 scripts/tcb_ledger.py(行口径)。正本:docs/architecture/kernel-layers.md(分层规则 + forbid 运动)、docs/development/tcb-ledger.md(生成台账)。相关:<a href="formal.html">形式验证</a>(Kani 证 unsafe)、<a href="taxonomy.html">缺陷分类学</a>(居留地实证)。</div>

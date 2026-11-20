@@ -65,17 +65,15 @@ This is not "an assistant filling in a few lines." It places AI where subsystems
 
 ## Safety: the itemized bill, not the slogan
 
-**The surface.** `kernel/src` is 361,875 lines. Measured by the in-tree ledger script:
+**The surface.** `kernel/src` is 362,762 lines. Measured by the in-tree ledger script:
 
 | Series | Lines | Share |
 |---|---:|---:|
-| `unsafe { … }` block bodies | 25,769 | 7.1% |
-| `unsafe fn` / `unsafe impl` bodies | 27,097 | 7.5% |
-| **Dual series — the honest total** | **50,630** | **14.0%** |
+| `unsafe { … }` block bodies | 13,623 | 3.8% |
+| `unsafe fn` / `unsafe impl` bodies | 3,517 | 1.0% |
+| **Dual series — the honest total** | **16,712** | **4.6%** |
 
-The dual series became the headline on 2026-11-19: the earlier line count missed raw-pointer `unsafe fn` bodies. On the block-only series the tree is 7.1%, down from 9.5% the day before and 12.1% before the reduction campaign. Layered by privilege, `kernel/src` carries 5,224 unsafe tokens — **3,166 of them outside the Framework layer**, which is the reduction target (47 files already carry `#![forbid(unsafe_code)]`; 63 more have no unsafe left at all). 63% of unsafe constructs carry a written `// SAFETY:` contract, and CI fails the build when a region appears in the tree but not in the [ledger](docs/development/tcb-ledger.md).
-
-**The record.** 33 memory-corruption-class bugs over the project's history, each adjudicated individually: **23** had the defect inside an explicitly audited `unsafe` block, architecture assembly, or an `unsafe` interior; **10** were in safe code — and every one of those ten is an ownership, refcount, lock-protocol, or stack-depth decision that the type system does not check today. Pointer-expression classes — indexing overrun, iterator invalidation, format string, wild pointer arithmetic — are **zero in safe code**. Six of the 33 were caught in review before any boot ran them.
+The unsafe that remains is a territory, not a population: **171 modules are compiler-enforced zero-unsafe** (`#![forbid(unsafe_code)]`; CI ratchets the set — a file that regresses fails the build), and what is left concentrates in the Framework layer — per-arch entry, page-table, and uaccess edges plus one named edge module per subsystem, each block under a numbered INV contract. 67% of unsafe blocks carry a written `// SAFETY:` contract, and CI fails when a region appears in the tree without a row in the [verification ledger](docs/development/unsafe-verification.md). The defect classes that dominate C-kernel CVE history — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are **zero in safe code** (the adjudicated record behind this claim: [defect taxonomy](https://topkernel.github.io/Rux/en/security/taxonomy.html)).
 
 **The proofs.** 164 Kani harnesses discharge core unsafe routines for all inputs; 1,184 host-side tests run in CI; loom enumerates interleavings for the mutex, PI-chain, and timer primitives; 4 SPIN models check the futex, interrupt/preempt, lock-ordering, and scheduler models; Miri runs nightly.
 
@@ -128,7 +126,7 @@ Because the host can use KVM, x86_64 is the primary platform for both function a
 - **LTP**: 1,139 of 1,869 pass. Several hundred still fail; the TIMEOUT class is adjudicated case by case, and each failure that is not ours is recorded as such.
 - **lmbench**: 13 rows trail, the largest deficit file creation at 22–26× and loopback socket latency at 2.1–2.2×. Each row carries a measured decomposition of the gap.
 - **Direct I/O**: 1 MiB sequential streams sit at 0.75–0.83× of the reference.
-- **The unsafe surface**: 14.0% of the kernel still depends on human review. The campaign targets ≤5,000 unsafe lines (≤1%) with a per-block irreducibility proof recorded in the [ledger](docs/development/tcb-ledger.md); the ladder and the measured starting point are in [the plan](docs/development/unsafe-5000-plan.md).
+- **The unsafe surface**: 4.6% of the kernel (16,712 lines) still depends on human review. The campaign target is ≤5,000 lines (≤1%) with a per-block irreducibility proof — which primitive owns the block, why no safe shape exists, the reference counterpart — recorded in the [ledger](docs/development/unsafe-verification.md); the ladder is in [the plan](docs/development/unsafe-5000-plan.md).
 - **Formal verification**: Kani covers the core unsafe primitives, not every key path; loom and SPIN cover the concurrency primitives.
 - **The AI working model** at 400,000 lines is under observation, not settled.
 - **The 29 registered divergences** need their compatibility evidence kept current as the kernel moves.

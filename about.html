@@ -117,19 +117,19 @@
 
     <h2 id="safety"><span class="anchor">§4</span>安全:不喊"Rust 所以安全",给你看明细</h2>
     <p>"Rust 所以安全"这句话大家听腻了。真正有价值的是:unsafe 里出过什么事,我怎么管的。</p>
-    <p><b>unsafe 面有多大。</b><code>kernel/src</code> 共 361,875 行,按仓库内的台账脚本口径:</p>
+    <p><b>unsafe 面有多大。</b><code>kernel/src</code> 共 362,762 行,按仓库内的台账脚本口径:</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>口径</th><th>行数</th><th>占比</th></tr></thead>
       <tbody>
-        <tr><td><code>unsafe { … }</code> 块体</td><td class="num">25,769</td><td class="num">7.1%</td></tr>
-        <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> 函数体</td><td class="num">27,097</td><td class="num">7.5%</td></tr>
-        <tr><td><b>双口径合计(诚实总数)</b></td><td class="num"><b>50,630</b></td><td class="num"><b>14.0%</b></td></tr>
+        <tr><td><code>unsafe { … }</code> 块体</td><td class="num">13,623</td><td class="num">3.8%</td></tr>
+        <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> 函数体</td><td class="num">3,517</td><td class="num">1.0%</td></tr>
+        <tr><td><b>双口径合计(诚实总数)</b></td><td class="num"><b>16,712</b></td><td class="num"><b>4.6%</b></td></tr>
       </tbody>
     </table></div>
-    <p>分层口径下,kernel/src 带 5,224 个 unsafe 记号,其中 <b>3,166 个在 Framework 层之外</b> —— 这就是收缩目标(47 个文件已带 <code>#![forbid(unsafe_code)]</code>,另有 63 个文件已无 unsafe)。63% 的 unsafe 构造带书写的 <code>// SAFETY:</code> 契约;树内出现台账未登记的区域,CI 直接失败。</p>
-    <p><b>缺陷史。</b>Rux 全史 <b>33 例</b>内存破坏类缺陷逐一归档:<b>23 例</b>在 unsafe/汇编,<b>10 例</b>在 safe 代码 —— 而这 10 例全部是所有权/引用计数/锁协议/栈深决策类;而 C 内核里最常见的指针越界、迭代器失效、格式串注入、野指针运算,在 safe 代码里是 <b>零</b>。另有 6 例在 boot 之前就被代码评审拦下。</p>
+    <p>分层口径下,kernel/src 带 2,863 个 unsafe 记号,其中 <b>1,322 个在 Framework 层之外</b>(service 层)。171 个模块带 <code>#![forbid(unsafe_code)]</code>,由编译器强制零 unsafe、CI 棘轮只增不减;89 个 service 文件已无 unsafe。69% 的 unsafe 构造带书写的 <code>// SAFETY:</code> 契约;树内出现台账未登记的区域,CI 直接失败。</p>
+    <p><b>缺陷史。</b>Rux 全史 <b>35 例</b>内存破坏类缺陷逐一归档:<b>23 例</b>在 unsafe/汇编,<b>12 例</b>在 safe 代码 —— 而这 12 例全部是所有权/引用计数/锁协议/栈深决策类(缩减战役贡献 2 例:RAII 句柄旁保留的手动引用计数释放、指向已亡构造临时的自引用链表头;均由数据完整性电池捕获,均协议层修复);而 C 内核里最常见的指针越界、迭代器失效、格式串注入、野指针运算,在 safe 代码里是 <b>零</b>。另有 6 例在 boot 之前就被代码评审拦下。</p>
     <p><b>形式验证。</b>164 个 Kani harness 对核心 unsafe 代码做全输入证明;1,184 个宿主侧测试;loom 枚举互斥锁、PI 链与定时器的交错执行;4 个 SPIN 模型;Miri nightly。</p>
-    <div class="callout">不说"我 90% 是 Safe Rust"就完事 —— 我告诉你剩下 14.0% 里出过什么、集中在哪、有没有被工具盯住。这是可审计的安全,不是口号。详见 <a href="security/index.html">安全总览</a>与<a href="security/taxonomy.html">缺陷分类学</a>。</div>
+    <div class="callout">不说"我 90% 是 Safe Rust"就完事 —— 我告诉你剩下 4.6% 里出过什么、集中在哪、有没有被工具盯住。这是可审计的安全,不是口号。详见 <a href="security/index.html">安全总览</a>与<a href="security/taxonomy.html">缺陷分类学</a>。</div>
 
     <h2 id="perf"><span class="anchor">§5</span>性能:同机同加速对照,领先的落后的都放出来</h2>
     <p>我用 QEMU + KVM 同机同加速对照,不拿不同环境的数据互相比。</p>
@@ -161,7 +161,7 @@
     <ul>
       <li>LTP 1,869 项过 1,139 项,还有几百项没过;TIMEOUT 类按 P0 规则逐行归因,非本内核造成的失败逐条留档</li>
       <li>lmbench 13 项落后,最大 22–26×;1M 直写 0.75–0.83×。每行都带测得的差距分解</li>
-      <li>unsafe 面还有 14.0% 依赖人工评审;收缩目标是 ≤5,000 行(≤1%),每块残余都要写明不可约理由(台账与阶梯见 docs/development/unsafe-5000-plan.md)</li>
+      <li>unsafe 面还有 4.6%(16,712 行)依赖人工评审;收缩目标是 ≤5,000 行(≤1%),每块残余都要写明不可约理由(台账与阶梯见 docs/development/unsafe-5000-plan.md)</li>
       <li>Kani 覆盖核心 unsafe,还没铺到全部关键路径;loom 与 SPIN 覆盖并发原语</li>
       <li>AI 编码模式能不能长期撑住 40 万行,我自己也在观察</li>
       <li>29 项设计分歧的兼容性证据需要持续维护</li>
