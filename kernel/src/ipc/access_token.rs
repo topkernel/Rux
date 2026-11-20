@@ -31,6 +31,7 @@
 //! array (io control only; samgr consults the token's type bits, not this
 //! array, for CanRequest).
 
+#![forbid(unsafe_code)]
 use alloc::collections::BTreeMap;
 
 use crate::fs::devfs::registry;

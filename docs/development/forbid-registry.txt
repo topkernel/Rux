@@ -65,11 +65,13 @@ kernel/src/fs/procfs/timer_list.rs
 kernel/src/fs/procfs/uptime.rs
 kernel/src/fs/procfs/version.rs
 kernel/src/fs/readahead.rs
+kernel/src/fs/selinuxfs.rs
 kernel/src/fs/xattr.rs
 kernel/src/interrupt/domain.rs
 kernel/src/interrupt/irqchip.rs
 kernel/src/interrupt/irqthread.rs
 kernel/src/interrupt/ksoftirqd.rs
+kernel/src/ipc/access_token.rs
 kernel/src/ipc/util.rs
 kernel/src/mm/allocator.rs
 kernel/src/mm/hugepage.rs

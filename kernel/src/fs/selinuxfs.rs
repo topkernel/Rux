@@ -19,6 +19,7 @@
 //!
 //! Anything else is ENOENT — libselinux falls back gracefully.
 
+#![forbid(unsafe_code)]
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
