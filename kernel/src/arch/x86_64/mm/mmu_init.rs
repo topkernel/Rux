@@ -354,25 +354,9 @@ pub fn alloc_page_table() -> Option<u64> {
     }
 }
 
-/// Get virtual address for accessing a page table given its physical address
-#[inline]
-pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
-    match get_alloc_stage() {
-        AllocStage::Early => {
-            // Early pool lives inside the kernel image: reach it at its
-            // higher-half VMA (VMA - va_kernel_pa_offset == LMA). Works
-            // under both the bootstrap tables and the real ROOT tables.
-            let offset = KERNEL_MAP.va_kernel_pa_offset as u64;
-            let virt_addr = phys_addr.wrapping_add(offset);
-            virt_addr as *mut PageTable
-        }
-        AllocStage::Fixmap | AllocStage::Late => {
-            // Linear mapping is available at these stages
-            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
-            virt_addr.bits() as *mut PageTable
-        }
-    }
-}
+/// The phys→table conversion edge lives in the framework module now
+/// (one audited site per arch; see unsafe_edges.rs).
+pub use super::unsafe_edges::get_page_table_virt;
 
 fn free_page_table_checked(phys_addr: u64, site: &str) {
     free_page_table_checked_rooted(phys_addr, site, 0)

@@ -40,6 +40,21 @@
 
 use super::pagetable::{PageTable, PageTableEntry};
 
+pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
+    match super::mmu_init::get_alloc_stage() {
+        super::mmu_init::AllocStage::Early => {
+            // Static pools live in the image; convert via the image offset
+            let offset = unsafe { super::memory_layout::KERNEL_MAP.va_kernel_pa_offset } as u64;
+            (phys_addr.wrapping_add(offset)) as *mut PageTable
+        }
+        super::mmu_init::AllocStage::Fixmap | super::mmu_init::AllocStage::Late => {
+            let virt_addr = super::memory_layout::phys_to_virt(super::memory_layout::PhysAddr::new(phys_addr));
+            virt_addr.bits() as *mut PageTable
+        }
+    }
+}
+
+
 /// Typed handle to one translation-table page (512 entries) — the single
 /// audited phys→table edge of the aarch64 mm tree (INV-AE-PT-*).
 #[derive(Clone, Copy)]

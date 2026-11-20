@@ -7,6 +7,7 @@
 //!
 //! Supports RISC-V 64-bit (RV64GC) architecture
 
+pub mod unsafe_edges;
 pub mod boot;
 pub mod pt_regs;
 pub mod trap;
