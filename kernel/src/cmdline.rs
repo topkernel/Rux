@@ -82,7 +82,7 @@ const FDT_END: u32 = 0x9;
 /// the blob with the 0xd00dfeed magic check before walking, and the
 /// walkers keep their cursors inside [fdt, fdt+totalsize).
 #[inline]
-fn fdt_u8(p: *const u8) -> u8 {
+pub(crate) fn fdt_u8(p: *const u8) -> u8 {
     // SAFETY: INV-FDT-1 — a 1-byte read inside the mapped DTB blob.
     unsafe { p.read() }
 }
@@ -90,7 +90,7 @@ fn fdt_u8(p: *const u8) -> u8 {
 /// Cursor advance inside the mapped DTB (INV-FDT-1): a safe wrapper so
 /// the walkers never hand-roll pointer arithmetic.
 #[inline]
-fn fdt_add(p: *const u8, n: isize) -> *const u8 {
+pub(crate) fn fdt_add(p: *const u8, n: isize) -> *const u8 {
     // SAFETY: INV-FDT-1 — arithmetic within the mapped DTB blob; the
     // walkers bound their loops by the header-derived `end`.
     unsafe { p.offset(n) }
@@ -98,7 +98,7 @@ fn fdt_add(p: *const u8, n: isize) -> *const u8 {
 
 /// Big-endian u32 read at a cursor inside the mapped DTB (INV-FDT-1).
 #[inline]
-fn fdt_u32(p: *const u8) -> u32 {
+pub(crate) fn fdt_u32(p: *const u8) -> u32 {
     // SAFETY: INV-FDT-1 — a 4-byte read inside the mapped DTB blob.
     unsafe { u32::from_be_bytes(core::ptr::read_unaligned(p as *const [u8; 4])) }
 }

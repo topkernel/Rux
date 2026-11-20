@@ -222,118 +222,109 @@ fn psci_call(fnid: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 /// Parse the DTB `/psci` node for the conduit method and the CPU_ON
 /// function id. Mirrors the manual FDT walk in cmdline.rs (arch-neutral,
 /// no heap). Returns false when no /psci node exists (caller defaults).
-unsafe fn detect_psci_from_dtb() -> bool {
-    // SAFETY: the DTB physical address is fixed by QEMU before boot and
-    // the linear map covers all of RAM (same translation the memory-region
-    // parser in main.rs uses post-MMU).
+fn detect_psci_from_dtb() -> bool {
+    // The DTB physical address is fixed by QEMU before boot and the
+    // linear map covers all of RAM; the walk uses the shared FDT read
+    // edge (INV-FDT-1, cmdline.rs) — same proof, one audited site.
+    use crate::cmdline::{fdt_u8, fdt_add, fdt_u32};
     let dtb_phys = super::boot::get_dtb_pointer();
     let dtb_virt = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(dtb_phys)).bits();
     let fdt = dtb_virt as *const u8;
 
-    let read_u32 = |p: *const u8| -> u32 {
-        // SAFETY: FDT structure is 4-byte aligned big-endian; the walker
-        // only advances within [fdt, fdt+totalsize) as validated below.
-        unsafe {
-            ((*p as u32) << 24)
-                | ((*p.add(1) as u32) << 16)
-                | ((*p.add(2) as u32) << 8)
-                | (*p.add(3) as u32)
-        }
-    };
+    let read_u32 = |p: *const u8| -> u32 { fdt_u32(p) };
 
-    // SAFETY: header reads stay inside the FDT blob (validated by magic).
-    unsafe {
-        if read_u32(fdt) != 0xd00d_feed {
-            return false;
-        }
-        let off_dt_struct = read_u32(fdt.add(0x08)) as usize;
-        let off_dt_strings = read_u32(fdt.add(0x0C)) as usize;
-        let size_dt_struct = read_u32(fdt.add(0x24)) as usize;
-        let strings = fdt.add(off_dt_strings);
-
-        const FDT_BEGIN_NODE: u32 = 0x1;
-        const FDT_END_NODE: u32 = 0x2;
-        const FDT_PROP: u32 = 0x3;
-        const FDT_END: u32 = 0x9;
-
-        let mut ptr = fdt.add(off_dt_struct);
-        let end = ptr.add(size_dt_struct);
-        let mut depth = 0usize;
-        let mut in_psci = false;
-        let mut found = false;
-
-        while ptr < end {
-            let token = read_u32(ptr);
-            ptr = ptr.add(4);
-            match token {
-                FDT_BEGIN_NODE => {
-                    let mut name = [0u8; 32];
-                    let mut i = 0;
-                    while *ptr != 0 && i < 31 {
-                        name[i] = *ptr;
-                        ptr = ptr.add(1);
-                        i += 1;
-                    }
-                    ptr = ptr.add(1); // NUL
-                    ptr = ptr.add((4 - ((ptr as usize) & 3)) & 3);
-                    // Root children carry bare names ("psci"); unit
-                    // addresses ("psci@...") are matched too. A root
-                    // child is announced while depth == 1 (the root
-                    // BEGIN_NODE already bumped it).
-                    let ok = name[..i] == *b"psci" || name[..i].starts_with(b"psci@");
-                    if depth == 1 && ok {
-                        in_psci = true;
-                        found = true;
-                    }
-                    depth += 1;
-                }
-                FDT_END_NODE => {
-                    if in_psci && depth == 2 {
-                        in_psci = false;
-                    }
-                    depth -= 1;
-                }
-                FDT_PROP => {
-                    let len = read_u32(ptr) as usize;
-                    let nameoff = read_u32(ptr.add(4)) as usize;
-                    ptr = ptr.add(8);
-                    let mut name_ptr = strings.add(nameoff);
-                    let mut pname = [0u8; 16];
-                    let mut i = 0;
-                    while *name_ptr != 0 && i < 15 {
-                        pname[i] = *name_ptr;
-                        name_ptr = name_ptr.add(1);
-                        i += 1;
-                    }
-                    if in_psci {
-                        match &pname[..i] {
-                            b"method" => {
-                                let m = core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                                    ptr,
-                                    len.min(4),
-                                ));
-                                let hvc = m.trim_end_matches('\0') == "hvc";
-                                CONDUIT_HVC.store(hvc, Ordering::Release);
-                            }
-                            b"cpu_on" => {
-                                // <u32 function-id>; 64-bit variant expected
-                                let v = read_u32(ptr);
-                                if v != 0 {
-                                    CPU_ON_FN.store(v, Ordering::Release);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    ptr = ptr.add(len);
-                    ptr = ptr.add((4 - ((ptr as usize) & 3)) & 3);
-                }
-                FDT_END => break,
-                _ => break,
-            }
-        }
-        found
+    if read_u32(fdt) != 0xd00d_feed {
+        return false;
     }
+    let off_dt_struct = read_u32(fdt_add(fdt, 0x08)) as usize;
+    let off_dt_strings = read_u32(fdt_add(fdt, 0x0C)) as usize;
+    let size_dt_struct = read_u32(fdt_add(fdt, 0x24)) as usize;
+    let strings = fdt_add(fdt, off_dt_strings as isize);
+
+    const FDT_BEGIN_NODE: u32 = 0x1;
+    const FDT_END_NODE: u32 = 0x2;
+    const FDT_PROP: u32 = 0x3;
+    const FDT_END: u32 = 0x9;
+
+    let mut ptr = fdt_add(fdt, off_dt_struct as isize);
+    let end = fdt_add(ptr, size_dt_struct as isize);
+    let mut depth = 0usize;
+    let mut in_psci = false;
+    let mut found = false;
+
+    while ptr < end {
+        let token = read_u32(ptr);
+        ptr = fdt_add(ptr, 4);
+        match token {
+            FDT_BEGIN_NODE => {
+                let mut name = [0u8; 32];
+                let mut i = 0;
+                while fdt_u8(ptr) != 0 && i < 31 {
+                    name[i] = fdt_u8(ptr);
+                    ptr = fdt_add(ptr, 1);
+                    i += 1;
+                }
+                ptr = fdt_add(ptr, 1); // NUL
+                ptr = fdt_add(ptr, ((4 - ((ptr as usize) & 3)) & 3) as isize);
+                // Root children carry bare names ("psci"); unit
+                // addresses ("psci@...") are matched too. A root
+                // child is announced while depth == 1 (the root
+                // BEGIN_NODE already bumped it).
+                let ok = name[..i] == *b"psci" || name[..i].starts_with(b"psci@");
+                if depth == 1 && ok {
+                    in_psci = true;
+                    found = true;
+                }
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                if in_psci && depth == 2 {
+                    in_psci = false;
+                }
+                depth -= 1;
+            }
+            FDT_PROP => {
+                let len = read_u32(ptr) as usize;
+                let nameoff = read_u32(fdt_add(ptr, 4)) as usize;
+                ptr = fdt_add(ptr, 8);
+                let mut name_ptr = fdt_add(strings, nameoff as isize);
+                let mut pname = [0u8; 16];
+                let mut i = 0;
+                while fdt_u8(name_ptr) != 0 && i < 15 {
+                    pname[i] = fdt_u8(name_ptr);
+                    name_ptr = fdt_add(name_ptr, 1);
+                    i += 1;
+                }
+                if in_psci {
+                    match &pname[..i] {
+                        b"method" => {
+                            // INV-FDT-1 read: at most 4 bytes of the prop
+                            // payload, inside the blob.
+                            let bytes = [fdt_u8(fdt_add(ptr, 0)),
+                                         fdt_u8(fdt_add(ptr, 1)),
+                                         fdt_u8(fdt_add(ptr, 2)),
+                                         fdt_u8(fdt_add(ptr, 3))];
+                            let hvc = bytes.starts_with(b"hvc");
+                            CONDUIT_HVC.store(hvc, Ordering::Release);
+                        }
+                        b"cpu_on" => {
+                            // <u32 function-id>; 64-bit variant expected
+                            let v = read_u32(ptr);
+                            if v != 0 {
+                                CPU_ON_FN.store(v, Ordering::Release);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                ptr = fdt_add(ptr, len as isize);
+                ptr = fdt_add(ptr, ((4 - ((ptr as usize) & 3)) & 3) as isize);
+            }
+            FDT_END => break,
+            _ => break,
+        }
+    }
+    found
 }
 
 // ==================== Boot-complete handshake ====================
