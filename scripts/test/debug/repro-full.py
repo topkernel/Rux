@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """gnome-sigill reproduction driver.
 
 Shortened chain: Xorg + start-gnome.sh start immediately (auto.sh SLEEPs

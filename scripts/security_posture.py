@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Generate the kernel security posture ledger.
 
 The ledger is the living artifact of the security review track: every

@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """lmbench_boot.py — boot the Rux x86_64 kernel with the lmbench
 benchmark binaries as the payload and collect results.
 

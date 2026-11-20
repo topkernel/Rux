@@ -1,0 +1,19 @@
+[package]
+name = "kernel-safety-tests"
+version = "0.1.0"
+edition = "2021"
+
+# Host-side Miri battery over the safety primitives
+# (docs/development/unsafe-5000-plan.md Layer 2.1). Standalone like
+# kernel/verify (the root workspace sets panic=abort, which disables
+# the unwinding #[should_panic] needs); the kernel sources are
+# included VERBATIM via include! — no copies to drift.
+#
+# Run:
+#   cd kernel/safety-tests && cargo +nightly miri test
+# (the plan's `-p kernel-safety-tests` form runs from any workspace
+# that adds this crate as a member).
+
+[workspace]
+
+[dependencies]

@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # build-rootfs.sh — build an ext4 rootfs carrying Geekbench for the
 # x86_64 rig, mirroring the lmbench protocol (userspace/lmbench):
 # a static musl runner at /test/geekbench_run is the PID-1 init and the

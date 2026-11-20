@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """tgsig_boot.py — boot the rt_tgsigqueueinfo parity probe (tgsig.c).
 
 Minimal q35 boot (KVM or TCG), init=/test/tgsig, verdict from the

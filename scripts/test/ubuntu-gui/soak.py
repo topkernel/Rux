@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """soak.py — long-run stability soak for the Ubuntu GUI (udesk) session.
 
 Boots the Ubuntu GUI image (smp4, MTTCG multi, dfx watchdog+taskdump),

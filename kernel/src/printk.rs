@@ -2278,9 +2278,10 @@ mod persistent_log {
             Some(ptr) if !ptr.is_null() => ptr,
             _ => return None,
         };
-        // SAFETY: fs_ptr is a valid pointer returned by get_ext4_fs()
-        // when non-null.
-        let fs = unsafe { &*fs_ptr };
+        // fs_ptr is the mount's instance word (get_ext4_fs's non-null
+        // GLOBAL) — resolved through the framework edge (INV-FS-GLOBALSB-1
+        // provenance).
+        let fs = crate::fs::unsafe_edges::static_ref_unchecked(fs_ptr as *mut crate::fs::ext4::Ext4FileSystem);
         let cached = FILE_INO.load(Ordering::Relaxed);
         if cached != 0 {
             // Still alive? A deleted file's inode read fails; reset and
@@ -2381,8 +2382,8 @@ mod persistent_log {
             Some(ptr) if !ptr.is_null() => ptr,
             _ => return,
         };
-        // SAFETY: same provenance as resolve_file.
-        let fs = unsafe { &*fs_ptr };
+        // Same provenance as resolve_file (INV-FS-GLOBALSB-1 edge).
+        let fs = crate::fs::unsafe_edges::static_ref_unchecked(fs_ptr as *mut crate::fs::ext4::Ext4FileSystem);
 
         // Stage the delta: records with seq > LAST_SEQ, oldest-first,
         // at most MAX_RECORDS_PER_FLUSH of the newest ones.

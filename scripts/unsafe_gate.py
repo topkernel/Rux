@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Unsafe-verification merge gate.
 
 Enforces the unsafe-code accounting policy:
@@ -131,6 +131,52 @@ def hotpath_print_ratchet(failures):
             failures.append(line)
 
 
+def escape_hatch_check(failures):
+    """Layer 4.1 rule: a PUBLIC escape hatch (as_ptr/as_raw/into_raw/
+    from_raw/leak/phys) on the handle primitives must carry a
+    per-site INV citation (within 25 lines above the fn) that resolves
+    in the ARCH_DOCS registry. The audit table lives in
+    safety-and-performance.md ("Escape-hatch audit"); this check is
+    its enforcement arm — a new public hatch without a row fails the
+    gate (make it pub(crate) or write the row)."""
+    import re as _re
+    hatch_re = _re.compile(
+        r"^\s*pub(?:\s+unsafe)?\s+fn\s+"
+        r"(as_ptr|as_raw|into_raw|from_raw|leak|phys)\b", _re.M)
+    inv_re = _re.compile(r"\b(INV-[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\b")
+    owners = [
+        ROOT / "kernel" / "src" / "safety",
+        ROOT / "kernel" / "src" / "process" / "task_ref.rs",
+        ROOT / "kernel" / "src" / "fs" / "unsafe_edges.rs",
+    ]
+    files = []
+    for o in owners:
+        if o.is_dir():
+            files.extend(sorted(o.glob("*.rs")))
+        elif o.is_file():
+            files.append(o)
+    docs_blob = "".join(d.read_text(encoding="utf-8", errors="replace")
+                        for d in ARCH_DOCS if d.exists())
+    for f in files:
+        text = f.read_text(encoding="utf-8", errors="replace")
+        lines = text.split("\n")
+        for m in hatch_re.finditer(text):
+            ln = text.count("\n", 0, m.start()) + 1
+            window = "\n".join(lines[max(0, ln - 26):ln])
+            invs = inv_re.findall(window)
+            if not invs:
+                failures.append(
+                    f"escape hatch: {f.relative_to(ROOT)}:{ln} "
+                    f"'{m.group(1)}' has no INV citation within 25 lines "
+                    f"(write the per-site row or make it pub(crate))")
+                continue
+            if not any(i in docs_blob for i in invs):
+                failures.append(
+                    f"escape hatch: {f.relative_to(ROOT)}:{ln} "
+                    f"cites {invs[0]} but the id is not in the ARCH_DOCS "
+                    f"registry (add the index row)")
+
+
 def root_hygiene_check(failures):
     """Repo-root hygiene (user rule, violated repeatedly): no loose
     UNTRACKED files at the repo root — scratch scripts/logs/probe
@@ -159,6 +205,7 @@ def main():
     failures = []
 
     forbid_ratchet_check(failures)
+    escape_hatch_check(failures)
     root_hygiene_check(failures)
     hotpath_print_ratchet(failures)
 

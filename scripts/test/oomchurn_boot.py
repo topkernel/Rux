@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """oomchurn_boot.py — boot the Rux kernel with oomchurn as init and
 stream the serial log, reporting the verdict (oom-accounting lane).
 

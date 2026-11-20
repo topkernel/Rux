@@ -431,22 +431,14 @@ impl<'a> BlockAllocator<'a> {
         let desc_block = group_desc_start_block + (group_idx / desc_per_block);
         let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
 
-        // SAFETY: BG_FREE_BLOCKS_OFF (u32*3 = 12 bytes) is within the block;
-        // volatile write ensures the store is not optimized away.
-        unsafe {
-            let bh = bio::bread(self.fs.device, desc_block)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(desc_offset + BG_FREE_BLOCKS_OFF) as *mut u16;
-            free_blocks_ptr.write_volatile(free_blocks);
-            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-            }
+        // BG_FREE_BLOCKS_OFF is within the block (descriptor layout);
+        // the deferred edge owns dirty+journal (F4-R2: durability-deferred).
+        bio::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
+            crate::safety::bytes::write_at::<u16>(data, desc_offset + BG_FREE_BLOCKS_OFF, free_blocks);
             // metadata_csum write path: the read path verifies each group
-            // descriptor's bg_checksum at MOUNT (mod.rs — a stale checksum
-            // refuses the next mount), so every on-disk counter change must
-            // re-seal the descriptor slot it landed in.
+            // descriptor's bg_checksum at MOUNT (a stale checksum refuses
+            // the next mount), so the counter change re-seals the slot.
             if self.fs.metadata_csum {
-                let data = &mut (*bh).b_data;
                 let end = (desc_offset + group_desc_size).min(data.len());
                 if desc_offset < end {
                     crate::fs::ext4::csum::group_desc_csum_set(
@@ -456,65 +448,30 @@ impl<'a> BlockAllocator<'a> {
                     );
                 }
             }
-            // F4-R2 (leg-31, f4-ext4-route-map.md route 2): group-desc
-            // free-BLOCKS counter — durability-deferred like the superblock
-            // counters (order-unconstrained; e2fsck class on crash).
-            // Bitmaps and inode tables keep their inline syncs.
-            // metadata_csum: the descriptor's bg_checksum covers the
-            // counter — re-seal it over the buffered content or the NEXT
-            // mount's descriptor verification fails on the cook lineage.
-            if self.fs.metadata_csum {
-                let data: &mut [u8] = &mut (*bh).b_data;
-                super::csum::group_desc_csum_set(
-                    self.fs.csum_seed,
-                    group_idx as u32,
-                    &mut data[desc_offset..desc_offset + group_desc_size],
-                );
-            }
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::brelse(bh);
             Ok(())
-        }
+        })
     }
 
-    // SAFETY: SB_FREE_BLOCKS_OFF (u32*3 = 12 bytes) is within the superblock;
-    // volatile read/write ensures ordering.
     fn update_superblock_free_blocks(&self, delta: i32) -> Result<(), i32> {
-        unsafe {
-            let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
-            let bh = bio::bread(self.fs.device, sb_block as u64)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
-            let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(sb_start + SB_FREE_BLOCKS_OFF) as *mut u32;
-            let current = free_blocks_ptr.read_volatile();
+        let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
+        let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
+        // SB_FREE_BLOCKS_OFF is within the superblock; the deferred edge
+        // owns dirty+journal (F4-R2: durability-deferred like the GD twin).
+        bio::with_block_deferred_mut(self.fs.device, sb_block as u64, |data, _| {
+            let current = crate::safety::bytes::read_at::<u32>(data, sb_start + SB_FREE_BLOCKS_OFF).unwrap_or(0);
             let new_count = (current as i64 + delta as i64) as u32;
-            free_blocks_ptr.write_volatile(new_count);
-            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-            }
+            crate::safety::bytes::write_at::<u32>(data, sb_start + SB_FREE_BLOCKS_OFF, new_count);
             // metadata_csum write path: the read path verifies s_checksum
             // at mount — re-seal it over the full 1024-byte superblock
             // after any counter mutation (see also the free_inodes twin).
             if self.fs.metadata_csum {
-                let data = &mut (*bh).b_data;
                 let sb_end = (sb_start + 1024).min(data.len());
                 if sb_start < sb_end {
-                    crate::fs::ext4::csum::superblock_csum_set(
-                        &mut data[sb_start..sb_end],
-                    );
+                    crate::fs::ext4::csum::superblock_csum_set(&mut data[sb_start..sb_end]);
                 }
             }
-            // F4-R2 (leg-31): superblock free-BLOCKS counter,
-            // durability-deferred (see update_group_desc_free_blocks).
-            // metadata_csum: s_checksum covers the counter — re-seal.
-            if self.fs.metadata_csum {
-                let data: &mut [u8] = &mut (*bh).b_data;
-                super::csum::superblock_csum_set(&mut data[sb_start..sb_start + 1024]);
-            }
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::brelse(bh);
             Ok(())
-        }
+        })
     }
 }
 
@@ -956,20 +913,10 @@ impl<'a> InodeAllocator<'a> {
         let desc_block = group_desc_start_block + (group_idx / desc_per_block);
         let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
 
-        // SAFETY: desc_offset + 14 is within the block (bg_free_inodes_count_lo field);
-        // volatile write ensures the store is not optimized away.
-        unsafe {
-            let bh = bio::bread(self.fs.device, desc_block)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-            let data = &mut (*bh).b_data;
-            // Update free inode count (bg_free_inodes_count_lo offset in Ext4GroupDesc)
-            let free_inodes_ptr = data.as_mut_ptr().add(desc_offset + 14) as *mut u16;
-            free_inodes_ptr.write_volatile(free_inodes);
-            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-            }
-
+        // bg_free_inodes_count_lo is within the block; the deferred edge
+        // owns dirty+journal (F4-R2 durability-deferred).
+        bio::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
+            crate::safety::bytes::write_at::<u16>(data, desc_offset + 14, free_inodes);
             // metadata_csum write path: re-seal this descriptor slot after
             // the counter change (see update_group_desc_free_blocks).
             if self.fs.metadata_csum {
@@ -982,23 +929,8 @@ impl<'a> InodeAllocator<'a> {
                     );
                 }
             }
-
-            // F4-R2 (leg-31): group-desc free-INODES counter,
-            // durability-deferred (order-unconstrained; e2fsck class).
-            // metadata_csum: re-seal the descriptor checksum (see
-            // update_group_desc_free_blocks).
-            if self.fs.metadata_csum {
-                super::csum::group_desc_csum_set(
-                    self.fs.csum_seed,
-                    group_idx as u32,
-                    &mut data[desc_offset..desc_offset + group_desc_size],
-                );
-            }
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::brelse(bh);
-
             Ok(())
-        }
+        })
     }
 
     /// R109 (metadata_csum interop): refresh bg_itable_unused from the
@@ -1071,19 +1003,14 @@ impl<'a> InodeAllocator<'a> {
         let desc_per_block = self.fs.block_size as u64 / group_desc_size as u64;
         let desc_block = group_desc_start_block + (group_idx / desc_per_block);
         let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
-        // SAFETY: bread returns a valid BufferHead; the writes below are
-        // in-bounds of the descriptor slot (checked against the block).
-        unsafe {
-            let bh = bio::bread(self.fs.device, desc_block)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let data = &mut (*bh).b_data;
+        // The writes below are in-bounds of the descriptor slot; the
+        // deferred edge owns dirty+journal (F4-R2 class).
+        bio::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
             if desc_offset + 0x1E <= data.len() {
-                (data.as_mut_ptr().add(desc_offset + 0x1C) as *mut u16)
-                    .write_volatile(unused);
+                crate::safety::bytes::write_at::<u16>(data, desc_offset + 0x1C, unused);
             }
             if group_desc_size >= 64 && desc_offset + 0x34 <= data.len() {
-                (data.as_mut_ptr().add(desc_offset + 0x32) as *mut u16)
-                    .write_volatile(0);
+                crate::safety::bytes::write_at::<u16>(data, desc_offset + 0x32, 0);
             }
             if self.fs.metadata_csum {
                 let end = (desc_offset + group_desc_size).min(data.len());
@@ -1095,12 +1022,8 @@ impl<'a> InodeAllocator<'a> {
                     );
                 }
             }
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-            }
-            bio::brelse(bh);
-        }
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -1108,49 +1031,23 @@ impl<'a> InodeAllocator<'a> {
     // SAFETY: sb_start + 16 is within the superblock (s_free_inodes_count field);
     // volatile read/write ensures ordering.
     fn update_superblock_free_inodes(&self, delta: i32) -> Result<(), i32> {
-        unsafe {
-            let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
-
-            let bh = bio::bread(self.fs.device, sb_block as u64)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-            let data = &mut (*bh).b_data;
-
-            // Superblock starts at byte 1024 within the block
-            // s_free_inodes_count is at offset 16 within the superblock (5th u32 field)
-            let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
-            let free_inodes_ptr = data.as_mut_ptr().add(sb_start + 16) as *mut u32;
-
-            let current = free_inodes_ptr.read_volatile();
-            let new = (current as i32 + delta) as u32;
-            free_inodes_ptr.write_volatile(new);
-            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-            }
-
+        let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
+        let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
+        // s_free_inodes_count sits at offset 16 within the superblock; the
+        // deferred edge owns dirty+journal (F4-R2 durability-deferred).
+        bio::with_block_deferred_mut(self.fs.device, sb_block as u64, |data, _| {
+            let current = crate::safety::bytes::read_at::<u32>(data, sb_start + 16).unwrap_or(0);
+            let new_count = (current as i32 + delta) as u32;
+            crate::safety::bytes::write_at::<u32>(data, sb_start + 16, new_count);
             // metadata_csum write path: re-seal s_checksum after the
             // counter change (see update_superblock_free_blocks).
             if self.fs.metadata_csum {
                 let sb_end = (sb_start + 1024).min(data.len());
                 if sb_start < sb_end {
-                    crate::fs::ext4::csum::superblock_csum_set(
-                        &mut data[sb_start..sb_end],
-                    );
+                    crate::fs::ext4::csum::superblock_csum_set(&mut data[sb_start..sb_end]);
                 }
             }
-
-            // F4-R2 (leg-31): superblock free-INODES counter,
-            // durability-deferred (see update_group_desc_free_blocks).
-            // metadata_csum: re-seal (see update_superblock_free_blocks).
-            if self.fs.metadata_csum {
-                super::csum::superblock_csum_set(
-                    &mut data[sb_start..sb_start + 1024],
-                );
-            }
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::brelse(bh);
-
             Ok(())
-        }
+        })
     }
 }

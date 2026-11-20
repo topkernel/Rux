@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Deterministic B-form prober: drives the icount QEMU by its OUTPUT
 (prompt-synced), and when output stalls (the silent pipe hang), sends
 the DUMP! magic so the guest's RX-IRQ DFX trigger prints the task

@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """ub2404_gm3.py — headline boot, blind-login variant.
 
 The serial console drops bytes under load ("UART TX stalled"), so waiting

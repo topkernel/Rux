@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # Rux OS - Toybox Build Script
 #
 # Cross-compile toybox using musl libc, generating statically linked RISC-V 64-bit binary
@@ -24,6 +24,7 @@ echo "MUSL_DIR: ${MUSL_DIR}"
 echo ""
 
 # Check cross-compiler toolchain
+echo "DBG-PATH=$PATH"
 if ! command -v riscv64-linux-gnu-gcc &> /dev/null; then
     echo "Error: riscv64-linux-gnu-gcc not found"
     echo "Please install RISC-V cross-compiler toolchain"

@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # extract-lmbench.sh — unpack the lmbench benchmark suite into
 # userspace/lmbench/src/. The tarball is tracked; the extracted tree is
 # NOT (user directive 2026-10-31: benchmark sources stay out of git).

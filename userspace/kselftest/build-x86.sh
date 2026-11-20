@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # build-x86.sh — extract + static-build the portable kselftest subset for
 # the qa-suites lane (x86_64 guest, serial console).
 #

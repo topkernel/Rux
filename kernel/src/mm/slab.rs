@@ -14,6 +14,8 @@
 //! # Supported Object Sizes
 //! 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 bytes
 
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 
@@ -54,9 +56,9 @@ enum SlabState {
 /// a 2-mod-8 address — fine for the old u16 free-list writes, fatal once
 /// arbitrary GlobalAlloc layouts (Box<u64>, ArcInner<...>) flow through.
 #[repr(C, align(8))]
-struct SlabHeader {
+pub(super) struct SlabHeader {
     /// Cache index this slab belongs to
-    cache_idx: u8,
+    pub(crate) cache_idx: u8,
     /// Object size
     object_size: u16,
     /// Total object count
@@ -197,14 +199,13 @@ impl SlabCache {
 
         // Update header info
         // Read next free index (stored in object memory)
-        // SAFETY: obj_ptr points within a slab page allocated from SlabPages;
-        // we hold the cache lock so no concurrent alloc/free on this cache.
-        let next_free = unsafe {
-            if self.object_size >= 2 {
-                *(obj_ptr as *const u16)
-            } else {
-                obj_idx + 1
-            }
+        // obj_ptr points within a slab page allocated from SlabPages;
+        // we hold the cache lock so no concurrent alloc/free on this
+        // cache (INV-MM-4).
+        let next_free = if self.object_size >= 2 {
+            super::edges::slab_read_freelist_link(obj_ptr)
+        } else {
+            obj_idx + 1
         };
 
         // Validate free-list index: detect corruption by checking the value is
@@ -289,11 +290,10 @@ impl SlabCache {
         }
 
         // Write object index to object memory (as free list)
-        // SAFETY: ptr points within a slab page; we hold the cache lock.
-        unsafe {
-            if self.object_size >= 2 {
-                *(ptr as *mut u16) = header.free_index;
-            }
+        // ptr points within a slab page; we hold the cache lock
+        // (INV-MM-4).
+        if self.object_size >= 2 {
+            super::edges::slab_write_freelist_link(ptr, header.free_index);
         }
 
         header.free_index = obj_idx;
@@ -343,20 +343,17 @@ impl SlabCache {
         for i in 0..self.objects_per_slab - 1 {
             let obj_offset = header_size + i * self.object_size;
             let obj_ptr = (page_addr + obj_offset) as *mut u16;
-            // SAFETY: obj_ptr is within a freshly allocated slab page; no
-            // concurrent access — this slab is not yet in any list.
-            unsafe {
-                *obj_ptr = (i + 1) as u16;
-            }
+            // obj_ptr is within a freshly allocated slab page; no
+            // concurrent access — this slab is not yet in any list
+            // (INV-MM-4 fresh-slab arm).
+            super::edges::slab_write_freelist_link(obj_ptr as *mut u8, (i + 1) as u16);
         }
 
         // Last object's next is 0xFFFF (list end marker)
         if self.objects_per_slab > 0 {
             let last_offset = header_size + (self.objects_per_slab - 1) * self.object_size;
             let last_ptr = (page_addr + last_offset) as *mut u16;
-            unsafe {
-                *last_ptr = 0xFFFF;
-            }
+            super::edges::slab_write_freelist_link(last_ptr as *mut u8, 0xFFFF);
         }
 
         Some(page)
@@ -435,11 +432,6 @@ pub struct SlabPages {
     max_pages: usize,
 }
 
-// Safety: SlabPages uses AtomicUsize for the only concurrently-modified field.
-// All other fields are immutable after initialization. get_header_mut() returns
-// pointers to non-overlapping page-aligned memory, so concurrent accesses to
-// different slabs are safe.
-unsafe impl Sync for SlabPages {}
 
 impl SlabPages {
     pub const fn new(base_addr: usize, max_pages: usize) -> Self {
@@ -478,9 +470,10 @@ impl SlabPages {
     /// Get slab header
     fn get_header_mut(&self, idx: u16) -> &mut SlabHeader {
         let addr = self.get_page_addr(idx);
-        // SAFETY: addr is page-aligned within the slab region; caller holds
-        // cache lock ensuring exclusive access to this slab.
-        unsafe { &mut *(addr as *mut SlabHeader) }
+        // addr is page-aligned within the slab region; caller holds
+        // the cache lock ensuring exclusive access to this slab
+        // (INV-MM-4).
+        super::edges::slab_header_mut(addr)
     }
 
     /// Get next slab
@@ -524,12 +517,17 @@ impl SlabPages {
 ///
 /// All fields are `Sync`:
 ///   - `caches`: per-cache `Spinlock` — only one CPU can hold a given cache lock
-///   - `pages`: `SlabPages` with `unsafe impl Sync` (atomic page counter, immutable fields)
+///   - `pages`: `SlabPages` (Sync proof in mm::edges, atomic page counter)
 ///   - `initialized`: `AtomicUsize` — lock-free read
 ///
 /// This allows `SLAB_ALLOCATOR` to be a plain `static` (no `mut`), eliminating
 /// the `&mut` aliasing UB that existed when multiple CPUs simultaneously called
 /// `kmalloc` for different cache indices.
+pub(super) fn slab_pages_cell(
+) -> &'static core::cell::UnsafeCell<SlabPages> {
+    &SLAB_ALLOCATOR.pages
+}
+
 pub struct SlabAllocator {
     /// Slab cache array
     caches: [Spinlock<SlabCache>; NUM_CACHES],
@@ -539,8 +537,6 @@ pub struct SlabAllocator {
     initialized: AtomicUsize,
 }
 
-// Safety: all fields are individually Sync (see struct doc comment above).
-unsafe impl Sync for SlabAllocator {}
 
 /// Static Slab allocator instance.
 static SLAB_ALLOCATOR: SlabAllocator = SlabAllocator {
@@ -569,11 +565,9 @@ impl SlabAllocator {
     /// `SlabPages` fields that are immutable afterwards.  No other CPU may
     /// access `SLAB_ALLOCATOR` concurrently during this call.
     pub fn init(base_addr: usize, max_pages: usize) {
-        // SAFETY: init() is called once during boot before secondary CPUs start
-        // and before any kmalloc/kfree call. UnsafeCell allows one-time init write.
-        unsafe {
-            *SLAB_ALLOCATOR.pages.get() = SlabPages::new(base_addr, max_pages);
-        }
+        // init() runs once during boot before secondary CPUs start and
+        // before any kmalloc/kfree call (INV-MM-4 init arm).
+        super::edges::slab_pages_init(base_addr, max_pages);
         SLAB_ALLOCATOR.initialized.store(1, Ordering::Release);
     }
 
@@ -584,9 +578,9 @@ impl SlabAllocator {
 
     /// Get shared reference to pages (safe after init).
     fn pages() -> &'static SlabPages {
-        // SAFETY: pages are only written once during init() (before concurrent access).
-        // After init, all accesses are reads or atomic operations.
-        unsafe { &*SLAB_ALLOCATOR.pages.get() }
+        // Pages are only written once during init(); after init all
+        // accesses are reads or atomic operations (INV-MM-4 shared arm).
+        super::edges::slab_pages()
     }
 
     /// Find appropriate cache index
@@ -648,11 +642,9 @@ pub fn kmalloc(size: usize) -> *mut u8 {
         // Store cache_idx in slab header for O(1) kfree lookup
         let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
         let header = page_addr as *mut SlabHeader;
-        // SAFETY: page_addr is page-aligned and within the slab region;
-        // we hold the cache lock.
-        unsafe {
-            (*header).cache_idx = cache_idx as u8;
-        }
+        // page_addr is page-aligned and within the slab region; we
+        // hold the cache lock (INV-MM-4).
+        super::edges::slab_header_mut(page_addr).cache_idx = cache_idx as u8;
     }
     ptr
 }
@@ -675,9 +667,9 @@ pub fn kfree(ptr: *mut u8) {
     // Check if pointer is within slab region
     if page_addr >= base && page_addr < slab_end {
         let header = page_addr as *const SlabHeader;
-        // SAFETY: page_addr is within the slab region (checked above); slab
-        // header was written by kmalloc and is stable.
-        let idx = unsafe { (*header).cache_idx as usize };
+        // page_addr is within the slab region (checked above); the slab
+        // header was written by kmalloc and is stable (INV-MM-4).
+        let idx = super::edges::slab_header_cache_idx(page_addr) as usize;
         if idx < NUM_CACHES {
             let mut cache = SLAB_ALLOCATOR.caches[idx].lock_irqsave();
             if cache.free(ptr, SlabAllocator::pages()) {
@@ -710,10 +702,9 @@ pub fn kfree(ptr: *mut u8) {
 pub fn kzalloc(size: usize) -> *mut u8 {
     let ptr = kmalloc(size);
     if !ptr.is_null() {
-        // SAFETY: ptr was returned by kmalloc, size matches the allocation.
-        unsafe {
-            core::ptr::write_bytes(ptr, 0, size);
-        }
+        // ptr was returned by kmalloc, size matches the allocation
+        // (INV-MM-4 owned arm).
+        super::edges::slab_zero(ptr, size);
     }
     ptr
 }

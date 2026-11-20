@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Validate the kernel exception table (.ex_table) against disassembly.
 
 Every .ex_table entry must point at a memory-access instruction (load/store)

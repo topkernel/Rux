@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # run-rux.sh — one boot per lmbench case on the Rux x86_64 kernel
 # (KVM). Prints "<case>|<measurement lines>".
 set -uo pipefail

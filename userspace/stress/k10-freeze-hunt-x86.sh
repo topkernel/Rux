@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # k10-freeze-hunt-x86.sh — kill10 hunt for BOTH residual faces handed to
 # the stress lane by LTP r24 (kill10 lying-slot fix a5dfbe33 now merged):
 #   face 1 (common): lost-timer-wake park subset — children never finish,
