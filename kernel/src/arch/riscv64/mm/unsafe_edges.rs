@@ -40,6 +40,32 @@
 
 use super::pagetable::{PageTable, PageTableEntry};
 
+/// Get virtual address for accessing a page table given its physical address
+#[inline]
+pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
+    match super::mmu_init::get_alloc_stage() {
+        super::mmu_init::AllocStage::Early => {
+            // Early stage: EARLY_PMD/PTE are static arrays in BSS (at KERNEL_LINK_ADDR).
+            // alloc_page_table returns their physical addresses.
+            // Convert using va_kernel_pa_offset (= KERNEL_LINK_ADDR - KERNEL_PHYS).
+            let offset = unsafe { super::memory_layout::KERNEL_MAP.va_kernel_pa_offset } as u64;
+            let virt_addr = phys_addr.wrapping_add(offset);
+            virt_addr as *mut PageTable
+        }
+        super::mmu_init::AllocStage::Fixmap => {
+            // Linear mapping should be available at this point
+            let virt_addr = super::memory_layout::phys_to_virt(super::memory_layout::PhysAddr::new(phys_addr));
+            virt_addr.bits() as *mut PageTable
+        }
+        super::mmu_init::AllocStage::Late => {
+            // Use linear mapping after buddy allocator is ready
+            let virt_addr = super::memory_layout::phys_to_virt(super::memory_layout::PhysAddr::new(phys_addr));
+            virt_addr.bits() as *mut PageTable
+        }
+    }
+}
+
+
 /// Typed handle to one page-table page (512 entries) — the single
 /// audited phys→table edge of the riscv64 mm tree (INV-RE-PT-*).
 #[derive(Clone, Copy)]
