@@ -503,6 +503,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             core::sync::atomic::AtomicU32::new(0);
         let n = SHARED_FILE_MMAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 32 {
+            // HOTPATH-PRINT: shared-file mmap tap; oh_hunt_prints_on gate + SHARED_FILE_MMAPS<32 budget
             crate::pr_warn!(
                 "mmap[{}] pid {} len={:#x} flags={:#x} fd={} off={:#x}",
                 n,
@@ -833,6 +834,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                                 .unwrap_or("")
                                 .trim_end_matches('\0');
+                            // HOTPATH-PRINT: RLIMIT_AS ENOMEM path only; budget NR<20
                             crate::pr_warn!(
                                 "mmap-enomem: RLIMIT_AS comm='{}' len={:#x} total_vm={:#x} limit={:#x}",
                                 comm,
@@ -1061,6 +1063,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     // oh-svc T1 attribution tap (known-gap 4):
                                     // rux:ohhunt (retired dfx=ohhunt) gates it.
                                     if crate::trace::EVENT_OHHUNT.armed() {
+                                        // HOTPATH-PRINT: drm mmap resolve-fail; EVENT_OHHUNT tracepoint gate
                                         crate::pr_warn!(
                                             "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
                                             fd,
@@ -1099,6 +1102,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                         if n < 20
                                             && crate::trace::EVENT_OHHUNT.armed()
                                         {
+                                            // HOTPATH-PRINT: drm mmap placement-ENOMEM; PEMAP_N<20 budget + EVENT_OHHUNT gate
                                             crate::pr_warn!(
                                                 "drm: mmap placement-ENOMEM pid={} fd={} len={:#x} err={}",
                                                 crate::process::current_pid(),
@@ -1204,6 +1208,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             let ops_tag = crate::fs::file::get_file_fd(fd as usize)
                                 .and_then(|f| f.get_ops().map(|o| o as *const _ as usize))
                                 .unwrap_or(0);
+                            // HOTPATH-PRINT: unmappable-fd ENODEV path only (device/fifo/socket, once per bad mmap)
                             crate::pr_info!(
                                 "MMAP-ENODEV pid {} fd {} len {:#x} prot {:#x} flags {:#x} ops {:#x} path {}",
                                 crate::process::current_pid(),
@@ -1414,6 +1419,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 && map_flags & map::MAP_ANONYMOUS != 0
                                 && actual_length >= 0x4000_0000;
                             if big_reserve {
+                                // HOTPATH-PRINT: PROTNONE-MAP big-reserve arm; >=1GB anon PROT_NONE filter (rare by construction)
                                 crate::pr_info!(
                                     "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
                                     crate::process::current_pid(),
@@ -1427,6 +1433,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     && actual_length >= 0x10_0000
                                     && !big_reserve
                                 {
+                                    // HOTPATH-PRINT: PROTNONE-MAP trace; EVENT_SYSCALLTRACE gate + >=1MB anon PROT_NONE filter
                                     crate::pr_info!(
                                         "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
                                         crate::process::current_pid(),
@@ -1435,6 +1442,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     );
                                 }
                                 if map_flags & map::MAP_FIXED != 0 {
+                                    // HOTPATH-PRINT: FIXED-MAP trace; EVENT_SYSCALLTRACE gate
                                     crate::pr_info!(
                                         "FIXED-MAP pid {} addr {:#x} len {:#x} prot {:#x} fd {}",
                                         crate::process::current_pid(),
@@ -1456,6 +1464,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 && !big_reserve
                             {
                                 vmap_budget_line(|| {
+                                    // HOTPATH-PRINT: PROTNONE-MAP-S trace; EVENT_VMAP gate + <1MB filter + vmap_budget_line 600-line cap
                                     crate::pr_info!(
                                         "PROTNONE-MAP-S pid {} addr {:#x} len {:#x}",
                                         crate::process::current_pid(),
@@ -1530,6 +1539,7 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
     // cap); the b91/b92 hunts re-arm with rux:vmap (retired dfx=vmap).
     if length >= 0x8_0000 {
         vmap_budget_line(|| {
+            // HOTPATH-PRINT: BIGMUNMAP report; >=512KB filter + vmap_budget_line 600-line cap
             crate::pr_info!(
                 "BIGMUNMAP pid {} addr {:#x} len {:#x}",
                 crate::process::current_pid(),
@@ -1610,6 +1620,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // the shadow's tmp before mremap) are entry/exit traced only under
     // rux:syscalltrace (retired dfx=syscalltrace) (two lines per call, same gating as MREMAP).
     if ret != 0 {
+        // HOTPATH-PRINT: mprotect failure path only (rare, CFI-shadow hunt)
         crate::pr_info!(
             "MPROTECT-FAIL pid {} addr {:#x} len {:#x} prot {:#x} -> {}",
             crate::process::current_pid(),
@@ -1630,6 +1641,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     } else if crate::trace::EVENT_SYSCALLTRACE.armed()
         && (args[2] as u32) & 0x6 == 0
     {
+        // HOTPATH-PRINT: MPROTECT-R trace; EVENT_SYSCALLTRACE gate + PROT_READ-only filter
         crate::pr_info!(
             "MPROTECT-R pid {} addr {:#x} len {:#x} prot {:#x}",
             crate::process::current_pid(),
@@ -1681,12 +1693,14 @@ fn mprotect_fail_forensics(addr: usize, length: usize) {
             gap_at = Some(covered_to);
         }
         match gap_at {
+            // HOTPATH-PRINT: mprotect fail forensics; called only from the ret!=0 arm (1630)
             Some(g) => crate::pr_info!(
                 "MPROTECT-FOR: range GAP at {:#x} (wanted {:#x}..{:#x})",
                 g,
                 addr,
                 end
             ),
+            // HOTPATH-PRINT: mprotect fail forensics; called only from the ret!=0 arm (1630)
             None => crate::pr_info!(
                 "MPROTECT-FOR: range COVERED (flags/perm class) {:#x}..{:#x}",
                 addr,
@@ -1704,9 +1718,11 @@ fn mprotect_fail_forensics(addr: usize, length: usize) {
                 continue;
             }
             if shown >= 6 {
+                // HOTPATH-PRINT: mprotect fail forensics; 6-row cap inside the failure-only report
                 crate::pr_info!("MPROTECT-FOR: ... (capped)");
                 break;
             }
+            // HOTPATH-PRINT: mprotect fail forensics; 6-row cap, failure-only report
             crate::pr_info!(
                 "MPROTECT-FOR: vma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                 vs,
@@ -1747,6 +1763,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     // b91-b93 hunts re-arm with rux:vmap (retired dfx=vmap).
     if prot & 0x2 != 0 {
         vmap_budget_line(|| {
+            // HOTPATH-PRINT: MPROTECT-RW report; PROT_WRITE filter + vmap_budget_line 600-line cap
             crate::pr_info!(
                 "MPROTECT-RW pid {} addr {:#x} len {:#x}",
                 crate::process::current_pid(),
@@ -1765,6 +1782,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     // line budget dies in pid-1 startup before any guard of interest.
     if prot == 0 && length <= 0x10_0000 {
         vmap_budget_line(|| {
+            // HOTPATH-PRINT: MPROTECT-DN report; PROT_NONE + <=1MB filter + vmap_budget_line cap
             crate::pr_info!(
                 "MPROTECT-DN pid {} addr {:#x} len {:#x} prot {:#x}",
                 crate::process::current_pid(),
@@ -1851,6 +1869,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                     // dlopen loop printed one line per load. Joins the
                     // rux:vmap (retired dfx=vmap) budget family.
                     vmap_budget_line(|| {
+                        // HOTPATH-PRINT: MPROTECT-CFI report; RELRO-finalize filter + vmap_budget_line cap
                         crate::pr_info!(
                             "MPROTECT-CFI pid {} addr {:#x} len {:#x} prot {:#x}",
                             crate::process::current_pid(),
@@ -2564,6 +2583,7 @@ fn copy_old_to_new_pages(
                 static DST_HIT_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if DST_HIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                    // HOTPATH-PRINT: mremap dst-replace forensics; budget DST_HIT_N<24, racing-leaf path only
                     crate::pr_info!(
                         "MREMAP-DST-REPLACE pid={} va={:#x} src={:#x} — replacing racing leaf",
                         crate::process::current_pid(),
@@ -2696,6 +2716,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
     // Failure returns are rare and always interesting (CFI-shadow hunt):
     // log ungated, success only under rux:syscalltrace (retired dfx=syscalltrace).
     if ret < 0 {
+        // HOTPATH-PRINT: mremap failure path only (rare, CFI-shadow hunt)
         crate::pr_info!(
             "MREMAP-FAIL pid {} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x} -> {}",
             crate::process::current_pid(),
@@ -2709,10 +2730,12 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
             .map(|t| { (*t).comm() }.to_vec())
             .unwrap_or_default();
         let comm = core::str::from_utf8(&comm_bytes).unwrap_or("?");
+        // HOTPATH-PRINT: MREMAP-ENTER trace; EVENT_SYSCALLTRACE gate
         crate::pr_info!(
             "MREMAP-ENTER pid={} comm={} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x}",
             pid, comm, args[0], args[1], args[2], args[3], args[4]
         );
+        // HOTPATH-PRINT: MREMAP-EXIT trace; EVENT_SYSCALLTRACE gate
         crate::pr_info!("MREMAP-EXIT pid={} -> {:#x}", pid, ret);
     }
     ret
@@ -2815,6 +2838,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         static MRC_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if MRC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+            // HOTPATH-PRINT: MREMAP-CFI presence sample; budget MRC_N<60, CFI-shadow shape filter
             crate::pr_info!(
                 "MREMAP-CFI pid {} old {:#x} len {:#x} -> new {:#x} ({})",
                 crate::process::current_pid(),

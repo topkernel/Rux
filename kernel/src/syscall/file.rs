@@ -102,6 +102,7 @@ fn bmsscan_watch_open(path: &str, flags: u32) {
             }
         }
     };
+    // HOTPATH-PRINT: bmscan hunt tap; fn-entry budget N<800 (BMSSCAN family), error-relevant opens only
     crate::pr_warn!(
         "BMSSCAN-OPEN[{}] pid={} {} {} {}{}{} parent={}",
         n,
@@ -131,6 +132,7 @@ pub fn bmsscan_watch_mkdir(path: &str) {
     let comm = crate::sched::current()
         .map(|t| t.comm_str().into_owned())
         .unwrap_or_default();
+    // HOTPATH-PRINT: bmscan hunt tap; fn-entry budget N<128 (BMSSCAN family)
     crate::pr_warn!(
         "BMSSCAN-MKDIR[{}] pid={} {} {}",
         n,
@@ -268,6 +270,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                                 core::sync::atomic::AtomicUsize::new(0);
                             let n = ATRES_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             if n < 16 {
+                                // HOTPATH-PRINT: drm-node resolve-fail forensics; budget ATRES_FAIL_N<16, card/renderD filter
                                 crate::pr_warn!(
                                     "openat-resolve-fail[{}] dirfd {} '{}' -> errno {} (pid {})",
                                     n,
@@ -305,6 +308,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                 OPATH_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
             };
             if n < 20 && pid >= 300 {
+                // HOTPATH-PRINT: O_PATH hunt; budget OPATH_TRACE_N<20, pid>=300 filter
                 crate::pr_info!(
                     "o-path open: '{}' flags={:#x} pid={}",
                     full_path, flags, pid
@@ -343,6 +347,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
         if claimed == pid && pid >= 418 {
             let n = SO_SLOT_N[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 64 {
+                // HOTPATH-PRINT: so-slot hunt; budget SO_SLOT_N<64, pid>=418 filter
                 crate::pr_info!("so-open[{}.{}] '{}' (pid {})", slot, n, full_path, pid);
             }
         }
@@ -606,6 +611,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                 core::sync::atomic::AtomicUsize::new(0);
             let n = DRIOpen_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 32 {
+                // HOTPATH-PRINT: dri open-fail forensics; budget DRIOpen_FAIL_N<32, /dev/dri error path only
                 crate::pr_warn!(
                     "dri-open-fail[{}] '{}' flags {:#x} -> errno {} (pid {})",
                     n,
@@ -625,6 +631,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                 core::sync::atomic::AtomicUsize::new(0);
             let n = DRIDIR_OPEN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 8 {
+                // HOTPATH-PRINT: dri dir-open trace; budget DRIDIR_OPEN_N<8
                 crate::pr_warn!(
                     "dri-dir-open[{}] '{}' flags {:#x} ok (pid {})",
                     n,
@@ -654,6 +661,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                 Err(e) => *e as i64,
             };
             let creating = (flags & O_CREAT) != 0;
+            // HOTPATH-PRINT: paramws hunt; budget N<48 (see counter above)
             crate::pr_info!(
                 "paramws open[{}] '{}' flags {:#x} creat={} -> {} (pid {})",
                 n,
@@ -959,6 +967,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
                                 stk.push_str(" --");
                             }
                         }
+                        // HOTPATH-PRINT: svcdbg LOOP hunt; shape-gated (#-prefixed path) + COUNT<3 budget
                         crate::pr_info!(
                             "svcdbg LOOP fstatat path='{}' dirfd={} dirfd-name={:?} rip={:#x} rsp={:#x} phys={:?} stk{}",
                             p, dirfd, fdpath, rip, ursp, phys, stk);
@@ -1013,6 +1022,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
                 if FSTAT_EP_ERR_N.fetch_add(
                     1, core::sync::atomic::Ordering::Relaxed) < 20
                 {
+                    // HOTPATH-PRINT: fstatat empty-path error path only; budget FSTAT_EP_ERR_N<20
                     crate::pr_info!(
                         "fstatat empty-path err: dirfd={} flags={:#x} ret={} pid={}",
                         dirfd, flags, e,
@@ -1061,6 +1071,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
                                 pathname_ptr, pb.len(), &mut pb)
                                 .map(|s| core::str::from_utf8(s).unwrap_or("?"))
                                 .unwrap_or("?");
+                            // HOTPATH-PRINT: fstatat error path only; budget n<40 + pid>=300 filter
                             crate::pr_info!(
                                 "fstatat err: dirfd={} path='{}' flags={:#x} ret={} pid={}",
                                 dirfd, shown, flags, e,
@@ -1179,6 +1190,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
                         let comm = crate::sched::current()
                             .map(|t| t.comm_str().into_owned())
                             .unwrap_or_default();
+                        // HOTPATH-PRINT: bmscan dents tap; budget DN<500 + first-slot filter
                         crate::pr_warn!(
                             "BMSSCAN-DENTS[{}] pid={} {} '{}' -> {}",
                             n, pid, comm, p, bytes
@@ -1224,6 +1236,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
                                     txt.push('.');
                                 }
                             }
+                            // HOTPATH-PRINT: dri getdents census; oh_hunt_prints_on gate + DRIDENTS_N<24 + /dev/dri filter
                             crate::pr_warn!(
                                 "dri-getdents[{}] '{}' -> {} bytes: {} (pid {})",
                                 n,
@@ -1233,6 +1246,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
                                 crate::process::current_pid()
                             );
                         }
+                        // HOTPATH-PRINT: dri getdents errno arm; same oh_hunt gate + DRIDENTS_N<24 budget
                         Err(e) => crate::pr_warn!(
                             "dri-getdents[{}] '{}' -> errno {} (pid {})",
                             n,
@@ -1377,6 +1391,7 @@ fn datatap_enabled(path: &str) -> bool {
 }
 
 fn datatap_log(op: &str, path: &str, detail: &str, rc: i64) {
+    // HOTPATH-PRINT: apptap; every caller gates through datatap_enabled (EVENT_DATATAP + /data filter)
     crate::pr_info!(
         "apptap {} '{}' {} -> {} (pid {})",
         op,
@@ -1432,6 +1447,7 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
             Ok(()) => 0,
             Err(e) => e as i64,
         };
+        // HOTPATH-PRINT: paramws mkdir tap; /dev/__parameters prefix only (rare fixed path, OH boot only)
         crate::pr_info!(
             "paramws mkdir '{}' mode {:#o} -> {} (pid {})",
             full_path,
@@ -1461,6 +1477,7 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
                 static MKDIRFAIL_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if MKDIRFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    // HOTPATH-PRINT: mkdir error path only (EEXIST excluded); budget MKDIRFAIL_N<8
                     crate::pr_info!(
                         "mkdirfail '{}' mode {:#o}: {} (pid {})",
                         full_path,
@@ -2298,6 +2315,7 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
                 // MntPhases index map above; unread phases stay 0 for
                 // early-return paths (EFAULT before capable, ...).
                 let p = ph.0;
+                // HOTPATH-PRINT: mntslow stall report; oh_hunt_prints_on gate + >2ms TSC filter + N budget (see above)
                 crate::pr_warn!(
                     "mntslow: {} cyc (~{} us) comm='{}' -> {} | us: src={} cap={} tgt={} cwd={} fst={} lkp={} op={} reg={}",
                     dt,
@@ -2455,6 +2473,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             // unbounded; it now lives behind the existing OH hunt-print
             // master gate (rux:ohhunt (retired dfx=ohhunt)).
             if args[3] & 8192 != 0 && crate::dfx::switches::oh_hunt_prints_on() {
+                // HOTPATH-PRINT: mount precheck-fail trace; oh_hunt_prints_on gate + MS_MOVE-only filter
                 crate::pr_warn!(
                     "mnt-precheck-fail MS_MOVE '{}' -> '{}': {} (pid {})",
                     source,
@@ -2531,6 +2550,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             static MSMV_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if MSMV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                // HOTPATH-PRINT: MSMOVE trace; oh_hunt_prints_on gate + MSMV_N<60 budget
                 crate::pr_info!(
                     "MSMOVE[{}] '{}' -> '{}' initns={} (pid {})",
                     MSMV_N.load(core::sync::atomic::Ordering::Relaxed),
@@ -2553,6 +2573,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             }) {
                 Ok(()) => 0,
                 Err(e) => {
+                    // HOTPATH-PRINT: vswitch-root failure path only (rare, always interesting)
                     crate::pr_warn!(
                         "vswitch-root syscall fail '{}' -> {}: {} (pid {})",
                         source_abs,
@@ -2602,6 +2623,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             static RMNT_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if RMNT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                // HOTPATH-PRINT: remount trace; oh_hunt_prints_on gate + RMNT_N<120 budget
                 crate::pr_info!(
                     "remount[{}] '{}' flags {:#x} (pid {})",
                     RMNT_N.load(core::sync::atomic::Ordering::Relaxed),
@@ -2652,6 +2674,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
                 static RMNT_FAIL_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if RMNT_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    // HOTPATH-PRINT: remount error path only; budget RMNT_FAIL_N<8
                     crate::pr_warn!(
                         "remount fail '{}' -> {} (pid {})",
                         target,
@@ -2711,6 +2734,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             static BINDFAIL_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if BINDFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                // HOTPATH-PRINT: bindmount error path only; budget BINDFAIL_N<8
                 crate::pr_info!(
                     "bindmount '{}' -> '{}' flags {:#x}: {}",
                     source,
@@ -2815,6 +2839,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
                 static MNT_FAIL_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if MNT_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                    // HOTPATH-PRINT: mount error path only; budget MNT_FAIL_N<16
                     crate::pr_info!(
                         "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
                         n,
@@ -2828,6 +2853,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             } else if (n < 128 || always)
                 && crate::dfx::switches::oh_hunt_prints_on()
             {
+                // HOTPATH-PRINT: mount success trace; oh_hunt_prints_on gate + n<128 budget
                 crate::pr_info!(
                     "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
                     n,
@@ -3005,6 +3031,7 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         static UMOUNTFAIL_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UMOUNTFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            // HOTPATH-PRINT: umount error path only; budget UMOUNTFAIL_N<8
             crate::pr_info!(
                 "umountfail '{}' flags {:#x}: {} (pid {})",
                 target,
@@ -3116,6 +3143,7 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
             let comm = crate::sched::current()
                 .map(|t| t.comm_str().into_owned())
                 .unwrap_or_default();
+            // HOTPATH-PRINT: bmscan access tap; fn-entry budget (BMSSCAN family, N<800)
             crate::pr_warn!(
                 "BMSSCAN-ACCESS[{}] pid={} {} '{}' mode={:#o} size={}",
                 n, crate::process::current_pid(), comm, full_path, mode, size_txt
@@ -4627,6 +4655,7 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
             static NOBLEDBG2_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if NOBLEDBG2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+                // HOTPATH-PRINT: NOBLEDBG tap; budget NOBLEDBG2_N<64
                 crate::pr_warn!("NOBLEDBG openat2 shortcut path={}", cleaned);
             }
         }
@@ -7001,6 +7030,7 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
             static MOVE_NT_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if MOVE_NT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                // HOTPATH-PRINT: movemount ENOENT error path only; budget MOVE_NT_N<40
                 crate::pr_info!(
                     "movemount-enoent target '{}' -> {} (pid {})",
                     target,
@@ -7055,6 +7085,7 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
                     static MOVE_OK_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if MOVE_OK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                        // HOTPATH-PRINT: movemount trace; oh_hunt_prints_on gate + MOVE_OK_N<120 budget
                         crate::pr_info!(
                             "movemount[{}] '{}' -> '{}' flags {:#x} (pid {})",
                             MOVE_OK_N.load(core::sync::atomic::Ordering::Relaxed),
@@ -7624,6 +7655,7 @@ pub fn sys_move_mount_tap(args: SyscallArgs) -> i64 {
         static MM_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if MM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            // HOTPATH-PRINT: movemount error path only; budget MM_N<8
             crate::pr_info!(
                 "movemount-fail[{}] from_fd={} to_fd={} -> {} (pid {})",
                 MM_N.load(core::sync::atomic::Ordering::Relaxed),
@@ -7658,6 +7690,7 @@ pub fn sys_mount_setattr_tap(args: SyscallArgs) -> i64 {
             } else {
                 alloc::string::String::from("<null>")
             };
+            // HOTPATH-PRINT: mount_setattr error path only; budget MS_N<8
             crate::pr_info!(
                 "mount_setattr-fail[{}] dfd={} path='{}' -> {} (pid {})",
                 MS_N.load(core::sync::atomic::Ordering::Relaxed),
@@ -7780,6 +7813,7 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
                             if MSA_MISS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                 < 40
                             {
+                                // HOTPATH-PRINT: mount_setattr no-cover report; budget MSA_MISS_N<40, abs!="/" filter
                                 crate::pr_info!(
                                     "mount_setattr no-cover '{}' (pid {})",
                                     abs,
@@ -7812,6 +7846,7 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
             static MSA_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if MSA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                // HOTPATH-PRINT: mount_setattr trace; oh_hunt_prints_on gate + MSA_N<80 budget
                 crate::pr_info!(
                     "mount_setattr[{}] set={:#x} clr={:#x}: flags {:#x} -> {:#x} (pid {})",
                     MSA_N.load(core::sync::atomic::Ordering::Relaxed),
