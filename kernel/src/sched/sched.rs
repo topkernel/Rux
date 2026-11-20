@@ -8908,12 +8908,7 @@ pub fn scheduler_tick() {
             // must not feed the leak window (see the TICK-GHOST gate at
             // this tick's tail for the capture story). One volatile pid
             // read; poison fails the compare.
-            let cur = if !cur.is_null() && unsafe {
-                core::ptr::read_volatile(
-                    (cur as *const u8)
-                        .add(crate::process::task::task_offsets::TASK_PID) as *const u32,
-                ) == TASK_POISON
-            } {
+            let cur = if !cur.is_null() && crate::sched::edges::task_pid_volatile(cur) == TASK_POISON {
                 core::ptr::null_mut()
             } else {
                 cur
@@ -10121,15 +10116,8 @@ pub fn scheduler_tick() {
         // SAFETY: read at compile-time Task offsets in the kernel
         // linear map (same contract as the R127 screen / poison probe
         // — cannot fault).
-        let ghost = unsafe {
-            let pid = core::ptr::read_volatile(
-                (current as *const u8)
-                    .add(crate::process::task::task_offsets::TASK_PID) as *const u32,
-            );
-            let state = core::ptr::read_volatile(
-                (current as *const u8)
-                    .add(crate::process::task::task_offsets::TASK_STATE) as *const u32,
-            );
+        let ghost = {
+            let (pid, state) = crate::sched::edges::task_poison_pair_volatile(current);
             pid == TASK_POISON || state == TASK_POISON
         };
         if ghost {
