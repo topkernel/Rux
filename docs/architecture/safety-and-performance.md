@@ -1113,6 +1113,25 @@ discipline; slowtask's `audit` call is the single-auditor CAS
 contract; oops.rs's putchar_no_lock is the panic-path console twin
 (F4-adjacent).
 
+**Escape-hatch audit (Layer 4.1, 2026-11-21)** — the tree-wide
+inventory of public raw-land hatches on the handle primitives, each
+with its per-site row (the unsafe_gate escape_hatch_check rule
+enforces: a public hatch without a doc-resolvable INV citation within
+25 lines fails the gate):
+
+| hatch | owner INV | contract headline |
+|---|---|---|
+| KPtr::as_ptr / ::phys | INV-KPTR-4 | address-of for DMA descriptor programming; the KPtr stays alive (no ownership transfer) |
+| KPtr::into_raw / from_raw | INV-KPTR-4 | ownership transfer through raw land; re-adopt exactly once or leak |
+| DmaSlot::as_ptr / ::phys | INV-DMA-2 | window-lifetime address for descriptor programming; block-lifetime rule applies |
+| TaskBorrow::as_ptr / from_raw | INV-TASKREF-1 | shared-borrow read/write only, no store, no yield; adopt-once under the caller's liveness proof |
+| TaskRef::as_ptr / into_raw | INV-TASKREF-1 | address-of under the live pin; into_raw transfers the pin (exactly-one task_put) |
+| File::get_private_data / private_data_ptr / take_private_data | INV-FS-FILEPRIV-1 | raw-word slot copies (open/close cell discipline); typed views must go through fs/unsafe_edges |
+
+Non-hatches verified: everything else in kernel/src/safety/ is either
+typed-safe surface or pub(crate); frame.rs/dma.rs windows are
+constructed through their INV'd ctors.
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
