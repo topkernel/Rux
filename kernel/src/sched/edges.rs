@@ -941,3 +941,20 @@ impl RbTimeline {
         }
     }
 }
+
+/// Shared view of a stored GRQ pointer (INV-SCE-3 twin for the lock
+/// guard's held `*const GlobalRunQueue`): the guard's construction
+/// passed the ready gate; read-only access through the guard.
+#[inline]
+pub fn grq_ptr_shared(p: *const GlobalRunQueue) -> &'static GlobalRunQueue {
+    // SAFETY: INV-SCE-3 — the guard holds the initialized GRQ.
+    unsafe { &*p }
+}
+
+/// Mutable view of a stored GRQ pointer (INV-SCE-3 twin): mutation is
+/// serialized by the guard's own lock.
+#[inline]
+pub fn grq_ptr_mut(p: *const GlobalRunQueue) -> &'static mut GlobalRunQueue {
+    // SAFETY: INV-SCE-3 — same gate; the caller holds the lock.
+    unsafe { &mut *(p as *mut GlobalRunQueue) }
+}

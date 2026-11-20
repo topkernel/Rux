@@ -588,7 +588,7 @@ impl<'a> GrqGuard<'a> {
         // ahead of the word (the orphaned-word producer).
         grq_site_mark_at(cpu, 0);
         // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
-        unsafe { (*self.grq).lock.unlock() };
+        crate::sched::edges::grq_ptr_mut(self.grq).lock.unlock();
         core::mem::forget(self);
         flags
     }
@@ -598,14 +598,14 @@ impl core::ops::Deref for GrqGuard<'_> {
     type Target = GlobalRunQueue;
     fn deref(&self) -> &Self::Target {
         // SAFETY: we hold the GRQ lock via this guard, so shared access is valid.
-        unsafe { &*self.grq }
+        crate::sched::edges::grq_ptr_shared(self.grq)
     }
 }
 
 impl core::ops::DerefMut for GrqGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: we hold the GRQ lock via this guard, so exclusive access is guaranteed.
-        unsafe { &mut *self.grq }
+        crate::sched::edges::grq_ptr_mut(self.grq)
     }
 }
 
@@ -622,7 +622,7 @@ impl Drop for GrqGuard<'_> {
         // grq-source-fix: site-clear + the single word store below —
         // no separate tracker step (see lock_irqsave_site).
         grq_site_mark_at(cpu, 0);
-        unsafe { (*self.grq).lock.unlock() };
+        crate::sched::edges::grq_ptr_mut(self.grq).lock.unlock();
         crate::arch::cpu::restore_irq(self.flags);
     }
 }
@@ -637,21 +637,21 @@ impl core::ops::Deref for GrqPlainGuard<'_> {
     type Target = GlobalRunQueue;
     fn deref(&self) -> &Self::Target {
         // SAFETY: we hold the GRQ lock via this guard, so shared access is valid.
-        unsafe { &*self.grq }
+        crate::sched::edges::grq_ptr_shared(self.grq)
     }
 }
 
 impl core::ops::DerefMut for GrqPlainGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: we hold the GRQ lock via this guard, so exclusive access is guaranteed.
-        unsafe { &mut *self.grq }
+        crate::sched::edges::grq_ptr_mut(self.grq)
     }
 }
 
 impl Drop for GrqPlainGuard<'_> {
     fn drop(&mut self) {
         // SAFETY: we hold the GRQ lock via this guard; Drop runs exactly once.
-        unsafe { (*self.grq).lock.unlock() };
+        crate::sched::edges::grq_ptr_mut(self.grq).lock.unlock();
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
@@ -6884,7 +6884,7 @@ pub fn wake_up_enqueue_opt(
                             // kernel-stack entry frame region.
                             unsafe {
                                 for k in 0..21 {
-                                    uf[k] = core::ptr::read_volatile(base.add(k));
+                                    uf[k] = crate::sync::edges::read_volatile_u64((base as usize) + 8 * k);
                                 }
                             }
                             true

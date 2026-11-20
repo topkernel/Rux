@@ -853,7 +853,7 @@ pub fn ffrt_chain_walk(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+                Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -1112,7 +1112,7 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string:
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+                Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -1949,7 +1949,7 @@ pub fn fuxw_word_shape(task: *mut crate::process::Task, uaddr: u64) -> Option<al
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+                Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -2033,7 +2033,7 @@ pub fn deep_ufw(task: *mut crate::process::Task) -> Option<alloc::string::String
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+                Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -2079,7 +2079,7 @@ pub fn fuxwatch_read_word(root_ppn: u64) -> u32 {
                 crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (addr & 0xfff)),
             );
             // SAFETY: linear-mapped RAM word.
-            unsafe { core::ptr::read_volatile(kv.as_usize() as *const u32) }
+            crate::sync::edges::read_volatile_u32(kv.as_usize())
         }
         _ => 0xffff_ffff,
     }
@@ -2129,7 +2129,7 @@ pub fn fuxwatch_read_word_at(root_ppn: u64, addr: u64) -> u32 {
                 crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (addr & 0xfff)),
             );
             // SAFETY: linear-mapped RAM word.
-            unsafe { core::ptr::read_volatile(kv.as_usize() as *const u32) }
+            crate::sync::edges::read_volatile_u32(kv.as_usize())
         }
         _ => 0xffff_ffff,
     }
@@ -2160,7 +2160,7 @@ fn rd_word(root: u64, va: u64) -> Option<u64> {
                 crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
             );
             // SAFETY: linear-mapped RAM word.
-            Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+            Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
         }
         _ => None,
     }
@@ -2492,7 +2492,7 @@ pub fn oh67_poll_decode(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+                Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -2568,7 +2568,7 @@ pub fn oh67_m2_decode() -> alloc::string::String {
                         ),
                     );
                     // SAFETY: linear-mapped RAM word.
-                    Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+                    Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
                 }
                 _ => None,
             }
@@ -4577,7 +4577,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
                             ),
                         );
                         // SAFETY: linear-mapped RAM word.
-                        Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+                        Some(crate::sync::edges::read_volatile_u64(kv.as_usize()))
                     }
                     _ => None,
                 }
@@ -7665,7 +7665,7 @@ pub fn futex_requeue(
         let mut head1 = HASH_HEADS[futex_hash(&key1)].lock_irqsave();
         if is_cmp {
             // SAFETY: exception-table protected read; unmapped → EFAULT.
-            match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
+            match crate::sync::edges::word_read(uaddr) {
                 Some(uval) if uval == cmpval => {}
                 Some(_) => return -EAGAIN as i64,
                 None => return -EFAULT as i64,
@@ -7714,7 +7714,7 @@ pub fn futex_requeue(
         // (reference futex_get_value_locked + EAGAIN at out_unlock).
         if is_cmp {
             // SAFETY: exception-table protected read; unmapped → EFAULT.
-            match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
+            match crate::sync::edges::word_read(uaddr) {
                 Some(uval) if uval == cmpval => {}
                 Some(_) => return -EAGAIN as i64,
                 None => return -EFAULT as i64,
@@ -7831,7 +7831,7 @@ pub fn futex_requeue(
         // always resident here, so the observable contract matches.
         if is_cmp {
             // SAFETY: exception-table protected read; unmapped → EFAULT.
-            match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
+            match crate::sync::edges::word_read(uaddr) {
                 Some(uval) if uval == cmpval => {}
                 Some(_) => return -EAGAIN as i64,
                 None => return -EFAULT as i64,
@@ -8100,7 +8100,7 @@ pub fn dfx_dump_futex_state(uaddr: usize, parked_pid: u32) {
     // The user word and its neighbours (16 words starting uaddr-16).
     for i in 0..4 {
         let a = uaddr + 16 * i;
-        match unsafe { crate::arch::uaccess::get_user(a as *const u32) } {
+        match crate::sync::edges::word_read(a) {
             Some(v) => {
                 taskdump_raw_line(b" +");
                 taskdump_dec(i as u64 * 4);
