@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # ft03-ab.sh — ftest03 isolation A/B (LTP r24 handoff): N boots per kernel,
 # debug builds, private stress rootfs, KVM. Verdicts from the child TFAIL
 # lines (DATA checks) per boot.

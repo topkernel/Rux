@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Generate the test-coverage ledger (docs/test/test-coverage.md).
 
 The ledger answers one question per subsystem: what actually exercises

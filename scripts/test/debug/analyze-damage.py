@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """analyze-damage.py — post-mortem for the no-snapshot repro run.
 
 Compares the guest-written image's /tmp/rdata blocks against the original

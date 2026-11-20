@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 # faultaround_boot.py — boot the x86_64 kernel with the faultaround probe
 # as init (loader_vma_boot.py shape) and report the verdict for the
 # mm-side fault-around change (session 14).

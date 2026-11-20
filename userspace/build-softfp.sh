@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # Rux OS - pinned-march soft-fp overlay build (BUG-S005 / S004 hygiene)
 #
 # Compiles gcc's soft-fp quad-float routines with the project march pin

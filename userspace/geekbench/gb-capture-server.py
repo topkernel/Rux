@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """gb-capture-server.py — TLS server that captures the Geekbench result
 upload POST bodies. Geekbench (tryout build) only exposes scores inside
 the HTTPS upload to browser.geekbench.com; the browser result page is

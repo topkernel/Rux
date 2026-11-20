@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Hot-path print guard (print-audit lane, 2026-11).
 
 One un-gated pr_err! on a per-op path costs ~0.4-0.7 ms of polled-16550

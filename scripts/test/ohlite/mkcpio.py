@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Pack a staging directory tree as gzip'd cpio newc (distro ramdisk shape).
 
 Usage: mkcpio.py <staging-dir> <out.img>

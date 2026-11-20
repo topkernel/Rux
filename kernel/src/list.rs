@@ -15,6 +15,13 @@
 //! - Intrusive list: list_head is embedded directly in data structures
 //! - Highly generic: same list can be used for different data types
 //! - Small memory overhead: each node only needs 2 pointers (16 bytes)
+//!
+//! INV-LIST-1 (F15-registered primitive, safety-and-performance.md):
+//! every unsafe method's contract is "the caller holds the embedding
+//! structure's lock and passes nodes that are live members of THIS
+//! list or freshly constructed" — the per-method Safety notes below
+//! restate that contract per shape. This module IS the primitive core
+//! (the plan's round-C class (a)); it stays unsafe-fn by design.
 
 use core::ptr;
 

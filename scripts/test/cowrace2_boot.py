@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """cowrace2_boot.py — boot the x86_64 Rux kernel with the cowrace2 probe as
 init and judge COW/fork CONTENT integrity (oh-crash lane, 50th agent).
 

@@ -1,7 +1,7 @@
+#!/bin/bash
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/bin/bash
 # run-probe.sh — boot the probe image (Rux kernel or reference kernel)
 # with /test/aes_probe as init and capture its serial output.
 #

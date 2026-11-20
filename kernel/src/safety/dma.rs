@@ -216,6 +216,7 @@ pub struct DmaSlot<T: ?Sized> {
 impl<T: ?Sized> DmaSlot<T> {
     /// Raw address (escape hatch for descriptor programming; the
     /// block-lifetime rule still applies).
+    /// (INV-DMA-2 hatch row: window-lifetime address, no ownership.)
     pub fn as_ptr(&self) -> *mut T {
         self.ptr.as_ptr()
     }

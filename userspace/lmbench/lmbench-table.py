@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """lmbench-table.py — standing refresh: median of N Rux passes + the
 frozen reference column (run/lmbench-refkvm.txt), using make-report's
 family-aware extraction. Rows where some passes starved use the median

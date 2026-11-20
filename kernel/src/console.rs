@@ -1036,9 +1036,9 @@ pub fn getchar() -> Option<u8> {
         // (same ownership rule as the twins: once armed, DR belongs to
         // the IRQ handler).
         if !UART_IRQ_ARMED.load(Ordering::Acquire) && pl011_rx_pending() {
-            // SAFETY: DR read consumes the byte; no handler competes for
-            // it while the armed flag is clear.
-            let c = unsafe { core::ptr::read_volatile(uart_virt_addr() as *const u32) as u8 };
+            // DR read consumes the byte; no handler competes for it
+            // while the armed flag is clear (INV-MMIO-1 shape).
+            let c = crate::safety::mmio::MmioRegion::new(uart_virt_addr(), 4).read_u32(0) as u8;
             return process_input(c);
         }
     }
@@ -1095,8 +1095,9 @@ pub fn uart_has_data() -> bool {
 /// aarch64 PL011 helper: RX FIFO empty (FR bit 4)
 #[cfg(feature = "aarch64")]
 fn pl011_rx_pending() -> bool {
-    // SAFETY: FR is a pure flag register at the live PL011 base.
-    unsafe { core::ptr::read_volatile((uart_virt_addr() + 0x18) as *const u32) & (1 << 4) == 0 }
+    // FR is a pure flag register at the live PL011 base (the fixmap VA
+    // once installed, the identity address before — INV-MMIO-1 shape).
+    crate::safety::mmio::MmioRegion::new(uart_virt_addr() + 0x18, 4).read_u32(0) & (1 << 4) == 0
 }
 
 /// aarch64 PL011: interrupt-driven RX on GICv3 SPI 1 (INTID 33; the DTB
@@ -1108,17 +1109,20 @@ fn pl011_rx_pending() -> bool {
 pub fn init_irq() {
     fn pl011_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
         let mut received = 0usize;
-        // SAFETY: DR reads consume RX bytes the handler owns; ICR is the
-        // clear register (RX | receive-timeout).
-        unsafe {
+        // DR reads consume RX bytes the handler owns; ICR is the clear
+        // register (RX | receive-timeout) — all through the MMIO region
+        // edge (INV-MMIO-1/2/3).
+        {
+            let dr = crate::safety::mmio::MmioRegion::new(uart_virt_addr(), 4);
             while pl011_rx_pending() {
-                let c = core::ptr::read_volatile(uart_virt_addr() as *const u32) as u8;
+                let c = dr.read_u32(0) as u8;
                 UART_RX_BUF.put(c);
                 tty_isig_record(c);
                 uart_rx_debug_magic(c);
                 received += 1;
             }
-            core::ptr::write_volatile((uart_virt_addr() + 0x44) as *mut u32, (1 << 4) | (1 << 6));
+            crate::safety::mmio::MmioRegion::new(uart_virt_addr() + 0x44, 4)
+                .write_u32(0, (1 << 4) | (1 << 6));
         }
         if received > 0 {
             static FIRST_RX: core::sync::atomic::AtomicBool =
@@ -1136,17 +1140,20 @@ pub fn init_irq() {
     // Drain bytes that reached the FIFO before the IRQ was armed (same
     // cold-boot first-command family as the twins' pre-arm drain: without
     // it, early input is capped by the 16-byte FIFO).
-    // SAFETY: single-CPU boot context with the GIC line still masked.
-    unsafe {
+    // Single-CPU boot context with the GIC line still masked; the DR
+    // drain and the IMSC arm go through the MMIO region edge.
+    {
+        let dr = crate::safety::mmio::MmioRegion::new(uart_virt_addr(), 4);
         while pl011_rx_pending() {
-            let c = core::ptr::read_volatile(uart_virt_addr() as *const u32) as u8;
+            let c = dr.read_u32(0) as u8;
             UART_RX_BUF.put(c);
         }
         // Arm RX (IMSC bit 4) AND the receive-timeout interrupt (bit 6):
         // the default FIFO threshold is 2 bytes, so a single typed char
         // raises only the 32-cycle RT interrupt — without RTIM the lone
         // keystroke never interrupts at all.
-        core::ptr::write_volatile((uart_virt_addr() + 0x38) as *mut u32, (1 << 4) | (1 << 6));
+        crate::safety::mmio::MmioRegion::new(uart_virt_addr() + 0x38, 4)
+            .write_u32(0, (1 << 4) | (1 << 6));
     }
     if crate::interrupt::request_irq(
         33, // SPI 1 → INTID 33

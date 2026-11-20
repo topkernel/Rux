@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """vma_storm_boot.py — boot the Rux kernel with the vma_storm VMA-race
 probe as init, stream the serial log, report the verdict.
 

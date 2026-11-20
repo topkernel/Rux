@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """oh2_probe_boot.py — boot the Rux kernel with the OpenHarmony Phase 2
 pre-work probe (memfd + ashmem + access_token_id) as init, stream the
 serial log, report the verdict.

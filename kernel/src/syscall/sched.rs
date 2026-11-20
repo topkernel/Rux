@@ -6,6 +6,8 @@
 //!
 //! Includes: futex, sched_yield, getpriority, setpriority
 
+#![forbid(unsafe_code)]
+
 use super::*;
 
 /// PRIO_PROCESS - Process priority
@@ -610,15 +612,9 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
             sched_util_min: 0,
             sched_util_max: core::u32::MAX,
         };
-        // Header-truncated out-copy (copy_len <= size_of::<SchedAttr>()).
-        // SAFETY: `attr` is a live local, aligned, plain data, and
-        // copy_len was clamped to its size above.
-        let src = unsafe {
-            core::slice::from_raw_parts(
-                &attr as *const SchedAttr as *const u8,
-                copy_len,
-            )
-        };
+        // Header-truncated out-copy (copy_len <= size_of::<SchedAttr>()):
+        // the head of the live local's byte image (INV-CBYTES-1).
+        let src = &crate::safety::bytes::bytes_of(&attr)[..copy_len];
         let uncopied = crate::arch::uaccess_safe::UserSlice::new(attr_ptr as usize, copy_len)
             .copy_out(src);
         if uncopied != 0 {
@@ -688,11 +684,22 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     if uncopied != 0 {
         return -(errno::EFAULT as i64);
     }
-    // SAFETY: attr_storage is a fully-initialized byte buffer of exactly
-    // sizeof(SchedAttr) and SchedAttr is repr(C) plain data.
-    let attr = unsafe {
-        core::ptr::read_unaligned(attr_storage.as_ptr() as *const SchedAttr)
-    };
+    // attr_storage is a fully-initialized byte buffer of exactly
+    // sizeof(SchedAttr) and SchedAttr is repr(C) plain data
+    // (INV-CBYTES-2 unaligned rebuild; from_bytes checks the bound).
+    let attr = crate::safety::bytes::from_bytes::<SchedAttr>(&attr_storage)
+        .unwrap_or(SchedAttr {
+            size: 0,
+            sched_policy: 0,
+            sched_flags: 0,
+            sched_nice: 0,
+            sched_priority: 0,
+            sched_runtime: 0,
+            sched_deadline: 0,
+            sched_period: 0,
+            sched_util_min: 0,
+            sched_util_max: 0,
+        });
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {

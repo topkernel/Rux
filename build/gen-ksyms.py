@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """Generate the kernel symbol table used for runtime symbolization.
 
 The kernel is built with Rust's v0 mangling, so the raw ELF symbol

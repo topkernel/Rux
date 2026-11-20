@@ -56,6 +56,9 @@ impl TaskBorrow {
     /// Escape hatch for APIs still taking raw pointers (queue/hash
     /// internals). The borrow discipline above still applies to the
     /// caller's use of the returned pointer.
+    /// (INV-TASKREF-1 hatch row: shared-borrow read/write, no store,
+    /// no yield — see the safety-and-performance audit table.)
+    /// (INV-TASKREF-1 hatch row: address-of under the live pin.)
     pub fn as_ptr(&self) -> *mut Task {
         self.0.as_ptr()
     }
@@ -65,6 +68,8 @@ impl TaskBorrow {
     /// handles, walk-callback pointers). The caller proves the same
     /// contract `lookup` documents: a short read/write in syscall
     /// context on this CPU, no yield, no store.
+    /// (INV-TASKREF-1 hatch row: adopt-once under the caller's
+    /// liveness proof.)
     ///
     /// # Safety
     /// `p` must point at a live task (the caller's borrow/pin/tree-lock
@@ -131,6 +136,7 @@ impl TaskRef {
 
     /// Escape hatch: keep the pin, hand out the raw pointer. The
     /// caller becomes responsible for the eventual `task_put`.
+    /// (INV-TASKREF-1 hatch row: pin transfer, exactly-one task_put.)
     pub fn into_raw(self) -> *mut Task {
         let p = self.0.as_ptr();
         core::mem::forget(self);

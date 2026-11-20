@@ -1440,15 +1440,11 @@ pub fn iblock_extent_mut(i_block: &mut [u32; 15], index: usize) -> Option<&mut E
     if off + core::mem::size_of::<Ext4Extent>() > core::mem::size_of::<u32>() * 15 {
         return None;
     }
-    // SAFETY: bounds checked above; repr(C) layout; the array's u32
-    // alignment implies Ext4Extent's u32 alignment.
-    unsafe {
-        Some(&mut *(
-            core::ptr::from_mut(i_block)
-                .cast::<u8>()
-                .add(off) as *mut Ext4Extent
-        ))
-    }
+    // Bounds checked above; the u32-array's alignment covers
+    // Ext4Extent's (the shared header-view edge).
+    crate::net::buffer::hdr_view_mut::<Ext4Extent>(
+        crate::safety::bytes::bytes_of_mut(i_block)[off..].as_mut(),
+    )
 }
 
 fn node_extents(data: &[u8], count: usize) -> &[Ext4Extent] {
@@ -1526,17 +1522,11 @@ fn alloc_meta_block(
     };
     let blk = allocator.alloc_block(goal)?;
     *meta_sectors += (fs.block_size / 512) as u64;
-    // SAFETY: fs.device is valid; blk is freshly allocated.
-    unsafe {
-        let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
-        for byte in (*bh).b_data.iter_mut() {
-            *byte = 0;
-        }
-        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-        let sync_res = bio::sync_dirty_buffer(bh);
-        bio::brelse(bh);
-        sync_res?;
-    }
+    // Zero the fresh metadata block (the sync edge owns the protocol).
+    bio::with_block_mut(fs.device, blk, |data, _| {
+        data.fill(0);
+        Ok(())
+    })?;
     Ok(blk)
 }
 
@@ -1586,32 +1576,15 @@ fn write_node(
     if fs.metadata_csum && data.len() >= 4 {
         let mut sealed = alloc::vec::Vec::from(data);
         crate::fs::ext4::csum::extent_block_csum_set(csum_seed, &mut sealed);
-        let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
-        // SAFETY: bh pinned by bread; whole-block copy into b_data.
-        unsafe {
-            (*bh).b_data.copy_from_slice(&sealed);
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-            }
-        }
-        let sync_res = bio::sync_dirty_buffer(bh);
-        bio::brelse(bh);
-        return sync_res;
+        return bio::with_block_mut(fs.device, blk, |data, _| {
+            data.copy_from_slice(&sealed);
+            Ok(())
+        });
     }
-    let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
-    // SAFETY: bh pinned by bread; whole-block copy + dirty mark.
-    unsafe {
-        (*bh).b_data.copy_from_slice(data);
-        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-        // Family b: journal registration (see the sealed branch above).
-        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-        }
-    }
-    let sync_res = bio::sync_dirty_buffer(bh);
-    bio::brelse(bh);
-    sync_res
+    bio::with_block_mut(fs.device, blk, |block_data, _| {
+        block_data.copy_from_slice(data);
+        Ok(())
+    })
 }
 
 /// Initialize an empty node header in `data` (already zeroed).

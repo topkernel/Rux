@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
 
-#!/usr/bin/env python3
 """sysfs_drm_probe_boot.py — boot the Rux x86_64 kernel with the DRM/KMS probe
 as init and report the verdict.
 
