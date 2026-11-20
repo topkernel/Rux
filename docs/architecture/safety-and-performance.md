@@ -731,6 +731,18 @@ deref; BLOCK_CACHE is an OnceSlot now (INV-SLOT-1/2).
 *Reference:* `buffer_head`'s `b_hash`/`b_assoc_map` intrusive links —
 the same C shape with no type discipline at all.
 
+**F12. boot provenance (init.rs)** — owner `kernel/src/init.rs`.
+*Reads/writes:* PID 1's task constructed IN a static storage slot
+(INIT_TASK_STORAGE) before the allocator, scheduler, or any typed
+lifecycle exists; the address-space switch into the fresh user root;
+the handoff of the child's pt_regs frame. *Why no safe shape exists:*
+there is nothing to borrow FROM yet — no fdtable, no pid hash, no
+scheduler; every typed handle in the kernel presumes a state this code
+is CREATING (the same reason main.rs's boot provenance is F-family).
+*Reference:* `start_kernel`/`rest_init` — C has no shapes to violate.
+*Containment:* runs once, BSP, IRQs off; the ELF parse itself rides
+CopyBytes (from_bytes is safe since round-5 batch 9).
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
