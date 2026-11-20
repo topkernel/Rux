@@ -129,11 +129,9 @@ fn superblock_on_disk(disk: &[u8]) -> &superblock::Ext4SuperBlockOnDisk {
         view.len() >= core::mem::size_of::<superblock::Ext4SuperBlockOnDisk>(),
         "block-0 read too small for the on-disk superblock"
     );
-    // SAFETY: view covers at least the struct; the struct is #[repr(C)]
-    // of integer fields read only (no reference fields), and every read
-    // below goes through unaligned-safe loads on riscv64/x86_64 alike
-    // because the on-disk image itself was DMA'd byte-aligned.
-    unsafe { &*(view.as_ptr() as *const superblock::Ext4SuperBlockOnDisk) }
+    // The shared header-view edge (INH-BUF-3 shape): view covers at
+    // least the struct; #[repr(C)] integer fields, unaligned-safe loads.
+    crate::net::buffer::hdr_view::<superblock::Ext4SuperBlockOnDisk>(view).unwrap_or_else(|| unreachable!())
 }
 
 pub struct Ext4FileSystem {
@@ -494,14 +492,10 @@ impl Ext4FileSystem {
                     // (unsafe-slim r3) slice-indexed source; the one raw
                     // copy moves copy_len bytes into the packed struct.
                     let src_bytes = &gd_data[gd_offset..gd_offset + copy_len];
-                    // SAFETY: src_bytes has exactly copy_len readable bytes
-                    // and gd is a live local of at least that size.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src_bytes.as_ptr(),
-                            &mut gd as *mut superblock::Ext4GroupDesc as *mut u8,
-                            copy_len,
-                        );
+                    // The packed on-disk group descriptor as a value
+                    // (CopyBytes owns the byte-image read).
+                    if let Some(g) = crate::safety::bytes::from_bytes::<superblock::Ext4GroupDesc>(src_bytes) {
+                        gd = g;
                     }
                 }
 
@@ -644,17 +638,13 @@ impl Ext4FileSystem {
 
         // Parse inode (slot-clamped local copy; the struct tail stays
         // zeroed when s_inode_size < sizeof(Ext4InodeOnDisk)).
+        // The on-disk inode as a value (CopyBytes owns the read; the
+        // struct tail stays zeroed when copy_len < sizeof).
         let mut on_disk = inode::Ext4InodeOnDisk::default();
         {
-            // SAFETY: copy_len bytes at data+inode_offset are within the
-            // bounds-checked buffer; the destination is a fresh local.
-            let dst = unsafe {
-                core::slice::from_raw_parts_mut(
-                    &mut on_disk as *mut _ as *mut u8,
-                    copy_len,
-                )
-            };
-            dst.copy_from_slice(&data[inode_offset..inode_offset + copy_len]);
+            let src = &data[inode_offset..inode_offset + copy_len];
+            let dst = crate::safety::bytes::bytes_of_mut(&mut on_disk);
+            dst[..copy_len].copy_from_slice(src);
         }
         let result = inode::Ext4Inode::from_disk(&on_disk, ino);
 
@@ -920,13 +910,8 @@ impl Ext4FileSystem {
 
         // Fast symlink: target stored in block array (<= 60 bytes)
         if size <= 60 && inode.blocks == 0 {
-            let bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &inode.block[0] as *const _ as *const u8,
-                    size
-                )
-            };
-            return Ok(String::from_utf8_lossy(bytes).into_owned());
+            let all = crate::safety::bytes::bytes_of(&inode.block);
+            return Ok(String::from_utf8_lossy(&all[..size]).into_owned());
         }
 
         // Slow symlink: target stored in data blocks
@@ -1263,9 +1248,7 @@ fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<
     // ext4 short symbolic link threshold is usually 60 bytes
     if size <= 60 && inode.blocks == 0 {
         // Read directly from block array
-        let block_data = unsafe {
-            core::slice::from_raw_parts(inode.block.as_ptr() as *const u8, 60)
-        };
+        let block_data = crate::safety::bytes::bytes_of(&inode.block);
         buffer[..size].copy_from_slice(&block_data[..size]);
     } else {
         // Long symbolic link: read from data block
@@ -3254,7 +3237,7 @@ fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<
 /// the Ext4FileSystem instance.
 ///
 /// SAFETY: `base` must be an ext4 inode (EXT4_INODE_OPS).
-pub unsafe fn iget_by_ino(
+pub fn iget_by_ino(
     base: &Inode,
     ino: u64,
 ) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
@@ -3492,11 +3475,10 @@ pub fn mounted_ext4_fs() -> Option<&'static Ext4FileSystem> {
 /// Get Ext4FileSystem pointer from inode's private_data
 fn get_ext4_fs_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32> {
     let fs_ptr = inode.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
-    // SAFETY: fs_ptr was stored as a raw pointer to the global Ext4FileSystem during
-    // create_vfs_inode; it is valid for the lifetime of the mount.
-    unsafe {
-        Ok(&*(fs_ptr as *const Ext4FileSystem))
-    }
+    // SAFETY: fs_ptr was stored as a raw pointer to the global
+    // Ext4FileSystem during create_vfs_inode; valid for the mount's
+    // lifetime (the ONE audited inode->fs resolver).
+    Ok(unsafe { &*(fs_ptr as *const Ext4FileSystem) })
 }
 
 /// Mutating-op variant of get_ext4_fs_from_inode: a read-only-mounted ext4

@@ -130,11 +130,14 @@ fn vlen_fits() -> bool {
 /// VS must currently be Initial (not Dirty — nothing may have touched
 /// the registers between the probe and this call).
 #[inline]
-unsafe fn vs_disable() {
-    let sstatus: u64;
-    asm!("csrr {}, sstatus", out(reg) sstatus);
-    let new_sstatus = sstatus & !SR_VS;
-    asm!("csrw sstatus, {}", in(reg) new_sstatus);
+fn vs_disable() {
+    // SAFETY: sstatus CSR RMW (VS field, register-only).
+    unsafe {
+        let sstatus: u64;
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+        let new_sstatus = sstatus & !SR_VS;
+        asm!("csrw sstatus, {}", in(reg) new_sstatus);
+    }
 }
 
 static VLEN_WARNED: AtomicBool = AtomicBool::new(false);
@@ -152,7 +155,7 @@ static VLEN_WARNED: AtomicBool = AtomicBool::new(false);
 /// Must be called from the current task's trap context (illegal-
 /// instruction handler) on a hart that has V. Interrupts are disabled
 /// in the trap entry path, so the zeroing is atomic w.r.t. switches.
-pub unsafe fn vstate_first_use_init() -> bool {
+pub fn vstate_first_use_init() -> bool {
     if !hart_has_v() {
         return false;
     }
@@ -171,40 +174,42 @@ pub unsafe fn vstate_first_use_init() -> bool {
         return false;
     }
     // SAFETY: VS is now Initial; writing vector registers auto-dirties.
-    asm!(
-        ".word {vsetvli}",
-        ".word {vsetvli}",
-        ".word {v0}",  ".word {v1}",  ".word {v2}",  ".word {v3}",
-        ".word {v4}",  ".word {v5}",  ".word {v6}",  ".word {v7}",
-        ".word {v8}",  ".word {v9}",  ".word {v10}", ".word {v11}",
-        ".word {v12}", ".word {v13}", ".word {v14}", ".word {v15}",
-        ".word {v16}", ".word {v17}", ".word {v18}", ".word {v19}",
-        ".word {v20}", ".word {v21}", ".word {v22}", ".word {v23}",
-        ".word {v24}", ".word {v25}", ".word {v26}", ".word {v27}",
-        ".word {v28}", ".word {v29}", ".word {v30}", ".word {v31}",
-        ".word {vstart0}",
-        ".word {vcsr0}",
-        vsetvli = const VSETVLI_E8M1,
-        v0 = const vmv_v_i0(0),  v1 = const vmv_v_i0(1),
-        v2 = const vmv_v_i0(2),  v3 = const vmv_v_i0(3),
-        v4 = const vmv_v_i0(4),  v5 = const vmv_v_i0(5),
-        v6 = const vmv_v_i0(6),  v7 = const vmv_v_i0(7),
-        v8 = const vmv_v_i0(8),  v9 = const vmv_v_i0(9),
-        v10 = const vmv_v_i0(10), v11 = const vmv_v_i0(11),
-        v12 = const vmv_v_i0(12), v13 = const vmv_v_i0(13),
-        v14 = const vmv_v_i0(14), v15 = const vmv_v_i0(15),
-        v16 = const vmv_v_i0(16), v17 = const vmv_v_i0(17),
-        v18 = const vmv_v_i0(18), v19 = const vmv_v_i0(19),
-        v20 = const vmv_v_i0(20), v21 = const vmv_v_i0(21),
-        v22 = const vmv_v_i0(22), v23 = const vmv_v_i0(23),
-        v24 = const vmv_v_i0(24), v25 = const vmv_v_i0(25),
-        v26 = const vmv_v_i0(26), v27 = const vmv_v_i0(27),
-        v28 = const vmv_v_i0(28), v29 = const vmv_v_i0(29),
-        v30 = const vmv_v_i0(30), v31 = const vmv_v_i0(31),
-        vstart0 = const CSRW_VSTART_X0,
-        vcsr0 = const CSRW_VCSR_X0,
-        options(nostack),
-    );
+    unsafe {
+        asm!(
+                ".word {vsetvli}",
+                ".word {vsetvli}",
+                ".word {v0}",  ".word {v1}",  ".word {v2}",  ".word {v3}",
+                ".word {v4}",  ".word {v5}",  ".word {v6}",  ".word {v7}",
+                ".word {v8}",  ".word {v9}",  ".word {v10}", ".word {v11}",
+                ".word {v12}", ".word {v13}", ".word {v14}", ".word {v15}",
+                ".word {v16}", ".word {v17}", ".word {v18}", ".word {v19}",
+                ".word {v20}", ".word {v21}", ".word {v22}", ".word {v23}",
+                ".word {v24}", ".word {v25}", ".word {v26}", ".word {v27}",
+                ".word {v28}", ".word {v29}", ".word {v30}", ".word {v31}",
+                ".word {vstart0}",
+                ".word {vcsr0}",
+                vsetvli = const VSETVLI_E8M1,
+                v0 = const vmv_v_i0(0),  v1 = const vmv_v_i0(1),
+                v2 = const vmv_v_i0(2),  v3 = const vmv_v_i0(3),
+                v4 = const vmv_v_i0(4),  v5 = const vmv_v_i0(5),
+                v6 = const vmv_v_i0(6),  v7 = const vmv_v_i0(7),
+                v8 = const vmv_v_i0(8),  v9 = const vmv_v_i0(9),
+                v10 = const vmv_v_i0(10), v11 = const vmv_v_i0(11),
+                v12 = const vmv_v_i0(12), v13 = const vmv_v_i0(13),
+                v14 = const vmv_v_i0(14), v15 = const vmv_v_i0(15),
+                v16 = const vmv_v_i0(16), v17 = const vmv_v_i0(17),
+                v18 = const vmv_v_i0(18), v19 = const vmv_v_i0(19),
+                v20 = const vmv_v_i0(20), v21 = const vmv_v_i0(21),
+                v22 = const vmv_v_i0(22), v23 = const vmv_v_i0(23),
+                v24 = const vmv_v_i0(24), v25 = const vmv_v_i0(25),
+                v26 = const vmv_v_i0(26), v27 = const vmv_v_i0(27),
+                v28 = const vmv_v_i0(28), v29 = const vmv_v_i0(29),
+                v30 = const vmv_v_i0(30), v31 = const vmv_v_i0(31),
+                vstart0 = const CSRW_VSTART_X0,
+                vcsr0 = const CSRW_VCSR_X0,
+                options(nostack),
+            );
+    };
     true
 }
 
@@ -215,11 +220,13 @@ pub unsafe fn vstate_first_use_init() -> bool {
 /// for a byte-exact register image and then restores the exact saved
 /// vl/vtype/vstart/vcsr, leaving live == buffer.
 ///
-/// # Safety
-/// Caller must run on the owning task's hart with VS non-Off (Dirty).
-/// `csrs` must be 8-byte aligned, [u64; 4]; `vregs` [u8; 512].
+/// Runs on the owning task's hart with VS non-Off (Dirty); the store
+/// targets are the caller's typed [u64; 4] / [u8; VREGS_BYTES] buffers.
 #[inline]
-pub unsafe fn vstate_save(csrs: *mut u64, vregs: *mut u8) {
+pub fn vstate_save(csrs: &mut [u64; 4], vregs: &mut [u8; super::vext::VREGS_BYTES]) {
+    // SAFETY: x10/x11 address the typed buffers (4x u64 + 512 bytes —
+    // exactly what the sequence reads/writes).
+    unsafe {
     asm!(
         "csrs sstatus, {mask}",           // ensure enabled (idempotent)
         ".word {rdvl}",  "sd x5, 0(x10)",
@@ -288,22 +295,25 @@ pub unsafe fn vstate_save(csrs: *mut u64, vregs: *mut u8) {
         vsetvl = const VSETVL_T0_T1,
         wrvstart = const CSRW_VSTART_X7,
         wrvcsr = const CSRW_VCSR_X28,
-        in("x10") csrs,
-        in("x11") vregs,
+        in("x10") csrs.as_mut_ptr(),
+        in("x11") vregs.as_mut_ptr(),
         out("x5") _, out("x6") _, out("x7") _, out("x28") _,
         options(nostack),
     );
+    }
 }
 
 /// Reload a saved vector state. Must run with VS Off or Initial for the
 /// outgoing image; enables VS (the loads auto-dirty it) and ends with
 /// live == buffer (the caller then records VS=Clean).
 ///
-/// # Safety
-/// Caller must run on the owning task's hart. `csrs` 8-byte aligned
-/// [u64; 4]; `vregs` [u8; 512] previously filled by [`vstate_save`].
+/// Runs on the owning task's hart; the load sources are the typed
+/// buffers previously filled by [`vstate_save`].
 #[inline]
-pub unsafe fn vstate_restore(csrs: *const u64, vregs: *const u8) {
+pub fn vstate_restore(csrs: &[u64; 4], vregs: &[u8; super::vext::VREGS_BYTES]) {
+    // SAFETY: x10/x11 address the typed buffers (read-only for the
+    // reload sequence).
+    unsafe {
     asm!(
         "csrs sstatus, {mask}",           // enable before vector ops
         "ld x5, 0(x10)",                  // vl
@@ -362,11 +372,12 @@ pub unsafe fn vstate_restore(csrs: *const u64, vregs: *const u8) {
         vsetvl = const VSETVL_T0_T1,
         wrvstart = const CSRW_VSTART_X7,
         wrvcsr = const CSRW_VCSR_X28,
-        in("x10") csrs,
-        in("x11") vregs,
+        in("x10") csrs.as_ptr(),
+        in("x11") vregs.as_ptr(),
         out("x5") _, out("x6") _, out("x7") _, out("x28") _,
         options(nostack),
     );
+    }
 }
 
 /// Decode whether a faulting instruction is a vector instruction.

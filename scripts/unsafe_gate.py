@@ -117,6 +117,21 @@ def forbid_ratchet_check(failures):
                             f"— removal needs a visible registry edit")
 
 
+def root_hygiene_check(failures):
+    """Repo-root hygiene (user rule, violated repeatedly): no loose
+    UNTRACKED files at the repo root — scratch scripts/logs/probe
+    sources belong in a worktree's run/, never at root. Tracked root
+    files are by definition reviewed; directories are out of scope."""
+    import subprocess as _sp
+    out = _sp.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                  capture_output=True, text=True,
+                  cwd=str(Path(__file__).resolve().parent.parent)).stdout
+    for line in out.splitlines():
+        if line.startswith("??") and "/" not in line[3:]:
+            failures.append(f"root hygiene: untracked file at repo root: "
+                            f"{line[3:]} (scratch belongs in a worktree run/)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
@@ -130,6 +145,7 @@ def main():
     failures = []
 
     forbid_ratchet_check(failures)
+    root_hygiene_check(failures)
 
     if args.check:
         regions = full_census()

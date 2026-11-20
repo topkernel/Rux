@@ -380,15 +380,13 @@ fn init_cpu_state(cpu: usize) {
 /// so all tables live in kernel .data/.bss already mapped by the boot
 /// page tables.
 pub fn init() {
-    unsafe {
-        // Enable the FPU before anything can touch FP state (context
-        // switches run fxsave/fxrstor unconditionally).
-        // SAFETY: one-time boot-CPU feature setup.
-        super::thread::fpu_init();
+    // fpu_init and the cpu-state bring-up are safe fns now (their own
+    // audited blocks); the stub tables are plain address arrays.
+    super::thread::fpu_init();
+    init_cpu_state(0);
 
-        init_cpu_state(0);
-
-        // ---- IDT ----
+    // ---- IDT ----
+    {
         extern "C" {
             static stub_0: u8;
             static stub_1: u8;
@@ -468,8 +466,10 @@ pub fn init() {
             &raw const stub_227, &raw const stub_228, &raw const stub_229,
         ];
 
-        let idt = &raw mut IDT_X86;
-        for (v, entry) in (*idt).iter_mut().enumerate() {
+        // SAFETY: single-CPU boot section; the static-mut IDT is
+        // exclusively owned here until lidt publishes it.
+        let idt = unsafe { &raw mut IDT_X86 };
+        for (v, entry) in unsafe { (*idt).iter_mut() }.enumerate() {
             // int1/int3/into are reachable from user mode (DPL 3); #DF
             // uses IST1; everything else is a plain kernel interrupt gate.
             let lv = crate::drivers::intc::apic::LOCAL_TIMER_VECTOR as usize;
@@ -493,7 +493,7 @@ pub fn init() {
         };
         // SAFETY: lidt loads the interrupt descriptor table base/limit;
         // the table is fully initialized above and static.
-        x86_load_idt(&idtr);
+        unsafe { x86_load_idt(&idtr) };
 
         // ---- PIC 8259 (before any interrupt can fire; IF is still off) ----
         init_8259();
@@ -510,6 +510,8 @@ pub fn init_secondary(cpu: usize) {
         init_cpu_state(cpu);
         let idtr = PseudoDescriptor {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
+            // SAFETY: AP bring-up on its own CPU before enabling
+            // interrupts; the shared IDT is read-only here.
             base: &raw mut IDT_X86 as usize as u64,
         };
         x86_load_idt(&idtr);

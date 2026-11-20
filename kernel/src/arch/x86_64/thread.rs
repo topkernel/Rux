@@ -111,10 +111,11 @@ impl ThreadStruct {
     /// x87, SSE, AVX, OPMASK, ZMM_Hi256, Hi16_ZMM; PKRU/PT/AMX live in
     /// higher bits we never enable).
     ///
-    /// # Safety
-    /// Must run in the task's own context on the local CPU, with the FPU
-    /// enabled (CR4.OSXSAVE set by `fpu_init`).
-    pub unsafe fn fpu_save_for_switch(&mut self) {
+    /// Runs in the task's own context on the local CPU (a call on a
+    /// foreign struct would snapshot the WRONG live state — a logic bug
+    /// the switch protocol prevents; memory-wise the target is this
+    /// struct's own typed array).
+    pub fn fpu_save_for_switch(&mut self) {
         // Two encodings for one reason: XSAVE/XRSTOR #UD while
         // CR4.OSXSAVE is clear, and the very first task switches of
         // boot run before fpu_init has enabled it on that CPU. Until
@@ -186,22 +187,29 @@ impl ThreadStruct {
                     // SAFETY: xrstor64 reads the image written by
                     // fpu_save_for_switch (or built by mark_fpu_clean —
                     // XSTATE_BV=0 initializes every extended component).
-                    core::arch::asm!(
-                        "xrstor64 ({ptr})",
-                        ptr = in(reg) self.fpu.bytes.as_ptr(),
-                        in("eax") 0xFFFF_FFFFu32,
-                        in("edx") 0xFFFF_FFFFu32,
-                        options(att_syntax, nostack, preserves_flags),
-                    );
+                    unsafe {
+                        core::arch::asm!(
+                            "xrstor64 ({ptr})",
+                            ptr = in(reg) self.fpu.bytes.as_ptr(),
+                            in("eax") 0xFFFF_FFFFu32,
+                            in("edx") 0xFFFF_FFFFu32,
+                            options(att_syntax, nostack, preserves_flags),
+                        );
+                    }
                 } else {
                     // SAFETY: legacy pair for the pre-fpu_init window.
-                    core::arch::asm!(
-                        "fxrstor64 ({ptr})",
-                        ptr = in(reg) self.fpu.bytes.as_ptr(),
-                        options(att_syntax, nostack, preserves_flags),
-                    );
+                    unsafe {
+                        core::arch::asm!(
+                            "fxrstor64 ({ptr})",
+                            ptr = in(reg) self.fpu.bytes.as_ptr(),
+                            options(att_syntax, nostack, preserves_flags),
+                        );
+                    }
                 }
             } else {
+                // SAFETY: register-level init (no memory operands except
+                // the constant MXCSR load).
+                unsafe {
                 core::arch::asm!(
                     "fninit",
                     "ldmxcsr ({mxcsr})",
@@ -224,6 +232,7 @@ impl ThreadStruct {
                     mxcsr = in(reg) &MXCSR_DEFAULT,
                     options(att_syntax, nostack),
                 );
+                }
                 // Wipe the YMM half too — but only where XCR0 actually
                 // enables AVX: vzeroall on a part (or XCR0 mask) without
                 // it would itself #UD.
@@ -277,12 +286,16 @@ impl Default for ThreadStruct {
 ///
 /// # Safety
 /// Must be called once per CPU before any FP instruction.
-pub unsafe fn fpu_init() {
-    // SAFETY: RMW of CR4/CR0 feature bits — no memory effects; xsave
-    // area untouched.  fninit establishes the x87 initial state.
-    unsafe {
-        let mut cr4: u64;
-        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+pub fn fpu_init() {
+    // Per-asm audited blocks: register RMWs and CPUID-gated enablement
+    // (no memory effects; the xsave area is untouched here).
+    // SAFETY: CR4 read (register-only).
+    let mut cr4: u64 = unsafe {
+        let v;
+        core::arch::asm!("mov {}, cr4", out(reg) v, options(nomem, nostack));
+        v
+    };
+    {
         cr4 |= (1 << 9) | (1 << 10); // OSFXSR | OSXMMEEXCPT
         // XSAVE enablement. Guard on the CAPABILITY bit only: CPUID.1:ECX
         // bit 27 (OSXSAVE) MIRRORS CR4.OSXSAVE and reads 0 until the OS
@@ -296,7 +309,8 @@ pub unsafe fn fpu_init() {
         if xsave_capable {
             cr4 |= 1 << 18; // OSXSAVE
         }
-        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+        // SAFETY: CR4 write (feature-bit RMW).
+        unsafe { core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags)) };
 
         // FSGSBASE (CPUID-gated inside): per-CPU CR4 bit the context
         // switch gates on — fpu_init runs once per CPU (BSP + every AP),
@@ -308,11 +322,16 @@ pub unsafe fn fpu_init() {
         // the fpu_init CR4 write above is an RMW so the bit sticks.
         crate::arch::x86_64::cpu::enable_smep();
 
-        let mut cr0: u64;
-        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
+        // SAFETY: CR0 read (register-only).
+        let mut cr0: u64 = unsafe {
+            let v;
+            core::arch::asm!("mov {}, cr0", out(reg) v, options(nomem, nostack));
+            v
+        };
         cr0 &= !(1 << 2); // clear EM (no emulation)
         cr0 |= 1 << 1; // set MP (monitor coprocessor)
-        core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
+        // SAFETY: CR0 write (feature-bit RMW).
+        unsafe { core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags)) };
 
         // XCR0 = every user component the CPU enumerates in leaf 0xD
         // ANDed with the imm8-reachable set {x87, SSE, AVX, OPMASK,
@@ -345,13 +364,15 @@ pub unsafe fn fpu_init() {
             }
             // SAFETY: xsetbv with ECX=0 programs XCR0; EDX:EAX holds the
             // mask. Only the bits CPUID reported are set.
-            core::arch::asm!(
-                "xsetbv",
-                in("eax") mask as u32,
-                in("edx") (mask >> 32) as u32,
-                in("ecx") 0u32,
-                options(nostack, preserves_flags),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "xsetbv",
+                    in("eax") mask as u32,
+                    in("edx") (mask >> 32) as u32,
+                    in("ecx") 0u32,
+                    options(nostack, preserves_flags),
+                );
+            }
             // Only now may the switch paths use the xsave/xrstor pair
             // (they #UD while OSXSAVE is clear).
             XSAVE_READY.store(true, core::sync::atomic::Ordering::Release);
@@ -401,12 +422,15 @@ pub unsafe fn fpu_init() {
         // fninit alone leaves MXCSR at its reset-unknown value; load the
         // ABI default explicitly so the boot CPU starts fully masked too.
         // (ldmxcsr is m32-only — no register form.)
-        core::arch::asm!(
-            "fninit",
-            "ldmxcsr [{mxcsr}]",
-            mxcsr = in(reg) &MXCSR_DEFAULT,
-            options(nostack, preserves_flags),
-        );
+        // SAFETY: register init + constant MXCSR load.
+        unsafe {
+            core::arch::asm!(
+                "fninit",
+                "ldmxcsr [{mxcsr}]",
+                mxcsr = in(reg) &MXCSR_DEFAULT,
+                options(nostack, preserves_flags),
+            );
+        }
     }
 }
 

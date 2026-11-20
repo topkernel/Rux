@@ -6276,7 +6276,7 @@ pub fn sys_open_by_handle_at(args: SyscallArgs) -> i64 {
     let ino = u64::from_le_bytes(payload[4..].try_into().unwrap());
 
     // Materialize the inode from disk (export iget).
-    let inode = match unsafe { crate::fs::ext4::iget_by_ino(&base_inode, ino) } {
+    let inode = match crate::fs::ext4::iget_by_ino(&base_inode, ino) {
         Ok(i) => i,
         Err(_) => return -(errno::ESTALE as i64),
     };

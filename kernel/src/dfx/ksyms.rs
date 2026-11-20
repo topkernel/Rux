@@ -27,6 +27,7 @@
 
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
+#![forbid(unsafe_code)]
 use alloc::format;
 use alloc::string::{String, ToString};
 

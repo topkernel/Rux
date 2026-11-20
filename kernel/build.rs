@@ -1047,7 +1047,11 @@ fn compile_boot_asm() {
         if dtb_src.exists() {
             println!("cargo:rerun-if-changed={}", dtb_src.display());
         }
-        let dtb_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/dtb_blob.S");
+        // Generated asm lives in OUT_DIR (never the source tree): the
+        // old in-tree dtb_blob.S embedded each build's absolute path,
+        // so every worktree's build rewrote a tracked file — the
+        // recurring merge-conflict and stray-diff generator.
+        let dtb_asm = out_dir.join("dtb_blob.S");
         fs::write(&dtb_asm, format!(
             ".section .rodata\n.balign 8\n.globl aarch64_virt_dtb\naarch64_virt_dtb:\n.incbin \"{}\"\n.globl aarch64_virt_dtb_end\naarch64_virt_dtb_end:\n",
             dtb_src.display())).expect("write dtb_blob.S");

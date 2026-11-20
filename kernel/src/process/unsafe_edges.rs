@@ -168,6 +168,22 @@ pub fn file_private_data_take_boxed<T>(file: &crate::fs::File) -> Option<alloc::
     Some(unsafe { alloc::boxed::Box::from_raw(p as *mut T) })
 }
 
+/// Read a File's `private_data` slot as a MUTABLE reference to `T`.
+///
+/// INV-PROC-NSFILE-1 (mutable arm): the caller has verified the File's
+/// type identity (the ops-table check that precedes every downcast) and
+/// holds the serialization that proves no other alias is live — the
+/// owning fd-table Arc pin plus the type's own lock discipline (the
+/// epoll `entries` lock guards every mutable touch of an EpollFile's
+/// lists). Same slot-population contract as the shared arm.
+#[inline]
+pub fn file_private_data_mut<T>(file: &crate::fs::File) -> Option<&'static mut T> {
+    // SAFETY: INV-PROC-NSFILE-1 mutable arm — identity-checked slot
+    // read; the caller's lock discipline excludes concurrent aliases.
+    let p = unsafe { *file.private_data.get() }?;
+    Some(unsafe { &mut *(p as *mut T) })
+}
+
 /// Diagnostic volatile read of one aligned u64.
 ///
 /// INV-PROC-DIAG-1: bounded, read-only forensics of a possibly-racing
