@@ -13,6 +13,9 @@
 //!
 //! Simplified implementation: Uses simple byte buffers instead of full page cache
 
+// (INV-BUFCHUNK-1: the chunked-buffer family — the from_bytes/new/
+// read/write/resize rows are the CopyBytes-shaped POD views plus the
+// chunk-table stores under the buffer's own lock.)
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use crate::sync::spinlock::Spinlock;

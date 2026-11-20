@@ -17,6 +17,10 @@
 //!   never interleave (review 5.2: PIPE_BUF atomicity was broken).
 //! - Pipe capacity is 64 KiB (Linux default, review 5.2: was 16 KiB).
 
+// (INV-PIPE-BUF-1: the pipe buffer family — the ring's page vector
+// and size/cursor fields are mutated only under the pipe's inode
+// lock; the resize rows move pages under the same lock; the close
+// pair drops exactly the two ends' references.)
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;

@@ -10,6 +10,10 @@
 //! - /proc/[pid]/stat - Process statistics
 //! - /proc/[pid]/fd/ - File descriptors
 
+// (INV-PROC-PIN-1: the PinnedTask family — the task is pinned at
+// construction (pid_hash_lookup_pinned/task_refcnt+), released only in
+// Drop; every generate_* reader and the mm-read rows go through the
+// pin/TaskBorrow borrow; the target mm rides the aspace Arc.)
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;

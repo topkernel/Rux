@@ -271,6 +271,10 @@ fn next_file_id() -> u64 {
 /// (install/dup/fork displacement-free publication), and the ArcInner
 /// allocation must be pinned across this call (a slot reference or a
 /// fdreap-parked Weak) — the CAS itself must never act on freed memory.
+/// (INV-FILE-ARC-1: the strong-word offset assumption this family
+/// rests on is PINNED AT BOOT by verify_arc_inner_layout below; the
+/// caller-pins + CAS-nonzero-or-clean-fail protocol is the audited
+/// edge — every row of this family rides it.)
 #[inline]
 unsafe fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
     // std Arc layout on our 64-bit targets: ArcInner { strong:
@@ -304,6 +308,8 @@ unsafe fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
 /// toolchain moved the refcount word, every lock-free fd lookup would
 /// CAS the wrong memory — fail loudly at boot instead.
 pub(crate) fn verify_arc_inner_layout() {
+    // (INV-FILE-ARC-1: the boot-time pin of the ArcInner strong-word
+    // offset — the family's layout assumption, checked here once.)
     crate::pr_info!(
         "fs: File={}B (open/close hot path size gate)",
         core::mem::size_of::<File>()
@@ -431,6 +437,10 @@ impl FileOwner {
 // SAFETY: File is only shared across threads when referenced through Arc,
 // and all mutable access goes through Spinlock or UnsafeCell fields that
 // are synchronized with IRQ-safe locking.
+// (INV-FILE-SEND-1: File's Sync/Send are carried per-field — cells are
+// write-once (INV-FILE-CELL-1), pos/cloexec/dirent_cache behind their
+// locks, flags/f_owner/f_signum atomics, io_lock a real mutex. No
+// field admits a data race through &File.)
 unsafe impl Sync for File {}
 unsafe impl Send for File {}
 
@@ -479,6 +489,13 @@ impl File {
     }
 
     /// Set inode
+    ///
+    /// (INV-FILE-CELL-1: the inode/dentry/ops cells are write-ONCE at
+    /// open/creation time, before the File is published to an fd
+    /// table, and never re-pointed; shared reads through a live &File
+    /// are therefore race-free. The private_data cell adds ONE
+    /// mutation: the close-path take (INV-FS-FILEPRIV-1). Every cell
+    /// accessor row rides this contract.)
     pub fn set_inode(&self, inode: Arc<Inode>) {
         // Lease/open bookkeeping: every File that gains an inode is an
         // open file description on that inode (the F_SETLEASE grant

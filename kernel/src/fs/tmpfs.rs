@@ -32,6 +32,10 @@
 //! refcounted user pages — mapping falls back to the generic inode path),
 //! memory limits/statfs accounting is static.
 
+// (INV-TMPFS-SB-1: the tmpfs mount-lifetime family — the superblock
+// is leaked into the registry at mount (INV-FS-GLOBALSB-1 provenance);
+// the name cells are parent-children-lock serialized (set_name's
+// contract); read_at/reserve_page rows ride the page's own lock.)
 use crate::errno;
 use crate::fs::inode::{file_type, setattr_attr, Inode, InodeMode, Ino, INodeOps, VfsDirEntry};
 use crate::fs::superblock::{FileSystemType, FsContext, SuperBlock, SuperBlockFlags};

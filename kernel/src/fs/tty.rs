@@ -17,6 +17,9 @@
 //! - VMIN/VTIME are not timed (raw mode delivers immediately)
 //! - IEXTEN/VLNEXT/VWERASE/VREPRINT/VDISCARD are accepted but not acted on
 
+// (INV-TTY-WIRE-1: the termios/termio wire-format converters — the
+// byte views are CopyBytes-style struct<->bytes casts over POD
+// layouts with fixed kernel-side sizes; no pointers cross.)
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::process::wait::WaitQueueHead;

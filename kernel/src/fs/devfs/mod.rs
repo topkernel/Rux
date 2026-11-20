@@ -9,6 +9,10 @@
 //! - Manages device nodes
 //! - Supports character devices and block devices
 
+// (INV-DEVFS-SHARED-1: the coherent shared-backing family — the
+// shared workspace grows/mutates only under the entry's shared lock;
+// the fault/read/write rows pin the page span through the backing
+// table before touching it.)
 pub mod registry;
 
 use alloc::string::String;
