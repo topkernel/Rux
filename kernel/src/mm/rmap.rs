@@ -8,6 +8,8 @@
 //! virtual addresses that map a given physical page. This is essential
 //! for page migration, memory compaction, and page reclamation.
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 
 use core::cell::Cell;
@@ -78,8 +80,9 @@ impl AnonVma {
         if ptr.is_null() {
             None
         } else {
-            // SAFETY: ptr was stored by set_vma() and the VMA outlives the page.
-            unsafe { Some(&*ptr) }
+            // ptr was stored by set_vma() and the VMA outlives the page
+            // (INV-MM-2 reachability arm).
+            Some(crate::syscall::edges::boxed_ref(ptr))
         }
     }
 }
@@ -97,8 +100,10 @@ pub type AnonVmaChain = AnonVma;
 /// - `address`: Virtual address of the mapping
 /// - `exclusive`: Whether this is an exclusive mapping
 pub fn page_add_anon_rmap(page: &Page, _vma: &Vma, address: usize, _exclusive: bool) {
-    // SAFETY: page is exclusively owned (refcount == 1) when adding rmap.
-    unsafe {
+    // page is exclusively owned (refcount == 1) when adding rmap
+    // (Page's mutators are interior-mutable &self — the old wrappers
+    // were vestigial).
+    {
         // Set anonymous and swap-backed flags
         page.set_flag(super::page_desc::PageFlag::Anonymous);
         page.set_flag(super::page_desc::PageFlag::SwapBacked);
@@ -125,8 +130,9 @@ pub fn page_add_anon_rmap(page: &Page, _vma: &Vma, address: usize, _exclusive: b
 /// - `mapping`: Address space (file mapping)
 /// - `index`: Page offset in the file
 pub fn page_add_file_rmap(page: &Page, mapping: usize, index: usize) {
-    // SAFETY: page is exclusively owned when adding file rmap.
-    unsafe {
+    // page is exclusively owned when adding file rmap (interior-
+    // mutable mutators; vestigial wrapper removed).
+    {
         // Set mapping and index (rmap only; LRU uses dedicated field)
         page.set_mapping(mapping as *mut core::ffi::c_void);
         page.set_index(index);
@@ -147,8 +153,8 @@ pub fn page_add_file_rmap(page: &Page, mapping: usize, index: usize) {
 /// # Arguments
 /// - `page`: Page descriptor
 pub fn page_remove_rmap(page: &Page) {
-    // SAFETY: caller holds page lock (or page is unshared).
-    unsafe {
+    // caller holds page lock (or page is unshared).
+    {
         // R21-1: dec_mapcount returns the POST-decrement value; the
         // convention is -1 (PAGE_MAPCOUNT_BIAS) = unmapped, 0 = one
         // mapping. The old `== 0` check fired one mapping EARLY (a
@@ -344,11 +350,11 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
     // under the locks (moved into the vector — never dropped there), then
     // walk them with no locks held. RefCell: the walker takes F: Fn.
     let mm_pins = Cell::new(Vec::<alloc::sync::Arc<crate::mm::mm_struct::MmStruct>>::new());
-    crate::sched::for_each_task(|task_ptr| {
-        // SAFETY: for_each_task provides valid task pointers; the task struct
-        // is protected by the task list lock inside for_each_task.
-        unsafe {
-            let task = &*task_ptr;
+    crate::sched::for_each_task(|task| {
+        // for_each_task hands out &Task references; the task struct is
+        // protected by the task list lock inside for_each_task.
+        {
+            let task = task;
 
             // Skip tasks without an address space (kernel threads)
             // R25-2: PIN the address space — do_exit's set_address_space(None)
@@ -414,11 +420,9 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                 let root_ppn = mm.pgd();
                 // SAFETY: root_ppn is the Arc-pinned mm's live root;
                 // the walker only reads page-table pages.
-                let walk_result = unsafe {
-                    crate::arch::mm::mm_ops::PageTableWalker::walk(
-                        root_ppn, target_vaddr as u64,
-                    )
-                };
+                // INV-SY-1 walk edge (Arc-pinned mm's live root).
+                let walk_result =
+                    crate::sync::edges::pt_walk(root_ppn, target_vaddr as u64);
 
                 if let Some((ppn, _pte_bits)) = walk_result {
                     if ppn as usize == target_pfn {
@@ -430,19 +434,18 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                         // unmap and migration never unmapped anything on
                         // x86_64/aarch64. TLB flush stays with the caller
                         // (R10-6: hart-local; the batch shootdown below).
-                        // SAFETY: FD-1 — the arch's audited leaf
-                        // replace: mm is Arc-pinned, root_ppn is this
-                        // mm's live root, the ppn was just re-validated
-                        // by the walk above.
-                        if unsafe {
-                            crate::arch::mm::mm_ops::leaf_pte_replace(
-                                mm,
-                                root_ppn,
-                                target_vaddr as u64,
-                                target_pfn as u64,
-                                swap_entry,
-                            )
-                        } {
+                        // FD-1 — the arch's audited leaf replace: mm is
+                        // Arc-pinned, root_ppn is this mm's live root,
+                        // the ppn was just re-validated by the walk
+                        // above (leaf_pte_replace is a safe fn — the
+                        // old wrapper was vestigial).
+                        if crate::arch::mm::mm_ops::leaf_pte_replace(
+                            mm,
+                            root_ppn,
+                            target_vaddr as u64,
+                            target_pfn as u64,
+                            swap_entry,
+                        ) {
                             crate::mm::flush_tlb_page_local(target_vaddr as u64);
 
                             // Decrement mapcount

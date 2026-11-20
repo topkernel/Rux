@@ -254,3 +254,44 @@ pub fn copy_kva_from(dst: &mut [u8], src: *const u8) {
     // dst.len() bytes; the pieces never overlap.
     unsafe { core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len()) }
 }
+
+// ---------------------------------------------------------------------------
+// INV-MM-7: the swap-device static and page-frame slices.
+// ---------------------------------------------------------------------------
+
+/// Shared view of the swap-device static (INV-MM-7 dev-static arm: the
+/// array is written only by the single-threaded swap_activate init;
+/// after `enabled` publishes (Release), every field is atomic or
+/// Spinlock-guarded).
+#[inline]
+pub fn swap_dev_static(idx: usize) -> &'static super::swap::SwapDevice {
+    // SAFETY: INV-MM-7 — interior mutability is atomics/Spinlock only
+    // after the init writes; the shared borrow races nothing.
+    unsafe { &*super::swap::SWAP_DEVICES.as_mut_ptr().add(idx) }
+}
+
+/// Mutable view of the swap-device static (INV-MM-7 init arm: the
+/// single-threaded swap_activate window).
+#[inline]
+pub fn swap_dev_static_mut(idx: usize) -> &'static mut super::swap::SwapDevice {
+    // SAFETY: INV-MM-7 — init window; no concurrent reader exists
+    // before `enabled` is stored.
+    unsafe { &mut *super::swap::SWAP_DEVICES.as_mut_ptr().add(idx) }
+}
+
+/// The PAGE_SIZE mutable slice at a page-aligned kernel linear address
+/// (INV-MM-7 page-slice arm: the frame is a buddy allocation the caller
+/// owns for the call).
+#[inline]
+pub fn page_slice_mut(virt_addr: usize) -> &'static mut [u8] {
+    // SAFETY: INV-MM-7 — page-aligned live frame; PAGE_SIZE length
+    // matches the buddy allocation exactly.
+    unsafe { core::slice::from_raw_parts_mut(virt_addr as *mut u8, crate::mm::page::PAGE_SIZE) }
+}
+
+/// The shared twin of [`page_slice_mut`] (INV-MM-7 page-slice arm).
+#[inline]
+pub fn page_slice(virt_addr: usize) -> &'static [u8] {
+    // SAFETY: INV-MM-7 — as page_slice_mut, shared.
+    unsafe { core::slice::from_raw_parts(virt_addr as *const u8, crate::mm::page::PAGE_SIZE) }
+}
