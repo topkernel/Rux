@@ -28,6 +28,7 @@
 //! OLDEST event is overwritten (a diagnostic watermark, never a
 //! correctness object) and [`EV_LOST`] counts the clobbers.
 
+#![forbid(unsafe_code)]
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 

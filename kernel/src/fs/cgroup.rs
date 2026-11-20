@@ -559,13 +559,10 @@ pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
 
     // Create the on-disk (/rootfs) mount-point directories when the rootfs
     // is available so the path is visible there too (best effort).
-    if let Some(rootfs_sb) = crate::fs::rootfs::get_rootfs_sb() {
-        // SAFETY: pointer from get_rootfs_sb is the global RootFS instance.
-        unsafe {
-            let _ = (*rootfs_sb).create_dir("/sys", 0o755);
-            let _ = (*rootfs_sb).create_dir("/sys/fs", 0o755);
-            let _ = (*rootfs_sb).create_dir(target, 0o755);
-        }
+    if let Some(rootfs_sb) = crate::fs::rootfs::get_rootfs_sb_ref() {
+        let _ = rootfs_sb.create_dir("/sys", 0o755);
+        let _ = rootfs_sb.create_dir("/sys/fs", 0o755);
+        let _ = rootfs_sb.create_dir(target, 0o755);
     }
 
     // Dentry tree mount.
@@ -585,13 +582,11 @@ pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
     // mount makes the cgroup tree (cgroup.procs, subtree_control, etc.)
     // reachable at the path systemd walks (noble-desktop, 2026-11-13).
     if target != "/sys/fs/cgroup" {
-        if let Some(rootfs_sb) = crate::fs::rootfs::get_rootfs_sb() {
-            unsafe {
-                let _ = (*rootfs_sb).create_dir("/sys", 0o755);
-                let _ = (*rootfs_sb).create_dir("/sys/fs", 0o755);
-                let _ = (*rootfs_sb).create_dir("/sys/fs/cgroup", 0o755);
-                let _ = (*rootfs_sb).create_dir("/sys/fs/cgroup/init.scope", 0o755);
-            }
+        if let Some(rootfs_sb) = crate::fs::rootfs::get_rootfs_sb_ref() {
+            let _ = rootfs_sb.create_dir("/sys", 0o755);
+            let _ = rootfs_sb.create_dir("/sys/fs", 0o755);
+            let _ = rootfs_sb.create_dir("/sys/fs/cgroup", 0o755);
+            let _ = rootfs_sb.create_dir("/sys/fs/cgroup/init.scope", 0o755);
         }
         // Re-link the cgroup dentry tree at /sys/fs/cgroup
         let _ = mount_cgroupfs("/sys/fs/cgroup");
@@ -680,10 +675,8 @@ fn leak_ino_data(node: Arc<CgroupNode>, kind: CgroupFileKind) -> *mut u8 {
 
 /// Read the private data back.
 // SAFETY: pointer came from leak_ino_data and is never freed.
-unsafe fn ino_data(inode: &Inode) -> Option<&'static CgroupInoData> {
-    inode
-        .private_data
-        .map(|p| &*(p as *const CgroupInoData))
+fn ino_data<'a>(inode: &'a Inode) -> Option<&'a CgroupInoData> {
+    crate::fs::unsafe_edges::privdata_ref::<CgroupInoData>(inode)
 }
 
 // ============================================================================
@@ -692,7 +685,7 @@ unsafe fn ino_data(inode: &Inode) -> Option<&'static CgroupInoData> {
 
 /// cgroupfs lookup: child cgroup directory or a control file.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+fn cgroupfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let data = ino_data(dir).ok_or(errno::Errno::NotADirectory)?;
 
     // Control files take precedence over same-named cgroup children
@@ -711,7 +704,7 @@ unsafe fn cgroupfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno>
 
 /// cgroupfs mkdir: create a child cgroup.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_mkdir(dir: &Inode, name: &[u8], _mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
+fn cgroupfs_mkdir(dir: &Inode, name: &[u8], _mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
     let data = ino_data(dir).ok_or(errno::Errno::NotADirectory)?;
     let name_str = core::str::from_utf8(name)
         .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
@@ -727,7 +720,7 @@ unsafe fn cgroupfs_mkdir(dir: &Inode, name: &[u8], _mode: InodeMode) -> Result<A
 
 /// cgroupfs rmdir: remove an (empty) child cgroup.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
+fn cgroupfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
     let data = match ino_data(dir) {
         Some(d) => d,
         None => return errno::Errno::NotADirectory.as_neg_i32(),
@@ -745,7 +738,7 @@ unsafe fn cgroupfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
 
 /// cgroupfs readdir: control files + child cgroup directories.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
+fn cgroupfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
     let data = ino_data(inode)?;
     let node = &data.node;
 
@@ -789,7 +782,7 @@ unsafe fn cgroupfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 
 /// cgroupfs iget: instantiate the VFS inode for (parent, name, ino).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
     let data = ino_data(parent).ok_or(errno::Errno::NotADirectory)?;
 
     // Control file?
@@ -814,7 +807,7 @@ unsafe fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Ino
 
 /// cgroupfs getattr.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+fn cgroupfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     let data = match ino_data(inode) {
         Some(d) => d,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -855,7 +848,7 @@ unsafe fn cgroupfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 /// was an ours-only error family in the why-slow boot error-stream diff).
 /// Control-file CONTENT stays kernel-owned.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+fn cgroupfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
     if attr == setattr_attr::ATTR_SIZE {
         return 0;
@@ -893,7 +886,7 @@ unsafe fn cgroupfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i3
 
 /// cgroupfs open: snapshot control-file content for reads.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
+fn cgroupfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if !inode.mode.is_regular_file() {
         return 0;
     }
@@ -911,7 +904,7 @@ unsafe fn cgroupfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
 
 /// cgroupfs get_file_ops.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::FileOps> {
+fn cgroupfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&CGROUP_FILE_OPS)
     } else if inode.mode.is_directory() {
@@ -955,14 +948,14 @@ struct CgroupFileContent {
 }
 
 fn cgroupfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    // SAFETY: private_data is either None or a valid CgroupFileContent
-    // placed by cgroupfs_open; it is only freed by cgroupfs_file_close.
-    unsafe {
-        let data_ptr = match *file.private_data.get() {
-            Some(p) => p,
+    // private_data is either None or a valid CgroupFileContent placed by
+    // cgroupfs_open; it is only freed by cgroupfs_file_close
+    // (INV-FS-FILEPRIV-1, resolved through the framework edge).
+    {
+        let content = match crate::fs::unsafe_edges::file_privdata_ref::<CgroupFileContent>(file) {
+            Some(c) => c,
             None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
         };
-        let content = &*(data_ptr as *const CgroupFileContent);
         let offset = file.get_pos() as usize;
         let available = content.data.len().saturating_sub(offset);
         let to_read = buf.len().min(available);
@@ -977,14 +970,14 @@ fn cgroupfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 }
 
 fn cgroupfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
-    // SAFETY: inode was written once at open time; read-only access here.
-    let inode_opt = unsafe { (*file.inode.get()).clone() };
-    let inode = match inode_opt {
+    // The inode cell is write-once at open (File::get_inode discipline).
+    let inode = match file.get_inode().cloned() {
         Some(i) => i,
         None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
     };
-    // SAFETY: cgroupfs inodes carry a CgroupInoData in private_data.
-    let data = match unsafe { ino_data(&inode) } {
+    // cgroupfs inodes carry a CgroupInoData in private_data
+    // (INV-FS-PRIVDATA-1).
+    let data = match ino_data(&inode) {
         Some(d) => d,
         None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
     };
@@ -997,13 +990,12 @@ fn cgroupfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 }
 
 fn cgroupfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
-    // SAFETY: see cgroupfs_file_read.
-    unsafe {
-        let data_ptr = match *file.private_data.get() {
-            Some(p) => p,
+    // See cgroupfs_file_read (INV-FS-FILEPRIV-1).
+    {
+        let content = match crate::fs::unsafe_edges::file_privdata_ref::<CgroupFileContent>(file) {
+            Some(c) => c,
             None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
         };
-        let content = &*(data_ptr as *const CgroupFileContent);
         let file_size = content.data.len() as isize;
         let new_offset = match whence {
             0 => offset,
@@ -1020,13 +1012,10 @@ fn cgroupfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> is
 }
 
 fn cgroupfs_file_close(file: &crate::fs::File) -> i32 {
-    // SAFETY: see cgroupfs_file_read; null-out first to prevent
-    // use-after-free by concurrent readers.
-    unsafe {
-        if let Some(data_ptr) = *file.private_data.get() {
-            *file.private_data.get() = None;
-            drop(Box::from_raw(data_ptr as *mut CgroupFileContent));
-        }
+    // The take empties the cell first; the Box::from_raw reclaim is the
+    // framework edge's exactly-once drop (INV-FS-FILEPRIV-1).
+    if let Some(content) = crate::fs::unsafe_edges::file_privdata_take::<CgroupFileContent>(file) {
+        drop(content);
     }
     0
 }

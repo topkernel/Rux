@@ -51,6 +51,8 @@
 //! Per the observability policy the table must not grow — new
 //! observability goes through tracepoints.
 
+#![forbid(unsafe_code)]
+
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]

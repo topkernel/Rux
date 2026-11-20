@@ -330,14 +330,10 @@ pub struct TraceFsEntryData {
     pub gid: core::sync::atomic::AtomicU32,
 }
 
-/// Recover the entry data from an inode (private_data came from the
-/// iget/create_root_inode path — the one audited deref below).
-fn entry_of(inode: &Inode) -> Option<&'static TraceFsEntryData> {
-    inode.private_data.map(|p| {
-        // SAFETY: iget/create_root_inode stored an Arc'd entry
-        // (inode-lifetime); read-only view.
-        unsafe { &*(p as *const TraceFsEntryData) }
-    })
+/// Recover the entry data from an inode.
+/// SAFETY: private_data must have come from tracefs_iget/create_root_inode.
+fn entry_of<'a>(inode: &'a Inode) -> Option<&'a TraceFsEntryData> {
+    crate::fs::unsafe_edges::privdata_ref::<TraceFsEntryData>(inode)
 }
 
 /// Resolve a child of `dir`.
@@ -351,7 +347,7 @@ fn resolve_child(dir: &DebugFsNode, name: &[u8]) -> Option<Arc<DebugFsNode>> {
 
 /// tracefs lookup: child inode number.
 /// SAFETY: VFS callback contract.
-unsafe fn tracefs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+fn tracefs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let entry = entry_of(dir).ok_or(errno::Errno::NotADirectory)?;
     match resolve_child(&entry.node, name) {
         Some(child) => Ok(child.ino),
@@ -361,7 +357,7 @@ unsafe fn tracefs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> 
 
 /// tracefs iget: instantiate the VFS Inode for a resolved child.
 /// SAFETY: VFS callback contract.
-unsafe fn tracefs_iget(
+fn tracefs_iget(
     parent: &Inode,
     name: &[u8],
     ino: Ino,
@@ -391,7 +387,7 @@ unsafe fn tracefs_iget(
 
 /// tracefs getattr.
 /// SAFETY: VFS callback contract.
-unsafe fn tracefs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+fn tracefs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     use core::sync::atomic::Ordering::Relaxed;
     let entry = match entry_of(inode) {
         Some(e) => e,
@@ -442,7 +438,7 @@ unsafe fn tracefs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 /// was the top ours-only error family in the why-slow/launcher-errno
 /// boot error-stream diff (~494 rows). File CONTENT stays kernel-owned.
 /// SAFETY: VFS callback contract.
-unsafe fn tracefs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+fn tracefs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
     if attr == setattr_attr::ATTR_SIZE {
         return 0;
@@ -490,7 +486,7 @@ unsafe fn tracefs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32
 
 /// tracefs readdir: the child entries of a directory.
 /// SAFETY: VFS callback contract.
-unsafe fn tracefs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
+fn tracefs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
     let entry = entry_of(inode)?;
     if !entry.node.is_dir {
         return None;
@@ -517,7 +513,7 @@ unsafe fn tracefs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 /// STREAMING nodes (trace_pipe) skip the snapshot — their reads drain
 /// fresh content per call instead.
 /// SAFETY: VFS callback contract.
-unsafe fn tracefs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
+fn tracefs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if !inode.mode.is_regular_file() {
         return 0;
     }
@@ -547,7 +543,7 @@ unsafe fn tracefs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
 
 /// tracefs get_file_ops.
 /// SAFETY: VFS callback contract.
-unsafe fn tracefs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+fn tracefs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&TRACEFS_FILE_OPS)
     } else if inode.mode.is_directory() {
@@ -559,9 +555,11 @@ unsafe fn tracefs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file
 
 /// tracefs destroy_inode: reclaim the leaked Box<TraceFsEntryData>.
 /// SAFETY: VFS callback contract; Drop-time hook.
-unsafe fn tracefs_destroy_inode(inode: &mut Inode) {
+fn tracefs_destroy_inode(inode: &mut Inode) {
     if let Some(ptr) = inode.private_data.take() {
-        drop(Box::from_raw(ptr as *mut TraceFsEntryData));
+        // SAFETY: the Box was leaked by into_raw at inode creation
+        // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
+        drop(unsafe { Box::from_raw(ptr as *mut TraceFsEntryData) });
     }
 }
 
@@ -608,12 +606,13 @@ pub struct TraceFsFileContent {
 /// returns 0 ("nothing new now"), which poll loops treat as
 /// EAGAIN-equivalent.
 fn tracefs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    // SAFETY: private_data was installed by tracefs_open under this File.
-    let Some(ptr) = file.private_data_ptr() else {
-        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
+    // The snapshot box is this description's private data
+    // (INV-FS-FILEPRIV-1, the mut twin: streaming refill mutates it,
+    // serialized by the description's own read sequence).
+    let content = match crate::fs::unsafe_edges::file_privdata_ref_mut::<TraceFsFileContent>(file) {
+        Some(c) => c,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
-    // SAFETY: pointer provenance is Box::into_raw in tracefs_open.
-    let content = unsafe { &mut *(ptr as *mut TraceFsFileContent) };
     let offset = file.get_pos() as usize;
     if content.streaming && offset >= content.data.len() {
         // Refill: drain the generator into the live batch. The inode
@@ -642,7 +641,7 @@ fn tracefs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 /// write: dispatch to the file's store handler.
 fn tracefs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
-    // SAFETY: inode pointer set at open; read-only access here.
+    // The inode cell is write-once at open (File::get_inode).
     let inode = match file.get_inode().cloned() {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
@@ -667,12 +666,11 @@ fn tracefs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 
 /// lseek within the snapshot.
 fn tracefs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
-    // SAFETY: see tracefs_file_read.
-    let Some(ptr) = file.private_data_ptr() else {
-        return errno::Errno::BadFileNumber.as_neg_i32() as isize;
+    // See the read op above (INV-FS-FILEPRIV-1).
+    let content = match crate::fs::unsafe_edges::file_privdata_ref::<TraceFsFileContent>(file) {
+        Some(c) => c,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
-    // SAFETY: pointer provenance is Box::into_raw in tracefs_open.
-    let content = unsafe { &*(ptr as *const TraceFsFileContent) };
     let file_size = content.data.len() as isize;
     let new_offset = match whence {
         0 => offset,
@@ -689,14 +687,9 @@ fn tracefs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isi
 
 /// close: free the content snapshot.
 fn tracefs_file_close(file: &crate::fs::File) -> i32 {
-    // SAFETY: see tracefs_file_read; null-out first to close the race window.
-    let ptr = file.private_data_ptr();
-    file.clear_private_data();
-    if let Some(ptr) = ptr {
-        // SAFETY: provenance is Box::into_raw in tracefs_open.
-        // SAFETY: the Box<TraceFsFileContent> the open path stored (sole ref).
-        drop(unsafe { Box::from_raw(ptr as *mut TraceFsFileContent) });
-    }
+    // The take empties the cell first (no UAF window); the Box reclaim
+    // rides the framework edge (INV-FS-FILEPRIV-1).
+    drop(crate::fs::unsafe_edges::file_privdata_take::<TraceFsFileContent>(file));
     0
 }
 

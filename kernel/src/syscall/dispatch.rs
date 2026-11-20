@@ -6,6 +6,7 @@
 //!
 //! This module handles system call dispatch and common processing
 
+#![forbid(unsafe_code)]
 use crate::arch::pt_regs::PtRegs;
 use super::*;
 

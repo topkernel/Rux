@@ -12,6 +12,7 @@
 //! - CBS: Enforces runtime/period constraints
 //! - Admission control: Ensures total bandwidth < 100%
 
+#![forbid(unsafe_code)]
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, AtomicI64, Ordering};
 use crate::process::task::Task;

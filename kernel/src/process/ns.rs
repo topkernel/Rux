@@ -22,6 +22,7 @@
 //! Syscalls: unshare(2), setns(2) (here); /proc/[pid]/ns/{kind} magic
 //! symlinks + ns fds (open intercepted in sys_openat) live here too.
 
+#![forbid(unsafe_code)]
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;

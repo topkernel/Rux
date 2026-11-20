@@ -36,6 +36,8 @@
 //! Every line is behind the `rux:scmtap (retired dfx=scmtap)` switch; cost when off is one
 //! relaxed load per potential print site.
 
+#![forbid(unsafe_code)]
+
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]

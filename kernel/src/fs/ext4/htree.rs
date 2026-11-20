@@ -522,7 +522,7 @@ pub fn dx_find_entry(
             let data = unsafe { &(*lbh).b_data };
             let mut offset = 0usize;
             while offset < block_size {
-                let entry = unsafe { Ext4DirEntry::from_bytes(&data[offset..], block_size) };
+                let entry = Ext4DirEntry::from_bytes(&data[offset..], block_size);
                 if entry.rec_len == 0 {
                     break;
                 }

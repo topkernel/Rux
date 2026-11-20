@@ -4,6 +4,7 @@
 //!
 //! Device driver module
 
+
 pub mod intc;
 pub mod timer;
 pub mod rtc;

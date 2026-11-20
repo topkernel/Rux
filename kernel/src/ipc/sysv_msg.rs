@@ -24,6 +24,7 @@ const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
 /// struct msginfo — returned by IPC_INFO / MSG_INFO
 /// Must match Linux's include/uapi/linux/msg.h. Total: 30 bytes.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct MsgInfoUapi {
     pub msgpool: i32,  // +0  pool pages
     pub msgmap: i32,   // +4  pool entries
@@ -38,6 +39,7 @@ pub struct MsgInfoUapi {
 /// struct msqid64_ds — returned by IPC_STAT, IPC_SET
 /// Must match asm-generic/msgbuf.h for RV64. Total: 120 bytes.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct MsqidDsUapi {
     pub msg_perm: IpcPermUapi,
     pub msg_stime: i64,
@@ -338,15 +340,8 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                     ds.msg_lrpid = entry.inner.msg_lrpid.load(Ordering::Relaxed);
                 }
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<MsqidDsUapi>() above;
-            // ds is a stack-local copy of the message queue metadata.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &ds as *const MsqidDsUapi as *const u8,
-                    core::mem::size_of::<MsqidDsUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
             0
         }
         IPC_SET => {
@@ -392,16 +387,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                 __unused4: 0,
                 __unused5: 0,
             };
-            // SAFETY: buf_ptr was access_ok-validated above; ds is a
-            // stack-local repr(C) struct of exactly that size.
-            if unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    &mut ds as *mut MsqidDsUapi as *mut u8,
-                    buf_ptr,
-                    core::mem::size_of::<MsqidDsUapi>(),
-                )
-            } != 0
-            {
+            if crate::arch::uaccess_safe::copy_in_t(&mut ds, buf_ptr as usize) != 0 {
                 return -(errno::EFAULT as i64);
             }
             let mut slots = MSG_IDS.slots.lock();
@@ -442,14 +428,8 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                 msgtql: 65536,
                 msgseg: 0xffff,
             };
-            // SAFETY: buf_ptr was null-checked and access_ok-validated above.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &info as *const MsgInfoUapi as *const u8,
-                    core::mem::size_of::<MsgInfoUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &info);
             // Return: highest used slot index (Linux ipc_get_maxidx);
             // -1 when empty. LTP feeds this value straight into MSG_STAT.
             msg_max_idx() as i64
@@ -482,14 +462,8 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                 msgtql: 65536,
                 msgseg: 0xffff,
             };
-            // SAFETY: buf_ptr was null-checked and access_ok-validated above.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &info as *const MsgInfoUapi as *const u8,
-                    core::mem::size_of::<MsgInfoUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &info);
             // Return: highest used slot index, -1 when empty (see IPC_INFO).
             msg_max_idx() as i64
         }
@@ -550,15 +524,8 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                     return -(errno::EINVAL as i64);
                 }
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated above;
-            // ds is a stack-local repr(C) struct of exactly that size.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &ds as *const MsqidDsUapi as *const u8,
-                    core::mem::size_of::<MsqidDsUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
             result_id as i64
         }
         11 => {
@@ -614,15 +581,8 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                     return -(errno::EINVAL as i64);
                 }
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated above;
-            // ds is a stack-local repr(C) struct of exactly that size.
-            unsafe {
-                copy_to_user(
-                    buf_ptr as *mut u8,
-                    &ds as *const MsqidDsUapi as *const u8,
-                    core::mem::size_of::<MsqidDsUapi>(),
-                );
-            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
             result_id as i64
         }
         _ => -(errno::EINVAL as i64),
@@ -654,7 +614,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
     // be EFAULT — the old unwrap_or(0) turned a PROT_NONE page into
     // mtype=0 and reported EINVAL (reference ksys_msgsnd: get_user failure
     // is EFAULT before any EINVAL on the type).
-    let mtype = match unsafe { get_user(msgp as *const i64) } {
+    let mtype = match crate::arch::uaccess_safe::read_user::<i64>(msgp as usize) {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
     };
@@ -663,7 +623,9 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
     }
 
     // SAFETY: msgp + 8 is within the access_ok-validated region.
-    let data_ptr = unsafe { msgp.add(8) };
+    // The data span starts at msgp+8 (after mtype); handled through the
+    // capsule below (no raw pointer arithmetic left here).
+    let data_ptr = msgp as usize + 8;
     let mut data = alloc::vec::Vec::with_capacity(msgsz);
     data.resize(msgsz, 0);
     // SAFETY: data_ptr was access_ok-validated for msgsz bytes above;
@@ -671,7 +633,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
     // The return value (uncopied byte count) MUST be checked — a partial
     // copy would zero-fill the tail and corrupt the message (review IPC M:
     // msgsnd 忽略 copy_from_user 返回值).
-    if unsafe { copy_from_user(data.as_mut_ptr(), data_ptr, msgsz) } != 0 {
+    if crate::arch::uaccess_safe::copy_in(&mut data, data_ptr as usize) != 0 {
         return -(errno::EFAULT as i64);
     }
 
@@ -946,25 +908,17 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
 
         if let Some((_mi, msg)) = result {
             // Copy mtype (8 bytes)
-            // SAFETY: msgp was access_ok-validated for msgsz+8 bytes above;
-            // put_user is the exception-table copy path.
-            unsafe {
-                let _ = put_user(msgp as *mut i64, msg.mtype);
-            }
+            // Typed write through the safe uaccess capsule (msgp was
+            // access_ok-validated for msgsz+8 bytes above).
+            let _ = crate::arch::uaccess_safe::write_user(msgp as usize, msg.mtype);
             // Copy message data. The E2BIG check ran BEFORE the removal
             // above (reference do_msgrcv), so the only size case left here
             // is MSG_NOERROR truncation; the old remove-then-restore path
             // reordered the queue and updated rtime/lrpid on failure.
             let copy_len = msg.data.len().min(msgsz);
-            // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
-            // copy_len <= msgsz, so the copy is within bounds.
-            unsafe {
-                copy_to_user(
-                    msgp.add(8),
-                    msg.data.as_ptr(),
-                    copy_len,
-                );
-            }
+            // Copy through the safe uaccess capsule (msgp+8 was
+            // access_ok-validated for msgsz bytes above; copy_len <= msgsz).
+            let _ = crate::arch::uaccess_safe::copy_out(msgp as usize + 8, &msg.data[..copy_len]);
             // Wake up senders (space freed)
             {
                 let slots = MSG_IDS.slots.lock();

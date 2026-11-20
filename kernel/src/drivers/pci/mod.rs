@@ -6,6 +6,7 @@
 //!
 //! Implements PCI configuration space access and device enumeration
 
+#![forbid(unsafe_code)]
 /// PCI configuration space register offsets
 pub mod offset {
     pub const VENDOR_ID: u8 = 0x00;

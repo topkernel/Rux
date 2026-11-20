@@ -9,6 +9,7 @@
 //! - `WARN()`: Non-fatal warning. Logs message + stack trace + taints kernel.
 //! - `BUG()`:  Fatal. Logs message + stack trace, then calls `panic!()`.
 
+#![forbid(unsafe_code)]
 use core::fmt::Write;
 use crate::dfx::backtrace::ConsoleWriter;
 use crate::dfx::taint;

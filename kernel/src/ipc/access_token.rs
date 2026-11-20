@@ -31,6 +31,7 @@
 //! array (io control only; samgr consults the token's type bits, not this
 //! array, for CanRequest).
 
+#![forbid(unsafe_code)]
 use alloc::collections::BTreeMap;
 
 use crate::fs::devfs::registry;
@@ -183,7 +184,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
     // task_struct of the process; mirror the drivers/access_tokenid.rs
     // port which already uses task.tgid().
     let pid = crate::sched::current()
-        .map(|t| unsafe { (*t).tgid() as u32 })
+        .map(|t| t.tgid() as u32)
         .unwrap_or_else(crate::process::current_pid);
     // rux:syscalltrace (retired dfx=syscalltrace): the per-ioctl trace. Ungated this is the
     // highest-rate print of an OH boot — hdf_devmgr polls
@@ -208,7 +209,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
                 ftoken
             };
             // SAFETY: arg validated, 8 bytes.
-            if unsafe { copy_to_user(arg as *mut u8, v.to_ne_bytes().as_ptr(), 8) } != 0 {
+            if crate::arch::uaccess_safe::copy_out(arg as usize, &v.to_ne_bytes()) != 0 {
                 return ebadf();
             }
             0
@@ -219,7 +220,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             }
             let mut buf = [0u8; 8];
             // SAFETY: arg validated, 8 bytes.
-            if unsafe { copy_from_user(buf.as_mut_ptr(), arg as *const u8, 8) } != 0 {
+            if crate::arch::uaccess_safe::copy_in(&mut buf, arg as usize) != 0 {
                 return ebadf();
             }
             let v = u64::from_ne_bytes(buf);
@@ -227,7 +228,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             // nwebspawn+render. We accept root and 3020 — init's service
             // children run as root until their setuid.
             let uid = crate::process::current_task()
-                .map(|t| unsafe { (*t).cred().uid })
+                .map(|t| t.cred().uid)
                 .unwrap_or(0);
             if uid != 0 && uid != 3020 {
                 return eperm();
@@ -244,7 +245,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             }
             let mut buf = [0u8; 260];
             // SAFETY: arg validated, 260 bytes.
-            if unsafe { copy_from_user(buf.as_mut_ptr(), arg as *const u8, 260) } != 0 {
+            if crate::arch::uaccess_safe::copy_in(&mut buf, arg as usize) != 0 {
                 return ebadf();
             }
             let token = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
@@ -269,7 +270,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             }
             let mut buf = [0u8; 4];
             // SAFETY: arg validated, 4 bytes.
-            if unsafe { copy_from_user(buf.as_mut_ptr(), arg as *const u8, 4) } != 0 {
+            if crate::arch::uaccess_safe::copy_in(&mut buf, arg as usize) != 0 {
                 return ebadf();
             }
             let token = u32::from_ne_bytes(buf);
@@ -285,7 +286,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             }
             let mut buf = [0u8; 12];
             // SAFETY: arg validated, 12 bytes.
-            if unsafe { copy_from_user(buf.as_mut_ptr(), arg as *const u8, 12) } != 0 {
+            if crate::arch::uaccess_safe::copy_in(&mut buf, arg as usize) != 0 {
                 return ebadf();
             }
             let token = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);

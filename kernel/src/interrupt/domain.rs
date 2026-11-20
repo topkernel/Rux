@@ -7,6 +7,7 @@
 //! Maps hardware IRQ numbers to virtual IRQ numbers.
 //! Phase 1: linear 1:1 mapping for PLIC.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sync::spinlock::Spinlock;
 

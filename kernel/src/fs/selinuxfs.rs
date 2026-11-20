@@ -19,6 +19,7 @@
 //!
 //! Anything else is ENOENT — libselinux falls back gracefully.
 
+#![forbid(unsafe_code)]
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -137,7 +138,7 @@ fn build_child_inode(idx: usize) -> Arc<Inode> {
 /// selinuxfs at all" (samgr SA-gate forensics, boots b50+).
 static NODE_TOUCHED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-unsafe fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     if dir.ino != ROOT_INO {
         // Class discovery probes (`class/<name>/index`) land here — log
         // the first few: they show which security classes libselinux
@@ -172,7 +173,7 @@ unsafe fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno
     }
 }
 
-unsafe fn selinuxfs_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+fn selinuxfs_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
     if parent.ino != ROOT_INO {
         return Err(errno::Errno::NoSuchFileOrDirectory);
     }
@@ -182,7 +183,7 @@ unsafe fn selinuxfs_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<Arc<I
     }
 }
 
-unsafe fn selinuxfs_readdir(dir: &Inode) -> Option<Vec<VfsDirEntry>> {
+fn selinuxfs_readdir(dir: &Inode) -> Option<Vec<VfsDirEntry>> {
     if dir.ino != ROOT_INO {
         return Some(Vec::new());
     }
@@ -203,7 +204,7 @@ unsafe fn selinuxfs_readdir(dir: &Inode) -> Option<Vec<VfsDirEntry>> {
     Some(out)
 }
 
-unsafe fn selinuxfs_get_file_ops(inode: &Inode) -> Option<&'static FileOps> {
+fn selinuxfs_get_file_ops(inode: &Inode) -> Option<&'static FileOps> {
     if inode.mode.is_directory() {
         Some(&crate::fs::file::DIR_FILE_OPS)
     } else {
@@ -215,7 +216,7 @@ unsafe fn selinuxfs_get_file_ops(inode: &Inode) -> Option<&'static FileOps> {
 /// The default (no setattr op) answers EROFS, which init logs as a
 /// boot-graph warning; a silent success keeps the graph clean. Mode
 /// bits on synthetic nodes are cosmetic — nothing enforces them.
-unsafe fn selinuxfs_setattr(_inode: &Inode, _attr: u32, _arg1: u64, _arg2: u64) -> i32 {
+fn selinuxfs_setattr(_inode: &Inode, _attr: u32, _arg1: u64, _arg2: u64) -> i32 {
     0
 }
 
@@ -250,10 +251,10 @@ pub(crate) static SELINUXFS_INODE_OPS: INodeOps = INodeOps {
 fn selinuxfs_read(file: &File, buf: &mut [u8]) -> isize {
     // private_data on the FILE is cloned from the inode at open time by
     // the generic path; when absent, fall back to the inode's tag.
-    let tag = match unsafe { *file.private_data.get() } {
+    let tag = match file.get_private_data() {
         Some(p) => p as usize,
         None => {
-            let inode = match unsafe { (*file.inode.get()).clone() } {
+            let inode = match file.get_inode().cloned() {
                 Some(i) => i,
                 None => return -9, // EBADF
             };
@@ -285,9 +286,9 @@ fn selinuxfs_write(_file: &File, buf: &[u8]) -> isize {
 /// read_at — without this entry the fill served a zero page (version
 /// byte 0 instead of STATUS_PAGE's 1).
 fn selinuxfs_read_at(file: &File, offset: u64, buf: &mut [u8]) -> isize {
-    let tag = match unsafe { *file.private_data.get() } {
+    let tag = match file.get_private_data() {
         Some(p) => p as usize,
-        None => match unsafe { (*file.inode.get()).clone() } {
+        None => match file.get_inode().cloned() {
             Some(i) => match i.private_data {
                 Some(p) => p as usize,
                 None => return -9,

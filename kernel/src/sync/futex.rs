@@ -771,13 +771,13 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
                     Some(ref w) if !w.task.is_null() => {
                         // SAFETY: liveness verified via the pid hash before
                         // the tgid read; the derefs touch only pid fields.
-                        let t = unsafe { (*w.task).pid() };
+                        let t = crate::sched::edges::task_shared(w.task).pid();
                         let live = core::ptr::eq(
                             // SAFETY: diagnostic pid-hash lookup.
-                            unsafe { crate::sched::find_task_by_pid(t) },
+                            crate::sched::find_task_by_pid(t),
                             w.task,
                         );
-                        let hit = live && (unsafe { (*w.task).tgid() as u32 } == tgid);
+                        let hit = live && (crate::sched::edges::task_shared(w.task).tgid() as u32 == tgid);
                         (Some((hit, t, w.key.uaddr, w.woken)), w.next)
                     }
                     Some(ref w2) => (None, w2.next),
@@ -1897,7 +1897,7 @@ pub fn fuxw_owner_park_state(tid: u32, uaddr: u64, now: u32) -> (u32, bool, usiz
             Some(ref w) if !w.task.is_null() => {
                 // SAFETY: liveness verified via the pid hash before the
                 // tid read; the derefs touch only pid fields.
-                let t = unsafe { (*w.task).pid() };
+                let t = crate::sched::edges::task_shared(w.task).pid();
                 if w.key.uaddr as u64 != uaddr {
                     continue;
                 }
@@ -7796,7 +7796,7 @@ pub fn futex_requeue(
         // depth for the residency-fastpath residue.
         for task in &wake_list {
             if !task.is_null() {
-                let pid = unsafe { (**task).pid() };
+                let pid = crate::sched::edges::task_shared(*task).pid();
                 let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
                 if fresh == *task {
                     Task::wake_up_in_futex_bucket(*task, &head1.proof());
@@ -7951,7 +7951,7 @@ pub fn futex_requeue(
         // the nested GRQ acquire — INV-LOCK-5 class crossing).
         for task in &wake_list {
             if !task.is_null() {
-                let pid = unsafe { (**task).pid() };
+                let pid = crate::sched::edges::task_shared(*task).pid();
                 let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
                 if fresh == *task {
                     Task::wake_up_in_futex_bucket(*task, &guard_lo.proof());
@@ -8203,7 +8203,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 let tgid = crate::sched::edges::task_shared(t).tgid() as u32;
                 // SAFETY: pid-hash lookup of the tgid leader; read-only
                 // comm read.
-                let lead = unsafe { crate::sched::find_task_by_pid(tgid) };
+                let lead = crate::sched::find_task_by_pid(tgid);
                 if !lead.is_null()
                     && crate::sched::edges::task_shared(lead).comm().starts_with(b"udisksd")
                 {
@@ -9251,12 +9251,8 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 };
                                 if rsp != 0 {
                                     let rd64 = |va: usize| -> Option<u64> {
-                                        let lo = unsafe {
-                                            crate::sync::edges::read_u32_via_task(t, va)
-                                        }?;
-                                        let hi = unsafe {
-                                            crate::sync::edges::read_u32_via_task(t, va + 4)
-                                        }?;
+                                        let lo = crate::sync::edges::read_u32_via_task(t, va)?;
+                                        let hi = crate::sync::edges::read_u32_via_task(t, va + 4)?;
                                         Some(lo as u64 | ((hi as u64) << 32))
                                     };
                                     if let Some(slot12) = rd64(rsp + 8 * 12) {
@@ -9667,7 +9663,7 @@ pub fn note_task_unlink(pid: u32, tgid: u32) {
     // page walk must not take pid-hash locks; PageTableWalker does not).
     let uaddr = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
     if uaddr != 0 && tgid == RWFRZ_TGID.load(core::sync::atomic::Ordering::Relaxed) {
-        let t = unsafe { crate::sched::find_task_by_pid(pid) };
+        let t = crate::sched::find_task_by_pid(pid);
         if !t.is_null() {
             let tk = crate::sched::edges::task_shared(t);
             let comm = tk.comm();
@@ -10110,7 +10106,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
             // raw buffer for write.
             if nr == 20 {
                 let mut iovs = alloc::vec![0u8; 3 * 16];
-                let n = unsafe { crate::sync::edges::read_bytes_via_task(t, args[1] as usize, &mut iovs) };
+                let n = crate::sync::edges::read_bytes_via_task(t, args[1] as usize, &mut iovs);
                 for i in 0..3 {
                     if n < (i + 1) * 16 {
                         break;
@@ -10118,7 +10114,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                     let base = u64::from_le_bytes(iovs[i * 16..i * 16 + 8].try_into().unwrap());
                     let len = u64::from_le_bytes(iovs[i * 16 + 8..i * 16 + 16].try_into().unwrap());
                     let mut head = alloc::vec![0u8; 48];
-                    let hn = unsafe { crate::sync::edges::read_bytes_via_task(t, base as usize, &mut head) };
+                    let hn = crate::sync::edges::read_bytes_via_task(t, base as usize, &mut head);
                     let mut txt = alloc::string::String::new();
                     for &b in &head[..hn] {
                         if b == 0 {
@@ -10143,14 +10139,14 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
         }
         2 => {
             // open(2): pathname at args[0]
-            let p = unsafe { crate::sync::edges::read_cstr_via_task(t, args[0] as usize, 96) };
+            let p = crate::sync::edges::read_cstr_via_task(t, args[0] as usize, 96);
             crate::pr_warn!("KILLDUMP: tid {} open path='{}'", tk.pid(), p);
         }
         165 => {
             // mount(2): source/target/fstype at args[0..2]
-            let s = unsafe { crate::sync::edges::read_cstr_via_task(t, args[0] as usize, 96) };
-            let tg = unsafe { crate::sync::edges::read_cstr_via_task(t, args[1] as usize, 96) };
-            let ft = unsafe { crate::sync::edges::read_cstr_via_task(t, args[2] as usize, 32) };
+            let s = crate::sync::edges::read_cstr_via_task(t, args[0] as usize, 96);
+            let tg = crate::sync::edges::read_cstr_via_task(t, args[1] as usize, 96);
+            let ft = crate::sync::edges::read_cstr_via_task(t, args[2] as usize, 32);
             crate::pr_warn!(
                 "KILLDUMP: tid {} mount src='{}' tgt='{}' fstype='{}'",
                 tk.pid(),
@@ -11730,7 +11726,7 @@ fn waiter_clusters(min: usize) -> alloc::vec::Vec<WordCluster> {
                         let t = w.task;
                         let pid = crate::sched::edges::task_shared(t).pid();
                         let live = core::ptr::eq(
-                            unsafe { crate::sched::find_task_by_pid(pid) },
+                            crate::sched::find_task_by_pid(pid),
                             t,
                         );
                         if live {
@@ -11838,7 +11834,10 @@ pub fn freeze_scan(now: u64, hz: u64) {
                             // SAFETY: read-only pid/state of a task still
                             // linked in a futex bucket (waiter_clusters ran
                             // under the bucket lock when it sampled).
-                            unsafe { ((*c.sample).pid(), (*c.sample).state().bits()) }
+                            {
+                    let cs = crate::sched::edges::task_shared(c.sample);
+                    (cs.pid(), cs.state().bits())
+                }
                         };
                         crate::pr_warn!(
                             "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (was {}, d{:+}) wtid={} wstate={:#x}",
@@ -11868,14 +11867,14 @@ pub fn freeze_scan(now: u64, hz: u64) {
                             // SAFETY: read-only diagnostics of a task still
                             // linked in a futex bucket (sampled under the
                             // bucket lock by waiter_clusters).
-                            let tk = unsafe { &*c.sample };
+                            let tk = crate::sched::edges::task_shared(c.sample);
                             let cb = tk.comm();
                             let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
                             let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
                             // The process name: the tgid leader's comm
                             // (thread comms like 'pool-spawner' name the
                             // GLib role, the leader names the daemon).
-                            let lead = unsafe { crate::sched::find_task_by_pid(c.tgid) };
+                            let lead = crate::sched::find_task_by_pid(c.tgid);
                             let leader_comm = if lead.is_null() {
                                 "?"
                             } else {
@@ -12076,7 +12075,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                     // (mutex vs cond vs rwlock path) when
                                     // symbolized against the image's libs.
                                     if !c.sample.is_null() {
-                                        unsafe { apppark_rets(c.sample) };
+                                        apppark_rets(c.sample);
                                     }
                                 }
                             }
@@ -12166,7 +12165,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                         n
                                     );
                                     if !c.sample.is_null() {
-                                        unsafe { apppark_rets(c.sample) };
+                                        apppark_rets(c.sample);
                                     }
                                 }
                             }
@@ -12602,8 +12601,8 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
             // splices long multi-line dumps mid-line (sc89 lost the
             // holder's chain between frame[2] and frame[17]); two
             // passes rarely lose the same line twice.
-            unsafe { rwfz_stack_frames(t, "nbr", 24, 256, false) };
-            unsafe { rwfz_stack_frames(t, "nbr2", 24, 256, false) };
+            rwfz_stack_frames(t, "nbr", 24, 256, false);
+            rwfz_stack_frames(t, "nbr2", 24, 256, false);
         }
     });
 }
@@ -12655,7 +12654,7 @@ pub(crate) fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
             prio,
         );
         // SAFETY: t is a live Task from the pid-hash walk.
-        unsafe { rwfz_stack_frames(t, "task", 8, 64, prio) };
+        rwfz_stack_frames(t, "task", 8, 64, prio);
     });
     count_cell.get()
 }

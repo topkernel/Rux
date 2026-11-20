@@ -6,6 +6,7 @@
 //!
 //! Includes: socket, bind, listen, accept, connect, sendto, recvfrom
 
+#![forbid(unsafe_code)]
 use super::*;
 
 /// sys_socket - Create socket

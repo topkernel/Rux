@@ -6,6 +6,7 @@
 //!
 //! - do_execve_elf: Load ELF binary and set up user execution context
 
+#![forbid(unsafe_code)]
 use alloc::string::String;
 
 /// Base virtual address for loading the ELF interpreter (dynamic linker)

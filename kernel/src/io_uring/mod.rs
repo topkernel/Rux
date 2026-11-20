@@ -452,7 +452,7 @@ static LIFECYCLE_LOCK: Spinlock<()> = Spinlock::new(());
 /// Returns None if the ring is absent or being torn down.
 fn pin_ring(file: &File) -> Option<RingRef> {
     let _guard = LIFECYCLE_LOCK.lock();
-    let ptr = unsafe { *file.private_data.get() }? as *const IoUring;
+    let ptr = file.get_private_data()? as *const IoUring;
     // SAFETY: ptr was installed by Box::into_raw for an IO_URING_OPS file
     // and cannot be freed while we hold the lifecycle lock + a reference.
     let ring = unsafe { &*ptr };
@@ -464,11 +464,13 @@ fn pin_ring(file: &File) -> Option<RingRef> {
 
 fn io_uring_close(file: &File) -> i32 {
     let _guard = LIFECYCLE_LOCK.lock();
-    if let Some(ptr) = unsafe { *file.private_data.get() } {
-        // Clear FIRST so no new reference can be acquired, then drop ours;
-        // the final unref (which may free the ring) runs under the lock.
-        // SAFETY: ptr came from Box::into_raw at install time.
-        unsafe { *file.private_data.get() = None; }
+    // take_private_data clears FIRST so no new reference can be acquired
+    // (the cell discipline's close-path take, INV-FS-FILEPRIV-1), then we
+    // drop our reference; the final unref (which may free the ring) runs
+    // under the lock.
+    if let Some(ptr) = file.take_private_data() {
+        // SAFETY: ptr came from Box::into_raw at install time; the
+        // lifecycle lock serializes against every pin_ring reader.
         unsafe { (*(ptr as *const IoUring)).unref(); }
     }
     0
@@ -505,7 +507,7 @@ pub fn io_uring_mmap_handler(
     // after — a concurrent close() could free the ring in between).
     let (ring, _ring_guard) = {
         let _guard = LIFECYCLE_LOCK.lock();
-        let ring_ptr = unsafe { *file.private_data.get() }.ok_or(-9)?;
+        let ring_ptr = file.get_private_data().ok_or(-9)?;
         // SAFETY: under the lifecycle lock, close() cannot clear+free the
         // ring between the read and try_ref.
         let ring = unsafe { &*(ring_ptr as *const IoUring) };
@@ -743,13 +745,8 @@ fn do_read(file: &Arc<File>, buf: usize, len: usize) -> i32 {
         if n <= 0 {
             return if total > 0 { total as i32 } else { n as i32 };
         }
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_to_user(
-                (buf + total) as *mut u8,
-                kbuf.as_ptr(),
-                n as usize,
-            )
-        };
+        let uncopied =
+            crate::arch::uaccess_safe::copy_out((buf + total) as usize, &kbuf[..n as usize]);
         if uncopied != 0 {
             return if total > 0 { total as i32 } else { -14 }; // EFAULT
         }
@@ -820,13 +817,7 @@ fn do_write(file: &Arc<File>, buf: usize, len: usize) -> i32 {
 
     while total < len {
         let chunk = core::cmp::min(len - total, kbuf.len());
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_from_user(
-                kbuf.as_mut_ptr(),
-                (buf + total) as *const u8,
-                chunk,
-            )
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_in(&mut kbuf[..chunk], (buf + total) as usize);
         if uncopied != 0 {
             return if total > 0 { total as i32 } else { -14 }; // EFAULT
         }

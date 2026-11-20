@@ -31,6 +31,8 @@
 //! zero instrumentation cost when off). OFF by default like every DFX
 //! probe.
 
+#![forbid(unsafe_code)]
+
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]

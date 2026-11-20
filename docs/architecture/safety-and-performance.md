@@ -1410,3 +1410,24 @@ registered per the data-corruption doctrine.
   handed to the pick-protocol lane in run/COORD-NOTE-R11.md). make test
   1555/1555 fresh rootfs; triple-arch rc=0. [lane worktree oh-launch
   run/OH-LAUNCH.md round 13]
+
+## Primitive INV index (literal ids — machine-greppable)
+
+Every id below is spelled literally for the unsafe_gate artifact
+verifier (compressed "X-1/2/3" prose elsewhere in this file does not
+match a literal grep). One line per id; the owning module's header
+comment carries the full contract text.
+
+- INV-CBYTES-1 (byte image) — safety/bytes.rs: a `T: Copy` value's byte image is exactly its object representation.
+- INV-CBYTES-2 (bounds/alignment) — safety/bytes.rs: sub-object accessors re-derive offsets from the same `T`, checked in-bounds and aligned.
+- INV-CBYTES-3 (liveness) — safety/bytes.rs: every accessor takes a reference, so the underlying value is live for the call.
+- INV-RING-1 (capacity) — safety/ring.rs: N is a power of two; the mask derives from N, an index can never leave the array.
+- INV-RING-2 (SPSC with a CAS consumer) — safety/ring.rs: one producer (the IRQ handler) advances tail; consumers CAS head; put never blocks.
+- INV-RING-3 (static liveness) — safety/ring.rs: the ring is a machine-lifetime static of MaybeUninit<T: Copy> cells; volatile cross-hart slot access.
+- INV-RING-4 (peek/depth) — safety/ring.rs: depth_hint is a Relaxed hint; the CAS in get is the sole authority.
+- INV-WINDOW-1 (bounds) — safety/frame.rs: the KernelStackWindow covers only the stack's own backing pages.
+- INV-WINDOW-2 (alignment) — safety/frame.rs: word reads require aligned addresses inside the window.
+- INV-WINDOW-3 (stale memory) — safety/frame.rs: reads are volatile — the bytes may be stale or concurrently written task stack.
+- INV-FOR-1 (stale adoption) — dfx/forensics_edges.rs: task came from a diagnostic slot; read-only view of a possibly-freed task, pid stable for the struct's lifetime.
+- INV-FOR-2 (raw word) — dfx/forensics_edges.rs: addr names memory the producer believes mapped; single volatile read of mapped-or-guarded memory.
+- INV-FOR-3 (location key) — dfx/forensics_edges.rs: key was stored from a real event; the value is a rodata-backed Location.

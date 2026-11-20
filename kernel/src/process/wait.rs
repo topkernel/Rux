@@ -10,6 +10,7 @@
 //! - When a process needs to wait for a condition, it joins the wait queue and calls schedule()
 //! - When the condition is met, wake_up() wakes waiting processes
 
+#![forbid(unsafe_code)]
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;

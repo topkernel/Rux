@@ -539,10 +539,18 @@ impl File {
     /// (the slot is written at open time before the file is published,
     /// and cleared only at close — both under the owning file's
     /// lifecycle, never concurrently with a live handle's use).
+    /// The typed view/reclaim twins live in fs/unsafe_edges.rs
+    /// (INV-FS-FILEPRIV-1) — use those, never inline derefs.
     pub fn private_data_ptr(&self) -> Option<*mut u8> {
         // SAFETY: a plain load of a pointer-sized word; the value is
         // handed out as an opaque copy, not dereferenced here.
         unsafe { *self.private_data.get() }
+    }
+
+    /// L4 name twin of [`Self::private_data_ptr`] (same slot-value
+    /// copy; kept so both call-site families read naturally).
+    pub fn get_private_data(&self) -> Option<*mut u8> {
+        self.private_data_ptr()
     }
 
     /// Clear the private-data slot (the close-path twin; called only
@@ -551,6 +559,15 @@ impl File {
         // SAFETY: the store races no live handle (close is the last
         // user of this open file description).
         unsafe { *self.private_data.get() = None };
+    }
+
+    /// Take the private-data slot value out (the close-path reclaim
+    /// first half; the exactly-once reclaim twin is
+    /// `fs::unsafe_edges::file_privdata_take`).
+    pub fn take_private_data(&self) -> Option<*mut u8> {
+        // SAFETY: INV-FS-FILEPRIV-1; callers run in the release path
+        // where no shared reader can race the cell.
+        unsafe { (*self.private_data.get()).take() }
     }
 
     /// Get close-on-exec flag

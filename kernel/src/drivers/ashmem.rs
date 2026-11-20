@@ -57,7 +57,9 @@ pub const ASHMEM_IS_UNPINNED: i64 = 0;
 pub const ASHMEM_IS_PINNED: i64 = 1;
 
 /// struct ashmem_pin { u32 offset; u32 len; } (8 bytes on every ABI).
+/// All-POD wire fields — Copy for the typed uaccess capsule.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct AshmemPin {
     offset: u32,
     len: u32,
@@ -292,14 +294,15 @@ fn any_unpinned(unpinned: &[UnpinRange], pgstart: usize, pgend: usize) -> bool {
 // and is freed by ashmem_file_close (ops.close, exactly once per open
 // file description). Callers hold an Arc<File> from the fd table, so the
 // close op cannot have run yet.
-unsafe fn area_of(file: &crate::fs::file::File) -> Option<&'static AshmemArea> {
-    let cell = file.private_data.get();
-    (*cell).map(|p| &*(p as *const AshmemArea))
+fn area_of<'a>(file: &'a crate::fs::file::File) -> Option<&'a AshmemArea> {
+    // The area box is the description's private data (INV-FS-FILEPRIV-1,
+    // the framework edge); the Arc<File> callers hold pins it.
+    crate::fs::unsafe_edges::file_privdata_ref::<AshmemArea>(file)
 }
 
 fn ashmem_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
     // SAFETY: see area_of.
-    let area = match unsafe { area_of(file) } {
+    let area = match area_of(file) {
         Some(a) => a,
         None => return -9, // EBADF
     };
@@ -340,7 +343,7 @@ fn ashmem_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
 
 fn ashmem_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isize {
     // SAFETY: see area_of.
-    let area = match unsafe { area_of(file) } {
+    let area = match area_of(file) {
         Some(a) => a,
         None => return -9, // EBADF
     };
@@ -370,14 +373,10 @@ fn ashmem_file_close(file: &crate::fs::file::File) -> i32 {
     // Linux ashmem_release: mappings do NOT pin the area — it dies on
     // close. Mapped pages survive on their own refcounts (AshmemPages
     // drop only releases the pool's owner references).
-    // SAFETY: ops.close runs exactly once, on the final reference drop
-    // (close_fd / fdtable teardown / deferred close_pending).
-    unsafe {
-        let cell = file.private_data.get();
-        if let Some(p) = (*cell).take() {
-            drop(alloc::boxed::Box::from_raw(p as *mut AshmemArea));
-        }
-    }
+    // ops.close runs exactly once, on the final reference drop (close_fd
+    // / fdtable teardown / deferred close_pending); the Box reclaim
+    // rides the framework edge (INV-FS-FILEPRIV-1).
+    drop(crate::fs::unsafe_edges::file_privdata_take::<AshmemArea>(file));
     0
 }
 
@@ -419,12 +418,12 @@ pub fn ashmem_file_ioctl(
     if !is_ashmem_file(file) {
         return None;
     }
-    Some(unsafe { ashmem_ioctl(file, request, arg) })
+    Some(ashmem_ioctl(file, request, arg))
 }
 
-/// SAFETY: `arg` is the raw syscall argument; every user-pointer use is
-/// validated through the uaccess helpers before dereference.
-unsafe fn ashmem_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> i64 {
+/// `arg` is the raw syscall argument; every user-pointer use rides the
+/// exception-table uaccess paths (validated before dereference).
+fn ashmem_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> i64 {
     use crate::arch::uaccess::{access_ok, copy_to_user, strncpy_from_user};
 
     const EINVAL: i64 = 22;
@@ -478,9 +477,9 @@ unsafe fn ashmem_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -
             } else {
                 (ASHMEM_NAME_DEF, ASHMEM_NAME_DEF.len())
             };
-            // SAFETY: arg validated above for ASHMEM_NAME_LEN bytes and
-            // len <= ASHMEM_NAME_LEN.
-            if copy_to_user(arg as *mut u8, bytes.as_ptr(), len) != 0 {
+            // arg validated above for ASHMEM_NAME_LEN bytes and
+            // len <= ASHMEM_NAME_LEN (typed capsule copy).
+            if crate::arch::uaccess_safe::copy_out(arg as usize, &bytes[..len]) != 0 {
                 return -EFAULT;
             }
             0
@@ -519,13 +518,8 @@ unsafe fn ashmem_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -
             if arg == 0 || !access_ok(arg, core::mem::size_of::<AshmemPin>()) {
                 return -EFAULT;
             }
-            // SAFETY: arg validated for the 8-byte struct.
-            if crate::arch::uaccess::copy_from_user(
-                &mut pin as *mut AshmemPin as *mut u8,
-                arg as *const u8,
-                core::mem::size_of::<AshmemPin>(),
-            ) != 0
-            {
+            // arg validated for the 8-byte struct (typed capsule copy).
+            if crate::arch::uaccess_safe::copy_in_t(&mut pin, arg) != 0 {
                 return -EFAULT;
             }
 
@@ -606,7 +600,7 @@ pub fn ashmem_mmap(
     }
 
     // SAFETY: see area_of.
-    let area = unsafe { area_of(file) }.ok_or(-EINVAL)?;
+    let area = area_of(file).ok_or(-EINVAL)?;
 
     // Validation + pool creation under the area lock; the actual PTE work
     // happens outside it (snapshot the page list first, shmat discipline).

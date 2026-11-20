@@ -13,6 +13,7 @@
 //! # Integration
 //! Call tcp_timer_tick() in clock interrupt handler to check and process expired timers
 
+#![forbid(unsafe_code)]
 use crate::drivers::timer::get_jiffies;
 use crate::net::tcp::{TcpSocket, TcpState, TcpSocketTable, TcpTxBatch, TCP_SOCKET_TABLE_SIZE, TCP_DEFAULT_MSS};
 
