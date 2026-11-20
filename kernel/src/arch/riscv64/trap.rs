@@ -1379,26 +1379,27 @@ fn sigbus_has_handler() -> bool {
 #[no_mangle]
 pub extern "C" fn riscv_bad_user_frame(regs: *mut PtRegs) -> ! {
     let r = unsafe { &*regs };
-    unsafe {
-        let mut put = |b: u8| crate::console::putchar_no_lock(b);
-        for &b in b"trap: BADFRAME pid=0x" { putb(b); }
-        let pid = crate::sched::get_current_pid() as u64;
-        for sh in (0..32).step_by(4).rev() {
-            let n = ((pid >> sh) & 0xF) as u8;
-            putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-        for &b in b" epc=0x" { putb(b); }
-        for sh in (0..64).step_by(4).rev() {
-            let n = ((r.epc >> sh) & 0xF) as u8;
-            putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-        for &b in b" sp=0x" { putb(b); }
-        for sh in (0..64).step_by(4).rev() {
-            let n = ((r.sp >> sh) & 0xF) as u8;
-            putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-        putb(b'\n');
+    {
+
+    for &b in b"trap: BADFRAME pid=0x" { putb(b); }
+    let pid = crate::sched::get_current_pid() as u64;
+    for sh in (0..32).step_by(4).rev() {
+        let n = ((pid >> sh) & 0xF) as u8;
+        putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
     }
+    for &b in b" epc=0x" { putb(b); }
+    for sh in (0..64).step_by(4).rev() {
+        let n = ((r.epc >> sh) & 0xF) as u8;
+        putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+    }
+    for &b in b" sp=0x" { putb(b); }
+    for sh in (0..64).step_by(4).rev() {
+        let n = ((r.sp >> sh) & 0xF) as u8;
+        putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+    }
+    putb(b'\n');
+
+            }
     crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
     // do_exit schedules away and never returns; park defensively.
     loop {
@@ -1654,20 +1655,21 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             // entirely. This line names pid/comm/addr so the next
             // occurrence is attributable; the full zone dump follows via
             // oom_forensic_dump (printk-based, best effort).
-            unsafe {
-                let mut put = |b: u8| crate::console::putchar_no_lock(b);
-                for &b in b"trap: PF-OOM pid=0x" { putb(b); }
-                let pid = crate::sched::get_current_pid() as u64;
-                for sh in (0..32).step_by(4).rev() {
-                    let n = ((pid >> sh) & 0xF) as u8;
-                    putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                }
-                for &b in b" addr=0x" { putb(b); }
-                for sh in (0..64).step_by(4).rev() {
-                    let n = ((fault_addr >> sh) & 0xF) as u8;
-                    putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                }
-                putb(b'\n');
+            {
+
+            for &b in b"trap: PF-OOM pid=0x" { putb(b); }
+            let pid = crate::sched::get_current_pid() as u64;
+            for sh in (0..32).step_by(4).rev() {
+                let n = ((pid >> sh) & 0xF) as u8;
+                putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+            }
+            for &b in b" addr=0x" { putb(b); }
+            for sh in (0..64).step_by(4).rev() {
+                let n = ((fault_addr >> sh) & 0xF) as u8;
+                putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+            }
+            putb(b'\n');
+        
             }
             // FORENSIC (fake-OOM family): allocator state at the kill moment.
             crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
@@ -1718,10 +1720,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             // task's real kernel-stack top; 16K-aligned sp heuristic
             // otherwise).
             if KP_DUMP_ENTERED.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                let mut put = |b: u8| crate::console::putchar_no_lock(b);
-                for &b in b"trap: KERNPANIC re-entered during dump; halting cpu=" {
-                    putb(b);
-                }
+                putfrag(b"trap: KERNPANIC re-entered during dump; halting cpu=");
                 {
                     let c = crate::arch::cpu_id();
                     if c < 10 {
