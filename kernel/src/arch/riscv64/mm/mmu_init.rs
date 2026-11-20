@@ -918,22 +918,29 @@ fn owner_maps_pfn(root_ppn: u64, pfn: usize) -> (usize, [usize; 4]) {
     // SAFETY: diagnostic read-only walk of a live task's page-table tree
     // (serialized by the caller's PTE_MODIFY_LOCK); every table pointer is
     // derived from a valid PTE chain.
-    unsafe {
-        let root = get_page_table_virt(root_ppn << PAGE_SHIFT);
-        for vpn2 in 0..crate::arch::mm::memory_layout::KERNEL_PGD_START {
-            let pte2 = (*root).get(vpn2);
+    // Typed read-only walk (the round-1 PtTable edge); a guard miss is
+    // a corrupt tree — report no hits (the diagnostic caller prints the
+    // stamps regardless).
+    let root = match PtTable::from_phys(root_ppn << PAGE_SHIFT) {
+        Some(t) => t,
+        None => return (0, [0usize; 4]),
+    };
+    let mut hits = 0usize;
+    let mut vas = [0usize; 4];
+    for vpn2 in 0..crate::arch::mm::memory_layout::KERNEL_PGD_START {
+            let pte2 = root.get(vpn2);
             if !pte2.is_valid() || pte2.is_leaf() {
                 continue; // 1G user leaf: no file text lives there in practice
             }
-            let t1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+            let Some(t1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else { continue };
             for vpn1 in 0..512 {
-                let pte1 = (*t1).get(vpn1);
+                let pte1 = t1.get(vpn1);
                 if !pte1.is_valid() || pte1.is_leaf() {
                     continue;
                 }
-                let t0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+                let Some(t0) = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT) else { continue };
                 for vpn0 in 0..512 {
-                    let pte0 = (*t0).get(vpn0);
+                    let pte0 = t0.get(vpn0);
                     if !pte0.is_valid() || !pte0.is_leaf() || !pte0.is_user() {
                         continue;
                     }
@@ -945,7 +952,6 @@ fn owner_maps_pfn(root_ppn: u64, pfn: usize) -> (usize, [usize; 4]) {
                     }
                 }
             }
-        }
     }
     (hits, vas)
 }
@@ -2042,14 +2048,13 @@ pub unsafe extern "C" fn setup_vm() {
 ///
 /// Later, setup_linear_mapping() adds the full linear mapping at PAGE_OFFSET.
 pub fn init() {
-    unsafe {
-        // MMU is already enabled by boot.S trampoline
-        // Stay in Early stage for initial page table setup (uses static BSS arrays)
-        // Don't switch to Fixmap yet — phys_to_virt won't work until linear mapping is set up
-        // pt_ops_set_fixmap() will be called after setup_linear_mapping()
-
-        // Initialize root page table
-        ROOT_PAGE_TABLE.zero();
+    // MMU is already enabled by boot.S trampoline; the map fns below are
+    // the round-1/2 safe walkers — only the static root zero and the
+    // CR3/satp-class writes keep audited blocks.
+    // SAFETY: single-CPU boot section; the static root is exclusively
+    // owned here.
+    unsafe { ROOT_PAGE_TABLE.zero() };
+    {
 
         let root_ppn = root_page_table_ppn();
 
@@ -2107,7 +2112,9 @@ pub fn init() {
         super::fixmap::init_uart_fixmap();
 
         // Switch to permanent page table
-        let addr_space = MmStruct::new_kernel(root_ppn);
+        // (new_kernel keeps the mm-tree's root contract — the mm/ lane
+        // owns its conversion.)
+        let addr_space = unsafe { MmStruct::new_kernel(root_ppn) };
         addr_space.enable();
     }
 }
@@ -2153,7 +2160,7 @@ pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
 /// Setup device mappings (called after fixmap stage is ready)
 #[allow(dead_code)]
 pub fn setup_device_mappings() {
-    unsafe {
+    {
         // SVPBMT IO memory type (PTE bits 62:61) requires the CPU to
         // implement the svpbmt extension — QEMU's default `-cpu rv64`
         // ISA (rv64imafdch...) does NOT include svpbmt, and setting the
@@ -2220,10 +2227,11 @@ pub fn setup_device_mappings() {
 
 /// Setup linear mapping for physical memory
 pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
-    unsafe {
-        // Initialize KERNEL_MAP.va_pa_offset for phys_to_virt/virt_to_phys
-        // va_pa_offset = PAGE_OFFSET - phys_ram_base
-        KERNEL_MAP.va_pa_offset = VA_PA_OFFSET;
+    // Initialize KERNEL_MAP.va_pa_offset for phys_to_virt/virt_to_phys
+    // (va_pa_offset = PAGE_OFFSET - phys_ram_base)
+    // SAFETY: single-CPU boot section; no concurrent reader exists.
+    unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET };
+    {
 
         // Include X (execute) permission for kernel code in linear mapping
         let linear_flags = PageTableEntry::V | PageTableEntry::R |
@@ -2256,7 +2264,8 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
             }
         }
 
-        asm!("sfence.vma zero, zero", options(nomem, nostack));
+        // SAFETY: TLB fence (memory-safe in any context).
+        unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
     }
 }
 
@@ -2264,7 +2273,9 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
 pub fn enable() {
     unsafe {
         let root_ppn = root_page_table_ppn();
-        let addr_space = MmStruct::new_kernel(root_ppn);
+        // (new_kernel keeps the mm-tree's root contract — the mm/ lane
+        // owns its conversion.)
+        let addr_space = unsafe { MmStruct::new_kernel(root_ppn) };
         addr_space.enable();
     }
 }
