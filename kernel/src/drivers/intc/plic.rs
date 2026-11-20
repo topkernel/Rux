@@ -12,6 +12,7 @@
 //!
 //! All register accesses use the S-mode context (2*hart + 1).
 
+#![forbid(unsafe_code)]
 use core::arch::asm;
 use crate::println;
 use crate::interrupt::{

@@ -10,6 +10,7 @@
 //! - child's thread.sp points to pt_regs
 //! - child's thread.ra points to ret_from_fork
 
+#![forbid(unsafe_code)]
 use crate::process::task::{Task, TaskState, Pid};
 use crate::fs::FdTable;
 use crate::arch::pt_regs::PtRegs;

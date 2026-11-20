@@ -13,6 +13,7 @@
 //!   and a global byte cap, plus expiry GC on every insertion
 //!   (IP_FRAG_TIMEOUT, Linux-style drop-on-expiry).
 
+#![forbid(unsafe_code)]
 use super::{IpHdr, IPHDR_LEN, ip_frag_flags};
 use crate::sync::spinlock::Spinlock;
 

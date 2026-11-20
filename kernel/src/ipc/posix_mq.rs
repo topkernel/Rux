@@ -255,9 +255,9 @@ fn mq_parse_name(name_ptr: *const u8) -> Result<alloc::vec::Vec<u8>, i32> {
     // exception entry: a name that ran into an unmapped page before its
     // NUL terminator faulted the kernel (R20-3 class).
     let mut raw = [0u8; 256];
-    // SAFETY: name_ptr was null-checked and access_ok-validated for 256
+    // Safe uaccess capsule: name_ptr was access_ok-validated for 256
     // bytes above; raw is a 256-byte stack buffer.
-    let uncopied = unsafe { copy_from_user(raw.as_mut_ptr(), name_ptr, 256) };
+    let uncopied = crate::arch::uaccess_safe::copy_in(&mut raw, name_ptr as usize);
     let copied = 256 - uncopied;
     if copied == 0 {
         return Err(-errno::EFAULT);
@@ -316,19 +316,10 @@ pub fn sys_mq_open(args: [u64; 6]) -> i64 {
         // a partial fault). The old raw `*attr_ptr` deref took a kernel
         // page fault on user addresses (SUM=0) the moment a test actually
         // passed an attr — KERNPANIC "pfault" during LTP mq_open01.
-        let mut buf = core::mem::MaybeUninit::<MqAttr>::zeroed();
-        if unsafe {
-            copy_from_user(
-                buf.as_mut_ptr() as *mut u8,
-                attr_ptr as *const u8,
-                core::mem::size_of::<MqAttr>(),
-            )
-        } != 0
-        {
-            return -(errno::EFAULT as i64);
+        match crate::arch::uaccess_safe::read_user::<MqAttr>(attr_ptr as usize) {
+            Some(a) => Some(a),
+            None => return -(errno::EFAULT as i64),
         }
-        // SAFETY: fully initialized by zeroed() above.
-        Some(unsafe { buf.assume_init() })
     } else {
         None
     };
@@ -483,7 +474,7 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     // exception-table copy replaces the old raw i64 derefs (pfault hazard
     // on user addresses under SUM=0). A partial fault still EFAULTs.
     let mut ts = [0u8; 16];
-    if unsafe { copy_from_user(ts.as_mut_ptr(), timeout_ptr, 16) } != 0 {
+    if crate::arch::uaccess_safe::copy_in(&mut ts, timeout_ptr as usize) != 0 {
         return Err(-errno::EFAULT);
     }
     // SAFETY: ts is 16 initialized bytes; reading two little-endian i64s
@@ -561,7 +552,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
     // data is a Vec with capacity msg_len, so the destination is valid.
     // The uncopied count MUST be checked — a partial copy would silently
     // zero-fill the tail (review IPC M: mq_send 忽略 copy_from_user 返回值).
-    if unsafe { copy_from_user(data.as_mut_ptr(), msg_ptr, msg_len) } != 0 {
+    if crate::arch::uaccess_safe::copy_in(&mut data, msg_ptr as usize) != 0 {
         return -(errno::EFAULT as i64);
     }
 
@@ -798,13 +789,13 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
             }
             // SAFETY: msg_ptr was access_ok-validated for copy_len bytes above;
             // msg.data.as_ptr() is valid for msg.data.len() bytes (>= copy_len).
-            unsafe { copy_to_user(msg_ptr, msg.data.as_ptr(), copy_len); }
+            let _ = crate::arch::uaccess_safe::copy_out(msg_ptr as usize, &msg.data[..copy_len]);
 
             // Copy priority
             if !prio_ptr.is_null() && access_ok(prio_ptr as usize, 4) {
                 // SAFETY: prio_ptr was access_ok-validated for 4 bytes above;
                 // put_user is the exception-table copy path.
-                unsafe { let _ = put_user(prio_ptr, msg.priority); };
+                let _ = crate::arch::uaccess_safe::write_user(prio_ptr as usize, msg.priority);
             }
 
             return copy_len as i64;
@@ -896,7 +887,9 @@ const SIGEV_THREAD_ID: i32 = 3;
 /// struct sigevent layout for RV64 (first two fields needed for mq_notify).
 /// sigev_value (8 bytes) is at offset 8, but we only need sigev_notify (offset 0)
 /// and sigev_signo (offset 4).
+/// All-POD wire fields — Copy for the typed uaccess capsule.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct SigEvent {
     sigev_value: u64,    // union { int, void*, void(*)(sigval_t) }
     sigev_signo: i32,
@@ -934,16 +927,9 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         // above; copy_from_user is the exception-table copy path (SUM=0
         // safe) and zero-fills the tail on a partial fault, so the struct
         // is fully initialized either way.
-        let mut sev_buf = core::mem::MaybeUninit::<SigEvent>::zeroed();
-        unsafe {
-            copy_from_user(
-                sev_buf.as_mut_ptr() as *mut u8,
-                sevp as *const u8,
-                core::mem::size_of::<SigEvent>(),
-            );
-        }
-        // SAFETY: fully initialized by the zeroed() above.
-        let s = unsafe { sev_buf.assume_init() };
+        let Some(s) = crate::arch::uaccess_safe::read_user::<SigEvent>(sevp as usize) else {
+            return -(errno::EFAULT as i64);
+        };
 
         // Validate the notification type and signal number up front.
         // Linux do_mq_notify accepts SIGEV_NONE, SIGEV_SIGNAL and
@@ -1087,19 +1073,9 @@ pub fn sys_mq_getsetattr(args: [u64; 6]) -> i64 {
         // SAFETY: newattr_ptr was access_ok-validated above; the
         // exception-table copy path replaces a raw deref (same pfault
         // hazard as the mq_open attr read).
-        let mut buf = core::mem::MaybeUninit::<MqAttr>::zeroed();
-        if unsafe {
-            copy_from_user(
-                buf.as_mut_ptr() as *mut u8,
-                newattr_ptr as *const u8,
-                core::mem::size_of::<MqAttr>(),
-            )
-        } != 0
-        {
+        let Some(newattr) = crate::arch::uaccess_safe::read_user::<MqAttr>(newattr_ptr as usize) else {
             return -(errno::EFAULT as i64);
-        }
-        // SAFETY: fully initialized by zeroed() above.
-        let newattr = unsafe { buf.assume_init() };
+        };
         // Only O_NONBLOCK is settable (reference mq_getsetattr: flags with
         // any bit outside O_NONBLOCK are EINVAL). The old code stored the
         // raw value verbatim.
@@ -1116,15 +1092,9 @@ pub fn sys_mq_getsetattr(args: [u64; 6]) -> i64 {
             return -(errno::EFAULT as i64);
         }
         let attr = *mq.attr.lock();
-        // SAFETY: attr_ptr was access_ok-validated for size_of::<MqAttr>() above;
-        // &attr is a stack-local copy of the queue attributes.
-        unsafe {
-            copy_to_user(
-                attr_ptr as *mut u8,
-                &attr as *const MqAttr as *const u8,
-                core::mem::size_of::<MqAttr>(),
-            );
-        }
+        // Typed copy through the safe uaccess capsule (attr_ptr was
+        // access_ok-validated above).
+        let _ = crate::arch::uaccess_safe::copy_out_t(attr_ptr as usize, &attr);
     }
 
     0
@@ -1234,8 +1204,9 @@ pub fn mq_fds_cleanup(task: *mut crate::process::Task) {
     if task.is_null() {
         return;
     }
-    // SAFETY: task was null-checked above and is a valid pointer to the exiting
-    // task passed from do_exit; pid() is safe to call on it.
+    // task was null-checked above and is a valid pointer to the exiting
+    // task passed from do_exit.
+    // SAFETY: do_exit's raw task pointer, pinned for the cleanup call.
     let pid = unsafe { (*task).pid() as u32 };
 
     // Phase 1: Collect matching entries and clear them from the fd table.

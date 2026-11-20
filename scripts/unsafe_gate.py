@@ -92,6 +92,31 @@ def verify_artifact(art):
     return "unreachable"
 
 
+def forbid_ratchet_check(failures):
+    """Layer-1 ratchet: every file in docs/development/forbid-registry.txt
+    must still carry `#![forbid(unsafe_code)]`. Flips ADD to the registry
+    in the same commit; a file losing the attribute (or the registry
+    entry being deleted) fails the gate — removals must go through a
+    visible registry edit, which review sees."""
+    import re as _re
+    from pathlib import Path as _Path
+    root = _Path(__file__).resolve().parent.parent
+    reg = root / "docs" / "development" / "forbid-registry.txt"
+    if not reg.is_file():
+        failures.append("forbid-registry.txt missing — the Layer-1 ratchet "
+                        "cannot run (regenerate with the flip commit)")
+        return
+    attr = "#![forbid(unsafe_code)]"
+    for rel in reg.read_text().split():
+        f = root / rel
+        if not f.is_file():
+            failures.append(f"forbid ratchet: registry file gone: {rel}")
+            continue
+        if attr not in f.read_text(encoding="utf-8", errors="replace"):
+            failures.append(f"forbid ratchet: {rel} lost #![forbid(unsafe_code)] "
+                            f"— removal needs a visible registry edit")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
@@ -103,6 +128,8 @@ def main():
 
     artifacts = load_artifacts()
     failures = []
+
+    forbid_ratchet_check(failures)
 
     if args.check:
         regions = full_census()

@@ -6,6 +6,7 @@
 //!
 //! Used to probe and initialize VirtIO devices
 
+#![forbid(unsafe_code)]
 use crate::println;
 use crate::config::ENABLE_VIRTIO_NET_PROBE;
 use crate::sync::spinlock::Spinlock;

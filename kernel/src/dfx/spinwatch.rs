@@ -30,6 +30,7 @@
 //! (existing hunt rigs keep working; the frozen dfx= switch table is
 //! untouched — this module was never in it).
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::Ordering::Relaxed;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 

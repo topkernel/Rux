@@ -723,91 +723,89 @@ impl Ext4FileSystem {
         }
         // SAFETY: self.device is a valid GenDisk pointer; dir.get_data_blocks returns
         // valid block numbers; bio::bread returns a valid BufferHead for each block.
-        unsafe {
-            // Traverse directory's data blocks — through the block-list
-            // memo when warm (22nd): the per-block extent walk train
-            // (Vec + one extent lookup per block) ran on EVERY lookup;
-            // big dirs paid it per miss.
-            let blocks = match self.dir_blocks_cached(dir) {
-                Some(b) => b,
-                None => {
-                    let b = dir.get_data_blocks(self)?;
-                    self.dir_blocks_store(dir, b.clone());
-                    b
-                }
-            };
-            crate::dfx::fsw::note_dir_lookup(blocks.len());
-
-            // Pathology probe (oh-svc cook1/cook2 wedge): a directory scan
-            // whose block list is absurdly large means a corrupt inode
-            // (i_size/extent garbage) turned lookup into a multi-minute
-            // bread+parse loop that monopolizes the CPU under the bucket
-            // locks. Name the inode before we enter the loop so the boot
-            // log pinpoints which directory went bad. A real directory of
-            // 1024+ blocks (4MiB of dirents) never exists in these images.
-            if blocks.len() > 1024 {
-                crate::pr_err!(
-                    "ext4: PATHOLOGICAL DIR LOOKUP dir ino={} size={} blocks={} blocks_field={} name={:?}",
-                    dir.ino,
-                    dir.size,
-                    blocks.len(),
-                    dir.blocks,
-                    name
-                );
+        // Traverse directory's data blocks — through the block-list
+        // memo when warm (22nd): the per-block extent walk train
+        // (Vec + one extent lookup per block) ran on EVERY lookup;
+        // big dirs paid it per miss.
+        let blocks = match self.dir_blocks_cached(dir) {
+            Some(b) => b,
+            None => {
+                let b = dir.get_data_blocks(self)?;
+                self.dir_blocks_store(dir, b.clone());
+                b
             }
+        };
+        crate::dfx::fsw::note_dir_lookup(blocks.len());
 
-            for block in blocks.iter() {
-                if *block == 0 {
+        // Pathology probe (oh-svc cook1/cook2 wedge): a directory scan
+        // whose block list is absurdly large means a corrupt inode
+        // (i_size/extent garbage) turned lookup into a multi-minute
+        // bread+parse loop that monopolizes the CPU under the bucket
+        // locks. Name the inode before we enter the loop so the boot
+        // log pinpoints which directory went bad. A real directory of
+        // 1024+ blocks (4MiB of dirents) never exists in these images.
+        if blocks.len() > 1024 {
+            crate::pr_err!(
+                "ext4: PATHOLOGICAL DIR LOOKUP dir ino={} size={} blocks={} blocks_field={} name={:?}",
+                dir.ino,
+                dir.size,
+                blocks.len(),
+                dir.blocks,
+                name
+            );
+        }
+
+        for block in blocks.iter() {
+            if *block == 0 {
+                continue;
+            }
+            let bh = bio::bread(self.device, *block)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+            let data = bio::bh_data(&bh);
+            let mut offset = 0;
+
+            while offset < self.block_size as usize {
+                let entry = dir::Ext4DirEntry::from_bytes(
+                    &data[offset..],
+                    self.block_size as usize,
+                );
+
+                // Guard against corrupted directory entries (rec_len == 0)
+                if entry.rec_len == 0 {
+                    break;
+                }
+
+                if entry.inode == 0 {
+                    offset += entry.rec_len as usize;
                     continue;
                 }
-                let bh = bio::bread(self.device, *block)
-                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let data = bio::bh_data(&bh);
-                let mut offset = 0;
-
-                while offset < self.block_size as usize {
-                    let entry = dir::Ext4DirEntry::from_bytes(
-                        &data[offset..],
-                        self.block_size as usize,
-                    );
-
-                    // Guard against corrupted directory entries (rec_len == 0)
-                    if entry.rec_len == 0 {
-                        break;
-                    }
-
-                    if entry.inode == 0 {
+                let entry_name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
+                    Ok(s) => s,
+                    // Non-UTF8 (corrupt/binary) name: SKIP the entry but
+                    // still advance — a bare `continue` here retried the
+                    // SAME offset forever and livelocked the walker (the
+                    // OH userdata carries such entries; two vCPUs spun
+                    // in from_bytes with no serial output).
+                    Err(_) => {
                         offset += entry.rec_len as usize;
                         continue;
                     }
+                };
 
-                    let entry_name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
-                        Ok(s) => s,
-                        // Non-UTF8 (corrupt/binary) name: SKIP the entry but
-                        // still advance — a bare `continue` here retried the
-                        // SAME offset forever and livelocked the walker (the
-                        // OH userdata carries such entries; two vCPUs spun
-                        // in from_bytes with no serial output).
-                        Err(_) => {
-                            offset += entry.rec_len as usize;
-                            continue;
-                        }
-                    };
-
-                    if entry_name == name {
-                        bio::brelse(bh);
-                        return Ok(entry);
-                    }
-
-                    offset += entry.rec_len as usize;
+                if entry_name == name {
+                    bio::brelse(bh);
+                    return Ok(entry);
                 }
 
-                bio::brelse(bh);
+                offset += entry.rec_len as usize;
             }
 
-            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+            bio::brelse(bh);
         }
+
+        Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 
     /// List directory contents
@@ -820,96 +818,94 @@ impl Ext4FileSystem {
     pub fn list_dir(&self, dir: &inode::Ext4Inode) -> Result<Vec<dir::Ext4DirEntry>, i32> {
         // SAFETY: self.device is a valid GenDisk pointer; dir.get_data_blocks returns
         // valid block numbers; bio::bread returns valid BufferHeads for directory blocks.
-        unsafe {
-            let mut entries = Vec::new();
+        let mut entries = Vec::new();
 
-            // Traverse directory's data blocks (block-list memo, 22nd —
-            // see lookup()).
-            let blocks = match self.dir_blocks_cached(dir) {
-                Some(b) => b,
-                None => {
-                    let b = dir.get_data_blocks(self)?;
-                    self.dir_blocks_store(dir, b.clone());
-                    b
-                }
-            };
-            crate::dfx::fsw::note_list_dir();
-            // Pathology probe — see the twin in lookup().
-            if blocks.len() > 1024 {
-                crate::pr_err!(
-                    "ext4: PATHOLOGICAL DIR LIST dir ino={} size={} blocks={} blocks_field={}",
-                    dir.ino,
-                    dir.size,
-                    blocks.len(),
-                    dir.blocks
-                );
+        // Traverse directory's data blocks (block-list memo, 22nd —
+        // see lookup()).
+        let blocks = match self.dir_blocks_cached(dir) {
+            Some(b) => b,
+            None => {
+                let b = dir.get_data_blocks(self)?;
+                self.dir_blocks_store(dir, b.clone());
+                b
             }
+        };
+        crate::dfx::fsw::note_list_dir();
+        // Pathology probe — see the twin in lookup().
+        if blocks.len() > 1024 {
+            crate::pr_err!(
+                "ext4: PATHOLOGICAL DIR LIST dir ino={} size={} blocks={} blocks_field={}",
+                dir.ino,
+                dir.size,
+                blocks.len(),
+                dir.blocks
+            );
+        }
 
-            for block in blocks.iter() {
-                if *block == 0 {
+        for block in blocks.iter() {
+            if *block == 0 {
+                continue;
+            }
+            let bh = bio::bread(self.device, *block)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+            let data = bio::bh_data(&bh);
+            let mut offset = 0;
+
+            while offset < self.block_size as usize {
+                let entry = dir::Ext4DirEntry::from_bytes(
+                    &data[offset..],
+                    self.block_size as usize,
+                );
+
+                // Guard against corrupted directory entries (rec_len == 0)
+                if entry.rec_len == 0 {
+                    break;
+                }
+
+                if entry.inode == 0 {
+                    offset += entry.rec_len as usize;
                     continue;
                 }
-                let bh = bio::bread(self.device, *block)
-                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let data = bio::bh_data(&bh);
-                let mut offset = 0;
-
-                while offset < self.block_size as usize {
-                    let entry = dir::Ext4DirEntry::from_bytes(
-                        &data[offset..],
-                        self.block_size as usize,
-                    );
-
-                    // Guard against corrupted directory entries (rec_len == 0)
-                    if entry.rec_len == 0 {
-                        break;
-                    }
-
-                    if entry.inode == 0 {
+                // Skip . and ..
+                let name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
+                    Ok(s) => s,
+                    // Non-UTF8 name: skip but ADVANCE (see lookup — a
+                    // bare continue livelocked on the same offset).
+                    Err(_) => {
                         offset += entry.rec_len as usize;
                         continue;
                     }
-
-                    // Skip . and ..
-                    let name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
-                        Ok(s) => s,
-                        // Non-UTF8 name: skip but ADVANCE (see lookup — a
-                        // bare continue livelocked on the same offset).
-                        Err(_) => {
-                            offset += entry.rec_len as usize;
-                            continue;
-                        }
-                    };
-                    if name != "." && name != ".." {
-                        // (launcher-errno lane) Degrade, never panic: a
-                        // huge directory (the V0 vehicle's Linux-written
-                        // trees carry 100K+ entry dirs) must not reach
-                        // handle_alloc_error on the whole-dir Vec — the
-                        // le5 V0 boot died exactly there (ALLOCTHROW
-                        // 4 MiB inside ext4_readdir, kernel panic at
-                        // t=40 s). On reservation failure return the
-                        // PARTIAL list; the caller's pos-based walk
-                        // serves what was collected.
-                        if entries.try_reserve_exact(1).is_err() {
-                            crate::pr_err!(
-                                "ext4: list_dir partial: ino={} entries collected={} (heap budget)",
-                                dir.ino,
-                                entries.len()
-                            );
-                            return Ok(entries);
-                        }
-                        entries.push(entry.clone());
+                };
+                if name != "." && name != ".." {
+                    // (launcher-errno lane) Degrade, never panic: a
+                    // huge directory (the V0 vehicle's Linux-written
+                    // trees carry 100K+ entry dirs) must not reach
+                    // handle_alloc_error on the whole-dir Vec — the
+                    // le5 V0 boot died exactly there (ALLOCTHROW
+                    // 4 MiB inside ext4_readdir, kernel panic at
+                    // t=40 s). On reservation failure return the
+                    // PARTIAL list; the caller's pos-based walk
+                    // serves what was collected.
+                    if entries.try_reserve_exact(1).is_err() {
+                        crate::pr_err!(
+                            "ext4: list_dir partial: ino={} entries collected={} (heap budget)",
+                            dir.ino,
+                            entries.len()
+                        );
+                        return Ok(entries);
                     }
-
-                    offset += entry.rec_len as usize;
+                    entries.push(entry.clone());
                 }
 
-                bio::brelse(bh);
+                offset += entry.rec_len as usize;
             }
 
-            Ok(entries)
+            bio::brelse(bh);
         }
+
+        Ok(entries)
     }
 
     /// Read symbolic link target path
@@ -1392,14 +1388,13 @@ pub fn resolve_writeback_inode(
         return Some(inode);
     }
     let fs = ext4_instance_from_id(fs_id)?;
-    // SAFETY: `fs` is a live registered instance (the registry is the
-    // liveness authority); read_inode takes a shared reference.
+    // `fs` is a live registered instance (the registry is the liveness
+    // authority); read_inode takes a shared reference.
     let ext4_inode = fs.read_inode(ino as u32).ok()?;
-    let fs_ptr = fs as *const Ext4FileSystem as *mut Ext4FileSystem;
     // The materialized copy is NOT inserted into the icache: it is a
     // writeback-scoped view, and publishing it would fight the icache's
     // own eviction policy for slots.
-    Some(create_vfs_inode_in(fs_ptr, ino as u32, &ext4_inode))
+    Some(create_vfs_inode_in(fs, ino as u32, &ext4_inode))
 }
 
 /// Persist the inode-table blocks of the given writeback targets.
@@ -1777,64 +1772,58 @@ pub fn create_file(path: &str, mode: u32) -> Result<alloc::sync::Arc<Inode>, i32
     use crate::fs::ext4::inode::{Ext4Inode, file_type};
     use crate::fs::ext4::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
 
-    // SAFETY: GLOBAL_EXT4_FS stores a pointer set during ext4_mount; null check
-    // follows; the pointer is valid for the lifetime of the mount.
-    unsafe {
-        let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
-        if fs_ptr.is_null() {
-            return Err(errno::Errno::IOError.as_neg_i32());
-        }
-        let fs = &*fs_ptr;
+    // GLOBAL_EXT4_FS stores the mount's instance (INV-EXT4-GLOBALFS);
+    // resolve through the audited edge.
+    let fs = mounted_ext4_fs().ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-        // Parse path to get parent directory and filename
-        let abs_path = resolve_path(path);
-        let (parent_path, filename) = split_path(&abs_path);
+    // Parse path to get parent directory and filename
+    let abs_path = resolve_path(path);
+    let (parent_path, filename) = split_path(&abs_path);
 
-        // Lookup parent directory, creating intermediate dirs if needed (mkdir -p)
-        let parent_inode = create_parent_dirs(fs, &abs_path, &parent_path)?;
+    // Lookup parent directory, creating intermediate dirs if needed (mkdir -p)
+    let parent_inode = create_parent_dirs(fs, &abs_path, &parent_path)?;
 
-        if !parent_inode.is_dir() {
-            return Err(errno::Errno::NotADirectory.as_neg_i32());
-        }
-
-        // Allocate new inode
-        let allocator = allocator::InodeAllocator::new(fs);
-        let new_ino = allocator.alloc_inode()?;
-
-        // Initialize new inode
-        let mut new_inode = Ext4Inode {
-            ino: new_ino,
-            mode: (file_type::S_IFREG | (mode as u16 & 0o777)) as u16,
-            uid: 0,
-            gid: 0,
-            size: 0,
-            blocks: 0,
-            links_count: 1,
-            flags: 0x80000,  // EXT4_EXTENTS_FL - use extent tree
-            block: [0u32; 15],
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
-            generation: 0,
-        };
-
-        // Initialize extent header in i_block
-        let header = extent::get_extent_header_mut(&mut new_inode.block);
-        header.eh_magic = EXT4_EXT_MAGIC;
-        header.eh_entries = 0;
-        header.eh_max = 4;
-        header.eh_depth = 0;
-        header.eh_generation = 0;
-
-        // Write new inode to disk
-        inode::write_inode(fs, new_ino, &new_inode)?;
-
-        // Add directory entry in parent
-        add_dir_entry(fs, &parent_inode, filename, new_ino, 1)?;  // 1 = regular file
-
-        // Create VFS inode
-        Ok(create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &new_inode))
+    if !parent_inode.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
     }
+
+    // Allocate new inode
+    let allocator = allocator::InodeAllocator::new(fs);
+    let new_ino = allocator.alloc_inode()?;
+
+    // Initialize new inode
+    let mut new_inode = Ext4Inode {
+        ino: new_ino,
+        mode: (file_type::S_IFREG | (mode as u16 & 0o777)) as u16,
+        uid: 0,
+        gid: 0,
+        size: 0,
+        blocks: 0,
+        links_count: 1,
+        flags: 0x80000,  // EXT4_EXTENTS_FL - use extent tree
+        block: [0u32; 15],
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        generation: 0,
+    };
+
+    // Initialize extent header in i_block
+    let header = extent::get_extent_header_mut(&mut new_inode.block);
+    header.eh_magic = EXT4_EXT_MAGIC;
+    header.eh_entries = 0;
+    header.eh_max = 4;
+    header.eh_depth = 0;
+    header.eh_generation = 0;
+
+    // Write new inode to disk
+    inode::write_inode(fs, new_ino, &new_inode)?;
+
+    // Add directory entry in parent
+    add_dir_entry(fs, &parent_inode, filename, new_ino, 1)?;  // 1 = regular file
+
+    // Create VFS inode
+    Ok(create_vfs_inode_in(fs, new_ino, &new_inode))
 }
 
 /// fallocate flags (UAPI)
@@ -1891,441 +1880,447 @@ pub fn ext4_fallocate_on(
 
     // SAFETY: the instance pointer comes from the caller's inode
     // (private_data) or the boot GLOBAL — both valid for the mount.
-    unsafe {
-        let fs = &*fs_ptr;
+    // The instance pointer comes from the caller's inode private_data
+    // (fs_hint, INV-EXT4-PRIVFS provenance: create_vfs_inode installed
+    // it) or the boot GLOBAL (INV-EXT4-GLOBALFS) — both valid for the
+    // mount; resolved through the framework edges.
+    let fs: &Ext4FileSystem = if let Some(hint) = fs_hint {
+        crate::fs::unsafe_edges::static_ref_unchecked(hint as *mut Ext4FileSystem)
+    } else {
+        mounted_ext4_fs().ok_or(errno::Errno::IOError.as_neg_i32())?
+    };
 
-        // EFBIG before touching the allocator (Linux ext4_fallocate checks
-        // s_maxbytes first). The extent tree encodes logical blocks in a
-        // u32 ee_block, so the largest representable file is 2^32 blocks;
-        // a request past that used to fall into the block allocator and
-        // drain the whole filesystem run by run before failing ENOSPC —
-        // and because a failed preallocation did not persist the inode,
-        // every drained block leaked permanently (the LTP r4/r5 "/tmp
-        // fills and never recovers" regression: fallocate02's EFBIG
-        // subtests alone consumed ~500MB this way).
-        let max_file_size = (1u64 << 32) * fs.block_size as u64;
-        if offset >= max_file_size || end > max_file_size {
-            return Err(errno::Errno::FileTooLarge.as_neg_i32());
-        }
-
-        let _ext4_guard = EXT4_BIG_LOCK.lock();
-
-        // PUNCH-PATH DATA SYNC (falloc-wedge lane, 2026-11-16): a punch
-        // on a file whose buffered writes are still unflushed must first
-        // WRITE THOSE PAGES BACK — the reference ext4_punch_hole starts
-        // with filemap_write_and_wait_range(). Without it, the on-disk
-        // inode still carried the pre-write size (0 for a fresh file)
-        // and no extents, so the punch clamped to an empty range and
-        // returned SUCCESS as a no-op while the page cache kept serving
-        // the original bytes (LTP fallocate06's clear-check and the
-        // punchprobe: every hole byte read back nonzero,
-        // run/shell-punch3.log). Flushing materializes the data blocks
-        // and the on-disk size the punch then operates on. Callers hold
-        // no loop io claim (syscall context), so the writeback engine's
-        // re-entry discipline is satisfied; WRITEBACK_GUARD serializes
-        // against concurrent flush engines.
-        if mode & FALLOC_FL_PUNCH_HOLE != 0 {
-            let fs_id = fs as *const Ext4FileSystem as u64;
-            if let Some(vfs_ino) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino as u64) {
-                crate::fs::ext4::file::ext4_flush_dirty_inode(
-                    &vfs_ino,
-                    0,
-                    u64::MAX,
-                );
-            }
-        }
-
-        let mut ext4_inode = fs.read_inode(ino)?;
-        if !ext4_inode.is_reg() {
-            return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32()); // EBADR-ish
-        }
-        // falloc-wedge debug (bounded): name the punch's starting state.
-        if mode & FALLOC_FL_PUNCH_HOLE != 0 {
-            static PDBG: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if PDBG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
-                crate::pr_info!(
-                    "PUNCH-DBG ino={} off={} len={} disk_size={} extent={} i_blocks={}",
-                    ino,
-                    offset,
-                    len,
-                    ext4_inode.size,
-                    ext4_inode.has_extent(),
-                    ext4_inode.blocks
-                );
-            }
-        }
-
-        let block_size = fs.block_size as u64;
-        let file_size = ext4_inode.size;
-
-        if mode & FALLOC_FL_PUNCH_HOLE != 0 {
-            if mode & FALLOC_FL_KEEP_SIZE == 0 {
-                return Err(errno::Errno::InvalidArgument.as_neg_i32());
-            }
-            // Clamp the punch range to the file size.
-            let file_end = file_size.min(end);
-            if offset >= file_end {
-                return Ok(()); // nothing to punch
-            }
-            // ALIGNED INTERIOR + ZEROED EDGES (falloc-wedge round 3,
-            // 2026-11-16): only blocks FULLY covered by the range are
-            // freed; partial edge blocks are zeroed IN PLACE, allocation
-            // kept — the reference ext4_punch_hole shape (non-bigalloc).
-            // The first cut floored/ceiled the range to block
-            // granularity, so a MISALIGNED punch clobbered the bytes
-            // just outside the range (LTP fallocate06's clear-check:
-            // memcmp of the prefix before the punched range failed,
-            // run/shell-f06c.log).
-            let interior_first = (offset + block_size - 1) / block_size;
-            let interior_last_excl = file_end / block_size;
-            let punch_first = interior_first;
-            let punch_last = interior_last_excl; // exclusive
-            // Edge byte ranges to zero in place (outside the interior).
-            let head_zero = (offset, core::cmp::min(file_end, interior_first * block_size));
-            let tail_zero = (
-                core::cmp::max(offset, interior_last_excl * block_size),
-                file_end,
-            );
-            // Zero the partial edge blocks IN PLACE (byte-sliced,
-            // allocation kept). Runs BEFORE the interior rebuild — the
-            // map is still the pre-punch one, so phys resolution is
-            // exact for both extent and indirect files. Missing blocks
-            // (holes) need nothing — they already read as zeros.
-            {
-                // phys of one file block, from the pre-punch map.
-                let resolve = |blk: u64| -> Option<u64> {
-                    if ext4_inode.has_extent() {
-                        let exts = crate::fs::ext4::extent::ext4_ext_gather(
-                            fs,
-                            &ext4_inode.block,
-                        )
-                        .ok()?;
-                        exts.iter()
-                            .find(|e| {
-                                blk >= e.ee_block as u64 && blk < e.ee_block as u64 + e.len as u64
-                            })
-                            .map(|e| e.phys + (blk - e.ee_block as u64))
-                    } else if blk < 12 {
-                        let b = ext4_inode.block[blk as usize];
-                        if b != 0 { Some(b as u64) } else { None }
-                    } else {
-                        let ind = ext4_inode.block[12] as u64;
-                        if ind == 0 { return None; }
-                        let bh = crate::fs::bio::bread(fs.device, ind)?;
-                        let o = ((blk - 12) * 4) as usize;
-                        let d = bio::bh_data(&bh);
-                        let b = u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
-                        crate::fs::bio::brelse(bh);
-                        if b != 0 { Some(b as u64) } else { None }
-                    }
-                };
-                for &(zfrom, zto) in &[head_zero, tail_zero] {
-                    let mut off = zfrom;
-                    while off < zto {
-                        let blk = off / block_size;
-                        let in_blk = off % block_size;
-                        let n = core::cmp::min(zto - off, block_size - in_blk);
-                        if let Some(phys) = resolve(blk) {
-                            if phys != 0 {
-                                if let Some(bh) = crate::fs::bio::bread(fs.device, phys) {
-                                    let d = bio::bh_data_mut(&bh);
-                                    d[(in_blk as usize)..(in_blk + n) as usize].fill(0);
-                                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
-                                    let _ = crate::fs::bio::sync_dirty_buffer(bh);
-                                    crate::fs::bio::brelse(bh);
-                                }
-                            }
-                        }
-                        off += n;
-                    }
-                }
-            }
-
-            // R108: punch frees collected by the extent branch, drained
-            // after the tail write_inode_disk publishes the punched map.
-            let mut r108_punch_drain: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
-            let mut r108_punch_meta: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
-
-            if ext4_inode.has_extent() {
-                // Any-depth punch via gather/classify/rebuild (the old
-                // inline-root-only walker refused deep trees and could
-                // not represent more than 4 surviving fragments).
-                let hdr = extent::get_extent_header(&ext4_inode.block);
-                if hdr.eh_magic == EXT4_EXT_MAGIC {
-                    // R108 (crash-ordering, see ext4_setattr): the punch
-                    // frees are DEFERRED until the punched map is durably
-                    // published (write_inode_disk at the tail of this path
-                    // syncs) — freeing against the still-stale on-disk map
-                    // is the re-free poison window.
-                    let mut r108_punch_runs: alloc::vec::Vec<(u64, u64)> =
-                        alloc::vec::Vec::new();
-                    let all = crate::fs::ext4::extent::ext4_ext_gather(fs, &ext4_inode.block)?;
-                    let mut kept: alloc::vec::Vec<crate::fs::ext4::extent::RawExtent> =
-                        alloc::vec::Vec::new();
-                    let mut freed_sectors: u64 = 0;
-                    for e in &all {
-                        let ext_first = e.ee_block as u64;
-                        let ext_len = e.len as u64;
-                        let ext_last = ext_first + ext_len;
-                        let phys = e.phys;
-
-                        if ext_first >= punch_first && ext_last <= punch_last {
-                            // Entirely inside the punch range: free it all
-                            // (one bitmap pass for the contiguous run —
-                            // see free_inode_blocks for why per-block
-                            // frees are untenable for big extents). R108:
-                            // freed after the punched map is durable.
-                            r108_punch_runs.push((phys, ext_len));
-                            freed_sectors += ext_len * (block_size / 512);
-                        } else if ext_first < punch_last && ext_last > punch_first {
-                            // Partially covered (falloc-wedge lane,
-                            // 2026-11-16): SPLIT at the punch boundaries and
-                            // free the covered middle — the reference
-                            // kernel's ext4_ext_remove_space shape. The old
-                            // arm zeroed the covered blocks in place and
-                            // KEPT the allocation, so punching any proper
-                            // prefix of an extent returned NO space (LTP
-                            // fallocate05's dealloc step: punch [0,64) of a
-                            // 256-block extent freed nothing and the
-                            // follow-up write ENOSPC'd, run/shell-f05.log).
-                            let z_from = punch_first.max(ext_first);
-                            let z_to = punch_last.min(ext_last);
-                            // Left survivor [ext_first, z_from): same
-                            // phys origin, unchanged unwritten flag (a
-                            // kept preallocated range must stay unwritten
-                            // — masked lengths turn never-materialized
-                            // blocks into "written" and reads would fetch
-                            // disk garbage instead of zeros).
-                            if z_from > ext_first {
-                                kept.push(crate::fs::ext4::extent::RawExtent {
-                                    ee_block: ext_first as u32,
-                                    phys,
-                                    len: (z_from - ext_first) as u16,
-                                    unwritten: e.unwritten,
-                                });
-                            }
-                            // Right survivor [z_to, ext_last): phys shifted
-                            // past the freed middle.
-                            if ext_last > z_to {
-                                kept.push(crate::fs::ext4::extent::RawExtent {
-                                    ee_block: z_to as u32,
-                                    phys: phys + (z_to - ext_first),
-                                    len: (ext_last - z_to) as u16,
-                                    unwritten: e.unwritten,
-                                });
-                            }
-                            // Covered middle: FREED (written and unwritten
-                            // alike — a punched preallocated range
-                            // deallocates, Linux semantics). R108: freed
-                            // after the punched map is durable.
-                            r108_punch_runs.push((
-                                phys + (z_from - ext_first),
-                                z_to - z_from,
-                            ));
-                            freed_sectors += (z_to - z_from) * (block_size / 512);
-                        } else {
-                            kept.push(*e);
-                        }
-                    }
-                    let csum_seed = crate::fs::ext4::csum::dir_csum_seed(
-                        fs.csum_seed,
-                        ext4_inode.ino,
-                        ext4_inode.generation,
-                    );
-                    let meta_delta = crate::fs::ext4::extent::ext4_ext_rebuild_deferred(
-                        fs, &mut ext4_inode.block, &kept, &mut r108_punch_meta, csum_seed,
-                    )?;
-                    // R108: the punched map (rebuilt above) is published
-                    // durably by the write_inode_disk at the tail of this
-                    // path; only then do the collected runs free. The
-                    // frees are stashed here and drained at the tail.
-                    r108_punch_drain = r108_punch_runs;
-                    ext4_inode.blocks = ext4_inode
-                        .blocks
-                        .saturating_sub(freed_sectors)
-                        .saturating_add_signed(meta_delta);
-                }
-            } else {
-                // Indirect-block files (falloc-wedge lane, 2026-11-16):
-                // FREE the interior blocks instead of zeroing them in
-                // place — the old arm returned no space, so a punch on an
-                // indirect file (ext2/ext3 mounts) never made room (LTP
-                // fallocate05's dealloc step, run/shell-f05.log). Direct
-                // pointers of the ALIGNED INTERIOR are freed and cleared
-                // (partial edge blocks were zeroed above, allocation
-                // kept); the singly-indirect range frees its data blocks
-                // and zeroes the matching entries (the indirect block
-                // itself survives while any entry remains — bounded
-                // one-block conservatism; unlink/truncate reclaim it).
-                // Deeper indirection keeps nothing to free here (edge
-                // zeroing above already covered its bytes; interior
-                // blocks past the singly range are left allocated —
-                // bounded, noted). All bitmap frees ride the R108 drain
-                // below (map durable first, frees after).
-                if interior_first >= interior_last_excl {
-                    // Whole range inside (at most) the two edge blocks —
-                    // nothing to free, the edge zeroing did everything.
-                } else {
-                let first = interior_first as usize;
-                let last = (interior_last_excl - 1) as usize;
-                let mut freed_indirect_blocks: u64 = 0;
-                for i in first..=last.min(11) {
-                    let b = ext4_inode.block[i];
-                    if b != 0 {
-                        r108_punch_drain.push((b as u64, 1));
-                        freed_indirect_blocks += 1;
-                        ext4_inode.block[i] = 0;
-                    }
-                }
-                if last >= 12 && ext4_inode.block[12] != 0 {
-                    let ind_blk = ext4_inode.block[12] as u64;
-                    let ents_per_blk = (fs.block_size / 4) as usize;
-                    let ent_first = first.saturating_sub(12);
-                    let ent_last_excl = core::cmp::min(last.saturating_sub(12) + 1, ents_per_blk);
-                    if ent_first < ent_last_excl {
-                        if let Some(bh) = crate::fs::bio::bread(fs.device, ind_blk) {
-                            let data = bio::bh_data_mut(&bh);
-                            for ei in ent_first..ent_last_excl {
-                                let o = ei * 4;
-                                let b = u32::from_le_bytes([
-                                    data[o], data[o + 1], data[o + 2], data[o + 3],
-                                ]);
-                                if b != 0 {
-                                    r108_punch_drain.push((b as u64, 1));
-                                    freed_indirect_blocks += 1;
-                                    data[o..o + 4].fill(0);
-                                }
-                            }
-                            bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
-                            let _ = crate::fs::bio::sync_dirty_buffer(bh);
-                            crate::fs::bio::brelse(bh);
-                        }
-                    }
-                }
-                if freed_indirect_blocks > 0 {
-                    ext4_inode.blocks = ext4_inode
-                        .blocks
-                        .saturating_sub(freed_indirect_blocks * (block_size / 512));
-                }
-                }
-            }
-
-            // PAGE-CACHE DISCIPLINE (falloc-wedge root cause, 2026-11-16):
-            // kill ONLY the punched range's cached state — the reference
-            // ext4_punch_hole runs truncate_pagecache_range(offset, end),
-            // never a whole-inode invalidation. The whole-inode
-            // invalidate_inode that ran here dropped STILL-DIRTY
-            // delayed-allocation pages of the whole file — outside the
-            // punched range those frames are the only copy of
-            // acknowledged writes (LTP fallocate05/06 data loss;
-            // punchprobe3 caught it with NO flush involved). Pages FULLY
-            // covered by [offset, file_end) die; partial EDGE pages keep
-            // their frames (they hold live bytes outside the range) with
-            // the punched slice zeroed in-frame — the same discipline
-            // tmpfs punch_hole uses. The pre-sync above flushed the dirty
-            // set, so the dropped pages are clean; a page still dirty
-            // after a failed flush inside the punched range dies with the
-            // punch — its data is deleted by definition.
-            {
-                let cache = crate::fs::page_cache::get_page_cache();
-                let fs_id = fs as *const Ext4FileSystem as u64;
-                let ps = crate::mm::PAGE_SIZE as u64;
-                let first_full = offset.div_ceil(ps);
-                let last_full = file_end / ps; // exclusive
-                if last_full > first_full {
-                    cache.invalidate_inode_span(fs_id, ino as u64, first_full, last_full);
-                }
-                // Zero the punched byte range in surviving live frames
-                // (partial edges, plus pinned/mapped pages the span
-                // invalidate left as marked): readers must see zeros.
-                const ZCHUNK: usize = 65536;
-                let total = (file_end - offset) as usize;
-                if total > 0 {
-                    let zeros = alloc::vec![0u8; ZCHUNK.min(total)];
-                    let mut off = offset;
-                    while off < file_end {
-                        let n = ((file_end - off) as usize).min(zeros.len());
-                        cache.writeback_update_range_stale(fs_id, ino as u64, off, &zeros[..n]);
-                        off += n as u64;
-                    }
-                }
-            }
-
-            let sec = crate::drivers::rtc::wall_secs() as u32;
-            ext4_inode.mtime = sec;
-            ext4_inode.ctime = sec;
-            // write_inode_disk expects the on-disk layout; convert.
-            let on_disk = ext4_inode.to_on_disk();
-            inode::write_inode_disk(fs, ino, &on_disk)?;
-            // R108: the punched map is now DURABLE (write_inode_disk
-            // syncs) — drain the deferred punch frees (data runs and the
-            // replaced tree's metadata blocks). A failure above (the `?`
-            // on write_inode_disk) skips the frees: leaked blocks (bits
-            // set, unclaimed) instead of re-free poison.
-            if !r108_punch_drain.is_empty() || !r108_punch_meta.is_empty() {
-                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
-                for (phys, len) in &r108_punch_drain {
-                    let _ = allocator.free_block_run(*phys, *len);
-                }
-                for blk in &r108_punch_meta {
-                    let _ = allocator.free_block(*blk);
-                }
-            }
-            return Ok(());
-        }
-
-        // KEEP_SIZE / default: preallocate blocks up to `end`.
-        let needed_blocks = (end + block_size - 1) / block_size;
-        let current_blocks = (file_size + block_size - 1) / block_size;
-        if needed_blocks > current_blocks {
-            // Extent files: UNWRITTEN preallocation — metadata-only, no
-            // per-block zeroing (a 300MB posix_fallocate would otherwise
-            // issue 76800 buffer reads+writes and wedge the system).
-            let alloc_res = if ext4_inode.has_extent() {
-                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
-                let goal_group = (ext4_inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
-                file::preallocate_unwritten_extents(
-                    fs, &mut ext4_inode, needed_blocks, current_blocks, &allocator, goal_group,
-                )
-            } else {
-                file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks, current_blocks)
-            };
-            if let Err(e) = alloc_res {
-                // The allocators mark blocks used in the on-disk bitmap as
-                // they go, but only the in-memory `ext4_inode` carries the
-                // extents claiming them. Persist the partial state BEFORE
-                // propagating the error — otherwise every block allocated
-                // before the failure (ENOSPC mid-run, bitmap I/O error, ...)
-                // is owned by nobody and leaks permanently once the caller
-                // deletes the file (the r4/r5 /tmp-exhaustion leak).
-                // Linux keeps partial fallocate allocations too; the file
-                // stays deletable and truncatable, reclaiming its blocks.
-                let sec = crate::drivers::rtc::wall_secs() as u32;
-                ext4_inode.mtime = sec;
-                ext4_inode.ctime = sec;
-                let on_disk = ext4_inode.to_on_disk();
-                let _ = inode::write_inode_disk(fs, ino, &on_disk);
-                return Err(e);
-            }
-        }
-        // Default mode (no FALLOC_FL_KEEP_SIZE) extends the file: the range
-        // is guaranteed allocated, reads as zeros, and i_size grows to
-        // cover it (fallocate(2); POSIX posix_fallocate relies on this —
-        // LTP fallocate01/03 stat the size after allocating). KEEP_SIZE
-        // leaves i_size untouched.
-        if mode & FALLOC_FL_KEEP_SIZE == 0 && end > ext4_inode.size {
-            ext4_inode.set_size(end);
-        }
-        {
-            let sec = crate::drivers::rtc::wall_secs() as u32;
-            ext4_inode.mtime = sec;
-            ext4_inode.ctime = sec;
-            let on_disk = ext4_inode.to_on_disk();
-            inode::write_inode_disk(fs, ino, &on_disk)?;
-        }
-        Ok(())
+    // EFBIG before touching the allocator (Linux ext4_fallocate checks
+    // s_maxbytes first). The extent tree encodes logical blocks in a
+    // u32 ee_block, so the largest representable file is 2^32 blocks;
+    // a request past that used to fall into the block allocator and
+    // drain the whole filesystem run by run before failing ENOSPC —
+    // and because a failed preallocation did not persist the inode,
+    // every drained block leaked permanently (the LTP r4/r5 "/tmp
+    // fills and never recovers" regression: fallocate02's EFBIG
+    // subtests alone consumed ~500MB this way).
+    let max_file_size = (1u64 << 32) * fs.block_size as u64;
+    if offset >= max_file_size || end > max_file_size {
+        return Err(errno::Errno::FileTooLarge.as_neg_i32());
     }
+
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
+
+    // PUNCH-PATH DATA SYNC (falloc-wedge lane, 2026-11-16): a punch
+    // on a file whose buffered writes are still unflushed must first
+    // WRITE THOSE PAGES BACK — the reference ext4_punch_hole starts
+    // with filemap_write_and_wait_range(). Without it, the on-disk
+    // inode still carried the pre-write size (0 for a fresh file)
+    // and no extents, so the punch clamped to an empty range and
+    // returned SUCCESS as a no-op while the page cache kept serving
+    // the original bytes (LTP fallocate06's clear-check and the
+    // punchprobe: every hole byte read back nonzero,
+    // run/shell-punch3.log). Flushing materializes the data blocks
+    // and the on-disk size the punch then operates on. Callers hold
+    // no loop io claim (syscall context), so the writeback engine's
+    // re-entry discipline is satisfied; WRITEBACK_GUARD serializes
+    // against concurrent flush engines.
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        let fs_id = fs as *const Ext4FileSystem as u64;
+        if let Some(vfs_ino) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino as u64) {
+            crate::fs::ext4::file::ext4_flush_dirty_inode(
+                &vfs_ino,
+                0,
+                u64::MAX,
+            );
+        }
+    }
+
+    let mut ext4_inode = fs.read_inode(ino)?;
+    if !ext4_inode.is_reg() {
+        return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32()); // EBADR-ish
+    }
+    // falloc-wedge debug (bounded): name the punch's starting state.
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        static PDBG: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if PDBG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
+            crate::pr_info!(
+                "PUNCH-DBG ino={} off={} len={} disk_size={} extent={} i_blocks={}",
+                ino,
+                offset,
+                len,
+                ext4_inode.size,
+                ext4_inode.has_extent(),
+                ext4_inode.blocks
+            );
+        }
+    }
+
+    let block_size = fs.block_size as u64;
+    let file_size = ext4_inode.size;
+
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        if mode & FALLOC_FL_KEEP_SIZE == 0 {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+        // Clamp the punch range to the file size.
+        let file_end = file_size.min(end);
+        if offset >= file_end {
+            return Ok(()); // nothing to punch
+        }
+        // ALIGNED INTERIOR + ZEROED EDGES (falloc-wedge round 3,
+        // 2026-11-16): only blocks FULLY covered by the range are
+        // freed; partial edge blocks are zeroed IN PLACE, allocation
+        // kept — the reference ext4_punch_hole shape (non-bigalloc).
+        // The first cut floored/ceiled the range to block
+        // granularity, so a MISALIGNED punch clobbered the bytes
+        // just outside the range (LTP fallocate06's clear-check:
+        // memcmp of the prefix before the punched range failed,
+        // run/shell-f06c.log).
+        let interior_first = (offset + block_size - 1) / block_size;
+        let interior_last_excl = file_end / block_size;
+        let punch_first = interior_first;
+        let punch_last = interior_last_excl; // exclusive
+        // Edge byte ranges to zero in place (outside the interior).
+        let head_zero = (offset, core::cmp::min(file_end, interior_first * block_size));
+        let tail_zero = (
+            core::cmp::max(offset, interior_last_excl * block_size),
+            file_end,
+        );
+        // Zero the partial edge blocks IN PLACE (byte-sliced,
+        // allocation kept). Runs BEFORE the interior rebuild — the
+        // map is still the pre-punch one, so phys resolution is
+        // exact for both extent and indirect files. Missing blocks
+        // (holes) need nothing — they already read as zeros.
+        {
+            // phys of one file block, from the pre-punch map.
+            let resolve = |blk: u64| -> Option<u64> {
+                if ext4_inode.has_extent() {
+                    let exts = crate::fs::ext4::extent::ext4_ext_gather(
+                        fs,
+                        &ext4_inode.block,
+                    )
+                    .ok()?;
+                    exts.iter()
+                        .find(|e| {
+                            blk >= e.ee_block as u64 && blk < e.ee_block as u64 + e.len as u64
+                        })
+                        .map(|e| e.phys + (blk - e.ee_block as u64))
+                } else if blk < 12 {
+                    let b = ext4_inode.block[blk as usize];
+                    if b != 0 { Some(b as u64) } else { None }
+                } else {
+                    let ind = ext4_inode.block[12] as u64;
+                    if ind == 0 { return None; }
+                    let bh = crate::fs::bio::bread(fs.device, ind)?;
+                    let o = ((blk - 12) * 4) as usize;
+                    let d = bio::bh_data(&bh);
+                    let b = u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
+                    crate::fs::bio::brelse(bh);
+                    if b != 0 { Some(b as u64) } else { None }
+                }
+            };
+            for &(zfrom, zto) in &[head_zero, tail_zero] {
+                let mut off = zfrom;
+                while off < zto {
+                    let blk = off / block_size;
+                    let in_blk = off % block_size;
+                    let n = core::cmp::min(zto - off, block_size - in_blk);
+                    if let Some(phys) = resolve(blk) {
+                        if phys != 0 {
+                            if let Some(bh) = crate::fs::bio::bread(fs.device, phys) {
+                                let d = bio::bh_data_mut(&bh);
+                                d[(in_blk as usize)..(in_blk + n) as usize].fill(0);
+                                bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
+                                let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                                crate::fs::bio::brelse(bh);
+                            }
+                        }
+                    }
+                    off += n;
+                }
+            }
+        }
+
+        // R108: punch frees collected by the extent branch, drained
+        // after the tail write_inode_disk publishes the punched map.
+        let mut r108_punch_drain: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+        let mut r108_punch_meta: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
+        if ext4_inode.has_extent() {
+            // Any-depth punch via gather/classify/rebuild (the old
+            // inline-root-only walker refused deep trees and could
+            // not represent more than 4 surviving fragments).
+            let hdr = extent::get_extent_header(&ext4_inode.block);
+            if hdr.eh_magic == EXT4_EXT_MAGIC {
+                // R108 (crash-ordering, see ext4_setattr): the punch
+                // frees are DEFERRED until the punched map is durably
+                // published (write_inode_disk at the tail of this path
+                // syncs) — freeing against the still-stale on-disk map
+                // is the re-free poison window.
+                let mut r108_punch_runs: alloc::vec::Vec<(u64, u64)> =
+                    alloc::vec::Vec::new();
+                let all = crate::fs::ext4::extent::ext4_ext_gather(fs, &ext4_inode.block)?;
+                let mut kept: alloc::vec::Vec<crate::fs::ext4::extent::RawExtent> =
+                    alloc::vec::Vec::new();
+                let mut freed_sectors: u64 = 0;
+                for e in &all {
+                    let ext_first = e.ee_block as u64;
+                    let ext_len = e.len as u64;
+                    let ext_last = ext_first + ext_len;
+                    let phys = e.phys;
+
+                    if ext_first >= punch_first && ext_last <= punch_last {
+                        // Entirely inside the punch range: free it all
+                        // (one bitmap pass for the contiguous run —
+                        // see free_inode_blocks for why per-block
+                        // frees are untenable for big extents). R108:
+                        // freed after the punched map is durable.
+                        r108_punch_runs.push((phys, ext_len));
+                        freed_sectors += ext_len * (block_size / 512);
+                    } else if ext_first < punch_last && ext_last > punch_first {
+                        // Partially covered (falloc-wedge lane,
+                        // 2026-11-16): SPLIT at the punch boundaries and
+                        // free the covered middle — the reference
+                        // kernel's ext4_ext_remove_space shape. The old
+                        // arm zeroed the covered blocks in place and
+                        // KEPT the allocation, so punching any proper
+                        // prefix of an extent returned NO space (LTP
+                        // fallocate05's dealloc step: punch [0,64) of a
+                        // 256-block extent freed nothing and the
+                        // follow-up write ENOSPC'd, run/shell-f05.log).
+                        let z_from = punch_first.max(ext_first);
+                        let z_to = punch_last.min(ext_last);
+                        // Left survivor [ext_first, z_from): same
+                        // phys origin, unchanged unwritten flag (a
+                        // kept preallocated range must stay unwritten
+                        // — masked lengths turn never-materialized
+                        // blocks into "written" and reads would fetch
+                        // disk garbage instead of zeros).
+                        if z_from > ext_first {
+                            kept.push(crate::fs::ext4::extent::RawExtent {
+                                ee_block: ext_first as u32,
+                                phys,
+                                len: (z_from - ext_first) as u16,
+                                unwritten: e.unwritten,
+                            });
+                        }
+                        // Right survivor [z_to, ext_last): phys shifted
+                        // past the freed middle.
+                        if ext_last > z_to {
+                            kept.push(crate::fs::ext4::extent::RawExtent {
+                                ee_block: z_to as u32,
+                                phys: phys + (z_to - ext_first),
+                                len: (ext_last - z_to) as u16,
+                                unwritten: e.unwritten,
+                            });
+                        }
+                        // Covered middle: FREED (written and unwritten
+                        // alike — a punched preallocated range
+                        // deallocates, Linux semantics). R108: freed
+                        // after the punched map is durable.
+                        r108_punch_runs.push((
+                            phys + (z_from - ext_first),
+                            z_to - z_from,
+                        ));
+                        freed_sectors += (z_to - z_from) * (block_size / 512);
+                    } else {
+                        kept.push(*e);
+                    }
+                }
+                let csum_seed = crate::fs::ext4::csum::dir_csum_seed(
+                    fs.csum_seed,
+                    ext4_inode.ino,
+                    ext4_inode.generation,
+                );
+                let meta_delta = crate::fs::ext4::extent::ext4_ext_rebuild_deferred(
+                    fs, &mut ext4_inode.block, &kept, &mut r108_punch_meta, csum_seed,
+                )?;
+                // R108: the punched map (rebuilt above) is published
+                // durably by the write_inode_disk at the tail of this
+                // path; only then do the collected runs free. The
+                // frees are stashed here and drained at the tail.
+                r108_punch_drain = r108_punch_runs;
+                ext4_inode.blocks = ext4_inode
+                    .blocks
+                    .saturating_sub(freed_sectors)
+                    .saturating_add_signed(meta_delta);
+            }
+        } else {
+            // Indirect-block files (falloc-wedge lane, 2026-11-16):
+            // FREE the interior blocks instead of zeroing them in
+            // place — the old arm returned no space, so a punch on an
+            // indirect file (ext2/ext3 mounts) never made room (LTP
+            // fallocate05's dealloc step, run/shell-f05.log). Direct
+            // pointers of the ALIGNED INTERIOR are freed and cleared
+            // (partial edge blocks were zeroed above, allocation
+            // kept); the singly-indirect range frees its data blocks
+            // and zeroes the matching entries (the indirect block
+            // itself survives while any entry remains — bounded
+            // one-block conservatism; unlink/truncate reclaim it).
+            // Deeper indirection keeps nothing to free here (edge
+            // zeroing above already covered its bytes; interior
+            // blocks past the singly range are left allocated —
+            // bounded, noted). All bitmap frees ride the R108 drain
+            // below (map durable first, frees after).
+            if interior_first >= interior_last_excl {
+                // Whole range inside (at most) the two edge blocks —
+                // nothing to free, the edge zeroing did everything.
+            } else {
+            let first = interior_first as usize;
+            let last = (interior_last_excl - 1) as usize;
+            let mut freed_indirect_blocks: u64 = 0;
+            for i in first..=last.min(11) {
+                let b = ext4_inode.block[i];
+                if b != 0 {
+                    r108_punch_drain.push((b as u64, 1));
+                    freed_indirect_blocks += 1;
+                    ext4_inode.block[i] = 0;
+                }
+            }
+            if last >= 12 && ext4_inode.block[12] != 0 {
+                let ind_blk = ext4_inode.block[12] as u64;
+                let ents_per_blk = (fs.block_size / 4) as usize;
+                let ent_first = first.saturating_sub(12);
+                let ent_last_excl = core::cmp::min(last.saturating_sub(12) + 1, ents_per_blk);
+                if ent_first < ent_last_excl {
+                    if let Some(bh) = crate::fs::bio::bread(fs.device, ind_blk) {
+                        let data = bio::bh_data_mut(&bh);
+                        for ei in ent_first..ent_last_excl {
+                            let o = ei * 4;
+                            let b = u32::from_le_bytes([
+                                data[o], data[o + 1], data[o + 2], data[o + 3],
+                            ]);
+                            if b != 0 {
+                                r108_punch_drain.push((b as u64, 1));
+                                freed_indirect_blocks += 1;
+                                data[o..o + 4].fill(0);
+                            }
+                        }
+                        bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
+                        let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                        crate::fs::bio::brelse(bh);
+                    }
+                }
+            }
+            if freed_indirect_blocks > 0 {
+                ext4_inode.blocks = ext4_inode
+                    .blocks
+                    .saturating_sub(freed_indirect_blocks * (block_size / 512));
+            }
+            }
+        }
+
+        // PAGE-CACHE DISCIPLINE (falloc-wedge root cause, 2026-11-16):
+        // kill ONLY the punched range's cached state — the reference
+        // ext4_punch_hole runs truncate_pagecache_range(offset, end),
+        // never a whole-inode invalidation. The whole-inode
+        // invalidate_inode that ran here dropped STILL-DIRTY
+        // delayed-allocation pages of the whole file — outside the
+        // punched range those frames are the only copy of
+        // acknowledged writes (LTP fallocate05/06 data loss;
+        // punchprobe3 caught it with NO flush involved). Pages FULLY
+        // covered by [offset, file_end) die; partial EDGE pages keep
+        // their frames (they hold live bytes outside the range) with
+        // the punched slice zeroed in-frame — the same discipline
+        // tmpfs punch_hole uses. The pre-sync above flushed the dirty
+        // set, so the dropped pages are clean; a page still dirty
+        // after a failed flush inside the punched range dies with the
+        // punch — its data is deleted by definition.
+        {
+            let cache = crate::fs::page_cache::get_page_cache();
+            let fs_id = fs as *const Ext4FileSystem as u64;
+            let ps = crate::mm::PAGE_SIZE as u64;
+            let first_full = offset.div_ceil(ps);
+            let last_full = file_end / ps; // exclusive
+            if last_full > first_full {
+                cache.invalidate_inode_span(fs_id, ino as u64, first_full, last_full);
+            }
+            // Zero the punched byte range in surviving live frames
+            // (partial edges, plus pinned/mapped pages the span
+            // invalidate left as marked): readers must see zeros.
+            const ZCHUNK: usize = 65536;
+            let total = (file_end - offset) as usize;
+            if total > 0 {
+                let zeros = alloc::vec![0u8; ZCHUNK.min(total)];
+                let mut off = offset;
+                while off < file_end {
+                    let n = ((file_end - off) as usize).min(zeros.len());
+                    cache.writeback_update_range_stale(fs_id, ino as u64, off, &zeros[..n]);
+                    off += n as u64;
+                }
+            }
+        }
+
+        let sec = crate::drivers::rtc::wall_secs() as u32;
+        ext4_inode.mtime = sec;
+        ext4_inode.ctime = sec;
+        // write_inode_disk expects the on-disk layout; convert.
+        let on_disk = ext4_inode.to_on_disk();
+        inode::write_inode_disk(fs, ino, &on_disk)?;
+        // R108: the punched map is now DURABLE (write_inode_disk
+        // syncs) — drain the deferred punch frees (data runs and the
+        // replaced tree's metadata blocks). A failure above (the `?`
+        // on write_inode_disk) skips the frees: leaked blocks (bits
+        // set, unclaimed) instead of re-free poison.
+        if !r108_punch_drain.is_empty() || !r108_punch_meta.is_empty() {
+            let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+            for (phys, len) in &r108_punch_drain {
+                let _ = allocator.free_block_run(*phys, *len);
+            }
+            for blk in &r108_punch_meta {
+                let _ = allocator.free_block(*blk);
+            }
+        }
+        return Ok(());
+    }
+
+    // KEEP_SIZE / default: preallocate blocks up to `end`.
+    let needed_blocks = (end + block_size - 1) / block_size;
+    let current_blocks = (file_size + block_size - 1) / block_size;
+    if needed_blocks > current_blocks {
+        // Extent files: UNWRITTEN preallocation — metadata-only, no
+        // per-block zeroing (a 300MB posix_fallocate would otherwise
+        // issue 76800 buffer reads+writes and wedge the system).
+        let alloc_res = if ext4_inode.has_extent() {
+            let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+            let goal_group = (ext4_inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
+            file::preallocate_unwritten_extents(
+                fs, &mut ext4_inode, needed_blocks, current_blocks, &allocator, goal_group,
+            )
+        } else {
+            file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks, current_blocks)
+        };
+        if let Err(e) = alloc_res {
+            // The allocators mark blocks used in the on-disk bitmap as
+            // they go, but only the in-memory `ext4_inode` carries the
+            // extents claiming them. Persist the partial state BEFORE
+            // propagating the error — otherwise every block allocated
+            // before the failure (ENOSPC mid-run, bitmap I/O error, ...)
+            // is owned by nobody and leaks permanently once the caller
+            // deletes the file (the r4/r5 /tmp-exhaustion leak).
+            // Linux keeps partial fallocate allocations too; the file
+            // stays deletable and truncatable, reclaiming its blocks.
+            let sec = crate::drivers::rtc::wall_secs() as u32;
+            ext4_inode.mtime = sec;
+            ext4_inode.ctime = sec;
+            let on_disk = ext4_inode.to_on_disk();
+            let _ = inode::write_inode_disk(fs, ino, &on_disk);
+            return Err(e);
+        }
+    }
+    // Default mode (no FALLOC_FL_KEEP_SIZE) extends the file: the range
+    // is guaranteed allocated, reads as zeros, and i_size grows to
+    // cover it (fallocate(2); POSIX posix_fallocate relies on this —
+    // LTP fallocate01/03 stat the size after allocating). KEEP_SIZE
+    // leaves i_size untouched.
+    if mode & FALLOC_FL_KEEP_SIZE == 0 && end > ext4_inode.size {
+        ext4_inode.set_size(end);
+    }
+    {
+        let sec = crate::drivers::rtc::wall_secs() as u32;
+        ext4_inode.mtime = sec;
+        ext4_inode.ctime = sec;
+        let on_disk = ext4_inode.to_on_disk();
+        inode::write_inode_disk(fs, ino, &on_disk)?;
+    }
+    Ok(())
 }
 
 /// Split path into parent directory and filename
@@ -2607,13 +2602,9 @@ use crate::fs::Stat;
 /// exclusively through VFS mutations may memo ENOENT results; dynamic
 /// filesystems are excluded).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-pub unsafe fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
-    let fs_ptr = dir.private_data.ok_or(errno::Errno::IOError)?;
-    let fs = &*(fs_ptr as *const Ext4FileSystem);
-
-    // Get ext4 inode from parent's private_data
-    let parent_ext4_inode = dir.sb.ok_or(errno::Errno::NotADirectory)?;
-    let parent_inode = &*(parent_ext4_inode as *const inode::Ext4Inode);
+pub fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+    let fs = get_ext4_fs_from_inode(dir).map_err(|e| errno::Errno::from_neg_i32(e))?;
+    let parent_inode = sb_inode_of(dir).map_err(|_| errno::Errno::NotADirectory)?;
 
     // Convert name to str
     let name_str = core::str::from_utf8(name).map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
@@ -2625,19 +2616,15 @@ pub unsafe fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno>
 
 /// Ext4 getattr operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
-    let fs_ptr = match inode.private_data {
-        Some(ptr) => ptr,
-        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
-    };
-    let _fs = &*(fs_ptr as *const Ext4FileSystem);
-
+fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
+    if get_ext4_fs_from_inode(inode).is_err() {
+        return errno::Errno::NoSuchFileOrDirectory.as_neg_i32();
+    }
     // Get ext4 inode from sb field (we store it there)
-    let ext4_inode_ptr = match inode.sb {
-        Some(ptr) => ptr,
-        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    let ext4_inode = match sb_inode_of(inode) {
+        Ok(v) => v,
+        Err(e) => return e,
     };
-    let ext4_inode = &*(ext4_inode_ptr as *const inode::Ext4Inode);
 
     // st_dev = the filesystem instance's id. Fallback only: the central
     // stat exits (vfs_stat / file_stat / stat_file_by_path*) overwrite
@@ -2679,19 +2666,16 @@ unsafe fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
 
 /// Ext4 readlink operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
-    let fs_ptr = match inode.private_data {
-        Some(ptr) => ptr,
-        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+    let fs = match get_ext4_fs_from_inode(inode) {
+        Ok(fs) => fs,
+        Err(_) => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
     };
-    let fs = &*(fs_ptr as *const Ext4FileSystem);
-
     // Get ext4 inode from sb field
-    let ext4_inode_ptr = match inode.sb {
-        Some(ptr) => ptr,
-        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    let ext4_inode = match sb_inode_of(inode) {
+        Ok(v) => v,
+        Err(_) => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
     };
-    let ext4_inode = &*(ext4_inode_ptr as *const inode::Ext4Inode);
 
     if !ext4_inode.is_symlink() {
         return errno::Errno::InvalidArgument.as_neg_i32() as isize;
@@ -2705,10 +2689,7 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 
     // Short symlink: data stored inline
     if size <= 60 && !ext4_inode.has_extent() {
-        let block_data = core::slice::from_raw_parts(
-            ext4_inode.block.as_ptr() as *const u8,
-            60
-        );
+        let block_data = crate::safety::bytes::bytes_of(&ext4_inode.block);
         buf[..size].copy_from_slice(&block_data[..size]);
         size as isize
     } else {
@@ -2724,7 +2705,7 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 ///
 /// Handles chmod (ATTR_MODE), chown (ATTR_UID_GID), and ftruncate (ATTR_SIZE)
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
 
     // Session 25 (MAP_SHARED writeback): on a size change, flush dirty
@@ -3174,10 +3155,12 @@ fn flush_pending_reaps() {
 /// file that means the last descriptor just closed (unlink keeps the
 /// number/blocks until then; see ext4_unlink_inner). The reap itself is
 /// deferred to the next ext4 entry point (PENDING_REAPS note above).
-unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
+fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
     if let Some(ptr) = inode.sb {
         // ptr was created by Box::into_raw(Box::new(ext4_inode.clone()))
-        let _ = alloc::boxed::Box::from_raw(ptr as *mut inode::Ext4Inode);
+        // SAFETY: sb holds the Box leaked by into_raw in create_vfs_inode
+        // (INV-EXT4-SBRES-1); this Drop is the single reclaim.
+        let _ = unsafe { alloc::boxed::Box::from_raw(ptr as *mut inode::Ext4Inode) };
         inode.sb = None;
     }
     if let Ok(fs) = get_ext4_fs_from_inode(inode) {
@@ -3253,15 +3236,14 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
 ///
 /// Reads the child inode from disk using the parent's filesystem pointer.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
-    let fs_ptr = parent.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
-    let fs = &*(fs_ptr as *const Ext4FileSystem);
+fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
+    let fs = get_ext4_fs_from_inode(parent).map_err(errno::Errno::from_neg_i32)?;
 
     // Read child inode from disk
     let ext4_inode = fs.read_inode(ino as u32)
         .map_err(|_| errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, ino as u32, &ext4_inode);
+    let vfs_inode = create_vfs_inode_in(fs, ino as u32, &ext4_inode);
     crate::fs::inode::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
@@ -3281,7 +3263,7 @@ pub unsafe fn iget_by_ino(
 
 /// Wrapper for ext4_mkdir to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
+fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
@@ -3295,7 +3277,7 @@ unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resul
     // Read the new inode and convert to in-memory format
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
-    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &ext4_inode);
+    let vfs_inode = create_vfs_inode_in(fs, new_ino, &ext4_inode);
     crate::fs::inode::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
@@ -3303,15 +3285,15 @@ unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resul
 /// Update the parent directory's cached Ext4Inode after a directory modification.
 /// This ensures subsequent lookups see the latest block pointers and size.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn refresh_parent_dir_cache(dir: &Inode, fs: &Ext4FileSystem) {
+fn refresh_parent_dir_cache(dir: &Inode, fs: &Ext4FileSystem) {
     refresh_inode_cache(dir, fs);
 }
 
 /// Refresh the Ext4Inode cached in inode.sb after a disk write.
 /// This ensures cached data (size, blocks, timestamps) stays in sync.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
-    if let Some(sb_ptr) = inode.sb {
+fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
+    if let Ok(cached) = sb_inode_of_mut(inode) {
         if let Ok(disk_inode) = inode::read_inode(fs, inode.ino as u32) {
             let mut updated = inode::Ext4Inode::from_disk(&disk_inode, inode.ino as u32);
             // Delayed-allocation guard (compat-r3): buffered writes publish
@@ -3333,7 +3315,6 @@ unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
                     }
                 }
             }
-            let cached = &mut *(sb_ptr as *mut inode::Ext4Inode);
             *cached = updated;
         }
     }
@@ -3341,7 +3322,7 @@ unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
 
 /// Wrapper for ext4_rmdir to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
+fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = match get_ext4_fs_rw_from_inode(dir) {
         Ok(f) => f,
@@ -3367,7 +3348,7 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 
 /// Wrapper for ext4_create to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
+fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
@@ -3378,14 +3359,14 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
 
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
-    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &ext4_inode);
+    let vfs_inode = create_vfs_inode_in(fs, new_ino, &ext4_inode);
     crate::fs::inode::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
 
 /// Wrapper for ext4_mknod to match VFS signature (device/FIFO nodes).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
+fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_mknod(fs, dir.ino as u32, name, mode.bits() as u16, dev)?;
@@ -3395,14 +3376,14 @@ unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64
 
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
-    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &ext4_inode);
+    let vfs_inode = create_vfs_inode_in(fs, new_ino, &ext4_inode);
     crate::fs::inode::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
 
 /// Wrapper for ext4_symlink to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
+fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_symlink(fs, dir.ino as u32, name, target)?;
@@ -3412,14 +3393,14 @@ unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Resul
 
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
-    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &ext4_inode);
+    let vfs_inode = create_vfs_inode_in(fs, new_ino, &ext4_inode);
     crate::fs::inode::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
 
 /// Wrapper for ext4_link to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
+fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = match get_ext4_fs_rw_from_inode(dir) {
         Ok(f) => f,
@@ -3432,8 +3413,7 @@ unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
             // and stat read links_count through it, and namei::ext4_link
             // only updates the on-disk inode — the stale cache reported
             // st_nlink == 1 after a successful link (LTP fstat02).
-            if let Some(ptr) = target.sb {
-                let cached = &mut *(ptr as *mut inode::Ext4Inode);
+            if let Ok(cached) = sb_inode_of_mut(target) {
                 if let Ok(disk) = inode::read_inode(fs, target.ino as u32) {
                     let mut fresh = inode::Ext4Inode::from_disk(&disk, target.ino as u32);
                     // Delayed-allocation guard (compat-r3): same discipline
@@ -3460,7 +3440,7 @@ unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 
 /// Wrapper for ext4_unlink to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
+fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
     flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = match get_ext4_fs_rw_from_inode(dir) {
@@ -3536,6 +3516,30 @@ fn get_ext4_fs_rw_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i
     Ok(fs)
 }
 
+/// INV-EXT4-SBRES-1 (unsafe-slim L4): `inode.sb`, when `Some(p)`, is a
+/// `Box::into_raw(Box::new(ext4_inode.clone()))` installed by
+/// create_vfs_inode[_in] and reclaimed by ext4_destroy_inode at the
+/// final Arc<Inode> drop — the only take-site. The borrow is tied to
+/// the `&Inode` it came from, so it cannot outlive the inode whose
+/// Drop reclaims the box. Every read of the cached on-disk inode goes
+/// through this helper (or the `_mut` twin below) — the ONE audited
+/// resolution per direction.
+fn sb_inode_of(inode: &Inode) -> Result<&inode::Ext4Inode, i32> {
+    let p = inode.sb.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    // SAFETY: INV-EXT4-SBRES-1 above.
+    Ok(unsafe { &*(p as *const inode::Ext4Inode) })
+}
+
+/// The mutating twin of `sb_inode_of` (INV-EXT4-SBRES-1): for
+/// cache-refresh stores into the sb box. Callers hold the ext4 big
+/// lock (EXT4_BIG_LOCK) or run in single-threaded creation contexts.
+fn sb_inode_of_mut(inode: &Inode) -> Result<&mut inode::Ext4Inode, i32> {
+    let p = inode.sb.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    // SAFETY: INV-EXT4-SBRES-1 above; no aliasing shared borrow is live
+    // at the store sites that use this (see each caller's lock note).
+    Ok(unsafe { &mut *(p as *mut inode::Ext4Inode) })
+}
+
 /// Get file operations for ext4 regular files and directories
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
@@ -3550,10 +3554,9 @@ fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps>
 
 /// Ext4 readdir: list directory entries via inode.ops
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
+fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
     let fs_ptr = get_ext4_fs_from_inode(inode).ok()?;
-    let ext4_inode_ptr = inode.sb?;
-    let ext4_inode = &*(ext4_inode_ptr as *const inode::Ext4Inode);
+    let ext4_inode = sb_inode_of(inode).ok()?;
 
     let ext4_entries = fs_ptr.list_dir(ext4_inode).ok()?;
     let mut entries = alloc::vec::Vec::new();
@@ -3627,14 +3630,13 @@ fn ext4_dirent_file_type(ft: u8) -> u8 {
 ///   behavior the list_dir scanner has always had on dx dirs.
 // SAFETY: VFS callback contract; the Ext4Inode behind inode.sb outlives
 // the call (the open File pins the VFS Inode that owns it).
-unsafe fn ext4_readdir_fill(
+fn ext4_readdir_fill(
     inode: &Inode,
     pos: u64,
     buf: &mut [u8],
 ) -> Result<(usize, u64), i32> {
     let fs = get_ext4_fs_from_inode(inode)?;
-    let ext4_inode = &*(inode.sb.ok_or(errno::Errno::IOError.as_neg_i32())?
-        as *const inode::Ext4Inode);
+    let ext4_inode = sb_inode_of(inode)?;
 
     let dir_size = ext4_inode.size;
     if pos >= dir_size || buf.is_empty() {
@@ -3761,18 +3763,23 @@ unsafe fn ext4_readdir_fill(
 /// This helper function creates a VFS inode structure from an ext4 inode,
 /// properly setting up the inode_operations and private data.
 pub fn create_vfs_inode(ino: u32, ext4_inode: &inode::Ext4Inode) -> alloc::sync::Arc<Inode> {
-    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
-    create_vfs_inode_in(fs_ptr, ino, ext4_inode)
+    let fs = mounted_ext4_fs().expect("create_vfs_inode: no mounted ext4 instance");
+    create_vfs_inode_in(fs, ino, ext4_inode)
 }
 
 /// Instance-aware variant: wires the new inode to `fs_ptr` (the creating
 /// directory's filesystem — a loop-mounted ext2's children must point at
 /// the LOOP instance, not the boot root).
 pub fn create_vfs_inode_in(
-    fs_ptr: *mut Ext4FileSystem,
+    fs: &Ext4FileSystem,
     ino: u32,
     ext4_inode: &inode::Ext4Inode,
 ) -> alloc::sync::Arc<Inode> {
+    // The instance's identity word (fs_id / private_data storage): the
+    // reference itself is the liveness proof; only its ADDRESS is stored
+    // (never dereferenced through those fields — see get_ext4_fs_from_inode
+    // for the read-back edge).
+    let fs_ptr = fs as *const Ext4FileSystem as *mut Ext4FileSystem;
     // Keep the full S_IALLUGO (0o7777: setuid/setgid/sticky included)
     // for dirs and regs, matching the chmod path (update_mode's
     // v & 0o7777 below). Masking to 0o777 silently dropped S_ISUID on
@@ -4004,7 +4011,7 @@ pub fn mount_loop_instance(
                     let root = fs_ref
                         .read_inode(2)
                         .map(|ext4_inode| {
-                            create_vfs_inode_in(fs_ptr, 2, &ext4_inode)
+                            create_vfs_inode_in(fs_ref, 2, &ext4_inode)
                         })
                         .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
                     return Ok((root, fs_ref.read_only));
@@ -4047,10 +4054,10 @@ pub fn mount_loop_instance(
     // for the sget-by-bdev rationale). Registered first: a reuse hit must
     // never outlive the registry row.
     loop_instance_publish(disk, fs_ptr);
-    // SAFETY: fs_ptr is a leaked, valid instance pointer.
-    let fs_ref = unsafe { &*fs_ptr };
+    // fs_ptr is a leaked, valid instance pointer (registry-proven).
+    let fs_ref = crate::fs::unsafe_edges::static_ref_unchecked(fs_ptr);
     match fs_ref.read_inode(2) {
-        Ok(ext4_inode) => Ok((create_vfs_inode_in(fs_ptr, 2, &ext4_inode), fs_ref.read_only)),
+        Ok(ext4_inode) => Ok((create_vfs_inode_in(fs_ref, 2, &ext4_inode), fs_ref.read_only)),
         Err(_) => {
             // Not a filesystem root (bad magic / inode 2): fail the mount
             // and reclaim the instance.

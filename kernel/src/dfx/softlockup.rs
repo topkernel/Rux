@@ -10,6 +10,7 @@
 //! against current time and reports any CPU that hasn't scheduled
 //! for longer than the threshold.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::MAX_CPUS;
 use crate::dfx::taint;

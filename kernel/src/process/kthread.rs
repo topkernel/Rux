@@ -7,6 +7,7 @@
 //! Provides `kernel_thread()` and simplified `kthread` API for creating
 //! kernel-mode threads. Used by ksoftirqd and other kernel services.
 
+#![forbid(unsafe_code)]
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use crate::sync::spinlock::Spinlock;

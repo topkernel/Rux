@@ -25,6 +25,7 @@
 //! and is called from the shutdown cascade — every probe rig ends with
 //! a reboot(2), so the numbers ride the serial log out.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 /// Phase slots (see `report()` for the names).

@@ -36,6 +36,7 @@
 //!   fires after the wedge has settled, so its burn cannot decide the
 //!   race it reports on.
 
+#![forbid(unsafe_code)]
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

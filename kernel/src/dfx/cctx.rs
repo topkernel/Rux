@@ -30,6 +30,8 @@
 //! own clock-read cost to its phase; the ranking and aggregate split are
 //! solid.
 
+#![forbid(unsafe_code)]
+
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]

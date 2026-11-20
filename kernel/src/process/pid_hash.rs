@@ -11,6 +11,7 @@
 //! removal only writes the removed node's next pointer, not a neighbour's,
 //! making concurrent RCU traversal safe on SMP.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::ptr;
 use crate::process::task::Task;

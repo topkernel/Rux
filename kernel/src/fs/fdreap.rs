@@ -52,6 +52,7 @@
 //! drop (in the closer's context for the common case, i.e. before
 //! close(2) returns), memory after an asynchronous grace.
 
+#![forbid(unsafe_code)]
 use crate::fs::file::File;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
