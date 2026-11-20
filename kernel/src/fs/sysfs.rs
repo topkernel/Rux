@@ -1938,7 +1938,7 @@ static GLOBAL_SYSFS_MOUNT: core::sync::atomic::AtomicPtr<VfsMount> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 // SAFETY: FsContext is a valid VFS mount callback argument.
-unsafe extern "C" fn sysfs_mount_cb(
+fn sysfs_mount_cb(
     _fs_context: &crate::fs::superblock::FsContext<'_>,
 ) -> Result<*mut SuperBlock, i32> {
     let root = sysfs_root().ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
@@ -1950,9 +1950,10 @@ unsafe extern "C" fn sysfs_mount_cb(
 }
 
 // SAFETY: sb came from sysfs_mount_cb's Box::into_raw.
-unsafe extern "C" fn sysfs_kill_sb(sb: *mut SuperBlock) {
+fn sysfs_kill_sb(sb: *mut SuperBlock) {
     if !sb.is_null() {
-        drop(Box::from_raw(sb as *mut SysfsSuperBlock));
+        // SAFETY: the Box the mount callback stored (unmount path).
+        drop(unsafe { alloc::boxed::Box::from_raw(sb as *mut SysfsSuperBlock) });
     }
 }
 

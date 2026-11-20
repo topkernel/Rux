@@ -213,7 +213,7 @@ static GLOBAL_SB: AtomicPtr<TraceFsSuperBlock> = AtomicPtr::new(core::ptr::null_
 /// Mount callback used by the filesystem registry (userspace
 /// `mount("tracefs", ...)`).
 /// SAFETY: FsContext is a valid VFS mount callback argument.
-unsafe extern "C" fn tracefs_mount_cb(
+fn tracefs_mount_cb(
     _fs_context: &crate::fs::superblock::FsContext<'_>,
 ) -> Result<*mut SuperBlock, i32> {
     let root = tracefs_root().ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
@@ -226,7 +226,7 @@ unsafe extern "C" fn tracefs_mount_cb(
 
 /// Superblock teardown.
 /// SAFETY: VFS callback contract.
-unsafe extern "C" fn tracefs_kill_sb(_sb: *mut SuperBlock) {}
+fn tracefs_kill_sb(_sb: *mut SuperBlock) {}
 
 /// The tracefs filesystem type.
 pub static TRACEFS_FS_TYPE: FileSystemType = FileSystemType::new(

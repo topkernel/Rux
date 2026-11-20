@@ -853,7 +853,7 @@ fn tmpfs_make_inode(node: &Arc<TmpfsNode>) -> Arc<Inode> {
 /// returned. Real instances (with their trees) come from
 /// `create_mount_instance()` via `mount::do_mount`.
 // SAFETY: FsContext is a valid reference from the registry mount path.
-unsafe extern "C" fn tmpfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
+fn tmpfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     Ok(Box::into_raw(Box::new(SuperBlock::new(PAGE_SIZE, TMPFS_MAGIC))))
 }
 

@@ -225,7 +225,7 @@ static GLOBAL_MOUNT: core::sync::atomic::AtomicPtr<VfsMount> =
 /// `mount("debugfs", ...)`). The boot path mounts the instance directly,
 /// like sysfs and procfs do.
 /// SAFETY: FsContext is a valid VFS mount callback argument.
-unsafe extern "C" fn debugfs_mount_cb(
+fn debugfs_mount_cb(
     _fs_context: &crate::fs::superblock::FsContext<'_>,
 ) -> Result<*mut SuperBlock, i32> {
     let root = debugfs_root().ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
@@ -237,7 +237,7 @@ unsafe extern "C" fn debugfs_mount_cb(
 }
 
 /// Superblock teardown.
-unsafe extern "C" fn debugfs_kill_sb(_sb: *mut SuperBlock) {}
+fn debugfs_kill_sb(_sb: *mut SuperBlock) {}
 
 /// The debugfs filesystem type.
 pub static DEBUGFS_FS_TYPE: FileSystemType = FileSystemType::new(

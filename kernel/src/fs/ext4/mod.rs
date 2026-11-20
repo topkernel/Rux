@@ -1066,7 +1066,7 @@ static EXT4_FS_TYPE: FileSystemType = FileSystemType::new(
 /// Mount an ext4 filesystem. Called from VFS mount path.
 // SAFETY: fc is a valid FsContext reference from the VFS mount call;
 /// the returned SuperBlock pointer is valid for the mount lifetime.
-unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> {
+fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     crate::pr_info!("ext4: mounting...");
 
     // Get source device
@@ -1087,17 +1087,20 @@ unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> 
 /// Kill an ext4 superblock during unmount. Called from VFS umount path.
 // SAFETY: sb is a valid SuperBlock pointer from a previous ext4_mount call;
 // s_fs_info contains a valid Ext4FileSystem pointer from Box::into_raw.
-unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
-    if let Some(fs_info) = (*sb).s_fs_info {
-        // Unregister BEFORE the free (the writeback resolver's liveness
-        // authority).
-        ext4_instance_unregister(fs_info as *mut Ext4FileSystem);
-        let _fs = Box::from_raw(fs_info as *mut Ext4FileSystem);
-        // Box will be automatically freed
+fn ext4_kill_sb(sb: *mut SuperBlock) {
+    // SAFETY: sb is a valid SuperBlock from a previous ext4_mount call;
+    // s_fs_info carries the Ext4FileSystem Box::into_raw pointer. The
+    // unmount path is the sole remaining user (mount-installed globals
+    // are torn down first).
+    unsafe {
+        if let Some(fs_info) = (*sb).s_fs_info {
+            // Unregister BEFORE the free (the writeback resolver's
+            // liveness authority).
+            ext4_instance_unregister(fs_info as *mut Ext4FileSystem);
+            let _fs = Box::from_raw(fs_info as *mut Ext4FileSystem);
+        }
+        let _sb = Box::from_raw(sb);
     }
-
-    let _sb = Box::from_raw(sb);
-    // Box will be automatically freed
 }
 
 /// Read entire file from ext4 filesystem (supports symbolic links)

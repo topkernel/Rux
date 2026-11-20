@@ -33,33 +33,34 @@ impl CharDev {
     }
 
     /// Read from character device
-    pub unsafe fn read(&self, buf: *mut u8, count: usize) -> isize {
+    pub fn read(&self, buf: &mut [u8]) -> isize {
         match self.dev_type {
-            CharDevType::UartConsole => uart_read(buf, count),
+            CharDevType::UartConsole => uart_read(buf),
             CharDevType::Other => -38_i32 as isize, // ENOSYS
         }
     }
 
     /// Write to character device
-    pub unsafe fn write(&self, buf: *const u8, count: usize) -> isize {
+    pub fn write(&self, buf: &[u8]) -> isize {
         match self.dev_type {
-            CharDevType::UartConsole => uart_write(buf, count),
+            CharDevType::UartConsole => uart_write(buf),
             CharDevType::Other => -38_i32 as isize, // ENOSYS
         }
     }
 }
 
-pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
+pub fn uart_read(buf: &mut [u8]) -> isize {
     // POSIX: read(fd, buf, 0) returns 0 without touching the buffer. The
     // loop below stores slice[bytes_read] BEFORE checking bytes_read >=
     // count, so a zero-length slice would panic on index-out-of-bounds the
     // moment a character is available (sys_read filters count==0 today, but
     // File::read is callable from other kernel paths).
+    let count = buf.len();
     if count == 0 {
         return 0;
     }
     let mut bytes_read: usize = 0;
-    let slice = core::slice::from_raw_parts_mut(buf, count);
+    let slice = buf;
 
     loop {
         // Try to read a character from console (ring buffer + hardware)
@@ -105,7 +106,7 @@ pub fn uart_write_kernel(slice: &[u8]) -> isize {
     slice.len() as isize
 }
 
-pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
+pub fn uart_write(buf: &[u8]) -> isize {
     // R20-4 (PIPE2 pp=0 root cause): console output must stay atomic
     // against other task-context writers, or the nettest PIPE2 marker
     // splits and the gate greps 0 hits. The old fix took the UART lock
@@ -125,7 +126,7 @@ pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
     // the IRQ-off windows shrink from whole-buffer to sub-chunk (the
     // per-byte putc stall bound lives in console.rs). Byte dropping on
     // TX_STALLED is unchanged (putc latches and drops per its budget).
-    uart_write_kernel(core::slice::from_raw_parts(buf, count))
+    uart_write_kernel(buf)
 }
 
 /// UART character device file operations (public access)
@@ -169,7 +170,8 @@ pub fn char_dev_file_stat(file: &crate::fs::File, stat: &mut crate::fs::Stat) ->
     }
     // SAFETY: ops identity confirms a UART File; private_data points at the
     // static CharDev installed by init_std_fds_for_task (or equivalent).
-    let ptr = unsafe { *file.private_data.get() }?;
+    let ptr = file.private_data_ptr()?;
+    // SAFETY: the &'static CharDev init_std_fds stored (file-lifetime).
     let dev = unsafe { &*(ptr as *const CharDev) };
     stat.st_dev = CHAR_DEV_STAT_DEV;
     stat.st_ino = ptr as usize as u64;
@@ -196,18 +198,20 @@ fn uart_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         }
     }
 
-    if let Some(priv_data) = unsafe { *file.private_data.get() } {
+    if let Some(priv_data) = file.private_data_ptr() {
+        // SAFETY: init_std_fds stored a &'static CharDev (file-lifetime).
         let char_dev = unsafe { &*(priv_data as *const CharDev) };
-        unsafe { char_dev.read(buf.as_mut_ptr(), buf.len()) }
+        char_dev.read(buf)
     } else {
         -9  // EBADF
     }
 }
 
 fn uart_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
-    if let Some(priv_data) = unsafe { *file.private_data.get() } {
+    if let Some(priv_data) = file.private_data_ptr() {
+        // SAFETY: as uart_file_read.
         let char_dev = unsafe { &*(priv_data as *const CharDev) };
-        unsafe { char_dev.write(buf.as_ptr(), buf.len()) }
+        char_dev.write(buf)
     } else {
         -9  // EBADF
     }
@@ -217,11 +221,10 @@ fn uart_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 ///
 /// Returns Some(()) if it's a character device, None if not
 pub fn char_dev_stat(file: &crate::fs::File, stat: &mut crate::fs::Stat) -> Option<()> {
-    unsafe {
-        let ops_opt = &*file.ops.get();
-        if let Some(ops) = ops_opt {
+    {
+        if let Some(ops) = file.get_ops() {
             // Check if it's a UART character device (by comparing ops pointer)
-            let ops_ptr = *ops as *const crate::fs::FileOps;
+            let ops_ptr = ops as *const _ as *const crate::fs::FileOps;
             let uart_ops_ptr = &UART_OPS as *const crate::fs::FileOps;
 
             if ops_ptr == uart_ops_ptr {
