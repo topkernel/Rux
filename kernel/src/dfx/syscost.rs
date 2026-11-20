@@ -41,6 +41,8 @@
 //! each) plus the current uptime so host-side serial timestamps can be
 //! correlated with guest time.
 
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::alloc::string::ToString;

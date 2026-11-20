@@ -4,6 +4,8 @@
 //!
 //! Loopback network device
 
+
+#![forbid(unsafe_code)]
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use crate::net::buffer::SkBuff;
 use crate::sync::seqlock::SeqLock;

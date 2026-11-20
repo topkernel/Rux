@@ -47,6 +47,8 @@
 //! where a monotonic-fresh id can never alias (del of a fired id is a
 //! safe no-op). The guard is for the SCOPED pattern only — by design.
 
+#![forbid(unsafe_code)]
+
 /// Which arm recipe a guard re-arms with (`rearm_if_spent`).
 #[derive(Clone, Copy)]
 enum WakeKind {

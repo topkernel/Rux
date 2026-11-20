@@ -4,6 +4,8 @@
 //!
 //! ARP Protocol
 
+
+#![forbid(unsafe_code)]
 use crate::net::buffer::SkBuff;
 use crate::net::ethernet::{ETH_ALEN, eth_is_broadcast_addr};
 use crate::config::ARP_CACHE_SIZE;

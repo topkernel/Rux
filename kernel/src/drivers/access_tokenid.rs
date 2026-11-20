@@ -27,6 +27,8 @@
 //!
 //! /proc/<pid>/tokenid exposure is not implemented (skeleton scope).
 
+#![forbid(unsafe_code)]
+
 use crate::fs::dev_t::{DevNo, MISC_MAJOR};
 
 /// ioctl command words (asm-generic encoding, 8-byte u64 payload).

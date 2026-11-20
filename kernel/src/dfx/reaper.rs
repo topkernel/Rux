@@ -44,6 +44,8 @@
 //! timer-softirq scan uses the try-variant of the pid-hash walk (a
 //! partial snapshot is fine — the next second retries).
 
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::Ordering;
 
 /// Name-set (SPAWN) tracking capacity. Small: only com.*-prefixed names

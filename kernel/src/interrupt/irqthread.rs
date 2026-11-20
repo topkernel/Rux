@@ -16,6 +16,8 @@
 //! re-check-before-schedule). The timer/clock source and IPI vectors
 //! never use this — they stay raw hardirq (the reference's shape).
 
+#![forbid(unsafe_code)]
+
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

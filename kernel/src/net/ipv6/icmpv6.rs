@@ -8,6 +8,8 @@
 //! All messages carry the mandatory ICMPv6 checksum computed over the
 //! IPv6 pseudo-header (see super::transport_checksum6).
 
+
+#![forbid(unsafe_code)]
 use super::{
     is_local_addr, is_unspecified, multicast_mac, neigh_update, solicited_node_multicast,
     transport_checksum6, Ipv6Addr, IPV6_ADDR_ALL_NODES, IPV6_ADDR_ALL_ROUTERS, IPV6_HDR_LEN,

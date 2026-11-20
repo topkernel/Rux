@@ -24,6 +24,8 @@
 //! Discipline: one arming print per boot; ZERO traffic until a hit
 //! (transient pass-1 states are counted, never printed).
 
+#![forbid(unsafe_code)]
+
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]

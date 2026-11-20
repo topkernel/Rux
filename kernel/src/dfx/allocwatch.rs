@@ -38,6 +38,8 @@
 //! acquire when on; a single load when off). Budgeted prints: 200
 //! reports per boot, re-report per holder at most every 5 s.
 
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub const SITE_SMALL_ALLOC: u8 = 0;

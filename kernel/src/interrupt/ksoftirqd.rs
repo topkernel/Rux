@@ -7,6 +7,8 @@
 //! When `__do_softirq()` exceeds its iteration budget, it wakes ksoftirqd
 //! to drain remaining softirqs at normal scheduling priority.
 
+
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::config::MAX_CPUS;
 

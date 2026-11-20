@@ -4,6 +4,8 @@
 //!
 //! Ethernet Layer
 
+
+#![forbid(unsafe_code)]
 use crate::net::buffer::{SkBuff, EthProtocol};
 
 /// Ethernet header length

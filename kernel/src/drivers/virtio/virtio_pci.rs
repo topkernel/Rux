@@ -6,6 +6,8 @@
 //!
 //! Implements VirtIO device PCI transport (Modern VirtIO 1.0+)
 
+
+#![forbid(unsafe_code)]
 use crate::drivers::pci::{PCIConfig, vendor, virtio_device, BARType, PCIBAR};
 use crate::drivers::virtio::queue;
 use crate::drivers::virtio::offset;
