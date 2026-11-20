@@ -3813,3 +3813,20 @@ pub(crate) fn with_block_mut<T>(
     sync_res?;
     out
 }
+
+/// The SHARED twin of the block-update edges: bread -> typed &[u8] view
+/// -> caller reads -> brelse. No mutation, no BH_Dirty, no journal —
+/// INV-BIO-BLOCKUPD's read contract (the pin is this scope's refcount).
+pub(crate) fn with_block<T>(
+    device: &'static crate::drivers::blkdev::GenDisk,
+    blocknr: u64,
+    f: impl FnOnce(&[u8]) -> T,
+) -> Option<T> {
+    let bh = bread(device, blocknr)?;
+    // SAFETY: INV-BIO-PIN — bread pinned the buffer; the &mut window
+    // rides this function's exclusive scope.
+    let data: &[u8] = unsafe { &(*bh).b_data };
+    let out = f(data);
+    brelse(bh);
+    Some(out)
+}
