@@ -1947,8 +1947,8 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
 /// fs_id + S_IFREG gate rejects every foreign inode BEFORE
 /// private_data is dereferenced; a NULL private_data is rejected too.
 pub fn devfs_reg_current_size(file: &crate::fs::File) -> Option<u64> {
-    // SAFETY: caller passes a valid File; only stable fields are read.
-    unsafe {
+    // Caller passes a valid File; only stable fields are read.
+    {
         let inode = crate::fs::unsafe_edges::file_inode(file)?;
         if inode.fs_id != crate::fs::inode::FS_ID_DEVFS
             || !inode.mode.is_regular_file()

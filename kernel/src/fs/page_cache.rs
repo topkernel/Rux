@@ -557,6 +557,56 @@ fn phys_to_virt_ptr(phys: usize) -> *mut u8 {
     phys_to_virt(PhysAddr::new(phys as u64)).0 as *mut u8
 }
 
+/// A byte window over one exclusively-owned page frame (INV-PC-WIN):
+/// `phys` names a frame the CALLER owns for this call (zone-allocated,
+/// not yet in the cache/map); the window is exactly PAGE_SIZE bytes of
+/// the linear map and lives only for the call. The one audited edge in
+/// this file for frame fills/copies — the four INV-PC-PAGECOPY sites
+/// below route through it.
+struct FrameWindow {
+    ptr: *mut u8,
+}
+
+impl FrameWindow {
+    /// INV-PC-WIN construction (the one raw edge).
+    #[inline]
+    fn from_phys(phys: usize) -> FrameWindow {
+        // SAFETY: INV-PC-WIN — linear-map address of a live frame; the
+        // pointer is inert until the fill/copy methods (same INV).
+        FrameWindow { ptr: phys_to_virt_ptr(phys) }
+    }
+
+    /// Fill from a kernel slice, zero the tail (INV-PC-WIN).
+    #[inline]
+    fn fill_from(&mut self, src: &[u8]) {
+        let copy_len = core::cmp::min(src.len(), PAGE_SIZE);
+        // SAFETY: INV-PC-WIN — owned frame, PAGE_SIZE window, bounded copy.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr, copy_len);
+            if copy_len < PAGE_SIZE {
+                core::ptr::write_bytes(self.ptr.add(copy_len), 0, PAGE_SIZE - copy_len);
+            }
+        }
+    }
+
+    /// Copy `copy_len` bytes from another frame, zero the tail
+    /// (INV-PC-WIN on both frames).
+    #[inline]
+    fn copy_frame_from(&mut self, src_phys: usize, copy_len: usize) {
+        // SAFETY: INV-PC-WIN — both frames live and owned/locked by the
+        /// caller's call (the old INV-PC-PAGECOPY argument).
+        unsafe {
+            let src = phys_to_virt_ptr(src_phys) as *const u8;
+            if copy_len > 0 {
+                core::ptr::copy_nonoverlapping(src, self.ptr, copy_len);
+            }
+            if copy_len < PAGE_SIZE {
+                core::ptr::write_bytes(self.ptr.add(copy_len), 0, PAGE_SIZE - copy_len);
+            }
+        }
+    }
+}
+
 // ==================== Round-5 named page-fill edges ====================
 //
 // The insert/writeback family's one shared shape: copying bytes into
@@ -569,33 +619,13 @@ fn phys_to_virt_ptr(phys: usize) -> *mut u8 {
 /// rest of the frame zeroes).
 #[inline]
 fn fill_page_from(phys_addr: usize, src: &[u8]) {
-    // SAFETY: INV-PC-PAGECOPY — phys_addr names this call's private
-    // frame; the linear map covers PAGE_SIZE bytes from it.
-    unsafe {
-        let dst = phys_to_virt_ptr(phys_addr);
-        let copy_len = core::cmp::min(src.len(), PAGE_SIZE);
-        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, copy_len);
-        if copy_len < PAGE_SIZE {
-            core::ptr::write_bytes(dst.add(copy_len), 0, PAGE_SIZE - copy_len);
-        }
-    }
+    FrameWindow::from_phys(phys_addr).fill_from(src);
 }
 
 /// Copy a whole frame from another frame (frame-to-frame revive/refresh).
 #[inline]
 fn copy_page_page(dst_phys: usize, src_phys: usize, copy_len: usize) {
-    // SAFETY: INV-PC-PAGECOPY — both frames are zone-allocated and
-    // privately owned by this call; len bounded by the caller.
-    unsafe {
-        let dst = phys_to_virt_ptr(dst_phys);
-        let frame_src = phys_to_virt_ptr(src_phys) as *const u8;
-        if copy_len > 0 {
-            core::ptr::copy_nonoverlapping(frame_src, dst, copy_len);
-        }
-        if copy_len < PAGE_SIZE {
-            core::ptr::write_bytes(dst.add(copy_len), 0, PAGE_SIZE - copy_len);
-        }
-    }
+    FrameWindow::from_phys(dst_phys).copy_frame_from(src_phys, copy_len);
 }
 
 /// Copy `n` bytes at kernel `src` into the frame at `pfn`, offset `off`

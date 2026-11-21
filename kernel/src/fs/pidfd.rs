@@ -114,13 +114,18 @@ pub fn attach(file: &crate::fs::File, data: alloc::boxed::Box<PidFdData>) {
 }
 
 /// Resolve a file's pidfd identity, if it has one.
-///
-/// SAFETY: `data` returned here is valid while the file holds it.
-pub unsafe fn data_of(file: &crate::fs::File) -> Option<&'static PidFdData> {
-    let p = (*file.private_data.get())?;
-    // SAFETY: the pointer came from Box::into_raw(PidFdData) in attach()
-    // and stays owned by the file for its lifetime.
-    Some(&*(p as *const PidFdData))
+/// The FILEPRIV-1 edge twin: the pointer came from Box::into_raw
+/// (PidFdData) in attach() and stays owned by the file for its
+/// lifetime — the boxed-private-data lifetime claim the edge carries.
+pub fn data_of(file: &crate::fs::File) -> Option<&'static PidFdData> {
+    // SAFETY: INV-FS-FILEPRIV-1 (write-once cell, install at attach);
+    // the 'static lifetime claim per the Box::into_raw ownership above.
+    let p = unsafe { *file.private_data.get() }?;
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: same INV + ownership claim.
+    Some(unsafe { &*(p as *const PidFdData) })
 }
 
 /// fdinfo helper (procfs): the pid a PIDFD_OPS file names, if `file`

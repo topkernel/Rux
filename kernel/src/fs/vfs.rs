@@ -6333,13 +6333,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
                 let mut fl = [0u8; 32];
-                if unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        fl.as_mut_ptr(),
-                        arg as *const u8,
-                        32,
-                    )
-                } > 0
+                if crate::arch::uaccess_safe::copy_in_t(&mut fl, arg) > 0
                 {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
@@ -6407,13 +6401,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     }
                     out
                 };
-                if unsafe {
-                    crate::arch::uaccess::copy_to_user(
-                        arg as *mut u8,
-                        out.as_ptr(),
-                        32,
-                    )
-                } > 0
+                if crate::arch::uaccess_safe::copy_out(arg, &out[..32]) > 0
                 {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
@@ -6433,13 +6421,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
                 let mut fl = [0u8; 32];
-                if unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        fl.as_mut_ptr(),
-                        arg as *const u8,
-                        32,
-                    )
-                } > 0
+                if crate::arch::uaccess_safe::copy_in_t(&mut fl, arg) > 0
                 {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
@@ -6536,8 +6518,8 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                         Some(gid) => {
                             let pgid = gid as u32;
                             let found = core::cell::Cell::new(false);
-                            crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
-                                if (*task).pgid() == pgid {
+                            crate::process::pid_hash::pid_hash_for_each_task(|task| {
+                                if task.pgid() == pgid {
                                     found.set(true);
                                 }
                             });
@@ -6622,13 +6604,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
                 let mut buf = [0u8; 8];
-                if unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        buf.as_mut_ptr(),
-                        arg as *const u8,
-                        8,
-                    )
-                } > 0
+                if crate::arch::uaccess_safe::copy_in_t(&mut buf, arg) > 0
                 {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
@@ -6670,8 +6646,8 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 let exists = match resolved {
                     Some(gid) if kind == 2 => {
                         let found = core::cell::Cell::new(false);
-                        crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
-                            if (*task).pgid() == gid as u32 {
+                        crate::process::pid_hash::pid_hash_for_each_task(|task| {
+                            if task.pgid() == gid as u32 {
                                 found.set(true);
                             }
                         });
@@ -6719,13 +6695,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 let mut buf = [0u8; 8];
                 buf[0..4].copy_from_slice(&otype.to_le_bytes());
                 buf[4..8].copy_from_slice(&opid.to_le_bytes());
-                if unsafe {
-                    crate::arch::uaccess::copy_to_user(
-                        arg as *mut u8,
-                        buf.as_ptr(),
-                        8,
-                    )
-                } > 0
+                if crate::arch::uaccess_safe::copy_out(arg, &buf[..8]) > 0
                 {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
@@ -7614,8 +7584,10 @@ pub fn open_mem_file_regen(
     flags: u32,
     regen: Option<fn() -> alloc::vec::Vec<u8>>,
 ) -> Result<usize, i32> {
-    // SAFETY: MEM_FILE_OPS is a static FileOps; Box::into_raw ownership is transferred to File
-    unsafe {
+    // MEM_FILE_OPS is a static FileOps; set_ops/set_private_data are the
+    // safe installers (pre-publication writes — the File's own INV);
+    // Box::into_raw is safe Rust (pointer cast only).
+    {
         let file = Arc::new(File::new(FileFlags::new(flags)));
         file.set_ops(&MEM_FILE_OPS);
         let content = alloc::boxed::Box::new(MemFileContent {

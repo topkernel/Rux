@@ -915,7 +915,7 @@ impl VirtioGpuDevice {
     /// Get framebuffer
     pub fn get_framebuffer(&self) -> Option<FrameBuffer> {
         let info = self.fb_info.as_ref()?;
-        unsafe {
+        {
             Some(FrameBuffer::new(info.addr, FrameBufferInfo {
                 addr: info.addr,
                 size: info.size,

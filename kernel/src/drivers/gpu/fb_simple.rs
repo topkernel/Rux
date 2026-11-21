@@ -57,8 +57,9 @@ pub fn probe_simple_framebuffer() -> Option<SimpleFrameBufferInfo> {
 
 /// Create a simplified framebuffer
 pub fn create_framebuffer(info: &SimpleFrameBufferInfo) -> Option<FrameBuffer> {
-    unsafe {
-        // Map physical address to virtual address (assume identity mapping)
+    {
+        // FrameBuffer::new routes through MmioRegion (INV-MMIO-1) — the
+        // device-window construction owns its own audit.
         let fb = FrameBuffer::new(info.addr, FrameBufferInfo {
             addr: info.addr,
             size: info.size,
