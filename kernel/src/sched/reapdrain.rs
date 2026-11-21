@@ -184,6 +184,37 @@ static PENDING: crate::sync::spinlock::Spinlock<Vec<PendingReap>> =
 static DRAIN_ACTIVE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+// ---- Grace-batch state (the boot-42/63 redesign, 2026-11-21) ----
+//
+// The original grace stage had two protocol bugs that made the round
+// NEVER complete under load: (1) it never held the RCU waiter count,
+// and rcu_note_context_switch SUPPRESSES its QS store when
+// RCU_WAITERS == 0 — a poller that nobody counts starves its own
+// round; (2) it never released GP_IN_FLIGHT on completion, so every
+// target after the first only ever latched the finished generation.
+// Fix: a PERSISTENT grace batch (entries that passed the switch stage
+// wait here across ticks), the waiter count held while the batch is
+// non-empty, done+release on completion, and an expedited nudge
+// (resched IPIs to the lagging CPUs — the reference's
+// synchronize_rcu_expedited shape) when a round stalls.
+
+/// The in-flight grace batch (switch-stage graduates awaiting grace).
+static GRACE_BATCH: crate::sync::spinlock::Spinlock<Vec<PendingReap>> =
+    crate::sync::spinlock::Spinlock::new(Vec::new());
+/// The batch's target generation (0 = none open).
+static GRACE_TARGET: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// Consecutive drainer runs the current target has been unmet.
+static GRACE_STALL_RUNS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// Waiter-count held (idempotent hold/release via compare).
+static GRACE_WAITER_HELD: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Nudge threshold: runs of an unmet target before the IPIs fire
+/// (3 ticks = 30 ms — far above a normal round's completion).
+const GRACE_NUDGE_RUNS: u32 = 3;
+
 /// How many entries ever completed via the sustained arm (the R85
 /// adjudication counter — its growth names marker-miss shapes).
 static R85_FREED: core::sync::atomic::AtomicU32 =
@@ -237,6 +268,18 @@ fn switch_stage_done(claim: &ReapClaim) -> (bool, bool) {
     {
         return (true, false);
     }
+    // boot-63 residue: the PACING gate — a task still executing its
+    // terminal deschedule loop publishes positive knowledge
+    // (terminal_pacing, set at loop entry, cleared only at the real
+    // retire sites). Its abort-retry windows can hold the whole
+    // slotless+unmarked+!on_cpu conjunction while the page must not be
+    // freed; the 20-tick timing bet is no longer the discriminator.
+    if t
+        .terminal_pacing
+        .load(core::sync::atomic::Ordering::Acquire)
+    {
+        return (false, false);
+    }
     // R85 physical truth: no CPU slot names this task. A task still
     // executing its terminal loop is tp on SOME hart and the R55
     // slot resync re-derives it — slotless means the frame is gone.
@@ -250,24 +293,22 @@ fn switch_stage_done(claim: &ReapClaim) -> (bool, bool) {
     (!named_by_slot, true)
 }
 
-/// Poll the shared-grace machinery: has every online CPU reported at
-/// or after `target`? (The same check the blocking
-/// `synchronize_rcu` loop makes, minus the sleeping.)
-fn grace_reported(target: u32) -> bool {
-    crate::sync::rcu::all_online_cpus_reported_pub(target)
-}
-
 /// The per-tick drainer. Called from the scheduler tick; one
 /// CAS-guarded CPU runs it, budget-bounded, IRQ-context-safe (the
 /// frees touch only IRQ-safe machinery: page free, `task_put`'s
 /// poison/paint/dealloc, and Arc drops that are no-ops — do_exit
 /// already released every Arc on the exit path).
 pub fn reap_drain_tick() {
-    if PENDING
+    // Fast path: nothing pending AND no open grace batch.
+    let pend_empty = PENDING
         .try_lock()
         .map(|p| p.is_empty())
-        .unwrap_or(true)
-    {
+        .unwrap_or(true);
+    let batch_empty = GRACE_BATCH
+        .try_lock()
+        .map(|b| b.is_empty())
+        .unwrap_or(true);
+    if pend_empty && batch_empty {
         return;
     }
     if DRAIN_ACTIVE
@@ -276,96 +317,159 @@ pub fn reap_drain_tick() {
     {
         return;
     }
-    // Snapshot-and-clear: work on a local batch so the lock is held
-    // only for the move (the frees below must not hold it — release
-    // paths can re-enter defer_reap_storage from the same tick on
-    // another CPU).
+    // Adaptive budget (the backpressure that self-heals cap pressure):
+    // the nominal 8 grows with pending depth so a full list drains at
+    // 4x-8x rate instead of spilling to the fallback.
+    let depth = PENDING.try_lock().map(|p| p.len()).unwrap_or(0);
+    let budget = if depth > (PENDING_CAP * 3) / 4 {
+        DRAIN_BUDGET * 8
+    } else if depth > PENDING_CAP / 2 {
+        DRAIN_BUDGET * 4
+    } else {
+        DRAIN_BUDGET
+    };
+    // Snapshot-and-clear of the switch-stage candidates.
     let mut batch: Vec<PendingReap> = {
         let mut p = PENDING.lock();
-        let n = p.len().min(DRAIN_BUDGET);
+        let n = p.len().min(budget);
         let taken: Vec<PendingReap> = p.drain(..n).collect();
         taken
     };
-    if batch.is_empty() {
-        DRAIN_ACTIVE.store(false, Ordering::Release);
-        return;
-    }
 
-    // One grace target for the whole batch: every entry's
-    // pid_hash_remove happened before this bump, so a full round at
-    // this target closes every reader window that predates any of
-    // them (the same ordering argument synchronize_rcu makes).
-    let mut grace_target: Option<u32> = None;
     let mut keep: Vec<PendingReap> = Vec::new();
-    let mut freed = 0usize;
-
     for mut e in batch.drain(..) {
-        if !e.grace {
-            let (done, via_r85) = switch_stage_done(&e.claim);
-            if !done {
+        if e.grace {
+            // Re-queued grace entry (survivor of a prior run).
+            keep.push(e);
+            continue;
+        }
+        let (done, via_r85) = switch_stage_done(&e.claim);
+        if !done {
+            keep.push(e);
+            continue;
+        }
+        if via_r85 {
+            e.r85_ticks += 1;
+            if e.r85_ticks < SUSTAINED_FREE_TICKS {
                 keep.push(e);
                 continue;
             }
-            if via_r85 {
-                e.r85_ticks += 1;
-                if e.r85_ticks < SUSTAINED_FREE_TICKS {
-                    keep.push(e);
-                    continue;
-                }
-                let n = R85_FREED.fetch_add(1, Ordering::Relaxed);
-                if n < 32 {
-                    crate::dfx::taskdump::taskdump_raw_line(b"REAP-R85-FREE #");
-                    crate::dfx::taskdump::taskdump_dec(n as u64);
-                    crate::dfx::taskdump::taskdump_raw_line(b" pid=");
-                    crate::dfx::taskdump::taskdump_dec(
-                        e.claim.task().pid() as u64,
-                    );
-                    crate::dfx::taskdump::taskdump_raw_line(b"\n");
-                }
+            let n = R85_FREED.fetch_add(1, Ordering::Relaxed);
+            if n < 32 {
+                crate::dfx::taskdump::taskdump_raw_line(b"REAP-R85-FREE #");
+                crate::dfx::taskdump::taskdump_dec(n as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b" pid=");
+                crate::dfx::taskdump::taskdump_dec(e.claim.task().pid() as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b"\n");
             }
-            e.grace = true;
         }
-        // Grace stage: lazily open (or latch) the batch's shared target.
-        let target = match grace_target {
-            Some(t) => t,
-            None => {
-                let t = crate::sync::rcu::shared_grace_target_pub();
-                grace_target = Some(t);
-                t
+        e.grace = true;
+        keep.push(e);
+    }
+
+    // Put the not-yet-grace survivors back.
+    if !keep.is_empty() {
+        let mut p = PENDING.lock();
+        for mut e in keep.drain(..) {
+            if !e.grace && p.len() < PENDING_CAP {
+                p.push(e);
+            } else {
+                // Grace-marked entries join the persistent batch below;
+                // the only drop here is a non-grace over-cap re-park
+                // (the loud leak, counted).
+                if !e.grace {
+                    CLAIM_DROPPED.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let mut gb = GRACE_BATCH.lock();
+                    gb.push(e);
+                }
             }
-        };
-        if grace_reported(target) {
-            // Storage free (release_task_storage's tail, minus both
-            // waits — the conditions it waited for are exactly the
-            // ones this ladder proved).
-            // The burn: the obligation this entry carried since its
-            // mint is consumed here — into_free is the only exit from
-            // the claim type, so the exactly-once free is a type
-            // invariant now (the pilot's deliverable).
-            e.claim.into_free();
-            freed += 1;
-        } else {
-            keep.push(e);
         }
     }
 
-    // Put the survivors back.
-    if !keep.is_empty() {
-        let mut p = PENDING.lock();
-        for e in keep {
-            if p.len() < PENDING_CAP {
-                p.push(e);
+    // ---- The grace stage (persistent batch, held-waiter protocol) ----
+    // Merge this run's graduates into the batch; open or reuse the
+    // target; hold the waiter count while the batch is non-empty
+    // (rcu_note_context_switch suppresses QS stores otherwise — the
+    // boot-42 stall root cause); on completion, free the whole batch
+    // and release GP_IN_FLIGHT (the boot-63 latch root cause).
+    let cur_target = GRACE_TARGET.load(Ordering::Acquire);
+    let target = if cur_target == 0 {
+        let t = crate::sync::rcu::shared_grace_target_pub();
+        GRACE_TARGET.store(t, Ordering::Release);
+        if GRACE_WAITER_HELD
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            crate::sync::rcu::grace_waiter_hold();
+        }
+        GRACE_STALL_RUNS.store(0, Ordering::Release);
+        t
+    } else {
+        cur_target
+    };
+
+    if crate::sync::rcu::all_online_cpus_reported_pub(target) {
+        // Round complete: free the whole batch, close the round.
+        let drained: Vec<PendingReap> = {
+            let mut gb = GRACE_BATCH.lock();
+            core::mem::replace(&mut *gb, Vec::new())
+        };
+        for e in drained {
+            e.claim.into_free();
+        }
+        crate::sync::rcu::shared_grace_done_pub();
+        GRACE_TARGET.store(0, Ordering::Release);
+        GRACE_STALL_RUNS.store(0, Ordering::Release);
+        if GRACE_WAITER_HELD
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            crate::sync::rcu::grace_waiter_release();
+        }
+    } else {
+        // Stall watch: expedite by poking the lagging CPUs (the
+        // reference's synchronize_rcu_expedited shape — a resched IPI
+        // on a kernel-preempt host forces the IRQ-exit switch that
+        // stores the QS report the round is waiting on).
+        let runs = GRACE_STALL_RUNS.fetch_add(1, Ordering::Relaxed) + 1;
+        if runs >= GRACE_NUDGE_RUNS {
+            let mut laggards = crate::sync::rcu::grace_lagging_cpus(target);
+            let me = crate::arch::cpu_id() as usize;
+            // Self-only stall (the drainer's own CPU between context
+            // switches — the p4 storm's shape: the tick that opened
+            // the target is always one QS behind its own bump until
+            // its task next switches) is NORMAL and resolves at that
+            // switch: no IPI, no print. Only a STALLED PEER gets the
+            // expedited nudge.
+            laggards.retain(|&c| c != me);
+            if !laggards.is_empty() {
+                let mut names = alloc::string::String::new();
+                use core::fmt::Write as _;
+                for cpu in laggards {
+                    crate::arch::ipi::send_reschedule_ipi(cpu);
+                    let _ = write!(names, "{} ", cpu);
+                }
+                static NUDGE_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let n = NUDGE_N.fetch_add(1, Ordering::Relaxed);
+                if n < 32 {
+                    crate::dfx::taskdump::taskdump_raw_line(b"REAP-GP-NUDGE #");
+                    crate::dfx::taskdump::taskdump_dec(n as u64);
+                    crate::dfx::taskdump::taskdump_raw_line(b" gen=");
+                    crate::dfx::taskdump::taskdump_dec(target as u64);
+                    crate::dfx::taskdump::taskdump_raw_line(b" laggards=");
+                    for b in names.as_bytes() {
+                        crate::dfx::taskdump::taskdump_raw_line(&[*b]);
+                    }
+                    crate::dfx::taskdump::taskdump_raw_line(b"\n");
+                }
             }
-            // Over cap on re-park: the entry is past its switch stage;
-            // dropping it leaks the Task page loudly rather than
-            // corrupting anything (the cap only binds with a wedged
-            // drainer). Counted below.
-            else {
-                CLAIM_DROPPED.fetch_add(1, Ordering::Relaxed);
-            }
+            // Re-arm: one nudge burst per GRACE_NUDGE_RUNS window.
+            GRACE_STALL_RUNS.store(0, Ordering::Release);
         }
     }
-    let _ = freed;
+
     DRAIN_ACTIVE.store(false, Ordering::Release);
 }
 
