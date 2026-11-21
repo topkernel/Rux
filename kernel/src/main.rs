@@ -362,6 +362,14 @@ pub fn rust_main_tail() -> ! {
         {
             cmdline::init_from(arch::boot::boot_cmdline());
             print_status("boot", "multiboot cmdline + e820 parsed", true);
+            // MPK evaluation probe (Layer 3, unsafe-5000-plan.md):
+            // mpkprobe=1, BSP-only, default off — capability check +
+            // WRPKRU cost + the fault-injection prototype. Runs here
+            // (post-cmdline, post-mm): fpu_init is too early for the
+            // cmdline parser, and the probe needs the static-root walk.
+            if cmdline::get_param("mpkprobe").as_deref() == Some("1") {
+                arch::x86_64::mpk::probe();
+            }
         }
         // aarch64: QEMU's ELF -kernel boot passes no cmdline (the -append
         // protocol is Linux-image-only, like the missing DTB pointer) —
