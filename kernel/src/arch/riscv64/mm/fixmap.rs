@@ -10,6 +10,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use super::unsafe_edges::PtTable;
 use super::{PAGE_SIZE, PAGE_SHIFT, VMEMMAP_START, PageTableEntry, PageTable, map_page, get_page_table_virt};
 use super::{ROOT_PAGE_TABLE, alloc_page_table};
 use crate::mm::PhysFrame;
@@ -106,7 +107,7 @@ pub const fn is_fixmap_addr(virt: usize) -> bool {
 /// - `idx`: Fixmap slot index
 /// - `phys`: Physical address to map (must be page-aligned)
 /// - `flags`: Page table entry flags
-pub unsafe fn set_fixmap(idx: FixedAddress, phys: usize, flags: u64) {
+pub fn set_fixmap(idx: FixedAddress, phys: usize, flags: u64) {
     let idx_usize = idx as usize;
     let virt = fix_to_virt(idx_usize);
     let virt_addr = super::VirtAddr::new(virt as u64);
@@ -118,11 +119,14 @@ pub unsafe fn set_fixmap(idx: FixedAddress, phys: usize, flags: u64) {
     map_page(root_ppn, virt_addr, phys_addr, flags);
 
     // Flush TLB for this address
-    core::arch::asm!(
-        "sfence.vma {virt}, zero",
-        virt = in(reg) virt,
-        options(nomem, nostack)
-    );
+    // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
+    unsafe {
+        core::arch::asm!(
+            "sfence.vma {virt}, zero",
+            virt = in(reg) virt,
+            options(nomem, nostack)
+        )
+    };
 }
 
 /// Clear a fixmap entry
@@ -131,38 +135,40 @@ pub unsafe fn set_fixmap(idx: FixedAddress, phys: usize, flags: u64) {
 ///
 /// # Safety
 /// This function modifies the kernel page table directly.
-pub unsafe fn clear_fixmap(idx: FixedAddress) {
+pub fn clear_fixmap(idx: FixedAddress) {
     let idx_usize = idx as usize;
     let virt = fix_to_virt(idx_usize);
 
-    // Get the page table entry and clear it
+    // Get the page table entry and clear it (typed walk)
     let vpn2 = (virt >> 30) & 0x1FF;
     let vpn1 = (virt >> 21) & 0x1FF;
     let vpn0 = (virt >> 12) & 0x1FF;
 
-    let root = &mut ROOT_PAGE_TABLE;
+    let root = PtTable::static_root();
     let pte2 = root.get(vpn2);
 
     if pte2.is_valid() {
-        let ppn1 = pte2.ppn();
-        let table1_phys = ppn1 << PAGE_SHIFT;
-        let table1 = get_page_table_virt(table1_phys);
-
-        let pte1 = (*table1).get(vpn1);
+        let Some(table1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else {
+            return;
+        };
+        let pte1 = table1.get(vpn1);
         if pte1.is_valid() && !pte1.is_leaf() {
-            let ppn0 = pte1.ppn();
-            let table0_phys = ppn0 << PAGE_SHIFT;
-            let table0 = get_page_table_virt(table0_phys);
+            let Some(table0) = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT) else {
+                return;
+            };
 
             // Clear the PTE
-            (*table0).set(vpn0, PageTableEntry::from_bits(0));
+            table0.set(vpn0, PageTableEntry::from_bits(0));
 
             // Flush TLB
-            core::arch::asm!(
-                "sfence.vma {virt}, zero",
-                virt = in(reg) virt,
-                options(nomem, nostack)
-            );
+            // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
+            unsafe {
+                core::arch::asm!(
+                    "sfence.vma {virt}, zero",
+                    virt = in(reg) virt,
+                    options(nomem, nostack)
+                )
+            };
         }
     }
 }
@@ -237,7 +243,7 @@ pub fn is_uart_fixmap_initialized() -> bool {
 ///
 /// # Arguments
 /// - `user_root_ppn`: Physical page number of user's root page table
-pub unsafe fn copy_fixmap_to_user(user_root_ppn: u64) {
+pub fn copy_fixmap_to_user(user_root_ppn: u64) {
     let uart_virt = UART_VIRT_ADDR.load(Ordering::Acquire);
     if uart_virt == 0 {
         return;

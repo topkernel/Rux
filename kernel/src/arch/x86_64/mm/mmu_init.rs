@@ -2642,54 +2642,57 @@ pub fn setup_device_mappings() {
         DEVICE_ALIAS64_BASE, DEVICE_ALIAS64_PHYS_BASE, DEVICE_ALIAS64_SIZE,
         DEVICE_ALIAS_BASE, DEVICE_ALIAS_PHYS_BASE, DEVICE_ALIAS_SIZE,
     };
-    unsafe {
-        // Uncached device memory: PWT|PCD (the IO alias in pagetable.rs).
-        let device_flags = PageTableEntry::P | PageTableEntry::RW
-            | PageTableEntry::ACCESSED | PageTableEntry::DIRTY | PageTableEntry::IO;
+    // All map helpers below are the round-1 safe walkers.
+    {
 
-        // q35 MMCONFIG ECAM window: 256MB, 2MB-aligned — megapages.
-        map_kernel_region_huge(PCIE_ECAM_BASE, PCIE_ECAM_SIZE, device_flags);
+    // Uncached device memory: PWT|PCD (the IO alias in pagetable.rs).
+    let device_flags = PageTableEntry::P | PageTableEntry::RW
+        | PageTableEntry::ACCESSED | PageTableEntry::DIRTY | PageTableEntry::IO;
 
-        // 32-bit PCI MMIO hole 0xc0000000..4GB: the firmware assigns virtio
-        // BARs here (observed at 0xfe000000). One full PD of 2MB leaves.
-        map_kernel_region_huge(0xc000_0000, 0x4000_0000, device_flags);
+    // q35 MMCONFIG ECAM window: 256MB, 2MB-aligned — megapages.
+    map_kernel_region_huge(PCIE_ECAM_BASE, PCIE_ECAM_SIZE, device_flags);
 
-        // IOAPIC + LAPIC: single 4K pages each (already covered by the hole
-        // megapages above; re-mapping the 4K pages keeps their exactness).
-        map_kernel_region(IOAPIC_BASE, IOAPIC_BASE, 0x1000, device_flags);
-        map_kernel_region(LAPIC_BASE, LAPIC_BASE, 0x1000, device_flags);
+    // 32-bit PCI MMIO hole 0xc0000000..4GB: the firmware assigns virtio
+    // BARs here (observed at 0xfe000000). One full PD of 2MB leaves.
+    map_kernel_region_huge(0xc000_0000, 0x4000_0000, device_flags);
 
-        // KERNEL-HALF alias of the whole device region (Linux fixmap-style):
-        // one contiguous window [DEVICE_ALIAS_BASE, +1.25GB) mirroring phys
-        // [0xb0000000, 0x100000000). The kernel half is shared into every
-        // mm's PML4, so trap-context MMIO works under any user CR3 — the
-        // replacement for the E8-MM low-identity clone (that clone let
-        // fork/teardown walks demote and free device-window page tables:
-        // the x86 scribbler family).
-        map_kernel_region(
-            DEVICE_ALIAS_BASE as u64,
-            DEVICE_ALIAS_PHYS_BASE as u64,
-            DEVICE_ALIAS_SIZE as u64,
-            device_flags,
-        );
+    // IOAPIC + LAPIC: single 4K pages each (already covered by the hole
+    // megapages above; re-mapping the 4K pages keeps their exactness).
+    map_kernel_region(IOAPIC_BASE, IOAPIC_BASE, 0x1000, device_flags);
+    map_kernel_region(LAPIC_BASE, LAPIC_BASE, 0x1000, device_flags);
 
-        // Second alias window: the above-4G PCI hole, eight PML4 slots of
-        // 1GB leaves. With the OH device set QEMU places 64-bit BARs at
-        // 0xc000000000 (768GB — it moves with device count/RAM; an earlier
-        // boot had them under 512GB) — bar_va()/device_alias() must resolve
-        // those under ANY CR3, or the first virtio MMIO access from
-        // interrupt context under a user CR3 page-faults (seen as the OH
-        // boot KERNPANIC at raw ISR address 0xc000005000 inside
-        // intx_dispatch, right after PID 1 started).
-        let mut v = DEVICE_ALIAS64_BASE as u64;
-        let mut p = DEVICE_ALIAS64_PHYS_BASE as u64;
-        let end = v + DEVICE_ALIAS64_SIZE as u64;
-        while v < end {
-            map_pud_huge_page(v as usize, p as usize, device_flags);
-            v += PUD_SIZE;
-            p += PUD_SIZE;
-        }
-        crate::arch::mm::asid::flush_tlb_all();
+    // KERNEL-HALF alias of the whole device region (Linux fixmap-style):
+    // one contiguous window [DEVICE_ALIAS_BASE, +1.25GB) mirroring phys
+    // [0xb0000000, 0x100000000). The kernel half is shared into every
+    // mm's PML4, so trap-context MMIO works under any user CR3 — the
+    // replacement for the E8-MM low-identity clone (that clone let
+    // fork/teardown walks demote and free device-window page tables:
+    // the x86 scribbler family).
+    map_kernel_region(
+        DEVICE_ALIAS_BASE as u64,
+        DEVICE_ALIAS_PHYS_BASE as u64,
+        DEVICE_ALIAS_SIZE as u64,
+        device_flags,
+    );
+
+    // Second alias window: the above-4G PCI hole, eight PML4 slots of
+    // 1GB leaves. With the OH device set QEMU places 64-bit BARs at
+    // 0xc000000000 (768GB — it moves with device count/RAM; an earlier
+    // boot had them under 512GB) — bar_va()/device_alias() must resolve
+    // those under ANY CR3, or the first virtio MMIO access from
+    // interrupt context under a user CR3 page-faults (seen as the OH
+    // boot KERNPANIC at raw ISR address 0xc000005000 inside
+    // intx_dispatch, right after PID 1 started).
+    let mut v = DEVICE_ALIAS64_BASE as u64;
+    let mut p = DEVICE_ALIAS64_PHYS_BASE as u64;
+    let end = v + DEVICE_ALIAS64_SIZE as u64;
+    while v < end {
+        map_pud_huge_page(v as usize, p as usize, device_flags);
+        v += PUD_SIZE;
+        p += PUD_SIZE;
+    }
+    crate::arch::mm::asid::flush_tlb_all();
+
     }
 }
 

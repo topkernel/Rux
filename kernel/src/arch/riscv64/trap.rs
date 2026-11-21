@@ -1077,8 +1077,8 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
         Some(t) => t,
         None => return,
     };
-    // SAFETY: current task pointer is valid for the trap context.
-    let mm = unsafe { (*task).address_space_arc() };
+    // Current task's typed handle (trap context).
+    let mm = task.address_space_arc();
     let mm = match mm {
         Some(m) => m,
         None => {
@@ -1519,9 +1519,8 @@ crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6=
                 // library/executable directly. Best-effort — resolution
                 // failures still print the range and perms.
                 if let Some(task) = crate::sched::current() {
-                    // SAFETY: current is the faulting task itself;
-                    // address_space_arc clones the Arc out of it.
-                    if let Some(mm) = unsafe { (*task).address_space_arc() } {
+                    // Current is the faulting task itself (typed handle).
+                    if let Some(mm) = task.address_space_arc() {
                         for a in [fault_addr, regs.epc] {
                             match mm.find_vma(
                                 crate::mm::VirtAddr::new(a as usize)) {

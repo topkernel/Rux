@@ -104,6 +104,9 @@ pub fn read_cr0() -> u64 {
 ///
 /// # Safety
 /// The value must keep PE/PG/PAE as required by the current mode.
+/// IRREDUCIBLE F-ROW (F-CR-1): control-register writes (CR0/CR3/CR4)
+/// and MSRs — reference kernel arch/x86/include/asm/special_insns.h;
+/// no safe Rust shape exists (inline asm is the only access).
 pub unsafe fn write_cr0(value: u64) {
     // SAFETY: caller keeps the mode-defining bits intact.
     unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) };
