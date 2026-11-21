@@ -104,10 +104,10 @@ pub fn memblock_mut() -> &'static mut super::memblock::MemBlock {
 /// Walk the CURRENT stack's frame-pointer chain into `frames` (INV-MM-2
 /// diag arm: this CPU's own stack, bounded by the callee's guard).
 #[inline]
-pub fn walk_fp_chain(s0: u64, frames: &mut [u64; 10]) {
+pub fn walk_fp_chain<const N: usize>(s0: u64, frames: &mut [u64; N]) {
     // SAFETY: INV-MM-2 diag arm — the walker is the audited
     // frame-pointer reader; s0 came from current_frame_pointer() on
-    // this CPU's stack.
+    // this CPU's stack; N matches the caller's frame array.
     unsafe { crate::dfx::memwatch::walk_fp_chain(s0, frames) }
 }
 
@@ -450,3 +450,16 @@ pub fn node_data_init() {
 // atomics (start_brk/brk) — every mutable access runs under its lock.
 unsafe impl Send for super::vma::VmaManager {}
 unsafe impl Sync for super::vma::VmaManager {}
+
+/// The caller's return address (x86_64 diagnostic: `movq 8(%rbp)`;
+/// INV-MM-2 diag arm — frame pointers are forced on, this stack frame
+/// is live).
+#[cfg(feature = "x86_64")]
+#[inline]
+pub fn x86_caller_return_address() -> u64 {
+    let ret: u64;
+    // SAFETY: INV-MM-2 diag arm — one frame-pointer-chain read of the
+    // current stack.
+    unsafe { core::arch::asm!("movq 8(%rbp), {}", out(reg) ret, options(att_syntax)) };
+    ret
+}
