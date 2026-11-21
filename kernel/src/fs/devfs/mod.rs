@@ -276,7 +276,7 @@ fn nulldev_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
 /// Explicit poll op (review 5.2 low: relied on the generic "no handler =
 /// ready" fallback, which a future default change would silently break).
 fn nulldev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
@@ -350,7 +350,7 @@ pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
 }
 
 pub(crate) fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 && crate::fs::tty::console().input_poll_ready() {
         ready |= POLLIN | POLLRDNORM;
@@ -379,7 +379,7 @@ fn zerodev_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
 }
 
 fn zerodev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
@@ -428,7 +428,7 @@ fn randdev_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
 }
 
 fn randdev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
