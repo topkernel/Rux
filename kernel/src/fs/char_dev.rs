@@ -134,7 +134,7 @@ pub fn uart_write(buf: &[u8]) -> isize {
 
 /// UART character device file operations (public access)
 fn uart_file_poll(_file: &crate::fs::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 && crate::console::uart_data_ready() {
         ready |= POLLIN | POLLRDNORM;

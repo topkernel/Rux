@@ -19,10 +19,10 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2619**
-- with artifact (non-GAP): **2553** (97.5%)
-- GAP: **66**
-- by kind: block=2292, unsafe-extern=7, unsafe-fn=162, unsafe-impl=158
+- unsafe regions: **2616**
+- with artifact (non-GAP): **2536** (96.9%)
+- GAP: **80**
+- by kind: block=2292, unsafe-extern=7, unsafe-fn=162, unsafe-impl=155
 - by category (regions carry 0..n tags): ptr-ops=672, asm=278, volatile=163, raw-construct=58, addr-arith=57, no-preempt=15, ffi=13, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
@@ -30,7 +30,7 @@ census id is accounted for here.
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
 | arch | 789 | 789 | 0 |
-| fs | 644 | 606 | 38 |
+| fs | 644 | 604 | 40 |
 | mm | 184 | 161 | 23 |
 | dfx | 128 | 128 | 0 |
 | drivers | 120 | 120 | 0 |
@@ -39,11 +39,11 @@ census id is accounted for here.
 | tests | 105 | 105 | 0 |
 | process | 80 | 80 | 0 |
 | ipc | 67 | 67 | 0 |
-| <top> | 61 | 60 | 1 |
+| <top> | 61 | 61 | 0 |
 | net | 53 | 53 | 0 |
 | safety | 50 | 50 | 0 |
 | perf | 40 | 40 | 0 |
-| syscall | 27 | 23 | 4 |
+| syscall | 24 | 7 | 17 |
 | io_uring | 19 | 19 | 0 |
 | interrupt | 16 | 16 | 0 |
 | security | 7 | 7 | 0 |
@@ -1743,8 +1743,8 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 68 | read_file_from_rootfs | block | - | INV:INV-FS-GLOBALSB-1 | `694e66434228` |
-| 75 | read_file_from_rootfs | block | - | INV:INV-FS-GLOBALSB-1 | `cb6c50486477` |
+| 69 | read_file_from_rootfs | block | - | GAP | `318752271784` |
+| 76 | read_file_from_rootfs | block | - | GAP | `f76c72810cfb` |
 
 ### kernel/src/fs/mount.rs (2)
 
@@ -3632,7 +3632,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1711 | rust_main | block | asm | GAP | `327fa7ff2852` |
+| 1711 | rust_main | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `327fa7ff2852` |
 
 ### kernel/src/printk.rs (4)
 
@@ -3924,7 +3924,7 @@ census id is accounted for here.
 
 ## syscall
 
-### kernel/src/syscall/edges.rs (27)
+### kernel/src/syscall/edges.rs (24)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -3934,27 +3934,24 @@ census id is accounted for here.
 | 92 | list_entry_mut | block | ptr-ops | INV:INV-SYSC-1 | `533b6bc2c4dd` |
 | 103 | list_link_tail | block | - | INV:INV-SYSC-1 | `1f325ab448d9` |
 | 111 | list_unlink | block | - | INV:INV-SYSC-1 | `77a52e19abb7` |
-| 123 | <module> | unsafe-impl | - | GAP | `92df503eb9b7` |
-| 129 | <module> | unsafe-impl | - | GAP | `1298f229abc4` |
-| 132 | <module> | unsafe-impl | - | GAP | `61fb552d7f39` |
-| 136 | <module> | unsafe-impl | - | GAP | `0560f3e2719c` |
-| 152 | boxed_ref | block | - | INV:INV-SYSC-2 | `a0f00f066fa5` |
-| 164 | boxed_mut | block | - | INV:INV-SYSC-2 | `1d5765155960` |
-| 176 | boxed_drop | block | - | INV:INV-SYSC-2 | `f16318f757ac` |
-| 210 | x86_panic_reset | block | asm | INV:INV-SYSC-4 | `d5c438bb011d` |
-| 244 | x86_reboot_pulse | block | - | INV:INV-SYSC-4 | `a0a9abf6a8a7` |
-| 259 | sbi_shutdown_ecall | block | asm | INV:INV-SYSC-4 | `3299e9e9a082` |
-| 286 | pidfd_data_of | block | - | INV:INV-SYSC-5 | `7f6c9f11baa9` |
-| 306 | file_inode_set_pre_publish | block | - | INV:INV-SYSC-7 | `217b001a947c` |
-| 334 | arch_map_page | block | - | INV:INV-SYSC-8 | `b052b7517ac8` |
-| 354 | unmap_user_leaf_locked | block | - | INV:INV-SYSC-8 | `484f871b8f77` |
-| 380 | copy_page_linear | block | ptr-ops | INV:INV-SYSC-8 | `07e713e48505` |
-| 403 | page_desc_of | block | - | INV:INV-SYSC-8 | `c5d6c97ae6de` |
-| 519 | pt_walk_writable_phys | block | ptr-ops | INV:INV-SYSC-8 | `36fbdfd9dd9e` |
-| 526 | pt_walk_writable_phys | block | - | INV:INV-SYSC-8 | `120c8fdd2c42` |
-| 546 | pt_walk_writable_phys | block | ptr-ops | INV:INV-SYSC-8 | `e49d57f959ab` |
-| 573 | file_write_page | block | ptr-ops | INV:INV-SYSC-8 | `33b68af17757` |
-| 592 | arch_map_user_page | block | - | INV:INV-SYSC-8 | `f9d39eb37ff6` |
+| 123 | <module> | unsafe-impl | - | INV:INV-SYSC-1 | `92df503eb9b7` |
+| 149 | boxed_ref | block | - | GAP | `f23c7871c7f8` |
+| 161 | boxed_mut | block | - | GAP | `d5ac7291073f` |
+| 173 | boxed_drop | block | - | GAP | `47e9983d2262` |
+| 207 | x86_panic_reset | block | asm | GAP | `59c16a8fab5d` |
+| 241 | x86_reboot_pulse | block | - | GAP | `680367503e04` |
+| 256 | sbi_shutdown_ecall | block | asm | GAP | `448e0e6dd3b8` |
+| 283 | pidfd_data_of | block | - | GAP | `e94d74912835` |
+| 303 | file_inode_set_pre_publish | block | - | GAP | `a5fc6192ec76` |
+| 331 | arch_map_page | block | - | GAP | `9cd3202b2556` |
+| 351 | unmap_user_leaf_locked | block | - | GAP | `7ce38926b763` |
+| 377 | copy_page_linear | block | ptr-ops | GAP | `15e173f78be1` |
+| 400 | page_desc_of | block | - | GAP | `21794856d352` |
+| 516 | pt_walk_writable_phys | block | ptr-ops | GAP | `05cb84977630` |
+| 523 | pt_walk_writable_phys | block | - | GAP | `4b67d7779dbf` |
+| 543 | pt_walk_writable_phys | block | ptr-ops | GAP | `349996274ae0` |
+| 570 | file_write_page | block | ptr-ops | GAP | `f3b7a4898532` |
+| 589 | arch_map_user_page | block | - | GAP | `436de7bc11c0` |
 
 ## io_uring
 

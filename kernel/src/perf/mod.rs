@@ -1330,7 +1330,7 @@ fn perf_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 /// poll(2): readable while unwritten ring data exists.
 fn perf_poll(file: &crate::fs::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
     let Some(ev) = event_of(file) else { return POLLERR };
     if events & POLLIN != 0 {

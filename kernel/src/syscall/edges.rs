@@ -126,14 +126,11 @@ unsafe impl Send for crate::syscall::misc::EpollWakeRegistry {}
 // while the binding is linked (shard lock held or pinned per
 // notify_pins), and the node is unlinked before the epoll's close op
 // frees the box (INV-SYSC-1/2).
-unsafe impl Send for crate::syscall::misc::EpollWakeNode {}
 
 // SAFETY: same contract as EpollWakeRegistry (the per-shard type).
-unsafe impl Send for crate::syscall::misc::EpollWakeShard {}
 
 // SAFETY: task pointers are only compared for identity; queue pointers
 // are unregistered in the owning fd's close op before the box is freed.
-unsafe impl Send for crate::syscall::misc::SignalfdWakeRegistry {}
 
 // ---------------------------------------------------------------------------
 // INV-SYSC-2: unshared-box borrows + the exactly-once reclaim

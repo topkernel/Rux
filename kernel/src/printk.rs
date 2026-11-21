@@ -1762,7 +1762,7 @@ fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
 /// epoll treats that as permanently ready, so every kmsg waiter
 /// woke, read EOF, and re-armed in a tight loop.
 fn kmsg_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 {
         let rb = RING_BUFFER.lock_irqsave();
@@ -1987,7 +1987,7 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
 /// /proc/kmsg poll: POLLIN iff unconsumed records exist; always writable
 /// (matches kmsg_file_poll's shape; epoll waiters need the edge).
 fn proc_kmsg_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let rb = RING_BUFFER.lock_irqsave();
     let readable = rb.read_seq < RING_NEXT_SEQ.load(Ordering::Relaxed);
     drop(rb);

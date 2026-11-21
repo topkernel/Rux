@@ -1196,7 +1196,7 @@ fn unix_recvmsg_user(
             if let Some(peer) = sock.peer_arc() {
                 let fid = peer.file_id.load(Ordering::Acquire);
                 if fid != 0 {
-                    crate::syscall::misc::epoll_notify_file(fid);
+                    crate::fs::event_notify::epoll_notify_file(fid);
                 }
             }
             Ok(UnixRecvResult {
@@ -1274,7 +1274,7 @@ fn unix_recvmsg_user(
                     peer.wait_queue.wake_up_one();
                     let fid = peer.file_id.load(Ordering::Acquire);
                     if fid != 0 {
-                        crate::syscall::misc::epoll_notify_file(fid);
+                        crate::fs::event_notify::epoll_notify_file(fid);
                     }
                 }
             }
@@ -1698,7 +1698,7 @@ pub fn unix_connect(
             // arrival.
             let fid = server.file_id.load(Ordering::Acquire);
             if fid != 0 {
-                crate::syscall::misc::epoll_notify_file(fid);
+                crate::fs::event_notify::epoll_notify_file(fid);
             }
             // rux:socksnap (retired dfx=socksnap) (launcher-chain hunt, b16): name every client
             // that reaches a Spawn-family listener. The OH appspawn
@@ -2686,7 +2686,7 @@ pub fn unix_send(
                 // arrival, not just empty→nonempty transitions).
                 let fid = target.file_id.load(Ordering::Acquire);
                 if fid != 0 {
-                    crate::syscall::misc::epoll_notify_file(fid);
+                    crate::fs::event_notify::epoll_notify_file(fid);
                 }
                 return Ok(sent_len);
             }
@@ -2930,7 +2930,7 @@ pub fn unix_recv(
                     }
                     let fid = peer.file_id.load(Ordering::Acquire);
                     if fid != 0 {
-                        crate::syscall::misc::epoll_notify_file(fid);
+                        crate::fs::event_notify::epoll_notify_file(fid);
                     }
                 }
                 return Ok(UnixRecvResult {
@@ -2969,7 +2969,7 @@ pub fn unix_recv(
                 if let Some(peer) = sock.peer_arc() {
                     let fid = peer.file_id.load(Ordering::Acquire);
                     if fid != 0 {
-                        crate::syscall::misc::epoll_notify_file(fid);
+                        crate::fs::event_notify::epoll_notify_file(fid);
                     }
                 }
                 return Ok(UnixRecvResult {
@@ -3030,7 +3030,7 @@ pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
             // EOF is a readability edge for the peer's watchers too.
             let fid = peer.file_id.load(Ordering::Acquire);
             if fid != 0 {
-                crate::syscall::misc::epoll_notify_file(fid);
+                crate::fs::event_notify::epoll_notify_file(fid);
             }
         }
     }
@@ -3130,7 +3130,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
         // its EPOLLET watchers must see (Xorg detects dead clients this way).
         let fid = peer.file_id.load(Ordering::Acquire);
         if fid != 0 {
-            crate::syscall::misc::epoll_notify_file(fid);
+            crate::fs::event_notify::epoll_notify_file(fid);
         }
     }
     // Drop the pinned socket-node inode (its identity was our reg key).
@@ -3606,7 +3606,7 @@ fn unix_recv_stream_user(
                 peer.wait_queue.wake_up_one();
                 let fid = peer.file_id.load(Ordering::Acquire);
                 if fid != 0 {
-                    crate::syscall::misc::epoll_notify_file(fid);
+                    crate::fs::event_notify::epoll_notify_file(fid);
                 }
             }
             if !files.is_empty() {
@@ -3683,7 +3683,7 @@ fn unix_file_close(file: &File) -> i32 {
 }
 
 fn unix_file_poll(file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     // SAFETY: ops identity was verified (see unix_file_read).
     let socket = match unix_of_file(file) {
         Some(s) => s,
