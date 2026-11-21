@@ -257,5 +257,7 @@ __x86_64_start:
 .size __x86_64_start, . - __x86_64_start
 "#,
     early_boot_init = sym early_boot_init,
+    // (lib/bin split): the symbol now lives in the BIN crate; the asm
+    // sym reference goes through the lib's forwarding declaration.
     rust_main = sym crate::rust_main,
 );
