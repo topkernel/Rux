@@ -3714,12 +3714,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 core::sync::atomic::AtomicU32::new(0);
             if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
             crate::pr_err!(
-                "pagefault: Segfault at {:#x}, rip={:#x}, rsp={:#x}, pid={}, mode={}",
+                "pagefault: Segfault at {:#x}, rip={:#x}, rsp={:#x}, pid={}, mode={}, fill_site={}",
                 fault_addr,
                 regs.rip,
                 regs.rsp,
                 crate::sched::get_current_pid(),
-                if regs.kernel_mode() { "kernel" } else { "user" }
+                if regs.kernel_mode() { "kernel" } else { "user" },
+                crate::arch::mm::page_fault::FILL_REFUSAL_SITE.load(core::sync::atomic::Ordering::Relaxed)
             );
             }
             if regs.user_mode() {
