@@ -1144,6 +1144,17 @@ f9f61c823e7b	kernel/src/fs/devfs/mod.rs	shared_entry_of	2025		INV:INV-DEVFS-SHAR
 5b7f1520b4c8	kernel/src/fs/devfs/mod.rs	shared_read_off	2060	ptr-ops	INV:INV-DEVFS-SHARED-1
 b61f0214f93f	kernel/src/fs/devfs/mod.rs	shared_write_off	2100	ptr-ops	INV:INV-DEVFS-SHARED-1
 32b843792a2a	kernel/src/fs/elf.rs	load_segment	638	ptr-ops	INV:INV-CBYTES-2
+cf8bab5883f8	kernel/src/fs/event_notify.rs	list_first	80		GAP
+632c216ce657	kernel/src/fs/event_notify.rs	list_next	86		GAP
+80d09d5f39cf	kernel/src/fs/event_notify.rs	list_link_tail	94		GAP
+4b6137125552	kernel/src/fs/event_notify.rs	list_unlink	101		GAP
+abc2cba74eea	kernel/src/fs/event_notify.rs	boxed_mut	107		GAP
+c7eeb44a22a5	kernel/src/fs/event_notify.rs	boxed_drop	114		GAP
+a109ddbfcbff	kernel/src/fs/event_notify.rs	list_entry_mut	121	ptr-ops	GAP
+c9031bc3c926	kernel/src/fs/event_notify.rs	list_entry	133	ptr-ops	GAP
+bc5b8f1749f7	kernel/src/fs/event_notify.rs	boxed_ref	155		GAP
+2a64da003001	kernel/src/fs/event_notify.rs	<module>	634		GAP
+4bb8d331808a	kernel/src/fs/event_notify.rs	<module>	635		GAP
 b4e0bb27df33	kernel/src/fs/ext4/allocator.rs	read_block_bitmap	383		INV:INV-EXT4-ALLOC-1
 feac21e6ec6f	kernel/src/fs/ext4/allocator.rs	read_inode_bitmap	858		INV:INV-EXT4-ALLOC-1
 e53b54b8744a	kernel/src/fs/ext4/allocator.rs	refresh_bg_itable_unused	969		INV:INV-EXT4-ALLOC-1
