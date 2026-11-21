@@ -162,15 +162,23 @@ impl ReapClaim {
     /// Burn: consume the obligation and run the storage free.
     /// Byte-identical to the raw form's `reap_storage_free` (the
     /// identity-preservation obligation).
-    fn into_free(self) {
+    fn into_free(self) -> (u32, u32) {
         let task = self.0.as_ptr();
         core::mem::forget(self);
-        reap_storage_free(task);
+        reap_storage_free(task)
     }
 }
 
 struct PendingReap {
     claim: ReapClaim,
+    /// The parent's pid at reap time (boot-118's WAIT4-PARK fix: a
+    /// parent parked in wait4 on THIS child gets a deferred-notify
+    /// wake when the drainer completes the child's storage — the
+    /// reaper-side notify already ran in do_exit, but a racing park
+    /// could have missed it; this is the belt-and-braces arm, 0 = no
+    /// parent known). Captured at MINT (release_task still knows the
+    /// tree), consumed at BURN.
+    parent_pid: u32,
     /// Consecutive ticks the entry has held the R85 conjunction.
     r85_ticks: u32,
     /// Past the switch stage, waiting for the batch grace target.
@@ -222,7 +230,7 @@ static R85_FREED: core::sync::atomic::AtomicU32 =
 
 /// Hand the storage free of a fully-released task to the drainer.
 /// `false` = over cap: the caller must run the synchronous fallback.
-pub fn defer_reap_storage(task: *mut Task) -> bool {
+pub fn defer_reap_storage(task: *mut Task, parent_pid: u32) -> bool {
     // The mint: the obligation leaves the reaper's hands here. On
     // over-cap return the OBLIGATION stays with the caller (the raw
     // fallback frees it) — the claim is not minted.
@@ -243,6 +251,7 @@ pub fn defer_reap_storage(task: *mut Task) -> bool {
     }
     p.push(PendingReap {
         claim,
+        parent_pid,
         r85_ticks: 0,
         grace: false,
     });
@@ -416,7 +425,8 @@ pub fn reap_drain_tick() {
             core::mem::replace(&mut *gb, Vec::new())
         };
         for e in drained {
-            e.claim.into_free();
+            let (pp, cp) = e.claim.into_free();
+            notify_parent_if_any(pp, cp);
         }
         crate::sync::rcu::shared_grace_done_pub();
         GRACE_TARGET.store(0, Ordering::Release);
@@ -428,6 +438,13 @@ pub fn reap_drain_tick() {
             crate::sync::rcu::grace_waiter_release();
         }
     } else {
+        // The drainer's own tick context is outside every RCU
+        // read-side section: report THIS cpu's quiescent state at the
+        // current generation (boot-118: the surviving wedge's lagging
+        // cpu was one that reported via switches alone, and long
+        // user-mode stretches between switches stalled the round while
+        // generations climbed around it).
+        crate::sync::rcu::report_self_quiescent();
         // Stall watch: expedite by poking the lagging CPUs (the
         // reference's synchronize_rcu_expedited shape — a resched IPI
         // on a kernel-preempt host forces the IRQ-exit switch that
@@ -473,11 +490,27 @@ pub fn reap_drain_tick() {
     DRAIN_ACTIVE.store(false, Ordering::Release);
 }
 
+/// The burn's wake arm (boot-118): a parent parked in wait4 on this
+/// child must observe the completion even when the drainer (not the
+/// parent's own reaper) finished it. The deferred-notify machinery is
+/// the proven channel (processed on the next schedule tail / repick on
+/// the parent's CPU; single-slot overwrite fires predecessors inline).
+fn notify_parent_if_any(parent_pid: u32, child_pid: u32) {
+    if parent_pid != 0 && parent_pid != child_pid {
+        crate::sched::sched::defer_exit_notify(parent_pid, child_pid);
+    }
+}
+
 /// The storage free proper — the tail of the old
 /// `release_task_storage` with both waits removed (their conditions
 /// are the ladder's completion predicates).
-fn reap_storage_free(task: *mut Task) {
+fn reap_storage_free(task: *mut Task) -> (u32, u32) {
     let t = crate::process::unsafe_edges::borrow_task_mut(task);
+    // The wake arm's inputs, read BEFORE the page may leave our hands
+    // (task_put's last-pin free): the parent (tree edge) and the
+    // child's own pid (the notify's subject).
+    let parent_pid = t.parent_ptr().map(|p: *const Task| crate::process::unsafe_edges::borrow_task(p as *mut Task).pid()).unwrap_or(0);
+    let child_pid = t.pid();
     t.free_kernel_stack();
     crate::process::unsafe_edges::free_fork_pt_regs(t);
     t.set_address_space(None);
@@ -485,4 +518,5 @@ fn reap_storage_free(task: *mut Task) {
     t.signal = None;
     t.set_fs(None);
     crate::process::task::Task::task_put(task);
+    (parent_pid, child_pid)
 }

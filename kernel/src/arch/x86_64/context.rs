@@ -563,6 +563,13 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 }
 
 fn context_switch_body(prev: &mut Task, next: &mut Task) {
+    // MPK phase 1 (mpkguard): re-arm the closed PKRU. PKRU is NOT in
+    // the trap frame — a task preempted mid-window would otherwise
+    // hand the next task an open key-1 zone. Windows never contain a
+    // schedule point (they wrap volatile accesses only), so this is
+    // the belt-and-braces backstop; the discipline note is at
+    // arch::mpk::switch_rearm.
+    crate::arch::mpk::switch_rearm();
     // cctx probe (closegap lane): phase stamps in the OUTGOING frame.
     // The post-asm stamp is parked in a per-CPU slot (the switch is
     // CPU-local with IRQs off) because prev's frame freezes

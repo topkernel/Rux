@@ -395,6 +395,24 @@ pub fn grace_waiter_hold() {
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
 }
 
+/// Public twin for the async reap drainer: report THIS cpu as
+/// quiescent at the current generation (the boot-118 fix — the
+/// drainer's tick context is outside every RCU read-side section, so
+/// its own report is sound; a round whose only laggard is a cpu that
+/// reports via switches alone could stall for the whole storm when
+/// that cpu runs long user-mode stretches between switches).
+pub fn report_self_quiescent() {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    if RCU_WAITERS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let gen = RCU_GEN.load(Ordering::Acquire);
+    RCU_QS_GEN[cpu].store(gen, Ordering::Release);
+}
+
 /// Public twin: release the held waiter count.
 pub fn grace_waiter_release() {
     RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
