@@ -596,6 +596,11 @@ pub extern "C" fn ap_entry64() -> ! {
     // Per-CPU descriptor tables, syscall MSRs and FPU enable.
     crate::arch::trap::init_secondary(cpu);
 
+    // MPK per-CPU arm (before the first STI/schedule on this AP):
+    // CR4.PKE and the PKRU are per-CPU; the BSP's guard_arm armed only
+    // itself, and switch_rearm's wrpkru would #UD here otherwise.
+    super::mpk::cpu_online_arm();
+
     // Local APIC on this CPU (also arms the periodic timer; delivery
     // waits for STI below).
     crate::drivers::intc::apic::init_secondary();

@@ -80,13 +80,22 @@ fn rdpkru() -> u32 {
 /// WRPKRU — write PKRU (EAX = value; ECX/EDX must be zero).
 #[inline]
 fn wrpkru(v: u32) {
-    // SAFETY: pure register write; serializing per the ISA.
+    // SAFETY: pure register write; serializing per the ISA. ECX/EDX
+    // are DECLARED CLOBBERED (out(_), like rdpkru): the cost-loop bug
+    // — the template's "xor ecx,ecx" ran undeclared, so the release
+    // compiler legally kept a loop induction variable in ECX across
+    // the asm; `dec ecx; jne` then counted 0 -> 0xFFFFFFFF and the
+    // probe's warmup loop became ~2^32 iterations (a boot hang with
+    // zero output — RIP convicted inside the wrpkru loop via the QEMU
+    // monitor). An undeclared clobber is UB in EVERY caller context.
     unsafe {
         core::arch::asm!(
             "xor ecx, ecx",
             "xor edx, edx",
             "wrpkru",
             in("eax") v,
+            out("ecx") _,
+            out("edx") _,
             options(nostack)
         );
     }
@@ -322,6 +331,35 @@ pub fn guard_on() -> bool {
     GUARD.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Per-CPU arm at AP bringup (ap_entry64): CR4.PKE and the PKRU are
+/// PER-CPU state — the BSP's [`guard_arm`] arms only the BSP, and any
+/// RDPKRU/WRPKRU on an un-armed AP #UDs (kernel SIGILL on the AP's
+/// first context switch, `switch_rearm`'s wrpkru: the mab-grd1 boot —
+/// CPU 1, PID 0, RAX=closed_pkru, handle_illegal_instruction ->
+/// "Attempted to kill the idle task"). The tagged kernel-PT leaves are
+/// shared, so only the register arm is per-CPU. Runs before the AP's
+/// first STI and schedule; no-op when the guard is off.
+pub fn cpu_online_arm() {
+    if !guard_on() {
+        return;
+    }
+    let (_, _, ecx, _) = super::cpu::cpuid(7, 0);
+    if ecx & (1 << 3) == 0 {
+        crate::println!(
+            "mpkguard: cpu{} has no PKU — guard NOT armed here",
+            crate::arch::cpu_id()
+        );
+        return;
+    }
+    // SAFETY: CR4 update with the PKE bit only, CPUID-gated and
+    // idempotent (the guard_arm template).
+    unsafe {
+        let cr4 = super::cpu::read_cr4();
+        super::cpu::write_cr4(cr4 | (1 << 22));
+    }
+    wrpkru(closed_pkru());
+}
+
 /// Open the key-1 zone: returns the PKRU to restore. Every access to a
 /// tagged page runs between this and [`zone_close`]. IRQ-nesting-safe
 /// (save/restore, not open/close counting).
@@ -383,6 +421,18 @@ pub fn tag_kernel_pages(va: usize, len: usize) -> usize {
             }
         }
         off += 4096;
+    }
+    if tagged == 0 && len > 0 {
+        // Honest diagnostics (the mab rescan face): on the x86_64
+        // static/active root the walker currently resolves only the
+        // first 2MB of the direct map — kernel-heap VAs (DmaBlock,
+        // vring avail) return walk=None, so nothing gets tagged and
+        // the windowed accessors stay dormant (fail-open to untagged,
+        // never fail-closed on live traffic). Name it on every boot.
+        crate::println!(
+            "mpkguard: tag returned 0 for {:#x}+{:#x} (kernel-half walk gap — see ur-L1)",
+            va, len
+        );
     }
     tagged
 }
