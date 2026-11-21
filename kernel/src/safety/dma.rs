@@ -47,6 +47,12 @@ pub struct DmaBlock {
     len: usize,
     layout: core::alloc::Layout,
     frontier: usize,
+    /// MPK phase 1: the byte-offset range whose pages carry pkey=1
+    /// (None = unguarded block). Accesses inside the range open the
+    /// key-1 zone (WRPKRU save/restore) around the volatile op —
+    /// everything else on the block is untouched. The range is set
+    /// ONCE at vring creation, before the queue goes live.
+    pkey_range: Option<(usize, usize)>,
 }
 
 impl DmaBlock {
@@ -64,6 +70,7 @@ impl DmaBlock {
             len,
             layout,
             frontier: 0,
+            pkey_range: None,
         })
     }
 
@@ -176,6 +183,21 @@ impl DmaBlock {
             Some(e) if e <= self.len => {}
             _ => panic!("DMA read out of block: off={:#x} len={:#x}", off, self.len),
         }
+        // MPK phase 1: accesses into the pkey-tagged range open the
+        // zone (save/restore WRPKRU — IRQ-nesting-safe). Off-range
+        // (and guard-off) accesses pay one Option check.
+        if let Some((lo, hi)) = self.pkey_range {
+            if off >= lo && off < hi && crate::arch::mpk::guard_on() {
+                let prev = crate::arch::mpk::zone_open();
+                let v = self.read_volatile_at_inner::<T>(off);
+                crate::arch::mpk::zone_close(prev);
+                return v;
+            }
+        }
+        self.read_volatile_at_inner::<T>(off)
+    }
+
+    fn read_volatile_at_inner<T: Copy>(&self, off: usize) -> T {
         // SAFETY: INV-DMA-1/3 — live allocation, bounds-checked
         // offset, volatile because the device writes concurrently;
         // T is Copy so no partial-drop hazard.
@@ -189,8 +211,60 @@ impl DmaBlock {
             Some(e) if e <= self.len => {}
             _ => panic!("DMA write out of block: off={:#x} len={:#x}", off, self.len),
         }
+        // MPK phase 1: as the read twin's zone window.
+        if let Some((lo, hi)) = self.pkey_range {
+            if off >= lo && off < hi && crate::arch::mpk::guard_on() {
+                let prev = crate::arch::mpk::zone_open();
+                self.write_volatile_at_inner::<T>(off, val);
+                crate::arch::mpk::zone_close(prev);
+                return;
+            }
+        }
+        self.write_volatile_at_inner::<T>(off, val)
+    }
+
+    fn write_volatile_at_inner<T: Copy>(&self, off: usize, val: T) {
         // SAFETY: as read_volatile_at, write direction.
         unsafe { core::ptr::write_volatile(self.ptr.as_ptr().add(off) as *mut T, val) }
+    }
+
+    /// Declare the pkey-protected byte range (MPK phase 1) and tag its
+    /// pages. Call ONCE at creation time, before the block goes live;
+    /// `[lo, hi)` are offsets within the block. Returns the pages
+    /// tagged (0 = the guard is off — the range is not stored, the
+    /// block behaves unguarded).
+    pub fn set_pkey_range(&mut self, lo: usize, hi: usize) -> usize {
+        if !crate::arch::mpk::guard_on() {
+            return 0;
+        }
+        if lo >= hi || hi > self.len {
+            return 0;
+        }
+        let base = self.ptr.as_ptr() as usize;
+        let tagged = crate::arch::mpk::tag_kernel_pages(base + lo, hi - lo);
+        if tagged > 0 {
+            self.pkey_range = Some((lo, hi));
+        }
+        tagged
+    }
+
+    /// Clear the pkey tag on the block's pages and forget the range
+    /// (the pre-Drop companion: a freed tagged page would re-enter
+    /// the allocator STILL carrying pkey=1 — every later user of that
+    /// page faults. Call from the owning structure's teardown BEFORE
+    /// the block drops).
+    pub fn clear_pkey_range(&mut self) {
+        if let Some((lo, hi)) = self.pkey_range.take() {
+            let base = self.ptr.as_ptr() as usize;
+            crate::arch::mpk::untag_kernel_pages(base + lo, hi - lo);
+        }
+    }
+
+    /// The guarded range's first VA (the escape probe's target), or
+    /// None when unguarded.
+    pub fn pkey_target(&self) -> Option<*mut u64> {
+        self.pkey_range
+            .map(|(lo, _)| unsafe { self.ptr.as_ptr().add(lo) } as *mut u64)
     }
 }
 

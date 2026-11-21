@@ -298,7 +298,22 @@ impl VirtQueue {
             interrupt_status,
             interrupt_ack,
             vring: Some(Vring {
-                block,
+                // MPK phase 1: tag the AVAIL section's pages pkey=1
+                // (the guard is a no-op returning 0 pages when
+                // mpkguard is off). The section is page-isolated by
+                // construction; the tagged leaves are in the shared
+                // kernel-half tables (visible in every address space).
+                // This is the ONLY tagging call — the window discipline
+                // lives in DmaBlock's volatile accessors.
+                block: {
+                    #[allow(unused_mut)]
+                    let mut b = block;
+                    let _pages = b.set_pkey_range(
+                        off_avail,
+                        off_avail + avail_size_aligned,
+                    );
+                    b
+                },
                 desc,
                 avail,
                 used,
@@ -328,6 +343,12 @@ impl VirtQueue {
     /// Precondition (unchanged, still the caller's contract): the queue
     /// must not be registered with a device (no in-flight DMA).
     pub fn free_vring(&mut self) {
+        // MPK phase 1: untag BEFORE the block drops — a freed tagged
+        // page re-enters the allocator still carrying pkey=1 and every
+        // later user faults (the transient per-call queues' path).
+        if let Some(vr) = self.vring.as_mut() {
+            vr.block.clear_pkey_range();
+        }
         self.vring = None;
     }
 
