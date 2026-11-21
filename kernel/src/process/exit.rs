@@ -2408,7 +2408,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // reboot(2) cascade (never returns) unless one is already in
         // flight — that caller is waiting for exactly this exit.
         if current_pid == 1 {
-            crate::syscall::process::init_exited_fallback_cascade();
+            crate::process::reboot::init_exited_fallback_cascade();
         }
 
         // R9-3: close the preempt window between ZOMBIE and the deferred

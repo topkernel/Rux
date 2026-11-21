@@ -708,7 +708,7 @@ fn uart_rx_debug_magic(c: u8) {
     CAD_SEQ_POS.store(next, Ordering::Relaxed);
     if next == CAD_MAGIC.len() {
         CAD_SEQ_POS.store(0, Ordering::Relaxed);
-        crate::syscall::process::ctrl_alt_del_latch();
+        crate::process::reboot::ctrl_alt_del_latch();
     }
 }
 

@@ -3815,7 +3815,7 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
     // Ctrl-Alt-Del path: same task-context delivery rule. The input
     // detectors (UART RX IRQ, evdev) only latch an atomic; the SIGINT to
     // init (or the immediate-reboot cascade) runs here.
-    crate::syscall::process::cad_deliver_pending();
+    crate::process::reboot::cad_deliver_pending();
 
     // regs is the trap handler's frame pointer (the one frame edge
     // lives inside do_signal); sched::current() returns a typed &mut.
