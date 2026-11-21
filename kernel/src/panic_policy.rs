@@ -79,7 +79,7 @@ pub fn apply() -> ! {
         },
         PanicPolicy::RebootNow => {
             crate::println!("panic: rebooting (panic= immediate)");
-            crate::syscall::process::panic_reboot();
+            crate::process::reboot::panic_reboot();
         }
         PanicPolicy::RebootAfter(seconds) => {
             crate::println!("panic: rebooting in {}s (panic=)", seconds);
@@ -92,7 +92,7 @@ pub fn apply() -> ! {
             while crate::drivers::timer::get_jiffies() < deadline {
                 crate::arch::cpu::wfi();
             }
-            crate::syscall::process::panic_reboot();
+            crate::process::reboot::panic_reboot();
         }
     }
 }

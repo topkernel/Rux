@@ -10,6 +10,7 @@
 //! - `fork`: Process creation
 //! - `wait`: Wait queues
 
+pub mod reboot;
 pub mod task;
 pub mod task_ref;
 pub mod fork;

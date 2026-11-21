@@ -197,74 +197,13 @@ pub fn task_park_unwind(task: *mut Task) {
 // gate or the panic timeout).
 // ---------------------------------------------------------------------------
 
-/// x86_64 panic reset: drain the 8042, pulse its reset line, then force
-/// a triple fault through a null IDT (INV-SYSC-4; never returns to a
-/// working machine — the CPU resets or QEMU dies).
-#[cfg(feature = "x86_64")]
-pub fn x86_panic_reset() {
-    // SAFETY: INV-SYSC-4 — bare port I/O on the reset port and a
-    // deliberate faulting instruction; neither returns.
-    unsafe {
-        // Drain the 8042 input buffer first (writing the command
-        // while it is full is dropped on real hardware).
-        for _ in 0..100_000 {
-            if crate::arch::cpu::inb(0x64) & 0x02 == 0 {
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        crate::arch::cpu::outb(0x64, 0xFE);
-        // Give the pulse time to land.
-        for _ in 0..10_000_000 {
-            core::hint::spin_loop();
-        }
-        // Triple fault: load a null/limit-0 IDT and int3 — the
-        // vector lookup must fail, the double fault must fail the
-        // same way, and the CPU (QEMU included) resets.
-        static NULL_IDT: [u64; 2] = [0; 2];
-        core::arch::asm!(
-            "lidt [{}]",
-            in(reg) &NULL_IDT,
-            options(nomem, nostack)
-        );
-        core::arch::asm!("int3", options(nomem, nostack));
-    }
-}
-
-/// x86_64 reboot pulse: the 8042 keyboard-controller reset line, then
-/// the PCI/ATX reset port 0xcf9 (INV-SYSC-4; the caller parks after if
-/// the platform ignores both).
-#[cfg(feature = "x86_64")]
-pub fn x86_reboot_pulse() {
-    // SAFETY: INV-SYSC-4 — the two reset-port writes; reached only
-    // behind the CAP_SYS_BOOT gate in sys_reboot.
-    unsafe {
-        crate::arch::cpu::outb(0x64, 0xFE);
-        for _ in 0..100_000 {
-            core::hint::spin_loop();
-        }
-        crate::arch::cpu::outb(0xcf9, 0x0E);
-    }
-}
-
-/// riscv64 SBI legacy shutdown ecall (FID 0x8) — the pre-0.3 power-off
-/// path (INV-SYSC-4: the privileged ecall itself).
-#[cfg(feature = "riscv64")]
-pub fn sbi_shutdown_ecall() {
-    // SAFETY: INV-SYSC-4 — privileged SBI ecall; reached only after the
-    // CAP_SYS_BOOT gate in sys_reboot (or the panic fallback).
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            in("a7") 0x8u64,
-            out("a0") _,
-            out("a1") _,
-            options(nomem)
-        );
-    }
-}
-
+// The machine-reset repertoire (x86 panic reset / reboot pulse, the
+// riscv SBI shutdown ecall) moved to boot_edges.rs (crate-flip step 3,
+// 2026-11-21): arch-shaped code belongs with the boot provenance
+// edges. INV-SYSC-4 contracts unchanged; callers are process/reboot.rs
+// and the panic path.
 // ---------------------------------------------------------------------------
+
 // Filetyped subsystem calls that are still `unsafe fn` in their home
 // crates: thin named wrappers restating the call-site discipline once.
 // ---------------------------------------------------------------------------

@@ -121,7 +121,7 @@ pub fn rtc_init_wall_clock() {
 
     // wall = mono + offset  ⇒  offset = rtc - mono (round to nearest).
     let offset_secs = rtc_ns.saturating_sub(mono_ns).saturating_add(500_000_000) / 1_000_000_000;
-    crate::syscall::time::set_wall_epoch_offset_secs(offset_secs);
+    crate::timer::set_wall_epoch_offset_secs(offset_secs);
 }
 
 /// Current wall-clock seconds since the Unix epoch.
@@ -138,7 +138,7 @@ pub fn rtc_init_wall_clock() {
 /// lagged the timebase.
 pub fn wall_secs() -> u64 {
     (crate::drivers::timer::coarse_ns_since_boot()
-        + crate::syscall::time::wall_epoch_offset_ns())
+        + crate::timer::wall_epoch_offset_ns())
         / 1_000_000_000
 }
 

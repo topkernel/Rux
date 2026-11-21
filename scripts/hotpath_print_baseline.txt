@@ -4,7 +4,7 @@
 # removing prints (never after adding one without a review).
 kernel/src/sync/futex.rs 0
 kernel/src/ipc/binder.rs 0
-kernel/src/syscall/process.rs 47
+kernel/src/syscall/process.rs 31
 kernel/src/syscall/file.rs 0
 kernel/src/syscall/memory.rs 0
 kernel/src/mm/page_alloc.rs 0
