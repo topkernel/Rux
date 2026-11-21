@@ -7,6 +7,9 @@
 //!
 //! Implements read/write operations for character devices, mainly supports UART devices
 
+// (INV-CHARDEV-PRIV-1: the char-device fd family — private_data
+// holds the driver's installed tag/state word; the stat/read/write
+// rows read it under INV-FS-FILEPRIV-1's cell discipline.)
 use crate::console;
 
 #[repr(C)]

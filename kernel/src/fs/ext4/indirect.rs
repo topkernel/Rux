@@ -5,6 +5,9 @@
 
 //! ext4 indirect block handling
 
+// (INV-EXT4-IND-1: the indirect-block family — reads/writes go
+// through bread-pinned blocks (INV-BIO-BH's pin) with the triple
+// bounds-checked against the block before the chain walk steps.)
 use crate::errno;
 use crate::fs::bio;
 

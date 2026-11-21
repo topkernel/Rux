@@ -23,6 +23,10 @@
 //! NOT implemented (with the same refusal on the write side): index
 //! maintenance, dx_add_entry, casefolded/SIPHASH dirs (hash_version 6).
 
+// (INV-EXT4-HTREE-1: the htree dir-block views — dx_find_entry's
+// entry/leaf walks are bounds-checked against the pinned dir block
+// (rec_len/name_len validated per step, the same shape as
+// Ext4DirEntry::from_bytes's guards).)
 use super::dir::Ext4DirEntry;
 use super::Ext4FileSystem;
 use crate::fs::bio;

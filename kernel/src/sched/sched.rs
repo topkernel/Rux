@@ -8794,6 +8794,11 @@ pub fn dequeue_if_enqueued(task: &Task) {
 
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    // P4 async-reap: advance the deferred task-storage ladder (one
+    // CAS-guarded CPU per tick, budget-bounded, empty-list fast path
+    // is one try_lock). Runs FIRST so a storm's reaps recycle their
+    // stacks within the same tick cadence the forks consume them.
+    crate::sched::reapdrain::reap_drain_tick();
     // grq-lock-1st: service the printk deferrals (the deferred kmsg
     // reader wake + one pending console line) and drain the Rule-1
     // scheduler event ring. All three run with NO scheduler lock held —

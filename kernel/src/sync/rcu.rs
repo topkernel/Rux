@@ -343,6 +343,14 @@ pub fn synchronize_rcu_forced(max_ms: u64, site: &'static str) -> bool {
 static GP_IN_FLIGHT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Public twin for the async reap drainer: open (or latch) one shared
+/// grace target for a batch of deferrals. The bump happens strictly
+/// after the callers' reader-window-closing removals, so a full round
+/// at this target covers every window that predates the batch.
+pub fn shared_grace_target_pub() -> u32 {
+    shared_grace_target()
+}
+
 fn shared_grace_target() -> u32 {
     if GP_IN_FLIGHT
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -698,6 +706,13 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
 
 /// Whether every online CPU has reported a quiescent state at or after
 /// generation `gen`.
+/// Public twin for the async reap drainer: poll (never sleep) whether
+/// the shared-grace round at `target` has completed on every online
+/// CPU. Same predicate `wait_qs_sleepy` loops on.
+pub fn all_online_cpus_reported_pub(gen: u32) -> bool {
+    all_online_cpus_reported(gen)
+}
+
 fn all_online_cpus_reported(gen: u32) -> bool {
     for i in 0..MAX_CPUS {
         if !crate::sched::sched::cpu_online(i) {
