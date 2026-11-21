@@ -387,6 +387,10 @@ fn redist_configure_local(rd: usize) {
 /// Enable the CPU interface system registers (ICC_*): SRE, PMR, group-1
 /// enable. Called per CPU from the boot path (trap::enable_external_interrupt
 /// / secondary_cpu_entry). Idempotent.
+// IRREDUCIBLE F-ROW (F-GIC-A1): ICC_* system-register programming —
+// reference kernel drivers/irqchip/irq-gic-v3.c gic_cpu_init; the
+// GICv3 CPU-interface enable sequence is register-file access with no
+// safe shape (one audited block per sequence).
 pub fn enable_cpu_interface() {
     // SAFETY: ICC_* system-register programming below is the standard
     // GICv3 CPU-interface enable sequence for Group 1 at EL1.
