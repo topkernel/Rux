@@ -943,17 +943,14 @@ fn checksum_ok(vaddr: usize, len: usize) -> bool {
 /// u16 volatiles: keeps every access naturally aligned (no UB on any
 /// target), identical little-endian result on x86_64/riscv64/aarch64.
 fn read_phys_u32(phys: usize) -> u32 {
-    let lo = crate::safety::mmio::MmioRegion::new(
-        phys_to_lin(phys),
-        2,
-    )
-    .read_u16(0) as u32;
-    let hi = crate::safety::mmio::MmioRegion::new(
-        phys_to_lin(phys + 2),
-        2,
-    )
-    .read_u16(0) as u32;
-    lo | (hi << 16)
+    // BYTE-granular compose: ACPI/BIOS fields carry no alignment
+    // promise at all (odd offsets exist — e.g. checksum-adjusted table
+    // walk fields), so compose from four u8 volatiles — naturally
+    // aligned on every width, identical little-endian result.
+    let r = |off: usize| -> u32 {
+        crate::safety::mmio::MmioRegion::new(phys_to_lin(phys + off), 1).read_u8(0) as u32
+    };
+    r(0) | (r(1) << 8) | (r(2) << 16) | (r(3) << 24)
 }
 
 /// The linear-map VA of a physical address (the apic.rs local alias).
@@ -1203,6 +1200,19 @@ fn parse_madt(madt_phys: usize) -> usize {
     let mut ids = [0u32; crate::config::MAX_CPUS];
     let mut n = 0usize;
 
+    // MADT records are BYTE-granular (variable-length entries with u8
+    // length fields), so u32 fields inside them sit at arbitrary
+    // offsets — byte-composed reads, same doctrine as read_phys_u32
+    // (ACPI/BIOS RAM, not device MMIO; the natural-alignment contract
+    // does not apply).
+    let r32 = |region: &crate::safety::mmio::MmioRegion, off: usize| -> u32 {
+        let b0 = region.read_u8(off) as u32;
+        let b1 = region.read_u8(off + 1) as u32;
+        let b2 = region.read_u8(off + 2) as u32;
+        let b3 = region.read_u8(off + 3) as u32;
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    };
+
     let body = va + core::mem::size_of::<SdtHeader>() + 8; // skip lapic_addr+flags
     let mut off = body;
     let end = va + hdr_len;
@@ -1218,7 +1228,7 @@ fn parse_madt(madt_phys: usize) -> usize {
                 if elen >= 8 {
                     let (apic_id, flags) = (
                         madt.read_u8(off + 3 - va) as u32,
-                        madt.read_u32(off + 4 - va),
+                        r32(&madt, off + 4 - va),
                     );
                     // bit 0 = enabled (ACPI < 5.1); bit 1 = online-capable.
                     if flags & 0x3 != 0 {
@@ -1231,8 +1241,8 @@ fn parse_madt(madt_phys: usize) -> usize {
                 // Local x2APIC: [u16 rsvd][u32 uid][u32 flags][u32 acpi_id]
                 if elen >= 16 {
                     let (uid, flags) = (
-                        madt.read_u32(off + 4 - va),
-                        madt.read_u32(off + 8 - va),
+                        r32(&madt, off + 4 - va),
+                        r32(&madt, off + 8 - va),
                     );
                     if flags & 0x3 != 0 {
                         ids[n] = uid;
