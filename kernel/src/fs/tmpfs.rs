@@ -1487,15 +1487,12 @@ fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 }
 
 fn tmpfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
-    // SAFETY: see tmpfs_file_read.
-    let file_size = unsafe {
-        match (&*file.inode.get()).as_ref() {
-            Some(inode) => match node_of(inode) {
-                Ok(node) => node.file_size() as isize,
-                Err(_) => return -9,
-            },
-            None => return -9,
-        }
+    let file_size = match crate::fs::unsafe_edges::file_inode(file) {
+        Some(inode) => match node_of(inode) {
+            Ok(node) => node.file_size() as isize,
+            Err(_) => return -9,
+        },
+        None => return -9,
     };
     let current_pos = file.get_pos() as isize;
     let new_pos = match whence {

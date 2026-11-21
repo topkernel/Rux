@@ -312,9 +312,11 @@ impl FileChunk {
 
     /// Base pointer of the chunk storage.
     ///
-    /// # SAFETY: callers must not hold two live mutable slices into the
-    /// same chunk (the FileBuffer lock serializes all access in practice).
-    unsafe fn base_ptr(&mut self) -> *mut u8 {
+    /// The chunk's base address (address computation only — inert until
+    /// a deref; callers must not hold two live mutable slices into the
+    /// same chunk, the FileBuffer lock serializes all access in
+    /// practice).
+    fn base_ptr(&mut self) -> *mut u8 {
         match self {
             FileChunk::Page(phys) => {
                 crate::arch::mm::phys_to_virt(
@@ -458,12 +460,12 @@ impl FileBuffer {
             let tail = new_len % FILE_BUFFER_CHUNK;
             if tail != 0 {
                 if let Some(c) = self.chunks.last_mut() {
-                    // SAFETY: &mut access to the chunk we own; the write
-                    // stays inside the FILE_BUFFER_CHUNK-sized chunk.
+                    // &mut access to the chunk we own; the write stays
+                    // inside the FILE_BUFFER_CHUNK-sized chunk.
+                    // SAFETY: owned chunk, bounded tail zero.
                     unsafe {
-                        let base = c.base_ptr();
                         core::ptr::write_bytes(
-                            base.add(tail),
+                            c.base_ptr().add(tail),
                             0,
                             FILE_BUFFER_CHUNK - tail,
                         );
