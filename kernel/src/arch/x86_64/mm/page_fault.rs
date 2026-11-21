@@ -149,20 +149,19 @@ fn try_expand_stack(
     // Convert physical address to virtual address for kernel access
     let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
 
-    // Initialize page content based on type
-    // SAFETY: page_ptr is derived from phys_to_virt() on a freshly allocated page
-    // (alloc_user_phys_page). The page is PAGE_SIZE bytes and exclusively owned.
-    unsafe {
-        match vma_type {
-            VmaType::Anonymous => {
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
-            }
-            VmaType::FileBacked | VmaType::SharedMemory => {
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
-            }
-            VmaType::Device => {
-                // Device mapping: don't zero
-            }
+    // Initialize page content based on type: fresh exclusive page
+    // (INV-XE-ZP); each raw op carries its own block.
+    match vma_type {
+        VmaType::Anonymous => {
+            // SAFETY: fresh exclusive page (INV-XE-ZP).
+            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+        }
+        VmaType::FileBacked | VmaType::SharedMemory => {
+            // SAFETY: fresh exclusive page (INV-XE-ZP).
+            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+        }
+        VmaType::Device => {
+            // Device mapping: don't zero
         }
     }
 
@@ -1812,13 +1811,14 @@ pub fn handle_mm_fault(
     // Convert physical address to virtual address for kernel access
     let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
 
-    // Initialize page content based on type
-    // SAFETY: page_ptr is from phys_to_virt() on a freshly allocated physical page.
-    // The page is PAGE_SIZE bytes and exclusively owned by this fault handler.
-    unsafe {
+    // Initialize page content based on type: page_ptr is from
+    // phys_to_virt() on a freshly allocated, exclusively owned page
+    // (INV-XE-ZP); each raw op below carries its own block.
+    {
         match vma_type {
             VmaType::Anonymous => {
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                // SAFETY: fresh exclusive page (INV-XE-ZP).
+                unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
             }
             VmaType::FileBacked => {
                 // Fill from the pinned vm_file using the entry-time
@@ -1841,7 +1841,8 @@ pub fn handle_mm_fault(
                     && file_offset < effective_size
                     && effective_size.saturating_sub(file_offset) >= PAGE_SIZE_USIZE;
                 if !will_full_read {
-                    core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                    // SAFETY: fresh exclusive page (INV-XE-ZP).
+                    unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
                 }
 
                 // Read file data if we have a valid fd
@@ -1905,7 +1906,8 @@ pub fn handle_mm_fault(
                 // Device mapping: don't zero
             }
             VmaType::SharedMemory => {
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                // SAFETY: fresh exclusive page (INV-XE-ZP).
+                unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
             }
         }
     }
