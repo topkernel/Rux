@@ -81,6 +81,7 @@ fn try_expand_stack(
     let fault_addr_val = fault_addr.as_usize();
 
     // Check if fault address is within stack expansion range
+crate::arch::mm::page_fault::FILL_REFUSAL_SITE.store(1, core::sync::atomic::Ordering::Relaxed);
     if fault_addr_val < stack_limit {
         return MmFaultResult::Segfault;
     }
@@ -90,6 +91,7 @@ fn try_expand_stack(
     let (vma_start, stack_vma) = match vma_mgr_read.find_stack_vma(page_virt_addr) {
         Some((start, vma)) => (start, vma),
         None => {
+            crate::arch::mm::page_fault::FILL_REFUSAL_SITE.store(2, core::sync::atomic::Ordering::Relaxed);
             return MmFaultResult::Segfault;
         }
     };
@@ -98,11 +100,13 @@ fn try_expand_stack(
     let new_start = PageVirtAddr::new(fault_addr_val & !(MM_PAGE_SIZE - 1));
 
     // New start must be below current VMA start
+crate::arch::mm::page_fault::FILL_REFUSAL_SITE.store(3, core::sync::atomic::Ordering::Relaxed);
     if new_start.as_usize() >= vma_start.as_usize() {
         return MmFaultResult::Segfault;
     }
 
     // Check if expansion would exceed stack limit
+crate::arch::mm::page_fault::FILL_REFUSAL_SITE.store(4, core::sync::atomic::Ordering::Relaxed);
     if new_start.as_usize() < stack_limit {
         return MmFaultResult::Segfault;
     }
@@ -132,6 +136,7 @@ fn try_expand_stack(
     // Expand the stack VMA downward
     {
         let mut vma_mgr_write = addr_space.vma_write();
+crate::arch::mm::page_fault::FILL_REFUSAL_SITE.store(5, core::sync::atomic::Ordering::Relaxed);
         if vma_mgr_write
             .expand_downwards(vma_start, new_start)
             .is_err()
@@ -441,6 +446,13 @@ fn pte_counts_as_mapped(bits: u64, va: u64) -> bool {
 /// - `addr_space`: Address space
 /// - `fault_addr`: Virtual address that triggered fault
 /// - `flags`: Fault type flags (FaultFlags)
+/// L7 defect-A instrument: WHICH early-refusal arm returned Segfault
+/// (set at each site; printed once per boot by the trap Segfault arm).
+/// 1=stack_limit 2=no_stack_vma 3=not_below_start 4=below_stack_limit
+/// 5=expand_failed 6=perm(is_read&&!readable via Segfault) 9=entry_perm
+pub(crate) static FILL_REFUSAL_SITE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 pub fn handle_mm_fault(
     addr_space: &AddressSpace,
     fault_addr: VirtAddr,

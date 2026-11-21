@@ -1384,45 +1384,47 @@ fn tmpfs_destroy_inode(inode: &mut Inode) {
 fn tmpfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: inode/private_data installed by tmpfs_make_inode; the File
     // holds an Arc<Inode> keeping the node reference alive.
-    unsafe {
-        let inode = match (&*file.inode.get()).as_ref() {
-            Some(i) => i,
-            None => return -9,
+    {
+
+    let inode = match crate::fs::unsafe_edges::file_inode(file) {
+        Some(i) => i,
+        None => return -9,
         };
-        let node = match node_of(inode) {
-            Ok(n) => n,
-            Err(_) => return -9,
-        };
-        // Same pos-race serialization as reg_file_read: forked children
-        // sharing this open file description must not lose offset updates
-        // (LTP fork07 — see File::io_lock).
-        let _io_guard = file.io_lock.guard();
-        let offset = file.get_pos() as usize;
-        let n = node.read_at(offset, buf);
-        if n > 0 {
-            file.set_pos((offset + n) as u64);
-        }
-        // TEST-ONLY (gdmr24 dbtrace, removed before merge): udev db
-        // files under /run/udev/data read back with "G:\n" spliced
-        // before each tag line — sd-device parse aborts the tag
-        // (EINVAL), so card0 loses master-of-seat in enumeration.
-        // Trace db-shaped reads: first byte 'I'/'G'/'Q'/'S'/'E'/'V'
-        // followed by ':' narrows to db lines.
-        if n > 0
-            && buf.len() > 1
-            && matches!(buf[0], b'I' | b'G' | b'Q' | b'S' | b'E' | b'V')
-            && buf[1] == b':'
-            && crate::trace::EVENT_DBTRACE.armed()
-        {
-            let show = n.min(80);
-            crate::println!(
-                "DBR off={} n={} {:?}..",
-                offset,
-                n,
-                core::str::from_utf8(&buf[..show]).map(|s| s.replace('\n', "\\n")).unwrap_or_else(|_| "<bin>".into())
-            );
-        }
-        n as isize
+    let node = match node_of(inode) {
+        Ok(n) => n,
+        Err(_) => return -9,
+    };
+    // Same pos-race serialization as reg_file_read: forked children
+    // sharing this open file description must not lose offset updates
+    // (LTP fork07 — see File::io_lock).
+    let _io_guard = file.io_lock.guard();
+    let offset = file.get_pos() as usize;
+    let n = node.read_at(offset, buf);
+    if n > 0 {
+        file.set_pos((offset + n) as u64);
+    }
+    // TEST-ONLY (gdmr24 dbtrace, removed before merge): udev db
+    // files under /run/udev/data read back with "G:\n" spliced
+    // before each tag line — sd-device parse aborts the tag
+    // (EINVAL), so card0 loses master-of-seat in enumeration.
+    // Trace db-shaped reads: first byte 'I'/'G'/'Q'/'S'/'E'/'V'
+    // followed by ':' narrows to db lines.
+    if n > 0
+        && buf.len() > 1
+        && matches!(buf[0], b'I' | b'G' | b'Q' | b'S' | b'E' | b'V')
+        && buf[1] == b':'
+        && crate::trace::EVENT_DBTRACE.armed()
+    {
+        let show = n.min(80);
+        crate::println!(
+            "DBR off={} n={} {:?}..",
+            offset,
+            n,
+            core::str::from_utf8(&buf[..show]).map(|s| s.replace('\n', "\\n")).unwrap_or_else(|_| "<bin>".into())
+        );
+    }
+    n as isize
+
     }
 }
 
@@ -1435,50 +1437,52 @@ fn tmpfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 /// written and the caller retries — the next call hits ENOSPC.
 fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: see tmpfs_file_read.
-    unsafe {
-        let inode = match (&*file.inode.get()).as_ref() {
-            Some(i) => i,
-            None => return -9,
+    {
+
+    let inode = match crate::fs::unsafe_edges::file_inode(file) {
+        Some(i) => i,
+        None => return -9,
         };
-        let node = match node_of(inode) {
-            Ok(n) => n,
-            Err(_) => return -9,
-        };
-        let _write_guard = file.io_lock.guard();
-        let offset = if file.flags_bits() & crate::fs::FileFlags::O_APPEND != 0 {
-            let end = node.file_size();
-            file.set_pos(end);
-            end as usize
-        } else {
-            file.get_pos() as usize
-        };
-        // TEST-ONLY (gdmr24 dbtrace, removed before merge): see the
-        // matching hook in tmpfs_file_read.
-        if !buf.is_empty()
-            && matches!(buf[0], b'I' | b'G' | b'Q' | b'S' | b'E' | b'V')
-            && buf.get(1) == Some(&b':')
-            && crate::trace::EVENT_DBTRACE.armed()
-        {
-            let show = buf.len().min(80);
-            crate::println!(
-                "DBW off={} len={} {:?}..",
-                offset,
-                buf.len(),
-                core::str::from_utf8(&buf[..show]).map(|s| s.replace('\n', "\\n")).unwrap_or_else(|_| "<bin>".into())
-            );
-        }
-        let written = node.write_at(offset, buf);
-        inode.size.store(node.file_size(), Ordering::Release);
-        if written == 0 && !buf.is_empty() {
-            // The mount's page budget (size=) is exhausted and this write
-            // could not store a single byte. (write_at only returns 0 for
-            // an empty buffer otherwise, handled above.)
-            return crate::errno::Errno::NoSpaceLeftOnDevice.as_neg_i32() as isize;
-        }
-        if written > 0 {
-            file.set_pos((offset + written) as u64);
-        }
-        written as isize
+    let node = match node_of(inode) {
+        Ok(n) => n,
+        Err(_) => return -9,
+    };
+    let _write_guard = file.io_lock.guard();
+    let offset = if file.flags_bits() & crate::fs::FileFlags::O_APPEND != 0 {
+        let end = node.file_size();
+        file.set_pos(end);
+        end as usize
+    } else {
+        file.get_pos() as usize
+    };
+    // TEST-ONLY (gdmr24 dbtrace, removed before merge): see the
+    // matching hook in tmpfs_file_read.
+    if !buf.is_empty()
+        && matches!(buf[0], b'I' | b'G' | b'Q' | b'S' | b'E' | b'V')
+        && buf.get(1) == Some(&b':')
+        && crate::trace::EVENT_DBTRACE.armed()
+    {
+        let show = buf.len().min(80);
+        crate::println!(
+            "DBW off={} len={} {:?}..",
+            offset,
+            buf.len(),
+            core::str::from_utf8(&buf[..show]).map(|s| s.replace('\n', "\\n")).unwrap_or_else(|_| "<bin>".into())
+        );
+    }
+    let written = node.write_at(offset, buf);
+    inode.size.store(node.file_size(), Ordering::Release);
+    if written == 0 && !buf.is_empty() {
+        // The mount's page budget (size=) is exhausted and this write
+        // could not store a single byte. (write_at only returns 0 for
+        // an empty buffer otherwise, handled above.)
+        return crate::errno::Errno::NoSpaceLeftOnDevice.as_neg_i32() as isize;
+    }
+    if written > 0 {
+        file.set_pos((offset + written) as u64);
+    }
+    written as isize
+
     }
 }
 
@@ -1540,24 +1544,26 @@ pub fn is_tmpfs_file(file: &crate::fs::File) -> bool {
 /// SAFETY: inode/private_data installed by tmpfs_make_inode; the File
 /// holds an Arc<Inode> keeping the node reference alive.
 fn tmpfs_file_read_at(file: &crate::fs::File, offset: u64, buf: &mut [u8]) -> isize {
-    unsafe {
-        let inode = match (&*file.inode.get()).as_ref() {
-            Some(i) => i,
-            None => return -9,
+    {
+
+    let inode = match crate::fs::unsafe_edges::file_inode(file) {
+        Some(i) => i,
+        None => return -9,
         };
-        let node = match node_of(inode) {
-            Ok(n) => n,
-            Err(_) => return -9,
-        };
-        // Serialize with plain read/write for node-page consistency; the
-        // file position is never accessed. No IN_ACCESS here: this runs
-        // as ops.read_at behind File::read_at, whose native-op arm owns
-        // the notify — self-notifying double-fired the event (hidden by
-        // the inotify last-event merge except under an interleaving
-        // watcher event; review CR-3).
-        let _io_guard = file.io_lock.guard();
-        let n = node.read_at(offset as usize, buf);
-        n as isize
+    let node = match node_of(inode) {
+        Ok(n) => n,
+        Err(_) => return -9,
+    };
+    // Serialize with plain read/write for node-page consistency; the
+    // file position is never accessed. No IN_ACCESS here: this runs
+    // as ops.read_at behind File::read_at, whose native-op arm owns
+    // the notify — self-notifying double-fired the event (hidden by
+    // the inotify last-event merge except under an interleaving
+    // watcher event; review CR-3).
+    let _io_guard = file.io_lock.guard();
+    let n = node.read_at(offset as usize, buf);
+    n as isize
+
     }
 }
 

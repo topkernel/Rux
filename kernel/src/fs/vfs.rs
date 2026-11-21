@@ -7586,20 +7586,18 @@ fn procfs_dir_readdir(inode: &Inode) -> Option<alloc::vec::Vec<VfsDirEntry>> {
 ///
 /// Creates a File backed by a synthetic Inode with readdir support.
 pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
-    // SAFETY: PROCFS_DIR_OPS is a static INodeOps with well-defined callbacks; fd install is safe
-    unsafe {
-        let mut inode = Inode::new(
-            pid,
-            InodeMode::new(InodeMode::S_IFDIR | 0o555),
-        );
-        inode.ops = Some(&PROCFS_DIR_OPS);
-        inode.private_data = Some(pid as *mut u8);
+    // PROCFS_DIR_OPS is a static INodeOps with well-defined callbacks.
+    let mut inode = Inode::new(
+        pid,
+        InodeMode::new(InodeMode::S_IFDIR | 0o555),
+    );
+    inode.ops = Some(&PROCFS_DIR_OPS);
+    inode.private_data = Some(pid as *mut u8);
 
-        let file = alloc::sync::Arc::new(File::new(FileFlags::new(flags)));
-        *file.inode.get() = Some(alloc::sync::Arc::new(inode));
+    let file = alloc::sync::Arc::new(File::new(FileFlags::new(flags)));
+    crate::fs::unsafe_edges::file_inode_install(&file, alloc::sync::Arc::new(inode));
 
-        get_file_fd_install(file).ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())
-    }
+    get_file_fd_install(file).ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())
 }
 
 /// Open a memory-backed file with given content, return fd

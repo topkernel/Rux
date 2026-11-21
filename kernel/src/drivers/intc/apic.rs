@@ -302,10 +302,12 @@ fn kvm_pv_send_ipi(dest: u32, vector: u8) -> bool {
     if !KVM_PV_IPI.load(Ordering::Acquire) {
         return false;
     }
-    // SAFETY: pure register protocol with the hypervisor (no memory
-    // operands). The bitmap is a single-bit cluster with min=dest, so
-    // bitmap_low=1, bitmap_high=0 (arch/x86/kernel/kvm.c
-    // __send_ipi_mask, one-cpu cluster shape).
+    // IRREDUCIBLE F-ROW (F-HVCALL-X1): the KVM hypercall ABI
+    // (vmmcall/vmcall with the RBX-shuttle push/mov/pop bracket) —
+    // reference kernel arch/x86/kernel/kvm.c __send_ipi_mask's hc()
+    // twin; a register protocol with no memory operands has no safe
+    // shape. The bitmap is a single-bit cluster with min=dest
+    // (bitmap_low=1, bitmap_high=0).
     unsafe fn hc(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, vmmcall: bool) -> i64 {
         let ret: i64;
         // The KVM ABI passes arg1 in RBX, which LLVM reserves — shuttle
@@ -797,8 +799,10 @@ const CAL_MS: u64 = 50;
 /// Run one PIT channel-2 one-shot window and return the elapsed TSC and
 /// LAPIC-timer counts inside it.
 fn calibration_window() -> (u64, u64) {
-    // SAFETY: fixed 8254 ports; IF is off during early bring-up.
-    unsafe {
+    // Fixed 8254 ports; IF is off during early bring-up (the port-IO
+    // primitives are safe fns — INV-XE-PIO-1; the protocol ORDER is the
+    // reference's i8254 dance).
+    {
         // Gate off + speaker off, then re-program for a clean reload.
         let p61 = inb(PIT_CH2_GATE_PORT);
         outb(PIT_CH2_GATE_PORT, p61 & !0x03);

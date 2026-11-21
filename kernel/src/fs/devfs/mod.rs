@@ -1949,7 +1949,7 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
 pub fn devfs_reg_current_size(file: &crate::fs::File) -> Option<u64> {
     // SAFETY: caller passes a valid File; only stable fields are read.
     unsafe {
-        let inode = (*file.inode.get()).as_ref()?;
+        let inode = crate::fs::unsafe_edges::file_inode(file)?;
         if inode.fs_id != crate::fs::inode::FS_ID_DEVFS
             || !inode.mode.is_regular_file()
         {
@@ -1968,7 +1968,7 @@ pub fn shared_fault_file_page(file: &crate::fs::File, file_off: usize) -> Option
     // SAFETY: fault-path caller passes the pinned vm_file; only the
     // inode pointer field and its stable private_data are read.
     let entry = unsafe {
-        let inode = (*file.inode.get()).as_ref()?;
+        let inode = crate::fs::unsafe_edges::file_inode(file)?;
         // Same identity gate as devfs_reg_current_size: private_data is
         // only a DevfsEntry pointer on devfs inodes (foreign filesystems
         // store table indices/pids there — see that function's comment).
@@ -2020,20 +2020,21 @@ pub fn shared_fault_file_page(file: &crate::fs::File, file_off: usize) -> Option
 /// backing (read/write paths consult this — while active the backing is
 /// the canonical store, entry.data is stale).
 fn shared_entry_of(file: &crate::fs::File) -> Option<(&'static DevfsEntry, usize)> {
-    // SAFETY: caller passes a valid File; only stable inode fields are
-    // read. The entry is leaked-Arc-backed and outlives the file.
-    unsafe {
-        let inode = (*file.inode.get()).as_ref()?;
-        let entry = crate::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode)?;
-        if !entry.is_regular_file() {
-            return None;
-        }
-        if entry.shared_pages.lock_irqsave().is_none() {
-            return None;
-        }
-        let size = inode.get_size() as usize;
-        Some((entry, size))
+    // Caller passes a valid File; only stable inode fields are read.
+    // The entry is leaked-Arc-backed and outlives the file (the
+    // privdata edge's INV-FS-PRIVDATA-1 + the leak-at-install
+    // discipline of devfs_make_inode).
+    let inode = crate::fs::unsafe_edges::file_inode(file)?;
+    let entry: &'static DevfsEntry =
+        crate::fs::unsafe_edges::privdata_ref_leaked::<DevfsEntry>(inode)?;
+    if !entry.is_regular_file() {
+        return None;
     }
+    if entry.shared_pages.lock_irqsave().is_none() {
+        return None;
+    }
+    let size = inode.get_size() as usize;
+    Some((entry, size))
 }
 
 /// Copy `n` bytes at `off` OUT of the shared backing (bounded by the

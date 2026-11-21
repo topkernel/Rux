@@ -1534,7 +1534,7 @@ fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
 ///
 /// Returns false when the mapping could not be installed (page-table
 /// allocation failure — failible map_page, fake-OOM family).
-pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+pub fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
     map_page(user_root_ppn, user_virt, phys, flags)
 }
 
