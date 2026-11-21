@@ -1266,6 +1266,7 @@ their job on the checker infrastructure itself):
 | INV-FS-FILEINODE-2 | `fs/unsafe_edges.rs` | INV-FS-FILEINODE-2: the install twin of [`file_inode`] — writes the |
 | INV-FS-FILEPRIV-2 | `fs/unsafe_edges.rs` | INV-FS-FILEPRIV-2: the take-and-reclaim twin of file_privdata_ref — |
 
+| INV-PC-WIN | `fs/page_cache.rs` | byte window over one exclusively-owned page frame (fill_from/BufView family) |
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once

@@ -12,6 +12,64 @@ use super::*;
 /// System call argument array type
 pub type SyscallArgs = [u64; 6];
 
+/// FLIP M3-A: the two dispatch tables. Filled by the service crate's
+/// register_all (rux-syscall) at boot through the BIN composition; when
+/// filled, the generic match below is bypassed for table hits (the
+/// fallback match stays as the in-lib migration default until the M3-B
+/// package wiring removes the in-lib service files).
+pub type SyscallArgsFn = fn(SyscallArgs) -> i64;
+pub type SyscallRegsFn = fn(&mut crate::arch::pt_regs::PtRegs) -> i64;
+
+pub const NR_SYSCALLS: usize = 1200;
+
+pub static SYSCALL_ARGS_TABLE: crate::safety::slot::OnceSlot<
+    [Option<SyscallArgsFn>; NR_SYSCALLS],
+> = crate::safety::slot::OnceSlot::new();
+
+pub static SYSCALL_REGS_TABLE: crate::safety::slot::OnceSlot<
+    [Option<SyscallRegsFn>; 4],
+> = crate::safety::slot::OnceSlot::new();
+
+/// Registration entry (called by rux-syscall::register_all through the
+/// bin): args-table slice indexed by nr, plus the regs-variant entries
+/// (nr 139 rt_sigreturn today).
+pub fn syscall_register_tables(
+    args: &'static [(usize, SyscallArgsFn)],
+    regs: &'static [(usize, SyscallRegsFn)],
+) {
+    let mut atab = [None; NR_SYSCALLS];
+    for &(nr, f) in args {
+        if nr < NR_SYSCALLS {
+            atab[nr] = Some(f);
+        }
+    }
+    let _ = SYSCALL_ARGS_TABLE.publish(atab);
+    let mut rtab: [Option<SyscallRegsFn>; 4] = [None; 4];
+    for &(i, f) in regs.iter().take(4) {
+        rtab[i] = Some(f);
+    }
+    let _ = SYSCALL_REGS_TABLE.publish(rtab);
+}
+
+#[inline]
+fn table_lookup(nr: u32, args: SyscallArgs, regs: &mut crate::arch::pt_regs::PtRegs) -> Option<i64> {
+    if let Some(atab) = SYSCALL_ARGS_TABLE.get() {
+        if (nr as usize) < NR_SYSCALLS {
+            if let Some(f) = atab[nr as usize] {
+                return Some(f(args));
+            }
+        }
+    }
+    if nr == 139 {
+        if let Some(rtab) = SYSCALL_REGS_TABLE.get() {
+            if let Some(f) = rtab[0] {
+                return Some(f(regs));
+            }
+        }
+    }
+    None
+}
+
 /// Get system call number from PtRegs
 #[inline]
 fn syscall_get_nr(regs: &PtRegs) -> u64 {
@@ -477,6 +535,12 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // dispatch-tail ENOSYS-TRACE can exclude numbers that already
     // carry their own attribution (the keyctl budget lesson).
     let mut unknown_nr = false;
+    // FLIP M3-A: table-first dispatch (the service crate's registered
+    // fns); the match below is the in-lib fallback (identical bodies).
+    if let Some(r) = table_lookup(syscall_no as u32, args, regs) {
+        syscall_set_return_value(regs, r);
+        return;
+    }
     let result: i64 = match syscall_no as u32 {
         // ==================== Linux AIO (NR 0-4) ====================
         0 => memory::sys_io_setup(args),       // io_setup
