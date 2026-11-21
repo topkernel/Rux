@@ -2179,7 +2179,7 @@ fn handle_syscall(regs: &mut PtRegs) {
     // the stub stored it in the frame's rip slot.
 
     // Seccomp gate before any dispatch (U1c; same as the twin).
-    if let Some(rv) = crate::syscall::process::seccomp_syscall_gate(syscall_num, regs) {
+    if let Some(rv) = crate::syscall::seccomp::seccomp_syscall_gate(syscall_num, regs) {
         regs.rax = rv as u64;
         return;
     }
