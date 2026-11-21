@@ -1,4 +1,13 @@
-# The micro-core design — minimal TCB, every subsystem else a safe crate
+# The Seed-Core design (晶核) — minimal TCB, every subsystem else a safe crate
+
+Naming (2026-11-22): **Seed-Core / 晶核** — the materials-science metaphor:
+the ~3,000-line hand-written core is the SEED CRYSTAL; every service
+line crystallizes into safe code on the type-system lattice (forbid +
+borrow checking); the compiler is the crystallization condition. The
+seed is tiny yet determines the integrity of the whole crystal. The
+name deliberately distinguishes from MICROKERNEL (address-space
+isolation, ~1,000-cycle IPC boundaries) — this design has no address-
+space boundary at all.
 
 Status: DESIGN OF RECORD (2026-11-22, user directive: "shrink the TCB to the
 minimum; ideally every subsystem becomes a crate and is safe"). This document
@@ -95,6 +104,19 @@ The end-state defense stack, each layer at its measured cost:
 
 A microkernel spends ~1,000 cycles per boundary to buy (1); this design
 buys (1)+(2)+(3) for 0+~50+0.
+
+## 2b. Lineage and deltas (vs Asterinas Framekernel, vs RedLeaf)
+
+Same family — language-isolated kernels — three different bet structures:
+
+| Axis | Asterinas (Framekernel, USENIX ATC'25) | RedLeaf (PLOS'23) | This design |
+|---|---|---|---|
+| Isolation enforced by | Convention + review inside ONE kernel crate | The type system, via inter-domain zero-copy RPC | The COMPILER at crate granularity: per-crate `#![forbid(unsafe_code)]` (negative-probe verified) + Cargo's package DAG refusing cycles (dependency-direction acyclicity machine-checked) + a CI ratchet on the attribute set |
+| Boundary shape | Intra-binary function calls | Typed RPC channels over domain boundaries | Plain cross-crate function calls, LTO-inlined — thinner than RPC by a whole protocol layer |
+| Type-soundness failure mode | No backstop | No backstop (their stated bet) | MPK hardware backstop: pkey-tagged core metadata pages fault outside their window (WRPKRU at 47-49 measured cycles; fault-injection proven) |
+| TCB form | The framework zone (review-audited) | A small verified runtime | ~3,000 lines ITEMIZED (each with reference counterpart + F-row id), covered by the verification stack (Kani all-input proofs, Miri zero-UB, Verus narrow-adopt for unbounded arithmetic lemmas) |
+| Unique here | — | — | The census/INV/F-row ledger (97%+ artifact coverage: the audit surface is a ledger, not a code read); the policy/core splits S1/M1 (decision logic exits the core, mechanism stays); the binding measure-first flip ladder with shelving-as-success |
+| Where they lead | Full Linux syscall surface shipped earlier | Complete zero-copy-RPC formalism | — (honest) |
 
 ## 3. The end-state topology
 
