@@ -1240,7 +1240,7 @@ their job on the checker infrastructure itself):
 | INV-SYSV-UAPI-2 | `ipc/sysv_*.rs` | residual uaccess staging rows (sops copy edges + shm page ops) on the capsule boundary |
 | INV-KTASK-1 | cross-file | (*task)/task-ref rows where the source is a typed &Task/&mut Task or a pinned handle (pid_hash/current callers) — the cargo-cult audit applies, adopt rows ride INV-TASKREF-1 |
 
-## Round-D contract addendum (step-3 drift)
+## Round-D contract addendum (flip-window drift)
 
 | INV id | owner file | contract (headline) |
 |---|---|---|
