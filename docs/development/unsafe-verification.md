@@ -20,8 +20,8 @@ census id is accounted for here.
 ## Totals
 
 - unsafe regions: **2512**
-- with artifact (non-GAP): **2245** (89.4%)
-- GAP: **267**
+- with artifact (non-GAP): **2247** (89.5%)
+- GAP: **265**
 - by kind: block=2213, unsafe-extern=7, unsafe-fn=135, unsafe-impl=157
 - by category (regions carry 0..n tags): ptr-ops=652, asm=272, volatile=157, raw-construct=58, addr-arith=41, no-preempt=15, ffi=13, static-mut=5, layout-meta=5, transmute=4
 
@@ -36,7 +36,7 @@ census id is accounted for here.
 | sched | 111 | 109 | 2 |
 | sync | 106 | 106 | 0 |
 | tests | 105 | 105 | 0 |
-| mm | 100 | 45 | 55 |
+| mm | 100 | 47 | 53 |
 | process | 80 | 80 | 0 |
 | ipc | 67 | 67 | 0 |
 | <top> | 61 | 61 | 0 |
@@ -3109,13 +3109,13 @@ census id is accounted for here.
 | 385 | switch_address_space | block | - | GAP | `8587a3eb6ee6` |
 | 400 | <module> | unsafe-impl | - | GAP | `813106de8a5e` |
 | 401 | <module> | unsafe-impl | - | GAP | `eca08a161b50` |
-| 410 | compact_copy_page | block | - | GAP | `6cbf3684009c` |
+| 410 | compact_copy_page | block | - | INV:INV-MM-2 | `6cbf3684009c` |
 | 423 | kernel_layout_write | block | - | GAP | `193671dcef57` |
 | 431 | kernel_layout_ref | block | - | GAP | `ea0573eb453a` |
 | 446 | node_data_init | block | - | GAP | `a64f36659b10` |
 | 451 | <module> | unsafe-impl | - | GAP | `0b46b6542f6c` |
 | 452 | <module> | unsafe-impl | - | GAP | `3170e407a7ee` |
-| 463 | x86_caller_return_address | block | asm | GAP | `6a37c74635b3` |
+| 463 | x86_caller_return_address | block | asm | INV:INV-MM-2 | `6a37c74635b3` |
 | 481 | sa_hdr_mut | block | ptr-ops | GAP | `f6135ba51f76` |
 | 491 | sa_hdr_ref | block | ptr-ops | GAP | `e2bf725d1bf5` |
 | 499 | sa_read_u16 | block | volatile,ptr-ops | GAP | `022d49a46178` |
