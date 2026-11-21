@@ -250,3 +250,205 @@ pub fn probe() {
     wrpkru(reset_pkru);
     crate::println!("mpk: probe complete (page un-keyed, PKRU restored)");
 }
+
+// ===========================================================================
+// MPK adoption phase 1 — the standing guard (mpkguard=1, default off)
+// ===========================================================================
+//
+// Protected target (picked by measured window frequency, the assignment's
+// rule): the VRING's AVAIL SECTION — the driver-written pages whose
+// avail.idx a stray kernel write corrupts into a permanent I/O wedge
+// (queue.rs's own comment names the class). The section is page-isolated
+// by construction ("each v1.0 section starts on its own page boundary"),
+// so tagging its leaf PTEs pkey=1 touches NOTHING else. Window count =
+// one open/close per avail-ring access (per IO submit) ≈ the IO rate
+// (~2.4k/s under the pbench fs rows) — versus the GRQ's per-schedule
+// window rate (~160k/s under p2_ctxsw: 100k switches in 0.6 s, plus
+// enqueues): the vring wins by ~70x, and the plan's other named target
+// (GRQ bookkeeping) is recorded as the phase-2 candidate.
+//
+// Shape (the evaluation's four findings applied):
+// - Keys 1-15 armed AD|WD at boot (QEMU's PKRU reset is 0x0 here —
+//   finding #3: the reset value cannot be trusted).
+// - The avail pages are tagged in the ACTIVE root — the kernel-half
+//   PML4 entries are shared LINKS (create_user_address_space), so one
+//   leaf tag is instantly visible in every address space.
+// - The window: zone_open()/zone_close(prev) with PKRU save/restore
+//   (IRQ-nesting-safe: an interrupted open window's close restores the
+//   interruptee's value; the scheduler re-arms the closed value at
+//   context switch as the preempted-mid-window backstop).
+// - The negative probe: probe_escape() writes into a tagged page with
+//   the zone CLOSED through an ex_table window — rc=1 proves the
+//   standing backstop, not an argued one.
+
+/// Guard armed (mpkguard=1 seen at boot and PKU present).
+static GUARD: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Windows opened (the frequency measurement's counter).
+pub static WINDOWS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// PKRU with keys 1-15 fully denied (AD|WD) and key 0 open: the guard's
+/// standing closed value. = 0xFFFF_FFFC (bits 2..31 set, key0 bits clear).
+#[inline]
+pub fn closed_pkru() -> u32 {
+    0xFFFF_FFFC
+}
+
+/// Arm the standing guard (mpkguard=1 at boot). Idempotent; false when
+/// the hardware bit is absent (the guard silently stays off — the
+/// cmdline asked for protection the machine cannot give, say so).
+pub fn guard_arm() -> bool {
+    let (_, _, ecx, _) = super::cpu::cpuid(7, 0);
+    if ecx & (1 << 3) == 0 {
+        crate::println!("mpkguard: PKU absent — guard NOT armed");
+        return false;
+    }
+    // SAFETY: CR4.PKE arm (idempotent, CPUID-gated — the probe template).
+    unsafe {
+        let cr4 = super::cpu::read_cr4();
+        super::cpu::write_cr4(cr4 | (1 << 22));
+    }
+    wrpkru(closed_pkru());
+    GUARD.store(true, core::sync::atomic::Ordering::Release);
+    crate::println!("mpkguard: armed (keys 1-15 AD|WD, key0 open)");
+    true
+}
+
+/// Is the standing guard armed?
+#[inline]
+pub fn guard_on() -> bool {
+    GUARD.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Open the key-1 zone: returns the PKRU to restore. Every access to a
+/// tagged page runs between this and [`zone_close`]. IRQ-nesting-safe
+/// (save/restore, not open/close counting).
+#[inline]
+pub fn zone_open() -> u32 {
+    let prev = rdpkru();
+    // Clear key1's AD|WD (bits 2,3) only.
+    wrpkru(prev & !(KEY1_AD | KEY1_WD));
+    WINDOWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    prev
+}
+
+/// Close the zone: restore the PKRU [`zone_open`] returned.
+#[inline]
+pub fn zone_close(prev: u32) {
+    wrpkru(prev);
+}
+
+/// The context-switch backstop: re-arm the closed value. A task
+/// preempted mid-window cannot leak an open PKRU into the next task —
+/// the switch stores the closed value unconditionally (the window's
+/// own close then restores... nothing: the interrupted task re-arms on
+/// resume via its saved frame? No — PKRU is NOT in the trap frame; the
+/// preempted task resumes with whatever the switch left. The window
+/// discipline therefore relies on windows never containing a schedule
+/// point (they wrap volatile accesses only), and this store closes the
+/// hole a kernel-preempt switch inside an open window would otherwise
+/// leave. The re-opened access after resume re-faults through the
+/// ex_table bracket rather than silently succeeding — fail-closed).
+pub fn switch_rearm() {
+    if GUARD.load(core::sync::atomic::Ordering::Relaxed) {
+        wrpkru(closed_pkru());
+    }
+}
+
+/// Tag `[va, va+len)` pkey=1 in the ACTIVE root's kernel half. The
+/// kernel-half tables are shared links, so this is global. Returns the
+/// number of leaves tagged.
+pub fn tag_kernel_pages(va: usize, len: usize) -> usize {
+    let root = (super::cpu::read_cr3()
+        & super::mm::pagetable::PageTableEntry::PHYS_MASK_PUBLIC)
+        >> 12;
+    let mut tagged = 0usize;
+    let mut off = 0usize;
+    while off < len {
+        let page_va = (va + off) as u64;
+        if let Some((ppn, flags)) =
+            super::mm::mm_ops::PageTableWalker::walk(root, page_va)
+        {
+            let phys = super::mm::PhysAddr::new(ppn << 12);
+            let ok = super::mm::mmu_init::map_page_noflush(
+                root,
+                super::mm::VirtAddr::new(page_va),
+                phys,
+                flags | (1u64 << 59),
+            );
+            if ok {
+                tagged += 1;
+            }
+        }
+        off += 4096;
+    }
+    tagged
+}
+
+/// Untag `[va, va+len)` (clear pkey bits) in the ACTIVE root — the
+/// teardown companion of [`tag_kernel_pages`]. Returns leaves cleared.
+pub fn untag_kernel_pages(va: usize, len: usize) -> usize {
+    let root = (super::cpu::read_cr3()
+        & super::mm::pagetable::PageTableEntry::PHYS_MASK_PUBLIC)
+        >> 12;
+    let mut cleared = 0usize;
+    let mut off = 0usize;
+    while off < len {
+        let page_va = (va + off) as u64;
+        if let Some((ppn, flags)) =
+            super::mm::mm_ops::PageTableWalker::walk(root, page_va)
+        {
+            let phys = super::mm::PhysAddr::new(ppn << 12);
+            let ok = super::mm::mmu_init::map_page_noflush(
+                root,
+                super::mm::VirtAddr::new(page_va),
+                phys,
+                flags & !(0xFu64 << 59),
+            );
+            if ok {
+                cleared += 1;
+            }
+        }
+        off += 4096;
+    }
+    cleared
+}
+
+// The negative probe's escape write: same ex_table shape as the
+// evaluation's fault-injection (rc 0 = landed, 1 = hardware #PF).
+global_asm!(
+    ".global mpk_guard_escape",
+    ".hidden mpk_guard_escape",
+    "mpk_guard_escape:",
+    "0: movq $0xDEAD, (%rdi)",
+    "   xorl %eax, %eax",
+    "   ret",
+    "1: movl $1, %eax",
+    "   ret",
+    ".pushsection __ex_table, \"a\"",
+    ".balign 8",
+    ".quad 0b",
+    ".quad 1b",
+    ".popsection",
+    options(att_syntax)
+);
+
+extern "C" {
+    fn mpk_guard_escape(target: *mut u64) -> u32;
+}
+
+/// The standing-guard negative test: with the zone CLOSED, a raw write
+/// into a tagged page must #PF (rc=1). Returns the pass verdict text.
+pub fn probe_guard_escape(target: *mut u64) -> bool {
+    // SAFETY: the ex_table bracket converts the expected #PF to rc=1;
+    // if it unexpectedly lands, rc=0 = the guard is NOT standing.
+    let rc = unsafe { mpk_guard_escape(target) };
+    crate::println!(
+        "mpkguard: escape probe (zone closed) rc={} -> {}",
+        rc,
+        if rc == 1 { "PASS (hardware backstop standing)" } else { "FAIL (write landed!)" }
+    );
+    rc == 1
+}

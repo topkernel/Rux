@@ -1102,7 +1102,7 @@ pub(crate) fn release_task(task: *mut Task) {
     // single-threaded shape), so 1000 reaps = 3000 s and P4 could
     // never finish. Over cap (wedged drainer) the old bounded
     // synchronous path stands as the fallback.
-    if !crate::sched::reapdrain::defer_reap_storage(task) {
+    if !crate::sched::reapdrain::defer_reap_storage(task, t.parent_ptr().map(|p: *const Task| crate::process::unsafe_edges::borrow_task(p as *mut Task).pid()).unwrap_or(0)) {
         // Over-cap fallback: the obligation the drainer could not take
         // is minted here and burned synchronously (the cold path's
         // exactly-once, typed the same way).
