@@ -267,7 +267,7 @@ impl VirtioInputDevice {
 
         // INV-MMIO-1..3: the device-config register window (select/
         // subsel/size + 32-byte payload at +8).
-        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 0x28);
+        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 8 + 128);
         {
             // Select ID_NAME configuration
             cfg.write_u8(0, VIRTIO_INPUT_CFG_ID_NAME);
@@ -294,7 +294,7 @@ impl VirtioInputDevice {
         let config_base = self.pci.device_cfg_bar;
 
         // INV-MMIO-1..3: device-config window (see read_device_info).
-        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 0x28);
+        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 8 + 128);
         {
             // Check EV_ABS event (absolute coordinates)
             cfg.write_u8(0, VIRTIO_INPUT_CFG_EV_BITS);
@@ -475,7 +475,7 @@ impl VirtioInputDevice {
             return 0;
         }
         // INV-MMIO-1..3: device-config window.
-        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 0x28);
+        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 8 + 128);
         {
             cfg.write_u8(0, VIRTIO_INPUT_CFG_EV_BITS);
             cfg.write_u8(1, ev_type);
@@ -505,7 +505,7 @@ impl VirtioInputDevice {
             return None;
         }
         // INV-MMIO-1..3: device-config window.
-        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 0x28);
+        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 8 + 128);
         {
             cfg.write_u8(0, VIRTIO_INPUT_CFG_ABS_INFO);
             cfg.write_u8(1, axis);
