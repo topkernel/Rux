@@ -1240,6 +1240,24 @@ their job on the checker infrastructure itself):
 | INV-SYSV-UAPI-2 | `ipc/sysv_*.rs` | residual uaccess staging rows (sops copy edges + shm page ops) on the capsule boundary |
 | INV-KTASK-1 | cross-file | (*task)/task-ref rows where the source is a typed &Task/&mut Task or a pinned handle (pid_hash/current callers) — the cargo-cult audit applies, adopt rows ride INV-TASKREF-1 |
 
+## Round-D contract addendum (flip-window drift)
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-AE-ZP | `arch/aarch64/mm/page_fault.rs` | Exclusively owned fresh page inside the linear map (INV-AE-ZP). |
+| INV-MM-10 | `mm/mod.rs` | Contract (INV-MM-10): `root_ppn` must be a live page-table root and |
+| INV-MM-11 | `mm/edges.rs` | INV-MM-11: the kernel-layout OnceCell pair (init-guarded static). |
+| INV-MM-12 | `mm/pglist.rs` | Early boot only, before other CPUs are online (INV-MM-12 init arm |
+| INV-MM-13 | `mm/edges.rs` | INV-MM-13: the small-object allocator's in-page layout. Every address |
+| INV-MM-5 | `mm/pcp.rs` | Sync proof + raw-row edges live in mm::edges (INV-MM-5). |
+| INV-MM-6 | `mm/edges.rs` | kernel buffer (INV-MM-6 pinned-alias arm: the pin keeps the frame |
+| INV-MM-7 | `mm/page_alloc.rs` | Fresh allocation, exclusively owned (INV-MM-7 page-slice arm). |
+| INV-MM-8 | `mm/deferred_free.rs` | INV-MM-8: the lock is held. |
+| INV-MM-9 | `mm/vmemmap.rs` | mutation concurrent with vmemmap reads) — INV-MM-9. |
+| INV-RE-ZP | `arch/riscv64/mm/page_fault.rs` | The page is fresh and exclusively owned (INV-RE-ZP: alloc_user_phys_page |
+| INV-XE-PIO-1 | `arch/x86_64/cpu.rs` | Port I/O (INV-XE-PIO-1) |
+| INV-XE-ZP | `arch/x86_64/mm/unsafe_edges.rs` | frame exclusively — INV-XE-ZP in mmu_init). |
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once

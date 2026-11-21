@@ -118,7 +118,7 @@ pub fn vdso_data_tick() {
     let cycles = crate::drivers::timer::read_time();
     // 10 MHz source: 100 ns per cycle, exact.
     let mono_ns = cycles.saturating_mul(100);
-    let epoch_ns = crate::syscall::time::wall_epoch_offset_ns();
+    let epoch_ns = crate::timer::wall_epoch_offset_ns();
     // SAFETY: the page is only written here under the seqlock; user
     // readers validate via the seq word before trusting the fields.
     unsafe {
@@ -474,7 +474,7 @@ pub fn vdso_data_tick() {
             x86_track::wr(16, base.wrapping_add(d));
             x86_track::wr(8, raw);
         }
-        let epoch_ns = crate::syscall::time::wall_epoch_offset_ns();
+        let epoch_ns = crate::timer::wall_epoch_offset_ns();
         x86_track::wr(24, epoch_ns);
         let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
         if hz >= 1_000_000 {

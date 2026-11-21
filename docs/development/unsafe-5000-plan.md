@@ -221,6 +221,37 @@ sporadically. Expansion, in value order:
   template):** SMEP armed (CPUID-gated, per-CPU), page-0 refused at every
   table walk. This is the hardware layer's proof-of-pattern: a hardware
   bit that converts a corruption class into a guaranteed fault.
+- **Intel MPK (pkey) evaluation: ADOPT-READY (measured 2026-11-21,
+  probe at kernel/src/arch/x86_64/mpk.rs, cmdline `mpkprobe=1`,
+  default off).** All four deliverables landed on the primary rig
+  (9950X host, KVM, `-cpu max`): (1) CAPABILITY — CPUID.7.0:ECX
+  bit3 (PKU support) reads 1 in the guest; bit4 (OSPKE) flips to 1
+  the moment the kernel arms CR4.PKE (the probe's own verification —
+  note the bit semantics: bit3 is the HARDWARE bit, bit4 the
+  CR4.PKE mirror the OS sets; reading bit4 as the hardware bit was
+  the first probe's false negative); (2) COST — WRPKRU round-trip
+  **47-49 cycles/op** (100k ops, TSC-timed, under KVM), inside
+  ERIM's native 20-90-cycle band and trivially inside the <1%
+  overhead budget (a 47-cycle switch on microsecond-scale
+  primitive windows); (3) FAULT-INJECTION — a 4K page mapped with
+  pkey=1 (PTE bits 62:59) on the ACTIVE root at a fresh
+  user-range VA: with PKRU key1 enabled the raw-pointer write
+  LANDS (value verified); with key1 AD|WD set the SAME write takes
+  a hardware #PF, converted by the uaccess exception-table window
+  to a return code — the backstop is a proven fault, not an
+  argued one. Two probe-engineering findings for the adopter: the
+  protected page must be installed on the ACTIVE CR3 root (a
+  static-root install left it absent; the kernel-VA fault path
+  re-mapped it on its own NX template — the template-override, NOT
+  a PKU failure), and the fixmap window is huge-leaved at PMD (a
+  4K walk there resolves garbage — use a fresh user-range VA);
+  (4) QEMU's PKRU reset value is 0x0 on this host (Linux's
+  0x55555554 assumption does not hold under KVM) — any adopter
+  must SET the AD bits for keys 1-15 explicitly at arm time, not
+  rely on the reset. The design shape from this plan stands
+  (metadata pages in a pkey-protected region, WRPKRU windows at
+  the primitive boundaries); the probe's ex_table-bracketed access
+  window is the template for the primitives' internal accesses.
 - **MTE/CHERI: documented, not pursued** (platform-bound / research
   stage). The provenance-interaction question is tracked in the Rust
   design register as a watch item.
