@@ -87,7 +87,8 @@ fn verify_pid_double_free() {
 }
 
 /// INV-PID-K3: free makes PID available again (nr_allocated consistent).
-#[kani::unwind(128)]
+// Unwind bound: assume(n <= 50): the alloc/free driver loops take <= 50 body trips; each first-fit scan trips once (sequential fresh allocs). 55 = 50 + exit + headroom.
+#[kani::unwind(55)]
 #[kani::proof]
 fn verify_pid_free_consistency() {
     let mut alloc = PidAllocator::new();
