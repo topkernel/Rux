@@ -20,8 +20,8 @@ census id is accounted for here.
 ## Totals
 
 - unsafe regions: **2515**
-- with artifact (non-GAP): **2454** (97.6%)
-- GAP: **61**
+- with artifact (non-GAP): **2431** (96.7%)
+- GAP: **84**
 - by kind: block=2232, unsafe-extern=7, unsafe-fn=120, unsafe-impl=156
 - by category (regions carry 0..n tags): ptr-ops=653, asm=273, volatile=165, raw-construct=58, addr-arith=37, no-preempt=14, ffi=11, static-mut=5, layout-meta=5, transmute=4
 
@@ -29,8 +29,8 @@ census id is accounted for here.
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
-| arch | 773 | 773 | 0 |
-| fs | 644 | 594 | 50 |
+| arch | 773 | 752 | 21 |
+| fs | 644 | 593 | 51 |
 | dfx | 128 | 128 | 0 |
 | drivers | 118 | 114 | 4 |
 | sched | 111 | 107 | 4 |
@@ -39,7 +39,7 @@ census id is accounted for here.
 | mm | 100 | 100 | 0 |
 | process | 80 | 77 | 3 |
 | ipc | 67 | 67 | 0 |
-| <top> | 64 | 64 | 0 |
+| <top> | 64 | 63 | 1 |
 | net | 53 | 53 | 0 |
 | safety | 51 | 51 | 0 |
 | perf | 40 | 40 | 0 |
@@ -710,27 +710,27 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 76 | get_boot_magic | block | volatile | INV:F12 | `08d6b0321921` |
-| 97 | early_boot_init | block | volatile,ptr-ops | INV:F12 | `31e8174666e3` |
-| 110 | early_boot_init | block | - | INV:F19 | `5163b64242f5` |
-| 123 | early_boot_init | block | volatile,ptr-ops | INV:F19 | `88f371c09c46` |
-| 129 | early_boot_init | block | volatile,ptr-ops | INV:F19 | `870c1713be01` |
-| 130 | early_boot_init | block | volatile,ptr-ops | INV:F19 | `f5b2eeaddfc4` |
-| 131 | early_boot_init | block | volatile,ptr-ops | INV:F19 | `6a6bb999c1d4` |
-| 133 | early_boot_init | block | - | INV:F19 | `6417f5e60e9d` |
-| 143 | early_boot_init | block | - | INV:F19 | `b728d06aa194` |
-| 148 | early_boot_init | block | volatile,ptr-ops | INV:F19 | `9b5717e84ce8` |
-| 153 | early_boot_init | block | volatile | INV:F19 | `bb955f4f5d45` |
-| 158 | early_boot_init | block | - | INV:F19 | `836d6a54998f` |
-| 171 | early_boot_init | block | ptr-ops | INV:F19 | `a8c6e50ee760` |
-| 176 | early_boot_init | block | - | INV:F19 | `ec15b2d37317` |
-| 187 | early_boot_init | block | - | INV:F19 | `9433621fa786` |
-| 192 | early_boot_init | block | - | INV:F19 | `bb334effae8a` |
-| 194 | early_boot_init | block | - | INV:F19 | `31e7359980c5` |
-| 202 | early_boot_init | block | volatile | INV:F19 | `6fa498fa247c` |
-| 207 | early_boot_init | block | - | INV:F19 | `37890a318586` |
-| 218 | boot_memory_regions | block | volatile | INV:F19 | `34c7b15fe8ff` |
-| 228 | boot_cmdline | block | - | INV:F19 | `e0bccb504daa` |
+| 83 | get_boot_magic | block | volatile | GAP | `e90b31d2e7d1` |
+| 104 | early_boot_init | block | volatile,ptr-ops | GAP | `1dfa2611f64f` |
+| 117 | early_boot_init | block | - | GAP | `9ce5d9dac027` |
+| 130 | early_boot_init | block | volatile,ptr-ops | GAP | `8fc40c06841d` |
+| 136 | early_boot_init | block | volatile,ptr-ops | GAP | `4321327415ea` |
+| 137 | early_boot_init | block | volatile,ptr-ops | GAP | `853a1372d5e6` |
+| 138 | early_boot_init | block | volatile,ptr-ops | GAP | `e1d543bef2af` |
+| 140 | early_boot_init | block | - | GAP | `34ab597135f7` |
+| 150 | early_boot_init | block | - | GAP | `2be1fe46d20b` |
+| 155 | early_boot_init | block | volatile,ptr-ops | GAP | `939e6feaf35e` |
+| 160 | early_boot_init | block | volatile | GAP | `04411625862e` |
+| 165 | early_boot_init | block | - | GAP | `39154ecb712f` |
+| 178 | early_boot_init | block | ptr-ops | GAP | `b386f4bd1d7a` |
+| 183 | early_boot_init | block | - | GAP | `3bb4bc06806d` |
+| 194 | early_boot_init | block | - | GAP | `108b866eb758` |
+| 199 | early_boot_init | block | - | GAP | `7dee1563be17` |
+| 201 | early_boot_init | block | - | GAP | `cfdb4c40ad50` |
+| 209 | early_boot_init | block | volatile | GAP | `f54149b40113` |
+| 214 | early_boot_init | block | - | GAP | `151206fbb8f2` |
+| 225 | boot_memory_regions | block | volatile | GAP | `2469b002cd7a` |
+| 235 | boot_cmdline | block | - | GAP | `11dffebc838c` |
 
 ### kernel/src/arch/x86_64/context.rs (18)
 
@@ -1279,7 +1279,7 @@ census id is accounted for here.
 | 101 | list_unlink | block | - | INV:INV-SYSC-1 | `4b6137125552` |
 | 107 | boxed_mut | block | - | INV:INV-SYSC-2 | `abc2cba74eea` |
 | 114 | boxed_drop | block | - | INV:INV-SYSC-2 | `c7eeb44a22a5` |
-| 121 | list_entry_mut | block | ptr-ops | INV:INV-SYSC-1 | `a109ddbfcbff` |
+| 121 | list_entry_mut | block | ptr-ops | GAP | `d6d866db881d` |
 | 133 | list_entry | block | ptr-ops | INV:INV-SYSC-1 | `c9031bc3c926` |
 | 155 | boxed_ref | block | - | INV:INV-SYSC-2 | `bc5b8f1749f7` |
 | 634 | <module> | unsafe-impl | - | INV:INV-SYSC-2 | `2a64da003001` |
@@ -3436,7 +3436,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1772 | rust_main_impl | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `2a0cc5ffe1e4` |
+| 1754 | rust_main_impl | block | asm | GAP | `41ead2726693` |
 
 ### kernel/src/list.rs (7)
 

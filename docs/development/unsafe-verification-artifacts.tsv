@@ -452,27 +452,27 @@ dd9836b5c384	kernel/src/arch/uaccess_safe.rs	copy_out_t	138	ptr-ops	INV:INV-UACC
 81664be21d00	kernel/src/arch/uaccess_safe.rs	clear	292	ptr-ops	INV:INV-UACCESS-SAFE-1
 607e9ac88a3d	kernel/src/arch/uaccess_safe.rs	read_at	305	ptr-ops	INV:INV-UACCESS-SAFE-1
 9558706b6c26	kernel/src/arch/uaccess_safe.rs	write_at	318	ptr-ops	INV:INV-UACCESS-SAFE-1
-08d6b0321921	kernel/src/arch/x86_64/boot.rs	get_boot_magic	76	volatile	INV:F12
-31e8174666e3	kernel/src/arch/x86_64/boot.rs	early_boot_init	97	volatile,ptr-ops	INV:F12
-5163b64242f5	kernel/src/arch/x86_64/boot.rs	early_boot_init	110		INV:F19
-88f371c09c46	kernel/src/arch/x86_64/boot.rs	early_boot_init	123	volatile,ptr-ops	INV:F19
-870c1713be01	kernel/src/arch/x86_64/boot.rs	early_boot_init	129	volatile,ptr-ops	INV:F19
-f5b2eeaddfc4	kernel/src/arch/x86_64/boot.rs	early_boot_init	130	volatile,ptr-ops	INV:F19
-6a6bb999c1d4	kernel/src/arch/x86_64/boot.rs	early_boot_init	131	volatile,ptr-ops	INV:F19
-6417f5e60e9d	kernel/src/arch/x86_64/boot.rs	early_boot_init	133		INV:F19
-b728d06aa194	kernel/src/arch/x86_64/boot.rs	early_boot_init	143		INV:F19
-9b5717e84ce8	kernel/src/arch/x86_64/boot.rs	early_boot_init	148	volatile,ptr-ops	INV:F19
-bb955f4f5d45	kernel/src/arch/x86_64/boot.rs	early_boot_init	153	volatile	INV:F19
-836d6a54998f	kernel/src/arch/x86_64/boot.rs	early_boot_init	158		INV:F19
-a8c6e50ee760	kernel/src/arch/x86_64/boot.rs	early_boot_init	171	ptr-ops	INV:F19
-ec15b2d37317	kernel/src/arch/x86_64/boot.rs	early_boot_init	176		INV:F19
-9433621fa786	kernel/src/arch/x86_64/boot.rs	early_boot_init	187		INV:F19
-bb334effae8a	kernel/src/arch/x86_64/boot.rs	early_boot_init	192		INV:F19
-31e7359980c5	kernel/src/arch/x86_64/boot.rs	early_boot_init	194		INV:F19
-6fa498fa247c	kernel/src/arch/x86_64/boot.rs	early_boot_init	202	volatile	INV:F19
-37890a318586	kernel/src/arch/x86_64/boot.rs	early_boot_init	207		INV:F19
-34c7b15fe8ff	kernel/src/arch/x86_64/boot.rs	boot_memory_regions	218	volatile	INV:F19
-e0bccb504daa	kernel/src/arch/x86_64/boot.rs	boot_cmdline	228		INV:F19
+e90b31d2e7d1	kernel/src/arch/x86_64/boot.rs	get_boot_magic	83	volatile	INV:F5
+1dfa2611f64f	kernel/src/arch/x86_64/boot.rs	early_boot_init	104	volatile,ptr-ops	INV:F5
+9ce5d9dac027	kernel/src/arch/x86_64/boot.rs	early_boot_init	117		INV:F5
+8fc40c06841d	kernel/src/arch/x86_64/boot.rs	early_boot_init	130	volatile,ptr-ops	INV:F5
+4321327415ea	kernel/src/arch/x86_64/boot.rs	early_boot_init	136	volatile,ptr-ops	INV:F5
+853a1372d5e6	kernel/src/arch/x86_64/boot.rs	early_boot_init	137	volatile,ptr-ops	INV:F5
+e1d543bef2af	kernel/src/arch/x86_64/boot.rs	early_boot_init	138	volatile,ptr-ops	INV:F5
+34ab597135f7	kernel/src/arch/x86_64/boot.rs	early_boot_init	140		INV:F5
+2be1fe46d20b	kernel/src/arch/x86_64/boot.rs	early_boot_init	150		INV:F5
+939e6feaf35e	kernel/src/arch/x86_64/boot.rs	early_boot_init	155	volatile,ptr-ops	INV:F5
+04411625862e	kernel/src/arch/x86_64/boot.rs	early_boot_init	160	volatile	INV:F5
+39154ecb712f	kernel/src/arch/x86_64/boot.rs	early_boot_init	165		INV:F5
+b386f4bd1d7a	kernel/src/arch/x86_64/boot.rs	early_boot_init	178	ptr-ops	INV:F5
+3bb4bc06806d	kernel/src/arch/x86_64/boot.rs	early_boot_init	183		INV:F5
+108b866eb758	kernel/src/arch/x86_64/boot.rs	early_boot_init	194		INV:F5
+7dee1563be17	kernel/src/arch/x86_64/boot.rs	early_boot_init	199		INV:F5
+cfdb4c40ad50	kernel/src/arch/x86_64/boot.rs	early_boot_init	201		INV:F5
+f54149b40113	kernel/src/arch/x86_64/boot.rs	early_boot_init	209	volatile	INV:F5
+151206fbb8f2	kernel/src/arch/x86_64/boot.rs	early_boot_init	214		INV:F5
+2469b002cd7a	kernel/src/arch/x86_64/boot.rs	boot_memory_regions	225	volatile	INV:F5
+11dffebc838c	kernel/src/arch/x86_64/boot.rs	boot_cmdline	235		INV:F5
 c20a59cf77fa	kernel/src/arch/x86_64/context.rs	<module>	71		INV:INV-CS-5
 15650f3375e1	kernel/src/arch/x86_64/context.rs	switch_mm	74		INV:INV-CS-5
 a23dbdd42825	kernel/src/arch/x86_64/context.rs	x86_switch_publish	249		INV:INV-CS-5
@@ -1155,7 +1155,7 @@ cf8bab5883f8	kernel/src/fs/event_notify.rs	list_first	80		INV:INV-SYSC-1
 4b6137125552	kernel/src/fs/event_notify.rs	list_unlink	101		INV:INV-SYSC-1
 abc2cba74eea	kernel/src/fs/event_notify.rs	boxed_mut	107		INV:INV-SYSC-2
 c7eeb44a22a5	kernel/src/fs/event_notify.rs	boxed_drop	114		INV:INV-SYSC-2
-a109ddbfcbff	kernel/src/fs/event_notify.rs	list_entry_mut	121	ptr-ops	INV:INV-SYSC-1
+d6d866db881d	kernel/src/fs/event_notify.rs	list_entry_mut	121	ptr-ops	INV:INV-SYSC-1
 c9031bc3c926	kernel/src/fs/event_notify.rs	list_entry	133	ptr-ops	INV:INV-SYSC-1
 bc5b8f1749f7	kernel/src/fs/event_notify.rs	boxed_ref	155		INV:INV-SYSC-2
 2a64da003001	kernel/src/fs/event_notify.rs	<module>	634		INV:INV-SYSC-2
@@ -1424,11 +1424,11 @@ a1cad23e6ce6	kernel/src/fs/inode.rs	<module>	739		INV:INV-INODE-STATDEV-1
 b5397babde81	kernel/src/fs/inode.rs	update_cached_mode	792	volatile	INV:INV-INODE-STATDEV-1
 7fc8083cd2e5	kernel/src/fs/inode.rs	<module>	1225		INV:INV-INODE-STATDEV-1
 307115aa7d23	kernel/src/fs/inode.rs	<module>	1226		INV:INV-INODE-STATDEV-1
-0d687582f56f	kernel/src/fs/inotify.rs	notify_file	422		GAP
-ad35a7a499ea	kernel/src/fs/inotify.rs	instance_of	508		GAP
-d6940aa3a2a8	kernel/src/fs/inotify.rs	instance_of	509	ptr-ops	GAP
-4529f8420039	kernel/src/fs/inotify.rs	inotify_close	767		GAP
-b9229e7e8ae7	kernel/src/fs/inotify.rs	inotify_close	769	ptr-ops	GAP
+0d687582f56f	kernel/src/fs/inotify.rs	notify_file	422		INV:INV-INOTIFY-PRIV-1
+ad35a7a499ea	kernel/src/fs/inotify.rs	instance_of	508		INV:INV-INOTIFY-PRIV-1
+d6940aa3a2a8	kernel/src/fs/inotify.rs	instance_of	509	ptr-ops	INV:INV-INOTIFY-PRIV-1
+4529f8420039	kernel/src/fs/inotify.rs	inotify_close	767		INV:INV-INOTIFY-PRIV-1
+b9229e7e8ae7	kernel/src/fs/inotify.rs	inotify_close	769	ptr-ops	INV:INV-INOTIFY-PRIV-1
 9d95bf647da9	kernel/src/fs/jbd2/commit.rs	jbd2_journal_commit_transaction	300		INV:INV-JBD2-BH-1
 1ba732968d1d	kernel/src/fs/jbd2/commit.rs	jbd2_journal_commit_transaction	324		INV:INV-JBD2-BH-1
 b47fb1d71d36	kernel/src/fs/jbd2/commit.rs	jbd2_journal_commit_transaction	339	raw-construct,ptr-ops	INV:INV-JBD2-BH-1
@@ -1796,7 +1796,7 @@ e503b71d162b	kernel/src/ipc/posix_mq.rs	mq_fds_cleanup	1210		INV:INV-KTASK-1
 f7a295a8d542	kernel/src/ipc/sysv_sem.rs	sem_undo_exit	1515		INV:INV-SYSV-UAPI-2
 2a6833798be7	kernel/src/ipc/sysv_shm.rs	drop	99		INV:INV-SYSV-UAPI-2
 94ccd5ae0d70	kernel/src/ipc/sysv_shm.rs	sys_shmat	1037		INV:INV-SYSV-UAPI-2
-2a0cc5ffe1e4	kernel/src/lib.rs	rust_main_impl	1772	asm	INV:INV-BOOT-ZEROPAGE-1
+41ead2726693	kernel/src/lib.rs	rust_main_impl	1754	asm	INV:INV-BOOT-ZEROPAGE-1
 0953597665ba	kernel/src/list.rs	<module>	73		INV:INV-LIST-1
 d018f0b94a39	kernel/src/list.rs	<module>	92		INV:INV-LIST-1
 c48b7421a0d8	kernel/src/list.rs	<module>	108	ptr-ops	INV:INV-LIST-1
@@ -2240,10 +2240,10 @@ fe384533c354	kernel/src/sched/sched.rs	clear_trap_scratch	2794	asm	INV:INV-SCE-1
 4f083827414f	kernel/src/sched/sched.rs	alloc_task_slot	2999		INV:INV-TL-1
 e8b25c5aac18	kernel/src/sched/sched.rs	free_task_slot	3411		INV:INV-TL-2
 498f9909193f	kernel/src/sched/sched.rs	free_task_slot	3424	volatile,ptr-ops	INV:INV-TL-2
-af7100dee78c	kernel/src/sched/sched.rs	scheduler_tick	10041	volatile,ptr-ops	GAP
-e4eeb78ecd8d	kernel/src/sched/sched.rs	idle_guard_sp	12479	asm	GAP
-1e9878a2d0e0	kernel/src/sched/sched.rs	idle_guard_sp	12486	asm	GAP
-18f3852029a9	kernel/src/sched/sched.rs	idle_guard_sp	12493	asm	GAP
+af7100dee78c	kernel/src/sched/sched.rs	scheduler_tick	10041	volatile,ptr-ops	INV:INV-SCE-1
+e4eeb78ecd8d	kernel/src/sched/sched.rs	idle_guard_sp	12479	asm	INV:INV-SCE-1
+1e9878a2d0e0	kernel/src/sched/sched.rs	idle_guard_sp	12486	asm	INV:INV-SCE-1
+18f3852029a9	kernel/src/sched/sched.rs	idle_guard_sp	12493	asm	INV:INV-SCE-1
 554f094f895c	kernel/src/sched/side_edges.rs	<module>	19		INV:INV-SENDSYNC-1
 97eb38a1a9b4	kernel/src/sched/side_edges.rs	<module>	21		INV:INV-SENDSYNC-1
 d69da70f77a6	kernel/src/sched/side_edges.rs	evring_slot_mut	39		INV:INV-SCHED-EVRING-1

@@ -122,7 +122,7 @@ fn list_entry_mut<T>(cur: *mut ListHead) -> &'static mut T {
 }
 
 #[inline]
-pub(crate) fn list_entry_pub<T>(cur: *mut ListHead) -> &'static T {
+pub fn list_entry_pub<T>(cur: *mut ListHead) -> &'static T {
     list_entry(cur)
 }
 
@@ -170,10 +170,10 @@ pub type WakeFn = fn(ep: *mut u8, file_id: u64);
 
 
 pub struct EpollWakeNode {
-    pub(crate) list: crate::list::ListHead,
-    pub(crate) file_id: u64,
-    pub(crate) ep: *mut u8,
-    pub(crate) wake: WakeFn,
+    pub list: crate::list::ListHead,
+    pub file_id: u64,
+    pub ep: *mut u8,
+    pub wake: WakeFn,
 }
 
 /// ALLOCATION-FREE SHARD BODY (115th, allocator-under-shard-lock hunt):
@@ -193,8 +193,8 @@ pub struct EpollWakeNode {
 /// stuck ... EPOLL_WAKE_SHARDED + soft lockups). The sentinel cannot
 /// self-reference in a const initializer, so it is lazily `init()`ed on
 /// first acquisition (`init_once`, under the shard lock).
-pub(crate) struct EpollWakeShard {
-    pub(crate) head: crate::list::ListHead,
+pub struct EpollWakeShard {
+    pub head: crate::list::ListHead,
 }
 
 impl EpollWakeShard {
@@ -204,7 +204,7 @@ impl EpollWakeShard {
     /// Return the sentinel pointer, self-linking it on first use. Must be
     /// called with the shard lock held.
     #[inline]
-    pub(crate) fn init_once(&mut self) -> *mut crate::list::ListHead {
+    pub fn init_once(&mut self) -> *mut crate::list::ListHead {
         if self.head.next.is_null() {
             self.head.init();
         }
@@ -212,7 +212,7 @@ impl EpollWakeShard {
     }
 }
 
-pub(crate) static EPOLL_WAKE_SHARDED: [Spinlock<EpollWakeShard>; EPOLL_WAKE_SHARDS] =
+pub static EPOLL_WAKE_SHARDED: [Spinlock<EpollWakeShard>; EPOLL_WAKE_SHARDS] =
     [const {
         crate::sync::spinlock::Spinlock::new(EpollWakeShard {
             head: crate::list::ListHead::new(),
@@ -247,7 +247,7 @@ fn epoll_shard_index(file_id: u64) -> usize {
 }
 
 #[inline]
-pub(crate) fn epoll_wake_shard(file_id: u64) -> &'static crate::sync::spinlock::Spinlock<EpollWakeShard> {
+pub fn epoll_wake_shard(file_id: u64) -> &'static crate::sync::spinlock::Spinlock<EpollWakeShard> {
     &EPOLL_WAKE_SHARDED[epoll_shard_index(file_id)]
 }
 

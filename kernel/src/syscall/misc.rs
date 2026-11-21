@@ -852,7 +852,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                 )
             {
                 use core::sync::atomic::{AtomicU64, Ordering};
-                static PR_N: AtomicU64 = AtomicU64::new(0);
+                pub static PR_N: AtomicU64 = AtomicU64::new(0);
                 let n = PR_N.fetch_add(1, Ordering::Relaxed);
                 if n < 400 || n % 10 == 0 {
                     let mut l = crate::drivers::input::evdev::HuntLine::new();
@@ -1009,7 +1009,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                     let want = has_evdev
                         || crate::drivers::input::evdev::evdev_opener_pid(my_pid);
                     if want {
-                        static PP_N: AtomicU64 = AtomicU64::new(0);
+                        pub static PP_N: AtomicU64 = AtomicU64::new(0);
                         let n = PP_N.fetch_add(1, Ordering::Relaxed);
                         if n < 400 || n % 10 == 0 {
                             let mut l =

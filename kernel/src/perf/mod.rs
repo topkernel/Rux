@@ -1424,14 +1424,14 @@ fn perf_close(file: &crate::fs::File) -> i32 {
 }
 
 /// perf event file operations (read/poll/close).
-pub(crate) static PERF_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub static PERF_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(perf_read)
     .close(perf_close)
     .poll(perf_poll)
     .build();
 
 /// Poll-wait registration (event-driven poll, misc dispatcher).
-pub(crate) fn perf_poll_wait(
+pub fn perf_poll_wait(
     file: &crate::fs::File,
     task: *mut crate::process::task::Task,
 ) -> bool {
@@ -1441,7 +1441,7 @@ pub(crate) fn perf_poll_wait(
     true
 }
 
-pub(crate) fn perf_poll_unwait(
+pub fn perf_poll_unwait(
     file: &crate::fs::File,
     task: *mut crate::process::task::Task,
 ) {

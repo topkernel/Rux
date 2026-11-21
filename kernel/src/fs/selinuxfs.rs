@@ -225,7 +225,7 @@ fn selinuxfs_setattr(_inode: &Inode, _attr: u32, _arg1: u64, _arg2: u64) -> i32 
 /// verify_selinuxmnt() refuses to set selinux_mnt and every
 /// security_check_context() fails with ENOENT (boot b50's SA-denial
 /// loop: "GetServiceCheck callingSid:,SA:5100,ret:fail").
-pub(crate) static SELINUXFS_INODE_OPS: INodeOps = INodeOps {
+pub static SELINUXFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(selinuxfs_lookup),
     iget: Some(selinuxfs_iget),
     create: None,
