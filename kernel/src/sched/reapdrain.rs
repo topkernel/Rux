@@ -123,7 +123,7 @@ impl ReapClaim {
     /// transiently through the ladder's re-verified checks. `None`
     /// means null input (caller bug — the release path never passes
     /// one).
-    pub fn mint(task: *mut Task) -> Option<Self> {
+    pub(crate) fn mint(task: *mut Task) -> Option<Self> {
         // SAFETY: NonNull::new is the null check; the unreachability
         // contract is the caller's (documented above, one call site).
         core::ptr::NonNull::new(task).map(ReapClaim)
@@ -145,6 +145,18 @@ impl ReapClaim {
         // unlinked) — the same argument every task_shared caller
         // makes, now with the obligation typed.
         unsafe { self.0.as_ref() }
+    }
+
+    /// The channel boundary: hand the obligation back to a
+    /// lock-typed raw channel (the dead_threads lists). The re-park
+    /// exits of the sweep/fallback paths use this — the parked channel
+    /// is lock-disciplined raw (typing IT needs the Task field change
+    /// in the process lane's active zone; see the coverage map).
+    #[inline]
+    pub(crate) fn into_parked(self) -> *mut Task {
+        let p = self.0.as_ptr();
+        core::mem::forget(self);
+        p
     }
 
     /// Burn: consume the obligation and run the storage free.

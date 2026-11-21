@@ -512,10 +512,17 @@ pub fn de_thread(current: &Task) -> bool {
 /// Contract: `member` is a DEAD task parked on a leader's dead_threads
 /// list (callers guarantee the DEAD state — see sweep_dead_threads /
 /// release_task).
-fn free_dead_member(member: *mut Task) -> bool {
+/// Round-B extension: the member's storage-free obligation enters as a
+/// CLAIM (minted at the take-out under the dead-list lock — the
+/// exactly-once take). Exits: `None` = burned (the free ran; the claim
+/// was consumed), `Some(claim)` = re-park (the R87/R86 adjudication
+/// deferred; the caller pushes `claim.into_parked()` back on the list).
+fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::sched::reapdrain::ReapClaim> {
     // The caller parked `member` DEAD on the dead list; nothing else can
     // reach it while we hold the list's discipline (INV-PROC-BORROW-1's
-    // dead-list arm).
+    // dead-list arm). The claim owns the free — this body is its burn
+    // (or its deferral, handed back).
+    let member = claim.as_ptr();
     let m = crate::process::unsafe_edges::borrow_task_mut(member);
     // The member's final context switch-out may still be in flight —
     // on_cpu is cleared exactly when __switch_to has saved its context
@@ -645,7 +652,7 @@ fn free_dead_member(member: *mut Task) -> bool {
             crate::dfx::taskdump::taskdump_dec(claim as u64);
             crate::dfx::taskdump::taskdump_raw_line(b" (owner live/ambiguous; free deferred to next sweep)\n");
         }
-        return false;
+        return Some(claim);
     }
     // BOUNDED (lb125 decode): monopolist windows stalled this wait for
     // tens of seconds, freezing the exit — and every parent behind it.
@@ -663,7 +670,10 @@ fn free_dead_member(member: *mut Task) -> bool {
     m.set_fs(None);
 
     crate::process::task::Task::task_put(member);
-    true
+    // The burn: the obligation is consumed (the free above ran; the
+    // claim dies with it — no re-park path holds it).
+    core::mem::forget(claim);
+    None
 }
 
 /// Opportunistic sweep of a leader's dead-members list: free everyone
@@ -726,14 +736,21 @@ pub fn sweep_dead_threads(leader: *mut Task) {
     };
     for m in pending {
         // SAFETY: m came from the leader's dead list (DEAD, hash-removed,
-        // final switch-out completed).
-        let freed = free_dead_member(m);
+        // final switch-out completed). The take-out above (under the
+        // list lock) is the mint point — the exactly-once free is typed
+        // from here to the burn.
+        let freed = match crate::sched::reapdrain::ReapClaim::mint(m) {
+            Some(c) => free_dead_member(c).is_none(),
+            None => false,
+        };
         if !freed {
             // R87: heal-fail defers the free — re-park for the next
-            // sweep. Lifetime: this sweep's only caller is a member's own
-            // do_exit BEFORE its terminal DEAD store, so the leader's
-            // group-death wait is still blocked on us and the leader
-            // cannot have been reaped or freed mid-sweep.
+            // sweep (the channel boundary: the obligation returns to
+            // the lock-typed list). Lifetime: this sweep's only caller
+            // is a member's own do_exit BEFORE its terminal DEAD store,
+            // so the leader's group-death wait is still blocked on us
+            // and the leader cannot have been reaped or freed
+            // mid-sweep.
             let mut dl = leader_ref.dead_threads.lock();
             dl.push(m);
         }
@@ -784,8 +801,13 @@ pub fn sweep_dead_threads(leader: *mut Task) {
                 // SAFETY: the leader is dead, tree/pid-hash detached,
                 // its dead_threads list empty, and no other member can
                 // reach it (the caller was the last and is about to
-                // leave it forever).
-                release_task_storage(leader);
+                // leave it forever). The len==1 take under the list
+                // lock above is the mint point — the population-
+                // selected handoff is lock-arbitrated exactly-once, so
+                // the post-take obligation is linear like every other.
+                if let Some(c) = crate::sched::reapdrain::ReapClaim::mint(leader) {
+                    release_task_storage(c);
+                }
             }
         }
     }
@@ -887,15 +909,21 @@ pub(crate) fn release_task(task: *mut Task) {
                 let mut deferred_any = false;
                 for m in reclaim {
                     // SAFETY: m was parked DEAD with its final switch-out
-                    // complete; the list no longer references it.
-                    if free_dead_member(m) {
+                    // complete; the list no longer references it (the
+                    // retain above was the take-out — the mint point).
+                    let freed = match crate::sched::reapdrain::ReapClaim::mint(m) {
+                        Some(c) => free_dead_member(c).is_none(),
+                        None => false,
+                    };
+                    if freed {
                         continue;
                     }
                     // R87: heal-fail defers the free — re-park on this
                     // leader (alive in the reaper's own context) so a
                     // later sweep retries once the switch-out truly
-                    // completes. `empty && !deferred_any` keeps the reap
-                    // from completing while a deferral is parked.
+                    // completes (the channel boundary). `empty &&
+                    // !deferred_any` keeps the reap from completing
+                    // while a deferral is parked.
                     deferred_any = true;
                     let mut dl = t.dead_threads.lock();
                     dl.push(m);
@@ -1075,7 +1103,12 @@ pub(crate) fn release_task(task: *mut Task) {
     // never finish. Over cap (wedged drainer) the old bounded
     // synchronous path stands as the fallback.
     if !crate::sched::reapdrain::defer_reap_storage(task) {
-        release_task_storage(task);
+        // Over-cap fallback: the obligation the drainer could not take
+        // is minted here and burned synchronously (the cold path's
+        // exactly-once, typed the same way).
+        if let Some(c) = crate::sched::reapdrain::ReapClaim::mint(task) {
+            release_task_storage(c);
+        }
     }
 }
 
@@ -1096,7 +1129,16 @@ pub(crate) fn release_task(task: *mut Task) {
 /// dead-threads drain (re-run on every reap) / the leader's sweep, and
 /// the safety contract above is re-established by the drain's own
 /// predicate before any retry touches the page.
-fn release_task_storage(task: *mut Task) {
+/// Round-B extension: the storage-free obligation enters as a CLAIM.
+/// Callers mint at their lock-arbitrated take: the reaper's over-cap
+/// fallback (release_task's tail), and the deferred-leader finisher
+/// (sweep_dead_threads's tail — its len==1 take is exactly-once under
+/// the dead-list lock). Exits: the full free (burn — the claim is
+/// consumed), or the RTS-DEFER early return (the obligation re-parks
+/// on the reaper's dead_threads via the channel boundary — the raw
+/// pointer the early-return pushes IS the un-minted claim).
+fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
+    let task = claim.as_ptr();
     // SAFETY: unreachable through the pid hash / process tree (the
     // release contract); this call owns the storage.
     let t = crate::process::unsafe_edges::borrow_task_mut(task);
@@ -1222,7 +1264,7 @@ fn release_task_storage(task: *mut Task) {
                     crate::process::unsafe_edges::borrow_task_mut(rp)
                         .dead_threads
                         .lock()
-                        .push(task);
+                        .push(claim.into_parked());
                 }
             }
             return;
@@ -1247,6 +1289,9 @@ fn release_task_storage(task: *mut Task) {
     // Free Task struct back to kernel heap — via task_put (R12-5): any
     // outstanding lookup pins delay the actual free to their own put.
     crate::process::task::Task::task_put(task);
+    // The burn: the obligation is consumed (this is the synchronous
+    // path's exactly-once free; the claim dies with it).
+    core::mem::forget(claim);
 }
 
 /// Process exit
