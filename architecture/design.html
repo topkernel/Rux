@@ -84,7 +84,41 @@
     <div class="sub">每个子系统的机制、数据结构与实测数字 · 数字出处见各仓库文档,未测处如实标注</div>
 
     <h2 id="overview"><span class="anchor">§0</span>总览</h2>
-<div class="callout"><b>微核架构:Rux 与 Linux 最大的不同。</b>整个内核按一条判据分两半 —— 能活在 <code>#![forbid(unsafe_code)]</code> 下的代码进服务 crate(编译器保证零 unsafe),不能的进 ~3,000 行的 rux-core(带 INV 契约,被 Kani/Miri/Verus 覆盖);配三层防线(类型层 0 开销 + MPK 硬件层实测 47–49 周期/窗口 + 验证层),终态 TCB 约 3,000 行 —— 对照 Linux 全树皆 TCB 约 1:9000。<a href="micro-core.html">微核架构深读 →</a></div>
+<h2 id="seedcore"><span class="anchor">§0+</span>晶核架构(Seed-Core):Rux 与 Linux 最大的不同</h2>
+    <p>Rux 与 Linux 最本质的区别不在某个子系统的算法,而在<b>信任计算基础(TCB)的定义方式</b>。Linux 是 ~2,800 万行 C 单体内核:类型系统不检查内存安全,<b>全树皆 TCB</b>;Rux 用 Rust 类型系统把同一性质变成<b>编译期结构</b>,命名取材料学隐喻 —— <b>晶核架构</b>:~3,000 行手写核心是<b>晶种</b>,全部服务代码在类型格架上<b>结晶</b>为安全代码;晶核极小,却决定整块晶体的完整性。</p>
+    <p><b>唯一判据</b>,对每行代码各问一次:<code>能否活在 #![forbid(unsafe_code)] 之下?</code> 能 → 服务 crate(编译器保证零 unsafe,负探针验证:向 crate 加 unsafe 必使其自身构建失败);不能 → rux-core(带 INV 契约/F 行登记,被验证栈覆盖)。没有第三种归宿。</p>
+    <h3>不可还原底线(逐项,带参考内核对应物)</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>家族</th><th class="num">双计行</th><th>参考对应物</th></tr></thead><tbody>
+        <tr><td>陷阱进入/出口+信号帧</td><td class="num">~500</td><td>entry.S / sigreturn</td></tr>
+        <tr><td>上下文切换(三架构)+tp 寄存器</td><td class="num">~250</td><td>__switch_to / cpu_switch_to</td></tr>
+        <tr><td>uaccess 拷贝底层</td><td class="num">~320</td><td>uaccess.S / copy_user_64.S</td></tr>
+        <tr><td>FPU/RVV/FPSIMD 保存恢复</td><td class="num">~450</td><td>fpu/*.S / vector.S / fpsimd.S</td></tr>
+        <tr><td>页表原子写+走查底层</td><td class="num">~300</td><td>pgtable.h 原子操作</td></tr>
+        <tr><td>引导表+寄存器 IO+SBI/hypercall/GIC</td><td class="num">~750</td><td>head.S / special_insns.h / io.h / kvm.c / irq-gic-v3.c</td></tr>
+        <tr><td>同步原语内部+safety/ 原语+任务页生命周期+定时器核</td><td class="num">~420</td><td>spinlock.c 内部等</td></tr>
+      </tbody></table></div>
+    <p>对照 Linux 全树 TCB,比例约 <b>1 : 9,000</b>。调度与内存管理不做整 crate:两者均为<b>可判定策略骑在小 unsafe 核上</b>,S1/M1 劈分后策略层 forbid、机制留核 —— 切换/tp/锁原语/页表原子写是 TCB,CFS 数学不是。</p>
+    <h3>三层防线(各层实测成本)</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>层</th><th>机制</th><th class="num">边界成本</th><th>买到什么</th></tr></thead><tbody>
+        <tr><td><b>类型层</b></td><td>forbid crate + Cargo 依赖 DAG(Cargo 拒环=依赖方向无环机器检查)+CI 棘轮</td><td class="num"><b>0</b>(跨 crate 调用,LTO 内联;翻转实测零行为变化)</td><td>服务列内存不安全编译期不可表达</td></tr>
+        <tr><td><b>硬件层</b></td><td>Intel MPK 保护键:单地址空间内页粒度硬件域(WRPKRU 切密钥)</td><td class="num"><b>47–49 周期/窗口</b>(10 万次 TSC 计时;地址空间切换 ~1,000+)</td><td>核心元数据页打标,窗口外访问硬件 #PF(故障注入实证);&lt;1% 预算成立</td></tr>
+        <tr><td><b>验证层</b></td><td>Kani 12/12 全输入证明+Miri 零 UB+Verus 窄采用(无界算术引理)</td><td class="num"><b>0</b>(纯离线)</td><td>核心 ~3,000 行手工 unsafe 机器检查</td></tr>
+      </tbody></table></div>
+    <p>微内核(seL4/L4)以每服务独立地址空间买故障隔离,代价 ~1,000 周期/次 IPC(最优快路径),沿"缺页→驱动→服务器"链路倍增(Mach 教训);晶核架构用 <b>0+~50+0</b> 买到全部三层,隔离粒度更细(MPK 到页,IPC 只到进程)。</p>
+    <h3>与同谱系工作的差异(Framekernel / RedLeaf)</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>维度</th><th>Asterinas(Framekernel)</th><th>RedLeaf(PLOS'23)</th><th>Rux 晶核</th></tr></thead><tbody>
+        <tr><td>隔离的执行者</td><td>单 crate 内惯例+评审的 framework/service 分层</td><td>类型系统,域间零拷贝 RPC</td><td><b>编译器 crate 粒度强制</b>:逐 crate forbid(负探针验证)+Cargo 包 DAG 拒环(依赖无环性机器检查)+CI 棘轮</td></tr>
+        <tr><td>边界形态</td><td>二进制内函数调用</td><td>类型化 RPC 通道(协议层)</td><td>跨 crate 普通函数调用,LTO 内联 —— 比 RPC 薄一整层</td></tr>
+        <tr><td>类型健全性失守</td><td>无后备</td><td>无后备(其明示赌注)</td><td><b>MPK 硬件后备</b>(47–49 周期/窗口,故障注入实证)</td></tr>
+        <tr><td>TCB 形态</td><td>framework 区,评审审计</td><td>小验证运行时</td><td><b>~3,000 行逐项列表</b>(每行带参考对应物+F 行编号)+验证栈覆盖+台账(97%+ 区域有审计工件)</td></tr>
+        <tr><td>此处独有</td><td>—</td><td>—</td><td>census/INV/F 行台账;S1/M1 策略劈分;测量先行+搁置即成功的翻转梯子</td></tr>
+        <tr><td>对方领先(诚实)</td><td>更早交付完整 Linux 系统调用面</td><td>零拷贝 RPC 形式化更完整</td><td>—</td></tr>
+      </tbody></table></div>
+    <h3>分级落地数字</h3>
+    <p>当前 ~10,300 双计 → Rung 1 闭合(系统调用 crate,库内副本删除,结构性变化)→ +网络级+S1/M1 劈分(−~750)→ +文件系统/驱动级(−~2,770)→ +dfx 仪器退役评审(−600~1,000)→ <b>终态 = rux-core 尺寸 ≈4,000–4,700</b>。每级门禁:三架构构建+全量套件+fio 三案例+冒烟+forbid 负探针。设计正本:<code>docs/architecture/micro-core-design.md</code>(绑定梯子与中止判据);翻转机制:<code>crate-plan.md</code>。</p>>
     <p>Rux 是一份源码树服务三种架构(riscv64 / x86_64 / aarch64),约 90% 代码架构无关。对外以 349 个系统调用对齐Linux ABI;对内是净室设计 —— 每一项与主流实现不同的内部决策都登记在<a href="#divergences">设计分歧登记表</a>并携带兼容性证据。</p>
     <div class="tbl-wrap">
       <table>
