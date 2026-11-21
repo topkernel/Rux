@@ -3474,6 +3474,16 @@ fn fore_read_u64(root_ppn: u64, va: u64) -> Option<u64> {
             }
         }
     }
+
+    // Latch discipline (L7 mmap-family triage, 2026-11-21): release the
+    // re-entrancy latch on every CLEAN forensics exit. The swap(true)
+    // arm above used to stay latched forever after one dump, so any
+    // LATER fatal user SIGSEGV on the boot re-entered the halt path and
+    // parked its CPU — turning every subsequent segv-path bug into a
+    // whole-boot wedge with the forensics silenced (the mmap05->shmdt01
+    // pair-reproducer face). The recursion guard itself is unchanged:
+    // a fault WHILE this dump is in flight still takes the fr13 halt.
+    USEGV_FOR_ENTERED.store(false, core::sync::atomic::Ordering::Release);
 }
 
 /// Handle page fault (#PF): decode the error code (in the orig_rax slot)
