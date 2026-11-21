@@ -1258,6 +1258,14 @@ their job on the checker infrastructure itself):
 | INV-XE-PIO-1 | `arch/x86_64/cpu.rs` | Port I/O (INV-XE-PIO-1) |
 | INV-XE-ZP | `arch/x86_64/mm/unsafe_edges.rs` | frame exclusively — INV-XE-ZP in mmu_init). |
 
+## Round-D contract addendum (milestone-1 drift)
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-FS-FILEINODE-1 | `fs/unsafe_edges.rs` | INV-FS-FILEINODE-1: `File::inode` is an `UnsafeCell<Option<Arc<Inode>>>` |
+| INV-FS-FILEINODE-2 | `fs/unsafe_edges.rs` | INV-FS-FILEINODE-2: the install twin of [`file_inode`] — writes the |
+| INV-FS-FILEPRIV-2 | `fs/unsafe_edges.rs` | INV-FS-FILEPRIV-2: the take-and-reclaim twin of file_privdata_ref — |
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once

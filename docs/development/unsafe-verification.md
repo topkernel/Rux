@@ -3432,6 +3432,12 @@ census id is accounted for here.
 |------|----|------|------------|----------|----|
 | 102 | load | block | raw-construct,ptr-ops | INV:INV-FDT-1 | `f7211708faa1` |
 
+### kernel/src/lib.rs (1)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 1772 | rust_main_impl | block | asm | GAP | `2a0cc5ffe1e4` |
+
 ### kernel/src/list.rs (7)
 
 | line | fn | kind | categories | artifact | id |
@@ -3443,12 +3449,6 @@ census id is accounted for here.
 | 156 | <module> | unsafe-fn | - | INV:INV-LIST-1 | `e21862b2c335` |
 | 194 | <module> | unsafe-fn | - | INV:INV-LIST-1 | `9f331e6c8d28` |
 | 218 | offset | block | - | INV:INV-LIST-1 | `e4c86270ea95` |
-
-### kernel/src/main.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 1748 | rust_main | block | asm | GAP | `8d56e9f23016` |
 
 ### kernel/src/printk.rs (4)
 

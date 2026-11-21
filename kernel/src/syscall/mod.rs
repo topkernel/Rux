@@ -14,6 +14,13 @@
 // (declared at the crate root via #[path] — see main.rs/lib root).
 #![forbid(unsafe_code)]
 
+/// The seam registration hook (flip milestone shape): called by
+/// rust_main before the impl; the LIB-side default is a no-op — the
+/// service-crate composition (the bin) overrides it via the table's
+/// OnceSlot when rux-syscall lands. Exists so the call site is stable
+/// across the flip commits.
+pub fn seam_register_default() {}
+
 // The audited-edge escape: declared at the crate root (outside this
 // forbid tree) and re-exported under the historical path.
 pub(crate) use crate::syscall_edges as edges;
