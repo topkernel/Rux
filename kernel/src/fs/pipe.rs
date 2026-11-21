@@ -17,6 +17,10 @@
 //!   never interleave (review 5.2: PIPE_BUF atomicity was broken).
 //! - Pipe capacity is 64 KiB (Linux default, review 5.2: was 16 KiB).
 
+// (INV-PIPE-BUF-1: the pipe buffer family — the ring's page vector
+// and size/cursor fields are mutated only under the pipe's inode
+// lock; the resize rows move pages under the same lock; the close
+// pair drops exactly the two ends' references.)
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
@@ -394,7 +398,7 @@ impl Pipe {
     pub fn epoll_notify_read_end(&self) {
         let fid = self.epoll_read_fid.load(Ordering::Acquire);
         if fid != 0 {
-            crate::syscall::misc::epoll_notify_file(fid);
+            crate::fs::event_notify::epoll_notify_file(fid);
         }
     }
 
@@ -403,7 +407,7 @@ impl Pipe {
     pub fn epoll_notify_write_end(&self) {
         let fid = self.epoll_write_fid.load(Ordering::Acquire);
         if fid != 0 {
-            crate::syscall::misc::epoll_notify_file(fid);
+            crate::fs::event_notify::epoll_notify_file(fid);
         }
     }
 
@@ -1297,7 +1301,7 @@ fn oasync_notify(pipe_addr: usize, readable: bool) {
 }
 
 pub fn pipe_file_poll(file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
 
     if let Some(pipe_ptr) = file.private_data_ptr() {

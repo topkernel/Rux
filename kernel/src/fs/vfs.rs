@@ -2896,6 +2896,12 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // SAFETY: current_raw is protected by the claim (see the dentry
         // reader-bank protocol); it is non-null (set from a live Arc or
         // a memo-slot hit the same protocol validates).
+        // (INV-VFS-WALK-1: the path-walk's raw-position family — every
+        // &Dentry/&Inode deref in this walk (current_raw, child_raw,
+        // ino_ptr, the memo-slot hits) holds a WalkClaim that blocks
+        // the retirement drain, or is refreshed from a live owned Arc;
+        // the *_arc_from_raw adopts ride INV-DENTRY-ADOPT-1. All walk
+        // rows in this file ride this contract.)
         let cur_d: &Dentry = unsafe { &*current_raw };
 
         // ENOTDIR (Linux link_path_walk): `current` must be a directory to
@@ -7280,7 +7286,7 @@ fn mem_file_close(file: &File) -> i32 {
 /// graphical boot, ub-gfx 2026-11-17). Reference: Linux seq_file poll
 /// unconditionally returns DEFAULT_POLLMASK.
 fn mem_file_poll(_file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut r = 0u16;
     if events & POLLIN != 0 {
         r |= POLLIN | POLLRDNORM;

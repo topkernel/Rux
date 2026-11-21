@@ -35,16 +35,18 @@
 //! alloc path (the same churn that fills the pool drains it), so an
 //! idle system never accumulates entries.
 
+#![forbid(unsafe_code)]
+
 use core::alloc::Layout;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Pool capacity — bounded memory exposure (entries are 32 bytes each).
-const POOL_CAP: usize = 16384;
+pub(super) const POOL_CAP: usize = 16384;
 /// How long a matched free is held back (ms of jiffies).
 const DEFER_MS: u64 = 1500;
 
 #[derive(Clone, Copy)]
-struct Entry {
+pub(super) struct Entry {
     ptr: usize,
     size: usize,
     align: usize,
@@ -70,7 +72,7 @@ static DEFER_SIZES: [AtomicUsize; 4] = [
 /// record — most deallocs pay one load now, and the pre-registration
 /// phase pays zero).
 static DEFER_N: AtomicUsize = AtomicUsize::new(0);
-static mut POOL: [Entry; POOL_CAP] = [Entry {
+pub(super) static mut POOL: [Entry; POOL_CAP] = [Entry {
     ptr: 0,
     size: 0,
     align: 0,
@@ -137,7 +139,8 @@ pub fn try_defer(ptr: *mut u8, layout: &Layout) -> bool {
     let now = crate::drivers::timer::get_jiffies();
     let deadline = now.saturating_add(DEFER_MS);
     let _g = POOL_LOCK.lock_irqsave();
-    let pool = unsafe { &mut *core::ptr::addr_of_mut!(POOL) };
+    // INV-MM-8: the lock is held.
+    let pool = super::edges::defer_pool_mut();
     let head = POOL_HEAD.load(Ordering::Relaxed);
     let drained = POOL_DRAINED.load(Ordering::Relaxed);
     let used = head.wrapping_sub(drained);
@@ -190,7 +193,8 @@ pub fn drain(now: u64) -> usize {
     let mut new_earliest = u64::MAX;
     {
         let _g = POOL_LOCK.lock_irqsave();
-        let pool = unsafe { &mut *core::ptr::addr_of_mut!(POOL) };
+        // INV-MM-8: the lock is held.
+        let pool = super::edges::defer_pool_mut();
         let mut drained = POOL_DRAINED.load(Ordering::Relaxed);
         let head = POOL_HEAD.load(Ordering::Relaxed);
         while drained < head && batch_n < batch.len() {
@@ -219,30 +223,19 @@ pub fn drain(now: u64) -> usize {
     for i in 0..batch_n {
         let (ptr, size, align) = batch[i];
         if let Ok(layout) = Layout::from_size_align(size, align) {
-            unsafe {
-                // Route by REGION like buddy_allocator::dealloc_direct: a
-                // registered size class (Arc<MmStruct>, Arc<FdTable>,
-                // Arc<SignalStruct>) is <= 4 KiB and 8-aligned, so the
-                // ORIGINAL allocation usually came from the STATIC slab
-                // region (CombinedAllocator prefers kmalloc for those
-                // layouts), not the buddy heap. The old unconditional
-                // dealloc_untracked_pub refused out-of-heap pointers
-                // (FR_OUT_OF_WINDOW / DEALLOC_OUTSIDE) and permanently
-                // LEAKED every slab-resident entry — the drain comment
-                // claimed "calls dealloc_direct" but the code never did.
-                // kfree never re-defers, so the no-re-defer contract holds.
-                let in_slab = crate::mm::slab::slab_region()
-                    .map(|(s, e)| ptr >= s && ptr < e)
-                    .unwrap_or(false);
-                if in_slab {
-                    crate::mm::kfree(ptr as *mut u8);
-                } else {
-                    crate::mm::buddy_allocator::dealloc_untracked_pub(
-                        ptr as *mut u8,
-                        layout,
-                    );
-                }
-            }
+            // Route by REGION like buddy_allocator::dealloc_direct: a
+            // registered size class (Arc<MmStruct>, Arc<FdTable>,
+            // Arc<SignalStruct>) is <= 4 KiB and 8-aligned, so the
+            // ORIGINAL allocation usually came from the STATIC slab
+            // region (CombinedAllocator prefers kmalloc for those
+            // layouts), not the buddy heap. The old unconditional
+            // dealloc_untracked_pub refused out-of-heap pointers
+            // (FR_OUT_OF_WINDOW / DEALLOC_OUTSIDE) and permanently
+            // LEAKED every slab-resident entry — the drain comment
+            // claimed "calls dealloc_direct" but the code never did.
+            // kfree never re-defers, so the no-re-defer contract holds
+            // (INV-MM-8 drain arm).
+            super::edges::defer_dealloc(ptr, layout);
         }
     }
     batch_n

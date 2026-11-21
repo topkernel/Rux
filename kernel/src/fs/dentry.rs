@@ -315,6 +315,10 @@ pub fn dentry_drain_if_quiescent(parked: bool) {
 /// `p` must have been loaded from a dentry child memo slot / inode
 /// pointer mirror while a WalkClaim is held by the caller, and `p` must
 /// be non-null.
+/// (INV-DENTRY-ADOPT-1: the claim-then-adopt protocol — the WalkClaim
+/// blocks the deferred-retirement drain that would otherwise free the
+/// target; increment_strong_count + from_raw under that claim is the
+/// audited adopt edge. Both adopt fns and every call site ride it.)
 pub unsafe fn dentry_arc_from_raw(p: *const Dentry) -> Arc<Dentry> {
     Arc::increment_strong_count(p);
     Arc::from_raw(p)
@@ -444,6 +448,10 @@ fn memo_slot_read(
     }
     // SAFETY: seqlock-protected read (validated by the seq re-load
     // below; the sync::seqlock UnsafeCell discipline).
+    // (INV-DENTRY-MEMO-1: the child-memo read family — seqlock odd/even
+    // validation for the small slots, children-lock Release publication
+    // + immutable nslots for the big table, walk-claim blocking the
+    // drain; every memo/table row rides this.)
     let d = unsafe { &*slot.data.get() };
     let hit = d.ver == ver
         && d.hash == h
@@ -540,6 +548,10 @@ pub struct Dentry {
     inode_ptr: AtomicPtr<Inode>,
 }
 
+// (INV-DENTRY-SEND-1: Dentry/VfsMountInternal/BigMemoTable Sync/Send
+// are carried per-field — children/memo under their locks and seqlock,
+// the retirement banks under the drain lock; no field races through
+// a shared reference.)
 unsafe impl Send for Dentry {}
 unsafe impl Sync for Dentry {}
 

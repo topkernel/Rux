@@ -39,7 +39,7 @@ use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::AtomicU32;
 use crate::process::Task;
 use crate::process::task::TaskState;
-use crate::syscall::errno::{EINVAL, EFAULT, EAGAIN, ENOSYS, ETIMEDOUT};
+use crate::errno::constants::{EINVAL, EFAULT, EAGAIN, ENOSYS, ETIMEDOUT};
 
 /// FUTEX opcodes
 pub const FUTEX_WAIT: i32 = 0;
@@ -7215,7 +7215,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 };
                 if !woken {
                     remove_waiter(live_bucket, waiter_idx);
-                    return -crate::syscall::errno::EINTR as i64;
+                    return -crate::errno::constants::EINTR as i64;
                 }
             }
         }

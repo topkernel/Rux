@@ -7,6 +7,9 @@
 //!
 //! Implements read/write operations for character devices, mainly supports UART devices
 
+// (INV-CHARDEV-PRIV-1: the char-device fd family — private_data
+// holds the driver's installed tag/state word; the stat/read/write
+// rows read it under INV-FS-FILEPRIV-1's cell discipline.)
 use crate::console;
 
 #[repr(C)]
@@ -131,7 +134,7 @@ pub fn uart_write(buf: &[u8]) -> isize {
 
 /// UART character device file operations (public access)
 fn uart_file_poll(_file: &crate::fs::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 && crate::console::uart_data_ready() {
         ready |= POLLIN | POLLRDNORM;

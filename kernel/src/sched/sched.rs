@@ -3823,6 +3823,13 @@ fn grq_raw_puthex(v: u64) {
 pub fn schedule_dead_never_returns() {
     use crate::process::task::task_flags::TaskFlags;
     const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
+    // boot-63 residue: the pacing flag — positive knowledge that this
+    // task still executes here. Cleared only at the real switch-out
+    // retire sites (beside terminal_switch_done); the reap drainer's
+    // sustained arm waits on it instead of a timing bet.
+    if let Some(cur0) = current() {
+        cur0.terminal_pacing.store(true, core::sync::atomic::Ordering::Release);
+    }
     static TERM_RETRY_N: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
     static TERM_ENGAGE_N: core::sync::atomic::AtomicU32 =
@@ -5014,9 +5021,13 @@ fn __schedule() {
         if !prev.is_null()
             && crate::sched::current().map(|c| c as *mut Task) != Some(prev)
         {
-            crate::sched::edges::task_shared(prev)
-                .terminal_switch_done
+            let pt = crate::sched::edges::task_shared(prev);
+            pt.terminal_switch_done
                 .store(true, core::sync::atomic::Ordering::Release);
+            // The pacing flag retires with the switch: the tail that
+            // set it has truly stopped executing (boot-63's fix).
+            pt.terminal_pacing
+                .store(false, core::sync::atomic::Ordering::Release);
         }
     }
     // r11: the pick generation materialized — the picked context is
@@ -8794,6 +8805,11 @@ pub fn dequeue_if_enqueued(task: &Task) {
 
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    // P4 async-reap: advance the deferred task-storage ladder (one
+    // CAS-guarded CPU per tick, budget-bounded, empty-list fast path
+    // is one try_lock). Runs FIRST so a storm's reaps recycle their
+    // stacks within the same tick cadence the forks consume them.
+    crate::sched::reapdrain::reap_drain_tick();
     // grq-lock-1st: service the printk deferrals (the deferred kmsg
     // reader wake + one pending console line) and drain the Rule-1
     // scheduler event ring. All three run with NO scheduler lock held —
@@ -10578,9 +10594,11 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
     if !_prev.is_null() {
         // INV-SCE-2: the newborn's context is by definition not prev's
         // (the R11 terminal-release positive-knowledge store).
-        crate::sched::edges::task_shared(_prev)
-            .terminal_switch_done
+        let pt = crate::sched::edges::task_shared(_prev);
+        pt.terminal_switch_done
             .store(true, core::sync::atomic::Ordering::Release);
+        pt.terminal_pacing
+            .store(false, core::sync::atomic::Ordering::Release);
     }
     // r11: and retire the pick generation that switched us in — the
     // newborn is the materialization of this CPU's current generation

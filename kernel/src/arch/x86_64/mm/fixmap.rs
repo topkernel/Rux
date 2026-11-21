@@ -9,6 +9,7 @@
 //! is built. set_fixmap/clear_fixmap map/unmap through map_kernel_page;
 //! the fixmap PUD/PMD is pre-linked by mmu_init::init().
 
+use super::unsafe_edges::PtTable;
 use super::memory_layout::*;
 
 pub const FIXADDR_SIZE: usize = 16 * 1024 * 1024;
@@ -51,15 +52,13 @@ pub const fn is_fixmap_addr(virt: usize) -> bool {
 /// The fixmap PUD is pre-linked by mmu_init::init(), so no intermediate
 /// table allocation can happen here (safe to call before the buddy
 /// allocator exists).
-pub unsafe fn set_fixmap(idx: FixedAddress, phys: usize, flags: u64) {
+pub fn set_fixmap(idx: FixedAddress, phys: usize, flags: u64) {
     let virt = fix_to_virt(idx as usize);
     super::mmu_init::map_kernel_page(virt as u64, phys as u64, flags);
 }
 
 /// Unmap a fixed slot (zero the leaf PTE).
-pub unsafe fn clear_fixmap(idx: FixedAddress) {
-    use super::pagetable::PageTableEntry;
-    use super::memory_layout::PAGE_SHIFT;
+pub fn clear_fixmap(idx: FixedAddress) {
     let virt = fix_to_virt(idx as usize) as u64;
     let a = super::memory_layout::VirtAddr::new(virt);
     let vpn4 = a.pgd_index() as usize;
@@ -67,36 +66,37 @@ pub unsafe fn clear_fixmap(idx: FixedAddress) {
     let vpn2 = a.pmd_index() as usize;
     let vpn1 = a.pte_index() as usize;
 
-    // SAFETY: walks the static kernel root for a fixmap VA (kernel-half
+    // Typed walk of the static kernel root for a fixmap VA (kernel-half
     // links are shared in every root); every level is guaranteed present
     // (PUD pre-linked at boot; the slot was mapped by a prior set_fixmap).
-    unsafe {
-        let root = super::mmu_init::get_page_table_virt(
-            super::mmu_init::get_kernel_page_table_ppn() << PAGE_SHIFT,
-        );
-        let pte4 = (*root).get(vpn4);
-        if !pte4.is_valid() {
-            return;
-        }
-        let table3 = super::mmu_init::get_page_table_virt(pte4.ppn() << PAGE_SHIFT);
-        let pte3 = (*table3).get(vpn3);
-        if !pte3.is_valid() || pte3.is_leaf() {
-            return;
-        }
-        let table2 = super::mmu_init::get_page_table_virt(pte3.ppn() << PAGE_SHIFT);
-        let pte2 = (*table2).get(vpn2);
-        if !pte2.is_valid() || pte2.is_leaf() {
-            return;
-        }
-        let table1 = super::mmu_init::get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-        (*table1).set(vpn1, PageTableEntry::from_bits(0));
-        // Kernel-VA teardown: peers may cache the slot under their
-        // current PCID (PCID keeps kernel entries per-tag), so the
-        // shootdown is explicit — with PCID off it used to ride the
-        // peer's next CR3 reload. Cold path.
-        crate::arch::ipi::flush_tlb_others(virt, virt + super::memory_layout::PAGE_SIZE as u64);
-        crate::arch::cpu::invlpg(virt);
+    let Some(root) = PtTable::from_phys(
+        super::mmu_init::get_kernel_page_table_ppn() << super::memory_layout::PAGE_SHIFT,
+    ) else {
+        return;
+    };
+    let pte4 = root.get(vpn4);
+    if !pte4.is_valid() {
+        return;
     }
+    let Some(table3) = PtTable::from_phys(pte4.ppn() << super::memory_layout::PAGE_SHIFT) else {
+        return;
+    };
+    let pte3 = table3.get(vpn3);
+    if !pte3.is_valid() || pte3.is_leaf() {
+        return;
+    }
+    let Some(table2) = PtTable::from_phys(pte3.ppn() << super::memory_layout::PAGE_SHIFT) else {
+        return;
+    };
+    let pte2 = table2.get(vpn2);
+    if !pte2.is_valid() || pte2.is_leaf() {
+        return;
+    }
+    let Some(table1) = PtTable::from_phys(pte2.ppn() << super::memory_layout::PAGE_SHIFT) else {
+        return;
+    };
+    table1.set(vpn1, super::pagetable::PageTableEntry::from_bits(0));
+    crate::arch::cpu::invlpg(virt);
 }
 
 // ---- UART parity shims: x86 console is port I/O — no fixmap UART ----
@@ -117,6 +117,6 @@ pub fn is_uart_fixmap_initialized() -> bool {
 
 /// Copy fixmap PTEs into a user root (interface parity; x86 shares the
 /// kernel PML4 half instead). X86-TODO: confirm callers can no-op.
-pub unsafe fn copy_fixmap_to_user(_user_root_ppn: u64) {}
+pub fn copy_fixmap_to_user(_user_root_ppn: u64) {}
 
 pub fn print_fixmap_status() {}

@@ -32,6 +32,9 @@
 //!     └── fd/      - File descriptors
 //! ```
 
+// (residue rows: the Send/Sync impls carry ProcFSNode's per-field
+// locking (children/override fields under their locks — same shape
+// as INV-FILE-SEND-1); procfs_kill_sb rides INV-SBTYPE-1.)
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
@@ -2397,7 +2400,7 @@ fn procfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 /// EPERM for poll-less files, so without this op the monitor's kernel
 /// source never armed.
 fn procfs_file_poll(_file: &crate::fs::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut r = 0u16;
     if events & POLLIN != 0 {
         r |= POLLIN | POLLRDNORM;

@@ -58,7 +58,13 @@ impl MmioRegion {
         // is UB (no in-tree tripper: real MMIO bases are page-aligned).
         // The assert turns the documented contract into a checked one.
         debug_assert!(
-            (self.base + off) % width == 0,
+            // wrapping_add: alignment is a modulo property, and `off`
+            // may be ANY usize here (the window check below rejects
+            // the huge ones AFTER this line) — the Layer-2.2 Kani
+            // proof convicted the plain `self.base + off` as an
+            // overflow path in the checker itself (off near
+            // usize::MAX before the guard ran).
+            (self.base.wrapping_add(off)) % width == 0,
             "MMIO {} misaligned: base={:#x} off={:#x} width={}",
             what, self.base, off, width
         );
@@ -104,6 +110,34 @@ impl MmioRegion {
         let addr = self.check(off, 8, "read_u64") as *const u64;
         // SAFETY: INV-MMIO-1/2/3 — as read_u32, width 8.
         unsafe { core::ptr::read_volatile(addr) }
+    }
+
+    /// Byte-composed u32 read for PACKED firmware-table fields (little
+    /// endian). ACPI layouts pack their structs, so variable-offset
+    /// fields (MADT entry bodies after odd-length predecessors, XSDT
+    /// entries at the 4-mod-8 +36 body start) are legitimately NOT
+    /// naturally aligned — Linux reads them through #repr(packed)
+    /// structs, which compile to exactly this byte-wise composition.
+    /// u8 reads are always alignment-valid (INV-MMIO holds), so this
+    /// accessor is the contract-clean shape for those fields. Only for
+    /// RAM-backed firmware tables — never device registers, where
+    /// multi-byte access WIDTH is itself observable.
+    #[inline]
+    pub fn read_packed_u32(&self, off: usize) -> u32 {
+        let b0 = self.read_u8(off) as u32;
+        let b1 = self.read_u8(off + 1) as u32;
+        let b2 = self.read_u8(off + 2) as u32;
+        let b3 = self.read_u8(off + 3) as u32;
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+
+    /// Byte-composed u64 read for packed firmware-table fields — the
+    /// width-8 counterpart of `read_packed_u32` (XSDT entry pointers).
+    #[inline]
+    pub fn read_packed_u64(&self, off: usize) -> u64 {
+        let lo = self.read_packed_u32(off) as u64;
+        let hi = self.read_packed_u32(off + 4) as u64;
+        lo | (hi << 32)
     }
 
     /// Volatile u8 write (INV-MMIO-2/3).

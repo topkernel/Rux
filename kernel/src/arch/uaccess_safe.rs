@@ -19,6 +19,10 @@
 //! service files (`syscall/**` first) can carry
 //! `#![forbid(unsafe_code)]` while still doing user I/O.
 
+// (INV-UACCESS-SAFE-1: the capsule's own edges — each safe wrapper
+// holds exactly one audited call into the per-arch exception-table
+// primitive (INV-UACCESS-1); the UserPtr/UserSlice cell rows carry
+// the address/len pair discipline.)
 use super::uaccess;
 
 /// Copy `src` (kernel memory) out to the user address `dst_user`.

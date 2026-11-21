@@ -1077,6 +1077,16 @@ pub struct Task {
     /// stack is referenced by nothing.
     pub terminal_switch_done: core::sync::atomic::AtomicBool,
 
+    /// Positive knowledge that THIS task is still executing its
+    /// terminal deschedule loop (boot-63 residue, 2026-11-21): set at
+    /// schedule_dead_never_returns entry, cleared ONLY at the real
+    /// switch-out retire sites (beside terminal_switch_done). The reap
+    /// drainer's sustained arm requires it false — a pacing ZOMBIE/DEAD
+    /// tail can hold {slotless, unmarked, !on_cpu} through abort-retry
+    /// windows while its page must NOT be freed (the timing bet the
+    /// 20-tick arm made before this flag existed).
+    pub terminal_pacing: core::sync::atomic::AtomicBool,
+
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
     ti_a0: core::sync::atomic::AtomicU64,
     ti_a1: core::sync::atomic::AtomicU64,
@@ -1850,6 +1860,7 @@ impl Task {
             running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
             ti_pick_state: core::sync::atomic::AtomicU32::new(PICK_PICKED),
             terminal_switch_done: core::sync::atomic::AtomicBool::new(false),
+            terminal_pacing: core::sync::atomic::AtomicBool::new(false),
             journal_handle: core::cell::Cell::new(core::ptr::null_mut()),
             task_refcnt: core::sync::atomic::AtomicU32::new(1),
             ti_a0: core::sync::atomic::AtomicU64::new(0),

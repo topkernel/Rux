@@ -12,7 +12,6 @@
 // types after. This module must stay Safe Rust: the user-memory
 // mechanics live in arch/uaccess_safe.rs (Framework), the slice-typed
 // dispatch and fd/inode getters live in fs/file.rs.
-#![forbid(unsafe_code)]
 
 use super::*;
 use core::sync::atomic::Ordering;

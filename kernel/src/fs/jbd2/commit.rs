@@ -11,6 +11,8 @@
 //!   [descriptor_block_2: header + tags] [data_block_N] ...
 //!   [commit_block]
 
+// (INV-JBD2-BH-1: see recovery.rs — the commit path's bh-pinned
+// journal block IO and its byte views ride the same contract.)
 use core::mem::size_of;
 use alloc::sync::Arc;
 use alloc::vec::Vec;

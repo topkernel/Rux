@@ -127,6 +127,12 @@ mod init;
 mod boot_edges;
 mod initrd;
 mod syscall;
+// The syscall tree is #![forbid(unsafe_code)] (the Layer-1 structural
+// boundary); the subsystem's audited unsafe edges live OUTSIDE the
+// tree — same file, declared here so the forbid does not apply to it.
+// syscall::edges re-exports it so existing paths stay valid.
+#[path = "syscall/edges.rs"]
+pub(crate) mod syscall_edges;
 mod interrupt;
 mod dfx;
 mod ipc;
@@ -1857,10 +1863,16 @@ fn panic(info: &PanicInfo) -> ! {
 
     // Header
     let _ = w.write_str("\n\nKernel panic - not syncing:\n\n");
-    let _ = write!(w, "PANIC: {}\n", info.message());
+    // Location FIRST: the compiler's precondition messages (e.g. the
+    // read_volatile alignment check) are long enough to overrun the
+    // console path mid-write — the location line was observed lost
+    // ("...safetSstatus") which made every such panic un-symbolizable.
+    // The location is the one irreplaceable datum; emit it before the
+    // (possibly truncated) message.
     if let Some(loc) = info.location() {
         let _ = write!(w, "  Location: {}: {}\n", loc.file(), loc.line());
     }
+    let _ = write!(w, "PANIC: {}\n", info.message());
 
     // Separator
     let _ = w.write_str("\n---[ end Kernel panic - not syncing ]---\n\n");

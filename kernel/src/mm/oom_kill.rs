@@ -13,6 +13,8 @@
 //!
 //! The process with the highest score is killed.
 
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::Ordering;
 
 use crate::process::task::{Task, TaskState, TIF_MEMDIE};
@@ -157,8 +159,7 @@ fn select_bad_process(oc: &mut OomControl) {
     // Phase 1: bucket-locked collection with the cheap per-task filters.
     let mut candidates: alloc::vec::Vec<(u32, alloc::sync::Arc<crate::mm::mm_struct::MmStruct>)> =
         alloc::vec::Vec::new();
-    pid_hash_for_each_task(|task_ptr| unsafe {
-        let task = &*task_ptr;
+    pid_hash_for_each_task(|task| {
 
         // Skip kernel threads (no address space)
         if !task.has_address_space() {
@@ -490,7 +491,7 @@ pub fn fault_oom_kill_or_retry(pid: u32) -> bool {
 
     let mut totalpages = 0u64;
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+    if let Some(node) = crate::mm::pglist::first_online_node() {
         for zt in [
             crate::mm::zone::ZoneType::ZoneNormal,
             crate::mm::zone::ZoneType::ZoneDma32,
@@ -534,7 +535,7 @@ pub fn kernel_fault_oom_kill() -> bool {
     }
     let mut totalpages = 0u64;
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+    if let Some(node) = crate::mm::pglist::first_online_node() {
         for zt in [
             crate::mm::zone::ZoneType::ZoneNormal,
             crate::mm::zone::ZoneType::ZoneDma32,
@@ -564,7 +565,7 @@ pub fn kernel_fault_oom_kill() -> bool {
 pub fn sysrq_oom_kill() -> bool {
     let mut totalpages = 0u64;
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+    if let Some(node) = crate::mm::pglist::first_online_node() {
         for zt in [
             crate::mm::zone::ZoneType::ZoneNormal,
             crate::mm::zone::ZoneType::ZoneDma32,

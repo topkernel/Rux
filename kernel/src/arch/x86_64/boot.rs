@@ -102,94 +102,113 @@ pub fn early_boot_init() {
         &*ptr
     };
 
-    // SAFETY: BSS scratch, single-threaded early boot context.
-    unsafe {
-        BOOT_MAGIC = get_boot_magic();
+    // BSS scratch, single-threaded early boot context: each raw
+    // volatile op carries its own block below.
+    {
 
-        // ---- bzImage (Linux protocol): QEMU's linuxboot ROM has already
-        // patched the boot_params zero page at 0x10000 (where our setup
-        // sectors were loaded): e820_entries @ +0x1E8, e820_map @ +0x2D0
-        // (20-byte entries: addr u64, size u64, type u32; type 1 = usable),
-        // cmd_line_ptr @ +0x228. Multiboot handoff (EAX=0x2BADB002) is the
-        // other supported path. ----
-        if get_boot_magic() != 0x2BADB002 {
-            // bzImage path: the 16-bit trampoline ran BIOS int 15h E820 and
-            // stored the map at setup+0x660 with count (u16) at setup+0x658
-            // (setup is loaded at linear 0x10000).
-            let count = core::ptr::read_volatile(0x10658usize as *const u16) as usize;
-            let mut idx = 0usize;
-            for i in 0..count.min(32) {
-                // BIOS entries are 20 bytes, packed (repr(C) with u64 would
-                // stride 24 — read fields manually at 20-byte stride).
-                let base = 0x10660usize + i * 20;
-                let addr = core::ptr::read_volatile(base as *const u64);
-                let size = core::ptr::read_volatile((base + 8) as *const u64);
-                let mtype = core::ptr::read_volatile((base + 16) as *const u32);
+    // SAFETY: single-threaded boot BSS.
+    unsafe { BOOT_MAGIC = get_boot_magic() };
+
+    // ---- bzImage (Linux protocol): QEMU's linuxboot ROM has already
+    // patched the boot_params zero page at 0x10000 (where our setup
+    // sectors were loaded): e820_entries @ +0x1E8, e820_map @ +0x2D0
+    // (20-byte entries: addr u64, size u64, type u32; type 1 = usable),
+    // cmd_line_ptr @ +0x228. Multiboot handoff (EAX=0x2BADB002) is the
+    // other supported path. ----
+    if get_boot_magic() != 0x2BADB002 {
+        // bzImage path: the 16-bit trampoline ran BIOS int 15h E820 and
+        // stored the map at setup+0x660 with count (u16) at setup+0x658
+        // (setup is loaded at linear 0x10000).
+        // SAFETY: boot-protocol fixed physical location (setup+0x658).
+        let count = unsafe { core::ptr::read_volatile(0x10658usize as *const u16) } as usize;
+        let mut idx = 0usize;
+        for i in 0..count.min(32) {
+            // BIOS entries are 20 bytes, packed (repr(C) with u64 would
+            // stride 24 — read fields manually at 20-byte stride).
+            let base = 0x10660usize + i * 20;
+            let addr = unsafe { core::ptr::read_volatile(base as *const u64) };
+            let size = unsafe { core::ptr::read_volatile((base + 8) as *const u64) };
+            let mtype = unsafe { core::ptr::read_volatile((base + 16) as *const u32) };
+            // SAFETY: single-threaded boot BSS.
+            unsafe {
                 BOOT_MMAP[idx] = BootMemoryRegion {
                     start: addr,
                     end: addr + size,
                     usable: mtype == 1,
-                };
-                idx += 1;
-            }
-            BOOT_MMAP_COUNT = idx;
-
-            // command line from boot_params.cmd_line_ptr (setup header at
-            // 0x10000; QEMU/rom honor our cmd_line_ptr = 0x20000)
-            let cl = u64::from(core::ptr::read_volatile(0x10228usize as *const u32)) as usize;
-            if cl != 0 {
-                let src = cl as *const u8;
-                let mut i = 0usize;
-                while i < CMDLINE_MAX - 1 {
-                    let b = core::ptr::read_volatile(src.add(i));
-                    if b == 0 {
-                        break;
-                    }
-                    BOOT_CMDLINE[i] = b;
-                    i += 1;
                 }
-            }
-            return;
+            };
+            idx += 1;
         }
+        // SAFETY: single-threaded boot BSS.
+        unsafe { BOOT_MMAP_COUNT = idx };
 
-        // ---- Multiboot path (mmap format: flags bit 6) ----
-        if mbi.flags & (1 << 6) != 0 && mbi.mmap_addr != 0 && mbi.mmap_length != 0 {
-            let mut off = 0u32;
-            let mut idx = 0usize;
-            while off < mbi.mmap_length && idx < MAX_MMAP_ENTRIES {
-                let entry = &*((mbi.mmap_addr + off) as *const MbMmapEntry);
-                let size = if entry.size != 0 { entry.size } else { 20 };
-                let start = (entry.addr_low as u64) | ((entry.addr_high as u64) << 32);
-                let len = (entry.len_low as u64) | ((entry.len_high as u64) << 32);
+        // command line from boot_params.cmd_line_ptr (setup header at
+        // 0x10000; QEMU/rom honor our cmd_line_ptr = 0x20000)
+        // SAFETY: boot-protocol fixed physical location (setup+0x228).
+        let cl = u64::from(unsafe { core::ptr::read_volatile(0x10228usize as *const u32) }) as usize;
+        if cl != 0 {
+            let src = cl as *const u8;
+            let mut i = 0usize;
+            while i < CMDLINE_MAX - 1 {
+                let b = unsafe { core::ptr::read_volatile(src.add(i)) };
+                if b == 0 {
+                    break;
+                }
+                // SAFETY: single-threaded boot BSS.
+                unsafe { BOOT_CMDLINE[i] = b; };
+                i += 1;
+            }
+        }
+        return;
+    }
+
+    // ---- Multiboot path (mmap format: flags bit 6) ----
+    if mbi.flags & (1 << 6) != 0 && mbi.mmap_addr != 0 && mbi.mmap_length != 0 {
+        let mut off = 0u32;
+        let mut idx = 0usize;
+        while off < mbi.mmap_length && idx < MAX_MMAP_ENTRIES {
+            // SAFETY: the multiboot-provided mmap table, mapped at boot.
+            let entry = unsafe { &*((mbi.mmap_addr + off) as *const MbMmapEntry) };
+            let size = if entry.size != 0 { entry.size } else { 20 };
+            let start = (entry.addr_low as u64) | ((entry.addr_high as u64) << 32);
+            let len = (entry.len_low as u64) | ((entry.len_high as u64) << 32);
+            // SAFETY: single-threaded boot BSS.
+            unsafe {
                 BOOT_MMAP[idx] = BootMemoryRegion {
                     start,
                     end: start + len,
                     usable: entry.mtype == 1,
-                };
-                idx += 1;
-                off += size + 4;
-            }
-            BOOT_MMAP_COUNT = idx;
-        } else {
-            // Fall back to mem_lower/mem_upper (flags bit 0).
-            let upper_end = (1u64 << 20) + mbi.mem_upper as u64 * 1024;
-            BOOT_MMAP[0] = BootMemoryRegion { start: 0, end: upper_end, usable: true };
-            BOOT_MMAP_COUNT = 1;
-        }
-
-        // ---- Command line (flags bit 2) ----
-        if mbi.flags & (1 << 2) != 0 && mbi.cmdline != 0 {
-            let src = mbi.cmdline as *const u8;
-            let mut i = 0usize;
-            while i < CMDLINE_MAX - 1 {
-                let b = core::ptr::read_volatile(src.add(i));
-                if b == 0 {
-                    break;
                 }
-                BOOT_CMDLINE[i] = b;
-                i += 1;
-            }
+            };
+            idx += 1;
+            off += size + 4;
         }
+        // SAFETY: single-threaded boot BSS.
+        unsafe { BOOT_MMAP_COUNT = idx };
+    } else {
+        // Fall back to mem_lower/mem_upper (flags bit 0).
+        let upper_end = (1u64 << 20) + mbi.mem_upper as u64 * 1024;
+        // SAFETY: single-threaded boot BSS.
+        unsafe { BOOT_MMAP[0] = BootMemoryRegion { start: 0, end: upper_end, usable: true }; };
+        // SAFETY: single-threaded boot BSS.
+        unsafe { BOOT_MMAP_COUNT = 1 };
+    }
+
+    // ---- Command line (flags bit 2) ----
+    if mbi.flags & (1 << 2) != 0 && mbi.cmdline != 0 {
+        let src = mbi.cmdline as *const u8;
+        let mut i = 0usize;
+        while i < CMDLINE_MAX - 1 {
+            let b = unsafe { core::ptr::read_volatile(src.add(i)) };
+            if b == 0 {
+                break;
+            }
+            // SAFETY: single-threaded boot BSS.
+            unsafe { BOOT_CMDLINE[i] = b; };
+            i += 1;
+        }
+    }
+
     }
 }
 

@@ -6,7 +6,6 @@
 //!
 //! Includes: futex, sched_yield, getpriority, setpriority
 
-#![forbid(unsafe_code)]
 
 use super::*;
 

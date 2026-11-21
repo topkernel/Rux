@@ -334,7 +334,7 @@ pub fn push_event(&self, event: InputEvent) {
             let ids = self.open_file_ids.lock_irqsave();
             for &fid in ids.iter().take(n.min(ids.len())) {
                 if fid != 0 {
-                    crate::syscall::misc::epoll_notify_file(fid);
+                    crate::fs::event_notify::epoll_notify_file(fid);
                 }
             }
         }
@@ -870,7 +870,7 @@ fn evdev_file_close(file: &File) -> i32 {
 /// drained first so events that raced the tasklet BH still count (and so
 /// a poll-only client — no blocking read — keeps receiving).
 fn evdev_file_poll(file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
 
     // SAFETY: private_data contains a valid DevNo pointer set during open;
     // the EVDEV_* statics are initialized by init_evdev() before any file

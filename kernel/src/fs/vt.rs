@@ -28,6 +28,10 @@
 //! dev_t layout (Linux): tty0..ttyN are (4, 0..N); /dev/tty is (5, 0)
 //! and /dev/console is (5, 1) (TTYAUX_MAJOR). ttyS0 remains (4, 64).
 
+// (INV-VT-PRIV-1: the VT device fd family — private_data holds the
+// Box<DevNo> leaked by devfs_open; close is the single reclaim; the
+// ioctl rows read the cell under INV-FS-FILEPRIV-1's write-once
+// discipline.)
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::process::wait::WaitQueueHead;

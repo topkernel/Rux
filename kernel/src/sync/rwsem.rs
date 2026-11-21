@@ -97,6 +97,9 @@
 //! `schedule()`). `try_read`/`try_write` never sleep and are safe
 //! anywhere (the fuxstuck census relies on this).
 
+// (INV-RWSEM-1: the rwsem family — the count word's atomic protocol
+// pairs with the waitqueue; guard derefs ride the held semaphore
+// lifetime; panic rows are best-effort (INV-SPIN-1's contract).)
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::ops::{Deref, DerefMut};

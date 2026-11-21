@@ -4,6 +4,29 @@
 //!
 //! vDSO (virtual dynamic shared object) — P2.
 //!
+//! FRAMEKERNEL CLASSIFICATION (unsafe-slim L7, 2026-11-21): this file is
+//! mm's SECOND edge file (with mm/edges.rs — the doctrine's ≤2 per
+//! subsystem), NOT a service file to de-sign. It is one self-contained
+//! timekeeping primitive — the data-page seqlock, the volatile word
+//! pairs, and the rdtsc/rdcycle counter asm — whose unsafe is the
+//! audited core itself (the LTP clock_gettime04 protocol: base_tsc/
+//! base_mono_ns must pair under the seq word or the vDSO clock runs
+//! ahead of the syscall clock). Relocating these blocks into edges.rs
+//! would move the same audited bytes without shrinking anything.
+//!
+//! INV-MM-VDSO (the invariants this primitive owns):
+//! - The data page (`VDSO_DATA_PAGE`) is written ONLY by the timer-tick
+//!   / clock-set refresh paths under the seqlock protocol
+//!   (seq |= 1 → write fields → seq += 1), and read by user code that
+//!   validates the seq word before trusting the fields.
+//! - Word accesses are VOLATILE by contract (fields may be concurrently
+//!   read by user mappings; coherence is the seq word's job).
+//! - On x86_64 the page is the UNIFIED timekeeping anchor: `read_time`'s
+//!   TSC branch and the vDSO functions compute the same value from the
+//!   same words — the kernel/user bit-identity contract.
+//! - Counter reads are architecture-ordered (`lfence;rdtsc` on x86_64)
+//!   so the stamp sits inside the seq window.
+//!
 //! A two-page user mapping installed by every execve:
 //!
 //! ```text
@@ -43,6 +66,10 @@
 //! (the COARSE clocks, CPUTIME ids, garbage) falls back INSIDE the vDSO
 //! to the real syscall — the reference's shape (see mod x86 dispatch).
 
+// (INV-VDSO-DATA-1: the vDSO data page family — the page is a fixed
+// static mapping whose seqlock/fields are accessed at page-constant
+// offsets (the seq/data readers' contract); the tick/wr rows hold the
+// seqlock write discipline.)
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Fixed user mapping address (INTERP_BASE - 4 MiB, clear of the dynamic

@@ -14,6 +14,10 @@
 //!
 //! Reference: Documentation/filesystems/ext4/
 
+// (residue rows: ext4_kill_sb rides the fs-type raw ABI
+// (INV-SBTYPE-1, superblock.rs); read_file_internal and
+// create_vfs_inode_in ride INV-EXT4-GLOBALFS/SBRES-1 provenance;
+// ext4_instance_from_id rides the registry's liveness authority.)
 pub mod superblock;
 pub mod inode;
 pub mod dir;
@@ -2392,7 +2396,7 @@ fn add_dir_entry(
     // directory without updating the dx tree leaves real Linux unable to
     // find the entry. Conservatively refuse the write (review 5.5).
     if parent.flags & features::EXT4_INDEX_FL != 0 {
-        return Err(-(crate::syscall::errno::EOPNOTSUPP as i32));
+        return Err(-(crate::errno::constants::EOPNOTSUPP as i32));
     }
 
     // Get parent's data blocks

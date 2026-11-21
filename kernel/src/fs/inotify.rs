@@ -25,6 +25,10 @@
 //! Lock order: WATCH_REGISTRY -> InotifyInstance.inner (never nested the
 //! other way; add/rm_watch take them sequentially).
 
+// (INV-INOTIFY-PRIV-1: the inotify fd family — private_data holds the
+// Box'd instance/watch state installed at inotify_init; the notify
+// rows read the watch under the group's lock; close is the single
+// reclaim (INV-FS-FILEPRIV-1 cell discipline).)
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -745,7 +749,7 @@ fn inotify_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 fn inotify_poll(file: &File, _events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let instance = match instance_of(file) {
         Some(i) => i,
         None => return 0,

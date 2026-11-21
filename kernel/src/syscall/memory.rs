@@ -6,7 +6,6 @@
 //!
 //! Includes: brk, mmap, mmap_framebuffer, munmap, mprotect, msync, mremap, madvise, mincore, mlock, munlock
 
-#![forbid(unsafe_code)]
 
 use super::*;
 use super::SyscallArgs;

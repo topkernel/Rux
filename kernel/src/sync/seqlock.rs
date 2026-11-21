@@ -19,6 +19,9 @@
 //!   - Writer: increment (odd) → write data → increment (even).
 //!   - Reader: read seq → snapshot data → re-read seq → retry if changed.
 
+// (INV-SEQLOCK-1: the seqlock family — data cells are read under the
+// even-sequence validation (odd = writer in flight); writers hold the
+// exclusive phase; the UnsafeCell rows are the discipline itself.)
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicUsize, Ordering};

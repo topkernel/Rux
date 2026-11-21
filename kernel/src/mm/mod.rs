@@ -116,10 +116,10 @@ pub mod map {
 /// x86_64 walks page-at-a-time through the arch interface until the
 /// backend grows its own chunked allocator.
 ///
-/// # Safety
-/// `user_ppn` must be a live user page-table root; `virt_addr` must be
-/// page-aligned and unmapped in it.
-pub unsafe fn alloc_and_map_user_table(
+/// Contract: `user_ppn` must be a live user page-table root;
+/// `virt_addr` must be page-aligned and unmapped in it (the arch
+/// primitives are safe fns; the old unsafe wrappers were vestigial).
+pub fn alloc_and_map_user_table(
     user_ppn: u64,
     virt_addr: u64,
     size: u64,
@@ -127,22 +127,19 @@ pub unsafe fn alloc_and_map_user_table(
 ) -> Option<u64> {
     #[cfg(any(feature = "riscv64", feature = "aarch64"))]
     {
-        // SAFETY: caller guarantees a valid root (see fn doc).
-        unsafe { crate::arch::mm::alloc_and_map_to_user_table(user_ppn, virt_addr, size, flags) }
+        crate::arch::mm::alloc_and_map_to_user_table(user_ppn, virt_addr, size, flags)
     }
     #[cfg(feature = "x86_64")]
     {
-        // SAFETY: caller guarantees a valid root (see fn doc).
-        unsafe { crate::arch::mm::alloc_and_map_to_user_table(user_ppn, virt_addr, size, flags) }
+        crate::arch::mm::alloc_and_map_to_user_table(user_ppn, virt_addr, size, flags)
     }
 }
 
 /// Same contract as [`alloc_and_map_user_table`], for anonymous heap
 /// growth (sys_brk).
 ///
-/// # Safety
-/// Same as [`alloc_and_map_user_table`].
-pub unsafe fn alloc_and_map_user_memory(
+/// Contract: same as [`alloc_and_map_user_table`].
+pub fn alloc_and_map_user_memory(
     user_root_ppn: u64,
     virt_addr: u64,
     size: u64,
@@ -150,13 +147,11 @@ pub unsafe fn alloc_and_map_user_memory(
 ) -> Option<u64> {
     #[cfg(any(feature = "riscv64", feature = "aarch64"))]
     {
-        // SAFETY: caller guarantees a valid root (see fn doc).
-        unsafe { crate::arch::mm::alloc_and_map_user_memory(user_root_ppn, virt_addr, size, flags) }
+        crate::arch::mm::alloc_and_map_user_memory(user_root_ppn, virt_addr, size, flags)
     }
     #[cfg(feature = "x86_64")]
     {
-        // SAFETY: caller guarantees a valid root (see fn doc).
-        unsafe { crate::arch::mm::alloc_and_map_user_memory(user_root_ppn, virt_addr, size, flags) }
+        crate::arch::mm::alloc_and_map_user_memory(user_root_ppn, virt_addr, size, flags)
     }
 }
 
@@ -169,24 +164,12 @@ pub unsafe fn alloc_and_map_user_memory(
 /// PCID, see exec.rs); aarch64 decomposes the composed satp into
 /// TTBR0_EL1 (root PPA + ASID in [63:48]) with a full flush.
 ///
-/// # Safety
-/// `root_ppn` must be a live page-table root; caller must ensure the
-/// kernel half is mapped in the target root.
+/// Contract (INV-MM-10): `root_ppn` must be a live page-table root and
+/// the kernel half must be mapped in the target root — the unsafe
+/// arch-switch primitives live behind `edges::switch_address_space`.
 #[inline]
-pub unsafe fn switch_address_space(root_ppn: u64, asid: u16) {
-    #[cfg(feature = "riscv64")]
-    crate::arch::context::switch_mm(root_ppn, asid);
-    #[cfg(feature = "x86_64")]
-    {
-        // SAFETY: caller guarantees a valid root (see fn doc); the
-        // PCID-tagging/fallback discipline lives in asid::switch_root.
-        crate::arch::mm::asid::switch_root(root_ppn, asid);
-    }
-    #[cfg(feature = "aarch64")]
-    {
-        // SAFETY: caller guarantees a valid root (see fn doc).
-        crate::arch::mm::write_satp(crate::arch::mm::build_satp(asid, root_ppn as usize));
-    }
+pub fn switch_address_space(root_ppn: u64, asid: u16) {
+    edges::switch_address_space(root_ppn, asid);
 }
 
 /// Invalidate one user page mapping in the local TLB (no cross-CPU

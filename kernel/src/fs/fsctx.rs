@@ -38,6 +38,10 @@
 //! dentry/mount registry as mount(2) mounts (VfsMountInternal), so
 //! /proc/mounts, umount2 and MS_MOVE see them identically.
 
+// (INV-FSCTX-1: the fs_context fd family — private_data holds the
+// Box<FsContext> installed by sys_fsopen; every typed view is
+// OPS-IDENTITY-checked (FSCTX_OPS) before adoption, and the close
+// path is the single Box reclaim (INV-FS-FILEPRIV-1's cell twin).)
 use crate::fs::dentry::{Dentry, VfsMountInternal};
 use crate::fs::file::{FileFlags, FileOps};
 use crate::fs::inode::Inode;
@@ -521,11 +525,11 @@ pub fn make_detached_mount(
 /// Install a prepared file into the caller's fd table at the lowest
 /// free slot; EMFILE when full. Sets FD_CLOEXEC when asked.
 pub fn install_fd_with(file: Arc<crate::fs::File>, cloexec: bool) -> Result<usize, i32> {
-    let fdtable = crate::sched::get_current_fdtable().ok_or(-crate::syscall::errno::EBADF)?;
-    let fd = fdtable.alloc_fd().ok_or(-crate::syscall::errno::EMFILE)?;
+    let fdtable = crate::sched::get_current_fdtable().ok_or(-crate::errno::constants::EBADF)?;
+    let fd = fdtable.alloc_fd().ok_or(-crate::errno::constants::EMFILE)?;
     fdtable
         .install_fd(fd, file)
-        .map_err(|_| -crate::syscall::errno::EMFILE)?;
+        .map_err(|_| -crate::errno::constants::EMFILE)?;
     if cloexec {
         crate::fs::set_cloexec_fd(fd, true);
     }
@@ -590,14 +594,14 @@ pub fn mount_attr_apply(cur: MntFlags, attr_set: u64, attr_clr: u64) -> MntFlags
 /// rejected (no idmapped-mount support — userns_fd handling would lie).
 pub fn validate_mount_attr(attr: u64) -> Result<(), i32> {
     if attr & !(MOUNT_ATTR_KNOWN_SET | MOUNT_ATTR_IDMAP) != 0 {
-        return Err(-crate::syscall::errno::EINVAL);
+        return Err(-crate::errno::constants::EINVAL);
     }
     if attr & MOUNT_ATTR_IDMAP != 0 {
-        return Err(-crate::syscall::errno::EINVAL);
+        return Err(-crate::errno::constants::EINVAL);
     }
     let atime = attr & MOUNT_ATTR__ATIME;
     if atime != 0 && atime != MOUNT_ATTR_NOATIME && atime != MOUNT_ATTR_STRICTATIME {
-        return Err(-crate::syscall::errno::EINVAL);
+        return Err(-crate::errno::constants::EINVAL);
     }
     Ok(())
 }
@@ -619,23 +623,23 @@ pub fn validate_mount_attr_pair(attr_set: u64, attr_clr: u64) -> Result<(), i32>
     if attr_set & !(MOUNT_ATTR_KNOWN_SET | MOUNT_ATTR_IDMAP) != 0
         || attr_clr & !(MOUNT_ATTR_KNOWN_SET | MOUNT_ATTR_IDMAP) != 0
     {
-        return Err(-crate::syscall::errno::EINVAL);
+        return Err(-crate::errno::constants::EINVAL);
     }
     if attr_set & MOUNT_ATTR_IDMAP != 0 {
-        return Err(-crate::syscall::errno::EINVAL);
+        return Err(-crate::errno::constants::EINVAL);
     }
     if attr_clr & MOUNT_ATTR__ATIME != 0 {
         if attr_clr & MOUNT_ATTR__ATIME != MOUNT_ATTR__ATIME {
-            return Err(-crate::syscall::errno::EINVAL);
+            return Err(-crate::errno::constants::EINVAL);
         }
         match attr_set & MOUNT_ATTR__ATIME {
             x if x == MOUNT_ATTR_RELATIME
                 || x == MOUNT_ATTR_NOATIME
                 || x == MOUNT_ATTR_STRICTATIME => {}
-            _ => return Err(-crate::syscall::errno::EINVAL),
+            _ => return Err(-crate::errno::constants::EINVAL),
         }
     } else if attr_set & MOUNT_ATTR__ATIME != 0 {
-        return Err(-crate::syscall::errno::EINVAL);
+        return Err(-crate::errno::constants::EINVAL);
     }
     Ok(())
 }

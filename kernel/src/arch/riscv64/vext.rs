@@ -156,6 +156,9 @@ static VLEN_WARNED: AtomicBool = AtomicBool::new(false);
 /// instruction handler) on a hart that has V. Interrupts are disabled
 /// in the trap entry path, so the zeroing is atomic w.r.t. switches.
 pub fn vstate_first_use_init() -> bool {
+    // IRREDUCIBLE F-ROW (F-RV-3): zeroing the live vector register file
+    // (vmv.v.i x32 + CSR writes) — reference kernel vector.S's
+    // riscv_v_vstate_init counterpart; no safe Rust shape exists.
     if !hart_has_v() {
         return false;
     }
@@ -224,6 +227,12 @@ pub fn vstate_first_use_init() -> bool {
 /// targets are the caller's typed [u64; 4] / [u8; VREGS_BYTES] buffers.
 #[inline]
 pub fn vstate_save(csrs: &mut [u64; 4], vregs: &mut [u8; super::vext::VREGS_BYTES]) {
+    // IRREDUCIBLE F-ROW (F-RV-1): the whole-register vector save has no
+    // safe shape — Rust has no RVV intrinsics for vs1r/vl/vtype/vstart
+    // CSR access, and the sequence must run with the register file live.
+    // Reference counterpart: Linux kernel_rvec.S (vector state save,
+    // riscv/kernel/vector.S). The asm block below IS the primitive;
+    // targets are the typed buffers (x10/x11).
     // SAFETY: x10/x11 address the typed buffers (4x u64 + 512 bytes —
     // exactly what the sequence reads/writes).
     unsafe {
@@ -311,6 +320,9 @@ pub fn vstate_save(csrs: &mut [u64; 4], vregs: &mut [u8; super::vext::VREGS_BYTE
 /// buffers previously filled by [`vstate_save`].
 #[inline]
 pub fn vstate_restore(csrs: &[u64; 4], vregs: &[u8; super::vext::VREGS_BYTES]) {
+    // IRREDUCIBLE F-ROW (F-RV-2): the whole-register vector reload —
+    // same class as F-RV-1 (no safe RVV CSR/register access in Rust;
+    // reference kernel vector.S's restore path).
     // SAFETY: x10/x11 address the typed buffers (read-only for the
     // reload sequence).
     unsafe {

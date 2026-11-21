@@ -1132,6 +1132,114 @@ Non-hatches verified: everything else in kernel/src/safety/ is either
 typed-safe surface or pub(crate); frame.rs/dma.rs windows are
 constructed through their INV'd ctors.
 
+**Layer 2.2 machine-checked rows (Kani, 2026-11-21)** — the two
+riskiest INV families now carry bounded proofs (harnesses:
+kernel/safety-tests/src/kani.rs, `cargo kani` 12/12 green):
+
+- **INV-KPTR-1/2/4 (exactly-once free, layout lock)** — machine-
+  checked: the new->use->Drop lifecycle, the into_raw->from_raw
+  re-adoption (exactly one dealloc), and the leak arm (zero
+  deallocs, not UB) all verify UB-free for symbolic values; a
+  dealloc-layout drift or double free fails the proof.
+- **INV-MMIO-1/2/3 (no OOB window)** — machine-checked: for EVERY
+  offset value, each accessor (u8/u32/u64, read+write) either
+  accesses inside the declared window or reaches the designed
+  check() panic; no path performs an OOB access.
+- **INV-DMA-2/3 + INV-WINDOW-1/2/3 (the Miri-excluded families)** —
+  bounded proofs added: DmaBlock carve/volatile lifecycle and
+  KernelStackWindow read_u64's Some-only-in-window discipline.
+
+Two Kani convictions fixed in the same change (the proofs doing
+their job on the checker infrastructure itself):
+1. MmioRegion::check's alignment debug_assert computed `base + off`
+   with raw addition — off near usize::MAX overflowed the CHECKER
+   before the window guard ran (wrapping_add now; alignment is a
+   modulo property).
+2. KernelStackWindow::read_u64's guard computed `addr + 8` raw —
+   same class, the guard was UB-prone for the very addresses it
+   exists to reject (checked_add now).
+
+## Round-D contract addendum: the fs pre-convention population
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-FILE-ARC-1 | `fs/file.rs` | ArcInner strong-word offset pinned at boot (verify_arc_inner_layout); caller pins the allocation; CAS wins nonzero or fails clean |
+| INV-FILE-CELL-1 | `fs/file.rs` | inode/dentry/ops cells write-once at open pre-publication; private_data adds only the close-path take (INV-FS-FILEPRIV-1) |
+| INV-FILE-SEND-1 | `fs/file.rs` | File Sync/Send carried per-field: write-once cells, locked pos/cloexec/dirent_cache, atomics, real mutex |
+| INV-DENTRY-ADOPT-1 | `fs/dentry.rs` | claim-then-adopt: WalkClaim blocks the retirement drain; increment_strong_count+from_raw under the claim |
+| INV-DENTRY-MEMO-1 | `fs/dentry.rs` | child-memo family: seqlock small slots, children-lock Release big table, immutable nslots, claim-blocked drain |
+| INV-DENTRY-SEND-1 | `fs/dentry.rs` | Dentry/VfsMountInternal/BigMemoTable Sync/Send carried per-field (locks, seqlock, drain lock) |
+| INV-VFS-WALK-1 | `fs/vfs.rs` | path-walk raw-position family: every deref under a held WalkClaim or refreshed from a live Arc; adopts ride INV-DENTRY-ADOPT-1 |
+| INV-EXT4-JHANDLE-1 | `fs/ext4/namei.rs` | per-task journal-handle cell: set/clear/get/take_pre_capture all task-local |
+| INV-EXT4-SBINFO-1 | `fs/ext4/namei.rs` | in-memory sb_info installed once at mount, counters mutated under EXT4_BIG_LOCK |
+| INV-JBD2-BH-1 | `fs/jbd2/recovery.rs` | journal block IO family: bread-pinned blocks, bounds-checked byte views, single-threaded state machines |
+| INV-JBD2-INIT-1 | `fs/ext4/journal.rs` | journal init at mount: bh-pinned superblock probe + handle setup (single-threaded) |
+| INV-PROC-PIN-1 | `fs/procfs/pid.rs` | PinnedTask: pinned at construction, released in Drop; readers borrow through the pin |
+| INV-FSCTX-1 | `fs/fsctx.rs` | fs_context fd family: OPS-identity-checked typed views; close is the single Box reclaim |
+| INV-PIDFD-PIN-1 | `fs/pidfd.rs` | pidfd family: pid_hash_lookup_pinned + thread-ring leader pins, Drop releases exactly the pins taken |
+| INV-VT-PRIV-1 | `fs/vt.rs` | VT device fd family: Box<DevNo> cell, close is the single reclaim |
+| INV-TMPFS-SB-1 | `fs/tmpfs.rs` | tmpfs mount-lifetime family: leaked-in-registry sb (GLOBALSB provenance); name cells under the children lock |
+| INV-PIPE-BUF-1 | `fs/pipe.rs` | pipe buffer family: ring pages/cursors mutated only under the pipe inode lock; resize under the same lock |
+| INV-TTY-WIRE-1 | `fs/tty.rs` | termios/termio wire converters: POD struct-bytes casts, fixed sizes, no pointers |
+| INV-INODE-STATDEV-1 | `fs/inode.rs` | stat-dev registry family: locked map; advisory-mode volatile store (ATIME shape) |
+| INV-EXT4-INODEIO-1 | `fs/ext4/inode.rs` | on-disk inode IO: bread-pinned table blocks, fixed-offset field writes, EXT4_BIG_LOCK |
+| INV-EXT4-HTREE-1 | `fs/ext4/htree.rs` | htree dir-block views: bounds-checked entry/leaf walks over the pinned dir block |
+| INV-BUFCHUNK-1 | `fs/buffer.rs` | chunked-buffer family: CopyBytes-shaped POD views + chunk-table stores under the buffer lock |
+| INV-DEVFS-SHARED-1 | `fs/devfs/mod.rs` | coherent shared-backing family: grows/mutates under the entry shared lock; pages pinned through the table |
+| INV-INOTIFY-PRIV-1 | `fs/inotify.rs` | inotify fd family: Box'd instance state cell; watches under the group lock; close is the reclaim |
+| INV-LOCKS-KEY-1 | `fs/locks.rs` | file-lock family: keys/registries in locked maps; raw words are identity keys, never dereferenced |
+| INV-EXT4-IND-1 | `fs/ext4/indirect.rs` | indirect-block family: bread-pinned chain steps, triple bounds-checked |
+| INV-SYSRQ-1 | `fs/procfs/sysrq.rs` | sysrq diagnostics: task words/stacks through TaskBorrow pins held across the print |
+| INV-SBTYPE-1 | `fs/superblock.rs` | FileSystemType table ABI: raw-pointer extern "C" mount/kill_sb slots |
+| INV-CHARDEV-PRIV-1 | `fs/char_dev.rs` | char-device fd family: driver tag/state word cell (FILEPRIV discipline) |
+| INV-EXT4-ALLOC-1 | `fs/ext4/allocator.rs` | bitmap family: bread-pinned RMW blocks under EXT4_BIG_LOCK |
+| INV-PROCFS-SEND-1 | `fs/procfs/mod.rs` | ProcFSNode Sync/Send carried per-field (children/override fields under their locks) |
+
+## Round-D contract addendum (GAP pass 2)
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-MM-1 | `mm/edges.rs` | ! - INV-MM-1 (node borrow) — the single UMA node's `PglistData` as a |
+| INV-MM-2 | `mm/lru.rs` | (INV-MM-2 owned-frame arm). |
+| INV-MM-3 | `mm/memblock.rs` | mm::edges (INV-MM-3) use to reach it; never called from elsewhere |
+| INV-MM-4 | `mm/edges.rs` | INV-MM-4: the slab allocator's in-region raw accesses. All pointers are |
+| INV-MM-COMPACT-1 | `mm/compact.rs` | (INV-MM-COMPACT-1: the compactor family — page migration walks |
+| INV-PERCPU-1 | `sync/percpu.rs` | (INV-PERCPU-1: the per-CPU bank family — banks are addressed by |
+| INV-PERF-EV-1 | `perf/mod.rs` | (INV-PERF-EV-1: the perf-event family — the registry's Box<PerfEvent> |
+| INV-RCU-1 | `sync/rcu.rs` | (INV-RCU-1: the RCU family — grace-period state is per-CPU |
+| INV-RWLOCK-1 | `sync/rwlock.rs` | (INV-RWLOCK-1: the rwlock family — reader counts and the writer |
+| INV-SCE-11 | `sched/sched.rs` | INV-SCE-11: the tp-register derivation lives in the edges |
+| INV-SKB-1 | `net/buffer.rs` | (INV-SKB-1: the sk_buff family — heads are allocator-owned blocks |
+| INV-SMALLALLOC-1 | `mm/small_alloc.rs` | (INV-SMALLALLOC-1: the small allocator family — the magazine |
+| INV-SPIN-1 | `sync/spinlock.rs` | (INV-SPIN-1: the spinlock family — guards deref through the |
+| INV-TASKLET-1 | `interrupt/tasklet.rs` | (INV-TASKLET-1: the tasklet family — the intrusive list protocol is |
+| INV-TESTHARNESS-1 | `tests/fair_timeline.rs` | (INV-TESTHARNESS-1: the in-kernel test-harness family — fair_timeline/ |
+| INV-UACCESS-SAFE-1 | `arch/uaccess_safe.rs` | (INV-UACCESS-SAFE-1: the capsule's own edges — each safe wrapper |
+| INV-VDSO-DATA-1 | `mm/vdso.rs` | (INV-VDSO-DATA-1: the vDSO data page family — the page is a fixed |
+
+| INV-SKB-1 | `net/buffer.rs` | sk_buff family: allocator-owned heads, headroom-tracked data spans, bounds-checked slices |
+| INV-VDSO-DATA-1 | `mm/vdso.rs` | vDSO data page: fixed static mapping, page-constant offsets, seqlock write discipline |
+| INV-RWLOCK-1 | `sync/rwlock.rs` | rwlock family: atomic reader counts + writer word with documented pairing; guards ride the held lifetime; panic rows best-effort |
+| INV-SPIN-1 | `sync/spinlock.rs` | spinlock guards ride the held-lock lifetime; panic/deadlock-warn rows are PANIC-TIME BEST-EFFORT (tolerate garbage; the machine is already failing) |
+| INV-TASKLET-1 | `interrupt/tasklet.rs` | tasklet family: intrusive list is F6-registered; clone-to-claim rides the per-CPU list lock + Release count |
+| INV-SMALLALLOC-1 | `mm/small_alloc.rs` | small allocator: magazine spans/class pages owned by the class lock; arena base installed once |
+| INV-UACCESS-SAFE-1 | `arch/uaccess_safe.rs` | the capsule's own edges: one audited primitive call per wrapper (INV-UACCESS-1); UserPtr/Slice carry the addr/len pair |
+| INV-TESTHARNESS-1 | `tests/*.rs` | in-kernel test harnesses: adversarial raw statics are the thing under test; unit-test feature only |
+
+| INV-KSWAPD-1 | `mm/kswapd.rs` | reclaim scanner: zone/LRU-locked list walks; descriptor updates inside the isolation window |
+
+| INV-SEQLOCK-1 | `sync/seqlock.rs` | seqlock family: even-sequence validated reads, exclusive writer phase, the UnsafeCell IS the discipline |
+| INV-RWSEM-1 | `sync/rwsem.rs` | rwsem family: count-word protocol pairs with the waitqueue; guards ride the held lifetime; panic rows best-effort |
+| INV-RMAP-1 | `mm/rmap.rs` | reverse-map family: map-locked walks; index words read under the rmap lock's Release publication |
+| INV-PAGEDESC-1 | `mm/page_desc.rs` | vmemmap family: pfn-addressed descriptors through the managed-range-checked linear array; lock-free flag atomics |
+
+| INV-SENDSYNC-1 | cross-file | per-field Send/Sync impls on device/node structs (virtio_gpu/input, NetDevice, DebugFsNode, KObject, VfsMount, FsStruct, RootFSPathCache, MmStruct, VmaManager, fair-timeline nodes): each carried by that struct's own locks/atomics/write-once cells — spot-checked per impl at retag |
+| INV-COV-1 | `cov.rs` | coverage runtime's instrumented edge (capture under the cov-dump feature only) |
+| INV-STATIC-CELL-1 | cross-file | OnceCell/MaybeUninit static-singleton publishes (KERNEL_LAYOUT, NODE_DATA banks, deferred-free POOL, vmemmap stats): single early-boot writer under the init order, shared readers after |
+| INV-IOURING-REGION-1 | `io_uring/mod.rs` | the ring region family: alloc/free of the shared rings + page pins; views ride INV-IOURING-RING-1 |
+| INV-SYSV-UAPI-2 | `ipc/sysv_*.rs` | residual uaccess staging rows (sops copy edges + shm page ops) on the capsule boundary |
+| INV-KTASK-1 | cross-file | (*task)/task-ref rows where the source is a typed &Task/&mut Task or a pinned handle (pid_hash/current callers) — the cargo-cult audit applies, adopt rows ride INV-TASKREF-1 |
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
