@@ -846,7 +846,7 @@ fn handle_syscall(regs: &mut PtRegs) {
     // classic-BPF program; ERRNO actions replace the return value, KILL
     // actions queue SIGKILL. Returns Some(rv) when the syscall is blocked
     // (rv is reported to user), None when dispatch may proceed.
-    if let Some(rv) = crate::syscall::process::seccomp_syscall_gate(syscall_num, regs) {
+    if let Some(rv) = crate::syscall::seccomp::seccomp_syscall_gate(syscall_num, regs) {
         regs.a0 = rv as u64;
         return;
     }

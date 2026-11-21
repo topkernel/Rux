@@ -14,6 +14,8 @@
 // (declared at the crate root via #[path] — see main.rs/lib root).
 #![forbid(unsafe_code)]
 
+pub mod seccomp;
+
 /// The seam registration hook (flip milestone shape): called by
 /// rust_main before the impl; the LIB-side default is a no-op — the
 /// service-crate composition (the bin) overrides it via the table's
