@@ -85,7 +85,7 @@
     <h1>安全总览</h1>
     <div class="sub">安全论证的枢纽页:核心命题、四个子页的地图与 headline 数字 —— 每个论断在子页内给出机制、数据与出处 · 活文档:docs/architecture/safety-and-performance.md(每轮合并持续收证)</div>
 
-    <div class="callout" id="archdoc"><b>安全架构总文档(2026-11-20):docs/architecture/memory-safety-architecture.md。</b>一篇文档讲清整个内存安全设计:六层防御 —— L1 语言隔离、L2 系统调用边界、L3 特权模型、L4 硬件辅助、L5 形式验证、L6 运行时缓解,层与层互相支撑(语言消除缺陷类别 → 类型化原语把 unsafe 收缩为单次审计边 → 编译器强制的服务层边界 → 锁协议在源头消除并发失效形状 → 硬件把残余类别变成必然报错);两个数字的度量 —— unsafe 块行占 2.5%(9,238 行),含 unsafe fn/impl 体的双口径 3.2%(11,557 行),逐轮记账、只降不升,终点 ≤5,000 行 / ≤1% 并附逐块不可约证明;六条流程规则 —— 健全性边界即模块边界、检测器只报告不修复、热路径无打印、release 构建关闭调试特性、同一缺陷形状第三次出现即触发原语设计评审、缺陷全史逐条登记。全文含威胁模型(全史 33 例逐条裁定)、带不变量合同的原语目录、锁协议与诚实的缺口清单。<a href="https://github.com/topkernel/Rux/blob/main/docs/architecture/memory-safety-architecture.md">阅读全文(GitHub)↗</a></div>
+    <div class="callout" id="archdoc"><b>安全架构总文档(2026-11-20):docs/architecture/memory-safety-architecture.md。</b>一篇文档讲清整个内存安全设计:六层防御 —— L1 语言隔离、L2 系统调用边界、L3 特权模型、L4 硬件辅助、L5 形式验证、L6 运行时缓解,层与层互相支撑(语言消除缺陷类别 → 类型化原语把 unsafe 收缩为单次审计边 → 编译器强制的服务层边界 → 锁协议在源头消除并发失效形状 → 硬件把残余类别变成必然报错);两个数字的度量 —— unsafe 块行占 2.2%(8,759 行),含 unsafe fn/impl 体的双口径 2.2%(10,742 行),逐轮记账、只降不升,终点 ≤5,000 行 / ≤1% 并附逐块不可约证明;六条流程规则 —— 健全性边界即模块边界、检测器只报告不修复、热路径无打印、release 构建关闭调试特性、同一缺陷形状第三次出现即触发原语设计评审、缺陷全史逐条登记。全文含威胁模型(全史 33 例逐条裁定)、带不变量合同的原语目录、锁协议与诚实的缺口清单。<a href="https://github.com/topkernel/Rux/blob/main/docs/architecture/memory-safety-architecture.md">阅读全文(GitHub)↗</a></div>
 
     <h2 id="thesis"><span class="anchor">§1</span>核心命题</h2>
     <div class="callout"><b>安全检查在编译期发生、从快路径消失 —— 快的设计与安全的设计是同一个设计。</b>传统内核中安全与速度在快路径上互换;本内核将检查前移至类型系统与构建期,快路径不再支付该项成本。下方 §5 给出逐条"性能结果 ← 所携带安全性质"的配对实证。</div>
@@ -94,7 +94,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>子页</th><th>回答的问题</th><th>headline</th></tr></thead>
       <tbody>
-        <tr><td><a href="unsafe.html">分层 unsafe 台账</a></td><td>内存安全 TCB 有多大、在哪、受什么流程约束?</td><td class="num">2.5% unsafe 块行(393 文件/2,111 块;9,238/364,401 行),双口径 3.2%(含 unsafe fn/impl 体,11,557 行);Framework/Service 分层,service 层 forbid 82,预算只降不升</td></tr>
+        <tr><td><a href="unsafe.html">分层 unsafe 台账</a></td><td>内存安全 TCB 有多大、在哪、受什么流程约束?</td><td class="num">2.2% unsafe 块行(393 文件/2,137 块;8,759/396,139 行),双口径 2.2%(含 unsafe fn/impl 体,10,742 行);Framework/Service 分层,service 层 forbid 82,预算只降不升</td></tr>
         <tr><td><a href="taxonomy.html">缺陷分类学</a></td><td>历史缺陷实际长什么样、落在哪?</td><td class="num">全史 33 例逐条裁定:23 unsafe/汇编 + 10 safe 所有权类;指针表达式类 <b>0</b>;6 例 boot 前评审捕获</td></tr>
         <tr><td><a href="formal.html">形式验证</a></td><td>超出人工评审的机器验证有哪些?</td><td class="num">Kani 164 harness · SPIN 4 模型 · loom 8 场景 · Miri · 1,184 宿主测试;镜像同步纪律钉住证明有效性</td></tr>
         <tr><td><a href="hardening.html">运行时强化与缺口</a></td><td>运行时防线有哪些?缺什么、闭合形态是什么?</td><td class="num">六层防御模型 5/6 具备;posture 21 行 = 7 具备/3 quick/10 立项/1 接受;缺口逐项带闭合形态</td></tr>
@@ -103,7 +103,7 @@
 
     <h2 id="composite"><span class="anchor">§3</span>复合论证:为什么这些数字构成"足够安全"</h2>
     <ol>
-      <li><b>类别消除(编译期)</b>:统治 C 内核 CVE 史的表达式级缺陷(越界/迭代器失效/野指针运算/格式串)在 safe 代码中不可表达 —— 分类学的 <b>0 例</b>是该主张的实证面;unsafe 面收缩至 3.2%(双口径)且逐块审计。</li>
+      <li><b>类别消除(编译期)</b>:统治 C 内核 CVE 史的表达式级缺陷(越界/迭代器失效/野指针运算/格式串)在 safe 代码中不可表达 —— 分类学的 <b>0 例</b>是该主张的实证面;unsafe 面收缩至 2.2%(双口径)且逐块审计。</li>
       <li><b>残余类有专项应对</b>:10 例 safe 类缺陷全部是所有权/引用计数/锁协议/栈深决策 —— 即模型检查与符号执行的靶:loom 交错枚举(启用头 90 秒捕获一例真实锁协议缺陷)、Kani 对全部输入证明不变量表、proptest 钉评分/编码/代数规则。</li>
       <li><b>证明有效性有流程保证</b>:镜像同步纪律使内核代码与被证副本的漂移直接 fail 构建 —— 证明不会随演化静默失效;CI 分层(per-push 轻量 + nightly 重型)保证装置实际运行。</li>
       <li><b>缺陷面设计化</b>:panic 路径逐实例收编(十余条回归测试收据);仪器误判与负结果带收据归档 —— 判定纪律自身受审计。</li>
@@ -116,7 +116,7 @@
       <tbody>
         <tr><td>内存破坏类缺陷(全史,逐条裁定)</td><td class="num">33(23 unsafe 类 / 10 safe 所有权类)</td><td><a href="taxonomy.html">分类学 §2</a></td></tr>
         <tr><td>指针表达式类缺陷(safe 代码)</td><td class="num">0</td><td><a href="taxonomy.html">分类学 §2</a></td></tr>
-        <tr><td>unsafe 行占比 / unsafe 块</td><td class="num">2.5%(9,238/364,401 行)/ 2,111 块 · 双口径 3.2%(11,557 行)</td><td><a href="unsafe.html">台账 §3</a></td></tr>
+        <tr><td>unsafe 行占比 / unsafe 块</td><td class="num">2.2%(8,759/396,139 行)/ 2,137 块 · 双口径 2.2%(10,742 行)</td><td><a href="unsafe.html">台账 §3</a></td></tr>
         <tr><td>编译期 forbid(unsafe_code) 文件</td><td class="num">47(+56 文件已无 unsafe)</td><td><a href="unsafe.html">台账 §4</a></td></tr>
         <tr><td>Kani harness(对全输入证明)</td><td class="num">164(34 文件)/ ~150 个不变量族</td><td><a href="formal.html">形式验证 §2</a></td></tr>
         <tr><td>SPIN 模型 / loom 场景</td><td class="num">4 模型全 PASS / 8 场景(3 预植必捕)</td><td><a href="formal.html">形式验证 §3-4</a></td></tr>

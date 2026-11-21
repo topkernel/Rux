@@ -94,7 +94,7 @@
       <thead><tr><th>Layer</th><th>Contents</th><th>unsafe policy</th></tr></thead>
       <tbody>
         <tr><td><b>Framework</b></td><td>the hardware/privilege TCB: trap entry, page tables, context switch, raw MMIO/DMA, uaccess, low-level sync primitives (arch/, mm/, interrupt/, the virtio·intc·timer·pci cores, console/printk/sbi/main etc.)</td><td>unsafe permitted; every block carries a <code>// SAFETY:</code> invariant comment, coverage tracked in the ledger</td></tr>
-        <tr><td><b>service</b></td><td>everything userspace-facing (syscall, fs, ipc, net, process, the sched upper layer, cgroup, procfs...)</td><td><code>#![forbid(unsafe_code)]</code> is the target state (currently 191 modules compile-time forbidden; 93 service files already unsafe-free)</td></tr>
+        <tr><td><b>service</b></td><td>everything userspace-facing (syscall, fs, ipc, net, process, the sched upper layer, cgroup, procfs...)</td><td><code>#![forbid(unsafe_code)]</code> is the target state (currently 165 modules compile-time forbidden; 93 service files already unsafe-free)</td></tr>
         <tr><td><b>diagnostics</b></td><td>dfx/ forensic instruments, raw-memory tooling</td><td>reported separately — diagnostic churn must not hide inside the Framework bucket</td></tr>
         <tr><td><b>test</b></td><td>test code</td><td>excluded from the headline figure</td></tr>
       </tbody>
@@ -109,7 +109,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>Directory</th><th class="num">unsafe lines</th><th class="num">unsafe density</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td>Whole kernel</td><td class="num">9,238 / 364,401 lines (391 files, 2,424 unsafe blocks); dual series 11,557 lines (with unsafe fn/impl bodies)</td><td class="num"><b>2.5%</b> (dual <b>3.2%</b>)</td><td>budget rule: the percentage only goes down, or an increase is justified per release</td></tr>
+        <tr><td>Whole kernel</td><td class="num">8,759 / 396,139 lines (391 files, 2,424 unsafe blocks); dual series 10,742 lines (with unsafe fn/impl bodies)</td><td class="num"><b>2.2%</b> (dual <b>2.2%</b>)</td><td>budget rule: the percentage only goes down, or an increase is justified per release</td></tr>
         <tr><td>fs</td><td class="num">3,978</td><td class="num">5.2%</td><td>ext4 and the page cache form the bulk of the budget</td></tr>
         <tr><td>syscall</td><td class="num">1,962</td><td class="num">4.8%</td><td>the capsule boundary layer</td></tr>
         <tr><td>process / drivers</td><td class="num">1,777 / 1,189</td><td class="num">9.5% / 4.5%</td><td>process completed its typed-handle conversion (round 3b)</td></tr>
@@ -144,7 +144,7 @@
       <li><b>Class elimination (compile time)</b>, against C-kernel CVE history: buffer overruns (bounds-checked slices), Arc-owned use-after-free/double-free, data races on typed shared state (Send/Sync), iterator invalidation (borrowck), format-string injection (typed formatting) — the dominant classes are <b>unrepresentable in safe code</b>; the taxonomy's zero pointer-expression defects is the empirical face of the same argument (see <a href="taxonomy.html">taxonomy</a>).</li>
       <li><b>The density argument</b>: sync at 2.8% unsafe density is the layering's living sample — unsafe area scales with primitive complexity, not API surface.</li>
       <li><b>The pairing argument</b>: every Framework primitive carries (a) a Kani harness, (b) a proptest, and (c) — as the Framework shrinks — a Verus function spec (the registered next step, page-flag/refcount algebra first); RustBelt is cited as the trust anchor, not a build dependency.</li>
-      <li><b>The budget argument</b>: the monotone-down rule on the 3.2% dual series + every newly added unsafe requiring a commit-body explanation of "why safe code was not possible" — TCB growth is constrained by process, not convention.</li>
+      <li><b>The budget argument</b>: the monotone-down rule on the 2.2% dual series + every newly added unsafe requiring a commit-body explanation of "why safe code was not possible" — TCB growth is constrained by process, not convention.</li>
     </ul>
 
     <div class="callout">Reproduce: python3 scripts/gen_tcb_ledger.py --markdown (the layered token basis); python3 scripts/tcb_ledger.py (the line basis). Canonical: docs/architecture/kernel-layers.md (the rules + forbid effort), docs/development/tcb-ledger.md (the generated ledger). Related: <a href="formal.html">formal verification</a> (Kani proving unsafe), <a href="taxonomy.html">defect taxonomy</a> (the residency evidence).</div>
