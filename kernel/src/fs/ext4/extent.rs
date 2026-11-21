@@ -1246,15 +1246,12 @@ fn find_block_in_external_extent(
     // aligned block-sized byte slice; the subsequent casts to Ext4ExtentHeader,
     // Ext4Extent, and Ext4ExtentIdx are within this buffer and eh_entries is
     // validated against the on-disk header.
-    unsafe {
-        let bh = bio::bread(fs.device, block_num)
-            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-        let data = &(*bh).b_data;
+    // The read edge owns brelse on EVERY path (the interleaved
+    // release-on-error returns below were the raw shape).
+    match bio::with_block(fs.device, block_num, |data| -> Result<u64, i32> {
         let header = node_header(data);
 
         if header.eh_magic != EXT4_EXT_MAGIC {
-            bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
 
@@ -1266,7 +1263,6 @@ fn find_block_in_external_extent(
         if header.eh_entries > header.eh_max
             || header.eh_max as usize > max_slots
         {
-            bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
 
@@ -1280,23 +1276,19 @@ fn find_block_in_external_extent(
 
                 if logical_block >= start && logical_block < end {
                     let offset = logical_block - start;
-                    let unwritten = ext.is_unwritten();
-                    bio::brelse(bh);
                     // Ok(phys) loses the unwritten flag; callers that need
                     // it use find_block_external_ex below.
-                    let _ = unwritten;
                     return Ok(ext.start_block() + offset);
                 }
             }
 
-            bio::brelse(bh);
             Ok(0)
         } else {
-            // Internal node: recursive search
+            // Internal node: find the child index (binary-search-shaped
+            // scan), return it — the RECURSION runs outside the block
+            // scope (the child read takes its own buffer).
             let indices = node_indices(data, header.eh_entries as usize);
-
-            // Binary search for appropriate index
-            let mut child_block = 0;
+            let mut child_block = 0u64;
             for idx in indices {
                 if logical_block >= idx.ei_block as u64 {
                     child_block = idx.leaf_block();
@@ -1304,16 +1296,17 @@ fn find_block_in_external_extent(
                     break;
                 }
             }
-
-            bio::brelse(bh);
-
-            if child_block == 0 {
-                return Ok(0);
-            }
-
-            // Recursive search
-            find_block_in_external_extent(fs, child_block, logical_block, depth + 1)
+            Ok(child_block)
         }
+    }) {
+        Some(Ok(0)) => Ok(0),
+        Some(Ok(child)) if child > 0 => {
+            // Recursive search (own buffer, released by its own edge).
+            find_block_in_external_extent(fs, child, logical_block, depth + 1)
+        }
+        Some(Ok(_)) => Ok(0),
+        Some(Err(e)) => Err(e),
+        None => Err(errno::Errno::IOError.as_neg_i32()),
     }
 }
 
