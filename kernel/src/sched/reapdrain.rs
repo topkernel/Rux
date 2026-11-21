@@ -74,16 +74,91 @@ const SUSTAINED_FREE_TICKS: u32 = 20;
 /// already have named.
 const PENDING_CAP: usize = 1024;
 
-// The pending list crosses CPUs by design (the reaper enqueues, the
-// ticking CPU drains); the raw task pointer's exclusivity comes from
-// the release contract (unreachable via pid hash/tree; the list is
-// the sole owner) — the same Send/Sync declaration every queue in
-// this subsystem carries.
-unsafe impl Send for PendingReap {}
-unsafe impl Sync for PendingReap {}
+/// ReapClaim — the linearly-owned storage-free obligation for one
+/// unreachable task (Round-B pilot; the design page in run/UR-L1.md).
+///
+/// **MINT** — [`ReapClaim::mint`], exactly once per reap, from
+/// `release_task` AFTER pid_hash_remove + tree detach (the
+/// unreachability contract): from that moment nobody else can or will
+/// free this task's storage — the claim IS that obligation as a type.
+///
+/// **BURN** — [`ReapClaim::into_free`], consumes `self`, runs the
+/// storage-free window. Exactly-once is compiler-enforced: the claim
+/// is not `Clone`/`Copy` and `into_free` takes it by value.
+///
+/// **READS** — the ladder's checks go through [`ReapClaim::task`]
+/// (shared) and [`ReapClaim::as_ptr`] (the identity comparisons
+/// against per-CPU slots): no raw task pointer escapes this module.
+///
+/// **DROP** — the over-cap leak path (explicit, counted in
+/// [`CLAIM_DROPPED`]): a dropped claim leaks the Task page loudly,
+/// exactly the pre-pilot over-cap semantics.
+///
+/// The page's own lifecycle (alloc/poison/dealloc, INV-TL-1/2) is
+/// UNCHANGED — the claim types the free-obligation, not the page.
+/// Identity preservation: `as_ptr()` returns the minted pointer,
+/// always; the slot comparison and `into_free`'s body are
+/// byte-identical to the raw-pointer form they replace (the
+/// corruption-battery obligation).
+pub struct ReapClaim(core::ptr::NonNull<Task>);
+
+/// Claims ever dropped unburned (the over-cap leak counter — nonzero
+/// growth names a wedged drainer, same as the pre-pilot semantics).
+static CLAIM_DROPPED: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+// The claim crosses CPUs by design (reaper mints, the ticking CPU
+// burns); the exclusivity is the linear type itself plus the
+// unreachability contract minted on — the same Send/Sync declaration
+// every queue handle in this subsystem carries.
+unsafe impl Send for ReapClaim {}
+
+impl ReapClaim {
+    /// Mint the storage-free obligation for `task`.
+    ///
+    /// # Contract (the mint side of the pilot)
+    /// `task` is non-null and UNREACHABLE: pid_hash_remove and the
+    /// tree detach already ran (the caller is `release_task`'s tail);
+    /// no slot, queue, or tp register will name it again except
+    /// transiently through the ladder's re-verified checks. `None`
+    /// means null input (caller bug — the release path never passes
+    /// one).
+    pub fn mint(task: *mut Task) -> Option<Self> {
+        // SAFETY: NonNull::new is the null check; the unreachability
+        // contract is the caller's (documented above, one call site).
+        core::ptr::NonNull::new(task).map(ReapClaim)
+    }
+
+    /// The identity (bit-identical to the minted pointer, always).
+    #[inline]
+    pub fn as_ptr(&self) -> *mut Task {
+        self.0.as_ptr()
+    }
+
+    /// Shared read view for the ladder's checks (the INV-SCE-2
+    /// contract: unreachable-but-mapped; the claim keeps the page
+    /// alive by postponing the free).
+    #[inline]
+    fn task(&self) -> &Task {
+        // SAFETY: the claim owns the free; until into_free runs the
+        // page is mapped and immutable to everyone else (DEAD,
+        // unlinked) — the same argument every task_shared caller
+        // makes, now with the obligation typed.
+        unsafe { self.0.as_ref() }
+    }
+
+    /// Burn: consume the obligation and run the storage free.
+    /// Byte-identical to the raw form's `reap_storage_free` (the
+    /// identity-preservation obligation).
+    fn into_free(self) {
+        let task = self.0.as_ptr();
+        core::mem::forget(self);
+        reap_storage_free(task);
+    }
+}
 
 struct PendingReap {
-    task: *mut Task,
+    claim: ReapClaim,
     /// Consecutive ticks the entry has held the R85 conjunction.
     r85_ticks: u32,
     /// Past the switch stage, waiting for the batch grace target.
@@ -105,12 +180,26 @@ static R85_FREED: core::sync::atomic::AtomicU32 =
 /// Hand the storage free of a fully-released task to the drainer.
 /// `false` = over cap: the caller must run the synchronous fallback.
 pub fn defer_reap_storage(task: *mut Task) -> bool {
+    // The mint: the obligation leaves the reaper's hands here. On
+    // over-cap return the OBLIGATION stays with the caller (the raw
+    // fallback frees it) — the claim is not minted.
+    let claim = match ReapClaim::mint(task) {
+        Some(c) => c,
+        None => return false,
+    };
     let mut p = PENDING.lock();
     if p.len() >= PENDING_CAP {
+        // Un-mint: hand the obligation back to the caller by
+        // returning false; the claim must not drop (that would leak
+        // what the fallback is about to free). into_free is the only
+        // exit — so burn it here into the raw form the fallback
+        // expects. (The mint/burn pair at the cap boundary is the
+        // one place the raw form resurfaces, by design.)
+        core::mem::forget(claim);
         return false;
     }
     p.push(PendingReap {
-        task,
+        claim,
         r85_ticks: 0,
         grace: false,
     });
@@ -121,8 +210,9 @@ pub fn defer_reap_storage(task: *mut Task) -> bool {
 /// (the L6 lesson): DEAD, off-CPU, no in-flight marker, and EITHER the
 /// positive terminal marker or the R85 physical truth (no slot names
 /// the task on any hart). Returns (complete, via_r85).
-fn switch_stage_done(task: *mut Task) -> (bool, bool) {
-    let t = crate::sched::edges::task_shared(task);
+fn switch_stage_done(claim: &ReapClaim) -> (bool, bool) {
+    let task = claim.as_ptr();
+    let t = claim.task();
     if !t.state().is_dead() || t.on_cpu() {
         return (false, false);
     }
@@ -199,7 +289,7 @@ pub fn reap_drain_tick() {
 
     for mut e in batch.drain(..) {
         if !e.grace {
-            let (done, via_r85) = switch_stage_done(e.task);
+            let (done, via_r85) = switch_stage_done(&e.claim);
             if !done {
                 keep.push(e);
                 continue;
@@ -216,7 +306,7 @@ pub fn reap_drain_tick() {
                     crate::dfx::taskdump::taskdump_dec(n as u64);
                     crate::dfx::taskdump::taskdump_raw_line(b" pid=");
                     crate::dfx::taskdump::taskdump_dec(
-                        crate::sched::edges::task_shared(e.task).pid() as u64,
+                        e.claim.task().pid() as u64,
                     );
                     crate::dfx::taskdump::taskdump_raw_line(b"\n");
                 }
@@ -236,7 +326,11 @@ pub fn reap_drain_tick() {
             // Storage free (release_task_storage's tail, minus both
             // waits — the conditions it waited for are exactly the
             // ones this ladder proved).
-            reap_storage_free(e.task);
+            // The burn: the obligation this entry carried since its
+            // mint is consumed here — into_free is the only exit from
+            // the claim type, so the exactly-once free is a type
+            // invariant now (the pilot's deliverable).
+            e.claim.into_free();
             freed += 1;
         } else {
             keep.push(e);
@@ -255,7 +349,7 @@ pub fn reap_drain_tick() {
             // corrupting anything (the cap only binds with a wedged
             // drainer). Counted below.
             else {
-                R85_FREED.fetch_add(0, Ordering::Relaxed);
+                CLAIM_DROPPED.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
