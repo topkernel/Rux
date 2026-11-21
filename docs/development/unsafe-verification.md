@@ -3445,7 +3445,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1705 | rust_main | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `819b2db7fb66` |
+| 1711 | rust_main | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `327fa7ff2852` |
 
 ### kernel/src/printk.rs (4)
 
@@ -3747,10 +3747,10 @@ census id is accounted for here.
 | 92 | list_entry_mut | block | ptr-ops | INV:INV-SYSC-1 | `533b6bc2c4dd` |
 | 103 | list_link_tail | block | - | INV:INV-SYSC-1 | `1f325ab448d9` |
 | 111 | list_unlink | block | - | INV:INV-SYSC-1 | `77a52e19abb7` |
-| 123 | <module> | unsafe-impl | - | INV:INV-SYSC-1 | `d5ba29318a31` |
-| 129 | <module> | unsafe-impl | - | INV:INV-SYSC-1 | `f910f469f36f` |
-| 132 | <module> | unsafe-impl | - | INV:INV-SYSC-1 | `91d8acb9507e` |
-| 136 | <module> | unsafe-impl | - | INV:INV-SYSC-2 | `2318d7417f42` |
+| 123 | <module> | unsafe-impl | - | INV:INV-SYSC-1 | `92df503eb9b7` |
+| 129 | <module> | unsafe-impl | - | INV:INV-SYSC-1 | `1298f229abc4` |
+| 132 | <module> | unsafe-impl | - | INV:INV-SYSC-1 | `61fb552d7f39` |
+| 136 | <module> | unsafe-impl | - | INV:INV-SYSC-2 | `0560f3e2719c` |
 | 152 | boxed_ref | block | - | INV:INV-SYSC-2 | `a0f00f066fa5` |
 | 164 | boxed_mut | block | - | INV:INV-SYSC-2 | `1d5765155960` |
 | 176 | boxed_drop | block | - | INV:INV-SYSC-2 | `f16318f757ac` |

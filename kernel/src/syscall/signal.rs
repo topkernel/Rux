@@ -6,7 +6,6 @@
 //!
 //! Includes: rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack, sigpending
 
-#![forbid(unsafe_code)]
 
 use super::*;
 
