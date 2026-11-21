@@ -87,7 +87,7 @@
     <ul>
       <li><b>New Introduction page</b> (<a href="../about.html">about.html</a>, both languages): the project's position, the ABI contract, the AI working method, the unsafe detail, the performance comparison, what the tree contains and what is unfinished — collected on one page, linked from the top nav and the homepage buttons.</li>
       <li><b>Site figures refreshed to main @ 1689270d8</b>: kernel/ 679 files · <b>419,958 lines</b> (408,864 Rust); <b>349</b> system calls; in-kernel suite <b>1,584/1,584</b> (riscv64); <b>164</b> Kani harnesses; 1,184 host tests; <b>29</b> registered design divergences (the D-21 numbering collision is closed, D-29 fills the gap); the defect taxonomy holds 33 cases (23 unsafe/asm + 10 safe).</li>
-      <li><b>Unsafe ledger accounting fixed</b>: the ledger and census scripts now count git-tracked sources only — a stale generated file left by an older build (kernel/src/debug/ksyms_generated.rs, 27,625 lines, referenced by no module) had been diluting the denominator and reading low. The fix removed the dilution; every reduction round since re-banks on the dual series — see the ledger page for the current reading (3.6% dual).</li>
+      <li><b>Unsafe ledger accounting fixed</b>: the ledger and census scripts now count git-tracked sources only — a stale generated file left by an older build (kernel/src/debug/ksyms_generated.rs, 27,625 lines, referenced by no module) had been diluting the denominator and reading low. The fix removed the dilution; every reduction round since re-banks on the dual series — see the ledger page for the current reading (3.2% dual).</li>
     </ul>
 
     <h2 id="n1116"><span class="anchor">2026-11-16</span></h2>

@@ -113,7 +113,7 @@
       <li><b>Framework 层</b>(arch/mm 原语/interrupt/virtio 核心/trace/perf):允许 unsafe,逐块要求 <code>// SAFETY:</code> 注释(覆盖 3,207/5,009 = 64%)。</li>
       <li><b>service 层</b>:目标 100% <code>forbid(unsafe_code)</code> —— 已 47 个文件编译期禁止,另 56 个已无 unsafe;首个具名收缩目标 <code>syscall/io.rs</code> 69 个 unsafe token 已清零(typed entries + uaccess_safe)。</li>
       <li><b>syscall 边界 = 胶囊边界</b>:入口统一校验并翻译用户指针;uaccess_safe.rs 提供类型化 copy_in/copy_out。</li>
-      <li><b>unsafe 行占比 2.9%</b>(双口径 3.6%);trace 模块整体禁 unsafe。</li>
+      <li><b>unsafe 行占比 2.5%</b>(双口径 3.2%);trace 模块整体禁 unsafe。</li>
     </ul>
 
     <h2 id="repo"><span class="anchor">§3</span>仓库顶层布局</h2>
