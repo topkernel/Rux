@@ -171,15 +171,12 @@ pub const NCCS_KERNEL: usize = 19;
 
 /// Serialize a Termios into the 36-byte kernel-ABI layout (TCGETS).
 pub fn termios_to_kernel_bytes(t: &Termios, out: &mut [u8; TERMIOS_KERNEL_SIZE]) {
-    // SAFETY: out is a 36-byte buffer; unaligned u32 writes at 0/4/8/12
-    // are in bounds.
-    unsafe {
-        let p = out.as_mut_ptr() as *mut u32;
-        p.add(0).write_unaligned(t.c_iflag);
-        p.add(1).write_unaligned(t.c_oflag);
-        p.add(2).write_unaligned(t.c_cflag);
-        p.add(3).write_unaligned(t.c_lflag);
-    }
+    // Unaligned u32 encodes at 0/4/8/12 via the CopyBytes primitive
+    // (INV-CBYTES-2/3).
+    let _ = crate::safety::bytes::write_at(out, 0, t.c_iflag);
+    let _ = crate::safety::bytes::write_at(out, 4, t.c_oflag);
+    let _ = crate::safety::bytes::write_at(out, 8, t.c_cflag);
+    let _ = crate::safety::bytes::write_at(out, 12, t.c_lflag);
     out[16] = t.c_line;
     out[17..17 + NCCS_KERNEL].copy_from_slice(&t.c_cc[..NCCS_KERNEL]);
 }
@@ -207,13 +204,12 @@ pub fn termios_to_user_bytes(t: &Termios, out: &mut [u8; TERMIOS_USER_SIZE]) {
     out.fill(0);
     // SAFETY: out is a 52-byte buffer; unaligned u32 writes at 0/4/8/12 are
     // in bounds.
-    unsafe {
-        let p = out.as_mut_ptr() as *mut u32;
-        p.add(0).write_unaligned(t.c_iflag);
-        p.add(1).write_unaligned(t.c_oflag);
-        p.add(2).write_unaligned(t.c_cflag);
-        p.add(3).write_unaligned(t.c_lflag);
-    }
+    // Unaligned u32 encodes at 0/4/8/12 via the CopyBytes primitive
+    // (INV-CBYTES-2/3).
+    let _ = crate::safety::bytes::write_at(out, 0, t.c_iflag);
+    let _ = crate::safety::bytes::write_at(out, 4, t.c_oflag);
+    let _ = crate::safety::bytes::write_at(out, 8, t.c_cflag);
+    let _ = crate::safety::bytes::write_at(out, 12, t.c_lflag);
     out[16] = t.c_line;
     out[17..17 + NCCS].copy_from_slice(&t.c_cc);
 }
@@ -239,15 +235,12 @@ pub fn termios_from_user_bytes(buf: &[u8; TERMIOS_USER_SIZE]) -> Termios {
 /// Serialize a Termios into the 17-byte termio (TCGETA) layout.
 pub fn termios_to_termio_bytes(t: &Termios, out: &mut [u8; TERMIO_USER_SIZE]) {
     out.fill(0);
-    // SAFETY: out is a 17-byte buffer; unaligned u16 writes at 0/2/4/6 are in
-    // bounds.
-    unsafe {
-        let p = out.as_mut_ptr() as *mut u16;
-        p.add(0).write_unaligned(t.c_iflag as u16);
-        p.add(1).write_unaligned(t.c_oflag as u16);
-        p.add(2).write_unaligned(t.c_cflag as u16);
-        p.add(3).write_unaligned(t.c_lflag as u16);
-    }
+    // Unaligned u16 encodes at 0/2/4/6 via the CopyBytes primitive
+    // (INV-CBYTES-2/3).
+    let _ = crate::safety::bytes::write_at(out, 0, t.c_iflag as u16);
+    let _ = crate::safety::bytes::write_at(out, 2, t.c_oflag as u16);
+    let _ = crate::safety::bytes::write_at(out, 4, t.c_cflag as u16);
+    let _ = crate::safety::bytes::write_at(out, 6, t.c_lflag as u16);
     out[8] = t.c_line;
     out[9..17].copy_from_slice(&t.c_cc[..8]);
 }
@@ -256,14 +249,12 @@ pub fn termios_to_termio_bytes(t: &Termios, out: &mut [u8; TERMIO_USER_SIZE]) {
 /// 16 bits keep their previous values (termio cannot carry them).
 pub fn termios_from_termio_bytes(buf: &[u8; TERMIO_USER_SIZE], base: &Termios) -> Termios {
     let mut t = *base;
-    // SAFETY: buf is a 17-byte buffer; unaligned u16 reads at 0/2/4/6.
-    unsafe {
-        let p = buf.as_ptr() as *const u16;
-        t.c_iflag = p.add(0).read_unaligned() as u32;
-        t.c_oflag = p.add(1).read_unaligned() as u32;
-        t.c_cflag = p.add(2).read_unaligned() as u32;
-        t.c_lflag = p.add(3).read_unaligned() as u32;
-    }
+    // Unaligned u16 decodes at 0/2/4/6 via the CopyBytes primitive
+    // (INV-CBYTES-2).
+    t.c_iflag = crate::safety::bytes::read_at::<u16>(buf, 0).unwrap_or(0) as u32;
+    t.c_oflag = crate::safety::bytes::read_at::<u16>(buf, 2).unwrap_or(0) as u32;
+    t.c_cflag = crate::safety::bytes::read_at::<u16>(buf, 4).unwrap_or(0) as u32;
+    t.c_lflag = crate::safety::bytes::read_at::<u16>(buf, 6).unwrap_or(0) as u32;
     t.c_line = buf[8];
     t.c_cc[..8].copy_from_slice(&buf[9..17]);
     t
