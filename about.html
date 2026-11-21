@@ -123,7 +123,7 @@
       <tbody>
         <tr><td><code>unsafe { … }</code> 块体</td><td class="num">8,759</td><td class="num">2.2%</td></tr>
         <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> 函数体</td><td class="num">2,539</td><td class="num">0.6%</td></tr>
-        <tr><td><b>双口径合计(诚实总数)</b></td><td class="num"><b>10,742</b></td><td class="num"><b>2.2%</b></td></tr>
+        <tr><td><b>双口径合计(诚实总数)</b></td><td class="num"><b>10,742</b></td><td class="num"><b>2.7%</b></td></tr>
       </tbody>
     </table></div>
     <p>分层口径下,kernel/src 带 2,625 个 unsafe 记号,其中 <b>1,174 个在 Framework 层之外</b>(service 层)。165 个模块带 <code>#![forbid(unsafe_code)]</code>,由编译器强制零 unsafe、CI 棘轮只增不减;93 个 service 文件已无 unsafe。69% 的 unsafe 构造带书写的 <code>// SAFETY:</code> 契约;树内出现台账未登记的区域,CI 直接失败。</p>
@@ -161,7 +161,7 @@
     <ul>
       <li>LTP 1,869 项过 1,139 项,还有几百项没过;TIMEOUT 类按 P0 规则逐行归因,非本内核造成的失败逐条留档</li>
       <li>lmbench 13 项落后,最大 22–26×;1M 直写 0.75–0.83×。每行都带测得的差距分解</li>
-      <li>unsafe 面还有 2.2%(10,742 行)依赖人工评审;收缩目标是 ≤5,000 行(≤1%),每块残余都要写明不可约理由(台账与阶梯见 docs/development/unsafe-5000-plan.md)</li>
+      <li>unsafe 面还有 2.7%(10,742 行)依赖人工评审;收缩目标是 ≤5,000 行(≤1%),每块残余都要写明不可约理由(台账与阶梯见 docs/development/unsafe-5000-plan.md)</li>
       <li>Kani 覆盖核心 unsafe,还没铺到全部关键路径;loom 与 SPIN 覆盖并发原语</li>
       <li>AI 编码模式能不能长期撑住 40 万行,我自己也在观察</li>
       <li>29 项设计分歧的兼容性证据需要持续维护</li>

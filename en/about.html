@@ -123,7 +123,7 @@
       <tbody>
         <tr><td><code>unsafe { … }</code> block bodies</td><td class="num">8,759</td><td class="num">2.2%</td></tr>
         <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> bodies</td><td class="num">2,539</td><td class="num">0.6%</td></tr>
-        <tr><td><b>dual series — the honest total</b></td><td class="num"><b>10,742</b></td><td class="num"><b>2.2%</b></td></tr>
+        <tr><td><b>dual series — the honest total</b></td><td class="num"><b>10,742</b></td><td class="num"><b>2.7%</b></td></tr>
       </tbody>
     </table></div>
     <p>In the layered view, <code>kernel/src</code> carries 2,625 unsafe tokens, of which <b>1,174 sit outside the Framework layer</b> (the service tier). 165 modules carry <code>#![forbid(unsafe_code)]</code> — compiler-enforced zero-unsafe, ratcheted by CI so the set only grows; 93 service files hold no unsafe at all. 69% of unsafe constructs carry a written <code>// SAFETY:</code> contract, and CI fails when a region appears in the tree without a ledger entry.</p>
@@ -161,7 +161,7 @@
     <ul>
       <li>LTP: 1,139 of 1,869 pass; several hundred still fail. TIMEOUT cases are adjudicated one by one, and every failure that is not ours stays on record</li>
       <li>lmbench: 13 rows trail, the largest at 22–26×; 1 MiB direct write sits at 0.75–0.83×. Each row carries a measured decomposition of the gap</li>
-      <li>The unsafe surface: 2.2% (10,742 lines) still depends on human review; the reduction target is ≤5,000 unsafe lines (≤1%) with a per-block irreducibility proof (docs/development/unsafe-5000-plan.md)</li>
+      <li>The unsafe surface: 2.7% (10,742 lines) still depends on human review; the reduction target is ≤5,000 unsafe lines (≤1%) with a per-block irreducibility proof (docs/development/unsafe-5000-plan.md)</li>
       <li>Kani covers the core unsafe code, not every key path; loom and SPIN cover the concurrency primitives</li>
       <li>Whether the AI working model holds at 400,000 lines is under observation, not settled</li>
       <li>The 29 registered divergences need their compatibility evidence kept current</li>
