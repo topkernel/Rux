@@ -463,3 +463,53 @@ pub fn x86_caller_return_address() -> u64 {
     unsafe { core::arch::asm!("movq 8(%rbp), {}", out(reg) ret, options(att_syntax)) };
     ret
 }
+
+// ---------------------------------------------------------------------------
+// INV-MM-13: the small-object allocator's in-page layout. Every address
+// is derived from the kernel-heap direct map + the class geometry
+// (first-object offset, object stride); the freelist links are volatile
+// u16s stored inside free objects, and the in-page PageHdr is written
+// under the class lock (or during fresh-page init, before publication).
+// ---------------------------------------------------------------------------
+
+/// The in-page PageHdr, mutable (INV-MM-13: class lock held or the
+/// fresh page is not yet published).
+#[inline]
+pub fn sa_hdr_mut(page: usize) -> &'static mut super::small_alloc::PageHdr {
+    // SAFETY: INV-MM-13 — page is a live class page; exclusivity via
+    // the class lock / pre-publication.
+    unsafe { &mut *(page as *mut super::small_alloc::PageHdr) }
+}
+
+/// The in-page PageHdr, shared (INV-MM-13 probe arm: read-only
+/// magic/class fields of a live heap page).
+#[inline]
+pub fn sa_hdr_ref(page: usize) -> &'static super::small_alloc::PageHdr {
+    // SAFETY: INV-MM-13 — the page lies inside the kernel heap direct
+    // map (bitmap bit set); plain u8/u16 loads, worst case torn and
+    // filtered by the magic check.
+    unsafe { &*(page as *const super::small_alloc::PageHdr) }
+}
+
+/// Volatile u16 read (INV-MM-13: freelist link / diagnostic slot probe).
+#[inline]
+pub fn sa_read_u16(addr: usize) -> u16 {
+    // SAFETY: INV-MM-13 — in-page slot address derived from the class
+    // geometry.
+    unsafe { core::ptr::read_volatile(addr as *const u16) }
+}
+
+/// Volatile u16 write (INV-MM-13: freelist link install).
+#[inline]
+pub fn sa_write_u16(addr: usize, v: u16) {
+    // SAFETY: INV-MM-13 — in-page slot address; lock held or fresh
+    // page.
+    unsafe { core::ptr::write_volatile(addr as *mut u16, v) }
+}
+
+/// Volatile u64 read (INV-MM-13: diagnostic slot-content probe).
+#[inline]
+pub fn sa_read_u64(addr: usize) -> u64 {
+    // SAFETY: INV-MM-13 — live slab page of the class; slot in bounds.
+    unsafe { core::ptr::read_volatile(addr as *const u64) }
+}
