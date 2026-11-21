@@ -1818,7 +1818,7 @@ f0501376a1be	kernel/src/list.rs	<module>	140	ptr-ops	INV:INV-LIST-1
 e21862b2c335	kernel/src/list.rs	<module>	156		INV:INV-LIST-1
 9f331e6c8d28	kernel/src/list.rs	<module>	194		INV:INV-LIST-1
 e4c86270ea95	kernel/src/list.rs	offset	218		INV:INV-LIST-1
-819b2db7fb66	kernel/src/main.rs	rust_main	1705	asm	INV:INV-BOOT-ZEROPAGE-1
+327fa7ff2852	kernel/src/main.rs	rust_main	1711	asm	INV:INV-BOOT-ZEROPAGE-1
 e3852ddce358	kernel/src/mm/buddy_allocator.rs	<module>	171		INV:INV-HEAP-3
 0b4f426290a1	kernel/src/mm/buddy_allocator.rs	<module>	172		INV:INV-HEAP-3
 8251aca7f194	kernel/src/mm/buddy_allocator.rs	get	185		INV:INV-HEAP-3
@@ -2481,10 +2481,10 @@ f49b54e02c57	kernel/src/syscall/edges.rs	list_next	68		INV:INV-SYSC-1
 533b6bc2c4dd	kernel/src/syscall/edges.rs	list_entry_mut	92	ptr-ops	INV:INV-SYSC-1
 1f325ab448d9	kernel/src/syscall/edges.rs	list_link_tail	103		INV:INV-SYSC-1
 77a52e19abb7	kernel/src/syscall/edges.rs	list_unlink	111		INV:INV-SYSC-1
-d5ba29318a31	kernel/src/syscall/edges.rs	<module>	123		INV:INV-SYSC-1
-f910f469f36f	kernel/src/syscall/edges.rs	<module>	129		INV:INV-SYSC-1
-91d8acb9507e	kernel/src/syscall/edges.rs	<module>	132		INV:INV-SYSC-1
-2318d7417f42	kernel/src/syscall/edges.rs	<module>	136		INV:INV-SYSC-2
+92df503eb9b7	kernel/src/syscall/edges.rs	<module>	123		INV:INV-SYSC-1
+1298f229abc4	kernel/src/syscall/edges.rs	<module>	129		INV:INV-SYSC-1
+61fb552d7f39	kernel/src/syscall/edges.rs	<module>	132		INV:INV-SYSC-1
+0560f3e2719c	kernel/src/syscall/edges.rs	<module>	136		INV:INV-SYSC-2
 a0f00f066fa5	kernel/src/syscall/edges.rs	boxed_ref	152		INV:INV-SYSC-2
 1d5765155960	kernel/src/syscall/edges.rs	boxed_mut	164		INV:INV-SYSC-2
 f16318f757ac	kernel/src/syscall/edges.rs	boxed_drop	176		INV:INV-SYSC-2

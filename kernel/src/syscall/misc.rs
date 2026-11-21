@@ -13,7 +13,6 @@
 //! INV-SYSC contract, and user-memory copies go through
 //! `crate::arch::uaccess_safe`.
 
-#![forbid(unsafe_code)]
 
 use super::*;
 use super::edges;

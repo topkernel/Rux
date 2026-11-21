@@ -6,8 +6,18 @@
 //!
 //! This module implements the RISC-V 64-bit system call interface, organized by functionality
 
+// TREE-LEVEL FORBID (Layer-1 acceleration, 2026-11-21): this inner
+// attribute applies to the WHOLE syscall module tree — the compiler
+// now enforces the service boundary structurally (any new unsafe in
+// any syscall file fails the build, not the per-file lint). The ONE
+// escape is the audited edges module, which lives OUTSIDE this tree
+// (declared at the crate root via #[path] — see main.rs/lib root).
+#![forbid(unsafe_code)]
+
+// The audited-edge escape: declared at the crate root (outside this
+// forbid tree) and re-exported under the historical path.
+pub(crate) use crate::syscall_edges as edges;
 pub mod dispatch;
-pub mod edges;
 pub mod io;
 pub mod process;
 pub mod memory;

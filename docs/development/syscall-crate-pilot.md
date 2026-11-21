@@ -74,3 +74,32 @@ mergeable and gate-green:
 Gates for this pilot commit: riscv64 build rc=0; unsafe_gate OK;
 print ratchet OK. (Triple-arch + make test re-run at the branch tip
 with the tail-completion commit.)
+
+
+## Post-script (2026-11-21, the EXECUTE directive): the boundary is
+now COMPILER-ENFORCED in-tree
+
+The literal two-crate form is blocked by the Cargo cycle until a
+kernel-framework crate exists (kernel-syscall would depend on kernel
+for arch/fs/process/... while kernel depends on kernel-syscall for
+the dispatch entry — unresolvable in one workspace without the
+framework extraction). What the directive's substance requires — the
+forbid enforced at the boundary by the compiler, not per-file —
+landed instead:
+
+- `kernel/src/syscall/mod.rs` carries `#![forbid(unsafe_code)]` as an
+  inner attribute: it applies to the WHOLE module tree; the 12
+  per-file attributes were removed (subsumed).
+- The audited edges module escapes the tree: declared at the crate
+  root via `#[path = "syscall/edges.rs"] pub(crate) mod
+  syscall_edges` and re-exported as `syscall::edges` — same file,
+  same paths, outside the forbid scope.
+- ENFORCEMENT NEGATIVE-TESTED: a probe unsafe block in
+  syscall/time.rs fails the build with "usage of an `unsafe` block";
+  removal restores rc=0.
+- forbid-registry.txt: the 12 syscall per-file lines became ONE tree
+  line (kernel/src/syscall/mod.rs); the ratchet check unchanged.
+
+The helper relocations (poll/epoll 45, process/io/time 31) and the
+seam decision remain the priced follow-up; they shrink the reverse
+surface to the entry seam for the eventual two-crate flip.

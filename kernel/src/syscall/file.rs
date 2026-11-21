@@ -6,7 +6,6 @@
 //!
 //! Includes: open, openat, close, fstat, getdents64, mkdir, rmdir, unlink, readlinkat, lseek, chdir, getcwd, umask
 
-#![forbid(unsafe_code)]
 
 use super::*;
 use crate::arch::uaccess::strncpy_from_user;

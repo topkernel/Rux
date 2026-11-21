@@ -109,11 +109,6 @@ kernel/src/sched/wakewatch.rs
 kernel/src/security/capability.rs
 kernel/src/sync/condvar.rs
 kernel/src/sync/semaphore.rs
-kernel/src/syscall/dispatch.rs
-kernel/src/syscall/io.rs
-kernel/src/syscall/network.rs
-kernel/src/syscall/time.rs
-kernel/src/syscall/x86_compat.rs
 kernel/src/tests/boundary.rs
 kernel/src/tests/buffer_state.rs
 kernel/src/tests/checksum.rs
@@ -167,3 +162,4 @@ kernel/src/tests/virtio_queue.rs
 kernel/src/tests/vma_flags.rs
 kernel/src/timer/oneshot.rs
 kernel/src/trace/files.rs
+kernel/src/syscall/mod.rs
