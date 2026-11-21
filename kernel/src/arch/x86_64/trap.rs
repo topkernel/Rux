@@ -1047,28 +1047,38 @@ fn scribble_foreign_entry(
     scribble_put_hex(vector);
     scribble_put_str(b" frame=0x");
     scribble_put_hex(frame as u64);
-    // SAFETY: diagnostic header reads of the task named by the slot.
-    unsafe {
+    // Diagnostic header reads of the task named by the slot (typed
+    // handle — broken-machine report, short ops, the CPU parks after).
+    // SAFETY: the per-CPU slot named this task one frame ago (the same
+    // adoption proof as the switch path).
+    let tp = unsafe { crate::process::task_ref::TaskBorrow::from_raw(tp) };
+    {
         scribble_put_str(b" task=0x");
-        scribble_put_hex(tp as u64);
-        scribble_put_str(b" pid=");
-        scribble_put_hex((*tp).pid() as u64);
-        scribble_put_str(b" kstack=[0x");
-        scribble_put_hex((*tp).kernel_stack_bottom() as u64);
-        scribble_put_str(b",0x");
-        scribble_put_hex((*tp).get_kernel_stack().map_or(0, |p| p as u64));
+        scribble_put_hex(tp.as_ref().map(|t| t.as_ptr() as u64).unwrap_or(0));
+        if let Some(t) = &tp {
+            scribble_put_str(b" pid=");
+            scribble_put_hex(t.pid() as u64);
+            scribble_put_str(b" kstack=[0x");
+            scribble_put_hex(t.kernel_stack_bottom() as u64);
+            scribble_put_str(b",0x");
+            scribble_put_hex(t.get_kernel_stack().map_or(0, |p| p as u64));
+        }
         scribble_put_str(b") rsp0_mirror=0x");
         scribble_put_hex(super::smp::PER_CPU[cpu].tss_rsp0.load(core::sync::atomic::Ordering::Relaxed));
         scribble_put_str(b" TSS.rsp0=0x");
         let tss = &raw mut TSS_PER_CPU;
-        scribble_put_hex((*tss)[cpu].read_u64(TSS_OFF_RSP0));
+        // SAFETY: per-CPU TSS mirror (broken-machine read; the report
+        // is the point).
+        scribble_put_hex(unsafe { (*tss)[cpu].read_u64(TSS_OFF_RSP0) });
         scribble_put_str(b"\nFRAME:");
         for i in 0..21usize {
             if i % 4 == 0 {
                 scribble_put_str(b"\n  ");
             }
             scribble_put_str(b" ");
-            scribble_put_hex(core::ptr::read_volatile((frame + i * 8) as *const u64));
+            // SAFETY: frame walk of the foreign stack — best-effort
+            // forensic read (the CPU parks after this report).
+            scribble_put_hex(unsafe { core::ptr::read_volatile((frame + i * 8) as *const u64) });
         }
         // Frame surroundings: the slots just above the frame belong to the
         // stack owner's earlier execution — torn words there name what the
@@ -1077,7 +1087,7 @@ fn scribble_foreign_entry(
         let mut a = frame + 0xa8;
         while a < frame + 0xa8 + 0x100 {
             scribble_put_str(b" ");
-            scribble_put_hex(core::ptr::read_volatile(a as *const u64));
+            scribble_put_hex(unsafe { core::ptr::read_volatile(a as *const u64) });
             a += 8;
         }
     }
@@ -1771,17 +1781,13 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 }
             }
             let cur = crate::sched::current();
-            let cur_ptr = match cur {
-                Some(t) => t as *mut crate::process::task::Task as usize,
+            let cur_ptr = match &cur {
+                Some(t) => (&**t) as *const _ as usize,
                 None => 0,
             };
-            let (pid, pc) = unsafe {
-                if cur_ptr != 0 {
-                    let t = cur_ptr as *mut crate::process::task::Task;
-                    ((*t).pid() as u64, (*t).preempt_count() as u64)
-                } else {
-                    (0, 0)
-                }
+            let (pid, pc) = match &cur {
+                Some(t) => (t.pid() as u64, t.preempt_count() as u64),
+                None => (0, 0),
             };
             // pa16 calibration (perf line, 2026-10-24): age is a WALL-CLOCK
             // gap between timer-IRQ arrivals, which conflates three causes
@@ -1927,17 +1933,17 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // 0b. CPU-time accounting: charge the tick to the interrupted task,
     // user or system time by the mode the timer hit (user tasks only).
     if let Some(task) = crate::sched::current() {
-        // SAFETY: current() returned a live task pointer; we only touch
-        // per-task atomic counters, no teardown race on these fields.
-        unsafe {
-            if (*task).address_space().is_some() {
+        // current()'s typed &mut handle; we only touch per-task atomic
+        // counters (no teardown race on these fields).
+        {
+            if task.address_space().is_some() {
                 use core::sync::atomic::Ordering::Relaxed;
                 if regs.user_mode() {
-                    (*task).utime_ticks.fetch_add(1, Relaxed);
+                    task.utime_ticks.fetch_add(1, Relaxed);
                     crate::dfx::syscost::tick_user();
                     // leg-40C perf rider: user-mode rip sampling for
                     // launcher-comm tasks (dfx-gated inside).
-                    utime_sample_rip(regs.rip, (*task).comm());
+                    utime_sample_rip(regs.rip, task.comm());
                     // perf events (PERF_TYPE_SOFTWARE sampling): stash the
                     // interrupted PC + frame pointer for the softirq
                     // charger (RBP feeds the user callchain walk).
@@ -1945,27 +1951,27 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     crate::perf::note_tick_fp(
                         regs.rip,
                         crate::perf::MODE_USER,
-                        (*task).pid(),
+                        task.pid(),
                         regs.rbp,
-                        (*task).tgid(),
+                        task.tgid(),
                     );
                 } else {
-                    (*task).stime_ticks.fetch_add(1, Relaxed);
+                    task.stime_ticks.fetch_add(1, Relaxed);
                     // sc105 stime-burn attribution: sample WHERE the
                     // kernel-mode tick landed (4 KiB page bucket keyed by
                     // task comm, so one task's burn is separable from the
                     // boot crowd). KILLDUMP prints the table.
-                    stime_sample_rip(regs.rip, (*task).comm());
-                    if comm_has_launcher((*task).comm()) {
+                    stime_sample_rip(regs.rip, task.comm());
+                    if comm_has_launcher(task.comm()) {
                         STIME_LAUNCHER_TICKS.fetch_add(1, Relaxed);
                     }
                     crate::dfx::syscost::tick_kern(regs.rip);
                     crate::perf::note_tick_fp(
                         regs.rip,
                         crate::perf::MODE_KERNEL,
-                        (*task).pid(),
+                        task.pid(),
                         regs.rbp,
-                        (*task).tgid(),
+                        task.tgid(),
                     );
                 }
             } else {

@@ -180,6 +180,9 @@ __x64_futex_cmpxchg_u32:
     smap = sym super::cpu::SMAP_ENABLED
 );
 
+// IRREDUCIBLE F-ROW (F-UACC-2): the exception-table copy bottoms —
+// reference kernel arch/x86/lib/copy_user_64.S (rep movsb with .fixup
+// sections); hand-written asm is the only shape with fixup entries.
 extern "C" {
     fn __x64_copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize;
     fn __x64_copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize;

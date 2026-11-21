@@ -823,11 +823,9 @@ impl MmStruct {
     ///
     /// # Safety
     /// PTE_MODIFY_LOCK must be held.
-    pub unsafe fn unmap_one_user_leaf_locked(&self, va: usize) -> bool {
-        // SAFETY: self.pgd is a valid root; read-only walk.
-        let Some((ppn_val, pte_bits)) =
-            (unsafe { PageTableWalker::walk(self.pgd, va as u64) })
-        else {
+    pub fn unmap_one_user_leaf_locked(&self, va: usize) -> bool {
+        // Read-only typed walk.
+        let Some((ppn_val, pte_bits)) = PageTableWalker::walk(self.pgd, va as u64) else {
             return false;
         };
         if pte_bits & PageTableEntry::U == 0 {
@@ -839,29 +837,24 @@ impl MmStruct {
             let fb = crate::drivers::gpu::get_framebuffer_info()
                 .map_or(false, |i| phys >= i.addr && phys < i.addr + i.size as u64);
             if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
-                // SAFETY: verified present user leaf.
-                unsafe { self.clear_pte(va as u64) };
+                self.clear_pte(va as u64);
                 return true;
             }
         }
-        use crate::mm::page_desc::pfn_to_page_mut;
-        let page = pfn_to_page_mut(ppn_val as usize);
-        if !page.is_null() {
-            // SAFETY: null-checked descriptor of the leaf frame mapped
-            // at `va` by this address space.
-            unsafe {
-                (*page).rmap_alt_remove(self as *const _ as usize, va / PAGE_SIZE_USIZE);
-                if (*page).is_mapped() {
-                    crate::mm::rmap::page_remove_rmap(&*page);
-                }
-                (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_RV);
+        use crate::mm::page_desc::page_desc;
+        // Descriptor of the leaf frame mapped at `va` by this address
+        // space (INV-FRAME-1).
+        if let Some(page) = page_desc(ppn_val as usize) {
+            page.rmap_alt_remove(self as *const _ as usize, va / PAGE_SIZE_USIZE);
+            if page.is_mapped() {
+                crate::mm::rmap::page_remove_rmap(page);
             }
+            page.put_page_site(crate::dfx::driftwatch::S_UNMAP_RV);
             if pte_bits & cow_flags::PCACHE != 0 {
                 release_cache_mapping_pin(ppn_val as usize);
             }
         }
-        // SAFETY: verified present user leaf.
-        unsafe { self.clear_pte(va as u64) };
+        self.clear_pte(va as u64);
         self.sub_rss(1);
         true
     }
@@ -875,8 +868,9 @@ impl MmStruct {
     ///
     /// # Safety
     /// Caller holds PTE_MODIFY_LOCK; `va` is a user address of this mm.
-    unsafe fn clear_pte(&self, virt: u64) {
-        // SAFETY: walk-only helper on a valid root.
+    fn clear_pte(&self, virt: u64) {
+        // Walk-only helper on a valid root (typed handle from
+        // user_l3_table_for).
         if let Some(l3) = super::mmu_init::user_l3_table_for(self.pgd, virt) {
             let idx = ((virt >> PAGE_SHIFT) & 0x1FF) as usize;
             l3.set(idx, PageTableEntry::new());

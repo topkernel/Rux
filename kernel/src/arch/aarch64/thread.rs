@@ -160,7 +160,10 @@ impl ThreadStruct {
     /// FPU fault paths)
     // SAFETY: writes 512 bytes into self.fpu via volatile register moves.
     #[inline]
-    pub unsafe fn fpu_save(&mut self) {
+    pub unsafe // IRREDUCIBLE F-ROW (F-AFPU-1): FPSIMD save (str q0..q31 + fpcr/fpsr) —
+// reference kernel arch/arm64/kernel/fpsimd.S's fpsimd_save; no safe
+// Rust shape touches the NEON register file.
+fn fpu_save(&mut self) {
         unsafe {
             let dst = self.fpu.as_mut_ptr();
             core::arch::asm!(
@@ -198,7 +201,8 @@ impl ThreadStruct {
     /// Restore the FPSIMD state from this thread image
     // SAFETY: reads 512 bytes from self.fpu into live FP registers.
     #[inline]
-    pub unsafe fn fpu_restore(&self) {
+    pub unsafe // IRREDUCIBLE F-ROW (F-AFPU-2): FPSIMD restore — fpsimd.S's load path.
+fn fpu_restore(&self) {
         unsafe {
             let src = self.fpu.as_ptr();
             let fpcr = self.fpcr as u64;
