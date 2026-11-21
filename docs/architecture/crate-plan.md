@@ -192,3 +192,24 @@ skeleton. Conversion shape: TWO static tables in the lib
 regs-table), filled by rux-syscall::register_all at bin boot; the
 dispatch skeleton does the x86 preamble/translate, the table lookup,
 and the ENOSYS tail.
+
+
+## M2 LANDED (2026-11-22): the service crate exists, forbid-enforced
+
+rux-syscall builds standalone (riscv64) with the 12 files under
+crate-level forbid; the negative probe fails as required; ~30
+framework items graduated pub (the visibility tax — the service
+consuming the framework's public API). The PACKAGE-CYCLE finding is
+M2's structural result: kernel(lib+bin in one package) cannot depend
+on rux-syscall(lib) which depends on kernel(lib) — Cargo refuses.
+
+### M3 (the final wiring): three packages
+- kernel -> lib-only package (name rux)
+- kernel/rux-syscall -> service (exists)
+- kernel/rux-bin -> the composition bin (rust_main + register_all;
+  inherits the link-arg machinery via its own build.rs or the
+  workspace's)
+The Makefile's cargo invocations gain -p rux-bin (or --workspace).
+The boot entry already binds rust_main via linker symbols (x86's
+extern-decl sym), so the bin package's rust_main is found with NO
+asm changes.
