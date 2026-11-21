@@ -1151,11 +1151,10 @@ fn find_block_in_external_extent_ex(
     }
     // SAFETY: bio::bread returns a valid buffer_head; casts below stay
     // within the block-sized b_data.
-    unsafe {
-        let bh = bio::bread(fs.device, block_num)
-            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-        let data = &(*bh).b_data;
-        let header = &*(data.as_ptr() as *const Ext4ExtentHeader);
+    // The read edge owns brelse on EVERY path; the recursion nests one
+    // buffer per level (each bread pins independently, as before).
+    bio::with_block(fs.device, block_num, |data| -> Result<(u64, bool), i32> {
+        let header = node_header(data);
         if header.eh_magic != EXT4_EXT_MAGIC
             || header.eh_entries > header.eh_max
         {
@@ -1187,16 +1186,14 @@ fn find_block_in_external_extent_ex(
                     );
                 }
             }
-            bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         let max_slots = (fs.block_size as usize - core::mem::size_of::<Ext4ExtentHeader>())
             / core::mem::size_of::<Ext4Extent>();
         if header.eh_max as usize > max_slots {
-            bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
-        let result = if header.eh_depth == 0 {
+        if header.eh_depth == 0 {
             let entries = node_extents(data, header.eh_entries as usize);
             // Binary search (entries sorted by ee_block): O(log n) per
             // lookup instead of the linear scan (wrfsync lane).
@@ -1223,10 +1220,9 @@ fn find_block_in_external_extent_ex(
             } else {
                 find_block_in_external_extent_ex(fs, child_block, logical_block, depth + 1)
             }
-        };
-        bio::brelse(bh);
-        result
-    }
+        }
+    })
+    .unwrap_or_else(|| Err(errno::Errno::IOError.as_neg_i32()))
 }
 
 /// Read extent from external block and find logical block
