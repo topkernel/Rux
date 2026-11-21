@@ -1102,7 +1102,7 @@ pub(crate) fn release_task(task: *mut Task) {
     // single-threaded shape), so 1000 reaps = 3000 s and P4 could
     // never finish. Over cap (wedged drainer) the old bounded
     // synchronous path stands as the fallback.
-    if !crate::sched::reapdrain::defer_reap_storage(task) {
+    if !crate::sched::reapdrain::defer_reap_storage(task, t.parent_ptr().map(|p: *const Task| crate::process::unsafe_edges::borrow_task(p as *mut Task).pid()).unwrap_or(0)) {
         // Over-cap fallback: the obligation the drainer could not take
         // is minted here and burned synchronously (the cold path's
         // exactly-once, typed the same way).
@@ -2428,7 +2428,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // reboot(2) cascade (never returns) unless one is already in
         // flight — that caller is waiting for exactly this exit.
         if current_pid == 1 {
-            crate::syscall::process::init_exited_fallback_cascade();
+            crate::process::reboot::init_exited_fallback_cascade();
         }
 
         // R9-3: close the preempt window between ZOMBIE and the deferred

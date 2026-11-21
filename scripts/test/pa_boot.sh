@@ -69,7 +69,7 @@ APPEND="$APPEND ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrie
 # TERM-DESCHED / WAKE-REFUSED / WW heartbeat families moved behind
 # dfx=wwcensus (serial-cleanliness mandate), so a census boot must pass
 # the token explicitly or the Tier-1 census checks read zero.
-APPEND="$APPEND ${APPEND_EXTRA:-syscost=1 dfx=wwcensus}"
+APPEND="$APPEND ${APPEND_EXTRA:-syscost=1 trace_event=wwcensus}"
 
 DISKS="$(ro_drive 0 "$IMGDIR/updater.img")$(ro_drive 1 "$IMGDIR/system.img")$(ro_drive 2 "$IMGDIR/vendor.img")$(ro_drive 3 "$IMGDIR/sys_prod.img")$(ro_drive 4 "$IMGDIR/chip_prod.img")"
 

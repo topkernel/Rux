@@ -497,7 +497,7 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     // returns ETIMEDOUT immediately (Linux's behaviour). The
     // sub-jiffy remainder is rounded UP so the call never returns
     // ETIMEDOUT before the requested instant.
-    let (now_sec, now_nsec) = crate::syscall::time::realtime_secs_nanos();
+    let (now_sec, now_nsec) = crate::timer::realtime_secs_nanos();
     let now_ns = (now_sec as i128) * 1_000_000_000i128 + (now_nsec as i128);
     let target_ns = (ts_sec as i128) * 1_000_000_000i128 + (ts_nsec as i128);
     let delta_ns = if target_ns > now_ns { target_ns - now_ns } else { 0 };

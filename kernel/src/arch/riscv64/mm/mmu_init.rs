@@ -1963,6 +1963,10 @@ fn best_map_size(pa: usize, va: usize, size: usize) -> usize {
 ///
 /// This function is called from boot.S before relocate_enable_mmu.
 #[no_mangle]
+// IRREDUCIBLE F-ROW (F-BOOT-R1): the pre-MMU boot page-table builder —
+// reference kernel arch/riscv/kernel/head.S's setup_vm: runs before the
+// linear map exists (early-pool phys addressing, VA-PA offset derived
+// in asm), so every table write is raw. The whole fn IS the edge.
 pub unsafe extern "C" fn setup_vm() {
     // Get the VA-PA offset by comparing linked address with runtime address
     let va_pa_offset: u64;

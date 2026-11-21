@@ -98,3 +98,54 @@ Triple-arch build, full suite, unsafe_gate (forbid ratchet + ledger paths
 if files move), print ratchet, smoke — plus the rung's own reverse-surface
 grep coming back empty at the seam only. No behavior change anywhere in
 the ladder: a rung that needs one is redesigned, not argued.
+
+
+## Step 4 — THE SEAM DECISION (recorded 2026-11-21, steps 2-3 complete)
+
+**Decision: the dispatch table + syscall_handler stay KERNEL-SIDE as
+the shim; the per-call implementation fns are the service surface.**
+
+Rationale: the trap path (arch ×3 -> syscall_handler -> dispatch ->
+sys_*) is the machine's hottest call sequence after the timer — the
+registration-callback alternative (the kernel exposes a table the
+service fills at init) puts one indirect call plus a bounds-checked
+table load on EVERY syscall entry to buy a dependency-direction
+technicality, and the table's 500-slot static must then live
+framework-side anyway — the code does not move, only the indirection
+is added. The shim shape keeps the entry sequence a direct call chain
+(registered in the binary crate's composition, where main.rs already
+names both sides — the crate-plan's hub-and-leaf keeps framework
+below, services above, and the BINARY is the composition point that
+may depend on both). Cost: dispatch.rs + syscall_handler remain
+kernel files (they contain no unsafe beyond edges delegation — the
+tree forbid covers them today; at flip time they stay outside the
+service crate's forbid scope by construction, which is CORRECT: they
+are the seam, the one place the two worlds meet).
+
+Seam inventory (the post-flip reverse surface, measured after steps
+2-3): syscall_handler + dispatch (10 sites, the seam proper);
+seccomp_syscall_gate (3 arch-trap sites — the syscall FILTER is
+entry-seam by nature, stays with it); syscall/edges re-exports (8
+sites — edges stays framework-side per this plan, so these vanish at
+flip); errno re-export imports (5 alias sites — mechanically
+severable to crate::errno::constants); misc residue (param_stall_dump
+×2, kernel_random_bytes ×2, timerfd ×2, pid ×1 — per-owner one-line
+relocations); io/process/memory stragglers (~11, same class).
+Everything else from the pilot's 130-site surface is severed.
+
+## Flip readiness (the checklist for the flip commit)
+
+1. lib/bin split: kernel crate grows src/lib.rs (the framework lib:
+   every current main.rs `mod` becomes `pub mod`; rust_main becomes a
+   pub fn); main.rs becomes the thin composition bin depending on the
+   lib. No behavior change; the binary crate is the composition point.
+2. rux-syscall workspace member: lib.rs with `#![forbid(unsafe_code)]`
+   + `pub use rux::{arch, fs, ...}` root re-exports (so the service
+   files' crate::X paths resolve) + `#[path]`-includes of the 12
+   service files (zero moves). edges.rs STAYS in the framework crate.
+3. dispatch/syscall_handler stay in the binary crate (the seam, per
+   the decision above); the seccomp gate moves WITH the service crate
+   and the traps call through the binary's seam shim.
+4. The battery: triple-arch, make test, KVM smoke, unsafe_gate, and
+   the NEGATIVE PROBE (an unsafe block anywhere in the service crate
+   must fail the build).

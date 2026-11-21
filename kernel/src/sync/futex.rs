@@ -7541,7 +7541,7 @@ pub fn futex_parse_timeout_ns(
         // realtime clock — rebase onto the monotonic timebase the wake
         // timers use. A deadline already in the past saturates to 0 and
         // expires on the next check (Linux returns ETIMEDOUT promptly).
-        let wall = crate::syscall::time::wall_epoch_offset_ns() as u128;
+        let wall = crate::timer::wall_epoch_offset_ns() as u128;
         let spec = spec_ns as u128;
         Ok(Some(spec.saturating_sub(wall) as u64))
     } else {

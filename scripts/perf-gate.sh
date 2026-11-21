@@ -40,6 +40,9 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# int() — sanitize grep-chain vars before integer tests (the [: 0\n0
+# class: grep output can carry embedded newlines; tr strips to digits).
+int() { printf '%s' "$1" | tr -cd 0-9; }
 RUN_BASE="${RUN_BASE:-/tmp/perf-gate}"
 mkdir -p "$RUN_BASE"
 TIERS="1"
@@ -315,7 +318,13 @@ tier2_check() {
     # within +-1%). Override back to the retired TCG class with
     # PB_ACCEL=tcg,thread=multi — but then the anchor below is the wrong
     # class (see the P2 provenance note in perf-gate-baseline.md).
-    python3 "$ROOT/scripts/test/pbench_boot.py" --bzimage "$bz" --tag "$pbtag" \
+    # Anchor-class rule (SP-7 re-bank): the pbench anchor column is the
+    # KVM DEBUG class — booting the release kernel against it is the
+    # cross-class mismatch that read p1 0.050us vs anchor 0.300 (pgwin1's
+    # rc=3). PB_KERNEL overrides; default = the debug image beside $bz.
+    local pbz="${PB_KERNEL:-$(echo "$bz" | sed 's|/release/|/debug/|')}"
+    [ -f "$pbz" ] || pbz="$bz"
+    python3 "$ROOT/scripts/test/pbench_boot.py" --bzimage "$pbz" --tag "$pbtag" \
         --accel "${PB_ACCEL:-kvm}" \
         --timeout 1200 > "${RUN_BASE:-$ROOT/run}/perf-gate-$pbtag.log" 2>&1
     local rc=$?

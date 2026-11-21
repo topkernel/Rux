@@ -362,6 +362,43 @@ pub fn rust_main_tail() -> ! {
         {
             cmdline::init_from(arch::boot::boot_cmdline());
             print_status("boot", "multiboot cmdline + e820 parsed", true);
+            // MPK evaluation probe (Layer 3, unsafe-5000-plan.md):
+            // mpkprobe=1, BSP-only, default off — capability check +
+            // WRPKRU cost + the fault-injection prototype. Runs here
+            // (post-cmdline, post-mm): fpu_init is too early for the
+            // cmdline parser, and the probe needs the static-root walk.
+            if cmdline::get_param("mpkprobe").as_deref() == Some("1") {
+                arch::x86_64::mpk::probe();
+            }
+            // MPK phase 1 (the standing guard): arm BEFORE the PCI
+            // probe so the vrings created there can tag their avail
+            // sections. Default off; a no-op without the hardware bit.
+            if cmdline::get_param("mpkguard").as_deref() == Some("1") {
+                if arch::mpk::guard_arm() {
+                    // The standing-backstop self-test (phase 1's
+                    // negative probe): a dedicated page-aligned block,
+                    // its first page pkey-tagged, a raw write with the
+                    // zone CLOSED must #PF through the ex_table window.
+                    if let Some(mut b) =
+                        crate::safety::dma::DmaBlock::new(8192, 4096)
+                    {
+                        let pages = b.set_pkey_range(0, 4096);
+                        if pages == 1 {
+                            if let Some(t) = b.pkey_target() {
+                                arch::x86_64::mpk::probe_guard_escape(t);
+                            }
+                        } else {
+                            println!("mpkguard: self-test tag failed ({})", pages);
+                        }
+                        // UNTAG then drop: the freed page must re-enter
+                        // the allocator pkey-0 (a still-tagged freed
+                        // page faults every later user — the garbled
+                        // first boot's lesson).
+                        b.clear_pkey_range();
+                        drop(b);
+                    }
+                }
+            }
         }
         // aarch64: QEMU's ELF -kernel boot passes no cmdline (the -append
         // protocol is Linux-image-only, like the missing DTB pointer) —
