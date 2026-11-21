@@ -54,6 +54,9 @@ extern "C" {
 /// # Safety
 /// Early boot, single hart, MMU on with the boot tables live; called
 /// once from init() before any Rust-side kernel mapping is built.
+// IRREDUCIBLE F-ROW (F-BOOT-A1): TTBR1 adoption + the boot-table
+// teardown/linear-map setup — reference kernel arch/arm64/kernel/head.S
+// + mmu.c map_mem; pre-linear-map phys addressing.
 fn adopt_boot_ttbr1() {
     // Copy all 512 L0 entries (all-but-511 are zero on the boot
     // root; copying verbatim keeps the two roots identical).
