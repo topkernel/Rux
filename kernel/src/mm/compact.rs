@@ -13,6 +13,9 @@
 //! Reference: `refer/linux/mm/compaction.c`
 
 
+// (INV-MM-COMPACT-1: the compactor family — page migration walks
+// hold the zone lock + page pins; the descriptor writes ride the
+// migration's exclusive ownership window.)
 use super::page_desc::{
     Page, PageFlag, pfn_to_page, pfn_to_page_mut, page_to_pfn, copy_page_contents,
 };

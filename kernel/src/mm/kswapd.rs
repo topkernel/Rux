@@ -10,6 +10,9 @@
 //!
 //! On UMA (single node) systems there is one kswapd thread.
 
+// (INV-KSWAPD-1: the reclaim scanner family — page-list walks hold
+// the zone/LRU locks; descriptor flag updates happen inside the
+// exclusive isolation window the scanner holds per page.)
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use super::zone::{ZoneType, WMARK_HIGH};

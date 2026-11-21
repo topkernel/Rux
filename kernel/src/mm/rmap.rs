@@ -8,6 +8,9 @@
 //! virtual addresses that map a given physical page. This is essential
 //! for page migration, memory compaction, and page reclamation.
 
+// (INV-RMAP-1: the reverse-map family — the anon/file rmap walks
+// hold the map's lock; the descriptor index words are read under the
+// rmap lock's Release publication.)
 extern crate alloc;
 
 use core::cell::Cell;

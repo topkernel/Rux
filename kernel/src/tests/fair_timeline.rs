@@ -10,6 +10,10 @@
 //! untouched. The sentinel (RB_NIL) is read-only after init (every
 //! write in the tree ops is guarded by a != nil check), so concurrent
 //! scheduling cannot perturb these tests.
+// (INV-TESTHARNESS-1: the in-kernel test-harness family — fair_timeline/
+// syscall_time/small_alloc tests construct adversarial shared state
+// with raw statics deliberately (the thing under test); runs only
+// under the unit-test feature.
 use crate::sched::fair::{RbTimeline, SchedEntity};
 use alloc::vec::Vec;
 use super::{test_pass, test_fail, test_group_start};

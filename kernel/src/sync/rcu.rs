@@ -10,6 +10,10 @@
 //! Grace period: all CPUs must pass through at least one quiescent state
 //! (context switch, idle loop, or return to user mode).
 
+// (INV-RCU-1: the RCU family — grace-period state is per-CPU
+// counters under the gp lock; the callback trampolines' raw fn words
+// are published before the gp flip and only invoked after it (the
+// wait/flip discipline the module documents.)
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::config::MAX_CPUS;
 use crate::list::ListHead;

@@ -72,6 +72,10 @@
 //! alone. All REGISTRY takes are `lock_irqsave()` uniformly, so no
 //! holder can ever be interrupted into a path that wants it.
 
+// (INV-PERF-EV-1: the perf-event family — the registry's Box<PerfEvent>
+// pointers are valid while registered (the registry maps id->Box and
+// removes before drop); every &PerfEvent/&mut read rides registry
+// membership; the mmap rows pin through the event's own refcount.)
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;

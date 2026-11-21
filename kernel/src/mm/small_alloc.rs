@@ -46,6 +46,10 @@
 //! Lock order: class lock -> buddy lock (page create/reclaim). The
 //! reverse nesting never occurs (the buddy knows nothing of classes).
 
+// (INV-SMALLALLOC-1: the small allocator family — the magazine
+// discipline's raw spans (class pages, freelist links inside free
+// blocks) are owned by the class lock; the arena base words are
+// installed once at init.)
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 

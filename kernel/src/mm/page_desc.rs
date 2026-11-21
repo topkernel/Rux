@@ -31,6 +31,10 @@
 //!   This is the COW pre-condition: the page is shared read-only among multiple mappings.
 //!
 
+// (INV-PAGEDESC-1: the vmemmap family — descriptors are addressed by
+// pfn through the linear vmemmap array (bounds by the managed-range
+// check); the flag words are the same lock-free atomics every reader
+// uses.)
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use super::page::{PhysAddr, PhysFrame, PhysFrameNr, VirtAddr, PAGE_SIZE};

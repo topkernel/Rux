@@ -43,6 +43,10 @@
 //! (the COARSE clocks, CPUTIME ids, garbage) falls back INSIDE the vDSO
 //! to the real syscall — the reference's shape (see mod x86 dispatch).
 
+// (INV-VDSO-DATA-1: the vDSO data page family — the page is a fixed
+// static mapping whose seqlock/fields are accessed at page-constant
+// offsets (the seq/data readers' contract); the tick/wr rows hold the
+// seqlock write discipline.)
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Fixed user mapping address (INTERP_BASE - 4 MiB, clear of the dynamic

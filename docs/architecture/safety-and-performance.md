@@ -1195,6 +1195,44 @@ their job on the checker infrastructure itself):
 | INV-EXT4-ALLOC-1 | `fs/ext4/allocator.rs` | bitmap family: bread-pinned RMW blocks under EXT4_BIG_LOCK |
 | INV-PROCFS-SEND-1 | `fs/procfs/mod.rs` | ProcFSNode Sync/Send carried per-field (children/override fields under their locks) |
 
+## Round-D contract addendum (GAP pass 2)
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-MM-1 | `mm/edges.rs` | ! - INV-MM-1 (node borrow) — the single UMA node's `PglistData` as a |
+| INV-MM-2 | `mm/lru.rs` | (INV-MM-2 owned-frame arm). |
+| INV-MM-3 | `mm/memblock.rs` | mm::edges (INV-MM-3) use to reach it; never called from elsewhere |
+| INV-MM-4 | `mm/edges.rs` | INV-MM-4: the slab allocator's in-region raw accesses. All pointers are |
+| INV-MM-COMPACT-1 | `mm/compact.rs` | (INV-MM-COMPACT-1: the compactor family — page migration walks |
+| INV-PERCPU-1 | `sync/percpu.rs` | (INV-PERCPU-1: the per-CPU bank family — banks are addressed by |
+| INV-PERF-EV-1 | `perf/mod.rs` | (INV-PERF-EV-1: the perf-event family — the registry's Box<PerfEvent> |
+| INV-RCU-1 | `sync/rcu.rs` | (INV-RCU-1: the RCU family — grace-period state is per-CPU |
+| INV-RWLOCK-1 | `sync/rwlock.rs` | (INV-RWLOCK-1: the rwlock family — reader counts and the writer |
+| INV-SCE-11 | `sched/sched.rs` | INV-SCE-11: the tp-register derivation lives in the edges |
+| INV-SKB-1 | `net/buffer.rs` | (INV-SKB-1: the sk_buff family — heads are allocator-owned blocks |
+| INV-SMALLALLOC-1 | `mm/small_alloc.rs` | (INV-SMALLALLOC-1: the small allocator family — the magazine |
+| INV-SPIN-1 | `sync/spinlock.rs` | (INV-SPIN-1: the spinlock family — guards deref through the |
+| INV-TASKLET-1 | `interrupt/tasklet.rs` | (INV-TASKLET-1: the tasklet family — the intrusive list protocol is |
+| INV-TESTHARNESS-1 | `tests/fair_timeline.rs` | (INV-TESTHARNESS-1: the in-kernel test-harness family — fair_timeline/ |
+| INV-UACCESS-SAFE-1 | `arch/uaccess_safe.rs` | (INV-UACCESS-SAFE-1: the capsule's own edges — each safe wrapper |
+| INV-VDSO-DATA-1 | `mm/vdso.rs` | (INV-VDSO-DATA-1: the vDSO data page family — the page is a fixed |
+
+| INV-SKB-1 | `net/buffer.rs` | sk_buff family: allocator-owned heads, headroom-tracked data spans, bounds-checked slices |
+| INV-VDSO-DATA-1 | `mm/vdso.rs` | vDSO data page: fixed static mapping, page-constant offsets, seqlock write discipline |
+| INV-RWLOCK-1 | `sync/rwlock.rs` | rwlock family: atomic reader counts + writer word with documented pairing; guards ride the held lifetime; panic rows best-effort |
+| INV-SPIN-1 | `sync/spinlock.rs` | spinlock guards ride the held-lock lifetime; panic/deadlock-warn rows are PANIC-TIME BEST-EFFORT (tolerate garbage; the machine is already failing) |
+| INV-TASKLET-1 | `interrupt/tasklet.rs` | tasklet family: intrusive list is F6-registered; clone-to-claim rides the per-CPU list lock + Release count |
+| INV-SMALLALLOC-1 | `mm/small_alloc.rs` | small allocator: magazine spans/class pages owned by the class lock; arena base installed once |
+| INV-UACCESS-SAFE-1 | `arch/uaccess_safe.rs` | the capsule's own edges: one audited primitive call per wrapper (INV-UACCESS-1); UserPtr/Slice carry the addr/len pair |
+| INV-TESTHARNESS-1 | `tests/*.rs` | in-kernel test harnesses: adversarial raw statics are the thing under test; unit-test feature only |
+
+| INV-KSWAPD-1 | `mm/kswapd.rs` | reclaim scanner: zone/LRU-locked list walks; descriptor updates inside the isolation window |
+
+| INV-SEQLOCK-1 | `sync/seqlock.rs` | seqlock family: even-sequence validated reads, exclusive writer phase, the UnsafeCell IS the discipline |
+| INV-RWSEM-1 | `sync/rwsem.rs` | rwsem family: count-word protocol pairs with the waitqueue; guards ride the held lifetime; panic rows best-effort |
+| INV-RMAP-1 | `mm/rmap.rs` | reverse-map family: map-locked walks; index words read under the rmap lock's Release publication |
+| INV-PAGEDESC-1 | `mm/page_desc.rs` | vmemmap family: pfn-addressed descriptors through the managed-range-checked linear array; lock-free flag atomics |
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once
