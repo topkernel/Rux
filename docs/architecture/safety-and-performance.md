@@ -1233,6 +1233,13 @@ their job on the checker infrastructure itself):
 | INV-RMAP-1 | `mm/rmap.rs` | reverse-map family: map-locked walks; index words read under the rmap lock's Release publication |
 | INV-PAGEDESC-1 | `mm/page_desc.rs` | vmemmap family: pfn-addressed descriptors through the managed-range-checked linear array; lock-free flag atomics |
 
+| INV-SENDSYNC-1 | cross-file | per-field Send/Sync impls on device/node structs (virtio_gpu/input, NetDevice, DebugFsNode, KObject, VfsMount, FsStruct, RootFSPathCache, MmStruct, VmaManager, fair-timeline nodes): each carried by that struct's own locks/atomics/write-once cells — spot-checked per impl at retag |
+| INV-COV-1 | `cov.rs` | coverage runtime's instrumented edge (capture under the cov-dump feature only) |
+| INV-STATIC-CELL-1 | cross-file | OnceCell/MaybeUninit static-singleton publishes (KERNEL_LAYOUT, NODE_DATA banks, deferred-free POOL, vmemmap stats): single early-boot writer under the init order, shared readers after |
+| INV-IOURING-REGION-1 | `io_uring/mod.rs` | the ring region family: alloc/free of the shared rings + page pins; views ride INV-IOURING-RING-1 |
+| INV-SYSV-UAPI-2 | `ipc/sysv_*.rs` | residual uaccess staging rows (sops copy edges + shm page ops) on the capsule boundary |
+| INV-KTASK-1 | cross-file | (*task)/task-ref rows where the source is a typed &Task/&mut Task or a pinned handle (pid_hash/current callers) — the cargo-cult audit applies, adopt rows ride INV-TASKREF-1 |
+
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once

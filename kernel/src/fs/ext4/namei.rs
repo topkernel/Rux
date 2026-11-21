@@ -615,7 +615,7 @@ fn ext4_add_entry_locked(
     // linear scan would fight the spanning rec_len of block 0). Refuse the
     // write — reads still work via the linear scan fallback (review 5.5).
     if dir.i_flags & super::features::EXT4_INDEX_FL != 0 {
-        return Err(-(crate::syscall::errno::EOPNOTSUPP as i32));
+        return Err(-(crate::errno::constants::EOPNOTSUPP as i32));
     }
 
     // Read directory data blocks
@@ -1294,7 +1294,7 @@ fn ext4_mkdir_no_journal(
     return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     if name.len() > 255 {
-    return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+    return Err(-(crate::errno::constants::ENAMETOOLONG as i32));
     }
 
     // Check if parent link count would overflow
@@ -1513,7 +1513,7 @@ fn ext4_create_inner(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     if name.len() > 255 {
-        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+        return Err(-(crate::errno::constants::ENAMETOOLONG as i32));
     }
 
     // Allocate new inode
@@ -1583,7 +1583,7 @@ fn ext4_mknod_inner(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     if name.len() > 255 {
-        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+        return Err(-(crate::errno::constants::ENAMETOOLONG as i32));
     }
 
     let file_mode = mode;
@@ -1659,7 +1659,7 @@ fn ext4_symlink_inner(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     if name.len() > 255 {
-        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+        return Err(-(crate::errno::constants::ENAMETOOLONG as i32));
     }
 
     // Allocate new inode with S_IFLNK mode
@@ -1753,7 +1753,7 @@ fn ext4_link_inner(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     if name.len() > 255 {
-        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+        return Err(-(crate::errno::constants::ENAMETOOLONG as i32));
     }
 
     // Read target inode
@@ -1900,7 +1900,7 @@ fn ext4_delete_entry_locked(
     // refusing is the only correct option for a linear-only writer
     // (review 5.5: indexed 目录的创建/删除/改名返回 ENOTSUP).
     if dir_inode.i_flags & super::features::EXT4_INDEX_FL != 0 {
-        return Err(-(crate::syscall::errno::EOPNOTSUPP as i32));
+        return Err(-(crate::errno::constants::EOPNOTSUPP as i32));
     }
 
     // Find the entry
@@ -2154,7 +2154,7 @@ fn ext4_unlink_inner(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     if name.len() > 255 {
-        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+        return Err(-(crate::errno::constants::ENAMETOOLONG as i32));
     }
 
     // unlink(2) on a directory must fail EISDIR BEFORE the directory entry
@@ -2307,7 +2307,7 @@ fn ext4_rmdir_inner(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     if name.len() > 255 {
-        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+        return Err(-(crate::errno::constants::ENAMETOOLONG as i32));
     }
 
     // fsw op-cost anatomy: per-phase nanosecond marks (FSW3 rmd1-rmd5).
@@ -2793,7 +2793,7 @@ fn ext4_rename_inner(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     if old_name.len() > 255 || new_name.len() > 255 {
-        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+        return Err(-(crate::errno::constants::ENAMETOOLONG as i32));
     }
 
     // Read parent directory inodes
