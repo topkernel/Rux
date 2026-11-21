@@ -1216,13 +1216,38 @@ fn release_task_storage(task: *mut Task) {
             // (the one this call was about to drop via the final
             // task_put) is transferred to the list — the count is
             // unchanged and the page outlives the owner's switch.
-            if let Some(reaper) = crate::sched::current() {
-                let rp = reaper as *mut Task as *mut Task;
-                if rp != task {
-                    crate::process::unsafe_edges::borrow_task_mut(rp)
-                        .dead_threads
-                        .lock()
-                        .push(task);
+            //
+            // RESIDUE CONVICTION (2026-11-21, boot-42 repro, the
+            // epoll-ltp storm): parking on `current()` was WRONG —
+            // this fallback runs in arbitrary contexts (the reaper's
+            // syscall, the RELEASE-DEFER finisher's dying member, a
+            // tick-side over-cap path), so the deferred entry landed
+            // on a RANDOM task's dead_threads list. The repro showed
+            // single-threaded ZOMBIE entries (st=0x20 — the exit tail
+            // still executing, which is WHY tsd=0) parked on unrelated
+            // leaders' lists: `[1439:1439 st=0x20]` on leader 1438.
+            // The contaminated lists then mis-drive those tasks' own
+            // release ladders (RELEASE-DEFER cascades, entries freed
+            // by foreign drains, orphans). The SOUND retry owner is
+            // the P4 tick drainer (reapdrain) — its switch_stage_done
+            // re-proves the free conjunction every tick (ZOMBIE pacing
+            // tasks stay slot-named and held; frozen-frame ZOMBIEs go
+            // out via the sustained R85 arm; completed tails via tsd).
+            // Hand the entry back to it; the 3 s this wait burned is
+            // 300 drainer ticks — the cap that forced the fallback has
+            // had every chance to drain. If it is STILL full, leak the
+            // page loudly (leak-don't-dangle): never park on a task
+            // that does not own the entry.
+            if !crate::sched::reapdrain::defer_reap_storage(task) {
+                static RTS_LEAK_SEEN: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let n = RTS_LEAK_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 64 {
+                    crate::dfx::taskdump::taskdump_raw_line(
+                        b"RTS-LEAK (drainer over cap; Task page held, never freed under owner) pid=",
+                    );
+                    crate::dfx::taskdump::taskdump_dec(t.pid() as u64);
+                    crate::dfx::taskdump::taskdump_raw_line(b"\n");
                 }
             }
             return;
