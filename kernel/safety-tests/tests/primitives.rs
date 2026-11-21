@@ -141,7 +141,12 @@ fn mmio_window_in_bounds_ops() {
 #[test]
 #[should_panic(expected = "out of window")]
 fn mmio_window_oob_panics_not_ub() {
-    let backing = [0u8; 8];
-    let region = mmio::MmioRegion::new(&backing as *const [u8; 8] as usize, 8);
-    let _ = region.read_u32(6); // 6+4 > 8: panic (loud), never an OOB read
+    // Aligned backing AND aligned offset that still exceeds the window
+    // (8+4 > 8 bytes): the WINDOW gate fires — the loud panic, never an
+    // OOB read. (Misaligned pairs hit the alignment assert first since
+    // the Layer-2.1 finding #2 was enforced; that arm is covered by the
+    // Kani should_panic harnesses over all offsets.)
+    let backing = [0u32; 2];
+    let region = mmio::MmioRegion::new(backing.as_ptr() as usize, 8);
+    let _ = region.read_u32(8);
 }

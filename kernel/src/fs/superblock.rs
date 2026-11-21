@@ -11,6 +11,9 @@
 //! - `struct file_system_type`: Filesystem type, used for registration and mounting
 //! - `struct vfsmount`: Mount point, represents filesystem position in namespace
 
+// (INV-SBTYPE-1: the FileSystemType table ABI — mount/kill_sb are
+// raw-pointer extern "C" slots by the table's type; every fs-type
+// registration rides this one audited ABI edge.)
 use crate::errno;
 use alloc::sync::Arc;
 use crate::sync::spinlock::Spinlock;

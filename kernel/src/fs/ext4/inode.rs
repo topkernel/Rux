@@ -5,6 +5,10 @@
 
 //! ext4 inode operations
 
+// (INV-EXT4-INODEIO-1: the on-disk inode IO family — read/write/
+// write_disk operate on bread-pinned table blocks (INV-BIO-BH's pin)
+// with fixed-offset field writes bounds-checked against the block;
+// callers hold EXT4_BIG_LOCK.)
 use core::mem;
 use alloc::vec::Vec;
 

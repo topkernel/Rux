@@ -1067,7 +1067,16 @@ pub(crate) fn release_task(task: *mut Task) {
         // but the reaper — init and its param service — lives.
         return;
     }
-    release_task_storage(task);
+    // P4 async-reap: the storage free (switch markers + RCU grace +
+    // stack/Arc/Task free) belongs to the tick drainer now — the
+    // reaper NEVER waits. Measured base: every reap burned the full
+    // 3 s RTS deadline (the terminal marker never lands for the
+    // single-threaded shape), so 1000 reaps = 3000 s and P4 could
+    // never finish. Over cap (wedged drainer) the old bounded
+    // synchronous path stands as the fallback.
+    if !crate::sched::reapdrain::defer_reap_storage(task) {
+        release_task_storage(task);
+    }
 }
 
 /// The storage half of release_task: everything that actually returns
@@ -1175,6 +1184,28 @@ fn release_task_storage(task: *mut Task) {
                     b"RTS-DEFER (storage free deferred; owner still switching) pid=",
                 );
                 crate::dfx::taskdump::taskdump_dec(t.pid() as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b" on_cpu=");
+                crate::dfx::taskdump::taskdump_dec(t.on_cpu() as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b" swout=");
+                crate::dfx::taskdump::taskdump_dec(
+                    crate::sched::sched::switching_out_names(task) as u64,
+                );
+                crate::dfx::taskdump::taskdump_raw_line(b" tsd=");
+                crate::dfx::taskdump::taskdump_dec(
+                    t.terminal_switch_done.load(core::sync::atomic::Ordering::Acquire) as u64,
+                );
+                crate::dfx::taskdump::taskdump_raw_line(b" st=");
+                crate::dfx::taskdump::taskdump_dec(t.state().bits() as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b" slot=");
+                let mut slot_pid = u32::MAX;
+                for c in 0..crate::config::MAX_CPUS {
+                    let cur = crate::sched::sched::cpu_state(c).current;
+                    if cur == task {
+                        slot_pid = c as u32;
+                        break;
+                    }
+                }
+                crate::dfx::taskdump::taskdump_dec(slot_pid as u64);
                 crate::dfx::taskdump::taskdump_raw_line(b"\n");
             }
             // Hand the retry the reaper's ownership: re-park the task on

@@ -9,6 +9,8 @@
 //! Revoke is the mechanism used to prevent old log records for deleted
 //! metadata from being replayed on top of newer data using the same blocks.
 
+// (INV-JBD2-BH-1: see recovery.rs — the revoke-record path rides the
+// same bh-pinned discipline.)
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use alloc::sync::Arc;
 use alloc::vec::Vec;

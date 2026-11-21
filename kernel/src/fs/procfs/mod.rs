@@ -32,6 +32,9 @@
 //!     └── fd/      - File descriptors
 //! ```
 
+// (residue rows: the Send/Sync impls carry ProcFSNode's per-field
+// locking (children/override fields under their locks — same shape
+// as INV-FILE-SEND-1); procfs_kill_sb rides INV-SBTYPE-1.)
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;

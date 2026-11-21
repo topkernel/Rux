@@ -37,6 +37,10 @@
 //! global wait queue per lock class keeps the wake-all-and-recheck
 //! discipline simple (thundering herd at worst).
 
+// (INV-LOCKS-KEY-1: the file-lock family — lock keys and the open/
+// lease registries live in locked maps; the raw file/inode words in
+// the release/lease rows are identity keys into those maps (never
+// dereferenced), read under INV-FILE-CELL-1's cell discipline.)
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::fs::file::File;

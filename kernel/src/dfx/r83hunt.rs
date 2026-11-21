@@ -115,7 +115,11 @@ fn rq64(task: *mut Task, off: usize) -> u64 {
 }
 #[inline]
 fn rq32(task: *mut Task, off: usize) -> u32 {
-    crate::dfx::forensics_edges::raw_qword(task as u64 + off as u64) as u32
+    // Width-correct read: the u32 Task fields (TASK_PID, TASK_STATE,
+    // TI_PREEMPT_COUNT, ...) sit at 4-mod-8 offsets after the layout
+    // drift — a qword read there is a MISALIGNED volatile read (UB,
+    // panics the alignment check in debug builds).
+    crate::dfx::forensics_edges::raw_u32(task as u64 + off as u64)
 }
 
 /// The single reporting path: gates on the dedup ring, prints the victim

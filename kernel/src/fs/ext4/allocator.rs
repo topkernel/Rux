@@ -5,6 +5,9 @@
 
 //! ext4 block and inode allocator
 
+// (INV-EXT4-ALLOC-1: the bitmap family — block/inode bitmaps are
+// bread-pinned RMW blocks (INV-BIO-BH's pin) under EXT4_BIG_LOCK;
+// the bg descriptor refreshes ride the same pin.)
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 

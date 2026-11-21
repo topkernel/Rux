@@ -2896,6 +2896,12 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // SAFETY: current_raw is protected by the claim (see the dentry
         // reader-bank protocol); it is non-null (set from a live Arc or
         // a memo-slot hit the same protocol validates).
+        // (INV-VFS-WALK-1: the path-walk's raw-position family — every
+        // &Dentry/&Inode deref in this walk (current_raw, child_raw,
+        // ino_ptr, the memo-slot hits) holds a WalkClaim that blocks
+        // the retirement drain, or is refreshed from a live owned Arc;
+        // the *_arc_from_raw adopts ride INV-DENTRY-ADOPT-1. All walk
+        // rows in this file ride this contract.)
         let cur_d: &Dentry = unsafe { &*current_raw };
 
         // ENOTDIR (Linux link_path_walk): `current` must be a directory to

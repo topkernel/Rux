@@ -32,6 +32,11 @@ use super::Ext4FileSystem;
 ///
 /// SAFETY discipline: set/clear bracket the owning syscall on the SAME
 /// task; readers run in the same task's syscall context.
+// (INV-EXT4-JHANDLE-1: the per-task journal-handle cell family — the
+// handle pointer is stored by the SAME task that created the txn,
+// lives on that task's stack for the enclosing ext4_* op, and the
+// clear/get/take_pre_capture rows all run task-local; no cross-task
+// aliasing exists by construction.)
 pub(crate) unsafe fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
     if let Some(task) = crate::sched::current() {
         (*task).journal_handle.set(handle);
@@ -401,6 +406,11 @@ fn update_group_descriptor_inodes(fs: &Ext4FileSystem, group: u32, delta: i32) -
 }
 
 /// Update superblock free inode count
+// (INV-EXT4-SBINFO-1: the in-memory sb_info box is installed once at
+// mount and lives for the mount (the INV-EXT4-GLOBALFS provenance);
+// its counters are mutated under the EXT4_BIG_LOCK by these metadata
+// ops. The on-disk superblock update below rides the bread pin
+// (INV-BIO-BH).)
 fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), i32> {
     // Update in-memory sb_info
     let sb_info_ptr = fs.sb_info.as_ref().map(|x| x.as_ref() as *const super::superblock::Ext4SuperBlockInfo);

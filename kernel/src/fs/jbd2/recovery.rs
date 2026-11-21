@@ -11,6 +11,12 @@
 //! This prevents replaying data from incomplete transactions (those
 //! without a commit block), which would corrupt the filesystem.
 
+// Journal recovery (INV-JBD2-BH-1: every journal-block access in the
+// jbd2 family — recovery, commit, revoke — goes through a bread-pinned
+// BufferHead (INV-BIO-BH's pin discipline); the header/descriptor/tag
+// byte views are bounds-checked against that block's b_data; the
+// replay/commit state machines run single-threaded under the journal
+// lock at mount/commit time.)
 use core::mem::size_of;
 use alloc::sync::Arc;
 use alloc::vec::Vec;

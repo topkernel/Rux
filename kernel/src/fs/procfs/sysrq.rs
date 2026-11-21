@@ -21,6 +21,9 @@
 //! explicit "not supported" line instead of silently doing nothing —
 //! a silent no-op would read as "the kernel has no such problem".
 
+// (INV-SYSRQ-1: the sysrq diagnostic family — task words/stacks
+// read through TaskBorrow/pins held across the print (the same
+// short-borrow contract as INV-TASKREF-1); diagnostics only.)
 use crate::errno;
 
 /// Execute one sysrq command. `cmd` is the command character.

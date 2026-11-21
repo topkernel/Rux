@@ -11,6 +11,10 @@
 //! - `struct super_block`: Superblock, represents a filesystem
 //! - `struct inode_operations`: Inode operation function pointers
 
+// (INV-INODE-STATDEV-1: the stat-dev registry family — the per-fs
+// anonymous device numbers live in a locked map (stat_dev_for_fs
+// rows); update_cached_mode's volatile store is the advisory-field
+// discipline (same shape as INV-EXT4-ATIME).)
 use alloc::sync::Arc;
 use crate::errno::Errno;
 use crate::sync::spinlock::Spinlock;
