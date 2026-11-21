@@ -1,13 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "kernel",
 ]
 exclude = [
     "bootloader",
     "config",
     "userspace",
-    "kernel/verify",
+    "kernel",
 ]
 
 [workspace.package]
