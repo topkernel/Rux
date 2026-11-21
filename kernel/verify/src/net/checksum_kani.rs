@@ -31,6 +31,8 @@ pub fn verify_ip_checksum(data: &[u8]) -> bool {
 }
 
 /// INV-CSUM-K1: checksum of empty data is 0xFFFF.
+// Unwind bound: empty data — both loops (word walk, carry fold) take 0 body trips; 2 covers the exit checks.
+#[kani::unwind(2)]
 #[kani::proof]
 fn verify_zero_length() {
     let data: [u8; 0] = [];
@@ -38,6 +40,8 @@ fn verify_zero_length() {
 }
 
 /// INV-CSUM-K2: single byte checksum formula.
+// Unwind bound: 1-byte data — word walk takes 1 trip (odd tail), carry fold 0 (sum <= 0xFF00); 2 with headroom.
+#[kani::unwind(2)]
 #[kani::proof]
 fn verify_single_byte() {
     let val: u8 = kani::any();
@@ -47,6 +51,8 @@ fn verify_single_byte() {
 }
 
 /// INV-CSUM-K3: even-length 2-byte data checksum.
+// Unwind bound: 2-byte data — word walk takes 1 trip, carry fold 0 (sum <= 0xFFFF); 2 with headroom.
+#[kani::unwind(2)]
 #[kani::proof]
 fn verify_even_two_bytes() {
     let hi: u8 = kani::any();
@@ -57,6 +63,8 @@ fn verify_even_two_bytes() {
 }
 
 /// INV-CSUM-K4: verify property — appending checksum yields 0 for 3 words.
+// Unwind bound: 3 input words + appended csum = 5 u16s: word walk max 5 trips (verify pass over 10 bytes); Vec copies are capacity-8 (with_capacity); fold <= 2. 10 = 2x headroom.
+#[kani::unwind(10)]
 #[kani::proof]
 fn verify_verify_property() {
     let w0: u16 = kani::any();
@@ -72,6 +80,8 @@ fn verify_verify_property() {
 }
 
 /// INV-CSUM-K5: 4-word verify property (carry folding test).
+// Unwind bound: 4 words + csum = 5 u16s: word walk max 5 trips; Vec::new growth copy loops peak at 8 elements; fold <= 2. 10 = headroom over the 8-element copy.
+#[kani::unwind(10)]
 #[kani::proof]
 fn verify_carry_fold() {
     let w0: u16 = kani::any();
