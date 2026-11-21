@@ -221,9 +221,10 @@ impl MmStruct {
                         drop(_pte_guard);
                         crate::mm::page_alloc::free_page(phys_addr);
                     } else {
-                        // SAFETY: self.pgd is a valid root PPN, addr is page-aligned in the heap
-                        // region, and phys_addr is a freshly allocated exclusive page.
-                        unsafe {
+                        // self.pgd is a valid root PPN, addr is page-aligned
+                        // in the heap region, and phys_addr is freshly
+                        // allocated (the map walker's own contract).
+                        {
                             if !map_page(
                                 self.pgd,
                                 VirtAddr::new(addr as u64),

@@ -157,11 +157,8 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     crate::mm::vmstat::note_fault();
     if regs.user_mode() {
         if let Some(task) = crate::sched::current() {
-            // SAFETY: current() returned a live task pointer; this
-            // only touches a per-task atomic counter.
-            unsafe {
-                (*task).min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            }
+            // Typed handle — per-task atomic counter only.
+            task.min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
     let cr2 = crate::arch::cpu::read_cr2();
@@ -492,15 +489,16 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         a += 8;
                     }
                 }
-                // SAFETY: read-only header walk via the pid hash.
-                unsafe {
-                    crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
-                        let bottom = (*task).kernel_stack_bottom() as u64;
-                        let top = (*task).kernel_stack_top() as u64;
-                        let sp = (*task).thread().sp;
+                // Read-only header walk via the pid hash (typed &Task
+                // callback — the wrapper's unsafe was stale).
+                crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+                    {
+                        let bottom = task.kernel_stack_bottom() as u64;
+                        let top = task.kernel_stack_top() as u64;
+                        let sp = task.thread().sp;
                         let rsp = regs.rsp;
                         let hit = rsp >= bottom && rsp < top;
-                        let dead = (*task).state().is_dead();
+                        let dead = task.state().is_dead();
                         // Only print tasks whose stack is near the fault
                         // (±4MB) or dead-with-stack — keeps the dump short.
                         if hit
@@ -508,7 +506,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                             || (rsp + 0x400000 > bottom && rsp < bottom + 0x400000)
                         {
                             ptag(b"KSO-T pid=");
-                            phex((*task).pid() as u64);
+                            phex(task.pid() as u64);
                             ptag(b" dead=");
                             ptag(if dead { b"Y" } else { b"N" });
                             ptag(b" kstack=[");
@@ -520,9 +518,9 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                             ptag(if hit { b" <RSP-IN-THIS-STACK" } else { b"" });
                             ptag(b"\n");
                         }
-                        // keep walking
-                    });
-                }
+                    // keep walking
+                    }
+                });
             }
             panic!(
                 "Kernel stack overflow in task {} (fault_addr={:#x}, rsp={:#x}, rip={:#x}, kstack=[{:#x},{:#x}])",

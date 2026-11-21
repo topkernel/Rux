@@ -92,6 +92,9 @@ pub struct ThreadStruct {
     pub debug_flag: bool,
 }
 
+// IRREDUCIBLE F-ROW (F-CSR-R1, file-level): the sstatus CSR read/write
+// pairs sprinkled through the FPU wrappers — reference kernel
+// arch/riscv's csr.h CSRS/CSRC macros; CSR access has no safe shape.
 impl ThreadStruct {
     /// Create new thread structure
     pub const fn new() -> Self {

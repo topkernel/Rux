@@ -52,21 +52,8 @@ pub fn clamp_rw_count(count: usize) -> usize {
 // below are thin delegates kept for the console.rs RX-IRQ path (ISIG/echo
 // decisions) and legacy callers; pty fds carry their own per-pair TtyDevice.
 
-/// Check if the console terminal echo is enabled
-pub fn tty_echo_enabled() -> bool {
-    crate::fs::tty::console().echo_enabled()
-}
 
-/// Get the console terminal c_lflag
-pub fn tty_get_lflag() -> u32 {
-    crate::fs::tty::console().lflag()
-}
 
-/// Get the console terminal's foreground process group (0 = none set).
-/// Used by the tty ISIG (^C/^Z/^\) delivery path.
-pub fn tty_get_fg_pgrp() -> u32 {
-    crate::fs::tty::console().fg_pgrp.load(Ordering::Acquire)
-}
 
 /// sys_read - Read data from file descriptor
 ///

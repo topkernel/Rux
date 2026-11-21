@@ -340,6 +340,9 @@ pub fn set_tss_rsp0(top: u64) {
 /// CPU; the TSS descriptor points at THIS CPU's TSS), then re-assert
 /// the GS base (lgdt loads a null GS selector; the architectural GS
 /// base survives that, but re-writing it keeps the invariant explicit).
+// IRREDUCIBLE F-ROW (F-BOOT-X1): per-CPU GDT/TSS bring-up (static-mut
+// per-CPU tables + lgdt/ltr) — reference kernel arch/x86/kernel/cpu/
+// common.c cpu_init_exception_handling; boot-section ownership.
 fn init_cpu_state(cpu: usize) {
     unsafe {
         // ---- TSS ----
@@ -559,6 +562,9 @@ pub const IRQ_CASCADE: u8 = 2;
 
 /// Standard Linux-style init_8259A: ICW1-4 remap to vectors 32..47,
 /// cascade wiring, then mask everything except the cascade line.
+// IRREDUCIBLE F-ROW (F-BOOT-X2): the 8259 PIC ICW program sequence —
+// reference kernel arch/x86/kernel/i8259.c init_8259A; port-IO order
+// IS the protocol.
 fn init_8259() {
     // SAFETY: port writes program the 8259 during early init with IF off.
     unsafe {
