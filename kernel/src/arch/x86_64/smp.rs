@@ -337,13 +337,14 @@ fn tramp_write_u16(off: usize, v: u16) {
 
 /// Copy the trampoline blob to 0x8000 and build its page tables.
 fn setup_trampoline(kernel_cr3: u64) {
-    // SAFETY: symbols bound by the linker; the blob is read-only data.
+    // Linker-bound symbols; the blob is read-only data.
+    // SAFETY: symbol arithmetic + a bounded from_raw_parts over the
+    // linker section (len clamped to TRAMP_SIZE).
     unsafe {
         let start = &raw const __ap_trampoline_start as usize;
         let end = &raw const __ap_trampoline_end as usize;
         let len = (end - start).min(TRAMP_SIZE);
-        let blob = core::slice::from_raw_parts(start as *const u8, len);
-        tramp_write(0, blob);
+        tramp_write(0, core::slice::from_raw_parts(start as *const u8, len));
     }
 
     // gdtr base: linear address of the GDT inside the copy.

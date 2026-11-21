@@ -54,6 +54,9 @@ extern "C" {
 /// # Safety
 /// Early boot, single hart, MMU on with the boot tables live; called
 /// once from init() before any Rust-side kernel mapping is built.
+// IRREDUCIBLE F-ROW (F-BOOT-A1): TTBR1 adoption + the boot-table
+// teardown/linear-map setup — reference kernel arch/arm64/kernel/head.S
+// + mmu.c map_mem; pre-linear-map phys addressing.
 fn adopt_boot_ttbr1() {
     // Copy all 512 L0 entries (all-but-511 are zero on the boot
     // root; copying verbatim keeps the two roots identical).
@@ -182,7 +185,10 @@ static EARLY_L3_NEXT: AtomicUsize = AtomicUsize::new(0);
 pub fn alloc_page_table() -> Option<u64> {
     match get_alloc_stage() {
         AllocStage::Early | AllocStage::Fixmap => {
-            // SAFETY: static pools with bump counters (see early_alloc).
+            // Static pools with bump counters (see early_alloc); the
+            // claimed slot's address arithmetic is inert.
+            // SAFETY: single-CPU boot section; the fetch_add claims the
+            // slot exclusively.
             unsafe {
                 let (ptr, i) = {
                     // Prefer L3 pools for leaf tables; intermediate levels
@@ -205,7 +211,8 @@ pub fn alloc_page_table() -> Option<u64> {
                         }
                     }
                 };
-                let offset = KERNEL_MAP.va_kernel_pa_offset as u64;
+                // SAFETY: KERNEL_MAP is set by boot.S before rust_main.
+                let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
                 Some(ptr.wrapping_sub(offset))
             }
         }

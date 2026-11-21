@@ -285,9 +285,9 @@ impl MmStruct {
                         drop(_pte_guard);
                         crate::mm::page_alloc::free_page(phys_addr);
                     } else {
-                        // SAFETY: valid root, page-aligned heap address,
+                        // Valid root, page-aligned heap address,
                         // exclusively owned fresh page.
-                        unsafe {
+                        {
                             if !map_user_page(
                                 self.pgd,
                                 VirtAddr::new(addr as u64),

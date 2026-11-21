@@ -78,20 +78,25 @@ pub fn cpu_started(cpu: usize) -> bool {
 ///   lives in task_struct.ti_cpu at the fixed offset
 #[inline]
 pub fn cpu_id() -> usize {
-    // SAFETY: reading TPIDR_EL1 is a pure register read. When the value is
-    // small it holds a cpu index; otherwise it is the current task_struct
-    // pointer set by the trap entry path, and the fixed ti_cpu offset is
-    // within the struct layout.
-    unsafe {
-        let tp: u64;
-        core::arch::asm!("mrs {}, tpidr_el1", out(reg) tp, options(nomem, nostack, pure));
+    // IRREDUCIBLE F-ROW (F-TP-A1): TPIDR_EL1 is outside Rust's memory
+    // model — reference kernel arch/arm64's current_thread_info()-class
+    // read (__my_cpu_offset). Pure register read; the ti_cpu deref is
+    // the one raw edge below.
+    let tp: u64 = unsafe {
+        let v;
+        core::arch::asm!("mrs {}, tpidr_el1", out(reg) v, options(nomem, nostack, pure));
+        v
+    };
 
-        if tp < 0x1000 {
-            tp as usize
-        } else {
+    if tp < 0x1000 {
+        tp as usize
+    } else {
+        {
             let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
             let cpu_ptr = (tp as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
-            let raw = (*cpu_ptr).load(Ordering::Relaxed);
+            // SAFETY: tp was set by the entry path to a live Task; the
+            // TI_CPU offset read is a relaxed atomic load.
+            let raw = unsafe { (*cpu_ptr).load(Ordering::Relaxed) };
             // Defensive: clamp negative or out-of-range (see the riscv64
             // twin — initial -1 sign-extends to usize::MAX)
             if raw < 0 || (raw as usize) >= crate::arch::aarch64::MAX_CPUS {
