@@ -7584,8 +7584,10 @@ pub fn open_mem_file_regen(
     flags: u32,
     regen: Option<fn() -> alloc::vec::Vec<u8>>,
 ) -> Result<usize, i32> {
-    // SAFETY: MEM_FILE_OPS is a static FileOps; Box::into_raw ownership is transferred to File
-    unsafe {
+    // MEM_FILE_OPS is a static FileOps; set_ops/set_private_data are the
+    // safe installers (pre-publication writes — the File's own INV);
+    // Box::into_raw is safe Rust (pointer cast only).
+    {
         let file = Arc::new(File::new(FileFlags::new(flags)));
         file.set_ops(&MEM_FILE_OPS);
         let content = alloc::boxed::Box::new(MemFileContent {
