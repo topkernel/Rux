@@ -75,6 +75,20 @@ fn send_signal(sig: i32, _code: i32, _addr: u64, _rip: u64, _regs: &PtRegs) {
         let pid = current.pid();
         crate::signal::send_signal(pid, sig).ok();
 
+        // force_sig parity for hardware faults (the riscv64/aarch64
+        // twins and x86_64's own GP/trap arms call this; the #PF arms
+        // here missed it): a fault-generated SIGSEGV/SIGBUS pended on a
+        // thread that blocks the signal stays pending forever — do_signal's
+        // first_unmasked filter skips it, execution returns to the
+        // faulting rip, and the fault repeats: an unkillable livelock.
+        // Convicted on the LTP mmap05->shmdt01/mmap1 pair (2026-11-21):
+        // the child inherits a SIGSEGV-blocked mask, its first fault
+        // lands here, and the task refaults at the same rip until the
+        // runner's timeout (the user_segv_forensics dumps repeat, the
+        // VMA disappears under its own racing teardown). Linux delivers
+        // hardware-generated signals regardless of the mask.
+        crate::signal::force_unblock_current(sig);
+
         // Wake up process to handle signal (if it's sleeping)
         crate::signal::signal_wake_up(current as *mut _);
     }
