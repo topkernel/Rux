@@ -376,9 +376,10 @@ impl MmStruct {
     /// - `pgd`: Page table root PPN
     /// - `space_type`: Address space type
     ///
-    /// # Safety
-    /// Caller must ensure `pgd` points to a valid page table
-    pub unsafe fn new(pgd: u64, space_type: PageTableType) -> Self {
+    /// Contract: the caller must ensure `pgd` points to a valid page
+    /// table (the constructor only records it — no dereference happens
+    /// here; the old unsafe marker was vestigial).
+    pub fn new(pgd: u64, space_type: PageTableType) -> Self {
         use super::vma::RiscVAddressSpaceLayout;
         use super::vma::AddressSpaceLayout;
 
@@ -467,7 +468,7 @@ impl MmStruct {
     }
 
     /// Create a shared page table memory descriptor (for fork)
-    pub unsafe fn new_shared(pgd: u64, space_type: PageTableType, brk: VirtAddr) -> Self {
+    pub fn new_shared(pgd: u64, space_type: PageTableType, brk: VirtAddr) -> Self {
         let mut mm = Self::new(pgd, space_type);
         mm.start_brk.store(brk.as_usize(), Ordering::Release);
         mm.brk.store(brk.as_usize(), Ordering::Release);
@@ -477,17 +478,17 @@ impl MmStruct {
     /// Create a memory descriptor with specified type
     ///
     /// This is an alias for `new()`, providing an interface compatible with the old `AddressSpace::new_with_type`
-    pub unsafe fn new_with_type(pgd: u64, space_type: PageTableType) -> Self {
+    pub fn new_with_type(pgd: u64, space_type: PageTableType) -> Self {
         Self::new(pgd, space_type)
     }
 
     /// Create kernel address space (convenience method)
-    pub unsafe fn new_kernel(pgd: u64) -> Self {
+    pub fn new_kernel(pgd: u64) -> Self {
         Self::new(pgd, PageTableType::Kernel)
     }
 
     /// Create user address space (convenience method)
-    pub unsafe fn new_user(pgd: u64) -> Self {
+    pub fn new_user(pgd: u64) -> Self {
         Self::new(pgd, PageTableType::User)
     }
 
@@ -1301,8 +1302,9 @@ impl MmStruct {
     }
 }
 
-unsafe impl Send for MmStruct {}
-unsafe impl Sync for MmStruct {}
+// Send/Sync proofs live in mm::edges (INV-MM-2 family) — the Arc'd mm
+// crosses threads only through the pinned-reference discipline the
+// edges document.
 
 impl Drop for MmStruct {
     fn drop(&mut self) {
@@ -1463,13 +1465,12 @@ impl Drop for MmStruct {
             }
 
             let fp_t_pt = if fp { crate::dfx::forkprof::now() } else { 0 };
-            unsafe {
-                // The dying mm's OWN PteLock (INV-LOCK-7): uncontended by
-                // construction here (last-Arc + synchronize_rcu drain), so
-                // the teardown chunks never queue behind a live mm's
-                // sections.
-                crate::arch::mm::free_user_page_tables(self.pte_lock(), self.pgd, &vma_ranges);
-            }
+            // The dying mm's OWN PteLock (INV-LOCK-7): uncontended by
+            // construction here (last-Arc + synchronize_rcu drain), so
+            // the teardown chunks never queue behind a live mm's
+            // sections (free_user_page_tables is a safe fn — the old
+            // wrapper was vestigial).
+            crate::arch::mm::free_user_page_tables(self.pte_lock(), self.pgd, &vma_ranges);
             if fp {
                 crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_PTFREE, fp_t_pt);
             }

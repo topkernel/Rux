@@ -9,6 +9,8 @@
 //!
 //! The is part of Phase 0 of the memory management refactoring plan.
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 
 use core::mem::MaybeUninit;
@@ -290,17 +292,17 @@ impl KernelMemoryLayout {
 // read-only afterwards.  KERNEL_LAYOUT_INIT acts as a guard so that readers
 // can check initialization without accessing the MaybeUninit.
 static KERNEL_LAYOUT_INIT: AtomicBool = AtomicBool::new(false);
-static mut KERNEL_LAYOUT: MaybeUninit<KernelMemoryLayout> = MaybeUninit::uninit();
+pub(super) static mut KERNEL_LAYOUT: MaybeUninit<KernelMemoryLayout> =
+    MaybeUninit::uninit();
 
 /// Initialize kernel memory layout
 ///
 /// This should be called once during boot after memblock is initialized.
 pub fn kernel_layout_init(layout: KernelMemoryLayout) {
     if KERNEL_LAYOUT_INIT.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-        // SAFETY: first and only write — guarded by compare_exchange above.
-        unsafe {
-            KERNEL_LAYOUT.write(layout);
-        }
+        // First and only write — guarded by compare_exchange above
+        // (INV-MM-11 init arm).
+        super::edges::kernel_layout_write(layout);
     }
 }
 
@@ -311,9 +313,9 @@ pub fn kernel_layout() -> &'static KernelMemoryLayout {
     if !KERNEL_LAYOUT_INIT.load(Ordering::Acquire) {
         panic!("Kernel layout not initialized");
     }
-    // SAFETY: KERNEL_LAYOUT_INIT is true, so kernel_layout_init() has
-    // completed and the value is fully initialized.
-    unsafe { KERNEL_LAYOUT.assume_init_ref() }
+    // KERNEL_LAYOUT_INIT is true, so kernel_layout_init() has completed
+    // and the value is fully initialized (INV-MM-11 shared arm).
+    super::edges::kernel_layout_ref()
 }
 
 /// Check if kernel layout is initialized
