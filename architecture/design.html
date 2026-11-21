@@ -84,6 +84,7 @@
     <div class="sub">每个子系统的机制、数据结构与实测数字 · 数字出处见各仓库文档,未测处如实标注</div>
 
     <h2 id="overview"><span class="anchor">§0</span>总览</h2>
+<div class="callout"><b>微核架构:Rux 与 Linux 最大的不同。</b>整个内核按一条判据分两半 —— 能活在 <code>#![forbid(unsafe_code)]</code> 下的代码进服务 crate(编译器保证零 unsafe),不能的进 ~3,000 行的 rux-core(带 INV 契约,被 Kani/Miri/Verus 覆盖);配三层防线(类型层 0 开销 + MPK 硬件层实测 47–49 周期/窗口 + 验证层),终态 TCB 约 3,000 行 —— 对照 Linux 全树皆 TCB 约 1:9000。<a href="micro-core.html">微核架构深读 →</a></div>
     <p>Rux 是一份源码树服务三种架构(riscv64 / x86_64 / aarch64),约 90% 代码架构无关。对外以 349 个系统调用对齐Linux ABI;对内是净室设计 —— 每一项与主流实现不同的内部决策都登记在<a href="#divergences">设计分歧登记表</a>并携带兼容性证据。</p>
     <div class="tbl-wrap">
       <table>

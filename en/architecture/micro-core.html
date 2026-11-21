@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Micro-core Architecture · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=19">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../about.html">About</a>
+      <a href="design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Get Started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Guestbook</a>
+      <span class="lang-sw"><a href="../../architecture/micro-core.html">中文</a><a class="on" href="micro-core.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="micro-core.html" class="on">Micro-core (the biggest difference from Linux)</a>
+    <a href="design.html">Architecture &amp; Modules</a>
+    <a href="scheduler.html">Scheduler</a>
+    <a href="memory.html">Memory</a>
+    <a href="filesystem.html">Filesystem</a>
+    <a href="ipc.html">IPC</a>
+    <a href="boot.html">Boot</a>
+    <a href="interrupts.html">Interrupts &amp; Timers</a>
+    <a href="structure.html">Code Structure</a>
+    <a href="riscv64.html">Porting Guide</a>
+    <a href="kernel-lock.html">Lock Ordering</a><div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debug Guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Perf Debugging</a>
+    <a href="../debugging/locks.html">Lock Debugging</a>
+    <a href="../debugging/memory.html">Memory Forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; Symbols</a><div class="grp">Performance</div>
+    <a href="../performance/index.html">Overview</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">Micro-benchmarks</a><div class="grp">Security</div>
+    <a href="../security/index.html">Overview</a>
+    <a href="../security/formal.html">Formal Verification</a>
+    <a href="../security/unsafe.html">Unsafe Ledger</a>
+    <a href="../security/taxonomy.html">Defect Taxonomy</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>The Micro-core: a Type-Isolated Kernel</h1>
+    <div class="sub">kernel/rux-core + service crates · the one criterion, the irreducible floor, the three-layer defense, and the flip ladder — every mechanism with measured data · Design of record: docs/architecture/micro-core-design.md</div>
+
+    <h2 id="difference"><span class="anchor">§1</span>The fundamental difference from Linux: one criterion, two halves</h2>
+    <p>The essential difference between Rux and Linux is not any one subsystem's algorithm — it is <b>how the trusted computing base (TCB) is defined</b>. Linux is a ~28-million-line C monolith: the type system does not check memory safety, so <b>the entire kernel is the TCB</b> — any pointer error anywhere can corrupt anything; isolation is attempted through code review and runtime hardening.</p>
+    <p>Rux turns the same property into a <b>compile-time structure</b> via the Rust type system. The criterion is a single question asked of every line:</p>
+    <div class="callout"><b>Can this code live under <code>#![forbid(unsafe_code)]</code>?</b><br>YES → it belongs in a service crate (compiler-guaranteed zero unsafe). NO → it belongs in rux-core (under an INV contract or F-row, covered by the verification stack). There is no third bucket.</div>
+    <p>Corollary: the service subsystems (syscalls, networking, filesystem leaf layers, drivers, ext4, and the <b>policy layers</b> of scheduling and memory management) become structurally unable to express memory unsafety once their crates carry crate-level forbid — wild pointers, use-after-free, and data races, the classes that dominate the C-kernel CVE history, are <b>structurally zero in the service columns</b>. This is not "careful coding"; it is a compiler guarantee: the only way to add unsafe to a forbid crate is to delete the crate attribute itself, and the CI ratchet makes that deletion an explicit, reviewable act.</p>
+
+    <h2 id="floor"><span class="anchor">§2</span>The irreducible floor: rux-core ≈ 3,000 lines</h2>
+    <p>Every kernel hand-writes a small bottom layer (the reference kernel expresses it in arch/*.S). Rux's floor is itemized, each line with its reference counterpart and F-row id:</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Family</th><th class="num">Est. dual lines</th><th>Reference counterpart</th></tr></thead>
+      <tbody>
+        <tr><td>Trap entry/exit + signal frames</td><td class="num">~500</td><td>entry.S, sigreturn</td></tr>
+        <tr><td>Context switch (3 arches) + tp register</td><td class="num">~250</td><td>__switch_to / cpu_switch_to</td></tr>
+        <tr><td>uaccess copy bottoms</td><td class="num">~320</td><td>uaccess.S / copy_user_64.S</td></tr>
+        <tr><td>FPU/RVV/FPSIMD save-restore</td><td class="num">~450</td><td>fpu/*.S, vector.S, fpsimd.S</td></tr>
+        <tr><td>Page-table atomics + walk bottoms</td><td class="num">~300</td><td>pgtable.h atomics</td></tr>
+        <tr><td>Boot tables (GDT/TSS/8259/CSR)</td><td class="num">~350</td><td>head.S et al.</td></tr>
+        <tr><td>CR/MSR/CSR/port-IO register ops</td><td class="num">~250</td><td>special_insns.h, io.h</td></tr>
+        <tr><td>SBI/hypercall/GIC ABIs</td><td class="num">~150</td><td>kvm.c, irq-gic-v3.c</td></tr>
+        <tr><td>Sync primitive interiors + safety/ + task page lifecycle + timer core</td><td class="num">~420</td><td>spinlock.c interiors etc.</td></tr>
+      </tbody>
+    </table></div>
+    <p>That is the entire audited, machine-verified hand-written unsafe — against the Linux framing where the whole tree is TCB, a ratio of roughly <b>1 : 9,000</b> (3,000 lines vs ~28 million).</p>
+
+    <h2 id="defense"><span class="anchor">§3</span>The three-layer defense: 0 + ~50 + 0 cycles</h2>
+    <p>Microkernels (seL4/L4 family) buy fault isolation with <b>a separate address space per service</b>, at ~1,000 cycles per cross-service IPC on the best fastpaths, multiplied along fault→driver→server chains (the Mach lesson). Rux replaces address-space isolation with <b>language isolation</b>, plus a hardware backstop — three layers, each at its measured cost point:</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Layer</th><th>Mechanism</th><th class="num">Boundary cost (measured)</th><th>What it buys</th></tr></thead>
+      <tbody>
+        <tr><td><b>Type</b></td><td>forbid crates + the Cargo dependency graph (Cargo refuses cycles = one-way deps machine-checked)</td><td class="num"><b>0</b> (cross-crate calls, LTO-inlined; the flip verified zero behavior change)</td><td>Service columns cannot express memory unsafety at compile time</td></tr>
+        <tr><td><b>Hardware</b></td><td>Intel MPK protection keys: page-grain hardware domains inside the one address space</td><td class="num"><b>47–49 cycles/window</b> (100k TSC-timed ops; an address-space switch is ~1,000+)</td><td>Core metadata pages tagged; out-of-window access takes a hardware #PF (fault-injection proven); the &lt;1% budget holds</td></tr>
+        <tr><td><b>Verification</b></td><td>Kani 12/12 all-input proofs + Miri zero-UB + Verus narrow-adopt (unbounded arithmetic lemmas)</td><td class="num"><b>0</b> (offline)</td><td>The core's ~3,000 hand-written unsafe lines are machine-checked</td></tr>
+      </tbody>
+    </table></div>
+    <p>In one line: a microkernel spends ~1,000 cycles per boundary to buy the first layer; Rux buys all three for <b>0 + ~50 + 0</b>, at finer grain (MPK to the page; IPC only to the process). The mpkguard framework has landed (default off, enabled by mpkguard=1): the vring AVAIL sections are the phase-1 target (measured ~2.4k windows/s).</p>
+
+    <h2 id="topology"><span class="anchor">§4</span>End-state topology and the flip ladder</h2>
+    <pre><code>rux-core          (≈3,000 lines; the entire TCB)
+  entry/switch/uaccess/page-table asm · safety/ · sync primitives · task lifecycle · timer core
+  ← covered by Kani/Miri/Verus
+
+rux-sched-policy  forbid safe (CFS/RT/fairness/wakeup policy — decisions out of the core)
+rux-mm-policy     forbid safe (VMA tree / mmap / COW / fault decisions)
+rux-syscall       forbid safe (41k lines, 12 files — the flip is DONE)
+rux-fs-svc · rux-ext4 · rux-net · rux-drivers · rux-ipc · rux-dfx-svc</code></pre>
+    <p>Scheduling and memory management do not become whole crates: both are <b>decidable policy riding a small unsafe core</b> — after the split the policy layer is forbid-safe and the core stays in rux-core. The switch/tp/lock primitives/page-table atomics are TCB; CFS mathematics is not. Each rung's binding order: <b>measure the reverse surface → design the seam → flip → forbid → the domain battery</b> (the sched split passes the P4 storm + context-switch benchmarks; the mm split the mmap/fault families). A rung whose measurement shows a non-decomposable surface is <b>shelved with its numbers recorded</b> — shelving is success, not failure.</p>
+
+    <h2 id="numbers"><span class="anchor">§5</span>The numbers: staged landing</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Stage</th><th class="num">Expected dual</th></tr></thead>
+      <tbody>
+        <tr><td>Now (single-crate census)</td><td class="num">~10,300</td></tr>
+        <tr><td>Rung 1 close (syscall crate, in-lib copies deleted)</td><td class="num">~10,000 (structural change)</td></tr>
+        <tr><td>+ net rung + S1 sched split + M1 mm split</td><td class="num">−~750</td></tr>
+        <tr><td>+ fs service rungs (incl. ext4) + drivers rung</td><td class="num">−~2,770</td></tr>
+        <tr><td>+ dfx instrument retirement review (per-instrument, by hunt aliveness)</td><td class="num">−600–1,000</td></tr>
+        <tr><td><b>End state = the size of rux-core</b></td><td class="num"><b>≈4,000–4,700</b></td></tr>
+      </tbody>
+    </table></div>
+    <p>The percentage target (≤1%) holds on every path; the decisive input for the absolute 5,000-line target is the dfx retirement review. Every rung's gates: triple-arch builds, the full in-kernel suite, fio three-case, smoke, and the forbid negative probe (adding unsafe to the crate must fail its own build).</p>
+    <div class="callout">Reproduce &amp; primary sources: the design document docs/architecture/micro-core-design.md (binding ladder, abort criteria, itemized F-rows); the flip mechanics in crate-plan.md (the five-step recipe); the MPK evaluation and fault injection in unsafe-5000-plan.md Layer 3. Current progress: the syscall crate's three-step flip has landed (full suite green on the composition bin); the S1 measurement is queued.</div>
+
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site views <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-grid">
+      <div class="foot-col"><h4>Docs</h4>
+        <a href="../guides/getting-started.html">Get Started</a>
+        <a href="design.html">Architecture</a>
+        <a href="../performance/index.html">Performance</a>
+        <a href="../security/index.html">Security</a>
+      </div>
+      <div class="foot-col"><h4>Repo</h4>
+        <a href="https://github.com/topkernel/Rux">GitHub</a>
+        <a href="https://github.com/topkernel/Rux/blob/main/docs/architecture/micro-core-design.md">Design of record ↗</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=19"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

@@ -84,6 +84,7 @@
     <div class="sub">Mechanisms, data structures and measured numbers per subsystem — numbers come from the repository docs; unmeasured items are marked as such</div>
 
     <h2 id="overview"><span class="anchor">§0</span>Overview</h2>
+<div class="callout"><b>The micro-core: the biggest difference from Linux.</b>One criterion splits the kernel in half — code that can live under <code>#![forbid(unsafe_code)]</code> goes to service crates (compiler-guaranteed zero unsafe); the rest goes into the ~3,000-line rux-core (INV-contracted, covered by Kani/Miri/Verus); with a three-layer defense (type layer at 0 cost + the MPK hardware layer measured at 47–49 cycles/window + verification), the end-state TCB is ~3,000 lines — against Linux's whole-tree TCB, roughly 1:9,000.<a href="micro-core.html">Read the micro-core deep dive →</a></div>
     <p>Rux is one source tree serving three architectures (riscv64 / x86_64 / aarch64), ~90% arch-independent. Externally it matches the Linux ABI across 349 syscalls; internally it is a clean-room design — every internal decision that differs from the mainstream is registered in the <a href="#divergences">design-divergence register</a> with compatibility evidence.</p>
     <div class="tbl-wrap">
       <table>
