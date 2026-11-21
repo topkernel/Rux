@@ -7,14 +7,9 @@ edition = "2021"
 # files, #[path]-included from the framework side with ZERO moves; the
 # crate-level forbid is the compiler-enforced service boundary.
 #
-# Standalone workspace like kernel/verify (the root pins kernel
-# targets); path-depends on the rux framework LIB with feature
-# pass-through (the arch feature must match the kernel build).
-
-[workspace]
-
+# A member of the kernel-dir workspace (crate-flip M3-B).
 [dependencies]
-rux = { path = ".." }
+rux = { path = "..", default-features = false }
 
 [features]
 default = ["riscv64"]
