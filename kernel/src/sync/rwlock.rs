@@ -14,6 +14,11 @@
 //!   read_bh()        — disable BH + read lock
 //!   write_bh()       — disable BH + write lock
 
+// (INV-RWLOCK-1: the rwlock family — reader counts and the writer
+// word are atomics with the acquire/release pairing documented at the
+// slowpath; guard derefs ride the guard's lifetime (the lock's own
+// discipline); panic-path rows are best-effort prints (same contract
+// as spinlock's below).
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::ops::{Deref, DerefMut};

@@ -58,6 +58,11 @@
 //!   their locks and deliver wakes OUTSIDE them (timer.rs R12-3 pattern);
 //!   see drivers/virtio/mod.rs and `assert_no_virtio_lock`.
 
+// (INV-SPIN-1: the spinlock family — guards deref through the
+// held-lock lifetime; the panic/deadlock-warn rows are PANIC-TIME
+// BEST-EFFORT: they re-read the lock word and owner fields to print
+// diagnostics while the machine is already failing — correctness is
+// the pre-panic discipline, these reads tolerate garbage.)
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};

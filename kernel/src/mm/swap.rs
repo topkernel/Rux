@@ -8,6 +8,8 @@
 //! Swap entries are encoded in PTEs when pages are swapped out,
 //! and decoded on page fault to swap pages back in.
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -130,7 +132,7 @@ pub struct SwapDevice {
     enabled: AtomicUsize,
 }
 
-static mut SWAP_DEVICES: [SwapDevice; MAX_SWAP_DEVICES] = [
+pub(super) static mut SWAP_DEVICES: [SwapDevice; MAX_SWAP_DEVICES] = [
     SwapDevice::new_static(0),
     SwapDevice::new_static(1),
     SwapDevice::new_static(2),
@@ -146,9 +148,9 @@ fn swap_dev(idx: usize) -> Option<&'static SwapDevice> {
     if idx >= MAX_SWAP_DEVICES {
         return None;
     }
-    // SAFETY: static storage; interior mutability is atomics/Spinlock
-    // only after the single-threaded init writes.
-    Some(unsafe { &SWAP_DEVICES[idx] })
+    // static storage; interior mutability is atomics/Spinlock only
+    // after the single-threaded init writes (INV-MM-7 dev-static arm).
+    Some(super::edges::swap_dev_static(idx))
 }
 
 /// Map a physical swap page to its PAGE_SIZE mutable kernel slice (the
@@ -158,9 +160,10 @@ fn swap_page_slice_mut(phys_addr: usize) -> &'static mut [u8] {
     let virt_addr = crate::arch::mm::memory_layout::phys_to_virt(
         crate::arch::mm::memory_layout::PhysAddr(phys_addr as u64),
     ).0 as usize;
-    // SAFETY: page-aligned linear-mapping address of a live page; the
-    // PAGE_SIZE length matches the buddy allocation exactly.
-    unsafe { core::slice::from_raw_parts_mut(virt_addr as *mut u8, PAGE_SIZE) }
+    // page-aligned linear-mapping address of a live page; the
+    // PAGE_SIZE length matches the buddy allocation exactly
+    // (INV-MM-7 page-slice arm).
+    super::edges::page_slice_mut(virt_addr)
 }
 
 /// Shared-slice variant of [`swap_page_slice_mut`] (swap-out reads).
@@ -168,9 +171,9 @@ fn swap_page_slice(phys_addr: usize) -> &'static [u8] {
     let virt_addr = crate::arch::mm::memory_layout::phys_to_virt(
         crate::arch::mm::memory_layout::PhysAddr(phys_addr as u64),
     ).0 as usize;
-    // SAFETY: as swap_page_slice_mut; the page is exclusively owned
-    // (refcount == 1) during swap-out.
-    unsafe { core::slice::from_raw_parts(virt_addr as *const u8, PAGE_SIZE) }
+    // as swap_page_slice_mut; the page is exclusively owned
+    // (refcount == 1) during swap-out (INV-MM-7 page-slice arm).
+    super::edges::page_slice(virt_addr)
 }
 
 impl SwapDevice {
@@ -316,11 +319,12 @@ pub fn swap_activate(
         bitmap.push(0);
     }
 
-    // SAFETY: SWAP_DEVICES[0] fields are atomics or Spinlock-guarded;
+    // SWAP_DEVICES[0] fields are atomics or Spinlock-guarded;
     // `enabled` is stored LAST (Release) so readers never see a
-    // half-initialized device (see nr_active_swap / swap_alloc_slot).
-    unsafe {
-        let dev = &mut SWAP_DEVICES[0];
+    // half-initialized device (see nr_active_swap / swap_alloc_slot)
+    // — INV-MM-7 init arm.
+    {
+        let dev = super::edges::swap_dev_static_mut(0);
         dev.disk.store(disk as *const _ as usize, Ordering::Release);
         dev.swap_type = 0;
         dev.start_sector = start_sector;
@@ -560,11 +564,11 @@ fn get_swap_disk(swap_type: u32) -> Result<&'static crate::drivers::blkdev::GenD
     if !dev.is_enabled() {
         return Err(-22);
     }
-    // SAFETY: the stored bits are a registered &'static GenDisk
-    // (INV-BLKDEV-1) put there by swap_activate.
-    Ok(unsafe {
-        &*(dev.disk.load(Ordering::Acquire) as *const crate::drivers::blkdev::GenDisk)
-    })
+    // the stored bits are a registered &'static GenDisk
+    // (INV-BLKDEV-1) put there by swap_activate (INV-MM-2 arm).
+    Ok(crate::syscall::edges::boxed_ref(
+        dev.disk.load(Ordering::Acquire) as *const crate::drivers::blkdev::GenDisk,
+    ))
 }
 
 /// Convert swap offset to 512-byte sector number.

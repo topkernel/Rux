@@ -10,6 +10,10 @@
 //! Grace period: all CPUs must pass through at least one quiescent state
 //! (context switch, idle loop, or return to user mode).
 
+// (INV-RCU-1: the RCU family — grace-period state is per-CPU
+// counters under the gp lock; the callback trampolines' raw fn words
+// are published before the gp flip and only invoked after it (the
+// wait/flip discipline the module documents.)
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::config::MAX_CPUS;
 use crate::list::ListHead;
@@ -374,6 +378,44 @@ fn shared_grace_target() -> u32 {
 /// one.
 fn shared_grace_done() {
     GP_IN_FLIGHT.store(false, Ordering::Release);
+}
+
+/// Public twin for the async reap drainer: release the shared-grace
+/// in-flight slot after a POLLED round completes (or is abandoned) —
+/// without this the next target only ever latches the finished gen.
+pub fn shared_grace_done_pub() {
+    shared_grace_done();
+}
+
+/// Public twin: hold the waiter count while a polled grace round is
+/// pending. rcu_note_context_switch SUPPRESSES its QS store when
+/// RCU_WAITERS == 0 — a poller that never holds the count starves its
+/// own round (the drainer's cap-exhaustion root cause, 2026-11-21).
+pub fn grace_waiter_hold() {
+    RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Public twin: release the held waiter count.
+pub fn grace_waiter_release() {
+    RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// Public twin: the CPUs holding a polled round at `target` back —
+/// online, not idle, QS below target. The drainer's expedited nudge
+/// (resched IPI per the reference's synchronize_rcu_expedited shape)
+/// targets exactly these.
+pub fn grace_lagging_cpus(target: u32) -> alloc::vec::Vec<usize> {
+    let mut v = alloc::vec::Vec::new();
+    for i in 0..MAX_CPUS {
+        if !crate::sched::sched::cpu_online(i) {
+            continue;
+        }
+        if cpu_quiescent(i, target) {
+            continue;
+        }
+        v.push(i);
+    }
+    v
 }
 
 /// Forced grace period with SLEEPING polls — the fd-table reaper's form.

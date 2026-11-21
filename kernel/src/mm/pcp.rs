@@ -2,6 +2,8 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
+#![forbid(unsafe_code)]
+
 // ==================== Per-CPU pagesets (pcp) ====================
 //
 // Order-0 frame caching per CPU, mirroring the reference kernel's
@@ -55,10 +57,10 @@ pub const PCP_BATCH: usize = 16;
 const PCP_HIGH: usize = 2 * PCP_BATCH;
 
 #[repr(C, align(64))]
-struct PcpPageset {
+pub(super) struct PcpPageset {
     /// Cached order-0 PFNs. Slots [0..count) are live.
     list: [usize; PCP_HIGH],
-    count: usize,
+    pub(super) count: usize,
 }
 
 impl PcpPageset {
@@ -75,10 +77,10 @@ impl PcpPageset {
 /// mutable access is confined to the owning CPU inside its irq-off
 /// window (INV-PCP-3), which serializes nested entry on the same CPU.
 #[repr(C, align(64))]
-struct PcpRow(UnsafeCell<PcpPageset>);
-unsafe impl Sync for PcpRow {}
+pub(super) struct PcpRow(pub(super) UnsafeCell<PcpPageset>);
+/// Sync proof + raw-row edges live in mm::edges (INV-MM-5).
 
-static PCP_ROWS: [PcpRow; MAX_CPUS] = {
+pub(super) static PCP_ROWS: [PcpRow; MAX_CPUS] = {
     #[allow(clippy::declare_interior_mutable_const)]
     const ROW: PcpRow = PcpRow(UnsafeCell::new(PcpPageset::new()));
     [ROW; MAX_CPUS]
@@ -101,11 +103,11 @@ fn with_row<R>(f: impl FnOnce(&mut PcpPageset) -> R) -> Option<R> {
     let flags = crate::arch::cpu::save_and_disable_irq();
     let c = crate::arch::cpu_id() as usize;
     let out = if c < MAX_CPUS {
-        // SAFETY: UnsafeCell::get() hands out the raw row pointer; the
-        // &mut derived from it is exclusive because only this CPU can
-        // touch the row and interrupts are disabled (INV-PCP-3).
-        let row = unsafe { &*core::ptr::addr_of!(PCP_ROWS[c]) }.0.get();
-        Some(f(unsafe { &mut *row }))
+        // UnsafeCell::get() hands out the raw row pointer; the &mut
+        // derived from it is exclusive because only this CPU can touch
+        // the row and interrupts are disabled (INV-PCP-3 / INV-MM-5
+        // exclusive arm, via the edge).
+        Some(super::edges::pcp_row_exclusive(c, f))
     } else {
         None
     };
@@ -240,16 +242,17 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
     if page.is_null() {
         return false;
     }
-    // SAFETY: descriptor transitions below are the pcp ownership
-    // transfer for this frame; exclusivity comes from INV-PCP-1: only
-    // one of the three states owns the frame, and every state change
-    // validates the previous state first.
-    unsafe {
+    // Descriptor transitions below are the pcp ownership transfer for
+    // this frame; exclusivity comes from INV-PCP-1: only one of the
+    // three states owns the frame, and every state change validates
+    // the previous state first (INV-MM-2 via the edge).
+    {
+        let page: &mut _ = super::edges::page_of(pfn).unwrap();
         // Textbook in-use state only; anything else goes to the zone
         // slow path whose tripwires own the diagnosis.
-        if (*page).refcount() != 1
-            || (*page).test_flag(PageFlag::OnFreelist)
-            || (*page).order() != 0
+        if page.refcount() != 1
+            || page.test_flag(PageFlag::OnFreelist)
+            || page.order() != 0
         {
             return false;
         }
@@ -280,7 +283,7 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
                 return true; // handled: quarantined frames never re-enter
             }
         }
-        if (*page).test_flag(PageFlag::OnPcp) {
+        if page.test_flag(PageFlag::OnPcp) {
             // Double free of a pcp-cached frame. Leak it (stay cached,
             // never hand out twice) and name it, mirroring the buddy's
             // R15-3 stance. No printk from this path (free contexts hold
@@ -290,9 +293,9 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
             return true;
         }
         // In use -> cached.
-        (*page).set_refcount(0);
-        (*page).clear_flag(PageFlag::Referenced);
-        (*page).set_flag(PageFlag::OnPcp);
+        page.set_refcount(0);
+        page.clear_flag(PageFlag::Referenced);
+        page.set_flag(PageFlag::OnPcp);
     }
     // INV-PCP-2: the frame is free again (cached).
     zone.free_pages_add(1);
@@ -403,11 +406,10 @@ fn to_in_use(pfn: usize) {
 pub fn cached_pages_total() -> usize {
     let mut total = 0usize;
     for c in 0..MAX_CPUS {
-        // SAFETY: read-only peek of a single usize through the raw row
-        // pointer — no reference is formed; a moment-stale value is
-        // acceptable for reporting (the caller is diagnostic).
-        let row = unsafe { &*core::ptr::addr_of!(PCP_ROWS[c]) }.0.get();
-        total += unsafe { (*row).count };
+        // Read-only peek of a single usize — no reference is formed; a
+        // moment-stale value is acceptable for reporting (INV-MM-5 peek
+        // arm).
+        total += super::edges::pcp_row_count_peek(c);
     }
     total
 }
@@ -416,9 +418,9 @@ pub fn cached_pages_total() -> usize {
 pub fn cached_pages_per_cpu() -> [usize; MAX_CPUS] {
     let mut out = [0usize; MAX_CPUS];
     for c in 0..MAX_CPUS {
-        // SAFETY: read-only single-usize peek, see cached_pages_total.
-        let row = unsafe { &*core::ptr::addr_of!(PCP_ROWS[c]) }.0.get();
-        out[c] = unsafe { (*row).count };
+        // Read-only single-usize peek, see cached_pages_total
+        // (INV-MM-5 peek arm).
+        out[c] = super::edges::pcp_row_count_peek(c);
     }
     out
 }
@@ -432,11 +434,10 @@ pub fn cached_pages_per_cpu() -> [usize; MAX_CPUS] {
 pub fn forensics_scan_rows(pfn: usize, out: &mut [usize]) -> usize {
     let mut total = 0usize;
     for c in 0..MAX_CPUS {
-        // SAFETY: read-only peek of the row's list/count through the raw
-        // pointer — no reference escapes; moment-stale values are fine
-        // for a forensic snapshot.
-        let row = unsafe { &*core::ptr::addr_of!(PCP_ROWS[c]) }.0.get();
-        let r = unsafe { &*row };
+        // Read-only peek of the row's list/count — no reference escapes;
+        // moment-stale values are fine for a forensic snapshot
+        // (INV-MM-5 peek arm).
+        let r = super::edges::pcp_row_ref_peek(c);
         let count = r.count.min(PCP_HIGH);
         let mut hit = false;
         for i in 0..count {

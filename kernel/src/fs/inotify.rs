@@ -749,7 +749,7 @@ fn inotify_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 fn inotify_poll(file: &File, _events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let instance = match instance_of(file) {
         Some(i) => i,
         None => return 0,

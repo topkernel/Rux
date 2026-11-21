@@ -72,6 +72,10 @@
 //! alone. All REGISTRY takes are `lock_irqsave()` uniformly, so no
 //! holder can ever be interrupted into a path that wants it.
 
+// (INV-PERF-EV-1: the perf-event family — the registry's Box<PerfEvent>
+// pointers are valid while registered (the registry maps id->Box and
+// removes before drop); every &PerfEvent/&mut read rides registry
+// membership; the mmap rows pin through the event's own refcount.)
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -1326,7 +1330,7 @@ fn perf_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 /// poll(2): readable while unwritten ring data exists.
 fn perf_poll(file: &crate::fs::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
     let Some(ev) = event_of(file) else { return POLLERR };
     if events & POLLIN != 0 {

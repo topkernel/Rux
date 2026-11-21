@@ -229,24 +229,21 @@ fn try_expand_stack(
 
     // Reverse mapping for the stack page (VMA lock already dropped).
     {
-        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+        use crate::mm::page_desc::{page_desc, PageFlag};
         let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
-        let page = pfn_to_page_mut(page_pfn);
-        if !page.is_null() {
-            // SAFETY: null-checked; exclusively owned until the install.
-            unsafe {
-                (*page).set_flag(PageFlag::Anonymous);
-                // SwapBacked + LRU membership: reclaim visibility.
-                (*page).set_flag(PageFlag::SwapBacked);
-                (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
-                (*page).inc_mapcount();
-                crate::mm::rmap::page_record_mapping(
-                    &*page,
-                    addr_space as *const _ as usize,
-                    fault_addr.bits() as usize,
-                );
-                crate::mm::lru::page_add_anon_lru(&*page);
-            }
+        // Exclusively owned until the install (INV-FRAME-1); SwapBacked
+        // + LRU membership give reclaim visibility.
+        if let Some(page) = page_desc(page_pfn) {
+            page.set_flag(PageFlag::Anonymous);
+            page.set_flag(PageFlag::SwapBacked);
+            page.set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+            page.inc_mapcount();
+            crate::mm::rmap::page_record_mapping(
+                page,
+                addr_space as *const _ as usize,
+                fault_addr.bits() as usize,
+            );
+            crate::mm::lru::page_add_anon_lru(page);
         }
     }
     drop(_pte_guard);
@@ -510,12 +507,13 @@ pub fn handle_mm_fault(
     };
 
     // Initialize page content based on type
-    // SAFETY: exclusively owned fresh page inside the linear map.
+    // Exclusively owned fresh page inside the linear map (INV-AE-ZP).
     let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
-    unsafe {
+    {
         match vma_type {
             VmaType::Anonymous | VmaType::SharedMemory => {
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                // SAFETY: fresh exclusive page (INV-AE-ZP).
+                unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
             }
             VmaType::FileBacked => {
                 // Zero-fill first (partial reads / tail holes), then read
@@ -523,7 +521,8 @@ pub fn handle_mm_fault(
                 // file grown by write(2) after mmap must serve its new
                 // pages — twin mmapstress04 note); positional read_at so
                 // the shared file position is never touched (twin R71).
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                // SAFETY: fresh exclusive page (INV-AE-ZP).
+                unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
                 if vma_file_fd >= 0 && file_offset < effective_size {
                     // Prefer the VMA's pinned vm_file (the mapping fd may
                     // already be closed — twin ld.so note).
@@ -550,11 +549,14 @@ pub fn handle_mm_fault(
                             )
                         };
                         if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
-                            core::ptr::write_bytes(
-                                page_ptr.add(bytes_read as usize),
-                                0,
-                                PAGE_SIZE_USIZE - bytes_read as usize,
-                            );
+                            // SAFETY: same fresh page; tail zero.
+                            unsafe {
+                                core::ptr::write_bytes(
+                                    page_ptr.add(bytes_read as usize),
+                                    0,
+                                    PAGE_SIZE_USIZE - bytes_read as usize,
+                                )
+                            };
                         }
                     }
                 }
@@ -605,38 +607,36 @@ pub fn handle_mm_fault(
 
     // Reverse mapping + LRU for the newly mapped page (twin arms).
     {
-        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+        use crate::mm::page_desc::{page_desc, PageFlag};
         let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
-        let page = pfn_to_page_mut(page_pfn);
-        if !page.is_null() {
-            // SAFETY: null-checked; frame exclusively owned until the
-            // install above.
-            unsafe {
+        // Frame exclusively owned until the install above (INV-FRAME-1).
+        if let Some(page) = page_desc(page_pfn) {
+            {
                 match vma_type {
                     VmaType::Anonymous => {
-                        (*page).set_flag(PageFlag::Anonymous);
-                        (*page).set_flag(PageFlag::SwapBacked);
-                        (*page).set_index(
+                        page.set_flag(PageFlag::Anonymous);
+                        page.set_flag(PageFlag::SwapBacked);
+                        page.set_index(
                             fault_addr.bits() as usize / (PAGE_SIZE as usize),
                         );
-                        (*page).inc_mapcount();
+                        page.inc_mapcount();
                         crate::mm::rmap::page_record_mapping(
-                            &*page,
+                            page,
                             addr_space as *const _ as usize,
                             fault_addr.bits() as usize,
                         );
-                        crate::mm::lru::page_add_anon_lru(&*page);
+                        crate::mm::lru::page_add_anon_lru(page);
                     }
                     VmaType::SharedMemory => {
-                        (*page).set_flag(PageFlag::Anonymous);
-                        (*page).set_index(
+                        page.set_flag(PageFlag::Anonymous);
+                        page.set_index(
                             fault_addr.bits() as usize / (PAGE_SIZE as usize),
                         );
-                        (*page).inc_mapcount();
+                        page.inc_mapcount();
                         // Shmem stays off the anon LRU (twin note:
                         // try_to_unmap only walks Anonymous VMAs).
                         crate::mm::rmap::page_record_mapping(
-                            &*page,
+                            page,
                             addr_space as *const _ as usize,
                             fault_addr.bits() as usize,
                         );
@@ -647,18 +647,18 @@ pub fn handle_mm_fault(
                         // page from reclaim's point of view. Device
                         // frames keep no state.
                         if matches!(vma_type, VmaType::FileBacked) {
-                            (*page).set_flag(PageFlag::Anonymous);
-                            (*page).set_flag(PageFlag::SwapBacked);
-                            (*page).set_index(
+                            page.set_flag(PageFlag::Anonymous);
+                            page.set_flag(PageFlag::SwapBacked);
+                            page.set_index(
                                 fault_addr.bits() as usize / (PAGE_SIZE as usize),
                             );
-                            (*page).inc_mapcount();
+                            page.inc_mapcount();
                             crate::mm::rmap::page_record_mapping(
-                                &*page,
+                                page,
                                 addr_space as *const _ as usize,
                                 fault_addr.bits() as usize,
                             );
-                            crate::mm::lru::page_add_anon_lru(&*page);
+                            crate::mm::lru::page_add_anon_lru(page);
                         }
                     }
                 }

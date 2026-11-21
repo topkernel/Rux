@@ -1654,7 +1654,7 @@ fn socket_close(file: &File) -> i32 {
 }
 
 fn socket_file_poll(file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
 
     let socket = match socket_borrow(file, "poll") {
@@ -1925,7 +1925,7 @@ impl SocketTable {
                     // sk wake). See the file_id field note.
                     let fid = s.file_id.load(core::sync::atomic::Ordering::Acquire);
                     if fid != 0 {
-                        crate::syscall::misc::epoll_notify_file(fid);
+                        crate::fs::event_notify::epoll_notify_file(fid);
                     }
                 }
             }
@@ -1951,7 +1951,7 @@ impl SocketTable {
                     let woken = s.wait_queue.wake_up_all();
                     let fid = s.file_id.load(core::sync::atomic::Ordering::Acquire);
                     if fid != 0 {
-                        crate::syscall::misc::epoll_notify_file(fid);
+                        crate::fs::event_notify::epoll_notify_file(fid);
                     }
                     crate::trace::trace_net_udp_wake(
                         udp_fd,

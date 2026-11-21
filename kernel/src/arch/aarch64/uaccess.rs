@@ -168,6 +168,9 @@ pub fn access_ok(addr: usize, size: usize) -> bool {
 // Assembly function declarations
 // ============================================================================
 
+// IRREDUCIBLE F-ROW (F-UACC-3): the exception-table copy bottoms —
+// reference kernel arch/arm64/lib/copy_from_user.S; same fixup-table
+// class as the other arches.
 extern "C" {
     fn __aa64_copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize;
     fn __aa64_copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize;

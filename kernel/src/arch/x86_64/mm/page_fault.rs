@@ -149,20 +149,19 @@ fn try_expand_stack(
     // Convert physical address to virtual address for kernel access
     let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
 
-    // Initialize page content based on type
-    // SAFETY: page_ptr is derived from phys_to_virt() on a freshly allocated page
-    // (alloc_user_phys_page). The page is PAGE_SIZE bytes and exclusively owned.
-    unsafe {
-        match vma_type {
-            VmaType::Anonymous => {
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
-            }
-            VmaType::FileBacked | VmaType::SharedMemory => {
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
-            }
-            VmaType::Device => {
-                // Device mapping: don't zero
-            }
+    // Initialize page content based on type: fresh exclusive page
+    // (INV-XE-ZP); each raw op carries its own block.
+    match vma_type {
+        VmaType::Anonymous => {
+            // SAFETY: fresh exclusive page (INV-XE-ZP).
+            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+        }
+        VmaType::FileBacked | VmaType::SharedMemory => {
+            // SAFETY: fresh exclusive page (INV-XE-ZP).
+            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+        }
+        VmaType::Device => {
+            // Device mapping: don't zero
         }
     }
 
@@ -227,29 +226,22 @@ fn try_expand_stack(
     // Set up reverse mapping for stack page (VMA lock already dropped,
     // so set fields directly instead of calling page_add_anon_rmap)
     {
-        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+        use crate::mm::page_desc::{page_desc, PageFlag};
         let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
-        let page = pfn_to_page_mut(page_pfn);
-        if !page.is_null() {
-            // SAFETY: page is from pfn_to_page_mut and checked for null.
-            // This page was just allocated and is not yet shared, so exclusive access is guaranteed.
-            unsafe {
-                (*page).set_flag(PageFlag::Anonymous);
-                // SwapBacked + LRU_INACTIVE_ANON membership make the page
-                // visible to the reclaim engine — vmscan only swaps out
-                // pages that sit on LRU_INACTIVE_ANON with SwapBacked set.
-                // Without this, anonymous demand faults accumulate as
-                // unreclaimable memory and the system OOMs with swap idle.
-                (*page).set_flag(PageFlag::SwapBacked);
-                (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
-                (*page).inc_mapcount();
-                crate::mm::rmap::page_record_mapping(
-                    &*page,
-                    addr_space as *const _ as usize,
-                    fault_addr.bits() as usize,
-                );
-                crate::mm::lru::page_add_anon_lru(&*page);
-            }
+        // Fresh exclusive page (INV-FRAME-1); SwapBacked + LRU_INACTIVE_ANON
+        // membership make it visible to the reclaim engine — vmscan only
+        // swaps out pages on LRU_INACTIVE_ANON with SwapBacked set.
+        if let Some(page) = page_desc(page_pfn) {
+            page.set_flag(PageFlag::Anonymous);
+            page.set_flag(PageFlag::SwapBacked);
+            page.set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+            page.inc_mapcount();
+            crate::mm::rmap::page_record_mapping(
+                page,
+                addr_space as *const _ as usize,
+                fault_addr.bits() as usize,
+            );
+            crate::mm::lru::page_add_anon_lru(page);
         }
     }
     drop(_pte_guard);
@@ -862,22 +854,19 @@ pub fn handle_mm_fault(
                     // random-global scribbles: user stores landing in
                     // re-handed kernel pages).
                     {
-                        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
-                        let page = pfn_to_page_mut((shared_phys >> PAGE_SHIFT) as usize);
-                        if !page.is_null() {
-                            // SAFETY: page descriptor of a live frame;
-                            // the backing holds the base reference, so
-                            // get_page cannot race a 0→1 resurrection.
-                            unsafe {
-                                (*page).get_page();
-                                (*page).set_flag(PageFlag::Anonymous);
-                                (*page).inc_mapcount();
-                                crate::mm::rmap::page_record_mapping(
-                                    &*page,
-                                    addr_space as *const _ as usize,
-                                    fault_addr.bits() as usize,
-                                );
-                            }
+                        use crate::mm::page_desc::{page_desc, PageFlag};
+                        // Descriptor of a live frame; the backing holds
+                        // the base reference, so get_page cannot race a
+                        // 0→1 resurrection (INV-FRAME-1).
+                        if let Some(page) = page_desc((shared_phys >> PAGE_SHIFT) as usize) {
+                            page.get_page();
+                            page.set_flag(PageFlag::Anonymous);
+                            page.inc_mapcount();
+                            crate::mm::rmap::page_record_mapping(
+                                page,
+                                addr_space as *const _ as usize,
+                                fault_addr.bits() as usize,
+                            );
                         }
                     }
                     addr_space.add_rss(1);
@@ -1238,21 +1227,18 @@ pub fn handle_mm_fault(
                                             // mapcount is what blocks
                                             // eviction from freeing the
                                             // frame while mapped.
-                                            use crate::mm::page_desc::pfn_to_page_mut;
-                                            let pd = pfn_to_page_mut(
+                                            use crate::mm::page_desc::page_desc;
+                                            // Descriptor of a live cache
+                                            // frame, pinned at this
+                                            // moment (released only after
+                                            // this loop).
+                                            if let Some(pd) = page_desc(
                                                 (virt_to_phys(VirtAddr::new(run[i].1 as u64))
                                                     .bits()
                                                     >> PAGE_SHIFT)
                                                     as usize,
-                                            );
-                                            if !pd.is_null() {
-                                                // SAFETY: descriptor of a
-                                                // live cache frame, pinned
-                                                // at this moment (released
-                                                // only after this loop).
-                                                unsafe {
-                                                    (*pd).inc_mapcount();
-                                                }
+                                            ) {
+                                                pd.inc_mapcount();
                                             }
                                         }
                                         mapped_total += 1;
@@ -1618,22 +1604,19 @@ pub fn handle_mm_fault(
                         // (the session-22 "rmap not wired yet" gap —
                         // without flags these were the census-invisible
                         // unreclaimable copies).
-                        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
-                        let page = pfn_to_page_mut((phys[i] >> PAGE_SHIFT) as usize);
-                        if !page.is_null() {
-                            // SAFETY: freshly allocated, exclusively owned.
-                            unsafe {
-                                (*page).set_flag(PageFlag::Anonymous);
-                                (*page).set_flag(PageFlag::SwapBacked);
-                                (*page).set_index(va_i.bits() as usize / PAGE_SIZE_USIZE);
-                                (*page).inc_mapcount();
-                                crate::mm::rmap::page_record_mapping(
-                                    &*page,
-                                    addr_space as *const _ as usize,
-                                    va_i.bits() as usize,
-                                );
-                                crate::mm::lru::page_add_anon_lru(&*page);
-                            }
+                        use crate::mm::page_desc::{page_desc, PageFlag};
+                        // Freshly allocated, exclusively owned (INV-FRAME-1).
+                        if let Some(page) = page_desc((phys[i] >> PAGE_SHIFT) as usize) {
+                            page.set_flag(PageFlag::Anonymous);
+                            page.set_flag(PageFlag::SwapBacked);
+                            page.set_index(va_i.bits() as usize / PAGE_SIZE_USIZE);
+                            page.inc_mapcount();
+                            crate::mm::rmap::page_record_mapping(
+                                page,
+                                addr_space as *const _ as usize,
+                                va_i.bits() as usize,
+                            );
+                            crate::mm::lru::page_add_anon_lru(page);
                         }
                     }
                     mapped += 1;
@@ -1786,23 +1769,20 @@ pub fn handle_mm_fault(
                 // Bookkeeping INSIDE the lock — the Anonymous arm of the
                 // single-page path below, verbatim.
                 {
-                    use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
-                    let page = pfn_to_page_mut((phys[i] >> PAGE_SHIFT) as usize);
-                    if !page.is_null() {
-                        // SAFETY: freshly allocated, exclusively owned
-                        // until the map above.
-                        unsafe {
-                            (*page).set_flag(PageFlag::Anonymous);
-                            (*page).set_flag(PageFlag::SwapBacked);
-                            (*page).set_index(va_i.bits() as usize / PAGE_SIZE_USIZE);
-                            (*page).inc_mapcount();
-                            crate::mm::rmap::page_record_mapping(
-                                &*page,
-                                addr_space as *const _ as usize,
-                                va_i.bits() as usize,
-                            );
-                            crate::mm::lru::page_add_anon_lru(&*page);
-                        }
+                    use crate::mm::page_desc::{page_desc, PageFlag};
+                    // Freshly allocated, exclusively owned until the map
+                    // above (INV-FRAME-1).
+                    if let Some(page) = page_desc((phys[i] >> PAGE_SHIFT) as usize) {
+                        page.set_flag(PageFlag::Anonymous);
+                        page.set_flag(PageFlag::SwapBacked);
+                        page.set_index(va_i.bits() as usize / PAGE_SIZE_USIZE);
+                        page.inc_mapcount();
+                        crate::mm::rmap::page_record_mapping(
+                            page,
+                            addr_space as *const _ as usize,
+                            va_i.bits() as usize,
+                        );
+                        crate::mm::lru::page_add_anon_lru(page);
                     }
                 }
                 mapped += 1;
@@ -1831,13 +1811,14 @@ pub fn handle_mm_fault(
     // Convert physical address to virtual address for kernel access
     let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
 
-    // Initialize page content based on type
-    // SAFETY: page_ptr is from phys_to_virt() on a freshly allocated physical page.
-    // The page is PAGE_SIZE bytes and exclusively owned by this fault handler.
-    unsafe {
+    // Initialize page content based on type: page_ptr is from
+    // phys_to_virt() on a freshly allocated, exclusively owned page
+    // (INV-XE-ZP); each raw op below carries its own block.
+    {
         match vma_type {
             VmaType::Anonymous => {
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                // SAFETY: fresh exclusive page (INV-XE-ZP).
+                unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
             }
             VmaType::FileBacked => {
                 // Fill from the pinned vm_file using the entry-time
@@ -1860,7 +1841,8 @@ pub fn handle_mm_fault(
                     && file_offset < effective_size
                     && effective_size.saturating_sub(file_offset) >= PAGE_SIZE_USIZE;
                 if !will_full_read {
-                    core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                    // SAFETY: fresh exclusive page (INV-XE-ZP).
+                    unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
                 }
 
                 // Read file data if we have a valid fd
@@ -1884,8 +1866,10 @@ pub fn handle_mm_fault(
                             // peers read) and served pages from
                             // the wrong offset. See the riscv64
                             // twin and File::read_at.
+                            // SAFETY: read_at fills the fresh exclusive
+                            // page (INV-XE-ZP); short tails re-zero below.
                             let bytes_read =
-                                file.read_at(file_offset as u64, page_ptr, bytes_to_read);
+                                unsafe { file.read_at(file_offset as u64, page_ptr, bytes_to_read) };
 
                             // Any read that does not verifiably cover the
                             // whole page — short tail, 0, or a NEGATIVE
@@ -1904,11 +1888,14 @@ pub fn handle_mm_fault(
                                 0
                             };
                             if will_full_read && good < PAGE_SIZE_USIZE {
-                                core::ptr::write_bytes(
-                                    page_ptr.add(good),
-                                    0,
-                                    PAGE_SIZE_USIZE - good,
-                                );
+                                // SAFETY: same fresh page; tail zero.
+                                unsafe {
+                                    core::ptr::write_bytes(
+                                        page_ptr.add(good),
+                                        0,
+                                        PAGE_SIZE_USIZE - good,
+                                    )
+                                };
                             }
                         }
                     }
@@ -1919,7 +1906,8 @@ pub fn handle_mm_fault(
                 // Device mapping: don't zero
             }
             VmaType::SharedMemory => {
-                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                // SAFETY: fresh exclusive page (INV-XE-ZP).
+                unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
             }
         }
     }
@@ -1963,10 +1951,9 @@ pub fn handle_mm_fault(
         // race loser).
         return MmFaultResult::Handled;
     }
-    // Map page
-    // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
-    // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
-    unsafe {
+    // Map page (root_ppn valid, fault_addr page-aligned, phys_addr
+    // fresh, pte_flags well-formed — the walk primitive's contract).
+    {
         if !map_page(root_ppn, fault_addr, phys_addr, pte_flags) {
             // PT allocation failure (fake-OOM family): free the data
             // page, deliver OOM (trap layer SIGKILLs the user task).
@@ -1980,41 +1967,39 @@ pub fn handle_mm_fault(
 
     // Set up reverse mapping for the newly mapped page
     {
-        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+        use crate::mm::page_desc::{page_desc, PageFlag};
         let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
-        let page = pfn_to_page_mut(page_pfn);
-        if !page.is_null() {
-            // SAFETY: page is from pfn_to_page_mut and checked for null.
-            // The page was just allocated and mapped, so we have exclusive access.
-            unsafe {
+        // The page was just allocated and mapped (INV-FRAME-1 handle).
+        if let Some(page) = page_desc(page_pfn) {
+            {
                 match vma_type {
                     VmaType::Anonymous => {
-                        (*page).set_flag(PageFlag::Anonymous);
+                        page.set_flag(PageFlag::Anonymous);
                         // SwapBacked + LRU membership: required for vmscan
                         // to consider this page for swap-out (see the stack
                         // growth path above).
-                        (*page).set_flag(PageFlag::SwapBacked);
-                        (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
-                        (*page).inc_mapcount();
+                        page.set_flag(PageFlag::SwapBacked);
+                        page.set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+                        page.inc_mapcount();
                         // Multi-mapping bookkeeping: record (mm, vpn) so
                         // try_to_unmap can find re-mapped instances of this
                         // frame.
                         crate::mm::rmap::page_record_mapping(
-                            &*page,
+                            page,
                             addr_space as *const _ as usize,
                             fault_addr.bits() as usize,
                         );
-                        crate::mm::lru::page_add_anon_lru(&*page);
+                        crate::mm::lru::page_add_anon_lru(page);
                     }
                     VmaType::SharedMemory => {
-                        (*page).set_flag(PageFlag::Anonymous);
-                        (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
-                        (*page).inc_mapcount();
+                        page.set_flag(PageFlag::Anonymous);
+                        page.set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+                        page.inc_mapcount();
                         // Shmem stays off the anon LRU: try_to_unmap only
                         // walks VmaType::Anonymous VMAs, so marking these
                         // SwapBacked would only add reclaim scan churn.
                         crate::mm::rmap::page_record_mapping(
-                            &*page,
+                            page,
                             addr_space as *const _ as usize,
                             fault_addr.bits() as usize,
                         );
@@ -2028,16 +2013,16 @@ pub fn handle_mm_fault(
                         // unreclaimable, the fake-OOM drainer's
                         // accounting face. An exclusive copy IS an
                         // anonymous page from reclaim's point of view.
-                        (*page).set_flag(PageFlag::Anonymous);
-                        (*page).set_flag(PageFlag::SwapBacked);
-                        (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
-                        (*page).inc_mapcount();
+                        page.set_flag(PageFlag::Anonymous);
+                        page.set_flag(PageFlag::SwapBacked);
+                        page.set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+                        page.inc_mapcount();
                         crate::mm::rmap::page_record_mapping(
-                            &*page,
+                            page,
                             addr_space as *const _ as usize,
                             fault_addr.bits() as usize,
                         );
-                        crate::mm::lru::page_add_anon_lru(&*page);
+                        crate::mm::lru::page_add_anon_lru(page);
                     }
                     _ => {
                         // Device mappings: no descriptor state (frames
@@ -2096,26 +2081,26 @@ pub(crate) fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
     let vpn3 = a.pud_index() as usize;
     let vpn2 = a.pmd_index() as usize;
     let vpn1 = a.pte_index() as usize;
-    // SAFETY: same walk as read_pte_raw; the leaf exists (caller read it
+    // Same walk as read_pte_raw (typed); the leaf exists (caller read it
     // via read_pte_raw on the same root/addr), so the intermediate
     // tables are present. Only the leaf is replaced.
-    unsafe {
-        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-        let pte4 = (*root_table).get(vpn4);
+    {
+        let Some(root_table) = PtTable::from_phys(root_ppn << PAGE_SHIFT) else { return };
+        let pte4 = root_table.get(vpn4);
         if !pte4.is_valid() {
             return;
         }
-        let table3 = get_page_table_virt(pte4.ppn() << PAGE_SHIFT);
-        let pte3 = (*table3).get(vpn3);
+        let Some(table3) = PtTable::from_phys(pte4.ppn() << PAGE_SHIFT) else { return };
+        let pte3 = table3.get(vpn3);
         if !pte3.is_valid() || pte3.is_leaf() {
             return;
         }
-        let table2 = get_page_table_virt(pte3.ppn() << PAGE_SHIFT);
-        let pte2 = (*table2).get(vpn2);
+        let Some(table2) = PtTable::from_phys(pte3.ppn() << PAGE_SHIFT) else { return };
+        let pte2 = table2.get(vpn2);
         if !pte2.is_valid() || pte2.is_leaf() {
             return;
         }
-        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let Some(table1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else { return };
         // 0xb9 install validator (oh-launch round 7): a PRESENT entry
         // with zero address bits is corrupt by construction (physical
         // page 0 is reserved at boot on x86). The hilogd teardown
@@ -2139,7 +2124,7 @@ pub(crate) fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
                 );
             }
         }
-        (*table1).set(vpn1, super::pagetable::PageTableEntry::from_bits(bits));
+        table1.set(vpn1, super::pagetable::PageTableEntry::from_bits(bits));
     }
 }
 
@@ -2246,7 +2231,7 @@ fn handle_swap_fault(
     root_ppn: u64,
 ) -> MmFaultResult {
     use crate::mm::page::VirtAddr as PageVirtAddr;
-    use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+    use crate::mm::page_desc::{page_desc, PageFlag};
     use crate::mm::swap;
 
     // Extract swap type and offset
@@ -2362,24 +2347,20 @@ fn handle_swap_fault(
 
     // Set up rmap for the swapped-in page
     let page_pfn = (phys_addr >> PAGE_SHIFT) as usize;
-    let page = pfn_to_page_mut(page_pfn);
-    if !page.is_null() {
-        // SAFETY: page is checked for null. The page was just allocated for
-        // swap-in and is not yet shared, so exclusive access is guaranteed.
-        unsafe {
-            (*page).set_flag(PageFlag::Anonymous);
-            (*page).set_flag(PageFlag::SwapBacked);
-            (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
-            (*page).inc_mapcount();
-            crate::mm::rmap::page_record_mapping(
-                &*page,
-                addr_space as *const _ as usize,
-                fault_addr.bits() as usize,
-            );
+    // Fresh exclusive page (INV-FRAME-1).
+    if let Some(page) = crate::mm::page_desc::page_desc(page_pfn) {
+        page.set_flag(PageFlag::Anonymous);
+        page.set_flag(PageFlag::SwapBacked);
+        page.set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+        page.inc_mapcount();
+        crate::mm::rmap::page_record_mapping(
+            page,
+            addr_space as *const _ as usize,
+            fault_addr.bits() as usize,
+        );
 
-            // Add back to anon LRU
-            crate::mm::lru::page_add_anon_lru(&*page);
-        }
+        // Add back to anon LRU
+        crate::mm::lru::page_add_anon_lru(page);
     }
     drop(_pte_guard);
 

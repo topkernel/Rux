@@ -39,6 +39,9 @@ const MSR_FS_BASE: u32 = 0xC000_0100;
 /// MSR_KERNEL_GS_BASE — the SWAPGS shadow (task's user GS base).
 const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
+// IRREDUCIBLE F-ROW (F-CS-X1): the register/stack switch itself —
+// reference kernel arch/x86/kernel/entry.S __switch_to (callee-saved save/restore); the callee-saved register file + sp swap has
+// no safe shape (Rust owns the frame).
 extern "C" {
     fn __switch_to(prev: *mut Task, next: *mut Task);
 }

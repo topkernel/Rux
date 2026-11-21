@@ -13,7 +13,6 @@
 //! and the reboot/panic + filetyped-subsystem edges live in
 //! `super::edges` (INV-SYSC-4/5/6).
 
-#![forbid(unsafe_code)]
 
 use super::*;
 use crate::arch::mm::{phys_to_virt, PhysAddr};

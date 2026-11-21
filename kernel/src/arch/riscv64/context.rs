@@ -505,6 +505,9 @@ pub fn get_current_satp() -> u64 {
 // High-level context_switch
 // ============================================================================
 
+// IRREDUCIBLE F-ROW (F-CS-R1): the register/stack switch itself —
+// reference kernel arch/riscv/kernel/entry.S __switch_to; the callee-saved register file + sp swap has
+// no safe shape (Rust owns the frame).
 extern "C" {
     fn __switch_to(prev: *mut Task, next: *mut Task);
 }

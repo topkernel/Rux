@@ -7286,7 +7286,7 @@ fn mem_file_close(file: &File) -> i32 {
 /// graphical boot, ub-gfx 2026-11-17). Reference: Linux seq_file poll
 /// unconditionally returns DEFAULT_POLLMASK.
 fn mem_file_poll(_file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut r = 0u16;
     if events & POLLIN != 0 {
         r |= POLLIN | POLLRDNORM;

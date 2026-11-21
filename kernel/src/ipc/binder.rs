@@ -4405,7 +4405,7 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
     };
     drop(w);
     if has {
-        crate::syscall::misc::poll_events::POLLIN | crate::syscall::misc::poll_events::POLLRDNORM
+        crate::fs::event_notify::poll_events::POLLIN | crate::fs::event_notify::poll_events::POLLRDNORM
     } else {
         0
     }

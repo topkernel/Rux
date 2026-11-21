@@ -115,6 +115,8 @@ impl ThreadStruct {
     /// foreign struct would snapshot the WRONG live state — a logic bug
     /// the switch protocol prevents; memory-wise the target is this
     /// struct's own typed array).
+    // IRREDUCIBLE F-ROW (F-XFPU-2): xsaveopt64/xsave64/fxsave64 — same
+    // class as F-XFPU-1 (kernel fpu/*.S save paths).
     pub fn fpu_save_for_switch(&mut self) {
         // Two encodings for one reason: XSAVE/XRSTOR #UD while
         // CR4.OSXSAVE is clear, and the very first task switches of

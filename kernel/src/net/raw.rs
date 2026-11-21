@@ -493,7 +493,7 @@ fn raw_file_close(file: &File) -> i32 {
 }
 
 fn raw_file_poll(file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     // SAFETY: ops identity was verified (see raw_file_read).
     let socket = match raw_of_file(file) {
         Some(s) => s,

@@ -642,7 +642,7 @@ impl File {
     /// shapes; consumers reduce both to the same event bits, but the
     /// convention now lives here once.
     pub fn poll_dispatch(&self, events: u16) -> u16 {
-        use crate::syscall::misc::poll_events::*;
+        use crate::fs::event_notify::poll_events::*;
         let ops = self.get_ops();
         match ops.and_then(|o| o.poll) {
             Some(poll_fn) => poll_fn(self, events),

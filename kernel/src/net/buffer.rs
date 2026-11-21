@@ -4,6 +4,10 @@
 //!
 //! Network Buffer (SkBuff)
 
+// (INV-SKB-1: the sk_buff family — heads are allocator-owned blocks
+// with headroom-tracked data pointers (alloc/reserve/put maintain the
+// span invariants); data_slice_at rows are bounds-checked against the
+// len tail; Send/Sync carried by the head's single-owner discipline.)
 use core::sync::atomic::AtomicU64;
 
 /// Packet types

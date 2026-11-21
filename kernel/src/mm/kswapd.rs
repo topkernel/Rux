@@ -10,6 +10,12 @@
 //!
 //! On UMA (single node) systems there is one kswapd thread.
 
+// (INV-KSWAPD-1: the reclaim scanner family — page-list walks hold
+// the zone/LRU locks; descriptor flag updates happen inside the
+// exclusive isolation window the scanner holds per page.)
+
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use super::zone::{ZoneType, WMARK_HIGH};
@@ -72,13 +78,11 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         if !needs_reclaim {
             // Nothing to do — sleep.
             if let Some(current) = crate::sched::current() {
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(
-                            crate::process::task::TaskState::INTERRUPTIBLE,
-                        ),
-                    );
-                }
+                current.set_state(
+                    crate::process::task::TaskState::new(
+                        crate::process::task::TaskState::INTERRUPTIBLE,
+                    ),
+                );
             }
             crate::sched::schedule();
             continue;
@@ -123,7 +127,7 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 // standard boots never produce — the DEEP_PASS counters
                 // stay zero on the Tier-1 census (drct=0 discipline).
                 let mut deep_freed = 0usize;
-                if let Some(node) = unsafe { first_online_node_mut() } {
+                if let Some(node) = super::edges::first_node_mut() {
                     for zt in [
                         super::zone::ZoneType::ZoneNormal,
                         super::zone::ZoneType::ZoneDma32,
@@ -160,20 +164,18 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                     // own break-on-no-progress) and falls through to
                     // the OOM below.
                     if let Some(current) = crate::sched::current() {
-                        unsafe {
-                            (*current).set_state(
-                                crate::process::task::TaskState::new(
-                                    crate::process::task::TaskState::INTERRUPTIBLE,
-                                ),
-                            );
-                        }
+                        current.set_state(
+                            crate::process::task::TaskState::new(
+                                crate::process::task::TaskState::INTERRUPTIBLE,
+                            ),
+                        );
                     }
                     crate::sched::schedule();
                     continue;
                 }
 
                 // SAFETY: kswapd is the only reclaim thread; exclusive node access.
-                if let Some(node) = unsafe { first_online_node_mut() } {
+                if let Some(node) = super::edges::first_node_mut() {
                     // Find total pages from any initialized zone
                     let mut totalpages = 0u64;
                     for zt in [super::zone::ZoneType::ZoneNormal, super::zone::ZoneType::ZoneDma32, super::zone::ZoneType::ZoneDma] {
@@ -201,13 +203,11 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // Without a working reclaim path (try_to_unmap), kswapd may loop
         // indefinitely if the zone remains below watermarks.
         if let Some(current) = crate::sched::current() {
-            unsafe {
-                (*current).set_state(
-                    crate::process::task::TaskState::new(
-                        crate::process::task::TaskState::INTERRUPTIBLE,
-                    ),
-                );
-            }
+            current.set_state(
+                crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::INTERRUPTIBLE,
+                ),
+            );
         }
         crate::sched::schedule();
     }
@@ -222,7 +222,7 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 /// Returns true if any zone's free pages are below the high watermark.
 fn zone_below_high_watermark() -> bool {
     // SAFETY: kswapd watermark check — exclusive node access from kswapd thread.
-    let node = match unsafe { first_online_node_mut() } {
+    let node = match super::edges::first_node_mut() {
         Some(n) => n,
         None => return false,
     };
@@ -257,11 +257,12 @@ pub fn wakeup_kswapd(order: i32) {
         return;
     }
 
-    unsafe {
-        let task_ptr = KSWAPD_TASK.load(Ordering::Acquire);
-        if !task_ptr.is_null() {
-            crate::process::task::Task::wake_up(task_ptr);
-        }
+    // KSWAPD_TASK holds the pinned kthread pointer (set at spawn;
+    // wake_up is a safe fn over the raw task pointer — the old wrapper
+    // was vestigial).
+    let task_ptr = KSWAPD_TASK.load(Ordering::Acquire);
+    if !task_ptr.is_null() {
+        crate::process::task::Task::wake_up(task_ptr);
     }
 }
 

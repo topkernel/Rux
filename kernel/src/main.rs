@@ -127,6 +127,12 @@ mod init;
 mod boot_edges;
 mod initrd;
 mod syscall;
+// The syscall tree is #![forbid(unsafe_code)] (the Layer-1 structural
+// boundary); the subsystem's audited unsafe edges live OUTSIDE the
+// tree — same file, declared here so the forbid does not apply to it.
+// syscall::edges re-exports it so existing paths stay valid.
+#[path = "syscall/edges.rs"]
+pub(crate) mod syscall_edges;
 mod interrupt;
 mod dfx;
 mod ipc;

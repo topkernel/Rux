@@ -7,6 +7,9 @@
 //! Tasklets are a dynamic bottom-half mechanism built on top of softirq.
 //! Two priority levels: HI_SOFTIRQ (highest) and TASKLET_SOFTIRQ (normal).
 
+// (INV-TASKLET-1: the tasklet family — the intrusive list protocol is
+// F6-registered (safety-and-performance); the clone-to-claim rows
+// ride the per-CPU list lock and the count's Release publication.)
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::config::MAX_CPUS;

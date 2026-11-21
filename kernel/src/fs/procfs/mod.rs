@@ -2400,7 +2400,7 @@ fn procfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 /// EPERM for poll-less files, so without this op the monitor's kernel
 /// source never armed.
 fn procfs_file_poll(_file: &crate::fs::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut r = 0u16;
     if events & POLLIN != 0 {
         r |= POLLIN | POLLRDNORM;

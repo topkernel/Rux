@@ -7,6 +7,7 @@
 
 pub mod file;
 pub mod unsafe_edges;
+pub mod event_notify;
 pub mod fdreap;
 pub mod inode;
 pub mod dentry;
