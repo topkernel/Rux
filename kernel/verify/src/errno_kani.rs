@@ -87,6 +87,12 @@ fn verify_key_discriminants() {
 }
 
 /// INV-ERRNO-K5: all key errno values are positive and distinct.
+///
+/// Distinctness via pairwise scan, NOT std HashSet: HashSet::insert
+/// pulls in RandomState -> getrandom, whose symbolic path CBMC unwinds
+/// indefinitely (450+ iterations, no verdict in 50+ min) — this was the
+/// harness that stalled every full-suite run at position #41. The
+/// pairwise scan states the identical property and is O(1) for CBMC.
 #[kani::proof]
 fn verify_positive_distinct() {
     let vals = [
@@ -97,9 +103,10 @@ fn verify_positive_distinct() {
         Errno::OutOfMemory.as_i32(),
         Errno::TryAgain.as_i32(),
     ];
-    let mut seen = std::collections::HashSet::new();
-    for &v in &vals {
-        assert!(v > 0);
-        assert!(seen.insert(v));
+    for i in 0..vals.len() {
+        assert!(vals[i] > 0);
+        for j in (i + 1)..vals.len() {
+            assert!(vals[i] != vals[j]);
+        }
     }
 }

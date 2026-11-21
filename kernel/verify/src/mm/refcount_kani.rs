@@ -44,6 +44,7 @@ impl Page {
 
 /// INV-REF-K1: refcount never goes negative after any get/put sequence.
 /// Bounded loop: max 10 operations to keep CBMC tractable.
+#[kani::unwind(32)]
 #[kani::proof]
 fn verify_refcount_never_negative() {
     let initial: i32 = kani::any();
@@ -85,6 +86,7 @@ fn verify_mapcount_initial() {
 
 /// INV-MAP-K2: N maps + N unmaps → mapcount == PAGE_MAPCOUNT_BIAS.
 /// Bounded to 20 operations.
+#[kani::unwind(48)]
 #[kani::proof]
 fn verify_mapcount_symmetry() {
     let page = Page::new();

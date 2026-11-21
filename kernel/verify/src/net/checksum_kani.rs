@@ -38,6 +38,7 @@ fn verify_zero_length() {
 }
 
 /// INV-CSUM-K2: single byte checksum formula.
+#[kani::unwind(8)]
 #[kani::proof]
 fn verify_single_byte() {
     let val: u8 = kani::any();
@@ -47,6 +48,7 @@ fn verify_single_byte() {
 }
 
 /// INV-CSUM-K3: even-length 2-byte data checksum.
+#[kani::unwind(8)]
 #[kani::proof]
 fn verify_even_two_bytes() {
     let hi: u8 = kani::any();
@@ -57,6 +59,7 @@ fn verify_even_two_bytes() {
 }
 
 /// INV-CSUM-K4: verify property — appending checksum yields 0 for 3 words.
+#[kani::unwind(32)]
 #[kani::proof]
 fn verify_verify_property() {
     let w0: u16 = kani::any();
@@ -72,6 +75,7 @@ fn verify_verify_property() {
 }
 
 /// INV-CSUM-K5: 4-word verify property (carry folding test).
+#[kani::unwind(32)]
 #[kani::proof]
 fn verify_carry_fold() {
     let w0: u16 = kani::any();
@@ -89,6 +93,7 @@ fn verify_carry_fold() {
 }
 
 /// INV-CSUM-K6: all-zeros checksum is 0xFFFF.
+#[kani::unwind(80)]
 #[kani::proof]
 fn verify_all_zeros() {
     let len: usize = kani::any();

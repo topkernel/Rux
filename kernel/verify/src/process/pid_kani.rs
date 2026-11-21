@@ -87,6 +87,7 @@ fn verify_pid_double_free() {
 }
 
 /// INV-PID-K3: free makes PID available again (nr_allocated consistent).
+#[kani::unwind(128)]
 #[kani::proof]
 fn verify_pid_free_consistency() {
     let mut alloc = PidAllocator::new();
