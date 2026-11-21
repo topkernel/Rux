@@ -86,12 +86,11 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
 /// - Other architecture-specific cleanup
 #[inline]
 pub fn flush_thread() {
-    // Get current task
+    // Get current task (typed handle — we are the current task, so no
+    // concurrent mutation of thread state occurs).
     if let Some(current) = crate::sched::current() {
-        // SAFETY: current() returns a valid pointer to the current task_struct.
-        // We are the current task, so no concurrent mutation of thread state occurs.
-        unsafe {
-            let thread = (*current).thread_mut();
+        {
+            let thread = current.thread_mut();
 
             // Clear FPU state
             thread.fpu.fill(0);
@@ -113,10 +112,13 @@ pub fn flush_thread() {
             // data across images. With the live FS=Off, the new image's
             // first FP instruction traps and goes through the fpu_init
             // path (zeroed registers).
-            let sstatus: u64;
-            asm!("csrr {}, sstatus", out(reg) sstatus);
-            let new_sstatus = sstatus & !SR_FS_MASK & !crate::arch::riscv64::vext::SR_VS;
-            asm!("csrw sstatus, {}", in(reg) new_sstatus);
+            // SAFETY: sstatus CSR RMW (FS/VS fields, register-only).
+            unsafe {
+                let sstatus: u64;
+                asm!("csrr {}, sstatus", out(reg) sstatus);
+                let new_sstatus = sstatus & !SR_FS_MASK & !crate::arch::riscv64::vext::SR_VS;
+                asm!("csrw sstatus, {}", in(reg) new_sstatus);
+            }
         }
     }
 }

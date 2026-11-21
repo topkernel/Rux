@@ -51,10 +51,10 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
 /// FP state — ARCH-H1 parity) and fs/gs bases cleared.
 pub fn flush_thread() {
     if let Some(current) = crate::sched::current() {
-        // SAFETY: current() returns the running task; we are the only
-        // context that can touch our own thread state here.
-        unsafe {
-            let thread = (*current).thread_mut();
+        // Typed handle — we are the only context that can touch our
+        // own thread state here.
+        {
+            let thread = current.thread_mut();
             thread.mark_fpu_clean();
             thread.fs_base = 0;
             thread.gs_base = 0;
@@ -70,8 +70,12 @@ pub fn flush_thread() {
             // from task context.  The task's user GS base lives in the
             // SWAPGS shadow (0xC0000102) — that is what "no TLS on a
             // fresh image" clears here.
-            super::cpu::wrmsr(0xC000_0100, 0); // MSR_FS_BASE
-            super::cpu::wrmsr(0xC000_0102, 0); // MSR_KERNEL_GS_BASE (user shadow)
+            // SAFETY: cached-mirror clears (the live per-CPU GS at
+            // 0xC0000101 is untouched — see the note above).
+            unsafe {
+                super::cpu::wrmsr(0xC000_0100, 0); // MSR_FS_BASE
+                super::cpu::wrmsr(0xC000_0102, 0); // MSR_KERNEL_GS_BASE (user shadow)
+            }
 
             // LAZY FPU: the live registers still hold the OLD image's
             // state. Mark them stale (CR0.TS) so the first FP use of the

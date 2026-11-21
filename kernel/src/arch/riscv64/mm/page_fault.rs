@@ -1279,33 +1279,42 @@ pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
     let vpn1 = (vaddr >> 21) & 0x1FF;
     let vpn0 = (vaddr >> 12) & 0x1FF;
 
-    // SAFETY: root_ppn is a valid root page table PPN. get_page_table_virt returns
-    // a valid kernel-virtual pointer to each page table level. Only reads PTEs.
-    unsafe {
-        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-        let pte2 = (*root_table).get(vpn2 as usize);
-        if !pte2.is_valid() { return None; }
-        // Superpage leaves: compute the 4KB frame inside the leaf (PERF:
-        // MMIO windows map as 2MB L1 leaves; never follow a leaf PPN as a
-        // table pointer).
-        if pte2.is_leaf() {
-            // 1GB leaf: PPN[2] (bits 53:28) is the 1GB frame number.
-            let ppn2 = (pte2.bits() >> 28) & 0x3FF_FFFF;
-            return Some((ppn2 << 30) | (vaddr & 0x3FFF_FFFF & !0xFFF));
-        }
+    // Typed walk (the round-1 PtTable edge); superpage leaves
+    // compute the 4KB frame inside the leaf, never following a
+    // leaf PPN as a table pointer.
+    {
 
-        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-        let pte1 = (*table1).get(vpn1 as usize);
-        if !pte1.is_valid() { return None; }
-        if pte1.is_leaf() {
-            return Some((pte1.ppn_for_2mb_page() << 21) | (vaddr & 0x1F_FFFF & !0xFFF));
-        }
+let Some(root_table) = PtTable::from_phys(root_ppn << PAGE_SHIFT) else {
+    return None;
+};
+let pte2 = root_table.get(vpn2 as usize);
+if !pte2.is_valid() { return None; }
+// Superpage leaves: compute the 4KB frame inside the leaf (PERF:
+// MMIO windows map as 2MB L1 leaves; never follow a leaf PPN as a
+// table pointer).
+if pte2.is_leaf() {
+    // 1GB leaf: PPN[2] (bits 53:28) is the 1GB frame number.
+    let ppn2 = (pte2.bits() >> 28) & 0x3FF_FFFF;
+    return Some((ppn2 << 30) | (vaddr & 0x3FFF_FFFF & !0xFFF));
+}
 
-        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
-        let pte0 = (*table0).get(vpn0 as usize);
-        if !pte0.is_valid() { return None; }
+let Some(table1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else {
+    return None;
+};
+let pte1 = table1.get(vpn1 as usize);
+if !pte1.is_valid() { return None; }
+if pte1.is_leaf() {
+    return Some((pte1.ppn_for_2mb_page() << 21) | (vaddr & 0x1F_FFFF & !0xFFF));
+}
 
-        Some((pte0.ppn() as u64) << PAGE_SHIFT)
+let Some(table0) = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT) else {
+    return None;
+};
+let pte0 = table0.get(vpn0 as usize);
+if !pte0.is_valid() { return None; }
+
+Some((pte0.ppn() as u64) << PAGE_SHIFT)
+
     }
 }
 

@@ -63,32 +63,36 @@ pub fn cpu_started(cpu: usize) -> bool {
 /// - Must ensure trap.S handles tp register correctly
 #[inline]
 pub fn cpu_id() -> usize {
-    // SAFETY: Reading tp register is a pure read of a general-purpose register.
-    // The nomem/nostack/pure options guarantee no side effects.
-    // When tp < 0x1000 it holds a hart_id; otherwise it is a valid task_struct pointer
-    // set by trap.S, and the ti_cpu offset dereference is within the struct.
-    unsafe {
-        let tp_value: u64;
-        asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
+    // IRREDUCIBLE F-ROW (F-TP-R1): tp (the thread pointer register) is
+    // outside Rust's memory model — reference kernel reads it in C via
+    // arch/riscv's current_thread_info()->cpu (same tp-relative load).
+    // The nomem/nostack/pure asm guarantees no side effects; the
+    // ti_cpu dereference is the one raw edge below.
+    let tp_value: u64 = unsafe {
+        let v;
+        asm!("mv {}, tp", out(reg) v, options(nomem, nostack, pure));
+        v
+    };
 
-        // Check if tp is a small value (hart_id during early boot phase)
-        // Valid task_struct pointers should be in kernel address space (>= 0x80000000)
-        if tp_value < 0x1000 {
-            // Early boot phase, tp directly stores hart_id
-            tp_value as usize
-        } else {
-            // tp points to task_struct, get hart_id from ti_cpu field
-            let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
-            let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
-            let raw = (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed);
+    // Check if tp is a small value (hart_id during early boot phase)
+    // Valid task_struct pointers should be in kernel address space (>= 0x80000000)
+    if tp_value < 0x1000 {
+        // Early boot phase, tp directly stores hart_id
+        tp_value as usize
+    } else {
+        // tp points to task_struct, get hart_id from ti_cpu field
+        // SAFETY: tp was set by trap.S to a live Task (the switch
+        // protocol); the TI_CPU offset read is a relaxed atomic load.
+        let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
+        let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
+        let raw = unsafe { (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) };
             // Defensive: clamp negative or out-of-range ti_cpu to CPU 0.
             // ti_cpu is i32; -1 (initial value) would sign-extend to
             // usize::MAX which corrupts cpu_state indexing.
-            if raw < 0 || (raw as usize) >= crate::config::MAX_CPUS {
-                0
-            } else {
-                raw as usize
-            }
+        if raw < 0 || (raw as usize) >= crate::config::MAX_CPUS {
+            0
+        } else {
+            raw as usize
         }
     }
 }
