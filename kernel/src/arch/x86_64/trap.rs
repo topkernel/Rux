@@ -3712,7 +3712,12 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // carries the full forensics.
             static SEGV_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
-            if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            // Defect-C: the FIRST refusal per task (the static gets
+            // overwritten by successive faults; later prints mislead).
+            let first_for_task = crate::dfx::forensics_edges::mark_first_refusal(
+                crate::sched::get_current_pid() as u64,
+            );
+            if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 || first_for_task {
             crate::pr_err!(
                 "pagefault: Segfault at {:#x}, rip={:#x}, rsp={:#x}, pid={}, mode={}, fill_site={}",
                 fault_addr,
