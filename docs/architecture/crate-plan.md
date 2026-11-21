@@ -149,3 +149,46 @@ Everything else from the pilot's 130-site surface is severed.
 4. The battery: triple-arch, make test, KVM smoke, unsafe_gate, and
    the NEGATIVE PROBE (an unsafe block anywhere in the service crate
    must fail the build).
+
+
+## Flip milestone ledger
+
+### MILESTONE 1 LANDED (2026-11-22): the lib/bin split
+kernel/src/lib.rs = the rux framework LIB (34 pub mods, entry fns,
+crate attrs); kernel/src/main.rs = the composition BIN. rust_main
+stays no_mangle IN THE LIB (all three arches' entry asm resolves it
+there — x86 boot.S's compile-time `sym crate::rust_main` REQUIRES the
+symbol in the lib crate); its body calls seam_register_default() (the
+stable no-op hook) then rust_main_impl. Triple-arch rc=0, make test
+1,598 PASS. Zero behavior change.
+
+### The remaining knot, resolved by measurement: the entry symbol vs
+### the service crate
+
+The service crate (rux-syscall) must be called by SOMETHING at
+registration time, and the only composition point that can name both
+crates is the BIN — but the entry symbol lives in the LIB (boot.S's
+`sym` reference). Two resolutions, decided:
+
+A) ENTRY-TO-BIN (chosen): move the three arch entry pairs
+   (boot.rs/boot.S, entry.S) into the BIN. The sym reference then
+   resolves in the bin where rust_main + service registration both
+   live; the LIB keeps everything else. Cost: three file moves +
+   build.rs link-arg verification per arch (the .incbin DTB and -T
+   scripts must follow).
+
+B) Table-with-lib-default (rejected): the lib's dispatch table
+   defaults to the current match, replaced at registration — this
+   compiles the service files in BOTH crates until registration
+   lands, defeating the forbid guarantee.
+
+### The dispatch conversion inventory (measured, mechanical)
+The generic match is 381 single-call arms — 322 `NR => mod::fn(args)`
+plus 59 fully-qualified `NR => crate::x::y::fn(args)` — and ONE
+regs-passing variant (rt_sigreturn, NR 139). The default arm's
+ENOSYS-attribution block (37 lines) stays verbatim in the dispatch
+skeleton. Conversion shape: TWO static tables in the lib
+(OnceSlot<[Option<fn(SyscallArgs)->i64>; 1200]> + a one-entry
+regs-table), filled by rux-syscall::register_all at bin boot; the
+dispatch skeleton does the x86 preamble/translate, the table lookup,
+and the ENOSYS tail.
