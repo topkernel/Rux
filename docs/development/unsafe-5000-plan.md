@@ -246,6 +246,30 @@ sporadically. Expansion, in value order:
 3. **The audit lane extension:** scripts/unsafe_census.py grows a pattern
    histogram column per release, so the shape drift is visible in CI.
 
+## Part II status board (updated 2026-11-21 — user directive: remaining layers moved up)
+
+| Layer | Item | Status |
+|---|---|---|
+| 1 | Framekernel boundary: per-module forbids | **191 modules** compiler-enforced, CI-ratcheted |
+| 1 | Crate flips | **IN FLIGHT** — syscall pilot ADOPTED (syscall-crate-pilot.md: reverse surface 88 sites, ~90 relocations); the flip executing; net measured next |
+| 2.1 | Miri over primitives | **DONE** — 12/12 zero UB (kernel-safety-tests, verbatim #[path]) |
+| 2.2 | Kani proofs (KPTR/Mmio) | **DONE** — 12/12 verified; two checker-self convictions fixed |
+| 2.3 | Verus pilot | **DONE** — 4 theorems/1.9s; narrow-adopt verdict recorded |
+| 3 | MPK evaluation | **IN FLIGHT** — capability probe + ERIM-cost + fault-injection prototype assigned |
+| 3 | SMEP default-deny | **DONE** (the template) |
+| 4.1 | Escape-hatch CI rule | **DONE** — escape_hatch_check in unsafe_gate |
+| 4.2 | Pattern-review policy | **DONE** (below) |
+| 4.2 | Census pattern histogram | TODO (unsafe_census.py grows the column) |
+
+**Layer 4.2 standing policy (adopted 2026-11-21):** every THIRD recurrence
+of the same INV defect family triggers a PRIMITIVE-DESIGN REVIEW (is the
+abstraction shape itself unsound?) rather than a fourth site-patch. The
+GRQ campaign's four families (two-step release, second-authority
+trackers, IRQs-off-window deliveries, heal-style remediation) are the
+precedents — each got a protocol-level fix. The reviewer of record is
+the lane that lands the third recurrence; the review lands in
+safety-and-performance.md next to the family's INV rows.
+
 ## The combined sequencing
 
 - NOW (in flight): Part I's consolidation rounds (3a merged; 3b merged;
