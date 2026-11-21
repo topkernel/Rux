@@ -3486,6 +3486,16 @@ fn fore_read_u64(root_ppn: u64, va: u64) -> Option<u64> {
             }
         }
     }
+
+    // Latch discipline (L7 mmap-family triage, 2026-11-21): release the
+    // re-entrancy latch on every CLEAN forensics exit. The swap(true)
+    // arm above used to stay latched forever after one dump, so any
+    // LATER fatal user SIGSEGV on the boot re-entered the halt path and
+    // parked its CPU — turning every subsequent segv-path bug into a
+    // whole-boot wedge with the forensics silenced (the mmap05->shmdt01
+    // pair-reproducer face). The recursion guard itself is unchanged:
+    // a fault WHILE this dump is in flight still takes the fr13 halt.
+    USEGV_FOR_ENTERED.store(false, core::sync::atomic::Ordering::Release);
 }
 
 /// Handle page fault (#PF): decode the error code (in the orig_rax slot)
@@ -3704,12 +3714,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 core::sync::atomic::AtomicU32::new(0);
             if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
             crate::pr_err!(
-                "pagefault: Segfault at {:#x}, rip={:#x}, rsp={:#x}, pid={}, mode={}",
+                "pagefault: Segfault at {:#x}, rip={:#x}, rsp={:#x}, pid={}, mode={}, fill_site={}",
                 fault_addr,
                 regs.rip,
                 regs.rsp,
                 crate::sched::get_current_pid(),
-                if regs.kernel_mode() { "kernel" } else { "user" }
+                if regs.kernel_mode() { "kernel" } else { "user" },
+                crate::arch::mm::page_fault::FILL_REFUSAL_SITE.load(core::sync::atomic::Ordering::Relaxed)
             );
             }
             if regs.user_mode() {

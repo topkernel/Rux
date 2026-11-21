@@ -186,14 +186,13 @@ pub fn termios_to_kernel_bytes(t: &Termios, out: &mut [u8; TERMIOS_KERNEL_SIZE])
 
 /// Parse a Termios from the 36-byte kernel-ABI layout (TCSETS).
 pub fn termios_from_kernel_bytes(buf: &[u8; TERMIOS_KERNEL_SIZE]) -> Termios {
-    // SAFETY: buf is a 36-byte buffer; unaligned u32 reads at 0/4/8/12.
-    unsafe {
-        let p = buf.as_ptr() as *const u32;
-        Termios {
-            c_iflag: p.add(0).read_unaligned(),
-            c_oflag: p.add(1).read_unaligned(),
-            c_cflag: p.add(2).read_unaligned(),
-            c_lflag: p.add(3).read_unaligned(),
+    // buf is a 36-byte buffer; unaligned u32 decodes at 0/4/8/12 via
+    // the CopyBytes primitive (INV-CBYTES-2).
+    Termios {
+            c_iflag: crate::safety::bytes::read_at::<u32>(buf, 0).unwrap_or(0),
+            c_oflag: crate::safety::bytes::read_at::<u32>(buf, 4).unwrap_or(0),
+            c_cflag: crate::safety::bytes::read_at::<u32>(buf, 8).unwrap_or(0),
+            c_lflag: crate::safety::bytes::read_at::<u32>(buf, 12).unwrap_or(0),
             c_line: buf[16],
             c_cc: {
                 let mut cc = [0u8; NCCS];
@@ -201,7 +200,6 @@ pub fn termios_from_kernel_bytes(buf: &[u8; TERMIOS_KERNEL_SIZE]) -> Termios {
                 cc
             },
         }
-    }
 }
 
 /// Serialize a Termios into the 52-byte asm-generic user layout.
@@ -222,14 +220,13 @@ pub fn termios_to_user_bytes(t: &Termios, out: &mut [u8; TERMIOS_USER_SIZE]) {
 
 /// Parse a Termios from the 52-byte asm-generic user layout.
 pub fn termios_from_user_bytes(buf: &[u8; TERMIOS_USER_SIZE]) -> Termios {
-    // SAFETY: buf is a 52-byte buffer; unaligned u32 reads at 0/4/8/12.
-    unsafe {
-        let p = buf.as_ptr() as *const u32;
-        Termios {
-            c_iflag: p.add(0).read_unaligned(),
-            c_oflag: p.add(1).read_unaligned(),
-            c_cflag: p.add(2).read_unaligned(),
-            c_lflag: p.add(3).read_unaligned(),
+    // buf is a 52-byte buffer; unaligned u32 decodes at 0/4/8/12 via
+    // the CopyBytes primitive (INV-CBYTES-2).
+    Termios {
+            c_iflag: crate::safety::bytes::read_at::<u32>(buf, 0).unwrap_or(0),
+            c_oflag: crate::safety::bytes::read_at::<u32>(buf, 4).unwrap_or(0),
+            c_cflag: crate::safety::bytes::read_at::<u32>(buf, 8).unwrap_or(0),
+            c_lflag: crate::safety::bytes::read_at::<u32>(buf, 12).unwrap_or(0),
             c_line: buf[16],
             c_cc: {
                 let mut cc = [0u8; NCCS];
@@ -237,7 +234,6 @@ pub fn termios_from_user_bytes(buf: &[u8; TERMIOS_USER_SIZE]) -> Termios {
                 cc
             },
         }
-    }
 }
 
 /// Serialize a Termios into the 17-byte termio (TCGETA) layout.

@@ -301,7 +301,7 @@ fn area_of<'a>(file: &'a crate::fs::file::File) -> Option<&'a AshmemArea> {
 }
 
 fn ashmem_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
-    // SAFETY: see area_of.
+    // (area_of: the INV-FS-FILEPRIV-1 framework edge — safe fn.)
     let area = match area_of(file) {
         Some(a) => a,
         None => return -9, // EBADF
@@ -342,7 +342,7 @@ fn ashmem_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
 }
 
 fn ashmem_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isize {
-    // SAFETY: see area_of.
+    // (area_of: the INV-FS-FILEPRIV-1 framework edge — safe fn.)
     let area = match area_of(file) {
         Some(a) => a,
         None => return -9, // EBADF
@@ -431,7 +431,7 @@ fn ashmem_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> i64 {
     const EPERM: i64 = 1;
     const EFAULT: i64 = 14;
 
-    // SAFETY: see area_of.
+    // (area_of: the INV-FS-FILEPRIV-1 framework edge — safe fn.)
     let area = match area_of(file) {
         Some(a) => a,
         None => return -EINVAL,
@@ -599,7 +599,7 @@ pub fn ashmem_mmap(
         return Err(-EINVAL);
     }
 
-    // SAFETY: see area_of.
+    // (area_of: the INV-FS-FILEPRIV-1 framework edge — safe fn.)
     let area = area_of(file).ok_or(-EINVAL)?;
 
     // Validation + pool creation under the area lock; the actual PTE work
@@ -714,22 +714,19 @@ pub fn ashmem_mmap(
         // SAFETY: placement + i*PAGE_SIZE is page-aligned inside the range
         // being established; phys is a live pool page; root_ppn is the
         // caller's page-table root. Map + per-mapping reference under the
-        // PTE lock (shmat discipline).
-        unsafe {
+        // PTE lock (shmat discipline; the map walker is total-safe).
         #[cfg(feature = "x86_64")]
         let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(address_space).lock();
         #[cfg(not(feature = "x86_64"))]
         let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(address_space).lock_irqsave();
-            map_user_page(
-                root_ppn,
-                MmVirtAddr::new((placement + i * PAGE_SIZE) as u64),
-                MmPhysAddr::new(phys as u64),
-                pte_flags,
-            );
-            let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(phys));
-            if !page.is_null() {
-                (*page).get_page();
-            }
+        map_user_page(
+            root_ppn,
+            MmVirtAddr::new((placement + i * PAGE_SIZE) as u64),
+            MmPhysAddr::new(phys as u64),
+            pte_flags,
+        );
+        if let Some(page) = crate::mm::page_desc::page_desc(crate::mm::phys_to_pfn(phys)) {
+            page.get_page();
         }
     }
 

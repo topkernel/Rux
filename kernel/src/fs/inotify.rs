@@ -413,14 +413,13 @@ pub fn notify_file(file: &File, mask: u32) {
     if WATCH_COUNT.load(Ordering::Acquire) == 0 {
         return;
     }
-    // SAFETY: inode and dentry are written once at open time and never
-    // mutated afterwards; read-only access.
-    let inode = unsafe { (*file.inode.get()).clone() };
-    let dentry = unsafe { (*file.dentry.get()).clone() };
-    let inode = match inode {
+    // inode and dentry are written once at open time and never mutated
+    // afterwards (the FILEINODE/FILEPRIV write-once cells).
+    let inode = match crate::fs::unsafe_edges::file_inode_arc(file) {
         Some(i) => i,
         None => return,
     };
+    let dentry = unsafe { (*file.dentry.get()).clone() };
     let mut mask = mask;
     if inode.mode.is_directory() {
         mask |= IN_ISDIR;
