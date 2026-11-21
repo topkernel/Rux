@@ -600,25 +600,25 @@ ca76e3562f22	kernel/src/arch/x86_64/mm/page_fault.rs	fill_file_page	340	ptr-ops	
 940493c5a4ea	kernel/src/arch/x86_64/mm/page_fault.rs	filemap_pin_cache_page	364		INV:INV-XE-ZP
 5d885feb0281	kernel/src/arch/x86_64/mm/page_fault.rs	filemap_pin_cache_page	391		INV:INV-XE-ZP
 b453fe5a6f09	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	580		INV:F20
-992b81b767e0	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	638		INV:F20
-4a3567a427e9	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	724		INV:F20
-f4bf0c7b03fa	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	841		INV:F20
-feabca4ea451	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	948		INV:INV-VMA-4
-e2533bde5fff	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1228	addr-arith	INV:INV-LOCK-7
-8f2b47b2066e	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1375		INV:F20
-85a1700fbedc	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1404		INV:F20
-8c481a2125d9	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1506		INV:INV-VMA-4
-d8593b838a71	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1594		INV:INV-LOCK-7
-df2c5f828d14	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1613		INV:INV-LOCK-7
-4850b45b8639	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1707	ptr-ops,addr-arith	INV:INV-FRAME-1
-91ae2b5e1376	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1771		INV:INV-LOCK-7
-bb9d15d6ebf3	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1833	ptr-ops	INV:INV-XE-ZP
-9b56b5e8e7e8	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1857	ptr-ops	INV:INV-XE-ZP
-bc79d87e29b4	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1884		INV:INV-XE-ZP
-e6226fe24de7	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1904	ptr-ops	INV:INV-XE-ZP
-eb9559621dde	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1922	ptr-ops	INV:INV-XE-ZP
-62d564d136f3	kernel/src/arch/x86_64/mm/page_fault.rs	handle_swap_fault	2348	addr-arith	INV:F20
-5d6f41d4f182	kernel/src/arch/x86_64/mm/page_fault.rs	_root_table_ref	2393		INV:INV-FRAME-1
+34f2fbea5745	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	665		GAP
+e821acc5239a	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	751		GAP
+d59ef7dad60c	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	868		GAP
+101ef27235b8	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	975		INV:INV-VMA-4
+a123344d1f0d	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1255	addr-arith	INV:INV-LOCK-7
+a9c5ddb8c3b7	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1402		GAP
+706e1462334e	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1431		GAP
+e22ba3d14fa4	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1533		INV:INV-VMA-4
+94ae7b3f4da6	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1621		INV:INV-LOCK-7
+b53a6ccec7ea	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1640		INV:INV-LOCK-7
+834d889a9178	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1734	ptr-ops,addr-arith	INV:INV-FRAME-1
+538ad35b7c1c	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1798		INV:INV-LOCK-7
+d99b5b74d8ab	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1860	ptr-ops	INV:INV-XE-ZP
+42fe2ae7b2c6	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1884	ptr-ops	INV:INV-XE-ZP
+47eb8bcb7ef4	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1911		INV:INV-XE-ZP
+d75c334bf906	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1931	ptr-ops	INV:INV-XE-ZP
+ccd76e9684e5	kernel/src/arch/x86_64/mm/page_fault.rs	handle_mm_fault	1949	ptr-ops	INV:INV-XE-ZP
+8a9f7b3c532a	kernel/src/arch/x86_64/mm/page_fault.rs	handle_swap_fault	2375	addr-arith	GAP
+98b55d5bfed7	kernel/src/arch/x86_64/mm/page_fault.rs	_root_table_ref	2420		INV:INV-FRAME-1
 74069e593c81	kernel/src/arch/x86_64/mm/unsafe_edges.rs	<module>	45	ptr-ops,addr-arith	INV:INV-XE-PT-4
 3ce69bd67f80	kernel/src/arch/x86_64/mm/unsafe_edges.rs	from_phys	95		INV:INV-XE-PT-1
 0991eee38bf1	kernel/src/arch/x86_64/mm/unsafe_edges.rs	get_raw	123		INV:INV-XE-PT-3
@@ -738,19 +738,19 @@ c8e5e48809b5	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3603		INV:F19
 0a806226b15b	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3617		INV:F19
 e83e4ae92d9b	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3627		INV:F19
 fd92ef8dd97b	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3656		INV:F19
-7e2a2a405fb6	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3957	asm	INV:F19
-94d38852cf9e	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4009		INV:F19
-6cd9ee2104e7	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4021	volatile,ptr-ops	INV:F19
-dfe3be762b4f	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4040	volatile,ptr-ops	INV:F19
-b1806dc1e33e	kernel/src/arch/x86_64/trap.rs	kp_read64	4107	volatile,ptr-ops	INV:F19
-a867259bf2f6	kernel/src/arch/x86_64/trap.rs	kp_read32	4111	volatile,ptr-ops	INV:F19
-eaeecde58ae9	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4137	ptr-ops	INV:F19
-b1d33e500195	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4138	ptr-ops	INV:F19
-a64d63522ce6	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4139	ptr-ops	INV:F19
-0526800e64a8	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4140	ptr-ops	INV:F19
-2e4606baced7	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4141	ptr-ops	INV:F19
-8459bfae1975	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4155	ptr-ops	INV:F19
-ab068406c5f6	kernel/src/arch/x86_64/trap.rs	x86_double_fault_dump	4279	asm	INV:F19
+d230f8b5c480	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3965	asm	GAP
+b66e5bd24eb1	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4017		GAP
+2414ce38884b	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4029	volatile,ptr-ops	GAP
+bd6bb4c99fd9	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4048	volatile,ptr-ops	GAP
+c8faaa98b14a	kernel/src/arch/x86_64/trap.rs	kp_read64	4115	volatile,ptr-ops	GAP
+9eb9ba59d5a8	kernel/src/arch/x86_64/trap.rs	kp_read32	4119	volatile,ptr-ops	GAP
+01fa8f1f3d13	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4145	ptr-ops	GAP
+840e97cd6f2d	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4146	ptr-ops	GAP
+18d72aee578c	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4147	ptr-ops	GAP
+63dece447aa2	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4148	ptr-ops	GAP
+17d1dee4287f	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4149	ptr-ops	GAP
+d99698783301	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4163	ptr-ops	GAP
+743f43b1c08f	kernel/src/arch/x86_64/trap.rs	x86_double_fault_dump	4287	asm	GAP
 d35fa0b453ad	kernel/src/arch/x86_64/uaccess.rs	__x64_futex_cmpxchg_u32	200		INV:F19
 012a12e8e8e2	kernel/src/arch/x86_64/uaccess.rs	futex_cmpxchg_u32_user	206		INV:F19
 d7ae1e2040ea	kernel/src/arch/x86_64/uaccess.rs	<module>	233	ptr-ops	INV:F19
@@ -816,7 +816,7 @@ b4769c9a1282	kernel/src/dfx/forensics_edges.rs	t_pid	60		INV:INV-FOR-1
 9cee82c595fe	kernel/src/dfx/forensics_edges.rs	raw_qword	89	volatile,ptr-ops	INV:INV-FOR-2
 884c6c215aa6	kernel/src/dfx/forensics_edges.rs	raw_u32	100	volatile,ptr-ops	INV:INV-FOR-2
 a22c28a3f0f4	kernel/src/dfx/forensics_edges.rs	location	112	ptr-ops	INV:INV-FOR-3
-64f58474bda3	kernel/src/dfx/forensics_edges.rs	location_ref	120		INV:INV-FOR-3
+d147d79ded5b	kernel/src/dfx/forensics_edges.rs	location_ref	120		INV:INV-FOR-3
 aea7aab5e2de	kernel/src/dfx/hung_task.rs	report_hung_task	221	ptr-ops	INV:F18
 2aaca19a612a	kernel/src/dfx/leakorigin.rs	note_acquire	192	volatile,ptr-ops	INV:F1
 b44859cd4a9c	kernel/src/dfx/leakorigin.rs	note_acquire	237		INV:F1
@@ -1779,7 +1779,7 @@ e503b71d162b	kernel/src/ipc/posix_mq.rs	mq_fds_cleanup	1210		INV:INV-KTASK-1
 f7a295a8d542	kernel/src/ipc/sysv_sem.rs	sem_undo_exit	1515		INV:INV-SYSV-UAPI-2
 2a6833798be7	kernel/src/ipc/sysv_shm.rs	drop	99		INV:INV-SYSV-UAPI-2
 94ccd5ae0d70	kernel/src/ipc/sysv_shm.rs	sys_shmat	1037		INV:INV-SYSV-UAPI-2
-41ead2726693	kernel/src/lib.rs	rust_main_impl	1754	asm	INV:INV-BOOT-ZEROPAGE-1
+0faa24cbfe1d	kernel/src/lib.rs	rust_main_impl	1763	asm	INV:INV-BOOT-ZEROPAGE-1
 0953597665ba	kernel/src/list.rs	<module>	73		INV:INV-LIST-1
 d018f0b94a39	kernel/src/list.rs	<module>	92		INV:INV-LIST-1
 c48b7421a0d8	kernel/src/list.rs	<module>	108	ptr-ops	INV:INV-LIST-1

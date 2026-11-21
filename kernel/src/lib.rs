@@ -1361,8 +1361,17 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-// LAYOUT-7 GAP FIX: 0x81c0_0000 -> 0x81e0_0000 (the 28MB window end).
-const KERNEL_HEAP_PHYS: usize = 0x81e0_0000;
+// RUX-RISCV-LAYOUT-9 (M3-B1 hotfix): 0x81e0_0000 -> 0x8220_0000 —
+// completes the LAYOUT-8 move that updated the reserve (34MB), the
+// buddy's heap window, and boot.S's tables but MISSED this const (the
+// guard tripped when the M3-B merge's dual-compilation image reached
+// 0x81edb000 over the stale 0x81e0_0000 base; the linker window
+// already allows _end <= 0x82000000). TRANSITION NOTE: the
+// dual-compilation bloat (in-lib service copies + the rux-syscall
+// rlib) is the documented migration state; State B (the in-lib file
+// deletion) removes it — if the image then fits comfortably, a follow
+// -up may walk this back, with the layout gate re-verified either way.
+const KERNEL_HEAP_PHYS: usize = 0x8220_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 // aarch64: kernel window is [0x4008_0000, 0x4280_0000) (32MB; the

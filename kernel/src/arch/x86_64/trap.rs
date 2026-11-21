@@ -3717,6 +3717,9 @@ fn handle_page_fault(regs: &mut PtRegs) {
             let first_for_task = crate::dfx::forensics_edges::mark_first_refusal(
                 crate::sched::get_current_pid() as u64,
             );
+            // HOTPATH-PRINT: budget-gated — 8 total (SEGV_N) + the first
+            // refusal per task (defect-C's one-per-pid); the fault path is
+            // per-task-fatal, never a loop rate.
             if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 || first_for_task {
             crate::pr_err!(
                 "pagefault: Segfault at {:#x}, rip={:#x}, rsp={:#x}, pid={}, mode={}, fill_site={}",
