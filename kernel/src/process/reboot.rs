@@ -200,7 +200,7 @@ pub fn force_power_off() -> ! {
 /// P1 shutdown cascade body. Performs the ordered teardown and drives the
 /// machine into the reset/shutdown SBI call; returns only if every SBI
 /// path failed (caller parks).
-pub(crate) fn shutdown_cascade(cmd: u32) {
+pub fn shutdown_cascade(cmd: u32) {
         const LINUX_REBOOT_CMD_HALT: u32 = 0xCDEF0123;
     
     // Single-driver rule: the first cascade entry claims the teardown;

@@ -135,7 +135,7 @@ pub mod syscall;
 // tree — same file, declared here so the forbid does not apply to it.
 // syscall::edges re-exports it so existing paths stay valid.
 #[path = "syscall/edges.rs"]
-pub(crate) mod syscall_edges;
+pub mod syscall_edges;
 pub mod interrupt;
 pub mod dfx;
 pub mod ipc;
@@ -1407,27 +1407,9 @@ fn x86_dump_regions() {
     }
 }
 
-// Kernel main function
-/// asm `sym` forward: x86 boot.S references crate::rust_main at
-/// COMPILE time — inside the lib crate the name resolves here, and the
-/// BIN's rust_main (the real entry, with registration) carries this
-/// symbol via the linker... no: sym needs the address. Simplest sound
-/// shape: the lib's forward IS the bin's target because the BIN
-/// re-exports it — instead the boot entry calls a lib-owned no_mangle
-/// trampoline that the bin's constructor story doesn't need: the
-/// trampoline dispatches through the registered seam table, which is
-/// the flip's shape anyway.
-#[no_mangle]
-pub extern "C" fn rust_main() -> ! {
-    // (lib/bin split + flip: the asm entries (all arches) call THIS
-    // symbol. For the pre-service-crate milestone it forwards to the
-    // impl directly; when the service crate lands, the seam
-    // registration runs here — the LIB owns the symbol so boot.S's
-    // compile-time sym reference resolves, and registration does not
-    // need the bin at all: the table's OnceSlot lives in this crate.)
-    crate::syscall::seam_register_default();
-    rust_main_impl()
-}
+// Kernel main function (the rust_main ENTRY now lives in the BIN —
+// kernel/src/main.rs — which registers the service seams then calls
+// rust_main_impl below; the arch entries bind the symbol at link time.)
 
 /// The framework entry body (everything the old rust_main did).
 pub extern "C" fn rust_main_impl() -> ! {
