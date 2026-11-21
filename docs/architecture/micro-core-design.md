@@ -47,6 +47,55 @@ the lock protocol implementations already audited, the printk ring, the
 scheduler's switch/tp seams. The core's audit surface = the INV/F-row
 registry — already 97%+ ledgered.
 
+## 2a. Why not address-space isolation (the microkernel comparison)
+
+The classic way to buy fault isolation is separate address spaces per
+service (seL4/L4 family): a bad driver cannot corrupt kernel memory
+because it cannot address it. The price is the boundary — every
+cross-service operation is an IPC through a context switch, ~1,000
+cycles on the best fastpaths, multiplied along fault->driver->server
+chains (the Mach lesson; L4's fastpaths recovered much but not all of
+syscall-heavy paths).
+
+This design buys the SAME memory-safety property statically, at zero
+runtime cost: a `#![forbid(unsafe_code)]` crate CANNOT EXPRESS a wild
+pointer, use-after-free, or data race — the Rust type system provides
+what address spaces provide in a C microkernel, without a runtime
+boundary. Cross-crate calls are plain function calls (LTO inlines; the
+M3 flip verified zero behavior change with the dispatch tables live).
+This is the RedLeaf/Framekernel line: language isolation without
+address spaces, keeping the hardware backstop (below) instead of
+betting everything on the type system.
+
+What remains true for both designs: logic bugs (deadlocks, wrong
+decisions, leaks) pass through; only memory-safety classes differ.
+
+**The hardware backstop — MPK (Layer 3 of the safety plan, measured):**
+for defense-in-depth BELOW the type layer, Intel protection keys give
+page-grain hardware domains inside the ONE address space: WRPKRU
+transitions measured at **47-49 cycles** on this host (100k TSC-timed
+ops; the ERIM native band is 20-90), vs ~1,000+ for an address-space
+switch with TLB flush. Protected pages fault in hardware outside their
+window (fault-injection proven: the identical write lands with the key
+enabled and takes a hardware #PF with it disabled). The mpkguard
+framework is landed behind `mpkguard=1` (default off): boot arm with
+explicit keys, PKRU zones, context-switch re-arm, tagged-page
+discipline, the escape self-test. Phase-1 target: the vring AVAIL
+sections (~2.4k windows/s at pbench fs rates — the <1% budget holds);
+GRQ (~160k/s) is phase-2 candidate by measured frequency.
+
+The end-state defense stack, each layer at its measured cost:
+1. TYPE layer (0 cycles): forbid crates — service columns structurally
+   immune to memory unsafety.
+2. HARDWARE layer (~50 cycles/window, <1%): MPK-protected core
+   metadata — even a type-system soundness hole or smuggled unsafe
+   meets a hardware fault, not silent corruption.
+3. VERIFICATION layer (0 runtime): Kani/Miri/Verus over the ~3,000
+   core lines — the remaining hand-written unsafe is machine-checked.
+
+A microkernel spends ~1,000 cycles per boundary to buy (1); this design
+buys (1)+(2)+(3) for 0+~50+0.
+
 ## 3. The end-state topology
 
 ```
