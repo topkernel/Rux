@@ -2384,17 +2384,17 @@ f49b54e02c57	kernel/src/syscall/edges.rs	list_next	68		INV:INV-SYSC-1
 a0f00f066fa5	kernel/src/syscall/edges.rs	boxed_ref	152		INV:INV-SYSC-2
 1d5765155960	kernel/src/syscall/edges.rs	boxed_mut	164		INV:INV-SYSC-2
 f16318f757ac	kernel/src/syscall/edges.rs	boxed_drop	176		INV:INV-SYSC-2
-8726cfe7c1c9	kernel/src/syscall/edges.rs	pidfd_data_of	228		INV:INV-SYSC-5
-caa1d1d0ab41	kernel/src/syscall/edges.rs	file_inode_set_pre_publish	248		INV:INV-SYSC-7
-26d9ebe9c083	kernel/src/syscall/edges.rs	arch_map_page	276		INV:INV-SYSC-8
-e8885d56d10a	kernel/src/syscall/edges.rs	unmap_user_leaf_locked	296		INV:INV-SYSC-8
-1167e5f960d3	kernel/src/syscall/edges.rs	copy_page_linear	322	ptr-ops	INV:INV-SYSC-8
-977489498fe8	kernel/src/syscall/edges.rs	page_desc_of	345		INV:INV-SYSC-8
-d75115d2d171	kernel/src/syscall/edges.rs	pt_walk_writable_phys	461	ptr-ops	INV:INV-SYSC-8
-bd42054942fc	kernel/src/syscall/edges.rs	pt_walk_writable_phys	468		INV:INV-SYSC-8
-06bf4b639d5f	kernel/src/syscall/edges.rs	pt_walk_writable_phys	488	ptr-ops	INV:INV-SYSC-8
-dfeb533f8bdd	kernel/src/syscall/edges.rs	file_write_page	515	ptr-ops	INV:INV-SYSC-8
-ef7cce6ec996	kernel/src/syscall/edges.rs	arch_map_user_page	534		INV:INV-SYSC-8
+2dbf5fc03c62	kernel/src/syscall/edges.rs	pidfd_data_of	225		INV:INV-SYSC-5
+5641c64c60c1	kernel/src/syscall/edges.rs	file_inode_set_pre_publish	245		INV:INV-SYSC-7
+06dd31d3d46d	kernel/src/syscall/edges.rs	arch_map_page	273		INV:INV-SYSC-8
+1c96682f9f42	kernel/src/syscall/edges.rs	unmap_user_leaf_locked	293		INV:INV-SYSC-8
+381bdd8b9bc4	kernel/src/syscall/edges.rs	copy_page_linear	319	ptr-ops	INV:INV-SYSC-8
+cef0734bbd11	kernel/src/syscall/edges.rs	page_desc_of	342		INV:INV-SYSC-8
+eb76cc67b2a8	kernel/src/syscall/edges.rs	pt_walk_writable_phys	458	ptr-ops	INV:INV-SYSC-8
+8a0b1ae41ca6	kernel/src/syscall/edges.rs	pt_walk_writable_phys	465		INV:INV-SYSC-8
+6e5c5db90646	kernel/src/syscall/edges.rs	pt_walk_writable_phys	485	ptr-ops	INV:INV-SYSC-8
+b60449749353	kernel/src/syscall/edges.rs	file_write_page	512	ptr-ops	INV:INV-SYSC-8
+9c14d5840101	kernel/src/syscall/edges.rs	arch_map_user_page	531		INV:INV-SYSC-8
 af25785e5d2e	kernel/src/tests/fair_timeline.rs	walk_keys	47	ptr-ops,layout-meta	INV:INV-TESTHARNESS-1
 0dc38ba947c3	kernel/src/tests/fair_timeline.rs	walk_keys	55		INV:INV-TESTHARNESS-1
 5cebcb36bf58	kernel/src/tests/fair_timeline.rs	audit	66		INV:INV-TESTHARNESS-1

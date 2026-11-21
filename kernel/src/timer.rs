@@ -2093,3 +2093,55 @@ pub fn tick_trap_report(site: &str) {
 
 #[cfg(not(target_arch = "x86_64"))]
 pub fn tick_trap_report(_site: &str) {}
+
+// ============================================================================
+// Wall-clock epoch offset (moved from syscall/time.rs, crate-flip step 3:
+// RTC boot + vDSO refresh plumbing — framework-shaped, consumed by rtc,
+// printk, vdso, and the clock_settime syscall family.)
+// ============================================================================
+
+/// settimeofday / clock_settime(CLOCK_REALTIME).
+static WALL_EPOCH_OFFSET_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Current wall-clock epoch offset (seconds, floored).
+pub fn wall_epoch_offset_secs() -> u64 {
+    wall_epoch_offset_ns() / 1_000_000_000
+}
+
+/// Current wall-clock epoch offset (nanoseconds).
+pub fn wall_epoch_offset_ns() -> u64 {
+    WALL_EPOCH_OFFSET_NS.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Set the wall-clock epoch offset, seconds variant (RTC boot path).
+pub fn set_wall_epoch_offset_secs(secs: u64) {
+    set_wall_epoch_offset_ns(secs.saturating_mul(1_000_000_000));
+}
+
+/// Set the wall-clock epoch offset (settimeofday / clock_settime path).
+pub fn set_wall_epoch_offset_ns(ns: u64) {
+    WALL_EPOCH_OFFSET_NS.store(ns, core::sync::atomic::Ordering::Release);
+    // P2 vDSO: refresh the shared data page immediately so REALTIME
+    // readers do not wait for the next timer tick.
+    crate::mm::vdso::vdso_data_tick();
+}
+
+/// Current CLOCK_REALTIME (monotonic + wall epoch offset) as (secs, nanos).
+/// FIX8: shared by the adjtimex GET path (tx.time) and ADJ_SETOFFSET.
+/// Also shared with the POSIX-mq absolute-timeout conversion
+/// (kernel/src/ipc/posix_mq.rs), whose timeout is an ABSOLUTE
+/// CLOCK_REALTIME deadline interpreted against the same base
+/// clock_gettime serves.
+pub fn realtime_secs_nanos() -> (i64, u64) {
+    let (s, ns) = monotonic_time();
+    let total_ns = (s as u128 * 1_000_000_000u128 + ns as u128)
+        + wall_epoch_offset_ns() as u128;
+    ((total_ns / 1_000_000_000u128) as i64, (total_ns % 1_000_000_000u128) as u64)
+}
+
+/// Read the monotonic clock as (seconds, nanoseconds) from the CLINT.
+pub fn monotonic_time() -> (u64, u64) {
+    let cycles = crate::arch::cpu::read_time();
+    let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ; // 10 MHz
+    (cycles / freq_hz, (cycles % freq_hz) * 1_000_000_000 / freq_hz)
+}

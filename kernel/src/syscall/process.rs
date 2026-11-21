@@ -607,16 +607,7 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
 
 /// Open `path` through the VFS and return the file as an Arc WITHOUT
 /// keeping an fd (Linux vm_file semantics): the Arc outlives any closed fd
-/// number, so pinning it on the exec-time segment VMAs gives
-/// /proc/<pid>/maps a stable path identity even though exec holds no
-/// descriptor for the exe or the interpreter. Delegates to the fd-free VFS
-/// resolver, which also works in the PID-1 boot exec where no fdtable
-/// exists yet (the old file_open-based body returned None there — PID 1's
-/// maps lost the path column on every boot). Best-effort: None simply
-/// leaves the VMAs without a pinned file (offset bookkeeping stands).
-pub(crate) fn open_file_arc(path: &str) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
-    crate::fs::vfs::open_file_arc_nofd(path)
-}
+// (open_file_arc moved out: callers use vfs::open_file_arc_nofd directly — the wrapper was a pure delegation)
 
 /// One-resolution exec file handle (abi-review session 1): a single
 /// `path_lookup` yields the inode for the MAY_EXEC gate, the setuid
