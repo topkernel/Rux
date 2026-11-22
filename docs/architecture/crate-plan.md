@@ -17,7 +17,7 @@ rux/                      (the framework crate — "kernel/src" minus services)
 
 rux-syscall/              service crate — #![forbid(unsafe_code)] at crate level
 rux-net-svc/              service crate — same
-rux-fs-svc/               service crate — same
+rux-fs/               service crate — same
 rux-drivers-svc/          service crate — same
 rux-ext4/                 service crate — same (last rung; the largest)
 ```
@@ -67,7 +67,7 @@ behavior — relocations and attributes only.
 |---|---|---|
 | 1 | rux-syscall | pilot DONE: reverse surface 88 sites post-errno, all four families decomposed; 12/12 files already zero-unsafe |
 | 2 | rux-net-svc | measurement queued; net's service files are flat consumers of skbuf/driver framework |
-| 3 | rux-fs-svc | the VFS framework stays hub-side; the leaf file systems move |
+| 3 | rux-fs | the VFS framework stays hub-side; the leaf file systems move |
 | 4 | rux-drivers-svc | largest; depends on the safety primitives' MMIO/DMA surface being the only bridge |
 | 5 | rux-ext4 | deepest fs consumer; moves last with the most measurement |
 

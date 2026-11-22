@@ -129,7 +129,7 @@ rux-core          (≈3,000-3,500 dual lines; the entire TCB)
 rux-sched         forbid-safe  (CFS/RT/fairness/wakeup/deadline policy)
 rux-mm            forbid-safe  (VMA tree, mmap/COW/fault DECISIONS, brk)
 rux-syscall       forbid-safe  (DONE at M3; the pattern-proven first rung)
-rux-fs-svc        forbid-safe  (VFS glue, page cache, leaf filesystems)
+rux-fs        forbid-safe  (VFS glue, page cache, leaf filesystems)
 rux-ext4          forbid-safe  (deepest fs consumer)
 rux-net           forbid-safe
 rux-drivers       forbid-safe
