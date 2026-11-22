@@ -6,8 +6,9 @@
 //! declarations below shadow the glob for the flipped names (the
 //! framework's mm/mod.rs drops each declaration as its file flips).
 //!
-//! Flipped so far (M1b): hugepage.
+//! Flipped so far (M1b): hugepage, kswapd.
 
 pub mod hugepage;
+pub mod kswapd;
 
 pub use rux::mm::*;

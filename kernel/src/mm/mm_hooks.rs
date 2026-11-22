@@ -484,10 +484,14 @@ fn policy_hooks() -> &'static MmPolicyHooks {
 /// the composition bin's registration — OnceSlot first-wins, so a
 /// flipped file's crate rows prevail over these).
 pub fn register_in_tree_mm_policy() {
+    // Flipped families (kswapd) serve from the rux-mm crate, whose
+    // registration ran earlier in the composition bin (OnceSlot
+    // first-wins) — their rows here stay at the EMPTY defaults and
+    // never execute.
     mm_register_policy_hooks(MmPolicyHooks {
-        kswapd_init: crate::mm::kswapd::init,
-        kswapd_enable_oom: crate::mm::kswapd::enable_oom,
-        wakeup_kswapd: crate::mm::kswapd::wakeup_kswapd,
+        kswapd_init: no_policy_kswapd_init,
+        kswapd_enable_oom: no_policy_kswapd_enable_oom,
+        wakeup_kswapd: no_policy_wakeup_kswapd,
         try_to_free_pages: crate::mm::vmscan::try_to_free_pages,
         drain_file_cache_before_oom: crate::mm::vmscan::drain_file_cache_before_oom,
         vscan_heartbeat: crate::mm::vmscan::vscan_heartbeat,

@@ -68,9 +68,9 @@ pub fn register_all() {
     // each flip repoints the row at this crate's module. OnceSlot
     // first-wins over the framework's later in-tree registration.
     rux::mm::mm_hooks::mm_register_policy_hooks(rux::mm::mm_hooks::MmPolicyHooks {
-        kswapd_init: rux::mm::kswapd::init,
-        kswapd_enable_oom: rux::mm::kswapd::enable_oom,
-        wakeup_kswapd: rux::mm::kswapd::wakeup_kswapd,
+        kswapd_init: crate::mm::kswapd::init,
+        kswapd_enable_oom: crate::mm::kswapd::enable_oom,
+        wakeup_kswapd: crate::mm::kswapd::wakeup_kswapd,
         try_to_free_pages: rux::mm::vmscan::try_to_free_pages,
         drain_file_cache_before_oom: rux::mm::vmscan::drain_file_cache_before_oom,
         vscan_heartbeat: rux::mm::vmscan::vscan_heartbeat,

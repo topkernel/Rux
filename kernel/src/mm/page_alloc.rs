@@ -419,7 +419,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                 }
                 // Zone allocator failed — wake kswapd if below low watermark
                 if !zone.watermark_ok(order, WMARK_LOW) {
-                    super::kswapd::wakeup_kswapd(order as i32);
+                    super::mm_hooks::wakeup_kswapd(order as i32);
                 }
                 // Leg-15 pace: one tick per slowpath entry (zone fastpath
                 // failed), rux:schb (retired dfx=schb)-gated counter only.
