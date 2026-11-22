@@ -560,7 +560,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             if crate::sched::current_is_dying() {
                                 break;
                             }
-                            let freed = super::vmscan::try_to_free_pages(order as i32);
+                            let freed = super::mm_hooks::try_to_free_pages(order as i32);
                             gate_note_phase(GATE_PHASE_RETRY);
                             if let Some(pfn) = zone.alloc_pages(order) {
                                 ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
@@ -601,7 +601,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         } else {
                         gate_note_phase(GATE_PHASE_DEEP);
                         let deep_freed =
-                            super::vmscan::drain_file_cache_before_oom(deep_target);
+                            super::mm_hooks::drain_file_cache_before_oom(deep_target);
                         gate_note_phase(GATE_PHASE_RETRY);
                         if deep_freed > 0 {
                             if let Some(pfn) = zone.alloc_pages(order) {
@@ -759,7 +759,7 @@ pub fn oom_forensic_dump(site: &str) {
     // SP-7: per-page skip reasons — why anon candidates never reach the
     // swap write above.
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
-    crate::println!("OOM-FORENSIC: {}", super::vmscan::vscan_census_line());
+    crate::println!("OOM-FORENSIC: {}", super::mm_hooks::vscan_census_line());
     // falloc-wedge census: the page-cache reclaim/evict skip faces (same
     // SP-7 shape — names the filter that holds the file LRU hostage).
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)

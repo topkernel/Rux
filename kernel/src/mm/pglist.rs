@@ -79,7 +79,10 @@ pub struct PglistData {
     pub(crate) lru_tails: [AtomicUsize; NR_LRU_LISTS],
 
     /// Number of pages on each LRU list.
-    pub(crate) lru_sizes: [AtomicUsize; NR_LRU_LISTS],
+    // Published for the rux-mm policy crate (M1b): all-atomic interior
+    // mutability — safe to operate under forbid; the LRU size CAS/fetch
+    // loops live in the crate-side lru/vmscan policy.
+    pub lru_sizes: [AtomicUsize; NR_LRU_LISTS],
 
     /// Spinlock protecting all LRU list mutations.
     pub(crate) lru_lock: Spinlock<()>,
