@@ -29,6 +29,24 @@ SAFETY-comment coverage 3,207/5,009 (64%); 157 Kani harnesses, 1,104
 proptests, 4 SPIN models, Miri on the verify crate (generated ledger:
 docs/development/tcb-ledger.md; security-design.md §0).
 
+**Crate-flip rung 2 (net service crate, 2026-11-22):** the network
+stack's 16 files compile solely in kernel/rux-net under
+`#![forbid(unsafe_code)]` (compiler-enforced, negative-probe verified)
+— the second service column after rux-syscall. The move left ZERO
+unsafe behind: the 24 substrate constructs (static-mut table refs,
+Arc-refcount probes, POD header views) were extracted to the framework
+edge module first (net/net_edges.rs, INV rows above), and the four
+historical `unsafe impl Sync` socket markers proved VESTIGIAL — the
+structs are auto-Sync (all-Spinlock/atomic fields; deletion verified
+by green triple-arch build), a repeat of the "fear marker, not hazard"
+class. One safety improvement rode the extraction: pod_view/pod_view_mut
+CHECK ALIGNMENT (the old inline header casts never did — a misaligned
+skb buffer was silent UB, now the packet drops). Unsafe census:
+kernel/src net tree = the framework zone only (buffer + edges +
+wrappers, all INV-ledgered); the service files carry none. Battery:
+make test 886/886, riscv boot + /proc/net readback, fio 3-case verify
+battery PASS (same rig as baseline).
+
 **INV-UACCESS-1 (user-copy soundness, unsafe-slim round, 2026-11-19):**
 user-memory access outside `arch/` routes through `arch::uaccess_safe`
 (`copy_out`/`copy_in`/`read_user`/`write_user`/`clear_user`/

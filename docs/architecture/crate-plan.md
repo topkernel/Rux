@@ -246,3 +246,31 @@ owns its precondition (saves/clears/restores cred + caps).
 Lesson banked: when a pure-function test consults LIVE task state,
 the test must own that state — cross-test leakage is invisible until
 the leaking test moves.
+
+## Rung 2: net/ — CLOSED (2026-11-22)
+
+The net service crate (kernel/rux-net, workspace member 3):
+- SOLE COPY lives in the crate (src/net/: arp ethernet icmp netlink raw
+  socket tcp tcp_timer udp unix ipv4/ ipv6/); `#![forbid(unsafe_code)]`
+  is the compiler-enforced boundary, negative-probe verified through
+  the workspace.
+- The framework zone (kernel/src/net/): buffer (the skb substrate, 22
+  audited constructs), net_hooks (26-row hook table), file_arc +
+  net_edges (INV-NETARC-1 / INV-NET-SOCKTAB-1 / INV-NET-ARCREF-1 /
+  INV-NET-HDRVIEW-1 / INV-NET-CONTAINEROF-1), mod.rs's Arc wrappers.
+- Zero unsafe was left behind: the 24 substrate constructs extracted
+  BEFORE the move (commit 7008a1cb1); the four `unsafe impl Sync`
+  markers were vestigial (auto-Sync structs — deletion-verified).
+- The reverse surface rides NetHooks (26 rows; register_all fills the
+  full table from the crate; the composition bin calls it before
+  rust_main_impl). posix_mq's notify target became Arc<File> + a push
+  hook — the last framework TYPE reference into net.
+- rux-syscall -> rux-net: the sibling service dep (crate::net
+  re-pointed; zero source edits in its 10 files).
+- Battery: triple-arch rc=0; riscv boot to shell + guest /proc/net
+  readback (dev lo + route lo rows through the hooks); make test
+  886/886 (6 net-internals test modules gated — they follow the files,
+  the rung-1 recipe); fio 3-case verify battery + e2fsck PASS on the
+  same rig as the pre-flip baseline (x86_64 KVM, fioboot.py).
+- Fixes the step-1 gap: procfs's /proc/net consumed hook getters that
+  nobody registered since d754f9e12 — the tip restores real rows.
