@@ -115,7 +115,7 @@ unsafe fn vdso_seq() -> &'static AtomicU32 {
 /// even). Readers retry while seq is odd or changed across the read.
 #[cfg(not(feature = "x86_64"))]
 pub fn vdso_data_tick() {
-    let cycles = crate::drivers::timer::read_time();
+    let cycles = crate::timer::read_time();
     // 10 MHz source: 100 ns per cycle, exact.
     let mono_ns = cycles.saturating_mul(100);
     let epoch_ns = crate::timer::wall_epoch_offset_ns();

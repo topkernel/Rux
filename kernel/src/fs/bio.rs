@@ -1556,9 +1556,9 @@ pub fn invalidate_device(device: &blkdev::GenDisk) {
 /// CPUs). Bound the wait: after WAIT_DEADLINE_JIFFIES, give up and
 /// report -EIO so the syscall unwinds and the task stays killable.
 fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
-    const WAIT_DEADLINE_JIFFIES: u64 = crate::drivers::timer::msecs_to_jiffies(10_000);
+    const WAIT_DEADLINE_JIFFIES: u64 = crate::timer::msecs_to_jiffies(10_000);
     let mut slept = 0u32;
-    let deadline = crate::drivers::timer::get_jiffies().saturating_add(WAIT_DEADLINE_JIFFIES);
+    let deadline = crate::timer::get_jiffies().saturating_add(WAIT_DEADLINE_JIFFIES);
     loop {
         // SAFETY: INV-BIO-PIN — the owner's reference pins the buffer
         // across this wait (the module doc above).
@@ -1568,7 +1568,7 @@ fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
             return if state.test(BufferState::BH_Uptodate) { 0 } else { -5 };
         }
         if crate::sched::current().is_some() {
-            if crate::drivers::timer::get_jiffies() >= deadline {
+            if crate::timer::get_jiffies() >= deadline {
                 crate::pr_err!(
                     "bio: buffer io wait timeout block={} — reporting EIO (wedge fix)",
                     bh_ref.b_blocknr
@@ -1576,7 +1576,7 @@ fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
                 return -5;
             }
             let pid = crate::sched::get_current_pid();
-            let dl = crate::drivers::timer::get_jiffies().saturating_add(1);
+            let dl = crate::timer::get_jiffies().saturating_add(1);
             let id = crate::timer::add_timer_wakeup(dl, pid);
             // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
             crate::arch::cpu::restore_irq(true);
@@ -2427,7 +2427,7 @@ impl WriteBatch {
         // One device kick for the whole quietly-submitted batch (the PCI
         // submit path publishes chains quietly; every notify is an MMIO
         // trap). The MMIO device notifies inline per chain — a no-op kick.
-        crate::drivers::virtio::pci_blk_kick_all();
+        crate::drivers::blkdev::kick_all_pending_disks();
 
         let n = self.len;
         self.results_n = n;
@@ -2612,7 +2612,7 @@ impl WriteBatch {
 
         // ---- Phase 2: kick + wait ----
         // One kick for the whole window (chains were published quietly).
-        crate::drivers::virtio::pci_blk_kick_all();
+        crate::drivers::blkdev::kick_all_pending_disks();
 
         let mut first_error = 0i32;
         // Group heads and fallback spans, in slot order — the device

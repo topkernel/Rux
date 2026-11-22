@@ -4909,7 +4909,7 @@ pub fn vfs_rename_exchange(oldpath: &str, newpath: &str) -> Result<(), i32> {
     let n = EXCHANGE_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let tmp_name = format!(
         ".rux-rex-{:x}-{:x}",
-        crate::drivers::timer::get_jiffies(),
+        crate::timer::get_jiffies(),
         n
     );
     let new_parent_str = match newpath.rfind('/') {

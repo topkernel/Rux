@@ -111,7 +111,7 @@ pub fn tick() {
     if round % 4 != 0 {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies() as u64;
+    let now = crate::timer::get_jiffies() as u64;
     // SAFETY: single-auditor (heartbeat CAS admits one CPU; the table
     // is only touched from this path).
     unsafe { audit(now) };

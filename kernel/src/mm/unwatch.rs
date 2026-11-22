@@ -71,7 +71,7 @@ static LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::Spinlo
 /// never prints.
 pub fn note(kind: u8, a: u64, b: u64, cnt: u64) {
     let pid = crate::process::current_pid() as u64;
-    let j = crate::drivers::timer::get_jiffies();
+    let j = crate::timer::get_jiffies();
     let idx = CURSOR.fetch_add(1, Ordering::Relaxed) % RING_LEN;
     let _g = LOCK.lock_irqsave();
     let e = &RING[idx];
@@ -145,7 +145,7 @@ pub fn covered_by_unmap(va: u64) -> bool {
                     e.b.load(Ordering::Relaxed),
                     e.cnt.load(Ordering::Relaxed),
                     e.j.load(Ordering::Relaxed),
-                    crate::drivers::timer::get_jiffies().saturating_sub(e.j.load(Ordering::Relaxed))
+                    crate::timer::get_jiffies().saturating_sub(e.j.load(Ordering::Relaxed))
                 );
                 shown += 1;
             }

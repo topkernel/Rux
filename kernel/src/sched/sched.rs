@@ -476,7 +476,7 @@ pub fn wake_up_enqueue_opt(
                 // wwcensus family — ordinary boots stay clean.
                 if !w3_benign_running
                     && crate::trace::EVENT_WWCENSUS.armed()
-                    && crate::drivers::timer::get_jiffies() > 300
+                    && crate::timer::get_jiffies() > 300
                 {
                     w3_print_refused =
                         W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400;
@@ -559,7 +559,7 @@ pub fn wake_up_enqueue_opt(
                         [const { core::sync::atomic::AtomicU64::new(0) }; W3S];
                     static W3_JIF: [core::sync::atomic::AtomicU64; W3S] =
                         [const { core::sync::atomic::AtomicU64::new(0) }; W3S];
-                    let jif = crate::drivers::timer::get_jiffies();
+                    let jif = crate::timer::get_jiffies();
                     let exec = crate::sched::edges::task_shared(task)
                         .sched_entity()
                         .sum_exec_runtime
@@ -692,7 +692,7 @@ pub fn wake_up_enqueue_opt(
                         );
                         let k = crate::sched::edges::task_shared(task).timed_sleep_kind.load(core::sync::atomic::Ordering::Relaxed);
                         let d = crate::sched::edges::task_shared(task).timed_sleep_deadline.load(core::sync::atomic::Ordering::Relaxed);
-                        let n = crate::drivers::timer::read_time();
+                        let n = crate::timer::read_time();
         // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                         crate::pr_warn!(
                             "W3-TSL pid={} kind={} deadline={} now={} delta_ms={} dur_ms={} timer_id={} sigpend={:#x} sigmask={:#x}",
@@ -750,7 +750,7 @@ pub fn wake_up_enqueue_opt(
                             ww_append_dump(
                                 &mut buf,
                                 task,
-                                crate::drivers::timer::get_jiffies(),
+                                crate::timer::get_jiffies(),
                             );
         // HOTPATH-PRINT: hunt-era diagnostic on a cold/rare path (wedge adjudication); rate-bounded by its trigger condition.
                             crate::pr_warn!("{}", buf);
@@ -873,7 +873,7 @@ pub fn wake_up_enqueue_opt(
                     if !orphan_watch_confirm(
                         task,
                         crate::sched::edges::task_shared(task).pid(),
-                        crate::drivers::timer::get_jiffies(),
+                        crate::timer::get_jiffies(),
                         50,
                     ) {
                         return false;
@@ -1051,7 +1051,7 @@ pub fn wake_up_enqueue_opt(
                 // zeroing the GRQ guard booked at sched.rs:2994 on cpu5,
                 // then the guard's own release underflowing 5 ms later).
                 if mid_switch {
-                    let jif = crate::drivers::timer::get_jiffies();
+                    let jif = crate::timer::get_jiffies();
                     let mut stale = false;
                     for c in 0..MAX_CPUS {
                         if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire)
@@ -1442,7 +1442,7 @@ pub(crate) fn context_switch(prev: &mut Task, next: &mut Task) {
         if pc != 0 && !prev.state().is_dead() {
             static LAST: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let last = LAST.load(core::sync::atomic::Ordering::Acquire);
             if now.wrapping_sub(last) >= 20
                 && LAST
@@ -1744,7 +1744,7 @@ impl GlobalRunQueue {
         self.lock.lock();
         // Acquired: the section is now entered.
         grq_site_mark_at(cpu, site | GRQ_STEP_HELD);
-        GRQ_ACQ_JIF[cpu].store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
+        GRQ_ACQ_JIF[cpu].store(crate::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
         // grq-source-fix: no separate "held" tracker is written here.
         // The lock word itself names this cpu as the owner (owner-in-
         // word, RawSpinlock::held_word) — one authority, published by
@@ -2303,7 +2303,7 @@ pub fn grq_dump_holder(why: &str) {
     if !any {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     // grq-source-fix: the holder is DERIVED from the lock word (the
     // single authority — owner-in-word). Before sched init there is no
     // word to read; the site stamps alone still name the participants.
@@ -2736,7 +2736,7 @@ pub(crate) const SWITCHING_OUT_STALE_JIF: u64 = 50;
 /// stale-mark heal can fire instead of every scanner deferring to a
 /// switch that finished ages ago.
 pub fn task_is_mid_switch_out(task: *mut Task) -> bool {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     (0..MAX_CPUS).any(|c| {
         if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) != task as u64 {
             return false;
@@ -2789,7 +2789,7 @@ pub fn pick_owner_live(task: *mut Task) -> bool {
     // can fire; SWITCHING_OUT stays authoritative — a cpu switching
     // TO idle keeps its mark until the release store lands.
     let idle_mask = grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     (0..MAX_CPUS).any(|c| {
         // Same aging discipline as task_is_mid_switch_out: only a YOUNG
         // switch-out mark names a live owner; an aged mark is the
@@ -3001,7 +3001,7 @@ pub fn switching_out_names(task: *mut Task) -> bool {
 /// check already excludes every legitimate owner, so this is defense in
 /// depth against an out-of-tree divergence window.
 pub fn stale_mark_confirm(task: *mut Task, pid: u32, threshold: u64) -> bool {
-    orphan_watch_confirm(task, pid, crate::drivers::timer::get_jiffies(), threshold)
+    orphan_watch_confirm(task, pid, crate::timer::get_jiffies(), threshold)
 }
 
 /// Per-CPU reschedule flags
@@ -3822,7 +3822,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         const FTS_SLOT_WAIT_JIFFIES: u64 = 300; // 3 s, R86/FDM budget
         const FTS_SPIN_BATCH: u32 = 100_000;
         let mut spins: u32 = 0;
-        let armed_at = crate::drivers::timer::get_jiffies();
+        let armed_at = crate::timer::get_jiffies();
         let mut printed = false;
         crate::arch::cpu::restore_irq(true);
         loop {
@@ -3881,7 +3881,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 }
                 putchar(b'\n');
             }
-            if crate::drivers::timer::get_jiffies().wrapping_sub(armed_at)
+            if crate::timer::get_jiffies().wrapping_sub(armed_at)
                 >= FTS_SLOT_WAIT_JIFFIES
             {
                 // Leak, don't dangle: the owning CPU is wedged with a
@@ -4759,7 +4759,7 @@ fn __schedule() {
                 // Rate-limited (a divergence fight can pass here hot).
                 static LAST_RESYNC: core::sync::atomic::AtomicU64 =
                     core::sync::atomic::AtomicU64::new(0);
-                let now = crate::drivers::timer::get_jiffies();
+                let now = crate::timer::get_jiffies();
                 let last = LAST_RESYNC.load(core::sync::atomic::Ordering::Acquire);
                 if now.wrapping_sub(last) >= 2
                     && LAST_RESYNC
@@ -5413,7 +5413,7 @@ fn __schedule() {
         // hold) so the WAKE-HEAL adjudicates staleness by MARKER AGE,
         // not by the sighting history of the target task.
         SWITCHING_OUT_JIF[cpu_id].store(
-            crate::drivers::timer::get_jiffies(),
+            crate::timer::get_jiffies(),
             core::sync::atomic::Ordering::Release,
         );
     }
@@ -5889,7 +5889,7 @@ pub fn scheduler_tick() {
     {
         static SWEEP_LAST: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::timer::get_jiffies();
         let last = SWEEP_LAST.load(core::sync::atomic::Ordering::Acquire);
         if now.wrapping_sub(last) >= 100
             && SWEEP_LAST
@@ -6029,7 +6029,7 @@ pub fn scheduler_tick() {
                         );
                 }
                 if pc != 0 {
-                    let now = crate::drivers::timer::get_jiffies();
+                    let now = crate::timer::get_jiffies();
                     let task_word = cur as usize as u64;
                     // Find-or-claim this task's window slot: first slot
                     // naming it, else the first empty, else evict the
@@ -6663,7 +6663,7 @@ pub fn scheduler_tick() {
             core::sync::atomic::AtomicU64::new(0);
         static PARKWALK_ARMED: core::sync::atomic::AtomicBool =
             core::sync::atomic::AtomicBool::new(false);
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::timer::get_jiffies();
         let last = PARKWALK_LAST.load(core::sync::atomic::Ordering::Acquire);
         if now.wrapping_sub(last) >= 4
             && PARKWALK_LAST
@@ -7657,7 +7657,7 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
     use crate::dfx::taskdump::putc_brief as putchar;
     static LAST: core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(core::sync::atomic::Ordering::Relaxed);
     if now.wrapping_sub(last) < 25 {
         return;
@@ -7881,7 +7881,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                     if !orphan_watch_confirm(
                         task,
                         pid,
-                        crate::drivers::timer::get_jiffies(),
+                        crate::timer::get_jiffies(),
                         50,
                     ) {
                         // First (or recent) sighting — come back after the
@@ -8125,7 +8125,7 @@ fn harvest_orphan_tasks(_my_cpu: usize) {
         1
     };
     {
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::timer::get_jiffies();
         let last = LAST_LOADED_SCAN.load(core::sync::atomic::Ordering::Acquire);
         if now.wrapping_sub(last) < scan_interval {
             return;
@@ -8137,7 +8137,7 @@ fn harvest_orphan_tasks(_my_cpu: usize) {
             return;
         }
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
         // Helper APIs (heals, watch, relink) still take *mut Task.
         let t = t as *const Task as *mut Task;
@@ -8339,7 +8339,7 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
                                 core::sync::atomic::Ordering::Acquire,
                             );
                             born != 0
-                                && crate::drivers::timer::get_jiffies()
+                                && crate::timer::get_jiffies()
                                     .wrapping_sub(born)
                                     < SWITCHING_OUT_STALE_JIF
                         }))
@@ -8501,7 +8501,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                 // around it. (task_is_mid_switch_out above now reads
                 // aged marks as NOT in flight, so we get here.)
                 {
-                    let now = crate::drivers::timer::get_jiffies();
+                    let now = crate::timer::get_jiffies();
                     for c in 0..MAX_CPUS {
                         if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire)
                             == task as u64
@@ -8889,7 +8889,7 @@ pub fn cpu_idle_loop() -> ! {
             // the IPI, which interrupts the halt). Same shape as the
             // reference's polling-idle / need_resched-before-halt.
             POLLING_IDLE[cpu_id].store(true, core::sync::atomic::Ordering::Release);
-            let poll_t0 = crate::drivers::timer::monotonic_ns_since_boot();
+            let poll_t0 = crate::timer::monotonic_ns_since_boot();
             // paired-test 2 (perf-r3, 2026-11-03): the 30 us window already
             // absorbs most ping-pong handoffs, but the unix r/w roundtrip
             // anatomy showed IPIs still firing (815/1915 wakes) at a mean
@@ -8922,7 +8922,7 @@ pub fn cpu_idle_loop() -> ! {
                 IDLE_POLL_WINDOW_NS_CFG.store(window, core::sync::atomic::Ordering::Relaxed);
             }
             let IDLE_POLL_WINDOW_NS: u64 = window;
-            while crate::drivers::timer::monotonic_ns_since_boot()
+            while crate::timer::monotonic_ns_since_boot()
                 .saturating_sub(poll_t0)
                 < IDLE_POLL_WINDOW_NS
             {

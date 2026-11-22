@@ -851,7 +851,7 @@ fn is_framebuffer_frame(phys: u64) -> bool {
     // them down through put_page/free_pages corrupts the page_desc
     // accounting (mapcount/refcount of an unrelated descriptor) — the
     // recycled-frame family's amplifier.
-    if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
+    if let Some(info) = crate::console::get_framebuffer_info() {
         if phys >= info.addr && phys < info.addr + info.size as u64 {
             return true;
         }

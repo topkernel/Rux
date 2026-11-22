@@ -3172,7 +3172,7 @@ pub fn record(event: &TraceEvent, args: [u64; TRACE_ARGS]) -> bool {
     let seq = ring.seq.fetch_add(1, Ordering::Relaxed);
     ring.push(TraceRecord {
         seq,
-        ts_ns: crate::drivers::timer::monotonic_ns_since_boot(),
+        ts_ns: crate::timer::monotonic_ns_since_boot(),
         pid,
         cpu: cpu as u16,
         event_id: event.id,
@@ -3427,7 +3427,7 @@ pub fn cpu_stats(cpu: usize) -> String {
         .map(|i| ring.slot((start + i) % RING_CAPACITY).ts_ns)
         .min()
         .unwrap_or(0);
-    let now = crate::drivers::timer::monotonic_ns_since_boot();
+    let now = crate::timer::monotonic_ns_since_boot();
     let secs = |ns: u64| format!("{}.{:06}", ns / 1_000_000_000, (ns % 1_000_000_000) / 1000);
     format!(
         "entries: {}\noverrun: {}\ncommit overrun: 0\nbytes: {}\noldest event ts: {}\nnow ts: {}\ndropped events: {}\nread events: {}\n",

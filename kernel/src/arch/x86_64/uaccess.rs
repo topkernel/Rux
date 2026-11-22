@@ -372,7 +372,7 @@ fn fault_in_write(start: *mut u8, len: usize) -> bool {
             crate::arch::mm::MmFaultResult::CowPending => {
                 // handle_cow_fault resolves it
                 // Leg-15 pace: tick after return (pte_lock released).
-                let cow_j0 = crate::drivers::timer::get_jiffies();
+                let cow_j0 = crate::timer::get_jiffies();
                 let cow_res = crate::arch::mm::mm_ops::handle_cow_fault(
                     addr_space,
                     root_ppn,

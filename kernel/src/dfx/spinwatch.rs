@@ -117,7 +117,7 @@ pub fn record() -> bool {
         w.win.store(0, Relaxed);
         w.last_rep.store(0, Relaxed);
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let win = w.win.load(Relaxed);
     if win == 0 || now.saturating_sub(win) >= WIN_JIFFIES {
         w.win.store(now, Relaxed);

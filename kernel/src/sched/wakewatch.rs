@@ -134,7 +134,7 @@ pub fn ww_rt_pick_stats() -> (u64, u64, u64) {
 
 #[inline]
 fn now_ticks() -> u64 {
-    crate::drivers::timer::read_time()
+    crate::timer::read_time()
 }
 
 #[inline]
@@ -406,7 +406,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             }
             let t0 = crate::interrupt::softirq::SOFTIRQ_WIN_T0[c]
                 .load(Ordering::Acquire);
-            let age_ms = crate::drivers::timer::read_time()
+            let age_ms = crate::timer::read_time()
                 .saturating_sub(t0)
                 .wrapping_mul(1000)
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
@@ -497,7 +497,7 @@ pub fn heartbeat() {
 /// was 2 jiffies — sc166's 2380-line strand storm, see STRAND_THRESHOLD_MS).
 fn print_budget_ok() -> bool {
     static LAST: AtomicU64 = AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(Ordering::Acquire);
     if now.wrapping_sub(last) < 20 {
         return false;
@@ -600,7 +600,7 @@ fn stall_slot_of(task: *mut crate::process::Task) -> &'static StallSlot {
 /// then the scan. Prints via pr_warn (rate is inherently tiny: one line
 /// per 90+s stall).
 pub fn stallwatch_tick() {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     static LAST_SCAN: AtomicU64 = AtomicU64::new(0);
     let last = LAST_SCAN.load(Ordering::Relaxed);
     // Every ~5 s (assume HZ >= 50; a smaller HZ just scans more often).

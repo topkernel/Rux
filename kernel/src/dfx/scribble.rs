@@ -142,7 +142,7 @@ pub fn ring_log(cpu: usize, kind: u32, a: u64, b: u64) {
     }
     let i = RING_CUR.fetch_add(1, Ordering::Relaxed) % 128;
     let e = &RING[i];
-    e.stamp.store(crate::drivers::timer::read_time(), Ordering::Relaxed);
+    e.stamp.store(crate::timer::read_time(), Ordering::Relaxed);
     e.cpu.store(cpu as u32, Ordering::Relaxed);
     e.kind.store(kind, Ordering::Relaxed);
     e.a.store(a, Ordering::Relaxed);

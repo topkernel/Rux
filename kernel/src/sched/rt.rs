@@ -623,7 +623,7 @@ impl RtRunQueue {
                                 for &b in b"RT-PICK-SKIP pid=0x" { putchar(b); }
                                 ph(pid);
                                 for &b in b" jif=" { putchar(b); }
-                                ph(crate::drivers::timer::get_jiffies());
+                                ph(crate::timer::get_jiffies());
                                 for &b in b" cpu=" { putchar(b); }
                                 ph(cpu_id as u64);
                                 for &b in b" mask=0x" { putchar(b); }

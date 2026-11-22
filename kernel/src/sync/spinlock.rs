@@ -148,7 +148,7 @@ pub fn note_acquire_evidence() {
     let ev = &ACQUIRE_EVIDENCE[cpu];
     ev.task.store(t, Ordering::Relaxed);
     ev.jiffies
-        .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+        .store(crate::timer::get_jiffies(), Ordering::Relaxed);
 }
 
 /// Does `task` (a Task pointer) have LIVE acquire-side evidence on
@@ -268,7 +268,7 @@ impl RawSpinlock {
         self.acq_pid.store(crate::process::current_pid(), Ordering::Relaxed);
         self.acq_site.store(ra, Ordering::Relaxed);
         self.acq_jiffies
-            .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+            .store(crate::timer::get_jiffies(), Ordering::Relaxed);
     }
 
     /// Clear the holder (dfx-lock-owner feature only).
@@ -623,7 +623,7 @@ impl RawSpinlock {
             let asite = l.acq_site.load(Ordering::Relaxed);
             let ajif = l.acq_jiffies.load(Ordering::Relaxed);
             let wv = l.locked.load(Ordering::Relaxed);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let msg = b"LOCK-ACQ: word=";
             for &b in msg {
                 crate::console::uart_putc_raw(b);

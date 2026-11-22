@@ -307,7 +307,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         // Leg-15 pace: j0 captured at entry, counter ticked
                         // after return (no lock held — handle_cow_fault's
                         // pte_lock is released by then).
-                        let cow_j0 = crate::drivers::timer::get_jiffies();
+                        let cow_j0 = crate::timer::get_jiffies();
                         let cow_res = unsafe {
                             handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
                         };
@@ -616,7 +616,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         MmFaultResult::CowPending => {
             // COW page, try copy-on-write
             // Leg-15 pace: j0 at entry, tick after return (pte_lock released).
-            let cow_j0 = crate::drivers::timer::get_jiffies();
+            let cow_j0 = crate::timer::get_jiffies();
             let cow_res =
                 unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
             crate::dfx::schb::note_cow(cow_j0);

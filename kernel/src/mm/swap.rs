@@ -491,9 +491,9 @@ pub fn swap_write_page(swap_type: u32, offset: u64, phys_addr: usize) -> Result<
     let buf = swap_page_slice(phys_addr);
 
     // SP-5 round-4: swap-write latency census (module statics above).
-    let t0 = crate::drivers::timer::read_time();
+    let t0 = crate::timer::read_time();
     let r = crate::drivers::blkdev::blkdev_write(device, sector, buf);
-    let dt_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 1_000_000_000
+    let dt_ns = crate::timer::read_time().saturating_sub(t0) * 1_000_000_000
         / crate::config::TIMER_CLOCK_FREQ_HZ;
     SWAPW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if dt_ns > 10_000_000 {

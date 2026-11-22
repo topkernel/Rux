@@ -542,7 +542,7 @@ pub fn wfi() {
 /// calibration, busy delays) use [`read_counter`] + [`get_counter_freq`].
 #[inline]
 pub fn read_time() -> u64 {
-    crate::drivers::timer::read_time()
+    crate::timer::read_time()
 }
 
 /// Instruction serialization barrier

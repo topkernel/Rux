@@ -162,7 +162,7 @@ pub fn note_nameset(pid: u32, comm: &[u8]) {
         return;
     }
 
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     {
         let mut map = NAME_MAP.lock();
         if let Some(slot) = map.iter_mut().find(|r| r.pid == pid) {
@@ -216,7 +216,7 @@ fn nameset_of(pid: u32) -> Option<u64> {
 pub fn on_zombie(pid: u32, code: i32, parent_pid: u32, comm: &[u8; 16], last_nr: u32, last_a0: u64) {
     use core::sync::atomic::AtomicU32;
 
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     {
         let mut map = EXIT_MAP.lock();
         if let Some(slot) = map.iter_mut().find(|r| r.pid == pid) {
@@ -287,7 +287,7 @@ pub fn on_reap_wait4(reaper: u32, child: u32, wstatus: i32, nohang: bool) {
     crate::pr_warn!(
         "REAP4{} t={} reaper={}('{}') child={} wstatus={:#x} {}={}",
         if nohang { "N" } else { "" },
-        secs(crate::drivers::timer::get_jiffies()),
+        secs(crate::timer::get_jiffies()),
         reaper,
         comm_of(reaper),
         child,
@@ -319,7 +319,7 @@ pub fn on_reap_waitid(
     crate::pr_warn!(
         "REAPW{} t={} reaper={}('{}') idtype={} id={} opts={:#x} si_pid={} {} status={}{}",
         if wnowait { "-nw" } else { "" },
-        secs(crate::drivers::timer::get_jiffies()),
+        secs(crate::timer::get_jiffies()),
         reaper,
         comm_of(reaper),
         if via_pidfd { -1 } else { idtype },
@@ -339,7 +339,7 @@ pub fn poll_note(reaper: u32, idtype: i32, id: i32, options: i32) {
 
     static N: AtomicU32 = AtomicU32::new(0);
     static LAST: AtomicU64 = AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(Ordering::Relaxed);
     if now.saturating_sub(last) < 5 * crate::config::KERNEL_HZ as u64 {
         return;

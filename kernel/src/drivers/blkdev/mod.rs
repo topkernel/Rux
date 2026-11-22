@@ -28,6 +28,13 @@ pub struct BlockDeviceOps {
     pub release: Option<fn() -> i32>,
     /// Get geometry info
     pub getgeo: Option<fn(&mut Geo) -> i32>,
+    /// Kick quietly-submitted chains on this disk (rung4 prep move 2):
+    /// transport-level doorbell for drivers that publish chains without
+    /// notifying (the PCI virtio-blk quiet-submit path). The block
+    /// layer's drain/recovery paths call [`kick_all_pending_disks`] —
+    /// walking the registry — instead of naming any driver. None = the
+    /// transport notifies inline (no-op kick).
+    pub kick: Option<fn(&GenDisk)>,
 }
 
 #[repr(C)]
@@ -237,6 +244,24 @@ struct BlockDeviceManager {
     disks: Spinlock<Vec<Option<Box<GenDisk>>>>,
     /// Device number allocator
     major_next: AtomicU32,
+}
+
+/// Kick every registered disk whose transport may hold quietly-submitted
+/// chains (rung4 prep move 2): the block layer's drain/recovery paths
+/// call this INSTEAD of naming any driver — each registered disk's
+/// ops.kick (if present) doorbells its own queue. Disks whose transport
+/// notifies inline (ops.kick == None) are skipped.
+pub fn kick_all_pending_disks() {
+    // The registry walk (the manager's own iteration contract —
+    // INV-BLKDEV-1's stable Box addressing).
+    let disks = BLOCK_MANAGER.disks.lock();
+    for d in disks.iter() {
+        if let Some(gd) = d {
+            if let Some(kick) = gd.ops.and_then(|ops| ops.kick) {
+                kick(gd);
+            }
+        }
+    }
 }
 
 unsafe impl Send for BlockDeviceManager {}

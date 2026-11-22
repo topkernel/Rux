@@ -72,7 +72,7 @@ pub fn generate() -> Vec<u8> {
     // (kernel/sched/stats.c: seq_printf(seq, "timestamp %lu\n", jiffies)).
     out.push_str(&format!(
         "timestamp {}\n",
-        crate::drivers::timer::get_jiffies()
+        crate::timer::get_jiffies()
     ));
 
     for cpu in 0..num_cpus {

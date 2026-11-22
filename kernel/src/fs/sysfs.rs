@@ -1455,7 +1455,7 @@ fn build_tree() -> Arc<KObject> {
     attr_ro(&fb0, "modes", move || {
         #[cfg(feature = "riscv64")]
         {
-            match crate::drivers::gpu::get_framebuffer_info() {
+            match crate::console::get_framebuffer_info() {
                 Some(info) => {
                     format!("U:{}x{}p-0\n", info.width, info.height).into_bytes()
                 }

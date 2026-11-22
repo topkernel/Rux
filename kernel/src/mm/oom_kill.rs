@@ -431,7 +431,7 @@ static LAST_FAULT_KILL: core::sync::atomic::AtomicU64 =
 /// Returns TRUE when the task should retry (it consumed a kill, a recent
 /// global kill is still in flight, or another CPU just won a kill window).
 pub fn fault_oom_kill_or_retry(pid: u32) -> bool {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST_FAULT_KILL.load(core::sync::atomic::Ordering::Relaxed);
 
     // Retry window: a recent kill's victim is still exiting — retry for
@@ -517,7 +517,7 @@ pub fn fault_oom_kill_or_retry(pid: u32) -> bool {
 /// memory source; returns false when NOTHING is killable (the caller
 /// panics loudly — matching the x86_64 kernel-mode policy).
 pub fn kernel_fault_oom_kill() -> bool {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST_FAULT_KILL.load(core::sync::atomic::Ordering::Relaxed);
     if now.saturating_sub(last) < KILL_WINDOW_JIFFIES {
         return true; // a kill is in flight; its pages may serve the retry

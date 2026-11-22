@@ -276,7 +276,7 @@ extern "C" fn mmprof_dump_fn(_arg: *mut core::ffi::c_void) -> i32 {
         };
         // current() is the safe handle to the running task (we are it).
         let pid = current.pid();
-        let wake_at = crate::drivers::timer::get_jiffies()
+        let wake_at = crate::timer::get_jiffies()
             + MMPROF_DUMP_SECS * crate::config::KERNEL_HZ as u64;
         let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
         current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
@@ -328,7 +328,7 @@ pub fn report_line(k: u64) {
     #[cfg(not(feature = "x86_64"))]
     let hz = 0; // cycle-domain report only on the other ports
     let per_us = if hz > 1_000_000 { hz / 1_000_000 } else { 1 };
-    let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
+    let secs = crate::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
     match k {
         0 => {
             // A: mmap + mprotect stages

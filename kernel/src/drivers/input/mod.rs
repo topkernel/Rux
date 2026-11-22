@@ -230,6 +230,9 @@ pub fn init() {
     // Initialize PS/2 driver (does nothing on RISC-V)
     ps2::init_keyboard();
     ps2::init_mouse();
+    // rung4 prep move 3: own the tick diagnostic through the framework hook.
+    crate::timer::register_input_debug_tick(input_debug_tick);
+
 }
 
 /// Initialize VirtIO Input devices

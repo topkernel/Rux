@@ -130,7 +130,7 @@ fn enter_keyed(site: u8, class: u8) -> u64 {
     // stores in order even under Relaxed) — a reader seeing pid != 0
     // sees a coherent fresh stamp.
     h.jif
-        .store(crate::drivers::timer::get_jiffies() as u64, Ordering::Relaxed);
+        .store(crate::timer::get_jiffies() as u64, Ordering::Relaxed);
     h.key.store(key, Ordering::Relaxed);
     h.epoch.store(ep, Ordering::Relaxed);
     h.tgid.store(tgid, Ordering::Relaxed);
@@ -269,7 +269,7 @@ pub fn tick_check() {
     if !enabled() {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies() as u64;
+    let now = crate::timer::get_jiffies() as u64;
     tick_stuck_scan(now);
     // Section-meter heartbeat (every 10 s): names the per-boot cost
     // class even when no hold crosses the report threshold.
