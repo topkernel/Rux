@@ -938,25 +938,10 @@ static RECV: [RxSlot; 16] = [const { EMPTY_RX }; 16];
 /// pointer for host-side nm symbolization.
 fn recv_describe(fd: usize, out: &[AtomicU8; 96]) {
     let mut s = alloc::string::String::new();
-    if let Some((usock, nonblock)) = crate::net::unix::unix_file_of(fd) {
-        let kind = match usock.kind {
-            crate::net::unix::UnixKind::Stream => "stream",
-            _ => "dgram",
-        };
-        let bound = usock.bound_name.lock().clone().unwrap_or_default();
-        let peer_name = match usock.peer_cred() {
-            Some(c) => alloc::format!("pid {}", c.pid),
-            None => usock
-                .dgram_peer
-                .lock()
-                .clone()
-                .unwrap_or_else(|| "-".to_string()),
-        };
+    if let Some((detail, nonblock)) = crate::net::net_hooks::unix_socket_of_fd(fd) {
         s = alloc::format!(
-            "unix:{} bound=[{}] peer=[{}]{}",
-            kind,
-            bound,
-            peer_name,
+            "{}{}",
+            detail,
             if nonblock { " O_NONBLOCK" } else { "" }
         );
     } else if let Some(file) = crate::fs::get_file_fd(fd) {

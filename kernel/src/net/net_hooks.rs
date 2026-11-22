@@ -30,10 +30,12 @@ pub struct NetHooks {
     pub is_inet_socket_ops: fn(&'static crate::fs::FileOps) -> bool,
     pub is_netlink_ops: fn(&'static crate::fs::FileOps) -> bool,
     pub is_raw_ops: fn(&'static crate::fs::FileOps) -> bool,
-    /// syscost's unix-socket tracing probe.
-    pub unix_socket_of: fn(&File) -> Option<(bool, String)>,
-    /// posix_mq's notify socket probe.
-    pub mq_notify_sock: fn(&File) -> Option<i32>,
+    /// posix_mq's netlink notify probe.
+    pub netlink_socket_from_fd: fn(usize) -> Option<usize>,
+    /// syscost's unix-socket tracing probe (fd-based).
+    pub unix_socket_of_fd: fn(usize) -> Option<(alloc::string::String, bool)>,
+    /// The futex fd-detail line for a unix socket (bound=... peer=...).
+    pub unix_detail_of: fn(&File) -> Option<alloc::string::String>,
 }
 
 /// A /proc/net/tcp row (the socket-table getter's raw data; procfs
@@ -95,8 +97,9 @@ impl NetHooks {
         is_inet_socket_ops: |_| false,
         is_netlink_ops: |_| false,
         is_raw_ops: |_| false,
-        unix_socket_of: |_| None,
-        mq_notify_sock: |_| None,
+        netlink_socket_from_fd: |_| None,
+        unix_socket_of_fd: |_| None,
+        unix_detail_of: |_| None,
     };
 }
 
@@ -149,6 +152,8 @@ pub fn is_netlink_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_ne
 #[inline]
 pub fn is_raw_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_raw_ops)(ops) }
 #[inline]
-pub fn unix_socket_of(file: &File) -> Option<(bool, String)> { (hooks().unix_socket_of)(file) }
+pub fn netlink_socket_from_fd(fd: usize) -> Option<usize> { (hooks().netlink_socket_from_fd)(fd) }
 #[inline]
-pub fn mq_notify_sock(file: &File) -> Option<i32> { (hooks().mq_notify_sock)(file) }
+pub fn unix_socket_of_fd(fd: usize) -> Option<(alloc::string::String, bool)> { (hooks().unix_socket_of_fd)(fd) }
+#[inline]
+pub fn unix_socket_of(file: &File) -> Option<alloc::string::String> { (hooks().unix_detail_of)(file) }
