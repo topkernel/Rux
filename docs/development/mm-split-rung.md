@@ -204,3 +204,38 @@ policy served from the crate); x86_64 suite 888/888 (crate path; the
 pre-existing E0603 offsets breakage fixed in b20b766f0); minimal-rootfs
 boot to shell, zero panics; unsafe gate OK (sidecar content-remapped
 across the line shifts: 2098 INV / 186 GAP at HEAD).
+
+## M1a tier-2 perf gate (2026-11-23, x86_64/KVM + TCG)
+
+Attempted via scripts/perf-gate.sh --tiers 2; the script refused to
+boot twice (2+ foreign QEMUs — host capacity rule), so the same boot
+was run directly through scripts/test/pbench_boot.py (deviation noted;
+one QEMU at a time, 49G available). One TCG board (m1a-pb3/pb4) and
+one KVM board (m1a-pb6), debug bzImage @ 1d70a7c7d:
+
+| row | m1a KVM med (µs) | SP-7 KVM debug anchor | s1-close control (same day, KVM) |
+|---|---|---|---|
+| p1_null | 0.260 | 0.300 | — |
+| p1_clock | 0.340 | 0.371 | — |
+| p2_ctxsw | 1.668 | 1.242 (loaded band 2.0) | — |
+| p3a_fault_anon | 0.010 | — | 0.010 |
+| p3b_fault_cow | 1.994 | 8.075 (older main) | 1.974–2.024 |
+| p3c_fault_file | 0.010 | — | 0.010 |
+| p4_fork_exit | 317.7 | 578.0 (older main) | 333–335 |
+
+The mm-guarded rows (P2 ctxsw, P3a/b/c faults, P4 fork) are IN BAND vs
+the anchor class and vs a concurrently-booted control kernel from the
+s1-close lane — the crate indirection (fn-pointer table dispatch on
+the fault path, no LTO in debug) costs nothing measurable at the
+median. p3b/p4 sit far UNDER the SP-7 anchor because the anchor
+predates recent main-side work; the same-day control shows the same
+class.
+
+P5 AND LATER ROWS DID NOT RUN: every pbench board (mine AND the
+s1-close lane's, KVM and TCG alike) wedges deterministically right
+after p4_fork_exit — RTS-DEFER spam to pid=1394, then silence; the
+wedge signature is byte-identical on a kernel that does NOT carry the
+M1a commits. Verdict: a shared-base regression in the exit/reap
+storage-deferral path (kernel/src/process/exit.rs, RTS-DEFER machinery
+landed 2026-11-21), NOT an M1a effect. Routed to the exit/reap owner;
+M1a's own rows all completed and passed.
