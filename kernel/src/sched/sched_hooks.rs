@@ -274,8 +274,20 @@ pub fn sched_clock() -> u64 { (hooks().sched_clock)() }
 #[inline]
 pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::SchedPolicy, rt_prio: u32) { (hooks().change_task_policy)(task, new_policy, rt_prio) }
 
+/// Gated wrapper (devirt lane): the policy body's first act is the
+/// schedtrace arm check — a disarmed boot (every standard boot) records
+/// nothing, so the wrapper checks the same FRAMEWORK-side flag and
+/// skips the seam dispatch entirely. Armed boots record exactly as
+/// before. This site fires 2-4 times per context switch (PICK_PUB,
+/// AFFIRM, WAKE_OK, UNLINK_*), which is why it is gated rather than
+/// merely borrowed.
 #[inline]
-pub fn ww_record(task: *mut Task, code: u32) { (hooks().ww_record)(task, code) }
+pub fn ww_record(task: *mut Task, code: u32) {
+    if !crate::trace::EVENT_SCHEDTRACE.armed() {
+        return;
+    }
+    (hooks().ww_record)(task, code)
+}
 
 #[inline]
 pub fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> bool { (hooks().orphan_watch_confirm)(task, pid, now, threshold) }
@@ -298,8 +310,17 @@ pub fn r56_report_switch_abort(cpu: usize, pid: u32) { (hooks().r56_report_switc
 #[inline]
 pub fn sched_renice_locked(task: &mut Task, niceval: i32) { (hooks().sched_renice_locked)(task, niceval) }
 
+/// Gated wrapper (devirt lane): the policy body returns false
+/// immediately when leakhunt is disarmed; the wrapper checks the same
+/// FRAMEWORK-side flag first. Fires once per switch-in (the affirm
+/// path's ledger consume).
 #[inline]
-pub fn psledger_consume(task: *mut Task) -> bool { (hooks().psledger_consume)(task) }
+pub fn psledger_consume(task: *mut Task) -> bool {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
+        return false;
+    }
+    (hooks().psledger_consume)(task)
+}
 
 #[inline]
 pub fn steer_task_cpu(task: *mut Task, target: i32) { (hooks().steer_task_cpu)(task, target) }
@@ -438,8 +459,15 @@ pub fn ww_watch_slots() -> alloc::vec::Vec<usize> { (hooks().ww_watch_slots)() }
 #[inline]
 pub fn load_balance() { (hooks().load_balance)() }
 
+/// Gated wrapper (devirt lane): same leakhunt arm check the policy
+/// body performs first; disarmed boots skip the seam.
 #[inline]
-pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) { (hooks().psledger_note_publish)(task, cpu, pk) }
+pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
+        return;
+    }
+    (hooks().psledger_note_publish)(task, cpu, pk)
+}
 
 #[inline]
 pub fn psledger_peek(task: *mut Task) -> Option<(u32, u32, u64)> { (hooks().psledger_peek)(task) }
@@ -487,5 +515,15 @@ pub fn sched_ev(tag: u32, pid: u32, a: u64, b: u64) { (hooks().sched_ev)(tag, pi
 #[inline]
 pub fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut Task, claim: i32, pk: u32) { (hooks().stale_oncpu_healed)(tag, cpu_id, task, claim, pk) }
 
+/// Gated wrapper (devirt lane): vr_canary's policy body first checks
+/// the sched-hist arm flag — when the history is disarmed (every
+/// standard boot) the row does nothing, so the wrapper checks the same
+/// FRAMEWORK-side condition and skips the seam entirely. Armed boots
+/// dispatch exactly as before.
 #[inline]
-pub fn vr_canary(rq: &mut crate::sched::entities::CfsRunQueue, task: *mut Task, site: &[u8; 3], vr: u64) { (hooks().vr_canary)(rq, task, site, vr) }
+pub fn vr_canary(rq: &mut crate::sched::entities::CfsRunQueue, task: *mut Task, site: &[u8; 3], vr: u64) {
+    if !crate::sched::sched::sched_hist_armed() {
+        return;
+    }
+    (hooks().vr_canary)(rq, task, site, vr)
+}
