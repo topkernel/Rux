@@ -13,7 +13,7 @@
 
 use super::memory_layout::VirtAddr;
 use super::mm_ops::handle_cow_fault;
-use super::page_fault::{handle_mm_fault, FaultFlags};
+use super::page_fault::FaultFlags;
 // Re-exported so the trap path can `use crate::arch::mm::exception::MmFaultResult`.
 pub use super::page_fault::MmFaultResult;
 use crate::arch::pt_regs::PtRegs;
@@ -188,7 +188,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
                 .is_some()
             {
-                let result = handle_mm_fault(
+                let result = crate::mm::mm_hooks::handle_mm_fault(
                     &addr_space,
                     fault_addr,
                     access_type | FaultFlags::USER,
@@ -259,7 +259,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         return bad_area(regs, access_type, fault_addr);
     }
 
-    let result = handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
+    let result = crate::mm::mm_hooks::handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
 
     match result {
         MmFaultResult::Handled => MmFaultResult::Handled,

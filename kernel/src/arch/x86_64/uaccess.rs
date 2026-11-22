@@ -364,7 +364,7 @@ fn fault_in_write(start: *mut u8, len: usize) -> bool {
 
         // Not present: demand-map through the fault engine (anonymous
         // write fault / stack growth / file page).
-        match crate::arch::mm::page_fault::handle_mm_fault(
+        match crate::mm::mm_hooks::handle_mm_fault(
             &addr_space,
             crate::arch::mm::VirtAddr::new(page as u64),
             crate::arch::mm::page_fault::FaultFlags::WRITE,

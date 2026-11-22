@@ -380,8 +380,18 @@ pub fn rust_main_tail() -> ! {
                 if arch::mpk::guard_arm() {
                     // The standing-backstop self-test (phase 1's
                     // negative probe): a dedicated page-aligned block,
-                    // its first page pkey-tagged, a raw write with the
-                    // zone CLOSED must #PF through the ex_table window.
+                    // its first page pkey-tagged, then a raw write
+                    // with the zone CLOSED. ISA NOTE (the phase-1
+                    // finding): PKRU gates accesses to USER pages
+                    // only — a SUPERVISOR page (kernel heap, where
+                    // DmaBlock/vring memory lives) is governed by
+                    // PKS (CR4.PKS + IA32_PKRS), a separate mechanism
+                    // the PKU guard cannot enforce. So the honest
+                    // expectations here: tag succeeds, and the escape
+                    // write LANDS (rc=0) — the enforceable backstop
+                    // for user pages is proven by mpkprobe's
+                    // fault-inject phase B instead. Kernel-metadata
+                    // protection = the PKS variant (phase 2).
                     if let Some(mut b) =
                         crate::safety::dma::DmaBlock::new(8192, 4096)
                     {
@@ -1437,6 +1447,12 @@ fn x86_dump_regions() {
 
 /// The framework entry body (everything the old rust_main did).
 pub extern "C" fn rust_main_impl() -> ! {
+    // M1a seam: the mm-policy rows must be live before any user
+    // address-space op. Carved arches already registered their crate
+    // rows in the composition bin (OnceSlot first-wins); this fills
+    // the still-in-tree arches.
+    arch::mm::register_in_tree_mm_policy();
+
     // Initialize SMP (multi-core support) - must run first!
     // On QEMU virt, OpenSBI only starts one hart into S-mode.
     // Other harts will be started later via SBI HSM.

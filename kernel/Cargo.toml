@@ -78,7 +78,7 @@ strip = true
 # workspace excludes kernel/ (it lists kernel as a member — swapped to
 # exclude in the same change).
 [workspace]
-members = ["rux-syscall", "rux-net", "rux-sched-policy", "rux-fs", "rux-drivers", "rux-bin"]
+members = ["rux-syscall", "rux-net", "rux-sched-policy", "rux-fs", "rux-drivers", "rux-mm", "rux-bin"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,33 @@
+[package]
+name = "rux-mm"
+version = "0.1.0"
+edition = "2021"
+
+# The MM POLICY SERVICE CRATE (crate-flip M1a, the design doc's
+# mechanism/policy split applied to mm): the policy half of the per-arch
+# mm_ops.rs / page_fault.rs — mmap/munmap placement, free-area search,
+# brk, stack allocation, mprotect range decisions, VMA-piece removal,
+# fork's VMA-decision half, stack-expansion + fault ROUTING — compiled
+# under crate-level #![forbid(unsafe_code)]. The MECHANISM (page-table
+# walks + PTE atomics, the fill/copy frame primitives, uaccess bottoms,
+# the allocator) stays in the framework crate; the policy consumes it
+# through the published safe APIs (map_page, PageTableWalker, pte_lock_for,
+# the mm/fs unsafe_edges, page_slice_mut).
+#
+# Zero-move step: #[path]-includes of the carved files living in the
+# framework tree (kernel/src/mm/policy/); the physical moves are the
+# later cosmetic step per the crate-plan recipe. riscv64/aarch64 policy
+# carves follow the x86_64 one (their rows register from the framework
+# until then).
+
+[dependencies]
+rux = { path = "..", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64"]
+x86_64 = ["rux/x86_64"]
+aarch64 = ["rux/aarch64"]
+# Gates the guest test module + its run entry (make test forwards this
+# from rux-bin's unit-test through the SERVICE-TEST SEAM).
+unit-test = ["rux/unit-test"]

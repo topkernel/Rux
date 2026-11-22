@@ -80,13 +80,22 @@ fn rdpkru() -> u32 {
 /// WRPKRU — write PKRU (EAX = value; ECX/EDX must be zero).
 #[inline]
 fn wrpkru(v: u32) {
-    // SAFETY: pure register write; serializing per the ISA.
+    // SAFETY: pure register write; serializing per the ISA. ECX/EDX
+    // are DECLARED CLOBBERED (out(_), like rdpkru): the cost-loop bug
+    // — the template's "xor ecx,ecx" ran undeclared, so the release
+    // compiler legally kept a loop induction variable in ECX across
+    // the asm; `dec ecx; jne` then counted 0 -> 0xFFFFFFFF and the
+    // probe's warmup loop became ~2^32 iterations (a boot hang with
+    // zero output — RIP convicted inside the wrpkru loop via the QEMU
+    // monitor). An undeclared clobber is UB in EVERY caller context.
     unsafe {
         core::arch::asm!(
             "xor ecx, ecx",
             "xor edx, edx",
             "wrpkru",
             in("eax") v,
+            out("ecx") _,
+            out("edx") _,
             options(nostack)
         );
     }
@@ -322,6 +331,35 @@ pub fn guard_on() -> bool {
     GUARD.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Per-CPU arm at AP bringup (ap_entry64): CR4.PKE and the PKRU are
+/// PER-CPU state — the BSP's [`guard_arm`] arms only the BSP, and any
+/// RDPKRU/WRPKRU on an un-armed AP #UDs (kernel SIGILL on the AP's
+/// first context switch, `switch_rearm`'s wrpkru: the mab-grd1 boot —
+/// CPU 1, PID 0, RAX=closed_pkru, handle_illegal_instruction ->
+/// "Attempted to kill the idle task"). The tagged kernel-PT leaves are
+/// shared, so only the register arm is per-CPU. Runs before the AP's
+/// first STI and schedule; no-op when the guard is off.
+pub fn cpu_online_arm() {
+    if !guard_on() {
+        return;
+    }
+    let (_, _, ecx, _) = super::cpu::cpuid(7, 0);
+    if ecx & (1 << 3) == 0 {
+        crate::println!(
+            "mpkguard: cpu{} has no PKU — guard NOT armed here",
+            crate::arch::cpu_id()
+        );
+        return;
+    }
+    // SAFETY: CR4 update with the PKE bit only, CPUID-gated and
+    // idempotent (the guard_arm template).
+    unsafe {
+        let cr4 = super::cpu::read_cr4();
+        super::cpu::write_cr4(cr4 | (1 << 22));
+    }
+    wrpkru(closed_pkru());
+}
+
 /// Open the key-1 zone: returns the PKRU to restore. Every access to a
 /// tagged page runs between this and [`zone_close`]. IRQ-nesting-safe
 /// (save/restore, not open/close counting).
@@ -372,17 +410,42 @@ pub fn tag_kernel_pages(va: usize, len: usize) -> usize {
             super::mm::mm_ops::PageTableWalker::walk(root, page_va)
         {
             let phys = super::mm::PhysAddr::new(ppn << 12);
+            // Strip PS before the 4K re-install: the walk (fixed)
+            // resolves 2MB/1GB leaves, whose leaf bits carry PS — a
+            // PTE with PS set is reserved-bit-invalid at the 4K level
+            // (the page would read unmapped after tagging).
             let ok = super::mm::mmu_init::map_page_noflush(
                 root,
                 super::mm::VirtAddr::new(page_va),
                 phys,
-                flags | (1u64 << 59),
+                (flags & !super::mm::pagetable::PageTableEntry::PS)
+                    | (1u64 << 59),
             );
             if ok {
+                // Invalidate the page's translation NOW: the page was
+                // very likely touched before tagging (allocator poison
+                // paint / vring setup writes), and without the invlpg a
+                // stale pkey-0 TLB entry keeps serving accesses — the
+                // very first escape probe convicted this (rc=0, write
+                // landed). Tagging runs on the BSP before the APs come
+                // online, so a local invlpg covers every CPU that can
+                // hold a stale entry; an SMP-time re-tag needs the
+                // broadcast shootdown instead (phase 2).
+                super::cpu::invlpg(page_va);
                 tagged += 1;
             }
         }
         off += 4096;
+    }
+    if tagged == 0 && len > 0 {
+        // Tripwire: a zero-tag result means the windowed accessors stay
+        // dormant for this block (fail-open to untagged, never
+        // fail-closed on live traffic) — name it on every boot rather
+        // than letting the guard silently protect nothing.
+        crate::println!(
+            "mpkguard: tag returned 0 for {:#x}+{:#x}",
+            va, len
+        );
     }
     tagged
 }
@@ -401,13 +464,19 @@ pub fn untag_kernel_pages(va: usize, len: usize) -> usize {
             super::mm::mm_ops::PageTableWalker::walk(root, page_va)
         {
             let phys = super::mm::PhysAddr::new(ppn << 12);
+            // PS strip: same as tag_kernel_pages — leaf-resolved flags
+            // must not carry PS into the 4K re-install.
             let ok = super::mm::mmu_init::map_page_noflush(
                 root,
                 super::mm::VirtAddr::new(page_va),
                 phys,
-                flags & !(0xFu64 << 59),
+                (flags & !super::mm::pagetable::PageTableEntry::PS)
+                    & !(0xFu64 << 59),
             );
             if ok {
+                // Same invlpg discipline as tag_kernel_pages: the
+                // untagged PTE must displace any cached translation.
+                super::cpu::invlpg(page_va);
                 cleared += 1;
             }
         }

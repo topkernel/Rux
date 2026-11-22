@@ -959,7 +959,7 @@ fn owner_maps_pfn(root_ppn: u64, pfn: usize) -> (usize, [usize; 4]) {
 /// Look up task `pid`; when alive, count its live PTEs mapping `pfn`
 /// (0 when the task is gone or maps it nowhere) — the shared adjudication
 /// probe for the TEXTFREE-* / FILL-DOUBLE reports (gnome-sigill).
-pub(crate) fn textfree_owner_maps(owner_pid: u32, pfn: usize) -> usize {
+pub fn textfree_owner_maps(owner_pid: u32, pfn: usize) -> usize {
     // SAFETY: pid-hash lookup; the returned Task is only read (pid, mm
     // root) on this rare diagnostic path.
     let owner_task = unsafe { crate::sched::find_task_by_pid(owner_pid) };
@@ -1525,7 +1525,7 @@ fn pt_alloc_fail(level: &str, va: u64) {
 /// policy: user demand faults convert this to MmFaultResult::OutOfMemory,
 /// i.e. SIGKILL/OOM-kill, instead of the old kernel panic; see the
 /// fake-OOM family notes in alloc_page_table).
-fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+pub fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
 

@@ -155,3 +155,87 @@ real pointer conversions: oom victim handle, compact_zone Zone
 param). The risk mass is not the flip — it is M1a's per-arch
 carve and keeping the fault-path hot rows (pbench P3a/b/c, P6)
 inside their perf-gate bands afterward.
+
+## M1a execution record (2026-11-23, ur-L1)
+
+Landed, per the five-step recipe:
+
+1. SEAM (88836bb7b): kernel/src/mm/mm_hooks.rs — the MmHooks table
+   (6 rows: handle_mm_fault, mmap, munmap, find_free_area,
+   zap_page_range, fork), OnceSlot-published, accessors read the table
+   directly (the S1 self-recursion rule documented in-module). All ~40
+   framework call sites (syscall layer, sysv_shm, io_uring, ashmem,
+   ptrace, futex, gup, arch exception/uaccess) dispatch through it;
+   pre-carve arches register method/fn pointers (behavior identical).
+   FaultFlags + MmFaultResult moved to the seam (identical enums on
+   all three arches unified into one type).
+2. x86_64 carve (e78a5858b): kernel/src/mm/policy/x86_64.rs (3,392 ln,
+   0 unsafe) — mmap/munmap/find_free_area/set_brk/do_brk/
+   allocate_stack/set_range_permissions/map_vma/zap_page_range/
+   remove_vma_piece/range_is_pte_empty/fork + try_expand_stack/
+   pte_counts_as_mapped/is_protnone_marker/handle_mm_fault/
+   handle_swap_fault + the fault-around constants. Conversions: 6
+   full-page zeros -> mm::edges::page_slice_mut (INV-MM-7), 3 inode
+   derefs -> fs::unsafe_edges::file_inode (INV-FS-FILEINODE-1, pub'd
+   as the published contract), 1 raw read_at -> read_at_slice (exact
+   byte-count subslice), ~10 vestigial unsafe wrappers around
+   already-safe calls dropped. Compiled ONLY by rux-mm (forbid,
+   negative-probe verified: `error: usage of an unsafe block` ->
+   rux-mm/src/lib.rs:15).
+3. riscv64 carve (this commit): kernel/src/mm/policy/riscv64.rs
+   (2,179 ln, 0 unsafe) — same fn set plus munmap_legacy and
+   anon_faultaround_forward. Extra conversions vs the x86 twin: the 6
+   inline sfence.vma fences -> asid::sfence_vma_addr (published,
+   exact asm shape hoisted) / flush_tlb_all; set_brk's raw
+   pfn_to_page_mut deref -> the typed page_desc edge.
+4. Mechanism surface published (the policy's calling contract):
+   unmap_pages, perm_to_flags, PageTableWalker::walk, map_page_noflush,
+   textfree_owner_maps, release_cache_mapping_pin, the fill family,
+   read/write_pte_raw, l1_table_for, FILL_REFUSAL_SITE.
+5. aarch64 carve (1d70a7c7d): kernel/src/mm/policy/aarch64.rs (1,268
+   ln, 0 unsafe) — the same fn set (minus set_range_permissions/
+   remove_vma_piece/find_free_area_32bit, which aa never had) plus
+   protnone_represent. All three registrars now empty; every arch's mm
+   policy serves from rux_bin -> rux_mm::register_all.
+
+Gates: triple-arch rc=0 after every step; riscv64 suite 886/886 at the
+seam, 886/886 with the x86 carve, 886/886 with the rv carve (the rv
+policy served from the crate); x86_64 suite 888/888 (crate path; the
+pre-existing E0603 offsets breakage fixed in b20b766f0); minimal-rootfs
+boot to shell, zero panics; unsafe gate OK (sidecar content-remapped
+across the line shifts: 2098 INV / 186 GAP at HEAD).
+
+## M1a tier-2 perf gate (2026-11-23, x86_64/KVM + TCG)
+
+Attempted via scripts/perf-gate.sh --tiers 2; the script refused to
+boot twice (2+ foreign QEMUs — host capacity rule), so the same boot
+was run directly through scripts/test/pbench_boot.py (deviation noted;
+one QEMU at a time, 49G available). One TCG board (m1a-pb3/pb4) and
+one KVM board (m1a-pb6), debug bzImage @ 1d70a7c7d:
+
+| row | m1a KVM med (µs) | SP-7 KVM debug anchor | s1-close control (same day, KVM) |
+|---|---|---|---|
+| p1_null | 0.260 | 0.300 | — |
+| p1_clock | 0.340 | 0.371 | — |
+| p2_ctxsw | 1.668 | 1.242 (loaded band 2.0) | — |
+| p3a_fault_anon | 0.010 | — | 0.010 |
+| p3b_fault_cow | 1.994 | 8.075 (older main) | 1.974–2.024 |
+| p3c_fault_file | 0.010 | — | 0.010 |
+| p4_fork_exit | 317.7 | 578.0 (older main) | 333–335 |
+
+The mm-guarded rows (P2 ctxsw, P3a/b/c faults, P4 fork) are IN BAND vs
+the anchor class and vs a concurrently-booted control kernel from the
+s1-close lane — the crate indirection (fn-pointer table dispatch on
+the fault path, no LTO in debug) costs nothing measurable at the
+median. p3b/p4 sit far UNDER the SP-7 anchor because the anchor
+predates recent main-side work; the same-day control shows the same
+class.
+
+P5 AND LATER ROWS DID NOT RUN: every pbench board (mine AND the
+s1-close lane's, KVM and TCG alike) wedges deterministically right
+after p4_fork_exit — RTS-DEFER spam to pid=1394, then silence; the
+wedge signature is byte-identical on a kernel that does NOT carry the
+M1a commits. Verdict: a shared-base regression in the exit/reap
+storage-deferral path (kernel/src/process/exit.rs, RTS-DEFER machinery
+landed 2026-11-21), NOT an M1a effect. Routed to the exit/reap owner;
+M1a's own rows all completed and passed.

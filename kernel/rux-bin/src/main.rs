@@ -19,6 +19,10 @@ pub extern "C" fn rust_main() -> ! {
     rux_net::register_all();
     rux_fs::register_all();
     rux_syscall::register_all();
+    // The mm policy rows (M1a): carve-live on x86_64, still in-tree on
+    // riscv64/aarch64 (their register_in_tree fills the table inside
+    // rust_main_impl; OnceSlot first-wins keeps whichever ran first).
+    rux_mm::register_all();
     // Guest tests that flipped out with a service crate (pipe2 with
     // rux-fs) run via the framework's SERVICE-TEST SEAM, in the same
     // pass/fail counters as the in-framework suite.

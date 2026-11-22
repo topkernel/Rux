@@ -30,7 +30,7 @@
 //! instead of crashing.
 
 use crate::arch::pt_regs::PtRegs;
-use crate::arch::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault, handle_mm_fault};
+use crate::arch::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault};
 
 // Re-export MmFaultResult from page_fault (canonical definition)
 pub use super::page_fault::MmFaultResult;
@@ -302,7 +302,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
                     .is_some()
                 {
-                    let result = handle_mm_fault(
+                    let result = crate::mm::mm_hooks::handle_mm_fault(
                         &addr_space,
                         fault_addr,
                         access_type | FaultFlags::USER,
@@ -421,7 +421,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     }
 
     // 1. Call handle_mm_fault to handle
-    let result = handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
+    let result = crate::mm::mm_hooks::handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
 
     match result {
         crate::arch::mm::MmFaultResult::Handled => {
