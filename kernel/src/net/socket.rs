@@ -294,8 +294,6 @@ pub struct Socket {
     pub file_id: core::sync::atomic::AtomicU64,
 }
 
-// SAFETY: Socket uses Spinlocks for all mutable shared state.
-unsafe impl Sync for Socket {}
 
 impl Socket {
     /// Create a new Socket
@@ -1434,9 +1432,9 @@ fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
         // Arc layout: [strong:u64, weak:u64, data...] — into_raw hands
         // out &data, so the counts live at raw-16/raw-8 (the first c3
         // run read *raw = the Socket's first field, not the count).
-        // SAFETY: diagnostic reads of two u64s in the same allocation.
-        let strong = unsafe { core::ptr::read_volatile((raw - 16) as *const u64) };
-        let weak = unsafe { core::ptr::read_volatile((raw - 8) as *const u64) };
+        // INV-NET-ARCREF-1a: volatile count pair in the same allocation
+        // (net_edges forensics probe).
+        let (strong, weak) = crate::net::net_edges::arc_refcount_probe(raw);
         if (1..=(1 << 20)).contains(&strong) {
             // Plausible live Arc — classify as valid, forensics only.
             static MAG_N: core::sync::atomic::AtomicU32 =
@@ -1491,9 +1489,10 @@ fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
 /// table's dispatch serialization.
 fn socket_borrow(file: &File, site: &'static str) -> Option<&'static Socket> {
     let ptr = checked_socket_ptr(file, site)?;
-    // SAFETY: validated in-kernel-heap pointer naming a live Arc<Socket>
-    // (strong ref held by private_data for the file's lifetime).
-    Some(unsafe { &*(ptr as *const Socket) })
+    // INV-NET-ARCREF-1b: validated in-kernel-heap pointer naming a live
+    // Arc<Socket> (strong ref held by private_data for the file's
+    // lifetime) — net_edges audited deref.
+    Some(crate::net::net_edges::audited_deref(ptr as *const Socket))
 }
 
 fn socket_read(file: &File, buf: &mut [u8]) -> isize {
@@ -1625,11 +1624,9 @@ fn socket_close(file: &File) -> i32 {
 
     // Reconstruct the Arc that was leaked via into_raw so it can be
     // properly dropped (INV-NETARC-1: ptr came from Arc::into_raw in
-    // sys_socket_create with a +1 strong count; clearing first prevents
-    // a second reconstruction).
-    file.clear_private_data();
-    // SAFETY: the slot's sole Arc reference, checked above.
-    let socket_arc = unsafe { Arc::from_raw(ptr as *const Socket) };
+    // sys_socket_create with a +1 strong count; the take empties the
+    // cell, preventing a second reconstruction) — framework file_arc.
+    let Some(socket_arc) = crate::net::reclaim_file_arc::<Socket>(file) else { return 0 };
 
     // MSG_MORE cork release (Linux inet_release/ip_cork_release): data
     // held by send(MSG_MORE) is flushed, best-effort and nonblocking,

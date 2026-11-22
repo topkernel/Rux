@@ -495,6 +495,10 @@ line per id; the contract lives in the owning module.
 - **INV-MMIO-1** — MmioRegion register windows (kernel/src/safety/mmio.rs)
 - **INV-MMIO-2** — MmioRegion register windows (kernel/src/safety/mmio.rs)
 - **INV-MMIO-3** — MmioRegion register windows (kernel/src/safety/mmio.rs)
+- **INV-NET-ARCREF-1** — net framework edges: Arc-refcount probe + audited deref (net/net_edges.rs, L1)
+- **INV-NET-CONTAINEROF-1** — net framework edges: field-ptr container_of (net/net_edges.rs, L1)
+- **INV-NET-HDRVIEW-1** — net framework edges: POD header views, alignment-checked (net/net_edges.rs, L1)
+- **INV-NET-SOCKTAB-1** — net framework edges: static-mut table ref formation (net/net_edges.rs, L1)
 - **INV-NETARC-1** — socket-file Arc recovery (net/mod.rs, L5)
 - **INV-PCP-1** — primitive contract (see owning module)
 - **INV-RING-1** — SpscRing lock-free ring (kernel/src/safety/ring.rs)
@@ -1218,6 +1222,10 @@ their job on the checker infrastructure itself):
 | INV-VDSO-DATA-1 | `mm/vdso.rs` | (INV-VDSO-DATA-1: the vDSO data page family — the page is a fixed |
 
 | INV-SKB-1 | `net/buffer.rs` | sk_buff family: allocator-owned heads, headroom-tracked data spans, bounds-checked slices |
+| INV-NET-SOCKTAB-1 | `net/net_edges.rs` | rung-2 framework edge: static_table_ref/_mut form refs from addr_of_mut! on the stack's static-mut socket/route tables; callers hold the per-table serialization the sites document (crate-flip: rux-net is forbid) |
+| INV-NET-ARCREF-1 | `net/net_edges.rs` | rung-2 framework edge: arc_refcount_probe (volatile strong/weak reads at data-16/8, forensics only) + audited_deref (ops-identity-validated live Arc-backed ptr) |
+| INV-NET-HDRVIEW-1 | `net/net_edges.rs` | rung-2 framework edge: pod_view/pod_view_mut wire-header views; length AND ALIGNMENT checked (the old inline casts never checked alignment — misaligned skb buffers were silent UB, now drop) |
+| INV-NET-CONTAINEROF-1 | `net/net_edges.rs` | rung-2 framework edge: container_of maps a wait-queue FIELD ptr back to its UnixSocket via offset_of!; diagnostic-only sites |
 | INV-VDSO-DATA-1 | `mm/vdso.rs` | vDSO data page: fixed static mapping, page-constant offsets, seqlock write discipline |
 | INV-RWLOCK-1 | `sync/rwlock.rs` | rwlock family: atomic reader counts + writer word with documented pairing; guards ride the held lifetime; panic rows best-effort |
 | INV-SPIN-1 | `sync/spinlock.rs` | spinlock guards ride the held-lock lifetime; panic/deadlock-warn rows are PANIC-TIME BEST-EFFORT (tolerate garbage; the machine is already failing) |

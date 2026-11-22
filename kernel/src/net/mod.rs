@@ -6,6 +6,7 @@
 
 pub mod net_hooks;
 pub mod file_arc;
+pub mod net_edges;
 pub mod buffer;
 pub mod ethernet;
 pub mod arp;
@@ -54,6 +55,19 @@ pub(crate) fn file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::A
         alloc::sync::Arc::increment_strong_count(ptr);
         Some(alloc::sync::Arc::from_raw(ptr))
     }
+}
+
+/// Take the Arc OUT of a closing socket File's private_data slot and
+/// HAND IT BACK (the close paths that must USE the socket before the
+/// drop — flush held data, protocol close; INV-NETARC-1 + the caller's
+/// ops identity check). The cell is emptied first, making a second
+/// reclaim impossible.
+pub(crate) fn reclaim_file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::Arc<T>> {
+    let ptr = file.private_data_ptr()? as *const T;
+    file.clear_private_data();
+    // SAFETY: INV-NETARC-1 — reconstructing consumes the slot's single
+    // reference; the emptied cell makes this exactly-once.
+    unsafe { Some(alloc::sync::Arc::from_raw(ptr)) }
 }
 
 /// Take the Arc OUT of a closing socket File's private_data slot and

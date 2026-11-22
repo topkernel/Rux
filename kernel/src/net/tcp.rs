@@ -3499,9 +3499,9 @@ pub fn get_tcp_socket_table() -> &'static mut TcpSocketTable {
 /// The one consolidated &mut TCP_SOCKET_TABLE reference formation (see
 /// get_tcp_socket_table / tcp_socket_table_ref for the contracts).
 fn tcp_socket_table_mut() -> &'static mut TcpSocketTable {
-    // SAFETY: caller-serialized (TCP_TABLE_LOCK or the documented
-    // single-threaded init paths).
-    unsafe { &mut TCP_SOCKET_TABLE }
+    // INV-NET-SOCKTAB-1: caller-serialized (TCP_TABLE_LOCK or the
+    // documented single-threaded init paths) — net_edges formation.
+    crate::net::net_edges::static_table_mut(core::ptr::addr_of_mut!(TCP_SOCKET_TABLE))
 }
 
 /// Get TCP socket
@@ -3590,9 +3590,9 @@ pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
 /// holds TCP_TABLE_LOCK or the softirq/syscall serialization it
 /// documents).
 fn tcp_socket_table_ref() -> &'static TcpSocketTable {
-    // SAFETY: read-only view of the global table; caller-serialized
-    // against mutation (same contract as get_tcp_socket_table).
-    unsafe { &TCP_SOCKET_TABLE }
+    // INV-NET-SOCKTAB-1: read-only view, caller-serialized against
+    // mutation — net_edges formation.
+    crate::net::net_edges::static_table_ref(core::ptr::addr_of_mut!(TCP_SOCKET_TABLE))
 }
 
 /// R32-N9 helper: another live (non-CLOSE) socket already bound to `port`?

@@ -163,3 +163,4 @@ kernel/src/tests/vma_flags.rs
 kernel/src/timer/oneshot.rs
 kernel/src/trace/files.rs
 kernel/src/syscall/mod.rs
+kernel/rux-net/src/lib.rs

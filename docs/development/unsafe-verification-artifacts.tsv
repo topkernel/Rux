@@ -438,20 +438,21 @@ fe4568953cc3	kernel/src/arch/riscv64/vext.rs	vstate_save	238	asm	INV:F19
 1c8b906f22fa	kernel/src/arch/riscv64/vext.rs	vstate_restore	328	asm	INV:F19
 ecec1a3d4984	kernel/src/arch/uaccess_safe.rs	copy_out	39	ptr-ops	INV:INV-UACCESS-SAFE-1
 9b8ddd50d321	kernel/src/arch/uaccess_safe.rs	copy_in	53	ptr-ops	INV:INV-UACCESS-SAFE-1
-d5678d38b9ed	kernel/src/arch/uaccess_safe.rs	read_user	65	ptr-ops	INV:INV-UACCESS-SAFE-1
-6ff48813162a	kernel/src/arch/uaccess_safe.rs	write_user	75	ptr-ops	INV:INV-UACCESS-SAFE-1
-58c1fb249f27	kernel/src/arch/uaccess_safe.rs	clear_user	85	ptr-ops	INV:INV-UACCESS-SAFE-1
-e13bb16f8ffe	kernel/src/arch/uaccess_safe.rs	strnlen_user	95	ptr-ops	INV:INV-UACCESS-SAFE-1
-19ac2db642f3	kernel/src/arch/uaccess_safe.rs	futex_cmpxchg_u32	105	ptr-ops	INV:INV-UACCESS-SAFE-1
-e663417d971f	kernel/src/arch/uaccess_safe.rs	copy_in_t	122	ptr-ops	INV:INV-UACCESS-SAFE-1
-dd9836b5c384	kernel/src/arch/uaccess_safe.rs	copy_out_t	138	ptr-ops	INV:INV-UACCESS-SAFE-1
-9c07b4bb4e45	kernel/src/arch/uaccess_safe.rs	read	193	ptr-ops	INV:INV-UACCESS-SAFE-1
-61c461dc3ee6	kernel/src/arch/uaccess_safe.rs	write	201	ptr-ops	INV:INV-UACCESS-SAFE-1
-8a97a9c557f3	kernel/src/arch/uaccess_safe.rs	copy_in	274	ptr-ops	INV:INV-UACCESS-SAFE-1
-508b8fc53685	kernel/src/arch/uaccess_safe.rs	copy_out	285	ptr-ops	INV:INV-UACCESS-SAFE-1
-81664be21d00	kernel/src/arch/uaccess_safe.rs	clear	292	ptr-ops	INV:INV-UACCESS-SAFE-1
-607e9ac88a3d	kernel/src/arch/uaccess_safe.rs	read_at	305	ptr-ops	INV:INV-UACCESS-SAFE-1
-9558706b6c26	kernel/src/arch/uaccess_safe.rs	write_at	318	ptr-ops	INV:INV-UACCESS-SAFE-1
+e06b9bdee5be	kernel/src/arch/uaccess_safe.rs	copy_in_vec_exact	68	ptr-ops	INV:INV-UACCESS-SAFE-1
+d877b0a0c55a	kernel/src/arch/uaccess_safe.rs	read_user	87	ptr-ops	INV:INV-UACCESS-SAFE-1
+3bae809b3985	kernel/src/arch/uaccess_safe.rs	write_user	97	ptr-ops	INV:INV-UACCESS-SAFE-1
+5fe49f922ad8	kernel/src/arch/uaccess_safe.rs	clear_user	107	ptr-ops	INV:INV-UACCESS-SAFE-1
+ecfd95fce7b4	kernel/src/arch/uaccess_safe.rs	strnlen_user	117	ptr-ops	INV:INV-UACCESS-SAFE-1
+d4c4967fa6f9	kernel/src/arch/uaccess_safe.rs	futex_cmpxchg_u32	127	ptr-ops	INV:INV-UACCESS-SAFE-1
+f3f144b9060f	kernel/src/arch/uaccess_safe.rs	copy_in_t	144	ptr-ops	INV:INV-UACCESS-SAFE-1
+b4f23925528c	kernel/src/arch/uaccess_safe.rs	copy_out_t	160	ptr-ops	INV:INV-UACCESS-SAFE-1
+b3a9c448b079	kernel/src/arch/uaccess_safe.rs	read	215	ptr-ops	INV:INV-UACCESS-SAFE-1
+710b6822d674	kernel/src/arch/uaccess_safe.rs	write	223	ptr-ops	INV:INV-UACCESS-SAFE-1
+5f101485ea02	kernel/src/arch/uaccess_safe.rs	copy_in	296	ptr-ops	INV:INV-UACCESS-SAFE-1
+b15c2f3fdeb4	kernel/src/arch/uaccess_safe.rs	copy_out	307	ptr-ops	INV:INV-UACCESS-SAFE-1
+f324e8470bcf	kernel/src/arch/uaccess_safe.rs	clear	314	ptr-ops	INV:INV-UACCESS-SAFE-1
+f553a140e623	kernel/src/arch/uaccess_safe.rs	read_at	327	ptr-ops	INV:INV-UACCESS-SAFE-1
+cb0b69d916b1	kernel/src/arch/uaccess_safe.rs	write_at	340	ptr-ops	INV:INV-UACCESS-SAFE-1
 e90b31d2e7d1	kernel/src/arch/x86_64/boot.rs	get_boot_magic	83	volatile	INV:F5
 1dfa2611f64f	kernel/src/arch/x86_64/boot.rs	early_boot_init	104	volatile,ptr-ops	INV:F5
 9ce5d9dac027	kernel/src/arch/x86_64/boot.rs	early_boot_init	117		INV:F5
@@ -1583,10 +1584,10 @@ ee67d0ea8f84	kernel/src/fs/superblock.rs	<module>	84		INV:INV-SBTYPE-1
 f0d45dde0878	kernel/src/fs/superblock.rs	<module>	220		INV:INV-SBTYPE-1
 3203ea4367e2	kernel/src/fs/sysfs.rs	<module>	186		INV:INV-SENDSYNC-1
 6f9232bf0265	kernel/src/fs/sysfs.rs	<module>	187		INV:INV-SENDSYNC-1
-de849946b899	kernel/src/fs/sysfs.rs	sysfs_kill_sb	1956	ptr-ops	INV:INV-SBTYPE-1
-6f104c97e5a3	kernel/src/fs/sysfs.rs	sysfs_destroy_inode	2330	ptr-ops	INV:INV-FS-PRIVDATA-1
-16326ffc63ae	kernel/src/fs/sysfs.rs	sysfs_file_write	2415		INV:INV-FS-PRIVDATA-1
-ac8f6892d9ee	kernel/src/fs/sysfs.rs	sysfs_file_write	2420		INV:INV-FS-PRIVDATA-1
+b9470596eafd	kernel/src/fs/sysfs.rs	sysfs_kill_sb	1961	ptr-ops	INV:INV-SBTYPE-1
+7c8957d0d418	kernel/src/fs/sysfs.rs	sysfs_destroy_inode	2335	ptr-ops	INV:INV-FS-PRIVDATA-1
+11d8155b66cb	kernel/src/fs/sysfs.rs	sysfs_file_write	2420		INV:INV-FS-PRIVDATA-1
+26efa73ba286	kernel/src/fs/sysfs.rs	sysfs_file_write	2425		INV:INV-FS-PRIVDATA-1
 7b64feaa6a47	kernel/src/fs/tmpfs.rs	drop	98		INV:INV-TMPFS-SB-1
 db30928ace57	kernel/src/fs/tmpfs.rs	<module>	108		INV:INV-TMPFS-SB-1
 0de4c6fa9fa3	kernel/src/fs/tmpfs.rs	<module>	169		INV:INV-TMPFS-SB-1
@@ -1915,35 +1916,18 @@ decc6bf84076	kernel/src/net/buffer.rs	push_bytes	524	ptr-ops	INV:INV-SKB-1
 cb41001f2c27	kernel/src/net/buffer.rs	skb_copy_bits	564	ptr-ops	INV:INV-SKB-1
 480b739ccfb0	kernel/src/net/buffer.rs	hdr_view	616	ptr-ops	INV:INV-SKB-1
 53d041b24aee	kernel/src/net/buffer.rs	hdr_view_mut	626	ptr-ops	INV:INV-SKB-1
-d5bcc5061d37	kernel/src/net/ipv4/route.rs	route_lookup	192		INV:INV-SENDSYNC-1
-1f878e70e27c	kernel/src/net/ipv4/route.rs	route_add	227		INV:INV-SENDSYNC-1
-a0a93d496c52	kernel/src/net/ipv4/route.rs	route_remove	241		INV:INV-SENDSYNC-1
-9b8c387afc2b	kernel/src/net/ipv4/route.rs	route_clear	248		INV:INV-SENDSYNC-1
-b709a3bcc5f7	kernel/src/net/ipv4/route.rs	route_dump	255		INV:INV-SENDSYNC-1
-5a450cff93a1	kernel/src/net/ipv6/mod.rs	from_bytes	391	ptr-ops	INV:INV-SENDSYNC-1
-282c4d0a5b2d	kernel/src/net/ipv6/mod.rs	ipv6_push_header	435	ptr-ops	INV:INV-SENDSYNC-1
-7e356930c393	kernel/src/net/mod.rs	file_arc	52		INV:INV-NETARC-1
-00f71a3ad02d	kernel/src/net/mod.rs	take_file_arc	65		INV:INV-NETARC-1
-eb396fff1d48	kernel/src/net/netlink.rs	<module>	515		INV:INV-SENDSYNC-1
-7381115d08fc	kernel/src/net/raw.rs	<module>	115		INV:INV-SENDSYNC-1
-f1f73f496b2e	kernel/src/net/socket.rs	<module>	298		INV:INV-SENDSYNC-1
-04398b981b32	kernel/src/net/socket.rs	checked_socket_ptr	1438	volatile,ptr-ops	INV:INV-SENDSYNC-1
-18191190540e	kernel/src/net/socket.rs	checked_socket_ptr	1439	volatile,ptr-ops	INV:INV-SENDSYNC-1
-2bcb0c9a889f	kernel/src/net/socket.rs	socket_borrow	1496	ptr-ops	INV:INV-SENDSYNC-1
-f8d0aa39eb73	kernel/src/net/socket.rs	socket_close	1632	ptr-ops	INV:INV-NETARC-1
-95363a269569	kernel/src/net/tcp.rs	tcp_socket_table_mut	3504		INV:INV-SLOT-3
-079294f662c3	kernel/src/net/tcp.rs	tcp_socket_table_ref	3595		INV:INV-SKB-1
-efbbdf35dfa8	kernel/src/net/udp.rs	from_bytes	42	ptr-ops	INV:INV-SENDSYNC-1
-a460c2a8a672	kernel/src/net/udp.rs	udp_socket_get	315		INV:INV-SENDSYNC-1
-bbe9bd3cf980	kernel/src/net/udp.rs	udp_socket_read	325		INV:INV-SENDSYNC-1
-ece64b0dbdc9	kernel/src/net/udp.rs	udp_table_mut	335		INV:INV-SENDSYNC-1
-d5b271f93721	kernel/src/net/udp.rs	udp_table_ref	340		INV:INV-SENDSYNC-1
-50103f045ed3	kernel/src/net/udp.rs	udp_rcv	1499	raw-construct	INV:INV-SENDSYNC-1
-2148c63c6805	kernel/src/net/unix.rs	<module>	322		INV:INV-SENDSYNC-1
-84209e430f36	kernel/src/net/unix.rs	unix_wait_round	965	ptr-ops	INV:INV-SENDSYNC-1
-0abb6c86c8c2	kernel/src/net/unix.rs	unix_write_user	3268	ptr-ops	INV:INV-NETARC-1
-83750d4e6f27	kernel/src/net/unix.rs	oh67_unix_ready	3327	ptr-ops	INV:INV-NETARC-1
-f719f9b45dc2	kernel/src/net/unix.rs	unix_park_audit	4198	ptr-ops	INV:INV-SENDSYNC-1
+35f48b04ebe8	kernel/src/net/file_arc.rs	file_arc	12	ptr-ops	INV:INV-NETARC-1
+ef8f5fa0c8ae	kernel/src/net/file_arc.rs	take_file_arc	27	ptr-ops	INV:INV-NETARC-1
+1648c36c6b73	kernel/src/net/mod.rs	file_arc	54		INV:INV-NETARC-1
+01eb958f6874	kernel/src/net/mod.rs	reclaim_file_arc	70		INV:INV-NETARC-1
+e75b7da209e3	kernel/src/net/mod.rs	take_file_arc	80		INV:INV-NETARC-1
+8d65f94566ae	kernel/src/net/net_edges.rs	static_table_ref	24		INV:INV-NET-SOCKTAB-1
+e145dbdda764	kernel/src/net/net_edges.rs	static_table_mut	31		INV:INV-NET-SOCKTAB-1
+8073c8422f1c	kernel/src/net/net_edges.rs	arc_refcount_probe	43	volatile,ptr-ops	INV:INV-NET-ARCREF-1
+67b92813e401	kernel/src/net/net_edges.rs	audited_deref	56		INV:INV-NET-ARCREF-1
+f3d67adc6d0a	kernel/src/net/net_edges.rs	container_of	66	ptr-ops	INV:INV-NET-CONTAINEROF-1
+053e8c59a416	kernel/src/net/net_edges.rs	pod_view	83	ptr-ops	INV:INV-NET-HDRVIEW-1
+92c8d339ebfb	kernel/src/net/net_edges.rs	pod_view_mut	97	ptr-ops	INV:INV-NET-HDRVIEW-1
 86144efb5995	kernel/src/perf/mod.rs	refresh_wanted_bits	317	ptr-ops	INV:INV-PERF-EV-1
 3ec7c7158127	kernel/src/perf/mod.rs	ring_covers	434	ptr-ops	INV:INV-PERF-EV-1
 616525818e21	kernel/src/perf/mod.rs	register	485		INV:INV-PERF-EV-1
