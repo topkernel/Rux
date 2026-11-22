@@ -5651,17 +5651,51 @@ fn __schedule() {
     // the freed-under-its-own-schedule-chain producer (rip=0x1 /
     // rip=heap / #GP-on-ret at exit-storm time).
     if switching {
-        SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
-        if !prev.is_null()
-            && crate::sched::current().map(|c| c as *mut Task) != Some(prev)
-        {
-            let pt = crate::sched::edges::task_shared(prev);
-            pt.terminal_switch_done
-                .store(true, core::sync::atomic::Ordering::Release);
-            // The pacing flag retires with the switch: the tail that
-            // set it has truly stopped executing (boot-63's fix).
-            pt.terminal_pacing
-                .store(false, core::sync::atomic::Ordering::Release);
+        // P0 exit-reap (2026-11-23): retire the terminal-switch markers
+        // for the task the PER-CPU MARKER names — not the frame-local
+        // `prev`. In this kernel's coroutine switch model (both arch
+        // twins: __switch_to freezes the outgoing frame at its own call
+        // site and the resume re-enters the INCOMING task's old frame)
+        // this tail executes either in the resumed task's own old
+        // __schedule frame — whose frame-local `prev` is by construction
+        // the task that parked through that frame, i.e. ALWAYS ==
+        // current() — or, on a switch abort (.Lswitch_abort), in the
+        // outgoing task's own frame where current() == prev again. The
+        // old `current() != prev` arm was therefore unreachable for the
+        // task that actually switched out: terminal_switch_done could
+        // only ever land via the newborn schedule_tail site, and in the
+        // fork+exit shape (child dies, the PARKED parent resumes — not a
+        // newborn) it never landed at all. Measured on the pbench P4
+        // storm (x86/KVM): 0 tsd-arm completions, every one of the 1024
+        // drainer entries blocked on terminal_pacing forever, PENDING at
+        // cap, every later reap on the 3 s synchronous fallback
+        // (RTS-DEFER spam, battery never reaches DONE). The marker is
+        // the one piece of per-CPU state that positively names the
+        // outgoing task of THIS completed switch — published under the
+        // GRQ before the slot flip, retired here in the incoming frame
+        // after __switch_to's release store (the reference kernel's
+        // finish_task_switch `last` shape).
+        let cpu = crate::arch::cpu_id() as usize;
+        let retired = SWITCHING_OUT[cpu].swap(0, core::sync::atomic::Ordering::AcqRel) as *mut Task;
+        let cur = crate::sched::current().map(|c| c as *mut Task);
+        if !retired.is_null() && cur != Some(retired) {
+            // Discriminator: only a task whose terminal deschedule loop
+            // was executing (pacing) takes the positive done marker —
+            // and the pacing flag retires here with the switch (the
+            // tail that set it has truly stopped executing; boot-63's
+            // fix). A normal parked task must NOT carry a stale
+            // tsd=true: a task preempted mid-exit-tail before its
+            // terminal loop re-arms the flag would otherwise present
+            // {dead-ish, !on_cpu, slotless, tsd=true} to the reap
+            // drainer and free before its exit tail finished.
+            let rt = crate::sched::edges::task_shared(retired);
+            if rt
+                .terminal_pacing
+                .swap(false, core::sync::atomic::Ordering::AcqRel)
+            {
+                rt.terminal_switch_done
+                    .store(true, core::sync::atomic::Ordering::Release);
+            }
         }
     }
     // r11: the pick generation materialized — the picked context is
@@ -7509,14 +7543,29 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
     // terminal flag for the exit-path frees (same store as the
     // __schedule-tail retire site; a dying task the newborn replaced
     // would otherwise wait for a tail that never runs).
+    // P0 exit-reap (2026-11-23): same pacing discriminator as the
+    // __schedule-tail retire — the done marker is stamped ONLY on a
+    // task whose terminal deschedule loop was executing when the
+    // newborn replaced it. The old unconditional store stamped a stale
+    // tsd=true onto every task a newborn ever replaced (in a fork storm
+    // that is every parked parent); the stale flag survives until the
+    // task's own terminal loop re-arms it, and a task preempted between
+    // its ZOMBIE store and that re-arm would present
+    // {dead-ish, !on_cpu, slotless, tsd=true} to the reap drainer's
+    // switch stage — freed before its exit tail finished (the
+    // recycled-page face, the exact class boot-63's pacing gate
+    // exists to close).
     if !_prev.is_null() {
         // INV-SCE-2: the newborn's context is by definition not prev's
         // (the R11 terminal-release positive-knowledge store).
         let pt = crate::sched::edges::task_shared(_prev);
-        pt.terminal_switch_done
-            .store(true, core::sync::atomic::Ordering::Release);
-        pt.terminal_pacing
-            .store(false, core::sync::atomic::Ordering::Release);
+        if pt
+            .terminal_pacing
+            .swap(false, core::sync::atomic::Ordering::AcqRel)
+        {
+            pt.terminal_switch_done
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
     }
     // r11: and retire the pick generation that switched us in — the
     // newborn is the materialization of this CPU's current generation
