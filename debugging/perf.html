@@ -112,7 +112,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
       <thead><tr><th>组</th><th>量什么</th><th>协议要点</th></tr></thead>
       <tbody>
         <tr><td>P1</td><td>p1_null(SYS_getuid 循环 N=1e6)/ p1_clock</td><td>空系统调用与时钟读取基线</td></tr>
-        <tr><td>P2</td><td>p2_ctxsw</td><td>1 字节管道乒乓钉于 CPU0/CPU1,N=1e5,取半程(单次切换)</td></tr>
+        <tr><td>P2</td><td>p2_ctxsw</td><td>1 字节管道乒乓绑定于 CPU0/CPU1,N=1e5,取半程(单次切换)</td></tr>
         <tr><td>P3</td><td>p3a_fault_anon(64MB)/ p3b_fault_cow(32MB)/ p3c_fault_file(16MB)</td><td>缺页三态</td></tr>
         <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec(N=1e3)</td><td>exec 目标为自身重执行</td></tr>
         <tr><td>P5</td><td>p5a_pipe / p5b_dgram+recv_peek / p5c_stream_write / p5e-p5f 流控判别</td><td>74 B(hilogd 协议形态);p5a N=1e5,p5b N=2e4</td></tr>
@@ -133,7 +133,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
       <thead><tr><th>守护域</th><th>关键行</th></tr></thead>
       <tbody>
         <tr><td>分配/回收</td><td>small_alloc 全局类锁区段每次启动 ≤2500 万;REST 占机 ≤10%;回收慢路径 drct=0 类</td></tr>
-        <tr><td>调度</td><td>GRQ 平均持锁 2786 ns;调度事件普查 8±2/32±4;p2 ±20%;p4 fork 行列为开放回归项</td></tr>
+        <tr><td>调度</td><td>GRQ 平均持锁 2786 ns;调度事件普查 8±2/32±4;p2 ±20%;p4 fork 行为开放回归项</td></tr>
         <tr><td>文件系统</td><td>stat/openclose/read_cached/append/mkdrmdir/unlink 中位带;buffer 命中率 ≥99.1%</td></tr>
         <tr><td>中断/IRQ</td><td>IF=0 20.4±3pp;max cli REST ≤10 ms;SOFTIRQ 3.1±2pp;无新 IRQ-OFF 打印类</td></tr>
         <tr><td>IPC</td><td>p5a 18.3 / p5b 23–41 / p5c/f 24–27 / p5c3 25 / p5d 41–46 µs 带表</td></tr>

@@ -131,7 +131,7 @@
     <ul>
       <li><b>GDB</b>:<code>make debug</code>(先 make build;连 QEMU gdbstub,断点/单步/查内存)。</li>
       <li><b>确定性复现</b>:<code>THREAD=single make run</code>(单线程 TCG);或 <code>ACCEL=tcg</code> 关 KVM。</li>
-      <li><b>QEMU monitor</b>:经 unix socket 挂接,<code>screendump</code> 抓屏、寄存器/内存转储(hunt-wedge 自动使用)。</li>
+      <li><b>QEMU monitor</b>:经 unix socket 挂接,<code>screendump</code> 截屏、寄存器/内存转储(hunt-wedge 自动使用)。</li>
       <li><b>串口落盘</b>:-serial file:xxx.log,长浸泡后离线 grep。</li>
     </ul>
 

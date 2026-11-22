@@ -166,7 +166,7 @@
     <ul>
       <li><b>启动三段式</b>:memblock(双区表)→ fixmap → zone/buddy;Sv39 布局常量与 Linux 一致(PAGE_OFFSET/VMALLOC/vmemmap/TASK_SIZE)。</li>
       <li><b>vmemmap 页描述符</b>:64 字节 cache 行对齐的 <code>Page</code>,pfn↔page O(1);buddy MAX_ORDER=10,order-0 走 per-CPU pageset(PCP)快路径零 zone 锁。</li>
-      <li><b>small_alloc(magazine 缓存)</b>:8 个 2 幂类(8..1024B)+ per-CPU magazine(深 16),类锁只在成批 refill/flush 时取一次;每 slab 页一比特 free 路由,清位先于还页 —— 陈旧指针落 tripwire 而非静默破坏。起源:OH 首帧 ~21.3 万个净活小对象曾把分配器钉死(852MB/992MB 窗口)。</li>
+      <li><b>small_alloc(magazine 缓存)</b>:8 个 2 幂类(8..1024B)+ per-CPU magazine(深 16),类锁只在成批 refill/flush 时取一次;每 slab 页一比特 free 路由,清位先于还页 —— 陈旧指针落 tripwire 而非静默破坏。起源:OH 首帧 ~21.3 万个净活小对象曾使分配器停滞(852MB/992MB 窗口)。</li>
       <li><b>打包内核栈 slab(D-2,x86_64)</b>:80KB 槽/256KB 块 + 旁表,85.3KB/栈 vs 128KB,99.9% 槽打包,史上最深 3445 活任务零 canary 命中。</li>
       <li><b>页缓存</b>:全局 slot 表无锁读 + 每 inode 自旋锁;容量下限 32MB、软上限 = 受管 RAM 一半(旧固定 32MB 上限曾使 OH 库加载每缺页 ~1.5s)。</li>
       <li><b>延迟释放环(D-16)</b>:MmStruct/Task 释放进 16384 项环、1500 ms 墙钟排水 —— 回收延迟有界且与调度活动无关。</li>
@@ -300,7 +300,7 @@
     <h2 id="rust-native"><span class="anchor">§10</span>Rust 原生工程(登记表要点)</h2>
     <p>命题:外部参照兼容,内部<b>不是 C→Rust 翻译</b> —— 正确性与速度来自类型系统、所有权或Linux 内核没有的内部架构。每条带本仓库仪器测得的数字(无实测证据的条目只是占位,单列 G 区)。</p>
     <ul>
-      <li><b>类型系统使 bug 类 = 编译错</b>:D-19 六类误用被 rustc 捕获;S-1 并发原语模型检查(loom 交错 + Kani 证 INV-M1..M5)启用头 90 秒即抓到一个真实 pid-0 递归 bug;D-11 锁键、D-7 CpuLocal、WalkClaim 无锁 dcache(stat 0.643→0.423 µs)。</li>
+      <li><b>类型系统使 bug 类 = 编译错</b>:D-19 六类误用被 rustc 捕获;S-1 并发原语模型检查(loom 交错 + Kani 证 INV-M1..M5)启用后前 90 秒即检测到一个真实 pid-0 递归 bug;D-11 锁键、D-7 CpuLocal、WalkClaim 无锁 dcache(stat 0.643→0.423 µs)。</li>
       <li><b>safe-by-construction 即优化</b>:D-1 单结构取证(OH 调试轮次的调度缺陷族实际靠它找到);叶子表直走 unmap(vm-op 族 15→5 s/CPU-min);负向查找缓存(negative memo)(oracle 475k/963k/0)。</li>
       <li><b>语义分歧靠 diff Linux 树发现、靠采纳其行为修复</b>(根因而非症状):execve ETXTBSY、SysV IPC 按 namespace、共享 futex 键解析到物理字、tmpfs MAP_SHARED 经页缓存一致、binder poll 三条件、O_DIRECT 读先冲脏页缓存、SYSRET TF|RF 回退、用户态可写字符串全查 UTF-8。</li>
       <li><b>安全性质(C 内核靠工具租的类)</b>:构造性内存安全 + SMAP/CR0.WP/无恒等窗/用户态 W^X/seccomp/能力模型 + panic 面设计化(每实例收编 + 回归测试)。</li>

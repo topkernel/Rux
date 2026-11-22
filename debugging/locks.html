@@ -104,7 +104,7 @@
     <ul>
       <li><b>SPIN</b>(<code>kernel/verify/spin/</code>,4 模型:lock_ordering/futex_wait_wake/interrupt_preempt/sched_enqueue_dequeue):对已文档化路径做无死锁证明;关键嵌套(INV-LOCK-5:bucket_lock → GRQ 允许,GRQ → bucket 禁止)在模型中显式。</li>
       <li><b>Kani</b>:164 个 <code>#[kani::proof]</code> harness 对全输入证明核心 unsafe 代码与协议不变量。</li>
-      <li><b>loom</b>:SleepMutex 提取的状态机交错模型检查(8 场景)—— 启用头 90 秒即抓到一个真实 pid-0 递归缺陷(011a71c5);Kani 证 INV-M1..M5。</li>
+      <li><b>loom</b>:SleepMutex 提取的状态机交错模型检查(8 场景)—— 启用后前 90 秒即检测到一个真实 pid-0 递归缺陷(011a71c5);Kani 证 INV-M1..M5。</li>
       <li>三者共同覆盖"未具名锁对 + 未建模路径"之外的抽象层:具体路径由 SPIN,具体代码由 Kani,并发交错由 loom。</li>
     </ul>
 

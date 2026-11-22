@@ -107,7 +107,7 @@
       <li><b>规模</b>:~22.6k 符号,2.4MB 名 + 0.7MB 索引;镜像 +3.1MB(riscv64 曾因此同步移动 boot 窗/堆基/RAM 预留 14→18MB;x86_64 映射自运行时 __kernel_end 派生,无需移动)。</li>
       <li><b>启动开销</b>:零 —— 数据在镜像内,无运行期扫描。</li>
       <li><b>消费方</b>:/proc/kallsyms(标准 <code>addr type name</code> 行,22,636 行,覆盖至 _etext)、Oops/回溯的原生符号化(%ps 形态 <code>name+0xoff/0xsize</code>,非文本符号以 ? 标注)、回溯器。</li>
-      <li><b>守卫</b>:scripts/test/kallsyms-smoke.sh 钉住符号覆盖;交叉构建按 target-triple 忽略陈旧表。</li>
+      <li><b>守卫</b>:scripts/test/kallsyms-smoke.sh 验证符号覆盖率;交叉构建按 target-triple 忽略陈旧表。</li>
     </ul>
 
     <h2 id="oops"><span class="anchor">§3</span>oops 形态</h2>
@@ -142,7 +142,7 @@ x86_64-linux-gnu-addr2line -e &lt;bzImage 对应 vmlinux&gt; -f -C &lt;addr&gt;
 
     <h2 id="recipes"><span class="anchor">§7</span>从串口到根因的完整链路</h2>
     <ol>
-      <li>捕获:串口落盘(-serial file:)或 hunt-wedge 自动抓取;</li>
+      <li>捕获:串口落盘(-serial file:)或 hunt-wedge 自动采集;</li>
       <li>定类:scause/cr2 判异常类;panic 消息 + file:line 初判;</li>
       <li>定位:Call trace 全地址一次性 addr2line → 定位函数与行;</li>
       <li>取景:需要更多现场 → dfx=mmforensics / dfx=watchdog / REMOTE-BT 重跑;</li>

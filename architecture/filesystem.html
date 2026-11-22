@@ -152,7 +152,7 @@
     <ul>
       <li><b>BufferHead 五态</b>:BH_Uptodate/Dirty/Lock/Req/Mapped;hash 链 CacheEntry + LRU;锁序文档化:bucket 锁 → LRU 锁 → per-buffer 状态锁。桶数 64→2048 扩容登记。</li>
       <li><b>10 秒设备停顿纪律</b>:WAIT_DEADLINE_JIFFIES = 10 s —— 超时后<b>泄漏</b>(不释放)设备可能仍 DMA 的 buffer;宁可泄漏不产生写后破坏。</li>
-      <li><b>写规划闭包</b>:fsync 1092 s 事故(lb229:252 个相同 5 s TXN-HANG 样本钉住单任务于 WritePlan::push_entry 全窗;KV 负载爬行 550–1100 s vs 健康 ~40 s 类)—— 修复为<b>3 轮上限 + 保守线性回退</b>;index+worklist 定点闭包方案因在 journal/淘汰自旋锁上下文分配而<b>实测撤回</b>。</li>
+      <li><b>写规划闭包</b>:fsync 1092 s 事故(lb229:252 个相同 5 s TXN-HANG 样本使单任务停滞于 WritePlan::push_entry 全窗;KV 负载爬行 550–1100 s vs 健康 ~40 s 类)—— 修复为<b>3 轮上限 + 保守线性回退</b>;index+worklist 定点闭包方案因在 journal/淘汰自旋锁上下文分配而<b>实测撤回</b>。</li>
       <li><b>异步读批</b>:bread_async_multi(128 KiB 请求);<b>plugged span writeback</b>:提交 N 个请求不等待,整批单次等待(fsync 冲刷墙 ~2048 个串行 span @128MB ≈ 6.2 s → 批化);MAX_WRITE_BATCH = 32(32×64 KiB = 2 MiB 私有暂存,DMA 拷贝纪律,按提交序定序)。</li>
     </ul>
 

@@ -114,7 +114,7 @@
       <li><b>seccomp</b>:经典 BPF 子集解释器(LD|W|ABS/IMM、JMP|JEQ/JGT/JGE/JSET|K、RET|K;上限 4096 指令;越界载入与落尾 kill),门控位于两条 trap 路径的派发前;STRICT/FILTER 双模式;kill 动作队列 SIGKILL;fork 继承。PR_SET_NO_NEW_PRIVS 单向、跨 fork+exec 粘滞、门控非特权挂载(LTP prctl02 PASS)。登记的接受性分歧:单过滤器,无 TSYNC/TRACE/NOTIF。</li>
       <li><b>能力模型</b>:41 个 CAP_* UAPI 常数(CAP_VALID_MASK = 2^41−1);审计后 23 个被咨询点 + 六个此前从未检查的能力经 4e75d849 接线(NET_RAW/NET_ADMIN/SYS_PACCT/SETFCAP/DAC_READ_SEARCH/PERFMON);执法门点 ~18(Linux ~120 —— 广度差距在缺口登记册)。</li>
       <li><b>secure-exec 环境清洗(D-9)</b>:AT_SECURE 迁移时<b>内核</b>在安装 envp 前删除全部 LD_* —— 不依赖 libc 行为的纵深防御(静态链接自定义加载器同样受保护);登记代价:secure-exec 进程的 /proc/[pid]/environ 不列 LD_*。</li>
-      <li><b>OOM 评分语义</b>:oom_badness 形态(resident 基线 + oom_score_adj),评分规则由 10 项属性测试钉住(免疫/饱和规避/对称性)。</li>
+      <li><b>OOM 评分语义</b>:oom_badness 形态(resident 基线 + oom_score_adj),评分规则由 10 项属性测试固定(免疫/饱和规避/对称性)。</li>
     </ul>
 
     <h2 id="self"><span class="anchor">§4</span>内核自护</h2>

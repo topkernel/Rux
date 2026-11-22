@@ -141,7 +141,7 @@
       <li><b>Miri</b>:对 verify crate 全量以 <code>-Zmiri-disable-isolation</code> 解释执行,检出任何 UB 即 fail(nightly,360 分钟预算)。</li>
     </ul>
 
-    <h2 id="sync"><span class="anchor">§6</span>镜像同步纪律:证明钉在被证代码上</h2>
+    <h2 id="sync"><span class="anchor">§6</span>镜像同步纪律:证明绑定到被验证代码的对应版本</h2>
     <ul>
       <li>verify crate 手工镜像被证算法;镜像副本与内核原文的<b>漂移使构建失败</b>(scripts/verify_sync_check.py,逐函数等价归一化检查)—— 证明不可能在代码演化后静默失效;CI 与 make verify/make kani/make miri 全部先跑同步检查。</li>
       <li>状态机类提取(mutex_model.rs)额外要求状态转换表与内核实现在<b>同一提交</b>内变更。</li>

@@ -110,7 +110,7 @@
     <h2 id="softirq"><span class="anchor">§4</span>softirq 模型</h2>
     <ul>
       <li><b>10 类</b>:Hi/Timer/NetTx/NetRx/Block/IrqPoll/Tasklet/Sched/Hrtimer/Rcu;per-CPU pending 位图 + per-CPU/per-向量 raise 计数(供 /proc/softirqs)。</li>
-      <li><b>派发</b>:硬中断 raise;irq_exit 时 <code>__do_softirq()</code> 处理,溢出转 ksoftirqd。预算双界:<code>MAX_SOFTIRQ_RESTART = 10</code> 轮 + <code>2 ms</code> 墙钟(Linux MAX_SOFTIRQ_TIME 形态)—— 依据:无界 irq-exit 预算曾使 timer/IO 风暴将双 CPU 钉在 IRQ 上下文(93% si_busy),调度零拣选。</li>
+      <li><b>派发</b>:硬中断 raise;irq_exit 时 <code>__do_softirq()</code> 处理,溢出转 ksoftirqd。预算双界:<code>MAX_SOFTIRQ_RESTART = 10</code> 轮 + <code>2 ms</code> 墙钟(Linux MAX_SOFTIRQ_TIME 形态)—— 依据:无界 irq-exit 预算曾使 timer/IO 风暴将双 CPU 持续停留在 IRQ 上下文(93% si_busy),调度零拣选。</li>
       <li><b>ksoftirqd</b>:每 CPU 一个;排空循环内 need_resched 时 schedule()(幻影位公平性:否则反馈型积压使 kthread 经数千个 2 ms 窗独占其 CPU);睡眠前复查的丢失唤醒模式(run_ksoftirqd 形态)。</li>
       <li><b>窗口进度记录</b>:SOFTIRQ_WIN 紧凑打包 {open|handler bit|restart_count|pending} + SOFTIRQ_WIN_T0,跨 CPU 可读 —— 楔死窗口的外部取证;softirq 处理器投递簿记 SOFTIRQ_OFFSET,heal 落于窗口中段将楔死整机(VW-WEDGE 已确认为根因,29 个完成项丢失)。</li>
     </ul>

@@ -110,7 +110,7 @@ riscv64-linux-gnu-addr2line -e &lt;kernel&gt; -f -C &lt;addr&gt;
 <span class="c"># 离线提取 guest 日志(debugfs, 拷贝出的镜像)</span>
 debugfs -R &quot;cat /var/log/kmsg&quot; rootfs-copy.img
 
-<span class="c"># 死锁/挂死捕获(自动构建带持有者信息的内核 + 压力用例注入 + 现场抓取)</span>
+<span class="c"># 死锁/挂死捕获(自动构建带持有者信息的内核 + 压力用例注入 + 现场采集)</span>
 ./test/hunt-wedge.sh [rounds]
 
 <span class="c"># tracefs(统一 tracepoint)</span>

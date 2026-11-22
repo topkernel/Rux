@@ -176,7 +176,7 @@
     <ul>
       <li><b>debug= 启动旗标</b>(遗留但可用):<code>debug=taskdump,watchdog</code> 周期任务转储 + 自旋锁死锁看门狗;<code>debug=memwatch</code> 堆/页记账查泄漏。权威表在 <code>kernel/src/debug/switches.rs</code>。</li>
       <li><b>统一 tracepoint(新标准)</b>:tracefs 文件树完整对齐 Linux 语义 —— <code>tracing_on</code>、<code>trace</code>、<code>trace_pipe</code>、<code>available_events</code>、<code>set_event</code>、<code>snapshot</code>、<code>events/&lt;group&gt;/&lt;event&gt;/enable</code> 等;两级门控,未武装站点只付一次 relaxed load。</li>
-      <li><b>hunt-wedge</b>:<code>./test/hunt-wedge.sh</code> 死锁/挂死捕获(自动带持有者信息的构建 + 轰炸 + 现场抓取,配合 addr2line 定位)。</li>
+      <li><b>hunt-wedge</b>:<code>./test/hunt-wedge.sh</code> 死锁/挂死捕获(自动带持有者信息的构建 + 轰炸 + 现场采集,配合 addr2line 定位)。</li>
       <li><b>GDB</b>:<code>make debug</code>。</li>
     </ul>
 
