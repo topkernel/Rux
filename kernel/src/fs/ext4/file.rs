@@ -392,14 +392,18 @@ fn ext4_dio_read_batched(
                                 if chains >= MAX_BATCH {
                                     break;
                                 }
-                                let base = match dst {
+                                // INV-EXT4-REQRUN: recorded runs partition
+                                // [0, to_read) — each span is clamped to the
+                                // request's remaining full blocks at record
+                                // time (n <= remaining / block_size), so
+                                // req_dst[r] + req_len[r] <= to_read <= the
+                                // staging buffer's length. The bounds-checked
+                                // index below therefore never fires.
+                                let slice = match dst {
                                     DioReadDst::Staging(buf) => {
-                                        (**buf)[req_dst[r]..].as_mut_ptr()
+                                        &mut (**buf)[req_dst[r]..req_dst[r] + req_len[r]]
                                     }
                                     _ => unreachable!(),
-                                };
-                                let slice = unsafe {
-                                    core::slice::from_raw_parts_mut(base, req_len[r])
                                 };
                                 let ok = crate::drivers::blkdev::blkdev_read_async(
                                     fs.device,
@@ -837,22 +841,27 @@ impl ReadDst {
     /// semantics: a fault at the first byte is EFAULT, a fault mid-copy is
     /// a short read).
     ///
-    /// # Safety
-    /// `src` must hold `bytes` readable bytes; Kernel variant pointer must
-    /// have `len` writable bytes, User variant must be access_ok-validated.
-    fn put(&self, off: usize, src: *const u8, bytes: usize) -> Result<usize, i32> {
+    /// Contract (INV-EXT4-DIO-1): the Kernel variant pointer must have
+    /// `off + src.len()` writable bytes, the User variant is
+    /// access_ok-validated; `src` proves its own bytes.
+    fn put(&self, off: usize, src: &[u8]) -> Result<usize, i32> {
+        let bytes = src.len();
         match self {
             ReadDst::Kernel(dst, _) => {
-                // SAFETY: caller guarantees dst+off+bytes is in bounds.
-                unsafe { core::ptr::copy_nonoverlapping(src, dst.add(off), bytes) };
+                // SAFETY: INV-EXT4-DIO-1 — dst+off+bytes is in bounds
+                // (the staging buffer's caller-checked span).
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src.as_ptr(), dst.add(off), bytes)
+                };
                 Ok(bytes)
             }
             ReadDst::Discard(_) => Ok(bytes), // warm-up read: data lands in the page cache
             ReadDst::User(dst, _) => {
-                // SAFETY: exception-table copy; uncopied bytes truncate.
-                let uncopied = unsafe {
-                    crate::arch::uaccess::copy_to_user(dst.add(off), src, bytes)
-                };
+                // Exception-table copy; uncopied bytes truncate.
+                let uncopied = crate::arch::uaccess_safe::copy_out(
+                    (*dst as *const u8 as usize) + off,
+                    src,
+                );
                 if uncopied >= bytes {
                     // Nothing delivered: the page is unmapped — report the
                     // fault instead of a silent 0-byte "EOF" (the r8
@@ -876,7 +885,7 @@ impl ReadDst {
         let mut done = 0usize;
         while done < bytes {
             let n = core::cmp::min(4096, bytes - done);
-            let c = self.put(off + done, ZEROS.as_ptr(), n)?;
+            let c = self.put(off + done, &ZEROS[..n])?;
             if c < n {
                 break; // user fault: short read
             }
@@ -907,6 +916,25 @@ impl WriteSrc {
         }
     }
 
+    /// Byte view of the KERNEL source at `[off, off + n)`.
+    ///
+    /// INV-EXT4-WRITESRC-K: every `WriteSrc::Kernel` is built from a real
+    /// slice's `(as_ptr(), len())` (the three construction sites: the
+    /// FileOps staging buffer, the write_at boundary edge, the staged
+    /// fallback), so the whole `len()`-byte span is readable for the
+    /// source value's life. `off + n <= self.len()` is the caller's
+    /// bound (each caller derives `n` from the remaining source length).
+    /// `None` for a User source (those copy through the exception table).
+    #[inline]
+    fn kernel_bytes(&self, off: usize, n: usize) -> Option<&[u8]> {
+        debug_assert!(off.checked_add(n).is_some_and(|end| end <= self.len()));
+        match self {
+            // SAFETY: INV-EXT4-WRITESRC-K — a real slice backs the span.
+            WriteSrc::Kernel(p, _) => Some(unsafe { core::slice::from_raw_parts(p.add(off), n) }),
+            WriteSrc::User(..) => None,
+        }
+    }
+
     /// Clip the source to `n` bytes (RLIMIT_FSIZE truncation).
     #[inline]
     fn truncate(&self, n: usize) -> WriteSrc {
@@ -927,19 +955,19 @@ impl WriteSrc {
     /// (a page-cache frame span). Never call this with a spinlock held:
     /// the User arm's fault path can sleep (mapped-but-not-resident user
     /// pages are demand-filled by the trap handler).
-    fn copy_to_frame(&self, off: usize, dst: *mut u8, n: usize) -> usize {
+    fn copy_to_frame(&self, off: usize, dst: &mut [u8]) -> usize {
         match self {
-            // SAFETY: caller guarantees the kernel source pointer and
-            // destination validity.
-            WriteSrc::Kernel(p, _) => {
-                unsafe { core::ptr::copy_nonoverlapping(p.add(off), dst, n) };
+            // INV-EXT4-WRITESRC-K: the kernel source span `off..off+n`.
+            WriteSrc::Kernel(..) => {
+                dst.copy_from_slice(self.kernel_bytes(off, dst.len()).expect("Kernel source"));
                 0
             }
-            // SAFETY: exception-table copy from user memory — any
-            // address is sound to pass.
-            WriteSrc::User(p, _) => unsafe {
-                crate::arch::uaccess::copy_from_user(dst, p.add(off), n)
-            },
+            // Exception-table copy from user memory — any address is
+            // sound to pass; uncopied bytes are returned (and the frame
+            // holds a valid prefix, per the uaccess primitive's contract).
+            WriteSrc::User(p, _) => {
+                crate::arch::uaccess_safe::copy_in(dst, (*p as usize) + off)
+            }
         }
     }
 }
@@ -1033,23 +1061,23 @@ fn ext4_file_read_cached_dst(
                 // rux:exthunt (retired dfx=exthunt): frame-hit truth for the run's first page
                 // (a poisoned frame shows zeros here) — see exthunt_rd_hit.
                 if i == 0 {
-                    // SAFETY: page_data is a valid page-aligned pointer of
-                    // block_size bytes pinned by get_range_into.
-                    unsafe {
-                        let pd = run[0].1;
-                        crate::fs::ext4::extent::exthunt_rd_hit(
-                            ino,
-                            page_index,
-                            *pd,
-                            *pd.add(1),
-                        );
-                    }
+                    // First two bytes of the run's pinned frame
+                    // (INV-CBYTES-4) — frame-hit truth for exthunt.
+                    let head = crate::safety::bytes::pinned_frame_bytes(&run[0].1, 0, 2);
+                    crate::fs::ext4::extent::exthunt_rd_hit(
+                        ino,
+                        page_index,
+                        head[0],
+                        head[1],
+                    );
                 }
-                // SAFETY: page_data pointers are valid page-aligned
-                // pointers of block_size bytes pinned by get_range_into;
-                // the copy length is bounded by the contiguous span and the
-                // remaining request bytes.
-                unsafe {
+                // page_data pointers are valid page-aligned pointers of
+                // block_size bytes pinned by get_range_into; the copy
+                // length is bounded by the contiguous span and the
+                // remaining request bytes. Pointer values are only
+                // COMPARED here (physical adjacency); every byte access
+                // goes through the pinned-frame view below.
+                {
                     let avail = block_size_usize - in_page_off;
                     let mut span = avail;
                     let mut k = 1usize;
@@ -1061,7 +1089,16 @@ fn ext4_file_read_cached_dst(
                         k += 1;
                     }
                     let copy_len = core::cmp::min(remaining_now, span);
-                    let copied = match dst.put(buf_offset, run[i].1.add(in_page_off), copy_len) {
+                    // run[i].1 is a pinned page-cache frame (released via
+                    // put_range_with_entry below) — INV-CBYTES-4.
+                    let copied = match dst.put(
+                        buf_offset,
+                        crate::safety::bytes::pinned_frame_bytes(
+                            &run[i].1,
+                            in_page_off,
+                            copy_len,
+                        ),
+                    ) {
                         Ok(c) => c,
                         Err(e) => {
                             // Immediate full user fault: EFAULT when nothing
@@ -1205,7 +1242,7 @@ fn ext4_file_read_cached_dst(
                     // The audited ReadDst::put span — the raw window
                     // add rides its in-range contract (page_offset <
                     // block_size <= data.len()).
-                    match dst.put(buf_offset, data.as_ptr().wrapping_add(page_offset), copy_len) {
+                    match dst.put(buf_offset, &data[page_offset..page_offset + copy_len]) {
                         Ok(copied) => {
                             total_read += copied;
                             buf_offset += copied;
@@ -1534,9 +1571,9 @@ fn drain_batch(
         } else {
             // Multi-block buffers are private: free directly. A real
             // device EIO completed its chain — the DMA is done.
-            // SAFETY: bfree_multi's contract — private (non-cached)
-            // buffer, DMA quiesced (status != WAIT_TIMED_OUT above).
-            unsafe { bio::bfree_multi(bh_ptrs[i]) };
+            // bfree_multi's contract — private (non-cached) buffer,
+            // DMA quiesced (status != WAIT_TIMED_OUT above).
+            bio::bfree_multi(bh_ptrs[i]);
         }
     }
 }
@@ -1592,11 +1629,9 @@ impl<'a> DioWriteSrc<'a> {
             DioWriteSrc::User { pins, .. } => {
                 let mut d = 0usize;
                 pins.for_each_piece(off, dst.len(), |p, l| {
-                    // SAFETY: the pin keeps the frame alive; the alias is
-                    // l readable bytes.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(p as *const u8, dst[d..].as_mut_ptr(), l)
-                    };
+                    // The pin keeps the frame alive; the alias is l
+                    // readable bytes (INV-MM-6 pinned-alias arm).
+                    crate::mm::edges::copy_kva_from(&mut dst[d..][..l], p);
                     d += l;
                     true
                 });
@@ -1610,12 +1645,11 @@ impl<'a> DioWriteSrc<'a> {
         match self {
             DioWriteSrc::Staging(b) => b[off],
             DioWriteSrc::User { pins, .. } => {
-                let mut o = off;
-                let (p, _) = pins
-                    .next_piece(&mut o, off + 1)
-                    .expect("GUP write byte_at crossed a pin hole");
-                // SAFETY: alias readability as in gather.
-                unsafe { *(p as *const u8) }
+                // A one-byte gather: the piece walk owns the alias
+                // reasoning, so the probe byte needs no raw deref.
+                let mut b = [0u8; 1];
+                self.gather(off, &mut b);
+                b[0]
             }
         }
     }
@@ -3534,27 +3568,24 @@ fn ext4_sync_file_inner(
 fn file_ext4(
     file: &File,
 ) -> Option<(
-    &alloc::sync::Arc<Inode>,
+    &Inode,
     &crate::fs::ext4::Ext4FileSystem,
     &super::inode::Ext4Inode,
 )> {
-    // SAFETY: file.inode.get() points at the file's Option<Arc<Inode>>
-    // slot, valid for the `file` borrow (INV-EXT4-FILERES above).
-    let inode = unsafe { &*file.inode.get() }.as_ref()?;
-    // SAFETY: private_data/sb are installed at open and never cleared
-    // while the inode lives (INV-EXT4-FILERES above).
-    let fs = unsafe {
-        &*(inode.private_data? as *const crate::fs::ext4::Ext4FileSystem)
-    };
-    let ext4_ino = unsafe { &*(inode.sb? as *const super::inode::Ext4Inode) };
+    // The inode cell rides INV-FS-FILEINODE-1; private_data rides
+    // INV-FS-PRIVDATA-1 (the ext4 instance installed at create_vfs_inode);
+    // the sb box rides INV-EXT4-SBRES-1 (INV-EXT4-FILERES above).
+    let inode = crate::fs::unsafe_edges::file_inode(file)?;
+    let fs = crate::fs::unsafe_edges::privdata_ref::<crate::fs::ext4::Ext4FileSystem>(inode)?;
+    let ext4_ino = super::sb_inode_of(inode).ok()?;
     Some((inode, fs, ext4_ino))
 }
 
 /// (INV-EXT4-FILERES) safe twin for the EBADF/EIO split: is the file's
 /// VFS inode slot empty at all?
 fn file_inode_missing(file: &File) -> bool {
-    // SAFETY: same slot contract as file_ext4 (INV-EXT4-FILERES above).
-    unsafe { &*file.inode.get() }.is_none()
+    // Same slot contract as file_ext4 (INV-FS-FILEINODE-1).
+    crate::fs::unsafe_edges::file_inode(file).is_none()
 }
 
 /// VFS read wrapper - calls ext4_file_read_cached with page cache and read-ahead
@@ -3843,9 +3874,9 @@ pub fn ext4_file_pread_dio_user_vfs(
                 ext4_inode as *const super::inode::Ext4Inode
                     as *mut super::inode::Ext4Inode,
             );
-            // SAFETY: INV-EXT4-ATIME — one volatile store of the
-            // advisory u32; readers tolerate torn values.
-            unsafe { core::ptr::write_volatile(&mut i.atime, atime) };
+            // INV-EXT4-ATIME — one volatile store of the advisory u32;
+            // readers tolerate torn values.
+            crate::safety::bytes::store_volatile(&mut i.atime, atime);
         }
     }
     Some(n as isize)
@@ -4147,7 +4178,7 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
         // write-through core, exactly like the staged path would.
         let mut staged = alloc::vec![0u8; wsrc.len()];
         // SAFETY: staged is a valid kernel destination of wsrc.len().
-        let uncopied = wsrc.copy_to_frame(0, staged.as_mut_ptr(), staged.len());
+        let uncopied = wsrc.copy_to_frame(0, &mut staged[..]);
         if uncopied > 0 {
             let landed = staged.len() - uncopied;
             if landed == 0 {
@@ -4217,7 +4248,7 @@ pub fn ext4_file_pwrite_user_vfs(file: &File, offset: u64, src: *const u8, count
         let mut staged = alloc::vec![0u8; count];
         // SAFETY: staged is a valid kernel destination of count bytes.
         let uncopied =
-            WriteSrc::User(src, count).copy_to_frame(0, staged.as_mut_ptr(), count);
+            WriteSrc::User(src, count).copy_to_frame(0, &mut staged[..count]);
         if uncopied > 0 {
             let landed = count - uncopied;
             if landed == 0 {
@@ -4478,14 +4509,16 @@ fn ext4_buffered_write(
     // The cached Ext4Inode box behind inode.sb (INV-EXT4-SBRES-1),
     // resolved through the ext4 framework edge; the raw word is kept
     // only for the audited advisory-store epilog below.
-    let sb_ptr = match inode.sb {
-        Some(p) => p as *mut super::inode::Ext4Inode,
-        None => return errno::Errno::IOError.as_neg_i32() as isize,
+    let sbi = match super::sb_inode_of(inode) {
+        Ok(b) => b,
+        // INV-EXT4-SBRES-1 — the sb box lives for the inode; this shared
+        // view is read-mostly (the epilog's advisory stores go through
+        // the audited helper below, under the big lock).
+        Err(_) => return errno::Errno::IOError.as_neg_i32() as isize,
     };
-    // SAFETY: INV-EXT4-SBRES-1 — the sb box lives for the inode; this
-    // shared view is read-mostly (the epilog's advisory stores go
-    // through the audited helper below, under the big lock).
-    let sbi = unsafe { &*sb_ptr };
+    // The raw word is kept only for the audited advisory-store epilog
+    // below (the same box the resolver above borrowed).
+    let sb_ptr = sbi as *const super::inode::Ext4Inode as *mut super::inode::Ext4Inode;
     let fs_id = fs as *const crate::fs::ext4::Ext4FileSystem as u64;
     let ino = inode.ino as u64;
     let cache = page_cache::get_page_cache();
@@ -4659,11 +4692,9 @@ fn ext4_buffered_write(
         let n_pages = n_full as usize;
         let src_off = (first_full * ps - offset) as usize;
         match src {
-            WriteSrc::Kernel(p, _) => {
-                // SAFETY: the caller's kernel slice is valid for srclen
-                // bytes (ext4_kernel_write_at passes a real slice's
-                // start+length; the syscall layer never builds Kernel).
-                let buf = unsafe { core::slice::from_raw_parts(p, srclen) };
+            WriteSrc::Kernel(..) => {
+                // INV-EXT4-WRITESRC-K: the whole source span.
+                let buf = src.kernel_bytes(0, srclen).expect("Kernel source");
                 let consumed = cache.insert_dirty_batch(
                     fs_id,
                     ino,
@@ -4742,10 +4773,14 @@ fn ext4_buffered_write(
                 // in-bounds by that same inequality (wrapping_add keeps
                 // the in-range arithmetic explicit rather than relying on
                 // the unsafe add's debug-overflow behavior).
+                let frame = frame as *mut u8;
                 let uncopied = src.copy_to_frame(
                     buf_start,
-                    frame.wrapping_add(page_off) as *mut u8,
-                    want,
+                    crate::safety::bytes::pinned_frame_bytes_mut(
+                        &frame,
+                        page_off,
+                        want,
+                    ),
                 );
                 if uncopied > 0 {
                     let landed = want - uncopied;
@@ -4769,9 +4804,9 @@ fn ext4_buffered_write(
             if full_page {
                 // Base content fully replaced: no read-modify-write.
                 match src {
-                    WriteSrc::Kernel(p, _) => {
-                        // SAFETY: kernel source — slice the span.
-                        let s = unsafe { core::slice::from_raw_parts(p.add(buf_start), want) };
+                    WriteSrc::Kernel(..) => {
+                        // INV-EXT4-WRITESRC-K: the [buf_start, +want) span.
+                        let s = src.kernel_bytes(buf_start, want).expect("Kernel source");
                         if cache.insert_dirty(fs_id, ino, idx, s) {
                             copied += want;
                             served = true;
@@ -4827,10 +4862,16 @@ fn ext4_buffered_write(
             // base frame, then copy the covered span through a pin.
             if cache.insert_dirty(fs_id, ino, idx, &[]) {
                 if let Some(frame) = cache.get(fs_id, ino, idx) {
-                    // SAFETY: as above.
-                    let uncopied = unsafe {
-                        src.copy_to_frame(buf_start, frame.add(page_off) as *mut u8, want)
-                    };
+                    // As above: a pinned-frame mutable span.
+                    let frame = frame as *mut u8;
+                    let uncopied = src.copy_to_frame(
+                        buf_start,
+                        crate::safety::bytes::pinned_frame_bytes_mut(
+                            &frame,
+                            page_off,
+                            want,
+                        ),
+                    );
                     if uncopied > 0 {
                         let landed = want - uncopied;
                         copied += landed;
@@ -4876,14 +4917,11 @@ fn ext4_buffered_write(
             // would have hit.
             let mut bounce;
             let src_slice: &[u8] = match src {
-                WriteSrc::Kernel(p, _) => unsafe {
-                    core::slice::from_raw_parts(p.add(buf_start), want)
-                },
+                WriteSrc::Kernel(..) => src.kernel_bytes(buf_start, want).expect("Kernel source"),
                 WriteSrc::User(..) => {
                     bounce = alloc::vec![0u8; want];
                     // bounce is a valid kernel destination.
-                    let uncopied =
-                        src.copy_to_frame(buf_start, bounce.as_mut_ptr(), want);
+                    let uncopied = src.copy_to_frame(buf_start, &mut bounce[..]);
                     if uncopied > 0 {
                         copied += want - uncopied;
                         user_fault = true;
@@ -5141,11 +5179,11 @@ fn refresh_cached_vfs_inode(
         fresh_size
     };
     // Update cached copy in inode.sb
-    if let Some(ptr) = vi.sb {
-        // SAFETY: sb is the Box<Ext4Inode> this VFS inode owns (leaked
-        // in create_vfs_inode_in); no concurrent fd path frees it while
-        // the ext4 big lock is held (this runs under EXT4_BIG_LOCK).
-        let cached = unsafe { &mut *(ptr as *mut super::inode::Ext4Inode) };
+    // sb is the Box<Ext4Inode> this VFS inode owns (leaked in
+    // create_vfs_inode_in); no concurrent fd path frees it while the
+    // ext4 big lock is held (this runs under EXT4_BIG_LOCK) — the
+    // INV-EXT4-SBRES-1 mutable resolver carries that contract.
+    if let Ok(cached) = super::sb_inode_of_mut(vi) {
         cached.block = ext4_inode.block;
         cached.size = size;
         cached.blocks = ext4_inode.blocks;
@@ -5428,11 +5466,12 @@ pub fn ext4_flush_dirty_inode(
     }) {
         return 0;
     }
-    let fs_ptr = match inode.private_data {
-        Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+    // INV-FS-PRIVDATA-1: the ext4 instance this inode was created on.
+    let fs_ref = match crate::fs::unsafe_edges::privdata_ref::<crate::fs::ext4::Ext4FileSystem>(inode) {
+        Some(f) => f,
         None => return 0,
     };
-    let fs_id = fs_ptr as u64;
+    let fs_id = fs_ref as *const crate::fs::ext4::Ext4FileSystem as u64;
     let ino = inode.ino as u64;
     let cache = page_cache::get_page_cache();
 
@@ -5491,18 +5530,14 @@ pub fn ext4_flush_dirty_inode(
             while j < n && chunk[j].0 == chunk[j - 1].0 + 1 {
                 j += 1;
             }
-            // SAFETY: fs_ptr is the inode's private_data fs pointer,
-            // installed at mount/open and valid for the inode's life.
-            unsafe {
-                flush_run(
-                    &*fs_ptr,
-                    inode,
-                    &chunk[i..j],
-                    &mut stage,
-                    &mut done[i..j],
-                    &mut flusher,
-                )
-            };
+            flush_run(
+                fs_ref,
+                inode,
+                &chunk[i..j],
+                &mut stage,
+                &mut done[i..j],
+                &mut flusher,
+            );
             i = j;
         }
         cache.flush_done(fs_id, ino, &done[..n]);
@@ -5525,14 +5560,10 @@ pub fn ext4_flush_dirty_inode(
     // round trip per fsync (~30 us on the fio rig) is gone.
     {
         let _itb_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
-        // SAFETY: fs_ptr was validated at function entry (installed at
-        // mount/open, valid for the inode's life).
-        let (tbl_blk, dev) = unsafe {
-            (
-                super::inode::inode_table_block_of(&*fs_ptr, inode.ino as u32),
-                (*fs_ptr).device,
-            )
-        };
+        let (tbl_blk, dev) = (
+            super::inode::inode_table_block_of(fs_ref, inode.ino as u32),
+            fs_ref.device,
+        );
         if let Some(tbl_blk) = tbl_blk {
             let (mj, mi) = { ((*dev).major, (*dev).first_minor) };
             // SAFETY: probe/pin of the fs's ITB cache block; the pin is
@@ -5612,23 +5643,18 @@ fn flush_run(
         let (idx, pfn) = run[k];
         let off = idx * ps;
         let n_bytes = core::cmp::min(psu as u64, size - off) as usize;
-        let kva = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(
-            pfn * ps,
-        ))
-        .0 as *const u8;
-        // SAFETY: pfn belongs to a page-cache entry pinned by
-        // collect_dirty_range; the linear map covers the whole frame and
-        // n_bytes <= PAGE_SIZE.
-        unsafe {
-            core::ptr::copy_nonoverlapping(kva, stage.as_mut_ptr().add(k * psu), n_bytes);
-            if n_bytes < psu {
-                core::ptr::write_bytes(
-                    stage.as_mut_ptr().add(k * psu + n_bytes),
-                    0,
-                    psu - n_bytes,
-                );
-            }
-        }
+        // pfn belongs to a page-cache page PINNED by collect_dirty_range
+        // (ref++, balanced by the caller's flush_done) — INV-CBYTES-4;
+        // the linear map covers the whole frame.
+        let frame =
+            crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pfn * ps)).0 as *const u8;
+        let page = crate::safety::bytes::pinned_frame_bytes(&frame, 0, psu);
+        // The page's [0, n_bytes) prefix is live file data (n_bytes is
+        // the EOF clamp); the uncovered tail of a partial page stays
+        // zero — it is never written (the write clamps at run_bytes).
+        let slot = &mut stage[k * psu..(k + 1) * psu];
+        slot[..n_bytes].copy_from_slice(&page[..n_bytes]);
+        slot[n_bytes..].fill(0);
     }
 
     // The skip set: every SOURCE frame of the run (the write core's
@@ -5948,9 +5974,9 @@ fn run_sync_spans(
     let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
     // Fresh extent view: write core's refresh_cached_vfs_inode published
     // the just-written mapping into the cached sb copy under the big lock.
-    let sbi = match inode.sb {
-        Some(p) => unsafe { &*(p as *const super::inode::Ext4Inode) },
-        None => return,
+    let sbi = match super::sb_inode_of(inode) {
+        Ok(b) => b,
+        Err(_) => return,
     };
     let dev = fs.device;
     // SAFETY: dev is the fs's registered GenDisk; only identity fields
@@ -6081,15 +6107,13 @@ fn stamp_write_tail(ino: *mut super::inode::Ext4Inode, pub_end: u64, now: u32) {
     // advisory u32/u64 stores, volatile to keep the same torn-tolerant
     // discipline the direct store had.
     let i = crate::syscall::edges::boxed_mut(ino);
-    // SAFETY: INV-EXT4-ATIME family — advisory volatile stores into the
-    // pinned box; readers tolerate torn values.
-    unsafe {
-        if pub_end > i.size {
-            core::ptr::write_volatile(&mut i.size, pub_end);
-        }
-        core::ptr::write_volatile(&mut i.mtime, now);
-        core::ptr::write_volatile(&mut i.ctime, now);
+    // INV-EXT4-ATIME: advisory volatile stores into the pinned box;
+    // readers tolerate torn values.
+    if pub_end > i.size {
+        crate::safety::bytes::store_volatile(&mut i.size, pub_end);
     }
+    crate::safety::bytes::store_volatile(&mut i.mtime, now);
+    crate::safety::bytes::store_volatile(&mut i.ctime, now);
 }
 
 fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
@@ -6107,17 +6131,17 @@ fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
     };
     let stale = now.wrapping_sub(i.atime) >= 86_400;
     if i.atime < i.mtime || i.atime < i.ctime || stale || i.atime == 0 {
-        // SAFETY: same advisory-field store the direct path performed.
-        unsafe { core::ptr::write_volatile(&mut i.atime, now) };
+        // The same advisory-field store (INV-EXT4-ATIME).
+        crate::safety::bytes::store_volatile(&mut i.atime, now);
     }
 }
 
-fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut ReadAheadState {
+fn get_or_create_ra_state(file: &File, block_size: u64) -> &mut ReadAheadState {
     // SAFETY: file.ra is written only at File::new (None) and here
     // under io_lock by the description's reader; readers of the state
     // hold the same lock.
-    let opt = unsafe { &mut *file.ra.get() };
-    opt.get_or_insert_with(|| ReadAheadState::new(block_size))
+    crate::fs::unsafe_edges::file_ra_state_mut(file)
+        .get_or_insert_with(|| ReadAheadState::new(block_size))
 }
 
 /// Ext4 file operations structure (no close op since the readahead
@@ -6174,12 +6198,12 @@ fn fault_tsc_now() -> u64 {
 
 /// Block size of `file`'s filesystem (attribution helper above).
 fn fs_block_size_of(file: &File) -> u64 {
-    unsafe {
-        if let Some(inode) = (&*file.inode.get()).as_ref() {
-            if let Some(ptr) = inode.private_data {
-                return (*(ptr as *const crate::fs::ext4::Ext4FileSystem)).block_size as u64;
-            }
-        }
+    if let Some(fs) = crate::fs::unsafe_edges::file_inode(file)
+        .and_then(|inode| {
+            crate::fs::unsafe_edges::privdata_ref::<crate::fs::ext4::Ext4FileSystem>(inode)
+        })
+    {
+        return fs.block_size as u64;
     }
     crate::mm::PAGE_SIZE as u64
 }
@@ -6236,9 +6260,9 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
             let i = crate::syscall::edges::boxed_mut(
                 inode.sb.unwrap() as *mut super::inode::Ext4Inode,
             );
-            // SAFETY: INV-EXT4-ATIME — one volatile store of the
-            // advisory u32; readers tolerate torn values.
-            unsafe { core::ptr::write_volatile(&mut i.atime, atime) };
+            // INV-EXT4-ATIME — one volatile store of the advisory u32;
+            // readers tolerate torn values.
+            crate::safety::bytes::store_volatile(&mut i.atime, atime);
         }
     }
     ret
@@ -6246,10 +6270,7 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
 
 /// Default regular file lseek implementation
 fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
-    // SAFETY: file.inode.get() returns a valid pointer set during file open;
-    // the Option<Arc<Inode>> it points to remains valid for the file's lifetime.
-    let inode_opt = unsafe { &*file.inode.get() };
-    let inode = match inode_opt {
+    let inode = match crate::fs::unsafe_edges::file_inode(file) {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };

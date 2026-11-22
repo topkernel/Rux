@@ -112,3 +112,57 @@ pub fn bytes_of_slice_mut<T: Copy>(v: &mut [T]) -> &mut [u8] {
     // exclusive by &mut [T].
     unsafe { core::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, n) }
 }
+
+/// Byte view of a PINNED page-cache frame span.
+///
+/// INV-CBYTES-4 (pinned-frame window): `*frame` is a kernel direct-map
+/// alias of a whole `PAGE_SIZE` page-cache frame that the caller holds a
+/// pin on, and `[off, off + len)` lies inside that one page. The pin is
+/// taken by `page_cache::get()` / `get_range_into()` /
+/// `get_range_with_entry()` (each calls `pin_locked()` on the page and
+/// transfers the pin to the caller) and released through the matching
+/// `put()` / `put_range*()` on EVERY path including error exits. The pin keeps the frame allocated and the
+/// cache keeps its bytes stable while held, so the view is a plain
+/// re-labeling of live, readable memory. The returned slice borrows the
+/// caller's own handle to the pointer (the `bio::bh_data(&bh)` shape), so
+/// it cannot outlive the caller's pin-holding scope. This is the
+/// byte-level twin of the GUP pinned-alias copies (`mm::edges::copy_kva*`).
+#[inline]
+pub fn pinned_frame_bytes(frame: &*const u8, off: usize, len: usize) -> &[u8] {
+    debug_assert!(off.checked_add(len).is_some_and(|end| end <= crate::mm::PAGE_SIZE));
+    // SAFETY: INV-CBYTES-4 — off+len is inside the pinned PAGE_SIZE
+    // frame; the caller's pin holds the frame for this borrow.
+    unsafe { core::slice::from_raw_parts((*frame).add(off), len) }
+}
+
+/// Mutable twin of [`pinned_frame_bytes`] (INV-CBYTES-4, exclusive
+/// arm): the caller holds the pin AND is the writer of this span — the
+/// page-cache write paths copy user/kernel bytes into the pinned frame
+/// under the description's `io_lock`, so no other accessor aliases the
+/// span while this view lives.
+#[inline]
+pub fn pinned_frame_bytes_mut(frame: &*mut u8, off: usize, len: usize) -> &mut [u8] {
+    debug_assert!(off.checked_add(len).is_some_and(|end| end <= crate::mm::PAGE_SIZE));
+    // SAFETY: INV-CBYTES-4 exclusive arm — inside the pinned frame; the
+    // io_lock-holding writer is the only accessor of the span.
+    unsafe { core::slice::from_raw_parts_mut((*frame).add(off), len) }
+}
+
+/// Volatile store of a `Copy` value through an exclusive field reference.
+///
+/// INV-CBYTES-5 (advisory volatile field store): `place` is a live
+/// `&mut` to a plain-old-data field the caller owns for the store, so
+/// validity, alignment and exclusivity are all carried by the reference
+/// itself — the only thing `unsafe` adds is the VOLATILE qualifier.
+/// Use it for advisory fields that concurrent lock-free READERS sample
+/// (timestamps, sizes, counters): the volatile store keeps the write
+/// from being folded away or reordered past the caller's publication
+/// point, and readers are expected to tolerate a torn or stale value by
+/// the field's own contract. This is the reference-taking twin of the
+/// raw-pointer diagnostic stores in the process/sync edges.
+#[inline]
+pub fn store_volatile<T: Copy>(place: &mut T, value: T) {
+    // SAFETY: INV-CBYTES-5 — a plain volatile write through a live
+    // exclusive reference; T: Copy so there is no drop glue.
+    unsafe { core::ptr::write_volatile(place, value) }
+}
