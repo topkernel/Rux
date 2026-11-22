@@ -359,9 +359,17 @@ name = "rux-bin"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-drivers",
  "rux-fs",
  "rux-net",
  "rux-syscall",
+]
+
+[[package]]
+name = "rux-drivers"
+version = "0.1.0"
+dependencies = [
+ "rux",
 ]
 
 [[package]]
