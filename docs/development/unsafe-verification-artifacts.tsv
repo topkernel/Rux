@@ -46,20 +46,15 @@ c56e8e994a38	kernel/src/arch/aarch64/mm/exception.rs	do_page_fault	131		INV:F19
 5522017a4009	kernel/src/arch/aarch64/mm/fixmap.rs	init_uart_fixmap	80		INV:F19
 101d9decc629	kernel/src/arch/aarch64/mm/memory_layout.rs	phys_to_virt	429		INV:INV-BOOT-SETUP-1
 ccf59a874b5d	kernel/src/arch/aarch64/mm/memory_layout.rs	virt_to_phys	440		INV:INV-BOOT-SETUP-1
-c4d4efe8a692	kernel/src/arch/aarch64/mm/mm_ops.rs	map_single_page	190	ptr-ops	INV:F19
-4a04ea5d370b	kernel/src/arch/aarch64/mm/mm_ops.rs	set_brk	271		INV:F19
-8d2d7646c413	kernel/src/arch/aarch64/mm/mm_ops.rs	set_brk	284		INV:F19
-6011cc7fc5a3	kernel/src/arch/aarch64/mm/mm_ops.rs	set_brk	324	ptr-ops	INV:F19
-17d7b9065288	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	739		INV:F19
-a92840832773	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	766		INV:F19
-4677f4e6875d	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	779	ptr-ops	INV:F19
-d53d5a4360fe	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	798		INV:F19
-5203241af72b	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	810		INV:F19
-8d15944ea7bf	kernel/src/arch/aarch64/mm/mm_ops.rs	fork	930		INV:INV-FRAME-1
-591cf15a8654	kernel/src/arch/aarch64/mm/mm_ops.rs	fork	938		INV:INV-FRAME-1
-39e9ab50a22f	kernel/src/arch/aarch64/mm/mm_ops.rs	alloc_and_map_user_memory	1427	ptr-ops,addr-arith	INV:INV-AE-ZP
-e2c1ab749360	kernel/src/arch/aarch64/mm/mm_ops.rs	alloc_and_map_to_user_table	1520	ptr-ops,addr-arith	INV:INV-AE-ZP
-917a6b912def	kernel/src/arch/aarch64/mm/mm_ops.rs	mprotect_pte_range	2070		INV:INV-COW-4
+0715d926c784	kernel/src/arch/aarch64/mm/mm_ops.rs	map_single_page	170	ptr-ops	INV:F19
+0a517770266d	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	226		INV:F19
+830e4e654cc2	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	253		INV:F19
+4037ae1eea61	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	266	ptr-ops	INV:F19
+ad43d646f07e	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	285		INV:F19
+68f8004ada09	kernel/src/arch/aarch64/mm/mm_ops.rs	unmap_pages	297		INV:F19
+2b14c3dae979	kernel/src/arch/aarch64/mm/mm_ops.rs	alloc_and_map_user_memory	764	ptr-ops,addr-arith	INV:INV-AE-ZP
+0d2a953c739c	kernel/src/arch/aarch64/mm/mm_ops.rs	alloc_and_map_to_user_table	857	ptr-ops,addr-arith	INV:INV-AE-ZP
+9f09b06a7d43	kernel/src/arch/aarch64/mm/mm_ops.rs	mprotect_pte_range	1407		INV:INV-COW-4
 62159fb10960	kernel/src/arch/aarch64/mm/mmu_init.rs	adopt_boot_ttbr1	65	ptr-ops	INV:F20
 3e19af9fb5d7	kernel/src/arch/aarch64/mm/mmu_init.rs	adopt_boot_ttbr1	72	asm	INV:F20
 ea2d2c30e17d	kernel/src/arch/aarch64/mm/mmu_init.rs	root_page_table_ppn	90		INV:F20
@@ -76,23 +71,7 @@ cf70f6f149e4	kernel/src/arch/aarch64/mm/mmu_init.rs	teardown_early_identity_map	
 37da98235b1d	kernel/src/arch/aarch64/mm/mmu_init.rs	<module>	971		INV:F20
 e91738b94890	kernel/src/arch/aarch64/mm/mmu_init.rs	map_identity	972		INV:F20
 4dcfec1d2d5a	kernel/src/arch/aarch64/mm/mmu_init.rs	<module>	985		INV:F20
-1e44c41f1a12	kernel/src/arch/aarch64/mm/page_fault.rs	try_expand_stack	149	ptr-ops	INV:F20
-b5e73df2b59b	kernel/src/arch/aarch64/mm/page_fault.rs	try_expand_stack	180		INV:INV-AE-ZP
-846cedfc89fc	kernel/src/arch/aarch64/mm/page_fault.rs	try_expand_stack	189	addr-arith	INV:INV-AE-ZP
-16227bb56b51	kernel/src/arch/aarch64/mm/page_fault.rs	protnone_represent	280		INV:INV-COW-1
-25fd72fcffee	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	343		INV:INV-COW-1
-4705c3016ec3	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	364		INV:INV-COW-1
-78f937a8a078	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	372		INV:INV-COW-1
-31fd70695aa4	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	380		INV:INV-COW-1
-77a1cba07e73	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	390		INV:INV-COW-1
-509a29190be6	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	434		INV:INV-COW-1
-c1f74bbd7733	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	484	ptr-ops	INV:INV-AE-ZP
-9ba4543de762	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	493	ptr-ops	INV:INV-AE-ZP
-f69dbf2f3032	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	512		INV:INV-AE-ZP
-56d6f70b4783	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	521	ptr-ops	INV:INV-AE-ZP
-0a5d4afd7fe0	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	559		INV:INV-AE-ZP
-25a4efc17179	kernel/src/arch/aarch64/mm/page_fault.rs	handle_mm_fault	568	addr-arith	INV:INV-AE-ZP
-8f4489801306	kernel/src/arch/aarch64/mm/page_fault.rs	get_user_phys	650		INV:F20
+3a082e9be3b8	kernel/src/arch/aarch64/mm/page_fault.rs	get_user_phys	84		INV:F20
 ea3cf4624d8c	kernel/src/arch/aarch64/mm/pagetable.rs	get_satp	545	asm	INV:F20
 269ccf5b75d3	kernel/src/arch/aarch64/mm/unsafe_edges.rs	<module>	43	ptr-ops,addr-arith	INV:INV-AE-PT-4
 7c04c64a198b	kernel/src/arch/aarch64/mm/unsafe_edges.rs	get_page_table_virt	47		INV:INV-AE-PT-4

@@ -19,17 +19,17 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2284**
-- with artifact (non-GAP): **2098** (91.9%)
+- unsafe regions: **2263**
+- with artifact (non-GAP): **2077** (91.8%)
 - GAP: **186**
-- by kind: block=2025, unsafe-extern=7, unsafe-fn=107, unsafe-impl=145
-- by category (regions carry 0..n tags): ptr-ops=577, asm=267, volatile=158, raw-construct=51, addr-arith=30, no-preempt=14, ffi=11, static-mut=5, transmute=5, layout-meta=5
+- by kind: block=2004, unsafe-extern=7, unsafe-fn=107, unsafe-impl=145
+- by category (regions carry 0..n tags): ptr-ops=572, asm=267, volatile=158, raw-construct=51, addr-arith=28, no-preempt=14, ffi=11, static-mut=5, transmute=5, layout-meta=5
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
-| arch | 732 | 686 | 46 |
+| arch | 711 | 665 | 46 |
 | fs | 476 | 415 | 61 |
 | dfx | 128 | 128 | 0 |
 | drivers | 115 | 67 | 48 |
@@ -140,24 +140,19 @@ census id is accounted for here.
 | 429 | phys_to_virt | block | - | INV:INV-BOOT-SETUP-1 | `101d9decc629` |
 | 440 | virt_to_phys | block | - | INV:INV-BOOT-SETUP-1 | `ccf59a874b5d` |
 
-### kernel/src/arch/aarch64/mm/mm_ops.rs (14)
+### kernel/src/arch/aarch64/mm/mm_ops.rs (9)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 190 | map_single_page | block | ptr-ops | INV:F19 | `c4d4efe8a692` |
-| 271 | set_brk | block | - | INV:F19 | `4a04ea5d370b` |
-| 284 | set_brk | block | - | INV:F19 | `8d2d7646c413` |
-| 324 | set_brk | block | ptr-ops | INV:F19 | `6011cc7fc5a3` |
-| 739 | unmap_pages | block | - | INV:F19 | `17d7b9065288` |
-| 766 | unmap_pages | block | - | INV:F19 | `a92840832773` |
-| 779 | unmap_pages | block | ptr-ops | INV:F19 | `4677f4e6875d` |
-| 798 | unmap_pages | block | - | INV:F19 | `d53d5a4360fe` |
-| 810 | unmap_pages | block | - | INV:F19 | `5203241af72b` |
-| 930 | fork | block | - | INV:INV-FRAME-1 | `8d15944ea7bf` |
-| 938 | fork | block | - | INV:INV-FRAME-1 | `591cf15a8654` |
-| 1427 | alloc_and_map_user_memory | block | ptr-ops,addr-arith | INV:INV-AE-ZP | `39e9ab50a22f` |
-| 1520 | alloc_and_map_to_user_table | block | ptr-ops,addr-arith | INV:INV-AE-ZP | `e2c1ab749360` |
-| 2070 | mprotect_pte_range | block | - | INV:INV-COW-4 | `917a6b912def` |
+| 170 | map_single_page | block | ptr-ops | INV:F19 | `0715d926c784` |
+| 226 | unmap_pages | block | - | INV:F19 | `0a517770266d` |
+| 253 | unmap_pages | block | - | INV:F19 | `830e4e654cc2` |
+| 266 | unmap_pages | block | ptr-ops | INV:F19 | `4037ae1eea61` |
+| 285 | unmap_pages | block | - | INV:F19 | `ad43d646f07e` |
+| 297 | unmap_pages | block | - | INV:F19 | `68f8004ada09` |
+| 764 | alloc_and_map_user_memory | block | ptr-ops,addr-arith | INV:INV-AE-ZP | `2b14c3dae979` |
+| 857 | alloc_and_map_to_user_table | block | ptr-ops,addr-arith | INV:INV-AE-ZP | `0d2a953c739c` |
+| 1407 | mprotect_pte_range | block | - | INV:INV-COW-4 | `9f09b06a7d43` |
 
 ### kernel/src/arch/aarch64/mm/mmu_init.rs (16)
 
@@ -180,27 +175,11 @@ census id is accounted for here.
 | 972 | map_identity | block | - | INV:F20 | `e91738b94890` |
 | 985 | <module> | unsafe-fn | - | INV:F20 | `4dcfec1d2d5a` |
 
-### kernel/src/arch/aarch64/mm/page_fault.rs (17)
+### kernel/src/arch/aarch64/mm/page_fault.rs (1)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 149 | try_expand_stack | block | ptr-ops | INV:F20 | `1e44c41f1a12` |
-| 180 | try_expand_stack | block | - | INV:INV-AE-ZP | `b5e73df2b59b` |
-| 189 | try_expand_stack | block | addr-arith | INV:INV-AE-ZP | `846cedfc89fc` |
-| 280 | protnone_represent | block | - | INV:INV-COW-1 | `16227bb56b51` |
-| 343 | handle_mm_fault | block | - | INV:INV-COW-1 | `25fd72fcffee` |
-| 364 | handle_mm_fault | block | - | INV:INV-COW-1 | `4705c3016ec3` |
-| 372 | handle_mm_fault | block | - | INV:INV-COW-1 | `78f937a8a078` |
-| 380 | handle_mm_fault | block | - | INV:INV-COW-1 | `31fd70695aa4` |
-| 390 | handle_mm_fault | block | - | INV:INV-COW-1 | `77a1cba07e73` |
-| 434 | handle_mm_fault | block | - | INV:INV-COW-1 | `509a29190be6` |
-| 484 | handle_mm_fault | block | ptr-ops | INV:INV-AE-ZP | `c1f74bbd7733` |
-| 493 | handle_mm_fault | block | ptr-ops | INV:INV-AE-ZP | `9ba4543de762` |
-| 512 | handle_mm_fault | block | - | INV:INV-AE-ZP | `f69dbf2f3032` |
-| 521 | handle_mm_fault | block | ptr-ops | INV:INV-AE-ZP | `56d6f70b4783` |
-| 559 | handle_mm_fault | block | - | INV:INV-AE-ZP | `0a5d4afd7fe0` |
-| 568 | handle_mm_fault | block | addr-arith | INV:INV-AE-ZP | `25a4efc17179` |
-| 650 | get_user_phys | block | - | INV:F20 | `8f4489801306` |
+| 84 | get_user_phys | block | - | INV:F20 | `3a082e9be3b8` |
 
 ### kernel/src/arch/aarch64/mm/pagetable.rs (1)
 

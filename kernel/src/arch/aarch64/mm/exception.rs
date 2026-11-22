@@ -13,7 +13,7 @@
 
 use super::memory_layout::VirtAddr;
 use super::mm_ops::handle_cow_fault;
-use super::page_fault::{handle_mm_fault, FaultFlags};
+use super::page_fault::FaultFlags;
 // Re-exported so the trap path can `use crate::arch::mm::exception::MmFaultResult`.
 pub use super::page_fault::MmFaultResult;
 use crate::arch::pt_regs::PtRegs;
