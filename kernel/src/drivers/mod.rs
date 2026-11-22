@@ -21,8 +21,6 @@ pub mod gpu;
 pub mod input;
 pub mod loop_dev;
 pub mod ashmem;
-pub mod access_tokenid;
-pub mod watchdog;
 pub mod initcalls;
 pub mod hooks;
 pub mod drm;

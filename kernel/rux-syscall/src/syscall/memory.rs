@@ -952,7 +952,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // identical bits in both mm layers.
                     if fd >= 0 {
                         let is_fb = crate::fs::file::get_file_fd(fd as usize)
-                            .map(|f| crate::drivers::gpu::fbdev::is_fb_file(&f))
+                            .map(|f| crate::drivers::hooks::is_fb_file(&f))
                             .unwrap_or(false);
                         if is_fb {
                             let info = match crate::drivers::gpu::get_framebuffer_info() {
@@ -1012,7 +1012,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // already present), unmap only clears PTEs.
                             // Kick the auto-flush presenter awake: this
                             // mapper may be a flush-less renderer (Xorg).
-                            crate::drivers::gpu::fbdev::mark_fb_user_mapped();
+                            crate::drivers::hooks::mark_fb_user_mapped();
                             return placement as i64;
                         }
                     }

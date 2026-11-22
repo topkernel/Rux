@@ -64,6 +64,12 @@ pub struct DriverHooks {
     pub is_fb_file: fn(&File) -> bool,
     /// The FBIO_* dispatch for /dev/fb0 fds.
     pub fbdev_ioctl: fn(u32, usize) -> i64,
+    /// The WDIOC_* dispatch for /dev/watchdog fds (None = not a
+    /// watchdog file).
+    pub watchdog_ioctl: fn(&File, u32, usize) -> Option<i64>,
+    /// The TOKENID ioctl dispatch for /dev/access_token_id fds (None =
+    /// not a tokenid file).
+    pub tokenid_ioctl: fn(&File, u32, usize) -> Option<i64>,
     /// Mark the framebuffer user-mapped (kick the auto-flush presenter).
     pub mark_fb_user_mapped: fn(),
 }
@@ -98,6 +104,12 @@ fn no_fbdev_ioctl(_cmd: u32, _arg: usize) -> i64 {
     -(crate::errno::constants::ENOTTY as i64)
 }
 fn no_mark_fb_user_mapped() {}
+fn no_watchdog_ioctl(_file: &File, _cmd: u32, _arg: usize) -> Option<i64> {
+    None
+}
+fn no_tokenid_ioctl(_file: &File, _cmd: u32, _arg: usize) -> Option<i64> {
+    None
+}
 
 impl DriverHooks {
     /// The pre-registration table: every row a no-op (or ENOTTY for the
@@ -114,6 +126,8 @@ impl DriverHooks {
         init_fbdev: no_init_fbdev,
         is_fb_file: no_fb_file,
         fbdev_ioctl: no_fbdev_ioctl,
+        watchdog_ioctl: no_watchdog_ioctl,
+        tokenid_ioctl: no_tokenid_ioctl,
         mark_fb_user_mapped: no_mark_fb_user_mapped,
     };
 }
@@ -185,38 +199,13 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
 pub fn mark_fb_user_mapped() {
     (hooks().mark_fb_user_mapped)()
 }
-
-/// The framework-local rows (flip pre-state): the leaf fns still living
-/// in this crate, registered so the seam is exercised end-to-end before
-/// the rux-drivers crate takes the rows over (its register_all publishes
-/// FIRST from the composition bin; this fallback publish then no-ops).
-/// DELETED by the flip commit.
-pub fn register_framework_defaults() {
-    register_driver_hooks(DriverHooks {
-        devfs_char_rows: || {
-            alloc::vec![
-                CharDeviceRow {
-                    devno: crate::drivers::access_tokenid::DEV_ACCESS_TOKENID,
-                    ops: &crate::drivers::access_tokenid::TOKENID_OPS,
-                    // No /dev node: the ipc access-token registry owns the
-                    // node (see devfs populate's char_nodes note).
-                    node: None,
-                },
-                CharDeviceRow {
-                    devno: crate::drivers::watchdog::DEV_WATCHDOG,
-                    ops: &crate::drivers::watchdog::WATCHDOG_OPS,
-                    node: Some(("watchdog", 0o666)),
-                },
-            ]
-        },
-        loopback_init: || crate::drivers::net::loopback::loopback_init().is_some(),
-        get_loopback_device: crate::drivers::net::loopback::get_loopback_device,
-        loopback_send: crate::drivers::net::loopback::loopback_send,
-        loopback_poll: crate::drivers::net::loopback::loopback_poll,
-        loopback_stats: crate::drivers::net::loopback::loopback_stats,
-        init_fbdev: crate::drivers::gpu::fbdev::init_fbdev,
-        is_fb_file: crate::drivers::gpu::fbdev::is_fb_file,
-        fbdev_ioctl: crate::drivers::gpu::fbdev::fbdev_ioctl,
-        mark_fb_user_mapped: crate::drivers::gpu::fbdev::mark_fb_user_mapped,
-    });
+/// The WDIOC_* dispatch (None = not a watchdog file).
+#[inline]
+pub fn watchdog_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
+    (hooks().watchdog_ioctl)(file, cmd, arg)
+}
+/// The TOKENID ioctl dispatch (None = not a tokenid file).
+#[inline]
+pub fn tokenid_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
+    (hooks().tokenid_ioctl)(file, cmd, arg)
 }

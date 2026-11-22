@@ -832,10 +832,6 @@ pub fn rust_main_tail() -> ! {
         // the named-call era.
         {
             drivers::virtio::probe::register_probe_initcalls();
-            // The driver-leaf hook rows (watchdog/access_tokenid/loopback/
-            // fbdev today): framework-local fills until the rux-drivers
-            // crate takes them over (flip commit).
-            drivers::hooks::register_framework_defaults();
             // First scan MMIO devices (virtio-blk-device)
             let mmio_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Early);
             if mmio_count > 0 {

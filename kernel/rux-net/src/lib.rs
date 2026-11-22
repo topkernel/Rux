@@ -146,7 +146,7 @@ mod hooks_impl {
 
     pub fn dev_rows() -> alloc::vec::Vec<DevRow> {
         let mut rows = alloc::vec::Vec::new();
-        let lo = rux::drivers::net::loopback::loopback_stats();
+        let lo = rux::drivers::hooks::loopback_stats();
         rows.push(DevRow {
             name: alloc::string::String::from("lo"),
             rx_bytes: lo.rx_bytes,
