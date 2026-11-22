@@ -81,3 +81,15 @@ S1 does NOT abort — but it decomposes into two sub-rungs:
 
 Banked with this measurement: the 6 vestigial Send/Sync deletions +
 file-forbid on fair/rt/cgroup (10/14 files forbid pre-split).
+
+## S1a DONE (2026-11-22, first pass)
+
+The carve landed in one scripted batch + one fixer pass: sched.rs
+12,811 -> 7,404 core lines; sched_policy.rs 5,488 lines / 135 items
+under `#![forbid(unsafe_code)]` FROM LINE ONE (negative-probe
+verified). Span extraction is bracket-aware (the ';' inside
+`-> [T; N]` signatures truncated the first attempt — rebuilt on the
+census masker; 284 items, zero overlaps). The fixer pass's bump list
+(32 visibility bumps + `GlobalRunQueue.idle_cpus` + `this_cpu_mut`)
+IS the measured private core surface the S1b safe-API seam must own:
+33 items, not hundreds — the in-crate seam is cheap as designed.

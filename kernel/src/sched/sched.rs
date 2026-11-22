@@ -1902,7 +1902,7 @@ fn this_cpu() -> &'static PerCpuState {
 
 /// Get per-CPU state for the current CPU (mutable).
 #[inline]
-fn this_cpu_mut() -> &'static mut PerCpuState {
+pub(crate) fn this_cpu_mut() -> &'static mut PerCpuState {
     // INV-SCE-10: this CPU mutates its own slot.
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     crate::sched::edges::per_cpu_mut(cpu_id)

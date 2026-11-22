@@ -160,3 +160,4 @@ kernel/rux-net/src/lib.rs
 kernel/src/sched/fair.rs
 kernel/src/sched/rt.rs
 kernel/src/sched/cgroup.rs
+kernel/src/sched/sched_policy.rs
