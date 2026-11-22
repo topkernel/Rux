@@ -371,6 +371,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rux-sched-policy"
+version = "0.1.0"
+dependencies = [
+ "rux",
+]
+
+[[package]]
 name = "rux-syscall"
 version = "0.1.0"
 dependencies = [
