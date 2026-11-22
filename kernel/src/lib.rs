@@ -878,11 +878,11 @@ pub fn rust_main_tail() -> ! {
         // swap_init refuses to enable when the tail carve would overlap
         // the ext4 filesystem (see the ext4 guard in mm/swap.rs).
         {
-            mm::swap::swap_init();
+            mm::mm_hooks::swap_init();
             print_status_ex(
                 "mm",
                 &format!("swap {} MB tail carve", crate::config::SWAP_SIZE_MB),
-                if mm::swap::nr_active_swap() { Some(true) } else { None },
+                if mm::mm_hooks::nr_active_swap() { Some(true) } else { None },
             );
         }
 
@@ -955,7 +955,7 @@ pub fn rust_main_tail() -> ! {
 
         // Initialize kswapd background reclaim thread
         {
-            mm::kswapd::init();
+            mm::mm_hooks::kswapd_init();
             print_status("mm", "kswapd reclaim thread", true);
         }
 
@@ -1240,7 +1240,7 @@ pub fn rust_main_tail() -> ! {
         println!();
 
         // Enable OOM killer now that boot is complete
-        mm::kswapd::enable_oom();
+        mm::mm_hooks::kswapd_enable_oom();
 
         // ========== Timer interrupt setup ==========
         // Enable timer interrupts (also sets the first trigger internally)
@@ -1452,6 +1452,14 @@ pub extern "C" fn rust_main_impl() -> ! {
     // rows in the composition bin (OnceSlot first-wins); this fills
     // the still-in-tree arches.
     arch::mm::register_in_tree_mm_policy();
+
+    // M1b seam: the reclaim-side policy rows (kswapd/vmscan/oom/compact/
+    // swap/lru) — same contract: the bin's crate registration wins, this
+    // fills the rows from the still-in-tree files until each family's
+    // flip lands. Must precede every consumer: the allocator's
+    // wakeup_kswapd/direct-reclaim rows, the boot swap_init below, and
+    // the mmu_init teardown's swap_free_slot codec path.
+    mm::mm_hooks::register_in_tree_mm_policy();
 
     // Initialize SMP (multi-core support) - must run first!
     // On QEMU virt, OpenSBI only starts one hart into S-mode.

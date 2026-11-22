@@ -19,12 +19,18 @@
 
 // Root re-exports: the framework modules appear at THIS crate's root so
 // the policy file's crate::X paths resolve unchanged (the net recipe).
+// (`mm` is NOT in this list — it is the src/mm.rs module, which owns
+// the flipped §4 policy files and re-exports everything else from the
+// framework; `syscall` is added for the compact/swap edges consumers.)
 pub use rux::{
-    arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, ipc, mm,
-    process, safety, sched, sync, timer, trace,
+    arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, ipc,
+    process, safety, sched, security, signal, sync, syscall, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;
+
+/// The mm tree (see src/mm.rs — the rux-fs nesting recipe).
+pub mod mm;
 
 // The carved policy tree. The file is NOT declared by the framework's
 // module tree (kernel/src/mm/mod.rs never names policy/) — this crate
@@ -56,6 +62,44 @@ pub fn register_all() {
     #[cfg(not(any(feature = "x86_64", feature = "riscv64", feature = "aarch64")))]
     // Arch not carved yet: the framework's in-tree registration serves.
     {}
+
+    // M1b: the reclaim-policy rows. While a family is still unflipped
+    // its row points at the framework module (identical behavior);
+    // each flip repoints the row at this crate's module. OnceSlot
+    // first-wins over the framework's later in-tree registration.
+    rux::mm::mm_hooks::mm_register_policy_hooks(rux::mm::mm_hooks::MmPolicyHooks {
+        kswapd_init: crate::mm::kswapd::init,
+        kswapd_enable_oom: crate::mm::kswapd::enable_oom,
+        wakeup_kswapd: crate::mm::kswapd::wakeup_kswapd,
+        try_to_free_pages: crate::mm::vmscan::try_to_free_pages,
+        drain_file_cache_before_oom: crate::mm::vmscan::drain_file_cache_before_oom,
+        vscan_heartbeat: crate::mm::vmscan::vscan_heartbeat,
+        vscan_census_line: crate::mm::vmscan::vscan_census_line,
+        zone_dirty_writeback_state: crate::mm::vmscan::zone_dirty_writeback_state,
+        zone_below_dirty_writeback_mark: crate::mm::vmscan::zone_below_dirty_writeback_mark,
+        fault_oom_kill_or_retry: crate::mm::oom_kill::fault_oom_kill_or_retry,
+        kernel_fault_oom_kill: crate::mm::oom_kill::kernel_fault_oom_kill,
+        sysrq_oom_kill: crate::mm::oom_kill::sysrq_oom_kill,
+        oom_badness: crate::mm::oom_kill::oom_badness,
+        migration_in_progress: crate::mm::compact::migration_in_progress,
+        compact_zone: crate::mm::compact::compact_zone,
+        swap_init: crate::mm::swap::swap_init,
+        swap_activate: crate::mm::swap::swap_activate,
+        swap_deactivate: crate::mm::swap::swap_deactivate,
+        swap_boot_disk: crate::mm::swap::swap_boot_disk,
+        nr_active_swap: crate::mm::swap::nr_active_swap,
+        swap_free_slot: crate::mm::swap::swap_free_slot,
+        swap_stats: crate::mm::swap::swap_stats,
+        swap_write_census: crate::mm::swap::swap_write_census,
+        page_add_anon_lru: crate::mm::lru::page_add_anon_lru,
+        page_remove_lru: crate::mm::lru::page_remove_lru,
+        page_add_file_lru: crate::mm::lru::page_add_file_lru,
+        page_add_file_lru_young: crate::mm::lru::page_add_file_lru_young,
+        page_add_file_lru_young_batch: crate::mm::lru::page_add_file_lru_young_batch,
+        lru_activate_young: crate::mm::lru::lru_activate_young,
+        lru_tail: crate::mm::lru::lru_tail,
+        lru_demote_active_file_oldest: crate::mm::lru::lru_demote_active_file_oldest,
+    });
 }
 
 /// The guest-test entry (make test): the framework's run_all_tests

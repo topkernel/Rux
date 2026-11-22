@@ -27,14 +27,7 @@ pub mod vmstat;
 pub mod pglist;
 pub mod page_alloc;
 pub mod rmap;
-pub mod lru;
-pub mod vmscan;
-pub mod kswapd;
-pub mod oom_kill;
-pub mod hugepage;
 pub mod vmemmap;
-pub mod swap;
-pub mod compact;
 pub mod deferred_free;
 pub mod small_alloc;
 pub mod vdso;
@@ -243,13 +236,6 @@ pub use rmap::{
     page_mapped, page_get_mappings, page_referenced, page_clear_referenced,
     try_to_unmap, try_to_unmap_with_swap, rmap_stats, RmapStats,
 };
-pub use hugepage::{
-    HugePageType, HugePageStats,
-    PAGE_SHIFT, PMD_SHIFT, PGDIR_SHIFT, PMD_SIZE, PGDIR_SIZE,
-    HPAGE_PMD_NR, HPAGE_PGD_NR, HPAGE_PMD_ORDER, HPAGE_PGD_ORDER,
-    alloc_hugepage, free_hugepage, alloc_hugepage_pmd, free_hugepage_pmd,
-    hugepage_stats, is_pmd_aligned, is_pgd_aligned,
-    pmd_align_down, pmd_align_up, pgd_align_down, pgd_align_up,
-    vm_flags as huge_vm_flags, pte_flags as huge_pte_flags,
-    is_huge_pte, print_hugepage_info,
-};
+// hugepage: flipped to the rux-mm crate (M1b) — its items no longer
+// re-export at the mm root; framework consumers reach them through
+// the crate's crate::mm::hugepage (zero such consumers exist today).

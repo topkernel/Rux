@@ -256,28 +256,8 @@ pub fn copy_kva_from(dst: &mut [u8], src: *const u8) {
 }
 
 // ---------------------------------------------------------------------------
-// INV-MM-7: the swap-device static and page-frame slices.
+// INV-MM-7: page-frame slices.
 // ---------------------------------------------------------------------------
-
-/// Shared view of the swap-device static (INV-MM-7 dev-static arm: the
-/// array is written only by the single-threaded swap_activate init;
-/// after `enabled` publishes (Release), every field is atomic or
-/// Spinlock-guarded).
-#[inline]
-pub fn swap_dev_static(idx: usize) -> &'static super::swap::SwapDevice {
-    // SAFETY: INV-MM-7 — interior mutability is atomics/Spinlock only
-    // after the init writes; the shared borrow races nothing.
-    unsafe { &*super::swap::SWAP_DEVICES.as_mut_ptr().add(idx) }
-}
-
-/// Mutable view of the swap-device static (INV-MM-7 init arm: the
-/// single-threaded swap_activate window).
-#[inline]
-pub fn swap_dev_static_mut(idx: usize) -> &'static mut super::swap::SwapDevice {
-    // SAFETY: INV-MM-7 — init window; no concurrent reader exists
-    // before `enabled` is stored.
-    unsafe { &mut *super::swap::SWAP_DEVICES.as_mut_ptr().add(idx) }
-}
 
 /// The PAGE_SIZE mutable slice at a page-aligned kernel linear address
 /// (INV-MM-7 page-slice arm: the frame is a buddy allocation the caller

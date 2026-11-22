@@ -24,8 +24,8 @@ pub fn generate() -> Vec<u8> {
     // size/used/priority to 60/66/-end (kB units for size/used).
     content.push_str("Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n");
 
-    if crate::mm::swap::nr_active_swap() {
-        let stats = crate::mm::swap::swap_stats();
+    if crate::mm::mm_hooks::nr_active_swap() {
+        let stats = crate::mm::mm_hooks::swap_stats();
         let size_kb = stats.swap_total * 4; // pages -> kB
         let used_kb = (stats.swap_total - stats.swap_free) * 4;
         content.push_str(&alloc::format!(

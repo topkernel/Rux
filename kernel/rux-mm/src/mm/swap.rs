@@ -12,59 +12,26 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 
 use super::PAGE_SIZE;
 
 // ==================== Swap Entry Encoding ====================
+//
+// The PTE-entry codec is SEAM VOCABULARY (M1b): compiled in
+// mm_hooks.rs, named by both the arch fault mechanism and this policy
+// module. Re-exported here so the historical swap::/make_/is_ paths
+// keep resolving on both sides of the crate boundary.
 
-/// Signature bit in a swap PTE — distinguishes swap entries from
-/// genuinely-empty (zeroed) PTEs. Stored in bit 62.
-pub const SWAP_ENTRY_SIGNATURE: u64 = 1u64 << 62;
+pub use super::mm_hooks::{
+    is_migration_entry, is_swap_entry, make_migration_entry, make_swap_entry,
+    swap_entry_offset, swap_entry_type, MIGRATION_ENTRY_SIGNATURE, SWAP_ENTRY_SIGNATURE,
+};
 
 /// Maximum number of swap devices
 const MAX_SWAP_DEVICES: usize = 4;
-
-/// Build a swap entry value suitable for storing in a PTE.
-///
-/// Layout:
-///   Bit 62: signature (1)
-///   Bits [9:8]: swap type (up to 4 devices)
-///   Bits [53:10]: swap offset (up to 2^44 pages per device)
-///   Bit 0 (V): 0 (triggers page fault)
-#[inline]
-pub fn make_swap_entry(swap_type: u32, swap_offset: u64) -> u64 {
-    SWAP_ENTRY_SIGNATURE
-        | ((swap_type as u64 & 0x3) << 8)
-        | ((swap_offset & 0x003F_FFFF_FFFF) << 10)
-}
-
-/// Check whether a raw PTE value represents a swap entry.
-#[inline]
-pub fn is_swap_entry(pte: u64) -> bool {
-    (pte & SWAP_ENTRY_SIGNATURE) != 0
-}
-
-// ==================== Migration Entries (compaction, review 4.16) ====================
-
-/// Signature bit distinguishing a compaction migration entry from empty
-/// and swap-entry PTEs. Stored in bit 61 (V=0, so accessing it faults).
-pub const MIGRATION_ENTRY_SIGNATURE: u64 = 1u64 << 61;
-
-/// Build a migration-entry marker PTE (installed while a page is being
-/// relocated by compaction — see mm/compact.rs).
-#[inline]
-pub fn make_migration_entry() -> u64 {
-    MIGRATION_ENTRY_SIGNATURE
-}
-
-/// Check whether a raw PTE value is a migration marker.
-#[inline]
-pub fn is_migration_entry(pte: u64) -> bool {
-    (pte & MIGRATION_ENTRY_SIGNATURE) != 0
-}
 
 // ==================== In-flight swap-out tracking (review 4.12) ====================
 //
@@ -100,30 +67,21 @@ pub fn swap_slot_pending(swap_type: u32, offset: u64) -> bool {
         .any(|&(t, o)| t == swap_type && o == offset)
 }
 
-/// Extract the swap type from a swap entry.
-#[inline]
-pub fn swap_entry_type(pte: u64) -> u32 {
-    ((pte >> 8) & 0x3) as u32
-}
-
-/// Extract the swap offset from a swap entry.
-#[inline]
-pub fn swap_entry_offset(pte: u64) -> u64 {
-    (pte >> 10) & 0x003F_FFFF_FFFF
-}
-
 // ==================== Swap Device ====================
 
 /// A swap device backed by a block device.
 pub struct SwapDevice {
     /// Block device pointer (*const GenDisk as usize)
     disk: AtomicUsize,
-    /// Swap type index (0-based)
+    /// Swap type index (0-based; immutable after the const initializer)
     swap_type: u32,
-    /// Starting sector on the block device (512-byte units)
-    start_sector: u64,
-    /// Total swap slots (each slot = 1 page = 8 sectors)
-    max_slots: usize,
+    /// Starting sector on the block device (512-byte units; written once
+    /// by the single swap_activate, ordered by the `enabled` Release
+    /// store below)
+    start_sector: AtomicU64,
+    /// Total swap slots (each slot = 1 page = 8 sectors; same init-once
+    /// discipline as `start_sector`)
+    max_slots: AtomicUsize,
     /// Number of currently used slots
     used_slots: AtomicUsize,
     /// Slot usage bitmap (1 bit per slot)
@@ -132,25 +90,23 @@ pub struct SwapDevice {
     enabled: AtomicUsize,
 }
 
-pub(super) static mut SWAP_DEVICES: [SwapDevice; MAX_SWAP_DEVICES] = [
+/// The swap-device registry (INV-SREF-1 shape: machine-lifetime static
+/// storage, init-once at swap_activate; every mutable field is atomic or
+/// Spinlock-guarded, and `enabled` is stored LAST (Release) so a device
+/// observed enabled is fully initialized — the Acquire load in
+/// `is_enabled` orders the Relaxed init stores ahead of every reader).
+/// The whole table is a plain (non-`mut`) static: no `&mut` aliasing is
+/// needed or produced anywhere.
+static SWAP_DEVICES: [SwapDevice; MAX_SWAP_DEVICES] = [
     SwapDevice::new_static(0),
     SwapDevice::new_static(1),
     SwapDevice::new_static(2),
     SwapDevice::new_static(3),
 ];
 
-/// The swap-device registry accessor (INV-SREF-1 shape: machine-lifetime
-/// static storage, init-once at swap_activate; every field is atomic or
-/// Spinlock-guarded after init, and `enabled` is stored LAST (Release)
-/// so a device observed enabled is fully initialized). Bounds-checked —
-/// any index is sound to pass.
+/// Bounds-checked registry accessor (any index is sound to pass).
 fn swap_dev(idx: usize) -> Option<&'static SwapDevice> {
-    if idx >= MAX_SWAP_DEVICES {
-        return None;
-    }
-    // static storage; interior mutability is atomics/Spinlock only
-    // after the single-threaded init writes (INV-MM-7 dev-static arm).
-    Some(super::edges::swap_dev_static(idx))
+    SWAP_DEVICES.get(idx)
 }
 
 /// Map a physical swap page to its PAGE_SIZE mutable kernel slice (the
@@ -181,8 +137,8 @@ impl SwapDevice {
         Self {
             disk: AtomicUsize::new(0),
             swap_type: idx,
-            start_sector: 0,
-            max_slots: 0,
+            start_sector: AtomicU64::new(0),
+            max_slots: AtomicUsize::new(0),
             used_slots: AtomicUsize::new(0),
             slot_bitmap: Spinlock::new(Vec::new()),
             enabled: AtomicUsize::new(0),
@@ -322,13 +278,13 @@ pub fn swap_activate(
     // SWAP_DEVICES[0] fields are atomics or Spinlock-guarded;
     // `enabled` is stored LAST (Release) so readers never see a
     // half-initialized device (see nr_active_swap / swap_alloc_slot)
-    // — INV-MM-7 init arm.
+    // — INV-MM-7 init arm. (swap_type is 0 from the const initializer —
+    // the old redundant `= 0` store went away with the `static mut`.)
     {
-        let dev = super::edges::swap_dev_static_mut(0);
+        let dev = swap_dev(0).expect("SWAP_DEVICES[0] exists");
         dev.disk.store(disk as *const _ as usize, Ordering::Release);
-        dev.swap_type = 0;
-        dev.start_sector = start_sector;
-        dev.max_slots = max_slots;
+        dev.start_sector.store(start_sector, Ordering::Relaxed);
+        dev.max_slots.store(max_slots, Ordering::Relaxed);
         dev.used_slots.store(0, Ordering::Release);
         *dev.slot_bitmap.lock() = bitmap;
         dev.enabled.store(1, Ordering::Release);
@@ -403,7 +359,7 @@ pub fn swap_alloc_slot() -> Option<(u32, u64)> {
             }
 
             let mut bitmap = dev.slot_bitmap.lock();
-            let max_slots = dev.max_slots;
+            let max_slots = dev.max_slots.load(Ordering::Relaxed);
 
             for byte_idx in 0..bitmap.len() {
                 let byte = bitmap[byte_idx];
@@ -435,7 +391,7 @@ pub fn swap_free_slot(swap_type: u32, offset: u64) {
         return;
     }
     if let Some(dev) = swap_dev(swap_type as usize) {
-        if !dev.is_enabled() || (offset as usize) >= dev.max_slots {
+        if !dev.is_enabled() || (offset as usize) >= dev.max_slots.load(Ordering::Relaxed) {
             return;
         }
 
@@ -516,11 +472,9 @@ pub fn swap_write_census() -> (u64, u64, u64) {
     )
 }
 
-/// Swap statistics for /proc/meminfo.
-pub struct SwapStats {
-    pub swap_total: usize,
-    pub swap_free: usize,
-}
+// SwapStats is seam vocabulary (framework /proc consumers match on its
+// fields); re-exported so swap::SwapStats keeps resolving.
+pub use super::mm_hooks::SwapStats;
 
 /// Get swap statistics.
 pub fn swap_stats() -> SwapStats {
@@ -532,8 +486,9 @@ pub fn swap_stats() -> SwapStats {
             if !dev.is_enabled() {
                 continue;
             }
-            total += dev.max_slots;
-            free += dev.max_slots - dev.used_slots.load(Ordering::Relaxed);
+            total += dev.max_slots.load(Ordering::Relaxed);
+            free += dev.max_slots.load(Ordering::Relaxed)
+                - dev.used_slots.load(Ordering::Relaxed);
         }
     }
 
@@ -575,7 +530,8 @@ fn get_swap_disk(swap_type: u32) -> Result<&'static crate::drivers::blkdev::GenD
 fn get_swap_sector(swap_type: u32, offset: u64) -> u64 {
     if let Some(dev) = swap_dev(swap_type as usize) {
         if dev.is_enabled() {
-            return dev.start_sector + offset * (PAGE_SIZE as u64 / 512);
+            return dev.start_sector.load(Ordering::Relaxed)
+                + offset * (PAGE_SIZE as u64 / 512);
         }
     }
     offset * (PAGE_SIZE as u64 / 512)

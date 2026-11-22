@@ -1404,10 +1404,10 @@ pub fn free_user_page_tables(
 
                     // Swap entry (P=0 leaf with the swap signature): the
                     // page lives on the swap device — free the slot.
-                    if !pte1.is_valid() && crate::mm::swap::is_swap_entry(pte1.bits()) {
-                        crate::mm::swap::swap_free_slot(
-                            crate::mm::swap::swap_entry_type(pte1.bits()),
-                            crate::mm::swap::swap_entry_offset(pte1.bits()),
+                    if !pte1.is_valid() && crate::mm::mm_hooks::is_swap_entry(pte1.bits()) {
+                        crate::mm::mm_hooks::swap_free_slot(
+                            crate::mm::mm_hooks::swap_entry_type(pte1.bits()),
+                            crate::mm::mm_hooks::swap_entry_offset(pte1.bits()),
                         );
                         continue;
                     }

@@ -19,24 +19,24 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2263**
-- with artifact (non-GAP): **2077** (91.8%)
-- GAP: **186**
-- by kind: block=2004, unsafe-extern=7, unsafe-fn=107, unsafe-impl=145
-- by category (regions carry 0..n tags): ptr-ops=572, asm=267, volatile=158, raw-construct=51, addr-arith=28, no-preempt=14, ffi=11, static-mut=5, transmute=5, layout-meta=5
+- unsafe regions: **2232**
+- with artifact (non-GAP): **2033** (91.1%)
+- GAP: **199**
+- by kind: block=1977, unsafe-extern=7, unsafe-fn=107, unsafe-impl=141
+- by category (regions carry 0..n tags): ptr-ops=553, asm=267, volatile=158, raw-construct=51, addr-arith=28, no-preempt=14, ffi=11, static-mut=5, transmute=5, layout-meta=5
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
 | arch | 711 | 665 | 46 |
-| fs | 476 | 415 | 61 |
+| fs | 449 | 379 | 70 |
 | dfx | 128 | 128 | 0 |
 | drivers | 115 | 67 | 48 |
 | sync | 106 | 106 | 0 |
 | sched | 105 | 87 | 18 |
-| tests | 105 | 105 | 0 |
-| mm | 100 | 100 | 0 |
+| tests | 103 | 103 | 0 |
+| mm | 98 | 94 | 4 |
 | process | 80 | 77 | 3 |
 | ipc | 67 | 66 | 1 |
 | <top> | 65 | 60 | 5 |
@@ -1137,20 +1137,6 @@ census id is accounted for here.
 | 427 | write | block | - | GAP | `b88716778efd` |
 | 466 | resize | block | ptr-ops | GAP | `0d1b27dcf541` |
 
-### kernel/src/fs/cgroup.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 506 | cgroup2_kill_sb | block | - | INV:INV-SBTYPE-1 | `cb8d30e2f5a0` |
-
-### kernel/src/fs/char_dev.rs (3)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 178 | char_dev_file_stat | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `4b25ede3509d` |
-| 206 | uart_file_read | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `6ec289914c35` |
-| 216 | uart_file_write | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `c4337015e96d` |
-
 ### kernel/src/fs/debugfs.rs (3)
 
 | line | fn | kind | categories | artifact | id |
@@ -1190,12 +1176,12 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1559 | devfs_destroy_inode | block | ptr-ops | INV:INV-DEVFS-SHARED-1 | `61f68fd3adb9` |
-| 1749 | devfs_link | block | ptr-ops | INV:INV-DEVFS-SHARED-1 | `bfcdb1143679` |
-| 1889 | copy_in | block | ptr-ops | GAP | `3bbdff60b838` |
-| 1897 | copy_out | block | ptr-ops | GAP | `3a6c0b3bcb83` |
-| 1910 | zero | block | ptr-ops | GAP | `344625f088a3` |
-| 1935 | shared_grow_locked | block | ptr-ops | GAP | `6a54369e8e6f` |
+| 1572 | devfs_destroy_inode | block | ptr-ops | INV:INV-DEVFS-SHARED-1 | `fe1fadf84c56` |
+| 1762 | devfs_link | block | ptr-ops | INV:INV-DEVFS-SHARED-1 | `1e2b3e179967` |
+| 1902 | copy_in | block | ptr-ops | GAP | `447548168dea` |
+| 1910 | copy_out | block | ptr-ops | GAP | `a501303f6893` |
+| 1923 | zero | block | ptr-ops | GAP | `c352f56a1b3a` |
+| 1948 | shared_grow_locked | block | ptr-ops | GAP | `05f327839e63` |
 
 ### kernel/src/fs/elf.rs (1)
 
@@ -1367,20 +1353,20 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 409 | fsctx_close | block | - | INV:INV-FSCTX-1 | `0f2f64d04839` |
-| 410 | fsctx_close | block | ptr-ops | INV:INV-FSCTX-1 | `cae2097ac9c5` |
-| 411 | fsctx_close | block | - | INV:INV-FSCTX-1 | `9a5dec3c6874` |
-| 428 | fsctx_of | block | - | INV:INV-FSCTX-1 | `1c8bc34f1224` |
-| 429 | fsctx_of | block | ptr-ops | INV:INV-FSCTX-1 | `02cb70f7f81f` |
-| 441 | fsctx_of_mut | block | - | INV:INV-FSCTX-1 | `d396c4f4003a` |
-| 442 | fsctx_of_mut | block | ptr-ops | INV:INV-FSCTX-1 | `14a402d07a9b` |
-| 453 | mountfd_close | block | - | INV:INV-FSCTX-1 | `904a20a080ee` |
-| 454 | mountfd_close | block | ptr-ops | INV:INV-FSCTX-1 | `b67ed6c13688` |
-| 455 | mountfd_close | block | - | INV:INV-FSCTX-1 | `46c43a70fbc9` |
-| 471 | mountfd_of | block | - | INV:INV-FSCTX-1 | `53588495adbf` |
-| 472 | mountfd_of | block | ptr-ops | INV:INV-FSCTX-1 | `a06ab066fcb4` |
-| 488 | treepath_dentry | block | - | INV:INV-FSCTX-1 | `d61653ff203a` |
-| 519 | make_detached_mount | block | ptr-ops | INV:INV-FSCTX-1 | `564b92791912` |
+| 413 | fsctx_close | block | - | INV:INV-FSCTX-1 | `af6f23dd1c88` |
+| 414 | fsctx_close | block | ptr-ops | INV:INV-FSCTX-1 | `26284200e0e5` |
+| 415 | fsctx_close | block | - | INV:INV-FSCTX-1 | `f4c96298cef6` |
+| 432 | fsctx_of | block | - | INV:INV-FSCTX-1 | `2b97bc6e1cad` |
+| 433 | fsctx_of | block | ptr-ops | INV:INV-FSCTX-1 | `1f5547be910b` |
+| 445 | fsctx_of_mut | block | - | INV:INV-FSCTX-1 | `81b2cd9623eb` |
+| 446 | fsctx_of_mut | block | ptr-ops | INV:INV-FSCTX-1 | `1ff7edb15b92` |
+| 457 | mountfd_close | block | - | INV:INV-FSCTX-1 | `43e606b288a9` |
+| 458 | mountfd_close | block | ptr-ops | INV:INV-FSCTX-1 | `8bff4b45e157` |
+| 459 | mountfd_close | block | - | INV:INV-FSCTX-1 | `98c86c772464` |
+| 475 | mountfd_of | block | - | INV:INV-FSCTX-1 | `cda46c29644a` |
+| 476 | mountfd_of | block | ptr-ops | INV:INV-FSCTX-1 | `4720823e8f9f` |
+| 492 | treepath_dentry | block | - | INV:INV-FSCTX-1 | `af470facc82a` |
+| 523 | make_detached_mount | block | ptr-ops | INV:INV-FSCTX-1 | `b47937d5e6e0` |
 
 ### kernel/src/fs/inode.rs (8)
 
@@ -1394,16 +1380,6 @@ census id is accounted for here.
 | 792 | update_cached_mode | block | volatile | INV:INV-INODE-STATDEV-1 | `b5397babde81` |
 | 1225 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `7fc8083cd2e5` |
 | 1226 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `307115aa7d23` |
-
-### kernel/src/fs/inotify.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 422 | notify_file | block | - | INV:INV-INOTIFY-PRIV-1 | `0d687582f56f` |
-| 508 | instance_of | block | - | INV:INV-INOTIFY-PRIV-1 | `ad35a7a499ea` |
-| 509 | instance_of | block | ptr-ops | INV:INV-INOTIFY-PRIV-1 | `d6940aa3a2a8` |
-| 767 | inotify_close | block | - | INV:INV-INOTIFY-PRIV-1 | `4529f8420039` |
-| 769 | inotify_close | block | ptr-ops | INV:INV-INOTIFY-PRIV-1 | `b9229e7e8ae7` |
 
 ### kernel/src/fs/jbd2/commit.rs (14)
 
@@ -1483,18 +1459,12 @@ census id is accounted for here.
 | 464 | jbd2_journal_dirty_metadata | block | - | INV:INV-JBD2-BH-1 | `28968bb3a778` |
 | 486 | jbd2_journal_forget | block | - | INV:INV-JBD2-BH-1 | `949328cd281c` |
 
-### kernel/src/fs/memfd.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 213 | memfd_destroy_inode | block | ptr-ops | INV:INV-FS-PRIVDATA-1 | `3964a697a1a8` |
-
 ### kernel/src/fs/mod.rs (2)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 73 | read_file_from_rootfs | block | - | GAP | `0c24ead9da9f` |
-| 80 | read_file_from_rootfs | block | - | GAP | `a01152e9c253` |
+| 75 | read_file_from_rootfs | block | - | GAP | `22b8a962f4d3` |
+| 82 | read_file_from_rootfs | block | - | GAP | `fa6ab9c5b764` |
 
 ### kernel/src/fs/mount.rs (2)
 
@@ -1557,25 +1527,6 @@ census id is accounted for here.
 | 193 | pidfd_close | block | - | INV:INV-FS-FILEPRIV-1 | `01925da03920` |
 | 196 | pidfd_close | block | - | INV:INV-FS-FILEPRIV-1 | `26a4dd6286a9` |
 
-### kernel/src/fs/pipe.rs (14)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 66 | new | block | ptr-ops | INV:INV-PIPE-BUF-1 | `8a16e2220760` |
-| 108 | resize | block | ptr-ops | INV:INV-PIPE-BUF-1 | `7a70351b3ce9` |
-| 564 | file_pipe_private | block | ptr-ops | INV:INV-PIPE-BUF-1 | `a714aba87d17` |
-| 843 | pipe_read_common | block | ptr-ops | INV:INV-PIPE-BUF-1 | `aa887064b959` |
-| 870 | pipe_read_common | block | - | INV:INV-PIPE-BUF-1 | `3b62a1c33b5c` |
-| 985 | pipe_write_common | block | ptr-ops | INV:INV-PIPE-BUF-1 | `089b0700a00f` |
-| 1032 | pipe_write_common | block | raw-construct,ptr-ops | INV:INV-PIPE-BUF-1 | `1b687563354a` |
-| 1309 | pipe_file_poll | block | ptr-ops | INV:INV-PIPE-BUF-1 | `cdf78ac184a8` |
-| 1352 | pipe_file_close | block | ptr-ops | INV:INV-PIPE-BUF-1 | `81df77823a5b` |
-| 1397 | pipe_fionread | block | ptr-ops | INV:INV-PIPE-BUF-1 | `80a1d858e3ca` |
-| 1463 | pipe_get_sz | block | ptr-ops | INV:INV-PIPE-BUF-1 | `0d8500f0c712` |
-| 1486 | pipe_set_sz | block | ptr-ops | INV:INV-PIPE-BUF-1 | `1d6ba303b1bd` |
-| 1551 | abort_uninstalled_end | block | - | INV:INV-PIPE-BUF-1 | `c404b82414dc` |
-| 1591 | create_pipe | block | ptr-ops | INV:INV-PIPE-BUF-1 | `506c9bff93b6` |
-
 ### kernel/src/fs/procfs/mod.rs (3)
 
 | line | fn | kind | categories | artifact | id |
@@ -1600,7 +1551,7 @@ census id is accounted for here.
 | 1130 | get_fd_path | block | - | INV:INV-PROC-PIN-1 | `2cdcc40ff2b0` |
 | 1139 | get_fd_path | block | - | INV:INV-PROC-PIN-1 | `7896c0a512d1` |
 | 1209 | generate_oom_score | block | - | INV:INV-PROC-PIN-1 | `c8bfe923da13` |
-| 1222 | generate_oom_score | block | - | INV:INV-PROC-PIN-1 | `01571923c943` |
+| 1222 | generate_oom_score | block | - | INV:INV-PROC-PIN-1 | `cc7431592c11` |
 | 1244 | generate_oom_score_adj | block | - | INV:INV-PROC-PIN-1 | `344e6eaea734` |
 
 ### kernel/src/fs/procfs/self_proc.rs (1)
@@ -1631,17 +1582,14 @@ census id is accounted for here.
 | 48 | nr_free_pages | block | - | INV:INV-STATIC-CELL-1 | `e62c9fc06356` |
 | 151 | generate_buddyinfo | block | - | INV:INV-STATIC-CELL-1 | `f87350a7cf4c` |
 
-### kernel/src/fs/pty.rs (7)
+### kernel/src/fs/pty.rs (4)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 207 | pty_output | block | ptr-ops | INV:INV-VT-PRIV-1 | `1d93085e4660` |
-| 374 | pair_arc | block | - | INV:INV-NETARC-1 | `843f7cce278f` |
-| 388 | take_pair_arc | block | - | INV:INV-NETARC-1 | `fab477f219b5` |
-| 718 | copy_out | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `14261e57ccc3` |
-| 725 | copy_in | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `b9031ec5dc0f` |
-| 965 | pty_ioctl | block | - | INV:INV-FS-FILEPRIV-1 | `e5d9ab77c89e` |
-| 966 | pty_ioctl | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `155df10fe773` |
+| 713 | copy_out | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `8c958f40292a` |
+| 720 | copy_in | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `1cbe9d1331e4` |
+| 960 | pty_ioctl | block | - | INV:INV-FS-FILEPRIV-1 | `9038f0cf3c90` |
+| 961 | pty_ioctl | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `25be3865f450` |
 
 ### kernel/src/fs/rootfs.rs (8)
 
@@ -1672,17 +1620,6 @@ census id is accounted for here.
 | 219 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `89a73dfdc608` |
 | 220 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `f0d45dde0878` |
 
-### kernel/src/fs/sysfs.rs (6)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 186 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `3203ea4367e2` |
-| 187 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `6f9232bf0265` |
-| 1961 | sysfs_kill_sb | block | ptr-ops | INV:INV-SBTYPE-1 | `b9470596eafd` |
-| 2335 | sysfs_destroy_inode | block | ptr-ops | INV:INV-FS-PRIVDATA-1 | `7c8957d0d418` |
-| 2420 | sysfs_file_write | block | - | INV:INV-FS-PRIVDATA-1 | `11d8155b66cb` |
-| 2425 | sysfs_file_write | block | - | INV:INV-FS-PRIVDATA-1 | `26efa73ba286` |
-
 ### kernel/src/fs/tmpfs.rs (17)
 
 | line | fn | kind | categories | artifact | id |
@@ -1705,20 +1642,7 @@ census id is accounted for here.
 | 1223 | tmpfs_getattr | block | - | GAP | `1d7e711dec90` |
 | 1376 | tmpfs_destroy_inode | block | ptr-ops | GAP | `c89c242af3dd` |
 
-### kernel/src/fs/tracefs.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 562 | tracefs_destroy_inode | block | ptr-ops | INV:INV-FS-PRIVDATA-1 | `c87ddb39fdc7` |
-
-### kernel/src/fs/tty.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 447 | <module> | unsafe-impl | - | INV:INV-CBYTES-2 | `be842aab7358` |
-| 448 | <module> | unsafe-impl | - | INV:INV-CBYTES-2 | `e0efb5d50450` |
-
-### kernel/src/fs/unsafe_edges.rs (20)
+### kernel/src/fs/unsafe_edges.rs (29)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -1742,6 +1666,15 @@ census id is accounted for here.
 | 202 | privdata_ref_leaked | block | ptr-ops | INV:INV-FS-FILEINODE-1 | `bdf9175e00de` |
 | 210 | file_inode_arc | block | - | GAP | `6ee70b9f7220` |
 | 224 | file_ra_state_mut | block | - | GAP | `b1f8381f4e70` |
+| 247 | privdata_take_box | block | ptr-ops | GAP | `6e6d4eceebf9` |
+| 260 | privdata_drop_arc | block | ptr-ops | GAP | `d61837851f45` |
+| 270 | kill_sb_reclaim_box | block | ptr-ops | GAP | `a2c28d93c16e` |
+| 285 | file_privdata_arc_clone | block | - | GAP | `85a93422bac0` |
+| 298 | vec_zeroed_sized | block | ptr-ops | GAP | `1023ac52b317` |
+| 309 | kernel_slice | block | raw-construct | GAP | `f94fc78099f7` |
+| 315 | kernel_slice_mut | block | - | GAP | `52dac6a0081c` |
+| 323 | file_close | block | - | GAP | `012cdc2f6b6b` |
+| 337 | file_privdata_arc_static | block | - | GAP | `028178a8eacc` |
 
 ### kernel/src/fs/vfs.rs (32)
 
@@ -1770,15 +1703,15 @@ census id is accounted for here.
 | 3414 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `78c8536a89f1` |
 | 3419 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `435585c8123f` |
 | 5440 | file_open_tmpfile | block | - | GAP | `a95b26e92c1e` |
-| 7145 | mem_file_content | block | - | GAP | `673e65ad8cd1` |
-| 7146 | mem_file_content | block | ptr-ops | GAP | `37bf85acdba8` |
-| 7152 | mem_file_content_mut | block | - | GAP | `9be40b1ab980` |
-| 7153 | mem_file_content_mut | block | ptr-ops | GAP | `ed1a22067033` |
-| 7159 | mem_file_take_owned | block | - | GAP | `a37a2cdcb826` |
-| 7160 | mem_file_take_owned | block | ptr-ops | GAP | `01bbbdb76b95` |
-| 7333 | vfs_fallocate | block | ptr-ops | GAP | `4aa0249979f0` |
-| 7416 | vfs_fallocate | block | - | GAP | `e78ed186967f` |
-| 7425 | vfs_fallocate | block | ptr-ops | GAP | `a1685fb898f7` |
+| 7144 | mem_file_content | block | - | GAP | `931263e67016` |
+| 7145 | mem_file_content | block | ptr-ops | GAP | `b16a3b7b9677` |
+| 7151 | mem_file_content_mut | block | - | GAP | `92537d4b80ec` |
+| 7152 | mem_file_content_mut | block | ptr-ops | GAP | `82811a97d40d` |
+| 7158 | mem_file_take_owned | block | - | GAP | `2acd58384272` |
+| 7159 | mem_file_take_owned | block | ptr-ops | GAP | `45e2d39a99b7` |
+| 7332 | vfs_fallocate | block | ptr-ops | GAP | `77981281e85d` |
+| 7415 | vfs_fallocate | block | - | GAP | `be3407d98ebd` |
+| 7424 | vfs_fallocate | block | ptr-ops | GAP | `4dd9ccb0f76a` |
 
 ### kernel/src/fs/vt.rs (12)
 
@@ -2058,8 +1991,8 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 88 | flush_framebuffer | block | - | GAP | `32910875dc87` |
-| 107 | with_gpu_device | block | - | GAP | `df04b1028172` |
+| 79 | flush_framebuffer | block | - | GAP | `f9ca52b75c37` |
+| 98 | with_gpu_device | block | - | GAP | `d0162c50299c` |
 
 ### kernel/src/drivers/gpu/virtio_gpu.rs (10)
 
@@ -2620,7 +2553,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 402 | setup_boot_task_fdtable | block | - | INV:INV-TESTHARNESS-1 | `c25695ff9966` |
+| 443 | setup_boot_task_fdtable | block | - | INV:INV-TESTHARNESS-1 | `ba411505edbe` |
 
 ### kernel/src/tests/net_pins.rs (2)
 
@@ -2634,13 +2567,6 @@ census id is accounted for here.
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 111 | test_skb_push_pull | block | ptr-ops | INV:INV-TESTHARNESS-1 | `cfce9e7aeebe` |
-
-### kernel/src/tests/pipe2.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 14 | pipe_of | block | - | INV:INV-TESTHARNESS-1 | `c8d4e2992db1` |
-| 16 | pipe_of | block | ptr-ops | INV:INV-TESTHARNESS-1 | `5197725c92ab` |
 
 ### kernel/src/tests/preemptive_scheduler.rs (1)
 
@@ -2756,7 +2682,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 73 | test_loopback_send | block | ptr-ops | INV:INV-TESTHARNESS-1 | `ea2133a14547` |
+| 76 | test_loopback_send | block | ptr-ops | INV:INV-TESTHARNESS-1 | `339752136d37` |
 
 ### kernel/src/tests/wait4.rs (3)
 
@@ -2796,7 +2722,7 @@ census id is accounted for here.
 | 1683 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `c697e7116541` |
 | 1712 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `65e0ec16ef78` |
 
-### kernel/src/mm/edges.rs (47)
+### kernel/src/mm/edges.rs (45)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -2824,29 +2750,27 @@ census id is accounted for here.
 | 235 | pcp_row_ref_peek | block | - | INV:INV-MM-5 | `4c85cec895ec` |
 | 246 | copy_kva | block | ptr-ops | INV:INV-MM-6 | `21b06a26f228` |
 | 255 | copy_kva_from | block | ptr-ops | INV:INV-MM-6 | `f975b9fc76dc` |
-| 270 | swap_dev_static | block | - | INV:INV-MM-7 | `73750c932fd6` |
-| 279 | swap_dev_static_mut | block | - | INV:INV-MM-7 | `f39b790d2cd5` |
-| 289 | page_slice_mut | block | ptr-ops,addr-arith | INV:INV-MM-7 | `f0e1ea7134b9` |
-| 296 | page_slice | block | raw-construct,ptr-ops,addr-arith | INV:INV-MM-7 | `d2bc5e6d23f7` |
-| 311 | defer_pool_mut | block | - | INV:INV-MM-8 | `c7d7c0c1efe9` |
-| 341 | vmemmap_stats_read | block | - | INV:INV-MM-9 | `83675eeff014` |
-| 350 | vmemmap_stats_write | block | - | INV:INV-MM-9 | `3cf5596851e2` |
-| 360 | vmemmap_zero_region | block | ptr-ops | INV:INV-MM-9 | `922fd9ca0a22` |
-| 385 | switch_address_space | block | - | INV:INV-MM-10 | `8587a3eb6ee6` |
-| 400 | <module> | unsafe-impl | - | INV:INV-MM-10 | `813106de8a5e` |
-| 401 | <module> | unsafe-impl | - | INV:INV-MM-2 | `eca08a161b50` |
-| 410 | compact_copy_page | block | - | INV:INV-MM-2 | `6cbf3684009c` |
-| 423 | kernel_layout_write | block | - | INV:INV-MM-11 | `193671dcef57` |
-| 431 | kernel_layout_ref | block | - | INV:INV-MM-11 | `ea0573eb453a` |
-| 446 | node_data_init | block | - | INV:INV-MM-12 | `a64f36659b10` |
-| 451 | <module> | unsafe-impl | - | INV:INV-MM-12 | `0b46b6542f6c` |
-| 452 | <module> | unsafe-impl | - | INV:INV-MM-2 | `3170e407a7ee` |
-| 463 | x86_caller_return_address | block | asm | INV:INV-MM-2 | `6a37c74635b3` |
-| 481 | sa_hdr_mut | block | ptr-ops | INV:INV-MM-13 | `f6135ba51f76` |
-| 491 | sa_hdr_ref | block | ptr-ops | INV:INV-MM-13 | `e2bf725d1bf5` |
-| 499 | sa_read_u16 | block | volatile,ptr-ops | INV:INV-MM-13 | `022d49a46178` |
-| 507 | sa_write_u16 | block | volatile,ptr-ops | INV:INV-MM-13 | `8fe39c55206c` |
-| 514 | sa_read_u64 | block | volatile,ptr-ops | INV:INV-MM-13 | `30f8bb862aa2` |
+| 269 | page_slice_mut | block | ptr-ops,addr-arith | INV:INV-MM-7 | `dc1395706e63` |
+| 276 | page_slice | block | raw-construct,ptr-ops,addr-arith | INV:INV-MM-7 | `b370f45abcde` |
+| 291 | defer_pool_mut | block | - | INV:INV-MM-8 | `468e49a2971e` |
+| 321 | vmemmap_stats_read | block | - | INV:INV-MM-9 | `9120f676cff7` |
+| 330 | vmemmap_stats_write | block | - | INV:INV-MM-9 | `390d6b3bcc9c` |
+| 340 | vmemmap_zero_region | block | ptr-ops | INV:INV-MM-9 | `d6d6bed57093` |
+| 365 | switch_address_space | block | - | INV:INV-MM-10 | `b48399121366` |
+| 380 | <module> | unsafe-impl | - | GAP | `19a5d1bc2a8f` |
+| 381 | <module> | unsafe-impl | - | GAP | `0826dd7bd607` |
+| 390 | compact_copy_page | block | - | INV:INV-MM-2 | `24bd6bdd2492` |
+| 403 | kernel_layout_write | block | - | INV:INV-MM-11 | `1c7f69b93e55` |
+| 411 | kernel_layout_ref | block | - | INV:INV-MM-11 | `6046db934b11` |
+| 426 | node_data_init | block | - | INV:INV-MM-12 | `78f356f692a8` |
+| 431 | <module> | unsafe-impl | - | GAP | `133a8d271bce` |
+| 432 | <module> | unsafe-impl | - | GAP | `0e6281e87dad` |
+| 443 | x86_caller_return_address | block | asm | INV:INV-MM-2 | `1d9cac344091` |
+| 461 | sa_hdr_mut | block | ptr-ops | INV:INV-MM-13 | `3ddc59879961` |
+| 471 | sa_hdr_ref | block | ptr-ops | INV:INV-MM-13 | `2a4424410f09` |
+| 479 | sa_read_u16 | block | volatile,ptr-ops | INV:INV-MM-13 | `bbf3dc94a025` |
+| 487 | sa_write_u16 | block | volatile,ptr-ops | INV:INV-MM-13 | `db07841da464` |
+| 494 | sa_read_u64 | block | volatile,ptr-ops | INV:INV-MM-13 | `3381c713ca68` |
 
 ### kernel/src/mm/page_desc.rs (8)
 
@@ -2865,9 +2789,9 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 262 | node_data | block | - | INV:INV-MM-12 | `6033f44d1099` |
-| 275 | node_data_mut | block | - | INV:INV-MM-12 | `fbf9206c1763` |
-| 291 | <module> | unsafe-fn | static-mut | INV:INV-MM-12 | `468397f5f14d` |
+| 271 | node_data | block | - | INV:INV-MM-12 | `1632ed86fbda` |
+| 284 | node_data_mut | block | - | INV:INV-MM-12 | `8f1a421e6c94` |
+| 300 | <module> | unsafe-fn | static-mut | INV:INV-MM-12 | `fb289bd7af30` |
 
 ### kernel/src/mm/vdso.rs (19)
 
@@ -3162,7 +3086,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1787 | rust_main_impl | block | asm | GAP | `cfb65ceaae98` |
+| 1802 | rust_main_impl | block | asm | GAP | `2ed6a369ec89` |
 
 ### kernel/src/list.rs (7)
 

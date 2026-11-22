@@ -72,17 +72,26 @@ pub struct PglistData {
 
     /// LRU list heads: PFN of the first page (most-recently used end).
     /// 0 means the list is empty.  Protected by `lru_lock`.
-    pub(crate) lru_heads: [AtomicUsize; NR_LRU_LISTS],
+    // Published for the rux-mm policy crate (M1b): all-atomic PFN
+    // links under lru_lock — the link/unlink loops are crate-side lru
+    // policy, safe to operate under forbid.
+    pub lru_heads: [AtomicUsize; NR_LRU_LISTS],
 
     /// LRU list tails: PFN of the last page (least-recently used end,
     /// where kswapd scans from).  0 means the list is empty.
-    pub(crate) lru_tails: [AtomicUsize; NR_LRU_LISTS],
+    pub lru_tails: [AtomicUsize; NR_LRU_LISTS],
 
     /// Number of pages on each LRU list.
-    pub(crate) lru_sizes: [AtomicUsize; NR_LRU_LISTS],
+    // Published for the rux-mm policy crate (M1b): all-atomic interior
+    // mutability — safe to operate under forbid; the LRU size CAS/fetch
+    // loops live in the crate-side lru/vmscan policy.
+    pub lru_sizes: [AtomicUsize; NR_LRU_LISTS],
 
     /// Spinlock protecting all LRU list mutations.
-    pub(crate) lru_lock: Spinlock<()>,
+    // Published for the rux-mm policy crate (M1b): the LRU list lock —
+    // lock-and-link discipline is crate-side lru policy (INV under the
+    // lru_lock ordering rule, docs/architecture/lock-ordering.md).
+    pub lru_lock: Spinlock<()>,
 }
 
 impl PglistData {

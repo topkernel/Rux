@@ -32,16 +32,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 // Types
 // ============================================================================
 
-/// Result of a compaction attempt.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CompactResult {
-    /// Found a free block of the requested order.
-    Success,
-    /// Zone fully scanned but no suitable block found.
-    Complete,
-    /// No movable pages to compact.
-    Skipped,
-}
+// CompactResult is seam vocabulary (the framework allocator matches on
+// it, this module produces it); re-exported so compact::CompactResult
+// keeps resolving.
+pub use super::mm_hooks::CompactResult;
 
 /// Controls a single compaction pass over a zone.
 struct CompactControl {
@@ -444,8 +438,8 @@ fn migrate_page_window(
     // Unlink src here, and link dst in its place — the migrated page
     // keeps its reclaim visibility (same shape as the vmscan swap-out
     // cleanup).
-    super::lru::page_remove_lru(src);
-    super::lru::page_add_anon_lru(dst);
+    super::mm_hooks::page_remove_lru(src);
+    super::mm_hooks::page_add_anon_lru(dst);
 
     // Clear src metadata
     // Note: try_to_unmap() only decrements _mapcount, not _refcount.

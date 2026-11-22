@@ -239,3 +239,167 @@ M1a commits. Verdict: a shared-base regression in the exit/reap
 storage-deferral path (kernel/src/process/exit.rs, RTS-DEFER machinery
 landed 2026-11-21), NOT an M1a effect. Routed to the exit/reap owner;
 M1a's own rows all completed and passed.
+
+## M1b execution record (2026-11-23, ur-L1/m1b)
+
+The crate flip of the nine §4 policy files, measured first per the
+standing rule. Final per-file verdicts:
+
+| file | lines | verdict | seam cost |
+|---|---:|---|---|
+| hugepage | 307 | MOVED (sole-copy git mv) | 0 rows (zero framework call sites) |
+| kswapd | 290 | MOVED | 3 rows |
+| oom_kill | 586 | MOVED | 4 rows |
+| vmscan | 877 | MOVED | 6 rows |
+| lru | 579 | MOVED | 8 rows |
+| compact | 535 | MOVED | 2 rows (+CompactResult to seam) |
+| swap | 582* | MOVED | 8 rows (+codec+SwapStats to seam) |
+| vma | 1021 | SHELVED — type substrate | — |
+| mm_struct | 1488 | SHELVED — type substrate | — |
+
+*swap post-conversion line count differs slightly (codec/edges moved out,
+interior-mutability fields in).
+
+### The two shelvings (numbers, per the shelving-is-success rule)
+
+- **vma.rs**: 88 qualified framework-side refs across 19 staying files,
+  100% TYPES (VmaType 26, VmaFlags 20, VirtAddr 13, VmaOrigin 12, Vma 10,
+  VmaManager 3, layout types 4) — ZERO fn refs. Inherent impls must live
+  in the defining crate; the M1a seam itself (mm_hooks.rs) names
+  VmaFlags/VmaType; Cargo refuses the rux → rux-mm dependency that
+  re-exporting the types would need. The POLICY over the VMA tree already
+  moved with M1a (the per-arch policy files are VmaManager's consumers).
+- **mm_struct.rs**: 50 refs across 17 files, 100% types/statics (MmStruct
+  27, PteLock 10, GlobalPteLock 6, FRESH_TREE_PTE_LOCK 4, AddressSpace 2,
+  MmFlags 1) — and PteLock/GlobalPteLock/FRESH_TREE_PTE_LOCK are LOCK
+  MECHANISM (the VMA-find lock rule's primitive side, the defect-C seam)
+  which §4 itself keeps core-side.
+
+Unblock path (recorded, not scheduled): the types would need a
+shared types-crate below both rux and rux-mm — a redesign, not a file
+move. Neither file blocks any other rung.
+
+### The seam (31 rows + vocabulary)
+
+`MmPolicyHooks` (kernel/src/mm/mm_hooks.rs, same file/shape as MmHooks:
+OnceSlot, panic-not-noop defaults, direct-read accessors):
+- kswapd 3 (init/enable_oom/wakeup_kswapd)
+- vmscan 6 (try_to_free_pages, drain_file_cache_before_oom,
+  vscan_heartbeat, vscan_census_line, zone_dirty_writeback_state,
+  zone_below_dirty_writeback_mark)
+- oom_kill 4 (fault_oom_kill_or_retry, kernel_fault_oom_kill,
+  sysrq_oom_kill, oom_badness)
+- compact 2 (migration_in_progress, compact_zone)
+- swap 8 (init/activate/deactivate/boot_disk/nr_active/free_slot/stats/
+  write_census)
+- lru 8 (page_add_anon_lru, page_remove_lru, page_add_file_lru,
+  page_add_file_lru_young, page_add_file_lru_young_batch,
+  lru_activate_young, lru_tail, lru_demote_active_file_oldest)
+
+Seam vocabulary (direct, no dispatch — the FaultFlags/MmFaultResult
+precedent): the PTE-entry codec (make/is_swap_entry, make/
+is_migration_entry, entry type/offset, both signature consts) and the
+result types CompactResult + SwapStats. The codec is named by BOTH the
+arch fault mechanism and the swap policy; the types are produced by
+policy and matched by framework.
+
+### Conversions on the moved code (the M1a vocabulary, applied)
+
+- swap's `static mut SWAP_DEVICES` → plain `static` with full interior
+  mutability (start_sector/max_slots → atomics under the existing
+  enabled Release/Acquire publication gate; swap_type const-initialized
+  and never stored again). This DELETED the two INV-MM-7 dev-static
+  unsafe edges in mm/edges.rs (framework unsafe count −2 blocks) and is
+  what made the file movable with zero unsafe and zero framework edges
+  naming crate types.
+- The five `*mut` sites the measurement flagged needed NO conversion:
+  oom's `Victim.chosen: Option<*mut Task>` is stored and
+  identity-compared only (the kill re-pins by pid through
+  pid_hash_lookup_pinned); kswapd's `*mut c_void` thread arg and spawn
+  cast are ABI noise; compact's `*mut Zone` params and lru's
+  `&[*mut Page]` batches carry raw pointers as TYPES only — every deref
+  inside already rode the published boxed_ref/boxed_mut/page_ref_of
+  typed edges.
+- Published for the crate (visibility bumps): PglistData's LRU substrate
+  (lru_heads, lru_tails, lru_sizes — all-atomic arrays — and lru_lock
+  itself: the lock-and-link discipline IS the policy, the Spinlock
+  primitive stays core-side); security+signal+syscall join the crate's
+  root re-exports.
+
+### Commit ladder (each triple-arch rc=0)
+
+1. swap storage under full interior mutability (the M1b precondition;
+   edges −2 unsafe blocks)
+2. the M1b seam — MmPolicyHooks + codec + types + every framework call
+   site re-pointed (lib.rs, timer, page_alloc, ext4, procfs, both traps,
+   all three arches' mm_ops/mmu_init, rmap, page_cache x21, dfx ledger,
+   rux-syscall swapon/swapoff/mmap); in-tree registrar fills rows
+3-9. per-file flips (hugepage → kswapd → oom_kill → vmscan → lru →
+   compact → swap): sole-copy git mv into kernel/rux-mm/src/mm/, rows
+   repointed crate-side, the framework in-tree registrar's copies fall
+   to dead EMPTY defaults under the bin's first-wins registration.
+
+Boot-order check (the S1 self-recursion/order rule): registration stays
+at rust_main (rux-bin calls rux_mm::register_all before rust_main_impl);
+swap_init (lib.rs boot), kswapd spawn, and the mmu_init teardown's
+swap_free_slot all run strictly after it; no moved body calls a seam
+accessor that dispatches its own row (the codec is direct, the moved
+fns call each other crate-side).
+
+### Negative probe
+
+`unsafe { *x }` injected into rux-mm/src/mm/vmscan.rs (the one moved
+file without its own inner forbid): `error: usage of an unsafe block`
+with the lint level citing **rux-mm/src/lib.rs:15 #![forbid(unsafe_code)]**
+— the crate boundary is the operative enforcement. Reverted; clean
+rebuild rc=0. (Probing swap.rs instead cites that file's own inherited
+inner forbid — same enforcement, doubly belt-and-braces.)
+
+### Gates
+
+- Triple-arch rc=0 after every commit (x86_64, riscv64, aarch64).
+- riscv64 make test: **864/864 green** (main baseline 864).
+- minimal-rootfs boot to shell, zero panics; both seam-dispatched boot
+  rows fired (`mm: swap 256 MB tail carve [ok]`, `mm: kswapd reclaim
+  thread [ok]` — swap ACTIVATED, so the converted SWAP_DEVICES path
+  executed).
+- pbench (x86_64/KVM, debug bzImage): see the perf table below.
+
+### M1b tier-2 perf gate (2026-11-23, x86_64/KVM, debug bzImage, --smp 2 --mem 2G)
+
+Two m1b boards + one SAME-BASE control board (203cd6191 built in a
+side worktree, same rig, same day — the fair-comparison rule):
+
+| row | control med (µs) | m1b board1 | m1b board2 | delta (mean) |
+|---|---:|---:|---:|---:|
+| p1_null | 0.271 | 0.271 | 0.270 | 0.0% |
+| p1_clock | 0.351 | 0.351 | 0.351 | 0.0% |
+| p2_ctxsw | 1.723 | 1.753 | 1.738 | +1.3% |
+| p3a_fault_anon | 0.010 | 0.010 | 0.010 | 0.0% |
+| p3b_fault_cow | 2.064 | 2.084 | 2.054 | +0.2% |
+| p3c_fault_file | (not reached) | 0.010 | 0.010 | class 0.010 |
+| p4_fork_exit | 329.6 | 334.3 | 333.5 | +1.3% |
+
+Every mm-guarded row is within ~1.3% of the same-day same-base control
+(far inside the ±20% tier band). Note: today's p3b class reads ~2.06 on
+BOTH sides — above the 1.974-2.024 class recorded on M1a's day; that is
+day/host-load drift affecting the control equally, which is exactly why
+the gate compares same-day boards. The p3b min values tell the same
+story (ctrl 1.944, m1b 1.944/1.963).
+
+P5 AND LATER: all three boards (control included) wedge in the
+RTS-DEFER exit/reap family — the same shared-base defect M1a recorded
+(its signature is byte-identical on a kernel without any M1b commit);
+the wedge point drifts board-to-board (the control lost p3c to it, the
+m1b boards lost P5+). Not an M1b effect; remains with the exit/reap
+owner.
+
+### Unsafe gate
+
+Registry updated for the flips (hugepage/kswapd/oom_kill/lru/compact/
+swap at their new rux-mm paths; plus the rux-fs lane's missed
+selinuxfs path fix — pre-existing gate failure, one line). Sidecar
+content-remapped across the moves and the two deleted INV-MM-7
+dev-static edges: 2232 regions (base 2234, −2 = the deleted edges),
+2033 INV / 199 GAP (base 2017/217) — 43 INV annotations restored by
+(file,fn) carry-over after the id shifts. `unsafe_gate --check`: OK.

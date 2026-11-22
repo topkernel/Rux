@@ -3900,7 +3900,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // selection, rate-limited) the chance to free the real
                 // hog before this task dies. Retry on true, die on false
                 // (struck out or nothing killable).
-                if !crate::mm::oom_kill::fault_oom_kill_or_retry(
+                if !crate::mm::mm_hooks::fault_oom_kill_or_retry(
                     crate::process::current_pid(),
                 ) {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));

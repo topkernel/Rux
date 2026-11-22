@@ -133,8 +133,19 @@ rux-mm            forbid-safe  (M1a DONE 2026-11-23, origin c0e46ed73: the
                   routing, swap fault, fault-around — 6,876 lines with ZERO
                   unsafe blocks; 6-row mm_hooks seam over ~40 framework
                   call sites; p3b_fault_cow 1.994 within the same-day
-                  control band 1.974-2.024. M1b (the nine §4 policy
-                  files) follows)
+                  control band 1.974-2.024. M1b DONE 2026-11-23: seven of
+                  the nine §4 policy files (hugepage, kswapd, oom_kill,
+                  vmscan, lru, compact, swap — 3,706 lines) sole-copied
+                  under the crate forbid via the 31-row MmPolicyHooks
+                  seam + seam-vocabulary codec/types; swap's static-mut
+                  device table converted to full interior mutability
+                  (framework unsafe -2 blocks). SHELVED with numbers
+                  (mm-split-rung.md): vma + mm_struct — the TYPE
+                  substrate (88/50 framework-side type refs, zero fn
+                  refs; inherent impls must live with their types; the
+                  seam itself names MmStruct/VmaFlags/VmaType and Cargo
+                  forbids the rux->rux-mm cycle). Unblocks only via a
+                  types-in-shared-crate redesign, not a file move)
 rux-syscall       forbid-safe  (DONE at M3; the pattern-proven first rung)
 rux-fs        forbid-safe  (DONE 2026-11-23, origin 50f0cc97a: pipe/fifo/
                   inotify/memfd/selinuxfs sole-copied under crate forbid;

@@ -61,7 +61,7 @@
 //!   `insert` dedups against the live entry.
 
 use crate::arch::mm::{phys_to_virt, PhysAddr};
-use crate::mm::lru;
+use crate::mm::mm_hooks;
 use crate::mm::page_alloc::{alloc_page, alloc_page_batch, free_page};
 use crate::mm::page_desc::{page_desc, pfn_to_page_mut, Page, PageFlag, PageType};
 use crate::mm::pglist::{first_online_node, LRU_INACTIVE_FILE};
@@ -1314,7 +1314,7 @@ impl PageCache {
                         dirty_account_removed(page);
                         g.remove(&page_index);
                         if let Some(page_desc) = page_desc(pfn) {
-                                lru::page_remove_lru(page_desc);
+                                mm_hooks::page_remove_lru(page_desc);
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1368,7 +1368,7 @@ impl PageCache {
                         dirty_account_removed(page);
                         g.remove(&page_index);
                         if let Some(page_desc) = page_desc(pfn) {
-                                lru::page_remove_lru(page_desc);
+                                mm_hooks::page_remove_lru(page_desc);
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1409,7 +1409,7 @@ impl PageCache {
                     dirty_account_removed(page);
                     g.remove(&page_index);
                     if let Some(page_desc) = page_desc(pfn) {
-                            lru::page_remove_lru(page_desc);
+                            mm_hooks::page_remove_lru(page_desc);
                     }
                     release_page_frame(pfn);
                     self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1447,7 +1447,7 @@ impl PageCache {
                     dirty_account_removed(page);
                     g.remove(&page_index);
                     if let Some(page_desc) = page_desc(pfn) {
-                            lru::page_remove_lru(page_desc);
+                            mm_hooks::page_remove_lru(page_desc);
                     }
                     release_page_frame(pfn);
                     self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1496,7 +1496,7 @@ impl PageCache {
                         dirty_account_removed(page);
                         g.remove(&page_index);
                         if let Some(page_desc) = page_desc(pfn) {
-                                lru::page_remove_lru(page_desc);
+                                mm_hooks::page_remove_lru(page_desc);
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -2153,7 +2153,7 @@ impl PageCache {
                         dirty_account_removed(page);
                         g.remove(&page_index);
                         if let Some(page_desc) = page_desc(pfn) {
-                                lru::page_remove_lru(page_desc);
+                                mm_hooks::page_remove_lru(page_desc);
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -2223,7 +2223,7 @@ impl PageCache {
                         dirty_account_removed(&removed);
                     }
                     if let Some(page_desc) = page_desc(pfn) {
-                            lru::page_remove_lru(page_desc);
+                            mm_hooks::page_remove_lru(page_desc);
                     }
                     release_page_frame(pfn);
                 }
@@ -2314,7 +2314,7 @@ impl PageCache {
                         dirty_account_removed(&removed);
                     }
                     if let Some(page_desc) = page_desc(pfn) {
-                            lru::page_remove_lru(page_desc);
+                            mm_hooks::page_remove_lru(page_desc);
                     }
                     release_page_frame(pfn);
                 }
@@ -2450,7 +2450,7 @@ impl PageCache {
                         let stale = g.remove(&page_index).expect("contains_key");
                         dirty_account_removed(&stale);
                         if let Some(page_desc) = page_desc(stale.pfn) {
-                                lru::page_remove_lru(page_desc);
+                                mm_hooks::page_remove_lru(page_desc);
                         }
                         release_page_frame(stale.pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -2481,7 +2481,7 @@ impl PageCache {
                         pd.set_flag(PageFlag::UpToDate);
                         pd.set_mapping(key as usize as *mut core::ffi::c_void);
                         pd.set_index(page_index as usize);
-                        lru::page_add_file_lru_young(pd);
+                        mm_hooks::page_add_file_lru_young(pd);
                     }
                     g.insert(
                         page_index,
@@ -2626,7 +2626,7 @@ impl PageCache {
                         let stale = g.remove(&page_index).expect("contains_key");
                         dirty_account_removed(&stale);
                         if let Some(page_desc) = page_desc(stale.pfn) {
-                                lru::page_remove_lru(page_desc);
+                                mm_hooks::page_remove_lru(page_desc);
                         }
                         release_page_frame(stale.pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -2689,7 +2689,7 @@ impl PageCache {
                         // setting flags. (Two-tier policy: young at head, reclaim from
                         // tail; linking at the tail made the eviction scan see the
                         // freshest page first.)
-                        lru::page_add_file_lru_young(pd);
+                        mm_hooks::page_add_file_lru_young(pd);
                     }
 
                     // Fill the fresh frame (the named edge).
@@ -3136,7 +3136,7 @@ impl PageCache {
                                     let stale = e.remove();
                                     dirty_account_removed(&stale);
                                     if let Some(pd) = page_desc(stale.pfn) {
-                                            lru::page_remove_lru(pd);
+                                            mm_hooks::page_remove_lru(pd);
                                     }
                                     release_page_frame(stale.pfn);
                                     self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -3196,7 +3196,7 @@ impl PageCache {
                         }
                     }
                     if lru_n > 0 {
-                        lru::page_add_file_lru_young_batch(&lru_batch[..lru_n]);
+                        mm_hooks::page_add_file_lru_young_batch(&lru_batch[..lru_n]);
                     }
                     if mark_dirty && appended > 0 {
                         DIRTY_PAGES.fetch_add(appended as usize, Ordering::Relaxed);
@@ -3383,7 +3383,7 @@ impl PageCache {
             for k in 0..n {
                 let pfn = victims[k].1;
                 if let Some(pd) = page_desc(pfn) {
-                        lru::page_remove_lru(pd);
+                        mm_hooks::page_remove_lru(pd);
                 }
                 release_page_frame(pfn);
                 self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -3649,7 +3649,7 @@ impl PageCache {
         }
 
         for _round in 0..2 {
-            let mut pfn = lru::lru_tail(LRU_INACTIVE_FILE);
+            let mut pfn = mm_hooks::lru_tail(LRU_INACTIVE_FILE);
             let mut scanned = 0usize;
 
             while pfn != 0 && scanned < MAX_SCAN {
@@ -3771,12 +3771,12 @@ impl PageCache {
                             // end of the active list, keep scanning.
                             EV_SECOND_CHANCE.fetch_add(1, Ordering::Relaxed);
                             page.clear_flag(PageFlag::Referenced);
-                            lru::lru_activate_young(page);
+                            mm_hooks::lru_activate_young(page);
                             pfn = next_pfn;
                             continue;
                         }
                         Victim::Evict => {
-                            lru::page_remove_lru(page);
+                            mm_hooks::page_remove_lru(page);
                             release_page_frame(pfn);
                             self.total_pages.fetch_sub(1, Ordering::Relaxed);
                             STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
@@ -3791,7 +3791,7 @@ impl PageCache {
             // pages to the young end of inactive and retry once. An empty
             // active list (or nothing demotable) falls to the map scan.
             EV_SCAN_EXHAUST.fetch_add(1, Ordering::Relaxed);
-            let demoted = lru::lru_demote_active_file_oldest(DEMOTE_BATCH);
+            let demoted = mm_hooks::lru_demote_active_file_oldest(DEMOTE_BATCH);
             if demoted == 0 {
                 break;
             }
@@ -3838,7 +3838,7 @@ impl PageCache {
                     }
                     if p.test_flag(PageFlag::Referenced) {
                         p.clear_flag(PageFlag::Referenced);
-                        lru::lru_activate_young(p);
+                        mm_hooks::lru_activate_young(p);
                         continue; // second chance — keep scanning
                     }
                 }
@@ -3858,7 +3858,7 @@ impl PageCache {
                 }
                 drop(g);
                 if let Some(page_desc) = page_desc(pfn) {
-                        lru::page_remove_lru(page_desc);
+                        mm_hooks::page_remove_lru(page_desc);
                 }
                 release_page_frame(pfn);
                 self.total_pages.fetch_sub(1, Ordering::Relaxed);

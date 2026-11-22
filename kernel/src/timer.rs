@@ -747,7 +747,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // stress-port SP-7: per-page swap skip-reason census — one
             // line per second ONLY while anon reclaim is being exercised
             // (self-gated on census deltas; zero serial otherwise).
-            crate::mm::vmscan::vscan_heartbeat();
+            crate::mm::mm_hooks::vscan_heartbeat();
             // stress-port r9 (kill10 face-1 handoff): overdue-wheel
             // anomaly — an entry still IN the wheel more than 2 s past
             // its deadline is a wheel-side loss (the delivery-loss face
