@@ -187,8 +187,7 @@ pub fn note_acquire(
         // is strong stale-booking evidence.
         let mis = if (cpu as usize) < crate::config::MAX_CPUS {
             // Volatile: the sched slot is written by its owning CPU under
-            // the GRQ; this is a racy diagnostic read (same discipline as
-            // r83hunt's header reads).
+            // the GRQ; this is a racy diagnostic read.
             let slot_task = unsafe {
                 core::ptr::read_volatile(
                     &crate::sched::sched::cpu_state(cpu as usize).current

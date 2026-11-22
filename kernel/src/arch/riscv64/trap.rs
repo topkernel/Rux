@@ -2106,7 +2106,77 @@ pub extern "C" fn debug_trap_entry(_regs_ptr: u64, _cause: u64, _tp: u64) {
 /// Debug function to print trap exit info (called from assembly)
 #[no_mangle]
 pub extern "C" fn debug_trap_exit(_sp: u64, _tp: u64) {
-    // Debug disabled
+    // Debug output disabled
+}
+
+/// R84b/R85 ksp gate report — called from trap.S at the six ti_kernel_sp
+/// containment gates whenever the value fails the kernel-half test and the
+/// gate anchors sp at the task's own kernel-stack top instead.
+///
+/// The hunt that owned this report (dfx/r83hunt.rs) retired with its
+/// class closed (fix c1539f6ed + the fc5f23d47/2e9755c67 corruption
+/// family); the ASM GATES stay as defensive containment, so the report
+/// target moved here in compact form. Same discipline as the original:
+/// raw UART only (called from asm with arbitrary register state, locks
+/// unusable), one report per site per boot.
+///
+/// Arguments: a0 = site (1..=6, the trap.S gate id), a1 = the rejected
+/// value, a2 = tp, a3 = sepc of the interrupted context.
+#[no_mangle]
+pub extern "C" fn r84_ksp_trap(site: u64, val: u64, tp: u64, sepc: u64) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static SEEN: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+    let s = (site as usize) % 6;
+    if SEEN[s].swap(1, Ordering::AcqRel) != 0 {
+        return; // one report per site
+    }
+    fn phex(mut v: u64) {
+        use crate::console::uart_putc_raw as putchar;
+        for _ in 0..16 {
+            let n = (v >> 60) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+            v <<= 4;
+        }
+    }
+    fn pdec(mut v: u64) {
+        use crate::console::uart_putc_raw as putchar;
+        let mut buf = [0u8; 10];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    use crate::console::uart_putc_raw as putchar;
+    for b in b"\nKSP-GATE site=" {
+        putchar(*b);
+    }
+    pdec(site);
+    for b in b" val=0x" {
+        putchar(*b);
+    }
+    phex(val);
+    for b in b" tp=0x" {
+        putchar(*b);
+    }
+    phex(tp);
+    for b in b" sepc=0x" {
+        putchar(*b);
+    }
+    phex(sepc);
+    for b in b" jiffies=" {
+        putchar(*b);
+    }
+    pdec(crate::timer::get_jiffies());
+    putchar(b'\n');
 }
 
 // ============================================================================

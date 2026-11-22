@@ -58,8 +58,10 @@ pub mod ledger;
 pub mod driftwatch;
 #[cfg(feature = "x86_64")]
 pub mod scribble;
-/// R83 (R74 producer hunt): live task-header audit + victim dumps.
-pub mod r83hunt;
+// (2026-11-23, §7 retirement round: dfx/r83hunt.rs DELETED — the R74/R83
+// task-header hunt closed with c1539f6ed (the trap.S producer) and the
+// fc5f23d47 + 2e9755c67 corruption family; the module's 8 call-site
+// stubs and its rux:r83scan gate event went with it.)
 /// CLOCK_MONOTONIC jump tripwire (rux:monowatch (retired dfx=monowatch)): samples the shared
 /// timebase ~1 Hz and reports backward motion or multi-second spikes
 /// with the active clocksource named.
