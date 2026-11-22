@@ -47,7 +47,16 @@ pub fn pick_giveups() -> (u64, u64) {
 /// Total pick-walk entries since boot (WW5 heartbeat; wake-side
 /// snapshot for the strand line's visits= field).
 pub fn ww_pick_walks() -> u64 {
-    crate::sched::sched_hooks::ww_pick_walks()
+    // S1b sole-copy bug (the boot wedge): this impl is REGISTERED as the
+    // framework hook (lib.rs register_all row `ww_pick_walks`), so the
+    // old body's forward back to sched_hooks::ww_pick_walks() was
+    // self-recursion — hooks wrapper -> registered impl -> forwarder ->
+    // hooks wrapper, each level copying the 73-row hook table to the
+    // stack, until the stack chewed past the .bss page tables and the
+    // trap handler re-trapped (sepc=trap_entry, silent wedge at the
+    // first kswapd pick). Read the counter directly, like the
+    // ww_pick_walk_inc closure row does.
+    WW_PICK_WALKS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// (on_cpu-mark heals, stale-claim heals) since boot — the two R85
