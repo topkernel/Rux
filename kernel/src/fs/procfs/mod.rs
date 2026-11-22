@@ -2923,3 +2923,22 @@ fn partitions_generate() -> alloc::vec::Vec<u8> {
     ));
     out.into_bytes()
 }
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The proc mount entry (old mount.rs "proc"|"procfs" arm, verbatim).
+pub fn mount_proc(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data);
+    mount_procfs().map_err(|e| e as i32)?;
+    crate::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
+    crate::fs::mount::register_mount(fs_type, target, "proc", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["proc", "procfs"], mount_proc);
+}

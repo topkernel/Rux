@@ -322,3 +322,22 @@ pub fn create_root_inode() -> Arc<Inode> {
     inode.ops = Some(&SELINUXFS_INODE_OPS);
     Arc::new(inode)
 }
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The selinuxfs mount entry (old mount.rs arm, verbatim).
+pub fn mount_selinux(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data);
+    let root_inode = create_root_inode();
+    crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+    crate::fs::mount::register_mount(fs_type, target, "selinuxfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["selinuxfs"], mount_selinux);
+}

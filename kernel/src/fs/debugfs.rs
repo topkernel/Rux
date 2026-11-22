@@ -601,3 +601,29 @@ pub static DEBUGFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .lseek(debugfs_file_lseek)
     .close(debugfs_file_close)
     .build();
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The debugfs mount entry (old mount.rs arm, verbatim: single-instance
+/// semantics — an existing canonical mount answers EBUSY).
+pub fn mount_debugfs_instance(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data, fs_type);
+    if crate::fs::mount::mounted_as("debugfs", target) {
+        return Err(crate::errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+    }
+    if debugfs_root().is_none() {
+        init_debugfs()?;
+    }
+    let _ = crate::fs::vfs::path_lookup(target, 0);
+    crate::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
+    crate::fs::mount::register_mount("debugfs", target, "debugfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["debugfs"], mount_debugfs_instance);
+}

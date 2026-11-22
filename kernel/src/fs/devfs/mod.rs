@@ -2452,3 +2452,26 @@ pub fn create_root_inode(root_entry: &Arc<DevfsEntry>) -> alloc::sync::Arc<Inode
     inode.private_data = Some(Arc::into_raw(Arc::clone(root_entry)) as *mut u8);
     alloc::sync::Arc::new(inode)
 }
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The devtmpfs mount entry (old mount.rs "devfs"|"devtmpfs" arm).
+pub fn mount_devtmpfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data);
+    init();
+    if let Some(root_entry) = get_root_entry() {
+        crate::fs::vfs::vfs_mount(target, create_root_inode(&root_entry), mnt_flags);
+        crate::fs::mount::register_mount(fs_type, target, "devtmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        Ok(())
+    } else {
+        Err(crate::errno::Errno::NoSuchDevice.as_neg_i32())
+    }
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["devfs", "devtmpfs"], mount_devtmpfs);
+}
