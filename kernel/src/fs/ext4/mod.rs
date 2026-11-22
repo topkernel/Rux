@@ -3515,7 +3515,7 @@ fn get_ext4_fs_rw_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i
 /// Drop reclaims the box. Every read of the cached on-disk inode goes
 /// through this helper (or the `_mut` twin below) — the ONE audited
 /// resolution per direction.
-fn sb_inode_of(inode: &Inode) -> Result<&inode::Ext4Inode, i32> {
+pub(super) fn sb_inode_of(inode: &Inode) -> Result<&inode::Ext4Inode, i32> {
     let p = inode.sb.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
     // SAFETY: INV-EXT4-SBRES-1 above.
     Ok(unsafe { &*(p as *const inode::Ext4Inode) })
@@ -3524,7 +3524,7 @@ fn sb_inode_of(inode: &Inode) -> Result<&inode::Ext4Inode, i32> {
 /// The mutating twin of `sb_inode_of` (INV-EXT4-SBRES-1): for
 /// cache-refresh stores into the sb box. Callers hold the ext4 big
 /// lock (EXT4_BIG_LOCK) or run in single-threaded creation contexts.
-fn sb_inode_of_mut(inode: &Inode) -> Result<&mut inode::Ext4Inode, i32> {
+pub(super) fn sb_inode_of_mut(inode: &Inode) -> Result<&mut inode::Ext4Inode, i32> {
     let p = inode.sb.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
     // SAFETY: INV-EXT4-SBRES-1 above; no aliasing shared borrow is live
     // at the store sites that use this (see each caller's lock note).
