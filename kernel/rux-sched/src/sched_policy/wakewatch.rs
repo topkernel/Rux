@@ -152,6 +152,8 @@ fn slot_of(task: *mut crate::process::Task) -> &'static WwSlot {
 /// paths, fork first-link, heal re-inserts). Called with the GRQ lock
 /// held by the callers in sched.rs.
 pub fn note_wake(task: *mut crate::process::Task) {
+    let probe_zero = TABLE[0].task.load(Ordering::Relaxed);
+    if probe_zero == 0xFFFF_FFFF { for &c in b"z" { crate::console::uart_putc_raw(c); } }
     let slot = slot_of(task);
     slot.walks
         .store(super::fair::ww_pick_walks(), Ordering::Release);

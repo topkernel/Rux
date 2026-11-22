@@ -1,237 +1,91 @@
-//! MIT License
-//!
-//! Copyright (c) 2026 Fei Wang
-//!
-//! Completely Fair Scheduler (CFS) Implementation
-//!
-//! Core concepts of CFS:
-//! 1. Use virtual runtime (vruntime) to measure CPU time obtained by processes
-//! 2. vruntime = actual runtime * (NICE_0_LOAD / process weight)
-//! 3. Higher priority processes have larger weights, vruntime grows slower
-//! 4. When scheduling, select the process with smallest vruntime to run
-//!
-//! Key data structures:
-//! - SchedEntity: Scheduling entity, containing vruntime, weight, etc.
-//! - CfsRunQueue: CFS run queue, using BTreeMap sorted by vruntime
-//! - LoadWeight: Process weight, related to nice value
-//!
-//! This file also implements the FairSchedClass which wraps CFS:
-//! - SCHED_NORMAL: Normal tasks with nice-based weights
-//! - SCHED_BATCH: Batch tasks (similar to normal but with different wakeup behavior)
-//! - SCHED_IDLE: Idle policy tasks with very low weight (WEIGHT_IDLEPRIO = 3)
-//!
-//! SCHED_IDLE policy is NOT the same as idle_sched_class:
-//! - idle_sched_class is for per-CPU idle tasks (pid=0) only
-//! - SCHED_IDLE policy tasks use this class with minimal weight
+//! The scheduling ENTITY STORAGE (crate-flip S1b): the per-task
+//! scheduling entities, the load weights, the class RUNQUEUES (the
+//! GRQ's embedded storage) and the clock/slice math — everything Task
+//! or GlobalRunQueue embed by value. Storage follows the owner; the
+//! policy crate manipulates it through pub fields/methods and its
+//! decision fns (the pick cores live policy-side as free fns over
+//! this storage; the diag counters route through SchedHooks rows).
 
-
-// S1 pre-work (2026-11-22): zero unsafe remains (the Send/Sync markers were
-// vestigial — auto-derived; deletion verified by green check). Tree-level
-// forbid until the S1 crate split.
-#![forbid(unsafe_code)]
-
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-
-// Use config values for scheduler timing
-use crate::config::{KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
+use super::sched_hooks::{CLASS_DL_BIT, CLASS_RT_BIT, CLASS_CFS_BIT};
+use core::sync::atomic::{AtomicU64, AtomicBool, AtomicU32, AtomicI64, AtomicUsize, Ordering};
+use alloc::collections::BTreeMap;
+use super::edges::{VruntimeKey, RbNode, RbTimeline, node_key, node_of_task, task_of_node};
+use crate::list::ListHead;
 use crate::process::task::{Task, SchedPolicy};
-use super::class::{SchedClass, RunQueueRef};
+use crate::config::{MAX_CPUS, MAX_TASKS, KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
+use crate::trace;
 
-// ============================================================================
-// s14 pick-skip history (rux:schedtrace (retired dfx=schedtrace)) — the strand-victim discriminator.
-//
-// PICK-SKIP-ALL reports only the total-failure shape (a pick that found
-// NOTHING pickable). The msg-region WAKE-STRANDED family shows the other
-// shape: a victim refused by every pick AMID pickable candidates —
-// invisible to the report, yet it is the ~1s-grid strand producer
-// (fleet ltp-b r2: 100/100 strands in the msg* region with zero
-// skip-alls). This side table accumulates, per task, the refusal
-// reasons the pick walk issued while it sat queued; wakewatch's strand
-// report prints and clears the history at pick time, so every strand
-// line names WHY the victim was skipped for the whole window.
-// ============================================================================
 
-struct SkipHistSlot {
-    task: AtomicU64,
-    /// Refusal counts by reason (1=ownership/on_cpu/claim-this-cpu,
-    /// 2=foreign claim, 3=affinity, 4=throttled, 5=healed reset).
-    why: [AtomicU64; 5],
-    /// Total refusals recorded.
-    n: AtomicU64,
-    /// jiffies at the FIRST recorded refusal of this episode.
-    first_jif: AtomicU64,
+/// CFS run queue
+pub struct CfsRunQueue {
+    /// Task timeline sorted by vruntime
+    ///
+    /// grq-10ns: entity-embedded intrusive red-black tree (the reference
+    /// kernel's cfs_rq tasks_timeline / rb_root_cached). The nodes live
+    /// inside each task's SchedEntity, so insert/erase under the GRQ are
+    /// pointer rewires — the BTreeMap's allocator-backed split/merge is
+    /// gone from the critical section.
+    pub timeline: RbTimeline,
+
+    /// Currently running scheduling entity
+    pub curr: *mut crate::process::Task,
+
+    /// Minimum vruntime in queue
+    ///
+    /// Used for new task vruntime initialization
+    /// New task vruntime = min_vruntime, this prevents new tasks from getting too much CPU time
+    pub min_vruntime: AtomicU64,
+
+    /// Number of tasks in run queue
+    nr_running: AtomicU64,
+
+    /// Total weight
+    pub load_weight: AtomicU64,
+
+    /// Next task ID (for generating unique keys)
+    next_task_id: AtomicU64,
+    /// 64th (EEVDF avg_vruntime, 6.6 fair.c:706-739 parity): Sum of
+    /// (vruntime_i - min_vruntime)*w_i over the QUEUED entities -- the
+    /// RELATIVE form the reference derives explicitly ("since v_i is u64,
+    /// and the multiplication could easily overflow, transform it into a
+    /// relative form"). Maintained O(1) at timeline insert/remove; REBASED
+    /// by avg_vruntime_update (sum -= delta*load) on every min_vruntime
+    /// advance so every stored offset stays relative to the CURRENT
+    /// min_vruntime. The 63rd's first attempt stored ABSOLUTE
+    /// vruntime*weight sums and still added min_vruntime in the read --
+    /// V ~ min_vr + true average, the placed values fed back
+    /// multiplicatively (~2x per wake generation), wrapped u64 and froze
+    /// garbage vruntimes within a minute (ohw36: init vr=0xfd79.. frozen
+    /// unpicked from t=53s). The relative form is also leak-bounded: any
+    /// unpaired insert/remove residue is (vr - min_vr)*w -- the size of
+    /// the clamp window, never boot-magnitude. GRQ-HELD. i128: offsets
+    /// are small but weight-scaled products of a deep queue still fit
+    /// trivially.
+    avg_vruntime_sum: i128,
 }
 
-const SKIP_HIST_SLOTS: usize = 256;
-static SKIP_HIST: [SkipHistSlot; SKIP_HIST_SLOTS] = {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const ZERO: SkipHistSlot = SkipHistSlot {
-        task: AtomicU64::new(0),
-        why: [const { AtomicU64::new(0) }; 5],
-        n: AtomicU64::new(0),
-        first_jif: AtomicU64::new(0),
-    };
-    [ZERO; SKIP_HIST_SLOTS]
-};
-
-// ============================================================================
-// s16 (A2 census, WW5) — counter-based adjudication of the msg-region
-// strand family. The r6/r7 canary rounds printed ZERO STALE-ONCPU-RESET
-// lines through 753 WAKE-STRANDED events while STALE-CLAIM prints got
-// through the same 2-jiffy rate gate — strong evidence the R85 on_cpu
-// heal never fires during the strands, but prints are budget-gated and
-// a print-null is not a count-null. These counters are exact and
-// unconditional (same class as wakewatch's WAKE_N/PICK_N: one relaxed
-// inc on the pick-walk entry and two on cold heal paths); the WW5
-// heartbeat line reports them under rux:wwcensus (retired dfx=wwcensus).
-// ============================================================================
-static WW_PICK_WALKS: AtomicU64 = AtomicU64::new(0);
-static WW_ONCPU_HEALS: AtomicU64 = AtomicU64::new(0);
-static WW_CLAIM_HEALS: AtomicU64 = AtomicU64::new(0);
-
-// 60th (RUNQ-STRAND follow-up): the two pick-walk GIVE-UP shapes, counted
-// unconditionally (one relaxed inc each, zero cost when not read).
-// STASH-OVERFLOW: the 32-slot refusal stash filled — the walk abandoned
-// the rest of the tree, so every entry sorting above the stash window is
-// never visited by this pick (a >32-entry refusal wall strands the whole
-// right side of the timeline). SKIP-ALL: the walk refused everything and
-// the pick returned None with entries still linked (callers go idle).
-pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
-pub(crate) static PICK_SKIP_ALL: AtomicU64 = AtomicU64::new(0);
-
-/// (stash overflows, skip-all picks) since boot — the RUNQ-STRAND census
-/// prints them on every burst.
-pub fn pick_giveups() -> (u64, u64) {
-    (
-        PICK_STASH_OVERFLOW.load(Ordering::Relaxed),
-        PICK_SKIP_ALL.load(Ordering::Relaxed),
-    )
+/// Get current time (nanoseconds)
+///
+/// Use RISC-V time register
+pub fn sched_clock() -> u64 {
+    // Arch wall-clock counter (rdtime on riscv64, TSC on x86_64).
+    let time: u64 = crate::arch::cpu::read_time();
+    // Assume clock frequency is 10MHz (100ns precision)
+    // Actual value needs adjustment based on platform
+    time * TIMEBASE_MULT
 }
 
-/// Total pick-walk entries since boot (WW5 heartbeat; wake-side
-/// snapshot for the strand line's visits= field).
-pub fn ww_pick_walks() -> u64 {
-    WW_PICK_WALKS.load(Ordering::Relaxed)
+/// Calculate time slice (milliseconds)
+///
+/// Convert nanosecond time slice to milliseconds for timer interrupt
+pub fn sched_slice_to_ms(slice_ns: u64) -> u32 {
+    (slice_ns / 1_000_000) as u32
 }
 
-/// (on_cpu-mark heals, stale-claim heals) since boot — the two R85
-/// heal legs. Reported per-second by WW5; ~0 with hundreds of strands
-/// convicts "the heal never fires" where the rate-gated prints could
-/// only suggest it.
-pub fn ww_heals() -> (u64, u64) {
-    (
-        WW_ONCPU_HEALS.load(Ordering::Relaxed),
-        WW_CLAIM_HEALS.load(Ordering::Relaxed),
-    )
+/// Convert milliseconds to nanoseconds
+pub fn ms_to_ns(ms: u32) -> u64 {
+    (ms as u64) * 1_000_000
 }
-
-#[inline]
-fn skip_hist_of(task: *mut Task) -> &'static SkipHistSlot {
-    let a = task as usize;
-    &SKIP_HIST[(a >> 6 ^ a >> 12) & (SKIP_HIST_SLOTS - 1)]
-}
-
-/// Record one pick-walk refusal of `task` (called under the GRQ; only
-/// when rux:schedtrace (retired dfx=schedtrace) is armed).
-pub fn note_pick_skip(task: *mut Task, reason: u8) {
-    let s = skip_hist_of(task);
-    if s.task.load(Ordering::Relaxed) != task as usize as u64 {
-        // New episode for this slot: reset the counters.
-        s.task.store(task as usize as u64, Ordering::Release);
-        for w in &s.why {
-            w.store(0, Ordering::Relaxed);
-        }
-        s.n.store(0, Ordering::Relaxed);
-        s.first_jif.store(crate::timer::get_jiffies(), Ordering::Release);
-    }
-    if let Some(w) = s.why.get(reason as usize) {
-        w.fetch_add(1, Ordering::Relaxed);
-    }
-    s.n.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Print (direct console, GRQ-held discipline) and clear the recorded
-/// skip history of `task`. Called from wakewatch's strand report.
-pub fn print_skip_history(task: *mut Task) {
-    use crate::dfx::taskdump::putc_brief as putchar;
-    let s = skip_hist_of(task);
-    if s.task.load(Ordering::Acquire) != task as usize as u64 {
-        // s16: the 256-slot table is keyed by Task address and msgstress
-        // churn steals slots mid-strand, so "no SKIPHIST line" was
-        // ambiguous between "never refused" and "history clobbered by a
-        // colliding task". Name the collision explicitly — the census
-        // needs the distinction (a stolen slot cannot exonerate the
-        // walk).
-        for &c in b"\nSKIPHIST coll=1" {
-            putchar(c);
-        }
-        putchar(b'\n');
-        return;
-    }
-    let n = s.n.swap(0, Ordering::AcqRel);
-    // s16: print the line even when n == 0. "SKIPHIST stays empty" was
-    // previously an inference from no-line-at-all (ambiguous against
-    // probe-off and slot-reuse); an explicit skips=0 on every strand
-    // line makes the never-refused verdict census-readable.
-    let now = crate::timer::get_jiffies();
-    let first = s.first_jif.swap(0, Ordering::AcqRel);
-    let mut whys = [0u64; 5];
-    for (i, w) in s.why.iter().enumerate() {
-        whys[i] = w.swap(0, Ordering::AcqRel);
-    }
-    s.task.store(0, Ordering::Release);
-    fn pu(mut v: u64) {
-        use crate::dfx::taskdump::putc_brief as putchar;
-        let mut buf = [0u8; 20];
-        let mut k = 0;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        while v > 0 && k < buf.len() {
-            buf[k] = b'0' + (v % 10) as u8;
-            v /= 10;
-            k += 1;
-        }
-        while k > 0 {
-            k -= 1;
-            putchar(buf[k]);
-        }
-    }
-    for &c in b"\nSKIPHIST skips=" {
-        putchar(c);
-    }
-    pu(n);
-    for (i, cnt) in whys.iter().enumerate() {
-        if *cnt == 0 {
-            continue;
-        }
-        for &c in b" why" {
-            putchar(c);
-        }
-        pu((i + 1) as u64);
-        putchar(b'=');
-        pu(*cnt);
-    }
-    // s16: span only meaningful with at least one recorded refusal
-    // (first_jif is never set on a refusal-free episode).
-    if n > 0 {
-        for &c in b" span_ms=" {
-            putchar(c);
-        }
-        pu(now.wrapping_sub(first) * 1000 / crate::config::KERNEL_HZ as u64);
-    }
-    putchar(b'\n');
-}
-
-/// 60th (RUNQ-STRAND census): NON-destructive peek of `task`'s recorded
-/// pick-refusal history. REMOVED by the 63rd: superseded by the
-/// persistent per-task counters (Task::pick_visit_n / pick_refuse_why)
-/// which cannot be stolen by address collisions — print_skip_history
-/// (the wakewatch one-shot under rux:schedtrace (retired dfx=schedtrace)) remains.
-
-/// Clock frequency (HZ) - from config
-const HZ: u64 = KERNEL_HZ as u64;
 
 /// Scheduling granularity (nanoseconds) - from config
 pub const SCHED_MIN_GRANULARITY_NS: u64 = CFS_MIN_GRANULARITY_NS;
@@ -239,45 +93,508 @@ pub const SCHED_MIN_GRANULARITY_NS: u64 = CFS_MIN_GRANULARITY_NS;
 /// Scheduling latency (nanoseconds) - from config
 pub const SCHED_LATENCY_NS: u64 = CFS_LATENCY_NS;
 
-/// Weight when nice value is 0
+/// Timebase multiplier: QEMU uses 10MHz timebase, convert to nanoseconds
+const TIMEBASE_MULT: u64 = 100;
+
+/// Clock frequency (HZ) - from config
+const HZ: u64 = KERNEL_HZ as u64;
+
+/// One row of the strand-wall probe (CfsRunQueue::strand_wall_probe):
+/// a timeline entry that sorts before a stranded victim — a pick-order
+/// predecessor whose refusal every pick must digest before the victim
+/// can be reached.
+#[derive(Clone, Copy)]
+pub struct StrandWallRow {
+    pub vruntime: u64,
+    pub pid: u32,
+    /// SchedPolicy as u8 (0 Normal, 1 Fifo, 2 Rr, 3 Batch, 5 Idle, 6 Deadline)
+    pub policy: u64,
+    pub on_cpu: bool,
+    pub claim: i32,
+    pub aff: u32,
+    /// 61st: the entry's pick-walk refusal history — a wall of entries
+    /// with growing skip counts explains a victim deeper in the tree
+    /// that is never even VISITED (the 32-slot stash never gets past a
+    /// permanently-refused left edge; no overflow fires because the
+    /// pick succeeds at position <= 33).
+    pub skips: u32,
+    pub why: u32,
+    /// 63rd: which CPU slot names this entry at probe time (-1 = none)
+    /// — a wall entry that is BOTH linked and on a slot is the R56d
+    /// lying-slot / mid-switch-out shape, the refusal input the 62nd
+    /// asked to name.
+    pub slot: i32,
+    /// 63rd: jiffies since this entry's last pick (u32::MAX = never
+    /// picked since boot) — distinguishes the never-picked wheel class
+    /// from the cycling churn.
+    pub lp_jif: u32,
+    /// 63rd: times this entry was linked (woken) since boot — the churn
+    /// rate numerator.
+    pub wakes: u32,
+}
+
+/// RT runqueue
+/// Maximum RT priority (0-99, HIGHER value = higher priority, matching
+/// Linux). The runqueue bitmap index is inverted (bit 0 = priority 99) so
+/// the lowest set bit is the highest-priority runnable task.
+pub const MAX_RT_PRIO: usize = 100;
+
+pub struct RtRunQueue {
+    /// Number of RT tasks
+    pub rt_nr_running: AtomicU32,
+
+    /// Number of RR tasks
+    ///
+    /// Maintained by enqueue/dequeue but not yet read anywhere (reserved for
+    /// /proc/schedstat and RR throttling diagnostics) — kept accurate so a
+    /// future reader does not inherit drift.
+    pub rr_nr_running: AtomicU32,
+
+    /// Highest priority in queue
+    pub highest_prio: AtomicU32,
+
+    /// Priority bitmap: bit i is set if priority i has runnable tasks
+    /// We need 100 bits, so use 2 x 64-bit words
+    pub bitmap: [AtomicU64; 2],
+
+    /// Per-priority task lists
+    ///
+    /// Each list head anchors tasks at that priority level
+    pub queue: [ListHead; MAX_RT_PRIO],
+}
+
+impl RtRunQueue {
+    /// Create a new RT runqueue
+    pub fn new() -> Self {
+        // Create array of ListHead - this is safe because ListHead::new()
+        // creates a null-initialized struct
+        let queue = [const { ListHead::new() }; MAX_RT_PRIO];
+
+        Self {
+            rt_nr_running: AtomicU32::new(0),
+            rr_nr_running: AtomicU32::new(0),
+            highest_prio: AtomicU32::new(MAX_RT_PRIO as u32),
+            bitmap: [AtomicU64::new(0), AtomicU64::new(0)],
+            queue,
+        }
+    }
+
+    /// Const constructor for static initialization.
+    /// ListHead::new() creates null-initialized self-pointing nodes.
+    pub const fn new_const() -> Self {
+        Self {
+            rt_nr_running: AtomicU32::new(0),
+            rr_nr_running: AtomicU32::new(0),
+            highest_prio: AtomicU32::new(MAX_RT_PRIO as u32),
+            bitmap: [AtomicU64::new(0), AtomicU64::new(0)],
+            queue: [const { ListHead::new() }; MAX_RT_PRIO],
+        }
+    }
+
+    /// Initialize the runqueue (must call before use)
+    pub fn init(&mut self) {
+        for list in &mut self.queue {
+            list.init();
+        }
+    }
+
+    /// Get number of running tasks
+    #[inline]
+    pub fn nr_running(&self) -> u32 {
+        self.rt_nr_running.load(Ordering::Acquire)
+    }
+
+    /// timer-gap lane: raw bitmap word for wedge diagnostics (idx 0/1).
+    #[inline]
+    pub fn bitmap_word(&self, idx: usize) -> u64 {
+        self.bitmap[idx.min(1)].load(Ordering::Acquire)
+    }
+
+    /// timer-gap lane: is any task linked at a USER priority strictly
+    /// above `min_prio` whose affinity mask allows `mask`? Caller holds
+    /// the GRQ. Used by change_task_policy's self-weakening poke: a
+    /// running incumbent that just lowered itself must hand the cpu to
+    /// a now-higher queued task (the reference's check_preempt_curr at
+    /// __setscheduler). Walks bitmap words top-down; first allowed
+    /// match decides.
+    pub fn highest_linked_user_prio(&self, mask: u32, min_prio: u32) -> bool {
+        if mask == 0 {
+            return false;
+        }
+        for word_idx in 0..2usize {
+            let word = self.bitmap[word_idx].load(Ordering::Acquire);
+            let mut remaining = word;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                remaining &= remaining - 1;
+                let user_prio = 99 - (word_idx * 64 + bit);
+                if (user_prio as u32) <= min_prio {
+                    // Bitmap is ordered by (inverted) priority: once we
+                    // pass min_prio top-down, nothing above it remains.
+                    return false;
+                }
+                let head = &self.queue[word_idx * 64 + bit] as *const _ as *mut ListHead;
+                // SAFETY: head anchors linked tasks; bounded walk (8) —
+                // a corrupted ring cannot loop forever.
+                let mut pos = crate::sched::edges::list_next(head);
+                let mut n = 0;
+                while pos != head && n < 8 {
+                    n += 1;
+                    // SAFETY: pos is an embedded rt_run_list in a linked Task.
+                    let task = crate::sched::edges::task_of_rt_list(pos);
+                    if crate::sched::edges::task_shared(task).cpus_allowed() & mask != 0 {
+                        return true;
+                    }
+                    pos = crate::sched::edges::list_next(pos);
+                }
+            }
+        }
+        false
+    }
+
+    /// timer-gap lane: walk the user-priority list (0-99), `f` per task.
+    /// Caller holds the GRQ lock; read-only diagnostics. NOTE: queue[]
+    /// and the bitmap use the INVERTED index (bit 0 = priority 99), same
+    /// as enqueue/pick_next_cpu.
+    pub fn walk_prio(&self, prio: usize, f: &mut dyn FnMut(*mut Task)) {
+        if prio >= MAX_RT_PRIO {
+            return;
+        }
+        let inv = MAX_RT_PRIO - 1 - prio;
+        let word = self.bitmap[inv / 64].load(Ordering::Acquire);
+        if word & (1u64 << (inv % 64)) == 0 {
+            return;
+        }
+        let head = &self.queue[inv] as *const _ as *mut ListHead;
+        // SAFETY: head anchors linked tasks; walking next pointers under
+        // the GRQ lock is stable. Bounded at 8 entries to be safe against
+        // a corrupted ring.
+        let mut pos = crate::sched::edges::list_next(head);
+        let mut n = 0;
+        while pos != head && n < 8 {
+            n += 1;
+            // SAFETY: pos is an embedded rt_run_list in a linked Task.
+            let task = crate::sched::edges::task_of_rt_list(pos);
+            f(task);
+            pos = crate::sched::edges::list_next(pos);
+        }
+    }
+
+    /// Check if queue is empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.rt_nr_running.load(Ordering::Acquire) == 0
+    }
+
+    /// Decrement with a CHECKED subtract (the fair-class twin, see
+    /// fair.rs nr_running_dec): a raw fetch_sub on an unbalanced
+    /// decrement wraps the u32 to ~4e9 — is_empty() then reads false
+    /// forever and the idle fast path dies (the P08 comment's underflow
+    /// hazard, now structural).
+    fn rt_nr_dec(&self) {
+        // grq-hold-slim Cut 2: on the 1 -> 0 transition clear the RT
+        // class bit (GRQ-held; see CLASS_NONEMPTY in sched.rs).
+        if let Ok(old) = self.rt_nr_running.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |v| v.checked_sub(1),
+        ) {
+            if old == 1 {
+                crate::sched::sched::class_nonempty_clear(
+                    crate::sched::sched_hooks::CLASS_RT_BIT,
+                );
+            }
+        }
+    }
+
+    /// rr_nr_running twin of rt_nr_dec.
+    fn rr_nr_dec(&self) {
+        let _ = self.rr_nr_running.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |v| v.checked_sub(1),
+        );
+    }
+
+    /// Find the highest priority with runnable tasks
+    ///
+    /// Returns the bitmap index (0-99) or None if empty; bit 0 is the
+    /// inverted index for user priority 99, so a LOWER index is a HIGHER
+    /// priority.
+    #[inline]
+    fn find_highest_prio(&self) -> Option<u32> {
+        let word0 = self.bitmap[0].load(Ordering::Acquire);
+        if word0 != 0 {
+            // Find first set bit (lowest priority number = highest priority)
+            return Some(word0.trailing_zeros());
+        }
+
+        let word1 = self.bitmap[1].load(Ordering::Acquire);
+        if word1 != 0 {
+            // First set bit in word1 + 64
+            return Some(word1.trailing_zeros() + 64);
+        }
+
+        None
+    }
+
+    /// Enqueue a task
+    /// Returns true if the task was actually inserted (R7-B5: false when
+    /// the double-enqueue guard skipped it, so the caller keeps
+    /// grq.nr_running balanced).
+    pub fn enqueue(&mut self, task: *mut Task, head: bool) -> bool {
+        if task.is_null() {
+            return false;
+        }
+
+        // SAFETY: caller guarantees task is a valid pointer; null check above;
+        // task is not yet in the RT queue and we are adding it under the caller's lock.
+        {
+            // INV-SCE-1: GRQ-held task.
+            let t = crate::sched::edges::task_mut(task);
+            let raw = t.rt_priority() as usize;
+            if raw >= MAX_RT_PRIO {
+                return false;
+            }
+            // Bitmap index is INVERTED: bit 0 = priority 99 (highest). The
+            // old code stored the raw priority, making lower numbers win —
+            // the opposite of Linux, so `chrt -f 99` was the WEAKEST RT
+            // priority (review PROC-P06).
+            let prio = MAX_RT_PRIO - 1 - raw;
+
+            // Guard against double-enqueue: if the task is already on a
+            // runqueue, skip the insertion to avoid list corruption.
+            if t.rt_entity().is_on_rq() {
+                return false;
+            }
+
+            // Add to priority list
+            if head {
+                // Add to front of list (for preempted tasks)
+                crate::sched::edges::rt_list_add(t as *mut Task, &mut self.queue[prio] as *mut ListHead);
+            } else {
+                // Add to tail (for normal enqueue)
+                crate::sched::edges::rt_list_add_tail(t as *mut Task, &mut self.queue[prio] as *mut ListHead);
+            }
+
+            // Set bit in bitmap
+            let word_idx = prio / 64;
+            let bit_idx = prio % 64;
+            self.bitmap[word_idx].fetch_or(1u64 << bit_idx, Ordering::AcqRel);
+
+            // Update counters
+            // grq-hold-slim Cut 2: on the 0 -> nonempty transition set
+            // the RT class bit (GRQ-held).
+            let rt_old = self.rt_nr_running.fetch_add(1, Ordering::AcqRel);
+            if rt_old == 0 {
+                crate::sched::sched::class_nonempty_set(
+                    crate::sched::sched_hooks::CLASS_RT_BIT,
+                );
+            }
+
+            if t.policy() == SchedPolicy::Rr {
+                self.rr_nr_running.fetch_add(1, Ordering::AcqRel);
+            }
+
+            // Update highest priority
+            let curr_highest = self.highest_prio.load(Ordering::Acquire);
+            if (prio as u32) < curr_highest {
+                self.highest_prio.store(prio as u32, Ordering::Release);
+            }
+
+            // Set on_rq flag
+            t.rt_entity().set_on_rq(true);
+        }
+        true
+    }
+
+    /// Dequeue a task
+    pub fn dequeue(&mut self, task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+
+        // SAFETY: task was previously enqueued and is still in the RT queue;
+        // null check above; dequeue removes it from the list.
+        {
+            // INV-SCE-1: GRQ-held task.
+            let t = crate::sched::edges::task_mut(task);
+            // P08: dequeue of a task that is not linked (e.g. the currently
+            // running task, already dequeued at pick time) must be a no-op —
+            // it used to decrement rt_nr_running/rr_nr_running regardless,
+            // underflowing the counters and permanently disabling the idle
+            // fast path.
+            if !t.rt_entity().is_on_rq() {
+                return false;
+            }
+            let raw = t.rt_priority() as usize;
+            if raw >= MAX_RT_PRIO {
+                return false;
+            }
+            let prio = MAX_RT_PRIO - 1 - raw; // same inversion as enqueue
+
+            // Remove from list
+            crate::sched::edges::rt_list_del(t as *mut Task);
+
+            // Clear bit in bitmap if list is now empty
+            if self.queue[prio].is_empty() {
+                let word_idx = prio / 64;
+                let bit_idx = prio % 64;
+                self.bitmap[word_idx].fetch_and(!(1u64 << bit_idx), Ordering::AcqRel);
+            }
+
+            // Update counters
+            self.rt_nr_dec();
+
+            if t.policy() == SchedPolicy::Rr {
+                self.rr_nr_dec();
+            }
+
+            // Update highest priority if needed
+            if self.is_empty() {
+                self.highest_prio.store(MAX_RT_PRIO as u32, Ordering::Release);
+            } else if let Some(new_highest) = self.find_highest_prio() {
+                self.highest_prio.store(new_highest, Ordering::Release);
+            }
+
+            // Clear on_rq flag
+            t.rt_entity().set_on_rq(false);
+        }
+        true
+    }
+
+    /// R41: whether `task` is ACTUALLY linked on one of the priority
+    /// lists — as opposed to what rt_entity's on_rq flag claims. A task's
+    /// rt_run_list is init()-ed (self-pointing) at Task creation and
+    /// del() re-self-links it on unlink, so a self-pointing or null node
+    /// is provably NOT linked; a linked node's next can never point at
+    /// itself (each node appears at most once per list). Used by
+    /// __schedule's prev requeue to distinguish a legitimately-linked prev
+    /// (RR tick rotation / racing wake) from a stale on_rq=true flag.
+    /// Called with the GRQ lock held; refused-path only.
+    pub fn is_linked(&self, task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+        crate::sched::edges::rt_list_linked(task)
+    }
+
+    /// Unlink `task` from its priority list WITHOUT trusting the entity's
+    /// on_rq flag. free_task_slot's freed-while-linked defense (oh-display
+    /// b61-b66): a task whose page is about to return to the heap may
+    /// carry a STALE on_rq=false while its rt_run_list node is still
+    /// linked (one-sided unlink shapes) — plain dequeue() would refuse on
+    /// the flag and leave the dangling node behind, poisoning every later
+    /// walk of that list once the page is reused. is_linked() gates the
+    /// call, so a task that is provably unlinked costs one pointer read.
+    ///
+    /// Counters/bitmap are reconciled exactly like dequeue(). Called with
+    /// the GRQ lock held, from the task-free path only (the task memory is
+    /// still valid — del() writes land in the list's real neighbors).
+    pub fn force_unlink(&mut self, task: *mut Task) -> bool {
+        if task.is_null() || !self.is_linked(task) {
+            return false;
+        }
+        // SAFETY: is_linked() proved the node is linked into one of
+        // self.queue's lists; the caller (free_task_slot) holds the GRQ
+        // lock and the Task memory is not yet freed/poisoned.
+        {
+            // INV-SCE-1: GRQ-held task.
+            let t = crate::sched::edges::task_mut(task);
+            let raw = t.rt_priority() as usize;
+            // Remove from list regardless of the (possibly stale) on_rq
+            // flag — the linkage check above is the authority.
+            crate::sched::edges::rt_list_del(t as *mut Task);
+
+            if raw < MAX_RT_PRIO {
+                // Same bitmap inversion as enqueue/dequeue.
+                let prio = MAX_RT_PRIO - 1 - raw;
+                if self.queue[prio].is_empty() {
+                    let word_idx = prio / 64;
+                    let bit_idx = prio % 64;
+                    self.bitmap[word_idx].fetch_and(!(1u64 << bit_idx), Ordering::AcqRel);
+                }
+            } else {
+                // Priority out of range: the node was linked through some
+                // corruption; sweep every empty-list bit so the bitmap
+                // cannot keep naming a prio whose list is now empty.
+                for prio in 0..MAX_RT_PRIO {
+                    if self.queue[prio].is_empty() {
+                        let word_idx = prio / 64;
+                        let bit_idx = prio % 64;
+                        self.bitmap[word_idx].fetch_and(!(1u64 << bit_idx), Ordering::AcqRel);
+                    }
+                }
+            }
+
+            // Counters: rt_nr_running/rr_nr_running may already be
+            // consistent (a normally-linked task) or drifted; clamp at 0
+            // so a double-decrement cannot underflow.
+            // Counters: may already be consistent (a normally-linked
+            // task) or drifted; the checked subtract clamps at 0 so a
+            // double-decrement cannot underflow-wrap (the raw load>0
+            // guard raced a concurrent decrement).
+            self.rt_nr_dec();
+            if t.policy() == SchedPolicy::Rr {
+                self.rr_nr_dec();
+            }
+
+            if self.is_empty() {
+                self.highest_prio.store(MAX_RT_PRIO as u32, Ordering::Release);
+            } else if let Some(new_highest) = self.find_highest_prio() {
+                self.highest_prio.store(new_highest, Ordering::Release);
+            }
+
+            t.rt_entity().set_on_rq(false);
+        }
+        true
+    }
+
+    /// Pick the next task to run
+    pub fn pick_next(&mut self) -> Option<*mut Task> {
+        let prio = self.find_highest_prio()?;
+        let prio_usize = prio as usize;
+
+        // Get first task from that priority's list
+        // Use list_entry to get task from ListHead
+        let list_ptr = self.queue[prio_usize].next;
+        if list_ptr == &self.queue[prio_usize] as *const _ as *mut _ {
+            return None;
+        }
+
+        // Calculate task pointer from list head pointer
+        // Task contains rt_run_list at some offset
+        // SAFETY: list_ptr is the head of a non-empty priority list; the embedded
+        // ListHead is at offset rt_run_list within Task, so sub(offset) yields the Task.
+        let task = crate::sched::edges::task_of_rt_list(list_ptr);
+
+        // Dequeue it
+        self.dequeue(task);
+
+        Some(task)
+    }
+
+    /// Peek at the next task (without removing)
+    pub fn peek_next(&self) -> Option<*mut Task> {
+        let prio = self.find_highest_prio()?;
+        let prio_usize = prio as usize;
+
+        let list_ptr = self.queue[prio_usize].next;
+        if list_ptr == &self.queue[prio_usize] as *const _ as *mut _ {
+            return None;
+        }
+
+        // Calculate task pointer from list head pointer
+        // SAFETY: same as pick_next — list_ptr is an embedded ListHead in an enqueued Task.
+        let task = crate::sched::edges::task_of_rt_list(list_ptr);
+
+        Some(task)
+    }
+}
+
+// ---- The committed entity set (a7f385732) ----
+
 pub const NICE_0_LOAD: u64 = 1024;
-
-/// Weight for SCHED_IDLE tasks
-/// This is a very low weight (3) to give idle tasks minimal CPU time
-pub const WEIGHT_IDLEPRIO: u64 = 3;
-
-/// Nice value to weight mapping table
-///
-/// Nice value range: -20 to +19, total 40 levels
-/// Weights change by a factor of 1.25 (approximately 25% increase per 1024)
-pub const PRIO_TO_WEIGHT: [u64; 40] = [
-    /* -20 */ 88761, 71755, 56483, 46273, 36291,
-    /* -15 */ 29154, 23254, 18705, 14949, 11916,
-    /* -10 */ 9548,  7620,  6100,  4904,  3906,
-    /*  -5 */ 3121,  2501,  1991,  1586,  1277,
-    /*   0 */ 1024,   820,   655,   526,   423,
-    /*   5 */ 335,    272,   215,   172,   137,
-    /*  10 */ 110,     87,    70,    56,    45,
-    /*  15 */ 36,     29,    23,    18,    15,
-];
-
-/// Nice value to weight multiplier mapping table (for fast calculation)
-///
-/// Used to calculate vruntime. The reference kernel's
-/// `sched_prio_to_invweight[]` holds 2^32 / weight for each nice level
-/// (same values, same order); the vruntime delta is then
-/// `delta_exec * NICE_0_LOAD * inv_weight >> 32`, i.e.
-/// `delta_exec * NICE_0_LOAD / weight`.
-pub const PRIO_TO_WMULT: [u64; 40] = [
-    /* -20 */ 48388, 59856, 76040, 92818, 118348,
-    /* -15 */ 147320, 184698, 229616, 287308, 360437,
-    /* -10 */ 449829, 563644, 704093, 875809, 1099582,
-    /*  -5 */ 1376151, 1717300, 2157191, 2708050, 3363326,
-    /*   0 */ 4194304, 5237765, 6557202, 8165337, 10153587,
-    /*   5 */ 12820798, 15790321, 19976592, 24970740, 31350126,
-    /*  10 */ 39045157, 49367440, 61356676, 76695844, 95443717,
-    /*  15 */ 119304647, 148102320, 186737708, 238609294, 286331153,
-];
 
 /// Load weight
 #[derive(Debug, Clone, Copy)]
@@ -287,7 +604,6 @@ pub struct LoadWeight {
     /// Weight multiplier (for fast division)
     pub inv_weight: u64,
 }
-
 impl LoadWeight {
     /// Create new load weight
     ///
@@ -329,7 +645,6 @@ impl LoadWeight {
         }
     }
 }
-
 impl Default for LoadWeight {
     fn default() -> Self {
         Self::from_nice(0) // Default nice value is 0
@@ -394,7 +709,6 @@ pub struct SchedEntity {
     /// SchedEntity::new()), matching __sched_fork's vlag = 0.
     pub ever_enqueued: core::cell::Cell<bool>,
 }
-
 impl SchedEntity {
     /// Create new scheduling entity
     pub fn new() -> Self {
@@ -581,13 +895,11 @@ impl SchedEntity {
         self.exec_start.store(time, Ordering::Release);
     }
 }
-
 impl Default for SchedEntity {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl Clone for SchedEntity {
     fn clone(&self) -> Self {
         Self {
@@ -609,169 +921,572 @@ impl Clone for SchedEntity {
     }
 }
 
-/// Sort key for the CFS timeline.
+/// RT scheduling entity
 ///
-/// Since vruntime may be duplicate, we use (vruntime, task_id) as key
-/// This ensures uniqueness
-// The timeline engine (VruntimeKey, RbNode, RB_NIL, node_of_task/
-// task_of_node, node_key, RbTimeline and its ops) moved into
-// crate::sched::edges (INV-SCE-6) — the framework zone owns the
-// raw-pointer tree surgery; this file keeps the CFS policy.
-pub(crate) use crate::sched::edges::{RbNode, RbTimeline, VruntimeKey};
-use crate::sched::edges::{node_key, node_of_task, task_of_node};
+/// Stored in the Task struct
+#[derive(Debug)]
+pub struct SchedRtEntity {
+    /// Time slice (for SCHED_RR)
+    pub time_slice: AtomicU32,
 
-/// One row of the strand-wall probe (CfsRunQueue::strand_wall_probe):
-/// a timeline entry that sorts before a stranded victim — a pick-order
-/// predecessor whose refusal every pick must digest before the victim
-/// can be reached.
-#[derive(Clone, Copy)]
-pub struct StrandWallRow {
-    pub vruntime: u64,
-    pub pid: u32,
-    /// SchedPolicy as u8 (0 Normal, 1 Fifo, 2 Rr, 3 Batch, 5 Idle, 6 Deadline)
-    pub policy: u64,
-    pub on_cpu: bool,
-    pub claim: i32,
-    pub aff: u32,
-    /// 61st: the entry's pick-walk refusal history — a wall of entries
-    /// with growing skip counts explains a victim deeper in the tree
-    /// that is never even VISITED (the 32-slot stash never gets past a
-    /// permanently-refused left edge; no overflow fires because the
-    /// pick succeeds at position <= 33).
-    pub skips: u32,
-    pub why: u32,
-    /// 63rd: which CPU slot names this entry at probe time (-1 = none)
-    /// — a wall entry that is BOTH linked and on a slot is the R56d
-    /// lying-slot / mid-switch-out shape, the refusal input the 62nd
-    /// asked to name.
-    pub slot: i32,
-    /// 63rd: jiffies since this entry's last pick (u32::MAX = never
-    /// picked since boot) — distinguishes the never-picked wheel class
-    /// from the cycling churn.
-    pub lp_jif: u32,
-    /// 63rd: times this entry was linked (woken) since boot — the churn
-    /// rate numerator.
-    pub wakes: u32,
+    /// Whether on runqueue
+    pub on_rq: AtomicBool,
 }
-
-// R76 (fast-pace starvation hunt): per-pid pick-skip counters, direct-mapped
-// by pid into 64 slots. Only read/written from inside pick_next_cpu's report
-// block, which always runs under the GRQ lock — atomics are for the static's
-// Sync bound only. When one pid's skip count crosses 1000 the report emits a
-// SKIP-DEEP line with the task's state word, queue flag, cpu, and both stack
-// pointers so a post-mortem can tell a linked-but-starved task from a
-// phantom or a sleeper (the full3 wedge shape: PICK-SKIP-ALL naming pids
-// 576-599 for minutes with no other explanation in the log).
-pub(crate) struct SkipTrackEntry {
-    pub(crate) pid: core::sync::atomic::AtomicU32,
-    count: core::sync::atomic::AtomicU32,
-    dumped_at: core::sync::atomic::AtomicU32,
-}
-static SKIP_TRACK: [SkipTrackEntry; 64] = [
-    const {
-        SkipTrackEntry {
-            pid: core::sync::atomic::AtomicU32::new(0),
-            count: core::sync::atomic::AtomicU32::new(0),
-            dumped_at: core::sync::atomic::AtomicU32::new(0),
+impl SchedRtEntity {
+    /// Create a new RT entity
+    pub fn new() -> Self {
+        Self {
+            time_slice: AtomicU32::new(RR_TIMESLICE_TICKS),
+            on_rq: AtomicBool::new(false),
         }
-    };
-    64
+    }
+
+    /// Check if on runqueue
+    #[inline]
+    pub fn is_on_rq(&self) -> bool {
+        self.on_rq.load(Ordering::Acquire)
+    }
+
+    /// Set runqueue status
+    #[inline]
+    pub fn set_on_rq(&self, on_rq: bool) {
+        self.on_rq.store(on_rq, Ordering::Release);
+    }
+
+    /// Get time slice
+    #[inline]
+    pub fn get_time_slice(&self) -> u32 {
+        self.time_slice.load(Ordering::Acquire)
+    }
+
+    /// Set time slice
+    #[inline]
+    pub fn set_time_slice(&self, slice: u32) {
+        self.time_slice.store(slice, Ordering::Release);
+    }
+
+    /// Decrement time slice and return remaining
+    #[inline]
+    pub fn dec_time_slice(&self) -> u32 {
+        let slice = self.time_slice.load(Ordering::Acquire);
+        if slice > 0 {
+            self.time_slice.store(slice - 1, Ordering::Release);
+            slice - 1
+        } else {
+            0
+        }
+    }
+
+    /// Reset time slice to default
+    #[inline]
+    pub fn reset_time_slice(&self) {
+        self.time_slice.store(RR_TIMESLICE_TICKS, Ordering::Release);
+    }
+}
+impl Default for SchedRtEntity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Deadline scheduling entity
+#[derive(Debug)]
+pub struct SchedDlEntity {
+    /// Absolute deadline
+    pub deadline: AtomicU64,
+
+    /// Remaining runtime
+    pub runtime: AtomicI64,
+
+    /// Scheduling period
+    pub dl_period: AtomicU64,
+
+    /// Maximum runtime per period
+    pub dl_runtime: AtomicU64,
+
+    /// Whether throttled (out of runtime)
+    pub dl_throttled: AtomicBool,
+
+    /// Kernel timer ID armed to replenish this entity at its deadline
+    /// (0 = no timer pending). See sched.rs::arm_dl_replenish_timer —
+    /// a throttled task sits off the runqueue and is re-enqueued (with a
+    /// refilled budget) only by this timer's wake.
+    pub replenish_timer: AtomicU64,
+
+    /// Whether on runqueue
+    pub on_rq: AtomicBool,
+
+    /// Whether boosted (inheriting priority)
+    pub dl_boosted: AtomicBool,
+
+    /// Timestamp (ns) when this entity last started executing.
+    /// Used by update_curr() to calculate actual runtime consumed.
+    pub exec_start: AtomicU64,
+
+    /// The RELATIVE deadline value from the user's sched_attr
+    /// (sched_setattr), kept verbatim for sched_getattr readback. The
+    /// scheduler's own absolute `deadline` above is internal state that
+    /// moves with every replenishment and must not leak to user space.
+    pub attr_deadline: AtomicU64,
+}
+impl SchedDlEntity {
+    /// Create a new deadline entity
+    pub fn new() -> Self {
+        Self {
+            deadline: AtomicU64::new(0),
+            runtime: AtomicI64::new(DL_DEFAULT_RUNTIME_NS as i64),
+            dl_period: AtomicU64::new(DL_DEFAULT_PERIOD_NS),
+            dl_runtime: AtomicU64::new(DL_DEFAULT_RUNTIME_NS),
+            dl_throttled: AtomicBool::new(false),
+            replenish_timer: AtomicU64::new(0),
+            on_rq: AtomicBool::new(false),
+            dl_boosted: AtomicBool::new(false),
+            exec_start: AtomicU64::new(0),
+            attr_deadline: AtomicU64::new(0),
+        }
+    }
+
+    /// Check if on runqueue
+    #[inline]
+    pub fn is_on_rq(&self) -> bool {
+        self.on_rq.load(Ordering::Acquire)
+    }
+
+    /// Get bandwidth (runtime/period * DL_BW_UNIT)
+    pub fn get_bw(&self) -> u64 {
+        let runtime = self.dl_runtime.load(Ordering::Acquire);
+        let period = self.dl_period.load(Ordering::Acquire);
+
+        if period == 0 {
+            return 0;
+        }
+
+        (runtime * DL_BW_UNIT) / period
+    }
+
+    /// Update deadline (called on enqueue)
+    pub fn update_deadline(&self, now: u64) {
+        let period = self.dl_period.load(Ordering::Acquire);
+        let new_deadline = now + period;
+        self.deadline.store(new_deadline, Ordering::Release);
+    }
+
+    /// Replenish runtime and advance deadline (CBS replenishment)
+    ///
+    /// Called ONLY when a full period has been served out — i.e. from
+    /// `enqueue_task_locked` when the task's throttle window has expired
+    /// (the replenish timer's wake, or a first-ever enqueue). CBS is defeated
+    /// if this runs on every re-enqueue: the old code replenished on each
+    /// __schedule requeue of prev, so a single DL task could burn 100% of
+    /// every CPU (review batch 8, HIGH).
+    pub fn replenish_runtime(&self) {
+        let runtime = self.dl_runtime.load(Ordering::Acquire) as i64;
+        self.runtime.store(runtime, Ordering::Release);
+        // Advance deadline: now + period (CBS requirement)
+        let now = sched_clock();
+        let period = self.dl_period.load(Ordering::Acquire);
+        self.deadline.store(now + period, Ordering::Release);
+        self.dl_throttled.store(false, Ordering::Release);
+    }
+
+    /// Consume runtime
+    ///
+    /// Returns true if still has runtime, false if throttled
+    pub fn consume_runtime(&self, delta: u64) -> bool {
+        let remaining = self.runtime.load(Ordering::Acquire);
+        let new_remaining = remaining - delta as i64;
+
+        if new_remaining <= 0 {
+            self.runtime.store(0, Ordering::Release);
+            self.dl_throttled.store(true, Ordering::Release);
+            return false;
+        }
+
+        self.runtime.store(new_remaining, Ordering::Release);
+        true
+    }
+}
+impl Default for SchedDlEntity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub const PRIO_TO_WEIGHT: [u64; 40] = [
+    /* -20 */ 88761, 71755, 56483, 46273, 36291,
+    /* -15 */ 29154, 23254, 18705, 14949, 11916,
+    /* -10 */ 9548,  7620,  6100,  4904,  3906,
+    /*  -5 */ 3121,  2501,  1991,  1586,  1277,
+    /*   0 */ 1024,   820,   655,   526,   423,
+    /*   5 */ 335,    272,   215,   172,   137,
+    /*  10 */ 110,     87,    70,    56,    45,
+    /*  15 */ 36,     29,    23,    18,    15,
 ];
 
-/// grq-10ns: per-walk refusal ring — the successor pick walk's
-/// decision-time evidence (task + why code, 32 slots, same cap as the
-/// old stash array). All accesses under the GRQ (single writer between
-/// the record loop and the report print); atomics exist only for the
-/// static's Sync bound. Replaces the 768-byte stack array that the
-/// stash dance initialized on EVERY pick inside the GRQ critical
-/// section.
-pub(crate) const PICK_SKIP_RING_LEN: usize = 32;
-pub(crate) static PICK_SKIP_RING_TASK: [core::sync::atomic::AtomicU64; PICK_SKIP_RING_LEN] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; PICK_SKIP_RING_LEN];
-pub(crate) static PICK_SKIP_RING_WHY: [core::sync::atomic::AtomicU32; PICK_SKIP_RING_LEN] =
-    [const { core::sync::atomic::AtomicU32::new(0) }; PICK_SKIP_RING_LEN];
-pub(crate) static PICK_SKIP_RING_N: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+pub const PRIO_TO_WMULT: [u64; 40] = [
+    /* -20 */ 48388, 59856, 76040, 92818, 118348,
+    /* -15 */ 147320, 184698, 229616, 287308, 360437,
+    /* -10 */ 449829, 563644, 704093, 875809, 1099582,
+    /*  -5 */ 1376151, 1717300, 2157191, 2708050, 3363326,
+    /*   0 */ 4194304, 5237765, 6557202, 8165337, 10153587,
+    /*   5 */ 12820798, 15790321, 19976592, 24970740, 31350126,
+    /*  10 */ 39045157, 49367440, 61356676, 76695844, 95443717,
+    /*  15 */ 119304647, 148102320, 186737708, 238609294, 286331153,
+];
 
-/// grq-10ns: poison-discipline trip counters for the intrusive timeline
-/// (an insert descent or erase neighbor that failed the kernel-range
-/// check — the op was refused to keep the kernel alive). Reported by
-/// grq_diag_counts; a persistent nonzero rate names a scribble producer.
-pub(crate) struct TlPoisonCounters {
-    pub(crate) inserts: core::sync::atomic::AtomicU64,
-    pub(crate) erases: core::sync::atomic::AtomicU64,
+/// Default RR time slice in ticks. 100ms / (1000ms / KERNEL_HZ) = 10 ticks at HZ=100.
+pub const RR_TIMESLICE_TICKS: u32 = (100 * crate::config::KERNEL_HZ) / 1000;
+/// Default runtime in nanoseconds (100ms)
+pub const DL_DEFAULT_RUNTIME_NS: u64 = 100_000_000;
+/// Default deadline period in nanoseconds (1 second)
+pub const DL_DEFAULT_PERIOD_NS: u64 = 1_000_000_000;
+/// Deadline bandwidth unit (1 << 20 for precision)
+pub const DL_BW_UNIT: u64 = 1 << 20;
+
+/// r24 (kill10 wedge hunt): discriminator census for the W2
+/// WAKE-REFUSED-SLEEPING report — captured under the GRQ lock so the
+/// line tells "linked but starved" from "orphaned live pick mark" from
+/// "lying busy slot". Probe-lock discipline: this helper ONLY reads and
+/// formats; the caller prints after the guard is dropped.
+#[derive(Default)]
+pub struct W2RefusalCensus {
+    pub linked: bool,
+    pub on_rq: bool,
+    pub busy_slot: i32,
+    pub idle_slot: i32,
+    pub exec_ns: u64,
+    pub jiffies: u64,
+    pub quantum_ms: u32,
 }
-pub(crate) static TL_POISON: TlPoisonCounters = TlPoisonCounters {
-    inserts: core::sync::atomic::AtomicU64::new(0),
-    erases: core::sync::atomic::AtomicU64::new(0),
-};
 
-/// grq-10ns: read the poison counters (dfx census hook).
-pub fn tl_poison_counters() -> (u64, u64) {
-    (
-        TL_POISON.inserts.load(Ordering::Relaxed),
-        TL_POISON.erases.load(Ordering::Relaxed),
-    )
+impl core::fmt::Display for W2RefusalCensus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "linked={} on_rq={} busy_slot={} idle_slot={} exec_ns={} jif={} q_ms={}",
+            self.linked,
+            self.on_rq,
+            self.busy_slot,
+            self.idle_slot,
+            self.exec_ns,
+            self.jiffies,
+            self.quantum_ms
+        )
+    }
 }
 
-/// 64th (EEVDF seed hunt): how far a virtual runtime may legitimately sit
-/// from min_vruntime, in ns-of-virtual-time. The extreme legitimate case is
-/// a nice-19 CPU hog (weight 15 vs NICE_0 1024, vr grows 68x wall) running
-/// the whole boot: 600 s wall * 68 = 4.1e13. Everything past 1e15 is
-/// corruption-class — ohw36's frozen garbage was ~1e19 (u64 views of a
-/// truncated i128). Trips on |vr - min_vr| beyond this bound.
-const VR_CANARY_SPAN_NS: u64 = 1_000_000_000_000_000;
-
-/// 64th: vruntime sanity canary state (VRTRIP rate limiting).
-static VR_TRIPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static VR_TRIP_LAST_JIF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// CFS run queue
-pub struct CfsRunQueue {
-    /// Task timeline sorted by vruntime
+/// Deadline runqueue
+pub struct DlRunQueue {
+    /// Tasks sorted by deadline (earliest first)
     ///
-    /// grq-10ns: entity-embedded intrusive red-black tree (the reference
-    /// kernel's cfs_rq tasks_timeline / rb_root_cached). The nodes live
-    /// inside each task's SchedEntity, so insert/erase under the GRQ are
-    /// pointer rewires — the BTreeMap's allocator-backed split/merge is
-    /// gone from the critical section.
-    timeline: RbTimeline,
+    /// Key: (deadline, task_id)
+    /// Value: Task pointer
+    tasks: BTreeMap<DlKey, *mut Task>,
 
-    /// Currently running scheduling entity
-    pub curr: *mut crate::process::Task,
+    /// Number of DL tasks
+    pub dl_nr_running: AtomicU32,
 
-    /// Minimum vruntime in queue
+    /// Earliest deadline in queue
+    pub earliest_dl: AtomicU64,
+
+    /// Next task ID for unique keys
+    next_id: AtomicU64,
+}
+
+/// Key for deadline BTreeMap
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct DlKey {
+    deadline: u64,
+    task_id: u64,
+}
+
+impl DlRunQueue {
+    /// Create a new deadline runqueue
+    pub fn new() -> Self {
+        Self {
+            tasks: BTreeMap::new(),
+            dl_nr_running: AtomicU32::new(0),
+            earliest_dl: AtomicU64::new(u64::MAX),
+            next_id: AtomicU64::new(0),
+        }
+    }
+
+    /// Check if queue is empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.dl_nr_running.load(Ordering::Acquire) == 0
+    }
+
+    /// Get number of runnable tasks
+    #[inline]
+    pub fn nr_running(&self) -> u32 {
+        self.dl_nr_running.load(Ordering::Acquire)
+    }
+
+    /// Decrement with a CHECKED subtract (the fair-class twin, see
+    /// fair.rs nr_running_dec): a raw fetch_sub wraps on an unbalanced
+    /// decrement and is_empty() then reads false forever.
+    fn dl_nr_dec(&self) {
+        // grq-hold-slim Cut 2: on the 1 -> 0 transition clear the DL
+        // class bit (GRQ-held; see CLASS_NONEMPTY in sched.rs).
+        if let Ok(old) = self.dl_nr_running.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |v| v.checked_sub(1),
+        ) {
+            if old == 1 {
+                crate::sched::sched::class_nonempty_clear(
+                    crate::sched::sched_hooks::CLASS_DL_BIT,
+                );
+            }
+        }
+    }
+
+    /// Enqueue a task
+    /// Returns true if the task was actually inserted (R7-B5).
+    pub fn enqueue(&mut self, task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+
+        // R7-B4: double-enqueue guard. CFS and RT check their entity's
+        // on_rq before inserting; DL did not — two concurrent wake_ups of
+        // the same sleeping SCHED_DEADLINE task (timer timeout on one CPU +
+        // futex_wake on another) both passed the is_sleeping check and
+        // inserted the Task twice: two CPUs picked it and ran one kernel
+        // stack on two harts.
+        if crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.load(Ordering::Acquire) {
+            return false;
+        }
+
+        // Caller guarantees `task` points to a valid, live Task that
+        // remains allocated for the duration of this enqueue (the GRQ
+        // hold pins it — INV-PROC-BORROW-1's GRQ arm). The Task is not
+        // currently on any runqueue (precondition for enqueue).
+        {
+            let t = crate::process::unsafe_edges::borrow_task(task);
+            let dl = t.dl_entity();
+
+            // Get deadline
+            let deadline = dl.deadline.load(Ordering::Acquire);
+
+            // Generate unique key
+            let task_id = self.next_id.fetch_add(1, Ordering::AcqRel);
+            let key = DlKey { deadline, task_id };
+
+            // Add to tree
+            self.tasks.insert(key, task);
+
+            // Update counters
+            // grq-hold-slim Cut 2: on the 0 -> nonempty transition set
+            // the DL class bit (GRQ-held).
+            let dl_old = self.dl_nr_running.fetch_add(1, Ordering::AcqRel);
+            if dl_old == 0 {
+                crate::sched::sched::class_nonempty_set(
+                    crate::sched::sched_hooks::CLASS_DL_BIT,
+                );
+            }
+
+            // Update earliest deadline
+            let curr_earliest = self.earliest_dl.load(Ordering::Acquire);
+            if deadline < curr_earliest {
+                self.earliest_dl.store(deadline, Ordering::Release);
+            }
+
+            // Set on_rq flag
+            dl.on_rq.store(true, Ordering::Release);
+        }
+        true
+    }
+
+    /// Dequeue a task
     ///
-    /// Used for new task vruntime initialization
-    /// New task vruntime = min_vruntime, this prevents new tasks from getting too much CPU time
-    pub min_vruntime: AtomicU64,
+    /// Returns true only if the task was actually linked on this queue
+    /// (R32-DL2, mirroring rt.rs P08): a dequeue of a task that is not
+    /// linked (e.g. the currently running task, already dequeued at pick
+    /// time) must report false so callers keep grq.nr_running balanced.
+    pub fn dequeue(&mut self, task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
 
-    /// Number of tasks in run queue
-    nr_running: AtomicU64,
+        // Caller guarantees `task` points to a valid, live Task
+        // (INV-PROC-BORROW-1's GRQ arm).
+        {
+            let t = crate::process::unsafe_edges::borrow_task(task);
+            let dl = t.dl_entity();
 
-    /// Total weight
-    pub load_weight: AtomicU64,
+            // P08-mirror: a task that is not linked must be a no-op. The
+            // old unconditional `true` lied to dequeue_task() /
+            // change_task_policy() — every no-op exit of an RT/DL waiter's
+            // cleanup path decremented grq.nr_running, drifting the count.
+            if !dl.on_rq.load(Ordering::Acquire) {
+                return false;
+            }
 
-    /// Next task ID (for generating unique keys)
-    next_task_id: AtomicU64,
-    /// 64th (EEVDF avg_vruntime, 6.6 fair.c:706-739 parity): Sum of
-    /// (vruntime_i - min_vruntime)*w_i over the QUEUED entities -- the
-    /// RELATIVE form the reference derives explicitly ("since v_i is u64,
-    /// and the multiplication could easily overflow, transform it into a
-    /// relative form"). Maintained O(1) at timeline insert/remove; REBASED
-    /// by avg_vruntime_update (sum -= delta*load) on every min_vruntime
-    /// advance so every stored offset stays relative to the CURRENT
-    /// min_vruntime. The 63rd's first attempt stored ABSOLUTE
-    /// vruntime*weight sums and still added min_vruntime in the read --
-    /// V ~ min_vr + true average, the placed values fed back
-    /// multiplicatively (~2x per wake generation), wrapped u64 and froze
-    /// garbage vruntimes within a minute (ohw36: init vr=0xfd79.. frozen
-    /// unpicked from t=53s). The relative form is also leak-bounded: any
-    /// unpaired insert/remove residue is (vr - min_vr)*w -- the size of
-    /// the clamp window, never boot-magnitude. GRQ-HELD. i128: offsets
-    /// are small but weight-scaled products of a deep queue still fit
-    /// trivially.
-    avg_vruntime_sum: i128,
+            // Find and remove task by pointer only. Do NOT match on deadline
+            // because the deadline may have been updated between enqueue and
+            // dequeue, causing the search to miss the entry.
+            let mut found_key = None;
+            for (&key, &ptr) in self.tasks.iter() {
+                if ptr == task {
+                    found_key = Some(key);
+                    break;
+                }
+            }
+
+            if let Some(key) = found_key {
+                self.tasks.remove(&key);
+
+                // Update counters
+                self.dl_nr_dec();
+
+                // Update earliest deadline
+                if let Some((&next_key, _)) = self.tasks.iter().next() {
+                    self.earliest_dl.store(next_key.deadline, Ordering::Release);
+                } else {
+                    self.earliest_dl.store(u64::MAX, Ordering::Release);
+                }
+
+                // Clear on_rq flag
+                dl.on_rq.store(false, Ordering::Release);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// R41: whether `task` is ACTUALLY linked on this queue (scan by
+    /// pointer, mirroring dequeue's lookup) — as opposed to what the
+    /// entity's on_rq flag claims. Used by __schedule's prev requeue to
+    /// distinguish a legitimately-linked prev from a stale on_rq=true
+    /// flag. Called with the GRQ lock held; refused-path only.
+    pub fn is_linked(&self, task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+        self.tasks.iter().any(|(_, &ptr)| ptr == task)
+    }
+
+    /// Pick the task with earliest deadline
+    pub fn pick_next(&mut self) -> Option<*mut Task> {
+        if let Some((&_key, &task)) = self.tasks.iter().next() {
+            // Remove from tree
+            self.tasks.remove(&_key);
+
+            // Update counters
+            self.dl_nr_dec();
+
+            // Update earliest deadline
+            if let Some((&next_key, _)) = self.tasks.iter().next() {
+                self.earliest_dl.store(next_key.deadline, Ordering::Release);
+            } else {
+                self.earliest_dl.store(u64::MAX, Ordering::Release);
+            }
+
+            // Clear on_rq flag: `task` was just removed from self.tasks
+            // (a valid pointer to a live Task previously enqueued here).
+            crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
+
+            return Some(task);
+        }
+
+        None
+    }
+
+    /// Peek at the task with earliest deadline
+    pub fn peek_next(&self) -> Option<*mut Task> {
+        if let Some((&_key, &task)) = self.tasks.iter().next() {
+            return Some(task);
+        }
+        None
+    }
+
+    /// Pick the earliest-deadline task that is allowed to run on `cpu_id`.
+    /// Scans from the leftmost (earliest deadline) entry, skipping tasks
+    /// whose `cpus_allowed` mask does not include `cpu_id`.
+    ///
+    /// Iterates by temporarily removing non-matching entries to inspect
+    /// subsequent ones, then putting them back. DL task counts are typically
+    /// very small so this is fine.
+    pub fn pick_next_cpu(&mut self, cpu_id: usize, prev: *mut Task) -> Option<*mut Task> {
+        // Stash entries that don't match, then re-insert them after.
+        let mut skipped: [(DlKey, *mut Task); 64] = [(DlKey { deadline: 0, task_id: 0 }, core::ptr::null_mut()); 64];
+        let mut skip_count = 0usize;
+        let mut result = None;
+
+        loop {
+            let key = match self.tasks.iter().next() {
+                Some((&k, _)) => k,
+                None => break,
+            };
+            let task = match self.tasks.get(&key) {
+                Some(&t) => t,
+                None => break,
+            };
+
+            // b50 #GP guard — see the fair-class twin. A scribbled slot
+            // pointer must never reach the deref below.
+            if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
+                self.tasks.remove(&key);
+                self.dl_nr_dec();
+                crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
+                continue;
+            }
+
+            // SAFETY: `task` was obtained from self.tasks which only stores
+            // valid, live Task pointers inserted by enqueue().
+            // R8-1b: skip tasks whose context is not yet saved, except
+            // the switching CPU's own prev (fast path).
+            // R65: dual-bit ownership (on_cpu AND running_on_cpu claim
+            // must both be free) — see the fair-class twin.
+            let allowed = {
+                // R65-pick (probe-slow): single-qword ownership read —
+                // see the fair-class twin.
+                let t = crate::process::unsafe_edges::borrow_task(task);
+                let ownership_ok =
+                    task == prev || t.ownership_pickable(cpu_id);
+                t.cpu_allowed(cpu_id) && ownership_ok
+            };
+            if allowed {
+                // Found a match — remove and return it
+                self.tasks.remove(&key);
+                self.dl_nr_dec();
+
+                if let Some((&next_key, _)) = self.tasks.iter().next() {
+                    self.earliest_dl.store(next_key.deadline, Ordering::Release);
+                } else {
+                    self.earliest_dl.store(u64::MAX, Ordering::Release);
+                }
+
+                // `task` was just removed from self.tasks; a valid
+                // pointer to a live Task previously enqueued.
+                crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
+
+                result = Some(task);
+                break;
+            }
+
+            // Not allowed — remove temporarily and stash
+            self.tasks.remove(&key);
+            if skip_count < skipped.len() {
+                skipped[skip_count] = (key, task);
+                skip_count += 1;
+            } else {
+                // More than 64 skipped DL tasks (very unlikely) — just re-insert
+                self.tasks.insert(key, task);
+                break;
+            }
+        }
+
+        // Re-insert all skipped entries
+        for i in (0..skip_count).rev() {
+            let (key, task) = skipped[i];
+            self.tasks.insert(key, task);
+        }
+
+        result
+    }
 }
 
 impl CfsRunQueue {
@@ -893,7 +1608,7 @@ impl CfsRunQueue {
     /// cctx FAIR_TL probe (zero cost when cctx is off). Returns false
     /// when the poison discipline refused the link.
     #[inline]
-    fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::Task) -> bool {
+    pub fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::Task) -> bool {
         let t0 = crate::dfx::cctx::now();
         // nanosleep-loss conviction: inserting a node that is STILL
         // PHYSICALLY LINKED (a prior removal failed silently — pick_next
@@ -933,7 +1648,7 @@ impl CfsRunQueue {
                 // key, keep the kernel alive; the counters stay paired
                 // with the timeline (the entity was NOT linked).
                 se.sched_entity().set_timeline_key(None);
-                TL_POISON.inserts.fetch_add(1, Ordering::Relaxed);
+                crate::sched::sched::tl_poison_insert_inc();
                 crate::sched::sched::report_poisoned_rq_entry(
                     usize::MAX,
                     task as usize,
@@ -964,7 +1679,7 @@ impl CfsRunQueue {
     /// still holds). Returns false when the poison discipline refused
     /// the unlink (node stays linked; counters stay paired).
     #[inline]
-    fn timeline_remove(&mut self, key: &VruntimeKey, task: *mut crate::process::Task) -> bool {
+    pub fn timeline_remove(&mut self, key: &VruntimeKey, task: *mut crate::process::Task) -> bool {
         let t0 = crate::dfx::cctx::now();
         // SAFETY: callers pass the task whose node is linked (or, on the
         // poison path, a null task — handled below).
@@ -998,7 +1713,7 @@ impl CfsRunQueue {
                 ph(crate::sched::edges::task_shared(task).pid() as u64);
                 putchar(b'\n');
             }
-            TL_POISON.erases.fetch_add(1, Ordering::Relaxed);
+            crate::sched::sched::tl_poison_erase_inc();
             crate::dfx::cctx::add(&crate::dfx::cctx::FAIR_TL_NS, t0);
             crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_TL_N);
             return false;
@@ -1031,7 +1746,7 @@ impl CfsRunQueue {
     /// (sched.rs); a refused decrement leaves the value at 0 and
     /// grq_diag_counts() names the drift.
     #[track_caller]
-    fn nr_running_dec(&self) {
+    pub fn nr_running_dec(&self) {
         // grq-10ns: single locked-RMW form (fetch_sub = one xadd) instead
         // of the fetch_update CAS loop. Every writer of this counter
         // holds the GRQ lock, so a wrap (old == 0) can be restored with a
@@ -1042,7 +1757,7 @@ impl CfsRunQueue {
             // grq-hold-slim Cut 2: CFS emptied — clear the class
             // nonempty bit (GRQ-held; see CLASS_NONEMPTY in sched.rs).
             crate::sched::sched::class_nonempty_clear(
-                crate::sched::sched::CLASS_CFS_BIT,
+                crate::sched::sched_hooks::CLASS_CFS_BIT,
             );
         }
         if old == 0 {
@@ -1051,7 +1766,7 @@ impl CfsRunQueue {
             // restore — keep the class bit identical to what is_empty()
             // would now report.
             crate::sched::sched::class_nonempty_clear(
-                crate::sched::sched::CLASS_CFS_BIT,
+                crate::sched::sched_hooks::CLASS_CFS_BIT,
             );
             // REGRESSION GUARD: the counter was already 0 when a
             // removal path decremented again. The one historical producer
@@ -1062,7 +1777,7 @@ impl CfsRunQueue {
             // caller site via #[track_caller].
             static LAST: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::timer::get_jiffies();
+            let now = crate::drivers::timer::get_jiffies();
             let last = LAST.load(Ordering::Acquire);
             if now.wrapping_sub(last) >= 10
                 && LAST.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
@@ -1095,156 +1810,13 @@ impl CfsRunQueue {
         }
     }
 
-    /// 64th (EEVDF seed hunt): per-visit vruntime sanity canary. Checks the
-    /// ONE invariant every legit vruntime satisfies — |vr - min_vr| within
-    /// VR_CANARY_SPAN_NS (see the constant's derivation) — at the four
-    /// decision sites (enqueue placement, dequeue key, both pick walks).
-    /// On violation prints the task, both values, the writer site, and the
-    /// last 3 pick-ring events so the FIRST anomaly names the seed (the
-    /// 63rd's EEVDF boot corrupted vruntimes within a minute — frozen
-    /// 0xfd79-class values, init unpicked from t=53s — with no instrument
-    /// to localize the write). Armed on rux:fuxstuck (retired dfx=fuxstuck)|schedtrace (same gate
-    /// as the pick/wake history); zero cost otherwise (one switch load).
-    /// GRQ-held callers only; prints via the taskdump brief-budget funnel (R34 discipline, obs-hygiene: staged line-atomic writes).
-    pub fn vr_canary(&self, task: *mut crate::process::Task, site: &[u8; 3], vr: u64) {
-        if !crate::sched::sched::sched_hist_armed() {
-            return;
-        }
-        let min_vr = self.get_min_vruntime();
-        let up = vr.saturating_sub(min_vr);
-        let dn = min_vr.saturating_sub(vr);
-        if up <= VR_CANARY_SPAN_NS && dn <= VR_CANARY_SPAN_NS {
-            return;
-        }
-        let trip = VR_TRIPS.fetch_add(1, Ordering::Relaxed) + 1;
-        let now = crate::timer::get_jiffies();
-        // First 8 trips always print (the seed hunt needs the first-bad
-        // write); afterwards one per 300 jiffies so a corruption storm
-        // cannot flood the serial console.
-        let last = VR_TRIP_LAST_JIF.load(Ordering::Acquire);
-        if trip > 8
-            && now.wrapping_sub(last) < 300
-            && VR_TRIP_LAST_JIF
-                .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-        {
-            return;
-        }
-        VR_TRIP_LAST_JIF.store(now, Ordering::Release);
-        use crate::dfx::taskdump::putc_brief as putchar;
-        fn ph(mut v: u64) {
-            use crate::dfx::taskdump::putc_brief as putchar;
-            putchar(b'0');
-            putchar(b'x');
-            let mut buf = [0u8; 16];
-            let mut n = 0;
-            while n < 16 {
-                buf[n] = (v & 0xF) as u8;
-                v >>= 4;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(if buf[n] < 10 { b'0' + buf[n] as u8 } else { b'a' + buf[n] as u8 - 10 });
-            }
-        }
-        fn pd(mut v: u64) {
-            use crate::dfx::taskdump::putc_brief as putchar;
-            let mut buf = [0u8; 20];
-            let mut n = 0;
-            if v == 0 {
-                putchar(b'0');
-                return;
-            }
-            while v > 0 {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
-        }
-        fn ps(s: &[u8]) {
-            for &b in s {
-                crate::dfx::taskdump::putc_brief(b);
-            }
-        }
-        ps(b"\nVRTRIP site=");
-        ps(site);
-        ps(b" trip=");
-        pd(trip);
-        if !task.is_null() {
-            // SAFETY: diagnostic read of a Task the caller holds under the
-            // GRQ (linked on this queue, or being placed by enqueue).
-            let t = crate::sched::edges::task_shared(task);
-            ps(b" tid=");
-            pd(t.pid() as u64);
-            let comm = t.comm();
-            ps(b"(");
-            let mut j = 0;
-            while j < comm.len() && comm[j] != 0 && j < 12 {
-                putchar(comm[j]);
-                j += 1;
-            }
-            ps(b")");
-        }
-        ps(b" vr=");
-        ph(vr);
-        ps(b" min=");
-        ph(min_vr);
-        if up > VR_CANARY_SPAN_NS {
-            ps(b" up=");
-            pd(up / 1_000_000);
-            ps(b"ms");
-        } else {
-            ps(b" dn=");
-            pd(dn / 1_000_000);
-            ps(b"ms");
-        }
-        ps(b" j=");
-        pd(now);
-        // The last 3 pick-ring events (63rd instrument; entry layout
-        // kind:4 | why:8 | jiffies:30 | aux:22).
-        if !task.is_null() {
-            // SAFETY: as above.
-            let t = crate::sched::edges::task_shared(task);
-            let seq = t.pick_ring_seq.load(Ordering::Relaxed);
-            ps(b" ring=");
-            for k in 1..=3u64 {
-                let idx = (seq.wrapping_sub(k) & 15) as usize;
-                let v = t.pick_ring[idx].load(Ordering::Relaxed);
-                let kind = (v >> 60) & 0xF;
-                let why = (v >> 52) & 0xFF;
-                let jif = (v >> 22) & 0x3FFF_FFFF;
-                putchar(match kind {
-                    1 => b'L',
-                    2 => b'R',
-                    3 => b'P',
-                    4 | 5 => b'H',
-                    _ => b'?',
-                });
-                putchar(b'0' + (why & 0xF) as u8);
-                putchar(b'@');
-                pd(jif);
-                putchar(b' ');
-            }
-            ps(b"pk=");
-            pd(t.pick_n.load(Ordering::Relaxed));
-            ps(b" wk=");
-            pd(t.wake_n.load(Ordering::Relaxed));
-        }
-        putchar(b'\n');
-    }
-
     /// Same no-wrap discipline for the aggregated weight: a wrapped
     /// load_weight reads as a huge total and collapses every task's
     /// slice to the minimum granularity. Regression-guard twin of
     /// nr_running_dec above (the 2b092c49 unexcluded sections were the
     /// one historical producer).
     #[track_caller]
-    fn load_weight_sub(&self, weight: u64) {
+    pub fn load_weight_sub(&self, weight: u64) {
         // grq-10ns: single locked-RMW form (see nr_running_dec) — one
         // xadd; a wrap (old < weight) is restored to `old` because every
         // writer holds the GRQ.
@@ -1253,7 +1825,7 @@ impl CfsRunQueue {
             self.load_weight.store(old, Ordering::SeqCst);
             static LASTW: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::timer::get_jiffies();
+            let now = crate::drivers::timer::get_jiffies();
             let last = LASTW.load(Ordering::Acquire);
             if now.wrapping_sub(last) >= 10
                 && LASTW.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
@@ -1333,7 +1905,7 @@ impl CfsRunQueue {
     /// let min_vruntime run arbitrarily far ahead of the running task — a
     /// sleeper woken later than one latency window was clamped up to
     /// min_vruntime, erasing its entire sleep compensation.
-    pub(crate) fn update_min_vruntime(&mut self) {
+    pub fn update_min_vruntime(&mut self) {
         // SAFETY: self.curr is either null or set by set_curr() to a valid
         // Task pointer; only its sched_entity vruntime is read.
         let curr_v = if self.curr.is_null() {
@@ -1463,7 +2035,7 @@ impl CfsRunQueue {
             // else: preempted prev (state RUNNING) — keep vruntime.
 
             // 64th: vruntime sanity canary (see vr_canary).
-            self.vr_canary(task, b"ENQ", se.get_vruntime());
+            crate::sched::sched_hooks::vr_canary(self, task, b"ENQ", se.get_vruntime());
 
             // Generate unique key
             let task_id = self.next_task_id.fetch_add(1, Ordering::AcqRel);
@@ -1487,7 +2059,7 @@ impl CfsRunQueue {
             let nr_old = self.nr_running.fetch_add(1, Ordering::AcqRel);
             if nr_old == 0 {
                 crate::sched::sched::class_nonempty_set(
-                    crate::sched::sched::CLASS_CFS_BIT,
+                    crate::sched::sched_hooks::CLASS_CFS_BIT,
                 );
             }
             self.load_weight.fetch_add(se.load.weight, Ordering::AcqRel);
@@ -1495,7 +2067,7 @@ impl CfsRunQueue {
             // Update minimum vruntime
             self.update_min_vruntime();
 
-            crate::sched::sched::ww_record(task, crate::sched::sched::WW_EV_LINK);
+            crate::sched::sched_hooks::ww_record(task, crate::sched::sched_hooks::WW_EV_LINK);
 
             true
         }
@@ -1531,7 +2103,7 @@ impl CfsRunQueue {
             if se.timeline_key().is_some() {
                 let key = se.timeline_key().unwrap_or(VruntimeKey::new(0, 0));
                 // 64th: vruntime sanity canary (see vr_canary).
-                self.vr_canary(task, b"DEQ", key.vruntime);
+                crate::sched::sched_hooks::vr_canary(self, task, b"DEQ", key.vruntime);
                 // 64th (update_entity_lag parity, 6.6 fair.c:5534):
                 // capture the clamped lag BEFORE the removal —
                 // avg_vruntime still includes this entity, exactly like
@@ -1614,11 +2186,11 @@ impl CfsRunQueue {
         self.nr_running.store(truth, Ordering::Release);
         if truth > 0 {
             crate::sched::sched::class_nonempty_set(
-                crate::sched::sched::CLASS_CFS_BIT,
+                crate::sched::sched_hooks::CLASS_CFS_BIT,
             );
         } else {
             crate::sched::sched::class_nonempty_clear(
-                crate::sched::sched::CLASS_CFS_BIT,
+                crate::sched::sched_hooks::CLASS_CFS_BIT,
             );
         }
         Some((was, truth))
@@ -1767,7 +2339,7 @@ impl CfsRunQueue {
                             }
                         }
                         let last = tr.pick_last_jif.load(Ordering::Relaxed);
-                        let now = crate::timer::get_jiffies();
+                        let now = crate::drivers::timer::get_jiffies();
                         let lp = if last == 0 {
                             u32::MAX
                         } else {
@@ -1809,10 +2381,10 @@ impl CfsRunQueue {
     /// a queue unwedges). R34 discipline: callers hold the GRQ lock.
     /// s16 (WW5): the counters below are exact and unconditional — only
     /// the PRINT rides this budget.
-    fn heal_report_budget_ok() -> bool {
+    pub fn heal_report_budget_ok() -> bool {
         static LAST_REPORT: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
-        let now = crate::timer::get_jiffies();
+        let now = crate::drivers::timer::get_jiffies();
         let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
         if now.wrapping_sub(last) < 2 {
             return false;
@@ -1824,7 +2396,7 @@ impl CfsRunQueue {
 
     /// One heal line prefix: TAG by_cpu=N pid=P from_claim=C[ pk=K] (no
     /// trailing newline — callers append their context tail first).
-    fn stale_heal_line(tag: &[u8], cpu_id: usize, pid: u32, was: i32, pk: u32) {
+    pub fn stale_heal_line(tag: &[u8], cpu_id: usize, pid: u32, was: i32, pk: u32) {
         use crate::dfx::taskdump::putc_brief as putchar;
         for &b in tag {
             putchar(b);
@@ -1861,7 +2433,7 @@ impl CfsRunQueue {
     /// 63rd: `task` added for the persistent ring (the print can be
     /// budget-swallowed; the ring cannot).
     fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::Task) {
-        WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
+        crate::sched::sched::ww_claim_heal_inc();
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
             crate::sched::sched::sched_hist_ring(
                 crate::sched::edges::task_shared(task),
@@ -1906,7 +2478,7 @@ impl CfsRunQueue {
             for &b in M2 {
                 putchar(b);
             }
-            pdec5(crate::timer::get_jiffies());
+            pdec5(crate::drivers::timer::get_jiffies());
             // pick→switch ledger: an intact publication record for this
             // victim = the claim came from a pick that was never
             // affirmed (switched to) NOR aborted — the switchless pick,
@@ -1928,7 +2500,7 @@ impl CfsRunQueue {
                 for &b in C {
                     putchar(b);
                 }
-                pdec5(crate::timer::get_jiffies().wrapping_sub(pjif));
+                pdec5(crate::drivers::timer::get_jiffies().wrapping_sub(pjif));
             }
         }
         crate::dfx::taskdump::putc_brief(b'\n');
@@ -1944,7 +2516,7 @@ impl CfsRunQueue {
     /// (marks flipping between two cpus' claims). Same R34 discipline
     /// and 2s system-wide budget as the claim twin.
     fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
-        WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
+        crate::sched::sched::ww_oncpu_heal_inc();
         // 63rd: the heal event goes on the task's ring BEFORE the print
         // budget can swallow the line (a budgeted-out heal must still
         // appear in the victim's history).
@@ -2006,7 +2578,7 @@ impl CfsRunQueue {
     }
 
     /// Decimal printer for the heal reports (R34: direct console writes).
-    fn put_dec(v: u64) {
+    pub fn put_dec(v: u64) {
         use crate::dfx::taskdump::putc_brief as putchar;
         if v == 0 {
             putchar(b'0');
@@ -2201,7 +2773,7 @@ impl CfsRunQueue {
                         let was_pk = tr.pick_state();
                         tr.release_pick_ownership();
                         stale_reset += 1;
-                        Self::stale_oncpu_healed(
+                        crate::sched::sched_hooks::stale_oncpu_healed(
                             b"SWEEP-ONCPU-RESET",
                             cpu_id,
                             task,
@@ -2236,7 +2808,7 @@ impl CfsRunQueue {
                 }
                 tr.running_on_cpu.store(-1, Ordering::Release);
                 stale_reset += 1;
-                WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
+                crate::sched::sched::ww_claim_heal_inc();
                 if Self::heal_report_budget_ok() {
                     Self::stale_heal_line(b"SWEEP-CLAIM-RESET", cpu_id, tr.pid(), claim, u32::MAX);
                     crate::dfx::taskdump::putc_brief(b'\n');
@@ -2245,7 +2817,6 @@ impl CfsRunQueue {
         }
         (linked, stale_reset, owned_claim, oncpu_marked, oncpu_pids, owned_pids)
     }
-    // (grq-10ns walk end)
 
     /// Pick next task to run
     ///
@@ -2258,7 +2829,7 @@ impl CfsRunQueue {
         // node — the reference's rb_leftmost)
         if let Some((key, task)) = self.leftmost_entry() {
             // 64th: vruntime sanity canary (see vr_canary).
-            self.vr_canary(task, b"PK1", key.vruntime);
+            crate::sched::sched_hooks::vr_canary(self, task, b"PK1", key.vruntime);
             // b50 #GP guard family — a non-canonical pointer must never
             // reach the derefs below. grq-10ns: with the intrusive
             // timeline the entry cannot be unlinked (the link fields live
@@ -2266,7 +2837,7 @@ impl CfsRunQueue {
             // alive, and let the census name the wedge; the counters stay
             // paired with the still-linked entry.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                TL_POISON.erases.fetch_add(1, Ordering::Relaxed);
+                crate::sched::sched::tl_poison_erase_inc();
                 crate::sched::sched::report_poisoned_rq_entry(usize::MAX, task as usize);
                 return None;
             }
@@ -2306,756 +2877,6 @@ impl CfsRunQueue {
             return Some(task_of_node(node));
         }
         None
-    }
-
-    /// Pick the leftmost (min-vruntime) task that is allowed to run on `cpu_id`.
-    /// Scans from left to right, skipping tasks that cannot run on this CPU.
-    ///
-    /// Temporarily removes non-matching entries to inspect subsequent ones,
-    /// then re-inserts them. CFS task counts are typically reasonable so this
-    /// works fine without allocating.
-    pub fn pick_next_cpu(&mut self, cpu_id: usize, prev: *mut crate::process::Task) -> Option<*mut crate::process::Task> {
-        // s16 (WW5): one exact count per walk entry — the visits= field
-        // on the strand line divides this by the strand window.
-        WW_PICK_WALKS.fetch_add(1, Ordering::Relaxed);
-        // grq-10ns: cctx walk anatomy (picks entered / candidates
-        // consulted — the denominator for the walk-cost evidence).
-        crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_PICK_N);
-        // R7-G1 (GDB capture): this walk once kept a Vec::with_capacity
-        // (a HEAP allocation per pick under the GRQ irqsave lock), then
-        // a 32-slot stack array initialized on EVERY pick (768 B of
-        // stores in the critical section). grq-10ns: the successor walk
-        // REFUSES candidates in place (nothing is unlinked but the
-        // picked one), so the evidence moves to the PICK_SKIP_RING
-        // static below — zero per-pick stack or heap cost, and the
-        // report path reads the ring.
-        // R76 (fast-pace starvation hunt): each ring slot records the
-        // DECISION-TIME skip reason — the report must not re-read
-        // on_cpu/claim at print time, microseconds AFTER the decision
-        // (the switch-out release store legally rewrites the qword in
-        // that window). Reason codes:
-        // 1 = on_cpu set (mid switch-out / fast-path repick window),
-        // 2 = foreign live claim (claim=X, picker sees X as alive),
-        // 3 = affinity mask, 4 = cgroup throttled, 5 = stale claim healed.
-        let mut skip_count = 0usize;
-        let mut result = None;
-
-        // grq-10ns: SUCCESSOR WALK (the reference's rb_next iteration
-        // over the timeline). Start at the cached leftmost node; each
-        // candidate's successor is computed BEFORE the body so the
-        // body's control flow (continue/break) stays the iterator-shape
-        // it was; the walk stops after 32 refused candidates exactly
-        // like the old stash window (the 60th's census semantics are
-        // preserved: PICK_STASH_OVERFLOW counts the give-ups).
-        let nil = self.timeline.nil();
-        let mut node = self.timeline.leftmost;
-        loop {
-            if !(node != nil && !node.is_null() && RbTimeline::node_ok(node)) {
-                break;
-            }
-            let task = task_of_node(node);
-            // SAFETY: linked, in-range node (the key is the ORDER key
-            // stored on the entity).
-            let key = node_key(node);
-            // Advance BEFORE the body: a refused candidate is stepped
-            // past without any tree mutation.
-            // SAFETY: node is in-range; next() reads only link fields.
-            node = self.timeline.next(node);
-            crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_WALK_N);
-
-            // 64th: vruntime sanity canary (see vr_canary) — checked on
-            // every candidate the walk consults, decision-time.
-            self.vr_canary(task, b"PKC", key.vruntime);
-
-            // b50 #GP guard family: a scribbled timeline link yields a
-            // non-canonical *mut Task; the ownership probe below would
-            // #GP the kernel on its first qword load (boot b50, ~20 min
-            // in). grq-10ns: the poisoned NODE cannot be unlinked (its
-            // link fields are the garbage) — report, refuse this CPU's
-            // pick, and keep the kernel alive; the counters stay paired
-            // with the still-linked entry (the census names the wedge).
-            if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                TL_POISON.erases.fetch_add(1, Ordering::Relaxed);
-                crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
-                crate::sched::sched::ww_record(task, crate::sched::sched::WW_EV_UNLINK_POISON);
-                break;
-            }
-
-            // SAFETY: task is from the BTreeMap, a valid pointer stored during enqueue.
-            // R8-1b: skip tasks still marked on-CPU (context not saved —
-            // picking one would resume a STALE thread.sp) UNLESS it is the
-            // switching CPU's own prev, which re-picks itself only via the
-            // next == prev early return (no context restore happens).
-            // R65 (dual-bit ownership): ti_on_cpu and running_on_cpu are
-            // set/cleared together by the switch protocol (mark at pick,
-            // publish at switch-out), so a pickable task must show
-            // on_cpu == false AND claim == -1 (or our own claim). Testing
-            // BOTH closes the single-word scribble: a stray 8-byte store
-            // of a kernel-static pointer over the ownership word resets
-            // it to {false, -1} (x86-scribble3: the word held
-            // 0xffffffff_80661100, a .rodata ops pointer), which let a
-            // second CPU resume a task that was live on the first CPU's
-            // stack — the shared-stack scribble engine. With the claim in
-            // the predicate the corrupted task simply stays unpickable
-            // (the detector names it) instead of double-running.
-            //
-            // GNOME-wedge (stale-claim heal): a LINKED task showing
-            // {on_cpu == false, claim == X != -1} is unreachable by the
-            // switch protocol itself. The only legitimate linked states
-            // are {false, -1} (sleeping/woken, preempted-and-requeued
-            // after the switch-out release) and {true, X} (mid
-            // switch-out / fast-path re-pick, skipped on the on_cpu leg).
-            // The claim is published together with on_cpu at pick time
-            // under the GRQ (publish_pick_ownership), and released only
-            // by __switch_to's single full-qword {false, -1} store — no
-            // code path clears one bit without the other on a linked
-            // task. A linked task also cannot be
-            // executing anywhere (running tasks are dequeued by their
-            // pick), so resetting the claim cannot re-open the R65
-            // double-run window: that guard protects RUNNING tasks, which
-            // are unlinked and never reach this scan. Every producer of
-            // the impossible state (a heal path that cleared on_cpu
-            // alone, a qword-zeroing scribble, a wedged picker that never
-            // reached its switch-out release) left the task stranded
-            // permanently: linked, counted in nr_running, skipped by
-            // every CPU forever — the g2 GNOME freeze (10 tasks stuck,
-            // all CPUs idle-looping on the R20-2 recheck for 35 min,
-            // screen dead, khungtaskd itself stranded). Reset the stale
-            // claim, pick the task, and report loudly (rate-limited).
-            // cgroup v2 (U1b): skip tasks whose cgroup chain is
-            // cpu-throttled — they stay on the timeline and become
-            // pickable again when the period rolls over (the same
-            // affinity-style skip machinery above).
-            // R76: skip_reason is written at DECISION time (see the array
-            // comment above) — 0 = none, 1 = on_cpu, 2 = foreign live
-            // claim, 3 = affinity, 4 = cgroup throttled, 5 = stale claim
-            // healed (pickable on the NEXT pass).
-            let mut skip_reason = 0u32;
-            let allowed = {
-                // R65-pick (probe-slow): the dual-bit ownership test reads
-                // the whole qword in one load (Task::ownership_pickable) —
-                // same e87a8b40 semantics, half the loads per candidate.
-                // The GNOME-wedge stale-claim heal rides the REFUSAL path
-                // only: ownership_pickable is the fast path, and a refusal
-                // is split by re-reading the two bits — on_cpu=true is the
-                // legitimate NEW2 skip, while {on_cpu=false, foreign claim}
-                // on a LINKED candidate is the protocol-impossible state
-                // the heal resets (see the comment above).
-                let ownership_ok = if task == prev {
-                    true
-                } else if crate::sched::edges::task_shared(task).ownership_pickable(cpu_id) {
-                    true
-                } else {
-                    // WAKE-FASTREPRO (orphan-mark root cause, protocol
-                    // fix): the refusal branch used to consume TWO
-                    // separate loads — the claim half here, the on_cpu
-                    // byte again inside the branch conditions below —
-                    // with the owner scan between them. A task completing
-                    // a legitimate switch-out on another CPU transitions
-                    // its qword {true,X} -> {false,-1} and clears its
-                    // SWITCHING_OUT marker WITHOUT holding this GRQ, so
-                    // the split loads could assemble {on_cpu=false,
-                    // claim=X} — the "protocol-impossible" orphan pair —
-                    // out of a transient that never existed atomically
-                    // (12/12 captured STALE-CLAIM-RESET lines on the
-                    // fpns rig showed whole=0xffffffff00000000: the
-                    // qword was clean the whole time). Read the qword
-                    // ONCE, atomically, and decide on the decoded pair:
-                    // a mid-switch-out task reads {true,X} and lands on
-                    // the why=1 leg; only an ATOMIC {false, X-foreign}
-                    // reaches the stale-claim heal.
-                    let whole_qword = crate::sched::edges::task_ownership_qword(task);
-                    let split_oncpu = (whole_qword & 0xFF) != 0;
-                    let claim = (whole_qword >> 32) as i32;
-                    // R85 (tail-phase PICK-SKIP wedge): adjudicate every
-                    // refusal against SCHEDULER TRUTH instead of the
-                    // advisory bits. pick_owner_live (sched.rs) scans the
-                    // per-CPU current slots and the SWITCHING_OUT marks
-                    // under this same GRQ hold: a genuinely owned task is
-                    // named by its CPU's slot (running / picked — the mark
-                    // and slot publishes share one GRQ hold) or by a
-                    // SWITCHING_OUT entry (mid switch-out, release store
-                    // still pending). A marked task named by NEITHER
-                    // executes nowhere and no path will ever release its
-                    // marks: every pick would skip it with why=1/why=2
-                    // forever (the pid-1 tail wedge: linked,
-                    // {oncpu=1, claim=1, pk=1}, box idle).
-                    //
-                    // Organic captures (fork-storm soak, smp2, no
-                    // injectors): pid 1 re-entered these shapes every few
-                    // seconds for minutes — {oncpu=1, claim=-1, pk=1,
-                    // st=RUNNING, slot=0, swout=0, tcpu=crossed} (a
-                    // byte-granular on_cpu flip or a lost release; ti_cpu
-                    // naming the OTHER cpu) and {oncpu=0, claim=foreign}
-                    // (why=2). On dd5537f1 each occurrence was a
-                    // potential permanent strand; with this adjudication
-                    // each is swept in <=50 jiffies and the soak completes
-                    // all phases.
-                    let owner_live =
-                        crate::sched::sched::pick_owner_live(task);
-                    if !split_oncpu
-                        && claim != -1
-                        && claim as usize != cpu_id
-                    {
-                        // R74 (double-run gate, superseded): the old gate
-                        // trusted pick_state==LIVE plus hart liveness
-                        // (irq-frozen < 5s) — but LIVE legitimately
-                        // persists after a switch-out and says nothing
-                        // about whether the CLAIMER still owns the task.
-                        // The r74a capture (reset while CPU0 was inside
-                        // its pick → double-run) is now excluded
-                        // STRUCTURALLY: a pick's mark→slot publish window
-                        // is one continuous GRQ hold, so this scan can
-                        // never interleave it; the r74a shape reads
-                        // slot(claimer)==task → owner_live → refused. A
-                        // {on_cpu=false, foreign claim} candidate owned by
-                        // no slot and no in-flight switch is a byte-clear
-                        // residue or scribble garbage — reset it.
-                        if !owner_live {
-                            // WAKE-FASTREPRO contradiction key: the
-                            // branch condition decoded the pair from ONE
-                            // atomic qword load, but the owner scan that
-                            // followed takes time — the (GRQ-free) asm
-                            // switch-out release can still land
-                            // {false,X} -> {false,-1} under it. Re-read
-                            // the qword atomically and heal ONLY if it
-                            // still shows the exact observed pair: any
-                            // motion means the state was a transient, not
-                            // an orphan — refuse (the release already
-                            // healed it).
-                            let whole = crate::sched::edges::task_ownership_qword(task);
-                            let w_oncpu = (whole & 0xFF) != 0;
-                            let w_claim = (whole >> 32) as i32;
-                            if w_oncpu || w_claim != claim {
-                                // TORN VIEW: the qword moved between the
-                                // split loads and this atomic re-read. The
-                                // split-read pair never existed atomically
-                                // — healing it would corrupt a live pick
-                                // (claim-only store over {true,X}).
-                                static TORN_N: core::sync::atomic::AtomicU32 =
-                                    core::sync::atomic::AtomicU32::new(0);
-                                if TORN_N.fetch_add(1, Ordering::Relaxed) < 40 {
-                                    use crate::dfx::taskdump::putc_brief as putchar;
-                                    fn ph6(mut v: u64) {
-                                        use crate::dfx::taskdump::putc_brief as p;
-                                        for sh in (0..16).rev() {
-                                            let n = ((v >> (sh * 4)) & 0xF) as u8;
-                                            p(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                                        }
-                                    }
-                                    const M: &[u8] = b"\nSTALE-CLAIM-TORN pid=";
-                                    for &b in M { putchar(b); }
-                                    ph6(crate::sched::edges::task_shared(task).pid() as u64);
-                                    const M2: &[u8] = b" split_claim=";
-                                    for &b in M2 { putchar(b); }
-                                    ph6(claim.unsigned_abs() as u64);
-                                    const M3: &[u8] = b" whole=0x";
-                                    for &b in M3 { putchar(b); }
-                                    ph6(whole);
-                                    putchar(b'\n');
-                                }
-                                skip_reason = 2; // treat as foreign-live: refuse
-                            } else {
-                                crate::sched::edges::task_shared(task).running_on_cpu.store(-1, Ordering::Release);
-                                Self::stale_claim_healed(cpu_id, crate::sched::edges::task_shared(task).pid(), claim, task);
-                                skip_reason = 5;
-                            }
-                        } else {
-                            skip_reason = 2;
-                        }
-                        !owner_live
-                    } else {
-                        // why=1 leg: on_cpu set (or the claim names THIS
-                        // picker's cpu). This is the legitimate mid
-                        // switch-out / fast-repick transient — UNLESS no
-                        // owner backs it (slotless, no SWITCHING_OUT): the
-                        // release store was lost and the marks are stale
-                        // forever. Time-confirm through the orphan watch
-                        // (50 jiffies) so a picker that briefly appears
-                        // slotless under an out-of-tree divergence window
-                        // is re-recorded, then release the FULL qword —
-                        // the exact store __switch_to would have made.
-                        if !owner_live
-                            && crate::sched::sched::stale_mark_confirm(
-                                task,
-                                crate::sched::edges::task_shared(task).pid(),
-                                50,
-                            )
-                        {
-                            // TORN re-read guard (the why=2 twin's
-                            // discipline, smp8 orphan-race): the branch
-                            // condition decoded the pair from ONE atomic
-                            // qword load, but the owner scan and the
-                            // orphan-watch confirmation that followed take
-                            // time — the (GRQ-free) asm switch-out release
-                            // store can still land under them, and no
-                            // future divergence may be healed on evidence
-                            // the qword no longer supports. Re-read the
-                            // qword atomically and heal ONLY if it still
-                            // shows the exact observed pair (on_cpu bit
-                            // AND claim unchanged); any motion means the
-                            // state was a transient, not an orphan —
-                            // refuse (a real release already healed it; a
-                            // fresh publish means a live owner exists and
-                            // the next pass re-adjudicates).
-                            let whole = crate::sched::edges::task_ownership_qword(task);
-                            let w_oncpu = (whole & 0xFF) != 0;
-                            let w_claim = (whole >> 32) as i32;
-                            if w_oncpu != split_oncpu || w_claim != claim {
-                                // TORN VIEW: the qword moved between the
-                                // split read and this atomic re-read. The
-                                // observed pair never existed atomically
-                                // at the heal moment — releasing on it
-                                // could wipe a live pick's fresh marks.
-                                static TORN1_N: core::sync::atomic::AtomicU32 =
-                                    core::sync::atomic::AtomicU32::new(0);
-                                if TORN1_N.fetch_add(1, Ordering::Relaxed) < 40 {
-                                    use crate::console::putchar_no_lock as putchar;
-                                    fn ph6(mut v: u64) {
-                                        use crate::console::putchar_no_lock as p;
-                                        for sh in (0..16).rev() {
-                                            let n = ((v >> (sh * 4)) & 0xF) as u8;
-                                            p(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                                        }
-                                    }
-                                    const M: &[u8] = b"\nSTALE-ONCPU-TORN pid=";
-                                    for &b in M { putchar(b); }
-                                    ph6(crate::sched::edges::task_shared(task).pid() as u64);
-                                    const M2: &[u8] = b" split_oncpu=";
-                                    for &b in M2 { putchar(b); }
-                                    ph6(split_oncpu as u64);
-                                    const M2b: &[u8] = b" split_claim=";
-                                    for &b in M2b { putchar(b); }
-                                    ph6(claim.unsigned_abs() as u64);
-                                    const M3: &[u8] = b" whole=0x";
-                                    for &b in M3 { putchar(b); }
-                                    ph6(whole);
-                                    putchar(b'\n');
-                                }
-                                skip_reason = 1; // treat as owned/transient: refuse
-                            } else {
-                                let was_pk = crate::sched::edges::task_shared(task).pick_state();
-                                crate::sched::edges::task_shared(task).release_pick_ownership();
-                                Self::stale_oncpu_healed(b"STALE-ONCPU-RESET", cpu_id, task, claim, was_pk);
-                                skip_reason = 5;
-                            }
-                        } else {
-                            skip_reason = 1;
-                            // nanosleep-loss lane (hunt instrument): the
-                            // owner_live why=1 refusal — name the candidate's
-                            // qword + the owner bits (slot / SWITCHING_OUT)
-                            // at DECISION time (schedtrace-gated, budgeted).
-                            {
-                                static WHY1_N: core::sync::atomic::AtomicU32 =
-                                    core::sync::atomic::AtomicU32::new(0);
-                                let stale_task = crate::sched::sched::pick_trace_peek(task)
-                                    .is_some_and(|(_, ago)| ago > 30);
-                                if crate::trace::EVENT_SCHEDTRACE.armed()
-                                    && stale_task
-                                    && crate::timer::get_jiffies() > 300
-                                    && WHY1_N.fetch_add(
-                                        1,
-                                        core::sync::atomic::Ordering::Relaxed,
-                                    ) < 400
-                                {
-                                    use crate::dfx::taskdump::putc_brief as putchar;
-                                    fn ph(mut v: u64) {
-                                        for _ in 0..16 {
-                                            let n = (v >> 60) as u8;
-                                            putchar(if n < 10 {
-                                                b'0' + n
-                                            } else {
-                                                b'a' + n - 10
-                                            });
-                                            v <<= 4;
-                                        }
-                                    }
-                                    for &b in b"\nWHY1-OWNER-REFUSED pid=" {
-                                        putchar(b);
-                                    }
-                                    let mut v = crate::sched::edges::task_shared(task).pid() as u64;
-                                    for _ in 0..8 {
-                                        let n = (v >> 28) as u8;
-                                        putchar(if n < 10 {
-                                            b'0' + n
-                                        } else {
-                                            b'a' + n - 10
-                                        });
-                                        v <<= 4;
-                                    }
-                                    for &b in b" qword=0x" {
-                                        putchar(b);
-                                    }
-                                    ph(whole_qword);
-                                    for &b in b" slot=0x" {
-                                        putchar(b);
-                                    }
-                                    ph(crate::sched::sched::owner_slot_mask(task) as u64);
-                                    for &b in b" swout=0x" {
-                                        putchar(b);
-                                    }
-                                    ph(crate::sched::sched::switching_out_mask(task) as u64);
-                                    for &b in b" pk=" {
-                                        putchar(b);
-                                    }
-                                    let mut p9 = crate::sched::edges::task_shared(task).pick_state() as u64;
-                                    for _ in 0..4 {
-                                        let n = (p9 >> 28) as u8;
-                                        putchar(b'0' + n);
-                                        p9 <<= 4;
-                                    }
-                                    if let Some((ptc, ptj)) =
-                                        crate::sched::sched::pick_trace_peek(task)
-                                    {
-                                        for &b in b" pt=" {
-                                            putchar(b);
-                                        }
-                                        putchar(b'0' + ptc as u8);
-                                        for &b in b"/ago" {
-                                            putchar(b);
-                                        }
-                                        let mut j = ptj;
-                                        let mut buf = [0u8; 12];
-                                        let mut n = 0;
-                                        while j > 0 && n < 12 {
-                                            buf[n] = b'0' + (j % 10) as u8;
-                                            j /= 10;
-                                            n += 1;
-                                        }
-                                        if n == 0 {
-                                            putchar(b'0');
-                                        }
-                                        while n > 0 {
-                                            n -= 1;
-                                            putchar(buf[n]);
-                                        }
-                                    }
-                                    // nanosleep-loss lane: the pick→switch
-                                    // handoff ledger entry (publisher cpu,
-                                    // published pk, publish jiffies) — an
-                                    // intact entry names the CPU whose pick
-                                    // never reached its switch.
-                                    if let Some((pc, ppk, pj)) =
-                                        crate::sched::sched::psledger_peek(task)
-                                    {
-                                        for &b in b" psl=(cpu:" {
-                                            putchar(b);
-                                        }
-                                        let mut v = pc as u64;
-                                        for _ in 0..2 {
-                                            putchar(b'0' + (v & 0xF) as u8);
-                                            v >>= 4;
-                                        }
-                                        for &b in b",pk:" {
-                                            putchar(b);
-                                        }
-                                        putchar(b'0' + ppk as u8);
-                                        for &b in b",jif:" {
-                                            putchar(b);
-                                        }
-                                        let mut j =
-                                            crate::timer::get_jiffies().saturating_sub(pj);
-                                        let mut buf = [0u8; 12];
-                                        let mut n = 0;
-                                        while j > 0 && n < 12 {
-                                            buf[n] = b'0' + (j % 10) as u8;
-                                            j /= 10;
-                                            n += 1;
-                                        }
-                                        if n == 0 {
-                                            putchar(b'0');
-                                        }
-                                        while n > 0 {
-                                            n -= 1;
-                                            putchar(buf[n]);
-                                        }
-                                        putchar(b')');
-                                    }
-                                    putchar(b'\n');
-                                }
-                            }
-                        }
-                        false
-                    }
-                };
-                let affinity_ok = crate::sched::edges::task_shared(task).cpu_allowed(cpu_id);
-                if !affinity_ok {
-                    skip_reason = 3;
-                }
-                let throttled = crate::sched::cgroup::task_cgroup_throttled(task);
-                if throttled {
-                    skip_reason = 4;
-                }
-                affinity_ok && ownership_ok && !throttled
-            };
-            if allowed {
-                // Found a match — unlink it (the ONLY tree mutation of
-                // the walk; the successor for the loop was already
-                // computed).
-                self.timeline_remove(&key, task);
-
-                // SAFETY: task was just removed from the queue; no aliasing references exist.
-                {
-                    let task_ref = crate::sched::edges::task_mut(task);
-                    let se = task_ref.sched_entity();
-                    se.set_on_rq(false);
-
-                    self.nr_running_dec();
-                    self.load_weight_sub(se.load.weight);
-                    // min_vruntime is updated after the walk (see the
-                    // comment at update_min_vruntime below).
-                }
-
-                result = Some(task);
-                crate::sched::sched::ww_record(task, crate::sched::sched::WW_EV_UNLINK_PICK);
-                crate::sched::sched::pick_trace(task, 1);
-                break;
-            }
-
-            // Not allowed — record the refusal and step past the
-            // candidate IN PLACE (grq-10ns: no unlink, no stash).
-            // s14 (msg-region strand family): PICK-SKIP-ALL names only
-            // the total-failure shape (nothing pickable). A victim
-            // refused AMID other candidates is invisible — yet that is
-            // the msg* WAKE-STRANDED shape (100/100 strands with zero
-            // skip-alls in ltp-b r2's msg region). Stamp every refusal
-            // into a per-task history so the strand report (wakewatch
-            // check_picked) can name WHY the victim sat unpicked for
-            // the whole strand window. Armed only under rux:schedtrace (retired dfx=schedtrace).
-            if crate::trace::EVENT_SCHEDTRACE.armed() {
-                note_pick_skip(task, skip_reason as u8);
-            }
-            // 63rd (strand-wall hunt): decision-time refusal evidence,
-            // PERSISTENT on the task (the 61st's SKIP_HIST slots were
-            // stolen by churn) and armed on the fuxstuck census boots
-            // too — RUNQ-STRAND's burst sample missed the wheel
-            // thread's input on ohw29/30 precisely because this only
-            // armed under schedtrace.
-            if crate::sched::sched::sched_hist_armed() {
-                crate::sched::sched::sched_hist_refuse(task, skip_reason, cpu_id);
-            }
-            // Not allowed — count the refusal into the walk ring
-            // (decision-time evidence for the PICK-SKIP-ALL report
-            // below), then give up at the old 32-entry cap.
-            // 60th (RUNQ-STRAND): the cap is NOT "very unlikely" — >32
-            // simultaneously refused entries make EVERY later pick bail
-            // out here, and every entry sorting above the walk window
-            // (e.g. a linked, pickable, frozen censusd/samgr victim) is
-            // never even VISITED while the callers walk away
-            // empty-handed. Count it unconditionally; the strand census
-            // reports the total.
-            if skip_count < PICK_SKIP_RING_LEN {
-                PICK_SKIP_RING_TASK[skip_count].store(task as usize as u64, Ordering::Relaxed);
-                PICK_SKIP_RING_WHY[skip_count].store(skip_reason, Ordering::Relaxed);
-                skip_count += 1;
-            } else {
-                PICK_STASH_OVERFLOW.fetch_add(1, Ordering::Relaxed);
-                break;
-            }
-        }
-        PICK_SKIP_RING_N.store(skip_count, Ordering::Relaxed);
-
-        // Advance min_vruntime over the COMPLETE timeline. grq-10ns: the
-        // successor walk never lifted the refused entries out of the
-        // tree, so the invariant the old stash-dance ordering restored
-        // (min_vruntime computed over the full tree minus the picked
-        // task — the reference's update_min_vruntime) holds here by
-        // construction. min_vruntime only ever grows; it is the reference
-        // point new tasks and waking sleepers are placed against
-        // (enqueue_inner's sleep-compensation floor), so a drifted value
-        // silently erases their sleep credit.
-        if result.is_some() {
-            self.update_min_vruntime();
-        }
-
-        // GNOME-wedge canary: the timeline held candidates but NONE was
-        // pickable by this CPU — the exact shape that stranded 10 linked
-        // tasks in the g2 freeze (Xorg/dbus/gmain linked, every CPU
-        // idle-looping on the R20-2 recheck, nothing picked for 35 min).
-        // The 5s DFX dump shows the state but never the REASON, so name it
-        // here at skip time: per task its on_cpu/claim/affinity/throttle
-        // legs. Rate-limited to one report per 100 jiffies system-wide so
-        // the hot idle-loop callers cannot flood the console. SBI direct
-        // write discipline (R34): we hold the GRQ lock here.
-        if result.is_none() && skip_count > 0 {
-            PICK_SKIP_ALL.fetch_add(1, Ordering::Relaxed);
-            use crate::dfx::taskdump::putc_brief as putchar;
-            fn pd(mut v: u64) {
-                use crate::dfx::taskdump::putc_brief as putchar;
-                let mut buf = [0u8; 20];
-                let mut n = 0;
-                if v == 0 {
-                    putchar(b'0');
-                    return;
-                }
-                while v > 0 {
-                    buf[n] = b'0' + (v % 10) as u8;
-                    v /= 10;
-                    n += 1;
-                }
-                while n > 0 {
-                    n -= 1;
-                    putchar(buf[n]);
-                }
-            }
-            fn ps(s: &[u8]) {
-                for &b in s {
-                    crate::dfx::taskdump::putc_brief(b);
-                }
-            }
-            static LAST_REPORT: core::sync::atomic::AtomicU64 =
-                core::sync::atomic::AtomicU64::new(0);
-            let now = crate::timer::get_jiffies();
-            let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
-            // serial-clean: this canary fires on benign mid-switch-out
-            // transients too — print only behind rux:schedtrace (retired dfx=schedtrace).
-            if crate::trace::EVENT_SCHEDTRACE.armed()
-                && now.wrapping_sub(last) >= 100
-                && LAST_REPORT
-                    .compare_exchange(
-                        last,
-                        now,
-                        core::sync::atomic::Ordering::AcqRel,
-                        core::sync::atomic::Ordering::Acquire,
-                    )
-                    .is_ok()
-            {
-                ps(b"\nPICK-SKIP-ALL cpu=");
-                pd(cpu_id as u64);
-                ps(b" skipped=");
-                pd(skip_count as u64);
-                ps(b"\n");
-                for i in 0..skip_count {
-                    let task = PICK_SKIP_RING_TASK[i].load(Ordering::Relaxed)
-                        as usize as *mut crate::process::Task;
-                    let reason = PICK_SKIP_RING_WHY[i].load(Ordering::Relaxed);
-                    // SAFETY: diagnostic read of stable Task fields of a task
-                    // that is linked on this queue (pinned by the GRQ lock we
-                    // hold).
-                    {
-                        let tr = crate::sched::edges::task_shared(task);
-                        let claim = tr.running_on_cpu.load(Ordering::Relaxed);
-                        ps(b"  pid=");
-                        pd(tr.pid() as u64);
-                        // R76: WHY the decision refused — captured at scan
-                        // time, immune to the switch-out release racing the
-                        // print. The oncpu/claim/pk fields below are the
-                        // print-time snapshot (kept for continuity with the
-                        // older captures).
-                        ps(b" why=");
-                        pd(reason as u64);
-                        ps(b" oncpu=");
-                        putchar(b'0' + crate::sched::edges::task_shared(task).on_cpu() as u8);
-                        ps(b" claim=");
-                        if (claim as i64) < 0 {
-                            putchar(b'-');
-                        }
-                        pd((claim as i64).unsigned_abs());
-                        // R57: pick-state word (0=PICKED 1=LIVE 2=REVOKED) —
-                        // with oncpu/claim it names the exact protocol leg
-                        // that refused the candidate.
-                        ps(b" pk=");
-                        pd(crate::sched::edges::task_shared(task).pick_state() as u64);
-                        // R85 (tail-phase wedge hunt): the ownership
-                        // ADJUDICATION fields — st= the state word (the
-                        // harvester only heals RUNNING orphans; a wedged
-                        // waiter shows SLEEPING here), slot= the CPUs whose
-                        // current slot names the task, swout= the CPUs
-                        // whose in-flight switch-out names it. why=1 with
-                        // slot=0 swout=0 persisting across reports is the
-                        // un-owned stale mark the R85 pick-side heal
-                        // releases (STALE-ONCPU-RESET).
-                        ps(b" st=0x");
-                        let st = crate::sched::edges::task_shared(task).state().bits();
-                        let mut v = st as u64;
-                        for sh in (0..8u32).rev() {
-                            let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                        }
-                        ps(b" slot=");
-                        pd(crate::sched::sched::owner_slot_mask(task) as u64);
-                        ps(b" swout=");
-                        pd(crate::sched::sched::switching_out_mask(task) as u64);
-                        ps(b" aff=0x");
-                        let mut v = crate::sched::edges::task_shared(task).cpus_allowed() as u64;
-                        for sh in (0..8u32).rev() {
-                            let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                        }
-                        if crate::sched::cgroup::task_cgroup_throttled(task) {
-                            ps(b" THROTTLED");
-                        }
-                        putchar(b'\n');
-                        // R76 (fast-pace starvation hunt): per-pid skip
-                        // counting. The full3 wedge showed freshly spawned
-                        // tasks named in PICK-SKIP-ALL reports for minutes;
-                        // a task whose skip count crosses 1000 is either a
-                        // genuine starvation victim or a decision-time
-                        // transient that repeats forever — both deserve one
-                        // full-context dump (state word, queue flags, stack
-                        // pointers) so the post-mortem knows whether the
-                        // task was linked/sleeping/phantom at skip time.
-                        // Table is direct-mapped by pid (64 slots), only
-                        // ever touched under the GRQ lock this pick holds.
-                        {
-                            use core::sync::atomic::Ordering as Rel;
-                            let pid = crate::sched::edges::task_shared(task).pid();
-                            let slot = (pid as usize) & (SKIP_TRACK.len() - 1);
-                            let entry = &SKIP_TRACK[slot];
-                            if entry.pid.load(Rel::Relaxed) != pid {
-                                entry.pid.store(pid, Rel::Relaxed);
-                                entry.count.store(0, Rel::Relaxed);
-                                entry.dumped_at.store(0, Rel::Relaxed);
-                            }
-                            let count = {
-                                let c = entry.count.load(Rel::Relaxed);
-                                if c < u32::MAX { c + 1 } else { c }
-                            };
-                            entry.count.store(count, Rel::Relaxed);
-                            let dumped_at = entry.dumped_at.load(Rel::Relaxed);
-                            if count >= 1000 && count / 1000 > dumped_at {
-                                entry.dumped_at.store(count / 1000, Rel::Relaxed);
-                                ps(b"  SKIP-DEEP pid=");
-                                pd(pid as u64);
-                                ps(b" n=");
-                                pd(count as u64);
-                                ps(b" state=");
-                                let st = crate::sched::edges::task_shared(task).state().bits();
-                                let mut v = st as u64;
-                                for sh in (0..8u32).rev() {
-                                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                                }
-                                ps(b" onrq=");
-                                putchar(b'0' + crate::sched::edges::task_shared(task).sched_entity().is_on_rq() as u8);
-                                ps(b" ti_cpu=");
-                                if (crate::sched::edges::task_shared(task).ti_cpu() as i64) < 0 {
-                                    putchar(b'-');
-                                }
-                                pd((crate::sched::edges::task_shared(task).ti_cpu() as i64).unsigned_abs() as u64);
-                                ps(b" ksp=0x");
-                                let mut v = crate::sched::edges::task_shared(task).ti_kernel_sp() as u64;
-                                for sh in (0..16u32).rev() {
-                                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                                }
-                                ps(b" thsp=0x");
-                                let mut v = crate::sched::edges::task_shared(task).thread().sp;
-                                for sh in (0..16u32).rev() {
-                                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                                }
-                                ps(b" vrun=");
-                                pd(crate::sched::edges::task_shared(task).sched_entity().get_vruntime());
-                                putchar(b'\n');
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        result
     }
 
     /// Update current task runtime
@@ -3224,169 +3045,89 @@ impl CfsRunQueue {
         self.load_weight.store(0, Ordering::Release);
         // grq-hold-slim Cut 2: the drain emptied CFS — clear the class
         // bit (GRQ-held).
-        crate::sched::sched::class_nonempty_clear(crate::sched::sched::CLASS_CFS_BIT);
+        crate::sched::sched::class_nonempty_clear(crate::sched::sched_hooks::CLASS_CFS_BIT);
     }
 }
 
-impl Default for CfsRunQueue {
-    fn default() -> Self {
-        Self::new()
-    }
+/// grq-10ns: poison-discipline trip counters for the intrusive timeline
+/// (an insert descent or erase neighbor that failed the kernel-range
+/// check — the op was refused to keep the kernel alive). Reported by
+/// grq_diag_counts; a persistent nonzero rate names a scribble producer.
+pub struct TlPoisonCounters {
+    pub inserts: core::sync::atomic::AtomicU64,
+    pub erases: core::sync::atomic::AtomicU64,
 }
 
+pub static TL_POISON: TlPoisonCounters = TlPoisonCounters {
+    inserts: core::sync::atomic::AtomicU64::new(0),
+    erases: core::sync::atomic::AtomicU64::new(0),
+};
 
+// ==================== Shared sched observability state ====================
+// (sched-seam devirt lane, 2026-11-23): the per-switch diagnostic counters
+// below are PLAIN STATE, not policy — no decision reads them; the census
+// walks and /proc readers do. They originally moved into the rux-sched
+// service crate with the S1b flip, which put every per-switch access
+// through a SchedHooks fn-pointer row (wrapper -> OnceSlot read ->
+// indirect call) — p2_ctxsw measured the layer at ~0.4 us per switch
+// round (2.12-2.19 vs 1.708 same-window main, outside the +-20% sched
+// band). The storage and its trivial accessors live HERE (framework)
+// now; the rux-sched census code reads them through the normal
+// crate::sched re-exports (the same visibility PICK_GEN always had).
+// Same single instance, same stores at the same call sites — only the
+// dispatch layer is gone.
 
+/// r11: per-CPU pick-phase tracer table (pick_trace's key side).
+pub static PT_TASK: [AtomicUsize; 32] = [const { AtomicUsize::new(0) }; 32];
+pub static PT_CODE: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
+pub static PT_JIF: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
 
-/// Calculate time slice (milliseconds)
-///
-/// Convert nanosecond time slice to milliseconds for timer interrupt
-pub fn sched_slice_to_ms(slice_ns: u64) -> u32 {
-    (slice_ns / 1_000_000) as u32
-}
+/// grq-hold-slim Cut 2: single-class-chain short-circuit mask — each
+/// class's 0 <-> nonempty transition (GRQ-held) sets/clears its bit;
+/// pick_next_task's class walk loads it once instead of per-class
+/// is_empty() loads.
+pub static CLASS_NONEMPTY: AtomicU32 = AtomicU32::new(0);
 
-/// Convert milliseconds to nanoseconds
-pub fn ms_to_ns(ms: u32) -> u64 {
-    (ms as u64) * 1_000_000
-}
+/// Wakewatch (s15 A2 idle-mark/WFI hunt): per-CPU idle-loop phase stamp,
+/// written by the idle loop at each phase transition, read by the 1 Hz
+/// heartbeat. Codes: 0 = not in the idle loop, 1 = entering schedule(),
+/// 2 = idle post-schedule (idle-marked, R20-2 recheck window), 3 =
+/// pre-WFI (uart poll), 4 = inside WFI, 5 = post-WFI accounting.
+pub static WW_IDLE_PHASE: [AtomicU32; MAX_CPUS] =
+    [const { AtomicU32::new(0) }; MAX_CPUS];
 
-/// Timebase multiplier: QEMU uses 10MHz timebase, convert to nanoseconds
-const TIMEBASE_MULT: u64 = 100;
+/// SP-5 r5 frozen-tick trap: per-CPU schedule() milestone inside the
+/// IF=0 window that opens at the GRQ acquire. 0 = not inside
+/// schedule()'s GRQ window; 1 = about to acquire (or spinning); 2 =
+/// acquired, inside the CS; 3 = lock released IRQ-retained,
+/// context-switch tail; 4 = past restore (immediately cleared).
+pub static SCHED_CS_PHASE: [AtomicU32; MAX_CPUS] =
+    [const { AtomicU32::new(0) }; MAX_CPUS];
 
-/// Get current time (nanoseconds)
-///
-/// Use RISC-V time register
-pub fn sched_clock() -> u64 {
-    // Arch wall-clock counter (rdtime on riscv64, TSC on x86_64).
-    let time: u64 = crate::arch::cpu::read_time();
-    // Assume clock frequency is 10MHz (100ns precision)
-    // Actual value needs adjustment based on platform
-    time * TIMEBASE_MULT
-}
+/// runq-strand lane: per-CPU schedule()-entry count (one relaxed
+/// fetch_add per schedule); the monopolist census reads its per-burst
+/// delta (frozen = a CPU that stopped scheduling).
+pub static SCHED_CALLS: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
 
-// ============================================================================
-// Fair Scheduling Class Implementation
-// ============================================================================
+/// 105th wake-dispatch census: the dispatch outcome at each wake (1 =
+/// idle CPU claimed + IPI, 2 = no idle; sync wake won the vruntime
+/// compare -> poke, 3 = sync compare lost -> park handoff, 4 = async
+/// preempt check poked, 5 = async recency/compare gate -> no poke).
+pub static WAKE_DISP: AtomicU32 = AtomicU32::new(0);
 
-/// Fair scheduling class - wraps CFS
-///
-/// With the global RunQueue design, the actual CFS enqueue/dequeue/pick
-/// happens directly in sched.rs on GlobalRunQueue::cfs_rq. The SchedClass
-/// methods are simplified to no-ops or minimal stubs.
-pub struct FairSchedClass;
+/// Same census: the idle-CPU mask latched at wake ENTRY (before the
+/// claim), so "idle existed but claim lost" vs "no idle at all" are
+/// told apart.
+pub static WAKE_IDLE_MASK: AtomicU32 = AtomicU32::new(0);
 
-impl FairSchedClass {
-    pub const fn new() -> Self {
-        Self
-    }
-}
+/// Per-task schedstats runtime gate (/proc/sys/kernel/sched_schedstats,
+/// default OFF like the reference). One relaxed load per schedule edge
+/// when off.
+pub static SCHEDSTATS: AtomicBool = AtomicBool::new(false);
 
-impl SchedClass for FairSchedClass {
-    fn name(&self) -> &'static str {
-        "fair"
-    }
-
-    /// Actual enqueue happens in sched.rs::enqueue_task_locked.
-    fn enqueue_task(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) {
-    }
-
-    /// Actual dequeue happens in sched.rs::dequeue_task.
-    fn dequeue_task(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) -> bool {
-        false
-    }
-
-    /// Actual yield handling happens in sched.rs.
-    fn yield_task(&self, _rq: RunQueueRef) {
-    }
-
-    /// Preemption checks happen in sched.rs.
-    fn wakeup_preempt(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) {
-    }
-
-    /// Actual pick happens in sched.rs::pick_next_task.
-    fn pick_next_task(&self, _rq: RunQueueRef, _prev: *mut Task) -> *mut Task {
-        core::ptr::null_mut()
-    }
-
-    /// Actual re-enqueue happens in sched.rs::__schedule.
-    fn put_prev_task(&self, _rq: RunQueueRef, _prev: *mut Task, _next: *mut Task) {
-    }
-
-    /// Minimal — actual setup happens in sched.rs.
-    fn set_next_task(&self, _rq: RunQueueRef, _next: *mut Task, _first: bool) {
-    }
-
-    /// CFS load balancing is handled separately
-    fn balance(&self, _rq: RunQueueRef, _prev: *mut Task) -> bool {
-        false
-    }
-
-    /// CPU selection — simplified for global RQ.
-    /// The global queue is inherently balanced; just keep on the current CPU.
-    fn select_task_rq(&self, task: *mut Task, cpu: i32, _flags: i32) -> i32 {
-        if task.is_null() {
-            return cpu;
-        }
-
-        // With global RQ, no per-CPU load balancing needed.
-        // Just return the preferred CPU from the task's affinity.
-        // SAFETY: task is a valid pointer from the caller; null check above.
-        {
-            let task_ref = crate::sched::edges::task_shared(task);
-            let cpus_allowed = task_ref.cpus_allowed();
-            let wake_cpu = task_ref.wake_cpu();
-
-            // Prefer wake_cpu if allowed
-            if wake_cpu >= 0 {
-                let wake = wake_cpu as usize;
-                if wake < crate::config::MAX_CPUS && (cpus_allowed & (1u32 << wake)) != 0 {
-                    return wake_cpu;
-                }
-            }
-
-            // Check if current cpu is allowed
-            let cpu_usize = cpu as usize;
-            if cpu_usize < crate::config::MAX_CPUS && (cpus_allowed & (1u32 << cpu_usize)) != 0 {
-                return cpu;
-            }
-
-            // Fallback: first allowed CPU
-            for c in 0..crate::config::MAX_CPUS {
-                if (cpus_allowed & (1u32 << c)) != 0 {
-                    return c as i32;
-                }
-            }
-
-            cpu
-        }
-    }
-
-    /// Actual tick handling happens in sched.rs::scheduler_tick.
-    fn task_tick(&self, _rq: RunQueueRef, _task: *mut Task, _queued: bool) {
-    }
-
-    /// Actual runtime tracking happens in sched.rs.
-    fn update_curr(&self, _rq: RunQueueRef) {
-    }
-
-    fn get_rr_interval(&self, _rq: RunQueueRef, task: *mut Task) -> u32 {
-        if task.is_null() {
-            return 1;
-        }
-
-        // Return a reasonable default; actual slice is computed in sched.rs.
-        1
-    }
-
-    /// Actual check happens in sched.rs via GlobalRunQueue::cfs_rq.
-    fn has_runnable(&self, _rq: RunQueueRef) -> bool {
-        false
-    }
-
-    fn next_class(&self) -> Option<&'static dyn SchedClass> {
-        Some(&super::idle::IDLE_SCHED_CLASS)
-    }
-}
-
-/// Global fair scheduling class instance
-pub static FAIR_SCHED_CLASS: FairSchedClass = FairSchedClass::new();
-
+/// s14/60th walk-census counters: CFS pick-walk length and the two
+/// ownership-heal families. Reported by the census getters.
+pub static WW_PICK_WALKS: AtomicU64 = AtomicU64::new(0);
+pub static WW_ONCPU_HEALS: AtomicU64 = AtomicU64::new(0);
+pub static WW_CLAIM_HEALS: AtomicU64 = AtomicU64::new(0);

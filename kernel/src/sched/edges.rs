@@ -25,7 +25,7 @@
 
 use crate::process::task::Task;
 
-use super::fair::SchedEntity;
+use super::entities::SchedEntity;
 use super::sched::GlobalRunQueue;
 
 // ---------------------------------------------------------------------------

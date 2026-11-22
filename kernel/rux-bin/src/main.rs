@@ -16,6 +16,9 @@ pub extern "C" fn rust_main() -> ! {
     // regs tables route every dispatch from here on. Drivers first:
     // its DriverHooks rows are consumed from devfs populate onward.
     rux_drivers::register_all();
+    // Sched policy rows before the first schedule(): the SchedHooks
+    // table backs every pick from scheduler start.
+    rux_sched::register_all();
     rux_net::register_all();
     rux_fs::register_all();
     rux_syscall::register_all();

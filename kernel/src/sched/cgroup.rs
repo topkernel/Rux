@@ -203,7 +203,7 @@ impl CgroupNode {
 
     /// Child node constructor.
     fn new_child(name: &str, parent: Arc<Self>, level: u32, ino_base: u64) -> Self {
-        let now = crate::sched::fair::sched_clock();
+        let now = crate::sched::entities::sched_clock();
         Self {
             name: name.to_string(),
             parent: Some(parent),
@@ -715,7 +715,7 @@ pub fn cgroup_cpu_tick(current: *mut Task) -> bool {
         return false;
     }
 
-    let now = crate::sched::fair::sched_clock();
+    let now = crate::sched::entities::sched_clock();
     let unthrottled = cpu_period_rollover(now);
 
     let throttled = match task_cgroup(current) {
@@ -745,7 +745,7 @@ pub fn note_cpu_limit_changed(node: &Arc<CgroupNode>, was_limited: bool, now_lim
         CPU_LIMITED_NODES.fetch_sub(1, Ordering::AcqRel);
     } else if !was_limited && now_limited {
         CPU_LIMITED_NODES.fetch_add(1, Ordering::AcqRel);
-        let now = crate::sched::fair::sched_clock();
+        let now = crate::sched::entities::sched_clock();
         // SAFETY: nodes are never freed.
         let n = node;
         n.cpu_period_start_ns.store(now, Ordering::Release);

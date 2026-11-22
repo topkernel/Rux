@@ -12969,8 +12969,8 @@ fn binder_transaction(
         // Relaxed atomics now — the latch is a plain store, no unsafe and
         // no single-writer trust.
         txn.enq_disp.store(
-            (crate::sched::WAKE_DISP.load(core::sync::atomic::Ordering::Relaxed) & 0xF)
-                | (crate::sched::WAKE_IDLE_MASK.load(core::sync::atomic::Ordering::Relaxed) << 4)
+            (crate::sched::wake_disp() & 0xF)
+                | (crate::sched::wake_idle_mask() << 4)
                 | (((crate::sched::grq_nr_running_now() as u32).min(0xFF)) << 12),
             core::sync::atomic::Ordering::Relaxed,
         );

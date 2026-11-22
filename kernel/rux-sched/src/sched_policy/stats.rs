@@ -22,24 +22,14 @@
 //! `__schedule` (one `sched_clock` read serves the pick and the put)
 //! and in `enqueue_task_locked` (the wait-window open, under the GRQ
 //! lock).
+//!
+//! Devirt lane (2026-11-23): the gate's STORAGE (SCHEDSTATS) and its
+//! two accessors (enabled/set_enabled) are framework-native now
+//! (sched/entities.rs + sched/sched.rs) — a boolean load is not
+//! policy, and the per-schedule read was paying a SchedHooks dispatch
+//! for it. The sysctl and __schedule sites call them directly; the
+//! module stays as the doc home for the schedstat slice.
 
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
-
-use core::sync::atomic::{AtomicBool, Ordering};
-
-/// The runtime gate (the sysctl's storage). Default OFF, like the
-/// reference.
-static SCHEDSTATS: AtomicBool = AtomicBool::new(false);
-
-/// Is per-task scheduler statistics accounting on?
-#[inline]
-pub fn enabled() -> bool {
-    SCHEDSTATS.load(Ordering::Relaxed)
-}
-
-/// Turn per-task scheduler statistics on/off (the sysctl write side).
-pub fn set_enabled(on: bool) {
-    SCHEDSTATS.store(on, Ordering::Release);
-}

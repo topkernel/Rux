@@ -1261,7 +1261,7 @@ pub struct Task {
     /// Contains vruntime, weight and other CFS scheduling info.
     /// pub(crate) so fair.rs can compute the entity-embedded timeline
     /// node's container-of offset (grq-10ns intrusive rbtree).
-    pub(crate) sched_entity: crate::sched::fair::SchedEntity,
+    pub(crate) sched_entity: crate::sched::entities::SchedEntity,
 
     /// RT scheduling priority (0-99, lower value = higher priority)
     ///
@@ -1276,12 +1276,12 @@ pub struct Task {
     /// RT scheduling entity
     ///
     /// Contains time slice and other RT-specific scheduling info
-    rt_entity: crate::sched::rt::SchedRtEntity,
+    rt_entity: crate::sched::entities::SchedRtEntity,
 
     /// Deadline scheduling entity
     ///
     /// Contains deadline, runtime, period and other DL-specific info
-    dl_entity: crate::sched::deadline::SchedDlEntity,
+    dl_entity: crate::sched::entities::SchedDlEntity,
 
     /// SCHED_RESET_ON_FORK request (set via sched_setscheduler/setattr):
     /// forked children are reset to SCHED_OTHER/nice 0 and the request is
@@ -1915,11 +1915,11 @@ impl Task {
             static_prio,
             normal_prio,
             time_slice: DEFAULT_TIME_SLICE, // Default time slice (10 clock ticks = 100ms)
-            sched_entity: crate::sched::fair::SchedEntity::new(),
+            sched_entity: crate::sched::entities::SchedEntity::new(),
             rt_priority: 0,
             rt_run_list: ListHead::new(),
-            rt_entity: crate::sched::rt::SchedRtEntity::new(),
-            dl_entity: crate::sched::deadline::SchedDlEntity::new(),
+            rt_entity: crate::sched::entities::SchedRtEntity::new(),
+            dl_entity: crate::sched::entities::SchedDlEntity::new(),
             sched_reset_on_fork: core::sync::atomic::AtomicBool::new(false),
             kernel_stack: None,
             kernel_stack_bottom: 0,
@@ -2716,10 +2716,7 @@ impl Task {
                 // 105th wake-dispatch census (see sched::WAKE_DISP): the
                 // dispatch outcome + idle mask at wake entry, read back by
                 // the binder QPICK hunt. Relaxed stores; diagnostic only.
-                crate::sched::WAKE_IDLE_MASK.store(
-                    crate::sched::grq_idle_mask(),
-                    core::sync::atomic::Ordering::Relaxed,
-                );
+                crate::sched::wake_idle_mask_set(crate::sched::grq_idle_mask());
                 // R3 (rt-r3 lane): RT/DL wakes steer the idle claim to the
                 // wakee's PLACEMENT cpu (the reference's select_task_rq_rt
                 // + check_preempt_curr both operate on the placement rq; a
@@ -2736,7 +2733,7 @@ impl Task {
                 };
                 match crate::sched::claim_idle_cpu_for_prefer(allowed, rt_prefer) {
                     Some(idle_cpu) => {
-                        crate::sched::WAKE_DISP.store(1, core::sync::atomic::Ordering::Relaxed);
+                        crate::sched::wake_disp_set(1);
                         crate::sched::resched_cpu(idle_cpu);
                     }
                     None => {
@@ -2760,12 +2757,10 @@ impl Task {
                         // windows (FFRT mutex unlock→waiter-recheck) the
                         // reference keeps closed for sync handoffs.
                         if sync {
-                            crate::sched::WAKE_DISP
-                                .store(2, core::sync::atomic::Ordering::Relaxed);
+                            crate::sched::wake_disp_set(2);
                             crate::sched::preempt_check_wake_sync(task);
                         } else {
-                            crate::sched::WAKE_DISP
-                                .store(3, core::sync::atomic::Ordering::Relaxed);
+                            crate::sched::wake_disp_set(3);
                             crate::sched::preempt_check_wake(task);
                         }
                     }
@@ -2943,13 +2938,13 @@ impl Task {
 
     /// Get CFS scheduling entity
     #[inline]
-    pub fn sched_entity(&self) -> &crate::sched::fair::SchedEntity {
+    pub fn sched_entity(&self) -> &crate::sched::entities::SchedEntity {
         &self.sched_entity
     }
 
     /// Get CFS scheduling entity (mutable reference)
     #[inline]
-    pub fn sched_entity_mut(&mut self) -> &mut crate::sched::fair::SchedEntity {
+    pub fn sched_entity_mut(&mut self) -> &mut crate::sched::entities::SchedEntity {
         &mut self.sched_entity
     }
 
@@ -2997,25 +2992,25 @@ impl Task {
 
     /// Get RT scheduling entity
     #[inline]
-    pub fn rt_entity(&self) -> &crate::sched::rt::SchedRtEntity {
+    pub fn rt_entity(&self) -> &crate::sched::entities::SchedRtEntity {
         &self.rt_entity
     }
 
     /// Get RT scheduling entity (mutable reference)
     #[inline]
-    pub fn rt_entity_mut(&mut self) -> &mut crate::sched::rt::SchedRtEntity {
+    pub fn rt_entity_mut(&mut self) -> &mut crate::sched::entities::SchedRtEntity {
         &mut self.rt_entity
     }
 
     /// Get Deadline scheduling entity
     #[inline]
-    pub fn dl_entity(&self) -> &crate::sched::deadline::SchedDlEntity {
+    pub fn dl_entity(&self) -> &crate::sched::entities::SchedDlEntity {
         &self.dl_entity
     }
 
     /// Get Deadline scheduling entity (mutable reference)
     #[inline]
-    pub fn dl_entity_mut(&mut self) -> &mut crate::sched::deadline::SchedDlEntity {
+    pub fn dl_entity_mut(&mut self) -> &mut crate::sched::entities::SchedDlEntity {
         &mut self.dl_entity
     }
 
@@ -4158,7 +4153,7 @@ impl Task {
                 // pick materialized into a register restore.
                 crate::sched::sched::ww_record(
                     self as *const Task as *mut Task,
-                    crate::sched::sched::WW_EV_AFFIRM,
+                    crate::sched::sched_hooks::WW_EV_AFFIRM,
                 );
                 // pick→switch ledger (wake-fastrepro): the pick
                 // terminated — consume its publication record.

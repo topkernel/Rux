@@ -126,7 +126,13 @@ rux-core          (≈3,000-3,500 dual lines; the entire TCB)
   safety/  sync-primitives  task-lifecycle  timer-core  printk-ring
   ← verification stack: Kani 12/12, Miri 0-UB, Verus narrow-adopt
 
-rux-sched         forbid-safe  (CFS/RT/fairness/wakeup/deadline policy)
+rux-sched         forbid-safe  (S1 DONE 2026-11-23: sched_policy 5,488
+                  lines sole-copied into the crate — fair/rt/deadline/
+                  wakewatch/census policy; SchedHooks 78 rows after the
+                  observability devirtualization (was 111: statics moved
+                  to framework entities.rs with direct fns, three rows
+                  arm-gated); p2_ctxsw +1.7% vs same-window main after
+                  the fix (was +25.1%)
 rux-mm            forbid-safe  (M1a DONE 2026-11-23, origin c0e46ed73: the
                   per-arch mm policy — mmap/munmap placement, brk, stack
                   alloc, permission changes, VMA fork decisions, fault
@@ -174,6 +180,10 @@ zero (compiler-guaranteed). The whole-kernel dual number BECOMES the core
 size. See §6 for the stage math.
 
 ## 4. The two policy splits (the new rungs this design adds)
+
+> Naming (user directive, 2026-11-22): the service crates carry NO
+> -policy suffix — `rux-sched` (S1) and `rux-mm` (M1). The split
+> design below is unchanged; only the crate names shorten.
 
 The campaign's earlier framing kept sched and mm whole in "the framework".
 Both bundle decidable policy over a small unsafe core; the splits separate

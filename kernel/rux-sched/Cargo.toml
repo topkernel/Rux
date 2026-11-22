@@ -1,9 +1,10 @@
 [package]
-name = "rux-sched-policy"
+name = "rux-sched"
 version = "0.1.0"
 edition = "2021"
 
-# The SCHED POLICY SERVICE CRATE (crate-flip S1b): the scheduling
+# The SCHED SERVICE CRATE (crate-flip S1b; user naming directive
+# 2026-11-22: no -policy suffix; the future mm crate is rux-mm): the scheduling
 # classes and decision logic (pick/enqueue policy, wake placement,
 # balance, tick policy, throttling, cgroup policy, the diagnostic
 # walks), compiled under crate-level #![forbid(unsafe_code)] — the
