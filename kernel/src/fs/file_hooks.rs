@@ -36,3 +36,31 @@ pub(crate) fn oasync_unregister(file_id: u64) {
 pub(crate) fn char_dev_stat(file: &crate::fs::file::File, stat: &mut crate::fs::Stat) -> Option<i32> {
     crate::fs::char_dev::char_dev_file_stat(file, stat)
 }
+
+// ===== fifo + memfd hooks (the relocation seam's remaining families) =====
+
+/// FIFO teardown on inode unlink (fifo module's forget).
+pub(crate) fn fifo_forget(fs_id: u64, ino: u64) {
+    crate::fs::fifo::forget(fs_id, ino);
+}
+
+/// FIFO peer resolution (the special-open path's first half).
+pub(crate) fn fifo_peer(fs_id: u64, ino: u64) -> alloc::sync::Arc<crate::fs::fifo::FifoPeer> {
+    crate::fs::fifo::peer_for(fs_id, ino)
+}
+
+/// FIFO open on the resolved peer (the second half).
+pub(crate) fn fifo_open_file(
+    peer: &alloc::sync::Arc<crate::fs::fifo::FifoPeer>,
+    flags: u32,
+) -> Result<alloc::sync::Arc<crate::fs::file::File>, i32> {
+    crate::fs::fifo::fifo_open_file(peer, flags)
+}
+
+/// memfd seals: add (F_ADD_SEALS) / query (F_GET_SEALS).
+pub(crate) fn memfd_add_seals(file: &crate::fs::file::File, seals: u32) -> Result<(), i32> {
+    crate::fs::memfd::add_seals(file, seals)
+}
+pub(crate) fn memfd_get_seals(file: &crate::fs::file::File) -> Result<u32, i32> {
+    crate::fs::memfd::get_seals(file)
+}

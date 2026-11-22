@@ -4487,7 +4487,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
         if let Some(ref vp) = target_vpath {
             if let Some(ref i) = vp.inode {
                 if i.mode.is_fifo() {
-                    crate::fs::fifo::forget(i.fs_id, i.ino);
+                    crate::fs::file_hooks::fifo_forget(i.fs_id, i.ino);
                 }
             }
         }
@@ -5150,7 +5150,7 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
 
     // File leases: truncation conflicts with BOTH read and write leases
     // (Linux break_lease on ATTR_SIZE).
-    crate::fs::locks::break_lease(inode, true)
+    crate::fs::lock_hooks::break_lease(inode, true)
         .map_err(|e| e.as_neg_i32())?;
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
@@ -5222,7 +5222,7 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     }
 
     // File leases: ftruncate conflicts with read AND write leases.
-    crate::fs::locks::break_lease(inode, true)
+    crate::fs::lock_hooks::break_lease(inode, true)
         .map_err(|e| e.as_neg_i32())?;
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
@@ -5744,7 +5744,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             // analogue; LTP creat07's creat of a running child image).
             if mask & MAY_WRITE != 0
                 && inode.mode.is_regular_file()
-                && crate::fs::locks::inode_text_hold_count(&inode) > 0
+                && crate::fs::lock_hooks::inode_text_hold_count(&inode) > 0
             {
                 return Err(errno::Errno::TextFileBusy.as_neg_i32());
             }
@@ -5757,7 +5757,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // Directories never carry leases (set_lease rejects them).
         if inode.mode.is_regular_file() {
             let writer = flags & FileFlags::O_ACCMODE != FileFlags::O_RDONLY;
-            crate::fs::locks::break_lease(&inode, writer)
+            crate::fs::lock_hooks::break_lease(&inode, writer)
             .map_err(|e| e.as_neg_i32())?;
         }
 
@@ -5784,8 +5784,8 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // reader). Dispatch AFTER the DAC check, BEFORE the regular-file
         // path, so the pipe data path (not the inode data) serves I/O.
         if inode.mode.is_fifo() {
-            let peer = crate::fs::fifo::peer_for(inode.fs_id, inode.ino);
-            let file = crate::fs::fifo::fifo_open_file(&peer, flags)?;
+            let peer = crate::fs::file_hooks::fifo_peer(inode.fs_id, inode.ino);
+            let file = crate::fs::file_hooks::fifo_open_file(&peer, flags)?;
             file.set_inode(Arc::clone(&inode));
             if let Some(d) = opened_dentry {
                 file.set_dentry(d);
@@ -6359,17 +6359,17 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 // OFD variant: the requester's owner token is the open
                 // file description, not the process.
                 let owner = if cmd == fcntl::F_OFD_GETLK {
-                    crate::fs::locks::LockOwner::Ofd(file.file_id)
+                    crate::fs::lock_hooks::LockOwner::Ofd(file.file_id)
                 } else {
                     let owner_pid = crate::sched::current()
                         .map(|t| t.tgid())
                         .unwrap_or(0);
-                    crate::fs::locks::LockOwner::Pid(owner_pid)
+                    crate::fs::lock_hooks::LockOwner::Pid(owner_pid)
                 };
 
                 let out = {
                     let mut out = fl;
-                    match crate::fs::locks::posix_test_lock(
+                    match crate::fs::lock_hooks::posix_test_lock(
                         &file, owner, exclusive, start, end,
                     ) {
                         // First conflicting lock: report it with ABSOLUTE
@@ -6437,16 +6437,16 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                         if file.flags().is_writeonly() {
                             return Err(errno::Errno::BadFileNumber.as_neg_i32());
                         }
-                        crate::fs::locks::F_RDLCK_KIND
+                        crate::fs::lock_hooks::F_RDLCK_KIND
                     }
                     flock_types::F_WRLCK => {
                         // Write lock needs a writeable fd.
                         if file.flags().is_readonly() {
                             return Err(errno::Errno::BadFileNumber.as_neg_i32());
                         }
-                        crate::fs::locks::F_WRLCK_KIND
+                        crate::fs::lock_hooks::F_WRLCK_KIND
                     }
-                    flock_types::F_UNLCK => crate::fs::locks::F_UNLCK_KIND,
+                    flock_types::F_UNLCK => crate::fs::lock_hooks::F_UNLCK_KIND,
                     _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
                 };
 
@@ -6454,15 +6454,15 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 // Owner token: the process for classic POSIX locks, the
                 // open file description for F_OFD_SETLK/W (Linux 3.15+).
                 let owner = if cmd == fcntl::F_OFD_SETLK || cmd == fcntl::F_OFD_SETLKW {
-                    crate::fs::locks::LockOwner::Ofd(file.file_id)
+                    crate::fs::lock_hooks::LockOwner::Ofd(file.file_id)
                 } else {
                     let owner_pid = crate::sched::current()
                         .map(|t| t.tgid())
                         .unwrap_or(0);
-                    crate::fs::locks::LockOwner::Pid(owner_pid)
+                    crate::fs::lock_hooks::LockOwner::Pid(owner_pid)
                 };
 
-                crate::fs::locks::posix_set_lock(&file, owner, kind, start, end, wait)
+                crate::fs::lock_hooks::posix_set_lock(&file, owner, kind, start, end, wait)
                     .map(|_| 0)
                     .map_err(|e| e.as_neg_i32())
             }
@@ -6709,7 +6709,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                crate::fs::locks::set_lease(&file, arg as i16)
+                crate::fs::lock_hooks::set_lease(&file, arg as i16)
                     .map(|_| 0)
                     .map_err(|e| e.as_neg_i32())
             }
@@ -6720,7 +6720,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                Ok(crate::fs::locks::get_lease(&file) as usize)
+                Ok(crate::fs::lock_hooks::get_lease(&file) as usize)
             }
 
             // F_GETPIPE_SZ (1032) / F_SETPIPE_SZ (1031): pipe-only (Linux
@@ -6752,7 +6752,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                match crate::fs::memfd::add_seals(&file, arg as u32) {
+                match crate::fs::file_hooks::memfd_add_seals(&file, arg as u32) {
                     Ok(()) => Ok(0),
                     Err(e) => Err(e),
                 }
@@ -6762,7 +6762,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                match crate::fs::memfd::get_seals(&file) {
+                match crate::fs::file_hooks::memfd_get_seals(&file) {
                     Ok(seals) => Ok(seals as usize),
                     Err(e) => Err(e),
                 }

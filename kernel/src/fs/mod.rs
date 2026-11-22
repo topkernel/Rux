@@ -24,6 +24,7 @@ pub mod mount;
 pub mod mount_table;
 pub mod notify_hooks;
 pub mod file_hooks;
+pub mod lock_hooks;
 pub mod rootfs;
 pub mod tmpfs;
 pub mod ext4;

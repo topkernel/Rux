@@ -502,7 +502,7 @@ impl File {
         // checks and lease-break blocking consult these counts).
         // File::drop unregisters. O_ACCMODE=3: O_WRONLY(1)/O_RDWR(2)
         // carry write access.
-        crate::fs::locks::inode_open_register(&inode, self.flags_bits() & 0o3 != 0);
+        crate::fs::lock_hooks::inode_open_register(&inode, self.flags_bits() & 0o3 != 0);
         unsafe { *self.inode.get() = Some(inode); }
     }
 
@@ -1020,12 +1020,12 @@ impl Drop for File {
         // covers close(2), dup2(2) displacement, fdtable teardown and the
         // deferred close_pending path alike, across fork's shared
         // descriptions.
-        crate::fs::locks::flock_release_file(self.file_id);
+        crate::fs::lock_hooks::flock_release_file(self.file_id);
         // F_OFD_SETLK record locks likewise die with the description.
-        crate::fs::locks::ofd_release_file(self.file_id);
+        crate::fs::lock_hooks::ofd_release_file(self.file_id);
         // Lease bookkeeping: drop the inode open count and release any
         // lease this description holds (wakes blocked lease breakers).
-        crate::fs::locks::inode_open_unregister(self);
+        crate::fs::lock_hooks::inode_open_unregister(self);
         // O_ASYNC registry entry (pipes), if any.
         crate::fs::file_hooks::oasync_unregister(self.file_id);
         // P0-4 inotify: IN_CLOSE_WRITE / IN_CLOSE_NOWRITE fires when the
