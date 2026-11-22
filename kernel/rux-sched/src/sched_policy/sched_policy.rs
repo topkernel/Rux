@@ -15,6 +15,9 @@
 // the carve's fixer loop bumped exactly those).
 use crate::sched::sched::*;
 use crate::sched::entities::W2RefusalCensus;
+// Devirt lane: the shared observability state moved framework-side
+// (sched/entities.rs); this crate's census readers keep the bare names.
+use crate::sched::entities::{CLASS_NONEMPTY, SCHED_CALLS};
 use crate::sched::sched_hooks::{
     CLASS_DL_BIT,
     CLASS_RT_BIT,
@@ -393,46 +396,15 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
 
 
 
-pub static CLASS_NONEMPTY: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+// CLASS_NONEMPTY + class_nonempty_set/clear moved FRAMEWORK-side
+// (devirt lane): plain state, storage in sched/entities.rs; the
+// framework's enqueue/dequeue transitions call it directly and this
+// crate reads it through the crate::sched re-exports.
 
-/// Set a class's nonempty bit (GRQ-held; call on the 0 -> nonempty
-/// transition of that class's counter).
-#[inline]
-pub fn class_nonempty_set(bit: u32) {
-    CLASS_NONEMPTY.fetch_or(bit, core::sync::atomic::Ordering::Relaxed);
-}
-
-/// Clear a class's nonempty bit (GRQ-held; call on the -> empty
-/// transition of that class's counter).
-#[inline]
-pub fn class_nonempty_clear(bit: u32) {
-    CLASS_NONEMPTY.fetch_and(!bit, core::sync::atomic::Ordering::Relaxed);
-}
-
-// Wakewatch (s15 A2 idle-mark/WFI hunt): per-CPU idle-loop phase stamp,
-// written by the idle loop itself at each phase transition, read by the
-// 1 Hz heartbeat. The A2 strand shape (victims linked, SKIPHIST empty,
-// idle mask empty, ~1s resolution) needs to know WHERE the actually-idle
-// CPU sits while the strand runs: the phases split "inside WFI with a
-// cleared mark" (lost-mark producer) from "stuck pre-WFI" (recheck/uart
-// window) from "stuck in schedule()" (GRQ contention) from "post-WFI
-// accounting" — each names a different producer family.
-// Codes: 0 = not in the idle loop, 1 = entering schedule(), 2 = idle
-// post-schedule, idle-marked, R20-2 recheck window, 3 = pre-WFI (uart
-// poll), 4 = inside WFI, 5 = post-WFI accounting/mark clear.
-pub static WW_IDLE_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
-
-/// SP-5 r5 frozen-tick trap: per-CPU schedule() milestone inside the
-/// IF=0 window that opens at the GRQ acquire (sched.rs "lock the global
-/// RQ"). Both CPUs' 300 ms tick-death windows open there (TICKTRAP
-/// cli_open + syscost max segments); these stamps decompose the window
-/// cross-CPU: 0 = not inside schedule()'s GRQ window; 1 = about to
-/// acquire (or spinning on it); 2 = acquired, inside the CS (dequeue/
-/// enqueue/pick); 3 = lock released IRQ-retained, context-switch tail
-/// (incl. the deferred-exit notify in the incoming frame); 4 = past
-/// restore (immediately cleared to 0). One relaxed store per milestone.
-pub static SCHED_CS_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
+// WW_IDLE_PHASE and SCHED_CS_PHASE moved FRAMEWORK-side (devirt
+// lane): per-CPU phase stamps, plain state — storage now in
+// sched/entities.rs; this crate's census readers reach them through
+// the crate::sched re-exports.
 
 // Wakewatch (s15): per-CPU count of timer-tick-entry samples where the
 // hardware tp register disagreed with cpu_state.current (the lying-slot
@@ -475,33 +447,12 @@ pub fn ww_slot_mismatch_counters() -> [u64; MAX_CPUS] {
 
 
 
-#[inline]
-pub(crate) fn pick_gen_publish(cpu: usize, task: *mut Task) {
-    if cpu >= MAX_CPUS {
-        return;
-    }
-    let g = PICK_GEN[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
-    PICK_GEN_TASK[cpu].store(task as u64, core::sync::atomic::Ordering::Relaxed);
-    PICK_GEN_PID[cpu].store(
-        if task.is_null() { 0 } else { crate::sched::edges::task_shared(task).pid() },
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    PICK_GEN_JIF[cpu].store(
-        crate::drivers::timer::get_jiffies(),
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    // PICK_GEN_DONE stays below `g`: this generation is in flight.
-    let _ = g;
-}
+// pick_gen_publish moved FRAMEWORK-side (devirt lane): plain RMWs on
+// the framework-owned PICK_GEN statics (sched.rs, next to them).
 
-#[inline]
-pub(crate) fn pick_gen_retire(cpu: usize) {
-    if cpu >= MAX_CPUS {
-        return;
-    }
-    let g = PICK_GEN[cpu].load(core::sync::atomic::Ordering::Relaxed);
-    PICK_GEN_DONE[cpu].store(g, core::sync::atomic::Ordering::Relaxed);
-}
+
+// pick_gen_retire moved FRAMEWORK-side (devirt lane).
+
 
 /// r11: is `cpu`'s current pick generation a LOSING switch — published,
 /// unretired, its slot still naming the published task, past the in-flight
@@ -539,11 +490,8 @@ fn pick_gen_is_lost(cpu: usize, task: *mut Task, now_jiffies: u64) -> bool {
 /// describing the slot. All callers hold the GRQ (or run on the slot's
 /// own CPU with IRQs off — the abort-repub), so the ledger stays
 /// serialized against the tag-1 publisher.
-#[inline]
-pub(crate) fn pick_gen_supersede(cpu: usize, task: *mut Task) {
-    pick_gen_publish(cpu, task);
-    pick_gen_retire(cpu);
-}
+// pick_gen_supersede moved FRAMEWORK-side (devirt lane).
+
 
 
 /// bool sched_can_stop_tick(struct rq *rq) — reference kernel/sched/
@@ -672,11 +620,10 @@ pub fn preempt_check_wake(task: *mut Task) {
 /// without schedtrace, and the 61st's burst-sampled RUNQ-STRAND missed
 /// the wheel thread's refusal input — so the history follows the census
 /// gate too. One relaxed switch-table load per event.
-#[inline]
-pub fn sched_hist_armed() -> bool {
-    crate::trace::EVENT_FUXSTUCK.armed()
-        || crate::trace::EVENT_SCHEDTRACE.armed()
-}
+// sched_hist_armed moved FRAMEWORK-side (devirt lane): two trace-flag
+// loads — the old row made the pick walk pay a seam round trip to read
+// its own kernel's flags.
+
 
 /// Append one event to `task`'s persistent scheduler-history ring
 /// (callers hold the GRQ; writes race nothing).
@@ -1149,68 +1096,13 @@ pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut
     pcpu.idle
 }
 
-pub static PT_TASK: [core::sync::atomic::AtomicUsize; 32] =
-    [const { core::sync::atomic::AtomicUsize::new(0) }; 32];
+// PT_TASK/PT_CODE/PT_JIF moved FRAMEWORK-side (devirt lane; sched/entities.rs).
 
-pub static PT_CODE: [core::sync::atomic::AtomicU32; 32] =
-    [const { core::sync::atomic::AtomicU32::new(0) }; 32];
-
-pub static PT_JIF: [core::sync::atomic::AtomicU64; 32] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; 32];
-
-#[inline]
-pub fn pick_trace(task: *mut Task, code: u32) {
-    let t = task as usize;
-    if t == 0 {
-        return;
-    }
-    for s in 0..32 {
-        let cur = PT_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
-        if cur == t {
-            PT_CODE[s].store(code, core::sync::atomic::Ordering::Relaxed);
-            PT_JIF[s].store(
-                crate::drivers::timer::get_jiffies(),
-                core::sync::atomic::Ordering::Relaxed,
-            );
-            return;
-        }
-    }
-    // claim a free slot (racy claim is fine — worst case a lost stamp)
-    for s in 0..32 {
-        if PT_TASK[s]
-            .compare_exchange(
-                0,
-                t,
-                core::sync::atomic::Ordering::Relaxed,
-                core::sync::atomic::Ordering::Relaxed,
-            )
-            .is_ok()
-        {
-            PT_CODE[s].store(code, core::sync::atomic::Ordering::Relaxed);
-            PT_JIF[s].store(
-                crate::drivers::timer::get_jiffies(),
-                core::sync::atomic::Ordering::Relaxed,
-            );
-            return;
-        }
-    }
-}
+// pick_trace moved FRAMEWORK-side (devirt lane): pure diagnostic
+// stamping over entities.rs tables — no policy content.
 
 /// Reader-side: the task's last recorded phase (code, jiffies-ago).
-pub fn pick_trace_peek(task: *mut Task) -> Option<(u32, u64)> {
-    let t = task as usize;
-    for s in 0..32 {
-        if PT_TASK[s].load(core::sync::atomic::Ordering::Relaxed) == t {
-            return Some((
-                PT_CODE[s].load(core::sync::atomic::Ordering::Relaxed),
-                crate::drivers::timer::get_jiffies().saturating_sub(
-                    PT_JIF[s].load(core::sync::atomic::Ordering::Relaxed),
-                ),
-            ));
-        }
-    }
-    None
-}
+// pick_trace_peek moved FRAMEWORK-side (devirt lane).
 
 pub static PSLEDGER_TASK: [core::sync::atomic::AtomicUsize; 1024] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; 1024];
@@ -1873,7 +1765,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         // Per-task schedstat (T7): open the wait window — the pick edge
         // in __schedule closes it into schedstat_wait_ns. GRQ is held
         // here and there, so the stamp needs no lock of its own.
-        if crate::sched_policy::stats::enabled() && task.pid() != 0 {
+        if crate::sched::sched::enabled() && task.pid() != 0 {
             crate::sched::edges::task_shared(task)
                 .schedstat_wait_start
                 .store(crate::sched::entities::sched_clock(), core::sync::atomic::Ordering::Relaxed);
@@ -2272,8 +2164,7 @@ pub fn w2_refusal_census(task: *mut Task) -> W2RefusalCensus {
 /// requests are all refused) stops calling it entirely. One relaxed
 /// fetch_add per schedule — same cost class as the cctx probe's
 /// existing per-schedule counters.
-pub static SCHED_CALLS: [core::sync::atomic::AtomicU64; MAX_CPUS] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+// SCHED_CALLS moved FRAMEWORK-side (devirt lane; sched/entities.rs).
 
 /// MONOPOLIST census (runq-strand lane, 121st): the RUNQ-STRAND census
 /// names the victims; this names their CULPRITS. The cotask-decode
@@ -2928,14 +2819,12 @@ pub fn dfx_oncpu_inject() -> usize {
 ///   3 = no idle; sync wake, compare lost -> NO poke (park handoff)
 ///   4 = no idle; async wake, preempt check poked
 ///   5 = no idle; async wake, recency/compare gate -> NO poke
-pub static WAKE_DISP: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+// WAKE_DISP moved FRAMEWORK-side (devirt lane; sched/entities.rs).
 
 /// Same census: the idle-CPU mask latched at wake ENTRY (before the
 /// claim), so "idle existed but claim lost/failed" vs "no idle at all"
 /// are told apart.
-pub static WAKE_IDLE_MASK: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+// WAKE_IDLE_MASK moved FRAMEWORK-side (devirt lane; sched/entities.rs).
 
 pub(crate) fn g_diag_idle_bit(cpu: usize) -> bool {
     grq().idle_cpus.load(core::sync::atomic::Ordering::Relaxed) & (1u32 << cpu) != 0

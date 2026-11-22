@@ -66,7 +66,8 @@ pub use sched::{
     preempt_check_wake,
     preempt_check_wake_sync,
     // 105th wake-dispatch census latches (bindertrace consumer):
-    // readers use sched_hooks::wake_disp()/wake_idle_mask().
+    // readers use wake_disp()/wake_idle_mask() (framework-native since
+    // the devirt lane).
     grq_idle_mask,
     grq_nr_running_now,
     wake_up_process,
@@ -85,6 +86,36 @@ pub use sched::{
     cpu_idle_loop,
     init_secondary,
     idle_task_ptr,
+    // Framework-native observability accessors (sched-seam devirt
+    // lane): the former hook rows whose bodies are plain state touches.
+    pick_trace,
+    pick_trace_peek,
+    enabled,
+    set_enabled,
+    class_nonempty,
+    class_nonempty_set,
+    class_nonempty_clear,
+    sched_cs_phase,
+    sched_cs_phase_set,
+    sched_calls,
+    sched_calls_inc,
+    ww_idle_phase,
+    ww_idle_phase_set,
+    wake_disp,
+    wake_disp_set,
+    wake_idle_mask,
+    wake_idle_mask_set,
+    ww_pick_walks,
+    ww_pick_walk_inc,
+    ww_oncpu_heals,
+    ww_oncpu_heal_inc,
+    ww_claim_heals,
+    ww_claim_heal_inc,
+    tl_poison_inserts,
+    tl_poison_insert_inc,
+    tl_poison_erases,
+    tl_poison_erase_inc,
+    sched_hist_armed,
 };
 
 // Re-export process lifecycle functions from process::exit for backward compatibility
@@ -132,6 +163,25 @@ pub use class::{
 
 // Export RT scheduler types
 pub use entities::{RtRunQueue, MAX_RT_PRIO};
+
+// Shared sched observability state (sched-seam devirt lane): plain
+// counters/phase stamps the rux-sched census code reads — framework
+// storage, policy-visible through this re-export (the PICK_GEN shape).
+pub use entities::{
+    PT_TASK,
+    PT_CODE,
+    PT_JIF,
+    CLASS_NONEMPTY,
+    WW_IDLE_PHASE,
+    SCHED_CS_PHASE,
+    SCHED_CALLS,
+    WAKE_DISP,
+    WAKE_IDLE_MASK,
+    SCHEDSTATS,
+    WW_PICK_WALKS,
+    WW_ONCPU_HEALS,
+    WW_CLAIM_HEALS,
+};
 
 // Export deadline scheduler types
 pub use entities::DlRunQueue;

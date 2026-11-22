@@ -79,24 +79,25 @@ fn stop_class_fn() -> &'static dyn crate::sched::class::SchedClass {
 
 /// Registration: fills the framework's SchedHooks table (the S1b data
 /// seam). Called by the composition bin before the framework impl.
+/// Devirt lane (2026-11-23): the observability rows whose bodies are
+/// plain state touches (pick tracer, pick-generation ledger, phase
+/// stamps, schedstat/wake-census/walk-census counters, class-nonempty
+/// mask) left the table — that state lives framework-side
+/// (sched/entities.rs) with direct framework accessors; only policy
+/// rows and armed-gated diagnostics remain registered here.
 pub fn register_all() {
     use rux::sched::sched_hooks::{SchedHooks, sched_register_hooks};
     sched_register_hooks(SchedHooks {
-            enabled: sched_policy::stats::enabled,
             r56_print_pid: sched_policy::sched_policy::r56_print_pid,
-            pick_trace: sched_policy::sched_policy::pick_trace,
-            pick_gen_supersede: sched_policy::sched_policy::pick_gen_supersede,
             change_task_policy: sched_policy::sched_policy::change_task_policy,
             ww_record: sched_policy::sched_policy::ww_record,
             orphan_watch_confirm: sched_policy::sched_policy::orphan_watch_confirm,
-            pick_trace_peek: sched_policy::sched_policy::pick_trace_peek,
             yield_cpu: sched_policy::sched_policy::yield_cpu,
             enqueue_task_locked: sched_policy::sched_policy::enqueue_task_locked,
             ww_watch_add: sched_policy::sched_policy::ww_watch_add,
             abort_next_release_orphans: sched_policy::sched_policy::abort_next_release_orphans,
             r56_report_switch_abort: sched_policy::sched_policy::r56_report_switch_abort,
             sched_renice_locked: sched_policy::sched_policy::sched_renice_locked,
-            pick_gen_retire: sched_policy::sched_policy::pick_gen_retire,
             psledger_consume: sched_policy::sched_policy::psledger_consume,
             steer_task_cpu: sched_policy::sched_policy::steer_task_cpu,
             sched_can_stop_tick: sched_policy::sched_policy::sched_can_stop_tick,
@@ -112,7 +113,6 @@ pub fn register_all() {
             ww_stalled_cpu_state: sched_policy::sched_policy::ww_stalled_cpu_state,
             dfx_claim_inject: sched_policy::sched_policy::dfx_claim_inject,
             dfx_oncpu_inject: sched_policy::sched_policy::dfx_oncpu_inject,
-            ww_pick_walks: sched_policy::fair::ww_pick_walks,
             ww_heals: sched_policy::fair::ww_heals,
             ww_subgate_counts: sched_policy::wakewatch::ww_subgate_counts,
             ww_rt_pick_stats: sched_policy::wakewatch::ww_rt_pick_stats,
@@ -123,14 +123,12 @@ pub fn register_all() {
             w2_refusal_census: sched_policy::sched_policy::w2_refusal_census,
             task_sched_class: sched_policy::class::task_sched_class,
             ww_note_slot_mismatch: sched_policy::sched_policy::ww_note_slot_mismatch,
-            set_enabled: sched_policy::stats::set_enabled,
             monopolist_census: sched_policy::sched_policy::monopolist_census,
             runq_strand_census: sched_policy::sched_policy::runq_strand_census,
             ffrt_wait_census: sched_policy::sched_policy::ffrt_wait_census,
             rt_wedge_dump_tick: sched_policy::sched_policy::rt_wedge_dump_tick,
             rt_bandwidth_tick: sched_policy::sched_policy::rt_bandwidth_tick,
             emit_grq_reports: sched_policy::sched_policy::emit_grq_reports,
-            pick_gen_publish: sched_policy::sched_policy::pick_gen_publish,
             pick_next_task: sched_policy::sched_policy::pick_next_task,
             requeue_prev_locked: sched_policy::sched_policy::requeue_prev_locked,
             g_diag_idle_bit: sched_policy::sched_policy::g_diag_idle_bit,
@@ -139,19 +137,6 @@ pub fn register_all() {
             sched_ev_drain: sched_policy::sched_ev::sched_ev_drain,
             note_task_freed: sched_policy::wakewatch::note_task_freed,
             report_poisoned_rq_entry: sched_policy::sched_policy::report_poisoned_rq_entry,
-            ww_idle_phase: |cpu| sched_policy::sched_policy::WW_IDLE_PHASE[cpu].load(core::sync::atomic::Ordering::Relaxed),
-            ww_idle_phase_set: |cpu, v| sched_policy::sched_policy::WW_IDLE_PHASE[cpu].store(v, core::sync::atomic::Ordering::Release),
-            sched_cs_phase_set: |cpu, v| sched_policy::sched_policy::SCHED_CS_PHASE[cpu].store(v, core::sync::atomic::Ordering::Release),
-            sched_calls_inc: |cpu| { sched_policy::sched_policy::SCHED_CALLS[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed); },
-            sched_cs_phase: |cpu| sched_policy::sched_policy::SCHED_CS_PHASE[cpu].load(core::sync::atomic::Ordering::Relaxed),
-            wake_disp: || sched_policy::sched_policy::WAKE_DISP.load(core::sync::atomic::Ordering::Relaxed),
-            wake_disp_set: |v| sched_policy::sched_policy::WAKE_DISP.store(v, core::sync::atomic::Ordering::Relaxed),
-            wake_idle_mask_set: |v| sched_policy::sched_policy::WAKE_IDLE_MASK.store(v, core::sync::atomic::Ordering::Relaxed),
-            wake_idle_mask: || sched_policy::sched_policy::WAKE_IDLE_MASK.load(core::sync::atomic::Ordering::Relaxed),
-            class_nonempty: || sched_policy::sched_policy::CLASS_NONEMPTY.load(core::sync::atomic::Ordering::Relaxed),
-            pt_task: |cpu| sched_policy::sched_policy::PT_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed),
-            pt_code: |cpu| sched_policy::sched_policy::PT_CODE[cpu].load(core::sync::atomic::Ordering::Relaxed),
-            pt_jif: |cpu| sched_policy::sched_policy::PT_JIF[cpu].load(core::sync::atomic::Ordering::Relaxed),
             psledger_task: |cpu| sched_policy::sched_policy::PSLEDGER_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed),
             psledger_cpu: |cpu| sched_policy::sched_policy::PSLEDGER_CPU[cpu].load(core::sync::atomic::Ordering::Relaxed),
             psledger_jif: |cpu| sched_policy::sched_policy::PSLEDGER_JIF[cpu].load(core::sync::atomic::Ordering::Relaxed),
@@ -161,13 +146,9 @@ pub fn register_all() {
                 .iter()
                 .map(|w| w.load(core::sync::atomic::Ordering::Relaxed))
                 .collect(),
-            sched_calls: |cpu| sched_policy::sched_policy::SCHED_CALLS[cpu].load(core::sync::atomic::Ordering::Relaxed),
-            class_nonempty_set: sched_policy::sched_policy::class_nonempty_set,
-            class_nonempty_clear: sched_policy::sched_policy::class_nonempty_clear,
             load_balance: sched_policy::sched_policy::load_balance,
             psledger_note_publish: sched_policy::sched_policy::psledger_note_publish,
             psledger_peek: sched_policy::sched_policy::psledger_peek,
-            sched_hist_armed: sched_policy::sched_policy::sched_hist_armed,
             sched_hist_ring: sched_policy::sched_policy::sched_hist_ring,
             sched_hist_refuse: sched_policy::sched_policy::sched_hist_refuse,
             sched_hist_link: sched_policy::sched_policy::sched_hist_link,
@@ -178,22 +159,13 @@ pub fn register_all() {
             ww_tail_fill: sched_policy::sched_policy::ww_tail_fill,
             ww_append_dump: sched_policy::sched_policy::ww_append_dump,
             sched_ev: sched_policy::sched_ev::sched_ev,
-            ww_pick_walk_inc: || { sched_policy::fair::WW_PICK_WALKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); },
-            ww_oncpu_heal_inc: || { sched_policy::fair::WW_ONCPU_HEALS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); },
-            ww_claim_heal_inc: || { sched_policy::fair::WW_CLAIM_HEALS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); },
-            tl_poison_insert_inc: || { crate::sched::entities::TL_POISON.inserts.fetch_add(1, core::sync::atomic::Ordering::Relaxed); },
-            tl_poison_erase_inc: || { crate::sched::entities::TL_POISON.erases.fetch_add(1, core::sync::atomic::Ordering::Relaxed); },
             stale_oncpu_healed: sched_policy::fair::stale_oncpu_healed,
             fair_sched_class: fair_class_fn,
             rt_sched_class: rt_class_fn,
             dl_sched_class: dl_class_fn,
             idle_sched_class: idle_class_fn,
             stop_sched_class: stop_class_fn,            vr_canary: |rq, task, site, vr| sched_policy::fair::vr_canary(rq, task, site, vr),
-            ww_oncpu_heals: || sched_policy::fair::WW_ONCPU_HEALS.load(core::sync::atomic::Ordering::Relaxed),
-            ww_claim_heals: || sched_policy::fair::WW_CLAIM_HEALS.load(core::sync::atomic::Ordering::Relaxed),
             sched_clock: || crate::sched::entities::sched_clock(),
             sched_slice_to_ms: |ns| crate::sched::entities::sched_slice_to_ms(ns),
-            tl_poison_inserts: || crate::sched::entities::TL_POISON.inserts.load(core::sync::atomic::Ordering::Relaxed),
-            tl_poison_erases: || crate::sched::entities::TL_POISON.erases.load(core::sync::atomic::Ordering::Relaxed),
     });
 }

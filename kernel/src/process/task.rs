@@ -2716,7 +2716,7 @@ impl Task {
                 // 105th wake-dispatch census (see sched::WAKE_DISP): the
                 // dispatch outcome + idle mask at wake entry, read back by
                 // the binder QPICK hunt. Relaxed stores; diagnostic only.
-                crate::sched::sched_hooks::wake_idle_mask_set(crate::sched::grq_idle_mask());
+                crate::sched::wake_idle_mask_set(crate::sched::grq_idle_mask());
                 // R3 (rt-r3 lane): RT/DL wakes steer the idle claim to the
                 // wakee's PLACEMENT cpu (the reference's select_task_rq_rt
                 // + check_preempt_curr both operate on the placement rq; a
@@ -2733,7 +2733,7 @@ impl Task {
                 };
                 match crate::sched::claim_idle_cpu_for_prefer(allowed, rt_prefer) {
                     Some(idle_cpu) => {
-                        crate::sched::sched_hooks::wake_disp_set(1);
+                        crate::sched::wake_disp_set(1);
                         crate::sched::resched_cpu(idle_cpu);
                     }
                     None => {
@@ -2757,10 +2757,10 @@ impl Task {
                         // windows (FFRT mutex unlock→waiter-recheck) the
                         // reference keeps closed for sync handoffs.
                         if sync {
-                            crate::sched::sched_hooks::wake_disp_set(2);
+                            crate::sched::wake_disp_set(2);
                             crate::sched::preempt_check_wake_sync(task);
                         } else {
-                            crate::sched::sched_hooks::wake_disp_set(3);
+                            crate::sched::wake_disp_set(3);
                             crate::sched::preempt_check_wake(task);
                         }
                     }

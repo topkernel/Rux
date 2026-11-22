@@ -56,7 +56,7 @@ pub fn ww_pick_walks() -> u64 {
     // trap handler re-trapped (sepc=trap_entry, silent wedge at the
     // first kswapd pick). Read the counter directly, like the
     // ww_pick_walk_inc closure row does.
-    WW_PICK_WALKS.load(core::sync::atomic::Ordering::Relaxed)
+    crate::sched::entities::WW_PICK_WALKS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// (on_cpu-mark heals, stale-claim heals) since boot — the two R85
@@ -65,8 +65,8 @@ pub fn ww_pick_walks() -> u64 {
 /// only suggest it.
 pub fn ww_heals() -> (u64, u64) {
     (
-        crate::sched::sched_hooks::ww_oncpu_heals(),
-        crate::sched::sched_hooks::ww_claim_heals(),
+        crate::sched::entities::WW_ONCPU_HEALS.load(Ordering::Relaxed),
+        crate::sched::entities::WW_CLAIM_HEALS.load(Ordering::Relaxed),
     )
 }
 
@@ -238,8 +238,8 @@ pub(crate) static PICK_SKIP_RING_N: core::sync::atomic::AtomicUsize =
 /// grq-10ns: read the poison counters (dfx census hook).
 pub fn tl_poison_counters() -> (u64, u64) {
     (
-        crate::sched::sched_hooks::tl_poison_inserts(),
-        crate::sched::sched_hooks::tl_poison_erases(),
+        crate::sched::sched::tl_poison_inserts(),
+        crate::sched::sched::tl_poison_erases(),
     )
 }
 
@@ -371,7 +371,7 @@ pub static FAIR_SCHED_CLASS: FairSchedClass = FairSchedClass::new();
 pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: usize, prev: *mut crate::process::Task) -> Option<*mut crate::process::Task> {
         // s16 (WW5): one exact count per walk entry — the visits= field
         // on the strand line divides this by the strand window.
-        crate::sched::sched_hooks::ww_pick_walk_inc();
+        crate::sched::sched::ww_pick_walk_inc();
         // grq-10ns: cctx walk anatomy (picks entered / candidates
         // consulted — the denominator for the walk-cost evidence).
         crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_PICK_N);
@@ -429,7 +429,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
             // pick, and keep the kernel alive; the counters stay paired
             // with the still-linked entry (the census names the wedge).
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                crate::sched::sched_hooks::tl_poison_erase_inc();
+                crate::sched::sched::tl_poison_erase_inc();
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
                 crate::sched::sched_hooks::ww_record(task, crate::sched::sched_hooks::WW_EV_UNLINK_POISON);
                 break;
@@ -1125,7 +1125,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
     /// (marks flipping between two cpus' claims). Same R34 discipline
     /// and 2s system-wide budget as the claim twin.
     pub fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
-        WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
+        crate::sched::entities::WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
         // 63rd: the heal event goes on the task's ring BEFORE the print
         // budget can swallow the line (a budgeted-out heal must still
         // appear in the victim's history).
@@ -1191,7 +1191,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
     /// 63rd: `task` added for the persistent ring (the print can be
     /// budget-swallowed; the ring cannot).
     fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::Task) {
-        WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
+        crate::sched::entities::WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
             crate::sched::sched_hooks::sched_hist_ring(
                 crate::sched::edges::task_shared(task),
@@ -1407,11 +1407,9 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
         putchar(b'\n');
     }
 
-pub static WW_PICK_WALKS: AtomicU64 = AtomicU64::new(0);
-
-pub static WW_ONCPU_HEALS: AtomicU64 = AtomicU64::new(0);
-
-pub static WW_CLAIM_HEALS: AtomicU64 = AtomicU64::new(0);
+// WW_PICK_WALKS / WW_ONCPU_HEALS / WW_CLAIM_HEALS moved FRAMEWORK-side
+// (devirt lane; sched/entities.rs) — same counters, same stores; this
+// file reaches them through crate::sched::entities.
 
 /// 64th: vruntime sanity canary state (VRTRIP rate limiting).
 static VR_TRIPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

@@ -1705,8 +1705,8 @@ fn ww_heartbeat(now_time: u64) {
         mm_d[c] = mm[c].saturating_sub(LAST_MM[c].load(Ordering::Relaxed));
         LAST_MM[c].store(mm[c], Ordering::Relaxed);
     }
-    let phase0 = crate::sched::sched_hooks::ww_idle_phase(0);
-    let phase1 = crate::sched::sched_hooks::ww_idle_phase(1);
+    let phase0 = crate::sched::ww_idle_phase(0);
+    let phase1 = crate::sched::ww_idle_phase(1);
 
     // Wheel census (short lock; heartbeat is 1 Hz and holds no timer
     // locks at this point). Wheel-side: len + overdue hres backlog.
@@ -1852,7 +1852,7 @@ fn ww_heartbeat(now_time: u64) {
     static LAST_WALKS: AtomicU64 = AtomicU64::new(0);
     static LAST_OH: AtomicU64 = AtomicU64::new(0);
     static LAST_CH: AtomicU64 = AtomicU64::new(0);
-    let walks_total = crate::sched::sched_hooks::ww_pick_walks();
+    let walks_total = crate::sched::ww_pick_walks();
     let walks_d = walks_total.saturating_sub(LAST_WALKS.load(Ordering::Relaxed));
     LAST_WALKS.store(walks_total, Ordering::Relaxed);
     let (oh, ch) = crate::sched::sched_hooks::ww_heals();
@@ -1978,7 +1978,7 @@ pub fn tick_trap_report(site: &str) {
     let (idle_phase_self, pid_self) = {
         let cur = crate::sched::current();
         let p = cur.map(|t| t.pid()).unwrap_or(0);
-        (crate::sched::sched_hooks::ww_idle_phase(me), p)
+        (crate::sched::ww_idle_phase(me), p)
     };
     match &snap_self {
         Some(s) => crate::println!(
@@ -1986,7 +1986,7 @@ pub fn tick_trap_report(site: &str) {
             site, me,
             s.lvt, s.tmict, s.tmcct, s.svr, s.tpr, s.irr7, s.isr7,
             if_self, pid_self, idle_phase_self,
-            crate::sched::sched_hooks::sched_cs_phase(me),
+            crate::sched::sched_cs_phase(me),
             apic::tick_trap_adjudicate(s),
             apic::TIMER_ARM_SEQ[me].load(Ordering::Relaxed),
             apic::TIMER_ARM_OP[me].load(Ordering::Relaxed),
@@ -2049,7 +2049,7 @@ pub fn tick_trap_report(site: &str) {
                 ww_tick_age_ms(cpu),
                 apic::TIMER_ARM_SEQ[cpu].load(Ordering::Relaxed),
                 apic::TIMER_ARM_OP[cpu].load(Ordering::Relaxed),
-                crate::sched::sched_hooks::sched_cs_phase(cpu),
+                crate::sched::sched_cs_phase(cpu),
                 match crate::dfx::syscost::open_cli_segment(cpu) {
                     Some((file, line, age_raw)) => alloc::format!(
                         "{}:{} age_ms~{}",

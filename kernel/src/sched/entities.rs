@@ -7,7 +7,7 @@
 //! this storage; the diag counters route through SchedHooks rows).
 
 use super::sched_hooks::{CLASS_DL_BIT, CLASS_RT_BIT, CLASS_CFS_BIT};
-use core::sync::atomic::{AtomicU64, AtomicBool, AtomicU32, AtomicI64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicBool, AtomicU32, AtomicI64, AtomicUsize, Ordering};
 use alloc::collections::BTreeMap;
 use super::edges::{VruntimeKey, RbNode, RbTimeline, node_key, node_of_task, task_of_node};
 use crate::list::ListHead;
@@ -1648,7 +1648,7 @@ impl CfsRunQueue {
                 // key, keep the kernel alive; the counters stay paired
                 // with the timeline (the entity was NOT linked).
                 se.sched_entity().set_timeline_key(None);
-                crate::sched::sched_hooks::tl_poison_insert_inc();
+                crate::sched::sched::tl_poison_insert_inc();
                 crate::sched::sched::report_poisoned_rq_entry(
                     usize::MAX,
                     task as usize,
@@ -1713,7 +1713,7 @@ impl CfsRunQueue {
                 ph(crate::sched::edges::task_shared(task).pid() as u64);
                 putchar(b'\n');
             }
-            crate::sched::sched_hooks::tl_poison_erase_inc();
+            crate::sched::sched::tl_poison_erase_inc();
             crate::dfx::cctx::add(&crate::dfx::cctx::FAIR_TL_NS, t0);
             crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_TL_N);
             return false;
@@ -2433,7 +2433,7 @@ impl CfsRunQueue {
     /// 63rd: `task` added for the persistent ring (the print can be
     /// budget-swallowed; the ring cannot).
     fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::Task) {
-        crate::sched::sched_hooks::ww_claim_heal_inc();
+        crate::sched::sched::ww_claim_heal_inc();
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
             crate::sched::sched::sched_hist_ring(
                 crate::sched::edges::task_shared(task),
@@ -2516,7 +2516,7 @@ impl CfsRunQueue {
     /// (marks flipping between two cpus' claims). Same R34 discipline
     /// and 2s system-wide budget as the claim twin.
     fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
-        crate::sched::sched_hooks::ww_oncpu_heal_inc();
+        crate::sched::sched::ww_oncpu_heal_inc();
         // 63rd: the heal event goes on the task's ring BEFORE the print
         // budget can swallow the line (a budgeted-out heal must still
         // appear in the victim's history).
@@ -2808,7 +2808,7 @@ impl CfsRunQueue {
                 }
                 tr.running_on_cpu.store(-1, Ordering::Release);
                 stale_reset += 1;
-                crate::sched::sched_hooks::ww_claim_heal_inc();
+                crate::sched::sched::ww_claim_heal_inc();
                 if Self::heal_report_budget_ok() {
                     Self::stale_heal_line(b"SWEEP-CLAIM-RESET", cpu_id, tr.pid(), claim, u32::MAX);
                     crate::dfx::taskdump::putc_brief(b'\n');
@@ -2837,7 +2837,7 @@ impl CfsRunQueue {
             // alive, and let the census name the wedge; the counters stay
             // paired with the still-linked entry.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                crate::sched::sched_hooks::tl_poison_erase_inc();
+                crate::sched::sched::tl_poison_erase_inc();
                 crate::sched::sched::report_poisoned_rq_entry(usize::MAX, task as usize);
                 return None;
             }
@@ -3062,3 +3062,72 @@ pub static TL_POISON: TlPoisonCounters = TlPoisonCounters {
     inserts: core::sync::atomic::AtomicU64::new(0),
     erases: core::sync::atomic::AtomicU64::new(0),
 };
+
+// ==================== Shared sched observability state ====================
+// (sched-seam devirt lane, 2026-11-23): the per-switch diagnostic counters
+// below are PLAIN STATE, not policy — no decision reads them; the census
+// walks and /proc readers do. They originally moved into the rux-sched
+// service crate with the S1b flip, which put every per-switch access
+// through a SchedHooks fn-pointer row (wrapper -> OnceSlot read ->
+// indirect call) — p2_ctxsw measured the layer at ~0.4 us per switch
+// round (2.12-2.19 vs 1.708 same-window main, outside the +-20% sched
+// band). The storage and its trivial accessors live HERE (framework)
+// now; the rux-sched census code reads them through the normal
+// crate::sched re-exports (the same visibility PICK_GEN always had).
+// Same single instance, same stores at the same call sites — only the
+// dispatch layer is gone.
+
+/// r11: per-CPU pick-phase tracer table (pick_trace's key side).
+pub static PT_TASK: [AtomicUsize; 32] = [const { AtomicUsize::new(0) }; 32];
+pub static PT_CODE: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
+pub static PT_JIF: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+
+/// grq-hold-slim Cut 2: single-class-chain short-circuit mask — each
+/// class's 0 <-> nonempty transition (GRQ-held) sets/clears its bit;
+/// pick_next_task's class walk loads it once instead of per-class
+/// is_empty() loads.
+pub static CLASS_NONEMPTY: AtomicU32 = AtomicU32::new(0);
+
+/// Wakewatch (s15 A2 idle-mark/WFI hunt): per-CPU idle-loop phase stamp,
+/// written by the idle loop at each phase transition, read by the 1 Hz
+/// heartbeat. Codes: 0 = not in the idle loop, 1 = entering schedule(),
+/// 2 = idle post-schedule (idle-marked, R20-2 recheck window), 3 =
+/// pre-WFI (uart poll), 4 = inside WFI, 5 = post-WFI accounting.
+pub static WW_IDLE_PHASE: [AtomicU32; MAX_CPUS] =
+    [const { AtomicU32::new(0) }; MAX_CPUS];
+
+/// SP-5 r5 frozen-tick trap: per-CPU schedule() milestone inside the
+/// IF=0 window that opens at the GRQ acquire. 0 = not inside
+/// schedule()'s GRQ window; 1 = about to acquire (or spinning); 2 =
+/// acquired, inside the CS; 3 = lock released IRQ-retained,
+/// context-switch tail; 4 = past restore (immediately cleared).
+pub static SCHED_CS_PHASE: [AtomicU32; MAX_CPUS] =
+    [const { AtomicU32::new(0) }; MAX_CPUS];
+
+/// runq-strand lane: per-CPU schedule()-entry count (one relaxed
+/// fetch_add per schedule); the monopolist census reads its per-burst
+/// delta (frozen = a CPU that stopped scheduling).
+pub static SCHED_CALLS: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// 105th wake-dispatch census: the dispatch outcome at each wake (1 =
+/// idle CPU claimed + IPI, 2 = no idle; sync wake won the vruntime
+/// compare -> poke, 3 = sync compare lost -> park handoff, 4 = async
+/// preempt check poked, 5 = async recency/compare gate -> no poke).
+pub static WAKE_DISP: AtomicU32 = AtomicU32::new(0);
+
+/// Same census: the idle-CPU mask latched at wake ENTRY (before the
+/// claim), so "idle existed but claim lost" vs "no idle at all" are
+/// told apart.
+pub static WAKE_IDLE_MASK: AtomicU32 = AtomicU32::new(0);
+
+/// Per-task schedstats runtime gate (/proc/sys/kernel/sched_schedstats,
+/// default OFF like the reference). One relaxed load per schedule edge
+/// when off.
+pub static SCHEDSTATS: AtomicBool = AtomicBool::new(false);
+
+/// s14/60th walk-census counters: CFS pick-walk length and the two
+/// ownership-heal families. Reported by the census getters.
+pub static WW_PICK_WALKS: AtomicU64 = AtomicU64::new(0);
+pub static WW_ONCPU_HEALS: AtomicU64 = AtomicU64::new(0);
+pub static WW_CLAIM_HEALS: AtomicU64 = AtomicU64::new(0);

@@ -1562,12 +1562,33 @@ pub fn current_is_dying() -> bool {
 // the indexed getters, the consts live sched_hooks-side.)
 
 // ==================== Hook-routed policy surface (S1b) ====================
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+//
+// (sched-seam devirt lane, 2026-11-23): the OBSERVABILITY rows whose
+// bodies are plain state touches (class_nonempty, sched_hist_armed,
+// the schedstat gate, pick_trace, the pick-generation ledger) are
+// framework-native fns now — their storage lives in entities.rs and
+// the per-switch/per-enqueue call sites pay a direct call, not a
+// SchedHooks fn-pointer dispatch. The remaining shims below still
+// route through the table.
+
+/// Set a class's nonempty bit (GRQ-held; call on the 0 -> nonempty
+/// transition of that class's counter). Framework-native (devirt lane).
 #[inline]
-pub fn class_nonempty_set(bit: u32) { crate::sched::sched_hooks::class_nonempty_set(bit) }
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+pub fn class_nonempty_set(bit: u32) {
+    super::entities::CLASS_NONEMPTY.fetch_or(bit, core::sync::atomic::Ordering::Relaxed);
+}
+/// Clear a class's nonempty bit (GRQ-held; call on the -> empty
+/// transition of that class's counter). Framework-native (devirt lane).
 #[inline]
-pub fn class_nonempty_clear(bit: u32) { crate::sched::sched_hooks::class_nonempty_clear(bit) }
+pub fn class_nonempty_clear(bit: u32) {
+    super::entities::CLASS_NONEMPTY.fetch_and(!bit, core::sync::atomic::Ordering::Relaxed);
+}
+/// The class-chain short-circuit mask (pick_next_task loads it once per
+/// pick). Framework-native (devirt lane).
+#[inline]
+pub fn class_nonempty() -> u32 {
+    super::entities::CLASS_NONEMPTY.load(core::sync::atomic::Ordering::Relaxed)
+}
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
 pub fn load_balance() { crate::sched::sched_hooks::load_balance() }
@@ -1577,9 +1598,15 @@ pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) { crate::sche
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
 pub fn psledger_peek(task: *mut Task) -> Option<(u32, u32, u64)> { crate::sched::sched_hooks::psledger_peek(task) }
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+/// 63rd session (strand-wall hunt): gate for the persistent per-task
+/// pick/wake history — one relaxed switch-table load pair per event.
+/// Framework-native (devirt lane): the gate reads FRAMEWORK trace
+/// flags; the old row made the pick walk pay a seam round trip to read
+/// its own kernel's flags.
 #[inline]
-pub fn sched_hist_armed() -> bool { crate::sched::sched_hooks::sched_hist_armed() }
+pub fn sched_hist_armed() -> bool {
+    crate::trace::EVENT_FUXSTUCK.armed() || crate::trace::EVENT_SCHEDTRACE.armed()
+}
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
 pub fn sched_hist_ring(task: &Task, kind: u64, why: u64, aux: u64) { crate::sched::sched_hooks::sched_hist_ring(task, kind, why, aux) }
@@ -1612,9 +1639,20 @@ pub fn ww_append_dump(out: &mut dyn core::fmt::Write, task: *mut Task, now: u64)
 // SchedHooks table (registered by the rux-sched-policy crate at boot —
 // the NetHooks pattern). Callers' paths are unchanged.
 
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+/// Is per-task scheduler statistics accounting on? (the
+/// /proc/sys/kernel/sched_schedstats runtime gate — one relaxed load;
+/// framework-native since the devirt lane).
 #[inline]
-pub fn enabled() -> bool { crate::sched::sched_hooks::enabled() }
+pub fn enabled() -> bool {
+    super::entities::SCHEDSTATS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn per-task scheduler statistics on/off (the sysctl write side;
+/// framework-native since the devirt lane).
+#[inline]
+pub fn set_enabled(on: bool) {
+    super::entities::SCHEDSTATS.store(on, core::sync::atomic::Ordering::Release)
+}
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
@@ -1624,13 +1662,57 @@ pub(crate) fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) { crate::sch
 #[inline]
 pub fn sched_clock() -> u64 { crate::sched::sched_hooks::sched_clock() }
 
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+/// Nanosleep-loss pick-phase tracer: stamp `task`'s last recorded phase
+/// (framework-side since the devirt lane — pure diagnostic state, the
+/// table lives in entities.rs next to the other observability counters).
 #[inline]
-pub fn pick_trace(task: *mut Task, code: u32) { crate::sched::sched_hooks::pick_trace(task, code) }
+pub fn pick_trace(task: *mut Task, code: u32) {
+    let t = task as usize;
+    if t == 0 {
+        return;
+    }
+    for s in 0..32 {
+        let cur = super::entities::PT_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
+        if cur == t {
+            super::entities::PT_CODE[s].store(code, core::sync::atomic::Ordering::Relaxed);
+            super::entities::PT_JIF[s].store(
+                crate::drivers::timer::get_jiffies(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            return;
+        }
+    }
+    // claim a free slot (racy claim is fine — worst case a lost stamp)
+    for s in 0..32 {
+        if super::entities::PT_TASK[s]
+            .compare_exchange(
+                0,
+                t,
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            super::entities::PT_CODE[s].store(code, core::sync::atomic::Ordering::Relaxed);
+            super::entities::PT_JIF[s].store(
+                crate::drivers::timer::get_jiffies(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            return;
+        }
+    }
+}
 
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+/// r11: heal-side slot rewrite (R56c/R56d/steal/abort-repub/idle-heal/
+/// the R65 garbage-next guard): whatever generation was in flight is
+/// superseded — publish and retire the new slot content in one breath
+/// so the ledger keeps describing the slot (framework-side since the
+/// devirt lane; the statics were always framework-owned).
 #[inline]
-pub(crate) fn pick_gen_supersede(cpu: usize, task: *mut Task) { crate::sched::sched_hooks::pick_gen_supersede(cpu, task) }
+pub(crate) fn pick_gen_supersede(cpu: usize, task: *mut Task) {
+    pick_gen_publish(cpu, task);
+    pick_gen_retire(cpu);
+}
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
@@ -1644,9 +1726,23 @@ pub fn ww_record(task: *mut Task, code: u32) { crate::sched::sched_hooks::ww_rec
 #[inline]
 pub(crate) fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> bool { crate::sched::sched_hooks::orphan_watch_confirm(task, pid, now, threshold) }
 
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+/// Reader-side: the task's last recorded phase (code, jiffies-ago).
+/// Framework-side since the devirt lane (pure diagnostic state).
 #[inline]
-pub fn pick_trace_peek(task: *mut Task) -> Option<(u32, u64)> { crate::sched::sched_hooks::pick_trace_peek(task) }
+pub fn pick_trace_peek(task: *mut Task) -> Option<(u32, u64)> {
+    let t = task as usize;
+    for s in 0..32 {
+        if super::entities::PT_TASK[s].load(core::sync::atomic::Ordering::Relaxed) == t {
+            return Some((
+                super::entities::PT_CODE[s].load(core::sync::atomic::Ordering::Relaxed),
+                crate::drivers::timer::get_jiffies().saturating_sub(
+                    super::entities::PT_JIF[s].load(core::sync::atomic::Ordering::Relaxed),
+                ),
+            ));
+        }
+    }
+    None
+}
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
@@ -1672,9 +1768,17 @@ pub fn r56_report_switch_abort(cpu: usize, pid: u32) { crate::sched::sched_hooks
 #[inline]
 pub fn sched_renice_locked(task: &mut Task, niceval: i32) { crate::sched::sched_hooks::sched_renice_locked(task, niceval) }
 
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+/// r11: the picked context is resuming — retire this CPU's CURRENT pick
+/// generation (framework-side since the devirt lane; PICK_GEN statics
+/// were always framework-owned, the row was pure dispatch overhead).
 #[inline]
-pub(crate) fn pick_gen_retire(cpu: usize) { crate::sched::sched_hooks::pick_gen_retire(cpu) }
+pub(crate) fn pick_gen_retire(cpu: usize) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let g = PICK_GEN[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    PICK_GEN_DONE[cpu].store(g, core::sync::atomic::Ordering::Relaxed);
+}
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
@@ -1736,9 +1840,109 @@ pub fn dfx_claim_inject() -> usize { crate::sched::sched_hooks::dfx_claim_inject
 #[inline]
 pub fn dfx_oncpu_inject() -> usize { crate::sched::sched_hooks::dfx_oncpu_inject() }
 
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+/// s14/60th walk-census getters (framework-native since the devirt
+/// lane — plain counter reads).
 #[inline]
-pub fn ww_pick_walks() -> u64 { crate::sched::sched_hooks::ww_pick_walks() }
+pub fn ww_pick_walks() -> u64 {
+    super::entities::WW_PICK_WALKS.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[inline]
+pub fn ww_pick_walk_inc() {
+    super::entities::WW_PICK_WALKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+#[inline]
+pub fn ww_oncpu_heals() -> u64 {
+    super::entities::WW_ONCPU_HEALS.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[inline]
+pub fn ww_oncpu_heal_inc() {
+    super::entities::WW_ONCPU_HEALS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+#[inline]
+pub fn ww_claim_heals() -> u64 {
+    super::entities::WW_CLAIM_HEALS.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[inline]
+pub fn ww_claim_heal_inc() {
+    super::entities::WW_CLAIM_HEALS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+#[inline]
+pub fn tl_poison_inserts() -> u64 {
+    super::entities::TL_POISON.inserts.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[inline]
+pub fn tl_poison_insert_inc() {
+    super::entities::TL_POISON.inserts.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+#[inline]
+pub fn tl_poison_erases() -> u64 {
+    super::entities::TL_POISON.erases.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[inline]
+pub fn tl_poison_erase_inc() {
+    super::entities::TL_POISON.erases.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+// ---- Per-CPU phase/count/wake-census accessors (devirt lane): plain
+// state touches on entities.rs storage; framework-native. ----
+#[inline]
+pub fn sched_cs_phase(cpu: usize) -> u32 {
+    if cpu < MAX_CPUS {
+        super::entities::SCHED_CS_PHASE[cpu].load(core::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+#[inline]
+pub fn sched_cs_phase_set(cpu: usize, v: u32) {
+    if cpu < MAX_CPUS {
+        super::entities::SCHED_CS_PHASE[cpu].store(v, core::sync::atomic::Ordering::Release);
+    }
+}
+#[inline]
+pub fn sched_calls(cpu: usize) -> u64 {
+    if cpu < MAX_CPUS {
+        super::entities::SCHED_CALLS[cpu].load(core::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+#[inline]
+pub fn sched_calls_inc(cpu: usize) {
+    if cpu < MAX_CPUS {
+        super::entities::SCHED_CALLS[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+#[inline]
+pub fn ww_idle_phase(cpu: usize) -> u32 {
+    if cpu < MAX_CPUS {
+        super::entities::WW_IDLE_PHASE[cpu].load(core::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+#[inline]
+pub fn ww_idle_phase_set(cpu: usize, v: u32) {
+    if cpu < MAX_CPUS {
+        super::entities::WW_IDLE_PHASE[cpu].store(v, core::sync::atomic::Ordering::Release);
+    }
+}
+#[inline]
+pub fn wake_disp() -> u32 {
+    super::entities::WAKE_DISP.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[inline]
+pub fn wake_disp_set(v: u32) {
+    super::entities::WAKE_DISP.store(v, core::sync::atomic::Ordering::Relaxed);
+}
+#[inline]
+pub fn wake_idle_mask() -> u32 {
+    super::entities::WAKE_IDLE_MASK.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[inline]
+pub fn wake_idle_mask_set(v: u32) {
+    super::entities::WAKE_IDLE_MASK.store(v, core::sync::atomic::Ordering::Relaxed);
+}
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
@@ -1782,10 +1986,6 @@ pub fn ww_note_slot_mismatch(cpu: usize) { crate::sched::sched_hooks::ww_note_sl
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
-pub fn set_enabled(on: bool) { crate::sched::sched_hooks::set_enabled(on) }
-
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
-#[inline]
 pub fn monopolist_census(now_j: u64) { crate::sched::sched_hooks::monopolist_census(now_j) }
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
@@ -1808,9 +2008,28 @@ pub(crate) fn rt_bandwidth_tick(cpu: usize, current: *mut Task) { crate::sched::
 #[inline]
 pub fn emit_grq_reports(reports: &[GrqPendingReport]) { crate::sched::sched_hooks::emit_grq_reports(reports) }
 
-/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+/// r11: open this CPU's pick generation — every publish of a task into
+/// a PER_CPU current slot bumps the generation and records
+/// {task, pid, jiffies}; PICK_GEN_DONE stays below it while in flight
+/// (framework-side since the devirt lane; statics always lived here).
 #[inline]
-pub(crate) fn pick_gen_publish(cpu: usize, task: *mut Task) { crate::sched::sched_hooks::pick_gen_publish(cpu, task) }
+pub(crate) fn pick_gen_publish(cpu: usize, task: *mut Task) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let g = PICK_GEN[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    PICK_GEN_TASK[cpu].store(task as u64, core::sync::atomic::Ordering::Relaxed);
+    PICK_GEN_PID[cpu].store(
+        if task.is_null() { 0 } else { crate::sched::edges::task_shared(task).pid() },
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    PICK_GEN_JIF[cpu].store(
+        crate::drivers::timer::get_jiffies(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    // PICK_GEN_DONE stays below `g`: this generation is in flight.
+    let _ = g;
+}
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
@@ -3237,7 +3456,7 @@ pub(crate) static POLLING_IDLE: [core::sync::atomic::AtomicBool; MAX_CPUS] = [co
 #[inline]
 fn sched_cs_stamp(cpu: usize, phase: u32) {
     if cpu < MAX_CPUS {
-        crate::sched::sched_hooks::sched_cs_phase_set(cpu, phase);
+        super::entities::SCHED_CS_PHASE[cpu].store(phase, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -4866,7 +5085,7 @@ fn __schedule() {
     {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
         if cpu_id < MAX_CPUS {
-            crate::sched::sched_hooks::sched_calls_inc(cpu_id);
+            sched_calls_inc(cpu_id);
         }
     }
     clear_need_resched();
@@ -5660,7 +5879,7 @@ fn __schedule() {
     // A same-task repick (next == prev, the CPU-bound tick case) is NOT
     // a new timeslice — Linux counts switches-to — so only an open wait
     // window closes in that case; the exec stamp keeps running.
-    if crate::sched::sched_hooks::enabled() {
+    if enabled() {
         let now = crate::sched::entities::sched_clock();
         let same = next == prev;
         if !prev.is_null() && prev_t.pid() != 0 {
@@ -8989,7 +9208,7 @@ pub fn cpu_idle_loop() -> ! {
         let my_cpu = crate::arch::cpu_id() as usize;
         // WW_IDLE_PHASE 1: about to enter schedule() (may switch away and
         // back; the stamp survives until the next phase write).
-        crate::sched::sched_hooks::ww_idle_phase_set(cpu_id, 1);
+        ww_idle_phase_set(cpu_id, 1);
         // tick_nohz_idle_exit: leaving the idle section — the picked task
         // (if any) runs with inidle clear, so its irq exits take the
         // full_update_tick path (the reference's idle loop brackets its
@@ -9060,7 +9279,7 @@ pub fn cpu_idle_loop() -> ! {
             grq().mark_idle(cpu_id);
             crate::sync::rcu::rcu_note_context_switch();
             // WW_IDLE_PHASE 2: idle-marked, inside the R20-2 recheck window.
-            crate::sched::sched_hooks::ww_idle_phase_set(cpu_id, 2);
+            ww_idle_phase_set(cpu_id, 2);
 
             // R20-2: a task may have been enqueued between schedule()'s
             // nr_running==0 fast-path read and mark_idle — enqueue_task's
@@ -9153,7 +9372,7 @@ pub fn cpu_idle_loop() -> ! {
 
             // Poll UART for pending data before entering WFI.
             // WW_IDLE_PHASE 3: recheck passed, pre-WFI (uart poll window).
-            crate::sched::sched_hooks::ww_idle_phase_set(cpu_id, 3);
+            ww_idle_phase_set(cpu_id, 3);
             // closegap: the port read is a VM exit under KVM — only pay it
             // when a console reader is actually parked (interactive boots
             // keep it; benchmark boots with no reader skip one exit per
@@ -9197,10 +9416,10 @@ pub fn cpu_idle_loop() -> ! {
             // WW_IDLE_PHASE 4: about to WFI (the mark is set here — a
             // strand heartbeat reading phase=4 with idle bit CLEAR is the
             // lost-mark shape directly).
-            crate::sched::sched_hooks::ww_idle_phase_set(cpu_id, 4);
+            ww_idle_phase_set(cpu_id, 4);
             crate::arch::cpu::wfi();
             // WW_IDLE_PHASE 5: WFI returned, idle accounting + mark clear.
-            crate::sched::sched_hooks::ww_idle_phase_set(cpu_id, 5);
+            ww_idle_phase_set(cpu_id, 5);
             crate::fs::procfs::uptime::account_idle_cycles(
                 cpu_id,
                 crate::arch::cpu::read_time().wrapping_sub(idle_t0),
