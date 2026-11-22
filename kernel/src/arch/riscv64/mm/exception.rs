@@ -30,7 +30,7 @@
 //! instead of crashing.
 
 use crate::arch::pt_regs::PtRegs;
-use crate::arch::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault, handle_mm_fault};
+use crate::arch::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault};
 
 // Re-export MmFaultResult from page_fault (canonical definition)
 pub use super::page_fault::MmFaultResult;

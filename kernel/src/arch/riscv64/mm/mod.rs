@@ -61,12 +61,7 @@ pub use asid::{
 /// composition bin) wins the OnceSlot and these rows compile out —
 /// flipped arches delete their rows here in the carve commit.
 pub fn register_in_tree_mm_policy() {
-    crate::mm::mm_hooks::mm_register_hooks(crate::mm::mm_hooks::MmHooks {
-        handle_mm_fault: page_fault::handle_mm_fault,
-        mmap: crate::mm::MmStruct::mmap,
-        munmap: crate::mm::MmStruct::munmap,
-        find_free_area: crate::mm::MmStruct::find_free_area,
-        zap_page_range: crate::mm::MmStruct::zap_page_range,
-        fork: crate::mm::MmStruct::fork,
-    });
+    // M1a carve (riscv64): every policy row flipped to the rux-mm crate
+    // (the x86_64 twin); the composition bin's registration wins the
+    // OnceSlot before this runs.
 }

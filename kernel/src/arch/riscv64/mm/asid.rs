@@ -114,6 +114,27 @@ pub fn flush_tlb_all() {
     }
 }
 
+/// Address-scoped TLB fence for the fault paths (the M1a published
+/// seam): `sfence.vma {vaddr}, zero` — invalidates the address in
+/// EVERY ASID, fenced on both sides (the exact inline-asm shape the
+/// fault routing carried; hoisted here so the policy crate can call
+/// it under forbid). Memory-safe in any context.
+#[inline(always)]
+pub fn sfence_vma_addr(vaddr: u64) {
+    // SAFETY: sfence.vma with a specific vaddr and the zero ASID
+    // invalidates that address's TLB entries globally; the fences
+    // ensure memory ordering. Pure fence — no memory access.
+    unsafe {
+        core::arch::asm!(
+            "fence",
+            "sfence.vma {0}, zero",
+            "fence",
+            in(reg) vaddr,
+            options(nostack, preserves_flags)
+        )
+    }
+}
+
 /// Flush TLB entries for a specific ASID
 ///
 /// Invalidates all TLB entries tagged with the given ASID.

@@ -8,9 +8,9 @@
 //! table (kernel/src/mm/mm_hooks.rs); the composition bin registers
 //! this crate's rows before the framework impl boots.
 //!
-//! Migration state (M1a): the x86_64 carve is flipped (sole consumer of
-//! the policy file below); riscv64/aarch64 still run their in-tree
-//! policy through the same table until their carve commits.
+//! Migration state (M1a): the x86_64 and riscv64 carves are flipped
+//! (sole consumers of the policy files below); aarch64 still runs its
+//! in-tree policy through the same table until its carve commit.
 
 #![forbid(unsafe_code)]
 #![no_std]
@@ -32,13 +32,16 @@ extern crate alloc;
 #[cfg(feature = "x86_64")]
 #[path = "../../src/mm/policy/x86_64.rs"]
 pub mod mm_policy;
+#[cfg(feature = "riscv64")]
+#[path = "../../src/mm/policy/riscv64.rs"]
+pub mod mm_policy;
 
 /// Registration: fills the framework's MmHooks table (the M1a data
 /// seam). Called by the composition bin BEFORE the framework impl —
 /// OnceSlot first-wins, so these rows prevail over any later in-tree
 /// registration attempt.
 pub fn register_all() {
-    #[cfg(feature = "x86_64")]
+    #[cfg(any(feature = "x86_64", feature = "riscv64"))]
     rux::mm::mm_hooks::mm_register_hooks(rux::mm::mm_hooks::MmHooks {
         handle_mm_fault: crate::mm_policy::handle_mm_fault,
         mmap: crate::mm_policy::mmap,
@@ -47,7 +50,7 @@ pub fn register_all() {
         zap_page_range: crate::mm_policy::zap_page_range,
         fork: crate::mm_policy::fork,
     });
-    #[cfg(not(feature = "x86_64"))]
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
     // Arch not carved yet: the framework's in-tree registration serves.
     {}
 }
