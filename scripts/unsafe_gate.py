@@ -227,6 +227,11 @@ def main():
         total = len(regions)
         print(f"unsafe gate: {total} regions, {verified} with artifact "
               f"({100.0 * verified / max(total, 1):.1f}%), {total - verified} GAP")
+        # SAFETY-note coverage (informational, tracked over time; a
+        # threshold becomes a gate once the coverage work catches up).
+        noted = sum(1 for r in regions if r.get("safety_note"))
+        print(f"SAFETY-note coverage: {noted}/{total} "
+              f"({100.0 * noted / max(total, 1):.1f}%)")
         print(f"artifact kinds: {dict(sorted(kinds.items()))}")
 
         if missing:

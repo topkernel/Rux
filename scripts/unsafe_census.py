@@ -322,6 +322,19 @@ CATEGORIES = [
 ]
 
 
+SAFETY_MARKERS = ("SAFETY:", "safety:")
+
+
+def has_safety_note(region_text: str) -> bool:
+    """Whether the region carries a SAFETY justification comment.
+
+    The convention in this tree is a `// SAFETY: ...` line on (or just
+    above) the unsafe block. Measuring it turns "the comments are not
+    everywhere" from a review impression into a tracked number.
+    """
+    return any(m in region_text for m in SAFETY_MARKERS)
+
+
 def categorize(region_text):
     cats = []
     for name, rx in CATEGORIES:
@@ -348,6 +361,16 @@ def scan_texts(texts):
             if r["kind"] == "unsafe-extern" and "ffi" not in cats:
                 cats.append("ffi")
             r["categories"] = cats
+            # SAFETY-note coverage: the note conventionally sits on the
+            # line ABOVE the unsafe block, so look at the preceding
+            # lines as well as the region body.
+            # The SAFETY note is a COMMENT — the masked text has it
+            # blanked out, so the detection must run on the ORIGINAL
+            # source lines (the mask preserves line numbering).
+            orig_lines = text.split("\n")
+            lo = max(0, r["line"] - 6)
+            window = "\n".join(orig_lines[lo:r["end_line"] + 1])
+            r["safety_note"] = has_safety_note(window)
             regions.append(r)
     return regions
 
@@ -458,6 +481,9 @@ def write_ledger(regions, artifacts):
     total = len(regions)
     verified = sum(1 for r in regions if artifacts.get(r["id"], "GAP") != "GAP")
     cat_counter = Counter(c for r in regions for c in r.get("categories", []))
+    noted = sum(1 for r in regions if r.get("safety_note"))
+    print(f"SAFETY-note coverage: {noted}/{len(regions)} "
+          f"({100.0 * noted / max(len(regions), 1):.1f}%)")
     kind_counter = Counter(r["kind"] for r in regions)
 
     out = []
@@ -686,6 +712,9 @@ def main():
 
     print(f"unsafe regions: {len(regions)} across "
           f"{len(set(r['file'] for r in regions))} files")
+    noted = sum(1 for r in regions if r.get("safety_note"))
+    print(f"SAFETY-note coverage: {noted}/{len(regions)} "
+          f"({100.0 * noted / max(len(regions), 1):.1f}%)")
     print("per-subsystem:")
     for s, n in sorted(per_sys.items(), key=lambda x: -x[1]):
         print(f"  {s:12s} {n}")

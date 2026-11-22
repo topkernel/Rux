@@ -270,6 +270,49 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   + UTF-8 cmdline panic fix (830e3f8c). Test-harness-only panics
   (unit-test Vec drop) are excluded by method.
 
+### 2.3 The `expect`/`unwrap` population is a fail-fast surface, not a defect class
+
+A kernel-wide scan (2026-11-22) counts **286 `expect`/`unwrap` sites in
+production code** (tests/ excluded): binder 76, vfs 20, bio 16,
+sysv_sem 15, rootfs 11, and the rest in smaller clusters. They are NOT
+a defect class, and the review proposal to convert them all to
+`match`-plus-error-code would make the kernel worse. They split into
+three kinds:
+
+1. **Unreachable invariant assertions** — the majority. Examples:
+   `w.as_ref().unwrap()` on the WORLD guard (WORLD is initialized
+   before any binder call), `g.get(&k).expect("contains_key")` right
+   after a `contains_key` on the same map under the same lock
+   (`fs/page_cache.rs`, the map is `entry.lock`-guarded for the whole
+   block), `group.iter().min().unwrap()` on a slice the caller just
+   proved non-empty (`ipc/binder.rs`), `try_fdtable().unwrap()` right
+   after `try_fdtable()` returned Some in the same expression chain.
+   In a kernel, an unreachable invariant that stops to panic is the
+   correct behaviour: it turns a silent corruption into a loud,
+   attributable oops. Converting these to error returns would turn
+   "the kernel state is broken" into "one syscall returns -EIO",
+   which is strictly harder to diagnose and hides the corruption from
+   the bug detector.
+2. **Contract assertions on a caller-guaranteed precondition** — the
+   same reasoning; the contract is documented at the call site.
+3. **Genuinely optional lookups** — a small residue that must return
+   an error rather than panic. These are the ones worth changing, and
+   each change needs its own case-by-case reading (the map may be
+   concurrently mutated, the lookup may be absent by design).
+
+The TOCTOU subset — presence check followed by `get().expect()` with a
+mutation window in between — was scanned mechanically across
+kernel/src: **2 sites, both in `fs/page_cache.rs`, both inside the
+`entry.lock` guard** (the map cannot be mutated concurrently there),
+so neither can fire. The residue is therefore an unreachable set, not
+a latent panic family.
+
+Rule of thumb recorded here: a panic is a defect when its PRECONDITION
+can be broken by user input or by a concurrent actor. It is a
+detector when the precondition is an internal invariant. The review
+sweep should be re-run against that distinction, not against the
+syntactic presence of `expect`.
+
 ## 3. Performance, measured (each fast path IS a safe path)
 - lmbench, same host, same accel, both kernels under one q35+KVM rig
   (kernel e264a64b, standing table 2026-11-03): 4 rows ahead of the
