@@ -61,7 +61,7 @@ kernel/src/fs/procfs/timer_list.rs
 kernel/src/fs/procfs/uptime.rs
 kernel/src/fs/procfs/version.rs
 kernel/src/fs/readahead.rs
-kernel/src/fs/selinuxfs.rs
+kernel/rux-fs/src/fs/selinuxfs.rs
 kernel/src/fs/xattr.rs
 kernel/src/interrupt/domain.rs
 kernel/src/interrupt/irqchip.rs
@@ -70,8 +70,13 @@ kernel/src/interrupt/ksoftirqd.rs
 kernel/src/ipc/access_token.rs
 kernel/src/ipc/util.rs
 kernel/src/mm/allocator.rs
-kernel/src/mm/hugepage.rs
+kernel/rux-mm/src/mm/hugepage.rs
 kernel/src/mm/meminfo.rs
+kernel/rux-mm/src/mm/compact.rs
+kernel/rux-mm/src/mm/kswapd.rs
+kernel/rux-mm/src/mm/lru.rs
+kernel/rux-mm/src/mm/oom_kill.rs
+kernel/rux-mm/src/mm/swap.rs
 kernel/src/mm/page.rs
 kernel/src/mm/pagemap.rs
 kernel/src/mm/unwatch.rs
