@@ -20,8 +20,8 @@ census id is accounted for here.
 ## Totals
 
 - unsafe regions: **2497**
-- with artifact (non-GAP): **2401** (96.2%)
-- GAP: **96**
+- with artifact (non-GAP): **2413** (96.6%)
+- GAP: **84**
 - by kind: block=2217, unsafe-extern=7, unsafe-fn=118, unsafe-impl=155
 - by category (regions carry 0..n tags): ptr-ops=642, asm=273, volatile=165, raw-construct=58, addr-arith=35, no-preempt=14, ffi=11, static-mut=5, layout-meta=5, transmute=4
 
@@ -40,10 +40,10 @@ census id is accounted for here.
 | process | 80 | 77 | 3 |
 | ipc | 67 | 67 | 0 |
 | <top> | 64 | 64 | 0 |
-| net | 53 | 53 | 0 |
+| net | 53 | 51 | 2 |
 | safety | 51 | 51 | 0 |
 | perf | 40 | 40 | 0 |
-| syscall | 20 | 6 | 14 |
+| syscall | 20 | 20 | 0 |
 | io_uring | 19 | 19 | 0 |
 | interrupt | 16 | 16 | 0 |
 | security | 7 | 7 | 0 |
@@ -3519,8 +3519,8 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 51 | file_arc | block | - | INV:INV-NETARC-1 | `a28c7f700314` |
-| 64 | take_file_arc | block | - | INV:INV-NETARC-1 | `6efd8fa6f417` |
+| 52 | file_arc | block | - | GAP | `7e356930c393` |
+| 65 | take_file_arc | block | - | GAP | `00f71a3ad02d` |
 
 ### kernel/src/net/netlink.rs (1)
 
@@ -3724,20 +3724,20 @@ census id is accounted for here.
 | 92 | list_entry_mut | block | ptr-ops | INV:INV-SYSC-1 | `533b6bc2c4dd` |
 | 103 | list_link_tail | block | - | INV:INV-SYSC-1 | `1f325ab448d9` |
 | 111 | list_unlink | block | - | INV:INV-SYSC-1 | `77a52e19abb7` |
-| 148 | boxed_ref | block | - | GAP | `cf1c02922ed2` |
-| 160 | boxed_mut | block | - | GAP | `11346ba046e6` |
-| 172 | boxed_drop | block | - | GAP | `85d03ab3181b` |
-| 221 | pidfd_data_of | block | - | GAP | `e000c5b9f709` |
-| 241 | file_inode_set_pre_publish | block | - | GAP | `a16ee3ff22cf` |
-| 269 | arch_map_page | block | - | GAP | `2ac93e552c24` |
-| 289 | unmap_user_leaf_locked | block | - | GAP | `04ce5b844757` |
-| 315 | copy_page_linear | block | ptr-ops | GAP | `9803f27ffc4d` |
-| 338 | page_desc_of | block | - | GAP | `e0bbae551b18` |
-| 454 | pt_walk_writable_phys | block | ptr-ops | GAP | `0fafab315150` |
-| 461 | pt_walk_writable_phys | block | - | GAP | `b45fc0519a07` |
-| 481 | pt_walk_writable_phys | block | ptr-ops | GAP | `020ede3ae0f0` |
-| 508 | file_write_page | block | ptr-ops | GAP | `5ce7139e93fd` |
-| 527 | arch_map_user_page | block | - | GAP | `22fccdefe847` |
+| 148 | boxed_ref | block | - | INV:INV-SYSC-2 | `cf1c02922ed2` |
+| 160 | boxed_mut | block | - | INV:INV-SYSC-2 | `11346ba046e6` |
+| 172 | boxed_drop | block | - | INV:INV-SYSC-2 | `85d03ab3181b` |
+| 221 | pidfd_data_of | block | - | INV:INV-SYSC-5 | `e000c5b9f709` |
+| 241 | file_inode_set_pre_publish | block | - | INV:INV-SYSC-7 | `a16ee3ff22cf` |
+| 269 | arch_map_page | block | - | INV:INV-SYSC-8 | `2ac93e552c24` |
+| 289 | unmap_user_leaf_locked | block | - | INV:INV-SYSC-8 | `04ce5b844757` |
+| 315 | copy_page_linear | block | ptr-ops | INV:INV-SYSC-8 | `9803f27ffc4d` |
+| 338 | page_desc_of | block | - | INV:INV-SYSC-8 | `e0bbae551b18` |
+| 454 | pt_walk_writable_phys | block | ptr-ops | INV:INV-SYSC-8 | `0fafab315150` |
+| 461 | pt_walk_writable_phys | block | - | INV:INV-SYSC-8 | `b45fc0519a07` |
+| 481 | pt_walk_writable_phys | block | ptr-ops | INV:INV-SYSC-8 | `020ede3ae0f0` |
+| 508 | file_write_page | block | ptr-ops | INV:INV-SYSC-8 | `5ce7139e93fd` |
+| 527 | arch_map_user_page | block | - | INV:INV-SYSC-8 | `22fccdefe847` |
 
 ## io_uring
 

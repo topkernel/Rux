@@ -4,6 +4,7 @@
 //!
 //! Network Subsystem
 
+pub mod net_hooks;
 pub mod buffer;
 pub mod ethernet;
 pub mod arp;

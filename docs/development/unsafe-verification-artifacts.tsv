@@ -1922,8 +1922,8 @@ a0a93d496c52	kernel/src/net/ipv4/route.rs	route_remove	241		INV:INV-SENDSYNC-1
 b709a3bcc5f7	kernel/src/net/ipv4/route.rs	route_dump	255		INV:INV-SENDSYNC-1
 5a450cff93a1	kernel/src/net/ipv6/mod.rs	from_bytes	391	ptr-ops	INV:INV-SENDSYNC-1
 282c4d0a5b2d	kernel/src/net/ipv6/mod.rs	ipv6_push_header	435	ptr-ops	INV:INV-SENDSYNC-1
-a28c7f700314	kernel/src/net/mod.rs	file_arc	51		INV:INV-NETARC-1
-6efd8fa6f417	kernel/src/net/mod.rs	take_file_arc	64		INV:INV-NETARC-1
+7e356930c393	kernel/src/net/mod.rs	file_arc	52		INV:INV-NETARC-1
+00f71a3ad02d	kernel/src/net/mod.rs	take_file_arc	65		INV:INV-NETARC-1
 eb396fff1d48	kernel/src/net/netlink.rs	<module>	515		INV:INV-SENDSYNC-1
 7381115d08fc	kernel/src/net/raw.rs	<module>	115		INV:INV-SENDSYNC-1
 f1f73f496b2e	kernel/src/net/socket.rs	<module>	298		INV:INV-SENDSYNC-1
