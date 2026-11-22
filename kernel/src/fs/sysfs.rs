@@ -181,10 +181,6 @@ pub struct KObject {
     pub attributes: Spinlock<BTreeMap<String, Arc<Attribute>>>,
 }
 
-// SAFETY: all mutable state (children/attributes/parent) sits behind
-// Spinlocks; closures are required to be Send + Sync at construction.
-unsafe impl Send for KObject {}
-unsafe impl Sync for KObject {}
 
 impl KObject {
     /// Create a root object (ino 1).
@@ -1956,10 +1952,7 @@ fn sysfs_mount_cb(
 
 // SAFETY: sb came from sysfs_mount_cb's Box::into_raw.
 fn sysfs_kill_sb(sb: *mut SuperBlock) {
-    if !sb.is_null() {
-        // SAFETY: the Box the mount callback stored (unmount path).
-        drop(unsafe { alloc::boxed::Box::from_raw(sb as *mut SysfsSuperBlock) });
-    }
+    crate::fs::unsafe_edges::kill_sb_reclaim_box::<SysfsSuperBlock>(sb);
 }
 
 /// Get the sysfs superblock (if initialized).
@@ -2329,11 +2322,7 @@ fn sysfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps
 /// sysfs destroy_inode: reclaim the leaked Box<SysfsEntryData>.
 /// SAFETY: VFS callback contract; Drop-time hook.
 fn sysfs_destroy_inode(inode: &mut Inode) {
-    if let Some(ptr) = inode.private_data.take() {
-        // SAFETY: the Box was leaked by into_raw at inode creation
-        // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { Box::from_raw(ptr as *mut SysfsEntryData) });
-    }
+    crate::fs::unsafe_edges::privdata_take_box::<SysfsEntryData>(inode);
 }
 
 /// SysFS inode operations table.
@@ -2417,12 +2406,12 @@ fn sysfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 /// write: dispatch to the attribute store handler.
 fn sysfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: inode pointer set at open; read-only access here.
-    let inode = match unsafe { (*file.inode.get()).clone() } {
+    let inode = match crate::fs::unsafe_edges::file_inode_arc(file) {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
     // SAFETY: inode provenance is the sysfs iget path.
-    let entry = match unsafe { entry_of(&inode) } {
+    let entry = match entry_of(&inode) {
         Some(e) => e,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };

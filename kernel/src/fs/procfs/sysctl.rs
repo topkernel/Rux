@@ -601,7 +601,7 @@ pub fn write_core_pattern(input: &[u8]) -> i32 {
 /// Live: the inotify enqueue path consults it (rw; LTP inotify05 reads it
 /// and relies on the IN_Q_OVERFLOW-last semantics when it is exceeded).
 pub fn generate_inotify_max_queued_events() -> Vec<u8> {
-    alloc::format!("{}\n", crate::fs::inotify::max_queued_events()).into_bytes()
+    alloc::format!("{}\n", (crate::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&crate::fs::fs_hooks::FsHooks::EMPTY).inotify_max_queued_events)()).into_bytes()
 }
 
 pub fn write_inotify_max_queued_events(input: &[u8]) -> i32 {
@@ -612,8 +612,7 @@ pub fn write_inotify_max_queued_events(input: &[u8]) -> i32 {
             if v > (1 << 20) {
                 return -(crate::errno::constants::EINVAL as i32);
             }
-            crate::fs::inotify::MAX_QUEUED_EVENTS_SYSCTL
-                .store(v as usize, Ordering::Release);
+            (crate::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&crate::fs::fs_hooks::FsHooks::EMPTY).inotify_set_max_queued_events)(v as usize);
             0
         }
         Err(e) => e,

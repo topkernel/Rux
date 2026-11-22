@@ -1,0 +1,24 @@
+[package]
+name = "rux-fs"
+version = "0.1.0"
+edition = "2021"
+
+# The FS SERVICE CRATE (crate-flip rung 3): the movable filesystem
+# leaves — pipe, fifo, inotify, memfd, eventpoll, selinuxfs — compiled
+# under crate-level #![forbid(unsafe_code)] (the third service column).
+# Zero-move step: #[path]-includes of the existing framework files;
+# the substrate leaves (tmpfs/procfs/rootfs/devfs/sysfs) and the boot
+# leaves (cgroup/debugfs/tracefs/pty/tty/char_dev) plus locks stay in
+# the framework (the buffer.rs pattern) until their tranche.
+
+[dependencies]
+rux = { path = "..", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64"]
+x86_64 = ["rux/x86_64"]
+aarch64 = ["rux/aarch64"]
+# Gates the guest test module + its run entry (make test forwards this
+# from rux-bin's unit-test through the SERVICE-TEST SEAM).
+unit-test = ["rux/unit-test"]

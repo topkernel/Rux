@@ -9,7 +9,7 @@
 //! fn and registers its names here. `register_builtin_handlers()` runs
 //! once at boot (lib.rs, before any mount syscall) — it is the ONE
 //! framework-side place that names the leaves, i.e. the exact seam the
-//! rux-fs-svc crate flip later replaces with each leaf crate's
+//! rux-fs crate flip later replaces with each leaf crate's
 //! self-registration. Behavior-identical to the old match arms.
 
 use super::mount::{self, MntFlags};
@@ -56,16 +56,21 @@ pub fn lookup(fs_type: &str) -> Option<MountFn> {
 }
 
 /// The boot-time registration call (the crate-flip seam point). Each
-/// leaf's `mount_instance` is the verbatim old match-arm body.
+/// leaf's `mount_instance` is the verbatim old match-arm body. The
+/// service crate's rows (selinuxfs, via FsHooks.leaf_mount_register)
+/// run at THIS point — the same seam the built-ins use — never at
+/// rust_main time (the mount table/allocator are not up yet there).
 pub fn register_builtin_handlers() {
     super::tmpfs::mount_register();
     super::procfs::mount_register();
     super::devfs::mount_register();
     super::sysfs::mount_register();
     super::cgroup::mount_register();
-    super::selinuxfs::mount_register();
     super::debugfs::mount_register();
     super::tracefs::mount_register();
+    if let Some(hooks) = super::fs_hooks::FS_HOOKS.get() {
+        (hooks.leaf_mount_register)();
+    }
 }
 
 // Re-export for the leaf mount_instance bodies (register_mount row).

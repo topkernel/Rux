@@ -10,10 +10,11 @@ edition = "2021"
 # A member of the kernel-dir workspace (crate-flip M3-B).
 [dependencies]
 rux = { path = "..", default-features = false }
+rux-fs = { path = "../rux-fs", default-features = false }
 rux-net = { path = "../rux-net", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64", "rux-net/riscv64"]
-x86_64 = ["rux/x86_64", "rux-net/x86_64"]
-aarch64 = ["rux/aarch64", "rux-net/aarch64"]
+riscv64 = ["rux/riscv64", "rux-net/riscv64", "rux-fs/riscv64"]
+x86_64 = ["rux/x86_64", "rux-net/x86_64", "rux-fs/x86_64"]
+aarch64 = ["rux/aarch64", "rux-net/aarch64", "rux-fs/aarch64"]

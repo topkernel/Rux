@@ -3714,9 +3714,9 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
                 // without an explicit notify every read(2) on an ext4
                 // file dropped the event (LTP inotify01: the whole
                 // expected-event train shifted by one).
-                crate::fs::inotify::notify_file(
+                crate::fs::notify_hooks::notify_file(
                     file,
-                    crate::fs::inotify::inotify_events::IN_ACCESS,
+                    crate::fs::notify_hooks::ino_events::IN_ACCESS,
                 );
             }
             if probe {
@@ -3824,7 +3824,7 @@ pub fn ext4_file_read_dio_user_vfs(file: &File, dst: *mut u8, count: usize) -> O
         stamp_atime_relatime(
             ext4_inode as *const super::inode::Ext4Inode as *mut super::inode::Ext4Inode,
         );
-        crate::fs::inotify::notify_file(file, crate::fs::inotify::inotify_events::IN_ACCESS);
+        crate::fs::notify_hooks::notify_file(file, crate::fs::notify_hooks::ino_events::IN_ACCESS);
     }
     Some(n as isize)
 }
@@ -4208,9 +4208,9 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
         // inotify IN_MODIFY: this fast path bypasses File::write,
         // whose wrapper owns the notify on the staged path (same
         // discipline as the read twin, LTP inotify01).
-        crate::fs::inotify::notify_file(
+        crate::fs::notify_hooks::notify_file(
             file,
-            crate::fs::inotify::inotify_events::IN_MODIFY,
+            crate::fs::notify_hooks::ino_events::IN_MODIFY,
         );
     }
     written
@@ -4272,9 +4272,9 @@ pub fn ext4_file_pwrite_user_vfs(file: &File, offset: u64, src: *const u8, count
         // inotify IN_MODIFY: the staged path's File::write_at wrapper
         // owns the notify; this fast path bypasses it (same discipline
         // as the read twin, LTP inotify01).
-        crate::fs::inotify::notify_file(
+        crate::fs::notify_hooks::notify_file(
             file,
-            crate::fs::inotify::inotify_events::IN_MODIFY,
+            crate::fs::notify_hooks::ino_events::IN_MODIFY,
         );
     }
     written
@@ -4402,9 +4402,9 @@ pub fn ext4_file_write_dio_user_vfs(file: &File, src: *const u8, count: usize) -
         };
         file.set_pos(end);
         // IN_MODIFY: same discipline as ext4_file_write_user_vfs.
-        crate::fs::inotify::notify_file(
+        crate::fs::notify_hooks::notify_file(
             file,
-            crate::fs::inotify::inotify_events::IN_MODIFY,
+            crate::fs::notify_hooks::ino_events::IN_MODIFY,
         );
     }
     Some(written)
@@ -4432,9 +4432,9 @@ pub fn ext4_file_pwrite_dio_user_vfs(
     let written =
         ext4_dio_write_gup_run(fs, Some(inode), inode.ino as u32, offset, src, count)?;
     if written > 0 {
-        crate::fs::inotify::notify_file(
+        crate::fs::notify_hooks::notify_file(
             file,
-            crate::fs::inotify::inotify_events::IN_MODIFY,
+            crate::fs::notify_hooks::ino_events::IN_MODIFY,
         );
     }
     Some(written)

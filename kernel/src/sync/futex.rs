@@ -9115,15 +9115,9 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                                 &crate::ipc::binder::BINDER_OPS,
                                             ) {
                                                 "binder".into()
-                                            } else if core::ptr::eq(
-                                                p,
-                                                &crate::fs::pipe::PIPE_OPS,
-                                            ) {
+                                            } else if crate::fs::fs_hooks::is_pipe_ops(ops) {
                                                 "pipe".into()
-                                            } else if core::ptr::eq(
-                                                p,
-                                                &crate::fs::memfd::MEMFD_FILE_OPS,
-                                            ) {
+                                            } else if crate::fs::fs_hooks::is_memfd_ops(ops) {
                                                 "memfd".into()
                                             } else if core::ptr::eq(
                                                 p,
@@ -9822,10 +9816,10 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
     };
     let ops = ops_ref as *const crate::fs::FileOps as *const ();
     let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
-    if is(&crate::fs::pipe::PIPE_OPS) {
+    if crate::fs::fs_hooks::is_pipe_ops(ops_ref) {
         return "pipe";
     }
-    if is(&crate::fs::fifo::FIFO_OPS) {
+    if crate::fs::fs_hooks::is_fifo_ops(ops_ref) {
         return "fifo";
     }
     if crate::net::net_hooks::is_unix_socket_ops(ops_ref) {
@@ -9837,7 +9831,7 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
     if is(&crate::ipc::binder::BINDER_OPS) {
         return "binder";
     }
-    if is(&crate::fs::inotify::INOTIFY_OPS) {
+    if crate::fs::fs_hooks::is_inotify_ops(ops_ref) {
         return "inotify";
     }
     if file.get_ops().is_some_and(crate::syscall::support::is_eventfd_ops) {
@@ -9969,8 +9963,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                 );
                 match ty {
                     "pipe" => {
-                        if let Some(pipe) = crate::fs::pipe::pipe_of_file(&f) {
-                            let (fill, cap, rc, wc) = pipe.diag_snapshot();
+                        if let Some((fill, cap, rc, wc)) = crate::fs::fs_hooks::pipe_diag_snapshot(&f) {
                             let pipe_ptr = f.private_data_ptr()
                                 .map(|p| p as usize)
                                 .unwrap_or(0);
@@ -11289,7 +11282,7 @@ fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
     if let Some(rest) = p.strip_prefix("anon_inode:[") {
         if let Some(num) = rest.strip_suffix(']') {
             if let Ok(ino) = num.parse::<u64>() {
-                if let Some(name) = crate::fs::memfd::memfd_name_by_ino(ino) {
+                if let Some(name) = crate::fs::fs_hooks::memfd_name_by_ino(ino) {
                     return alloc::format!("{} memfd:{}", p, name);
                 }
             }

@@ -202,9 +202,10 @@ fn pty_output(ctx: usize, bytes: &[u8]) {
     if ctx == 0 {
         return;
     }
-    // SAFETY: ctx is the Arc::as_ptr of the owning PtyPair, set once at
-    // alloc time; the pair outlives every File referencing it.
-    let pair = unsafe { &*(ctx as *const PtyPair) };
+    // ctx is the Arc::as_ptr of the owning PtyPair, set once at alloc
+    // time; the pair outlives every File referencing it (the
+    // machine-lifetime adoption edge).
+    let pair = crate::fs::unsafe_edges::static_ref_unchecked::<PtyPair>(ctx as *mut PtyPair);
     let _ = pair.master_rx_write_exact(bytes);
 }
 
@@ -369,12 +370,7 @@ fn pair_arc(file: &File) -> Option<Arc<PtyPair>> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: ptr is a live Arc::into_raw value (file-lifetime); the
-    // increment balances the from_raw below.
-    unsafe {
-        Arc::increment_strong_count(ptr);
-        Some(Arc::from_raw(ptr))
-    }
+    crate::fs::unsafe_edges::file_privdata_arc_clone::<PtyPair>(file)
 }
 
 /// Take the File's PtyPair Arc out of the slot (close paths — the last
@@ -384,9 +380,8 @@ fn take_pair_arc(file: &File) -> Option<()> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: consuming the slot's sole Arc reference.
-    unsafe { drop(Arc::from_raw(ptr)) };
-    file.clear_private_data();
+    // Consuming the slot's sole Arc reference (the take edge drops it).
+    drop(crate::fs::unsafe_edges::file_privdata_take_arc::<PtyPair>(file));
     Some(())
 }
 

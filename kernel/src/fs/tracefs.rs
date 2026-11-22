@@ -556,11 +556,7 @@ fn tracefs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileO
 /// tracefs destroy_inode: reclaim the leaked Box<TraceFsEntryData>.
 /// SAFETY: VFS callback contract; Drop-time hook.
 fn tracefs_destroy_inode(inode: &mut Inode) {
-    if let Some(ptr) = inode.private_data.take() {
-        // SAFETY: the Box was leaked by into_raw at inode creation
-        // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { Box::from_raw(ptr as *mut TraceFsEntryData) });
-    }
+    crate::fs::unsafe_edges::privdata_take_box::<TraceFsEntryData>(inode);
 }
 
 /// tracefs inode operations table.

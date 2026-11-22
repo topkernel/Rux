@@ -11,7 +11,7 @@ pub mod event_notify;
 pub mod fdreap;
 pub mod inode;
 pub mod dentry;
-pub mod pipe;
+// pub mod pipe; — MOVED to the rux-fs service crate (rung 3)
 pub mod char_dev;
 pub mod elf;
 pub mod buffer;
@@ -25,6 +25,8 @@ pub mod mount_table;
 pub mod notify_hooks;
 pub mod file_hooks;
 pub mod lock_hooks;
+pub mod fs_hooks;
+pub mod notify_events;
 pub mod rootfs;
 pub mod tmpfs;
 pub mod ext4;
@@ -41,22 +43,22 @@ pub mod page_cache;
 pub mod readahead;
 pub mod io_completion;
 pub mod locks;
-pub mod inotify;
+// pub mod inotify; — MOVED to the rux-fs service crate (rung 3)
 pub mod tty;
 pub mod vt;
 pub mod pty;
 pub mod xattr;
-pub mod memfd;
+// pub mod memfd; — MOVED to the rux-fs service crate (rung 3)
 pub mod pidfd;
-pub mod selinuxfs;
-pub mod fifo;
+// pub mod selinuxfs; — MOVED to the rux-fs service crate (rung 3)
+// pub mod fifo; — MOVED to the rux-fs service crate (rung 3)
 pub mod cgroup;
 pub mod fsctx;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, close_file_fd_report, set_cloexec_fd};
 pub use fs_struct::FsStruct;
 pub use stat::{copy_stat_to_user, user_stat_size, Stat};
-pub use pipe::create_pipe;
+// pub use pipe::create_pipe; — MOVED to the rux-fs service crate (rung 3)
 pub use char_dev::CharDev;
 pub use rootfs::get_rootfs;
 pub use vfs::{file_open, file_close, file_stat, file_fcntl, fcntl, file_mkdir, file_rmdir, file_unlink, file_link, stat_file_by_path};
