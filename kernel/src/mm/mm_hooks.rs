@@ -484,7 +484,9 @@ fn policy_hooks() -> &'static MmPolicyHooks {
 /// the composition bin's registration — OnceSlot first-wins, so a
 /// flipped file's crate rows prevail over these).
 pub fn register_in_tree_mm_policy() {
-    // Flipped families (kswapd, oom_kill, vmscan, lru, compact) serve from the rux-mm crate, whose
+    // ALL families flipped (M1b complete): every row serves from the
+    // rux-mm crate, whose registration ran earlier in the composition bin
+    // (OnceSlot first-wins) — these defaults never execute from the rux-mm crate, whose
     // registration ran earlier in the composition bin (OnceSlot
     // first-wins) — their rows here stay at the EMPTY defaults and
     // never execute.
@@ -512,14 +514,14 @@ pub fn register_in_tree_mm_policy() {
         lru_demote_active_file_oldest: no_policy_lru_demote_active_file_oldest,
         migration_in_progress: no_policy_migration_in_progress,
         compact_zone: no_policy_compact_zone,
-        swap_init: crate::mm::swap::swap_init,
-        swap_activate: crate::mm::swap::swap_activate,
-        swap_deactivate: crate::mm::swap::swap_deactivate,
-        swap_boot_disk: crate::mm::swap::swap_boot_disk,
-        nr_active_swap: crate::mm::swap::nr_active_swap,
-        swap_free_slot: crate::mm::swap::swap_free_slot,
-        swap_stats: crate::mm::swap::swap_stats,
-        swap_write_census: crate::mm::swap::swap_write_census,
+        swap_init: no_policy_swap_init,
+        swap_activate: no_policy_swap_activate,
+        swap_deactivate: no_policy_swap_deactivate,
+        swap_boot_disk: no_policy_swap_boot_disk,
+        nr_active_swap: no_policy_nr_active_swap,
+        swap_free_slot: no_policy_swap_free_slot,
+        swap_stats: no_policy_swap_stats,
+        swap_write_census: no_policy_swap_write_census,
     });
 }
 

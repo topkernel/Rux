@@ -28,7 +28,6 @@ pub mod pglist;
 pub mod page_alloc;
 pub mod rmap;
 pub mod vmemmap;
-pub mod swap;
 pub mod deferred_free;
 pub mod small_alloc;
 pub mod vdso;
