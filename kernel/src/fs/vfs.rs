@@ -5784,8 +5784,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // reader). Dispatch AFTER the DAC check, BEFORE the regular-file
         // path, so the pipe data path (not the inode data) serves I/O.
         if inode.mode.is_fifo() {
-            let peer = crate::fs::file_hooks::fifo_peer(inode.fs_id, inode.ino);
-            let file = crate::fs::file_hooks::fifo_open_file(&peer, flags)?;
+            let file = crate::fs::file_hooks::fifo_open(inode.fs_id, inode.ino, flags)?;
             file.set_inode(Arc::clone(&inode));
             if let Some(d) = opened_dentry {
                 file.set_dentry(d);

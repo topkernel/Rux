@@ -113,6 +113,46 @@ static FAILED_TESTS: Spinlock<[FailedTest; MAX_FAILED_TESTS]> = Spinlock::new([c
 #[cfg(feature = "unit-test")]
 static FAILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+// SERVICE-TEST SEAM (crate-flip rung 3): guest tests that moved out with
+// their service leaves (pipe2 with rux-fs) register here at boot — the
+// composition bin (rux-bin) forwards them after register_all — and
+// run_all_tests executes them in registration order at the position the
+// family used to occupy. Same shape as the FsHooks seam: the framework
+// owns the mechanism (registry + reporting counters), the service owns
+// the test bodies.
+#[cfg(feature = "unit-test")]
+pub type ServiceTestFn = fn();
+#[cfg(feature = "unit-test")]
+const MAX_SERVICE_TESTS: usize = 8;
+#[cfg(feature = "unit-test")]
+static SERVICE_TESTS: Spinlock<[Option<ServiceTestFn>; MAX_SERVICE_TESTS]> =
+    Spinlock::new([None; MAX_SERVICE_TESTS]);
+#[cfg(feature = "unit-test")]
+static SERVICE_TEST_LEN: AtomicUsize = AtomicUsize::new(0);
+
+/// Register a service crate's guest-test entry (called from rux-bin).
+#[cfg(feature = "unit-test")]
+pub fn register_service_tests(f: ServiceTestFn) {
+    let mut table = SERVICE_TESTS.lock();
+    let i = SERVICE_TEST_LEN.load(Ordering::Relaxed);
+    if i < MAX_SERVICE_TESTS {
+        table[i] = Some(f);
+        SERVICE_TEST_LEN.store(i + 1, Ordering::Relaxed);
+    }
+}
+
+/// Run the registered service tests (called from run_all_tests).
+#[cfg(feature = "unit-test")]
+fn run_registered_service_tests() {
+    let n = SERVICE_TEST_LEN.load(Ordering::Relaxed);
+    let table = SERVICE_TESTS.lock();
+    for i in 0..n {
+        if let Some(f) = table[i] {
+            f();
+        }
+    }
+}
+
 /// Record test pass
 #[cfg(feature = "unit-test")]
 pub fn test_pass(name: &str) {
@@ -299,7 +339,8 @@ pub mod mkdir_unlink;
 #[cfg(feature = "unit-test")]
 pub mod link;
 #[cfg(feature = "unit-test")]
-pub mod pipe2;
+// pub mod pipe2; — MOVED to the rux-fs crate (rung 3 flip); runs in-guest
+// via the SERVICE-TEST SEAM below (registered by rux-bin, same counters)
 #[cfg(feature = "unit-test")]
 pub mod ext4_allocator;
 #[cfg(feature = "unit-test")]
@@ -614,8 +655,10 @@ pub fn run_all_tests() {
     test_group_start("link");
     link::test_link();
 
-    test_group_start("pipe2");
-    pipe2::test_pipe2();
+    // SERVICE-TEST SEAM: the crate-flipped leaves' guest tests (pipe2
+    // moved with rux-fs; rux-bin registered the entry at boot) run in
+    // the family's original position.
+    run_registered_service_tests();
 
     test_group_start("ext4_allocator");
     ext4_allocator::test_ext4_allocator();

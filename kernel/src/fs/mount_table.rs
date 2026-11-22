@@ -9,7 +9,7 @@
 //! fn and registers its names here. `register_builtin_handlers()` runs
 //! once at boot (lib.rs, before any mount syscall) — it is the ONE
 //! framework-side place that names the leaves, i.e. the exact seam the
-//! rux-fs-svc crate flip later replaces with each leaf crate's
+//! rux-fs crate flip later replaces with each leaf crate's
 //! self-registration. Behavior-identical to the old match arms.
 
 use super::mount::{self, MntFlags};
@@ -63,7 +63,6 @@ pub fn register_builtin_handlers() {
     super::devfs::mount_register();
     super::sysfs::mount_register();
     super::cgroup::mount_register();
-    super::selinuxfs::mount_register();
     super::debugfs::mount_register();
     super::tracefs::mount_register();
 }

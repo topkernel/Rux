@@ -548,12 +548,7 @@ pub fn pipe_of_file(file: &File) -> Option<&'static Pipe> {
 /// at creation and the File's lifetime pins the Arc — one raw window
 /// replaces the four open-coded derefs this file carried.
 fn file_pipe_private(file: &File) -> Option<&'static Pipe> {
-    // SAFETY: INV-PIPE-PRIV above.
-    let ptr = file.private_data_ptr()?;
-    if ptr.is_null() {
-        return None;
-    }
-    Some(unsafe { &*(ptr as *const Pipe) })
+    crate::fs::unsafe_edges::file_privdata_arc_static::<Pipe>(file)
 }
 
 /// True when `file` is a pipe/fifo description (PIPE_OPS) — used by the
@@ -1459,15 +1454,10 @@ pub fn pipe_set_sz(file: &File, size: usize) -> Result<usize, i32> {
     if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
         return Err(-(crate::errno::constants::EINVAL as i32));
     }
-    // SAFETY: ops identity confirmed this is a pipe File; private_data was
-    // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
-    // while the File exists.
-    let ptr = match file.private_data_ptr() {
-        Some(p) => p,
-        None => return Err(-(crate::errno::constants::EINVAL as i32)),
-    };
-    let pipe = unsafe { &*(ptr as *const Pipe) };
-    pipe.resize_checked(size)
+    match file_pipe_private(file) {
+        Some(pipe) => pipe.resize_checked(size),
+        None => Err(-(crate::errno::constants::EINVAL as i32)),
+    }
 }
 
 /// Synthetic st_dev for anonymous pipe file descriptions (Linux keeps
@@ -1528,12 +1518,10 @@ pub fn abort_uninstalled_end(file: &mut Arc<File>) {
     // caller breaks that, leave the op to that reference's drop instead
     // of racing it.
     if let Some(f) = Arc::get_mut(file) {
-        // SAFETY: exclusive &mut from get_mut — we are the sole owner and
+        // Exclusive &mut from get_mut — we are the sole owner and
         // close() runs at most this once (File::drop sees close_pending
         // == false and will not run it again).
-        // SAFETY: abort_uninstalled_ENOSPC runs before publication; f is
-        // the sole File reference.
-        unsafe { f.close() };
+        crate::fs::unsafe_edges::file_close(f);
     }
 }
 

@@ -1412,7 +1412,7 @@ pub fn generate_fdinfo(pid: u64, fd: u32) -> Vec<u8> {
         out.push_str(&alloc::format!("Pid:\t{}\nNSpid:\t{}\n", pid, pid));
     }
 
-    if let Some(watches) = crate::fs::inotify::fdinfo_watches(&file) {
+    if let Some(watches) = (crate::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&crate::fs::fs_hooks::FsHooks::EMPTY).inotify_fdinfo_watches)(&file) {
         for (wd, sdev, ino, mask) in watches {
             out.push_str(&alloc::format!(
                 "inotify wd:{:x} ino:{:x} sdev:{:x} mask:{:x} ignored_mask:0 \n",

@@ -332,7 +332,11 @@ pub fn create_fs_root(
             );
             Ok((root, false))
         }
-        "selinuxfs" => Ok((crate::fs::selinuxfs::create_root_inode(), false)),
+        "selinuxfs" => Ok((
+            (crate::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&crate::fs::fs_hooks::FsHooks::EMPTY).selinuxfs_root_inode)()
+                .ok_or(crate::errno::Errno::NoSuchDevice.as_neg_i32())?,
+            false,
+        )),
         "proc" | "procfs" => {
             crate::fs::procfs::mount_procfs().map_err(|e| e as i32)?;
             Ok((crate::fs::procfs::create_root_inode(), false))
