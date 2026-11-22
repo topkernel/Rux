@@ -2100,9 +2100,22 @@ impl PageTableWalker {
             if !pte.is_valid() {
                 return None;
             }
-            if level > 1 && pte.is_leaf() {
-                // 1GB (PUD leaf) or 2MB (PMD leaf) huge page
-                let shift = PAGE_SHIFT + 9 * (level as u64 - 1);
+            if level >= 1 && pte.is_leaf() {
+                // Huge page: PUD leaf (level 2) = 1GB, PMD leaf
+                // (level 1) = 2MB. Both levels must take this branch:
+                // the direct map is built from 2MB PMD leaves, and the
+                // old `level > 1` guard excluded them — a PMD leaf was
+                // descended into as if it were a page table (reading
+                // the mapped page's own bytes as PTEs), so every
+                // kernel-half walk past the first 4K-mapped 2MB
+                // returned None-or-garbage (the mpk tag gap: walk=None
+                // for DmaBlock/vring VAs; convicted by a raw PML4/PUD/
+                // PMD dump — PMD[0x1e2]=leaf). The shift is
+                // PAGE_SHIFT + 9*level (PMD 21, PUD 30): the old
+                // `level - 1` form computed 2MB for a 1GB leaf and
+                // returned a wrong phys for VAs deeper than 2MB into
+                // it.
+                let shift = PAGE_SHIFT + 9 * (level as u64);
                 let offset = virt & ((1 << shift) - 1);
                 let phys = pte.phys_addr() + offset;
                 return Some((phys >> PAGE_SHIFT, pte.bits()));

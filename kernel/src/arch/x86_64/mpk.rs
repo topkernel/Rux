@@ -410,27 +410,40 @@ pub fn tag_kernel_pages(va: usize, len: usize) -> usize {
             super::mm::mm_ops::PageTableWalker::walk(root, page_va)
         {
             let phys = super::mm::PhysAddr::new(ppn << 12);
+            // Strip PS before the 4K re-install: the walk (fixed)
+            // resolves 2MB/1GB leaves, whose leaf bits carry PS — a
+            // PTE with PS set is reserved-bit-invalid at the 4K level
+            // (the page would read unmapped after tagging).
             let ok = super::mm::mmu_init::map_page_noflush(
                 root,
                 super::mm::VirtAddr::new(page_va),
                 phys,
-                flags | (1u64 << 59),
+                (flags & !super::mm::pagetable::PageTableEntry::PS)
+                    | (1u64 << 59),
             );
             if ok {
+                // Invalidate the page's translation NOW: the page was
+                // very likely touched before tagging (allocator poison
+                // paint / vring setup writes), and without the invlpg a
+                // stale pkey-0 TLB entry keeps serving accesses — the
+                // very first escape probe convicted this (rc=0, write
+                // landed). Tagging runs on the BSP before the APs come
+                // online, so a local invlpg covers every CPU that can
+                // hold a stale entry; an SMP-time re-tag needs the
+                // broadcast shootdown instead (phase 2).
+                super::cpu::invlpg(page_va);
                 tagged += 1;
             }
         }
         off += 4096;
     }
     if tagged == 0 && len > 0 {
-        // Honest diagnostics (the mab rescan face): on the x86_64
-        // static/active root the walker currently resolves only the
-        // first 2MB of the direct map — kernel-heap VAs (DmaBlock,
-        // vring avail) return walk=None, so nothing gets tagged and
-        // the windowed accessors stay dormant (fail-open to untagged,
-        // never fail-closed on live traffic). Name it on every boot.
+        // Tripwire: a zero-tag result means the windowed accessors stay
+        // dormant for this block (fail-open to untagged, never
+        // fail-closed on live traffic) — name it on every boot rather
+        // than letting the guard silently protect nothing.
         crate::println!(
-            "mpkguard: tag returned 0 for {:#x}+{:#x} (kernel-half walk gap — see ur-L1)",
+            "mpkguard: tag returned 0 for {:#x}+{:#x}",
             va, len
         );
     }
@@ -451,13 +464,19 @@ pub fn untag_kernel_pages(va: usize, len: usize) -> usize {
             super::mm::mm_ops::PageTableWalker::walk(root, page_va)
         {
             let phys = super::mm::PhysAddr::new(ppn << 12);
+            // PS strip: same as tag_kernel_pages — leaf-resolved flags
+            // must not carry PS into the 4K re-install.
             let ok = super::mm::mmu_init::map_page_noflush(
                 root,
                 super::mm::VirtAddr::new(page_va),
                 phys,
-                flags & !(0xFu64 << 59),
+                (flags & !super::mm::pagetable::PageTableEntry::PS)
+                    & !(0xFu64 << 59),
             );
             if ok {
+                // Same invlpg discipline as tag_kernel_pages: the
+                // untagged PTE must displace any cached translation.
+                super::cpu::invlpg(page_va);
                 cleared += 1;
             }
         }

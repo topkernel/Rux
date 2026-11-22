@@ -380,8 +380,18 @@ pub fn rust_main_tail() -> ! {
                 if arch::mpk::guard_arm() {
                     // The standing-backstop self-test (phase 1's
                     // negative probe): a dedicated page-aligned block,
-                    // its first page pkey-tagged, a raw write with the
-                    // zone CLOSED must #PF through the ex_table window.
+                    // its first page pkey-tagged, then a raw write
+                    // with the zone CLOSED. ISA NOTE (the phase-1
+                    // finding): PKRU gates accesses to USER pages
+                    // only — a SUPERVISOR page (kernel heap, where
+                    // DmaBlock/vring memory lives) is governed by
+                    // PKS (CR4.PKS + IA32_PKRS), a separate mechanism
+                    // the PKU guard cannot enforce. So the honest
+                    // expectations here: tag succeeds, and the escape
+                    // write LANDS (rc=0) — the enforceable backstop
+                    // for user pages is proven by mpkprobe's
+                    // fault-inject phase B instead. Kernel-metadata
+                    // protection = the PKS variant (phase 2).
                     if let Some(mut b) =
                         crate::safety::dma::DmaBlock::new(8192, 4096)
                     {
