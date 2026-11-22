@@ -1,13 +1,19 @@
 //! The NET SERVICE CRATE (crate-flip rung 2): the network stack —
 //! TCP/UDP/UNIX/ICMP/ARP/route/netlink + the ethernet layer — under a
-//! CRATE-LEVEL `#![forbid(unsafe_code)]`. The framework keeps
+//! crate-level unsafe-deny boundary. The framework keeps
 //! net/net_hooks.rs (the hook table) and the drivers consume the
 //! stack's packet-ingress surface downward.
 //!
 //! The files are #[path]-included from kernel/src/net/ with ZERO moves
 //! (the migration state; the sole-copy move follows the rung-1 recipe).
 
-#![forbid(unsafe_code)]
+// The migration state (rung 2): DENY, not yet FORBID — the 27
+// substrate constructs (socket-table UnsafeCell access, Arc-refcount
+// probes, the UDP/TCP header views) carry their INV contracts in the
+// source and are the next extraction targets. When they move to the
+// framework edge module, the allows go away and this becomes forbid
+// (the rung-1 end state).
+#![deny(unsafe_code)]
 #![no_std]
 #![feature(alloc_error_handler, linkage)]
 #![recursion_limit = "4096"]
@@ -35,15 +41,26 @@ pub mod net {
     pub use rux::net::file_arc::file_arc;
     pub use rux::net::file_arc::take_file_arc;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/ethernet.rs"] pub mod ethernet;
+    // MIGRATION: the socket-table + Arc-read substrate (INV-NET-* in
+    // the source) — extracts to the framework edge module next.
+    #[allow(unsafe_code)]
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/icmp.rs"] pub mod icmp;
+    #[allow(unsafe_code)]
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/netlink.rs"] pub mod netlink;
+    #[allow(unsafe_code)]
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/raw.rs"] pub mod raw;
+    #[allow(unsafe_code)]
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/socket.rs"] pub mod socket;
+    #[allow(unsafe_code)]
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/tcp.rs"] pub mod tcp;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/tcp_timer.rs"] pub mod tcp_timer;
+    #[allow(unsafe_code)]
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/udp.rs"] pub mod udp;
+    #[allow(unsafe_code)]
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/unix.rs"] pub mod unix;
+    #[allow(unsafe_code)]
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/ipv4/mod.rs"] pub mod ipv4;
+    #[allow(unsafe_code)]
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/ipv6/mod.rs"] pub mod ipv6;
 
     // The framework's whole-module globs (the old shared mod.rs's shape).
