@@ -1994,6 +1994,13 @@ fn rmfb(fb_id: u32) -> i64 {
 
 /// Display one framebuffer on scanout 0 (the whole atomic model here:
 /// single plane, single CRTC, mode fixed).
+// F-DIAG-DRM (file-level): the two content probes (present_fb's FLIP
+// scan, prime_fd_to_handle's import scan) are ohhunt-gated DIAGNOSTIC
+// GEM-window scans — one audited block each (gem.kva..+size, the
+// object's own backing; sample offsets clamped). Reference counterpart:
+// the reference kernel's drm debugfs framebuffer-dump paths (likewise
+// diagnostic-only, not a runtime API). Not runtime state: gated off in
+// production boots.
 fn present_fb(fb_id: u32) -> i64 {
     // Snapshot the FB data under the lock, then run the virtio sequence
     // lock-free (device transactions can take milliseconds under TCG).

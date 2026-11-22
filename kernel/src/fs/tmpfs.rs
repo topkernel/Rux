@@ -298,10 +298,11 @@ impl TmpfsNode {
             // in it and never reach the node pages) — refusing it reads
             // stale NODE bytes (FXW FD-MISMATCH family).
             if let Some(frame) = cache.get_stale(self.fs_id, self.ino, page_idx as u64) {
-                // SAFETY: `frame` is the pinned cache page's kernel VA —
+                // `frame` is the pinned cache page's kernel VA —
                 // PAGE_SIZE readable bytes for the pin's lifetime;
                 // page_off + chunk <= PAGE_SIZE and done + chunk <=
-                // total by construction.
+                // total by construction (F-TMPFS-CACHE: the single
+                // audited frame-face copy; reference shmem_read_mapping_page).
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         frame.add(page_off),
