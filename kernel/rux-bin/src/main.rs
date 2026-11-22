@@ -16,5 +16,9 @@ pub extern "C" fn rust_main() -> ! {
     // regs tables route every dispatch from here on.
     rux_net::register_all();
     rux_syscall::register_all();
+    // The mm policy rows (M1a): carve-live on x86_64, still in-tree on
+    // riscv64/aarch64 (their register_in_tree fills the table inside
+    // rust_main_impl; OnceSlot first-wins keeps whichever ran first).
+    rux_mm::register_all();
     rust_main_impl()
 }

@@ -16,7 +16,7 @@
 
 use super::page_fault::FaultFlags;
 use crate::arch::pt_regs::PtRegs;
-use crate::arch::mm::{VirtAddr, MmFaultResult, handle_cow_fault, handle_mm_fault};
+use crate::arch::mm::{VirtAddr, MmFaultResult, handle_cow_fault};
 use crate::println;
 
 /// Exception table entry (16 bytes, sorted by fault_rip at link time ideally)

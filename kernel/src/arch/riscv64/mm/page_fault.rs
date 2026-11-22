@@ -24,45 +24,13 @@ use crate::mm::AddressSpace;
 // ==================== Fault Flags ====================
 
 /// Page fault type flags
-pub struct FaultFlags;
-
-impl FaultFlags {
-    /// Read fault
-    pub const READ: u32 = 0x01;
-    /// Write fault
-    pub const WRITE: u32 = 0x02;
-    /// Execute fault (instruction fetch)
-    pub const EXEC: u32 = 0x04;
-    /// User mode access
-    pub const USER: u32 = 0x08;
-    /// Kernel mode access
-    pub const KERNEL: u32 = 0x10;
-}
+// FaultFlags + MmFaultResult unified at the SEAM (mm/mm_hooks.rs) with
+// the M1a carve; re-export keeps every historical path resolving.
+pub use crate::mm::mm_hooks::{FaultFlags, MmFaultResult};
 
 // ==================== Fault Result ====================
 
 /// Page fault handling result
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MmFaultResult {
-    /// Handled successfully, can retry instruction
-    Handled,
-    /// Address not in any VMA (segmentation fault)
-    Segfault,
-    /// Permission denied (protection fault)
-    PermissionDenied,
-    /// Out of memory
-    OutOfMemory,
-    /// Bus error — file-backed fault past EOF (SIGBUS to the task)
-    BusError,
-    /// Already mapped (no handling needed)
-    AlreadyMapped,
-    /// COW pending (handled by handle_cow_fault)
-    CowPending,
-    /// Kernel exception fixed (via exception table)
-    Fixed,
-    /// Unfixable kernel exception
-    KernelPanic,
-}
 
 // ==================== Stack Expansion ====================
 

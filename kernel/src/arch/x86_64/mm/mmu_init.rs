@@ -1713,7 +1713,7 @@ fn pt_alloc_fail(level: &str, va: u64) {
 /// caches non-present translations, and every teardown path
 /// (munmap/mprotect) flushes what it zaps. Callers REPLACING a present
 /// leaf must flush that VA themselves.
-pub(crate) fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+pub fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
     // 0xb9 install validator (oh-launch round 7) — see write_pte_raw's
     // twin: a PRESENT entry with zero address bits is corrupt by
     // construction; name the installer the moment it is written. Gated

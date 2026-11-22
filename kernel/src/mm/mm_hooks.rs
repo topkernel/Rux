@@ -17,11 +17,54 @@
 //! method pointers pre-carve, crate fns post-carve), and call sites
 //! read the table only through these accessors.
 
-use crate::arch::mm::{MmFaultResult, VirtAddr as ArchVirtAddr};
+use crate::arch::mm::VirtAddr as ArchVirtAddr;
 use crate::mm::mm_struct::MmStruct;
 use crate::mm::page::VirtAddr as PageVirtAddr;
 use crate::mm::pagemap::{MapError, Perm};
 use crate::mm::vma::{VmaFlags, VmaType};
+
+// ==================== The seam vocabulary ====================
+// FaultFlags and MmFaultResult moved here with the M1a carve (from the
+// per-arch page_fault.rs): the trap layer, uaccess, ptrace/futex/gup and
+// this table all name them, so they belong to the seam, not to either
+// side. Each arch's page_fault.rs re-exports them so historical paths
+// keep resolving.
+
+pub struct FaultFlags;
+impl FaultFlags {
+    /// Read fault
+    pub const READ: u32 = 1 << 0;
+    /// Write fault
+    pub const WRITE: u32 = 1 << 1;
+    /// Execute fault (instruction fetch)
+    pub const EXEC: u32 = 1 << 2;
+    /// User mode access
+    pub const USER: u32 = 1 << 3;
+    /// Kernel mode access
+    pub const KERNEL: u32 = 1 << 4;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmFaultResult {
+    /// Fault fully handled — retry the instruction
+    Handled,
+    /// Anonymous page materialized — retry
+    Fixed,
+    /// COW resolved — retry
+    CowPending,
+    /// Mapping already exists — retry
+    AlreadyMapped,
+    /// Address not in any VMA (segmentation fault)
+    Segfault,
+    /// Permission denied (protection fault)
+    PermissionDenied,
+    /// Out of memory
+    OutOfMemory,
+    /// Bus error — file-backed fault past EOF (SIGBUS to the task)
+    BusError,
+    /// Kernel exception fixed (via exception table)
+    KernelPanic,
+}
 
 /// The mm-policy hook set (one row per framework->policy entry point;
 /// the reverse surface measured in docs/development/mm-split-rung.md —
