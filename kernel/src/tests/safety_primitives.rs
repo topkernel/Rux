@@ -314,3 +314,69 @@ pub fn test_safety_primitives_r4() {
         test_fail("stack window frame walk stops at top", "walk mismatch");
     }
 }
+
+/// Pinned-frame views (bytes-p0): the single-frame arm (INV-CBYTES-4)
+/// and the contiguous-run arm (INV-CBYTES-6). The run test allocates a
+/// REAL order-1 buddy block (two physically-contiguous PAGE_SIZE
+/// frames — exactly the shape the ext4 merged copyout merges), paints a
+/// position-dependent pattern across both frames, and verifies the run
+/// view reads the bytes continuously across the frame boundary, where
+/// the single-frame contract ends. The frames here are not
+/// page-cache-pinned; the test pins the VIEW semantics (byte image and
+/// boundary crossing) — the pin itself is the caller contract both
+/// primitives state and the ext4 call sites hold.
+pub fn test_safety_primitives_frame_run() {
+    test_group_start("safety primitives frame run");
+
+    use crate::mm::page_alloc::{alloc_pages, free_pages};
+    use crate::mm::zone::GfpFlags;
+    use crate::safety::bytes as cbytes;
+
+    let ps = crate::mm::PAGE_SIZE;
+    let phys = alloc_pages(GfpFlags::GFP_KERNEL, 1);
+    if phys == 0 {
+        test_fail("frame run order-1 alloc", "alloc_pages returned 0");
+        return;
+    }
+    let base = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(phys as u64)).0
+        as *mut u8;
+    // Paint a position-dependent pattern across both frames.
+    for i in 0..(2 * ps) {
+        unsafe { base.add(i).write_volatile(((i + 7) & 0xff) as u8) };
+    }
+    let frame = base as *const u8;
+
+    // Single-frame arm: an in-page span reads back the pattern.
+    let single = cbytes::pinned_frame_bytes(&frame, ps - 4, 4);
+    let ok_single = (0..4).all(|j| single[j] == (((ps - 4 + j + 7) & 0xff) as u8));
+    if ok_single {
+        test_pass("pinned_frame_bytes in-page span");
+    } else {
+        test_fail("pinned_frame_bytes in-page span", "pattern mismatch");
+    }
+
+    // Run arm: the span [ps-2, ps+2) CROSSES the frame boundary — the
+    // exact shape that fired the bytes-p0 assert through the
+    // single-frame primitive.
+    let run = cbytes::pinned_frame_run_bytes(&frame, ps - 2, 4);
+    let ok_cross = (0..4).all(|j| run[j] == (((ps - 2 + j + 7) & 0xff) as u8));
+    if ok_cross {
+        test_pass("pinned_frame_run_bytes boundary-crossing span");
+    } else {
+        test_fail("pinned_frame_run_bytes boundary-crossing span", "pattern mismatch");
+    }
+
+    // Full two-frame run: start, middle and far end all read the
+    // pattern (the whole span is one contiguous byte image).
+    let full = cbytes::pinned_frame_run_bytes(&frame, 0, 2 * ps);
+    let ok_full = full[0] == 7
+        && full[ps] == ((ps + 7) & 0xff) as u8
+        && full[2 * ps - 1] == ((2 * ps + 6) & 0xff) as u8;
+    if ok_full {
+        test_pass("pinned_frame_run_bytes full two-frame run");
+    } else {
+        test_fail("pinned_frame_run_bytes full two-frame run", "pattern mismatch");
+    }
+
+    free_pages(phys, 1);
+}

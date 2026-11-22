@@ -127,11 +127,46 @@ pub fn bytes_of_slice_mut<T: Copy>(v: &mut [T]) -> &mut [u8] {
 /// caller's own handle to the pointer (the `bio::bh_data(&bh)` shape), so
 /// it cannot outlive the caller's pin-holding scope. This is the
 /// byte-level twin of the GUP pinned-alias copies (`mm::edges::copy_kva*`).
+/// SINGLE-frame arm only: a span that legitimately crosses into
+/// verified-adjacent pinned frames goes through
+/// [`pinned_frame_run_bytes`] (INV-CBYTES-6) instead.
 #[inline]
 pub fn pinned_frame_bytes(frame: &*const u8, off: usize, len: usize) -> &[u8] {
     debug_assert!(off.checked_add(len).is_some_and(|end| end <= crate::mm::PAGE_SIZE));
     // SAFETY: INV-CBYTES-4 — off+len is inside the pinned PAGE_SIZE
     // frame; the caller's pin holds the frame for this borrow.
+    unsafe { core::slice::from_raw_parts((*frame).add(off), len) }
+}
+
+/// Byte view of a RUN of physically-contiguous pinned page-cache frames.
+///
+/// INV-CBYTES-6 (pinned-frame run window): `*frame` is the kernel
+/// direct-map alias of the FIRST frame of a run of PAGE_SIZE frames,
+/// EVERY frame the span `[off, off + len)` touches is pinned by the
+/// caller (the same `pin_locked()` pins INV-CBYTES-4 rests on — e.g.
+/// `get_range_with_entry` pins each page it returns), and the run's
+/// frames are direct-map NEIGHBORS: the caller verified physical
+/// adjacency (`frame[j] == frame[j-1] + PAGE_SIZE`) before merging, so
+/// every byte of the span is live, pinned, byte-stable memory and the
+/// view is a plain re-labeling — the multi-frame arm of INV-CBYTES-4.
+/// Frames are PAGE_SIZE-strided in the direct map, so adjacency of the
+/// aliases implies adjacency of the frames; the caller-side merge check
+/// is the contiguity enforcement (a single pointer cannot prove it
+/// here). The primitive does NOT split per page: the merged copyout
+/// exists precisely to serve contiguous runs with one copy, and
+/// per-page splitting would re-introduce the per-4KiB copy cost it
+/// removed. This arm exists because the family-6 conversion initially
+/// forced the ext4 merged copyout's page-crossing span through the
+/// one-frame primitive, whose `end <= PAGE_SIZE` debug assert panicked
+/// real execve reads (bytes-p0, 2026-11-23: ino=285, off=0, len=8192,
+/// a 2-frame group inside a 16 KiB exec chunk read) — the span was
+/// sound all along (both frames pinned), the contract was too narrow.
+#[inline]
+pub fn pinned_frame_run_bytes(frame: &*const u8, off: usize, len: usize) -> &[u8] {
+    debug_assert!(off < crate::mm::PAGE_SIZE && off.checked_add(len).is_some());
+    // SAFETY: INV-CBYTES-6 — off starts inside the first pinned frame
+    // and off+len covers only pinned direct-map-neighbor frames of the
+    // caller's run.
     unsafe { core::slice::from_raw_parts((*frame).add(off), len) }
 }
 

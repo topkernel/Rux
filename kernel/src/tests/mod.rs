@@ -520,6 +520,7 @@ pub fn run_all_tests() {
     test_group_start("safety primitives");
     safety_primitives::test_safety_primitives();
     safety_primitives::test_safety_primitives_r4();
+    safety_primitives::test_safety_primitives_frame_run();
 
     test_group_start("path");
     path::test_path();

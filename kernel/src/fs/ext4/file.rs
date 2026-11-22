@@ -1089,11 +1089,17 @@ fn ext4_file_read_cached_dst(
                         k += 1;
                     }
                     let copy_len = core::cmp::min(remaining_now, span);
-                    // run[i].1 is a pinned page-cache frame (released via
-                    // put_range_with_entry below) — INV-CBYTES-4.
+                    // run[i].1 starts a MERGED group of pinned frames:
+                    // the adjacency check above verified direct-map
+                    // neighbors, get_range_with_entry pinned EVERY frame
+                    // of the run, and copy_len may legitimately span
+                    // several frames (one dst.put for the whole group —
+                    // INV-CBYTES-6 run arm; bytes-p0: this span must NOT
+                    // go through the single-frame INV-CBYTES-4 view,
+                    // whose end <= PAGE_SIZE assert fires on k >= 2).
                     let copied = match dst.put(
                         buf_offset,
-                        crate::safety::bytes::pinned_frame_bytes(
+                        crate::safety::bytes::pinned_frame_run_bytes(
                             &run[i].1,
                             in_page_off,
                             copy_len,
