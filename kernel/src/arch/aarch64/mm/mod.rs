@@ -45,3 +45,19 @@ pub use asid::{
     build_satp, satp_to_asid, satp_to_ppn, read_satp, write_satp,
     AsidContext, print_asid_status,
 };
+
+/// M1a seam: register this arch's IN-TREE mm policy rows (the
+/// pre-carve provider). When the arch's policy carve lands in the
+/// rux-mm crate, the crate's `register_all` (called earlier by the
+/// composition bin) wins the OnceSlot and these rows compile out —
+/// flipped arches delete their rows here in the carve commit.
+pub fn register_in_tree_mm_policy() {
+    crate::mm::mm_hooks::mm_register_hooks(crate::mm::mm_hooks::MmHooks {
+        handle_mm_fault: page_fault::handle_mm_fault,
+        mmap: crate::mm::MmStruct::mmap,
+        munmap: crate::mm::MmStruct::munmap,
+        find_free_area: crate::mm::MmStruct::find_free_area,
+        zap_page_range: crate::mm::MmStruct::zap_page_range,
+        fork: crate::mm::MmStruct::fork,
+    });
+}

@@ -851,7 +851,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             // mapping page 0 (Linux ipc/shm.c; mapping the null page was
             // LTP issue #319, shmat03). Same placement call as the
             // shmaddr==0 arm below.
-            match addr_space.find_free_area(size_aligned) {
+            match crate::mm::mm_hooks::find_free_area(&addr_space, size_aligned) {
                 Ok(a) => a.as_usize(),
                 Err(_) => return -(errno::ENOMEM as i64),
             }
@@ -874,7 +874,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
         // 0x4000 MIT-SHM segments mapped over gnome-shell's brk heap at
         // 0x501000+ — the [pango] FcInit abort; PTE-OVERWRITE-LIVE
         // ctx=1, data_DESTROYED).
-        match addr_space.find_free_area(size_aligned) {
+        match crate::mm::mm_hooks::find_free_area(&addr_space, size_aligned) {
             Ok(a) => a.as_usize(),
             Err(_) => return -(errno::ENOMEM as i64),
         }
@@ -913,7 +913,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
                 if e <= s {
                     break;
                 }
-                if addr_space.munmap(VirtAddr::new(s), e - s).is_err() {
+                if crate::mm::mm_hooks::munmap(&addr_space, VirtAddr::new(s), e - s).is_err() {
                     return -(errno::ENOMEM as i64);
                 }
                 // VMA list changed — rescan from the top.
@@ -1021,7 +1021,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             // sparse segment): treat as fatal and roll back.
             let rollback_size = i * PAGE_SIZE;
             if rollback_size > 0 {
-                let _ = addr_space.munmap(VirtAddr::new(attach_addr), rollback_size);
+                let _ = crate::mm::mm_hooks::munmap(&addr_space, VirtAddr::new(attach_addr), rollback_size);
             }
             {
                 let slots = SHM_IDS.slots.lock();
@@ -1110,7 +1110,7 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
         Some(i) => i,
         None => {
             // Segment already gone, just unmap
-            let _ = addr_space.munmap(VirtAddr::new(shmaddr), vma_size);
+            let _ = crate::mm::mm_hooks::munmap(&addr_space, VirtAddr::new(shmaddr), vma_size);
             return 0;
         }
     };
@@ -1132,7 +1132,7 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
     }
 
     // munmap handles both VMA removal and page table unmapping
-    let _ = addr_space.munmap(VirtAddr::new(shmaddr), vma_size);
+    let _ = crate::mm::mm_hooks::munmap(&addr_space, VirtAddr::new(shmaddr), vma_size);
 
     // Free slot after munmap (slot lock already released)
     if should_free {

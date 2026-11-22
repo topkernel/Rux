@@ -793,7 +793,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 // exactly where child tables are about to be allocated
                 // (no-op on arches without the protocol).
                 crate::arch::mm::pt_pending_drain();
-                match parent_as.fork() {
+                match crate::mm::mm_hooks::fork(parent_as) {
                     Ok(child_as) => {
                         #[cfg(feature = "dfx-futex-trace")]
                         {

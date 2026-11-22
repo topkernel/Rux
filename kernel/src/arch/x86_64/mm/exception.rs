@@ -282,7 +282,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
                 .is_some();
             if covered || stack_growable {
-                let result = handle_mm_fault(
+                let result = crate::mm::mm_hooks::handle_mm_fault(
                     &addr_space,
                     fault_addr,
                     access_type | FaultFlags::USER,
@@ -606,7 +606,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     }
 
     // 1. Call handle_mm_fault to handle
-    let result = handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
+    let result = crate::mm::mm_hooks::handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
 
     match result {
         MmFaultResult::Handled | MmFaultResult::Fixed => {

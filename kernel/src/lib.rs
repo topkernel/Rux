@@ -1430,6 +1430,12 @@ fn x86_dump_regions() {
 
 /// The framework entry body (everything the old rust_main did).
 pub extern "C" fn rust_main_impl() -> ! {
+    // M1a seam: the mm-policy rows must be live before any user
+    // address-space op. Carved arches already registered their crate
+    // rows in the composition bin (OnceSlot first-wins); this fills
+    // the still-in-tree arches.
+    arch::mm::register_in_tree_mm_policy();
+
     // Initialize SMP (multi-core support) - must run first!
     // On QEMU virt, OpenSBI only starts one hart into S-mode.
     // Other harts will be started later via SBI HSM.

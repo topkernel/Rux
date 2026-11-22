@@ -674,20 +674,20 @@ pub fn ashmem_mmap(
     // as-is (VmaFlags::SHARED is the COW exemption key in
     // copy_page_table_cow). file_fd stays unset — the SysV shm detach
     // accounting keys on it and must not see ashrem VMAs.
-    let placement = address_space
-        .mmap(
-            crate::mm::page::VirtAddr::new(addr),
-            length,
-            vma_flags,
-            if map_shared {
-                VmaType::SharedMemory
-            } else {
-                VmaType::Anonymous
-            },
-            crate::mm::pagemap::Perm::ReadWrite,
-            0,
-        )
-        .map_err(|_| -ENOMEM)?
+    let placement = crate::mm::mm_hooks::mmap(
+        &address_space,
+        crate::mm::page::VirtAddr::new(addr),
+        length,
+        vma_flags,
+        if map_shared {
+            VmaType::SharedMemory
+        } else {
+            VmaType::Anonymous
+        },
+        crate::mm::pagemap::Perm::ReadWrite,
+        0,
+    )
+    .map_err(|_| -ENOMEM)?
         .as_usize();
 
     // PTE flags: MAP_SHARED maps pool pages writable (when PROT_WRITE);

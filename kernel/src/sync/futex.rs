@@ -447,7 +447,7 @@ fn resolve_futex_phys(uaddr: usize) -> usize {
     {
         if let Some(mm) = crate::sched::edges::task_shared(task).address_space() {
             let page = uaddr & !0xfff;
-            let _ = crate::arch::mm::handle_mm_fault(
+            let _ = crate::mm::mm_hooks::handle_mm_fault(
                 &mm,
                 crate::arch::mm::VirtAddr::new(page as u64),
                 crate::arch::mm::FaultFlags::READ,
