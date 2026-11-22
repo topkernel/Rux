@@ -131,7 +131,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         // rux:socksnap (retired dfx=socksnap): AF_UNIX listener queue depths + every epoll
         // interest set (appspawn-server wedge hunt, b15) — self-gated.
-        crate::net::unix::unix_listener_snapshot();
+        crate::net::net_hooks::unix_listener_snapshot();
         crate::syscall::support::epoll_interest_snapshot();
     }
 

@@ -34,6 +34,63 @@ pub struct NetHooks {
     pub unix_socket_of: fn(&File) -> Option<(bool, String)>,
     /// posix_mq's notify socket probe.
     pub mq_notify_sock: fn(&File) -> Option<i32>,
+    // ---- rung-2 flip rows (the sole-copy deletion's reverse surface) ----
+    /// futex park dump: (bound, peer) names of the unix socket on `fd`.
+    pub unix_fd_bound_peer: fn(fd: usize) -> Option<(String, String)>,
+    /// futex KILLDUMP: the unix socket file's diagnostic snapshot.
+    pub unix_file_diag: fn(&File) -> Option<UnixDiag>,
+    /// syscost recv_describe's unix arm: the formatted
+    /// "unix:kind bound=[..] peer=[..]" line.
+    pub unix_recv_describe: fn(fd: usize) -> Option<String>,
+    /// hung_task's listener census (prints net-side, like the park
+    /// audit).
+    pub unix_listener_snapshot: fn(),
+    /// taskdump's SLEEPSNAP unix park audit (prints net-side).
+    pub unix_park_audit: fn(),
+    /// The timers' "any TCP socket alive" probe (idle-balance guard).
+    pub tcp_table_nonempty: fn() -> bool,
+    /// memwatch's TCPCEN rows (locking is the hook impl's own).
+    pub tcp_census_rows: fn() -> Vec<TcpCensusRow>,
+    /// virtio-net RX bottom half (the packet pump).
+    pub ethernet_poll: fn(),
+    /// The TCP timer softirq handler (registered at softirq::init;
+    /// takes the softirq vector like every open_softirq handler).
+    pub tcp_timer_softirq: fn(usize),
+    /// sysfs uevent fanout (kobject_uevent's netlink broadcast).
+    pub uevent_broadcast: fn(&[u8]),
+    /// vfs fstat's socket arm: stat every socket family as S_IFSOCK
+    /// (sd-bus's sd_is_socket negotiation depends on it).
+    pub socket_file_stat: fn(&File, &mut crate::fs::Stat) -> Option<i32>,
+    /// posix_mq SIGEV_THREAD delivery: push the 32-byte musl marker
+    /// message onto the helper's netlink socket file.
+    pub netlink_push_kernel_message: fn(&File, [u8; 32]),
+    /// The init seam (rust_main_impl's net bring-up, in boot order).
+    pub init_tcp: fn(),
+    pub init_tcp_timer: fn(),
+    pub init_route: fn(),
+    pub set_local_ip: fn(u32),
+    pub ipv6_init: fn(),
+}
+
+/// futex KILLDUMP's unix-socket snapshot (all fields pre-formatted or
+/// numeric net-side; the framework only prints).
+pub struct UnixDiag {
+    pub kind: String,
+    pub bound: String,
+    pub peer: String,
+    pub queued_bytes: u64,
+    pub truesize: u64,
+    pub sndbuf: u64,
+    pub qlen: u64,
+}
+
+/// memwatch's TCPCEN row (one TCP table slot, net-side locked walk).
+pub struct TcpCensusRow {
+    pub fd: u32,
+    pub state: u8,
+    pub rx_len: u64,
+    pub rcv_wnd: u64,
+    pub local_port: u16,
 }
 
 /// A /proc/net/tcp row (the socket-table getter's raw data; procfs
@@ -97,6 +154,23 @@ impl NetHooks {
         is_raw_ops: |_| false,
         unix_socket_of: |_| None,
         mq_notify_sock: |_| None,
+        unix_fd_bound_peer: |_| None,
+        unix_file_diag: |_| None,
+        unix_recv_describe: |_| None,
+        unix_listener_snapshot: || {},
+        unix_park_audit: || {},
+        tcp_table_nonempty: || false,
+        tcp_census_rows: || Vec::new(),
+        ethernet_poll: || {},
+        tcp_timer_softirq: |_| {},
+        uevent_broadcast: |_| {},
+        socket_file_stat: |_, _| None,
+        netlink_push_kernel_message: |_, _| {},
+        init_tcp: || {},
+        init_tcp_timer: || {},
+        init_route: || {},
+        set_local_ip: |_| {},
+        ipv6_init: || {},
     };
 }
 
@@ -152,3 +226,39 @@ pub fn is_raw_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_raw_op
 pub fn unix_socket_of(file: &File) -> Option<(bool, String)> { (hooks().unix_socket_of)(file) }
 #[inline]
 pub fn mq_notify_sock(file: &File) -> Option<i32> { (hooks().mq_notify_sock)(file) }
+// The rung-2 flip rows.
+#[inline]
+pub fn unix_fd_bound_peer(fd: usize) -> Option<(String, String)> { (hooks().unix_fd_bound_peer)(fd) }
+#[inline]
+pub fn unix_file_diag(file: &File) -> Option<UnixDiag> { (hooks().unix_file_diag)(file) }
+#[inline]
+pub fn unix_recv_describe(fd: usize) -> Option<String> { (hooks().unix_recv_describe)(fd) }
+#[inline]
+pub fn unix_listener_snapshot() { (hooks().unix_listener_snapshot)() }
+#[inline]
+pub fn unix_park_audit() { (hooks().unix_park_audit)() }
+#[inline]
+pub fn tcp_table_nonempty() -> bool { (hooks().tcp_table_nonempty)() }
+#[inline]
+pub fn tcp_census_rows() -> Vec<TcpCensusRow> { (hooks().tcp_census_rows)() }
+#[inline]
+pub fn ethernet_poll() { (hooks().ethernet_poll)() }
+#[inline]
+pub fn tcp_timer_softirq(vec: usize) { (hooks().tcp_timer_softirq)(vec) }
+#[inline]
+pub fn uevent_broadcast(msg: &[u8]) { (hooks().uevent_broadcast)(msg) }
+#[inline]
+pub fn socket_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> { (hooks().socket_file_stat)(file, stat) }
+#[inline]
+pub fn netlink_push_kernel_message(file: &File, msg: [u8; 32]) { (hooks().netlink_push_kernel_message)(file, msg) }
+
+#[inline]
+pub fn init_tcp() { (hooks().init_tcp)() }
+#[inline]
+pub fn init_tcp_timer() { (hooks().init_tcp_timer)() }
+#[inline]
+pub fn init_route() { (hooks().init_route)() }
+#[inline]
+pub fn set_local_ip(ip: u32) { (hooks().set_local_ip)(ip) }
+#[inline]
+pub fn ipv6_init() { (hooks().ipv6_init)() }

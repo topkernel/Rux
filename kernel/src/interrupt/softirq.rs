@@ -683,10 +683,7 @@ pub fn init() {
     // Note: tasklet::init() runs after softirq::init() in interrupt::init(),
     // so it will overwrite the None entries for Hi and Tasklet — that's fine.
 
-    open_softirq(
-        SoftirqIndex::Timer as usize,
-        crate::net::tcp_timer::timer_softirq_handler,
-    );
+    open_softirq(SoftirqIndex::Timer as usize, crate::net::net_hooks::tcp_timer_softirq);
     open_softirq(
         SoftirqIndex::NetRx as usize,
         crate::drivers::net::virtio_net::net_rx_softirq_handler,

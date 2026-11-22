@@ -4037,6 +4037,31 @@ pub fn tcp_dump() -> alloc::vec::Vec<TcpSlotInfo> {
     out
 }
 
+/// memwatch's TCPCEN census (the crate-flip rung-2 hook row): up to 8
+/// live slots as (fd, state, rx len, advertised window, local port) —
+/// the bwslow zero-window hunt's row shape.
+pub fn tcp_census_dump() -> alloc::vec::Vec<crate::net::net_hooks::TcpCensusRow> {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    let table = tcp_socket_table_ref();
+    let mut out = alloc::vec::Vec::new();
+    for (fd, slot) in table.sockets.iter().take(table.count).enumerate() {
+        if let Some(s) = slot.as_ref() {
+            out.push(crate::net::net_hooks::TcpCensusRow {
+                fd: fd as u32,
+                state: s.state as u8,
+                rx_len: s.recv_buffer.len() as u64,
+                rcv_wnd: s.rcv_wnd as u64,
+                local_port: s.local_port,
+            });
+            if out.len() >= 8 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+
 /// Read-and-clear the slot's pending protocol error (SO_ERROR semantics).
 pub fn tcp_take_pending_error(fd: i32) -> i32 {
     let _g = TCP_TABLE_LOCK.lock_irqsave();

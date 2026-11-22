@@ -5999,7 +5999,7 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 // sd_is_socket() decides unix-fd NEGOTIATION on it
                 // (gdmr71 session-fifo hunt: without this every
                 // fd-carrying sd-bus send returned EOPNOTSUPP).
-                if crate::net::socket::socket_file_stat(&file, stat).is_some() {
+                if crate::net::net_hooks::socket_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }
                 if crate::fs::char_dev::char_dev_file_stat(&file, stat).is_some() {

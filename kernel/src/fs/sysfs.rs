@@ -1825,7 +1825,7 @@ pub fn uevent_send_full(
     extra_env: &[(&str, &str)],
 ) -> u64 {
     let (msg, seq) = uevent_payload_for(devpath, action, subsystem, extra_env);
-    crate::net::netlink::uevent_broadcast(&msg);
+    crate::net::net_hooks::uevent_broadcast(&msg);
     seq
 }
 

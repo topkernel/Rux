@@ -9090,30 +9090,11 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     let kind = match f.get_ops() {
                                         Some(ops) => {
                                             let p = ops as *const crate::fs::FileOps;
-                                            if core::ptr::eq(
-                                                p,
-                                                &crate::net::unix::UNIX_SOCKET_OPS,
-                                            ) {
-                                                match crate::net::unix::unix_file_of(
+                                            if crate::net::net_hooks::is_unix_socket_ops(ops) {
+                                                match crate::net::net_hooks::unix_fd_bound_peer(
                                                     fd as usize,
                                                 ) {
-                                                    Some((sock, _)) => {
-                                                        let bn = sock
-                                                            .bound_name
-                                                            .lock()
-                                                            .clone()
-                                                            .unwrap_or_else(|| {
-                                                                alloc::string::String::from(
-                                                                    "unbound",
-                                                                )
-                                                            });
-                                                        let peer =
-                                                            crate::net::unix::unix_peer_bound_name(
-                                                                &sock,
-                                                            )
-                                                            .unwrap_or_else(|| {
-                                                                alloc::string::String::from("-")
-                                                            });
+                                                    Some((bn, peer)) => {
                                                         alloc::format!(
                                                             "unix bound={} peer={}",
                                                             bn, peer
@@ -9121,18 +9102,13 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                                     }
                                                     None => "unix".into(),
                                                 }
-                                            } else if core::ptr::eq(
-                                                p,
-                                                &crate::net::socket::SOCKET_OPS,
+                                            } else if crate::net::net_hooks::is_inet_socket_ops(
+                                                ops,
                                             ) {
                                                 "inet-socket".into()
-                                            } else if core::ptr::eq(
-                                                p,
-                                                &crate::net::netlink::NETLINK_OPS,
-                                            ) {
+                                            } else if crate::net::net_hooks::is_netlink_ops(ops) {
                                                 "netlink".into()
-                                            } else if core::ptr::eq(p, &crate::net::raw::RAW_OPS)
-                                            {
+                                            } else if crate::net::net_hooks::is_raw_ops(ops) {
                                                 "raw-socket".into()
                                             } else if core::ptr::eq(
                                                 p,
@@ -9278,7 +9254,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             // park time (the appconn hex was unreadable —
                             // strncpy stopped at the abstract NUL).
                             if n == 0 {
-                                for line in crate::net::unix::registry_snapshot() {
+                                for line in crate::net::net_hooks::unix_registry_snapshot() {
                                     // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!("{}", line);
                                 }
@@ -9840,10 +9816,11 @@ pub fn kill_dump_tgid(tgid: u32) {
 /// sc97: type name for a File by fops identity (the kernel-image symbol
 /// at the ops address names any not listed here, offline via nm).
 fn kd_fd_type(file: &crate::fs::File) -> &'static str {
-    let ops = match file.get_ops() {
-        Some(o) => o as *const crate::fs::FileOps as *const (),
+    let ops_ref = match file.get_ops() {
+        Some(o) => o,
         None => return "no-ops",
     };
+    let ops = ops_ref as *const crate::fs::FileOps as *const ();
     let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
     if is(&crate::fs::pipe::PIPE_OPS) {
         return "pipe";
@@ -9851,10 +9828,10 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
     if is(&crate::fs::fifo::FIFO_OPS) {
         return "fifo";
     }
-    if is(&crate::net::unix::UNIX_SOCKET_OPS) {
+    if crate::net::net_hooks::is_unix_socket_ops(ops_ref) {
         return "unix-sock";
     }
-    if is(&crate::net::socket::SOCKET_OPS) {
+    if crate::net::net_hooks::is_inet_socket_ops(ops_ref) {
         return "inet-sock";
     }
     if is(&crate::ipc::binder::BINDER_OPS) {
@@ -10062,21 +10039,18 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                         }
                     }
                     "unix-sock" => {
-                        if let Some(us) = crate::net::unix::unix_of_file_diag(&f) {
-                            let (qb, qt, cap, ql) = us.diag_snapshot();
-                            let peer = us.dgram_peer.lock().clone();
-                            let bound = us.bound_name.lock().clone();
+                        if let Some(us) = crate::net::net_hooks::unix_file_diag(&f) {
                             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!(
-                                "KILLDUMP: tid {} unix kind={:?} bound={:?} dgram_peer={:?} queued={}B truesize={} sndbuf={} qlen={}",
+                                "KILLDUMP: tid {} unix kind={} bound={:?} dgram_peer={:?} queued={}B truesize={} sndbuf={} qlen={}",
                                 tk.pid(),
                                 us.kind,
-                                bound,
-                                peer,
-                                qb,
-                                qt,
-                                cap,
-                                ql
+                                us.bound,
+                                us.peer,
+                                us.queued_bytes,
+                                us.truesize,
+                                us.sndbuf,
+                                us.qlen
                             );
                         }
                     }

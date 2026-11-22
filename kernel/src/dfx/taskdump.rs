@@ -1649,7 +1649,7 @@ pub fn sleep_snapshot_early() {
     crate::ipc::binder::sleep_snapshot();
     // 53rd drain hunt: park-side AF_UNIX queue/wait census on the same
     // cadence (self-gated on rux:sleepsnap (retired dfx=sleepsnap) inside).
-    crate::net::unix::unix_park_audit();
+    crate::net::net_hooks::unix_park_audit();
     // 53rd timer-drive hunt: armed timerfd wheel entries + waiter census
     // (self-gated on rux:sleepsnap (retired dfx=sleepsnap) inside).
     crate::syscall::support::timerfd_wheel_audit();

@@ -191,7 +191,7 @@ pub fn timer_interrupt_handler() {
 
     // 2. Raise Timer softirq for TCP timer processing (gated on table
     //    occupancy — see the riscv64 twin / sc184)
-    if crate::net::tcp::get_tcp_socket_table().count() > 0 {
+    if crate::net::net_hooks::tcp_table_nonempty() {
         crate::interrupt::softirq::raise_softirq_irqoff(
             crate::interrupt::softirq::SoftirqIndex::Timer as usize,
         );
