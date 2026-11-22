@@ -15,17 +15,25 @@
 // Root re-exports: the framework modules appear at THIS crate's root so
 // the service files' crate::X paths resolve unchanged (the proven shape).
 pub use rux::{
-    arch, config, console, dfx, drivers, errno, fs, interrupt, mm,
+    arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, mm,
     process, safety, sched, security, signal, sync, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
+pub use rux::syscall; // the framework's syscall seam (support items)
 extern crate alloc;
 
 // The net tree, nested under crate::net (the historical paths).
 pub mod net {
     // the service files
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/arp.rs"] pub mod arp;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/buffer.rs"] pub mod buffer;
+    // buffer.rs (the raw-memory substrate: allocator calls, pointer
+    // arithmetic, slice construction — 22 unsafe constructs) stays
+    // FRAMEWORK-side (the edges.rs pattern); the crate consumes it
+    // via the re-export below.
+    pub use rux::net::buffer;
+    pub use rux::syscall; // the framework's syscall seam (support/edges)
+    pub use rux::net::file_arc::file_arc;
+    pub use rux::net::file_arc::take_file_arc;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/ethernet.rs"] pub mod ethernet;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/icmp.rs"] pub mod icmp;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/netlink.rs"] pub mod netlink;
