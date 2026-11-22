@@ -212,3 +212,37 @@ The Makefile's cargo invocations gain -p rux-bin (or --workspace).
 The boot entry already binds rust_main via linker symbols (x86's
 extern-decl sym), so the bin package's rust_main is found with NO
 asm changes.
+
+
+## RUNG 1 CLOSED (2026-11-22): the syscall service crate is sole-copy real
+
+### The census column split (the first service column)
+
+| column | files | unsafe blocks | block-lines | unsafe fns | fn-lines | dual |
+|---|---|---|---|---|---|---|
+| FRAMEWORK (kernel/src) | 478 | 2,217 | 9,255 | 280 | 2,544 | 11,799 |
+| SERVICE syscall (rux-syscall/src) | 11 | 0 | 0 | 0 | 0 | **0** |
+
+The service crate's 71 'unsafe' keyword hits are ALL in comments/
+doc-text (verified: zero real unsafe constructs — the crate-level
+#![forbid(unsafe_code)] is load-bearing and the negative probe fails
+as required at full-flip scope: an unsafe block in a service file
+fails the crate's own build).
+
+### The flip's final shape
+- kernel/src/syscall/: dispatch.rs (the seam: tables + ENOSYS tail +
+  x86 translation), edges.rs (audited zone), seccomp.rs (entry-seam
+  filter), support.rs (hooks + pure items) — 5 files, the seam.
+- kernel/rux-syscall/src/syscall/: the 10 service files, sole copy.
+- kernel/rux-bin/: the composition bin (rust_main -> register_all ->
+  rust_main_impl).
+
+### The regression that wasn't (recorded for the pattern)
+The sgid_mode 8-failure blocker resolved as TEST PRECONDITIONS: the
+test's 'root, no group, no CAP_FSETID' state was established by
+ANOTHER test's accidental cred side effects; the gating removed the
+accident. The kernel was correct both before and after — the test now
+owns its precondition (saves/clears/restores cred + caps).
+Lesson banked: when a pure-function test consults LIVE task state,
+the test must own that state — cross-test leakage is invisible until
+the leaking test moves.
