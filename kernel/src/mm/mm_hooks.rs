@@ -484,7 +484,7 @@ fn policy_hooks() -> &'static MmPolicyHooks {
 /// the composition bin's registration — OnceSlot first-wins, so a
 /// flipped file's crate rows prevail over these).
 pub fn register_in_tree_mm_policy() {
-    // Flipped families (kswapd, oom_kill, vmscan, lru) serve from the rux-mm crate, whose
+    // Flipped families (kswapd, oom_kill, vmscan, lru, compact) serve from the rux-mm crate, whose
     // registration ran earlier in the composition bin (OnceSlot
     // first-wins) — their rows here stay at the EMPTY defaults and
     // never execute.
@@ -510,8 +510,8 @@ pub fn register_in_tree_mm_policy() {
         lru_activate_young: no_policy_lru_activate_young,
         lru_tail: no_policy_lru_tail,
         lru_demote_active_file_oldest: no_policy_lru_demote_active_file_oldest,
-        migration_in_progress: crate::mm::compact::migration_in_progress,
-        compact_zone: crate::mm::compact::compact_zone,
+        migration_in_progress: no_policy_migration_in_progress,
+        compact_zone: no_policy_compact_zone,
         swap_init: crate::mm::swap::swap_init,
         swap_activate: crate::mm::swap::swap_activate,
         swap_deactivate: crate::mm::swap::swap_deactivate,

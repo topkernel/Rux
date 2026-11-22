@@ -624,8 +624,8 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     let zone_ptr: *mut Zone = zone;
                     // zone_ptr is a valid pointer to an initialized zone
                     // (compact_zone is now a safe fn over the same pointer).
-                    let cr = super::compact::compact_zone(zone_ptr, order);
-                    if matches!(cr, super::compact::CompactResult::Success) {
+                    let cr = super::mm_hooks::compact_zone(zone_ptr, order);
+                    if matches!(cr, super::mm_hooks::CompactResult::Success) {
                         // compact_zone does not destroy the zone; the
                         // pointer remains valid for the lifetime of the
                         // node (INV-SYSC-2 reachability arm).
