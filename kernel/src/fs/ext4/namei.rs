@@ -37,23 +37,23 @@ use super::Ext4FileSystem;
 // lives on that task's stack for the enclosing ext4_* op, and the
 // clear/get/take_pre_capture rows all run task-local; no cross-task
 // aliasing exists by construction.)
-pub(crate) unsafe fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
+pub(crate) fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
     if let Some(task) = crate::sched::current() {
-        (*task).journal_handle.set(handle);
+        task.journal_handle.set(handle);
     }
 }
 
 /// Clear the current journal handle
-pub(crate) unsafe fn clear_current_handle() {
+pub(crate) fn clear_current_handle() {
     if let Some(task) = crate::sched::current() {
-        (*task).journal_handle.set(core::ptr::null_mut());
+        task.journal_handle.set(core::ptr::null_mut());
     }
 }
 
 /// Get the current journal handle, if any
-pub(crate) unsafe fn get_current_handle() -> Option<*mut crate::fs::jbd2::Handle> {
+pub(crate) fn get_current_handle() -> Option<*mut crate::fs::jbd2::Handle> {
     let task = crate::sched::current()?;
-    let ptr = (*task).journal_handle.get();
+    let ptr = task.journal_handle.get();
     if ptr.is_null() { None } else { Some(ptr) }
 }
 
@@ -110,23 +110,24 @@ fn write_block_from_vec(device: &'static crate::drivers::blkdev::GenDisk, blockn
     }
     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-    // SAFETY: bh is pinned by bread/getblk_overwrite above; the manual
-    // refactors of this body keep the same aliasing window as before
-    // (bucket lock + pin).
-    unsafe {
-        // Get mutable reference to buffer head
-        let bh_ref = &mut *bh;
-
-        // Copy data to buffer
-        let buf_len = bh_ref.b_data.len().min(data.len());
-        bh_ref.b_data[0..buf_len].copy_from_slice(&data[0..buf_len]);
+    // bh is pinned by bread/getblk_overwrite above; the same aliasing
+    // window as before (bucket lock + pin) — the views ride the safe
+    // accessors.
+    {
+        let buf = bio::bh_data_mut(&bh);
+        let buf_len = buf.len().min(data.len());
+        buf[0..buf_len].copy_from_slice(&data[0..buf_len]);
 
         // Mark dirty and sync
-        bh_ref.set_state_bit(BufferState::BH_Dirty);
+        bio::bh_set_state_bit(&bh, BufferState::BH_Dirty);
 
         // If a journal handle is active, register this buffer
+        // (INV-EXT4-JHANDLE-1).
         if let Some(handle) = get_current_handle() {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(
+                crate::syscall::edges::boxed_mut(handle),
+                bh,
+            );
         }
     }
 
@@ -280,11 +281,9 @@ pub fn ext4_new_inode(
             eh_depth: 0,
             eh_generation: 0,
         };
-        // SAFETY: i_block is a [u32; 15] = 60 bytes; a 12-byte header at
-        // its start is in-bounds.
-        unsafe {
-            *crate::fs::ext4::extent::iblock_header_mut(&mut inode.i_block) = hdr;
-        }
+        // iblock_header_mut is the audited header view
+        // (INV-EXT4-IBLOCK-HDR).
+        *crate::fs::ext4::extent::iblock_header_mut(&mut inode.i_block) = hdr;
     }
     // Fresh inodes are born "now" (wall-clock epoch seconds —
     // drivers::rtc::wall_secs), as in Linux's ext4_new_inode.
@@ -412,36 +411,41 @@ fn update_group_descriptor_inodes(fs: &Ext4FileSystem, group: u32, delta: i32) -
 // ops. The on-disk superblock update below rides the bread pin
 // (INV-BIO-BH).)
 fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), i32> {
-    // Update in-memory sb_info
-    let sb_info_ptr = fs.sb_info.as_ref().map(|x| x.as_ref() as *const super::superblock::Ext4SuperBlockInfo);
-    if let Some(sb_info_ptr) = sb_info_ptr {
-        // SAFETY: sb_info is valid once filesystem is initialized
-        unsafe {
-            let sb_info = &mut *(sb_info_ptr as *mut super::superblock::Ext4SuperBlockInfo);
-            if delta < 0 {
-                sb_info.s_free_inodes_count =
-                    sb_info.s_free_inodes_count.saturating_sub((-delta) as u32);
-            } else {
-                sb_info.s_free_inodes_count =
-                    sb_info.s_free_inodes_count.saturating_add(delta as u32);
-            }
+    // Update in-memory sb_info (valid once the filesystem is
+    // initialized; the EXT4_BIG_LOCK caller context serializes — the
+    // interior mutation rides the boxed edge over the & reference).
+    if let Some(sb_info) = fs.sb_info.as_ref().map(|b| {
+        crate::syscall::edges::boxed_mut(b.as_ref() as *const super::superblock::Ext4SuperBlockInfo
+            as *mut super::superblock::Ext4SuperBlockInfo)
+    }) {
+        if delta < 0 {
+            sb_info.s_free_inodes_count =
+                sb_info.s_free_inodes_count.saturating_sub((-delta) as u32);
+        } else {
+            sb_info.s_free_inodes_count =
+                sb_info.s_free_inodes_count.saturating_add(delta as u32);
         }
     }
 
     // Write to on-disk superblock
     // s_free_inodes_count is at offset 16 within the superblock
-    // SAFETY: fs.device is a valid GenDisk pointer for the mounted ext4 filesystem; bio::bread returns valid BufferHeads and block numbers are bounds-checked.
-    unsafe {
+    // (fs.device is the mounted ext4's disk; the counter update is the
+    // read-modify-write span at sb_start+16, in bounds of the block).
+    {
         let sb_block = if fs.block_size == 1024 { 1u64 } else { 0u64 };
         let bh = bio::bread(fs.device, sb_block)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
         let data = bio::bh_data_mut(&bh);
         let sb_start = if fs.block_size == 1024 { 0usize } else { 1024usize };
-        let ptr = data.as_mut_ptr().add(sb_start + 16) as *mut u32;
-
-        let current = ptr.read_volatile();
-        ptr.write_volatile((current as i32 + delta) as u32);
+        // The counter RMW (LE u32 at sb_start+16; volatile pair — the
+        // durability-deferred discipline below relies on the committed
+        // store, not a register-cached one).
+        let cur = u32::from_le_bytes(
+            data[sb_start + 16..sb_start + 20].try_into().unwrap_or([0; 4]),
+        );
+        let next = (cur as i32).saturating_add(delta) as u32;
+        data[sb_start + 16..sb_start + 20].copy_from_slice(&next.to_le_bytes());
 
         // F4-R2 (leg-31, f4-ext4-route-map.md route 2): the free-inode
         // COUNTER is durability-deferred, not inline-synced. A counter is
@@ -464,7 +468,10 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
         // the inode bitmap / inode table it describes (see the allocator's
         // write_block_bitmap note).
         if let Some(handle) = get_current_handle() {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(
+                crate::syscall::edges::boxed_mut(handle),
+                bh,
+            );
         }
         bio::brelse(bh);
     }
@@ -700,11 +707,9 @@ fn ext4_add_entry_locked(
                     dir_block_seal(fs, dir_ino, &mut new_block);
                     // Write block back — ORDERED: everything this entry publishes
                     // (the new inode's table block, bitmaps, data blocks) is
-                    // persisted BEFORE the entry block itself.
-                    // SAFETY: same contract as write_block_from_vec.
-                    unsafe {
-                        write_entry_block_ordered(fs, block_nr, &new_block)?;
-                    }
+                    // persisted BEFORE the entry block itself (same
+                    // contract as write_block_from_vec).
+                    write_entry_block_ordered(fs, block_nr, &new_block)?;
 
                     return Ok(());
                 }
@@ -728,11 +733,9 @@ fn ext4_add_entry_locked(
     dir_block_seal(fs, dir_ino, &mut new_block);
 
     // Write new block — ORDERED (see the in-place path above): the freshly
-    // allocated block's bitmap bit persists before the entry that names it.
-    // SAFETY: same contract as write_block_from_vec.
-    unsafe {
-        write_entry_block_ordered(fs, new_block_nr, &new_block)?;
-    }
+    // allocated block's bitmap bit persists before the entry that names it
+    // (same contract as write_block_from_vec).
+    write_entry_block_ordered(fs, new_block_nr, &new_block)?;
 
     // Update directory inode to reference new block
     add_block_to_inode(fs, dir_ino, &dir, new_block_nr)?;
@@ -1114,17 +1117,18 @@ fn add_entry_to_block(
 /// Without an active journal handle nothing is deferred (every metadata
 /// write already syncs itself in logical order), so no publication is
 /// created — the capture window, if one was armed, is simply discarded.
-unsafe fn defer_entry_publication(fs: &Ext4FileSystem, entry_blocknr: u64) -> u64 {
-    // SAFETY: get_current_handle is task-local and null-safe.
-    let handle_ptr = match unsafe { get_current_handle() } {
+fn defer_entry_publication(fs: &Ext4FileSystem, entry_blocknr: u64) -> u64 {
+    // get_current_handle is task-local and null-safe.
+    let handle_ptr = match get_current_handle() {
         Some(p) => p,
         None => return 0,
     };
-    // SAFETY: the handle lives on this task's stack for the enclosing
-    // ext4_* operation; take_pre_capture mutates capture state owned by
-    // this task (us) and returns exactly the blocks this operation
-    // dirtied since the window was armed.
-    let pre: alloc::vec::Vec<u64> = unsafe { (*handle_ptr).take_pre_capture() };
+    // The handle lives on this task's stack for the enclosing ext4_*
+    // operation; take_pre_capture mutates capture state owned by this
+    // task (us; INV-EXT4-JHANDLE-1) and returns exactly the blocks this
+    // operation dirtied since the window was armed.
+    let pre: alloc::vec::Vec<u64> =
+        crate::syscall::edges::boxed_mut(handle_ptr).take_pre_capture();
     bio::publication_defer(fs.device, &pre, entry_blocknr)
 }
 
@@ -1133,15 +1137,15 @@ unsafe fn defer_entry_publication(fs: &Ext4FileSystem, entry_blocknr: u64) -> u6
 /// buffer cache, and record the publication. Persistence happens in
 /// order at the next drain point.
 ///
-/// SAFETY: same contract as write_block_from_vec (valid device, blocknr).
-unsafe fn write_entry_block_ordered(
+/// Same contract as write_block_from_vec (valid device, blocknr).
+fn write_entry_block_ordered(
     fs: &Ext4FileSystem,
     blocknr: u64,
     data: &[u8],
 ) -> Result<(), i32> {
-    // SAFETY: fs is the enclosing filesystem; blocknr is the block about
-    // to be written.
-    unsafe { defer_entry_publication(fs, blocknr) };
+    // fs is the enclosing filesystem; blocknr is the block about to be
+    // written.
+    defer_entry_publication(fs, blocknr);
     // SAFETY: fs.device is a valid GenDisk pointer; write_block_from_vec
     // handles the buffer lifecycle. Under a journal handle its sync is
     // deferred (the entry block stays dirty until a drain point); without
@@ -1425,7 +1429,7 @@ fn ext4_mkdir_inner(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 12)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window: record this operation's own metadata dirtied
     // before the entry publication (see defer_entry_publication).
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
@@ -1433,7 +1437,7 @@ fn ext4_mkdir_inner(
     let result = ext4_mkdir_no_journal(fs, dir_ino, name, mode);
 
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     crate::dfx::fsw::note_mkdir_us(
         (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
@@ -1491,12 +1495,12 @@ pub fn ext4_create(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window (see defer_entry_publication).
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_create_inner(fs, dir_ino, name, mode);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -1563,11 +1567,11 @@ pub fn ext4_mknod(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_mknod_inner(fs, dir_ino, name, mode, dev);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -1637,12 +1641,12 @@ pub fn ext4_symlink(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window (see defer_entry_publication).
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_symlink_inner(fs, dir_ino, name, target);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -1666,12 +1670,12 @@ fn ext4_symlink_inner(
     let (new_ino, mut new_inode) = ext4_new_inode(fs, dir_ino, S_IFLNK | 0o777, name)?;
 
     if target.len() <= 60 {
-        // Fast symlink: target stored inline in i_block array (60 bytes = 15 * 4)
-        // SAFETY: src and dst point to valid inode block data within the BufferHead; sizes are derived from the ext4 inode layout.
-        unsafe {
-            let block_ptr = new_inode.i_block.as_mut_ptr() as *mut u8;
-            core::ptr::copy_nonoverlapping(target.as_ptr(), block_ptr, target.len());
-        }
+        // Fast symlink: target stored inline in the i_block array (60
+        // bytes = 15 * 4; INV-CBYTES-1 — the all-u32 array's byte image,
+        // target.len() <= 60 bounds-checked by the branch).
+        crate::safety::bytes::bytes_of_mut(&mut new_inode.i_block)
+            [..target.len()]
+            .copy_from_slice(target);
         new_inode.i_size = target.len() as u32;
     } else {
         // Slow symlink: target stored in data block
@@ -1732,12 +1736,12 @@ pub fn ext4_link(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 6)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window (see defer_entry_publication).
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_link_inner(fs, dir_ino, target_ino, name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -1833,7 +1837,7 @@ pub(crate) fn ext4_reap_unlinked(
     // set_current_handle stores it in a thread-local for jbd2 metadata
     // journaling during this operation; clear_current_handle below resets
     // it before the stack slot dies.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     let result = (|| -> Result<(), i32> {
         // R20-FS1 order (same as the old eager path): persist the dead
         // inode FIRST (dtime set), then free blocks, then the inode number.
@@ -1855,7 +1859,7 @@ pub(crate) fn ext4_reap_unlinked(
     })();
     // SAFETY: clear_current_handle resets the thread-local journal handle
     // to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -2133,10 +2137,10 @@ pub fn ext4_unlink(
     let t0 = crate::drivers::timer::monotonic_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     let result = ext4_unlink_inner(fs, dir_ino, name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     crate::dfx::fsw::note_unlink_us(
         (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
@@ -2221,15 +2225,13 @@ impl PostCaptureGuard {
     fn new(fs: &Ext4FileSystem, dir_block: Option<u64>) -> Self {
         if let Some(blk) = dir_block {
             // SAFETY: get_current_handle is task-local and null-safe.
-            if unsafe { get_current_handle() }.is_some() {
+            if get_current_handle().is_some() {
                 let id = bio::publication_defer_entry_only(fs.device, blk);
-                // SAFETY: the handle is alive for this syscall and mutable
-                // from its owning task (us).
-                unsafe {
-                    if let Some(h) = get_current_handle() {
-                        let (mj, mi) = bio::dev_key_of(fs.device);
-                        (*h).begin_post_capture((mj, mi), id);
-                    }
+                // The handle is alive for this syscall and mutable from
+                // its owning task (us; INV-EXT4-JHANDLE-1).
+                if let Some(h) = get_current_handle() {
+                    let (mj, mi) = bio::dev_key_of(fs.device);
+                    crate::syscall::edges::boxed_mut(h).begin_post_capture((mj, mi), id);
                 }
                 return PostCaptureGuard { armed: true };
             }
@@ -2240,11 +2242,9 @@ impl PostCaptureGuard {
     fn disarm(&mut self) {
         if self.armed {
             self.armed = false;
-            // SAFETY: handle still alive (same syscall).
-            unsafe {
-                if let Some(h) = get_current_handle() {
-                    (*h).end_post_capture();
-                }
+            // Handle still alive (same syscall; INV-EXT4-JHANDLE-1).
+            if let Some(h) = get_current_handle() {
+                crate::syscall::edges::boxed_mut(h).end_post_capture();
             }
         }
     }
@@ -2286,10 +2286,10 @@ pub fn ext4_rmdir(
     let t0 = crate::drivers::timer::monotonic_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 10)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     let result = ext4_rmdir_inner(fs, dir_ino, name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     crate::dfx::fsw::note_rmdir_us(
         (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
@@ -2569,12 +2569,18 @@ pub(crate) fn free_indirect_block(
         read_block_to_vec(fs.device, blocknr as u64, fs.block_size as usize)?
     };
 
-    // SAFETY: data is block_size bytes; ptrs_per_block = block_size/4 fits exactly.
-    let pointers: &[u32] = unsafe {
-        core::slice::from_raw_parts(data.as_ptr() as *const u32, ptrs_per_block)
+    // data is block_size bytes; ptrs_per_block = block_size/4 fits
+    // exactly (INV-CBYTES-1 slice arm; the u32 view is the LE bytes of
+    // each 4-byte word, iterated without materializing).
+    let pointer_bytes = &data[..ptrs_per_block * 4];
+    let read_ptr = |i: usize| -> u32 {
+        u32::from_le_bytes(
+            pointer_bytes[i * 4..i * 4 + 4].try_into().unwrap_or([0; 4]),
+        )
     };
 
-    for &ptr in pointers {
+    for i in 0..ptrs_per_block {
+        let ptr = read_ptr(i);
         if ptr == 0 { continue; }
         if depth > 1 {
             free_indirect_block(fs, allocator, ino, mode, ptr, depth - 1)?;
@@ -2606,11 +2612,13 @@ fn revoke_freed_block(fs: &Ext4FileSystem, block: u64) {
     // SAFETY: reading the current task's journal handle slot is task-local;
     // the handle lives on this task's stack for the duration of the
     // enclosing ext4_* operation (set/clear bracket it).
-    if let Some(handle_ptr) = unsafe { get_current_handle() } {
-        // SAFETY: same stack-lifetime contract as above.
-        unsafe {
-            let _ = crate::fs::jbd2::jbd2_journal_revoke(&mut *handle_ptr, block, None);
-        }
+    if let Some(handle_ptr) = get_current_handle() {
+        // Same stack-lifetime contract as above (INV-EXT4-JHANDLE-1).
+        let _ = crate::fs::jbd2::jbd2_journal_revoke(
+            crate::syscall::edges::boxed_mut(handle_ptr),
+            block,
+            None,
+        );
     }
 }
 
@@ -2688,9 +2696,7 @@ pub(crate) fn free_inode_blocks(
         // the old walker only handled the 4-entry inline root and silently
         // LEAKED every deep-tree file) and the index/leaf metadata blocks
         // are freed afterwards.
-        let header = unsafe {
-            &*(inode.i_block.as_ptr() as *const super::extent::Ext4ExtentHeader)
-        };
+        let header = super::extent::iblock_header(&inode.i_block);
         if header.eh_magic == super::extent::EXT4_EXT_MAGIC {
             let exts = super::extent::ext4_ext_gather(fs, &inode.i_block)?;
             for e in &exts {
@@ -2768,7 +2774,7 @@ pub fn ext4_rename(
     // ordered publication queue (see ext4/journal.rs).
     let mut handle = super::journal::ext4_journal_start(fs, 16)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window for the new-name publication (see
     // defer_entry_publication). A replace of an existing target
     // separately arms the POST window (PostCaptureGuard) after this
@@ -2776,7 +2782,7 @@ pub fn ext4_rename(
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
