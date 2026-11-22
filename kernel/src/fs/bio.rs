@@ -2427,7 +2427,7 @@ impl WriteBatch {
         // One device kick for the whole quietly-submitted batch (the PCI
         // submit path publishes chains quietly; every notify is an MMIO
         // trap). The MMIO device notifies inline per chain — a no-op kick.
-        crate::drivers::virtio::pci_blk_kick_all();
+        crate::drivers::blkdev::kick_all_pending_disks();
 
         let n = self.len;
         self.results_n = n;
@@ -2612,7 +2612,7 @@ impl WriteBatch {
 
         // ---- Phase 2: kick + wait ----
         // One kick for the whole window (chains were published quietly).
-        crate::drivers::virtio::pci_blk_kick_all();
+        crate::drivers::blkdev::kick_all_pending_disks();
 
         let mut first_error = 0i32;
         // Group heads and fallback spans, in slot order — the device

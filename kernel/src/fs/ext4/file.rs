@@ -501,7 +501,7 @@ fn ext4_dio_read_batched(
                 }
 
                 // ---- Phase 2: one kick, then wait in order ----
-                crate::drivers::virtio::pci_blk_kick_all();
+                crate::drivers::blkdev::kick_all_pending_disks();
                 for c in 0..chains {
                     let mut ok = false;
                     if chain_armed[c] {
@@ -1480,7 +1480,7 @@ fn drain_batch(
     let mut status = [0i32; MAX_BATCH_DRAIN];
     // One device kick for the whole quietly-submitted batch (see
     // pci_submit_read_async): publish N chains, notify once, then wait.
-    crate::drivers::virtio::pci_blk_kick_all();
+    crate::drivers::blkdev::kick_all_pending_disks();
     for i in 0..count {
         status[i] = bio::bread_wait(bh_ptrs[i], &completions[i]);
     }
@@ -1698,7 +1698,7 @@ impl GupWriteChains {
         if self.n == 0 {
             return 0;
         }
-        crate::drivers::virtio::pci_blk_kick_all();
+        crate::drivers::blkdev::kick_all_pending_disks();
         let mut first_err = 0i32;
         for i in 0..self.n {
             let rc = self.completions[i].wait();

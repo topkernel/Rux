@@ -302,7 +302,7 @@ impl IoCompletion {
                 // Final chance (GSD fix): kick the queue and drain
                 // completions once — recovers lost-kick stalls.
                 crate::drivers::virtio::vw_report("async-deadline");
-                crate::drivers::virtio::pci_blk_kick_all();
+                crate::drivers::blkdev::kick_all_pending_disks();
                 crate::drivers::virtio::pci_process_async_completions();
                 if self.done.load(Ordering::Acquire) {
                     crate::pr_err!("io_completion: recovered by final kick/drain");
