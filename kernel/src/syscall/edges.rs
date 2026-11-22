@@ -120,7 +120,6 @@ pub fn list_unlink(node: &mut ListHead) {
 // SAFETY: the registry's epoll pointers are only dereferenced under the
 // registry/shard lock and are removed in the owning EpollFile's close
 // op, which runs before the box is freed (INV-SYSC-1/2 serialization).
-unsafe impl Send for crate::syscall::misc::EpollWakeRegistry {}
 
 // SAFETY: same contract as EpollWakeRegistry: `ep` is only dereferenced
 // while the binding is linked (shard lock held or pinned per

@@ -1734,7 +1734,7 @@ pub fn unix_connect(
                     // the epoll_pwait wedge; 5060e524 fixed the purge —
                     // this verifies the listener interest now survives
                     // spawn-child exits).
-                    crate::syscall::misc::epoll_dump_for_file(fid);
+                    crate::syscall::support::epoll_dump_for_file(fid);
                 }
             }
             Ok(())

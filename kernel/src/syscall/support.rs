@@ -49,6 +49,10 @@ pub struct SyscallHooks {
     pub param_stall_dump: fn(),
     /// eventfd ops identity (futex/io_uring compares).
     pub is_eventfd_ops: fn(&'static crate::fs::FileOps) -> bool,
+    /// EFAULT census line (the sleep-EFAULT hunt's per-call trace).
+    pub syscall_eio_line: fn(u64, &[u64; 6]),
+    /// net/unix's epoll binding dump (the AF_UNIX wedge hunt).
+    pub epoll_dump_for_file: fn(u64),
 }
 
 impl SyscallHooks {
@@ -63,6 +67,8 @@ impl SyscallHooks {
         timerfd_expire_notify: |_| {},
         param_stall_dump: || {},
         is_eventfd_ops: |_| false,
+        syscall_eio_line: |_, _| {},
+        epoll_dump_for_file: |_| {},
     };
 }
 
@@ -99,6 +105,10 @@ pub fn timerfd_expire_notify(tfd: u64) { (hooks().timerfd_expire_notify)(tfd) }
 pub fn param_stall_dump() { (hooks().param_stall_dump)() }
 #[inline]
 pub fn is_eventfd_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_eventfd_ops)(ops) }
+#[inline]
+pub fn syscall_eio_line(nr: u64, args: &[u64; 6]) { (hooks().syscall_eio_line)(nr, args) }
+#[inline]
+pub fn epoll_dump_for_file(fid: u64) { (hooks().epoll_dump_for_file)(fid) }
 
 // ==================== the mmap ring (moved bodily) ====================
 

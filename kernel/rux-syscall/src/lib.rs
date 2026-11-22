@@ -32,11 +32,156 @@ extern crate alloc;
 
 // The audited-edge zone stays FRAMEWORK-side; re-exported under the
 // service tree's historical path (syscall/edges.rs's consumers).
-pub use rux::syscall_edges;
 
-// The service tree, verbatim from the framework-side location.
-#[path = "../../src/syscall/mod.rs"]
-pub mod syscall;
+// The service tree — NESTED under crate::syscall (the historical
+// paths): the 10 files physically moved here at State B final (the
+// lib no longer compiles them; the crate is the sole copy). The
+// files' `use super::*;` pulls the glob re-exports below (the old
+// shared mod.rs's shape).
+pub mod syscall {
+    // the service files (THIS crate's own — the sole copies)
+    #[path = "io.rs"] pub mod io;
+    #[path = "process.rs"] pub mod process;
+    #[path = "memory.rs"] pub mod memory;
+    #[path = "file.rs"] pub mod file;
+    #[path = "signal.rs"] pub mod signal;
+    #[path = "time.rs"] pub mod time;
+    #[path = "network.rs"] pub mod network;
+    #[path = "sched.rs"] pub mod sched;
+    #[path = "misc.rs"] pub mod misc;
+    #[cfg(feature = "x86_64")]
+    #[path = "x86_compat.rs"] pub mod x86_compat;
+
+    // The shared UAPI types the old mod.rs carried at the syscall
+    // root (TimeVal, FdSet, ... — the service files' `use super::*`
+    // found them there).
+
+    // The shared UAPI types the old mod.rs carried at the syscall
+    // root (TimeVal, FdSet — the service files' `use super::*`
+    // found them there).
+/// Time value structure (struct timeval)
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct TimeVal {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
+
+/// File descriptor set (fd_set)
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct FdSet {
+    pub fds_bits: [u64; 16],
+}
+
+impl FdSet {
+    pub const fn new() -> Self {
+        Self { fds_bits: [0; 16] }
+    }
+
+    pub fn set(&mut self, fd: i32) {
+        if fd >= 0 && (fd as usize) < 1024 {
+            let fd = fd as usize;
+            self.fds_bits[fd / 64] |= 1 << (fd % 64);
+        }
+    }
+
+    pub fn clear(&mut self, fd: i32) {
+        if fd >= 0 && (fd as usize) < 1024 {
+            let fd = fd as usize;
+            self.fds_bits[fd / 64] &= !(1 << (fd % 64));
+        }
+    }
+
+    pub fn is_set(&self, fd: i32) -> bool {
+        if fd >= 0 && (fd as usize) < 1024 {
+            let fd = fd as usize;
+            (self.fds_bits[fd / 64] & (1 << (fd % 64))) != 0
+        } else {
+            false
+        }
+    }
+
+    pub fn zero(&mut self) {
+        self.fds_bits = [0; 16];
+    }
+}
+
+/// File descriptor count limit for select-style syscalls.
+///
+/// FD_SETSIZE is fixed at 1024 to match the FdSet layout above (16 × u64 =
+/// 1024 bits) and the asm-generic ABI. Taking it from config would silently
+/// break the bit layout whenever the config value differs (review 批次1).
+pub const FD_SETSIZE: i32 = 1024;
+
+    // The framework's whole-module re-exports (the old mod.rs's
+    // pub-use globs — the service files' `use super::*;` depends on
+    // every one of them; sourced from the rux re-exports at this
+    // crate's root).
+    pub use crate::arch::*;
+    pub use crate::config;
+    pub use crate::console;
+    pub use crate::dfx::*;
+    pub use crate::drivers::*;
+    pub use crate::fs::*;
+    pub use crate::io_uring::*;
+    pub use crate::ipc::*;
+    pub use crate::list;
+    pub use crate::mm::*;
+    pub use crate::module;
+    pub use crate::net::*;
+    pub use crate::perf;
+    pub use crate::printk;
+    pub use crate::process::*;
+    pub use crate::safety::*;
+    pub use crate::sched::*;
+    pub use crate::security::*;
+    pub use crate::signal::*;
+    pub use crate::sync::*;
+    pub use crate::timer::*;
+    pub use crate::trace;
+
+    // the errno table (the shared mod.rs's re-export)
+    pub mod errno {
+        pub use crate::errno::constants::*;
+    }
+
+    // dispatch types the files reference (SyscallArgs)
+    pub use rux::syscall::dispatch::{SyscallArgs, syscall_handler};
+
+    // the seam modules under historical paths (edges via the lib's
+    // syscall module)
+    // the edges module's audited helpers (the service files call them
+    // unqualified via use super::* — the old shared mod.rs's
+    // `use super::edges;` + glob)
+    pub use rux::syscall::edges;
+    pub use rux::syscall::seccomp;
+    pub use rux::syscall::support;
+    pub use rux::syscall::dispatch;
+}
+
+// (No root-level aliases for the service modules — the names collide
+// with the framework re-exports; register_all reaches them through
+// crate::syscall::io etc.)
+
+// The framework's syscall seam (dispatch + edges + seccomp + support)
+// re-exported under the historical crate::syscall path via shim:
+// The framework's syscall seam under explicit rux:: paths (the
+// service tree owns the crate::syscall name here).
+pub mod syscall_dispatch_shim {
+    pub use rux::syscall::dispatch;
+}
+pub mod syscall_seam {
+    pub use rux::syscall::edges;
+    pub use rux::syscall::seccomp;
+    pub use rux::syscall::support;
+    pub use rux::syscall::dispatch;
+}
+
+/// Framework-side seam items under the historical paths (the service
+/// files' `super::` and `crate::syscall::` references).
+pub mod syscall_shim {
+}
 
 /// The composition registration (called by the BIN's rust_main before
 /// the framework impl): fills the framework's two dispatch OnceSlot
@@ -420,6 +565,8 @@ fn register_hooks() {
         timerfd_expire_notify: syscall::misc::timerfd_expire_notify,
         param_stall_dump: syscall::misc::param_stall_dump,
         is_eventfd_ops: |ops: &'static rux::fs::FileOps| core::ptr::eq(ops, &syscall::misc::EVENTFD_OPS),
+        syscall_eio_line: |nr, args| syscall::io::syscall_eio_line(nr as usize, *args),
+        epoll_dump_for_file: |fid| syscall::misc::epoll_dump_for_file(fid),
     };
     syscall_register_hooks(hooks);
 }

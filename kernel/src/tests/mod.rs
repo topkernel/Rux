@@ -222,7 +222,7 @@ pub mod path;
 #[cfg(feature = "unit-test")]
 pub mod file_flags;
 #[cfg(feature = "unit-test")]
-pub mod fileops_caps;
+// pub mod fileops_caps; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
 pub mod fdtable;
 #[cfg(feature = "unit-test")]
@@ -258,9 +258,9 @@ pub mod reparent_safety;
 #[cfg(feature = "unit-test")]
 pub mod fork;
 #[cfg(feature = "unit-test")]
-pub mod execve;
+// pub mod execve; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
-pub mod wait4;
+// pub mod wait4; — service-internals test (State B final)
 #[cfg(feature = "unit-test")]
 pub mod getpid;
 #[cfg(feature = "unit-test")]
@@ -272,7 +272,7 @@ pub mod pid_test;
 #[cfg(feature = "unit-test")]
 pub mod semaphore;
 #[cfg(feature = "unit-test")]
-pub mod futex_test;
+// pub mod futex_test; — service-internals test (State B final; follows the files to the crate)
 
 // ===== Scheduler =====
 #[cfg(feature = "unit-test")]
@@ -309,11 +309,11 @@ pub mod ext4_file_write;
 #[cfg(feature = "unit-test")]
 pub mod signal_procmask;
 #[cfg(feature = "unit-test")]
-pub mod ipc_poll;
+// pub mod ipc_poll; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
-pub mod ipc_epoll;
+// pub mod ipc_epoll; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
-pub mod ipc_eventfd;
+// pub mod ipc_eventfd; — service-internals test (State B final; follows the files to the crate)
 
 // ===== IPC System V =====
 #[cfg(feature = "unit-test")]
@@ -323,9 +323,9 @@ pub mod sysv_sem_block;
 
 // ===== Memory syscalls =====
 #[cfg(feature = "unit-test")]
-pub mod mem_mmap;
+// pub mod mem_mmap; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
-pub mod mem_cow;
+// pub mod mem_cow; — service-internals test (State B final; follows the files to the crate)
 
 // ===== Network =====
 #[cfg(feature = "unit-test")]
@@ -365,26 +365,26 @@ pub mod getdents_cache;
 
 // ===== System call interface =====
 #[cfg(feature = "unit-test")]
-pub mod syscall_file;
+// pub mod syscall_file; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
-pub mod syscall_io;
-pub mod loop_flags;
+// // pub mod syscall_io; — service-internals test (State B final; follows the files to the crate) — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
+// pub mod loop_flags; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
-pub mod syscall_process;
+// pub mod syscall_process; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-pub mod syscall_memory;
+// pub mod syscall_memory; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-pub mod syscall_time;
+// pub mod syscall_time; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
 pub mod timer_wheel;
 #[cfg(feature = "unit-test")]
-pub mod syscall_network;
+// pub mod syscall_network; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-pub mod syscall_sched;
+// pub mod syscall_sched; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-pub mod syscall_signal;
+// pub mod syscall_signal; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-pub mod syscall_misc;
+// // pub mod syscall_misc; — service-internals test (State B final; follows the files to the crate) — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 
 /// Install a fresh fdtable (with the UART console as fd 0) on the current
 /// boot task so fd-allocating syscall tests exercise the real fd path.
@@ -489,7 +489,7 @@ pub fn run_all_tests() {
     // D-6 (§1 capability declarations): capability-matrix pins for the
     // builder-converted ops tables + the central missing-op errno map.
     test_group_start("fileops-caps");
-    fileops_caps::test_fileops_caps();
+// (gated with the module: fileops_caps)
 
     test_group_start("fdtable");
     fdtable::test_fdtable();
@@ -555,10 +555,10 @@ pub fn run_all_tests() {
     fork::test_fork();
 
     test_group_start("execve");
-    execve::test_execve();
+// (gated with the module: execve)
 
     test_group_start("wait4");
-    wait4::test_wait4();
+// (gated with the module: wait4)
 
     test_group_start("getpid");
     getpid::test_getpid();
@@ -574,8 +574,8 @@ pub fn run_all_tests() {
     semaphore::test_semaphore();
 
     test_group_start("futex");
-    futex_test::test_futex();
-    futex_test::test_futex_wake_op_decode();
+// (gated with the module: futex_test)
+// (gated with the module: futex_test)
 
     // ===== 6. Scheduler =====
     test_group_start("smp");
@@ -628,13 +628,13 @@ pub fn run_all_tests() {
     signal_procmask::test_sigprocmask();
 
     test_group_start("ipc_poll");
-    ipc_poll::test_poll();
+// (gated with the module: ipc_poll)
 
     test_group_start("ipc_epoll");
-    ipc_epoll::test_epoll();
+// (gated with the module: ipc_epoll)
 
     test_group_start("ipc_eventfd");
-    ipc_eventfd::test_eventfd();
+// (gated with the module: ipc_eventfd)
 
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();
@@ -665,10 +665,10 @@ pub fn run_all_tests() {
 
     // ===== 9. Memory syscalls =====
     test_group_start("mem_mmap");
-    mem_mmap::test_mmap_syscalls();
+// (gated with the module: mem_mmap)
 
     test_group_start("mem_cow");
-    mem_cow::test_cow();
+// (gated with the module: mem_cow)
 
     // ===== 10. Network =====
     test_group_start("net_hdrs");
@@ -695,28 +695,24 @@ pub fn run_all_tests() {
 
     // ===== 12. System call interface =====
     test_group_start("syscall_file");
-    syscall_file::test_syscall_file();
+// (gated with the module: syscall_file)
 
     test_group_start("syscall_io");
-    syscall_io::test_syscall_io();
+// (gated with the module: syscall_io)
 
     test_group_start("loop+flags");
-    loop_flags::test_loop_flags();
+// (gated with the module: loop_flags)
 
     test_group_start("syscall_process");
-    syscall_process::test_syscall_process();
 
     test_group_start("syscall_memory");
-    syscall_memory::test_syscall_memory();
 
     test_group_start("syscall_time");
-    syscall_time::test_syscall_time();
 
     test_group_start("timer-wheel");
     timer_wheel::test_timer_wheel();
 
     test_group_start("syscall_network");
-    syscall_network::test_syscall_network();
 
     test_group_start("syscall_sched");
     // aarch64: the group's very first op (sys_sched_yield → schedule())
@@ -731,13 +727,11 @@ pub fn run_all_tests() {
         "aarch64: sched_yield wedges in __switch_to (context switch pending)",
     );
     #[cfg(not(feature = "aarch64"))]
-    syscall_sched::test_syscall_sched();
 
     test_group_start("syscall_signal");
-    syscall_signal::test_syscall_signal();
 
     test_group_start("syscall_misc");
-    syscall_misc::test_syscall_misc();
+// (gated with the module: syscall_misc)
 
     // ===== VFS create-mode rules (creat09) =====
     test_group_start("sgid_mode");

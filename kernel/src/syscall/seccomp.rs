@@ -5,10 +5,21 @@
 //! (prctl) reference the pub consts and the task's mode setters.
 
 use crate::errno::constants as errno;
-use super::process::{
-    BPF_LD, BPF_W, BPF_H, BPF_B, BPF_IMM, BPF_ABS, BPF_JMP, BPF_JEQ,
-    BPF_JGT, BPF_JGE, BPF_JSET, BPF_RET, BPF_K,
-};
+// The BPF instruction consts (moved with the interpreter — the loader
+// in the service crate uses its own #[path] copy's scope).
+pub const BPF_LD: u16 = 0x00;
+pub const BPF_W: u16 = 0x00;
+pub const BPF_H: u16 = 0x08;
+pub const BPF_B: u16 = 0x10;
+pub const BPF_IMM: u16 = 0x00;
+pub const BPF_ABS: u16 = 0x20;
+pub const BPF_JMP: u16 = 0x05;
+pub const BPF_JEQ: u16 = 0x10;
+pub const BPF_JGT: u16 = 0x20;
+pub const BPF_JGE: u16 = 0x30;
+pub const BPF_JSET: u16 = 0x40;
+pub const BPF_RET: u16 = 0x06;
+pub const BPF_K: u16 = 0x00;
 
 /// Seccomp modes (uapi/linux/seccomp.h).
 pub const SECCOMP_MODE_DISABLED: u32 = 0;

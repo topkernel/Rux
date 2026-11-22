@@ -811,7 +811,7 @@ pub fn console() -> &'static TtyDevice {
 
 /// Does this file point at a terminal device?
 ///
-/// The terminal ioctls in syscall::io::sys_ioctl historically ran the
+/// The terminal ioctls in the service crate's sys_ioctl historically ran the
 /// CONSOLE-GLOBAL tty state for ANY fd — a pipe answered TCGETS and
 /// TIOCGPGRP with success, so isatty() returned true on pipes. An
 /// interactive shell dup'd onto pipes (fbterm: dash's stdin/stdout) then

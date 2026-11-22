@@ -1236,7 +1236,7 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
     if is(&TIMERFD_OPS) {
         return Some((timerfd_poll_wait, timerfd_poll_unwait));
     }
-    if is(&super::EVENTFD_OPS) {
+    if is(&EVENTFD_OPS) {
         return Some((eventfd_poll_wait, eventfd_poll_unwait));
     }
     // pidfds (pidfd_open files and /proc/<pid> dir fds): exit readiness
