@@ -20,8 +20,8 @@ census id is accounted for here.
 ## Totals
 
 - unsafe regions: **2475**
-- with artifact (non-GAP): **2392** (96.6%)
-- GAP: **83**
+- with artifact (non-GAP): **2378** (96.1%)
+- GAP: **97**
 - by kind: block=2205, unsafe-extern=7, unsafe-fn=118, unsafe-impl=145
 - by category (regions carry 0..n tags): ptr-ops=638, asm=273, volatile=164, raw-construct=57, addr-arith=35, no-preempt=14, ffi=11, static-mut=5, layout-meta=5, transmute=4
 
@@ -34,7 +34,7 @@ census id is accounted for here.
 | dfx | 128 | 128 | 0 |
 | drivers | 115 | 111 | 4 |
 | sync | 106 | 106 | 0 |
-| sched | 105 | 104 | 1 |
+| sched | 105 | 90 | 15 |
 | tests | 105 | 105 | 0 |
 | mm | 100 | 100 | 0 |
 | process | 80 | 77 | 3 |
@@ -2719,27 +2719,27 @@ census id is accounted for here.
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 147 | task | block | - | INV:INV-SCE-2 | `613f1c542f50` |
-| 194 | <module> | unsafe-impl | - | GAP | `63f7c3ddb59c` |
+| 194 | <module> | unsafe-impl | - | INV:INV-RD-CLAIM | `63f7c3ddb59c` |
 
 ### kernel/src/sched/sched.rs (15)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 92 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `e6dd4f64b434` |
-| 870 | grq_current_fp | block | asm | INV:INV-SCE-3 | `6b03a27aa0d1` |
-| 875 | grq_current_fp | block | asm | INV:INV-SCE-3 | `1252ff9dd71b` |
-| 880 | grq_current_fp | block | asm | INV:INV-SCE-3 | `67198bf76c96` |
-| 2794 | clear_trap_scratch | block | asm | INV:INV-SCE-10 | `fe384533c354` |
-| 2827 | init | block | - | INV:INV-SCE-4 | `26fb9240ce7c` |
-| 2982 | alloc_task_slot | block | ptr-ops | INV:INV-TL-1 | `542b2668ed38` |
-| 2992 | alloc_task_slot | block | ptr-ops | INV:INV-TL-1 | `53dde0caafe3` |
-| 2999 | alloc_task_slot | block | - | INV:INV-TL-1 | `4f083827414f` |
-| 3411 | free_task_slot | block | - | INV:INV-TL-2 | `e8b25c5aac18` |
-| 3424 | free_task_slot | block | volatile,ptr-ops | INV:INV-TL-2 | `498f9909193f` |
-| 10041 | scheduler_tick | block | volatile,ptr-ops | INV:INV-SCE-1 | `af7100dee78c` |
-| 12479 | idle_guard_sp | block | asm | INV:INV-SCE-1 | `e4eeb78ecd8d` |
-| 12486 | idle_guard_sp | block | asm | INV:INV-SCE-1 | `1e9878a2d0e0` |
-| 12493 | idle_guard_sp | block | asm | INV:INV-SCE-1 | `18f3852029a9` |
+| 184 | <module> | unsafe-impl | - | GAP | `1bac282fcbc9` |
+| 696 | grq_current_fp | block | asm | GAP | `0fef141fad5a` |
+| 701 | grq_current_fp | block | asm | GAP | `6c7454e45795` |
+| 706 | grq_current_fp | block | asm | GAP | `8a30e2eb06dc` |
+| 2016 | clear_trap_scratch | block | asm | GAP | `a3c6627e6cfa` |
+| 2049 | init | block | - | GAP | `7e61a278c4af` |
+| 2204 | alloc_task_slot | block | ptr-ops | GAP | `aacafc41823c` |
+| 2214 | alloc_task_slot | block | ptr-ops | GAP | `64f16b9c310f` |
+| 2221 | alloc_task_slot | block | - | GAP | `f23290b9c51b` |
+| 2633 | free_task_slot | block | - | GAP | `c65b3af11f25` |
+| 2646 | free_task_slot | block | volatile,ptr-ops | GAP | `2ec3153c6ded` |
+| 5563 | scheduler_tick | block | volatile,ptr-ops | GAP | `7badb8333b34` |
+| 7164 | idle_guard_sp | block | asm | GAP | `f88cd841a4e3` |
+| 7171 | idle_guard_sp | block | asm | GAP | `29e3c99fbe50` |
+| 7178 | idle_guard_sp | block | asm | GAP | `211890d01897` |
 
 ### kernel/src/sched/side_edges.rs (5)
 

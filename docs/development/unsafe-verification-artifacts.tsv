@@ -2190,21 +2190,21 @@ eab8b8269849	kernel/src/sched/edges.rs	per_cpu_shared	1059		INV:INV-SCE-10
 51ae407563d7	kernel/src/sched/edges.rs	secondary_idle_task	1099		INV:INV-SCE-4
 613f1c542f50	kernel/src/sched/reapdrain.rs	task	147		INV:INV-SCE-2
 63f7c3ddb59c	kernel/src/sched/reapdrain.rs	<module>	194		INV:INV-RD-CLAIM
-e6dd4f64b434	kernel/src/sched/sched.rs	<module>	92		INV:INV-SENDSYNC-1
-6b03a27aa0d1	kernel/src/sched/sched.rs	grq_current_fp	870	asm	INV:INV-SCE-3
-1252ff9dd71b	kernel/src/sched/sched.rs	grq_current_fp	875	asm	INV:INV-SCE-3
-67198bf76c96	kernel/src/sched/sched.rs	grq_current_fp	880	asm	INV:INV-SCE-3
-fe384533c354	kernel/src/sched/sched.rs	clear_trap_scratch	2794	asm	INV:INV-SCE-10
-26fb9240ce7c	kernel/src/sched/sched.rs	init	2827		INV:INV-SCE-4
-542b2668ed38	kernel/src/sched/sched.rs	alloc_task_slot	2982	ptr-ops	INV:INV-TL-1
-53dde0caafe3	kernel/src/sched/sched.rs	alloc_task_slot	2992	ptr-ops	INV:INV-TL-1
-4f083827414f	kernel/src/sched/sched.rs	alloc_task_slot	2999		INV:INV-TL-1
-e8b25c5aac18	kernel/src/sched/sched.rs	free_task_slot	3411		INV:INV-TL-2
-498f9909193f	kernel/src/sched/sched.rs	free_task_slot	3424	volatile,ptr-ops	INV:INV-TL-2
-af7100dee78c	kernel/src/sched/sched.rs	scheduler_tick	10041	volatile,ptr-ops	INV:INV-SCE-1
-e4eeb78ecd8d	kernel/src/sched/sched.rs	idle_guard_sp	12479	asm	INV:INV-SCE-1
-1e9878a2d0e0	kernel/src/sched/sched.rs	idle_guard_sp	12486	asm	INV:INV-SCE-1
-18f3852029a9	kernel/src/sched/sched.rs	idle_guard_sp	12493	asm	INV:INV-SCE-1
+1bac282fcbc9	kernel/src/sched/sched.rs	<module>	184		INV:INV-SENDSYNC-1
+0fef141fad5a	kernel/src/sched/sched.rs	grq_current_fp	696	asm	INV:INV-SCE-3
+6c7454e45795	kernel/src/sched/sched.rs	grq_current_fp	701	asm	INV:INV-SCE-3
+8a30e2eb06dc	kernel/src/sched/sched.rs	grq_current_fp	706	asm	INV:INV-SCE-3
+a3c6627e6cfa	kernel/src/sched/sched.rs	clear_trap_scratch	2016	asm	INV:INV-SCE-10
+7e61a278c4af	kernel/src/sched/sched.rs	init	2049		INV:INV-SCE-4
+aacafc41823c	kernel/src/sched/sched.rs	alloc_task_slot	2204	ptr-ops	INV:INV-TL-1
+64f16b9c310f	kernel/src/sched/sched.rs	alloc_task_slot	2214	ptr-ops	INV:INV-TL-1
+f23290b9c51b	kernel/src/sched/sched.rs	alloc_task_slot	2221		INV:INV-TL-1
+c65b3af11f25	kernel/src/sched/sched.rs	free_task_slot	2633		INV:INV-TL-2
+2ec3153c6ded	kernel/src/sched/sched.rs	free_task_slot	2646	volatile,ptr-ops	INV:INV-TL-2
+7badb8333b34	kernel/src/sched/sched.rs	scheduler_tick	5563	volatile,ptr-ops	INV:INV-SCE-1
+f88cd841a4e3	kernel/src/sched/sched.rs	idle_guard_sp	7164	asm	INV:INV-SCE-1
+29e3c99fbe50	kernel/src/sched/sched.rs	idle_guard_sp	7171	asm	INV:INV-SCE-1
+211890d01897	kernel/src/sched/sched.rs	idle_guard_sp	7178	asm	INV:INV-SCE-1
 554f094f895c	kernel/src/sched/side_edges.rs	<module>	19		INV:INV-SENDSYNC-1
 97eb38a1a9b4	kernel/src/sched/side_edges.rs	<module>	21		INV:INV-SENDSYNC-1
 d69da70f77a6	kernel/src/sched/side_edges.rs	evring_slot_mut	39		INV:INV-SCHED-EVRING-1
