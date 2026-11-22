@@ -27,7 +27,6 @@ pub mod vmstat;
 pub mod pglist;
 pub mod page_alloc;
 pub mod rmap;
-pub mod lru;
 pub mod vmemmap;
 pub mod swap;
 pub mod compact;

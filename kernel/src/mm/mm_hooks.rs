@@ -484,7 +484,7 @@ fn policy_hooks() -> &'static MmPolicyHooks {
 /// the composition bin's registration — OnceSlot first-wins, so a
 /// flipped file's crate rows prevail over these).
 pub fn register_in_tree_mm_policy() {
-    // Flipped families (kswapd, oom_kill, vmscan) serve from the rux-mm crate, whose
+    // Flipped families (kswapd, oom_kill, vmscan, lru) serve from the rux-mm crate, whose
     // registration ran earlier in the composition bin (OnceSlot
     // first-wins) — their rows here stay at the EMPTY defaults and
     // never execute.
@@ -502,6 +502,14 @@ pub fn register_in_tree_mm_policy() {
         vscan_census_line: no_policy_vscan_census_line,
         zone_dirty_writeback_state: no_policy_zone_dirty_writeback_state,
         zone_below_dirty_writeback_mark: no_policy_zone_below_dirty_writeback_mark,
+        page_add_anon_lru: no_policy_page_add_anon_lru,
+        page_remove_lru: no_policy_page_remove_lru,
+        page_add_file_lru: no_policy_page_add_file_lru,
+        page_add_file_lru_young: no_policy_page_add_file_lru_young,
+        page_add_file_lru_young_batch: no_policy_page_add_file_lru_young_batch,
+        lru_activate_young: no_policy_lru_activate_young,
+        lru_tail: no_policy_lru_tail,
+        lru_demote_active_file_oldest: no_policy_lru_demote_active_file_oldest,
         migration_in_progress: crate::mm::compact::migration_in_progress,
         compact_zone: crate::mm::compact::compact_zone,
         swap_init: crate::mm::swap::swap_init,
@@ -512,14 +520,6 @@ pub fn register_in_tree_mm_policy() {
         swap_free_slot: crate::mm::swap::swap_free_slot,
         swap_stats: crate::mm::swap::swap_stats,
         swap_write_census: crate::mm::swap::swap_write_census,
-        page_add_anon_lru: crate::mm::lru::page_add_anon_lru,
-        page_remove_lru: crate::mm::lru::page_remove_lru,
-        page_add_file_lru: crate::mm::lru::page_add_file_lru,
-        page_add_file_lru_young: crate::mm::lru::page_add_file_lru_young,
-        page_add_file_lru_young_batch: crate::mm::lru::page_add_file_lru_young_batch,
-        lru_activate_young: crate::mm::lru::lru_activate_young,
-        lru_tail: crate::mm::lru::lru_tail,
-        lru_demote_active_file_oldest: crate::mm::lru::lru_demote_active_file_oldest,
     });
 }
 

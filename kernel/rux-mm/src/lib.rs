@@ -91,14 +91,14 @@ pub fn register_all() {
         swap_free_slot: rux::mm::swap::swap_free_slot,
         swap_stats: rux::mm::swap::swap_stats,
         swap_write_census: rux::mm::swap::swap_write_census,
-        page_add_anon_lru: rux::mm::lru::page_add_anon_lru,
-        page_remove_lru: rux::mm::lru::page_remove_lru,
-        page_add_file_lru: rux::mm::lru::page_add_file_lru,
-        page_add_file_lru_young: rux::mm::lru::page_add_file_lru_young,
-        page_add_file_lru_young_batch: rux::mm::lru::page_add_file_lru_young_batch,
-        lru_activate_young: rux::mm::lru::lru_activate_young,
-        lru_tail: rux::mm::lru::lru_tail,
-        lru_demote_active_file_oldest: rux::mm::lru::lru_demote_active_file_oldest,
+        page_add_anon_lru: crate::mm::lru::page_add_anon_lru,
+        page_remove_lru: crate::mm::lru::page_remove_lru,
+        page_add_file_lru: crate::mm::lru::page_add_file_lru,
+        page_add_file_lru_young: crate::mm::lru::page_add_file_lru_young,
+        page_add_file_lru_young_batch: crate::mm::lru::page_add_file_lru_young_batch,
+        lru_activate_young: crate::mm::lru::lru_activate_young,
+        lru_tail: crate::mm::lru::lru_tail,
+        lru_demote_active_file_oldest: crate::mm::lru::lru_demote_active_file_oldest,
     });
 }
 

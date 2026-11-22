@@ -438,8 +438,8 @@ fn migrate_page_window(
     // Unlink src here, and link dst in its place — the migrated page
     // keeps its reclaim visibility (same shape as the vmscan swap-out
     // cleanup).
-    super::lru::page_remove_lru(src);
-    super::lru::page_add_anon_lru(dst);
+    super::mm_hooks::page_remove_lru(src);
+    super::mm_hooks::page_add_anon_lru(dst);
 
     // Clear src metadata
     // Note: try_to_unmap() only decrements _mapcount, not _refcount.
