@@ -127,7 +127,14 @@ rux-core          (≈3,000-3,500 dual lines; the entire TCB)
   ← verification stack: Kani 12/12, Miri 0-UB, Verus narrow-adopt
 
 rux-sched         forbid-safe  (CFS/RT/fairness/wakeup/deadline policy)
-rux-mm            forbid-safe  (VMA tree, mmap/COW/fault DECISIONS, brk)
+rux-mm            forbid-safe  (M1a DONE 2026-11-23, origin c0e46ed73: the
+                  per-arch mm policy — mmap/munmap placement, brk, stack
+                  alloc, permission changes, VMA fork decisions, fault
+                  routing, swap fault, fault-around — 6,876 lines with ZERO
+                  unsafe blocks; 6-row mm_hooks seam over ~40 framework
+                  call sites; p3b_fault_cow 1.994 within the same-day
+                  control band 1.974-2.024. M1b (the nine §4 policy
+                  files) follows)
 rux-syscall       forbid-safe  (DONE at M3; the pattern-proven first rung)
 rux-fs        forbid-safe  (DONE 2026-11-23, origin 50f0cc97a: pipe/fifo/
                   inotify/memfd/selinuxfs sole-copied under crate forbid;
