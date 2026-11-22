@@ -295,7 +295,7 @@ pub fn in_task() -> bool {
 
 /// Field offsets in PtRegs
 #[allow(dead_code)]
-mod offsets {
+pub mod offsets {
     use super::*;
 
     pub const R15: usize = core::mem::offset_of!(PtRegs, r15);
