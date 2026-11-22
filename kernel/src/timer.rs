@@ -711,10 +711,9 @@ pub fn timer_softirq_handler(_nr: usize) {
             // rate-capped inside) — the Gate-1 delivery adjudication
             // backdrop for the accountmgr->AMS StartUser oneway.
             crate::ipc::binder::ams46_audit();
-            // leg-29A: process-tree invariant validator (rux:treehunt (retired dfx=treehunt),
-            // self-gated + rate-capped inside) — E8-REPAR unlinked-
-            // snapshot root-cause hunt.
-            crate::dfx::treehunt::tick();
+            // (2026-11-23: the treehunt tick that ran here retired with
+            // dfx/treehunt.rs — the E8-REPAR class closed with the
+            // 7d4481320 reparent fixes.)
             // leg-33B: slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), self-gated +
             // rate-capped inside) — leaf attribution for nested-call
             // cascades (fs/futex stalls behind reader exhaustion).

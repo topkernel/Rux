@@ -120,11 +120,10 @@ pub mod leakorigin;
 /// hung server thread is stuck opening (leg-28 item 2: storage_daemon
 /// D-state open family); see dfx/pathstash.rs.
 pub mod pathstash;
-/// Process-tree invariant validator (rux:treehunt (retired dfx=treehunt), leg-29A): catches a
-/// live task whose parent pointer names released memory — the E8-REPAR
-/// "unlinked snapshot" class that produced the sc304 signal-Arc Oops —
-/// plus stale thread-group parent snapshots; see dfx/treehunt.rs.
-pub mod treehunt;
+// (2026-11-23, §7 retirement round: dfx/treehunt.rs DELETED — the
+// E8-REPAR unlinked-snapshot hunt closed with the 7d4481320/6f5e397ad
+// reparent fixes; its timer-tick stub, its rux:treehunt gate event and
+// the parent_children_head_ptr accessor went with it.)
 /// Slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), leg-33B): tasks stuck on the
 /// same syscall entry for >= 8 s get a line with args and the parked
 /// kernel-stack chain — attributes the leaf of nested-call cascades

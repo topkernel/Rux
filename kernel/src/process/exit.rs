@@ -2633,9 +2633,9 @@ fn reparent_children_to_init(dying: &Task) {
             // moved here that its already-run reparent would never move
             // again. The freed-then-reaped dest left every moved child
             // (and its thread-group members) naming freed memory — the
-            // TREE-PARENT-DEAD draws of rux:treehunt (retired dfx=treehunt) +
-            // test/subreap_churn.c, and the ancestor sc304's subreaper
-            // walk faulted into.
+            // class the retired treehunt probe drew as TREE-PARENT-DEAD
+            // (with test/subreap_churn.c), and the ancestor sc304's
+            // subreaper walk faulted into.
             let m_ref = crate::process::unsafe_edges::borrow_task(member);
             let st = m_ref.state();
             let member_exiting = m_ref.ti_flags()

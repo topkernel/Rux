@@ -3127,13 +3127,10 @@ impl Task {
         }
     }
 
-    /// Raw parent-children-list head pointer (rux:treehunt (retired dfx=treehunt) reads it to
-    /// distinguish linked leaders from unlinked snapshot members; null
-    /// for members by design). Diagnostic use only.
-    #[inline]
-    pub fn parent_children_head_ptr(&self) -> *mut core::ffi::c_void {
-        self.parent_children_head as *mut core::ffi::c_void
-    }
+    // (2026-11-23, §7 retirement round: the parent_children_head_ptr
+    // diagnostic accessor retired with dfx/treehunt.rs — it was the
+    // probe's only consumer. The parent_children_head field itself is
+    // live list machinery and stays.)
 
     /// Raw group_leader field (no healing) — for re-init during teardown.
     #[inline]
@@ -5250,8 +5247,9 @@ impl Task {
         // memory that gets reaped and recycled while the members live.
         // The member's own exit then walks release_task's
         // parent_ptr()/remove_child through freed memory (the sc304
-        // signal-Arc Oops family; reproduced by rux:treehunt (retired dfx=treehunt) +
-        // test/subreap_churn.c as TREE-SNAP-STALE). Refresh every
+        // signal-Arc Oops family; reproduced historically by the retired
+        // treehunt probe + test/subreap_churn.c as TREE-SNAP-STALE).
+        // Refresh every
         // member's snapshot to the new dest under this same lock hold —
         // the ring walk is the same bounded pattern the reparent member
         // scan uses, and members can't join/leave concurrently (both
