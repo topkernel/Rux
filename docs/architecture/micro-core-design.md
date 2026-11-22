@@ -129,10 +129,21 @@ rux-core          (≈3,000-3,500 dual lines; the entire TCB)
 rux-sched         forbid-safe  (CFS/RT/fairness/wakeup/deadline policy)
 rux-mm            forbid-safe  (VMA tree, mmap/COW/fault DECISIONS, brk)
 rux-syscall       forbid-safe  (DONE at M3; the pattern-proven first rung)
-rux-fs        forbid-safe  (VFS glue, page cache, leaf filesystems)
+rux-fs        forbid-safe  (DONE 2026-11-23, origin 50f0cc97a: pipe/fifo/
+                  inotify/memfd/selinuxfs sole-copied under crate forbid;
+                  FsHooks 26 rows + the service-test seam. Two boot
+                  regressions caught by the x86_64 battery and fixed
+                  in-merge: early selinuxfs mount_register caused the 'R'
+                  beacon reboot loop; the pipe_file_close clear/take
+                  inversion panicked on every pipe close)
 rux-ext4          forbid-safe  (deepest fs consumer)
-rux-net           forbid-safe
-rux-drivers       forbid-safe
+rux-net           forbid-safe  (DONE at R2)
+rux-drivers       forbid-safe  (DONE 2026-11-23, origin 8672a0ebf:
+                  watchdog/access_tokenid/loopback/fb_simple/fbdev
+                  sole-copied, 1,156 lines with zero unsafe of their own;
+                  virtio/intc/timer/pci/drm stay on the floor with
+                  per-family reasons; 12 DriverHooks rows + the leveled
+                  initcall table)
 rux-ipc           forbid-safe
 rux-dfx-svc       forbid-safe  (subject to §7 retirement review)
 ```
