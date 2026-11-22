@@ -23,6 +23,7 @@ pub mod posix_mq;
 pub mod binder;
 pub mod access_token;
 pub mod keys;
+pub mod edges;
 
 // Re-export IPC constants for use by dispatch and other modules
 pub use util::*;

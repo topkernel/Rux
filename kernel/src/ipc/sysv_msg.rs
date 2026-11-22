@@ -6,7 +6,7 @@
 //!
 //! Implements msgget, msgctl, msgsnd, msgrcv following the Linux kernel design.
 
-use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
+use crate::arch::uaccess::access_ok;
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
@@ -749,13 +749,11 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                         entry.inner.wq_send.remove(current as *mut _);
                     }
                 }
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(
-                            crate::process::task::TaskState::RUNNING,
-                        ),
-                    );
-                }
+                // sched::current() returns a live &mut Task — the
+                // historical raw-deref unsafe wrapper was vestigial.
+                current.set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
                 crate::sched::dequeue_task(&*current);
                 return 0;
             }
@@ -869,23 +867,18 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                     if msg_copy {
                         // MSG_COPY: non-destructive read — copy without removing
                         let msg = &messages[mi];
-                        // Copy mtype (8 bytes)
-                        // SAFETY: msgp was access_ok-validated for msgsz+8 bytes above;
-                        // put_user is the exception-table copy path.
-                        unsafe {
-                            let _ = put_user(msgp as *mut i64, msg.mtype);
-                        }
+                        // Copy mtype (8 bytes). The typed safe twin of the
+                        // historical put_user wrap (exception-table path).
+                        let _ =
+                            crate::arch::uaccess_safe::write_user(msgp as usize, msg.mtype);
                         // MSG_NOERROR truncates to msgsz like the normal read.
                         let msg_len = msg.data.len().min(msgsz);
-                        // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
-                        // msg_len <= msgsz, so the copy is within bounds.
-                        unsafe {
-                            copy_to_user(
-                                msgp.add(8),
-                                msg.data.as_ptr(),
-                                msg_len,
-                            );
-                        }
+                        // msgp+8 with msg_len <= msgsz bytes (the range was
+                        // access_ok-validated above).
+                        crate::arch::uaccess_safe::copy_out(
+                            msgp as usize + 8,
+                            &msg.data[..msg_len],
+                        );
                         // Do NOT update stats, do NOT wake senders
                         return msg_len as i64;
                     }
@@ -982,13 +975,11 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                         entry.inner.wq_recv.remove(current as *mut _);
                     }
                 }
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(
-                            crate::process::task::TaskState::RUNNING,
-                        ),
-                    );
-                }
+                // sched::current() returns a live &mut Task — the
+                // historical raw-deref unsafe wrapper was vestigial.
+                current.set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
                 crate::sched::dequeue_task(&*current);
                 continue;
             }
