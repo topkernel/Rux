@@ -3853,7 +3853,8 @@ fn check_sticky(parent_inode: &Inode, target_inode: Option<&Inode>) -> Result<()
 // the open/read/write/close paths (file.rs / file_open / file_opendir).
 // ============================================================================
 
-use crate::fs::inotify::inotify_events as ino;
+use crate::fs::notify_hooks as ino_hook;
+use crate::fs::notify_hooks::ino_events as ino;
 
 /// Parent inode of a dentry (for directory-watch name events).
 fn dentry_parent_inode(d: &Dentry) -> Option<Arc<Inode>> {
@@ -3870,7 +3871,7 @@ fn notify_about(
     cookie: u32,
 ) {
     let parent = dentry.and_then(|d| dentry_parent_inode(d));
-    crate::fs::inotify::notify(parent.as_deref(), inode, mask, name, cookie);
+    crate::fs::notify_hooks::notify(parent.as_deref(), inode, mask, name, cookie);
 }
 
 /// Link count of an inode (for IN_DELETE_SELF suppression on hard-linked
@@ -4087,7 +4088,7 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     }
 
     // inotify: IN_CREATE|IN_ISDIR on the parent (named).
-    crate::fs::inotify::notify(
+    crate::fs::notify_hooks::notify(
         Some(parent_inode),
         Some(&new_inode),
         ino::IN_CREATE | ino::IN_ISDIR,
@@ -4163,7 +4164,7 @@ pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
     }
 
     // inotify: IN_CREATE (named) on the parent.
-    crate::fs::inotify::notify(
+    crate::fs::notify_hooks::notify(
         Some(parent_inode),
         None,
         ino::IN_CREATE,
@@ -4223,7 +4224,7 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
         }
 
         // inotify: IN_CREATE on the parent (named).
-        crate::fs::inotify::notify(
+        crate::fs::notify_hooks::notify(
             Some(parent_inode),
             None,
             ino::IN_CREATE,
@@ -4373,7 +4374,7 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
         // IN_DELETE_SELF on the directory itself (auto-removes its
         // watches, delivering IN_IGNORED).
         let target_inode = target_vpath.as_ref().and_then(|vp| vp.inode.clone());
-        crate::fs::inotify::notify(
+        crate::fs::notify_hooks::notify(
             Some(parent_inode),
             None,
             ino::IN_DELETE | ino::IN_ISDIR,
@@ -4384,7 +4385,7 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
             // IN_ISDIR is NOT set on IN_DELETE_SELF (Linux
             // fsnotify_nameremove / inotify(7): the flag belongs
             // to the parent's named IN_DELETE above).
-            crate::fs::inotify::notify(
+            crate::fs::notify_hooks::notify(
                 None,
                 Some(ti),
                 ino::IN_DELETE_SELF,
@@ -4512,7 +4513,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
         // file's own watch (LTP inotify04: an unlinked watched
         // file must see IN_ATTRIB before IN_DELETE_SELF) — then
         // IN_DELETE_SELF when the last link went away.
-        crate::fs::inotify::notify(
+        crate::fs::notify_hooks::notify(
             Some(parent_inode),
             None,
             ino::IN_DELETE,
@@ -4520,11 +4521,11 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
             0,
         );
         if let Some(ref ti) = target_inode {
-            crate::fs::inotify::notify(None, Some(ti), ino::IN_ATTRIB, None, 0);
+            crate::fs::notify_hooks::notify(None, Some(ti), ino::IN_ATTRIB, None, 0);
         }
         if last_link {
             if let Some(ref ti) = target_inode {
-                crate::fs::inotify::notify(
+                crate::fs::notify_hooks::notify(
                     None,
                     Some(ti),
                     ino::IN_DELETE_SELF,
@@ -4599,14 +4600,14 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
         // inotify: a hard link appearing is IN_CREATE in the
         // destination directory (named); the linked inode itself
         // sees IN_ATTRIB (its link count changed).
-        crate::fs::inotify::notify(
+        crate::fs::notify_hooks::notify(
             Some(parent_inode),
             None,
             ino::IN_CREATE,
             Some(name.as_bytes()),
             0,
         );
-        crate::fs::inotify::notify(None, Some(src_inode), ino::IN_ATTRIB, None, 0);
+        crate::fs::notify_hooks::notify(None, Some(src_inode), ino::IN_ATTRIB, None, 0);
         Ok(())
     } else {
         Err(result)
@@ -4788,17 +4789,17 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
             .map(|i| i.mode.is_directory())
             .unwrap_or(false);
         let dir_bit = if isdir { ino::IN_ISDIR } else { 0 };
-        let cookie = crate::fs::inotify::alloc_cookie();
+        let cookie = crate::fs::notify_hooks::alloc_cookie();
         // MOVED_FROM/MOVED_TO go to parent-directory watches (named); a
         // direct watch on the file sees only IN_MOVE_SELF below.
-        crate::fs::inotify::notify(
+        crate::fs::notify_hooks::notify(
             Some(old_parent),
             None,
             ino::IN_MOVED_FROM | dir_bit,
             Some(old_name.as_bytes()),
             cookie,
         );
-        crate::fs::inotify::notify(
+        crate::fs::notify_hooks::notify(
             Some(new_parent),
             None,
             ino::IN_MOVED_TO | dir_bit,
@@ -4808,7 +4809,7 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
         if let Some(ref si) = src_inode {
             // IN_ISDIR is NOT set on IN_MOVE_SELF (Linux fsnotify_move
             // tags only the parent's named MOVED_FROM/MOVED_TO records).
-            crate::fs::inotify::notify(
+            crate::fs::notify_hooks::notify(
                 None,
                 Some(si),
                 ino::IN_MOVE_SELF,
@@ -5229,7 +5230,7 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
         // inotify: ftruncate → IN_MODIFY (through the File so parent
         // watches get the named event; Linux reports it for every
         // successful ftruncate, even a size no-op).
-        crate::fs::inotify::notify_file(&file, ino::IN_MODIFY);
+        crate::fs::notify_hooks::notify_file(&file, ino::IN_MODIFY);
         Ok(())
     } else {
         Err(result)
@@ -5680,7 +5681,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 }
                 // inotify: file creation via open(O_CREAT) → IN_CREATE on
                 // the parent directory (named).
-                crate::fs::inotify::notify(
+                crate::fs::notify_hooks::notify(
                     Some(&parent_inode),
                     None,
                     ino::IN_CREATE,
@@ -5791,7 +5792,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             }
             match get_file_fd_install(Arc::clone(&file)) {
                 Some(fd) => {
-                    crate::fs::inotify::notify_file(&file, ino::IN_OPEN);
+                    crate::fs::notify_hooks::notify_file(&file, ino::IN_OPEN);
                     return Ok(fd);
                 }
                 None => return Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
@@ -5841,9 +5842,9 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 // inotify: successful open → IN_OPEN (parent watches get
                 // the named event through the File's dentry). Linux emits
                 // IN_OPEN before the O_TRUNC IN_MODIFY of the same open.
-                crate::fs::inotify::notify_file(&file, ino::IN_OPEN);
+                crate::fs::notify_hooks::notify_file(&file, ino::IN_OPEN);
                 if trunc_modified {
-                    crate::fs::inotify::notify_file(&file, ino::IN_MODIFY);
+                    crate::fs::notify_hooks::notify_file(&file, ino::IN_MODIFY);
                 }
                 Ok(fd)
             }
@@ -6893,7 +6894,7 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
             Some(fd) => {
                 // inotify: directory open → IN_OPEN|IN_ISDIR (notify_file
                 // adds the IN_ISDIR modifier for directories).
-                crate::fs::inotify::notify_file(&file, ino::IN_OPEN);
+                crate::fs::notify_hooks::notify_file(&file, ino::IN_OPEN);
                 Ok(fd)
             }
             None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),

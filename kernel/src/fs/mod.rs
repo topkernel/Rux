@@ -22,6 +22,7 @@ pub mod permission;
 pub mod superblock;
 pub mod mount;
 pub mod mount_table;
+pub mod notify_hooks;
 pub mod rootfs;
 pub mod tmpfs;
 pub mod ext4;

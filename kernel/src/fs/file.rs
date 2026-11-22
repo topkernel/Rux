@@ -676,7 +676,7 @@ impl File {
                 if result > 0 {
                     // inotify IN_ACCESS (P0-4): one atomic load when no
                     // watches exist.
-                    crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_ACCESS);
+                    crate::fs::notify_hooks::notify_file(self, crate::fs::notify_hooks::ino_events::IN_ACCESS);
                 }
                 return result;
             }
@@ -703,7 +703,7 @@ impl File {
                 let result = write_fn(self, slice);
                 if result > 0 {
                     // inotify IN_MODIFY (P0-4): sqlite/editors/build tools.
-                    crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_MODIFY);
+                    crate::fs::notify_hooks::notify_file(self, crate::fs::notify_hooks::ino_events::IN_MODIFY);
                 }
                 return result;
             }
@@ -764,9 +764,9 @@ impl File {
                 let slice = core::slice::from_raw_parts_mut(buf, count);
                 let n = read_at_fn(self, offset, slice);
                 if n > 0 {
-                    crate::fs::inotify::notify_file(
+                    crate::fs::notify_hooks::notify_file(
                         self,
-                        crate::fs::inotify::inotify_events::IN_ACCESS,
+                        crate::fs::notify_hooks::ino_events::IN_ACCESS,
                     );
                 }
                 return n;
@@ -797,9 +797,9 @@ impl File {
                 let n = inode.read_data(offset as usize, slice);
                 if n > 0 {
                     // inotify IN_ACCESS on the pread(2) path (P0-4).
-                    crate::fs::inotify::notify_file(
+                    crate::fs::notify_hooks::notify_file(
                         self,
-                        crate::fs::inotify::inotify_events::IN_ACCESS,
+                        crate::fs::notify_hooks::ino_events::IN_ACCESS,
                     );
                 }
                 n as isize
@@ -875,9 +875,9 @@ impl File {
                 if n > 0 {
                     // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
                     // sqlite's journal/WAL writes all go through pwrite.
-                    crate::fs::inotify::notify_file(
+                    crate::fs::notify_hooks::notify_file(
                         self,
-                        crate::fs::inotify::inotify_events::IN_MODIFY,
+                        crate::fs::notify_hooks::ino_events::IN_MODIFY,
                     );
                 }
                 return n;
@@ -901,9 +901,9 @@ impl File {
                 if n > 0 {
                     // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
                     // sqlite's journal/WAL writes all go through pwrite.
-                    crate::fs::inotify::notify_file(
+                    crate::fs::notify_hooks::notify_file(
                         self,
-                        crate::fs::inotify::inotify_events::IN_MODIFY,
+                        crate::fs::notify_hooks::ino_events::IN_MODIFY,
                     );
                 }
                 n as isize
@@ -1031,7 +1031,7 @@ impl Drop for File {
         // P0-4 inotify: IN_CLOSE_WRITE / IN_CLOSE_NOWRITE fires when the
         // last reference to the description goes away (Linux fires it
         // from fput, i.e. dup'd fds defer it — same discipline).
-        crate::fs::inotify::notify_file_close(self);
+        crate::fs::notify_hooks::notify_file_close(self);
         if self.close_pending.load(Ordering::Acquire) {
             // SAFETY: we own the File exclusively (refcount reached 0) and
             // close_fd already committed this close; ops.close was installed
