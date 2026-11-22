@@ -1737,7 +1737,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         SchedPolicy::Idle => {
             // SCHED_IDLE uses CFS with low weight
             let se = task.sched_entity_mut();
-            se.load = crate::sched::fair::LoadWeight::new(crate::sched::fair::WEIGHT_IDLEPRIO);
+            se.load = crate::sched::entities::LoadWeight::new(crate::sched::fair::WEIGHT_IDLEPRIO);
             grq.cfs_rq.enqueue(task_ptr)
         }
     };

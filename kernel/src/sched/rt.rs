@@ -21,14 +21,14 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
 use crate::process::task::{Task, SchedPolicy};
 use crate::list::ListHead;
 use super::class::{SchedClass, RunQueueRef, ENQUEUE_HEAD};
+use super::entities::{SchedEntity, SchedRtEntity, SchedDlEntity, LoadWeight, NICE_0_LOAD};
+use super::entities::RR_TIMESLICE_TICKS;
 
 /// Maximum RT priority (0-99, HIGHER value = higher priority, matching
 /// Linux). The runqueue bitmap index is inverted (bit 0 = priority 99) so
 /// the lowest set bit is the highest-priority runnable task.
 pub const MAX_RT_PRIO: usize = 100;
 
-/// Default RR time slice in ticks. 100ms / (1000ms / KERNEL_HZ) = 10 ticks at HZ=100.
-pub const RR_TIMESLICE_TICKS: u32 = (100 * crate::config::KERNEL_HZ) / 1000;
 
 /// RT runqueue
 pub struct RtRunQueue {
@@ -655,75 +655,8 @@ impl RtRunQueue {
 
 
 
-/// RT scheduling entity
-///
-/// Stored in the Task struct
-#[derive(Debug)]
-pub struct SchedRtEntity {
-    /// Time slice (for SCHED_RR)
-    pub time_slice: AtomicU32,
 
-    /// Whether on runqueue
-    pub on_rq: AtomicBool,
-}
 
-impl SchedRtEntity {
-    /// Create a new RT entity
-    pub fn new() -> Self {
-        Self {
-            time_slice: AtomicU32::new(RR_TIMESLICE_TICKS),
-            on_rq: AtomicBool::new(false),
-        }
-    }
-
-    /// Check if on runqueue
-    #[inline]
-    pub fn is_on_rq(&self) -> bool {
-        self.on_rq.load(Ordering::Acquire)
-    }
-
-    /// Set runqueue status
-    #[inline]
-    pub fn set_on_rq(&self, on_rq: bool) {
-        self.on_rq.store(on_rq, Ordering::Release);
-    }
-
-    /// Get time slice
-    #[inline]
-    pub fn get_time_slice(&self) -> u32 {
-        self.time_slice.load(Ordering::Acquire)
-    }
-
-    /// Set time slice
-    #[inline]
-    pub fn set_time_slice(&self, slice: u32) {
-        self.time_slice.store(slice, Ordering::Release);
-    }
-
-    /// Decrement time slice and return remaining
-    #[inline]
-    pub fn dec_time_slice(&self) -> u32 {
-        let slice = self.time_slice.load(Ordering::Acquire);
-        if slice > 0 {
-            self.time_slice.store(slice - 1, Ordering::Release);
-            slice - 1
-        } else {
-            0
-        }
-    }
-
-    /// Reset time slice to default
-    #[inline]
-    pub fn reset_time_slice(&self) {
-        self.time_slice.store(RR_TIMESLICE_TICKS, Ordering::Release);
-    }
-}
-
-impl Default for SchedRtEntity {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ============================================================================
 // RT Scheduling Class

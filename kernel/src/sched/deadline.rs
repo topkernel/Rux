@@ -17,15 +17,11 @@ use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, AtomicI64, Ordering};
 use crate::process::task::Task;
 use super::class::{SchedClass, RunQueueRef};
+use super::entities::{SchedEntity, SchedRtEntity, SchedDlEntity, LoadWeight, NICE_0_LOAD};
+use super::entities::{DL_BW_UNIT, DL_DEFAULT_PERIOD_NS, DL_DEFAULT_RUNTIME_NS};
 
-/// Default deadline period in nanoseconds (1 second)
-pub const DL_DEFAULT_PERIOD_NS: u64 = 1_000_000_000;
 
-/// Default runtime in nanoseconds (100ms)
-pub const DL_DEFAULT_RUNTIME_NS: u64 = 100_000_000;
 
-/// Deadline bandwidth unit (1 << 20 for precision)
-pub const DL_BW_UNIT: u64 = 1 << 20;
 
 /// Maximum deadline bandwidth (100% = DL_BW_UNIT)
 pub const DL_BW_MAX: u64 = DL_BW_UNIT;
@@ -346,130 +342,8 @@ impl DlRunQueue {
 
 // Send/Sync impls live in side_edges.rs (this file carries zero unsafe).
 
-/// Deadline scheduling entity
-#[derive(Debug)]
-pub struct SchedDlEntity {
-    /// Absolute deadline
-    pub deadline: AtomicU64,
 
-    /// Remaining runtime
-    pub runtime: AtomicI64,
 
-    /// Scheduling period
-    pub dl_period: AtomicU64,
-
-    /// Maximum runtime per period
-    pub dl_runtime: AtomicU64,
-
-    /// Whether throttled (out of runtime)
-    pub dl_throttled: AtomicBool,
-
-    /// Kernel timer ID armed to replenish this entity at its deadline
-    /// (0 = no timer pending). See sched.rs::arm_dl_replenish_timer —
-    /// a throttled task sits off the runqueue and is re-enqueued (with a
-    /// refilled budget) only by this timer's wake.
-    pub replenish_timer: AtomicU64,
-
-    /// Whether on runqueue
-    pub on_rq: AtomicBool,
-
-    /// Whether boosted (inheriting priority)
-    pub dl_boosted: AtomicBool,
-
-    /// Timestamp (ns) when this entity last started executing.
-    /// Used by update_curr() to calculate actual runtime consumed.
-    pub exec_start: AtomicU64,
-
-    /// The RELATIVE deadline value from the user's sched_attr
-    /// (sched_setattr), kept verbatim for sched_getattr readback. The
-    /// scheduler's own absolute `deadline` above is internal state that
-    /// moves with every replenishment and must not leak to user space.
-    pub attr_deadline: AtomicU64,
-}
-
-impl SchedDlEntity {
-    /// Create a new deadline entity
-    pub fn new() -> Self {
-        Self {
-            deadline: AtomicU64::new(0),
-            runtime: AtomicI64::new(DL_DEFAULT_RUNTIME_NS as i64),
-            dl_period: AtomicU64::new(DL_DEFAULT_PERIOD_NS),
-            dl_runtime: AtomicU64::new(DL_DEFAULT_RUNTIME_NS),
-            dl_throttled: AtomicBool::new(false),
-            replenish_timer: AtomicU64::new(0),
-            on_rq: AtomicBool::new(false),
-            dl_boosted: AtomicBool::new(false),
-            exec_start: AtomicU64::new(0),
-            attr_deadline: AtomicU64::new(0),
-        }
-    }
-
-    /// Check if on runqueue
-    #[inline]
-    pub fn is_on_rq(&self) -> bool {
-        self.on_rq.load(Ordering::Acquire)
-    }
-
-    /// Get bandwidth (runtime/period * DL_BW_UNIT)
-    pub fn get_bw(&self) -> u64 {
-        let runtime = self.dl_runtime.load(Ordering::Acquire);
-        let period = self.dl_period.load(Ordering::Acquire);
-
-        if period == 0 {
-            return 0;
-        }
-
-        (runtime * DL_BW_UNIT) / period
-    }
-
-    /// Update deadline (called on enqueue)
-    pub fn update_deadline(&self, now: u64) {
-        let period = self.dl_period.load(Ordering::Acquire);
-        let new_deadline = now + period;
-        self.deadline.store(new_deadline, Ordering::Release);
-    }
-
-    /// Replenish runtime and advance deadline (CBS replenishment)
-    ///
-    /// Called ONLY when a full period has been served out — i.e. from
-    /// `enqueue_task_locked` when the task's throttle window has expired
-    /// (the replenish timer's wake, or a first-ever enqueue). CBS is defeated
-    /// if this runs on every re-enqueue: the old code replenished on each
-    /// __schedule requeue of prev, so a single DL task could burn 100% of
-    /// every CPU (review batch 8, HIGH).
-    pub fn replenish_runtime(&self) {
-        let runtime = self.dl_runtime.load(Ordering::Acquire) as i64;
-        self.runtime.store(runtime, Ordering::Release);
-        // Advance deadline: now + period (CBS requirement)
-        let now = crate::sched::fair::sched_clock();
-        let period = self.dl_period.load(Ordering::Acquire);
-        self.deadline.store(now + period, Ordering::Release);
-        self.dl_throttled.store(false, Ordering::Release);
-    }
-
-    /// Consume runtime
-    ///
-    /// Returns true if still has runtime, false if throttled
-    pub fn consume_runtime(&self, delta: u64) -> bool {
-        let remaining = self.runtime.load(Ordering::Acquire);
-        let new_remaining = remaining - delta as i64;
-
-        if new_remaining <= 0 {
-            self.runtime.store(0, Ordering::Release);
-            self.dl_throttled.store(true, Ordering::Release);
-            return false;
-        }
-
-        self.runtime.store(new_remaining, Ordering::Release);
-        true
-    }
-}
-
-impl Default for SchedDlEntity {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ============================================================================
 // Deadline Scheduling Class

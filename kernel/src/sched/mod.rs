@@ -19,6 +19,7 @@
 //! 5. idle_sched_class - Per-CPU idle task
 
 pub mod edges;
+pub mod entities;
 pub mod reapdrain;
 pub mod sched;
 pub mod sched_policy;
@@ -96,11 +97,21 @@ pub use crate::signal::send_signal;
 pub use crate::process::task::get_current_fdtable;
 
 // Export CFS-related types (now in fair module)
-pub use fair::{
+pub use entities::{
     SchedEntity,
-    CfsRunQueue,
     LoadWeight,
     NICE_0_LOAD,
+    SchedRtEntity,
+    SchedDlEntity,
+    RR_TIMESLICE_TICKS,
+    DL_DEFAULT_PERIOD_NS,
+    DL_DEFAULT_RUNTIME_NS,
+    DL_BW_UNIT,
+    PRIO_TO_WEIGHT,
+    PRIO_TO_WMULT,
+};
+pub use fair::{
+    CfsRunQueue,
     SCHED_MIN_GRANULARITY_NS,
     SCHED_LATENCY_NS,
     sched_clock,
@@ -122,19 +133,14 @@ pub use class::{
 // Export RT scheduler types
 pub use rt::{
     RtRunQueue,
-    SchedRtEntity,
     RT_SCHED_CLASS,
     MAX_RT_PRIO,
-    RR_TIMESLICE_TICKS,
 };
 
 // Export deadline scheduler types
 pub use deadline::{
     DlRunQueue,
-    SchedDlEntity,
     DL_SCHED_CLASS,
-    DL_DEFAULT_PERIOD_NS,
-    DL_DEFAULT_RUNTIME_NS,
 };
 
 // Export fair scheduler
