@@ -152,18 +152,21 @@ them.
 
 ### Rung S1 — sched policy / core split
 
-**S1 is the worked exemplar of MECHANISM/POLICY SEPARATION** (the classic
-OS principle, here enforced by the compiler): the MECHANISM (context
-switch, GRQ lock discipline, tp derivation, task-slot lifecycle — the
-state-manipulating machinery that owns the invariants) stays in the core
-under audit; the POLICY (which task next, where to place a wake, when to
-throttle — the DECISIONS that consume the mechanism's safe API) moves
-out under forbid. The compiler draws the line the principle only
-described: policy code literally cannot express the mechanism's unsafe,
-so the age-old "separate mechanism from policy" becomes a build error
-when violated, not a review comment. The seam artifacts (the hook table,
-the 33-item private-surface API) are the mechanism's PUBLISHED CONTRACT
-— the policy's entire view of the core. M1 repeats the shape for mm.
+**S1 is the first compiler-enforced implementation of MECHANISM/POLICY
+SEPARATION** (the classic OS design principle): the MECHANISM — the
+low-level state-changing operations (context switch, the global run
+queue's locking protocol, the current-task pointer's register read,
+task-slot allocation and reclamation) — directly maintains the kernel's
+data-structure invariants and stays in the core crate under audit; the
+POLICY — the decisions built on the mechanism (which task runs next,
+which CPU a wake-up is placed on, when to throttle) — accesses data only
+through the mechanism's type-safe interface and moves to a separate
+service crate under forbid. Traditionally this separation was maintained
+by code review alone; here the compiler statically guarantees it: any
+unsafe use in policy code is a compile error. The callback-function
+table and the private-interface API constitute the mechanism's complete
+calling contract published to the policy. M1 applies the same
+separation to mm.
 
 - MOVES to `rux-sched` (forbid): CFS/RT/deadline decision logic,
   fairness math, wakeup placement policy, load-balancing decisions,
