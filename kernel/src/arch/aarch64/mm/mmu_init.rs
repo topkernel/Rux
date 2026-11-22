@@ -419,7 +419,7 @@ fn release_user_leaf_mm(entry: PageTableEntry) {
     if phys == 0
         || !phys_valid(phys as usize)
         || crate::mm::page_alloc::is_foreign_user_frame(phys as usize)
-        || crate::drivers::gpu::get_framebuffer_info()
+        || crate::console::get_framebuffer_info()
             .map_or(false, |i| {
                 phys >= i.addr && phys < i.addr + i.size as u64
             })

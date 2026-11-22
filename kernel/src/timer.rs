@@ -164,6 +164,32 @@ pub fn coarse_ns_since_boot() -> u64 {
     timer::coarse_ns_since_boot()
 }
 
+// ============================================================================
+// Input-tick diagnostic hook (rung4 prep move 3): the timer tick's
+// input-health beat is driver functionality — the framework site holds
+// ONE optional fn pointer the input driver registers at init, so no
+// framework file names the input driver.
+// ============================================================================
+
+static INPUT_DEBUG_TICK_FN: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// The input driver registers its periodic diagnostic here (idempotent).
+pub fn register_input_debug_tick(f: fn()) {
+    INPUT_DEBUG_TICK_FN.store(f as usize, core::sync::atomic::Ordering::Release);
+}
+
+/// The timer tick's input-health beat (no-op until a driver registers).
+#[inline]
+pub fn input_debug_tick() {
+    let f = INPUT_DEBUG_TICK_FN.load(core::sync::atomic::Ordering::Acquire);
+    if f != 0 {
+        // SAFETY: the registered fn pointer was valid at registration
+        // (a static fn item) and the registry only ever holds it or 0.
+        unsafe { core::mem::transmute::<usize, fn()>(f)() };
+    }
+}
+
 
 /// Maximum number of concurrent timers (pool size, unchanged).
 pub const MAX_TIMERS: usize = wheel::MAX_TIMERS;
