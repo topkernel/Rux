@@ -233,7 +233,7 @@ pub fn get_netdevice_by_index(ifindex: u32) -> Option<&'static mut NetDevice> {
     // Simplified implementation: currently only supports finding loopback device
     // Full implementation needs to maintain device list
     if ifindex == 0 {
-        crate::drivers::net::get_loopback_device()
+        crate::drivers::hooks::get_loopback_device()
     } else {
         None
     }
@@ -250,7 +250,7 @@ pub fn get_netdevice_by_name(name: &str) -> Option<&'static mut NetDevice> {
     // Simplified implementation: currently only supports finding loopback device
     // Full implementation needs to maintain device list
     if name == "lo" {
-        crate::drivers::net::get_loopback_device()
+        crate::drivers::hooks::get_loopback_device()
     } else {
         None
     }

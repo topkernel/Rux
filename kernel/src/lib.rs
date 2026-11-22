@@ -832,6 +832,10 @@ pub fn rust_main_tail() -> ! {
         // the named-call era.
         {
             drivers::virtio::probe::register_probe_initcalls();
+            // The driver-leaf hook rows (watchdog/access_tokenid/loopback/
+            // fbdev today): framework-local fills until the rux-drivers
+            // crate takes them over (flip commit).
+            drivers::hooks::register_framework_defaults();
             // First scan MMIO devices (virtio-blk-device)
             let mmio_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Early);
             if mmio_count > 0 {
@@ -1109,7 +1113,7 @@ pub fn rust_main_tail() -> ! {
             // /dev/fb0 — framebuffer char device (registered when the GPU
             // initialized successfully above)
             if drivers::gpu::get_framebuffer_info().is_some() {
-                match drivers::gpu::fbdev::init_fbdev() {
+                match drivers::hooks::init_fbdev() {
                     Ok(()) => print_status("driver", "/dev/fb0 registered", true),
                     Err(()) => print_status("driver", "/dev/fb0 registration failed", false),
                 }

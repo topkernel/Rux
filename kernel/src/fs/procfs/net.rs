@@ -61,7 +61,7 @@ fn hex_addr_v6(a: &[u8; 16]) -> String {
 fn dev_rows() -> Vec<(&'static str, crate::drivers::net::space::DeviceStats)> {
     let mut rows = Vec::new();
     // lo is always present (loopback_init runs at boot).
-    rows.push(("lo", crate::drivers::net::loopback::loopback_stats()));
+    rows.push(("lo", crate::drivers::hooks::loopback_stats()));
     if let Some(dev) = crate::drivers::net::virtio_net::get_device() {
         rows.push(("eth0", dev.get_stats()));
     }
