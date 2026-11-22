@@ -1243,6 +1243,7 @@ their job on the checker infrastructure itself):
 | INV-NET-SOCKTAB-1 | `net/net_edges.rs` | rung-2 framework edge: static_table_ref/_mut form refs from addr_of_mut! on the stack's static-mut socket/route tables; callers hold the per-table serialization the sites document (crate-flip: rux-net is forbid) |
 | INV-NET-ARCREF-1 | `net/net_edges.rs` | rung-2 framework edge: arc_refcount_probe (volatile strong/weak reads at data-16/8, forensics only) + audited_deref (ops-identity-validated live Arc-backed ptr) |
 | INV-NET-HDRVIEW-1 | `net/net_edges.rs` | rung-2 framework edge: pod_view/pod_view_mut wire-header views; length AND ALIGNMENT checked (the old inline casts never checked alignment — misaligned skb buffers were silent UB, now drop) |
+| INV-RD-CLAIM | `sched/reapdrain.rs` | reap-claim family: ReapClaim carries the NonNull<Task> page-identity TCB handle; Send is the reaper-lock exclusivity (PENDING/GRACE_BATCH statics); the NonNull is dereferenced only by the reaper under the reap lock |
 | INV-NET-CONTAINEROF-1 | `net/net_edges.rs` | rung-2 framework edge: container_of maps a wait-queue FIELD ptr back to its UnixSocket via offset_of!; diagnostic-only sites |
 | INV-VDSO-DATA-1 | `mm/vdso.rs` | vDSO data page: fixed static mapping, page-constant offsets, seqlock write discipline |
 | INV-RWLOCK-1 | `sync/rwlock.rs` | rwlock family: atomic reader counts + writer word with documented pairing; guards ride the held lifetime; panic rows best-effort |

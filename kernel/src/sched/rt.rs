@@ -11,6 +11,12 @@
 //! - SCHED_FIFO: Run until blocked or preempted by higher priority
 //! - SCHED_RR: FIFO with time slices (default 100ms)
 
+
+// S1 pre-work (2026-11-22): zero unsafe remains (the Send/Sync markers were
+// vestigial — auto-derived; deletion verified by green check). Tree-level
+// forbid until the S1 crate split.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
 use crate::process::task::{Task, SchedPolicy};
 use crate::list::ListHead;
@@ -646,8 +652,8 @@ impl RtRunQueue {
     }
 }
 
-unsafe impl Send for RtRunQueue {}
-unsafe impl Sync for RtRunQueue {}
+
+
 
 /// RT scheduling entity
 ///
