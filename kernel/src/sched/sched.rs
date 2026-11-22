@@ -6043,15 +6043,12 @@ pub fn grq_diag_cpu_currents() -> [(
 // ==================== Scheduler Tick ====================
 
 pub fn scheduler_tick() {
-    crate::dfx::taskdump::putc_brief(b'T'); // PROBE
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     // P4 async-reap: advance the deferred task-storage ladder (one
     // CAS-guarded CPU per tick, budget-bounded, empty-list fast path
     // is one try_lock). Runs FIRST so a storm's reaps recycle their
     // stacks within the same tick cadence the forks consume them.
-    crate::dfx::taskdump::putc_brief(b'1'); // PROBE
     crate::sched::reapdrain::reap_drain_tick();
-    crate::dfx::taskdump::putc_brief(b'2'); // PROBE
     // grq-lock-1st: service the printk deferrals (the deferred kmsg
     // reader wake + one pending console line) and drain the Rule-1
     // scheduler event ring. All three run with NO scheduler lock held —
