@@ -87,6 +87,7 @@
 <h2 id="seedcore"><span class="anchor">§0+</span>晶核架构(Seed-Core):Rux 与 Linux 最大的不同</h2>
     <p>Rux 与 Linux 最本质的区别不在某个子系统的算法,而在<b>信任计算基础(TCB)的定义方式</b>。Linux 是 ~2,800 万行 C 单体内核:类型系统不检查内存安全,<b>全树皆 TCB</b>;Rux 用 Rust 类型系统把同一性质变成<b>编译期结构</b>,命名取材料学隐喻 —— <b>晶核架构</b>:~3,000 行手写核心是<b>晶核（seed crystal，材料学隐喻：微小核心决定整体结构完整性）</b>,全部服务代码在类型格架上<b>结晶</b>为安全代码;晶核极小,却决定整块晶体的完整性。</p>
     <p><b>唯一判据</b>,对每行代码各问一次:<code>能否活在 #![forbid(unsafe_code)] 之下?</code> 能 → 服务 crate(编译器保证零 unsafe,对抗性验证:向 crate 加 unsafe 必使其自身构建失败);不能 → rux-core(带 INV 契约/F 行登记,被验证栈覆盖)。没有第三种归宿。</p>
+    <div class="callout" style="margin-top:8px"><b>术语说明。</b><b>INV 契约(INV contract)</b>:每一段留在核心的 unsafe 代码都附带一条编号不变量声明(如 INV-SCE-3 = "调度器全局运行队列的守卫在构造时通过就绪门检查"),写明该段代码依赖的前置条件、执行约束和释放义务,登记在 docs/architecture/safety-and-performance.md 中,与代码一一对应。<b>F 行登记(F-row)</b>:对经论证无法用安全代码重写的 unsafe(如上下文切换必须直接操作 CPU 寄存器,无法通过 Rust 安全子集表达),在不可缩减性登记表中记录一行,内容包括:所属函数、行数、无法重写的原因、参考实现中的对应代码(如 Linux 的 entry.S)。两类记录合计:约 3,000 行核心代码中每一行 unsafe 都有对应的审计条目,覆盖率达 97% 以上。</div>
     <h3>不可还原底线(逐项,带参考内核对应物)</h3>
     <div class="tbl-wrap"><table>
       <thead><tr><th>家族</th><th class="num">双计行</th><th>参考对应物</th></tr></thead><tbody>
