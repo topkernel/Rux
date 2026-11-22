@@ -50,7 +50,7 @@
     <a href="../performance/microbench.html">内部微基准</a><div class="grp">安全</div>
     <a href="../security/index.html">安全总览</a>
     <a href="../security/formal.html">形式验证</a>
-    <a href="../security/unsafe.html">分层 unsafe 台账</a>
+    <a href="../security/unsafe.html">unsafe 审计记录</a>
     <a href="../security/taxonomy.html">缺陷分类学</a>
     <a href="../security/hardening.html">运行时强化与缺口</a><div class="grp">测试</div>
     <a href="../testing/index.html">测试总览</a>
@@ -85,8 +85,8 @@
 
     <h2 id="overview"><span class="anchor">§0</span>总览</h2>
 <h2 id="seedcore"><span class="anchor">§0+</span>晶核架构(Seed-Core):Rux 与 Linux 最大的不同</h2>
-    <p>Rux 与 Linux 最本质的区别不在某个子系统的算法,而在<b>信任计算基础(TCB)的定义方式</b>。Linux 是 ~2,800 万行 C 单体内核:类型系统不检查内存安全,<b>全树皆 TCB</b>;Rux 用 Rust 类型系统把同一性质变成<b>编译期结构</b>,命名取材料学隐喻 —— <b>晶核架构</b>:~3,000 行手写核心是<b>晶种</b>,全部服务代码在类型格架上<b>结晶</b>为安全代码;晶核极小,却决定整块晶体的完整性。</p>
-    <p><b>唯一判据</b>,对每行代码各问一次:<code>能否活在 #![forbid(unsafe_code)] 之下?</code> 能 → 服务 crate(编译器保证零 unsafe,负探针验证:向 crate 加 unsafe 必使其自身构建失败);不能 → rux-core(带 INV 契约/F 行登记,被验证栈覆盖)。没有第三种归宿。</p>
+    <p>Rux 与 Linux 最本质的区别不在某个子系统的算法,而在<b>信任计算基础(TCB)的定义方式</b>。Linux 是 ~2,800 万行 C 单体内核:类型系统不检查内存安全,<b>全树皆 TCB</b>;Rux 用 Rust 类型系统把同一性质变成<b>编译期结构</b>,命名取材料学隐喻 —— <b>晶核架构</b>:~3,000 行手写核心是<b>晶核（seed crystal，材料学隐喻：微小核心决定整体结构完整性）</b>,全部服务代码在类型格架上<b>结晶</b>为安全代码;晶核极小,却决定整块晶体的完整性。</p>
+    <p><b>唯一判据</b>,对每行代码各问一次:<code>能否活在 #![forbid(unsafe_code)] 之下?</code> 能 → 服务 crate(编译器保证零 unsafe,对抗性验证:向 crate 加 unsafe 必使其自身构建失败);不能 → rux-core(带 INV 契约/F 行登记,被验证栈覆盖)。没有第三种归宿。</p>
     <h3>不可还原底线(逐项,带参考内核对应物)</h3>
     <div class="tbl-wrap"><table>
       <thead><tr><th>家族</th><th class="num">双计行</th><th>参考对应物</th></tr></thead><tbody>
@@ -98,15 +98,15 @@
         <tr><td>引导表+寄存器 IO+SBI/hypercall/GIC</td><td class="num">~750</td><td>head.S / special_insns.h / io.h / kvm.c / irq-gic-v3.c</td></tr>
         <tr><td>同步原语内部+safety/ 原语+任务页生命周期+定时器核</td><td class="num">~420</td><td>spinlock.c 内部等</td></tr>
       </tbody></table></div>
-    <p>对照 Linux 全树 TCB,比例约 <b>1 : 9,000</b>。调度与内存管理不做整 crate:两者均为<b>可判定策略骑在小 unsafe 核上</b>,S1/M1 劈分后策略层 forbid、机制留核 —— 切换/tp/锁原语/页表原子写是 TCB,CFS 数学不是。</p>
+    <p>对照 Linux 全树 TCB,比例约 <b>1 : 9,000</b>。调度与内存管理不做整 crate:两者均为<b>可判定策略骑在小 unsafe 核上</b>,S1/M1 机制与策略分离后策略层 forbid、机制留核 —— 切换/tp/锁原语/页表原子写是 TCB,CFS 数学不是。</p>
     <h3>三层防线(各层实测成本)</h3>
     <div class="tbl-wrap"><table>
       <thead><tr><th>层</th><th>机制</th><th class="num">边界成本</th><th>买到什么</th></tr></thead><tbody>
-        <tr><td><b>类型层</b></td><td>forbid crate + Cargo 依赖 DAG(Cargo 拒环=依赖方向无环机器检查)+CI 棘轮</td><td class="num"><b>0</b>(跨 crate 调用,LTO 内联;翻转实测零行为变化)</td><td>服务列内存不安全编译期不可表达</td></tr>
+        <tr><td><b>类型层</b></td><td>forbid crate + Cargo 依赖 DAG(Cargo 拒环=依赖方向无环机器检查)+CI 单调性检查</td><td class="num"><b>0</b>(跨 crate 调用,LTO 内联;crate 化迁移实测零行为变化)</td><td>服务列内存不安全编译期不可表达</td></tr>
         <tr><td><b>硬件层</b></td><td>Intel MPK 保护键:单地址空间内页粒度硬件域(WRPKRU 切密钥)</td><td class="num"><b>47–49 周期/窗口</b>(10 万次 TSC 计时;地址空间切换 ~1,000+)</td><td>核心元数据页打标,窗口外访问硬件 #PF(故障注入实证);&lt;1% 预算成立</td></tr>
         <tr><td><b>验证层</b></td><td>Kani 12/12 全输入证明+Miri 零 UB+Verus 窄采用(无界算术引理)</td><td class="num"><b>0</b>(纯离线)</td><td>核心 ~3,000 行手工 unsafe 机器检查</td></tr>
       </tbody></table></div>
-    <p><p><b>调度劈分是"机制/策略分离"经典原则的首个编译器强制范例</b>(S1):机制(上下文切换、GRQ 锁纪律、tp 寄存器推导、任务槽生命周期 —— 持有不变量的状态操纵机器)留核心受审;策略(下一个选谁、唤醒放哪、何时节流 —— 消费机制安全 API 的<b>决策</b>)出核心入 forbid crate。编译器画出了原则只能描述的那条线:策略代码字面上无法表达机制的 unsafe,违反分离是<b>构建错误</b>而非评审意见;钩子表+私有面 API = 机制发布的契约,是策略对核心的全部视野。内存管理(M1)重复同一形状。</p>
+    <p><p><b>调度分离是"机制/策略分离"经典原则的首个编译器强制范例</b>(S1):机制(上下文切换、GRQ 锁纪律、tp 寄存器推导、任务槽生命周期 —— 持有不变量的状态操纵机器)留核心受审;策略(下一个选谁、唤醒放哪、何时节流 —— 消费机制安全 API 的<b>决策</b>)出核心入 forbid crate。编译器画出了原则只能描述的那条线:策略代码字面上无法表达机制的 unsafe,违反分离是<b>构建错误</b>而非评审意见;回调函数表与私有接口 API = 机制发布的契约,是策略对核心的全部视野。内存管理(M1)重复同一形状。</p>
     <p>微内核(seL4/L4)以每服务独立地址空间买故障隔离,代价 ~1,000 周期/次 IPC(最优快路径),沿"缺页→驱动→服务器"链路倍增(Mach 教训);晶核架构用 <b>0+~50+0</b> 买到全部三层,隔离粒度更细(MPK 到页,IPC 只到进程)。</p>
     <h3>与同谱系工作的差异(Framekernel / RedLeaf)</h3>
     <div class="tbl-wrap"><table>
@@ -119,7 +119,7 @@
         <tr><td>对方领先之处(如实)</td><td>更早交付完整 Linux 系统调用接口</td><td>零拷贝 RPC 的形式化验证更完整</td><td>—</td></tr>
       </tbody></table></div>
     <h3>分级落地数字</h3>
-    <p>当前 ~10,300 双计 → Rung 1 闭合(系统调用 crate,库内副本删除,结构性变化)→ +网络级+S1/M1 劈分(−~750)→ +文件系统/驱动级(−~2,770)→ +dfx 仪器退役评审(−600~1,000)→ <b>终态 = rux-core 尺寸 ≈4,000–4,700</b>。每级门禁:三架构构建+全量套件+fio 三案例+冒烟+forbid 负探针。设计正本:<code>docs/architecture/micro-core-design.md</code>(绑定梯子与中止判据);翻转机制:<code>crate-plan.md</code>。</p>>
+    <p>当前 ~10,300 双计 → Rung 1 闭合(系统调用 crate,库内副本删除,结构性变化)→ +网络级+S1/M1 机制与策略分离(−~750)→ +文件系统/驱动级(−~2,770)→ +dfx 仪器退役评审(−600~1,000)→ <b>终态 = rux-core 尺寸 ≈4,000–4,700</b>。每级门禁:三架构构建+全量套件+fio 三案例+冒烟+forbid 对抗性验证。设计正本:<code>docs/architecture/micro-core-design.md</code>(绑定迁移顺序与中止判据);crate 化迁移机制:<code>crate-plan.md</code>。</p>>
     <p>Rux 是一份源码树服务三种架构(riscv64 / x86_64 / aarch64),约 90% 代码架构无关。对外以 349 个系统调用对齐Linux ABI;对内是净室设计 —— 每一项与主流实现不同的内部决策都登记在<a href="#divergences">设计分歧登记表</a>并携带兼容性证据。</p>
     <div class="tbl-wrap">
       <table>
@@ -305,15 +305,15 @@
       <li><b>语义分歧靠 diff Linux 树发现、靠采纳其行为修复</b>(根因而非症状):execve ETXTBSY、SysV IPC 按 namespace、共享 futex 键解析到物理字、tmpfs MAP_SHARED 经页缓存一致、binder poll 三条件、O_DIRECT 读先冲脏页缓存、SYSRET TF|RF 回退、用户态可写字符串全查 UTF-8。</li>
       <li><b>安全性质(C 内核靠工具租的类)</b>:构造性内存安全 + SMAP/CR0.WP/无恒等窗/用户态 W^X/seccomp/能力模型 + panic 面设计化(每实例收编 + 回归测试)。</li>
       <li><b>重设计落地的性能(同一测试平台 A/B)</b>:lmbench 四行领先(lat_ctx 3.4×、lat_pipe 2.6×、exec 1.39×、fstat 1.19×)、切换 −58%、p5 族 −90~93%、fs 元数据族 −65~−88%;Geekbench 多核 7504(4-CPU 绑核)。</li>
-      <li><b>诚实占位(G 区)</b>:typed binder 事务 FSM、ext4/jbd2 宿主测试切片、内部完成环回写基底 —— 尚无 A/B 数字,离开占位区的唯一方式是交出实测行。</li>
+      <li><b>诚实占位(G 区)</b>:typed binder 事务 FSM、ext4/jbd2 宿主测试切片、内部完成环回写基础类型 —— 尚无 A/B 数字,离开占位区的唯一方式是交出实测行。</li>
     </ul>
 
     <!-- ================= 安全与性能 ================= -->
-    <h2 id="safety"><span class="anchor">§11</span>安全与性能双优(台账要点)</h2>
+    <h2 id="safety"><span class="anchor">§11</span>安全与性能双优(审计记录要点)</h2>
     <p>核心主张:<b>安全检查在编译期发生、从快路径消失 —— 快的设计与安全的设计是同一个设计。</b>出处:<code>docs/architecture/safety-and-performance.md</code>。</p>
     <ul>
       <li><b>bug 分类学 v1</b>(全史 3,358 个去重提交逐条裁定):33 个内存破坏类缺陷中 <b>23 个位于显式 unsafe 块/架构汇编</b>,<b>10 个位于 safe 代码</b> —— 但全部是安全 Rust 当今不类型检查的所有权/引用计数/锁协议类;<b>零</b>指针表达式缺陷(越界/迭代器失效/野指针运算/格式串)出现在 safe 代码。33 例中 6 例在任何 boot 前被评审抓到。</li>
-      <li><b>unsafe 表面已枚举且带合同</b>:unsafe 行占比 2.2%(双口径 2.2%);165 个模块编译期 forbid(unsafe_code) 由 CI 棘轮保证、93 个 service 文件已无 unsafe;SAFETY 注释覆盖 69%;164 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
+      <li><b>unsafe 表面已枚举且带合同</b>:unsafe 行占比 2.2%(双口径 2.2%);165 个模块编译期 forbid(unsafe_code) 由 CI 单调性检查保证、93 个 service 文件已无 unsafe;SAFETY 注释覆盖 69%;164 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
       <li><b>性能每条配对安全句</b>:如切换路径携带类型化 per-CPU 存储 + 键控锁;lmbench/Geekbench 数字与调度事件普查的判定结果记入同一张表;代价侧(futex 唤醒正在运行的任务时 ~10ms tick 量化)如实记录。</li>
       <li><b>诚实缺口登记册 v1</b>:缺 KASLR(无 boot 熵源)、内核 text/rodata W^X 收紧、编译器栈保护、KASAN 式毒化广度、KCSAN 观察点、kallsyms 掩蔽 —— 逐条写明"补齐长什么样"。</li>
     </ul>

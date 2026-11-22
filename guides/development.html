@@ -50,7 +50,7 @@
     <a href="../performance/microbench.html">内部微基准</a><div class="grp">安全</div>
     <a href="../security/index.html">安全总览</a>
     <a href="../security/formal.html">形式验证</a>
-    <a href="../security/unsafe.html">分层 unsafe 台账</a>
+    <a href="../security/unsafe.html">unsafe 审计记录</a>
     <a href="../security/taxonomy.html">缺陷分类学</a>
     <a href="../security/hardening.html">运行时强化与缺口</a><div class="grp">测试</div>
     <a href="../testing/index.html">测试总览</a>
@@ -153,7 +153,7 @@
       <li><b>锁序</b>:触碰锁嵌套前必读 <code>docs/architecture/lock-ordering.md</code>(INV-LOCK-*)。</li>
       <li><b>观测性政策</b>:新增内核观测一律走统一 trace-event 框架加 tracepoint(<code>kernel/src/trace/</code>,tracefs 挂载于 <code>/sys/kernel/tracing</code>);旧 <code>debug=</code> 开关表已冻结为遗留,不得增长。</li>
       <li><b>探针 tarball 政策</b>:guest 测试用例源码只以 <code>userspace/probes/probes.tar.gz</code> + 解压脚本形式归档,绝不提交散的 guest 源文件;宿主侧启动驱动(.py/.sh)留在 <code>test/</code> / <code>scripts/</code>。</li>
-      <li><b>台账</b>:每轮合并落地的安全属性、性能数字、bug 类消除,同改动内记入 <code>docs/architecture/safety-and-performance.md</code>;架构优势带实测证据记入 <code>docs/architecture/rust-native-register.md</code>(无数字 = 占位符,不算条目)。</li>
+      <li><b>审计记录</b>:每轮合并落地的安全属性、性能数字、bug 类消除,同改动内记入 <code>docs/architecture/safety-and-performance.md</code>;架构优势带实测证据记入 <code>docs/architecture/rust-native-register.md</code>(无数字 = 占位符,不算条目)。</li>
       <li><b>主仓库根保持干净</b>:不落任何 scratch 脚本、驱动、日志、镜像(gitignored 的也不行);启动驱动与临时脚本放自己工作树的 <code>run/</code>。</li>
     </ul>
 
@@ -194,7 +194,7 @@
       <li><code>AGENTS.md</code> —— 绑定性开发工作流(本页的规范源头)</li>
       <li><code>docs/architecture/lock-ordering.md</code> —— 动 virtio / 任何锁嵌套前必读</li>
       <li><code>docs/architecture/design-divergences.md</code> —— 内部分歧登记册(D 编号)</li>
-      <li><code>docs/architecture/safety-and-performance.md</code> —— 安全/性能双优证据台账</li>
+      <li><code>docs/architecture/safety-and-performance.md</code> —— 安全/性能双优证据审计记录</li>
       <li><code>docs/development/perf-gate-baseline.md</code> —— 性能门禁基线</li>
       <li><code>docs/test/README.md</code> —— 测试报告总入口(每份带测试环境与日期)</li>
     </ul>

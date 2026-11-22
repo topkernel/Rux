@@ -50,7 +50,7 @@
     <a href="../performance/microbench.html">内部微基准</a><div class="grp">安全</div>
     <a href="../security/index.html">安全总览</a>
     <a href="../security/formal.html">形式验证</a>
-    <a href="../security/unsafe.html">分层 unsafe 台账</a>
+    <a href="../security/unsafe.html">unsafe 审计记录</a>
     <a href="../security/taxonomy.html">缺陷分类学</a>
     <a href="../security/hardening.html">运行时强化与缺口</a><div class="grp">测试</div>
     <a class="on" href="index.html">测试总览</a>
@@ -121,7 +121,7 @@
         <a class="more" href="gnome-retrospective.html">进入子项 →</a>
       </div>
     </div>
-    <div class="callout">相关栏目:<a href="../performance/index.html"><b>性能测试</b></a>(调度事件普查 / pbench 全锚 / lmbench 逐用例 / Geekbench / 优化队列)与<a href="../security/index.html"><b>安全与形式验证</b></a>(bug 分类学 / unsafe 台账 / Kani / 缺口登记册)各自独立成栏。</div>
+    <div class="callout">相关栏目:<a href="../performance/index.html"><b>性能测试</b></a>(调度事件普查 / pbench 全锚 / lmbench 逐用例 / Geekbench / 优化队列)与<a href="../security/index.html"><b>安全与形式验证</b></a>(bug 分类学 / unsafe 审计记录 / Kani / 缺口登记册)各自独立成栏。</div>
 
     <h2 id="reports"><span class="anchor">§2</span>报告总目录</h2>
     <p>仓库 <code>docs/test/</code> 的常备报告(每份为带日期的实测快照,原始记录在仓库外 run/ 目录):</p>
@@ -134,9 +134,9 @@
           <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP 兼容性,双测试平台(riscv64 TCG / x86_64 KVM)</td><td class="mono">官方 scan3 1138/1869 → 当前预期 1139/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
           <tr><td>lmbench-report.md</td><td>lmbench 逐用例:Rux vs Linux(同机同加速)</td><td class="mono">2026-11-04 基线 → 见性能栏目</td></tr>
           <tr><td>geekbench-report.md</td><td>Geekbench 5:全部 21 项工作负载对照</td><td class="mono">MC 7504/7027 · SC 2465/2165 → 见性能栏目</td></tr>
-          <tr><td>stress-fleet.md</td><td>压测/稳定性/随机化/模糊测试集群设计 + 结果台账</td><td class="mono">常驻(11 QEMU)</td></tr>
+          <tr><td>stress-fleet.md</td><td>压测/稳定性/随机化/模糊测试集群设计 + 结果审计记录</td><td class="mono">常驻(11 QEMU)</td></tr>
           <tr><td>formal-verification-report.md</td><td>Kani / proptest / SPIN / Miri 常备状态</td><td class="mono">157 harness · 1104 proptests → 见安全栏目</td></tr>
-          <tr><td>test-coverage.md</td><td>覆盖台账(每次变更再生成)</td><td class="mono">滚动</td></tr>
+          <tr><td>test-coverage.md</td><td>覆盖审计记录(每次变更再生成)</td><td class="mono">滚动</td></tr>
           <tr><td>gnome-regression-retrospective.md</td><td>GNOME 桌面回归回溯:根因、门禁盲区与防复发改造</td><td class="mono">2026-11-07(含冻结面三层机制)→ 见回溯报告子页</td></tr>
           <tr><td>ltp-timeout-audit.md</td><td>LTP TIMEOUT 类逐行归因审计(P0 类规则)</td><td class="mono">2026-11-07 → 见 TIMEOUT 审计子页</td></tr>
         </tbody>
@@ -156,7 +156,7 @@
       <li><b>每个数字带测试平台</b>:架构、加速器、内核 profile、宿主负载纪律 —— 没有测试平台的数字不算结果。</li>
       <li><b>报告追加式</b>:新一轮追加小节或刷新常设表并注明日期,不静默改写历史。</li>
       <li><b>抖动隔离</b>:全量扫描新失败一律隔离复跑 2 次再定性为回归(已知抖动例:accept02、getrusage04、kill02、genfmod、rename/statfs 族)。</li>
-      <li><b>NOT-OURS 台账</b>:同一 musl 版 LTP 二进制跑在宿主 Linux 内核上,判定一致的失败记为测试/环境问题而非内核缺口。</li>
+      <li><b>NOT-OURS 审计记录</b>:同一 musl 版 LTP 二进制跑在宿主 Linux 内核上,判定一致的失败记为测试/环境问题而非内核缺口。</li>
       <li><b>仪器误诊也归档</b>:PTGUARD/FREEGUARD 误判(mapcount=−1 是哨兵)、首版 PT_LEDGER 假双自由 —— 带收据的阴性结果留在记录里。</li>
     </ul>
   </article>

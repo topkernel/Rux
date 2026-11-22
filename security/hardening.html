@@ -34,7 +34,7 @@
     <div class="grp">安全</div>
     <a href="index.html">安全总览</a>
     <a href="formal.html">形式验证</a>
-    <a href="unsafe.html">分层 unsafe 台账</a>
+    <a href="unsafe.html">unsafe 审计记录</a>
     <a href="taxonomy.html">缺陷分类学</a>
     <a href="hardening.html">运行时强化与缺口</a><div class="grp">性能</div>
     <a href="../performance/index.html">性能总览</a>
@@ -89,7 +89,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>层</th><th>机制</th><th>实测代价</th><th>Rux 现状</th></tr></thead>
       <tbody>
-        <tr><td>L1 语言级隔离</td><td>类型系统 + forbid(unsafe_code) 分层</td><td>~0</td><td>已具备(<a href="unsafe.html">分层台账</a>)</td></tr>
+        <tr><td>L1 语言级隔离</td><td>类型系统 + forbid(unsafe_code) 分层</td><td>~0</td><td>已具备(<a href="unsafe.html">分层审计记录</a>)</td></tr>
         <tr><td>L2 系统调用边界</td><td>uaccess + 入口校验</td><td>~55 ns / AC 括号</td><td>已具备(本页 §2)</td></tr>
         <tr><td>L3 特权模型</td><td>能力位、seccomp</td><td>每判定一次原子操作</td><td>已具备(本页 §3)</td></tr>
         <tr><td>L4 硬件辅助</td><td>SMAP/SUM、(MPK/MTE 为登记方向)</td><td>20–26 周期(MPK 参照)</td><td>已具备(本页 §2)</td></tr>
@@ -144,7 +144,7 @@
       <thead><tr><th>项</th><th>现状</th><th>闭合形态</th></tr></thead>
       <tbody>
         <tr><td>KASLR</td><td>偏移字段与管道存在;无 boot 熵源接线</td><td>入口 RDRAND/seed + 启动打印变化偏移</td></tr>
-        <tr><td>内核 text/rodata W^X</td><td>镜像映射 RWX(riscv64)/ RW 无 NX(x86_64);无 mark_rodata_ro</td><td>init 后 RO 翻转 + dfx 页表走查 tripwire</td></tr>
+        <tr><td>内核 text/rodata W^X</td><td>镜像映射 RWX(riscv64)/ RW 无 NX(x86_64);无 mark_rodata_ro</td><td>init 后 RO crate 化迁移 + dfx 页表走查 tripwire</td></tr>
         <tr><td>编译器栈保护</td><td>无(stack canary 为内核侧自建,非编译器生成)</td><td>rustc stack-protector 属性 + 构建旗标,成本经门实测</td></tr>
         <tr><td>硬化 usercopy</td><td>仅 access_ok 边界</td><td>uaccess 胶囊内的逐对象 usercopy 区间检查</td></tr>
         <tr><td>模块签名</td><td>当前无运行期代码加载(注册面),议题暂空</td><td>真实加载器落地时随行签名校验</td></tr>
@@ -162,7 +162,7 @@
       <li><b>D-19 类型化定时器轮</b>:六类历史缺陷类(混时钟域比较/periodic 误用/双重取消等)成为编译错,同一测试平台 A/B 同时给出性能改进(定时器 arm 锁 924→697 ns)—— 强化与性能同向的实例。</li>
     </ul>
 
-    <div class="callout">正本:docs/architecture/security-design.md(六层模型 + 度量表)、docs/development/security-posture.md(21 行 posture)、docs/architecture/safety-and-performance.md §5(缺口登记册)、docs/architecture/design-divergences.md(D-9/D-17/D-18)。相关:<a href="formal.html">形式验证</a>、<a href="taxonomy.html">缺陷分类学</a>、<a href="unsafe.html">分层 unsafe 台账</a>。</div>
+    <div class="callout">正本:docs/architecture/security-design.md(六层模型 + 度量表)、docs/development/security-posture.md(21 行 posture)、docs/architecture/safety-and-performance.md §5(缺口登记册)、docs/architecture/design-divergences.md(D-9/D-17/D-18)。相关:<a href="formal.html">形式验证</a>、<a href="taxonomy.html">缺陷分类学</a>、<a href="unsafe.html">unsafe 审计记录</a>。</div>
   </article>
 </div>
 </main>

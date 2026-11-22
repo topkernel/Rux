@@ -56,7 +56,7 @@
     <a href="../performance/microbench.html">内部微基准</a><div class="grp">安全</div>
     <a href="../security/index.html">安全总览</a>
     <a href="../security/formal.html">形式验证</a>
-    <a href="../security/unsafe.html">分层 unsafe 台账</a>
+    <a href="../security/unsafe.html">unsafe 审计记录</a>
     <a href="../security/taxonomy.html">缺陷分类学</a>
     <a href="../security/hardening.html">运行时强化与缺口</a><div class="grp">测试</div>
     <a href="../testing/index.html">测试总览</a>
@@ -93,7 +93,7 @@
     <h2 id="mmforensics"><span class="anchor">§2</span>dfx=mmforensics:页表与帧取证</h2>
     <ul>
       <li><b>触发点</b>:RAW-FREE watchpoint(Zone::free_pages)、活页表释放拒绝、PTLEDGER DOUBLE-FREE 拒绝、FUT-STALE-TREE 普查。</li>
-      <li><b>输出</b>:事件时刻的页描述符状态、PT 台账位、该帧的"化身历史"(取证环:PT_STAMP_RING —— 含盖章树的根、PT_FREE_RING、ZTRACE_ALLOC/ZTRACE_FREE、PTEI_RING 数据页安装)、per-CPU pageset 行,以及<b>对内核反向映射缺失的补偿</b>:有界扫描全部活任务的页表树,找出指向该 pfn 的链接。</li>
+      <li><b>输出</b>:事件时刻的页描述符状态、PT 审计记录位、该帧的"化身历史"(取证环:PT_STAMP_RING —— 含盖章树的根、PT_FREE_RING、ZTRACE_ALLOC/ZTRACE_FREE、PTEI_RING 数据页安装)、per-CPU pageset 行,以及<b>对内核反向映射缺失的补偿</b>:有界扫描全部活任务的页表树,找出指向该 pfn 的链接。</li>
       <li><b>代价</b>:fork/exit 热路径有计账开销 —— 仅排查期武装。</li>
     </ul>
 
@@ -143,7 +143,7 @@ e2fsck -f &lt;拷贝盘.img&gt;                          <span class="c"># 镜�
       <tbody>
         <tr><td>怀疑泄漏</td><td>dfx=memwatch 按调用点记账 → 分配器内停滞的持有者由 allocwatch 点名 → ledger 确认总量</td></tr>
         <tr><td>OOM 报告可信吗</td><td>ledger mismatch 判真耗尽/记账漂移 → VscanCensus 定回收失效分支</td></tr>
-        <tr><td>双重分配/帧破坏</td><td>dfx=mmforensics:PT 台账 + 戳环给帧化身史 + 全任务反向扫描找持有者</td></tr>
+        <tr><td>双重分配/帧破坏</td><td>dfx=mmforensics:PT 审计记录 + 戳环给帧化身史 + 全任务反向扫描找持有者</td></tr>
         <tr><td>野写</td><td>scribble canary 命中停靠 → GDB watchpoint 定写入者</td></tr>
         <tr><td>用户态崩溃</td><td>USEGV-L 行定 pid/rip/cr2 → USEGV-FOR 归因 cr2 落点</td></tr>
         <tr><td>堆破坏(brk 类)</td><td>TRIMQ 类隔离区仪器在专用狩猎工作分支(lane);主线用 mmforensics + scribble 组合</td></tr>

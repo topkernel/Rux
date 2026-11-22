@@ -56,7 +56,7 @@
     <a href="../performance/microbench.html">内部微基准</a><div class="grp">安全</div>
     <a href="../security/index.html">安全总览</a>
     <a href="../security/formal.html">形式验证</a>
-    <a href="../security/unsafe.html">分层 unsafe 台账</a>
+    <a href="../security/unsafe.html">unsafe 审计记录</a>
     <a href="../security/taxonomy.html">缺陷分类学</a>
     <a href="../security/hardening.html">运行时强化与缺口</a><div class="grp">测试</div>
     <a href="../testing/index.html">测试总览</a>
@@ -164,7 +164,7 @@ echo 0 &gt; tracing_on                                 <span class="c"># 停止�
         <tr><td class="mono">dfx=taskdump</td><td>rux:taskdump(周期任务快照)</td></tr>
         <tr><td class="mono">dfx=watchdog</td><td>自旋锁告警 + rux:taskdump 联动</td></tr>
         <tr><td class="mono">dfx=memwatch</td><td>rux:memwatch(分配点记账)</td></tr>
-        <tr><td class="mono">dfx=mmforensics</td><td>rux:mmforensics(PTE 台账/双拆检测)</td></tr>
+        <tr><td class="mono">dfx=mmforensics</td><td>rux:mmforensics(PTE 审计记录/双拆检测)</td></tr>
         <tr><td class="mono">dfx=schedtrace</td><td>rux:schedtrace(调度步进)</td></tr>
         <tr><td class="mono">dfx=sysring</td><td>rux:sysring(系统调用双录)</td></tr>
         <tr><td class="mono">dfx=sigtrace</td><td>rux:sigtrace(信号链)</td></tr>

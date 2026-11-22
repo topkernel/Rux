@@ -34,7 +34,7 @@
     <div class="grp">安全</div>
     <a href="index.html">安全总览</a>
     <a href="formal.html">形式验证</a>
-    <a href="unsafe.html">分层 unsafe 台账</a>
+    <a href="unsafe.html">unsafe 审计记录</a>
     <a href="taxonomy.html">缺陷分类学</a>
     <a href="hardening.html">运行时强化与缺口</a><div class="grp">性能</div>
     <a href="../performance/index.html">性能总览</a>
@@ -86,7 +86,7 @@
 
     <h2 id="method"><span class="anchor">§1</span>方法论</h2>
     <ul>
-      <li><b>语料</b>:main 可达的全部 <b>3,358 个去重非合并提交</b>主题(其中 2,702 个内核代码主题)+ 排查台账条目。</li>
+      <li><b>语料</b>:main 可达的全部 <b>3,358 个去重非合并提交</b>主题(其中 2,702 个内核代码主题)+ 排查审计记录条目。</li>
       <li><b>筛选</b>:以破坏/竞态/panic 词汇匹配出 169 个候选提交,<b>逐条人工裁定</b>,三轮清扫定稿(2026-11-03)。</li>
       <li><b>居留地判定</b>:每个内存破坏行的修复 diff 逐块审读,确定缺陷驻留于显式 unsafe 块/架构汇编/unsafe 内部(UnsafeCell 分配器元数据、raw 指针协议)还是 safe 代码。</li>
       <li><b>口径纪律</b>:仅遏制性提交不计为缺陷;revert-reland 对计一次;仪器误报不计入内核缺陷。</li>
@@ -142,13 +142,13 @@
 
     <h2 id="verdict"><span class="anchor">§7</span>结论:这些数字支持什么</h2>
     <ul>
-      <li><b>类别论证成立</b>:表达式级缺陷类(0 例)与 safe 代码的结构性免疫一致;35 例中 23 例驻留于显式 audited unsafe —— 与"unsafe 面即 TCB"的分层模型自洽(2.2% 面积 / 2.2% 双口径,<a href="unsafe.html">台账页</a>)。</li>
+      <li><b>类别论证成立</b>:表达式级缺陷类(0 例)与 safe 代码的结构性免疫一致;35 例中 23 例驻留于显式 audited unsafe —— 与"unsafe 面即 TCB"的分层模型自洽(2.2% 面积 / 2.2% 双口径,<a href="unsafe.html">审计记录页</a>)。</li>
       <li><b>残余类明确</b>:10 例 safe 类全部是所有权/引用计数/锁协议/栈深决策 —— 恰是模型检查与属性测试的靶(loom 锁协议、Kani INV-M 表、proptest 引用计数);硬化登记册将 checked Refcount、栈深分析列为闭合项。</li>
       <li><b>防线有效</b>:6/33 在任何启动前被评审捕获;panic 面逐实例收编;仪器误判有档案。</li>
       <li><b>不含糊的表述</b>:33 例/3,358 提交 ≈ 全史 1% 提交携带内存破坏缺陷,且全部带修复与回归证据 —— 这是"足够安全"的实证基线,而非断言。</li>
     </ul>
 
-    <div class="callout">复现与正本:docs/architecture/safety-and-performance.md §2(全表 33 行 + 边界行 + panic 收编清单 + 负结果档案)。相关:<a href="unsafe.html">分层 unsafe 台账</a>、<a href="formal.html">形式验证</a>。</div>
+    <div class="callout">复现与正本:docs/architecture/safety-and-performance.md §2(全表 33 行 + 边界行 + panic 收编清单 + 负结果档案)。相关:<a href="unsafe.html">unsafe 审计记录</a>、<a href="formal.html">形式验证</a>。</div>
   </article>
 </div>
 </main>
