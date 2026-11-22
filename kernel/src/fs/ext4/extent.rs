@@ -1651,11 +1651,9 @@ fn append_node(
         if n == 0 || n > cap {
             return Err(errno::Errno::IOError.as_neg_i32());
         }
-        // SAFETY: index entries fit per the buffer contract.
-        let (last_child, _last_ei) = unsafe {
-            let idxs = node_indices(data, cap);
-            (idxs[n - 1].leaf_block(), idxs[n - 1].ei_block)
-        };
+        // Index entries fit per the buffer contract (INV-EXT-VIEW).
+        let idxs = node_indices(data, cap);
+        let (last_child, _last_ei) = (idxs[n - 1].leaf_block(), idxs[n - 1].ei_block);
         // SAFETY: last_child is a valid fs block read from the index node.
         let mut child = read_node(fs, last_child)?;
         match append_node(fs, &mut child, external_node_cap(fs), depth - 1, e, meta_sectors, csum_seed)? {
@@ -1666,14 +1664,13 @@ fn append_node(
             }
             Some(split) => {
                 if n < cap {
-                    // SAFETY: slot n < cap within contract.
-                    unsafe {
-                        let slot = &mut node_indices_mut(data, cap)[n];
-                        slot.ei_block = split.ei_block;
-                        slot.ei_leaf_lo = split.child as u32;
-                        slot.ei_leaf_hi = (split.child >> 32) as u16;
-                        slot.ei_unused = 0;
-                    }
+                    // Slot n < cap within the view's own bounds contract
+                    // (INV-EXT-VIEW).
+                    let slot = &mut node_indices_mut(data, cap)[n];
+                    slot.ei_block = split.ei_block;
+                    slot.ei_leaf_lo = split.child as u32;
+                    slot.ei_leaf_hi = (split.child >> 32) as u16;
+                    slot.ei_unused = 0;
                     node_header_mut(data).eh_entries = (n + 1) as u16;
                     Ok(None)
                 } else {
@@ -1685,14 +1682,13 @@ fn append_node(
                     let mut nd = alloc::vec![0u8; fs.block_size as usize];
                     let ext_cap = external_node_cap(fs);
                     init_node_header(&mut nd, depth, ext_cap as u16);
-                    // SAFETY: fresh block-size buffer, ext_cap entries fit.
-                    unsafe {
-                        let slot = &mut node_indices_mut(&mut nd, ext_cap)[0];
-                        slot.ei_block = split.ei_block;
-                        slot.ei_leaf_lo = split.child as u32;
-                        slot.ei_leaf_hi = (split.child >> 32) as u16;
-                        slot.ei_unused = 0;
-                    }
+                    // Fresh block-size buffer, ext_cap entries fit
+                    // (INV-EXT-VIEW).
+                    let slot = &mut node_indices_mut(&mut nd, ext_cap)[0];
+                    slot.ei_block = split.ei_block;
+                    slot.ei_leaf_lo = split.child as u32;
+                    slot.ei_leaf_hi = (split.child >> 32) as u16;
+                    slot.ei_unused = 0;
                     node_header_mut(&mut nd).eh_entries = 1;
                     // SAFETY: blk just allocated.
                     write_node(fs, blk, &nd, csum_seed)?;
@@ -1717,9 +1713,7 @@ pub fn ext4_ext_append(
 ) -> Result<(), i32> {
     // Work on a byte image of the 60-byte root.
     let mut root = alloc::vec![0u8; 60];
-    root.copy_from_slice(unsafe {
-        core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60)
-    });
+    root.copy_from_slice(crate::safety::bytes::bytes_of(i_block));
     let depth = node_header(&root).eh_depth;
     if node_header(&root).eh_magic != EXT4_EXT_MAGIC {
         init_node_header(&mut root, 0, ROOT_NODE_CAP as u16);
@@ -1743,27 +1737,26 @@ pub fn ext4_ext_append(
             write_node(fs, down, &down_data, csum_seed)?;
             let new_depth = old_depth + 1;
             init_node_header(&mut root, new_depth, old_cap);
-            // SAFETY: root 60B holds 4 index entries per contract.
-            unsafe {
-                let first_ei = if old_depth == 0 {
-                    // Downgraded leaf: first index key = first extent's ee_block.
-                    let n = node_header(&down_data).eh_entries as usize;
-                    if n == 0 { e.ee_block } else { node_extents(&down_data, external_node_cap(fs))[0].ee_block }
-                } else {
-                    let n = node_header(&down_data).eh_entries as usize;
-                    if n == 0 { e.ee_block } else { node_indices(&down_data, external_node_cap(fs))[0].ei_block }
-                };
-                let slot = &mut node_indices_mut(&mut root, ROOT_NODE_CAP)[0];
-                slot.ei_block = first_ei;
-                slot.ei_leaf_lo = down as u32;
-                slot.ei_leaf_hi = (down >> 32) as u16;
-                slot.ei_unused = 0;
-                let slot2 = &mut node_indices_mut(&mut root, ROOT_NODE_CAP)[1];
-                slot2.ei_block = split.ei_block;
-                slot2.ei_leaf_lo = split.child as u32;
-                slot2.ei_leaf_hi = (split.child >> 32) as u16;
-                slot2.ei_unused = 0;
-            }
+            // Root 60B holds 4 index entries per contract
+            // (INV-EXT-VIEW).
+            let first_ei = if old_depth == 0 {
+                // Downgraded leaf: first index key = first extent's ee_block.
+                let n = node_header(&down_data).eh_entries as usize;
+                if n == 0 { e.ee_block } else { node_extents(&down_data, external_node_cap(fs))[0].ee_block }
+            } else {
+                let n = node_header(&down_data).eh_entries as usize;
+                if n == 0 { e.ee_block } else { node_indices(&down_data, external_node_cap(fs))[0].ei_block }
+            };
+            let slot = &mut node_indices_mut(&mut root, ROOT_NODE_CAP)[0];
+            slot.ei_block = first_ei;
+            slot.ei_leaf_lo = down as u32;
+            slot.ei_leaf_hi = (down >> 32) as u16;
+            slot.ei_unused = 0;
+            let slot2 = &mut node_indices_mut(&mut root, ROOT_NODE_CAP)[1];
+            slot2.ei_block = split.ei_block;
+            slot2.ei_leaf_lo = split.child as u32;
+            slot2.ei_leaf_hi = (split.child >> 32) as u16;
+            slot2.ei_unused = 0;
             node_header_mut(&mut root).eh_entries = 2;
             // rux:exthunt (retired dfx=exthunt): the tree just grew one level — the event the
             // ftest04/zzprobe4 all-zeros family correlates with.
@@ -1783,15 +1776,9 @@ pub fn ext4_ext_append(
         }
     }
 
-    // Copy the root image back into i_block.
-    // SAFETY: same-size copy (60 bytes) into the inode field.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            root.as_ptr(),
-            i_block.as_mut_ptr() as *mut u8,
-            60,
-        );
-    }
+    // Copy the root image back into i_block — same-size byte images
+    // (INV-CBYTES-1).
+    crate::safety::bytes::bytes_of_mut(i_block).copy_from_slice(&root);
     Ok(())
 }
 
@@ -1806,10 +1793,9 @@ pub fn ext4_ext_gather(
     if h.eh_magic != EXT4_EXT_MAGIC {
         return Ok(out);
     }
-    // SAFETY: root node access bounded by ROOT_NODE_CAP (60 bytes).
-    unsafe {
-        gather_node(fs, root, ROOT_NODE_CAP, h.eh_depth, &mut out)?;
-    }
+    // Root node access bounded by ROOT_NODE_CAP (60 bytes; the view's
+    // own bounds contract).
+    gather_node(fs, root, ROOT_NODE_CAP, h.eh_depth, &mut out)?;
     Ok(out)
 }
 
@@ -2208,12 +2194,11 @@ pub fn ext4_ext_convert_unwritten(
         let mut node = root.to_vec();
         let h = node_header_mut(&mut node);
         h.eh_entries = spliced.len() as u16;
-        // SAFETY: spliced.len() <= ROOT_NODE_CAP fits the 60-byte root.
-        unsafe {
-            node_extents_mut(&mut node, ROOT_NODE_CAP)[..spliced.len()]
-                .copy_from_slice(&spliced.iter().map(|e| e.to_disk()).collect::<alloc::vec::Vec<_>>());
-            core::ptr::copy_nonoverlapping(node.as_ptr(), i_block.as_mut_ptr() as *mut u8, 60);
-        }
+        // spliced.len() <= ROOT_NODE_CAP fits the 60-byte root
+        // (INV-EXT-VIEW; the image copy is same-size both sides).
+        node_extents_mut(&mut node, ROOT_NODE_CAP)[..spliced.len()]
+            .copy_from_slice(&spliced.iter().map(|e| e.to_disk()).collect::<alloc::vec::Vec<_>>());
+        crate::safety::bytes::bytes_of_mut(i_block).copy_from_slice(&node[..60]);
         return Ok(());
     }
     // Depth >= 1: LEAF-LOCAL splices. The write's range usually covers a
@@ -2262,12 +2247,11 @@ pub fn ext4_ext_convert_unwritten(
                 }
                 let h = node_header_mut(&mut node);
                 h.eh_entries = spliced.len() as u16;
-                // SAFETY: spliced.len() <= cap fits the node buffer.
-                unsafe {
-                    let disk: alloc::vec::Vec<_> =
-                        spliced.iter().map(|e| e.to_disk()).collect();
-                    node_extents_mut(&mut node, cap)[..spliced.len()].copy_from_slice(&disk);
-                }
+                // spliced.len() <= cap fits the node buffer
+                // (INV-EXT-VIEW).
+                let disk: alloc::vec::Vec<_> =
+                    spliced.iter().map(|e| e.to_disk()).collect();
+                node_extents_mut(&mut node, cap)[..spliced.len()].copy_from_slice(&disk);
                 // SAFETY: leaf_blk from the tree walk.
                 write_node(fs, leaf_blk, &node, csum_seed)?;
                 lb = leaf_end;
