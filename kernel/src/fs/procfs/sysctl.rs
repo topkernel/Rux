@@ -189,7 +189,7 @@ pub fn write_panic_on_oops(input: &[u8]) -> i32 {
 pub fn generate_sched_schedstats() -> Vec<u8> {
     alloc::format!(
         "{}\n",
-        if crate::sched::stats::enabled() { 1 } else { 0 }
+        if crate::sched::sched_hooks::enabled() { 1 } else { 0 }
     )
     .into_bytes()
 }
@@ -197,7 +197,7 @@ pub fn generate_sched_schedstats() -> Vec<u8> {
 pub fn write_sched_schedstats(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v @ 0..=1) => {
-            crate::sched::stats::set_enabled(v == 1);
+            crate::sched::sched_hooks::set_enabled(v == 1);
             0
         }
         _ => -(crate::errno::constants::EINVAL as i32),

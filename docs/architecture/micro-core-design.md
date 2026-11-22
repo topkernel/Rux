@@ -126,7 +126,7 @@ rux-core          (≈3,000-3,500 dual lines; the entire TCB)
   safety/  sync-primitives  task-lifecycle  timer-core  printk-ring
   ← verification stack: Kani 12/12, Miri 0-UB, Verus narrow-adopt
 
-rux-sched-policy  forbid-safe  (CFS/RT/fairness/wakeup/deadline logic)
+rux-sched  forbid-safe  (CFS/RT/fairness/wakeup/deadline logic)
 rux-mm-policy     forbid-safe  (VMA tree, mmap/COW/fault DECISIONS, brk)
 rux-syscall       forbid-safe  (DONE at M3; the pattern-proven first rung)
 rux-fs-svc        forbid-safe  (VFS glue, page cache, leaf filesystems)
@@ -146,13 +146,17 @@ size. See §6 for the stage math.
 
 ## 4. The two policy splits (the new rungs this design adds)
 
+> Naming (user directive, 2026-11-22): the service crates carry NO
+> -policy suffix — `rux-sched` (S1) and `rux-mm` (M1). The split
+> design below is unchanged; only the crate names shorten.
+
 The campaign's earlier framing kept sched and mm whole in "the framework".
 Both bundle decidable policy over a small unsafe core; the splits separate
 them.
 
 ### Rung S1 — sched policy / core split
 
-- MOVES to `rux-sched-policy` (forbid): CFS/RT/deadline decision logic,
+- MOVES to `rux-sched` (forbid): CFS/RT/deadline decision logic,
   fairness math, wakeup placement policy, load-balancing decisions,
   cgroup scheduling policy, idle balancing, the census/diagnostic walks.
 - STAYS in core: `__switch_to` + tp derivation + stack switch (F-CS/F-TP),

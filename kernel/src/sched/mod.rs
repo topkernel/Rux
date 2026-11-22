@@ -23,18 +23,18 @@ pub mod sched_hooks;
 pub mod entities;
 pub mod reapdrain;
 pub mod sched;
-pub mod sched_policy;
-pub mod sched_ev;
+// pub mod sched_policy; — MOVED to the rux-sched-policy service crate (S1b)
+// pub mod sched_ev; — MOVED to the rux-sched-policy service crate (S1b)
 pub mod class;
-pub mod rt;
-pub mod deadline;
-pub mod stop_task;
-pub mod idle;
-pub mod fair;
+// pub mod rt; — MOVED to the rux-sched-policy service crate (S1b)
+// pub mod deadline; — MOVED to the rux-sched-policy service crate (S1b)
+// pub mod stop_task; — MOVED to the rux-sched-policy service crate (S1b)
+// pub mod idle; — MOVED to the rux-sched-policy service crate (S1b)
+// pub mod fair; — MOVED to the rux-sched-policy service crate (S1b)
 pub mod cgroup;
-pub mod wakewatch;
+// pub mod wakewatch; — MOVED to the rux-sched-policy service crate (S1b)
 pub mod side_edges;
-pub mod stats;
+// pub mod stats; — MOVED to the rux-sched-policy service crate (S1b)
 
 pub use sched::{
     current,
@@ -65,9 +65,8 @@ pub use sched::{
     claim_idle_cpu_for_prefer,
     preempt_check_wake,
     preempt_check_wake_sync,
-    // 105th wake-dispatch census latches (bindertrace consumer).
-    WAKE_DISP,
-    WAKE_IDLE_MASK,
+    // 105th wake-dispatch census latches (bindertrace consumer):
+    // readers use sched_hooks::wake_disp()/wake_idle_mask().
     grq_idle_mask,
     grq_nr_running_now,
     wake_up_process,
@@ -111,7 +110,7 @@ pub use entities::{
     PRIO_TO_WEIGHT,
     PRIO_TO_WMULT,
 };
-pub use fair::{
+pub use entities::{
     CfsRunQueue,
     SCHED_MIN_GRANULARITY_NS,
     SCHED_LATENCY_NS,
@@ -132,26 +131,19 @@ pub use class::{
 };
 
 // Export RT scheduler types
-pub use rt::{
-    RtRunQueue,
-    RT_SCHED_CLASS,
-    MAX_RT_PRIO,
-};
+pub use entities::{RtRunQueue, MAX_RT_PRIO};
 
 // Export deadline scheduler types
-pub use deadline::{
-    DlRunQueue,
-    DL_SCHED_CLASS,
-};
+pub use entities::DlRunQueue;
 
 // Export fair scheduler
-pub use fair::FAIR_SCHED_CLASS;
+// FAIR_SCHED_CLASS: class chain via sched_hooks::fair_sched_class()
 
 // Export idle scheduler
-pub use idle::IDLE_SCHED_CLASS;
+// IDLE_SCHED_CLASS: via sched_hooks::idle_sched_class()
 
 // Export stop scheduler
-pub use stop_task::STOP_SCHED_CLASS;
+// STOP_SCHED_CLASS: via sched_hooks::stop_sched_class()
 
 // Export MAX_CPUS directly from config
 pub use crate::config::MAX_CPUS;

@@ -2865,8 +2865,7 @@ pub fn param_stall_dump() {
     // tick context — see trap.rs WW-P1-WATCH-ADD).
     if crate::trace::EVENT_SCHEDTRACE.armed() {
         let mut p1_watched = false;
-        for (i, w) in crate::sched::sched::WW_WATCH.iter().enumerate() {
-            let t = w.load(core::sync::atomic::Ordering::Relaxed);
+        for (i, &t) in crate::sched::sched_hooks::ww_watch_slots().iter().enumerate() {
             if t == 0 {
                 continue;
             }

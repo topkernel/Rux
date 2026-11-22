@@ -360,7 +360,7 @@ version = "0.1.0"
 dependencies = [
  "rux",
  "rux-net",
- "rux-sched-policy",
+ "rux-sched",
  "rux-syscall",
 ]
 
@@ -372,7 +372,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rux-sched-policy"
+name = "rux-sched"
 version = "0.1.0"
 dependencies = [
  "rux",

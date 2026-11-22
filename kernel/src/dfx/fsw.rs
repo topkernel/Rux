@@ -230,7 +230,7 @@ pub fn open_exec_stamp() -> (u64, bool) {
         None => (w0, false),
         Some(t) => {
             t.sched_entity()
-                .update_exec_runtime(crate::sched::fair::sched_clock());
+                .update_exec_runtime(crate::sched::entities::sched_clock());
             (w0, true)
         }
     }
@@ -248,7 +248,7 @@ pub fn open_close(w0: u64, exec_armed: bool) {
         if let Some(t) = crate::sched::current() {
             let d = t
                 .sched_entity()
-                .update_exec_runtime(crate::sched::fair::sched_clock());
+                .update_exec_runtime(crate::sched::entities::sched_clock());
             OPEN_EXEC_NS.fetch_add(d, Ordering::Relaxed);
             max_update(&OPEN_EXEC_MAX_NS, d);
         }

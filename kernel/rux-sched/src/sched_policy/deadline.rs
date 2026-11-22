@@ -1,25 +1,11 @@
-//! MIT License
-//!
-//! Copyright (c) 2026 Fei Wang
-//!
-//! Deadline Scheduling Implementation
-//!
-//! Implements SCHED_DEADLINE using Earliest Deadline First (EDF)
-//! with Constant Bandwidth Server (CBS) for bandwidth control.
-//!
-//! Key features:
-//! - EDF: Tasks are scheduled by earliest absolute deadline
-//! - CBS: Enforces runtime/period constraints
-//! - Admission control: Ensures total bandwidth < 100%
-
-#![forbid(unsafe_code)]
+//! The Deadline class (S1b sole copy): the DL policy over the
+//! framework's DlRunQueue storage.
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, AtomicI64, Ordering};
 use crate::process::task::Task;
-use super::class::{SchedClass, RunQueueRef};
-use super::entities::{SchedEntity, SchedRtEntity, SchedDlEntity, LoadWeight, NICE_0_LOAD};
-use super::entities::{DL_BW_UNIT, DL_DEFAULT_PERIOD_NS, DL_DEFAULT_RUNTIME_NS};
-
+use crate::sched::class::{SchedClass, RunQueueRef};
+use crate::sched::entities::{SchedEntity, SchedRtEntity, SchedDlEntity, LoadWeight, NICE_0_LOAD};
+use crate::sched::entities::{DL_BW_UNIT, DL_DEFAULT_PERIOD_NS, DL_DEFAULT_RUNTIME_NS};
 
 
 
@@ -87,7 +73,7 @@ impl DlRunQueue {
         ) {
             if old == 1 {
                 crate::sched::sched::class_nonempty_clear(
-                    crate::sched::sched::CLASS_DL_BIT,
+                    crate::sched::sched_hooks::CLASS_DL_BIT,
                 );
             }
         }
@@ -134,7 +120,7 @@ impl DlRunQueue {
             let dl_old = self.dl_nr_running.fetch_add(1, Ordering::AcqRel);
             if dl_old == 0 {
                 crate::sched::sched::class_nonempty_set(
-                    crate::sched::sched::CLASS_DL_BIT,
+                    crate::sched::sched_hooks::CLASS_DL_BIT,
                 );
             }
 
@@ -432,3 +418,4 @@ impl SchedClass for DlSchedClass {
 
 /// Global deadline scheduling class instance
 pub static DL_SCHED_CLASS: DlSchedClass = DlSchedClass::new();
+

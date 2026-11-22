@@ -75,7 +75,7 @@ pub fn test_scheduler() {
     // CPU than a nice 19 task. Inverting the factor starves the
     // low-priority tasks, so the direction is pinned here.
     {
-        use crate::sched::fair::SchedEntity;
+        use crate::sched::entities::SchedEntity;
         const DELTA: u64 = 1_000_000; // 1ms
 
         let hi = SchedEntity::from_nice(-20);

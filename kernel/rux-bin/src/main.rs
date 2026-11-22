@@ -14,7 +14,7 @@ use rux::rust_main_impl;
 pub extern "C" fn rust_main() -> ! {
     // Service registration MUST precede the first syscall: the args/
     // regs tables route every dispatch from here on.
-    rux_sched_policy::register_all();
+    rux_sched::register_all();
     rux_net::register_all();
     rux_syscall::register_all();
     rust_main_impl()

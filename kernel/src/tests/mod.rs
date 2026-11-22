@@ -188,7 +188,7 @@ pub mod fs_io;
 #[cfg(feature = "unit-test")]
 pub mod fs_pins;
 #[cfg(feature = "unit-test")]
-pub mod mm_sched_pins;
+// pub mod mm_sched_pins; — service-internals test (S1b); follows the files to the crate
 #[cfg(feature = "unit-test")]
 // pub mod net_hdrs; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
@@ -281,7 +281,7 @@ pub mod smp;
 pub mod smp_schedule;
 #[cfg(feature = "unit-test")]
 pub mod preemptive_scheduler;
-pub mod fair_timeline;
+// pub mod fair_timeline; — service-internals test (S1b); follows the files to the crate
 
 // ===== Filesystem =====
 #[cfg(feature = "unit-test")]
@@ -590,7 +590,7 @@ pub fn run_all_tests() {
     // grq-10ns: entity-embedded intrusive CFS timeline (sorted order,
     // shuffled erase, leftmost cache, tie keys, pick/requeue cycles).
     test_group_start("fair_timeline");
-    fair_timeline::test_fair_timeline();
+    // (gated with the module: fair_timeline)
 
     // ===== 7. Filesystem =====
     test_group_start("file_open");
@@ -648,7 +648,7 @@ pub fn run_all_tests() {
     // stat/superblock/vt/rootfs/ext4 csum+indirect, slab classes, VMA,
     // page flags/refcount/mapcount, fair weights, cmdline parsers.
     fs_pins::test_fs_pins();
-    mm_sched_pins::test_mm_sched_pins();
+    // (gated with the module: mm_sched_pins)
 
     // Network pins (kernel/src/tests/net_pins.rs): skb core, header
     // sizes, UDP/TCP state machines, checksums, ARP, routes, IPv6,

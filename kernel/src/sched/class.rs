@@ -200,11 +200,11 @@ impl SchedClassId {
     /// Get the scheduling class for this ID
     pub fn to_class(self) -> &'static dyn SchedClass {
         match self {
-            SchedClassId::Stop => &super::stop_task::STOP_SCHED_CLASS,
-            SchedClassId::Deadline => &super::deadline::DL_SCHED_CLASS,
-            SchedClassId::Rt => &super::rt::RT_SCHED_CLASS,
-            SchedClassId::Fair => &super::fair::FAIR_SCHED_CLASS,
-            SchedClassId::Idle => &super::idle::IDLE_SCHED_CLASS,
+            SchedClassId::Stop => crate::sched::sched_hooks::stop_sched_class(),
+            SchedClassId::Deadline => crate::sched::sched_hooks::dl_sched_class(),
+            SchedClassId::Rt => crate::sched::sched_hooks::rt_sched_class(),
+            SchedClassId::Fair => crate::sched::sched_hooks::fair_sched_class(),
+            SchedClassId::Idle => crate::sched::sched_hooks::idle_sched_class(),
         }
     }
 }
@@ -217,10 +217,10 @@ pub fn task_sched_class(task: &Task) -> &'static dyn SchedClass {
     use crate::process::task::SchedPolicy;
 
     match task.policy() {
-        SchedPolicy::Fifo | SchedPolicy::Rr => &super::rt::RT_SCHED_CLASS,
-        SchedPolicy::Deadline => &super::deadline::DL_SCHED_CLASS,
+        SchedPolicy::Fifo | SchedPolicy::Rr => crate::sched::sched_hooks::rt_sched_class(),
+        SchedPolicy::Deadline => crate::sched::sched_hooks::dl_sched_class(),
         // SCHED_IDLE tasks are handled by fair class with weight=3 (WEIGHT_IDLEPRIO)
-        SchedPolicy::Idle | SchedPolicy::Normal | SchedPolicy::Batch => &super::fair::FAIR_SCHED_CLASS,
+        SchedPolicy::Idle | SchedPolicy::Normal | SchedPolicy::Batch => crate::sched::sched_hooks::fair_sched_class(),
     }
 }
 
@@ -233,7 +233,7 @@ impl SchedClassIter {
     /// Create a new iterator starting from the highest priority class
     pub fn new() -> Self {
         Self {
-            current: Some(&super::stop_task::STOP_SCHED_CLASS),
+            current: Some(crate::sched::sched_hooks::stop_sched_class()),
         }
     }
 }

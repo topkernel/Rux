@@ -12,6 +12,48 @@ use super::sched::{GlobalRunQueue, GrqPendingReport};
 use super::entities::W2RefusalCensus;
 use crate::config::MAX_CPUS;
 
+// ---- The data contract (S1b): shared event codes / slot tags ----
+
+// Constants the core and the policy both name live HERE (framework):
+// the seam's vocabulary, like FileOps' flag bits.
+
+pub const CLASS_DL_BIT: u32 = 1;
+pub const CLASS_RT_BIT: u32 = 2;
+pub const CLASS_CFS_BIT: u32 = 4;
+pub const SLOT_W_SCHED_PICK: u32 = 1;
+pub const SLOT_W_R56D: u32 = 2;
+pub const SLOT_W_R56C: u32 = 3;
+pub const SLOT_W_STEAL: u32 = 4;
+pub const SLOT_W_ABORT_REPUB: u32 = 5;
+pub const WW_EV_WAKE_OK: u32 = 1;
+pub const WW_EV_LINK: u32 = 2;
+pub const WW_EV_UNLINK_PICK: u32 = 3;
+pub const WW_EV_UNLINK_SCHED: u32 = 4;
+pub const WW_EV_UNLINK_DEQ: u32 = 5;
+pub const WW_EV_UNLINK_POISON: u32 = 6;
+pub const WW_EV_PICK_PUB: u32 = 7;
+pub const WW_EV_WAKE_REFUSED: u32 = 8;
+pub const WW_EV_AFFIRM: u32 = 9;
+
+pub const EV_ENQ_POISONED: u32 = 1; // "ENQ-POISONED-TASK"
+pub const EV_ENQ_DEAD: u32 = 2; // "ENQ-DEAD-TASK"
+pub const EV_DL_ENQ_DEFERRED: u32 = 3; // "DL-ENQ-DEFERRED"
+pub const EV_R119_STALE_LIVE: u32 = 4; // "R119-STALE-LIVE-MARK-CLEARED"
+pub const EV_R49_ONCPU_ORPHAN: u32 = 5; // "R49-ONCPU-ORPHAN healed"
+pub const EV_R80_LIVE_PHANTOM: u32 = 6; // "R80-LIVE-PHANTOM-CLEARED"
+pub const EV_R46_RUNNING_PHANTOM: u32 = 7; // "R46-RUNNING-PHANTOM healed"
+pub const EV_W2_ENQ_HEAL_REFUSED: u32 = 8; // "W2-ENQUEUE-HEAL-REFUSED"
+pub const EV_LP_WAKE_OUTCOME: u32 = 9; // "LP-WAKE-OUTCOME"
+pub const EV_LP_WAKE_SKIP_EMPTY: u32 = 10; // "LP-WAKE-SKIP-EMPTY"
+pub const EV_FREED_WHILE_LINKED: u32 = 11; // "FREED-WHILE-LINKED-UNLINKED"
+pub const EV_NR_RUNNING_DESYNC: u32 = 12; // "NR-RUNNING-DESYNC"
+pub const EV_R56_STEAL: u32 = 13; // "R56-STEAL"
+pub const EV_R56_SLOT_CAPTURE: u32 = 14; // "R56-SLOT-CAPTURE-HEALED"
+pub const EV_R56_QUEUED_MARK: u32 = 15; // "R56-QUEUED-MARK-CLEARED"
+pub const EV_R80_LIVE_MARK: u32 = 16; // "R80-LIVE-MARK-CLEARED"
+pub const EV_RQD_MIGRATE: u32 = 17; // "RQD-MIGRATE-DISPATCH"
+pub const EV_RT_THROTTLED: u32 = 18; // "RT-CLASS-THROTTLED"
+
 /// The hook set: policy fns the core and the wider kernel call.
 #[derive(Clone, Copy)]
 pub struct SchedHooks {
@@ -46,7 +88,6 @@ pub struct SchedHooks {
     pub ww_stalled_cpu_state: fn(cpu: usize) -> (u64, u64, u64),
     pub dfx_claim_inject: fn() -> usize,
     pub dfx_oncpu_inject: fn() -> usize,
-    pub ww_pick_walks: fn() -> u64,
     pub ww_heals: fn() -> (u64, u64),
     pub ww_subgate_counts: fn() -> (u64, u64, u64),
     pub ww_rt_pick_stats: fn() -> (u64, u64, u64),
@@ -75,8 +116,13 @@ pub struct SchedHooks {
     pub note_task_freed: fn(task: *mut crate::process::Task),
     pub report_poisoned_rq_entry: fn(cpu: usize, raw: usize),
     pub ww_idle_phase: fn(cpu: usize) -> u32,
+    pub ww_idle_phase_set: fn(cpu: usize, v: u32),
+    pub sched_cs_phase_set: fn(cpu: usize, v: u32),
+    pub sched_calls_inc: fn(cpu: usize),
     pub sched_cs_phase: fn(cpu: usize) -> u32,
     pub wake_disp: fn() -> u32,
+    pub wake_disp_set: fn(u32),
+    pub wake_idle_mask_set: fn(u32),
     pub wake_idle_mask: fn() -> u32,
     pub class_nonempty: fn() -> u32,
     pub pt_task: fn(cpu: usize) -> usize,
@@ -87,14 +133,51 @@ pub struct SchedHooks {
     pub psledger_jif: fn(cpu: usize) -> u64,
     pub psledger_pk: fn(cpu: usize) -> u32,
     pub ww_watch: fn(cpu: usize) -> usize,
+    pub ww_watch_slots: fn() -> alloc::vec::Vec<usize>,
     pub sched_calls: fn(cpu: usize) -> u64,
+    pub class_nonempty_set: fn(bit: u32),
+    pub class_nonempty_clear: fn(bit: u32),
+    pub load_balance: fn(),
+    pub psledger_note_publish: fn(task: *mut Task, cpu: usize, pk: u32),
+    pub psledger_peek: fn(task: *mut Task) -> Option<(u32, u32, u64)>,
+    pub sched_hist_armed: fn() -> bool,
+    pub sched_hist_ring: fn(task: &Task, kind: u64, why: u64, aux: u64),
+    pub sched_hist_refuse: fn(task: *mut Task, skip_reason: u32, cpu: usize),
+    pub sched_hist_link: fn(task: *mut Task),
+    pub sched_hist_pick: fn(task: *mut Task, cpu: usize),
+    pub ww_cfs_geometry: fn(task: *mut Task) -> (u64, u64, u64),
+    pub ww_cfs_tie_mass: fn(task: *mut Task) -> u64,
+    pub ww_cfs_tie_mass_vr: fn(vr: u64) -> u64,
+    pub ww_tail_fill: fn(ix: usize) -> u64,
+    pub ww_append_dump: fn(out: &mut dyn core::fmt::Write, task: *mut Task, now: u64),
+    pub fair_sched_class: fn() -> &'static dyn SchedClass,
+    pub rt_sched_class: fn() -> &'static dyn SchedClass,
+    pub dl_sched_class: fn() -> &'static dyn SchedClass,
+    pub idle_sched_class: fn() -> &'static dyn SchedClass,
+    pub stop_sched_class: fn() -> &'static dyn SchedClass,
+
+    pub sched_ev: fn(tag: u32, pid: u32, a: u64, b: u64),
+    pub ww_pick_walk_inc: fn(),
+    pub ww_oncpu_heal_inc: fn(),
+    pub ww_claim_heal_inc: fn(),
+    pub tl_poison_insert_inc: fn(),
+    pub tl_poison_erase_inc: fn(),
+    pub vr_canary: fn(rq: &mut crate::sched::entities::CfsRunQueue, task: *mut Task, site: &[u8; 3], vr: u64),
+    pub stale_oncpu_healed: fn(tag: &[u8], cpu_id: usize, task: *mut Task, claim: i32, pk: u32),
+
+    pub tl_poison_inserts: fn() -> u64,
+    pub tl_poison_erases: fn() -> u64,
+    pub ww_pick_walks: fn() -> u64,
+    pub ww_oncpu_heals: fn() -> u64,
+    pub ww_claim_heals: fn() -> u64,
+
 }
 
 impl SchedHooks {
     pub const EMPTY: SchedHooks = SchedHooks {
         enabled: || Default::default(),
         r56_print_pid: |prefix, pid, suffix| Default::default(),
-        sched_clock: || Default::default(),
+        sched_clock: || crate::sched::entities::sched_clock(),
         pick_trace: |task, code| Default::default(),
         pick_gen_supersede: |cpu, task| Default::default(),
         change_task_policy: |task, new_policy, rt_prio| Default::default(),
@@ -147,13 +230,18 @@ impl SchedHooks {
         g_diag_idle_bit: |cpu| Default::default(),
         cpu_tick_stale_ms: |cpu| Default::default(),
         lp_idle_lie_report: |cpu| Default::default(),
-        sched_slice_to_ms: |slice_ns| Default::default(),
+        sched_slice_to_ms: |slice_ns| crate::sched::entities::sched_slice_to_ms(slice_ns),
         sched_ev_drain: |budget| Default::default(),
         note_task_freed: |task| Default::default(),
         report_poisoned_rq_entry: |cpu, raw| Default::default(),
         ww_idle_phase: |_| Default::default(),
+        ww_idle_phase_set: |_,_| {},
+        sched_cs_phase_set: |_,_| {},
+        sched_calls_inc: |_| {},
         sched_cs_phase: |_| Default::default(),
         wake_disp: || Default::default(),
+        wake_disp_set: |_| {},
+        wake_idle_mask_set: |_| {},
         wake_idle_mask: || Default::default(),
         class_nonempty: || Default::default(),
         pt_task: |_| Default::default(),
@@ -164,7 +252,40 @@ impl SchedHooks {
         psledger_jif: |_| Default::default(),
         psledger_pk: |_| Default::default(),
         ww_watch: |_| Default::default(),
+        ww_watch_slots: || alloc::vec::Vec::new(),
         sched_calls: |_| Default::default(),
+        class_nonempty_set: |bit| Default::default(),
+        class_nonempty_clear: |bit| Default::default(),
+        load_balance: || Default::default(),
+        psledger_note_publish: |task, cpu, pk| Default::default(),
+        psledger_peek: |task| Default::default(),
+        sched_hist_armed: || Default::default(),
+        sched_hist_ring: |task, kind, why, aux| Default::default(),
+        sched_hist_refuse: |task, skip_reason, cpu| Default::default(),
+        sched_hist_link: |task| Default::default(),
+        sched_hist_pick: |task, cpu| Default::default(),
+        ww_cfs_geometry: |task| Default::default(),
+        ww_cfs_tie_mass: |task| Default::default(),
+        ww_cfs_tie_mass_vr: |vr| Default::default(),
+        ww_tail_fill: |ix| Default::default(),
+        ww_append_dump: |out, task, now| Default::default(),
+        fair_sched_class: || panic!("SchedHooks: fair_sched_class before registration"),
+        rt_sched_class: || panic!("SchedHooks: rt_sched_class before registration"),
+        dl_sched_class: || panic!("SchedHooks: dl_sched_class before registration"),
+        idle_sched_class: || panic!("SchedHooks: idle_sched_class before registration"),
+        stop_sched_class: || panic!("SchedHooks: stop_sched_class before registration"),
+        sched_ev: |_,_,_,_| {},
+        ww_pick_walk_inc: || {},
+        ww_oncpu_heal_inc: || {},
+        ww_claim_heal_inc: || {},
+        tl_poison_insert_inc: || {},
+        tl_poison_erase_inc: || {},
+        vr_canary: |_,_,_,_| {},
+        stale_oncpu_healed: |_,_,_,_,_| {},
+        tl_poison_inserts: || crate::sched::entities::TL_POISON.inserts.load(core::sync::atomic::Ordering::Relaxed),
+        tl_poison_erases: || crate::sched::entities::TL_POISON.erases.load(core::sync::atomic::Ordering::Relaxed),
+        ww_oncpu_heals: || 0,
+        ww_claim_heals: || 0,
     };
 }
 
@@ -362,12 +483,22 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) { (hooks().report_poison
 
 #[inline]
 pub fn ww_idle_phase(cpu: usize) -> u32 { (hooks().ww_idle_phase)(cpu) }
+#[inline]
+pub fn ww_idle_phase_set(cpu: usize, v: u32) { (hooks().ww_idle_phase_set)(cpu, v) }
+#[inline]
+pub fn sched_cs_phase_set(cpu: usize, v: u32) { (hooks().sched_cs_phase_set)(cpu, v) }
+#[inline]
+pub fn sched_calls_inc(cpu: usize) { (hooks().sched_calls_inc)(cpu) }
 
 #[inline]
 pub fn sched_cs_phase(cpu: usize) -> u32 { (hooks().sched_cs_phase)(cpu) }
 
 #[inline]
 pub fn wake_disp() -> u32 { (hooks().wake_disp)() }
+#[inline]
+pub fn wake_disp_set(v: u32) { (hooks().wake_disp_set)(v) }
+#[inline]
+pub fn wake_idle_mask_set(v: u32) { (hooks().wake_idle_mask_set)(v) }
 
 #[inline]
 pub fn wake_idle_mask() -> u32 { (hooks().wake_idle_mask)() }
@@ -398,6 +529,94 @@ pub fn psledger_pk(cpu: usize) -> u32 { (hooks().psledger_pk)(cpu) }
 
 #[inline]
 pub fn ww_watch(cpu: usize) -> usize { (hooks().ww_watch)(cpu) }
+#[inline]
+pub fn ww_watch_slots() -> alloc::vec::Vec<usize> { (hooks().ww_watch_slots)() }
 
 #[inline]
 pub fn sched_calls(cpu: usize) -> u64 { (hooks().sched_calls)(cpu) }
+
+#[inline]
+pub fn class_nonempty_set(bit: u32) { (hooks().class_nonempty_set)(bit) }
+
+#[inline]
+pub fn class_nonempty_clear(bit: u32) { (hooks().class_nonempty_clear)(bit) }
+
+#[inline]
+pub fn load_balance() { (hooks().load_balance)() }
+
+#[inline]
+pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) { (hooks().psledger_note_publish)(task, cpu, pk) }
+
+#[inline]
+pub fn psledger_peek(task: *mut Task) -> Option<(u32, u32, u64)> { (hooks().psledger_peek)(task) }
+
+#[inline]
+pub fn sched_hist_armed() -> bool { (hooks().sched_hist_armed)() }
+
+#[inline]
+pub fn sched_hist_ring(task: &Task, kind: u64, why: u64, aux: u64) { (hooks().sched_hist_ring)(task, kind, why, aux) }
+
+#[inline]
+pub fn sched_hist_refuse(task: *mut Task, skip_reason: u32, cpu: usize) { (hooks().sched_hist_refuse)(task, skip_reason, cpu) }
+
+#[inline]
+pub fn sched_hist_link(task: *mut Task) { (hooks().sched_hist_link)(task) }
+
+#[inline]
+pub fn sched_hist_pick(task: *mut Task, cpu: usize) { (hooks().sched_hist_pick)(task, cpu) }
+
+#[inline]
+pub fn ww_cfs_geometry(task: *mut Task) -> (u64, u64, u64) { (hooks().ww_cfs_geometry)(task) }
+
+#[inline]
+pub fn ww_cfs_tie_mass(task: *mut Task) -> u64 { (hooks().ww_cfs_tie_mass)(task) }
+
+#[inline]
+pub fn ww_cfs_tie_mass_vr(vr: u64) -> u64 { (hooks().ww_cfs_tie_mass_vr)(vr) }
+
+#[inline]
+pub fn ww_tail_fill(ix: usize) -> u64 { (hooks().ww_tail_fill)(ix) }
+
+#[inline]
+pub fn ww_append_dump(out: &mut dyn core::fmt::Write, task: *mut Task, now: u64) { (hooks().ww_append_dump)(out, task, now) }
+
+#[inline]
+pub fn fair_sched_class() -> &'static dyn SchedClass { (hooks().fair_sched_class)() }
+#[inline]
+pub fn rt_sched_class() -> &'static dyn SchedClass { (hooks().rt_sched_class)() }
+#[inline]
+pub fn dl_sched_class() -> &'static dyn SchedClass { (hooks().dl_sched_class)() }
+#[inline]
+pub fn idle_sched_class() -> &'static dyn SchedClass { (hooks().idle_sched_class)() }
+#[inline]
+pub fn stop_sched_class() -> &'static dyn SchedClass { (hooks().stop_sched_class)() }
+
+#[inline]
+pub fn sched_ev(tag: u32, pid: u32, a: u64, b: u64) { (hooks().sched_ev)(tag, pid, a, b) }
+#[inline]
+pub fn ww_pick_walk_inc() { (hooks().ww_pick_walk_inc)() }
+#[inline]
+pub fn ww_oncpu_heal_inc() { (hooks().ww_oncpu_heal_inc)() }
+#[inline]
+pub fn ww_claim_heal_inc() { (hooks().ww_claim_heal_inc)() }
+#[inline]
+pub fn tl_poison_insert_inc() { (hooks().tl_poison_insert_inc)() }
+#[inline]
+pub fn tl_poison_erase_inc() { (hooks().tl_poison_erase_inc)() }
+#[inline]
+pub fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut Task, claim: i32, pk: u32) { (hooks().stale_oncpu_healed)(tag, cpu_id, task, claim, pk) }
+
+#[inline]
+pub fn vr_canary(rq: &mut crate::sched::entities::CfsRunQueue, task: *mut Task, site: &[u8; 3], vr: u64) { (hooks().vr_canary)(rq, task, site, vr) }
+
+#[inline]
+pub fn tl_poison_inserts() -> u64 { (hooks().tl_poison_inserts)() }
+
+#[inline]
+pub fn tl_poison_erases() -> u64 { (hooks().tl_poison_erases)() }
+
+#[inline]
+pub fn ww_oncpu_heals() -> u64 { (hooks().ww_oncpu_heals)() }
+
+#[inline]
+pub fn ww_claim_heals() -> u64 { (hooks().ww_claim_heals)() }

@@ -16,9 +16,9 @@
 // hold the global runqueue lock for every enqueue/dequeue/pick); the
 // raw Task pointers inside the BTreeMap are guarded by the queue's
 // link/unlink protocol.
-unsafe impl Send for crate::sched::deadline::DlRunQueue {}
+unsafe impl Send for crate::sched::entities::DlRunQueue {}
 // SAFETY: same GRQ serialization across CPUs.
-unsafe impl Sync for crate::sched::deadline::DlRunQueue {}
+unsafe impl Sync for crate::sched::entities::DlRunQueue {}
 
 // ---- sched_ev.rs ----------------------------------------------------------
 

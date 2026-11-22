@@ -1705,8 +1705,8 @@ fn ww_heartbeat(now_time: u64) {
         mm_d[c] = mm[c].saturating_sub(LAST_MM[c].load(Ordering::Relaxed));
         LAST_MM[c].store(mm[c], Ordering::Relaxed);
     }
-    let phase0 = crate::sched::sched::WW_IDLE_PHASE[0].load(Ordering::Acquire);
-    let phase1 = crate::sched::sched::WW_IDLE_PHASE[1].load(Ordering::Acquire);
+    let phase0 = crate::sched::sched_hooks::ww_idle_phase(0);
+    let phase1 = crate::sched::sched_hooks::ww_idle_phase(1);
 
     // Wheel census (short lock; heartbeat is 1 Hz and holds no timer
     // locks at this point). Wheel-side: len + overdue hres backlog.
@@ -1852,15 +1852,15 @@ fn ww_heartbeat(now_time: u64) {
     static LAST_WALKS: AtomicU64 = AtomicU64::new(0);
     static LAST_OH: AtomicU64 = AtomicU64::new(0);
     static LAST_CH: AtomicU64 = AtomicU64::new(0);
-    let walks_total = crate::sched::fair::ww_pick_walks();
+    let walks_total = crate::sched::sched_hooks::ww_pick_walks();
     let walks_d = walks_total.saturating_sub(LAST_WALKS.load(Ordering::Relaxed));
     LAST_WALKS.store(walks_total, Ordering::Relaxed);
-    let (oh, ch) = crate::sched::fair::ww_heals();
+    let (oh, ch) = crate::sched::sched_hooks::ww_heals();
     let oh_d = oh.saturating_sub(LAST_OH.load(Ordering::Relaxed));
     let ch_d = ch.saturating_sub(LAST_CH.load(Ordering::Relaxed));
     LAST_OH.store(oh, Ordering::Relaxed);
     LAST_CH.store(ch, Ordering::Relaxed);
-    let (s250, s500, s750) = crate::sched::wakewatch::ww_subgate_counts();
+    let (s250, s500, s750) = crate::sched::sched_hooks::ww_subgate_counts();
     crate::pr_info!(
         "WW5: walks={} oncpu_heal={} claim_heal={} s250={} s500={} s750={}",
         walks_d, oh_d, ch_d, s250, s500, s750
@@ -1888,7 +1888,7 @@ fn ww_heartbeat(now_time: u64) {
         let f_n = WW_FIRE_N.load(Ordering::Relaxed);
         let f_sum_us = WW_FIRE_SUM_TICKS.load(Ordering::Relaxed) / ticks_per_us;
         let f_avg = if f_n > 0 { f_sum_us / f_n } else { 0 };
-        let (rt_n, rt_avg, rt_max) = crate::sched::wakewatch::ww_rt_pick_stats();
+        let (rt_n, rt_avg, rt_max) = crate::sched::sched_hooks::ww_rt_pick_stats();
         crate::pr_info!(
             "WW6: fire_n={} fire_avg={}us fire_max={}us rt_pick_n={} rt_pick_avg={}us rt_pick_max={}us",
             f_n,
@@ -1919,10 +1919,10 @@ fn ww_heartbeat(now_time: u64) {
         sched[4], sched[5], sched[6],
         sched[7], sched[8], sched[9]
     );
-    crate::sched::wakewatch::heartbeat();
+    crate::sched::sched_hooks::heartbeat();
     // sc158 (Session R): one-shot park dump for wedged foundation/sa_main
     // registrar threads - see wakewatch::stallwatch_tick.
-    crate::sched::wakewatch::stallwatch_tick();
+    crate::sched::sched_hooks::stallwatch_tick();
 }
 
 /// Rate-gated direct-console print for fire-lateness outliers (no GRQ

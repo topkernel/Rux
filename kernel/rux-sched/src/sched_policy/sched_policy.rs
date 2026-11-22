@@ -13,8 +13,27 @@
 // The core half's items (bare names stay valid through the glob; the
 // visibility of private core items the policy needs is pub(crate) —
 // the carve's fixer loop bumped exactly those).
-use super::sched::*;
-use super::entities::W2RefusalCensus;
+use crate::sched::sched::*;
+use crate::sched::entities::W2RefusalCensus;
+use crate::sched::sched_hooks::{
+    CLASS_DL_BIT,
+    CLASS_RT_BIT,
+    CLASS_CFS_BIT,
+    SLOT_W_SCHED_PICK,
+    SLOT_W_R56D,
+    SLOT_W_R56C,
+    SLOT_W_STEAL,
+    SLOT_W_ABORT_REPUB,
+    WW_EV_WAKE_OK,
+    WW_EV_LINK,
+    WW_EV_UNLINK_PICK,
+    WW_EV_UNLINK_SCHED,
+    WW_EV_UNLINK_DEQ,
+    WW_EV_UNLINK_POISON,
+    WW_EV_PICK_PUB,
+    WW_EV_WAKE_REFUSED,
+    WW_EV_AFFIRM
+};
 use crate::errno;
 use crate::process::task::{Task, TaskState, SchedPolicy, Pid, PICK_LIVE, PICK_PICKED};
 use crate::arch;
@@ -57,7 +76,7 @@ fn arm_dl_replenish_timer(task: *mut Task) {
         if cur != 0 && crate::timer::timer_pending(cur) {
             return;
         }
-        let now = crate::sched::fair::sched_clock();
+        let now = crate::sched::entities::sched_clock();
         let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
         let delta_ns = deadline.saturating_sub(now);
         let expires = crate::drivers::timer::get_jiffies() + dl_ns_to_jiffies(delta_ns);
@@ -371,11 +390,8 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
 // the same counters at the same serialization point). Relaxed ordering
 // suffices: the GRQ lock provides the happens-before, no other
 // inter-word ordering is consumed.
-pub const CLASS_DL_BIT: u32 = 1;
 
-pub const CLASS_RT_BIT: u32 = 2;
 
-pub const CLASS_CFS_BIT: u32 = 4;
 
 pub static CLASS_NONEMPTY: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
@@ -454,15 +470,10 @@ pub fn ww_slot_mismatch_counters() -> [u64; MAX_CPUS] {
 // zero behavioral change. Tags: 1 = __schedule pick publish, 2 = R56d
 // own-slot resync, 3 = R56c lying-idle-slot heal (wake path), 4 = harvest
 // steal, 5 = switch-abort republish.
-pub const SLOT_W_SCHED_PICK: u32 = 1;
 
-pub const SLOT_W_R56D: u32 = 2;
 
-pub const SLOT_W_R56C: u32 = 3;
 
-pub const SLOT_W_STEAL: u32 = 4;
 
-pub const SLOT_W_ABORT_REPUB: u32 = 5;
 
 #[inline]
 pub(crate) fn pick_gen_publish(cpu: usize, task: *mut Task) {
@@ -627,7 +638,7 @@ pub fn preempt_check_wake(task: *mut Task) {
                 // the last run is µs-to-ms against a 6 ms threshold.
                 let se = crate::sched::edges::task_shared(task).sched_entity();
                 let exec_start = se.exec_start.load(core::sync::atomic::Ordering::Acquire);
-                let waited = crate::sched::fair::sched_clock().saturating_sub(exec_start);
+                let waited = crate::sched::entities::sched_clock().saturating_sub(exec_start);
                 // RT-plan R3 (docs/development/rt-kernel-plan.md): the D-14
                 // batch window was one full scheduling-latency window
                 // (6 ms), which quantized every fair wake that lost the
@@ -646,7 +657,7 @@ pub fn preempt_check_wake(task: *mut Task) {
                 // median 28,135 -> 150 us (187x); quiet 43 -> 31 us;
                 // p1_null/p2_ctxsw/p5b_dgram flat.
                 if exec_start != 0
-                    && waited < crate::sched::fair::SCHED_MIN_GRANULARITY_NS
+                    && waited < crate::sched::entities::SCHED_MIN_GRANULARITY_NS
                 {
                     return;
                 }
@@ -708,7 +719,7 @@ pub fn sched_hist_link(task: *mut Task) {
     t.wake_last_jif
         .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
     t.wait_open_ns
-        .store(crate::sched::fair::sched_clock(), core::sync::atomic::Ordering::Relaxed);
+        .store(crate::sched::entities::sched_clock(), core::sync::atomic::Ordering::Relaxed);
     sched_hist_ring(t, 1, 0, crate::arch::cpu_id() as u64 & 0xF);
 }
 
@@ -722,7 +733,7 @@ pub fn sched_hist_pick(task: *mut Task, cpu: usize) {
         .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
     let open = t.wait_open_ns.swap(0, core::sync::atomic::Ordering::Relaxed);
     if open != 0 {
-        let d = crate::sched::fair::sched_clock().saturating_sub(open);
+        let d = crate::sched::entities::sched_clock().saturating_sub(open);
         t.wait_last_ns.store(d, core::sync::atomic::Ordering::Relaxed);
         t.wait_sum_ns.fetch_add(d, core::sync::atomic::Ordering::Relaxed);
         t.wait_max_ns.fetch_max(d, core::sync::atomic::Ordering::Relaxed);
@@ -904,7 +915,7 @@ pub fn preempt_check_wake_sync(task: *mut Task) {
                 let curr_vruntime = crate::sched::edges::task_shared(running).sched_entity().get_vruntime();
                 if se_vruntime < curr_vruntime {
                     let delta = curr_vruntime - se_vruntime;
-                    if delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS {
+                    if delta > crate::sched::entities::SCHED_MIN_GRANULARITY_NS {
                         resched_cpu(this_cpu);
                     }
                 }
@@ -977,7 +988,7 @@ pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut
                 crate::sched::edges::task_shared(task)
                     .dl_entity()
                     .exec_start
-                    .store(crate::sched::fair::sched_clock(), core::sync::atomic::Ordering::Release);
+                    .store(crate::sched::entities::sched_clock(), core::sync::atomic::Ordering::Release);
                 // R7-B5: pick removes the task from the queue — pair the count.
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
@@ -1008,8 +1019,8 @@ pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut
         // ring, not the console (a packs used|period_start, b packs
         // now|rt_nr).
         if cpu_id == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-            crate::sched::sched_ev::sched_ev(
-                crate::sched::sched_ev::EV_RT_THROTTLED,
+            crate::sched_policy::sched_ev::sched_ev(
+                crate::sched::sched_hooks::EV_RT_THROTTLED,
                 cpu_id as u32,
                 (RT_TIME_USED[cpu_id].load(core::sync::atomic::Ordering::Relaxed) << 32)
                     | RT_PERIOD_START[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
@@ -1033,7 +1044,7 @@ pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut
         // re-arm; the heal machinery owns that shape, and a blind
         // retry would livelock the resched path.
         let mut skip_owner = usize::MAX;
-        let rt_picked = grq.rt_rq.pick_next_cpu(cpu_id, prev, &mut skip_owner);
+        let rt_picked = crate::sched_policy::rt::rt_pick_next_cpu(&mut grq.rt_rq, cpu_id, prev, &mut skip_owner);
         if skip_owner < MAX_CPUS
             && SWITCHING_OUT[skip_owner].load(core::sync::atomic::Ordering::Acquire) != 0
         {
@@ -1079,7 +1090,7 @@ pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut
 
     // 4. CFS — pick min-vruntime task that can run on this CPU
     if class_mask & CLASS_CFS_BIT != 0 {
-        if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id, prev) {
+        if let Some(task) = crate::sched_policy::fair::cfs_pick_next_cpu(&mut grq.cfs_rq, cpu_id, prev) {
             // PID-0 GATE — see the Deadline block above. This is the exact
             // site of the b64-b66 fatal: the CFS walk returned a
             // freed-then-recycled entry whose pid word read 0 with a claim
@@ -1283,7 +1294,7 @@ fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
         // Wakewatch forensics: consume the wake stamp and classify the
         // wake→pick latency (direct-console prints follow the R34
         // discipline — we hold the GRQ lock here).
-        crate::sched::wakewatch::check_picked(task_ptr, crate::arch::cpu_id() as usize);
+        crate::sched_policy::wakewatch::check_picked(task_ptr, crate::arch::cpu_id() as usize);
         // 63rd: persistent per-task history (strand-wall hunt) — the
         // pick_n counter vs a frozen exec clock is the
         // picked-but-never-executes signature.
@@ -1606,8 +1617,8 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         if pid == TASK_POISON {
             // Rule 1 (grq-lock-1st): NO print under the GRQ — the event
             // ring carries the evidence; the tick drain prints it.
-            crate::sched::sched_ev::sched_ev(
-                crate::sched::sched_ev::EV_ENQ_POISONED,
+            crate::sched_policy::sched_ev::sched_ev(
+                crate::sched::sched_hooks::EV_ENQ_POISONED,
                 pid,
                 0,
                 0,
@@ -1632,8 +1643,8 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         if st.is_dead() {
             // Rule 1: event ring, not the console (was console::putchar
             // under GRQ).
-            crate::sched::sched_ev::sched_ev(
-                crate::sched::sched_ev::EV_ENQ_DEAD,
+            crate::sched_policy::sched_ev::sched_ev(
+                crate::sched::sched_hooks::EV_ENQ_DEAD,
                 task.pid(),
                 st.bits() as u64,
                 0,
@@ -1685,7 +1696,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
             // the old unconditional replenish on every requeue is exactly
             // the defeated-CBS bug). Refuse; the replenish timer owns the
             // re-link. State stays SLEEPING — honest and still wakeable.
-            let now = crate::sched::fair::sched_clock();
+            let now = crate::sched::entities::sched_clock();
             let dl = task.dl_entity();
             let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
             if dl.dl_throttled.load(core::sync::atomic::Ordering::Acquire) && now < deadline {
@@ -1700,8 +1711,8 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
                 // the GRQ is held — record the event, the tick drain
                 // prints it (a = delta to deadline in ms, b = timer id;
                 // b == 0 with a live deadline is the LOST-timer shape).
-                crate::sched::sched_ev::sched_ev(
-                    crate::sched::sched_ev::EV_DL_ENQ_DEFERRED,
+                crate::sched_policy::sched_ev::sched_ev(
+                    crate::sched::sched_hooks::EV_DL_ENQ_DEFERRED,
                     task.pid(),
                     (deadline.saturating_sub(now)) / 1_000_000,
                     dl.replenish_timer.load(core::sync::atomic::Ordering::Acquire) as u64,
@@ -1738,7 +1749,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         SchedPolicy::Idle => {
             // SCHED_IDLE uses CFS with low weight
             let se = task.sched_entity_mut();
-            se.load = crate::sched::entities::LoadWeight::new(crate::sched::fair::WEIGHT_IDLEPRIO);
+            se.load = crate::sched::entities::LoadWeight::new(crate::sched_policy::fair::WEIGHT_IDLEPRIO);
             grq.cfs_rq.enqueue(task_ptr)
         }
     };
@@ -1854,7 +1865,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         ww_record(task_ptr, WW_EV_LINK);
         // Wakewatch forensics: stamp every successful link (wake, fork,
         // heal re-insert) so the pick side can measure wake→run latency.
-        crate::sched::wakewatch::note_wake(task_ptr);
+        crate::sched_policy::wakewatch::note_wake(task_ptr);
         // 63rd: persistent per-task history (strand-wall hunt).
         if sched_hist_armed() {
             sched_hist_link(task_ptr);
@@ -1862,10 +1873,10 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         // Per-task schedstat (T7): open the wait window — the pick edge
         // in __schedule closes it into schedstat_wait_ns. GRQ is held
         // here and there, so the stamp needs no lock of its own.
-        if crate::sched::stats::enabled() && task.pid() != 0 {
+        if crate::sched_policy::stats::enabled() && task.pid() != 0 {
             crate::sched::edges::task_shared(task)
                 .schedstat_wait_start
-                .store(crate::sched::fair::sched_clock(), core::sync::atomic::Ordering::Relaxed);
+                .store(crate::sched::entities::sched_clock(), core::sync::atomic::Ordering::Relaxed);
         }
     }
     inserted
@@ -1932,23 +1943,14 @@ pub fn steer_task_cpu(task: *mut Task, target: i32) {
 /// ordering is the lock's ordering.
 pub const WW_RING: usize = 1024;
 
-pub const WW_EV_WAKE_OK: u32 = 1;
 
-pub const WW_EV_LINK: u32 = 2;
 
-pub const WW_EV_UNLINK_PICK: u32 = 3;
 
-pub const WW_EV_UNLINK_SCHED: u32 = 4;
 
-pub const WW_EV_UNLINK_DEQ: u32 = 5;
 
-pub const WW_EV_UNLINK_POISON: u32 = 6;
 
-pub const WW_EV_PICK_PUB: u32 = 7;
 
-pub const WW_EV_WAKE_REFUSED: u32 = 8;
 
-pub const WW_EV_AFFIRM: u32 = 9;
 
 static WW_TASK: [core::sync::atomic::AtomicUsize; WW_RING] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; WW_RING];
@@ -2635,7 +2637,7 @@ pub fn runq_strand_census(now_j: u64) {
         // 60th: the two pick-walk give-up shapes (stash overflow /
         // skip-all), plus the WALL below this victim: entries every
         // pick consults first. Held under the same GRQ window.
-        let (ovf, skipall) = crate::sched::fair::pick_giveups();
+        let (ovf, skipall) = crate::sched_policy::fair::pick_giveups();
         let mut wall_s = alloc::string::String::new();
         let mut inc_s = alloc::string::String::new();
         let mut min_vr: u64 = 0;
@@ -2680,8 +2682,8 @@ pub fn runq_strand_census(now_j: u64) {
             // The wall: up to 8 entries sorting before the victim.
             {
                 use core::fmt::Write as _;
-                let mut rows: [crate::sched::fair::StrandWallRow; 8] = [
-                    crate::sched::fair::StrandWallRow {
+                let mut rows: [crate::sched::entities::StrandWallRow; 8] = [
+                    crate::sched::entities::StrandWallRow {
                         vruntime: 0,
                         pid: 0,
                         policy: 0,
@@ -2971,7 +2973,7 @@ pub(crate) fn check_cfs_preempt(task: *mut Task, cpus_allowed: u32) {
             let curr_vruntime = incumbent.sched_entity().get_vruntime();
             if se_vruntime < curr_vruntime {
                 let delta = curr_vruntime - se_vruntime;
-                if delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS {
+                if delta > crate::sched::entities::SCHED_MIN_GRANULARITY_NS {
                     resched_cpu(cpu);
                     return;
                 }
@@ -3302,7 +3304,7 @@ pub fn yield_cpu() {
         if matches!(policy, SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle) {
             let task_ptr = cur as *mut Task;
             let mut grq_guard = grq().lock_irqsave();
-            let now = crate::sched::fair::sched_clock();
+            let now = crate::sched::entities::sched_clock();
             let se = cur.sched_entity();
             if grq_guard.cfs_rq.get_curr() == task_ptr {
                 grq_guard.cfs_rq.update_curr(now);
