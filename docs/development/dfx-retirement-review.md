@@ -1,6 +1,13 @@
 # DFX Retirement Review (micro-core-design §7 — the census-math input)
 
 Date: 2026-11-22. Reviewer: the fixverify reverification lane.
+EXECUTED 2026-11-23 by the dfx-retire lane (branch dfx-retire, on top
+of the s1-closure merge 02bfede71): Phase 1 below landed as two commits
+(r83hunt, treehunt — see "Execution record"); the dfx→debug rename of
+§8 is DEFERRED with its precondition re-stated (it edits the six
+service crates' `crate::dfx::` path tokens, which the retirement lane
+does not own).
+
 Method: git archaeology (intro commit → convictions → fixes) crossed with
 face evidence from the four most recent full LTP scans on record
 (prefix@344ef0efb 957, post-RTS-DEFER@a09e7ab08 984, P4-rescan@10adeaf69
@@ -173,24 +180,107 @@ Phase 1 lands inside the −600..1,000 band the plan called for; the
 KEEP trio's retirement is evidence-gated on the live race family, not
 on preference.
 
-## 8. MERGE PLAN — dfx/ → debug/ (lands AFTER S1 closes)
+## 7a. Execution record (2026-11-23, dfx-retire lane)
+
+Phase 1 landed as two commits on branch `dfx-retire` (rebased on
+02bfede71, the s1-closure merge):
+
+- **r83hunt retirement**: −784/+89 across 10 files (net −695). The +89
+  is deliberate, not overhead padding: the six R85 ti_kernel_sp
+  containment GATES in riscv64 trap.S stay as defensive depth (they
+  repair a wild sp to the task's own stack top before PtRegs is
+  pushed), so their report target `r84_ksp_trap` moved from the retired
+  module into `arch/riscv64/trap.rs` in compact form — same symbol,
+  same discipline (raw UART, one report per site per boot). Also
+  removed: the freed-header paint loop AND its trailing duplicate
+  poison re-write in `free_task_slot` (the R47/R12-4 state/pid poison
+  the stale-wake guards actually read is untouched); the R83b waiter
+  self-watch snapshot block in SleepMutex's slowpath; the
+  gate-only `rux:r83scan` trace event row.
+- **treehunt retirement**: −278/+28 across 8 files (net −250). Also
+  removed: the `parent_children_head_ptr` diagnostic accessor (the
+  probe was its only consumer; the `parent_children_head` field is
+  live list machinery); the `rux:treehunt` trace event row;
+  `scripts/test/subreap_boot.py` no longer arms the retired token
+  (kept as the churn regression rig, TREE-* regex stays as a
+  regression tripwire).
+
+Net: **−915 dfx/ lines** (git-tracked: 19,123 → 18,208, exactly the
+two modules; the wider −945/−1,062 diffstat numbers include the
+call-site stub removals in sched/sync/timer/trace and the +89/+28
+replacement comments and trap.rs hook); dfx/ tree 39 → 37 files; trace
+event table 109 → 107 rows; dfx= switch table unchanged at 6 permanent
+switches (monotonicity preserved — nothing added).
+
+Re-verification during execution (beyond the review's face-evidence
+method): a fresh all-tree reference census INCLUDING the path-included
+service crates (`kernel/rux-*/src`, which a `kernel/src/`-only grep
+misses) confirmed every other dfx module has live call sites — scmtap
+in particular (20 emit sites across rux-fs/fifo and
+rux-syscall/network) is ALIVE as an EVENT_SCMTAP echo consumer, not
+dead; an earlier `kernel/src/`-only census had misread it as orphaned.
+
+## 7b. End state after Phase 1 (the documented KEEP-LEGACY rump)
+
+The §7 end state chose the rump over dissolution: `kernel/src/dfx/`
+stays (rename deferred, below) holding —
+
+- **6 permanent dfx= switches** (claiminject, oncpuinject,
+  scribblepark, scribblepid1, scribblesweep, wildwatch): fault
+  injectors, gdb-park actions, and the PTE-mutating detector —
+  behavior changers with no tracepoint form (switches.rs documents
+  each). Exit conditions: the injectors retire when their adjudication
+  hunts (GNOME wedge / R85 tail-phase) close; wildwatch's is §4's
+  criterion below.
+- **The KEEP trio + plumbing** (scribble, leakorigin, wildwatch,
+  forensics_edges) with the evidence-gated exit criteria in §§1/2/4.
+- **The migrated echo-consumer instruments** (allocwatch, driftwatch,
+  filerd, lostpark, monowatch, metawatch, slowtask, reaper, schb,
+  scmtap, ...): gates are `rux:` trace events since dfx-migrate
+  rounds 4/4b/5; the dfx= tokens are gone (no aliases, per the
+  2026-11-17 user directive). They retire family-by-family when their
+  hunts close, the same way r83hunt/treehunt just did.
+- **Standing debug infrastructure, not hunt instruments at all**:
+  taint/bug/backtrace/ksyms/softlockup/hung_task/oops/pstore/taskdump/
+  syscost/fsw/cctx/unixrd/forkprof/mmprof/hilogcensus/spinwatch/
+  mmforensics/ledger/pathstash/memwatch — perf-gate tooling (syscost
+  is REQUIRED by the merge gate), LTP-facing debug surfaces, and
+  pstore/oops which are boot-critical. Cmdline-gated (syscost=1 style)
+  or always-available; no dfx= switch involved.
+
+The rename (§8) is the only remaining mechanical step and is blocked
+on lane ownership, not on evidence: `crate::dfx::` appears in
+kernel/rux-fs, rux-syscall, rux-net, rux-mm, rux-drivers,
+rux-sched-policy (as of the s1-closure base) — six crates the
+dfx-retire lane does not own. It needs one coordinated mechanical
+commit when the crate lanes are quiet; the recipe in §8 is unchanged
+and remains valid.
+
+## 8. MERGE PLAN — dfx/ → debug/ (DEFERRED: needs crate-lane coordination)
 
 The 11-06 dfx→debug rename never reached the module directory:
-`kernel/src/dfx/` still holds 40 files / 52,979 lines while the module
-is declared `pub mod dfx` (lib.rs:140). One more crate-boundary change
-while L4 is debugging the boot hang would add noise, so the rename is
-sequenced after S1 closes. Steps, one mechanical commit:
+`kernel/src/dfx/` still holds the module while it is declared
+`pub mod dfx` (lib.rs). As of the Phase-1 execution (2026-11-23, on
+the s1-closure base) that is 37 git-tracked files / 18,208 lines
+(plus the build-generated, gitignored ksyms_generated.rs). S1 has
+closed, but a NEW blocker replaces the sequencing one: the
+`crate::dfx::` path token now lives inside the six path-included
+service crates (rux-fs, rux-syscall, rux-net, rux-mm, rux-drivers,
+rux-sched) — the rename is a one-commit mechanical rewrite across
+trees the retirement lane does not own, so it waits for a quiet
+window across the crate lanes. Steps, one mechanical commit:
 
-1. Execute Phase 1 retirements above (r83hunt, treehunt) — separate
-   commit, before the rename, so the history shows WHAT left and WHY.
-2. `git mv kernel/src/dfx/*.rs kernel/src/debug/` (the 38 surviving
+1. ~~Execute Phase 1 retirements above (r83hunt, treehunt)~~ DONE
+   2026-11-23 (§7a).
+2. `git mv kernel/src/dfx/*.rs kernel/src/debug/` (the 37 surviving
    files, ksyms_generated.rs included; drop the old directory).
 3. lib.rs: `pub mod dfx;` → `pub mod debug;`; same for any `#[path]`
    references and build.rs/Makefile paths that name `src/dfx`
    (ksyms.bin embed, any doc tooling).
 4. Tree-wide mechanical path rewrite: `crate::dfx::` → `crate::debug::`
-   (plus `dfx::` in the few `use dfx::` forms). No signature changes,
-   no logic changes — the diff must be path-tokens only.
+   (plus `dfx::` in the few `use dfx::` forms), INCLUDING the service
+   crates' sources. No signature changes, no logic changes — the diff
+   must be path-tokens only.
 5. Gate: dual-arch build rc=0, riscv suite green, one quiet syscost
    boot with census in band (Tier 1) — a pure rename must be
    performance-flat, and the gate proves it.

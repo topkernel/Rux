@@ -266,7 +266,7 @@ Current: ~10,300 dual (whole kernel, single-crate census).
 | + M1 mm-policy split | mm policy column → 0 | −~250 |
 | + Rung 3 fs-svc + 5 ext4 | fs service columns → 0 | −~2,400 |
 | + Rung 4 drivers | drivers column → 0 | −~370 |
-| + dfx retirement review (§7) | dead instruments retire | −600~1,000 |
+| + dfx retirement review (§7) | dead instruments retire | −600~1,000 (EXECUTED 2026-11-23: −915 dfx/ lines, r83hunt+treehunt; record in docs/development/dfx-retirement-review.md §7a) |
 | **End state** | **= rux-core size** | **≈4,000-4,700** |
 
 The ≤5,000 target is met with margin iff the dfx review retires its
@@ -281,6 +281,16 @@ hunt alive → instrument moves to `rux-dfx-svc` behind its flag (forbid if
 its unsafe can ride core primitives; else core-adjacent with INV rows).
 Input: L4's alive-call-site census (scribble 49 sites, leakorigin 26,
 r83hunt 8, wildwatch 5, treehunt 1). Each verdict one line in §8's table.
+
+EXECUTED (2026-11-23, dfx-retire lane): the full adjudication record,
+per-family verdicts with evidence and exit criteria, lives in
+docs/development/dfx-retirement-review.md. Phase 1 landed (r83hunt and
+treehunt deleted with their call-site stubs and gate events; −915
+dfx/ lines); the KEEP families (scribble, leakorigin, wildwatch +
+the 6 permanent switches) carry written exit criteria; the dfx→debug
+directory rename is deferred on crate-lane coordination (it rewrites
+`crate::dfx::` tokens inside the six service crates), recipe current
+in the review doc §8.
 
 ## 8. The execution ladder (order is binding; each rung = measure → design seam → flip → forbid → battery)
 

@@ -32,6 +32,15 @@
 //! (`thpark`, `syncguard`, `syncwatch`, `pctlmon`) name instruments
 //! whose probe bodies no longer exist — see `dead_dfx_tokens`.
 //!
+//! FULLY DELETED (§7 retirement round, 2026-11-23): two of the
+//! migrated families' hunts CLOSED, so their instruments AND their
+//! trace events left the tree entirely — `r83scan` (the R74/R83
+//! task-header hunt; fix c1539f6ed) and `treehunt` (the E8-REPAR
+//! unlinked-snapshot hunt; fixes 7d4481320/6f5e397ad). Arming those
+//! two names now draws the unknown-event path, honestly. The
+//! adjudication record with exit criteria for the remaining KEEP
+//! families lives in docs/development/dfx-retirement-review.md.
+//!
 //! What survives here is deliberate, not leftover:
 //!
 //! - BEHAVIOR INJECTION (`claiminject`, `oncpuinject`): these CHANGE
