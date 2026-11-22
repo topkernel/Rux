@@ -19,6 +19,7 @@
 //! 5. idle_sched_class - Per-CPU idle task
 
 pub mod edges;
+pub mod sched_hooks;
 pub mod entities;
 pub mod reapdrain;
 pub mod sched;

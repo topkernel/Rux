@@ -558,3 +558,35 @@ pub const DL_DEFAULT_RUNTIME_NS: u64 = 100_000_000;
 pub const DL_DEFAULT_PERIOD_NS: u64 = 1_000_000_000;
 /// Deadline bandwidth unit (1 << 20 for precision)
 pub const DL_BW_UNIT: u64 = 1 << 20;
+
+/// r24 (kill10 wedge hunt): discriminator census for the W2
+/// WAKE-REFUSED-SLEEPING report — captured under the GRQ lock so the
+/// line tells "linked but starved" from "orphaned live pick mark" from
+/// "lying busy slot". Probe-lock discipline: this helper ONLY reads and
+/// formats; the caller prints after the guard is dropped.
+#[derive(Default)]
+pub struct W2RefusalCensus {
+    pub linked: bool,
+    pub on_rq: bool,
+    pub busy_slot: i32,
+    pub idle_slot: i32,
+    pub exec_ns: u64,
+    pub jiffies: u64,
+    pub quantum_ms: u32,
+}
+
+impl core::fmt::Display for W2RefusalCensus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "linked={} on_rq={} busy_slot={} idle_slot={} exec_ns={} jif={} q_ms={}",
+            self.linked,
+            self.on_rq,
+            self.busy_slot,
+            self.idle_slot,
+            self.exec_ns,
+            self.jiffies,
+            self.quantum_ms
+        )
+    }
+}

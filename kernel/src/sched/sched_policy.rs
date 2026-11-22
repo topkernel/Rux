@@ -14,6 +14,7 @@
 // visibility of private core items the policy needs is pub(crate) —
 // the carve's fixer loop bumped exactly those).
 use super::sched::*;
+use super::entities::W2RefusalCensus;
 use crate::errno;
 use crate::process::task::{Task, TaskState, SchedPolicy, Pid, PICK_LIVE, PICK_PICKED};
 use crate::arch;
@@ -2122,7 +2123,7 @@ pub fn ww_record(task: *mut Task, code: u32) {
 /// P=unlink_pick S=unlink_sched D=unlink_deq X=unlink_poison
 /// K=pick_publish R=wake_refused A=affirm. Reader-side only; called
 /// from the binder-stall census (no GRQ held — the ring is atomics).
-pub fn ww_append_dump<W: core::fmt::Write>(out: &mut W, task: *mut Task, now: u64) {
+pub fn ww_append_dump(out: &mut dyn core::fmt::Write, task: *mut Task, now: u64) {
     if !crate::trace::EVENT_SCHEDTRACE.armed() {
         return;
     }
@@ -2215,20 +2216,6 @@ pub fn ww_append_dump<W: core::fmt::Write>(out: &mut W, task: *mut Task, now: u6
     let _ = writeln!(out, "]");
 }
 
-/// r24 (kill10 wedge hunt): discriminator census for the W2
-/// WAKE-REFUSED-SLEEPING report — captured under the GRQ lock so the
-/// line tells "linked but starved" from "orphaned live pick mark" from
-/// "lying busy slot". Probe-lock discipline: this helper ONLY reads and
-/// formats; the caller prints after the guard is dropped.
-pub struct W2RefusalCensus {
-    pub linked: bool,
-    pub on_rq: bool,
-    pub busy_slot: i32,
-    pub idle_slot: i32,
-    pub exec_ns: u64,
-    pub jiffies: u64,
-    pub quantum_ms: u32,
-}
 
 /// Snapshot the refusing guard's view of `task` (used by task.rs's W2
 /// report). Takes the GRQ lock briefly, mirroring wake_up_enqueue_opt's

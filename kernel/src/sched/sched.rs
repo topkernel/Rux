@@ -25,6 +25,8 @@
 //! Raw pointers are used to avoid borrow checker limitations, which is common
 //! practice in OS kernel development.
 
+use super::entities::W2RefusalCensus;
+use super::class::SchedClass;
 use super::sched_policy::*;
 
 // ==================== Core wake/enqueue/current family ====================
@@ -1556,8 +1558,6 @@ pub fn current_is_dying() -> bool {
     }
 }
 pub use super::sched_policy::{
-    emit_grq_reports,
-    report_poisoned_rq_entry,
     CLASS_DL_BIT,
     CLASS_RT_BIT,
     CLASS_CFS_BIT,
@@ -1566,39 +1566,28 @@ pub use super::sched_policy::{
     class_nonempty_clear,
     WW_IDLE_PHASE,
     SCHED_CS_PHASE,
-    ww_note_slot_mismatch,
-    ww_slot_mismatch_counters,
     SLOT_W_SCHED_PICK,
     SLOT_W_R56D,
     SLOT_W_R56C,
     SLOT_W_STEAL,
     SLOT_W_ABORT_REPUB,
-    sched_can_stop_tick,
-    preempt_check_wake,
     sched_hist_armed,
     sched_hist_ring,
     sched_hist_refuse,
     sched_hist_link,
     sched_hist_pick,
-    ww_sched_snapshot,
     ww_cfs_geometry,
     ww_cfs_tie_mass,
     ww_cfs_tie_mass_vr,
-    ww_stalled_cpu_state,
-    preempt_check_wake_sync,
     PT_TASK,
     PT_CODE,
     PT_JIF,
-    pick_trace,
-    pick_trace_peek,
     PSLEDGER_TASK,
     PSLEDGER_CPU,
     PSLEDGER_JIF,
     PSLEDGER_PK,
     psledger_note_publish,
-    psledger_consume,
     psledger_peek,
-    steer_task_cpu,
     WW_RING,
     WW_EV_WAKE_OK,
     WW_EV_LINK,
@@ -1610,27 +1599,255 @@ pub use super::sched_policy::{
     WW_EV_WAKE_REFUSED,
     WW_EV_AFFIRM,
     WW_WATCH,
-    ww_watch_add,
     ww_tail_fill,
-    ww_record,
     ww_append_dump,
-    W2RefusalCensus,
-    w2_refusal_census,
     SCHED_CALLS,
-    monopolist_census,
-    runq_strand_census,
-    ffrt_wait_census,
-    dfx_claim_inject,
-    dfx_oncpu_inject,
     WAKE_DISP,
     WAKE_IDLE_MASK,
-    change_task_policy,
-    sched_renice_locked,
-    yield_cpu,
     load_balance,
-    abort_next_release_orphans,
-    r56_report_switch_abort,
 };
+
+// ==================== Hook-routed policy surface (S1b) ====================
+// These were re-exports of the policy half; they now route through the
+// SchedHooks table (registered by the rux-sched-policy crate at boot —
+// the NetHooks pattern). Callers' paths are unchanged.
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn enabled() -> bool { crate::sched::sched_hooks::enabled() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) { crate::sched::sched_hooks::r56_print_pid(prefix, pid, suffix) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn sched_clock() -> u64 { crate::sched::sched_hooks::sched_clock() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn pick_trace(task: *mut Task, code: u32) { crate::sched::sched_hooks::pick_trace(task, code) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn pick_gen_supersede(cpu: usize, task: *mut Task) { crate::sched::sched_hooks::pick_gen_supersede(cpu, task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::SchedPolicy, rt_prio: u32) { crate::sched::sched_hooks::change_task_policy(task, new_policy, rt_prio) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_record(task: *mut Task, code: u32) { crate::sched::sched_hooks::ww_record(task, code) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> bool { crate::sched::sched_hooks::orphan_watch_confirm(task, pid, now, threshold) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn pick_trace_peek(task: *mut Task) -> Option<(u32, u64)> { crate::sched::sched_hooks::pick_trace_peek(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn yield_cpu() { crate::sched::sched_hooks::yield_cpu() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> bool { crate::sched::sched_hooks::enqueue_task_locked(grq, task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_watch_add(task: *mut Task) { crate::sched::sched_hooks::ww_watch_add(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) { crate::sched::sched_hooks::abort_next_release_orphans(cpu, next) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn r56_report_switch_abort(cpu: usize, pid: u32) { crate::sched::sched_hooks::r56_report_switch_abort(cpu, pid) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn sched_renice_locked(task: &mut Task, niceval: i32) { crate::sched::sched_hooks::sched_renice_locked(task, niceval) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn pick_gen_retire(cpu: usize) { crate::sched::sched_hooks::pick_gen_retire(cpu) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn psledger_consume(task: *mut Task) -> bool { crate::sched::sched_hooks::psledger_consume(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn steer_task_cpu(task: *mut Task, target: i32) { crate::sched::sched_hooks::steer_task_cpu(task, target) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn sched_can_stop_tick() -> bool { crate::sched::sched_hooks::sched_can_stop_tick() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn dl_throttle(task: &mut Task) { crate::sched::sched_hooks::dl_throttle(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> bool { crate::sched::sched_hooks::ensure_linked_locked(grq, task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn check_cfs_preempt(task: *mut Task, cpus_allowed: u32) { crate::sched::sched_hooks::check_cfs_preempt(task, cpus_allowed) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn check_rt_preempt(task: *mut Task, cpus_allowed: u32, prefer: i32) { crate::sched::sched_hooks::check_rt_preempt(task, cpus_allowed, prefer) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn check_dl_preempt(task: *mut Task, cpus_allowed: u32, prefer: i32) { crate::sched::sched_hooks::check_dl_preempt(task, cpus_allowed, prefer) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn orphan_watch_clear(task: *mut Task) { crate::sched::sched_hooks::orphan_watch_clear(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn pick_giveups() -> (u64, u64) { crate::sched::sched_hooks::pick_giveups() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_slot_mismatch_counters() -> [u64; MAX_CPUS] { crate::sched::sched_hooks::ww_slot_mismatch_counters() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_sched_snapshot() -> [u64; 10] { crate::sched::sched_hooks::ww_sched_snapshot() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_stalled_cpu_state(cpu: usize) -> (u64, u64, u64) { crate::sched::sched_hooks::ww_stalled_cpu_state(cpu) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn dfx_claim_inject() -> usize { crate::sched::sched_hooks::dfx_claim_inject() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn dfx_oncpu_inject() -> usize { crate::sched::sched_hooks::dfx_oncpu_inject() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_pick_walks() -> u64 { crate::sched::sched_hooks::ww_pick_walks() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_heals() -> (u64, u64) { crate::sched::sched_hooks::ww_heals() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_subgate_counts() -> (u64, u64, u64) { crate::sched::sched_hooks::ww_subgate_counts() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_rt_pick_stats() -> (u64, u64, u64) { crate::sched::sched_hooks::ww_rt_pick_stats() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn heartbeat() { crate::sched::sched_hooks::heartbeat() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn stallwatch_tick() { crate::sched::sched_hooks::stallwatch_tick() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn preempt_check_wake(task: *mut Task) { crate::sched::sched_hooks::preempt_check_wake(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn preempt_check_wake_sync(task: *mut Task) { crate::sched::sched_hooks::preempt_check_wake_sync(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn w2_refusal_census(task: *mut Task) -> W2RefusalCensus { crate::sched::sched_hooks::w2_refusal_census(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn task_sched_class(task: &Task) -> &'static dyn SchedClass { crate::sched::sched_hooks::task_sched_class(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ww_note_slot_mismatch(cpu: usize) { crate::sched::sched_hooks::ww_note_slot_mismatch(cpu) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn set_enabled(on: bool) { crate::sched::sched_hooks::set_enabled(on) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn monopolist_census(now_j: u64) { crate::sched::sched_hooks::monopolist_census(now_j) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn runq_strand_census(now_j: u64) { crate::sched::sched_hooks::runq_strand_census(now_j) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn ffrt_wait_census() { crate::sched::sched_hooks::ffrt_wait_census() }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn rt_wedge_dump_tick(cpu: usize) { crate::sched::sched_hooks::rt_wedge_dump_tick(cpu) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn rt_bandwidth_tick(cpu: usize, current: *mut Task) { crate::sched::sched_hooks::rt_bandwidth_tick(cpu, current) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn emit_grq_reports(reports: &[GrqPendingReport]) { crate::sched::sched_hooks::emit_grq_reports(reports) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn pick_gen_publish(cpu: usize, task: *mut Task) { crate::sched::sched_hooks::pick_gen_publish(cpu, task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Task) -> *mut Task { crate::sched::sched_hooks::pick_next_task(grq, cpu_id, prev) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn requeue_prev_locked(grq: &mut GlobalRunQueue, prev: &mut Task) { crate::sched::sched_hooks::requeue_prev_locked(grq, prev) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn g_diag_idle_bit(cpu: usize) -> bool { crate::sched::sched_hooks::g_diag_idle_bit(cpu) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn cpu_tick_stale_ms(cpu: usize) -> u64 { crate::sched::sched_hooks::cpu_tick_stale_ms(cpu) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub(crate) fn lp_idle_lie_report(cpu: usize) { crate::sched::sched_hooks::lp_idle_lie_report(cpu) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn sched_slice_to_ms(slice_ns: u64) -> u32 { crate::sched::sched_hooks::sched_slice_to_ms(slice_ns) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn sched_ev_drain(budget: usize) -> usize { crate::sched::sched_hooks::sched_ev_drain(budget) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn note_task_freed(task: *mut crate::process::Task) { crate::sched::sched_hooks::note_task_freed(task) }
+
+/// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
+#[inline]
+pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) { crate::sched::sched_hooks::report_poisoned_rq_entry(cpu, raw) }
+
 
 use crate::errno;
 use crate::process::task::{Task, TaskState, SchedPolicy, Pid, PICK_LIVE, PICK_PICKED};
@@ -5742,21 +5959,6 @@ fn __schedule() {
 // publish's age — the creation interleaving on one line.
 
 
-impl core::fmt::Display for W2RefusalCensus {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "linked={} on_rq={} busy_slot={} idle_slot={} exec_ns={} jif={} q_ms={}",
-            self.linked,
-            self.on_rq,
-            self.busy_slot,
-            self.idle_slot,
-            self.exec_ns,
-            self.jiffies,
-            self.quantum_ms
-        )
-    }
-}
 
 
 /// DFX diagnostic: authoritative CFS linked-state by pointer scan, used by

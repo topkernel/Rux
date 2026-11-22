@@ -28,11 +28,10 @@ extern crate alloc;
 // The policy tree at crate::sched_policy (the historical crate::sched::
 // paths stay valid through the framework's re-export chain).
 pub mod sched_policy {
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/sched_policy.rs"] pub mod core_policy;
+    #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/sched_policy.rs"] pub mod sched_policy;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/fair.rs"] pub mod fair;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/rt.rs"] pub mod rt;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/deadline.rs"] pub mod deadline;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/class.rs"] pub mod class;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/idle.rs"] pub mod idle;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/stop_task.rs"] pub mod stop_task;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/stats.rs"] pub mod stats;
@@ -58,6 +57,80 @@ pub mod sched_policy {
 /// Registration: fills the framework's SchedHooks table (the S1b data
 /// seam). Called by the composition bin before the framework impl.
 pub fn register_all() {
-    // (the full mapping lands with the hook table — the seam's rows are
-    // measured in run/s1b-reverse2.json: 90 fn rows / 336 refs)
+    use rux::sched::sched_hooks::{SchedHooks, sched_register_hooks};
+    sched_register_hooks(SchedHooks {
+            enabled: sched_policy::stats::enabled,
+            r56_print_pid: sched_policy::sched_policy::r56_print_pid,
+            sched_clock: sched_policy::fair::sched_clock,
+            pick_trace: sched_policy::sched_policy::pick_trace,
+            pick_gen_supersede: sched_policy::sched_policy::pick_gen_supersede,
+            change_task_policy: sched_policy::sched_policy::change_task_policy,
+            ww_record: sched_policy::sched_policy::ww_record,
+            orphan_watch_confirm: sched_policy::sched_policy::orphan_watch_confirm,
+            pick_trace_peek: sched_policy::sched_policy::pick_trace_peek,
+            yield_cpu: sched_policy::sched_policy::yield_cpu,
+            enqueue_task_locked: sched_policy::sched_policy::enqueue_task_locked,
+            ww_watch_add: sched_policy::sched_policy::ww_watch_add,
+            abort_next_release_orphans: sched_policy::sched_policy::abort_next_release_orphans,
+            r56_report_switch_abort: sched_policy::sched_policy::r56_report_switch_abort,
+            sched_renice_locked: sched_policy::sched_policy::sched_renice_locked,
+            pick_gen_retire: sched_policy::sched_policy::pick_gen_retire,
+            psledger_consume: sched_policy::sched_policy::psledger_consume,
+            steer_task_cpu: sched_policy::sched_policy::steer_task_cpu,
+            sched_can_stop_tick: sched_policy::sched_policy::sched_can_stop_tick,
+            dl_throttle: sched_policy::sched_policy::dl_throttle,
+            ensure_linked_locked: sched_policy::sched_policy::ensure_linked_locked,
+            check_cfs_preempt: sched_policy::sched_policy::check_cfs_preempt,
+            check_rt_preempt: sched_policy::sched_policy::check_rt_preempt,
+            check_dl_preempt: sched_policy::sched_policy::check_dl_preempt,
+            orphan_watch_clear: sched_policy::sched_policy::orphan_watch_clear,
+            pick_giveups: sched_policy::fair::pick_giveups,
+            ww_slot_mismatch_counters: sched_policy::sched_policy::ww_slot_mismatch_counters,
+            ww_sched_snapshot: sched_policy::sched_policy::ww_sched_snapshot,
+            ww_stalled_cpu_state: sched_policy::sched_policy::ww_stalled_cpu_state,
+            dfx_claim_inject: sched_policy::sched_policy::dfx_claim_inject,
+            dfx_oncpu_inject: sched_policy::sched_policy::dfx_oncpu_inject,
+            ww_pick_walks: sched_policy::fair::ww_pick_walks,
+            ww_heals: sched_policy::fair::ww_heals,
+            ww_subgate_counts: sched_policy::wakewatch::ww_subgate_counts,
+            ww_rt_pick_stats: sched_policy::wakewatch::ww_rt_pick_stats,
+            heartbeat: sched_policy::wakewatch::heartbeat,
+            stallwatch_tick: sched_policy::wakewatch::stallwatch_tick,
+            preempt_check_wake: sched_policy::sched_policy::preempt_check_wake,
+            preempt_check_wake_sync: sched_policy::sched_policy::preempt_check_wake_sync,
+            w2_refusal_census: sched_policy::sched_policy::w2_refusal_census,
+            task_sched_class: sched_policy::class::task_sched_class,
+            ww_note_slot_mismatch: sched_policy::sched_policy::ww_note_slot_mismatch,
+            set_enabled: sched_policy::stats::set_enabled,
+            monopolist_census: sched_policy::sched_policy::monopolist_census,
+            runq_strand_census: sched_policy::sched_policy::runq_strand_census,
+            ffrt_wait_census: sched_policy::sched_policy::ffrt_wait_census,
+            rt_wedge_dump_tick: sched_policy::sched_policy::rt_wedge_dump_tick,
+            rt_bandwidth_tick: sched_policy::sched_policy::rt_bandwidth_tick,
+            emit_grq_reports: sched_policy::sched_policy::emit_grq_reports,
+            pick_gen_publish: sched_policy::sched_policy::pick_gen_publish,
+            pick_next_task: sched_policy::sched_policy::pick_next_task,
+            requeue_prev_locked: sched_policy::sched_policy::requeue_prev_locked,
+            g_diag_idle_bit: sched_policy::sched_policy::g_diag_idle_bit,
+            cpu_tick_stale_ms: sched_policy::sched_policy::cpu_tick_stale_ms,
+            lp_idle_lie_report: sched_policy::sched_policy::lp_idle_lie_report,
+            sched_slice_to_ms: sched_policy::fair::sched_slice_to_ms,
+            sched_ev_drain: sched_policy::sched_ev::sched_ev_drain,
+            note_task_freed: sched_policy::wakewatch::note_task_freed,
+            report_poisoned_rq_entry: sched_policy::sched_policy::report_poisoned_rq_entry,
+            ww_idle_phase: |cpu| sched_policy::sched_policy::WW_IDLE_PHASE[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            sched_cs_phase: |cpu| sched_policy::sched_policy::SCHED_CS_PHASE[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            wake_disp: || sched_policy::sched_policy::WAKE_DISP.load(core::sync::atomic::Ordering::Relaxed),
+            wake_idle_mask: || sched_policy::sched_policy::WAKE_IDLE_MASK.load(core::sync::atomic::Ordering::Relaxed),
+            class_nonempty: || sched_policy::sched_policy::CLASS_NONEMPTY.load(core::sync::atomic::Ordering::Relaxed),
+            pt_task: |cpu| sched_policy::sched_policy::PT_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            pt_code: |cpu| sched_policy::sched_policy::PT_CODE[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            pt_jif: |cpu| sched_policy::sched_policy::PT_JIF[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            psledger_task: |cpu| sched_policy::sched_policy::PSLEDGER_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            psledger_cpu: |cpu| sched_policy::sched_policy::PSLEDGER_CPU[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            psledger_jif: |cpu| sched_policy::sched_policy::PSLEDGER_JIF[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            psledger_pk: |cpu| sched_policy::sched_policy::PSLEDGER_PK[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            ww_watch: |cpu| sched_policy::sched_policy::WW_WATCH[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            sched_calls: |cpu| sched_policy::sched_policy::SCHED_CALLS[cpu].load(core::sync::atomic::Ordering::Relaxed),
+    });
 }
