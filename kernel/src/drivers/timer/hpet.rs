@@ -409,9 +409,10 @@ pub fn init() -> bool {
                 | crate::arch::mm::pagetable::PageTableEntry::ACCESSED
                 | crate::arch::mm::pagetable::PageTableEntry::DIRTY
                 | crate::arch::mm::pagetable::PageTableEntry::IO;
-            // SAFETY: mapping one uncached alias page for the HPET block
-            // in the kernel half (reserved firmware region, never RAM).
-            unsafe {
+            // Mapping one uncached alias page for the HPET block in the
+            // kernel half (reserved firmware region, never RAM) — the
+            // map walker is a safe fn since round 1.
+            {
                 let va = 0xffff_8a00_0000_0000u64 + (base as u64 & 0xF_FFFF_F000);
                 crate::arch::mm::mmu_init::map_kernel_region(
                     va,

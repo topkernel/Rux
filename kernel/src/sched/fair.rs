@@ -24,6 +24,12 @@
 //! - idle_sched_class is for per-CPU idle tasks (pid=0) only
 //! - SCHED_IDLE policy tasks use this class with minimal weight
 
+
+// S1 pre-work (2026-11-22): zero unsafe remains (the Send/Sync markers were
+// vestigial — auto-derived; deletion verified by green check). Tree-level
+// forbid until the S1 crate split.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 
 // Use config values for scheduler timing
@@ -136,7 +142,7 @@ pub fn note_pick_skip(task: *mut Task, reason: u8) {
             w.store(0, Ordering::Relaxed);
         }
         s.n.store(0, Ordering::Relaxed);
-        s.first_jif.store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+        s.first_jif.store(crate::timer::get_jiffies(), Ordering::Release);
     }
     if let Some(w) = s.why.get(reason as usize) {
         w.fetch_add(1, Ordering::Relaxed);
@@ -167,7 +173,7 @@ pub fn print_skip_history(task: *mut Task) {
     // previously an inference from no-line-at-all (ambiguous against
     // probe-off and slot-reuse); an explicit skips=0 on every strand
     // line makes the never-refused verdict census-readable.
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let first = s.first_jif.swap(0, Ordering::AcqRel);
     let mut whys = [0u64; 5];
     for (i, w) in s.why.iter().enumerate() {
@@ -381,12 +387,12 @@ pub struct SchedEntity {
     /// hundreds of ms behind a low-duty wake-churn pack (ohw34: a 400ms
     /// link->pick on a worker BEFORE the wedge; the old placement preserved
     /// unbounded vruntime debt). GRQ-HELD (Cell): no lockless reader.
-    pub(crate) vlag: core::cell::Cell<i64>,
+    pub vlag: core::cell::Cell<i64>,
     /// 64th: false until this entity's first-ever link -- discriminates the
     /// 6.6 ENQUEUE_INITIAL placement (vruntime = avg_vruntime, lag zero)
     /// from a WAKE placement. GRQ-HELD. Fork children start false (fresh
     /// SchedEntity::new()), matching __sched_fork's vlag = 0.
-    pub(crate) ever_enqueued: core::cell::Cell<bool>,
+    pub ever_enqueued: core::cell::Cell<bool>,
 }
 
 impl SchedEntity {
@@ -744,7 +750,7 @@ pub struct CfsRunQueue {
     nr_running: AtomicU64,
 
     /// Total weight
-    pub(crate) load_weight: AtomicU64,
+    pub load_weight: AtomicU64,
 
     /// Next task ID (for generating unique keys)
     next_task_id: AtomicU64,
@@ -1056,7 +1062,7 @@ impl CfsRunQueue {
             // caller site via #[track_caller].
             static LAST: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let last = LAST.load(Ordering::Acquire);
             if now.wrapping_sub(last) >= 10
                 && LAST.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
@@ -1111,7 +1117,7 @@ impl CfsRunQueue {
             return;
         }
         let trip = VR_TRIPS.fetch_add(1, Ordering::Relaxed) + 1;
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::timer::get_jiffies();
         // First 8 trips always print (the seed hunt needs the first-bad
         // write); afterwards one per 300 jiffies so a corruption storm
         // cannot flood the serial console.
@@ -1247,7 +1253,7 @@ impl CfsRunQueue {
             self.load_weight.store(old, Ordering::SeqCst);
             static LASTW: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let last = LASTW.load(Ordering::Acquire);
             if now.wrapping_sub(last) >= 10
                 && LASTW.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
@@ -1761,7 +1767,7 @@ impl CfsRunQueue {
                             }
                         }
                         let last = tr.pick_last_jif.load(Ordering::Relaxed);
-                        let now = crate::drivers::timer::get_jiffies();
+                        let now = crate::timer::get_jiffies();
                         let lp = if last == 0 {
                             u32::MAX
                         } else {
@@ -1806,7 +1812,7 @@ impl CfsRunQueue {
     fn heal_report_budget_ok() -> bool {
         static LAST_REPORT: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::timer::get_jiffies();
         let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
         if now.wrapping_sub(last) < 2 {
             return false;
@@ -1900,7 +1906,7 @@ impl CfsRunQueue {
             for &b in M2 {
                 putchar(b);
             }
-            pdec5(crate::drivers::timer::get_jiffies());
+            pdec5(crate::timer::get_jiffies());
             // pick→switch ledger: an intact publication record for this
             // victim = the claim came from a pick that was never
             // affirmed (switched to) NOR aborted — the switchless pick,
@@ -1922,7 +1928,7 @@ impl CfsRunQueue {
                 for &b in C {
                     putchar(b);
                 }
-                pdec5(crate::drivers::timer::get_jiffies().wrapping_sub(pjif));
+                pdec5(crate::timer::get_jiffies().wrapping_sub(pjif));
             }
         }
         crate::dfx::taskdump::putc_brief(b'\n');
@@ -2646,7 +2652,7 @@ impl CfsRunQueue {
                                     .is_some_and(|(_, ago)| ago > 30);
                                 if crate::trace::EVENT_SCHEDTRACE.armed()
                                     && stale_task
-                                    && crate::drivers::timer::get_jiffies() > 300
+                                    && crate::timer::get_jiffies() > 300
                                     && WHY1_N.fetch_add(
                                         1,
                                         core::sync::atomic::Ordering::Relaxed,
@@ -2748,7 +2754,7 @@ impl CfsRunQueue {
                                             putchar(b);
                                         }
                                         let mut j =
-                                            crate::drivers::timer::get_jiffies().saturating_sub(pj);
+                                            crate::timer::get_jiffies().saturating_sub(pj);
                                         let mut buf = [0u8; 12];
                                         let mut n = 0;
                                         while j > 0 && n < 12 {
@@ -2899,7 +2905,7 @@ impl CfsRunQueue {
             }
             static LAST_REPORT: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
             // serial-clean: this canary fires on benign mid-switch-out
             // transients too — print only behind rux:schedtrace (retired dfx=schedtrace).
@@ -3228,8 +3234,8 @@ impl Default for CfsRunQueue {
     }
 }
 
-unsafe impl Send for CfsRunQueue {}
-unsafe impl Sync for CfsRunQueue {}
+
+
 
 /// Calculate time slice (milliseconds)
 ///

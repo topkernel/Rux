@@ -95,13 +95,13 @@ pub fn note_miss() {
 fn measure_tsc_hz() -> u64 {
     // 10 MHz timekeeper: 100_000 ticks = 10 ms.
     const WINDOW: u64 = 100_000;
-    let t0 = crate::drivers::timer::read_time();
+    let t0 = crate::timer::read_time();
     let c0 = crate::arch::cpu::read_counter();
-    while crate::drivers::timer::read_time().wrapping_sub(t0) < WINDOW {
+    while crate::timer::read_time().wrapping_sub(t0) < WINDOW {
         core::hint::spin_loop();
     }
     let c1 = crate::arch::cpu::read_counter();
-    let dt = crate::drivers::timer::read_time().wrapping_sub(t0);
+    let dt = crate::timer::read_time().wrapping_sub(t0);
     if dt == 0 || c1 <= c0 {
         return 0;
     }

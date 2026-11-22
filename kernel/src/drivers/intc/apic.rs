@@ -302,10 +302,12 @@ fn kvm_pv_send_ipi(dest: u32, vector: u8) -> bool {
     if !KVM_PV_IPI.load(Ordering::Acquire) {
         return false;
     }
-    // SAFETY: pure register protocol with the hypervisor (no memory
-    // operands). The bitmap is a single-bit cluster with min=dest, so
-    // bitmap_low=1, bitmap_high=0 (arch/x86/kernel/kvm.c
-    // __send_ipi_mask, one-cpu cluster shape).
+    // IRREDUCIBLE F-ROW (F-HVCALL-X1): the KVM hypercall ABI
+    // (vmmcall/vmcall with the RBX-shuttle push/mov/pop bracket) —
+    // reference kernel arch/x86/kernel/kvm.c __send_ipi_mask's hc()
+    // twin; a register protocol with no memory operands has no safe
+    // shape. The bitmap is a single-bit cluster with min=dest
+    // (bitmap_low=1, bitmap_high=0).
     unsafe fn hc(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, vmmcall: bool) -> i64 {
         let ret: i64;
         // The KVM ABI passes arg1 in RBX, which LLVM reserves — shuttle
@@ -797,8 +799,10 @@ const CAL_MS: u64 = 50;
 /// Run one PIT channel-2 one-shot window and return the elapsed TSC and
 /// LAPIC-timer counts inside it.
 fn calibration_window() -> (u64, u64) {
-    // SAFETY: fixed 8254 ports; IF is off during early bring-up.
-    unsafe {
+    // Fixed 8254 ports; IF is off during early bring-up (the port-IO
+    // primitives are safe fns — INV-XE-PIO-1; the protocol ORDER is the
+    // reference's i8254 dance).
+    {
         // Gate off + speaker off, then re-program for a clean reload.
         let p61 = inb(PIT_CH2_GATE_PORT);
         outb(PIT_CH2_GATE_PORT, p61 & !0x03);
@@ -933,6 +937,19 @@ fn checksum_ok(vaddr: usize, len: usize) -> bool {
     sum == 0
 }
 
+/// Volatile 16-bit read from a linear-mapped physical address.
+///
+/// For 2-byte-aligned firmware fields (the EBDA segment word at 0x40E):
+/// a u32 read there would trip INV-MMIO natural alignment — f2913fd03's
+/// detector-as-assertion exposed exactly that latent violation (debug
+/// x86_64 boots panicked in find_rsdp before this split).
+fn read_phys_u16(phys: usize) -> u16 {
+    let va = crate::arch::mm::memory_layout::phys_to_virt(
+        crate::arch::mm::memory_layout::PhysAddr::new(phys as u64),
+    );
+    crate::safety::mmio::MmioRegion::new(va.as_usize(), 2).read_u16(0)
+}
+
 /// Volatile 32-bit read from a linear-mapped physical address.
 fn read_phys_u32(phys: usize) -> u32 {
     let va = crate::arch::mm::memory_layout::phys_to_virt(
@@ -947,6 +964,15 @@ fn read_phys_u64(phys: usize) -> u64 {
         crate::arch::mm::memory_layout::PhysAddr::new(phys as u64),
     );
     crate::safety::mmio::MmioRegion::new(va.as_usize(), 8).read_u64(0)
+}
+
+/// Byte-composed 64-bit read for PACKED firmware-table fields at
+/// non-8-aligned physical addresses (XSDT entries at table+36).
+fn read_phys_packed_u64(phys: usize) -> u64 {
+    let va = crate::arch::mm::memory_layout::phys_to_virt(
+        crate::arch::mm::memory_layout::PhysAddr::new(phys as u64),
+    );
+    crate::safety::mmio::MmioRegion::new(va.as_usize(), 8).read_packed_u64(0)
 }
 
 /// Map the ACPI table scan windows into the linear map.  The firmware
@@ -1003,17 +1029,31 @@ fn ensure_phys_mapped(phys: usize, len: usize) {
 }
 
 /// Map a page around `phys` and read the u32 at `phys` (safe for ACPI
-/// header fields before the table length is known).
+/// header fields before the table length is known). PACKED: ACPI table
+/// bases are not guaranteed naturally aligned — QEMU's legacy blob
+/// points rev-0 RSDPs at an RSDT on an odd address (observed
+/// 0x7ffe23bd: +4 lands 1-mod-4 and trips INV-MMIO in debug builds).
 fn read_table_u32(phys: usize) -> u32 {
     ensure_phys_mapped(phys & !0xFFF, 8);
-    read_phys_u32(phys)
+    read_phys_packed_u32(phys)
+}
+
+/// Byte-composed 32-bit read for PACKED firmware-table fields at
+/// non-naturally-aligned physical addresses (see MmioRegion::read_packed_u32).
+fn read_phys_packed_u32(phys: usize) -> u32 {
+    let va = crate::arch::mm::memory_layout::phys_to_virt(
+        crate::arch::mm::memory_layout::PhysAddr::new(phys as u64),
+    );
+    crate::safety::mmio::MmioRegion::new(va.as_usize(), 4).read_packed_u32(0)
 }
 
 /// Find the RSDP in the EBDA / legacy BIOS ROM area.  Returns its
 /// physical address.
 fn find_rsdp() -> Option<usize> {
-    // EBDA base is a real-mode segment at 0x40E.
-    let ebda_seg = read_phys_u32(0x40E) & 0xFFFF;
+    // EBDA base is a real-mode segment word (u16) at 0x40E — read it with
+    // the width it has (2-byte aligned); a u32 read at 0x40E violates
+    // INV-MMIO natural alignment and panics debug builds (f2913fd03).
+    let ebda_seg = read_phys_u16(0x40E) as usize;
     let candidates: [usize; 2] = [(ebda_seg as usize) << 4, 0xE_0000];
     let sizes: [usize; 2] = [1024, 0x2_0000];
 
@@ -1099,9 +1139,14 @@ fn find_table(rsdp_phys: usize, want: &[u8; 4]) -> Option<usize> {
 
     for i in 0..count {
         let tbl = if entry_size == 8 {
-            read_phys_u64(entries_phys + i * 8) as usize
+            // XSDT entries start at +36 (SdtHeader): 4-mod-8 — packed
+            // field, byte-composed read (a natural u64 here would trip
+            // INV-MMIO on every 8-aligned XSDT).
+            read_phys_packed_u64(entries_phys + i * 8) as usize
         } else {
-            read_phys_u32(entries_phys + i * 4) as usize
+            // RSDT entries — packed (table bases not aligned, see
+            // read_table_u32).
+            read_phys_packed_u32(entries_phys + i * 4) as usize
         };
         if tbl == 0 {
             continue;
@@ -1140,12 +1185,15 @@ pub fn find_hpet_base() -> Option<usize> {
     // ACPI HPET table: 36-byte header, 8-byte event timer block ID,
     // then a Generic Address Structure whose u64 address sits at
     // offset 48 (space id at 44; 0 = system memory).
-    let space = read_phys_u32(tbl + 44) as u8;
+    // HPET GAS fields at table+44/48/52 — packed reads (unaligned table
+    // bases; the u64 address is read as two u32 halves because the
+    // field itself sits at 4-mod-8 when the table base is odd).
+    let space = read_phys_packed_u32(tbl + 44) as u8;
     if space != 0 {
         return None;
     }
-    let lo = read_phys_u32(tbl + 48) as usize;
-    let hi = read_phys_u32(tbl + 52) as usize;
+    let lo = read_phys_packed_u32(tbl + 48) as usize;
+    let hi = read_phys_packed_u32(tbl + 52) as usize;
     let addr = lo | (hi << 32);
     if addr == 0 {
         None
@@ -1194,7 +1242,10 @@ fn parse_madt(madt_phys: usize) -> usize {
                 if elen >= 8 {
                     let (apic_id, flags) = (
                         madt.read_u8(off + 3 - va) as u32,
-                        madt.read_u32(off + 4 - va),
+                        // Packed field: entry offsets walk variable-length
+                        // predecessors (10-byte ISOs et al.), so off+4 is
+                        // not naturally aligned — byte-composed read.
+                        madt.read_packed_u32(off + 4 - va),
                     );
                     // bit 0 = enabled (ACPI < 5.1); bit 1 = online-capable.
                     if flags & 0x3 != 0 {
@@ -1207,8 +1258,9 @@ fn parse_madt(madt_phys: usize) -> usize {
                 // Local x2APIC: [u16 rsvd][u32 uid][u32 flags][u32 acpi_id]
                 if elen >= 16 {
                     let (uid, flags) = (
-                        madt.read_u32(off + 4 - va),
-                        madt.read_u32(off + 8 - va),
+                        // Packed fields — see the type-0 arm.
+                        madt.read_packed_u32(off + 4 - va),
+                        madt.read_packed_u32(off + 8 - va),
                     );
                     if flags & 0x3 != 0 {
                         ids[n] = uid;

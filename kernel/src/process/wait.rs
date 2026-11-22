@@ -419,7 +419,7 @@ impl WaitQueueHead {
                                 pid as u64,
                                 st.bits() as u64,
                                 pc as u32 as u64,
-                                crate::drivers::timer::get_jiffies(),
+                                crate::timer::get_jiffies(),
                             );
                         }
                         // Do not count a refused wake as awakened: no task

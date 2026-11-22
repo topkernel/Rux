@@ -1070,7 +1070,7 @@ fn sweep_stale_async(
 ) -> usize {
     const GRACE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(30);
     let min_gap: u32 = (crate::config::KERNEL_HZ as u32).max(1);
-    let now = crate::drivers::timer::get_jiffies() as u32;
+    let now = crate::timer::get_jiffies() as u32;
     let Some(alloc) = pm(world, target).im(world).alloc.as_mut() else {
         return 0;
     };
@@ -1184,7 +1184,7 @@ fn sweep_silent_txns(
 ) -> (usize, Vec<Arc<BinderProc>>, Vec<Arc<BinderThread>>) {
     const ONEWAY_SILENCE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(30);
     const SYNC_SILENCE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(60);
-    let now = crate::drivers::timer::get_jiffies() as u32;
+    let now = crate::timer::get_jiffies() as u32;
     let mut retired = 0usize;
     let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
     // leg-32B: child threads that received a handed-on parked txn via
@@ -2264,7 +2264,7 @@ impl BinderThread {
     /// Append one transition to the ring. INV-BINDER-HELD: token proof.
     fn hist(&self, _held: &World, ev: u8, a: u32, b: u32) {
         let th = self.st(_held);
-        let j = crate::drivers::timer::get_jiffies() as u32;
+        let j = crate::timer::get_jiffies() as u32;
         th.hist[th.hcur] = BinderEv { j, ev, a, b };
         th.hcur = (th.hcur + 1) % BHIST;
     }
@@ -2419,10 +2419,10 @@ fn wait_for_context_manager(ctx: BinderCtx) {
         };
         let current = cur_ref as *mut crate::process::task::Task;
         let my_pid = cur_ref.pid();
-        let target = crate::drivers::timer::get_jiffies() + SLICE_JIFFIES.max(1);
+        let target = crate::timer::get_jiffies() + SLICE_JIFFIES.max(1);
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
         MANAGER_WAIT.prepare_to_wait(current, false, true);
-        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+        if crate::timer::get_jiffies() >= target || crate::signal::signal_pending() {
             MANAGER_WAIT.finish_wait(current);
             if timer_id != 0 {
                 crate::timer::del_timer(timer_id);
@@ -4405,7 +4405,7 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
     };
     drop(w);
     if has {
-        crate::syscall::misc::poll_events::POLLIN | crate::syscall::misc::poll_events::POLLRDNORM
+        crate::fs::event_notify::poll_events::POLLIN | crate::fs::event_notify::poll_events::POLLRDNORM
     } else {
         0
     }
@@ -5299,7 +5299,7 @@ pub fn sleep_snapshot() {
                             core::sync::atomic::AtomicU32::new(0);
                         static DUMP_N: core::sync::atomic::AtomicU32 =
                             core::sync::atomic::AtomicU32::new(0);
-                        let now_j = crate::drivers::timer::get_jiffies() as u32;
+                        let now_j = crate::timer::get_jiffies() as u32;
                         let bid = now_j / 500;
                         if DUMP_BURST.load(core::sync::atomic::Ordering::Relaxed) != bid {
                             DUMP_BURST.store(bid, core::sync::atomic::Ordering::Relaxed);
@@ -5442,7 +5442,7 @@ pub fn sleep_snapshot() {
                     // ~4x the distinct-thread count).
                     let key = ((tk.pid() as u64) << 44) | (rip & 0xfff_ffff_fff);
                     let idx = (tk.pid() as usize) % UFW_SEEN.len();
-                    let now100 = (crate::drivers::timer::get_jiffies() / 10) as u32;
+                    let now100 = (crate::timer::get_jiffies() / 10) as u32;
                     let seen_idx = if UFW_SEEN[idx].load(core::sync::atomic::Ordering::Relaxed)
                         == key
                     {
@@ -5788,7 +5788,7 @@ pub fn txn_hang_audit() {
     if !crate::trace::EVENT_TXNHANG.armed() {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies() as u32;
+    let now = crate::timer::get_jiffies() as u32;
     // One burst per 5 s (500 jiffies at HZ=100); first call fires.
     static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     use core::sync::atomic::Ordering::Relaxed;
@@ -6410,7 +6410,7 @@ pub fn txn_hang_audit() {
             // the real installs hang formed — lb70 lesson).
             static HANG_DUMP_AT: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now_j = crate::drivers::timer::get_jiffies();
+            let now_j = crate::timer::get_jiffies();
             let last = HANG_DUMP_AT.load(core::sync::atomic::Ordering::Acquire);
             if now_j.wrapping_sub(last) >= 60_000
                 && HANG_DUMP_AT
@@ -6743,7 +6743,7 @@ pub fn bwr_park_audit() {
     if !crate::trace::EVENT_TXNHANG.armed() {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies() as u32;
+    let now = crate::timer::get_jiffies() as u32;
     // One burst per 5 s (500 jiffies at HZ=100), offset from the
     // TXN-HANG burst by construction (they share the heartbeat slot but
     // independent gates; worst case both fire in the same tick).
@@ -7540,7 +7540,7 @@ pub fn ams46_audit() {
     if !ams46_on() {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies() as u32;
+    let now = crate::timer::get_jiffies() as u32;
     // One census per 5 s (500 jiffies at HZ=100); first call fires.
     static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     use core::sync::atomic::Ordering::Relaxed;
@@ -7688,7 +7688,7 @@ pub fn pool_census_audit() {
     if !pool_census_on() {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies() as u32;
+    let now = crate::timer::get_jiffies() as u32;
     static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     use core::sync::atomic::Ordering::Relaxed;
     let last = LAST.load(Relaxed);
@@ -8168,7 +8168,7 @@ fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
 /// threshold; a healthy boot parks readers for 1-3s at most). Read-only
 /// under WORLD; no formatting, no I/O — all output happens in schbd.
 pub fn schb_beat() -> (usize, usize, usize) {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let hz = crate::config::KERNEL_HZ as u64;
     let mut procs = 0usize;
     let mut waiters = 0usize;
@@ -8205,7 +8205,7 @@ pub fn schb_beat() -> (usize, usize, usize) {
 /// discipline). No stall_reported latching, no rekick side effects.
 pub fn schb_waiter_census(out: &mut alloc::string::String) {
     use core::fmt::Write as _;
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let hz = crate::config::KERNEL_HZ as u64;
     if hz == 0 {
         return;
@@ -8260,7 +8260,7 @@ pub fn stall_report() {
     /// runs 40 s timeouts, so a 15 s re-kick keeps chains alive without
     /// spamming healthy 1-3 s waits.
     const REKICK_SECS: u64 = 15;
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let hz = crate::config::KERNEL_HZ as u64;
     if hz == 0 {
         return;
@@ -9186,7 +9186,7 @@ fn binder_ioctl_write_read(
                     static ER_LAST: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     let n = ER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    let nowj = crate::drivers::timer::get_jiffies() as u32;
+                    let nowj = crate::timer::get_jiffies() as u32;
                     let last = ER_LAST.load(core::sync::atomic::Ordering::Relaxed);
                     if n < 60 && nowj.wrapping_sub(last) >= 200 {
                         if ER_LAST
@@ -9698,7 +9698,7 @@ fn binder_thread_write(
                         use core::sync::atomic::Ordering::Relaxed;
                         let t0 = AMS46_T0.load(Relaxed);
                         if t0 != 0 {
-                            let now_j = crate::drivers::timer::get_jiffies() as u32;
+                            let now_j = crate::timer::get_jiffies() as u32;
                             if now_j.wrapping_sub(t0)
                                 < (crate::config::KERNEL_HZ as u32).saturating_mul(120)
                             {
@@ -10224,7 +10224,7 @@ fn binder_thread_write(
                                 // (240 gone by ~35 s), dark exactly over the
                                 // account phase the map exists for.
                                 // lb51: lockless writer (under WORLD).
-                                let j = crate::drivers::timer::get_jiffies();
+                                let j = crate::timer::get_jiffies();
                                 if j >= 1000
                                     && ARM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                         < 240
@@ -10539,7 +10539,7 @@ fn binder_transaction(
                 // guard like the surrounding pr_info!s on this path
                 // (single short line, bounded).
                 {
-                    let now = crate::drivers::timer::get_jiffies() as u32;
+                    let now = crate::timer::get_jiffies() as u32;
                     let total = now.wrapping_sub(t.enq_j);
                     if total >= 150 {
                         static LAST: core::sync::atomic::AtomicU32 =
@@ -10976,7 +10976,7 @@ fn binder_transaction(
                                             t.from_tid.unwrap_or(0),
                                             { t.to_tid(world) },
                                             t.flags & TF_ONE_WAY != 0,
-                                            crate::drivers::timer::get_jiffies()
+                                            crate::timer::get_jiffies()
                                                 .wrapping_sub(t.enq_j as u64),
                                         );
                                     }
@@ -11008,7 +11008,7 @@ fn binder_transaction(
                                     t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
                                     t.from_tid.unwrap_or(0),
                                     { t.to_tid(world) },
-                                    crate::drivers::timer::get_jiffies()
+                                    crate::timer::get_jiffies()
                                         .wrapping_sub(t.enq_j as u64),
                                 );
                             }
@@ -11532,7 +11532,7 @@ fn binder_transaction(
         offsets_size,
         buffer_off: block_off,
         security_ctx,
-        enq_j: crate::drivers::timer::get_jiffies() as u32,
+        enq_j: crate::timer::get_jiffies() as u32,
         pick_j: core::sync::atomic::AtomicU32::new(0),
         enq_elig: core::sync::atomic::AtomicU8::new(0),
         enq_ns: crate::arch::cpu::read_time(),
@@ -12003,7 +12003,7 @@ fn binder_transaction(
         use core::sync::atomic::Ordering::Relaxed;
         let t0 = AMS46_T0.load(Relaxed);
         if t0 != 0 {
-            let now_j = crate::drivers::timer::get_jiffies() as u32;
+            let now_j = crate::timer::get_jiffies() as u32;
             if now_j.wrapping_sub(t0) < (crate::config::KERNEL_HZ as u32).saturating_mul(120) {
                 let tp = AMS46_TPID.load(Relaxed);
                 let sp = AMS46_SENDER.load(Relaxed);
@@ -13553,7 +13553,7 @@ fn binder_thread_read(
             }
             thread
                 .read_wait_since
-                .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
+                .store(crate::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
             thread.stall_reported.store(false, core::sync::atomic::Ordering::Release);
             thread.rekicked.store(false, core::sync::atomic::Ordering::Release);
             thread.rekick_count.store(0, core::sync::atomic::Ordering::Release);
@@ -13955,7 +13955,7 @@ fn binder_thread_read(
                                 // and the reading thread.
                                 if AMS46_T0.load(core::sync::atomic::Ordering::Relaxed) == 0 {
                                     AMS46_T0.store(
-                                        crate::drivers::timer::get_jiffies() as u32,
+                                        crate::timer::get_jiffies() as u32,
                                         core::sync::atomic::Ordering::Relaxed,
                                     );
                                     let fp = t
@@ -14141,7 +14141,7 @@ fn binder_thread_read(
                                 // The receiver stacks it for its BC_REPLY.
                                 t.set_to_tid(world, thread.tid);
                                 // sc208 SLOW-TXN probe: server-pickup stamp.
-                                let nowj = crate::drivers::timer::get_jiffies() as u32;
+                                let nowj = crate::timer::get_jiffies() as u32;
                                 // 105th QPICK probe (bindertrace): per-instance
                                 // queue-wait attribution for the 2-16 ms cluster
                                 // the BRTT census found. elig>0 at enqueue +

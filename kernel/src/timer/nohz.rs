@@ -416,7 +416,7 @@ pub fn tick_nohz_full_update_tick(cpu: usize) {
         crate::drivers::timer::set_next_trigger();
         return;
     }
-    let now = crate::drivers::timer::read_time();
+    let now = crate::timer::read_time();
     let grid = grid_period();
     tick_nohz_full_update_tick_at(cpu, now, grid);
 }
@@ -466,7 +466,7 @@ fn grid_period() -> u64 {
 /// remote CPU here re-evaluates at its own next exit).
 pub fn tick_nohz_rearm_local() {
     let cpu = crate::arch::cpu_id() as usize;
-    let now = crate::drivers::timer::read_time();
+    let now = crate::timer::read_time();
     let grid = grid_period();
     let ts = ts_of(cpu);
     if can_stop_full_tick(cpu) {

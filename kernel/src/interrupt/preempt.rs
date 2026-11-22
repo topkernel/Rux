@@ -156,7 +156,7 @@ pub fn might_sleep_check(site: &'static str) {
         return;
     }
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(core::sync::atomic::Ordering::Acquire);
     if now.wrapping_sub(last) < 200
         || LAST
@@ -596,7 +596,7 @@ pub fn irq_exit() {
         if cpu < crate::config::MAX_CPUS {
             let t0 = crate::interrupt::softirq::SOFTIRQ_WIN_T0[cpu]
                 .load(core::sync::atomic::Ordering::Acquire);
-            let now = crate::drivers::timer::read_time();
+            let now = crate::timer::read_time();
             if t0 == 0 || now.saturating_sub(t0) >= SOFTIRQ_STARVE_TICKS {
                 starved = true;
             }
@@ -692,7 +692,7 @@ pub fn tick_orphan_scan(cpu_id: usize) {
     static LAST: [core::sync::atomic::AtomicU64; crate::config::MAX_CPUS] =
         [const { core::sync::atomic::AtomicU64::new(0) };
             crate::config::MAX_CPUS];
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST[cpu_id].load(core::sync::atomic::Ordering::Acquire);
     if now.wrapping_sub(last) < 50 {
         return;

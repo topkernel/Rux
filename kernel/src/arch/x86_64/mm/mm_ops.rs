@@ -1647,7 +1647,7 @@ impl MmStruct {
         // drm GEM dumb-buffer backing. Clear the PTE only.
         {
             let phys = (ppn_val as u64) << 12;
-            let fb = crate::drivers::gpu::get_framebuffer_info()
+            let fb = crate::console::get_framebuffer_info()
                 .map_or(false, |i| phys >= i.addr && phys < i.addr + i.size as u64);
             if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
                 self.clear_pte(va as u64);
@@ -2815,7 +2815,7 @@ pub fn copy_page_table_cow(
     // Framebuffer frames (virtio-gpu scanout backing store) are
     // device-shared memory and must NEVER be COW-marked — mirror of the
     // riscv64 twin (see its long comment for the failure history).
-    let fb_frame_range: Option<(u64, u64)> = crate::drivers::gpu::get_framebuffer_info()
+    let fb_frame_range: Option<(u64, u64)> = crate::console::get_framebuffer_info()
         .map(|i| (i.addr >> 12, (i.addr + i.size as u64 + 0xFFF) >> 12));
 
     if parent_root_ppn == 0 {

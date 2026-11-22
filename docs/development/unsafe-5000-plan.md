@@ -171,12 +171,39 @@ sporadically. Expansion, in value order:
    access" (every register access in bounds). Acceptance: harnesses
    committed with the proofs passing; the INV rows in the ledger gain a
    "machine-checked" column.
-3. **Verus evaluation (one pilot, then decide).** The Atmosphere datapoint
+3. **Verus evaluation (one pilot, then decide) — PILOT COMPLETE
+   2026-11-21, verdict recorded below.** The Atmosphere datapoint
    (3.32:1 proof-to-code ratio, 20-second verification) says full
    deduction over a shrunk TCB module is feasible. Pilot: MmioRegion's
-   bounds invariant in Verus. If the proof cost stays in the promised
-   class, extend to KPtr's lifetime discipline; if not, Kani-bounded
-   remains the bar and the pilot's findings are recorded.
+   bounds invariant in Verus.
+
+   **PILOT RESULT (kernel/safety-tests/verus/pilot_mmio.rs; Verus
+   0.2026.11.02 prebuilt + rustup 1.99.1 toolchain, ~10 min setup,
+   no source build):** 4 proofs verified, 0 errors, 1.9 s — an order
+   under the 20 s pitch. Three theorems over a spec twin of
+   check()'s arithmetic: T1 no-OOB (admitted access spans lie inside
+   the window, unbounded inputs), T2 wrapping-add alignment closure
+   (the conviction-#1 fix's justification: 2^64 % w == 0 for
+   power-of-two widths — a lemma Kani CANNOT check, being bounded),
+   T3 admit-closure (addr reconstructs off). Ratio: 74 proof-file
+   lines to ~12 lines of mirrored impl arithmetic ≈ 6:1 raw, ≈ 3.7:1
+   counting only theorem+spec lines — the Atmosphere class.
+
+   **VERDICT: Kani-bounded stays the standing bar; Verus is adopted
+   NARROWLY, for the unbounded-arithmetic lemma class** (modulo/wrap
+   identities, bound derivations — properties that hold for ALL
+   inputs, where a bounded checker can only sample). The raw-memory
+   layer (volatile derefs) stays with Kani/Miri — Verus has no
+   executable model for it, and forcing it would distort the impl
+   (evaluation question 1: avoided by the spec-twin scope; the
+   twin↔impl correspondence is by line-mirroring and is the pilot's
+   honest weakness — a follow-up stitch would be a Kani harness
+   asserting twin/impl agreement on symbolic inputs). Composition
+   (question 3): complementary, not fighting — the two tools own
+   disjoint property classes over the same primitive. KPtr's
+   lifetime discipline: NOT extended this round — it is heap-liveness
+   (Kani's memory model already owns exactly-once); the Verus-shaped
+   share would be the layout-identity lemma, queued as optional.
 
 ## Layer 3 — Hardware: a runtime backstop for what static analysis cannot see (OPEN)
 
@@ -194,6 +221,37 @@ sporadically. Expansion, in value order:
   template):** SMEP armed (CPUID-gated, per-CPU), page-0 refused at every
   table walk. This is the hardware layer's proof-of-pattern: a hardware
   bit that converts a corruption class into a guaranteed fault.
+- **Intel MPK (pkey) evaluation: ADOPT-READY (measured 2026-11-21,
+  probe at kernel/src/arch/x86_64/mpk.rs, cmdline `mpkprobe=1`,
+  default off).** All four deliverables landed on the primary rig
+  (9950X host, KVM, `-cpu max`): (1) CAPABILITY — CPUID.7.0:ECX
+  bit3 (PKU support) reads 1 in the guest; bit4 (OSPKE) flips to 1
+  the moment the kernel arms CR4.PKE (the probe's own verification —
+  note the bit semantics: bit3 is the HARDWARE bit, bit4 the
+  CR4.PKE mirror the OS sets; reading bit4 as the hardware bit was
+  the first probe's false negative); (2) COST — WRPKRU round-trip
+  **47-49 cycles/op** (100k ops, TSC-timed, under KVM), inside
+  ERIM's native 20-90-cycle band and trivially inside the <1%
+  overhead budget (a 47-cycle switch on microsecond-scale
+  primitive windows); (3) FAULT-INJECTION — a 4K page mapped with
+  pkey=1 (PTE bits 62:59) on the ACTIVE root at a fresh
+  user-range VA: with PKRU key1 enabled the raw-pointer write
+  LANDS (value verified); with key1 AD|WD set the SAME write takes
+  a hardware #PF, converted by the uaccess exception-table window
+  to a return code — the backstop is a proven fault, not an
+  argued one. Two probe-engineering findings for the adopter: the
+  protected page must be installed on the ACTIVE CR3 root (a
+  static-root install left it absent; the kernel-VA fault path
+  re-mapped it on its own NX template — the template-override, NOT
+  a PKU failure), and the fixmap window is huge-leaved at PMD (a
+  4K walk there resolves garbage — use a fresh user-range VA);
+  (4) QEMU's PKRU reset value is 0x0 on this host (Linux's
+  0x55555554 assumption does not hold under KVM) — any adopter
+  must SET the AD bits for keys 1-15 explicitly at arm time, not
+  rely on the reset. The design shape from this plan stands
+  (metadata pages in a pkey-protected region, WRPKRU windows at
+  the primitive boundaries); the probe's ex_table-bracketed access
+  window is the template for the primitives' internal accesses.
 - **MTE/CHERI: documented, not pursued** (platform-bound / research
   stage). The provenance-interaction question is tracked in the Rust
   design register as a watch item.
@@ -218,6 +276,30 @@ sporadically. Expansion, in value order:
    rather than a fourth patch.
 3. **The audit lane extension:** scripts/unsafe_census.py grows a pattern
    histogram column per release, so the shape drift is visible in CI.
+
+## Part II status board (updated 2026-11-21 — user directive: remaining layers moved up)
+
+| Layer | Item | Status |
+|---|---|---|
+| 1 | Framekernel boundary: per-module forbids | **191 modules** compiler-enforced, CI-ratcheted |
+| 1 | Crate flips | **IN FLIGHT** — syscall pilot ADOPTED (syscall-crate-pilot.md: reverse surface 88 sites, ~90 relocations); the flip executing; net measured next |
+| 2.1 | Miri over primitives | **DONE** — 12/12 zero UB (kernel-safety-tests, verbatim #[path]) |
+| 2.2 | Kani proofs (KPTR/Mmio) | **DONE** — 12/12 verified; two checker-self convictions fixed |
+| 2.3 | Verus pilot | **DONE** — 4 theorems/1.9s; narrow-adopt verdict recorded |
+| 3 | MPK evaluation | **IN FLIGHT** — capability probe + ERIM-cost + fault-injection prototype assigned |
+| 3 | SMEP default-deny | **DONE** (the template) |
+| 4.1 | Escape-hatch CI rule | **DONE** — escape_hatch_check in unsafe_gate |
+| 4.2 | Pattern-review policy | **DONE** (below) |
+| 4.2 | Census pattern histogram | TODO (unsafe_census.py grows the column) |
+
+**Layer 4.2 standing policy (adopted 2026-11-21):** every THIRD recurrence
+of the same INV defect family triggers a PRIMITIVE-DESIGN REVIEW (is the
+abstraction shape itself unsound?) rather than a fourth site-patch. The
+GRQ campaign's four families (two-step release, second-authority
+trackers, IRQs-off-window deliveries, heal-style remediation) are the
+precedents — each got a protocol-level fix. The reviewer of record is
+the lane that lands the third recurrence; the review lands in
+safety-and-performance.md next to the family's INV rows.
 
 ## The combined sequencing
 

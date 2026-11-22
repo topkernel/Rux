@@ -80,13 +80,6 @@ kernel/src/mm/page.rs
 kernel/src/mm/pagemap.rs
 kernel/src/mm/unwatch.rs
 kernel/src/mm/vmstat.rs
-kernel/src/net/arp.rs
-kernel/src/net/ethernet.rs
-kernel/src/net/icmp.rs
-kernel/src/net/ipv4/checksum.rs
-kernel/src/net/ipv4/defrag.rs
-kernel/src/net/ipv6/icmpv6.rs
-kernel/src/net/tcp_timer.rs
 kernel/src/panic_policy.rs
 kernel/src/print.rs
 kernel/src/process/coredump.rs
@@ -109,11 +102,6 @@ kernel/src/sched/wakewatch.rs
 kernel/src/security/capability.rs
 kernel/src/sync/condvar.rs
 kernel/src/sync/semaphore.rs
-kernel/src/syscall/dispatch.rs
-kernel/src/syscall/io.rs
-kernel/src/syscall/network.rs
-kernel/src/syscall/time.rs
-kernel/src/syscall/x86_compat.rs
 kernel/src/tests/boundary.rs
 kernel/src/tests/buffer_state.rs
 kernel/src/tests/checksum.rs
@@ -167,3 +155,9 @@ kernel/src/tests/virtio_queue.rs
 kernel/src/tests/vma_flags.rs
 kernel/src/timer/oneshot.rs
 kernel/src/trace/files.rs
+kernel/src/syscall/mod.rs
+kernel/rux-net/src/lib.rs
+kernel/src/sched/fair.rs
+kernel/src/sched/rt.rs
+kernel/src/sched/cgroup.rs
+kernel/src/sched/sched_policy.rs

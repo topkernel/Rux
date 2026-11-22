@@ -4,32 +4,31 @@
 //!
 //! Network Subsystem
 
+pub mod net_hooks;
+pub mod file_arc;
+pub mod net_edges;
 pub mod buffer;
-pub mod ethernet;
-pub mod arp;
-pub mod icmp;
-pub mod ipv4;
-pub mod ipv6;
-pub mod udp;
-pub mod tcp;
-pub mod tcp_timer;
-pub mod socket;
-pub mod unix;
-pub mod netlink;
-pub mod raw;
+// pub mod ethernet; — MOVED to the rux-net service crate (rung 2)
+// pub mod arp; — MOVED to the rux-net service crate (rung 2)
+// pub mod icmp; — MOVED to the rux-net service crate (rung 2)
+// pub mod ipv4; — MOVED to the rux-net service crate (rung 2)
+// pub mod ipv6; — MOVED to the rux-net service crate (rung 2)
+// pub mod udp; — MOVED to the rux-net service crate (rung 2)
+// pub mod tcp; — MOVED to the rux-net service crate (rung 2)
+// pub mod tcp_timer; — MOVED to the rux-net service crate (rung 2)
+// pub mod socket; — MOVED to the rux-net service crate (rung 2)
+// pub mod unix; — MOVED to the rux-net service crate (rung 2)
+// pub mod netlink; — MOVED to the rux-net service crate (rung 2)
+// pub mod raw; — MOVED to the rux-net service crate (rung 2)
 
 pub use buffer::{
     SkBuff, PacketType, EthProtocol, IpProtocol,
     alloc_skb, kfree_skb,
 };
 
-pub use socket::{
-    Socket, SocketType, SocketState, RecvPacket,
-    SockAddrIn, AF_INET, SOCK_STREAM, SOCK_DGRAM, IPPROTO_TCP, IPPROTO_UDP,
-    get_socket, get_socket_from_fd,
-};
+// pub use socket::{...}; — MOVED to the rux-net service crate (rung 2)
 
-pub use ipv6::{AF_INET6, IpAddr};
+// pub use ipv6::{AF_INET6, IpAddr}; — MOVED to the rux-net service crate (rung 2)
 
 // ==================== Socket-file Arc edges (round-5) ====================
 
@@ -52,6 +51,19 @@ pub(crate) fn file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::A
         alloc::sync::Arc::increment_strong_count(ptr);
         Some(alloc::sync::Arc::from_raw(ptr))
     }
+}
+
+/// Take the Arc OUT of a closing socket File's private_data slot and
+/// HAND IT BACK (the close paths that must USE the socket before the
+/// drop — flush held data, protocol close; INV-NETARC-1 + the caller's
+/// ops identity check). The cell is emptied first, making a second
+/// reclaim impossible.
+pub(crate) fn reclaim_file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::Arc<T>> {
+    let ptr = file.private_data_ptr()? as *const T;
+    file.clear_private_data();
+    // SAFETY: INV-NETARC-1 — reconstructing consumes the slot's single
+    // reference; the emptied cell makes this exactly-once.
+    unsafe { Some(alloc::sync::Arc::from_raw(ptr)) }
 }
 
 /// Take the Arc OUT of a closing socket File's private_data slot and

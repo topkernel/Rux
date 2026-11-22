@@ -44,6 +44,153 @@ pub use wheel::{
     PeriodicAction, SoftirqCtx, Time,
 };
 
+// ============================================================================
+// Timekeeping core — jiffies + the shared tick-grid derivation
+// (rung4-drivers prep move 1: hoisted from the three arch timer drivers;
+// the reference kernel keeps these in kernel/time/, not in drivers —
+// the drivers' job is the tick that updates them, the clocksource read,
+// and the hardware re-arm. Zero-behavior relocation: same statics, same
+// derivation, callers re-pointed.)
+// ============================================================================
+
+/// jiffies — global tick counter (advanced from the arch timer IRQ via
+/// [`jiffies_update_from_timebase`] / [`jiffies_bump`]).
+pub(crate) static JIFFIES: AtomicU64 = AtomicU64::new(0);
+/// timebase value at the first tick — the origin of the nominal tick grid.
+pub(crate) static JIFFIES_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// HZ for the timekeeping conversions (config-derived, arch-uniform).
+pub const TK_HZ: u64 = crate::config::KERNEL_HZ as u64;
+
+/// Get current jiffies value (ticks since boot).
+#[inline]
+pub fn get_jiffies() -> u64 {
+    JIFFIES.load(Ordering::Acquire)
+}
+
+/// Test-only deterministic jiffy advance (unit-test harness): the tests
+/// run with the timer interrupt disabled and nothing increments JIFFIES
+/// during the suite. Tests that need "time has passed" semantics bump
+/// the counter explicitly instead of relying on incidental ticks.
+#[cfg(feature = "unit-test")]
+pub fn test_advance_jiffies(n: u64) {
+    JIFFIES.fetch_add(n, core::sync::atomic::Ordering::Release);
+}
+
+/// Convert jiffies to milliseconds.
+#[inline]
+pub const fn jiffies_to_msecs(jiffies: u64) -> u64 {
+    jiffies * 1000 / TK_HZ
+}
+
+/// Convert milliseconds to jiffies.
+#[inline]
+pub const fn msecs_to_jiffies(msecs: u64) -> u64 {
+    msecs * TK_HZ / 1000
+}
+
+/// Floor-map an absolute timebase value onto the jiffy grid — the read
+/// side of [`jiffies_update_from_timebase`]'s
+/// `floor((now - base) / period)` derivation (0 before the grid origin
+/// is established). `ticks_per_period` is the arch clocksource's ticks
+/// per tick period (CLOCK_FREQ / HZ). The timer wheel uses this to
+/// derive an hres entry's first-check jiffy from its precise CSR
+/// deadline, so routing never trusts caller-supplied jiffy bookkeeping.
+#[inline]
+pub fn jiffy_floor_of_time(t: u64, ticks_per_period: u64) -> u64 {
+    let base = JIFFIES_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return 0;
+    }
+    t.saturating_sub(base) / ticks_per_period
+}
+
+/// Advance jiffies from the TIMEBASE, not from IRQ counts — idempotent
+/// and multi-CPU-safe jiffies (every arch's tick handler calls this
+/// with its own `read_time()` and `ticks_per_period`; deriving from
+/// `floor((time - base) / period)` makes the update immune to
+/// accumulated re-arm latency and to N-harts-N-counts drift).
+/// Returns the number of jiffies this call advanced.
+#[inline]
+pub fn jiffies_update_from_timebase(now: u64, ticks_per_period: u64) -> u64 {
+    // Establish the grid origin on the first call.
+    if JIFFIES_BASE.load(Ordering::Acquire) == 0 {
+        JIFFIES_BASE
+            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire)
+            .ok();
+    }
+    let base = JIFFIES_BASE.load(Ordering::Acquire);
+    let nominal = now.saturating_sub(base) / ticks_per_period;
+    // Monotonic: only ever move forward.
+    let mut cur = JIFFIES.load(Ordering::Acquire);
+    while nominal > cur {
+        match JIFFIES.compare_exchange_weak(cur, nominal, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => break,
+            Err(actual) => cur = actual,
+        }
+    }
+    nominal.saturating_sub(cur)
+}
+
+/// Single-tick bump (the PIT-phase / pre-timebase fallback: every IRQ
+/// is exactly one tick). Returns 1.
+#[inline]
+pub fn jiffies_bump() -> u64 {
+    JIFFIES.fetch_add(1, Ordering::AcqRel);
+    1
+}
+
+/// The current-clocksource read in the arch's nominal CLOCK_FREQ domain
+/// (TSC track / HPET on x86_64, time CSR on riscv64, CNTVCT on
+/// aarch64). THE one framework->driver delegation in the timekeeping
+/// core — the crate flip turns this into the driverlib clocksource hook.
+#[inline]
+pub fn read_time() -> u64 {
+    timer::read_time()
+}
+
+/// High-resolution nanoseconds since boot (the clocksource read scaled
+/// to nanoseconds; same delegation shape as [`read_time`]).
+#[inline]
+pub fn monotonic_ns_since_boot() -> u64 {
+    timer::monotonic_ns_since_boot()
+}
+
+/// Coarse nanoseconds since boot, snapped to the nominal tick grid —
+/// the ktime_get_coarse family (drivers keep a period-exact twin; this
+/// framework route uses the driver's own coarse derivation).
+#[inline]
+pub fn coarse_ns_since_boot() -> u64 {
+    timer::coarse_ns_since_boot()
+}
+
+// ============================================================================
+// Input-tick diagnostic hook (rung4 prep move 3): the timer tick's
+// input-health beat is driver functionality — the framework site holds
+// ONE optional fn pointer the input driver registers at init, so no
+// framework file names the input driver.
+// ============================================================================
+
+static INPUT_DEBUG_TICK_FN: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// The input driver registers its periodic diagnostic here (idempotent).
+pub fn register_input_debug_tick(f: fn()) {
+    INPUT_DEBUG_TICK_FN.store(f as usize, core::sync::atomic::Ordering::Release);
+}
+
+/// The timer tick's input-health beat (no-op until a driver registers).
+#[inline]
+pub fn input_debug_tick() {
+    let f = INPUT_DEBUG_TICK_FN.load(core::sync::atomic::Ordering::Acquire);
+    if f != 0 {
+        // SAFETY: the registered fn pointer was valid at registration
+        // (a static fn item) and the registry only ever holds it or 0.
+        unsafe { core::mem::transmute::<usize, fn()>(f)() };
+    }
+}
+
+
 /// Maximum number of concurrent timers (pool size, unchanged).
 pub const MAX_TIMERS: usize = wheel::MAX_TIMERS;
 
@@ -75,7 +222,7 @@ static TIMER_EVER_ARMED: core::sync::atomic::AtomicBool =
 pub fn timer_softirq_work_pending() -> bool {
     TIMER_EVER_ARMED.load(Ordering::Acquire)
 
-        || HRES_NEXT.load(Ordering::Acquire) <= crate::drivers::timer::read_time()
+        || HRES_NEXT.load(Ordering::Acquire) <= crate::timer::read_time()
         // perf events: an armed sampler needs this softirq every tick
         // to charge the IRQ-stashed samples (perf::softirq_tick). One
         // relaxed load when nothing is armed (the sc184 discipline).
@@ -113,7 +260,7 @@ impl TimedSleepShadow {
         t.timed_sleep_kind.store(kind, Ordering::Release);
         t.timed_sleep_timer_id.store(timer_id, Ordering::Release);
         t.timed_sleep_armed_j
-            .store(crate::drivers::timer::get_jiffies() as u32, Ordering::Release);
+            .store(crate::timer::get_jiffies() as u32, Ordering::Release);
         t.timed_sleep_dur_ms.store(dur_ms, Ordering::Release);
         Some(TimedSleepShadow)
     }
@@ -422,7 +569,7 @@ fn del_note(id: u64) {
         core::panic::Location::caller().line() as u64,
         Ordering::Relaxed,
     );
-    DEL_JIF[slot].store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+    DEL_JIF[slot].store(crate::timer::get_jiffies(), Ordering::Relaxed);
     // direct-mapped id table (survives the ring's roll): 16K slots,
     // key = id itself — the wheel's ids are monotonic and sparse, so a
     // slot's id word validates the entry.
@@ -432,7 +579,7 @@ fn del_note(id: u64) {
         core::panic::Location::caller().line() as u64,
         Ordering::Relaxed,
     );
-    DELDM_JIF[d].store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+    DELDM_JIF[d].store(crate::timer::get_jiffies(), Ordering::Relaxed);
 }
 pub static DELDM_ID: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
 pub static DELDM_RA: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
@@ -444,7 +591,7 @@ pub fn del_lookup(id: u64) -> Option<(u64, u64)> {
         if DEL_ID[k].load(Ordering::Relaxed) == id {
             return Some((
                 DEL_RA[k].load(Ordering::Relaxed),
-                crate::drivers::timer::get_jiffies()
+                crate::timer::get_jiffies()
                     .saturating_sub(DEL_JIF[k].load(Ordering::Relaxed)),
             ));
         }
@@ -481,7 +628,7 @@ pub fn timer_softirq_handler(_nr: usize) {
 
     // High-resolution timers are NOT jiffy-deduped: an extra hart IRQ fired
     // at a sub-jiffy deadline re-runs this scan even in the same jiffy.
-    let now_time = crate::drivers::timer::read_time();
+    let now_time = crate::timer::read_time();
     let hres_due = HRES_NEXT.load(Ordering::Acquire) <= now_time;
 
     // Wakewatch forensics: stamp this CPU's Hrtimer-softirq entry
@@ -979,7 +1126,7 @@ pub fn expire_hres_inline() -> bool {
             }
         }
     }
-    let now_time = crate::drivers::timer::read_time();
+    let now_time = crate::timer::read_time();
     if HRES_NEXT.load(Ordering::Acquire) > now_time {
         return false;
     }
@@ -1347,7 +1494,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                         let d = token.id as usize & 0x3FFF;
                         FWHOW_ID[d].store(token.id, Ordering::Relaxed);
                         FWHOW_JIF[d].store(
-                            crate::drivers::timer::get_jiffies(),
+                            crate::timer::get_jiffies(),
                             Ordering::Relaxed,
                         );
                         FWHOW_OK[d].store(ok as u8, Ordering::Relaxed);
@@ -1434,7 +1581,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                 // counter) is accepted per the timerfd refcount audit.
                 // The address names the whole TimerFd so the notify hook can
                 // also wake readers blocked in timerfd_read (review批次1).
-                crate::syscall::misc::timerfd_expire_notify(tfd);
+                crate::syscall::support::timerfd_expire_notify(tfd);
             }
             Action::Signal { pid, signo } => {
                 let _ = crate::signal::send_signal(pid, signo);
@@ -1525,7 +1672,7 @@ fn fw_record(pid: u32, ok: bool, on_rq: bool, key: bool, st: u32) {
     FW_KEY[slot].store(key as u8, Ordering::Relaxed);
     FW_ST[slot].store(st, Ordering::Relaxed);
     // per-pid LAST-fire side table (survives the ring's roll)
-    let jif = crate::drivers::timer::get_jiffies();
+    let jif = crate::timer::get_jiffies();
     for k in 0..32 {
         if FWT_PID[k].load(Ordering::Relaxed) == pid
             && FWT_PID[k]
@@ -1617,7 +1764,7 @@ pub fn ww_note_tick_arrival(cpu: usize) {
 
 #[inline]
 fn read_time_stamp() -> u64 {
-    crate::drivers::timer::read_time()
+    crate::timer::read_time()
 }
 
 /// Wakewatch: age in ms of cpu's last timer-IRQ arrival (0 = never
@@ -1630,7 +1777,7 @@ pub fn ww_tick_age_ms(cpu: usize) -> u64 {
     if last == 0 {
         return 0;
     }
-    let age = crate::drivers::timer::read_time().saturating_sub(last);
+    let age = crate::timer::read_time().saturating_sub(last);
     age * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ
 }
 
@@ -1643,7 +1790,7 @@ pub fn ww_hres_age_ms(cpu: usize) -> u64 {
     if last == 0 {
         return 0;
     }
-    let age = crate::drivers::timer::read_time().saturating_sub(last);
+    let age = crate::timer::read_time().saturating_sub(last);
     age * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ
 }
 
@@ -1810,7 +1957,7 @@ fn ww_heartbeat(now_time: u64) {
                 for &b in b" tp=" { putchar(b); }
                 pdec(tpend as u64);
                 for &b in b" tdl-now=" { putchar(b); }
-                let nowt = crate::drivers::timer::read_time();
+                let nowt = crate::timer::read_time();
                 if tdl > nowt {
                     pdec((tdl - nowt) * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64);
                 } else {
@@ -1825,7 +1972,7 @@ fn ww_heartbeat(now_time: u64) {
                 for k in 0..32 {
                     if FWT_PID[k].load(Ordering::Relaxed) == pid {
                         for &b in b" fwj=" { putchar(b); }
-                        pdec(crate::drivers::timer::get_jiffies().saturating_sub(
+                        pdec(crate::timer::get_jiffies().saturating_sub(
                             FWT_JIF[k].load(Ordering::Relaxed)));
                         for &b in b" fw=(ok:" { putchar(b); }
                         pdec(FWT_OK[k].load(Ordering::Relaxed) as u64);
@@ -1930,7 +2077,7 @@ fn ww_heartbeat(now_time: u64) {
 /// direct writes — keep the same putchar_no_lock discipline).
 fn ww_latefire_budget_ok() -> bool {
     static LAST: AtomicU64 = AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(Ordering::Acquire);
     // sc167 storm gate: 10 jiffies (100 ms) let sc166 print 2503 STALL
     // lines, each a ~110-char direct-console write charged with IF=0 —
@@ -1970,7 +2117,7 @@ pub fn tick_trap_report(site: &str) {
     use crate::drivers::intc::apic;
 
     let me = crate::arch::cpu_id() as usize;
-    let tb_now = crate::drivers::timer::read_time();
+    let tb_now = crate::timer::read_time();
 
     // --- SELF (the CPU executing the dump) ---
     let if_self = crate::arch::cpu::get_interrupts_state();
@@ -2028,7 +2175,7 @@ pub fn tick_trap_report(site: &str) {
         // hypothesis, and this CPU must not hang on an unresponsive peer.
         let deadline = tb_now + crate::config::TIMER_CLOCK_FREQ_HZ / 20;
         let mut served = false;
-        while crate::drivers::timer::read_time() < deadline {
+        while crate::timer::read_time() < deadline {
             if crate::arch::ipi::SNAP_DONE[cpu].load(Ordering::Acquire) >= req {
                 served = true;
                 break;
@@ -2080,12 +2227,12 @@ pub fn tick_trap_report(site: &str) {
             apic::tick_trap_adjudicate(&s),
             crate::arch::ipi::SNAP_ARMSEQ[cpu].load(Ordering::Relaxed),
             apic::TIMER_ARM_OP[cpu].load(Ordering::Relaxed),
-            crate::drivers::timer::read_time().saturating_sub(apic::TIMER_ARM_TB[cpu].load(Ordering::Relaxed)),
+            crate::timer::read_time().saturating_sub(apic::TIMER_ARM_TB[cpu].load(Ordering::Relaxed)),
             apic::TIMER_ARM_DEADLINE[cpu].load(Ordering::Relaxed),
             apic::TIMER_ARM_COUNTS[cpu].load(Ordering::Relaxed),
             WW_TICK_IRQ[cpu].load(Ordering::Relaxed),
             ww_tick_age_ms(cpu),
-            crate::drivers::timer::read_time().saturating_sub(peer_tb) * 1000
+            crate::timer::read_time().saturating_sub(peer_tb) * 1000
                 / crate::config::TIMER_CLOCK_FREQ_HZ,
         );
     }
@@ -2093,3 +2240,55 @@ pub fn tick_trap_report(site: &str) {
 
 #[cfg(not(target_arch = "x86_64"))]
 pub fn tick_trap_report(_site: &str) {}
+
+// ============================================================================
+// Wall-clock epoch offset (moved from syscall/time.rs, crate-flip step 3:
+// RTC boot + vDSO refresh plumbing — framework-shaped, consumed by rtc,
+// printk, vdso, and the clock_settime syscall family.)
+// ============================================================================
+
+/// settimeofday / clock_settime(CLOCK_REALTIME).
+static WALL_EPOCH_OFFSET_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Current wall-clock epoch offset (seconds, floored).
+pub fn wall_epoch_offset_secs() -> u64 {
+    wall_epoch_offset_ns() / 1_000_000_000
+}
+
+/// Current wall-clock epoch offset (nanoseconds).
+pub fn wall_epoch_offset_ns() -> u64 {
+    WALL_EPOCH_OFFSET_NS.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Set the wall-clock epoch offset, seconds variant (RTC boot path).
+pub fn set_wall_epoch_offset_secs(secs: u64) {
+    set_wall_epoch_offset_ns(secs.saturating_mul(1_000_000_000));
+}
+
+/// Set the wall-clock epoch offset (settimeofday / clock_settime path).
+pub fn set_wall_epoch_offset_ns(ns: u64) {
+    WALL_EPOCH_OFFSET_NS.store(ns, core::sync::atomic::Ordering::Release);
+    // P2 vDSO: refresh the shared data page immediately so REALTIME
+    // readers do not wait for the next timer tick.
+    crate::mm::vdso::vdso_data_tick();
+}
+
+/// Current CLOCK_REALTIME (monotonic + wall epoch offset) as (secs, nanos).
+/// FIX8: shared by the adjtimex GET path (tx.time) and ADJ_SETOFFSET.
+/// Also shared with the POSIX-mq absolute-timeout conversion
+/// (kernel/src/ipc/posix_mq.rs), whose timeout is an ABSOLUTE
+/// CLOCK_REALTIME deadline interpreted against the same base
+/// clock_gettime serves.
+pub fn realtime_secs_nanos() -> (i64, u64) {
+    let (s, ns) = monotonic_time();
+    let total_ns = (s as u128 * 1_000_000_000u128 + ns as u128)
+        + wall_epoch_offset_ns() as u128;
+    ((total_ns / 1_000_000_000u128) as i64, (total_ns % 1_000_000_000u128) as u64)
+}
+
+/// Read the monotonic clock as (seconds, nanoseconds) from the CLINT.
+pub fn monotonic_time() -> (u64, u64) {
+    let cycles = crate::arch::cpu::read_time();
+    let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ; // 10 MHz
+    (cycles / freq_hz, (cycles % freq_hz) * 1_000_000_000 / freq_hz)
+}

@@ -197,7 +197,7 @@ fn alloc_serial() -> u32 {
 }
 
 fn now_realtime_secs() -> u64 {
-    let (s, _ns) = crate::syscall::time::realtime_secs_nanos();
+    let (s, _ns) = crate::timer::realtime_secs_nanos();
     s.max(0) as u64
 }
 

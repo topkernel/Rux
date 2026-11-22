@@ -151,7 +151,7 @@ pub fn stuck_window(cpu: usize) -> Option<(u64, u64)> {
     if t0 == 0 {
         return None;
     }
-    let age = crate::drivers::timer::read_time().saturating_sub(t0);
+    let age = crate::timer::read_time().saturating_sub(t0);
     if age <= crate::config::TIMER_CLOCK_FREQ_HZ {
         return None;
     }
@@ -256,7 +256,7 @@ fn note_carrier_evidence() {
     let ev = &CARRIER_EVIDENCE[cpu];
     ev.task.store(t, Ordering::Relaxed);
     ev.jiffies
-        .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+        .store(crate::timer::get_jiffies(), Ordering::Relaxed);
 }
 
 /// Close the carrier-evidence window (called at __do_softirq exit,
@@ -272,7 +272,7 @@ fn clear_carrier_evidence() {
     let ev = &CARRIER_EVIDENCE[cpu];
     ev.task.store(0, Ordering::Relaxed);
     ev.jiffies
-        .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+        .store(crate::timer::get_jiffies(), Ordering::Relaxed);
 }
 
 /// Does `task` (a Task pointer) have LIVE carrier-side evidence on
@@ -382,7 +382,7 @@ pub fn __do_softirq() -> bool {
     win_note(cpu, true, 0, 0, 0);
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     
-        SOFTIRQ_WIN_T0[cpu].store(crate::drivers::timer::read_time(), Ordering::Release);
+        SOFTIRQ_WIN_T0[cpu].store(crate::timer::read_time(), Ordering::Release);
     
 
     // Session-6 discriminator (fleet s2): bracket the SOFTIRQ PROCESSING
@@ -418,7 +418,7 @@ pub fn __do_softirq() -> bool {
     crate::dfx::syscost::zone_softirq_enter();
 
     let mut restart_count = 0;
-    let budget_t0 = crate::drivers::timer::read_time();
+    let budget_t0 = crate::timer::read_time();
     // First non-zero pending snapshot of this window (bracket print only).
     let mut first_pending: u32 = 0;
 
@@ -436,7 +436,7 @@ pub fn __do_softirq() -> bool {
         }
 
         WW_SOFTIRQ_RUNS.fetch_add(1, Ordering::Relaxed);
-        let t0 = crate::drivers::timer::read_time();
+        let t0 = crate::timer::read_time();
 
         // Process each set bit from LSB (highest priority) to MSB
         //
@@ -454,7 +454,7 @@ pub fn __do_softirq() -> bool {
         // handler.
         let mut remaining = pending;
         while remaining != 0 {
-            if crate::drivers::timer::read_time().saturating_sub(budget_t0)
+            if crate::timer::read_time().saturating_sub(budget_t0)
                 >= MAX_SOFTIRQ_TIME_TICKS
             {
                 // Leave the vectors we did not reach pending (Linux
@@ -487,7 +487,7 @@ pub fn __do_softirq() -> bool {
         }
 
         WW_SOFTIRQ_TICKS.fetch_add(
-            crate::drivers::timer::read_time().saturating_sub(t0),
+            crate::timer::read_time().saturating_sub(t0),
             Ordering::Relaxed,
         );
 
@@ -499,7 +499,7 @@ pub fn __do_softirq() -> bool {
         // self-re-raising vector (timer+net/blk storm) keeps this loop
         // inside the IRQ context forever (the WT4 collapse shape).
         if restart_count >= MAX_SOFTIRQ_RESTART
-            || crate::drivers::timer::read_time().saturating_sub(budget_t0)
+            || crate::timer::read_time().saturating_sub(budget_t0)
                 >= MAX_SOFTIRQ_TIME_TICKS
         {
             break 'outer;
@@ -683,10 +683,7 @@ pub fn init() {
     // Note: tasklet::init() runs after softirq::init() in interrupt::init(),
     // so it will overwrite the None entries for Hi and Tasklet — that's fine.
 
-    open_softirq(
-        SoftirqIndex::Timer as usize,
-        crate::net::tcp_timer::timer_softirq_handler,
-    );
+    open_softirq(SoftirqIndex::Timer as usize, crate::net::net_hooks::tcp_timer_softirq);
     open_softirq(
         SoftirqIndex::NetRx as usize,
         crate::drivers::net::virtio_net::net_rx_softirq_handler,

@@ -133,7 +133,7 @@ pub static UR_NS: AtomicU64 = AtomicU64::new(0);
 #[inline]
 pub fn now() -> u64 {
     if on() {
-        crate::drivers::timer::monotonic_ns_since_boot()
+        crate::timer::monotonic_ns_since_boot()
     } else {
         0
     }
@@ -144,7 +144,7 @@ pub fn now() -> u64 {
 pub fn add(dst: &AtomicU64, t0: u64) {
     if t0 != 0 {
         dst.fetch_add(
-            crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0),
+            crate::timer::monotonic_ns_since_boot().saturating_sub(t0),
             Ordering::Relaxed,
         );
     }
@@ -202,7 +202,7 @@ pub fn dump() {
     if !on() {
         return;
     }
-    let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
+    let secs = crate::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
     crate::pr_warn!(
         // Schedule-side anatomy (all NS sums; averages = sum / leftmost
         // count). SCH rows divide by SCH_N, CW rows by CTX_N.

@@ -35,6 +35,9 @@
 //! initializer (per-row constructors can come later), and the GRQ
 //! typed lock key named in §3 is the follow-on slice, not this one.
 
+// (INV-PERCPU-1: the per-CPU bank family — banks are addressed by
+// cpu id through the fixed static array (bounds by construction on
+// our SMP sizes); preemption-off windows own the per-bank access.)
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};

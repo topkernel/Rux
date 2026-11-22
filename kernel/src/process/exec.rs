@@ -44,7 +44,7 @@ pub static STACKZERO_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomi
 /// 4. Set up user stack (argc, argv, envp, auxv)
 /// 5. Update process context (address space, stack pointer, trap frame)
 ///
-pub(crate) fn do_execve_elf(
+pub fn do_execve_elf(
     task: &mut crate::process::task::Task,
     program_data: &[u8],
     argv: &[String],

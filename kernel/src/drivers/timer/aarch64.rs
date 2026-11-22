@@ -49,16 +49,12 @@ pub fn clock_freq() -> u64 {
 /// riscv64 CLINT does)
 pub const CLOCK_FREQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
 
-/// jiffies - global clock counter
-static JIFFIES: AtomicU64 = AtomicU64::new(0);
+// (JIFFIES/JIFFIES_BASE hoisted to crate::timer — rung4 prep move 1)
 
-/// timebase value at the first tick — origin of the nominal tick grid
-static JIFFIES_BASE: AtomicU64 = AtomicU64::new(0);
-
-/// Get current jiffies value
+/// Get current jiffies value (framework static)
 #[inline]
 pub fn get_jiffies() -> u64 {
-    JIFFIES.load(Ordering::Acquire)
+    crate::timer::get_jiffies()
 }
 
 /// Test-only deterministic jiffy advance (unit-test harness): the tests
@@ -69,7 +65,7 @@ pub fn get_jiffies() -> u64 {
 /// instead of relying on incidental ticks.
 #[cfg(feature = "unit-test")]
 pub fn test_advance_jiffies(n: u64) {
-    JIFFIES.fetch_add(n, core::sync::atomic::Ordering::Release);
+    crate::timer::test_advance_jiffies(n)
 }
 
 /// Floor-map an absolute timebase value onto the jiffy grid — the
@@ -80,11 +76,7 @@ pub fn test_advance_jiffies(n: u64) {
 /// caller-supplied jiffy bookkeeping.
 #[inline]
 pub fn jiffy_floor_of_time(t: u64) -> u64 {
-    let base = JIFFIES_BASE.load(Ordering::Acquire);
-    if base == 0 {
-        return 0;
-    }
-    t.saturating_sub(base) / ticks_per_period()
+    crate::timer::jiffy_floor_of_time(t, ticks_per_period())
 }
 
 /// Coarse time in nanoseconds since boot, snapped to the NOMINAL tick
@@ -99,26 +91,7 @@ pub fn coarse_ns_since_boot() -> u64 {
 /// Advance jiffies from the TIMEBASE (idempotent, multi-cpu safe)
 #[inline]
 fn increment_jiffies() {
-    let now = read_time();
-    if JIFFIES_BASE.load(Ordering::Acquire) == 0 {
-        JIFFIES_BASE
-            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire)
-            .ok();
-    }
-    let base = JIFFIES_BASE.load(Ordering::Acquire);
-    let nominal = now.saturating_sub(base) / ticks_per_period();
-    let mut cur = JIFFIES.load(Ordering::Acquire);
-    while nominal > cur {
-        match JIFFIES.compare_exchange_weak(
-            cur,
-            nominal,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => break,
-            Err(actual) => cur = actual,
-        }
-    }
+    crate::timer::jiffies_update_from_timebase(read_time(), ticks_per_period());
 }
 
 /// Convert jiffies to milliseconds
@@ -191,7 +164,7 @@ pub fn timer_interrupt_handler() {
 
     // 2. Raise Timer softirq for TCP timer processing (gated on table
     //    occupancy — see the riscv64 twin / sc184)
-    if crate::net::tcp::get_tcp_socket_table().count() > 0 {
+    if crate::net::net_hooks::tcp_table_nonempty() {
         crate::interrupt::softirq::raise_softirq_irqoff(
             crate::interrupt::softirq::SoftirqIndex::Timer as usize,
         );

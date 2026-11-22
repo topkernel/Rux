@@ -119,3 +119,20 @@ pub(crate) fn location_ref<T>(site: *const T) -> &'static T {
     // site tables only ever store real code-location references).
     unsafe { &*site }
 }
+
+/// Defect-C: first-refusal-per-task marker (a 64-slot pid ring; the
+/// fill_site static is overwritten by later faults, so only the FIRST
+/// print per task is trustworthy). Returns true the first time `pid` is
+/// seen (budget-free — bounded by task count).
+pub(crate) fn mark_first_refusal(pid: u64) -> bool {
+    static SEEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    static RING: [core::sync::atomic::AtomicU64; 64] =
+        [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+    let slot = (pid % 64) as usize;
+    let prev = RING[slot].swap(pid, core::sync::atomic::Ordering::AcqRel);
+    if prev != pid {
+        SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return true;
+    }
+    false
+}

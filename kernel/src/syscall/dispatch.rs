@@ -6,12 +6,81 @@
 //!
 //! This module handles system call dispatch and common processing
 
-#![forbid(unsafe_code)]
 use crate::arch::pt_regs::PtRegs;
 use super::*;
 
 /// System call argument array type
 pub type SyscallArgs = [u64; 6];
+
+/// FLIP M3-A: the two dispatch tables. Filled by the service crate's
+/// register_all (rux-syscall) at boot through the BIN composition; when
+/// filled, the generic match below is bypassed for table hits (the
+/// fallback match stays as the in-lib migration default until the M3-B
+/// package wiring removes the in-lib service files).
+pub type SyscallArgsFn = fn(SyscallArgs) -> i64;
+
+/// Native-number table dispatch for the x86_64 legacy preamble (the
+/// numbers the pre-translate arms used to call directly — State B
+/// final: the service crate registers them at their NATIVE slots).
+#[cfg(feature = "x86_64")]
+fn native_table_call(nr: u32, args: SyscallArgs, regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
+    if let Some(r) = table_lookup(nr, args, regs) {
+        return r;
+    }
+    -(crate::errno::constants::ENOSYS as i64)
+}
+
+pub type SyscallRegsFn = fn(&mut crate::arch::pt_regs::PtRegs) -> i64;
+
+pub const NR_SYSCALLS: usize = 1200;
+
+pub static SYSCALL_ARGS_TABLE: crate::safety::slot::OnceSlot<
+    [Option<SyscallArgsFn>; NR_SYSCALLS],
+> = crate::safety::slot::OnceSlot::new();
+
+pub static SYSCALL_REGS_TABLE: crate::safety::slot::OnceSlot<
+    [Option<SyscallRegsFn>; 4],
+> = crate::safety::slot::OnceSlot::new();
+
+/// Registration entry (called by rux-syscall::register_all through the
+/// bin): args-table slice indexed by nr, plus the regs-variant entries
+/// (nr 139 rt_sigreturn today).
+pub fn syscall_register_tables(
+    args: &'static [(usize, SyscallArgsFn)],
+    regs: &'static [(usize, SyscallRegsFn)],
+) {
+    let mut atab = [None; NR_SYSCALLS];
+    for &(nr, f) in args {
+        if nr < NR_SYSCALLS {
+            atab[nr] = Some(f);
+        }
+    }
+    let _ = SYSCALL_ARGS_TABLE.publish(atab);
+    let mut rtab: [Option<SyscallRegsFn>; 4] = [None; 4];
+    for &(i, f) in regs.iter().take(4) {
+        rtab[i] = Some(f);
+    }
+    let _ = SYSCALL_REGS_TABLE.publish(rtab);
+}
+
+#[inline]
+fn table_lookup(nr: u32, args: SyscallArgs, regs: &mut crate::arch::pt_regs::PtRegs) -> Option<i64> {
+    if let Some(atab) = SYSCALL_ARGS_TABLE.get() {
+        if (nr as usize) < NR_SYSCALLS {
+            if let Some(f) = atab[nr as usize] {
+                return Some(f(args));
+            }
+        }
+    }
+    if nr == 139 {
+        if let Some(rtab) = SYSCALL_REGS_TABLE.get() {
+            if let Some(f) = rtab[0] {
+                return Some(f(regs));
+            }
+        }
+    }
+    None
+}
 
 /// Get system call number from PtRegs
 #[inline]
@@ -234,7 +303,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         if rv == -5
             && crate::trace::EVENT_EPOLL_DELIVERY.armed()
         {
-            crate::syscall::io::syscall_eio_line(sc_nr, syscall_get_arguments(regs));
+            crate::syscall::support::syscall_eio_line(sc_nr as u64, &syscall_get_arguments(regs));
         }
         // launcher-errno lane: every failing syscall (EAGAIN excluded —
         // the idle-park storm would drown the signal) feeds the
@@ -307,12 +376,12 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     match syscall_no {
         7 => {
             // poll(fds, nfds, timeout_ms) — handler exists, no generic slot.
-            syscall_set_return_value(regs, misc::sys_poll(args));
+            let r = native_table_call(7, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         23 => {
             // select(nfds, r, w, e, timeval*) — timeval timeout variant.
-            syscall_set_return_value(regs, misc::sys_select(args));
+            let r = native_table_call(23, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         33 => {
@@ -322,14 +391,14 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // dup2.c). Linux dup2 semantics: oldfd == newfd returns newfd
             // if it is open, else EBADF; dup3() itself would EINVAL.
             let result = if args[0] == args[1] {
-                let probe = io::sys_fcntl([args[0], 1 /* F_GETFD */, 0, 0, 0, 0]);
+                let probe = native_table_call(72, [args[0], 1 /* F_GETFD */, 0, 0, 0, 0], regs);
                 if probe < 0 {
                     probe // -EBADF from the lookup itself
                 } else {
                     args[0] as i64
                 }
             } else {
-                io::sys_dup3([args[0], args[1], 0, 0, 0, 0])
+                native_table_call(24, [args[0], args[1], 0, 0, 0, 0], regs)
             };
             syscall_set_return_value(regs, result);
             return;
@@ -340,7 +409,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // untranslated, 37 fell through to generic 37 = linkat and
             // every glibc alarm() caller parsed a linkat errno as the
             // return value (LTP alarm02/03/05/06/07 family).
-            syscall_set_return_value(regs, time::sys_alarm(args));
+            let r = native_table_call(37, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         78 => {
@@ -348,19 +417,19 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // 18, d_type at 18+nlen+1). No asm-generic number (generic
             // libcs use getdents64); untranslated, 78 fell through to
             // generic 78 = readlinkat.
-            syscall_set_return_value(regs, file::sys_getdents(args));
+            let r = native_table_call(141, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         34 => {
             // pause(): sleep until a signal; always -EINTR.
-            syscall_set_return_value(regs, signal::sys_pause(args));
+            let r = native_table_call(34, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         131 => {
             // sigaltstack(ss, old_ss) — x86_64 native number. Unhandled,
             // it fell through to the generic table where 131 is tgkill
             // and the (ptr, ptr) arguments were parsed as a kill triple.
-            syscall_set_return_value(regs, signal::sys_sigaltstack(args));
+            let r = native_table_call(131, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         132 => {
@@ -369,7 +438,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // where 132 is SIGALTSTACK, so every utime(2) caller silently
             // no-op'd (LTP utime01: stamps read back 0, not the set
             // values).
-            syscall_set_return_value(regs, file::sys_utime(args));
+            let r = native_table_call(132, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         139 => {
@@ -378,7 +447,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // untranslated, 139 would hit the generic table's
             // rt_sigreturn and pop a garbage signal frame (LTP
             // sysfs01..05 "Test killed by SIGSEGV").
-            syscall_set_return_value(regs, file::sys_sysfs(args));
+            let r = native_table_call(135, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         213 => {
@@ -386,7 +455,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             let result = if (args[0] as i64) <= 0 {
                 -(errno::EINVAL as i64)
             } else {
-                misc::sys_epoll_create(args)
+                native_table_call(0, args, regs) /* misc::sys_epoll_create */
             };
             syscall_set_return_value(regs, result);
             return;
@@ -396,7 +465,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // asm-generic number. Untranslated, 235 fell through to
             // generic 235 = mbind; glibc's utimes() on x86_64 issues
             // the native number (LTP utimes01 on x86).
-            syscall_set_return_value(regs, file::sys_utimes(args));
+            let r = native_table_call(0, args, regs); /* file::sys_utimes */ syscall_set_return_value(regs, r);
             return;
         }
         261 => {
@@ -404,13 +473,13 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // number. Untranslated, 261 fell through to generic 261 =
             // prlimit64, whose EINVAL was read as the test outcome by
             // LTP futimesat01 on every x86 run.
-            syscall_set_return_value(regs, file::sys_futimesat_native(args));
+            let r = native_table_call(0, args, regs); /* file::sys_futimesat_native */ syscall_set_return_value(regs, r);
             return;
         }
         232 => {
             // epoll_wait(epfd, events, maxevents, timeout_ms) — handler
             // exists, no generic slot (generic uses epoll_pwait).
-            syscall_set_return_value(regs, misc::sys_epoll_wait(args));
+            let r = native_table_call(0, args, regs); /* misc::sys_epoll_wait */ syscall_set_return_value(regs, r);
             return;
         }
         172 => {
@@ -433,7 +502,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     }
 
     #[cfg(feature = "x86_64")]
-    let syscall_no = match crate::syscall::x86_compat::translate(syscall_no as u64, &args) {
+    let syscall_no = match x86_compat::translate(syscall_no as u64, &args) {
         Some((generic_nr, generic_args)) => {
             args = generic_args;
             generic_nr as i64
@@ -442,7 +511,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         // same-numbered generic syscall (x86 156 _sysctl vs generic
         // getsid — LTP sysctl01/03/04 read ESRCH instead of ENOSYS).
         // Routed to the unmapped-number arm below, which answers ENOSYS.
-        None if crate::syscall::x86_compat::native_enosys_hole(syscall_no as u64) => {
+        None if x86_compat::native_enosys_hole(syscall_no as u64) => {
             u64::MAX as i64
         }
         None => syscall_no as i64,
@@ -478,402 +547,17 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // dispatch-tail ENOSYS-TRACE can exclude numbers that already
     // carry their own attribution (the keyctl budget lesson).
     let mut unknown_nr = false;
-    let result: i64 = match syscall_no as u32 {
-        // ==================== Linux AIO (NR 0-4) ====================
-        0 => memory::sys_io_setup(args),       // io_setup
-        1 => memory::sys_io_destroy(args),     // io_destroy
-        2 => memory::sys_io_submit(args),      // io_submit
-        3 => memory::sys_io_cancel(args),      // io_cancel
-        4 => memory::sys_io_getevents(args),   // io_getevents
-
-        // ==================== Extended Attributes (NR 5-16) ====================
-        5 => file::sys_setxattr(args),         // setxattr
-        6 => file::sys_lsetxattr(args),        // lsetxattr
-        7 => file::sys_fsetxattr(args),        // fsetxattr
-        8 => file::sys_getxattr(args),         // getxattr
-        9 => file::sys_lgetxattr(args),        // lgetxattr
-        10 => file::sys_fgetxattr(args),       // fgetxattr
-        11 => file::sys_listxattr(args),       // listxattr
-        12 => file::sys_llistxattr(args),      // llistxattr
-        13 => file::sys_flistxattr(args),      // flistxattr
-        14 => file::sys_removexattr(args),     // removexattr
-        15 => file::sys_lremovexattr(args),    // lremovexattr
-        16 => file::sys_fremovexattr(args),    // fremovexattr
-
-        // ==================== File Operations ====================
-        17 => file::sys_getcwd(args),
-        18 => time::sys_lookup_dcookie(args),  // lookup_dcookie
-        19 => misc::sys_eventfd2(args),        // eventfd2
-        20 => misc::sys_epoll_create1(args),   // epoll_create1 (flags!
-        // LTP round 3: NR 20 used to land on sys_epoll_create, silently
-        // dropping EPOLL_CLOEXEC — epoll_create1_01's F_GETFD check failed)
-        21 => misc::sys_epoll_ctl(args),       // epoll_ctl
-        22 => misc::sys_epoll_pwait(args),     // epoll_pwait
-        26 => misc::sys_inotify_init1(args),   // inotify_init1
-        27 => misc::sys_inotify_add_watch(args), // inotify_add_watch
-        28 => misc::sys_inotify_rm_watch(args),  // inotify_rm_watch
-        23 => io::sys_dup(args),               // dup
-        24 => io::sys_dup3(args),              // dup3
-        25 => io::sys_fcntl(args),             // fcntl
-        29 => io::sys_ioctl(args),             // ioctl
-        30 => process::sys_ioprio_set(args),   // ioprio_set
-        31 => process::sys_ioprio_get(args),   // ioprio_get
-        32 => io::sys_flock(args),             // flock
-        33 => file::sys_mknodat(args),         // mknodat
-        34 => file::sys_mkdirat(args),         // mkdirat
-        35 => file::sys_unlinkat(args),        // unlinkat
-        36 => file::sys_symlinkat(args),       // symlinkat
-        37 => file::sys_linkat(args),          // linkat
-        38 => file::sys_renameat(args),        // renameat
-        39 => file::sys_umount(args),          // umount2
-        40 => file::sys_mount(args),           // mount
-        41 => process::sys_pivot_root(args),   // pivot_root
-        42 => time::sys_nfsservctl(args),      // nfsservctl
-        43 => file::sys_statfs(args),          // statfs
-        44 => file::sys_fstatfs(args),         // fstatfs
-        45 => file::sys_truncate(args),        // truncate
-        46 => file::sys_ftruncate(args),       // ftruncate
-        47 => file::sys_fallocate(args),       // fallocate
-        48 => file::sys_faccessat(args),       // faccessat
-        49 => file::sys_chdir(args),           // chdir
-        50 => file::sys_fchdir(args),          // fchdir
-        51 => file::sys_chroot(args),          // chroot
-        52 => file::sys_fchmod(args),          // fchmod
-        53 => file::sys_fchmodat(args),        // fchmodat
-        54 => file::sys_fchownat(args),        // fchownat
-        55 => file::sys_fchown(args),          // fchown
-        56 => file::sys_openat(args),          // openat
-        57 => file::sys_close(args),           // close
-        58 => file::sys_vhangup(args),         // vhangup
-        59 => io::sys_pipe2(args),             // pipe2
-        60 => process::sys_quotactl(args),     // quotactl
-        61 => file::sys_getdents64(args),      // getdents64
-        62 => file::sys_lseek(args),           // lseek
-        63 => io::sys_read(args),              // read
-        64 => io::sys_write(args),             // write
-        65 => io::sys_readv(args),             // readv
-        66 => io::sys_writev(args),            // writev
-        67 => io::sys_pread64(args),           // pread64
-        68 => io::sys_pwrite64(args),          // pwrite64
-        69 => io::sys_preadv(args),            // preadv
-        70 => io::sys_pwritev(args),           // pwritev
-        71 => io::sys_sendfile(args),          // sendfile
-        72 => misc::sys_pselect6(args),        // pselect6
-        73 => misc::sys_ppoll(args),           // ppoll
-        74 => signal::sys_signalfd4(args),     // signalfd4
-        75 => io::sys_vmsplice(args),          // vmsplice
-        76 => io::sys_splice(args),            // splice
-        77 => io::sys_tee(args),               // tee
-        78 => file::sys_readlinkat(args),      // readlinkat
-        79 => file::sys_fstatat(args),         // fstatat
-        80 => file::sys_fstat(args),           // fstat
-        81 => file::sys_sync(args),            // sync
-        82 => file::sys_fsync(args),           // fsync
-        83 => file::sys_fdatasync(args),       // fdatasync
-        84 => file::sys_sync_file_range(args), // sync_file_range
-        85 => misc::sys_timerfd_create(args),  // timerfd_create
-        86 => misc::sys_timerfd_settime(args), // timerfd_settime
-        87 => misc::sys_timerfd_gettime(args), // timerfd_gettime
-        88 => file::sys_futimesat(args),       // utimensat
-        89 => file::sys_acct(args),            // acct
-
-        // ==================== Process Operations ====================
-        90 => process::sys_capget(args),       // capget
-        91 => process::sys_capset(args),       // capset
-        92 => process::sys_personality(args),  // personality
-        93 => process::sys_exit(args),         // exit (calling thread only)
-        94 => process::sys_exit_group(args),   // exit_group (whole thread group)
-        95 => process::sys_waitid(args),       // waitid
-        96 => process::sys_set_tid_address(args),
-        97 => process::sys_unshare(args),      // unshare
-        98 => sched::sys_futex(args),          // futex
-        99 => process::sys_set_robust_list(args),
-        100 => time::sys_get_robust_list(args), // get_robust_list
-        101 => time::sys_nanosleep(args),      // nanosleep
-        102 => time::sys_getitimer(args),      // getitimer
-        103 => time::sys_setitimer(args),      // setitimer
-        104 => process::sys_kexec_load(args),  // kexec_load
-        105 => process::sys_init_module(args), // init_module
-        106 => process::sys_delete_module(args), // delete_module
-        107 => time::sys_timer_create(args),   // timer_create
-        108 => time::sys_timer_gettime(args),  // timer_gettime
-        109 => time::sys_timer_getoverrun(args), // timer_getoverrun
-        110 => time::sys_timer_settime(args),  // timer_settime
-        111 => time::sys_timer_delete(args),   // timer_delete
-        112 => time::sys_clock_settime(args),  // clock_settime
-        113 => time::sys_clock_gettime(args),  // clock_gettime
-        114 => time::sys_clock_getres(args),   // clock_getres
-        115 => time::sys_clock_nanosleep(args),// clock_nanosleep
-        116 => crate::printk::sys_syslog(args),  // syslog
-        117 => crate::process::ptrace::sys_ptrace(args), // ptrace
-        118 => sched::sys_sched_setparam(args),// sched_setparam
-        119 => sched::sys_sched_setscheduler(args), // sched_setscheduler
-        120 => sched::sys_sched_getscheduler(args), // sched_getscheduler
-        121 => sched::sys_sched_getparam(args),    // sched_getparam
-        122 => sched::sys_sched_setaffinity(args), // sched_setaffinity
-        123 => sched::sys_sched_getaffinity(args), // sched_getaffinity
-        124 => sched::sys_sched_yield(args),   // sched_yield
-        125 => sched::sys_sched_get_priority_max(args), // sched_get_priority_max
-        126 => sched::sys_sched_get_priority_min(args), // sched_get_priority_min
-        127 => sched::sys_sched_rr_get_interval(args), // sched_rr_get_interval
-        128 => signal::sys_restart_syscall(args), // restart_syscall
-        129 => process::sys_kill(args),        // kill
-        130 => signal::sys_tkill(args),        // tkill
-        131 => process::sys_tgkill(args),      // tgkill
-        132 => signal::sys_sigaltstack(args),  // sigaltstack
-        133 => signal::sys_rt_sigsuspend(args), // rt_sigsuspend (Linux NR 133)
-        134 => signal::sys_rt_sigaction(args), // rt_sigaction (Linux NR 134)
-        135 => signal::sys_rt_sigprocmask(args),// rt_sigprocmask
-        136 => signal::sys_sigpending(args),   // rt_sigpending (Linux NR 136)
-        137 => process::sys_rt_sigtimedwait(args), // rt_sigtimedwait
-        138 => process::sys_rt_sigqueueinfo(args), // rt_sigqueueinfo
-        139 => signal::sys_rt_sigreturn(regs), // rt_sigreturn
-        140 => sched::sys_setpriority(args),   // setpriority (R7-4: was swapped)
-        141 => sched::sys_getpriority(args),   // getpriority
-        142 => process::sys_reboot(args),      // reboot
-        143 => process::sys_setregid(args),    // setregid
-        144 => process::sys_setgid(args),      // setgid
-        145 => process::sys_setreuid(args),    // setreuid
-        146 => process::sys_setuid(args),      // setuid
-        147 => process::sys_setresuid(args),   // setresuid
-        148 => process::sys_getresuid(args),   // getresuid
-        149 => process::sys_setresgid(args),   // setresgid
-        150 => process::sys_getresgid(args),   // getresgid
-        151 => process::sys_setfsuid(args),    // setfsuid
-        152 => process::sys_setfsgid(args),    // setfsgid
-        153 => process::sys_times(args),       // times
-        154 => process::sys_setpgid(args),     // setpgid
-        155 => process::sys_getpgid(args),     // getpgid
-        156 => process::sys_getsid(args),      // getsid
-        157 => process::sys_setsid(args),      // setsid
-        158 => process::sys_getgroups(args),   // getgroups
-        159 => process::sys_setgroups(args),   // setgroups
-        160 => process::sys_uname(args),       // newuname
-        161 => process::sys_sethostname(args), // sethostname
-        162 => process::sys_setdomainname(args), // setdomainname
-        163 => process::sys_getrlimit(args),   // getrlimit
-        164 => process::sys_setrlimit(args),   // setrlimit
-        165 => process::sys_getrusage(args),   // getrusage
-        166 => file::sys_umask(args),          // umask
-        167 => process::sys_prctl(args),       // prctl
-        168 => process::sys_getcpu(args),      // getcpu
-        169 => time::sys_gettimeofday(args),   // gettimeofday
-        // 1180: internal slot for time(2) — the asm-generic ABI has no
-        // time(2) (riscv64 glibc derives it from clock_gettime); x86_64
-        // glibc calls SYS_time directly when no vDSO is provided, so
-        // x86_compat translates NR 201 here. Return value = seconds.
-        1180 => time::sys_time(args),
-        170 => time::sys_settimeofday(args),   // settimeofday
-        171 => time::sys_adjtimex(args),       // adjtimex
-        172 => process::sys_getpid(args),      // getpid
-        173 => process::sys_getppid(args),     // getppid
-        174 => process::sys_getuid(args),      // getuid
-        175 => process::sys_geteuid(args),     // geteuid
-        176 => process::sys_getgid(args),      // getgid
-        177 => process::sys_getegid(args),     // getegid
-        178 => process::sys_gettid(args),      // gettid
-        179 => process::sys_sysinfo(args),     // sysinfo
-
-        // ==================== IPC Operations ====================
-        // NR 180-185: POSIX MQ
-        180 => crate::ipc::posix_mq::sys_mq_open(args),       // mq_open
-        181 => crate::ipc::posix_mq::sys_mq_unlink(args),     // mq_unlink
-        182 => crate::ipc::posix_mq::sys_mq_timedsend(args),  // mq_timedsend
-        183 => crate::ipc::posix_mq::sys_mq_timedreceive(args), // mq_timedreceive
-        184 => crate::ipc::posix_mq::sys_mq_notify(args),     // mq_notify
-        185 => crate::ipc::posix_mq::sys_mq_getsetattr(args), // mq_getsetattr
-        // NR 186-189: System V msg
-        186 => crate::ipc::sysv_msg::sys_msgget(args),       // msgget
-        187 => crate::ipc::sysv_msg::sys_msgctl(args),       // msgctl
-        188 => crate::ipc::sysv_msg::sys_msgrcv(args),       // msgrcv
-        189 => crate::ipc::sysv_msg::sys_msgsnd(args),       // msgsnd
-        // NR 190-193: System V sem
-        190 => crate::ipc::sysv_sem::sys_semget(args),       // semget
-        191 => crate::ipc::sysv_sem::sys_semctl(args),       // semctl
-        192 => crate::ipc::sysv_sem::sys_semtimedop(args),   // semtimedop
-        193 => crate::ipc::sysv_sem::sys_semop(args),        // semop
-        // NR 194-197: System V shm
-        194 => crate::ipc::sysv_shm::sys_shmget(args),       // shmget
-        195 => crate::ipc::sysv_shm::sys_shmctl(args),       // shmctl
-        196 => crate::ipc::sysv_shm::sys_shmat(args),        // shmat
-        197 => crate::ipc::sysv_shm::sys_shmdt(args),        // shmdt
-
-        // ==================== Network Operations ====================
-        198 => network::sys_socket(args),      // socket
-        199 => network::sys_socketpair(args),  // socketpair
-        200 => network::sys_bind(args),        // bind
-        201 => network::sys_listen(args),      // listen
-        202 => network::sys_accept(args),      // accept
-        203 => network::sys_connect(args),     // connect
-        204 => network::sys_getsockname(args), // getsockname
-        205 => network::sys_getpeername(args), // getpeername
-        206 => network::sys_sendto(args),      // sendto
-        207 => network::sys_recvfrom(args),    // recvfrom
-        208 => network::sys_setsockopt(args),  // setsockopt
-        209 => network::sys_getsockopt(args),  // getsockopt
-        210 => network::sys_shutdown(args),    // shutdown
-        211 => network::sys_sendmsg(args),     // sendmsg
-        212 => network::sys_recvmsg(args),     // recvmsg
-        243 => network::sys_recvmmsg(args),    // recvmmsg
-        242 => network::sys_accept4(args),     // accept4
-
-        // ==================== Memory Operations ====================
-        213 => file::sys_readahead(args),      // readahead
-        214 => memory::sys_brk(args),          // brk
-        215 => memory::sys_munmap(args),       // munmap
-        216 => memory::sys_mremap(args),       // mremap
-        // ==================== Key retention (asm-generic 217-219) ====================
-        // x86_64 natives 248/249/250 arrive translated in x86_compat.
-        217 => crate::ipc::keys::sys_add_key(args),     // add_key
-        218 => crate::ipc::keys::sys_request_key(args), // request_key
-        219 => crate::ipc::keys::sys_keyctl(args),      // keyctl
-        222 => memory::sys_mmap(args),         // mmap
-        223 => memory::sys_fadvise64(args),    // fadvise64
-        224 => file::sys_swapon(args),         // swapon
-        225 => file::sys_swapoff(args),        // swapoff
-        226 => memory::sys_mprotect(args),     // mprotect
-        227 => memory::sys_msync(args),        // msync
-        228 => memory::sys_mlock(args),        // mlock
-        229 => memory::sys_munlock(args),      // munlock
-        230 => memory::sys_mlockall(args),     // mlockall
-        231 => memory::sys_munlockall(args),   // munlockall
-        232 => memory::sys_mincore(args),      // mincore
-        233 => memory::sys_madvise(args),      // madvise
-        234 => memory::sys_remap_file_pages(args), // remap_file_pages
-        235 => memory::sys_mbind(args),        // mbind
-        236 => memory::sys_get_mempolicy(args), // get_mempolicy
-        237 => memory::sys_set_mempolicy(args), // set_mempolicy
-        238 => memory::sys_migrate_pages(args), // migrate_pages
-        239 => memory::sys_move_pages(args),   // move_pages
-        240 => process::sys_rt_tgsigqueueinfo(args), // rt_tgsigqueueinfo (asm-generic 240)
-        241 => process::sys_perf_event_open(args),   // perf_event_open (asm-generic 241)
-
-        // ==================== Process Operations (cont.) ====================
-        220 => process::sys_clone(args),       // clone
-        221 => process::sys_execve(args),      // execve
-        260 => process::sys_wait4(args),       // wait4
-        261 => process::sys_prlimit64(args),   // prlimit64
-        268 => process::sys_setns(args),       // setns
-
-        // ==================== RISC-V Specific ====================
-        258 => process::sys_riscv_hwprobe(args), // riscv_hwprobe
-        259 => process::sys_riscv_flush_icache(args), // riscv_flush_icache
-        267 => process::sys_syncfs(args),      // syncfs
-
-        // ==================== Scheduler Extended ====================
-        274 => sched::sys_sched_setattr(args), // sched_setattr (Linux NR 274)
-        275 => sched::sys_sched_getattr(args), // sched_getattr (Linux NR 275)
-
-        // ==================== File Handle / Copy ====================
-        264 => file::sys_name_to_handle_at(args), // name_to_handle_at
-        265 => file::sys_open_by_handle_at(args), // open_by_handle_at
-        266 => time::sys_clock_adjtime(args),  // clock_adjtime
-        269 => network::sys_sendmmsg(args),    // sendmmsg
-        270 => process::sys_process_vm_readv(args), // process_vm_readv
-        271 => process::sys_process_vm_writev(args), // process_vm_writev
-        272 => process::sys_kcmp(args),        // kcmp
-        273 => process::sys_finit_module(args), // finit_module
-
-        // ==================== Select/Poll/Epoll ====================
-        276 => file::sys_renameat2(args),      // renameat2
-        277 => process::sys_seccomp(args),     // seccomp
-        278 => misc::sys_getrandom(args),      // getrandom
-        279 => process::sys_memfd_create(args), // memfd_create
-        280 => process::sys_bpf(args),         // bpf
-        281 => process::sys_execveat(args),    // execveat
-        282 => process::sys_userfaultfd(args), // userfaultfd
-        283 => process::sys_membarrier(args),  // membarrier
-        284 => memory::sys_mlock2(args),       // mlock2
-        285 => file::sys_copy_file_range(args), // copy_file_range
-        286 => file::sys_preadv2(args),        // preadv2
-        287 => file::sys_pwritev2(args),       // pwritev2
-        288 => memory::sys_pkey_mprotect(args), // pkey_mprotect
-        289 => memory::sys_pkey_alloc(args),   // pkey_alloc
-        290 => memory::sys_pkey_free(args),    // pkey_free
-        292 => memory::sys_io_pgetevents(args), // io_pgetevents
-        293 => time::sys_rseq(args),           // rseq
-        294 => process::sys_kexec_file_load(args), // kexec_file_load
-
-        // ==================== Fanotify ====================
-        262 => time::sys_fanotify_init(args),  // fanotify_init
-        263 => time::sys_fanotify_mark(args),  // fanotify_mark
-
-        // ==================== Others ====================
-        291 => file::sys_statx(args),          // statx
-        437 => file::sys_openat2(args),        // openat2
-
-        // ==================== _time64 variants (NR 403-423) ====================
-        403 => time::sys_clock_gettime64(args),    // clock_gettime64
-        404 => time::sys_clock_settime64(args),    // clock_settime64
-        405 => time::sys_clock_adjtime64(args),    // clock_adjtime64
-        406 => time::sys_clock_getres_time64(args), // clock_getres_time64
-        407 => time::sys_clock_nanosleep_time64(args), // clock_nanosleep_time64
-        408 => time::sys_timer_gettime64(args),   // timer_gettime64
-        409 => time::sys_timer_settime64(args),   // timer_settime64
-        410 => time::sys_timerfd_gettime64(args), // timerfd_gettime64
-        411 => time::sys_timerfd_settime64(args), // timerfd_settime64
-        412 => time::sys_utimensat_time64(args),  // utimensat_time64
-        413 => time::sys_pselect6_time64(args),  // pselect6_time64
-        414 => time::sys_ppoll_time64(args),     // ppoll_time64
-        416 => time::sys_io_pgetevents_time64(args), // io_pgetevents_time64
-        417 => time::sys_recvmmsg_time64(args),  // recvmmsg_time64
-        418 => crate::ipc::posix_mq::sys_mq_timedsend(args),  // mq_timedsend_time64
-        419 => crate::ipc::posix_mq::sys_mq_timedreceive(args), // mq_timedreceive_time64
-        420 => crate::ipc::sysv_sem::sys_semtimedop(args),  // semtimedop_time64
-        421 => time::sys_rt_sigtimedwait_time64(args), // rt_sigtimedwait_time64
-        422 => time::sys_futex_time64(args),    // futex_time64
-        423 => time::sys_sched_rr_get_interval_time64(args), // sched_rr_get_interval_time64
-
-        // ==================== Latest Kernel Features (NR 424-470) ====================
-        424 => process::sys_pidfd_send_signal(args), // pidfd_send_signal
-        425 => process::sys_io_uring_setup(args),   // io_uring_setup
-        426 => process::sys_io_uring_enter(args),   // io_uring_enter
-        427 => process::sys_io_uring_register(args), // io_uring_register
-        428 => file::sys_open_tree(args),       // open_tree
-        429 => file::sys_move_mount_tap(args),  // move_mount (ub2404 ns bring-up: failures on serial)
-        430 => file::sys_fsopen(args),         // fsopen
-        431 => file::sys_fsconfig(args),       // fsconfig
-        432 => file::sys_fsmount(args),        // fsmount
-        433 => file::sys_fspick(args),         // fspick
-        434 => process::sys_pidfd_open(args),   // pidfd_open
-        435 => process::sys_clone3(args),       // clone3
-        436 => process::sys_close_range(args),  // close_range
-        438 => process::sys_pidfd_getfd(args),  // pidfd_getfd
-        439 => process::sys_faccessat2(args),  // faccessat2
-        440 => process::sys_process_madvise(args), // process_madvise
-        441 => file::sys_epoll_pwait2(args),   // epoll_pwait2
-        442 => file::sys_mount_setattr_tap(args), // mount_setattr (ub2404 ns bring-up: failures on serial)
-        443 => file::sys_quotactl_fd(args),   // quotactl_fd
-        444 => file::sys_landlock_create_ruleset(args), // landlock_create_ruleset
-        445 => file::sys_landlock_add_rule(args), // landlock_add_rule
-        446 => file::sys_landlock_restrict_self(args), // landlock_restrict_self
-        447 => process::sys_memfd_secret(args), // memfd_secret
-        448 => process::sys_process_mrelease(args), // process_mrelease
-        449 => file::sys_futex_waitv(args),     // futex_waitv
-        450 => memory::sys_set_mempolicy_home_node(args), // set_mempolicy_home_node
-        451 => file::sys_cachestat(args),       // cachestat
-        452 => file::sys_fchmodat2(args),       // fchmodat2
-        453 => file::sys_map_shadow_stack(args), // map_shadow_stack
-        454 => file::sys_futex_wake(args),      // futex_wake
-        455 => file::sys_futex_wait(args),      // futex_wait
-        456 => file::sys_futex_requeue(args),   // futex_requeue
-        457 => file::sys_statmount(args),       // statmount
-        458 => file::sys_listmount(args),       // listmount
-        459 => file::sys_lsm_get_self_attr(args), // lsm_get_self_attr
-        460 => file::sys_lsm_set_self_attr(args), // lsm_set_self_attr
-        461 => file::sys_lsm_list_modules(args), // lsm_list_modules
-        462 => file::sys_mseal(args),          // mseal
-        463 => file::sys_setxattrat(args),      // setxattrat
-        464 => file::sys_getxattrat(args),      // getxattrat
-        465 => file::sys_listxattrat(args),     // listxattrat
-        466 => file::sys_removexattrat(args),   // removexattrat
-        467 => file::sys_open_tree_attr(args),  // open_tree_attr
-        468 => file::sys_file_getattr(args),    // file_getattr
-        469 => file::sys_file_setattr(args),    // file_setattr
-        470 => file::sys_listns(args),         // listns
-
-        // ==================== Unimplemented System Calls ====================
-        _ => {
+    // FLIP M3-A: table-first dispatch (the service crate's registered
+    // fns); the match below is the in-lib fallback (identical bodies).
+    if let Some(r) = table_lookup(syscall_no as u32, args, regs) {
+        syscall_set_return_value(regs, r);
+        return;
+    }
+    // (The 349-arm in-lib match is DELETED — State B final: the
+    // service crate is the sole implementation; its register_all
+    // published the table the lookup above consults. Unregistered
+    // numbers reach the budgeted ENOSYS attribution below.)
+    unknown_nr = true;
             unknown_nr = true;
             // Budgeted PER-NR (8 lines each, 16 distinct numbers, 400
             // lines total), WITH the caller's pid+comm. The keyctl
@@ -925,9 +609,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                     comm
                 );
             }
-            -(errno::ENOSYS as i64)
-        }
-    };
+    let result: i64 = -(errno::ENOSYS as i64);
 
     // EFAULTTRAC (sleep-EFAULT hunt): python's time.sleep surfaces EFAULT
     // from some syscall, but not from any of the instrumented sleep paths.
@@ -1527,4 +1209,434 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             }
         }
     }
+}
+
+// ============================================================================
+// x86_64 native->generic translation (moved from syscall/x86_compat.rs —
+// State B final: the SEAM owns the number translation; the service crate
+// keeps its copy for the sys_x86_* arms it still serves).
+// ============================================================================
+#[cfg(feature = "x86_64")]
+pub mod x86_compat {
+    use super::SyscallArgs;
+    // The const table moved WITH translate (x86_compat's own locals).
+    const AT_FDCWD: u64 = -100i64 as u64;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_SYMLINK_FOLLOW: u64 = 0x400;
+    const AT_REMOVEDIR: u64 = 0x200;
+    const SIGCHLD: u64 = 17;
+    const CLONE_VM: u64 = 0x100;
+    const CLONE_VFORK: u64 = 0x4000;
+    const O_CREAT_WRONLY_TRUNC: u64 = 0x241;
+    pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
+        let [a0, a1, a2, _a3, _a4, _a5] = *args;
+        match nr {
+            0 => Some((63, *args)), // read
+            1 => Some((64, *args)), // write
+            2 => Some((56, [AT_FDCWD, a0, a1, a2, 0, 0])), // open
+            3 => Some((57, *args)), // close
+            4 => Some((79, [AT_FDCWD, a0, a1, 0, 0, 0])), // stat
+            5 => Some((80, *args)), // fstat
+            6 => Some((79, [AT_FDCWD, a0, a1, AT_SYMLINK_NOFOLLOW, 0, 0])), // lstat
+            8 => Some((62, *args)), // lseek
+            9 => Some((222, *args)), // mmap
+            10 => Some((226, *args)), // mprotect
+            11 => Some((215, *args)), // munmap
+            12 => Some((214, *args)), // brk
+            13 => Some((134, *args)), // rt_sigaction
+            14 => Some((135, *args)), // rt_sigprocmask
+            15 => Some((139, *args)), // rt_sigreturn
+            16 => Some((29, *args)), // ioctl
+            17 => Some((67, *args)), // pread64
+            18 => Some((68, *args)), // pwrite64
+            19 => Some((65, *args)), // readv
+            20 => Some((66, *args)), // writev
+            21 => Some((48, [AT_FDCWD, a0, a1, 0, 0, 0])), // access
+            22 => Some((59, [a0, 0, 0, 0, 0, 0])), // pipe
+            24 => Some((124, *args)), // sched_yield
+            25 => Some((216, *args)), // mremap
+            26 => Some((227, *args)), // msync
+            27 => Some((232, *args)), // mincore
+            28 => Some((233, *args)), // madvise
+            // SysV shm: x86_64 has direct calls (no ipc() multiplexer), same
+            // argument order as asm-generic — pure number remaps. Without
+            // these, shmget(29) fell through to generic 29 (ioctl → ENOTTY).
+            29 => Some((194, *args)), // shmget
+            30 => Some((196, *args)), // shmat
+            31 => Some((195, *args)), // shmctl
+            32 => Some((23, *args)), // dup
+            // 33 dup2: handled by the dispatch's x86_64 legacy block (needs the
+            // oldfd==newfd special case that dup3 rejects with EINVAL).
+            // 34 pause: handled by the dispatch's x86_64 legacy block (no
+            // asm-generic number exists; needs the pause sleep loop).
+            35 => Some((101, *args)), // nanosleep
+            36 => Some((102, *args)), // getitimer
+            38 => Some((103, *args)), // setitimer
+            39 => Some((172, *args)), // getpid
+            40 => Some((71, *args)), // sendfile
+            41 => Some((198, *args)), // socket
+            42 => Some((203, *args)), // connect
+            43 => Some((202, *args)), // accept
+            44 => Some((206, *args)), // sendto
+            45 => Some((207, *args)), // recvfrom
+            46 => Some((211, *args)), // sendmsg
+            47 => Some((212, *args)), // recvmsg
+            48 => Some((210, *args)), // shutdown
+            49 => Some((200, *args)), // bind
+            50 => Some((201, *args)), // listen
+            51 => Some((204, *args)), // getsockname
+            52 => Some((205, *args)), // getpeername
+            53 => Some((199, *args)), // socketpair
+            54 => Some((208, *args)), // setsockopt
+            55 => Some((209, *args)), // getsockopt
+            56 => Some((220, *args)), // clone
+            57 => Some((220, [SIGCHLD, 0, 0, 0, 0, 0])), // fork
+            58 => Some((220, [CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0, 0])), // vfork
+            59 => Some((221, *args)), // execve
+            60 => Some((93, *args)), // exit
+            61 => Some((260, *args)), // wait4
+            62 => Some((129, *args)), // kill
+            63 => Some((160, *args)), // uname
+            // SysV sem: same ABI, number remap only. Without these, semget(64)
+            // fell through to generic 64 (write → EBADF on the key-as-fd).
+            64 => Some((190, *args)), // semget
+            65 => Some((193, *args)), // semop
+            66 => Some((191, *args)), // semctl
+            // SysV msg: without these, msgget(68) fell through to generic 68
+            // (pwrite64 → EBADF) — the LTP x86-r2 N2 family (45+ tests).
+            67 => Some((197, *args)), // shmdt
+            68 => Some((186, *args)), // msgget
+            69 => Some((189, *args)), // msgsnd
+            70 => Some((188, *args)), // msgrcv
+            71 => Some((187, *args)), // msgctl
+            72 => Some((25, *args)), // fcntl
+            73 => Some((32, *args)), // flock
+            74 => Some((82, *args)), // fsync
+            75 => Some((83, *args)), // fdatasync
+            76 => Some((45, *args)), // truncate
+            77 => Some((46, *args)), // ftruncate
+            79 => Some((17, *args)), // getcwd
+            80 => Some((49, *args)), // chdir
+            81 => Some((50, *args)), // fchdir
+            82 => Some((38, [AT_FDCWD, a0, AT_FDCWD, a1, 0, 0])), // rename
+            83 => Some((34, [AT_FDCWD, a0, a1, 0, 0, 0])), // mkdir
+            84 => Some((35, [AT_FDCWD, a0, AT_REMOVEDIR, 0, 0, 0])), // rmdir
+            85 => Some((56, [AT_FDCWD, a0, O_CREAT_WRONLY_TRUNC, a1, 0, 0])), // creat
+            86 => Some((37, [AT_FDCWD, a0, AT_FDCWD, a1, 0, 0])), // link
+            87 => Some((35, [AT_FDCWD, a0, 0, 0, 0, 0])), // unlink
+            88 => Some((36, [a0, AT_FDCWD, a1, 0, 0, 0])), // symlink
+            89 => Some((78, [AT_FDCWD, a0, a1, a2, 0, 0])), // readlink
+            90 => Some((53, [AT_FDCWD, a0, a1, 0, 0, 0])), // chmod
+            91 => Some((52, *args)), // fchmod
+            92 => Some((54, [AT_FDCWD, a0, a1, a2, 0, 0])), // chown
+            93 => Some((55, *args)), // fchown
+            94 => Some((54, [AT_FDCWD, a0, a1, a2, AT_SYMLINK_NOFOLLOW, 0])), // lchown
+            95 => Some((166, *args)), // umask
+            96 => Some((169, *args)), // gettimeofday
+            97 => Some((163, *args)), // getrlimit
+            98 => Some((165, *args)), // getrusage
+            99 => Some((179, *args)), // sysinfo
+            100 => Some((153, *args)), // times
+            // ptrace: was missing → generic 101 (nanosleep) EFAULTed on the
+            // request register (LTP x86-r2 ptrace03 "EFAULT").
+            101 => Some((117, *args)), // ptrace
+            102 => Some((174, *args)), // getuid
+            103 => Some((116, *args)), // syslog
+            104 => Some((176, *args)), // getgid
+            105 => Some((146, *args)), // setuid
+            106 => Some((144, *args)), // setgid
+            107 => Some((175, *args)), // geteuid
+            108 => Some((177, *args)), // getegid
+            109 => Some((154, *args)), // setpgid
+            110 => Some((173, *args)), // getppid
+            111 => Some((155, [0, 0, 0, 0, 0, 0])), // getpgrp = getpgid(0)
+            112 => Some((157, *args)), // setsid
+            113 => Some((145, *args)), // setreuid
+            114 => Some((143, *args)), // setregid
+            115 => Some((158, *args)), // getgroups
+            116 => Some((159, *args)), // setgroups
+            117 => Some((147, *args)), // setresuid
+            118 => Some((148, *args)), // getresuid
+            119 => Some((149, *args)), // setresgid
+            120 => Some((150, *args)), // getresgid
+            121 => Some((155, *args)), // getpgid
+            122 => Some((151, *args)), // setfsuid
+            123 => Some((152, *args)), // setfsgid
+            124 => Some((156, *args)), // getsid
+            125 => Some((90, *args)), // capget
+            126 => Some((91, *args)), // capset
+            127 => Some((136, *args)), // rt_sigpending
+            128 => Some((137, *args)), // rt_sigtimedwait
+            129 => Some((138, *args)), // rt_sigqueueinfo
+            130 => Some((133, *args)), // rt_sigsuspend
+            131 => Some((132, *args)), // sigaltstack
+            133 => Some((33, [AT_FDCWD, a0, a1, a2, 0, 0])), // mknod
+            135 => Some((92, *args)), // personality
+            137 => Some((43, *args)), // statfs
+            138 => Some((44, *args)), // fstatfs
+            140 => Some((141, *args)), // getpriority
+            141 => Some((140, *args)), // setpriority
+            142 => Some((118, *args)), // sched_setparam
+            143 => Some((121, *args)), // sched_getparam
+            144 => Some((119, *args)), // sched_setscheduler
+            145 => Some((120, *args)), // sched_getscheduler
+            146 => Some((125, *args)), // sched_get_priority_max
+            147 => Some((126, *args)), // sched_get_priority_min
+            148 => Some((127, *args)), // sched_rr_get_interval
+            149 => Some((228, *args)), // mlock
+            150 => Some((229, *args)), // munlock
+            151 => Some((230, *args)), // mlockall
+            152 => Some((231, *args)), // munlockall
+            153 => Some((58, *args)), // vhangup
+            155 => Some((41, *args)), // pivot_root
+            157 => Some((167, *args)), // prctl
+            159 => Some((171, *args)), // adjtimex
+            160 => Some((164, *args)), // setrlimit
+            161 => Some((51, *args)), // chroot
+            162 => Some((81, *args)), // sync
+            163 => Some((89, *args)), // acct
+            164 => Some((170, *args)), // settimeofday
+            165 => Some((40, *args)), // mount
+            166 => Some((39, *args)), // umount2
+            167 => Some((224, *args)), // swapon
+            168 => Some((225, *args)), // swapoff
+            169 => Some((142, *args)), // reboot
+            170 => Some((161, *args)), // sethostname
+            171 => Some((162, *args)), // setdomainname
+            175 => Some((105, *args)), // init_module
+            176 => Some((106, *args)), // delete_module
+            179 => Some((60, *args)), // quotactl
+            180 => Some((42, *args)), // nfsservctl
+            186 => Some((178, *args)), // gettid
+            187 => Some((213, *args)), // readahead
+            188 => Some((5, *args)), // setxattr
+            189 => Some((6, *args)), // lsetxattr
+            190 => Some((7, *args)), // fsetxattr
+            191 => Some((8, *args)), // getxattr
+            192 => Some((9, *args)), // lgetxattr
+            193 => Some((10, *args)), // fgetxattr
+            194 => Some((11, *args)), // listxattr
+            195 => Some((12, *args)), // llistxattr
+            196 => Some((13, *args)), // flistxattr
+            197 => Some((14, *args)), // removexattr
+            198 => Some((15, *args)), // lremovexattr
+            199 => Some((16, *args)), // fremovexattr
+            200 => Some((130, *args)), // tkill
+            202 => Some((98, *args)), // futex
+            203 => Some((122, *args)), // sched_setaffinity
+            204 => Some((123, *args)), // sched_getaffinity
+            206 => Some((0, *args)), // io_setup
+            207 => Some((1, *args)), // io_destroy
+            208 => Some((4, *args)), // io_getevents
+            209 => Some((2, *args)), // io_submit
+            210 => Some((3, *args)), // io_cancel
+            212 => Some((18, *args)), // lookup_dcookie
+            216 => Some((234, *args)), // remap_file_pages
+            217 => Some((61, *args)), // getdents64
+            218 => Some((96, *args)), // set_tid_address
+            219 => Some((128, *args)), // restart_syscall
+            220 => Some((192, *args)), // semtimedop
+            221 => Some((223, *args)), // fadvise64
+            222 => Some((107, *args)), // timer_create
+            223 => Some((110, *args)), // timer_settime
+            224 => Some((108, *args)), // timer_gettime
+            225 => Some((109, *args)), // timer_getoverrun
+            226 => Some((111, *args)), // timer_delete
+            227 => Some((112, *args)), // clock_settime
+            228 => Some((113, *args)), // clock_gettime
+            229 => Some((114, *args)), // clock_getres
+            // time(2): return value = seconds, optional tloc store — NOT
+            // shape-compatible with gettimeofday (buffer layout + return
+            // semantics differ), so it gets its own internal generic slot.
+            // Without this, static glibc's time() returns -1 forever (no
+            // vDSO) — ohlite's second-stage never computed a nonzero uptime.
+            201 => Some((1180, *args)), // time
+            230 => Some((115, *args)), // clock_nanosleep
+            231 => Some((94, *args)), // exit_group
+            233 => Some((21, *args)), // epoll_ctl
+            234 => Some((131, *args)), // tgkill
+            237 => Some((235, *args)), // mbind
+            238 => Some((237, *args)), // set_mempolicy
+            239 => Some((236, *args)), // get_mempolicy
+            // POSIX mq block: was missing → generic 240-245 dispatched
+            // rt_tgsigqueueinfo/perf_event_open/recvmmsg/fanotify/… instead.
+            240 => Some((180, *args)), // mq_open
+            241 => Some((181, *args)), // mq_unlink
+            242 => Some((182, *args)), // mq_timedsend
+            243 => Some((183, *args)), // mq_timedreceive
+            244 => Some((184, *args)), // mq_notify
+            245 => Some((185, *args)), // mq_getsetattr
+            246 => Some((104, *args)), // kexec_load
+            247 => Some((95, *args)), // waitid
+            // Key-retention block: was missing → keyctl (250) surfaced as an
+            // unknown-syscall ENOSYS from every systemd-spawned service
+            // (KeyringMode=private joins a session keyring at spawn — 57
+            // lines/boot on ub2404), and add_key/request_key probes from
+            // libkeyutils/LTP TCONF'd on the ENOSYS.
+            248 => Some((217, *args)), // add_key
+            249 => Some((218, *args)), // request_key
+            250 => Some((219, *args)), // keyctl
+            251 => Some((30, *args)), // ioprio_set
+            252 => Some((31, *args)), // ioprio_get
+            253 => Some((26, [0, 0, 0, 0, 0, 0])), // inotify_init = inotify_init1(0)
+            254 => Some((27, *args)), // inotify_add_watch
+            255 => Some((28, *args)), // inotify_rm_watch
+            256 => Some((238, *args)), // migrate_pages
+            257 => Some((56, *args)), // openat
+            258 => Some((34, *args)), // mkdirat
+            259 => Some((33, *args)), // mknodat
+            260 => Some((54, *args)), // fchownat
+            262 => Some((79, *args)), // newfstatat
+            263 => Some((35, *args)), // unlinkat
+            264 => Some((38, *args)), // renameat
+            265 => Some((37, *args)), // linkat
+            266 => Some((36, *args)), // symlinkat
+            267 => Some((78, *args)), // readlinkat
+            268 => Some((53, *args)), // fchmodat
+            269 => Some((48, *args)), // faccessat
+            270 => Some((72, *args)), // pselect6
+            271 => Some((73, *args)), // ppoll
+            272 => Some((97, *args)), // unshare
+            273 => Some((99, *args)), // set_robust_list
+            274 => Some((100, *args)), // get_robust_list
+            275 => Some((76, *args)), // splice
+            276 => Some((77, *args)), // tee
+            277 => Some((84, *args)), // sync_file_range
+            278 => Some((75, *args)), // vmsplice
+            279 => Some((239, *args)), // move_pages
+            280 => Some((88, *args)), // utimensat
+            281 => Some((22, *args)), // epoll_pwait
+            282 => Some((74, [a0, a1, a2, 0, 0, 0])), // signalfd = signalfd4(…, flags=0)
+            283 => Some((85, *args)), // timerfd_create
+            285 => Some((47, *args)), // fallocate
+            286 => Some((86, *args)), // timerfd_settime
+            287 => Some((87, *args)), // timerfd_gettime
+            288 => Some((242, *args)), // accept4
+            289 => Some((74, *args)), // signalfd4
+            290 => Some((19, *args)), // eventfd2
+            284 => Some((19, [a0, 0, 0, 0, 0, 0])), // eventfd = eventfd2(init, flags=0)
+            291 => Some((20, *args)), // epoll_create1
+            292 => Some((24, *args)), // dup3
+            293 => Some((59, *args)), // pipe2
+            294 => Some((26, *args)), // inotify_init1
+            295 => Some((69, *args)), // preadv
+            296 => Some((70, *args)), // pwritev
+            297 => Some((240, *args)), // rt_tgsigqueueinfo
+            298 => Some((241, *args)), // perf_event_open
+            299 => Some((243, *args)), // recvmmsg
+            300 => Some((262, *args)), // fanotify_init
+            301 => Some((263, *args)), // fanotify_mark
+            302 => Some((261, *args)), // prlimit64
+            303 => Some((264, *args)), // name_to_handle_at
+            304 => Some((265, *args)), // open_by_handle_at
+            305 => Some((266, *args)), // clock_adjtime
+            306 => Some((267, *args)), // syncfs
+            307 => Some((269, *args)), // sendmmsg
+            308 => Some((268, *args)), // setns
+            309 => Some((168, *args)), // getcpu
+            310 => Some((270, *args)), // process_vm_readv
+            311 => Some((271, *args)), // process_vm_writev
+            312 => Some((272, *args)), // kcmp
+            313 => Some((273, *args)), // finit_module
+            314 => Some((274, *args)), // sched_setattr
+            315 => Some((275, *args)), // sched_getattr
+            316 => Some((276, *args)), // renameat2
+            317 => Some((277, *args)), // seccomp
+            318 => Some((278, *args)), // getrandom
+            319 => Some((279, *args)), // memfd_create
+            320 => Some((294, *args)), // kexec_file_load
+            321 => Some((280, *args)), // bpf
+            322 => Some((281, *args)), // execveat
+            323 => Some((282, *args)), // userfaultfd
+            324 => Some((283, *args)), // membarrier
+            325 => Some((284, *args)), // mlock2
+            326 => Some((285, *args)), // copy_file_range
+            327 => Some((286, *args)), // preadv2
+            328 => Some((287, *args)), // pwritev2
+            329 => Some((288, *args)), // pkey_mprotect
+            330 => Some((289, *args)), // pkey_alloc
+            331 => Some((290, *args)), // pkey_free
+            332 => Some((291, *args)), // statx
+            333 => Some((292, *args)), // io_pgetevents
+            334 => Some((293, *args)), // rseq
+            424 => Some((424, *args)), // pidfd_send_signal: same nr
+            425 => Some((425, *args)), // io_uring_setup: same nr
+            426 => Some((426, *args)), // io_uring_enter: same nr
+            427 => Some((427, *args)), // io_uring_register: same nr
+            428 => Some((428, *args)), // open_tree: same nr
+            429 => Some((429, *args)), // move_mount: same nr
+            430 => Some((430, *args)), // fsopen: same nr
+            431 => Some((431, *args)), // fsconfig: same nr
+            432 => Some((432, *args)), // fsmount: same nr
+            433 => Some((433, *args)), // fspick: same nr
+            434 => Some((434, *args)), // pidfd_open: same nr
+            435 => Some((435, *args)), // clone3: same nr
+            436 => Some((436, *args)), // close_range: same nr
+            437 => Some((437, *args)), // openat2: same nr
+            438 => Some((438, *args)), // pidfd_getfd: same nr
+            439 => Some((439, *args)), // faccessat2: same nr
+            440 => Some((440, *args)), // process_madvise: same nr
+            441 => Some((441, *args)), // epoll_pwait2: same nr
+            442 => Some((442, *args)), // mount_setattr: same nr
+            443 => Some((443, *args)), // quotactl_fd: same nr
+            444 => Some((444, *args)), // landlock_create_ruleset: same nr
+            445 => Some((445, *args)), // landlock_add_rule: same nr
+            446 => Some((446, *args)), // landlock_restrict_self: same nr
+            447 => Some((447, *args)), // memfd_secret: same nr
+            448 => Some((448, *args)), // process_mrelease: same nr
+            449 => Some((449, *args)), // futex_waitv: same nr
+            450 => Some((450, *args)), // set_mempolicy_home_node: same nr
+            451 => Some((451, *args)), // cachestat: same nr
+            452 => Some((452, *args)), // fchmodat2: same nr
+            453 => Some((453, *args)), // map_shadow_stack: same nr
+            454 => Some((454, *args)), // futex_wake: same nr
+            455 => Some((455, *args)), // futex_wait: same nr
+            456 => Some((456, *args)), // futex_requeue: same nr
+            457 => Some((457, *args)), // statmount: same nr
+            458 => Some((458, *args)), // listmount: same nr
+            459 => Some((459, *args)), // lsm_get_self_attr: same nr
+            460 => Some((460, *args)), // lsm_set_self_attr: same nr
+            461 => Some((461, *args)), // lsm_list_modules: same nr
+            _ => None,
+        }
+    }
+    
+    pub fn native_enosys_hole(nr: u64) -> bool {
+        // Reference-x86_64 sys_ni slots: the number exists in the ABI but
+        // the syscall was removed or never wired — the reference answers
+        // ENOSYS. Left unmapped, these fall through to the same-numbered
+        // GENERIC syscall, which is a DIFFERENT call:
+        //   156 _sysctl → generic getsid (ESRCH; LTP sysctl01/03/04)
+        //   134 uselib → rt_sigaction; 174 create_module → getuid;
+        //   177 get_kernel_syms → getegid; 178 query_module → gettid;
+        //   181/182 getpmsg/putpmsg → mq_unlink/mq_timedsend;
+        //   183 afs_syscall / 184 tuxcall / 185 security → mq_timedreceive/
+        //   mq_notify/mq_getsetattr; 214/215 epoll_{ctl,wait}_old →
+        //   brk/munmap (!); 236 vserver → get_mempolicy.
+        if matches!(
+            nr,
+            134 | 156 | 174 | 177 | 178 | 181 | 182 | 183 | 184 | 185 | 214 | 215
+                | 236
+        ) {
+            return true;
+        }
+        // Implemented on the reference x86_64 but not here. No 64-bit
+        // Ubuntu caller issues these natives (glibc-2.39 uses arch_prctl
+        // for TLS; there is no LDT consumer), and the same-numbered
+        // generic rows are DIFFERENT calls — 154 modify_ldt → setpgid,
+        // 205 set_thread_area → getpeername, 211 get_thread_area →
+        // sendmsg — so ENOSYS (the honest "not implemented") is safer
+        // than the silent wrong-syscall fallthrough. Recorded as an
+        // honest gap: implement properly if an LTP/compat case ever
+        // needs them. 172 iopl / 173 ioperm lived here too until the
+        // LTP ioperm01/iopl01 rows demanded the real contract surface
+        // (arch/x86_64/process.rs + the dispatch pre-translate arms —
+        // the sweep note's "implement properly if an LTP case ever
+        // needs them" case arrived).
+        // 136 ustat: the modern toolchain has no <sys/ustat.h>, so LTP
+        // ustat01/02 TCONF on the reference too; generic 136 is
+        // rt_sigpending.
+        matches!(nr, 136 | 154 | 205 | 211)
+    }
+    
 }

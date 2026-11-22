@@ -391,7 +391,7 @@ fn at_close(_file: &crate::fs::File) -> i32 {
 }
 
 fn at_poll(_file: &crate::fs::File, _events: u16) -> u16 {
-    crate::syscall::misc::poll_events::POLLIN | crate::syscall::misc::poll_events::POLLRDNORM
+    crate::fs::event_notify::poll_events::POLLIN | crate::fs::event_notify::poll_events::POLLRDNORM
 }
 
 pub static ACCESS_TOKEN_OPS: FileOps = FileOps::builder()

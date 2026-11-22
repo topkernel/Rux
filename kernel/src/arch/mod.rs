@@ -71,3 +71,32 @@ pub use x86_64::context::context_switch;
 
 #[cfg(feature = "aarch64")]
 pub use aarch64::context::context_switch;
+
+/// MPK (pkey) guard shim: the real implementation is x86_64-only; the
+/// other arches get always-off stubs so generic code (safety/dma.rs)
+/// compiles unchanged.
+#[cfg(feature = "x86_64")]
+pub use crate::arch::x86_64::mpk;
+#[cfg(not(feature = "x86_64"))]
+pub mod mpk {
+    #[inline]
+    pub fn guard_on() -> bool {
+        false
+    }
+    #[inline]
+    pub fn zone_open() -> u32 {
+        0
+    }
+    #[inline]
+    pub fn zone_close(_prev: u32) {}
+    pub fn tag_kernel_pages(_va: usize, _len: usize) -> usize {
+        0
+    }
+    pub fn untag_kernel_pages(_va: usize, _len: usize) -> usize {
+        0
+    }
+    pub fn guard_arm() -> bool {
+        false
+    }
+    pub fn switch_rearm() {}
+}

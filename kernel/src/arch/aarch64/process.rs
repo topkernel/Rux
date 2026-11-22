@@ -40,44 +40,9 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
     regs.frame_pad = [0; 2];
 }
 
-/// Copy thread state (fork) — interface parity; the active path is the
-/// generic copy_thread in process/fork.rs (see module doc)
-pub unsafe fn copy_thread(
-    child: *mut Task,
-    parent_regs: &PtRegs,
-) -> Option<*mut PtRegs> {
-    use alloc::alloc::{alloc, Layout};
-
-    let layout = Layout::from_size_align(core::mem::size_of::<PtRegs>(), 16).ok()?;
-    let mem_ptr = alloc(layout);
-    if mem_ptr.is_null() {
-        return None;
-    }
-    let child_regs = mem_ptr as *mut PtRegs;
-
-    // Copy the parent's state; child x0 = 0 (fork return). NO pc advance:
-    // the SVC exception leaves ELR (the frame's pc) at the instruction
-    // AFTER the svc — the architectural return address — so advancing
-    // here would skip one user instruction in the child (the exact bug
-    // family documented in trap.rs handle_syscall; parity with the live
-    // generic copy_thread in process/fork.rs, which copies verbatim).
-    let mut frame = *parent_regs;
-    frame.regs[0] = 0;
-    frame.pc = parent_regs.pc;
-    frame.orig_x0 = 0;
-    core::ptr::write(child_regs, frame);
-
-    (*child).set_fork_child(child_regs);
-
-    extern "C" {
-        fn ret_from_fork();
-    }
-    let thread = (*child).thread_mut();
-    thread.ra = ret_from_fork as u64;
-    thread.sp = child_regs as u64;
-
-    Some(child_regs)
-}
+// (arch copy_thread DELETED, round 6: interface-parity twin with zero
+// callers — the live fork path is the generic copy_thread in
+// process/fork.rs, writing the frame at Task::pt_regs())
 
 /// Clean up thread state (execve): clear FPSIMD image so the new image
 /// starts from a zero FP state (the riscv64 "FP residue" lesson), and
@@ -87,10 +52,10 @@ pub unsafe fn copy_thread(
 #[inline]
 pub fn flush_thread() {
     if let Some(current) = crate::sched::current() {
-        // SAFETY: we are the current task; no concurrent mutation of our
-        // thread state occurs.
-        unsafe {
-            let thread = (*current).thread_mut();
+        // We are the current task; no concurrent mutation of our thread
+        // state occurs.
+        {
+            let thread = current.thread_mut();
             thread.fpu.fill(0);
             thread.fpcr = 0;
             thread.fpsr = 0;

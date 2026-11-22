@@ -449,7 +449,7 @@ fn handle_syscall(regs: &mut PtRegs) {
     regs.regs[0] = crate::errno::constants::ENOSYS as u64;
 
     // U1c seccomp gate (riscv64 parity: policy runs before dispatch).
-    if let Some(rv) = crate::syscall::process::seccomp_syscall_gate(syscall_num, regs) {
+    if let Some(rv) = crate::syscall::seccomp::seccomp_syscall_gate(syscall_num, regs) {
         regs.regs[0] = rv as u64;
         return;
     }

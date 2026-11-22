@@ -7,6 +7,8 @@
 //! This module implements a unified buddy system for physical page allocation.
 //! It provides APIs like __get_free_pages() and free_pages().
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -60,6 +62,7 @@ pub fn reclaim_gate_exit_release(pid: u32) {
         let n = RECLAIM_GATE_EXIT_RELEASES.fetch_add(1, Ordering::Relaxed) + 1;
         // Bounded by actual mid-block deaths (rare by construction), so
         // each one is worth a serial line on the repro runs.
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::pr_info!(
             "RECLAIM-GATE: pid {} died holding IN_DIRECT_RECLAIM; cleared ({} releases total)",
             pid,
@@ -143,10 +146,11 @@ pub static RECLAIM_PROGRESS: AtomicU64 = AtomicU64::new(0);
 /// softirq starvation, unlike the 1 Hz census).
 #[inline]
 fn gate_release(holder: usize) {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let age = now.saturating_sub(GATE_TAKEN_J.load(Ordering::Relaxed));
     if age >= 200 {
         GATE_LONGHOLDS.fetch_add(1, Ordering::Relaxed);
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::pr_info!(
             "GATE-LONGHOLD holder={} age={}j phase={} phase_age={}j rounds={} freed={} deep={} acqs={} waiters={} exhausted={} selffight={}",
             holder,
@@ -185,7 +189,7 @@ fn gate_holder_is_me() -> bool {
 pub fn gate_note_phase(p: usize) {
     if gate_holder_is_me() {
         GATE_PHASE.store(p, Ordering::Relaxed);
-        GATE_PHASE_J.store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+        GATE_PHASE_J.store(crate::timer::get_jiffies(), Ordering::Relaxed);
     }
 }
 
@@ -222,7 +226,7 @@ pub fn reclaim_gate_census() {
     if holder == 0 || holder == usize::MAX {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let taken = GATE_TAKEN_J.load(Ordering::Relaxed);
     // Taken==0 can mean "never" only when the gate is also free; a
     // holder implies a successful CAS wrote a nonzero stamp (jiffies
@@ -236,20 +240,20 @@ pub fn reclaim_gate_census() {
     let phase_age = now.saturating_sub(GATE_PHASE_J.load(Ordering::Relaxed));
     // Best-effort holder task read (cross-CPU; the task may be exiting
     // concurrently — same discipline as the parkwalk census).
-    let (tstate, tcpu) = unsafe {
+    let (tstate, tcpu) = {
         let t = crate::sched::find_task_by_pid(holder as u32);
         if t.is_null() {
             (0xFFFFFFFFu32, 0xFFFFu32)
         } else {
-            ((*t).state().bits(), (*t).ti_cpu() as u32)
+            // INV-PROC-BORROW-1 census arm (racy best-effort read).
+            let t = crate::process::unsafe_edges::borrow_task(t);
+            (t.state().bits(), t.ti_cpu() as u32)
         }
     };
-    let zone_free = unsafe {
-        first_online_node_mut()
-            .and_then(|n| n.zone(super::zone::ZoneType::ZoneNormal))
-            .map(|z| z.nr_free())
-            .unwrap_or(0)
-    };
+    let zone_free = super::edges::first_node()
+        .and_then(|n| n.zone(super::zone::ZoneType::ZoneNormal))
+        .map(|z| z.nr_free())
+        .unwrap_or(0);
     // falloc-wedge census addendum: the holder's last tick-interrupted RIP
     // (TICK_ENTRY_RIP is per-CPU, sampled every tick) — names where a
     // stranded holder is actually spinning, sampled once per second of
@@ -259,6 +263,7 @@ pub fn reclaim_gate_census() {
     } else {
         0
     };
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::pr_info!(
         "GATE-CENSUS holder={} age={}j phase={} phase_age={}j rounds={} freed={} deep={} task_state={:#x} tcpu={} zone_free={} waiters={} exhausted={} selffight={} last_exh_pid={} last_exh_age={}j holder_rip={:#x}",
         holder,
@@ -338,9 +343,7 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
         if phys != 0 {
             let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
                 [0; crate::dfx::memwatch::SITE_FRAMES];
-            unsafe {
-                crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
-            }
+            super::edges::walk_fp_chain(mw_s0, &mut mw_frames);
             crate::dfx::memwatch::note_page_alloc(phys, order, &mw_frames);
         }
         phys
@@ -386,7 +389,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
 
     // Try to allocate from the Zone system first
     // SAFETY: early boot or under allocator lock — exclusive node access.
-    if let Some(node) = unsafe { first_online_node_mut() } {
+    if let Some(node) = super::edges::first_node_mut() {
         let zone_type = gfp_flags.zone_type();
         if let Some(zone) = node.zone_mut(zone_type) {
             if zone.is_initialized() {
@@ -533,7 +536,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         if holder != usize::MAX {
                             GATE_LAST_EXH_PID.store(holder as u64, Ordering::Relaxed);
                             GATE_LAST_EXH_J
-                                .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+                                .store(crate::timer::get_jiffies(), Ordering::Relaxed);
                         }
                     }
                     } // !nested_holder_alloc
@@ -542,7 +545,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         // then follow the holder's phases.
                         GATE_ACQS.fetch_add(1, Ordering::Relaxed);
                         GATE_TAKEN_J.store(
-                            crate::drivers::timer::get_jiffies(),
+                            crate::timer::get_jiffies(),
                             Ordering::Relaxed,
                         );
                         GATE_ROUNDS.store(0, Ordering::Relaxed);
@@ -619,13 +622,15 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     // avoiding the aliasing UB of re-creating &mut from a raw
                     // pointer while the original &mut binding is still live.
                     let zone_ptr: *mut Zone = zone;
-                    // SAFETY: zone_ptr is a valid pointer to an initialized zone.
-                    let cr = unsafe { super::compact::compact_zone(zone_ptr, order) };
+                    // zone_ptr is a valid pointer to an initialized zone
+                    // (compact_zone is now a safe fn over the same pointer).
+                    let cr = super::compact::compact_zone(zone_ptr, order);
                     if matches!(cr, super::compact::CompactResult::Success) {
-                        // SAFETY: compact_zone does not destroy the zone; the
-                        // pointer remains valid for the lifetime of the node.
-                        // Using raw pointer method call avoids creating a new &mut.
-                        let pfn = unsafe { (*zone_ptr).alloc_pages(order) };
+                        // compact_zone does not destroy the zone; the
+                        // pointer remains valid for the lifetime of the
+                        // node (INV-SYSC-2 reachability arm).
+                        let pfn =
+                            crate::syscall::edges::boxed_mut(zone_ptr).alloc_pages(order);
                         if let Some(pfn) = pfn {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
                             // Descriptors initialized under the zone lock.
@@ -657,6 +662,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
         static LEG_WARN: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if LEG_WARN.fetch_add(1, Ordering::Relaxed) < 5 {
+            // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
             crate::pr_err!("page_alloc: legacy memblock alloc order={} after zone init", order);
         }
     }
@@ -697,12 +703,15 @@ pub fn oom_forensic_dump(site: &str) {
     // attributes the "out of memory" to a category (or to drift).
     super::super::dfx::ledger::dump(&alloc::format!("oom: {}", site));
 
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!("==== OOM-FORENSIC #{} @ {} ====", DUMPS.load(Ordering::Relaxed), site);
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: in_direct_reclaim={} (holder pid; 0=free) gate_exit_releases={}",
         IN_DIRECT_RECLAIM.load(Ordering::Relaxed),
         RECLAIM_GATE_EXIT_RELEASES.load(Ordering::Relaxed)
     );
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: gate phase={} rounds={} freed={} deep={} waiters={} exhausted={} selffight={} taken_age={}j acqs={} longholds={} now_j={} taken_j={} prog={}",
         GATE_PHASE.load(Ordering::Relaxed),
@@ -712,20 +721,21 @@ pub fn oom_forensic_dump(site: &str) {
         GATE_WAITERS.load(Ordering::Relaxed),
         GATE_EXHAUSTED.load(Ordering::Relaxed),
         GATE_SELF.load(Ordering::Relaxed),
-        crate::drivers::timer::get_jiffies()
+        crate::timer::get_jiffies()
             .saturating_sub(GATE_TAKEN_J.load(Ordering::Relaxed)),
         GATE_ACQS.load(Ordering::Relaxed),
         GATE_LONGHOLDS.load(Ordering::Relaxed),
-        crate::drivers::timer::get_jiffies(),
+        crate::timer::get_jiffies(),
         GATE_TAKEN_J.load(Ordering::Relaxed),
         RECLAIM_PROGRESS.load(Ordering::Relaxed)
     );
     // SP-5 clock discrimination: raw timebase + tick IRQ counts —
     // separates "read_time broke backward" from "timer IRQs stopped"
     // (the two ways now_j can lag or freeze).
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: clock tb={} irq0={} irq1={}",
-        crate::drivers::timer::read_time(),
+        crate::timer::read_time(),
         crate::timer::WW_TICK_IRQ[0].load(core::sync::atomic::Ordering::Relaxed),
         crate::timer::WW_TICK_IRQ[1].load(core::sync::atomic::Ordering::Relaxed),
     );
@@ -738,6 +748,7 @@ pub fn oom_forensic_dump(site: &str) {
     // SP-5 round 4: the reclaim round's per-page cost driver.
     {
         let (n, slow, max_ns) = super::swap::swap_write_census();
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::println!(
             "OOM-FORENSIC: swapwrite n={} slow={} max_ms={}",
             n,
@@ -747,22 +758,25 @@ pub fn oom_forensic_dump(site: &str) {
     }
     // SP-7: per-page skip reasons — why anon candidates never reach the
     // swap write above.
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!("OOM-FORENSIC: {}", super::vmscan::vscan_census_line());
     // falloc-wedge census: the page-cache reclaim/evict skip faces (same
     // SP-7 shape — names the filter that holds the file LRU hostage).
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: {}",
         crate::fs::page_cache::pcache_reclaim_census_line()
     );
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = unsafe { first_online_node_mut() } {
+    if let Some(node) = super::edges::first_node_mut() {
         for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma, ZoneType::ZoneMovable] {
             if let Some(zone) = node.zone(zt) {
                 if !zone.is_initialized() {
                     continue;
                 }
                 let report = zone.forensic_free_report();
+                // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
                 crate::println!(
                     "OOM-FORENSIC: zone {} free_cnt={} managed={} wmark min/low/high={}/{}/{}",
                     zone.zone_type().name(),
@@ -777,12 +791,14 @@ pub fn oom_forensic_dump(site: &str) {
                     let (declared, walked, head) = report[order];
                     walk_total += walked << order;
                     if declared != 0 || walked != 0 {
+                        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
                         crate::println!(
                             "OOM-FORENSIC:   order {:>2}: declared={} walked={} head_pfn={}",
                             order, declared, walked, head
                         );
                     }
                 }
+                // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
                 crate::println!(
                     "OOM-FORENSIC:   walkable pages total={} vs free_cnt={}{}",
                     walk_total,
@@ -796,11 +812,13 @@ pub fn oom_forensic_dump(site: &str) {
         for lru_i in 0..super::pglist::NR_LRU_LISTS {
             let sz = node.lru_sizes[lru_i].load(Ordering::Relaxed);
             if sz > 0 {
+                // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
                 crate::println!("OOM-FORENSIC: lru[{}] size={}", lru_i, sz);
             }
             l0 += sz;
         }
         if l0 == 0 {
+            // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
             crate::println!("OOM-FORENSIC: all LRU lists empty");
         }
         // session-9 (r51/r58 follow-up): clean/dirty breakdown of the
@@ -820,11 +838,11 @@ pub fn oom_forensic_dump(site: &str) {
             while pfn != 0 && n < 300_000 {
                 // SAFETY: forensic read-only flag access via the
                 // descriptor array; pfn came off an LRU link chain.
-                let page = super::page_desc::pfn_to_page(pfn);
-                if page.is_null() {
-                    break;
-                }
-                let p = unsafe { &*page };
+                // INV-MM-2 chain arm.
+                let p = match super::edges::page_ref_of(pfn) {
+                    Some(p) => p,
+                    None => break,
+                };
                 if p.test_flag(super::page_desc::PageFlag::Dirty) {
                     dirty += 1;
                 }
@@ -847,6 +865,7 @@ pub fn oom_forensic_dump(site: &str) {
                 }
                 pfn = next;
             }
+            // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
             crate::println!(
                 "OOM-FORENSIC: file-lru[{}] walked={} dirty={} writeback={} referenced={} unevictable={} locked={}",
                 lru_i, n, dirty, wb, refd, unev, locked
@@ -856,18 +875,21 @@ pub fn oom_forensic_dump(site: &str) {
 
     // Page-descriptor census
     let st = super::page_desc::page_desc_stats();
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: desc used={} free={} reserved={} anon={} mapped={}",
         st.used_pages, st.free_pages, st.reserved_pages, st.anonymous_pages, st.mapped_pages
     );
 
     // Swap
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: swap active={}",
         super::swap::nr_active_swap()
     );
 
     // Seed-detector counters (see zone.rs)
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: seed_alarms={} double_free_tripwires={}",
         super::zone::SEED_ALARMS.load(Ordering::Relaxed),
@@ -887,13 +909,11 @@ pub fn oom_forensic_dump(site: &str) {
         let mut orphan_first: [usize; 8] = [0; 8];
         let mut inverse_first: [usize; 8] = [0; 8];
         for i in 0..nr_descs {
-            let page = pfn_to_page(MIN_PFN + i);
-            if page.is_null() {
-                continue;
-            }
-            // SAFETY: read-only descriptor access on the diagnostic path.
-            let (rc, linked, reserved) = unsafe {
-                ((*page).refcount(), (*page).test_flag(PageFlag::OnFreelist), (*page).is_reserved())
+            // Read-only descriptor access on the diagnostic path
+            // (INV-MM-2 chain arm).
+            let (rc, linked, reserved) = match super::edges::page_ref_of(MIN_PFN + i) {
+                Some(p) => (p.refcount(), p.test_flag(PageFlag::OnFreelist), p.is_reserved()),
+                None => continue,
             };
             if rc == 0 && !linked && !reserved {
                 orphan += 1;
@@ -907,10 +927,12 @@ pub fn oom_forensic_dump(site: &str) {
                 }
             }
         }
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::println!(
             "OOM-FORENSIC: orphan(unlinked,ref0)={} first={:?}",
             orphan, orphan_first
         );
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::println!(
             "OOM-FORENSIC: inverse(linked,ref>0)={} first={:?}",
             inverse, inverse_first
@@ -925,7 +947,7 @@ pub fn oom_forensic_dump(site: &str) {
         let mut zm = 0usize;
         let mut zw = 0usize;
         // SAFETY: diagnostic read-only node access.
-        if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+        if let Some(node) = crate::mm::pglist::first_online_node() {
             if let Some(zone) = node.zone(super::zone::ZoneType::ZoneNormal) {
                 if zone.is_initialized() {
                     zf = zone.nr_free();
@@ -947,6 +969,7 @@ pub fn oom_forensic_dump(site: &str) {
             super::zone::DOUBLE_FREE_COUNT.load(Ordering::Relaxed) as u64,
         );
     }
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!("==== OOM-FORENSIC end ====");
 }
 
@@ -962,7 +985,7 @@ pub fn alloc_page_batch(gfp_flags: GfpFlags, n: usize, out: &mut [usize]) -> usi
         return 0;
     }
     // SAFETY: exclusive node access — same discipline as alloc_pages_inner.
-    if let Some(node) = unsafe { first_online_node_mut() } {
+    if let Some(node) = super::edges::first_node_mut() {
         let zone_type = gfp_flags.zone_type();
         if let Some(zone) = node.zone_mut(zone_type) {
             if zone.is_initialized() {
@@ -1005,9 +1028,8 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
         let virt = crate::arch::mm::phys_to_virt(
             crate::arch::mm::PhysAddr::new(addr as u64),
         );
-        unsafe {
-            core::ptr::write_bytes(virt.0 as *mut u8, 0, PAGE_SIZE);
-        }
+        // Fresh allocation, exclusively owned (INV-MM-7 page-slice arm).
+        super::edges::page_slice_mut(virt.0 as usize).fill(0);
     }
     addr
 }
@@ -1058,8 +1080,10 @@ fn report_free_refusal(detail_msg: &core::fmt::Arguments) {
     static COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     let n = COUNT.fetch_add(1, Relaxed);
     if n < DETAIL_BUDGET {
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::pr_err!("{}", detail_msg);
     } else if (n + 1) % SUMMARY_EVERY == 0 {
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::pr_err!(
             "free_pages: refused/dropped {} frames so far (per-frame prints suppressed)",
             n + 1
@@ -1103,6 +1127,7 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
         core::sync::atomic::AtomicUsize::new(0);
     let n = REPORTS.fetch_add(1, Relaxed);
     if n < 8 {
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::pr_err!(
             "pcache-leaf phantom zero-put: frame {:#x} still cache-owned (site {}) — leaking instead of freeing",
             phys,
@@ -1110,6 +1135,7 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
         );
         crate::dfx::backtrace::dump_stack();
     } else if (n + 1) % 4096 == 0 {
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::pr_err!(
             "pcache-leaf phantom zero-put: {} frames leaked so far (prints suppressed)",
             n + 1
@@ -1158,18 +1184,19 @@ pub fn free_pages(addr: usize, order: usize) {
     // Refuse the free (bounded leak) and name the frame; the mapping
     // keeps working, so the boot survives to reveal more.
     {
-        let pd = crate::mm::page_desc::pfn_to_page(phys_to_pfn(addr));
-        if !pd.is_null() && unsafe { (*pd).is_mapped() } {
+        let pd_ref = super::edges::page_ref_of(phys_to_pfn(addr));
+        if pd_ref.is_some_and(|p| p.is_mapped()) {
             static MAPPED_FREES: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             dw::FREE_REFUSED_MAPPED
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if MAPPED_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
                 crate::pr_err!(
                     "free_pages: REFUSED frame {:#x} order {} still MAPPED (mapcount {}) pid {} — leaking instead of aliasing",
                     addr,
                     order,
-                    unsafe { (*pd).mapcount() },
+                    pd_ref.map(|p| p.mapcount()).unwrap_or(0),
                     crate::process::current_pid()
                 );
                 crate::dfx::backtrace::dump_stack();
@@ -1196,10 +1223,9 @@ pub fn free_pages(addr: usize, order: usize) {
     // sequence) and REFUSE the free (quarantine-leak), so the frame
     // never re-enters circulation and scrambles the trail.
     if crate::trace::EVENT_MMFORENSICS.armed() {
-        let pd = crate::mm::page_desc::pfn_to_page(phys_to_pfn(addr));
-        if !pd.is_null() {
-            // SAFETY: read-only descriptor access on the diagnostic path.
-            let p = unsafe { &*pd };
+        // Read-only descriptor access on the diagnostic path
+        // (INV-MM-2).
+        if let Some(p) = super::edges::page_ref_of(phys_to_pfn(addr)) {
             if p.page_type() == crate::mm::page_desc::PageType::PageCache
                 && !p.mapping().is_null()
             {
@@ -1207,6 +1233,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     core::sync::atomic::AtomicUsize::new(0);
                 let n = CACHE_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if n < 8 {
+                    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
                     crate::pr_err!(
                         "free_pages: REFUSED frame {:#x} still CACHE-OWNED (type PageCache, mapping key live, refcount {}) pid {} — phantom-put free face",
                         addr,
@@ -1249,9 +1276,7 @@ pub fn free_pages(addr: usize, order: usize) {
         // per frame.
         #[cfg(feature = "x86_64")]
         {
-            let ret: u64;
-            // SAFETY: frame pointers forced on; diagnostic return-address read.
-            unsafe { core::arch::asm!("movq 8(%rbp), {}", out(reg) ret, options(att_syntax)); }
+            let ret: u64 = super::edges::x86_caller_return_address();
             report_free_refusal(&format_args!(
                 "free_pages: WILD addr={:#x} order={} caller={:#x}",
                 addr, order, ret
@@ -1342,6 +1367,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     let root = crate::sched::current()
                         .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
                         .unwrap_or(0);
+                    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
                     crate::pr_err!(
                         "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} dying_root={:#x} ownfrees={} — free REFUSED (leaked)",
                         pfn, order, owner_pid, owner_va, dying, root,
@@ -1353,6 +1379,7 @@ pub fn free_pages(addr: usize, order: usize) {
                 }
                 #[cfg(not(feature = "riscv64"))]
                 {
+                    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
                     crate::pr_err!(
                         "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} — free REFUSED (leaked)",
                         pfn, order, owner_pid, owner_va, dying
@@ -1376,7 +1403,7 @@ pub fn free_pages(addr: usize, order: usize) {
 
     // Try to free to the Zone system first
     // SAFETY: exclusive node access — caller must ensure no concurrent mutation.
-    if let Some(node) = unsafe { first_online_node_mut() } {
+    if let Some(node) = super::edges::first_node_mut() {
         // Try each zone type to find which one contains this PFN.
         // ZoneMovable included (review 4.7): pages allocated with
         // __GFP_MOVABLE live there and silently leaked when their free
@@ -1489,16 +1516,15 @@ pub fn page_to_virt(page: &Page) -> usize {
 ///   heap/slab window — that clamp is what left ~980 MB below
 ///   KERNEL_HEAP_PHYS permanently unmanaged on x86_64).
 pub fn init_zone_system(phys_start: usize, phys_size: usize, _kernel_end: usize) {
-    // Initialize node data structure
-    // SAFETY: Called once during early boot before any page allocation.
-    unsafe {
-        init_node_data();
-    }
+    // Initialize node data structure: called once during early boot
+    // before any page allocation (init_node_data is now a safe fn).
+    init_node_data();
 
     // Get mutable node
     let node = match node_data_mut(0) {
         Some(n) => n,
         None => {
+            // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
             crate::println!("page_alloc: Failed to get node 0 for zone initialization");
             return;
         }
@@ -1514,6 +1540,7 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, _kernel_end: usize)
     let max_phys_size = max_pages * PAGE_SIZE;
     let effective_phys_size = phys_size.min(max_phys_size);
     if effective_phys_size != phys_size {
+        // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::pr_err!(
             "page_alloc: phys_size {}MB exceeds MAX_PAGES limit {}MB, truncating",
             phys_size / (1024 * 1024), max_phys_size / (1024 * 1024));
@@ -1608,6 +1635,7 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, _kernel_end: usize)
     // One-line boot banner: span vs seeded vs holes, so any future
     // structural loss is visible immediately.
     let span_pages = alloc_end_pfn - alloc_start_pfn;
+    // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "page_alloc: zone Normal span={} pages ({} MB), seeded={} ({} MB), unmanaged-in-span={} ({} MB)",
         span_pages, span_pages * PAGE_SIZE / (1024 * 1024),
@@ -1624,7 +1652,7 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, _kernel_end: usize)
 /// # Safety
 /// Caller must ensure the returned physical address is used only by the kernel
 /// and freed exactly once via `__free_pages` with the correct order.
-pub unsafe fn __get_free_pages(gfp_flags: GfpFlags, order: usize) -> usize {
+pub fn __get_free_pages(gfp_flags: GfpFlags, order: usize) -> usize {
     alloc_pages(gfp_flags, order)
 }
 
@@ -1633,7 +1661,7 @@ pub unsafe fn __get_free_pages(gfp_flags: GfpFlags, order: usize) -> usize {
 /// # Safety
 /// Caller must ensure the returned physical address is used only by the kernel
 /// and freed exactly once via `__free_page`.
-pub unsafe fn __get_free_page(gfp_flags: GfpFlags) -> usize {
+pub fn __get_free_page(gfp_flags: GfpFlags) -> usize {
     alloc_page(gfp_flags)
 }
 
@@ -1642,7 +1670,7 @@ pub unsafe fn __get_free_page(gfp_flags: GfpFlags) -> usize {
 /// # Safety
 /// Caller must ensure the returned physical address is used only by the kernel
 /// and freed exactly once via `__free_page`.
-pub unsafe fn __get_zeroed_page(gfp_flags: GfpFlags) -> usize {
+pub fn __get_zeroed_page(gfp_flags: GfpFlags) -> usize {
     get_zeroed_page(gfp_flags)
 }
 
@@ -1651,7 +1679,7 @@ pub unsafe fn __get_zeroed_page(gfp_flags: GfpFlags) -> usize {
 /// # Safety
 /// `addr` must be a physical address previously returned by `__get_free_pages`
 /// with the same `order`, and must not have been freed already.
-pub unsafe fn __free_pages(addr: usize, order: usize) {
+pub fn __free_pages(addr: usize, order: usize) {
     free_pages(addr, order);
 }
 
@@ -1660,6 +1688,6 @@ pub unsafe fn __free_pages(addr: usize, order: usize) {
 /// # Safety
 /// `addr` must be a physical address previously returned by `__get_free_page`
 /// or `__get_zeroed_page`, and must not have been freed already.
-pub unsafe fn __free_page(addr: usize) {
+pub fn __free_page(addr: usize) {
     free_page(addr);
 }

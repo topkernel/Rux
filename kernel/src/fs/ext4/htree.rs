@@ -23,6 +23,10 @@
 //! NOT implemented (with the same refusal on the write side): index
 //! maintenance, dx_add_entry, casefolded/SIPHASH dirs (hash_version 6).
 
+// (INV-EXT4-HTREE-1: the htree dir-block views — dx_find_entry's
+// entry/leaf walks are bounds-checked against the pinned dir block
+// (rec_len/name_len validated per step, the same shape as
+// Ext4DirEntry::from_bytes's guards).)
 use super::dir::Ext4DirEntry;
 use super::Ext4FileSystem;
 use crate::fs::bio;
@@ -373,7 +377,7 @@ pub fn dx_find_entry(
     let (hash, root_at, indirect_levels, root_eoff, root_count);
     {
         // SAFETY: bh from bio::bread; read-only access below.
-        let data = unsafe { &(*root_bh).b_data };
+        let data = bio::bh_data(&root_bh);
         if data.len() < block_size {
             bio::brelse(root_bh);
             return None;
@@ -448,7 +452,7 @@ pub fn dx_find_entry(
                 let fr = &frames[level];
                 // SAFETY: bh alive in the frame; read-only access.
                 (
-                    unsafe { entry_block(&(*fr.bh).b_data, fr.entries_off, fr.at) },
+                    entry_block(bio::bh_data(&fr.bh), fr.entries_off, fr.at),
                     fr.hash,
                 )
             };
@@ -467,7 +471,7 @@ pub fn dx_find_entry(
             };
             let parsed = {
                 // SAFETY: nbh just read; read-only access.
-                let data = unsafe { &(*nbh).b_data };
+                let data = bio::bh_data(&nbh);
                 if data.len() < block_size {
                     None
                 } else {
@@ -509,7 +513,7 @@ pub fn dx_find_entry(
             let top = &frames[frames.len() - 1];
             // SAFETY: bh alive in the frame; read-only access.
             (
-                unsafe { entry_block(&(*top.bh).b_data, top.entries_off, top.at) },
+                entry_block(bio::bh_data(&top.bh), top.entries_off, top.at),
                 top.hash,
             )
         };
@@ -519,7 +523,7 @@ pub fn dx_find_entry(
         let mut found: Option<Ext4DirEntry> = None;
         {
             // SAFETY: lbh just read; read-only access.
-            let data = unsafe { &(*lbh).b_data };
+            let data = bio::bh_data(&lbh);
             let mut offset = 0usize;
             while offset < block_size {
                 let entry = Ext4DirEntry::from_bytes(&data[offset..], block_size);
@@ -559,7 +563,7 @@ pub fn dx_find_entry(
         let bhash = {
             let fr = &frames[level];
             // SAFETY: bh alive in the frame; read-only access.
-            unsafe { entry_hash(&(*fr.bh).b_data, fr.entries_off, fr.at) }
+            entry_hash(bio::bh_data(&fr.bh), fr.entries_off, fr.at)
         };
         // ext4_htree_next_block's stop rule: only for LSB-0 (even)
         // lookup hashes does the walk stop, and only when the next
@@ -578,7 +582,7 @@ pub fn dx_find_entry(
             let block = {
                 let fr = &frames[level];
                 // SAFETY: bh alive in the frame; read-only access.
-                unsafe { entry_block(&(*fr.bh).b_data, fr.entries_off, fr.at) }
+                entry_block(bio::bh_data(&fr.bh), fr.entries_off, fr.at)
             };
             level += 1;
             let Some(nbh) = read_dir_logical_block(fs, dir, block as u64) else {
@@ -587,7 +591,7 @@ pub fn dx_find_entry(
             };
             let parsed = {
                 // SAFETY: nbh just read; read-only access.
-                let data = unsafe { &(*nbh).b_data };
+                let data = bio::bh_data(&nbh);
                 parse_index_block(data, block_size, fs.metadata_csum)
                     .map(|(_, eoff, count, _)| (eoff, count))
             };

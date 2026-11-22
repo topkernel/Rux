@@ -29,7 +29,7 @@ core::arch::global_asm!(include_str!("uaccess.S"));
 /// Linux MAX_RW_COUNT (INT_MAX & PAGE_MASK, 2 GiB minus one page): the
 /// per-syscall upper bound for single read/write style transfers, so a
 /// huge user count can never overflow internal length arithmetic.
-/// Applied at the syscall layer via `crate::syscall::io::clamp_rw_count`.
+/// Applied at the syscall layer via `crate::syscall::support::clamp_rw_count`.
 pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
 
 /// User space access error type
@@ -90,6 +90,10 @@ pub fn access_ok(addr: usize, size: usize) -> bool {
 /// # Safety
 /// - `from` must point to valid kernel memory
 /// - `to` must be a valid user space address
+// IRREDUCIBLE F-ROW (F-UACC-1): the exception-table copy bottoms —
+// reference kernel arch/riscv/lib/uaccess.S (__copy_user,
+// __clear_user, the lr/sc futex word); hand-written asm is the only
+// shape that can carry fixup entries per instruction.
 extern "C" {
     fn __copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize;
     fn __copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize;

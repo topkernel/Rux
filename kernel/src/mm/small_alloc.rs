@@ -46,6 +46,13 @@
 //! Lock order: class lock -> buddy lock (page create/reclaim). The
 //! reverse nesting never occurs (the buddy knows nothing of classes).
 
+// (INV-SMALLALLOC-1: the small allocator family — the magazine
+// discipline's raw spans (class pages, freelist links inside free
+// blocks) are owned by the class lock; the arena base words are
+// installed once at init.)
+
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 
@@ -65,7 +72,7 @@ const HDR_MAGIC: u16 = 0x5142;
 
 /// In-page header (16 bytes) at the start of every slab page.
 #[repr(C)]
-struct PageHdr {
+pub(super) struct PageHdr {
     magic: u16,
     cls: u8,
     state: u8,
@@ -77,9 +84,9 @@ struct PageHdr {
 
 #[inline]
 fn hdr_of(page: usize) -> &'static mut PageHdr {
-    // SAFETY: callers hold the class lock (or are initializing a page
-    // that no other CPU can reach yet — still under the class lock).
-    unsafe { &mut *(page as *mut PageHdr) }
+    // Callers hold the class lock (or are initializing a page no other
+    // CPU can reach yet — still under the class lock) — INV-MM-13.
+    super::edges::sa_hdr_mut(page)
 }
 
 /// Class index for a layout already known to fit (size,align <= 1024).
@@ -162,7 +169,7 @@ pub fn object_span(addr: usize) -> Option<(usize, usize)> {
     // page lies inside the kernel heap direct map (bitmap bit set) so
     // the mapping is valid. Fields are plain u8/u16 loads — worst case
     // a torn value, filtered by the magic check below.
-    let hdr = unsafe { &*(page as *const PageHdr) };
+    let hdr = super::edges::sa_hdr_ref(page);
     if hdr.magic != HDR_MAGIC {
         return None;
     }
@@ -487,7 +494,7 @@ fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
             continue;
         }
         let ptr = page_addr + fo + obj * s;
-        let next_free = unsafe { core::ptr::read_volatile(ptr as *const u16) } as usize;
+        let next_free = super::edges::sa_read_u16(ptr) as usize;
         hdr.free_head = if next_free >= objs_per_page as usize { 0xFFFF } else { next_free as u16 };
         hdr.free_count -= 1;
         if hdr.free_count == 0 {
@@ -523,13 +530,13 @@ fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
     let mut i = 0usize;
     while i < objs_per_page as usize {
         let val: u16 = if i + 1 >= objs_per_page as usize { 0xFFFF } else { (i + 1) as u16 };
-        unsafe { core::ptr::write_volatile((page + fo + i * s) as *mut u16, val) };
+        super::edges::sa_write_u16(page + fo + i * s, val);
         i += 1;
     }
     // Serve object 0.
     let ptr = page + fo;
     let hdr = hdr_of(page);
-    let next_free = unsafe { core::ptr::read_volatile(ptr as *const u16) } as usize;
+    let next_free = super::edges::sa_read_u16(ptr) as usize;
     hdr.free_head = if next_free >= objs_per_page as usize { 0xFFFF } else { next_free as u16 };
     hdr.free_count -= 1;
     if hdr.free_count == 0 {
@@ -741,7 +748,7 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
             crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
             continue;
         }
-        unsafe { core::ptr::write_volatile(addr as *mut u16, hdr.free_head) };
+        super::edges::sa_write_u16(addr, hdr.free_head);
         hdr.free_head = (off / s) as u16;
         hdr.free_count += 1;
         cache.obj_frees.fetch_add(1, Ordering::Relaxed);
@@ -908,7 +915,7 @@ pub fn census_peek(ci: usize, per_page: usize) {
         while i < objs && i < per_page.max(16) {
             // SAFETY: live slab page of this class; slot in bounds.
             let p = page_addr + fo + i * s;
-            let a0 = unsafe { core::ptr::read_volatile(p as *const u64) };
+            let a0 = super::edges::sa_read_u64(p);
             if a0 != 0 {
                 let mut k = 0usize;
                 while k < nvals {
@@ -1010,16 +1017,16 @@ pub fn census_peek3(ci: usize) {
         while i < objs {
             // SAFETY: live slab page of this class; slot in bounds.
             let p = page_addr + fo + i * s;
-            let a0 = unsafe { core::ptr::read_volatile(p as *const u64) };
-            let a1 = unsafe { core::ptr::read_volatile((p + 8) as *const u64) };
-            let a2 = unsafe { core::ptr::read_volatile((p + 16) as *const u64) };
+            let a0 = super::edges::sa_read_u64(p);
+            let a1 = super::edges::sa_read_u64(p + 8);
+            let a2 = super::edges::sa_read_u64(p + 16);
             if a0 == 0 && a1 == 0 && a2 == 0 {
                 i += 1;
                 continue;
             }
             total += 1;
             // BTree node length: u16 at +10 (parent 8B, parent_idx u16).
-            let blen = unsafe { core::ptr::read_volatile((p + 10) as *const u16) } as u64;
+            let blen = super::edges::sa_read_u16(p + 10) as u64;
             if a0 <= 4096 && a1 <= 4096 && a2 != 0 && a2 < (1 << 24) {
                 n_arc += 1;
             } else if (a0 == 0 || is_kheap(a0)) && (1..=11).contains(&blen) && is_userva(a2) {

@@ -109,7 +109,7 @@ pub fn note_proc_open(pid: u32) {
         return;
     }
     let seq = PROC_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    let j = crate::drivers::timer::get_jiffies();
+    let j = crate::timer::get_jiffies();
     let mut ring = PROC_RING.lock();
     ring[(seq as usize - 1) % PROC_RING_LEN] = (seq, pid, j);
 }
@@ -142,7 +142,7 @@ pub fn note_cow(j0: u64) {
         return;
     }
     PACE_COW.fetch_add(1, Ordering::Relaxed);
-    let d = crate::drivers::timer::get_jiffies().saturating_sub(j0);
+    let d = crate::timer::get_jiffies().saturating_sub(j0);
     PACE_COW_J.fetch_add(d, Ordering::Relaxed);
 }
 
@@ -152,7 +152,7 @@ pub fn note_drct(j0: u64) {
         return;
     }
     PACE_DRCT.fetch_add(1, Ordering::Relaxed);
-    let d = crate::drivers::timer::get_jiffies().saturating_sub(j0);
+    let d = crate::timer::get_jiffies().saturating_sub(j0);
     PACE_DRCT_J.fetch_add(d, Ordering::Relaxed);
     PACE_DRCT_MAXJ.fetch_max(d, Ordering::Relaxed);
 }
@@ -301,7 +301,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         return 0;
     }
     let beat_jiffies = (BEAT_SECS * hz).max(1);
-    let boot_jiffies = crate::drivers::timer::get_jiffies();
+    let boot_jiffies = crate::timer::get_jiffies();
 
     let mut last_pidmax: u32 = 0;
     let mut plateau: u32 = 0;
@@ -319,13 +319,13 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             Some(t) => t.pid(),
             None => break,
         };
-        let target = crate::drivers::timer::get_jiffies() + beat_jiffies;
+        let target = crate::timer::get_jiffies() + beat_jiffies;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
         if timer_id != 0 {
             // Re-derived running-task borrows (never held across
             // schedule() below).
             crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
-            if crate::drivers::timer::get_jiffies() >= target {
+            if crate::timer::get_jiffies() >= target {
                 if let Some(t) = crate::sched::current() {
                     t.set_state(TaskState::new(TaskState::RUNNING));
                     // A racing wake may have enqueued us mid-exit — take
@@ -388,7 +388,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         });
         let (bprocs, bwait, bwait15) = crate::ipc::binder::schb_beat();
         let flow = max_pid.saturating_sub(last_pidmax);
-        let t_secs = crate::drivers::timer::get_jiffies().saturating_sub(boot_jiffies) / hz;
+        let t_secs = crate::timer::get_jiffies().saturating_sub(boot_jiffies) / hz;
 
         {
             // Leg-15 pace snapshot (all reads relaxed, schbd context):

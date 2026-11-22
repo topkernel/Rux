@@ -39,6 +39,9 @@ const MSR_FS_BASE: u32 = 0xC000_0100;
 /// MSR_KERNEL_GS_BASE — the SWAPGS shadow (task's user GS base).
 const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
+// IRREDUCIBLE F-ROW (F-CS-X1): the register/stack switch itself —
+// reference kernel arch/x86/kernel/entry.S __switch_to (callee-saved save/restore); the callee-saved register file + sp swap has
+// no safe shape (Rust owns the frame).
 extern "C" {
     fn __switch_to(prev: *mut Task, next: *mut Task);
 }
@@ -560,6 +563,13 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 }
 
 fn context_switch_body(prev: &mut Task, next: &mut Task) {
+    // MPK phase 1 (mpkguard): re-arm the closed PKRU. PKRU is NOT in
+    // the trap frame — a task preempted mid-window would otherwise
+    // hand the next task an open key-1 zone. Windows never contain a
+    // schedule point (they wrap volatile accesses only), so this is
+    // the belt-and-braces backstop; the discipline note is at
+    // arch::mpk::switch_rearm.
+    crate::arch::mpk::switch_rearm();
     // cctx probe (closegap lane): phase stamps in the OUTGOING frame.
     // The post-asm stamp is parked in a per-CPU slot (the switch is
     // CPU-local with IRQs off) because prev's frame freezes

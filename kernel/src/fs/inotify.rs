@@ -25,6 +25,10 @@
 //! Lock order: WATCH_REGISTRY -> InotifyInstance.inner (never nested the
 //! other way; add/rm_watch take them sequentially).
 
+// (INV-INOTIFY-PRIV-1: the inotify fd family — private_data holds the
+// Box'd instance/watch state installed at inotify_init; the notify
+// rows read the watch under the group's lock; close is the single
+// reclaim (INV-FS-FILEPRIV-1 cell discipline).)
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -409,14 +413,13 @@ pub fn notify_file(file: &File, mask: u32) {
     if WATCH_COUNT.load(Ordering::Acquire) == 0 {
         return;
     }
-    // SAFETY: inode and dentry are written once at open time and never
-    // mutated afterwards; read-only access.
-    let inode = unsafe { (*file.inode.get()).clone() };
-    let dentry = unsafe { (*file.dentry.get()).clone() };
-    let inode = match inode {
+    // inode and dentry are written once at open time and never mutated
+    // afterwards (the FILEINODE/FILEPRIV write-once cells).
+    let inode = match crate::fs::unsafe_edges::file_inode_arc(file) {
         Some(i) => i,
         None => return,
     };
+    let dentry = unsafe { (*file.dentry.get()).clone() };
     let mut mask = mask;
     if inode.mode.is_directory() {
         mask |= IN_ISDIR;
@@ -745,7 +748,7 @@ fn inotify_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 fn inotify_poll(file: &File, _events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let instance = match instance_of(file) {
         Some(i) => i,
         None => return 0,
@@ -811,4 +814,41 @@ pub fn inotify_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
     if let Some(instance) = instance_of(file) {
         instance.wait_queue.remove(task);
     }
+}
+
+// ============================================================================
+// Rung-3 NOTIFY SEAM: the fs-framework notify hooks.
+//
+// vfs.rs and file.rs must not reference inotify by name; they call
+// through this hook table instead. inotify_self_register() runs from
+// mount_table::register_builtin_handlers (the same boot seam point).
+// Zero behavior change: the hook fns ARE the old direct calls.
+// ============================================================================
+
+/// The framework-facing notify entry: parent+inode event (fsnotify
+/// shape — create/unlink/rename/move...).
+pub(crate) fn hook_notify(
+    parent: Option<&crate::fs::inode::Inode>,
+    inode: Option<&crate::fs::inode::Inode>,
+    mask: u32,
+    name: Option<&[u8]>,
+    cookie: u32,
+) {
+    notify(parent, inode, mask, name, cookie);
+}
+
+/// The framework-facing file-event entry (inotify_file_event shape —
+/// IN_ACCESS/IN_MODIFY on read/write).
+pub(crate) fn hook_notify_file(file: &crate::fs::file::File, mask: u32) {
+    notify_file(file, mask);
+}
+
+/// The framework-facing close-event entry.
+pub(crate) fn hook_notify_file_close(file: &crate::fs::file::File) {
+    notify_file_close(file);
+}
+
+/// The framework-facing cookie allocator (event pairing).
+pub(crate) fn hook_alloc_cookie() -> u32 {
+    alloc_cookie()
 }

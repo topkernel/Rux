@@ -6,6 +6,7 @@
 
 pub mod unsafe_edges;
 pub mod boot;
+pub mod mpk;
 pub mod pt_regs;
 pub mod trap;
 pub mod context;

@@ -97,6 +97,9 @@
 //! `schedule()`). `try_read`/`try_write` never sleep and are safe
 //! anywhere (the fuxstuck census relies on this).
 
+// (INV-RWSEM-1: the rwsem family — the count word's atomic protocol
+// pairs with the waitqueue; guard derefs ride the held semaphore
+// lifetime; panic rows are best-effort (INV-SPIN-1's contract).)
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::ops::{Deref, DerefMut};
@@ -156,7 +159,7 @@ const STALL_WAITER_JIFFIES: u64 = (crate::config::KERNEL_HZ as u64) * 3;
 /// wedge class prints hundreds of lines otherwise).
 fn stall_report_ok() -> bool {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(Ordering::Relaxed);
     now.wrapping_sub(last) >= (crate::config::KERNEL_HZ as u64) * 10
         && LAST
@@ -474,7 +477,7 @@ impl RwSemaphore {
             adjustment = READER_BIAS;
             let oldcount = self.count.fetch_add(adjustment, Ordering::AcqRel);
             if oldcount & WRITER_LOCKED != 0 {
-                let now = crate::drivers::timer::get_jiffies();
+                let now = crate::timer::get_jiffies();
                 if time_after(now, list[0].timeout) {
                     if oldcount & FLAG_HANDOFF == 0 {
                         adjustment -= FLAG_HANDOFF;
@@ -557,7 +560,7 @@ impl RwSemaphore {
                 if has_handoff {
                     return false;
                 }
-                if !time_after(crate::drivers::timer::get_jiffies(), list[index].timeout) {
+                if !time_after(crate::timer::get_jiffies(), list[index].timeout) {
                     return false;
                 }
                 new |= FLAG_HANDOFF;
@@ -717,7 +720,7 @@ impl RwSemaphore {
                     if self.owner_value() & OWNER_NONSPINNABLE != 0 {
                         break 'outer;
                     }
-                    rspin_deadline = crate::drivers::timer::monotonic_ns_since_boot()
+                    rspin_deadline = crate::timer::monotonic_ns_since_boot()
                         + self.rspin_threshold_ns();
                     loop_count = 0;
                 } else {
@@ -725,7 +728,7 @@ impl RwSemaphore {
                     // (rwsem.c:876-880 — avoid a clock read per spin).
                     loop_count = loop_count.wrapping_add(1);
                     if loop_count & 0xf == 0
-                        && crate::drivers::timer::monotonic_ns_since_boot() > rspin_deadline
+                        && crate::timer::monotonic_ns_since_boot() > rspin_deadline
                     {
                         self.set_nonspinnable();
                         break 'outer;
@@ -810,9 +813,9 @@ impl RwSemaphore {
             }
         };
 
-        let timeout = crate::drivers::timer::get_jiffies() + WAIT_TIMEOUT_JIFFIES.max(1);
+        let timeout = crate::timer::get_jiffies() + WAIT_TIMEOUT_JIFFIES.max(1);
         let mut enqueued = false;
-        let first_park = crate::drivers::timer::get_jiffies();
+        let first_park = crate::timer::get_jiffies();
 
         loop {
             let mut wakers = alloc::vec::Vec::with_capacity(8);
@@ -882,7 +885,7 @@ impl RwSemaphore {
             // Stall tripwire (see STALL_WAITER_JIFFIES): name a waiter
             // the grant is not reaching.
             if !granted_now
-                && time_after(crate::drivers::timer::get_jiffies(), first_park + STALL_WAITER_JIFFIES)
+                && time_after(crate::timer::get_jiffies(), first_park + STALL_WAITER_JIFFIES)
                 && stall_report_ok()
             {
                 let (count, owner, queued) = self.dfx_state();
@@ -890,7 +893,7 @@ impl RwSemaphore {
                     "RWSEM-STALL-R {} waiter={} waited={}j count={:#x} owner={:#x} queued={} (reader parked without grant)",
                     self.name,
                     crate::sched::edges::task_shared(cur).pid(),
-                    crate::drivers::timer::get_jiffies().wrapping_sub(first_park),
+                    crate::timer::get_jiffies().wrapping_sub(first_park),
                     count,
                     owner,
                     queued
@@ -959,8 +962,8 @@ impl RwSemaphore {
             }
         };
 
-        let timeout = crate::drivers::timer::get_jiffies() + WAIT_TIMEOUT_JIFFIES.max(1);
-        let first_park = crate::drivers::timer::get_jiffies();
+        let timeout = crate::timer::get_jiffies() + WAIT_TIMEOUT_JIFFIES.max(1);
+        let first_park = crate::timer::get_jiffies();
 
         loop {
             let mut wakers = alloc::vec::Vec::with_capacity(8);
@@ -1014,7 +1017,7 @@ impl RwSemaphore {
             };
             // Stall tripwire (see STALL_WAITER_JIFFIES).
             if !acquired_now
-                && time_after(crate::drivers::timer::get_jiffies(), first_park + STALL_WAITER_JIFFIES)
+                && time_after(crate::timer::get_jiffies(), first_park + STALL_WAITER_JIFFIES)
                 && stall_report_ok()
             {
                 let (count, owner, queued) = self.dfx_state();
@@ -1037,7 +1040,7 @@ impl RwSemaphore {
                     "RWSEM-STALL-W {} waiter={} waited={}j count={:#x} owner={} alive={} queued={} (writer parked without grant)",
                     self.name,
                     crate::sched::edges::task_shared(cur).pid(),
-                    crate::drivers::timer::get_jiffies().wrapping_sub(first_park),
+                    crate::timer::get_jiffies().wrapping_sub(first_park),
                     count,
                     owner_pid,
                     owner_alive,

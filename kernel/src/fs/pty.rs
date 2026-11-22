@@ -484,7 +484,7 @@ fn ptmx_write(file: &File, buf: &[u8]) -> isize {
 }
 
 fn ptmx_poll(file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
 
     let pair = match pair_of(file) {
         Some(p) => p,
@@ -646,7 +646,7 @@ fn pty_slave_write(file: &File, buf: &[u8]) -> isize {
 }
 
 fn pty_slave_poll(file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
 
     let pair = match pair_of(file) {
         Some(p) => p,

@@ -271,6 +271,10 @@ fn next_file_id() -> u64 {
 /// (install/dup/fork displacement-free publication), and the ArcInner
 /// allocation must be pinned across this call (a slot reference or a
 /// fdreap-parked Weak) — the CAS itself must never act on freed memory.
+/// (INV-FILE-ARC-1: the strong-word offset assumption this family
+/// rests on is PINNED AT BOOT by verify_arc_inner_layout below; the
+/// caller-pins + CAS-nonzero-or-clean-fail protocol is the audited
+/// edge — every row of this family rides it.)
 #[inline]
 unsafe fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
     // std Arc layout on our 64-bit targets: ArcInner { strong:
@@ -304,6 +308,8 @@ unsafe fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
 /// toolchain moved the refcount word, every lock-free fd lookup would
 /// CAS the wrong memory — fail loudly at boot instead.
 pub(crate) fn verify_arc_inner_layout() {
+    // (INV-FILE-ARC-1: the boot-time pin of the ArcInner strong-word
+    // offset — the family's layout assumption, checked here once.)
     crate::pr_info!(
         "fs: File={}B (open/close hot path size gate)",
         core::mem::size_of::<File>()
@@ -431,6 +437,10 @@ impl FileOwner {
 // SAFETY: File is only shared across threads when referenced through Arc,
 // and all mutable access goes through Spinlock or UnsafeCell fields that
 // are synchronized with IRQ-safe locking.
+// (INV-FILE-SEND-1: File's Sync/Send are carried per-field — cells are
+// write-once (INV-FILE-CELL-1), pos/cloexec/dirent_cache behind their
+// locks, flags/f_owner/f_signum atomics, io_lock a real mutex. No
+// field admits a data race through &File.)
 unsafe impl Sync for File {}
 unsafe impl Send for File {}
 
@@ -479,13 +489,20 @@ impl File {
     }
 
     /// Set inode
+    ///
+    /// (INV-FILE-CELL-1: the inode/dentry/ops cells are write-ONCE at
+    /// open/creation time, before the File is published to an fd
+    /// table, and never re-pointed; shared reads through a live &File
+    /// are therefore race-free. The private_data cell adds ONE
+    /// mutation: the close-path take (INV-FS-FILEPRIV-1). Every cell
+    /// accessor row rides this contract.)
     pub fn set_inode(&self, inode: Arc<Inode>) {
         // Lease/open bookkeeping: every File that gains an inode is an
         // open file description on that inode (the F_SETLEASE grant
         // checks and lease-break blocking consult these counts).
         // File::drop unregisters. O_ACCMODE=3: O_WRONLY(1)/O_RDWR(2)
         // carry write access.
-        crate::fs::locks::inode_open_register(&inode, self.flags_bits() & 0o3 != 0);
+        crate::fs::lock_hooks::inode_open_register(&inode, self.flags_bits() & 0o3 != 0);
         unsafe { *self.inode.get() = Some(inode); }
     }
 
@@ -625,7 +642,7 @@ impl File {
     /// shapes; consumers reduce both to the same event bits, but the
     /// convention now lives here once.
     pub fn poll_dispatch(&self, events: u16) -> u16 {
-        use crate::syscall::misc::poll_events::*;
+        use crate::fs::event_notify::poll_events::*;
         let ops = self.get_ops();
         match ops.and_then(|o| o.poll) {
             Some(poll_fn) => poll_fn(self, events),
@@ -659,7 +676,7 @@ impl File {
                 if result > 0 {
                     // inotify IN_ACCESS (P0-4): one atomic load when no
                     // watches exist.
-                    crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_ACCESS);
+                    crate::fs::notify_hooks::notify_file(self, crate::fs::notify_hooks::ino_events::IN_ACCESS);
                 }
                 return result;
             }
@@ -686,7 +703,7 @@ impl File {
                 let result = write_fn(self, slice);
                 if result > 0 {
                     // inotify IN_MODIFY (P0-4): sqlite/editors/build tools.
-                    crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_MODIFY);
+                    crate::fs::notify_hooks::notify_file(self, crate::fs::notify_hooks::ino_events::IN_MODIFY);
                 }
                 return result;
             }
@@ -747,9 +764,9 @@ impl File {
                 let slice = core::slice::from_raw_parts_mut(buf, count);
                 let n = read_at_fn(self, offset, slice);
                 if n > 0 {
-                    crate::fs::inotify::notify_file(
+                    crate::fs::notify_hooks::notify_file(
                         self,
-                        crate::fs::inotify::inotify_events::IN_ACCESS,
+                        crate::fs::notify_hooks::ino_events::IN_ACCESS,
                     );
                 }
                 return n;
@@ -780,9 +797,9 @@ impl File {
                 let n = inode.read_data(offset as usize, slice);
                 if n > 0 {
                     // inotify IN_ACCESS on the pread(2) path (P0-4).
-                    crate::fs::inotify::notify_file(
+                    crate::fs::notify_hooks::notify_file(
                         self,
-                        crate::fs::inotify::inotify_events::IN_ACCESS,
+                        crate::fs::notify_hooks::ino_events::IN_ACCESS,
                     );
                 }
                 n as isize
@@ -858,9 +875,9 @@ impl File {
                 if n > 0 {
                     // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
                     // sqlite's journal/WAL writes all go through pwrite.
-                    crate::fs::inotify::notify_file(
+                    crate::fs::notify_hooks::notify_file(
                         self,
-                        crate::fs::inotify::inotify_events::IN_MODIFY,
+                        crate::fs::notify_hooks::ino_events::IN_MODIFY,
                     );
                 }
                 return n;
@@ -884,9 +901,9 @@ impl File {
                 if n > 0 {
                     // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
                     // sqlite's journal/WAL writes all go through pwrite.
-                    crate::fs::inotify::notify_file(
+                    crate::fs::notify_hooks::notify_file(
                         self,
-                        crate::fs::inotify::inotify_events::IN_MODIFY,
+                        crate::fs::notify_hooks::ino_events::IN_MODIFY,
                     );
                 }
                 n as isize
@@ -1003,18 +1020,18 @@ impl Drop for File {
         // covers close(2), dup2(2) displacement, fdtable teardown and the
         // deferred close_pending path alike, across fork's shared
         // descriptions.
-        crate::fs::locks::flock_release_file(self.file_id);
+        crate::fs::lock_hooks::flock_release_file(self.file_id);
         // F_OFD_SETLK record locks likewise die with the description.
-        crate::fs::locks::ofd_release_file(self.file_id);
+        crate::fs::lock_hooks::ofd_release_file(self.file_id);
         // Lease bookkeeping: drop the inode open count and release any
         // lease this description holds (wakes blocked lease breakers).
-        crate::fs::locks::inode_open_unregister(self);
+        crate::fs::lock_hooks::inode_open_unregister(self);
         // O_ASYNC registry entry (pipes), if any.
-        crate::fs::pipe::oasync_unregister_file(self.file_id);
+        crate::fs::file_hooks::oasync_unregister(self.file_id);
         // P0-4 inotify: IN_CLOSE_WRITE / IN_CLOSE_NOWRITE fires when the
         // last reference to the description goes away (Linux fires it
         // from fput, i.e. dup'd fds defer it — same discipline).
-        crate::fs::inotify::notify_file_close(self);
+        crate::fs::notify_hooks::notify_file_close(self);
         if self.close_pending.load(Ordering::Acquire) {
             // SAFETY: we own the File exclusively (refcount reached 0) and
             // close_fd already committed this close; ops.close was installed

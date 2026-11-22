@@ -334,7 +334,7 @@ pub fn push_event(&self, event: InputEvent) {
             let ids = self.open_file_ids.lock_irqsave();
             for &fid in ids.iter().take(n.min(ids.len())) {
                 if fid != 0 {
-                    crate::syscall::misc::epoll_notify_file(fid);
+                    crate::fs::event_notify::epoll_notify_file(fid);
                 }
             }
         }
@@ -870,7 +870,7 @@ fn evdev_file_close(file: &File) -> i32 {
 /// drained first so events that raced the tasklet BH still count (and so
 /// a poll-only client — no blocking read — keeps receiving).
 fn evdev_file_poll(file: &File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
 
     // SAFETY: private_data contains a valid DevNo pointer set during open;
     // the EVDEV_* statics are initialized by init_evdev() before any file
@@ -1719,16 +1719,16 @@ fn input_echo_budget(n: u64) -> bool {
 static HUNT_ECHO_LOCK: crate::sync::spinlock::Spinlock<()> =
     crate::sync::spinlock::Spinlock::new(());
 
-pub(crate) struct HuntLine {
+pub struct HuntLine {
     buf: [u8; 192],
     n: usize,
 }
 
 impl HuntLine {
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self { buf: [0; 192], n: 0 }
     }
-    pub(crate) fn push(&mut self, s: &[u8]) {
+    pub fn push(&mut self, s: &[u8]) {
         for &b in s {
             if self.n < self.buf.len() {
                 self.buf[self.n] = b;
@@ -1736,7 +1736,7 @@ impl HuntLine {
             }
         }
     }
-    pub(crate) fn u64(&mut self, v: u64) {
+    pub fn u64(&mut self, v: u64) {
         let mut tmp = [0u8; 20];
         let mut k = 0usize;
         let mut x = v;
@@ -1754,7 +1754,7 @@ impl HuntLine {
             self.push(&[tmp[i]]);
         }
     }
-    pub(crate) fn flush(&mut self) {
+    pub fn flush(&mut self) {
         if self.n == 0 {
             return;
         }
@@ -1910,7 +1910,7 @@ fn cad_detect(event: InputEvent) {
             if CAD_MOD_CTRL.load(core::sync::atomic::Ordering::Acquire)
                 && CAD_MOD_ALT.load(core::sync::atomic::Ordering::Acquire)
             {
-                crate::syscall::process::ctrl_alt_del_latch();
+                crate::process::reboot::ctrl_alt_del_latch();
             }
         }
         _ => {}

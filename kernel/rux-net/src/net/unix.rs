@@ -1,0 +1,4319 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! AF_UNIX (local IPC) sockets — P0-1 (desktop IPC base).
+//!
+//! Supported semantics:
+//! - SOCK_STREAM (byte stream)
+//! - SOCK_SEQPACKET (connection-mode, record boundaries preserved,
+//!   SO_TYPE = SOCK_SEQPACKET, MSG_TRUNC on short recvs)
+//! - SOCK_DGRAM (connectionless datagrams with per-message boundaries)
+//! - bind()/listen()/connect()/accept() against the global name table
+//! - abstract names (sun_path[0] == 0): address IS the name, no
+//!   filesystem node, visible in /proc/net/unix as "@name"
+//! - Linux autobind: an unbound socket that connects() (or a DGRAM that
+//!   sends) is bound to a unique abstract name "\0%05x"
+//! - socketpair() — a pre-connected pair (two fds, no name-table entry)
+//! - SCM_RIGHTS fd passing through sendmsg/recvmsg cmsg data
+//! - SCM_CREDENTIALS: kernel-filled {pid,uid,gid} of the sender
+//! - blocking send/recv/accept via the W3 wait-queue discipline
+//!   (prepare_to_wait → re-check → schedule → finish_wait)
+//! - poll: Linux semantics — listeners report only POLLIN (never
+//!   POLLHUP); a connected STREAM/SEQPACKET socket whose peer CLOSED
+//!   reports POLLHUP plus a readable POLLIN while data remains
+//!
+//! Locking model:
+//! - UNIX_TABLE guards the namespace (bind/connect/close).
+//! - Each socket's recv_queue/accept_queue/state/eof are independent
+//!   Spinlocks; a sender only ever takes the TARGET's recv_queue lock
+//!   (one lock at a time — no ABBA between two sockets).
+//! - Peer links are `Weak` on both sides: the fds (File::private_data
+//!   raw Arcs) are the only strong owners, so "peer closed" is simply
+//!   "Weak::upgrade fails" and no reference cycle can leak a pair.
+//! - Wakeup ownership (reference reader/writer queue split): receivers
+//!   and acceptors wait on their OWN wait_queue for data/children;
+//!   senders blocked on a full target and connectors blocked on a full
+//!   listen backlog wait EXCLUSIVELY on the TARGET's peer_wait. Every
+//!   wait site re-checks its condition after registering (spurious
+//!   wakes are harmless — the wait round returns Ok and the caller
+//!   re-checks). Data arrival wakes ONE exclusive waiter + every
+//!   non-exclusive poller; a drain wakes ONE parked sender per freed
+//!   record; close/shutdown wake everything (EOF broadcast).
+
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+
+use crate::fs::file::{File, FileFlags, FileOps};
+use crate::net::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
+use crate::process::wait::WaitQueueHead;
+use crate::sync::spinlock::Spinlock;
+
+/// Address family
+pub const AF_UNIX: i32 = 1;
+
+/// Socket types (values from asm-generic)
+pub const SOCK_STREAM: i32 = 1;
+pub const SOCK_DGRAM: i32 = 2;
+pub const SOCK_SEQPACKET: i32 = 5;
+
+/// struct sockaddr_un: sa_family_t + sun_path[108]
+pub const UNIX_PATH_MAX: usize = 108;
+/// sizeof(struct sockaddr_un)
+pub const SOCKADDR_UN_LEN: usize = 110;
+
+/// SOL_SOCKET / SCM_RIGHTS (cmsg)
+pub const SOL_SOCKET: i32 = 1;
+pub const SCM_RIGHTS: i32 = 1;
+/// SOL_SOCKET / SCM_CREDENTIALS (cmsg): sender's {pid, uid, gid} triple.
+pub const SCM_CREDENTIALS: i32 = 2;
+
+/// struct ucred — the SCM_CREDENTIALS cmsg payload (12 bytes on LP64).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnixCred {
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// Socket states
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnixState {
+    Unconnected,
+    Connecting,
+    Connected,
+    Listening,
+    Closed,
+}
+
+/// Socket kind (internal)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnixKind {
+    /// Byte stream (SOCK_STREAM)
+    Stream,
+    /// Connection-mode record stream (SOCK_SEQPACKET): send requires a
+    /// connection like STREAM, but receive preserves record boundaries
+    /// like DGRAM.
+    Seqpacket,
+    /// Datagram (SOCK_DGRAM)
+    Dgram,
+}
+
+/// One queued receive record.
+///
+/// STREAM sockets preserve the byte stream across segments (recv drains
+/// as many segments as the buffer fits); the per-segment structure only
+/// exists so SCM_RIGHTS attachments can be delivered with the FIRST recv
+/// that touches the corresponding bytes (Linux association semantics).
+/// DGRAM sockets deliver exactly one segment per recv.
+pub struct UnixSeg {
+    /// Undelivered payload bytes of this segment
+    pub data: Vec<u8>,
+    /// SCM_RIGHTS payload — consumed by the first recv touching this
+    /// segment (delivered as cmsg, then cleared from the remainder)
+    pub files: Vec<Arc<File>>,
+    /// SCM_CREDENTIALS payload — same first-touch delivery as `files`.
+    pub cred: Option<UnixCred>,
+    /// Sender's bound name (for recvfrom address reporting). Arc, not
+    /// String: the enqueue hot path stamps every segment with the
+    /// sender's name and the MSG_PEEK hot path clones it — a
+    /// per-segment String was a heap alloc per send plus another per
+    /// peek on the p5 socket family (leg-34 fast path).
+    pub src: Option<Arc<str>>,
+    /// Flow-control charge this segment was admitted under
+    /// (seg_charge at push time). Kept per segment so pops and partial
+    /// stream drains decrement RecvQueue::charge by exactly what the
+    /// push added, even if the charge formula later changes.
+    pub charge: usize,
+}
+
+/// Receive queue with its running flow-control charge (leg-34 fast
+/// path). INVARIANT (guarded by the recv_queue Spinlock): `charge` ==
+/// Σ seg.charge over `segs`. The enqueue gate and target_has_room read
+/// the counter instead of walking the queue — the walk was O(queue
+/// depth) under the lock on EVERY unix send (and again per blocked-
+/// sender recheck), which priced the p5 socket family ~200x over the
+/// reference on flow-controlled pairs.
+pub struct RecvQueue {
+    pub segs: VecDeque<UnixSeg>,
+    pub charge: usize,
+}
+
+/// Per-send diagnostic-tap classification of bound_name, cached at
+/// bind time (leg-34 fast path). The send hot path previously locked
+/// bound_name and string-scanned it (ends_with) up to three times per
+/// send for the hilog / param / spawn taps; now it loads this bitmask.
+/// Recomputed by refresh_name_caches() at every bound_name assignment
+/// (bind / connect-inherit / autobind — all cold paths).
+pub const TAP_HILOG: u8 = 1; // .../hilogInput or .../hilogd.server
+pub const TAP_PARAM: u8 = 2; // .../paramservice listener
+pub const TAP_SPAWN: u8 = 4; // .../<x>Spawn listener
+
+/// AF_UNIX socket
+pub struct UnixSocket {
+    /// Stream or Dgram
+    pub kind: UnixKind,
+    /// Socket state
+    pub state: Spinlock<UnixState>,
+    /// Bound name (display/reporting: the sun_path given at bind for
+    /// filesystem sockets; the registry key itself for abstract names).
+    pub bound_name: Spinlock<Option<String>>,
+    /// Cached Arc copy of bound_name for segment src stamping — the
+    /// enqueue hot path clones this (refcount bump) instead of
+    /// allocating a String per segment. Maintained by
+    /// refresh_name_caches() alongside tap_class.
+    src_arc: Spinlock<Option<Arc<str>>>,
+    /// Cached tap classification (TAP_* bits). Maintained by
+    /// refresh_name_caches().
+    tap_class: AtomicU8,
+    /// 111st hot-path mirrors (passcred_flag/perf-r3 discipline): the
+    /// per-message DGRAM send/recv paths — the 89k msg/s hilog fabric —
+    /// took the options Spinlock twice per send (sndtimeo in the write
+    /// path + sndbuf cap) and once per recv (rcvtimeo), plus the
+    /// bound_name / peer / dead / state / eof / shut_wr Spinlock pairs
+    /// just to READ one-way latches. The fp-chain record (hp108r-w1)
+    /// priced the family: sndtimeo_deadline alone 1.4k samples, the
+    /// unix_send lock sites ~3.6k. Mirrors are one-way or config
+    /// values; writers store BEFORE (latches) or after (config) the
+    /// authoritative Spinlock write, hot readers skip the locked read
+    /// when the mirror says "not set" — every skip direction is the
+    /// benign half of the race Linux already has against concurrent
+    /// setsockopt/shutdown/close.
+    sndtimeo_us_m: AtomicU64,
+    rcvtimeo_us_m: AtomicU64,
+    sndbuf_m: AtomicU32,
+    /// True once bound_name has EVER been Some (bind / accept-inherit /
+    /// autobind — every assignment runs refresh_name_caches, which
+    /// maintains this). Skips the bound_name lock pair on the per-send
+    /// autobind check.
+    has_bound_name_m: AtomicBool,
+    /// True once a peer Weak has EVER been stored (accept / socketpair).
+    /// A name-connected DGRAM socket never has one: the send path skips
+    /// the peer lock pair when clear.
+    has_peer_m: AtomicBool,
+    /// One-way close latch: stored BEFORE the state=Closed / dead=true
+    /// writes in unix_close. The per-send EPIPE gate and the 110th
+    /// dgram-peer-cache validation load this instead of the dead+state
+    /// lock pair per message.
+    closed_m: AtomicBool,
+    /// One-way EOF latch (RCV_SHUTDOWN view): stored before every
+    /// `*eof.lock() = true` write (shutdown both legs, peer close).
+    eof_m: AtomicBool,
+    /// One-way SHUT_WR latch: stored before the shut_wr write in
+    /// unix_shutdown. Skips the shut_wr lock pair on every send.
+    shut_wr_m: AtomicBool,
+    /// Name-table registration key. For abstract sockets this is the
+    /// abstract name (== bound_name); for filesystem sockets it is the
+    /// socket node's inode identity "#<fs_id>:<ino>" (see fs_reg_key) —
+    /// the table key by which connects find this socket. None = unbound.
+    reg_name: Spinlock<Option<String>>,
+    /// The socket node's inode, pinned for the lifetime of the binding.
+    /// The reg key IS the inode identity, so keeping the Arc prevents
+    /// (fs_id, ino) from being recycled while this socket is bound —
+    /// the same reason Linux's unix socket holds its inode.
+    node_inode: Spinlock<Option<alloc::sync::Arc<crate::fs::inode::Inode>>>,
+    /// Connected peer (STREAM, and DGRAM socketpairs). Weak both ways: no
+    /// Arc cycle, and the peer's close() makes upgrade() fail — that IS
+    /// the EOF/EPIPE signal.
+    peer: Spinlock<Option<Weak<UnixSocket>>>,
+    /// Connected default destination name (DGRAM connected via connect())
+    pub dgram_peer: Spinlock<Option<String>>,
+    /// 110th: resolved-Arc cache for `dgram_peer`. The send path used to
+    /// re-resolve the NAME through UNIX_TABLE (lock + String hash +
+    /// memcmp + Arc clone) on EVERY connected datagram send — the hilog
+    /// fabric (every OH daemon's log line) made that the top unix-path
+    /// sample family. The cached Arc is validated per use against the
+    /// close markers (`dead`/`Closed`, both set under their own locks at
+    /// unix_close BEFORE the name-table entry is removed); a dead cached
+    /// peer re-resolves the name — preserving the name-follow behavior
+    /// (a restarted daemon's new socket transparently receives; keying
+    /// by name, not by Arc identity, is the existing Rux semantics this
+    /// cache must not change).
+    dgram_peer_sock: Spinlock<Option<Arc<UnixSocket>>>,
+    /// Listener accept queue (children created by client connect())
+    accept_queue: Spinlock<VecDeque<Arc<UnixSocket>>>,
+    /// listen() backlog cap
+    backlog: Spinlock<usize>,
+    /// Receive queue (segments + running flow-control charge)
+    recv_queue: Spinlock<RecvQueue>,
+    /// STREAM-only parking for ancillary data (SCM_RIGHTS/SCM_CREDENTIALS)
+    /// sent with a ZERO-length payload. A byte stream has no record
+    /// boundaries, so Linux associates ancillary data with the first byte
+    /// of subsequently queued data — it must NOT materialize a 0-length
+    /// "message": an empty segment sitting alone in recv_queue made recv()
+    /// return Ok(len=0), which stream readers (GDBus, libdbus, Xlib) take
+    /// as peer EOF — a healthy connection then tears itself down (the
+    /// "Broken pipe on a live bus" shape). The next non-empty enqueue
+    /// drains this onto the front of the new segment (first-touch delivery).
+    pending_anc: Spinlock<Vec<(Vec<Arc<File>>, Option<UnixCred>)>>,
+    /// Entry count mirror of `pending_anc` (perf-r3): the enqueue fast
+    /// path takes the drain lock only when something is actually parked —
+    /// a per-send lock pair on every stream send was pure cost for the
+    /// (overwhelmingly common) empty case. Relaxed: the lock still
+    /// provides the ordering for actual drain correctness; the counter
+    /// only decides whether to bother.
+    pending_anc_n: AtomicUsize,
+    /// Cached mirror of options.passcred (perf-r3): Linux's
+    /// unix_maybe_add_creds() consults the SENDER's and RECEIVER's
+    /// SOCK_PASSCRED flags at send time — both sides uncredentialed means
+    /// the skb carries no cred snapshot at all. Stamping every segment
+    /// unconditionally (old shape) paid a task-cred snapshot per send on
+    /// sockets that can never report it (recvmsg emits the cmsg only
+    /// under the RECEIVER's SO_PASSCRED). The atomic mirrors the option
+    /// the setsockopt path writes under the options lock.
+    passcred_flag: AtomicBool,
+    /// Peer performed close()/shutdown — drain then EOF
+    eof: Spinlock<bool>,
+    /// This socket's close() ran (poll: peer sees POLLHUP — the Linux
+    /// sk_shutdown = SHUTDOWN_MASK condition, distinct from a mere
+    /// peer shutdown(SHUT_WR) which only yields EOF-readable).
+    dead: Spinlock<bool>,
+    /// Our write half was shut (shutdown(SHUT_WR) / SHUT_RDWR)
+    shut_wr: Spinlock<bool>,
+    /// Pending socket error (the reference's sk_err). Set on the
+    /// SURVIVING peer when the closing side of a SOCK_STREAM/SOCK_
+    /// SEQPACKET connection closed with UNREAD data still queued
+    /// (reference unix_release_sock: `if (skb || embrion)
+    /// WRITE_ONCE(skpair->sk_err, ECONNRESET)`). A reader drains the
+    /// queued data first, then the NEXT recv reports -ECONNRESET
+    /// instead of a clean EOF — the peer lost data it never read.
+    err: ErrLatch,
+    /// W3-style wait queue for blocking recv/accept — the data-arrival
+    /// queue. Reference shape: sk_sleep(sk) / sk_receive_queue.wq. Waiters:
+    /// blocking recv callers (DGRAM/SEQPACKET register EXCLUSIVE —
+    /// reference __skb_wait_for_more_packets; STREAM registers
+    /// non-exclusive — reference unix_stream_data_wait), accept callers
+    /// (EXCLUSIVE — reference unix_accept's skb_recv_datagram) and the
+    /// poll/epoll registrations (NON-exclusive — reference poll_wait).
+    /// Woken by data arrival (sk_data_ready = ONE exclusive + every
+    /// non-exclusive), EOF/close/shutdown (sock_def_wakeup = wake_all)
+    /// and, for STREAM, the peer's per-segment write_space (ONE).
+    pub wait_queue: WaitQueueHead,
+    /// The peer-side wait queue: everyone blocked on THIS socket's
+    /// capacity/state — senders parked on a full receive queue and
+    /// connectors parked on a full listen backlog (reference
+    /// unix_sock->peer_wait; both park there EXCLUSIVELY via
+    /// unix_wait_for_peer). Woken on drain (ONE per freed record —
+    /// reference __unix_dgram_recvmsg's peer_wait sync_poll wake and the
+    /// STREAM per-skb consume_skb -> sock_wfree -> write_space chain) and
+    /// on close/shutdown (wake_all — reference unix_release_sock /
+    /// unix_shutdown).
+    pub peer_wait: WaitQueueHead,
+    /// Stored socket options (shared shape with the AF_INET layer)
+    pub options: Spinlock<SocketOptions>,
+    /// Creator's credentials — reported to the peer by SO_PEERCRED /
+    /// SCM_CREDENTIALS. Snapshot at socket creation (like Linux
+    /// sk_peer_cred semantics for the connecting side).
+    pub creds: Spinlock<UnixCred>,
+    /// Identity of this socket's open file description (File.file_id),
+    /// stamped when the fd is installed. Data-arrival points use it to
+    /// call epoll_notify_file() so edge-triggered (EPOLLET) watchers see
+    /// every enqueue — a snapshot-only ET model would swallow arrivals
+    /// that land between a drain and the next epoll_wait (Xorg registers
+    /// its client sockets EPOLLET; missing the edge wedges the server).
+    /// 0 = no fd installed yet.
+    pub file_id: AtomicU64,
+}
+
+
+impl UnixSocket {
+    pub fn new(kind: UnixKind) -> Self {
+        Self {
+            kind,
+            state: Spinlock::new(UnixState::Unconnected),
+            bound_name: Spinlock::new(None),
+            src_arc: Spinlock::new(None),
+            tap_class: AtomicU8::new(0),
+            reg_name: Spinlock::new(None),
+            node_inode: Spinlock::new(None),
+            peer: Spinlock::new(None),
+            dgram_peer: Spinlock::new(None),
+            dgram_peer_sock: Spinlock::new(None),
+            accept_queue: Spinlock::new(VecDeque::new()),
+            backlog: Spinlock::new(16),
+            recv_queue: Spinlock::new(RecvQueue {
+                segs: VecDeque::new(),
+                charge: 0,
+            }),
+            pending_anc: Spinlock::new(Vec::new()),
+            pending_anc_n: AtomicUsize::new(0),
+            passcred_flag: AtomicBool::new(false),
+            sndtimeo_us_m: AtomicU64::new(0),
+            rcvtimeo_us_m: AtomicU64::new(0),
+            sndbuf_m: AtomicU32::new(212992), // SocketOptions::new() default
+            has_bound_name_m: AtomicBool::new(false),
+            has_peer_m: AtomicBool::new(false),
+            closed_m: AtomicBool::new(false),
+            eof_m: AtomicBool::new(false),
+            shut_wr_m: AtomicBool::new(false),
+            eof: Spinlock::new(false),
+            dead: Spinlock::new(false),
+            shut_wr: Spinlock::new(false),
+            err: ErrLatch::new(),
+            wait_queue: WaitQueueHead::new(),
+            peer_wait: WaitQueueHead::new(),
+            options: Spinlock::new(SocketOptions::new()),
+            creds: Spinlock::new(current_unix_cred()),
+            file_id: AtomicU64::new(0),
+        }
+    }
+
+    /// SO_PEERCRED: the connected peer's {pid, uid, gid}.
+    /// None = not connected (Linux fails getsockopt with ENOTCONN).
+    pub fn peer_cred(&self) -> Option<UnixCred> {
+        let peer = self.peer_arc()?;
+        let c = *peer.creds.lock();
+        Some(c)
+    }
+
+    /// W3: SO_RCVTIMEO as an absolute jiffies deadline (None = infinite).
+    /// 111st: mirror read — per-recv on the hilog fabric (89k msg/s);
+    /// setsockopt publishes rcvtimeo_us_m after the options write.
+    pub fn rcvtimeo_deadline(&self) -> Option<u64> {
+        timeout_to_deadline(self.rcvtimeo_us_m.load(Ordering::Relaxed))
+    }
+
+    /// W3: SO_SNDTIMEO as an absolute jiffies deadline (None = infinite).
+    /// 111st: mirror read — per-send on the hilog fabric (the record's
+    /// 1.4k-sample sndtimeo_deadline line).
+    pub fn sndtimeo_deadline(&self) -> Option<u64> {
+        timeout_to_deadline(self.sndtimeo_us_m.load(Ordering::Relaxed))
+    }
+
+    /// Bytes currently queued for the receiver.
+    fn queued_bytes(&self) -> usize {
+        let q = self.recv_queue.lock();
+        q.segs.iter().map(|s| s.data.len()).sum()
+    }
+
+    /// sc97 KILLDUMP support: flow-control snapshot for the
+    /// wedged-writer forensics — (queued_bytes, queued_truesize,
+    /// sndbuf_cap, recv_queue_len).
+    pub fn diag_snapshot(&self) -> (usize, usize, usize, usize) {
+        let (qb, ql) = {
+            let q = self.recv_queue.lock();
+            (
+                q.segs.iter().map(|s| s.data.len()).sum(),
+                q.segs.len(),
+            )
+        };
+        let cap = self.options.lock().sndbuf as usize;
+        (qb, self.queued_truesize(), cap, ql)
+    }
+
+    /// Stream-pair diagnostic for the epoll-interest dumps (69th,
+    /// rux:pid1spin (retired dfx=pid1spin)): the two sides of a connection in one snapshot —
+    /// own queue (segs/bytes), own EOF/dead, and the WRITE-ROOM inputs
+    /// (peer truesize vs own sndbuf cap), so a dump line decides
+    /// "writable" exactly like unix_file_poll's POLLOUT leg. Locks are
+    /// taken one at a time (own queue, flags, peer queue, options).
+    pub fn diag_stream_pair(&self) -> (usize, usize, bool, bool, bool, usize, usize, usize, usize, usize, usize, usize) {
+        let (segs, qb) = {
+            let q = self.recv_queue.lock();
+            (
+                q.segs.len(),
+                q.segs.iter().map(|s| s.data.len()).sum(),
+            )
+        };
+        let eof = *self.eof.lock();
+        let dead = *self.dead.lock();
+        // peer lock and peer queue lock are separate acquisitions; the
+        // peer Arc clone keeps it alive across them.
+        let peer = self
+            .peer
+            .lock()
+            .as_ref()
+            .and_then(|w| w.upgrade());
+        let (peer_alive, peer_ts) = match peer {
+            Some(p) => (true, p.queued_truesize()),
+            None => (false, 0),
+        };
+        let _ = peer; // (diag extensions below use raw addresses)
+        let peer_raw = self
+            .peer
+            .lock()
+            .as_ref()
+            .map(|w| w as *const _ as usize)
+            .unwrap_or(0);
+        let sndcap = self.options.lock().sndbuf as usize;
+        let acceptq = self.accept_queue.lock().len();
+        let self_ptr = self as *const UnixSocket as usize;
+        let charge_v = self.recv_queue.lock().charge;
+        let err_v = self.err.load() as i32 as usize;
+        (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, self_ptr, peer_raw, charge_v, err_v)
+    }
+
+    /// Kernel-heap cost of the receive queue (Linux `sk_wmem_alloc` /
+    /// skb-truesize semantics).
+    ///
+    /// The flow-control cap (SO_SNDBUF) must be charged what a queued
+    /// segment actually COSTS, not its payload length: the buddy heap's
+    /// minimum block is one page, so a 1-byte datagram occupies PAGE_SIZE
+    /// of kernel heap plus its VecDeque slot. Payload-only accounting let
+    /// LTP sendfile07's fill loop (1-byte writes until EAGAIN, cap
+    /// 212992) queue one page per byte — 128MB of heap before the byte
+    /// cap was reached — killing tasks with ALLOCTHROW and taking the
+    /// whole sweep chunk down (the r8 sendfile/sendmsg/sendmmsg CRASH
+    /// family). Linux charges skb->truesize for exactly this reason.
+    fn queued_truesize(&self) -> usize {
+        // sc101: keep this in lockstep with seg_charge (proportional slab
+        // cost — see its comment); divergent formulas made the enqueue
+        // gate and target_has_room disagree.
+        // leg-34: O(1) — the running RecvQueue::charge counter replaces
+        // the per-call queue walk (the walk ran under the lock on every
+        // send and every blocked-sender room recheck).
+        self.recv_queue.lock().charge
+    }
+
+    /// Resolve the connected peer to a strong Arc (None = peer gone).
+    fn peer_arc(&self) -> Option<Arc<UnixSocket>> {
+        self.peer.lock().as_ref().and_then(|w| w.upgrade())
+    }
+
+    /// Recompute the hot-path name caches (src_arc, tap_class) from
+    /// bound_name. MUST be called at every bound_name assignment
+    /// (unix_bind, the connect() child inherit, autobind). Cold path —
+    /// one lock, one Arc allocation when a name exists.
+    fn refresh_name_caches(&self) {
+        let name = self.bound_name.lock().clone();
+        // 111st: has_bound_name_m — the per-send autobind check skips
+        // the bound_name lock pair once a name (any name) is published.
+        // Refresh runs at every bound_name assignment, so the latch
+        // covers bind / accept-inherit / autobind alike.
+        if name.is_some() {
+            self.has_bound_name_m.store(true, Ordering::Release);
+        }
+        let mut cls: u8 = 0;
+        if let Some(n) = name.as_ref() {
+            if n.ends_with("hilogInput") || n.ends_with("hilogd.server") {
+                cls |= TAP_HILOG;
+            }
+            if n.ends_with("paramservice") {
+                cls |= TAP_PARAM;
+            }
+            if n.ends_with("Spawn") {
+                cls |= TAP_SPAWN;
+            }
+        }
+        *self.src_arc.lock() = name.map(|n| Arc::from(n.as_str()));
+        self.tap_class.store(cls, Ordering::Release);
+    }
+
+    /// Would recv() return data / EOF (anything but EAGAIN)?
+    /// Fast-fail view of recv_ready for the syscall entry (53rd): a
+    /// nonblocking reader spinning on an empty queue — hilogd.server's
+    /// drain loop at 16.6k recvfrom/s — must learn "nothing to receive"
+    /// BEFORE any staging allocation (reference shape: skb_dequeue NULL
+    /// -> EAGAIN, zero allocation). Advisory only: the blocking engine's
+    /// own re-check under its wait registration stays authoritative.
+    pub fn recv_not_ready_fast(&self) -> bool {
+        !self.recv_ready()
+    }
+
+    fn recv_ready(&self) -> bool {
+        if !self.recv_queue.lock().segs.is_empty() {
+            return true;
+        }
+        // A pending socket error is a readable condition (the reference
+        // surfaces it from the wait loop's sock_error check).
+        if self.err.load() != 0 {
+            return true;
+        }
+        // EOF (peer closed) is a readable condition — read returns 0.
+        // 111st: one-way latch mirrors — both stored BEFORE their locked
+        // writes, so false PROVES the underlying flag is unset (a
+        // completing writer's wake re-triggers every re-checking
+        // reader; the transient is the same concurrent-close window the
+        // reference exposes).
+        self.eof_m.load(Ordering::Acquire)
+            || self.closed_m.load(Ordering::Acquire)
+    }
+
+    /// Can send() accept more bytes now (or fail with a real error)?
+    fn send_ready(&self) -> bool {
+        match self.kind {
+            UnixKind::Stream | UnixKind::Seqpacket => {
+                // Linux unix_writable(): SHUTDOWN (either our SHUT_WR or
+                // the peer's close setting SHUTDOWN_MASK) silences EPOLLOUT.
+                if *self.shut_wr.lock() || self.peer_gone() {
+                    return false;
+                }
+                match self.peer_arc() {
+                    Some(peer) => {
+                        let cap = self.options.lock().sndbuf as usize;
+                        peer.queued_truesize() < cap
+                    }
+                    // No peer link (listener/unconnected): send() would
+                    // return ENOTCONN/EPIPE immediately — "ready".
+                    None => true,
+                }
+            }
+            // Datagram send never blocks on this socket's own state (the
+            // target's queue is checked at send time; a dead target is an
+            // immediate error).
+            UnixKind::Dgram => true,
+        }
+    }
+
+    /// Did the connected peer fully CLOSE (poll POLLHUP condition)?
+    ///
+    /// Linux sets the surviving socket's sk_shutdown to SHUTDOWN_MASK when
+    /// the peer of a SOCK_STREAM/SOCK_SEQPACKET socket is released; that is
+    /// exactly the EPOLLHUP condition. A mere peer shutdown(SHUT_WR) is NOT
+    /// "gone" — only EOF-readable. The `dead` flag distinguishes the two;
+    /// a dead Weak link (fd dropped entirely) counts as gone too.
+    fn peer_gone(&self) -> bool {
+        match self.peer.lock().as_ref() {
+            // No peer link (listener / unconnected): not "gone", just alone.
+            None => false,
+            Some(w) => match w.upgrade() {
+                Some(peer) => *peer.dead.lock(),
+                // Freed — the last fd of the peer dropped: gone.
+                None => true,
+            },
+        }
+    }
+
+    /// Does this listener have a pending connection?
+    fn accept_ready(&self) -> bool {
+        !self.accept_queue.lock().is_empty()
+    }
+}
+
+/// Convert a microsecond timeout (0 = infinite) to an absolute jiffies
+/// deadline (1 jiffy = 10ms). Mirrors socket.rs.
+fn timeout_to_deadline(us: u64) -> Option<u64> {
+    if us == 0 {
+        return None;
+    }
+    Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1))
+}
+
+/// Snapshot the current task's credentials for SO_PEERCRED/SCM_CREDENTIALS.
+fn current_unix_cred() -> UnixCred {
+    match crate::sched::current() {
+        Some(task) => {
+            let c = task.cred();
+            UnixCred {
+                pid: crate::process::current_pid() as i32,
+                uid: c.uid,
+                gid: c.gid,
+            }
+        }
+        None => UnixCred { pid: 0, uid: 0, gid: 0 },
+    }
+}
+
+/// hilogtap=1 — arm the per-send hilog/param diagnostic tap (tri-state,
+/// cctx pattern). The tap scans every record for ~125 key/tag shapes;
+/// on the hilogd storm that is seconds of CPU per second inside the
+/// send path (the 39th's UNIXRD-WV send-phase measurement). OFF by
+/// default like every DFX probe; boot drivers that need the HILOG-AMS /
+/// slog / alog / ilog / PCTL evidence pass hilogtap=1.
+static HILOGTAP_ARMED: AtomicU8 = AtomicU8::new(0);
+fn hilogtap_on() -> bool {
+    match HILOGTAP_ARMED.load(Ordering::Relaxed) {
+        2 => true,
+        1 => false,
+        _ => {
+            let v = match crate::cmdline::get_cmdline() {
+                None => false,
+                Some(_) => crate::cmdline::get_param("hilogtap").as_deref() == Some("1"),
+            };
+            HILOGTAP_ARMED.store(if v { 2 } else { 1 }, Ordering::Relaxed);
+            crate::pr_warn!(
+                "hilogtap: {} (cmdline hilogtap param = {:?})",
+                if v { "armed" } else { "off" },
+                crate::cmdline::get_param("hilogtap")
+            );
+            v
+        }
+    }
+}
+
+/// rux:pctlmon (retired dfx=pctlmon) (66th): arm ONLY the param-service control tap + lifecycle
+/// prints — no hilog record scanning, so a boot can trace the param
+/// protocol's full path (client send → queue → server read → reply)
+/// without the hilogtap CPU tax.
+fn pctlmon_on() -> bool {
+    crate::trace::EVENT_PCTLMON.armed()
+}
+
+// ============================================================================
+// Global namespace
+// ============================================================================
+
+/// Global AF_UNIX name table: bound path (or abstract key) → socket.
+static UNIX_TABLE: Spinlock<alloc::collections::BTreeMap<String, Arc<UnixSocket>>> =
+    Spinlock::new(alloc::collections::BTreeMap::new());
+
+/// Encode a sun_path byte string as a registry key.
+///
+/// Filesystem paths become the plain path string; abstract names
+/// (sun_path[0] == 0) keep their leading NUL so the two namespaces cannot
+/// collide.
+fn name_key(sun_path: &[u8]) -> Option<String> {
+    if sun_path.is_empty() {
+        return None;
+    }
+    if sun_path[0] == 0 {
+        // Abstract namespace: keep the leading NUL, strip trailing NULs
+        // (an all-NUL name is the empty abstract name — invalid).
+        let mut bytes = sun_path.to_vec();
+        while bytes.len() > 1 && bytes.last() == Some(&0) {
+            bytes.pop();
+        }
+        if bytes.len() == 1 {
+            return None;
+        }
+        return String::from_utf8(bytes).ok();
+    }
+    // Filesystem path: NUL-terminated.
+    let len = sun_path
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(sun_path.len());
+    if len == 0 {
+        return None;
+    }
+    String::from_utf8(sun_path[..len].to_vec()).ok()
+}
+
+/// Look up a socket by registry key.
+fn lookup(name: &str) -> Option<Arc<UnixSocket>> {
+    UNIX_TABLE.lock().get(name).cloned()
+}
+
+/// Key-resolution forensics switch (bind/connect table keys). Off in
+/// production builds; flip for alias-path debugging.
+const UNIX_KEY_DEBUG: bool = false;
+
+/// Truncate a key for a console debug line.
+fn key_shown(s: &str) -> &str {
+    &s[..s.len().min(64)]
+}
+
+/// Resolve a filesystem socket path to its name-table registration key:
+/// the socket NODE's inode identity "#<fs_id>:<ino>".
+///
+/// Linux matches filesystem unix addresses by INODE
+/// (unix_find_socket_byinode), never by the literal path bytes — every
+/// path that resolves to the same dentry names the same socket: symlink
+/// aliases (/var/run -> /run on every distro: dbus-daemon binds the
+/// config address /run/dbus/system_bus_socket while GLib's GDBus
+/// hardcodes /var/run/dbus/system_bus_socket), relative paths, ".."
+/// segments, hardlinks. The old raw-string registry made the GLib
+/// connect miss the daemon's entry — connect() returned ECONNREFUSED
+/// against a healthy listener, gnome-session aborted ("Failed to connect
+/// to system bus: Could not connect: Connection refused"), and the
+/// daemon looked "dead" from the outside while it kept serving the whole
+/// time (socket file present, no SIGDEATH, /proc/net/unix healthy).
+///
+/// Returns None when the path does not resolve (no node at that path):
+/// callers treat that as "no listener" (ECONNREFUSED) — exactly Linux,
+/// where a path with no socket node simply names no socket. Abstract
+/// names ('\0'-prefixed) never come through here.
+///
+/// Must be called OUTSIDE the UNIX_TABLE lock (the walk takes VFS locks).
+///
+/// `Err(code)` = the path itself failed to resolve — connect(2)/sendto(2)
+/// must surface that errno (ENOENT/ENOTDIR/EACCES), exactly like Linux's
+/// kern_path inside unix_find_other. A path that resolves but is not a
+/// bound socket is the CALLER's "no node" case (ECONNREFUSED).
+fn fs_reg_key(raw: &str) -> Result<String, i32> {
+    const PATH_LIMIT: usize = 4096;
+    if raw.len() > PATH_LIMIT {
+        return Err(-36); // ENAMETOOLONG
+    }
+    let vp = crate::fs::vfs::path_lookup(raw, crate::fs::vfs::LOOKUP_FOLLOW)?;
+    let inode = vp.inode.ok_or(-2i32)?;
+    Ok(alloc::format!("#{}:{}", inode.fs_id, inode.ino))
+}
+
+/// /proc/net/unix snapshot: one line per named socket, Linux layout
+/// `Num RefCount Protocol Flags Type St Path` where abstract names are
+/// printed with a leading '@' in place of the NUL.
+pub fn proc_net_unix_snapshot() -> Vec<u8> {
+    let mut out = String::from("Num       RefCount Protocol Flags    Type St Path\n");
+    let table = UNIX_TABLE.lock();
+    for (_reg_key, sock) in table.iter() {
+        // Display the address the socket was bound with (sun_path or
+        // @abstract); the registration key is an internal inode identity.
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| String::from("?"));
+        let typ: u16 = match sock.kind {
+            UnixKind::Stream => 1,
+            UnixKind::Seqpacket => 5,
+            UnixKind::Dgram => 2,
+        };
+        let st: u8 = match *sock.state.lock() {
+            UnixState::Unconnected => 1,  // SS_UNCONNECTED
+            UnixState::Connecting => 2,   // SS_CONNECTING
+            UnixState::Connected => 3,    // SS_CONNECTED
+            UnixState::Listening => 7,    // SS_LISTENING (sk_state TCP_LISTEN)
+            UnixState::Closed => 4,       // SS_DISCONNECTING
+        };
+        let path = if let Some(rest) = name.strip_prefix('\0') {
+            alloc::format!("@{}", rest)
+        } else {
+            name.clone()
+        };
+        out += &alloc::format!(
+            "{:016x}: 00000002 00000000 00000000 {:04x} {:02x} {}\n",
+            Arc::as_ptr(sock) as usize,
+            typ,
+            st,
+            path
+        );
+    }
+    out.into_bytes()
+}
+
+/// sc138 (Session Q): diagnostic registry snapshot for the app-park
+/// decode — one compact line per NAMED unix socket with the state
+/// machine position, queue depths, peer name, and the creator pid.
+/// Unlike proc_net_unix_snapshot this keeps the leading-NUL of
+/// abstract names (escaped) so the appconn hex can be matched exactly.
+pub fn registry_snapshot() -> alloc::vec::Vec<alloc::string::String> {
+    let mut lines = alloc::vec::Vec::new();
+    // Clone Arcs under the table lock, then read per-socket fields
+    // AFTER releasing it (socket locks never nest into the table).
+    let entries: alloc::vec::Vec<(alloc::string::String, Arc<UnixSocket>)> = {
+        let table = UNIX_TABLE.lock();
+        table
+            .iter()
+            .map(|(k, s)| (k.clone(), Arc::clone(s)))
+            .collect()
+    };
+    for (key, sock) in entries.iter().take(48) {
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| alloc::string::String::from("?"));
+        let shown: alloc::string::String = name
+            .bytes()
+            .map(|b| {
+                if (0x20..0x7f).contains(&b) {
+                    alloc::format!("{}", b as char)
+                } else {
+                    alloc::format!("\\x{:02x}", b)
+                }
+            })
+            .collect();
+        let st = match *sock.state.lock() {
+            UnixState::Unconnected => "unconn",
+            UnixState::Connecting => "connecting",
+            UnixState::Connected => "connected",
+            UnixState::Listening => "LISTEN",
+            UnixState::Closed => "closed",
+        };
+        let kind = match sock.kind {
+            UnixKind::Stream => "stream",
+            UnixKind::Seqpacket => "seqpkt",
+            UnixKind::Dgram => "dgram",
+        };
+        let rxq = sock.recv_queue.lock().segs.len();
+        let accq = sock.accept_queue.lock().len();
+        let peer = sock
+            .peer
+            .lock()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .and_then(|p| p.bound_name.lock().clone())
+            .unwrap_or_else(|| alloc::string::String::from("-"));
+        let pid = sock.creds.lock().pid;
+        let esc = |s: &str| -> alloc::string::String {
+            s.bytes()
+                .take(56)
+                .map(|b| {
+                    if (0x20..0x7f).contains(&b) {
+                        alloc::format!("{}", b as char)
+                    } else {
+                        alloc::format!("\\x{:02x}", b)
+                    }
+                })
+                .collect()
+        };
+        lines.push(alloc::format!(
+            "unixreg: key='{}' name='{}' {} {} rxq={} accq={} peer='{}' pid={}",
+            esc(key),
+            shown,
+            kind,
+            st,
+            rxq,
+            accq,
+            esc(&peer),
+            pid
+        ));
+    }
+    lines
+}
+
+// ============================================================================
+// sockaddr_un parsing / serialization
+// ============================================================================
+
+/// A parsed AF_UNIX address.
+#[derive(Clone)]
+pub struct UnixAddr {
+    /// Registry key (filesystem path, or "\0..." for abstract)
+    pub key: String,
+}
+
+/// Parse a sockaddr_un from its raw bytes (family little-endian).
+/// `bytes` must be at least 2 bytes (the family field).
+pub fn parse_sockaddr_un(bytes: &[u8]) -> Option<UnixAddr> {
+    if bytes.len() < 2 {
+        return None;
+    }
+    let family = u16::from_le_bytes([bytes[0], bytes[1]]);
+    if family != AF_UNIX as u16 {
+        return None;
+    }
+    let path_len = (bytes.len() - 2).min(UNIX_PATH_MAX);
+    let key = name_key(&bytes[2..2 + path_len])?;
+    Some(UnixAddr { key })
+}
+
+/// Write a sockaddr_un { AF_UNIX, path } into user memory.
+/// `name` = None writes only the family (unbound socket) with len 2.
+///
+/// review F6: move_addr_to_user discipline — the copy is clamped to the
+/// CALLER's buffer length (the *addrlen value read here) while the stored
+/// length is the full kernel size; the old form wrote `total` bytes
+/// unconditionally, clobbering whatever followed a short caller object.
+///
+/// Contract: `addr_ptr`/`addrlen_ptr` must be access_ok-validated by
+/// the caller for up to SOCKADDR_UN_LEN / 4 bytes; the typed family is
+/// the exception-table copy path.
+pub fn put_sockaddr_un(
+    addr_ptr: *mut u8,
+    addrlen_ptr: *mut u32,
+    name: Option<&str>,
+) -> bool {
+    use crate::arch::uaccess_safe as ua;
+    let mut buf = [0u8; SOCKADDR_UN_LEN];
+    buf[0] = AF_UNIX as u8;
+    buf[1] = 0;
+    let total = match name {
+        Some(path) => {
+            // Abstract names carry the leading NUL in the string itself.
+            let bytes = path.as_bytes();
+            let n = bytes.len().min(UNIX_PATH_MAX);
+            buf[2..2 + n].copy_from_slice(&bytes[..n]);
+            // Filesystem-style names get a NUL terminator when they fit.
+            let with_nul = if !bytes.is_empty() && bytes[0] != 0 && n < UNIX_PATH_MAX {
+                n + 1
+            } else {
+                n
+            };
+            2 + with_nul
+        }
+        None => 2,
+    };
+    // review F6: clamp to the caller's object (a faulting length read
+    // falls back to the full write; the put_user below reports it).
+    let copy_len = ua::read_user::<u32>(addrlen_ptr as usize)
+        .map(|v| (v as usize).min(total))
+        .unwrap_or(total);
+    if ua::copy_out(addr_ptr as usize, &buf[..copy_len]) != 0 {
+        return false;
+    }
+    let _ = ua::write_user(addrlen_ptr as usize, total as u32);
+    true
+}
+
+// ============================================================================
+// Blocking wait engine (W3 socket_wait_round discipline)
+// ============================================================================
+
+/// One blocking wait round on `queue`, re-checking `ready` after
+/// registering (prepare → re-check → sleep → finish). `exclusive` mirrors
+/// the reference's prepare_to_wait{,_exclusive} choice per wait site:
+/// exclusive entries consume the wake budget (one wake per event reaches
+/// exactly one of them), non-exclusive entries are woken by every pass.
+/// Returns Ok(()) when the caller should re-check its condition,
+/// Err(errno) to abort (EINTR / timeout-as-EAGAIN / ENOMEM).
+fn unix_wait_round(
+    queue: &WaitQueueHead,
+    exclusive: bool,
+    ready: &dyn Fn() -> bool,
+    deadline: Option<u64>,
+) -> Result<(), i32> {
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return Err(-11), // no task context — behave non-blocking
+    };
+
+    // 123rd (final hop): name the socket whose queue the reader parks on.
+    if crate::trace::EVENT_SCHEDTRACE.armed() {
+        static WQ_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = WQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 24 || n % 200 == 0 {
+            let sock_of_queue = (queue as *const _ as usize)
+                .wrapping_sub(core::mem::offset_of!(UnixSocket, wait_queue));
+            // INV-NET-CONTAINEROF-1: wait_queue field ptr -> socket.
+            let q = crate::net::net_edges::container_of::<UnixSocket>(
+                queue as *const _ as usize,
+                core::mem::offset_of!(UnixSocket, wait_queue),
+            );
+            static LAST_J: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now = crate::drivers::timer::get_jiffies();
+            let prev_j = LAST_J.swap(now, core::sync::atomic::Ordering::Relaxed);
+            crate::pr_warn!(
+                "WQ-PARK #{} pid={} sock={:#x} segs={} kind={:?} jif={} dt={}",
+                n,
+                crate::process::current_pid(),
+                sock_of_queue,
+                q.recv_queue.lock().segs.len(),
+                q.kind,
+                now,
+                now.wrapping_sub(prev_j)
+            );
+        }
+    }
+    queue.prepare_to_wait(current, exclusive, true);
+
+    // Re-check AFTER registering: if the condition was met between our
+    // check and prepare_to_wait, the waker found an empty queue.
+    if ready() {
+        queue.finish_wait(current);
+        // R36-B2: take ourselves back off the GRQ — we never slept, but a
+        // concurrent wake may have enqueued us.
+        crate::sched::dequeue_task(&*current);
+        return Ok(());
+    }
+
+    if crate::signal::signal_pending() {
+        queue.finish_wait(current);
+        crate::sched::dequeue_task(&*current);
+        return Err(-4); // EINTR
+    }
+
+    let timer_id = deadline
+        .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
+        .unwrap_or(0);
+    if deadline.is_some() && timer_id == 0 {
+        // Timer pool exhausted — a timed wait would sleep forever.
+        queue.finish_wait(current);
+        crate::sched::dequeue_task(&*current);
+        return Err(-12); // ENOMEM
+    }
+
+    // R54: schedule() restores the caller's SIE state; re-arm IRQs so
+    // ticks/IPIs reach this CPU across the wait.
+    crate::arch::cpu::restore_irq(true);
+    crate::sched::schedule();
+
+    if timer_id != 0 {
+        crate::timer::del_timer(timer_id);
+    }
+    queue.finish_wait(current);
+
+    if crate::signal::signal_pending() {
+        return Err(-4); // EINTR
+    }
+    if let Some(dl) = deadline {
+        if crate::drivers::timer::get_jiffies() >= dl {
+            // Linux SO_RCVTIMEO/SO_SNDTIMEO expiry surfaces as EAGAIN.
+            return Err(-11);
+        }
+    }
+    Ok(())
+}
+
+/// Blocking recv engine: try recv, on would-block return EAGAIN
+/// (non-blocking) or wait on the socket's own queue and retry.
+///
+/// `peek` (MSG_PEEK, Linux recv(2)): return the data that the NEXT receive
+/// would return WITHOUT consuming it — the segment stays queued, ancillary
+/// data stays attached, and a subsequent non-peek receive returns the same
+/// bytes. hilogd's datagram reader probes each packet's 2-byte length
+/// header with `recv(fd, &len, 2, MSG_PEEK)` before the real recvmsg;
+/// without peek semantics the probe consumed the record's first two bytes
+/// and discarded the rest, so hilogd never saw one well-formed HilogMsg
+/// and `hilog` query output stayed empty.
+pub fn unix_recv_ctl(
+    sock: &Arc<UnixSocket>,
+    buf: &mut [u8],
+    nonblock: bool,
+    deadline: Option<u64>,
+    peek: bool,
+) -> Result<UnixRecvResult, i32> {
+    loop {
+        match unix_recv(sock, buf, peek) {
+            Ok(r) => return Ok(r),
+            Err(e) if e != -11 => return Err(e),
+            Err(_) => {}
+        }
+        if nonblock {
+            return Err(-11);
+        }
+        let s = sock.clone();
+        // Reference wait-exclusivity per kind: DGRAM/SEQPACKET readers
+        // register EXCLUSIVE (datagram.c __skb_wait_for_more_packets ->
+        // prepare_to_wait_exclusive); STREAM readers register
+        // non-exclusive (af_unix.c unix_stream_data_wait -> plain
+        // prepare_to_wait — an arrival wakes all parked stream readers).
+        let exclusive = !matches!(s.kind, UnixKind::Stream);
+        unix_wait_round(&s.wait_queue, exclusive, &|| sock_recv_ready(&s), deadline)?;
+    }
+}
+
+/// Would recv() return anything (data/EOF/error)? Shared with the wait
+/// rounds and poll.
+fn sock_recv_ready(sock: &UnixSocket) -> bool {
+    sock.recv_ready()
+}
+
+// ============================================================================
+// recvmsg direct-to-user receive (reference skb_copy_datagram_msg shape)
+// ============================================================================
+
+/// Cursor over the caller's user iovec list (the syscall layer's
+/// access_ok-validated snapshot — sec-r1): writes kernel slices into the
+/// iovecs in order, across iov boundaries.
+struct UserIovCursor<'a> {
+    iovs: &'a [(usize, usize)],
+    idx: usize,
+    off: usize,
+}
+
+impl<'a> UserIovCursor<'a> {
+    fn new(iovs: &'a [(usize, usize)]) -> Self {
+        Self { iovs, idx: 0, off: 0 }
+    }
+
+    /// Copy `src` into the iovec list from the current cursor. Returns the
+    /// bytes landed and whether a user-page fault truncated the copy. A
+    /// faulting tail is reported, never unwound — the caller decides the
+    /// consume/keep split (same contract as the reference's
+    /// skb_copy_datagram_msg: it reports the error, the skb bookkeeping
+    /// happens at the call site).
+    fn write(&mut self, mut src: &[u8]) -> (usize, bool) {
+        use crate::arch::uaccess::copy_to_user;
+        let mut good = 0usize;
+        while !src.is_empty() {
+            // Skip empty / exhausted iovecs.
+            while self.idx < self.iovs.len() && self.off >= self.iovs[self.idx].1 {
+                self.idx += 1;
+                self.off = 0;
+            }
+            if self.idx >= self.iovs.len() {
+                break; // iovec list exhausted — caller handles the tail
+            }
+            let (base, len) = self.iovs[self.idx];
+            let n = (len - self.off).min(src.len());
+            // base was access_ok-validated for `len` bytes at snapshot
+            // time; copy_out is the exception-table copy path.
+            let uncopied = crate::arch::uaccess_safe::copy_out(base + self.off, &src[..n]);
+            let landed = n - uncopied;
+            good += landed;
+            self.off += landed;
+            src = &src[landed..];
+            if uncopied > 0 {
+                return (good, true);
+            }
+        }
+        (good, false)
+    }
+}
+
+/// One direct-to-user receive attempt (no bounce buffer, no blocking):
+/// DGRAM/SEQPACKET pop the record, drop the queue lock, then copy
+/// seg -> user (reference __unix_dgram_recvmsg: __skb_try_recv_datagram
+/// dequeues BEFORE the copy; a copy fault drops the record and reports
+/// EFAULT). STREAM drains segment by segment, copying each with the queue
+/// lock RELEASED (a user-page fault must never resolve under the
+/// recv_queue spinlock — the reference runs its copy under the sleepable
+/// u->iolock, never under the queue lock), keeping a partially-consumed
+/// tail queued for the retry (reference unix_stream_read_generic:
+/// UNIXCB(skb).consumed advances, the skb stays until fully drained).
+/// Ancillary data rides first-touch exactly like unix_recv.
+/// 124th: dgram recvmsg outcome counters (the hilogd jam adjudicator).
+pub struct RecvStats {
+    pub pop: u64,
+    pub fault: u64,
+    pub trunc: u64,
+    pub empty: u64,
+}
+pub static RECVSTATS: Spinlock<RecvStats> = Spinlock::new(RecvStats {
+    pop: 0,
+    fault: 0,
+    trunc: 0,
+    empty: 0,
+});
+
+fn unix_recvmsg_user(
+    sock: &Arc<UnixSocket>,
+    iovs: &[(usize, usize)],
+    total: usize,
+) -> Result<UnixRecvResult, i32> {
+    match sock.kind {
+        UnixKind::Dgram | UnixKind::Seqpacket => {
+            let popped = {
+                let mut q = sock.recv_queue.lock();
+                let seg = q.segs.pop_front();
+                if let Some(sg) = seg.as_ref() {
+                    q.charge -= sg.charge;
+                }
+                seg
+            };
+            let Some(seg) = popped else {
+                RECVSTATS.lock().empty += 1;
+                return unix_recvmsg_empty_tail(sock);
+            };
+            // Copy OUTSIDE the queue lock (fault discipline above).
+            let orig_len = seg.data.len();
+            let take = orig_len.min(total);
+            let mut cur = UserIovCursor::new(iovs);
+            let (good, faulted) = cur.write(&seg.data[..take]);
+            if faulted {
+                // Reference __unix_dgram_recvmsg: skb_copy_datagram_msg
+                // error -> out_free — the record is consumed, the data is
+                // lost, EFAULT is reported.
+                RECVSTATS.lock().fault += 1;
+                return Err(-14);
+            }
+            {
+                let mut st = RECVSTATS.lock();
+                st.pop += 1;
+                if take < orig_len {
+                    st.trunc += 1;
+                }
+            }
+            // Record consumed: reference wakes the receive queue's
+            // peer_wait ONCE per freed record (wq_has_sleeper-guarded).
+            sock.peer_wait.wake_up_one();
+            // Peer writability rose (EPOLLOUT edge — see unix_recv).
+            if let Some(peer) = sock.peer_arc() {
+                let fid = peer.file_id.load(Ordering::Acquire);
+                if fid != 0 {
+                    crate::fs::event_notify::epoll_notify_file(fid);
+                }
+            }
+            Ok(UnixRecvResult {
+                len: take,
+                orig_len,
+                src: seg.src,
+                files: seg.files,
+                cred: seg.cred,
+                truncated: take < orig_len,
+            })
+        }
+        UnixKind::Stream => {
+            let mut cur = UserIovCursor::new(iovs);
+            let mut written = 0usize;
+            let mut files: Vec<Arc<File>> = Vec::new();
+            let mut cred: Option<UnixCred> = None;
+            let mut src: Option<Arc<str>> = None;
+            let mut drained_any = false;
+            let mut fault_tail = false;
+            loop {
+                let popped = {
+                    let mut q = sock.recv_queue.lock();
+                    let seg = q.segs.pop_front();
+                    if let Some(sg) = seg.as_ref() {
+                        q.charge -= sg.charge;
+                    }
+                    seg
+                };
+                let Some(mut seg) = popped else {
+                    break;
+                };
+                drained_any = true;
+                // Charge just dropped: reference consume_skb -> sock_wfree
+                // -> unix_write_space per consumed skb (nr_exclusive = 1) —
+                // ONE parked sender per freed segment off our peer_wait.
+                sock.peer_wait.wake_up_one();
+                // First-touch ancillary pickup (see unix_recv).
+                files.extend(seg.files.drain(..));
+                if cred.is_none() {
+                    cred = seg.cred.take();
+                } else {
+                    seg.cred = None;
+                }
+                if src.is_none() {
+                    src = seg.src.take();
+                } else {
+                    seg.src = None;
+                }
+                let want = total - written;
+                let take = seg.data.len().min(want);
+                let (good, faulted) = cur.write(&seg.data[..take]);
+                written += good;
+                if faulted {
+                    // Stream fault: keep the unconsumed tail queued for the
+                    // retry (same contract as the read(2) direct drain);
+                    // the landed prefix stays consumed.
+                    push_back_remainder(sock, seg.data, good, None);
+                    fault_tail = true;
+                    break;
+                }
+                if take < seg.data.len() {
+                    // Buffer filled mid-segment: remainder stays queued
+                    // (fds already delivered — first-touch semantics).
+                    push_back_remainder(sock, seg.data, take, None);
+                    break;
+                }
+                if written >= total {
+                    break;
+                }
+            }
+            if drained_any {
+                // Sender-side readiness: the reference's write_space fires
+                // on the SENDER's sk_sleep (its parked pollers/readers).
+                if let Some(peer) = sock.peer_arc() {
+                    peer.wait_queue.wake_up_one();
+                    let fid = peer.file_id.load(Ordering::Acquire);
+                    if fid != 0 {
+                        crate::fs::event_notify::epoll_notify_file(fid);
+                    }
+                }
+            }
+            if written == 0 {
+                if fault_tail {
+                    return Err(-14); // EFAULT — nothing landed
+                }
+                return unix_recvmsg_empty_tail(sock);
+            }
+            if fault_tail {
+                // Partial success with a faulting tail: report what landed
+                // (reference unix_stream_read_generic: `copied` so far).
+            }
+            Ok(UnixRecvResult {
+                len: written,
+                orig_len: written,
+                src,
+                files,
+                cred,
+                truncated: false,
+            })
+        }
+    }
+}
+
+/// Empty-queue tail shared by the direct path's kinds (mirror of
+/// unix_recv's tail): EOF, ENOTCONN, or EAGAIN.
+// 122nd err-latch watchdog: the app-hang root is a growing non-errno
+// value in a live socket's err field; log the caller whenever a change
+// is observed at the recv gate (rate-limited). rux:schedtrace (retired dfx=schedtrace)-gated.
+fn err_latch_watchdog(sock: &Arc<UnixSocket>) {
+    if !crate::trace::EVENT_SCHEDTRACE.armed() {
+        return;
+    }
+    static LAST: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+    static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let v = sock.err.load();
+    let prev = LAST.swap(v, core::sync::atomic::Ordering::Relaxed);
+    if v != prev {
+        let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 40 {
+            crate::pr_warn!(
+                "ERR-LATCH sock={:#x} {} -> {} ra={:#x}",
+                sock as *const _ as usize,
+                prev,
+                v,
+                crate::dfx::backtrace::caller_return_address() as usize
+            );
+        }
+    }
+}
+
+fn unix_recvmsg_empty_tail(sock: &Arc<UnixSocket>) -> Result<UnixRecvResult, i32> {
+    err_latch_watchdog(sock);
+    // Pending socket error first (reference __skb_wait_for_more_packets
+    // checks sock_error before the shutdown/EOF legs): ECONNRESET beats
+    // a clean EOF when the peer closed with unread data. sock_error()
+    // CLEARS on read — one delivery, then the next recv reports EOF.
+    {
+        let e = sock.err.load();
+        if e != 0 {
+            sock.err.store(0);
+            return Err(e);
+        }
+    }
+    // 111st: one-way latch mirrors — both stored BEFORE their locked
+    // writes, so false PROVES neither is set; true = closing/EOF is
+    // imminent (the closer's wake re-triggers the blocking re-check).
+    if sock.eof_m.load(Ordering::Acquire) || sock.closed_m.load(Ordering::Acquire) {
+        return Ok(unix_recv_eof());
+    }
+    match sock.kind {
+        UnixKind::Stream | UnixKind::Seqpacket => {
+            let state = *sock.state.lock();
+            if state == UnixState::Unconnected || state == UnixState::Listening {
+                return Err(-107); // ENOTCONN
+            }
+        }
+        UnixKind::Dgram => {}
+    }
+    Err(-11) // EAGAIN
+}
+
+/// Blocking direct-to-user recvmsg engine (the recvmsg twin of
+/// unix_recv_ctl): try unix_recvmsg_user, on EAGAIN wait on the socket's
+/// data-arrival queue with the kind's reference exclusivity and retry.
+/// The caller passes its validated iovec snapshot; no bounce buffer is
+/// ever allocated.
+pub fn unix_recvmsg_user_ctl(
+    sock: &Arc<UnixSocket>,
+    iovs: &[(usize, usize)],
+    nonblock: bool,
+    deadline: Option<u64>,
+) -> Result<UnixRecvResult, i32> {
+    let total: usize = iovs.iter().map(|&(_, l)| l).sum();
+    loop {
+        match unix_recvmsg_user(sock, iovs, total) {
+            Ok(r) => return Ok(r),
+            Err(e) if e != -11 => return Err(e),
+            Err(_) => {}
+        }
+        if nonblock {
+            return Err(-11);
+        }
+        let s = sock.clone();
+        // Same wait shape as unix_recv_ctl (DGRAM/SEQPACKET readers
+        // EXCLUSIVE, STREAM readers non-exclusive — reference parity).
+        let exclusive = !matches!(s.kind, UnixKind::Stream);
+        unix_wait_round(&s.wait_queue, exclusive, &|| sock_recv_ready(&s), deadline)?;
+    }
+}
+
+// ============================================================================
+// Socket operations
+// ============================================================================
+
+/// bind(): register this socket under a name.
+pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
+    // UNIXBIND trace (noble-desktop dbus hunt) — retired: an
+    // unconditional per-bind print of every /run/ socket name (15 lines
+    // per ub2404 boot, unbounded on a busy /run). Behind the existing OH
+    // hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) and budgeted.
+    if crate::dfx::switches::oh_hunt_prints_on()
+        && addr.key.len() > 1
+        && !addr.key.starts_with("\0")
+        && addr.key.contains("/run/")
+    {
+        static UNIXBIND_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if UNIXBIND_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+            crate::pr_warn!("UNIXBIND: {}", addr.key);
+        }
+    }
+    if sock.bound_name.lock().is_some() || sock.reg_name.lock().is_some() {
+        return Err(-22); // EINVAL — already bound
+    }
+    // Filesystem-path bind: Linux bind(2) creates a S_IFSOCK inode at
+    // sun_path (visible to stat/chmod/ls; abstract names skip this).
+    // dbus-daemon chmod()s the socket path after bind — without the node
+    // the daemon fails its setup. The node is created through the VFS
+    // (symlinks in the walk are followed — a bind through /var/run/...
+    // lands on /run/...), and the NAME TABLE is keyed by that inode's
+    // identity (see fs_reg_key) so every alias path that resolves to the
+    // same node connects to this socket — the Linux inode-matching rule.
+    let mut key = addr.key.clone();
+    if !addr.key.starts_with('\0') {
+        let inode = match create_socket_node(&addr.key) {
+            Ok(i) => i,
+            // EEXIST on the path = EADDRINUSE (stale socket file).
+            Err(-17) => return Err(-98),
+            Err(e) => return Err(e),
+        };
+        key = alloc::format!("#{}:{}", inode.fs_id, inode.ino);
+        // Pin the inode: the reg key is its identity, and holding the Arc
+        // keeps (fs_id, ino) from being recycled while we are bound.
+        *sock.node_inode.lock() = Some(inode);
+    }
+    let mut table = UNIX_TABLE.lock();
+    if table.contains_key(&key) {
+        drop(table);
+        // Name taken with our node freshly created (the holder's node was
+        // unlinked while it stayed bound). Undo the stray node so bind
+        // does not litter the fs.
+        if !addr.key.starts_with('\0') {
+            let _ = crate::fs::vfs::vfs_unlink(&addr.key);
+            *sock.node_inode.lock() = None;
+        }
+        return Err(-98); // EADDRINUSE
+    }
+    if UNIX_KEY_DEBUG {
+        crate::pr_info!(
+            "unix: BIND raw={:?} key={:?} by pid={}",
+            key_shown(&addr.key),
+            key_shown(&key),
+            crate::process::current_pid()
+        );
+    }
+    // bound_name stays the sun_path the caller gave (display/reporting);
+    // the registration key is separate for filesystem sockets.
+    *sock.bound_name.lock() = Some(addr.key.clone());
+    sock.refresh_name_caches();
+    *sock.reg_name.lock() = Some(key.clone());
+    table.insert(key, sock.clone());
+    Ok(())
+}
+
+/// Filesystem paths are registry keys without the leading NUL marker that
+/// abstract addresses carry.
+#[allow(dead_code)]
+fn is_fs_path(key: &str) -> bool {
+    !key.starts_with('\0')
+}
+
+/// Create a socket node (S_IFSOCK) at `path`, the way Linux bind(2) does.
+/// Same create-and-retype pattern as FIFO mknod: create a regular file,
+/// then set its mode word to S_IFSOCK|perm via setattr.
+/// Returns the retyped inode — the socket's name-table identity.
+fn create_socket_node(
+    path: &str,
+) -> Result<alloc::sync::Arc<crate::fs::inode::Inode>, i32> {
+    // O_WRONLY|O_CREAT|O_EXCL — the transient fd is closed immediately.
+    match crate::fs::file_open(path, 0o1 | 0o100 | 0o200 | 0o1000, 0o777) {
+        Ok(fd) => {
+            // fd is a valid open descriptor from file_open above.
+            let inode = {
+                let file = match crate::fs::get_file_fd(fd) {
+                    Some(f) => f,
+                    None => {
+                        crate::fs::close_file_fd(fd);
+                        return Err(-5); // EIO
+                    }
+                };
+                match file.get_inode() {
+                    Some(i) => i.clone(),
+                    None => {
+                        crate::fs::close_file_fd(fd);
+                        return Err(-5); // EIO
+                    }
+                }
+            };
+            // Retype to S_IFSOCK (mode bits: 0777 & ~umask was applied at
+            // create; keep the permission bits, swap the type field).
+            let full_mode =
+                crate::fs::inode::InodeMode::S_IFSOCK | (inode.mode.bits() & 0o777);
+            let ret = inode.op_setattr(
+                crate::fs::inode::setattr_attr::ATTR_MODE,
+                full_mode as u64,
+                0,
+            );
+            // SAFETY: fd is a valid open descriptor from file_open above.
+            crate::fs::close_file_fd(fd);
+            if ret != 0 {
+                return Err(ret);
+            }
+            Ok(inode)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// listen(): mark a STREAM/SEQPACKET socket as a listener.
+pub fn unix_listen(sock: &Arc<UnixSocket>, backlog: i32) -> Result<(), i32> {
+    if !matches!(sock.kind, UnixKind::Stream | UnixKind::Seqpacket) {
+        return Err(-95); // EOPNOTSUPP
+    }
+    // Linux autobinds an unbound listener to a unique abstract name.
+    if sock.bound_name.lock().is_none() {
+        autobind(sock);
+    }
+    if backlog > 0 {
+        *sock.backlog.lock() = backlog as usize;
+    }
+    *sock.state.lock() = UnixState::Listening;
+    Ok(())
+}
+
+/// connect(): STREAM/SEQPACKET — hook up with a listener; DGRAM — set the
+/// default destination.
+///
+/// `nonblock` is the connecting fd's O_NONBLOCK — it governs the
+/// full-backlog behavior exactly like Linux (see below).
+pub fn unix_connect(
+    sock: &Arc<UnixSocket>,
+    addr: &UnixAddr,
+    nonblock: bool,
+) -> Result<(), i32> {
+    // UNIXCONNECT trace — retired: an unconditional per-connect print of
+    // every /run/ socket name (338 lines per ub2404 boot: journal,
+    // nscd, userdb). Behind the existing OH hunt-print master gate
+    // (rux:ohhunt (retired dfx=ohhunt)) and budgeted.
+    if crate::dfx::switches::oh_hunt_prints_on()
+        && addr.key.len() > 1
+        && !addr.key.starts_with(' ')
+        && addr.key.contains("/run/")
+    {
+        static UNIXCONNECT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if UNIXCONNECT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+            crate::pr_warn!("UNIXCONNECT: {}", addr.key);
+        }
+    }
+    if *sock.shut_wr.lock() {
+        return Err(-32); // EPIPE
+    }
+    match sock.kind {
+        UnixKind::Stream | UnixKind::Seqpacket => {
+            if *sock.state.lock() == UnixState::Connected {
+                return Err(-106); // EISCONN
+            }
+            // Filesystem paths resolve to the node's inode identity, so
+            // alias paths (symlinks: /var/run vs /run) find the listener
+            // (Linux matches by inode — see fs_reg_key). A path that
+            // resolves but has no bound socket node: ECONNREFUSED; a
+            // path that does not resolve surfaces the lookup errno
+            // (ENOENT etc.) like Linux's kern_path. ABSTRACT names
+            // (leading NUL) are already registry keys — never run them
+            // through the filesystem resolver (path_lookup of a "\0..."
+            // string always fails, so abstract connects were refused —
+            // LTP bind04 AF_UNIX abstract stream/seqpacket).
+            let lookup_key = if addr.key.starts_with('\0') {
+                addr.key.clone()
+            } else {
+                match fs_reg_key(&addr.key) {
+                    Ok(k) => k,
+                    Err(e) => return Err(e), // lookup errno (ENOENT, ...)
+                }
+            };
+            let server = match lookup(&lookup_key) {
+                Some(s) => s,
+                None => {
+                    if UNIX_KEY_DEBUG {
+                        crate::pr_info!(
+                            "unix: connect REFUSED no-entry key={:?} raw={:?} by pid={}",
+                            key_shown(&lookup_key),
+                            key_shown(&addr.key),
+                            crate::process::current_pid()
+                        );
+                    }
+                    return Err(-111); // ECONNREFUSED
+                }
+            };
+            if *server.state.lock() != UnixState::Listening {
+                return Err(-111); // ECONNREFUSED
+            }
+            // Backlog full? Linux unix_stream_connect: a blocking
+            // connect WAITS for the listener to accept (unix_wait_for_peer)
+            // and a non-blocking one gets EAGAIN — never an instant
+            // ECONNREFUSED. Refusing outright made every client of a
+            // momentarily-stalled listener (dbus-daemon forking an
+            // activation helper under load, so its main loop pauses and
+            // the accept queue backs up) see "Connection refused" — GLib
+            // treats that as bus death and gnome-session aborts. Once the
+            // daemon drains the queue the same connect succeeds, which is
+            // why the bus "self-heals" minutes later.
+            loop {
+                let q_len = server.accept_queue.lock().len();
+                let bk = *server.backlog.lock();
+                if q_len < bk {
+                    break;
+                }
+                if *server.state.lock() != UnixState::Listening {
+                    return Err(-111); // listener died while we waited
+                }
+                if nonblock {
+                    return Err(-11); // EAGAIN
+                }
+                // Blocking: sleep on the LISTENER's peer_wait until an
+                // accept pops a child (room) or the listener closes —
+                // reference unix_wait_for_peer(other = the listener):
+                // prepare_to_wait_exclusive(&u->peer_wait). Woken by the
+                // accept pop (wake_up_one) and the listener's close
+                // (wake_all — unix_release_sock wakes its own peer_wait).
+                let s = server.clone();
+                unix_wait_round(
+                    &s.peer_wait,
+                    true,
+                    &|| {
+                        s.accept_queue.lock().len() < *s.backlog.lock()
+                            || *s.state.lock() != UnixState::Listening
+                    },
+                    None,
+                )?;
+            }
+            // Linux autobind: an unbound connecting client gets a unique
+            // abstract name so the server can address/report it.
+            if sock.bound_name.lock().is_none() {
+                autobind(sock);
+            }
+            // Server-side child: connected to us, queued for accept().
+            let child = Arc::new(UnixSocket::new(sock.kind));
+            *child.state.lock() = UnixState::Connected;
+            *child.peer.lock() = Some(Arc::downgrade(sock));
+            child.has_peer_m.store(true, Ordering::Release);
+            // The child inherits the server's bound name for
+            // getsockname/recvfrom reporting.
+            *child.bound_name.lock() = server.bound_name.lock().clone();
+            child.refresh_name_caches();
+            // SO_PEERCRED: the child IS the server endpoint, so clients
+            // asking for the peer's creds must see the server's, not the
+            // connecting client's (the child was allocated inside the
+            // client's connect() syscall context).
+            *child.creds.lock() = *server.creds.lock();
+            // Client side: point at the child. The child's Arc is owned by
+            // the server's accept queue until accept() installs it as an fd.
+            *sock.peer.lock() = Some(Arc::downgrade(&child));
+            sock.has_peer_m.store(true, Ordering::Release);
+            *sock.state.lock() = UnixState::Connected;
+            server.accept_queue.lock().push_back(child);
+            // 66th (rux:pctlmon (retired dfx=pctlmon)): a client just queued itself onto the
+            // param-service listener — the connect half of the connection
+            // lifecycle (PCTL-ACCEPT names the accept half). A connect
+            // with no matching accept = requests queueing on a child init
+            // never took.
+            if pctlmon_on() && server.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0 {
+                static PCTL_C_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let n = PCTL_C_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 200 {
+                    crate::pr_warn!(
+                        "PCTL-CONNECT #{} pid={} qlen={}",
+                        n,
+                        crate::process::current_pid(),
+                        server.accept_queue.lock().len()
+                    );
+                }
+            }
+            // Data arrival on the LISTENER — reference unix_stream_connect
+            // fires other->sk_data_ready (sock_def_readable, nr_exclusive
+            // = 1): every non-exclusive poller plus ONE exclusive acceptor.
+            server.wait_queue.wake_up_one();
+            // A queued connection is an ARRIVAL on the listener — the
+            // epoll analogue of unix_send's notify on the target. Without
+            // it an EPOLLET-watched listener (Xorg registers its listener
+            // EPOLLET) only re-reports on a readiness snapshot CHANGE: a
+            // backlog that drained (accept-until-EAGAIN) and refilled
+            // between two epoll_wait calls still reads EPOLLIN ==
+            // last_reported and the edge is swallowed — late connectors
+            // sit in the accept queue forever while the server keeps
+            // serving the fds it already holds. Linux re-queues the epi
+            // from the listener's data_ready callback on EVERY connection
+            // arrival.
+            let fid = server.file_id.load(Ordering::Acquire);
+            if fid != 0 {
+                crate::fs::event_notify::epoll_notify_file(fid);
+            }
+            // rux:socksnap (retired dfx=socksnap) (launcher-chain hunt, b16): name every client
+            // that reaches a Spawn-family listener. The OH appspawn
+            // protocol is one connect + one request + one pid reply, so
+            // this line paired with the REQ dump in unix_send answers
+            // "who asked appspawn to start what" without a guest shell.
+            // AppSpawn/NativeSpawn/CJAppSpawn/HybridSpawn all end in
+            // "Spawn"; other listeners stay silent.
+            // sc18 addendum: census the listener's wait queue around the
+            // wake (total, woken-flagged, awakened). The b14-sc18 wedge
+            // shape is "server parked in an infinite epoll_pwait, zero
+            // deliveries ever, accept queue fills" — entries==0 means the
+            // park never registered on this socket (poll_wait routing
+            // bug); entries>0 with woken>0 but awakened==0 is the VW
+            // sticky-skip lost wake (entry marked, task never scheduled).
+            if crate::trace::EVENT_SOCKSNAP.armed() {
+                let name = server.bound_name.lock().clone();
+                if name.as_deref().map(|n| n.ends_with("Spawn")).unwrap_or(false) {
+                    let (tot, won) = server.wait_queue.vw_queue_census();
+                    let awok = server.wait_queue.wake_up_all();
+                    crate::pr_warn!(
+                        "socksnap: CONNECT pid={} -> {} (server fid={:#x}) wq=({},{}) woke={}",
+                        crate::process::current_pid(),
+                        key_shown(name.as_deref().unwrap_or("?")),
+                        fid,
+                        tot,
+                        won,
+                        awok
+                    );
+                    // b20: the khungtaskd snapshot cadence wedges after its
+                    // first pass, so pin the watching epolls' counters to
+                    // THIS connect's timeline (waits/rep discrimination for
+                    // the epoll_pwait wedge; 5060e524 fixed the purge —
+                    // this verifies the listener interest now survives
+                    // spawn-child exits).
+                    crate::syscall::support::epoll_dump_for_file(fid);
+                }
+            }
+            Ok(())
+        }
+        UnixKind::Dgram => {
+            // The target must exist (Linux checks this for connect()).
+            // Resolved to the node's inode identity for the same
+            // alias-path reasons as STREAM. Abstract names are their own
+            // registry keys (never through the filesystem resolver — see
+            // the Stream branch; LTP bind05 abstract datagram).
+            let lookup_key = if addr.key.starts_with('\0') {
+                addr.key.clone()
+            } else {
+                match fs_reg_key(&addr.key) {
+                    Ok(k) => k,
+                    Err(e) => return Err(e), // lookup errno (ENOENT, ...)
+                }
+            };
+            let target = match lookup(&lookup_key) {
+                Some(t) => t,
+                None => return Err(-111), // ECONNREFUSED
+            };
+            // Autobind an abstract name if unbound (Linux semantics: a
+            // connected DGRAM socket needs a reply address).
+            if sock.bound_name.lock().is_none() {
+                autobind(sock);
+            }
+            // 110th: prime the resolved-Arc cache alongside the name.
+            *sock.dgram_peer.lock() = Some(lookup_key);
+            *sock.dgram_peer_sock.lock() = Some(target);
+            *sock.state.lock() = UnixState::Connected;
+            Ok(())
+        }
+    }
+}
+
+/// Autobind an abstract address (Linux format: "\0" + 5 hex digits).
+fn autobind(sock: &Arc<UnixSocket>) {
+    static ABSTRACT_COUNTER: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(1);
+    loop {
+        let n = ABSTRACT_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let key = String::from(alloc::format!("\0{:05x}", n));
+        let mut table = UNIX_TABLE.lock();
+        if !table.contains_key(&key) {
+            table.insert(key.clone(), sock.clone());
+            // Abstract names ARE their own registration key.
+            *sock.bound_name.lock() = Some(key.clone());
+            sock.refresh_name_caches();
+            *sock.reg_name.lock() = Some(key);
+            return;
+        }
+    }
+}
+
+/// accept(): pop one established child (EAGAIN when none pending).
+pub fn unix_accept(sock: &Arc<UnixSocket>) -> Result<Arc<UnixSocket>, i32> {
+    if !matches!(sock.kind, UnixKind::Stream | UnixKind::Seqpacket) {
+        return Err(-95); // EOPNOTSUPP
+    }
+    if *sock.state.lock() != UnixState::Listening {
+        return Err(-22); // EINVAL
+    }
+    let child = sock.accept_queue.lock().pop_front().ok_or(-11)?; // EAGAIN
+    // An accept freed backlog room — wake blocking connects that are
+    // waiting for space on this listener's peer_wait (they re-check and
+    // enqueue). Reference unix_accept: wake_up_interruptible(&u->peer_wait)
+    // — ONE exclusive waiter per freed slot (1 popped child = 1 slot).
+    sock.peer_wait.wake_up_one();
+    Ok(child)
+}
+
+/// W3: one wait round for a blocking accept — sleeps on the listener's
+/// wait queue (woken by client connect / listener close) until a child is
+/// pending, the deadline expires, or a signal arrives.
+pub fn unix_accept_wait(sock: &Arc<UnixSocket>, deadline: Option<u64>) -> Result<(), i32> {
+    // Reference unix_accept blocks via skb_recv_datagram ->
+    // __skb_wait_for_more_packets -> prepare_to_wait_exclusive on
+    // sk_sleep. The connect arrival wakes ONE acceptor per child.
+    unix_wait_round(&sock.wait_queue, true, &|| sock.accept_ready(), deadline)
+}
+
+/// The connected peer's bound name (accept/getpeername reporting).
+pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
+    sock.peer_arc().and_then(|p| p.bound_name.lock().clone())
+}
+
+/// Flow-control charge of one segment of `len` payload bytes: payload plus
+/// the per-segment heap cost. Linux charges skb->truesize ≈ len + ~512
+/// (slab-object overhead), NOT a page per skb.
+///
+/// sc101: the old charge added PAGE_SIZE per segment (the r8 buddy-heap
+/// discipline, written when the heap looked page-granular), but the
+/// CombinedAllocator routes ≤4096-byte allocations to the SLAB — a
+/// 200-byte hilog message really costs ~a slab object, not 4 KiB. The
+/// overcharge throttled a default 212992-byte SO_SNDBUF to ~50 queued
+/// messages, so every chatty client (OH developer-mode apps emit
+/// thousands of libhilog writev's at startup) blocked on the receiver's
+/// drain rate — hilogd writes each record to the serial console, and
+/// the launcher burned its whole 3 s spawn budget parked in writev
+/// (stime 183 ticks, utime 2). Proportional charge: sndbuf now bounds
+/// ~hundreds of messages, absorbing bursts while still capping total
+/// queued bytes ≈ real heap cost (the r8 1-byte-storm hole stays closed
+/// — the charge still exceeds the true per-segment allocation).
+
+/// 122nd err-write trap (rux:schedtrace (retired dfx=schedtrace)): UnixSocket.err is being
+/// scribbled with a truesize-class counter at the message rate; the
+/// jammed-hilogd reader chain is fully explained by it. This wrapper
+/// names every WRITER: a store whose new value differs logs the new
+/// value and the caller's return address.
+pub struct ErrLatch {
+    inner: Spinlock<i32>,
+}
+
+impl ErrLatch {
+    pub fn new() -> Self {
+        Self { inner: Spinlock::new(0) }
+    }
+    pub fn load(&self) -> i32 {
+        *self.inner.lock()
+    }
+    pub fn store(&self, v: i32) {
+        if crate::trace::EVENT_SCHEDTRACE.armed() {
+            let prev = *self.inner.lock();
+            if prev != v {
+                static WN: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let n = WN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 40 {
+                    crate::pr_warn!(
+                        "ERR-WRITE sock={:#x} {} -> {} ra={:#x}",
+                        self as *const _ as usize,
+                        prev,
+                        v,
+                        crate::dfx::backtrace::caller_return_address() as usize
+                    );
+                }
+            }
+        }
+        *self.inner.lock() = v;
+    }
+}
+
+pub fn err_field_offset() -> usize {
+    core::mem::offset_of!(UnixSocket, err)
+}
+
+/// Offset of the ErrLatch's DATA word (the i32) from the UnixSocket base:
+/// struct offset of `err` + offset of the data inside Spinlock<i32>.
+/// RawSpinlock and data get reordered by the compiler — never assume +8.
+pub fn err_data_offset() -> usize {
+    core::mem::offset_of!(UnixSocket, err) + core::mem::offset_of!(ErrLatch, inner)
+        + crate::sync::spinlock::Spinlock::<i32>::data_offset()
+}
+
+fn seg_charge(len: usize) -> usize {
+    const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>() + 512;
+    len + SEG_OVERHEAD
+}
+
+/// Can `target` accept a segment of `len` bytes (Linux unix-SO_SNDBUF
+/// semantics: at least one segment is always accepted)?
+fn target_has_room(target: &Arc<UnixSocket>, len: usize, cap: usize) -> bool {
+    // A target that closed (or is tearing down) will NEVER drain its
+    // queue: report room so a sender blocked on a full receive queue
+    // wakes up and takes the EPIPE path in the send loop. Linux wakes
+    // blocked writers when the peer's socket is released; without this
+    // the single wake from unix_close() re-checked a still-full queue
+    // and the sender went back to sleep forever — a wedged client whose
+    // server had exited without draining (unixstress chaos child hang).
+    if *target.dead.lock() || *target.state.lock() == UnixState::Closed {
+        return true;
+    }
+    // RCV_SHUTDOWN parity: a read-side-shut target will never drain for
+    // OUR sender's benefit — report room so the blocked sender wakes and
+    // takes the EPIPE path in the send loop (the check above).
+    if *target.eof.lock() {
+        return true;
+    }
+    let queued = target.queued_truesize();
+    queued == 0 || queued + seg_charge(len) <= cap
+}
+
+/// Send one message (segment). `dest` overrides the connected destination
+/// (DGRAM sendto). `files` is the SCM_RIGHTS payload (already resolved
+/// from the sender's fd table). `cred` is the SCM_CREDENTIALS triple
+/// (kernel-filled from the sending task).
+///
+/// `data` is OWNED: the successful enqueue moves the Vec straight into
+/// the queued segment (zero further copies). The syscall layer builds
+/// this Vec with the ONE user copy of the payload (perf-ipc: the old
+/// `&[u8]` + `data.to_vec()` at the enqueue made every unix send a
+/// double copy — staged user→kernel, then kernel→segment).
+pub fn unix_send(
+    sock: &Arc<UnixSocket>,
+    data: alloc::vec::Vec<u8>,
+    files: Vec<Arc<File>>,
+    cred: Option<UnixCred>,
+    dest: Option<&UnixAddr>,
+    nonblock: bool,
+    deadline: Option<u64>,
+) -> Result<usize, i32> {
+    // 111st: shut_wr_m / sndbuf_m mirror reads (one-way latch + config
+    // mirror) — this entry runs once per message on the hilog fabric.
+    // shut_wr_m is stored BEFORE the shut_wr write, so false proves the
+    // flag is unset; a concurrent shutdown's transient is the same race
+    // Linux has (SHUT_WR is immediate for concurrent senders).
+    if sock.shut_wr_m.load(Ordering::Acquire) {
+        return Err(-32); // EPIPE
+    }
+    let cap = sock.sndbuf_m.load(Ordering::Relaxed) as usize;
+
+    // sc102 spin detector: a sender whose rip parks in the writev wrapper
+    // while stime runs away (183-190 ticks, utime ~0) is LOOPING here —
+    // either the enqueue gate and target_has_room disagree (busy retry) or
+    // each round enqueues into a queue that never effectively drains.
+    // Rate-limited: one print per socket per 1000 rounds names the gate
+    // values at the moment of suspicion.
+    let mut rounds: u32 = 0;
+
+    loop {
+        rounds = rounds.wrapping_add(1);
+        if rounds % 1000 == 0 {
+            let tqp = {
+                let tk = sock.dgram_peer.lock().clone();
+                tk.unwrap_or_default()
+            };
+            let (qb, qt, _c, ql) = sock.diag_snapshot();
+            crate::pr_warn!(
+                "unixsend-loop: pid {} rounds={} dgram_peer={} self(q={}B true={} qlen={}) len={} cap={} nonblock={}",
+                crate::process::current_pid(),
+                rounds,
+                tqp,
+                qb,
+                qt,
+                ql,
+                data.len(),
+                cap,
+                nonblock
+            );
+        }
+        // Resolve the receiving end fresh each round (the peer may have
+        // closed while we were blocked).
+        let target: Arc<UnixSocket> = match sock.kind {
+            UnixKind::Stream | UnixKind::Seqpacket => {
+                // Connection-mode: an explicit destination is EISCONN.
+                if dest.is_some() {
+                    return Err(-106); // EISCONN
+                }
+                let state = *sock.state.lock();
+                if state != UnixState::Connected {
+                    return Err(-107); // ENOTCONN
+                }
+                match sock.peer_arc() {
+                    Some(p) => p,
+                    None => return Err(-32), // EPIPE — peer closed
+                }
+            }
+            UnixKind::Dgram => {
+                // Linux autobinds an unbound DGRAM sender so the receiver
+                // has a reply address. 111st: has_bound_name_m skips the
+                // bound_name lock pair (latch set in refresh_name_caches
+                // at every assignment).
+                if !sock.has_bound_name_m.load(Ordering::Acquire)
+                    && sock.bound_name.lock().is_none()
+                {
+                    autobind(sock);
+                }
+                if let Some(a) = dest {
+                    // sendto resolves to the node's inode identity — a
+                    // symlink alias reaches the same DGRAM target.
+                    let key = match fs_reg_key(&a.key) {
+                        Ok(k) => k,
+                        Err(e) => return Err(e), // lookup errno (ENOENT, ...)
+                    };
+                    match lookup(&key) {
+                        Some(t) => t,
+                        None => return Err(-111), // ECONNREFUSED
+                    }
+                } else if sock.has_peer_m.load(Ordering::Acquire) {
+                    // 111st: a DGRAM socket with a peer Weak is a
+                    // socketpair — no peer Weak can ever exist on a
+                    // name-connected DGRAM socket, so the latch lets the
+                    // fabric skip the peer lock pair per message.
+                    match sock.peer_arc() {
+                        Some(p) => p,
+                        None => return Err(-32), // EPIPE — peer closed
+                    }
+                } else if let Some(cached) = sock.dgram_peer_sock.lock().clone() {
+                    // 110th fast path: the connect()-resolved Arc, validated
+                    // against the close markers. A dead cached peer falls
+                    // through to the name re-resolution — the name-follow
+                    // semantics (a restarted daemon's replacement socket
+                    // receives) are keyed by NAME, and the cache is only an
+                    // accelerator, never an identity.
+                    // 111st: closed_m replaces the dead+state lock pair in
+                    // the validation (stored BEFORE both writes at
+                    // unix_close — false proves both are unset).
+                    if cached.closed_m.load(Ordering::Acquire) {
+                        if let Some(key) = sock.dgram_peer.lock().clone() {
+                            match lookup(&key) {
+                                Some(t) => {
+                                    *sock.dgram_peer_sock.lock() = Some(t.clone());
+                                    t
+                                }
+                                None => return Err(-111), // ECONNREFUSED
+                            }
+                        } else {
+                            return Err(-89); // EDESTADDRREQ
+                        }
+                    } else {
+                        cached
+                    }
+                } else if let Some(key) = sock.dgram_peer.lock().clone() {
+                    match lookup(&key) {
+                        Some(t) => {
+                            *sock.dgram_peer_sock.lock() = Some(t.clone());
+                            t
+                        }
+                        None => return Err(-111), // ECONNREFUSED
+                    }
+                } else {
+                    return Err(-89); // EDESTADDRREQ
+                }
+            }
+        };
+
+        // 111st: closed_m fast gate (one-way latch stored before the
+        // state=Closed/dead writes at unix_close; false proves not yet
+        // closed, true = the close began — EPIPE either way, the same
+        // concurrent-close race the reference exposes).
+        if target.closed_m.load(Ordering::Acquire) {
+            return Err(-32); // EPIPE
+        }
+        // RCV_SHUTDOWN parity (reference unix_dgram_sendmsg /
+        // unix_stream_sendmsg: `other->sk_shutdown & RCV_SHUTDOWN ->
+        // EPIPE`): the target's read side is shut (peer SHUT_WR toward it,
+        // or its peer closed). eof also releases a blocked sender: unix_wait_for_peer
+        // re-evaluates RCV_SHUTDOWN after every wake.
+        // 111st: eof_m mirror (stored before every eof write).
+        if target.eof_m.load(Ordering::Acquire) {
+            return Err(-32); // EPIPE
+        }
+
+        // rux:socksnap (retired dfx=socksnap) (launcher-chain hunt, b16): dump the head of every
+        // message whose receiving end belongs to a Spawn-family listener
+        // (AppSpawn/NativeSpawn/CJAppSpawn/HybridSpawn). The OH request
+        // carries the target process name as a C string inside the struct,
+        // so hex+printable of the first 64 bytes names the app being asked
+        // for. Replies from appspawn ride the same socket in the other
+        // direction (target = client socket, no Spawn bound name) and stay
+        // silent — only requests print.
+        if crate::trace::EVENT_SOCKSNAP.armed()
+            && !data.is_empty()
+        {
+            // leg-34: the Spawn classification is cached in tap_class at
+            // bind time — no bound_name lock/scan per send.
+            let is_spawn = target.tap_class.load(Ordering::Acquire) & TAP_SPAWN != 0;
+            if is_spawn {
+                let n = data.len().min(64);
+                let mut hex = alloc::string::String::new();
+                for i in 0..n {
+                    hex.push_str(&alloc::format!("{:02x}", data[i]));
+                }
+                let mut txt: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(n);
+                for &b in &data[..n] {
+                    txt.push(if b >= 0x20 && b < 0x7f { b } else { b'.' });
+                }
+                let s = core::str::from_utf8(&txt).unwrap_or("");
+                let name = target.bound_name.lock().clone();
+                crate::pr_warn!(
+                    "socksnap: REQ pid={} -> {} len={} hex={} txt={}",
+                    crate::process::current_pid(),
+                    key_shown(name.as_deref().unwrap_or("?")),
+                    data.len(),
+                    hex,
+                    s
+                );
+            }
+        }
+
+        // hilog tap (drm/ui bring-up): OH's userspace log lines exist
+        // ONLY inside hilogd (libEGL's stderr adapter prints '<message
+        // truncated>' markers). The receiving sockets are bound to
+        // .../hilogInput / .../hilogd.server — mirror graphics-relevant
+        // logs to serial. Datagrams on hilogInput are HilogMsg records
+        // (base/hiviewdfx/hilog frameworks/libhilog/include/hilog_base.h),
+        // a __packed 28-byte header followed by tag and content:
+        //
+        //   off 0  u16 len            total: 28 + tagLen + contentLen
+        //   off 2  u16 bitfield       version:3 | type:4<<3 | level:3<<7
+        //                              | tagLen:6<<10   (little-endian)
+        //   off 4  u32 tv_sec   off 8  u32 tv_nsec  off 12 u32 mono_sec
+        //   off 16 u32 pid       off 20 u32 tid      off 24 u32 domain
+        //   off 28 u8 tag[tagLen]     NUL-terminated
+        //   off 28+tagLen u8 content  plain text: args are vsnprintf'd
+        //                              client-side; {private} args arrive
+        //                              as the literal "<private>"
+        //
+        // 39th: the tap body below scans EVERY record for ~125 key/tag
+        // shapes (AMS/graphics/spawn/account/installd cohorts). On the
+        // hilogd storm (25k records/s) that is seconds of CPU per second
+        // inside the send path and part of the 90%-kernel-tick saturation
+        // face (UNIXRD-WV send phase 14.3 us/op, u2v7). It is a DIAGNOSTIC
+        // instrument, not kernel semantics — OFF by default like every
+        // DFX probe (filerd discipline); arm with hilogtap=1 when a boot
+        // needs the HILOG-AMS/slog/alog/ilog/PCTL evidence.
+        // 66th: rux:pctlmon (retired dfx=pctlmon) arms ONLY the param tap below (no record
+        // scanning) — the 105-timeout hunt needs PCTL-SEND on every boot
+        // without hilogtap's cost.
+        // The first tap smeared the whole datagram through a printable
+        // filter, mixing header bytes into the text and hiding the exact
+        // EGL failure lines behind garbage ("EGLC0GL" etc). Decode the
+        // header, then tag: content, and only fall back to the smear for
+        // records that do not parse.
+        if hilogtap_on() || pctlmon_on() {
+                // leg-34: hilog/param listener classification cached in
+                // tap_class at bind time — previously a bound_name lock plus
+                // up to three ends_with scans on EVERY unix send.
+                let is_hilog = target.tap_class.load(Ordering::Acquire) & TAP_HILOG != 0;
+                // sc209 (leg 14): param-service control tap. sc208's crawl is
+                // samgr's on-demand loads timing out: "Start dynamic proc:
+                // installs,511,105_14991ms" x24 — ServiceControlWithExtra =
+                // SystemSetParameter("ohos.ctl.start", ...) over this socket,
+                // returning PARAM_CODE_TIMEOUT(105) after 15 s, and the
+                // server-side "Handle set param" log NEVER shows the installs
+                // sets (the client's FIRST attempt even returned 0 in 0 ms
+                // with no server handling — a stale/instant reply). This tap
+                // prints every ParamMessage (u32 type, u32 msgSize, u32 id,
+                // char key[100] @12, ParamMsgContent @112) SENT to the
+                // paramservice listener, plus param-ish messages SENT BY pid
+                // 1 (server responses carry type MSG_SET_PARAM with the
+                // result i32 at off 112). Client-send vs server-arrival gap =
+                // socket/wake loss; a pid-1 response with no matching request
+                // = the duplicated-reply conviction.
+                if !data.is_empty() && data.len() >= 12 {
+                    let is_param_listener =
+                        target.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0;
+                    let sender_pid = crate::process::current_pid();
+                    // type: 0 SET / 1 WAIT / 2 ADD_WATCHER / 3 DEL_WATCHER /
+                    // 4 NOTIFY / 5 SAVE. Plausibility gate: type <= 5 and
+                    // msgSize == data.len() and key starts printable.
+                    let mtype = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                    let msize = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                    let mid = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+                    let looks_param = mtype <= 5
+                        && msize as usize == data.len()
+                        && data.len() > 12
+                        && data[12] >= b'a'
+                        && data[12] <= b'z';
+                    if is_param_listener || (sender_pid == 1 && looks_param) {
+                        static PCTL_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = PCTL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 300 {
+                            let mut kbuf = [0u8; 40];
+                            let kmax = core::cmp::min(40, data.len() - 12);
+                            let mut klen = 0usize;
+                            while klen < kmax && data[12 + klen] != 0 {
+                                kbuf[klen] = data[12 + klen];
+                                klen += 1;
+                            }
+                            let key = core::str::from_utf8(&kbuf[..klen]).unwrap_or("?");
+                            let mut extra = alloc::string::String::new();
+                            if sender_pid == 1 {
+                                // Server response: result i32 at off 112.
+                                if data.len() >= 116 {
+                                    let r = i32::from_le_bytes([
+                                        data[112], data[113], data[114], data[115],
+                                    ]);
+                                    extra = alloc::format!(" result={}", r);
+                                }
+                            } else if data.len() >= 116 {
+                                // Client request: ParamMsgContent @112
+                                // (u8 type=1 PARAM_VALUE, u16 size) → string @116.
+                                let ctype = data[112];
+                                if ctype == 1 {
+                                    let mut vbuf = [0u8; 48];
+                                    let vmax = core::cmp::min(48, data.len() - 116);
+                                    let mut vlen = 0usize;
+                                    while vlen < vmax && data[116 + vlen] != 0 {
+                                        vbuf[vlen] = data[116 + vlen];
+                                        vlen += 1;
+                                    }
+                                    extra.push(' ');
+                                    extra.push_str(core::str::from_utf8(&vbuf[..vlen]).unwrap_or("?"));
+                                }
+                            }
+                            crate::pr_warn!(
+                                "PCTL-SEND #{} pid={} -> {} len={} type={} msgId={} key={}{}{}",
+                                n,
+                                sender_pid,
+                                if is_param_listener { "paramservice" } else { "client" },
+                                data.len(),
+                                mtype,
+                                mid,
+                                key,
+                                extra,
+                                // 66th: the TARGET's queue state at send —
+                                // a request that piles onto a full/unread
+                                // queue while later sends show the same
+                                // depth pinpoints a server that stopped
+                                // reading THAT connection.
+                                if is_param_listener {
+                                    let q = target.recv_queue.lock();
+                                    alloc::format!(
+                                        " [q={}/{} eof={} dead={}]",
+                                        q.segs.len(),
+                                        q.charge,
+                                        *target.eof.lock() as u8,
+                                        *target.dead.lock() as u8
+                                    )
+                                } else {
+                                    alloc::string::String::new()
+                                }
+                            );
+                        }
+                    }
+                }
+                // 66th: the record-scan taps below are hilogtap-only;
+                // pctlmon arms the param tap above and nothing here.
+                if is_hilog && hilogtap_on() && !data.is_empty() {
+                    let mut text = [0u8; 160];
+                    let mut k = 0usize;
+                    let mut prefix = [0u8; 24];
+                    let mut plen = 0usize;
+                    let mut decoded = false;
+                    if data.len() >= 28 {
+                        let mlen = u16::from_le_bytes([data[0], data[1]]) as usize;
+                        let bits = u16::from_le_bytes([data[2], data[3]]) as usize;
+                        let level = (bits >> 7) & 0x7;
+                        let tag_len = (bits >> 10) & 0x3f;
+                        let mut pid = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+                        if 28 + tag_len <= mlen && mlen <= data.len() {
+                            let lv = match level {
+                                3 => b'D',
+                                4 => b'I',
+                                5 => b'W',
+                                6 => b'E',
+                                7 => b'F',
+                                _ => b'?',
+                            };
+                            // "L<lv> <pid> " then "<tag>: <content>". OH builds
+                            // libhilog with __RECV_MSG_WITH_UCRED_: the header
+                            // pid stays 0 and the real sender rides
+                            // SCM_CREDENTIALS — stamp that pid on the tap line.
+                            if pid == 0 {
+                                if let Some(c) = cred.as_ref() {
+                                    if c.pid > 0 {
+                                        pid = c.pid as u32;
+                                    }
+                                }
+                            }
+                            let mut pfx: [u8; 16] = [0; 16];
+                            let mut n = 0usize;
+                            pfx[n] = lv;
+                            n += 1;
+                            let mut num = [0u8; 10];
+                            let mut nd = 0usize;
+                            let mut v = pid;
+                            loop {
+                                num[nd] = b'0' + (v % 10) as u8;
+                                nd += 1;
+                                v /= 10;
+                                if v == 0 {
+                                    break;
+                                }
+                            }
+                            while nd > 0 {
+                                nd -= 1;
+                                pfx[n] = num[nd];
+                                n += 1;
+                            }
+                            pfx[n] = b' ';
+                            n += 1;
+                            plen = n;
+                            prefix[..n].copy_from_slice(&pfx[..n]);
+                            let tag = &data[28..28 + tag_len];
+                            let content = &data[28 + tag_len..mlen];
+                            let mut append = |src: &[u8], text: &mut [u8; 160], k: &mut usize| {
+                                for &b in src.iter() {
+                                    if b == 0 {
+                                        break;
+                                    }
+                                    if b == b'\n' || b == b'\t' {
+                                        if *k < text.len() {
+                                            text[*k] = b' ';
+                                            *k += 1;
+                                        }
+                                        continue;
+                                    }
+                                    if b >= 0x20 && b < 0x7f && *k < text.len() {
+                                        text[*k] = b;
+                                        *k += 1;
+                                    }
+                                }
+                            };
+                            append(tag, &mut text, &mut k);
+                            if k > 0 && k < text.len() {
+                                text[k] = b':';
+                                k += 1;
+                                text[k] = b' ';
+                                k += 1;
+                            } else if k < text.len() {
+                                text[k] = b':';
+                                k += 1;
+                            }
+                            append(content, &mut text, &mut k);
+                            decoded = true;
+                        }
+                    }
+                    if !decoded {
+                        for &b in data.iter() {
+                            if b >= 0x20 && b < 0x7f {
+                                text[k] = b;
+                                k += 1;
+                                if k == text.len() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let s = core::str::from_utf8(&text[..k]).unwrap_or("");
+                    // u17 lesson: "dri" matches "driver", "Render" matches
+                    // the audio RenderRouters flood, "display" matches
+                    // everything — keep the set tight and case-distinct.
+                    // Tag allowlist first (decoded tags are exact, no
+                    // substring risk): RS/bootanimation/composer cohort.
+                    const TAGS: [&str; 12] = [
+                        "OHOS::RS", "BootAnimation", "Composer", "ComposerAgent",
+                        "ComposerManager", "2DGraphics", "FrameCollector",
+                        "FramePainter", "EGL", "OpenGLWrapper", "DISP", "MESA",
+                    ];
+                    const KEYS: [&str; 23] = [
+                        "EGL", "egl", "DRI", "dri2", "Mesa", "mesa", "gbm", "GBM", "virtio",
+                        "llvmpipe", "gallium", "swrast", "softpipe", "GL_", "GLES", "Composer",
+                        "composer", "Rosen", "rosen", "DISP", "gralloc", "Gralloc", "DRI2",
+                    ];
+                    // Mesa's egl_dri2 extension probe floods ~1200
+                    // "[dri2_get_proc_address@...] procname = gl..." lines
+                    // through the DISP tag right before the interesting
+                    // window (screen create → llvmpipe init → verdict);
+                    // skipping them keeps the budget for the verdict lines.
+                    let flood = s.contains("procname = gl");
+                    // leg-30B5: the StartUser/SwitchToUser user-start chain
+                    // cohort at WARN (visible at loglevel 6, unlike the GL
+                    // cohort's pr_debug): BMS's ImplicitQueryInfoByPriority
+                    // verdicts ("user is not existed" = GetUserId rejected
+                    // user 100; "can't find target AbilityInfo" = the isBoot
+                    // retry ladder's spin reason), accountmgr's adapter
+                    // results, and AMS's own handler narration. Rare lines
+                    // concentrated in the post-unlock window — own budget.
+                    const AMS_KEYS: [&str; 49] = [
+                        "SwitchToUser",
+                        "startUser in service",
+                        "highest priority ability",
+                        "user is not existed",
+                        "invalid userId",
+                        "userId not exist",
+                        "CreateNewUser user",
+                        "CreateNewUser end",
+                        "bundle size:",
+                        "wait complete",
+                        "AbilityManagerAdapter",
+                        "in call back",
+                        "StartUser current",
+                        "low-mem mode",
+                        "foregroundUserId:",
+                        "not supported!",
+                        "failed to get os account",
+                        "os account proxy",
+                        "Get samgr failed",
+                        "account iface_cast",
+                        "failed to get account",
+                        "can't find target",
+                        "IsOsAccountExists path",
+                        // lb47: the ipc-skeleton failure verdicts. The bare
+                        // "SendRequest" key matched the SA_CLIENT success flood
+                        // ("SubscribeSystemAbility SendRequest succeed!") and
+                        // ate the whole 600 budget by ~125 s on lb46 — dark for
+                        // the entire StartUser window. Tightened to the failure
+                        // shapes only: IPCObjectProxy's ZLOGE "failed, handle:"
+                        // (every SendRequest error verdict, includes the
+                        // ERR_DEAD_OBJECT class), the null-invoker ZLOGE, the
+                        // samgr stub-object error, the work-thread pool family,
+                        // and the measured-cost lines.
+                        "failed, handle:",
+                        "invoker is null",
+                        "Invalid samgr stub",
+                        "SendRequestInner cost",
+                        "SendRequest failed",
+                        "SendRequest fail",
+                        "work thread",
+                        "find target AbilityInfo",
+                        "create user:",
+                        "permission verification failed, not account",
+                        // lb48 (seventh successor): the death-mark verdicts.
+                        // A death-marked IPCObjectProxy answers every later
+                        // SendRequest locally with ERR_DEAD_OBJECT (ZLOGD
+                        // only) — the permanent fast-fail engine. These keys
+                        // name every path that marks, un-marks, or rejects
+                        // the mark: WaitForInit's self-heal ("init again"),
+                        // OnBinderDied's address-reject ("Invalid proxy
+                        // object"), the ioctl-level errno verdict ("fail,
+                        // result:" — the ONLY path whose value can be -32 ==
+                        // ERR_DEAD_OBJECT, since a kernel BR_DEAD_REPLY maps
+                        // to +0x7205 which SendRequestInner never compares),
+                        // the parcel-side write failure, and the obituary
+                        // refcount reject.
+                        "init again",
+                        "Invalid proxy object",
+                        "fail, result:",
+                        "WriteTransaction ERROR",
+                        "failed to increment strong reference count",
+                        // 27th session (lb362/366 decode): the BMS boot-scan
+                        // verdict cohort. The fresh-boot loss is the initial
+                        // user-0 preinstall stream never installing (0
+                        // SetBundleQuota lines vs 84 on the lb317 win), and
+                        // every branch verdict in OnBmsStarting is an I/E
+                        // hilog line this tap never forwarded. These keys
+                        // name the exact branch taken on the next roll:
+                        // BmsStartEvent start/end, the CheckInitialUser wait
+                        // ("Bms initial user"), the bail-outs ("no space",
+                        // "preInstall bundleInfos failed", "QueryAllData
+                        // failed", "persistent data is empty"), the branch
+                        // verdicts ("first boot", "ReInstall all haps",
+                        // "Guard against install infos lossed strategy"),
+                        // and the CreateNewUser empty-set verdict
+                        // ("GetAllPreInstallBundleInfos failed").
+                        // Once-per-boot or once-per-user lines; volume < 20
+                        // per boot against the 600-line budget.
+                        "BmsStartEvent",
+                        "Bms initial user",
+                        "OnBmsStarting",
+                        "no space",
+                        "preInstall bundleInfos failed",
+                        "QueryAllData failed",
+                        "persistent data is empty",
+                        "first boot",
+                        "ReInstall all haps",
+                        "Guard against install infos lossed strategy",
+                        "GetAllPreInstallBundleInfos failed",
+                    ];
+                    let ams_family = AMS_KEYS.iter().any(|key| s.contains(key));
+                    if ams_family {
+                        static AMS_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = AMS_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 600 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_warn!("HILOG-AMS[{}] {}{}", n, p, s);
+                        }
+                    }
+                    // Decoded line is "<tag>: <content>" — prefix-match the
+                    // tag so "OHOS::RS" (which contains ':') still works.
+                    let interesting = TAGS.iter().any(|t| {
+                        s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                    }) || KEYS.iter().any(|key| s.contains(key));
+                    if !flood && interesting {
+                        static HILOG_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 3000 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_debug!("hilog[{}] {}{}", n, p, s);
+                        }
+                    }
+                    // Spawn-chain tap (launcher hunt, b16): the appspawn ->
+                    // fork -> exec/ArkTS-chain evidence lives in hilog under
+                    // appspawn/ams/bms/ability-runtime tags, none of which the
+                    // graphics filter above passes. b16 exhausted the 3000
+                    // graphics taps before appspawn's single fork ever
+                    // logged, so this cohort gets its own counter and budget.
+                    // Exact tags first, then one substring set — "ppSpawn"
+                    // spans AppSpawn/APPSPAWN/appspawn (the family of
+                    // spellings OH actually emits) without matching unrelated
+                    // words.
+                    const SPAWN_TAGS: [&str; 10] = [
+                        "APPSPAWN", "AppSpawn", "Ams", "Bms", "BundleMgr",
+                        "AbilityRuntime", "AbilityManagerService", "CJAppspawn",
+                        "NativeService", "appspawn",
+                    ];
+                    const SPAWN_KEYS: [&str; 9] = [
+                        "ppSpawn", "StartAbility", "start ability", "bundleName",
+                        "AbilityManager", "appspawn", "OnForeground", "OnBackground",
+                        "AbilityScheduler",
+                    ];
+                    let spawn_hit = SPAWN_TAGS.iter().any(|t| {
+                        s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                    }) || SPAWN_KEYS.iter().any(|key| s.contains(key));
+                    if spawn_hit {
+                        static SPAWN_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = SPAWN_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        // b21 lesson: 3000 taps ran out mid-boot (slog[2999])
+                        // right at the spawn-section logs — the whole chain
+                        // (BMS dir creation, child runtime, OnForeground) went
+                        // dark exactly when it got interesting. 30000 covers a
+                        // full OH boot's spawn-cohort traffic (~4.5MB serial).
+                        if n < 30000 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_debug!("slog[{}] {}{}", n, p, s);
+                        }
+                    }
+                    // ACCOUNT cohort (sc43 hunt): the USER_UNLOCKED publish chain
+                    // — osaccount SendToStorageAccountStart -> UnlockUser ->
+                    // ActiveUserKey/PrepareStartUser -> SetIsVerified ->
+                    // PublishCommonEvent(USER_UNLOCKED) -> BMS
+                    // user_unlocked_event_subscriber creating the per-bundle
+                    // el1/100/database dirs — is the one link that never fires on
+                    // Rux. accountmgr's hilog (domain 0xd001b00, tags OsAccount/
+                    // AccountMgr/AccountFwk) was invisible to both cohorts above.
+                    const ACCT_TAGS: [&str; 7] = [
+                        "OsAccount", "AccountMgr", "AccountFwk", "ACCOUNT",
+                        "AccountSA", "StorageManager", "StorageDaemon",
+                    ];
+                    const ACCT_KEYS: [&str; 8] = [
+                        "USER_UNLOCKED", "UnlockUser", "PrepareStartUser",
+                        "ActiveUserKey", "is unlocked", "user_unlocked",
+                        "need CreateBundleDataDir", "OsAccount",
+                    ];
+                    let acct_hit = ACCT_TAGS.iter().any(|t| {
+                        s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                    }) || ACCT_KEYS.iter().any(|key| s.contains(key));
+                    if acct_hit {
+                        static ACCT_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = ACCT_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 6000 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_debug!("alog[{}] {}{}", n, p, s);
+                        }
+                    }
+                    // INSTALLD cohort (sc45 hunt): installd-in-BMS creates
+                    // el1/<uid>/base/<b> but never el1/<uid>/database/<b> nor
+                    // any el2 leaf on Rux, while the Linux reference creates
+                    // all of them. The BMSInstalld tag (domain 0xD001122)
+                    // logs every abort reason in CreateBundleDataDir
+                    // ("Base directory does not existed",
+                    // "HapFileRestorecon failed", "MkOwnerDir failed errno")
+                    // but was invisible to every cohort above.
+                    const ILD_TAGS: [&str; 1] = ["BMSInstalld"];
+                    const ILD_KEYS: [&str; 6] = [
+                        "CreateBundleDataDir", "HapFileRestorecon", "SetDirApl",
+                        "MkOwnerDir", "does not existed", "installd permission",
+                    ];
+                    let ild_hit = ILD_TAGS.iter().any(|t| {
+                        s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                    }) || ILD_KEYS.iter().any(|key| s.contains(key));
+                    if ild_hit {
+                        static ILD_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = ILD_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 10000 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_debug!("ilog[{}] {}{}", n, p, s);
+                        }
+                    }
+                }
+            }
+
+        // STREAM + zero-length payload: never enqueue an empty segment.
+        // A byte stream has no record boundaries — ancillary data rides the
+        // first subsequently queued bytes (Linux association semantics); a
+        // materialized 0-length segment made recv() return Ok(0), which
+        // stream readers take as peer EOF (see pending_anc on UnixSocket).
+        if data.is_empty() && matches!(sock.kind, UnixKind::Stream) {
+            if !files.is_empty() || cred.is_some() {
+                let n = {
+                    let mut anc = target.pending_anc.lock();
+                    anc.push((files, cred));
+                    anc.len()
+                };
+                target.pending_anc_n.store(n, Ordering::Release);
+            }
+            return Ok(0);
+        }
+
+        {
+            let mut q = target.recv_queue.lock();
+            // Truesize discipline (see seg_charge): the enqueue gate must
+            // charge the segment's HEAP cost, or 1-byte datagram fills
+            // exhaust the buddy heap one page at a time before the byte
+            // cap is ever reached (r8 ALLOCTHROW family).
+            // leg-34: the running RecvQueue::charge replaces the
+            // O(depth) walk that used to run here on every send.
+            let queued: usize = q.charge;
+            if queued == 0 || queued + seg_charge(data.len()) <= cap {
+                // leg-34: Arc clone of the bind-time cache (refcount
+                // bump), not a per-segment String allocation.
+                let src = sock.src_arc.lock().clone();
+                // Drain parked ancillary data onto the front of the new
+                // segment: first-touch delivery with the first bytes that
+                // were queued AFTER the (files, cred) arrived. The count
+                // mirror gates the lock pair (perf-r3): the empty case —
+                // every ordinary stream send — skips it entirely.
+                let mut files = files;
+                let mut cred = cred;
+                if target.pending_anc_n.load(Ordering::Acquire) != 0 {
+                    let mut anc = target.pending_anc.lock();
+                    for (pf, pc) in anc.drain(..) {
+                        files.extend(pf);
+                        if cred.is_none() {
+                            cred = pc;
+                        }
+                    }
+                    target.pending_anc_n.store(0, Ordering::Release);
+                }
+                // SO_PASSCRED parity (perf-r3): Linux's
+                // unix_maybe_add_creds() snapshots the sender's
+                // {pid,uid,gid} into the skb at send time only when the
+                // SENDER's or the RECEIVER's socket has SOCK_PASSCRED
+                // set — an uncredentialed pair carries no snapshot at
+                // all. The RECEIVER's recvmsg emits the SCM_CREDENTIALS
+                // cmsg only when the receiving socket has SO_PASSCRED
+                // set, so gating here changes nothing observable for
+                // credentialed receivers (hilogd — which derefs the cmsg
+                // pointer unconditionally after recvmsg — sets
+                // SO_PASSCRED, so its segments are still stamped) while
+                // the common no-passcred pair skips the per-send task
+                // snapshot.
+                if cred.is_none()
+                    && (sock.passcred_flag.load(Ordering::Relaxed)
+                        || target.passcred_flag.load(Ordering::Relaxed))
+                {
+                    cred = Some(current_unix_cred());
+                }
+                let charge = seg_charge(data.len());
+                q.charge += charge;
+                let sent_len = data.len();
+                q.segs.push_back(UnixSeg {
+                    data,
+                    files,
+                    cred,
+                    src,
+                    charge,
+                });
+                drop(q);
+                // Data arrival — reference sk_data_ready (sock_def_readable,
+                // wake_up_interruptible_sync_poll, nr_exclusive = 1): every
+                // non-exclusive poller plus ONE exclusive reader. Blocked
+                // senders are NOT on this queue anymore (they park on
+                // target.peer_wait) — an arrival no longer stampedes them.
+                target.wait_queue.wake_up_one();
+                // Readiness rose for the TARGET's file description: re-arm
+                // edge-triggered epoll watchers and wake blocked waiters.
+                // Every enqueue is a potential fresh edge (Linux re-queues
+                // the epi from the socket's data_ready callback on every
+                // arrival, not just empty→nonempty transitions).
+                let fid = target.file_id.load(Ordering::Acquire);
+                if fid != 0 {
+                    crate::fs::event_notify::epoll_notify_file(fid);
+                }
+                return Ok(sent_len);
+            }
+        }
+
+        if nonblock {
+            return Err(-11); // EAGAIN
+        }
+        // Block on the TARGET's peer_wait (room condition) — reference
+        // unix_wait_for_peer(other = the receiving socket): EXCLUSIVE on
+        // u->peer_wait, woken by the receiver's drain (ONE wake per freed
+        // record) and the target's close/shutdown (wake_all).
+        let t = target.clone();
+        unix_wait_round(&t.peer_wait, true, &|| target_has_room(&t, data.len(), cap), deadline)?;
+    }
+}
+
+/// Result of a receive: bytes copied, full length of the record (DGRAM
+/// truncation reporting), sender name, and SCM_RIGHTS files /
+/// SCM_CREDENTIALS triple.
+pub struct UnixRecvResult {
+    pub len: usize,
+    pub orig_len: usize,
+    pub src: Option<Arc<str>>,
+    pub files: Vec<Arc<File>>,
+    pub cred: Option<UnixCred>,
+    pub truncated: bool,
+}
+
+fn unix_recv_eof() -> UnixRecvResult {
+    UnixRecvResult {
+        len: 0,
+        orig_len: 0,
+        src: None,
+        files: Vec::new(),
+        cred: None,
+        truncated: false,
+    }
+}
+
+/// Receive one message (STREAM: drain across segments; DGRAM: one
+/// segment). Returns EAGAIN when nothing is available.
+///
+/// `peek` (MSG_PEEK): copy from the front of the queue WITHOUT popping —
+/// the record, its ancillary data and its sender name all stay queued for
+/// the next non-peek receive (Linux unix_dgram_recvmsg/unix_stream_read_generic
+/// MSG_PEEK semantics).
+pub fn unix_recv(
+    sock: &Arc<UnixSocket>,
+    buf: &mut [u8],
+    peek: bool,
+) -> Result<UnixRecvResult, i32> {
+    let mut q = sock.recv_queue.lock();
+    if peek {
+        if let Some(front) = q.segs.front() {
+            match sock.kind {
+                UnixKind::Dgram | UnixKind::Seqpacket => {
+                    // One record, boundaries visible through the peek.
+                    let orig_len = front.data.len();
+                    let take = orig_len.min(buf.len());
+                    buf[..take].copy_from_slice(&front.data[..take]);
+                    // Ancillary data is reported but NOT consumed.
+                    let files = front.files.clone();
+                    let cred = front.cred;
+                    let src = front.src.clone();
+                    drop(q);
+                    // Reference __unix_dgram_recvmsg fires the peer_wait
+                    // wake on EVERY successful try-recv INCLUDING a peek
+                    // (wq_has_sleeper-guarded, nr_exclusive = 1).
+                    sock.peer_wait.wake_up_one();
+                    return Ok(UnixRecvResult {
+                        len: take,
+                        orig_len,
+                        src,
+                        files,
+                        cred,
+                        truncated: take < orig_len,
+                    });
+                }
+                UnixKind::Stream => {
+                    // Byte-stream peek: across as many queued segments as
+                    // the buffer holds, nothing consumed.
+                    let mut copied = 0usize;
+                    let mut orig_total = 0usize;
+                    let mut files = Vec::new();
+                    let mut cred: Option<UnixCred> = None;
+                    let mut src: Option<Arc<str>> = None;
+                    for seg in q.segs.iter() {
+                        orig_total += seg.data.len();
+                        let take = seg.data.len().min(buf.len() - copied);
+                        buf[copied..copied + take].copy_from_slice(&seg.data[..take]);
+                        copied += take;
+                        if cred.is_none() {
+                            cred = seg.cred;
+                        }
+                        if src.is_none() {
+                            src = seg.src.clone();
+                        }
+                        if copied >= buf.len() {
+                            break;
+                        }
+                    }
+                    drop(q);
+                    return Ok(UnixRecvResult {
+                        len: copied,
+                        orig_len: orig_total,
+                        src,
+                        files,
+                        cred,
+                        // A stream peek that stopped at the buffer edge with
+                        // more bytes queued is not a "record" truncation;
+                        // Linux reports no MSG_TRUNC for streams either.
+                        truncated: false,
+                    });
+                }
+            }
+        }
+        // Empty queue under peek: fall through to the EOF/EAGAIN tail below.
+    }
+    match sock.kind {
+        UnixKind::Stream => {
+            if let Some(mut seg) = {
+                let seg = q.segs.pop_front();
+                if let Some(sg) = seg.as_ref() {
+                    q.charge -= sg.charge;
+                }
+                seg
+            } {
+                let mut files = Vec::new();
+                let mut cred: Option<UnixCred> = None;
+                let mut src: Option<Arc<str>> = None;
+                let mut copied = 0usize;
+                let mut orig_total = 0usize;
+                // Fully-consumed segment count — the wake currency of the
+                // drain (reference: one consume_skb -> sock_wfree ->
+                // write_space chain per consumed skb).
+                let mut whole = 0usize;
+                // Drain this segment (and any following ones) into buf.
+                loop {
+                    orig_total += seg.data.len();
+                    let take = seg.data.len().min(buf.len() - copied);
+                    buf[copied..copied + take].copy_from_slice(&seg.data[..take]);
+                    copied += take;
+                    files.extend(seg.files.drain(..));
+                    if cred.is_none() {
+                        cred = seg.cred.take();
+                    }
+                    if let Some(s) = seg.src.take() {
+                        src = Some(s);
+                    }
+                    if copied >= buf.len() {
+                        // Keep the remainder (fds cleared — they were
+                        // delivered with this recv, first-touch semantics)
+                        // for the next recv.
+                        if take < seg.data.len() {
+                            seg.data.drain(..take);
+                            let rest = seg_charge(seg.data.len());
+                            seg.charge = rest;
+                            q.charge += rest;
+                            q.segs.push_front(seg);
+                        } else {
+                            whole += 1;
+                        }
+                        break;
+                    }
+                    match {
+                        let next = q.segs.pop_front();
+                        if let Some(sg) = next.as_ref() {
+                            q.charge -= sg.charge;
+                        }
+                        next
+                    } {
+                        Some(next) => {
+                            whole += 1;
+                            seg = next;
+                        }
+                        None => {
+                            whole += 1;
+                            break;
+                        }
+                    }
+                }
+                drop(q);
+                // sc209 (leg 14): arrival half of the PCTL param tap (see
+                // the send side in unix_send). When pid 1 (begetd, which
+                // hosts the param service) reads a stream segment that
+                // parses as a ParamMessage, print it — client-send lines
+                // without a matching PCTL-RECV name where the installs
+                // ctl sets die (queue stall vs server epoll wake loss).
+                // 110th: gated behind rux:pctlmon (retired dfx=pctlmon) (the switch built for
+                // exactly this tap) — ~132 lines rode every perf boot,
+                // each costing UART emit + hilogd drain.
+                if copied >= 12 && crate::process::current_pid() == 1 && pctlmon_on() {
+                    let mtype = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    if mtype <= 5 && buf[12] >= b'a' && buf[12] <= b'z' {
+                        static PCTL_R_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = PCTL_R_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 300 {
+                            let mid = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                            let mut kbuf = [0u8; 40];
+                            let kmax = core::cmp::min(40, copied - 12);
+                            let mut klen = 0usize;
+                            while klen < kmax && buf[12 + klen] != 0 {
+                                kbuf[klen] = buf[12 + klen];
+                                klen += 1;
+                            }
+                            let key = core::str::from_utf8(&kbuf[..klen]).unwrap_or("?");
+                            crate::pr_warn!(
+                                "PCTL-RECV #{} pid=1 len={} type={} msgId={} key={}",
+                                n,
+                                copied,
+                                mtype,
+                                mid,
+                                key
+                            );
+                        }
+                    }
+                }
+                // Room freed per fully-consumed segment: the reference
+                // fires consume_skb -> sock_wfree(sender) -> unix_write_space
+                // per consumed skb (nr_exclusive = 1). Wake ONE parked
+                // sender per freed segment on our peer_wait, and deliver the
+                // sender-side readiness ONCE on the peer's wait_queue (the
+                // reference's per-skb write_space wake on the sender's
+                // sk_sleep; one pass reports the same readiness with fewer
+                // spurious reader wakes).
+                for _ in 0..whole {
+                    sock.peer_wait.wake_up_one();
+                }
+                // Draining also raises the PEER's writability (its send
+                // queue just got room) — an EPOLLET edge on the peer's
+                // fd. Without this notify, a peer whose EPOLLOUT edge was
+                // reported and then swallowed by a fill/drain cycle between
+                // two epoll_wait calls (snapshot still says EPOLLOUT ==
+                // last_reported) never learns it can write again — Linux
+                // fires the sender's write_space callback here.
+                if let Some(peer) = sock.peer_arc() {
+                    if whole > 0 {
+                        peer.wait_queue.wake_up_one();
+                    }
+                    let fid = peer.file_id.load(Ordering::Acquire);
+                    if fid != 0 {
+                        crate::fs::event_notify::epoll_notify_file(fid);
+                    }
+                }
+                return Ok(UnixRecvResult {
+                    len: copied,
+                    orig_len: orig_total,
+                    src,
+                    files,
+                    cred,
+                    truncated: false,
+                });
+            }
+        }
+        UnixKind::Dgram | UnixKind::Seqpacket => {
+            // One record per recv (boundaries preserved); a short buffer
+            // truncates and reports MSG_TRUNC.
+            if let Some(seg) = {
+                let seg = q.segs.pop_front();
+                if let Some(sg) = seg.as_ref() {
+                    q.charge -= sg.charge;
+                }
+                seg
+            } {
+                let orig_len = seg.data.len();
+                let take = orig_len.min(buf.len());
+                buf[..take].copy_from_slice(&seg.data[..take]);
+                let files = seg.files;
+                let cred = seg.cred;
+                let src = seg.src;
+                drop(q);
+                // Record consumed: reference __unix_dgram_recvmsg wakes the
+                // receive queue's peer_wait with
+                // wake_up_interruptible_sync_poll (nr_exclusive = 1) — ONE
+                // parked sender per freed record, wq_has_sleeper-guarded.
+                sock.peer_wait.wake_up_one();
+                // Peer writability rose (see the STREAM branch above).
+                if let Some(peer) = sock.peer_arc() {
+                    let fid = peer.file_id.load(Ordering::Acquire);
+                    if fid != 0 {
+                        crate::fs::event_notify::epoll_notify_file(fid);
+                    }
+                }
+                return Ok(UnixRecvResult {
+                    len: take,
+                    orig_len,
+                    src,
+                    files,
+                    cred,
+                    truncated: take < orig_len,
+                });
+            }
+        }
+    }
+    drop(q);
+
+    // Empty queue: EOF or error or block. Pending socket error first,
+    // read-and-clear (reference sock_error semantics — one delivery,
+    // then EOF).
+    {
+        let e = sock.err.load();
+        if e != 0 {
+            sock.err.store(0);
+            return Err(e);
+        }
+    }
+    // 111st: one-way latch mirrors — both stored BEFORE their locked
+    // writes, so false PROVES neither is set; true = closing/EOF is
+    // imminent (the closer's wake re-triggers the blocking re-check).
+    if sock.eof_m.load(Ordering::Acquire) || sock.closed_m.load(Ordering::Acquire) {
+        return Ok(unix_recv_eof());
+    }
+    match sock.kind {
+        UnixKind::Stream | UnixKind::Seqpacket => {
+            let state = *sock.state.lock();
+            if state == UnixState::Unconnected || state == UnixState::Listening {
+                return Err(-107); // ENOTCONN
+            }
+        }
+        UnixKind::Dgram => {}
+    }
+    Err(-11) // EAGAIN
+}
+
+/// shutdown(): SHUT_RD(0) / SHUT_WR(1) / SHUT_RDWR(2).
+pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
+    if how < 0 || how > 2 {
+        return Err(-22); // EINVAL
+    }
+    if how >= 1 {
+        // 111st: latch first (see the mirror docs on UnixSocket).
+        sock.shut_wr_m.store(true, Ordering::Release);
+        *sock.shut_wr.lock() = true;
+        // Tell the peer its recvs will EOF (after draining).
+        if let Some(peer) = sock.peer_arc() {
+            peer.eof_m.store(true, Ordering::Release);
+            *peer.eof.lock() = true;
+            peer.wait_queue.wake_up_all();
+            // EOF is a readability edge for the peer's watchers too.
+            let fid = peer.file_id.load(Ordering::Acquire);
+            if fid != 0 {
+                crate::fs::event_notify::epoll_notify_file(fid);
+            }
+        }
+    }
+    if how == 0 || how == 2 {
+        // SHUT_RD: subsequent recvs return EOF once the queue drains.
+        sock.eof_m.store(true, Ordering::Release);
+        *sock.eof.lock() = true;
+    }
+    // sk_state_change(sk) (sock_def_wakeup = wake_all on sk_sleep): our
+    // own readers/acceptors/pollers see the state change.
+    sock.wait_queue.wake_up_all();
+    // Parked senders on our peer_wait re-check too (the reference's
+    // unix_wait_for_peer re-evaluates RCV_SHUTDOWN after its wake; the
+    // send loop takes the EPIPE path).
+    sock.peer_wait.wake_up_all();
+    Ok(())
+}
+
+/// close(): release the name, mark the peer's EOF, wake waiters.
+pub fn unix_close(sock: &Arc<UnixSocket>) {
+    // 66th (rux:pctlmon (retired dfx=pctlmon)): last close of a param-service socket — either
+    // init dropping an accepted client (unread queued requests die here,
+    // and the CLIENT sees EPIPE only on its NEXT send) or a client dying.
+    // queued>0 on an init-side close = requests silently dropped.
+    if pctlmon_on() && sock.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0 {
+        static PCTL_X_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = PCTL_X_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 200 {
+            let q = sock.recv_queue.lock();
+            let (qb, ql) = (q.charge, q.segs.len());
+            drop(q);
+            crate::pr_warn!(
+                "PCTL-CLOSE #{} pid={} fid={:#x} queued={}B/{}segs peer_alive={}",
+                n,
+                crate::process::current_pid(),
+                sock.file_id.load(Ordering::Acquire),
+                qb,
+                ql,
+                sock.peer_arc().is_some()
+            );
+        }
+    }
+    // 111st: closed_m latch FIRST — the send fast path and the dgram-peer
+    // cache validation prove "not closing" from this store alone.
+    sock.closed_m.store(true, Ordering::Release);
+    *sock.state.lock() = UnixState::Closed;
+    // Peer's poll() starts reporting POLLHUP (Linux SHUTDOWN_MASK on peer
+    // release) — set before the wake below so a racing poll sees it.
+    *sock.dead.lock() = true;
+    // Remove our name-table entry (the registration key — the inode
+    // identity for filesystem sockets, the abstract name otherwise).
+    if let Some(name) = sock.reg_name.lock().take() {
+        let mut table = UNIX_TABLE.lock();
+        // Only remove if the entry still points at US (a replaced entry
+        // after a re-bind must survive).
+        if table
+            .get(&name)
+            .map(|s| Arc::ptr_eq(s, sock))
+            .unwrap_or(false)
+        {
+            table.remove(&name);
+            // NOTE: the filesystem node created at bind() is deliberately
+            // NOT unlinked here — Linux keeps the socket file after the
+            // last fd closes (the classic stale-socket-file behavior; a
+            // re-bind over it gets EADDRINUSE until it is unlinked).
+            // Auto-removing it broke LTP bind04/bind05, whose cleanup
+            // unlink(2)s the path AFTER closing the sockets and expects
+            // it to still exist.
+        }
+    }
+    // Peer gets drain-then-EOF semantics.
+    if let Some(peer) = sock.peer_arc() {
+        peer.eof_m.store(true, Ordering::Release);
+        *peer.eof.lock() = true;
+        // Reference unix_release_sock: when a SOCK_STREAM/SOCK_SEQPACKET
+        // socket closes with UNREAD data still in its receive queue, the
+        // surviving peer gets sk_err = ECONNRESET — its next recv (after
+        // draining what was already delivered to it) reports the reset,
+        // not a clean EOF. The closing side's own queued data is about to
+        // be discarded below.
+        if matches!(sock.kind, UnixKind::Stream | UnixKind::Seqpacket)
+            && !sock.recv_queue.lock().segs.is_empty()
+        {
+            peer.err.store(-104); // ECONNRESET
+        }
+        // skpair->sk_state_change(skpair) (sock_def_wakeup = wake_all on
+        // the PEER's sk_sleep): the peer's readers/acceptors/pollers see
+        // EOF/POLLHUP.
+        peer.wait_queue.wake_up_all();
+        // Senders parked on the PEER's peer_wait re-check and take EPIPE
+        // (the reference reaches them via the RCV_SHUTDOWN re-evaluation
+        // after their next wake; we wake them here so a blocked writev
+        // fails promptly instead of sleeping out its timeout).
+        peer.peer_wait.wake_up_all();
+        // Peer close raises the peer's POLLIN|POLLHUP readiness — an edge
+        // its EPOLLET watchers must see (Xorg detects dead clients this way).
+        let fid = peer.file_id.load(Ordering::Acquire);
+        if fid != 0 {
+            crate::fs::event_notify::epoll_notify_file(fid);
+        }
+    }
+    // Drop the pinned socket-node inode (its identity was our reg key).
+    *sock.node_inode.lock() = None;
+    // Pending children of a dying listener are dropped with their Arcs;
+    // their clients see EPIPE on the next send (peer upgrade fails).
+    sock.accept_queue.lock().clear();
+    // scmtap (gdm session-fifo hunt): fds still parked in OUR receive
+    // queue at close time are about to be released — the receiver died
+    // (or stopped reading) before the ancillary segment was touched.
+    if crate::dfx::scmtap::enabled() {
+        let q = sock.recv_queue.lock();
+        let mut nfds = 0usize;
+        let mut segs = 0usize;
+        for seg in q.segs.iter() {
+            if !seg.files.is_empty() {
+                segs += 1;
+                nfds += seg.files.len();
+            }
+        }
+        drop(q);
+        if nfds > 0 {
+            crate::dfx::scmtap::tap_orphan(nfds, segs);
+        }
+    }
+    // unix_release_sock: wake_up_interruptible_all(&u->peer_wait) —
+    // senders/connectors parked on OUR peer_wait re-check and take
+    // EPIPE/ECONNREFUSED; our own waiters (readers/pollers — an
+    // skpair-less self-reader still sees EOF) re-check too.
+    sock.peer_wait.wake_up_all();
+    sock.wait_queue.wake_up_all();
+}
+
+// ============================================================================
+// File operations
+// ============================================================================
+
+/// Recover a strong Arc<UnixSocket> from a File's private_data.
+/// Contract: the caller must have identity-checked the File against
+/// UNIX_SOCKET_OPS first (unix_socket_from_fd / unix_file_of do).
+fn unix_of_file(file: &File) -> Option<Arc<UnixSocket>> {
+    // Ops identity checked by the caller; the shared net-family edge
+    // (INV-NETARC-1) does the Arc revival.
+    crate::net::file_arc::<UnixSocket>(file)
+}
+
+/// sc97 KILLDUMP support: identity-checked reconstruction for a File
+/// from ANOTHER task's fdtable (unix_file_of only sees current's).
+/// Returns None for non-unix files.
+pub fn unix_of_file_diag(file: &File) -> Option<Arc<UnixSocket>> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &UNIX_SOCKET_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity checked above.
+    unix_of_file(file)
+}
+
+fn unix_file_nonblock(file: &File) -> bool {
+    (file.flags().bits() & FileFlags::O_NONBLOCK) != 0
+}
+
+fn unix_file_read(file: &File, buf: &mut [u8]) -> isize {
+    // SAFETY: ops identity was verified — this File was created by
+    // unix_socket_install with a UnixSocket Arc in private_data.
+    let socket = match unix_of_file(file) {
+        Some(s) => s,
+        None => return -9,
+    };
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.rcvtimeo_deadline();
+    match unix_recv_ctl(&socket, buf, nonblock, deadline, false) {
+        Ok(r) => r.len as isize,
+        Err(e) => e as isize,
+    }
+}
+
+fn unix_file_write(file: &File, buf: &[u8]) -> isize {
+    // SAFETY: ops identity was verified (see unix_file_read).
+    let socket = match unix_of_file(file) {
+        Some(s) => s,
+        None => return -9,
+    };
+    if *socket.shut_wr.lock() {
+        return -32; // EPIPE
+    }
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.sndtimeo_deadline();
+    // Owned-Vec send (perf-ipc): one copy here (buf is the generic write
+    // path's staging slice); write(2) on a unix socket normally takes the
+    // unix_write_user direct path instead — zero staging.
+    let data = buf.to_vec();
+    match unix_send(&socket, data, Vec::new(), None, None, nonblock, deadline) {
+        Ok(n) => n as isize,
+        Err(e) => e as isize,
+    }
+}
+
+/// write(2)/writev fast path for AF_UNIX: build the segment with the ONE
+/// user→kernel copy (no staging buffer, no second copy at the enqueue).
+/// Mirrors pipe_write_user. `src` must be access_ok-validated for `count`
+/// bytes. A faulting source is EFAULT with nothing sent (the generic
+/// staged path's contract).
+pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
+    use crate::arch::uaccess::copy_from_user;
+    // cctx probe (closegap lane): whole-op send sum for lat_unix.
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::UW_N);
+    let cc_out = |r: isize| -> isize {
+        crate::dfx::cctx::add(&crate::dfx::cctx::UW_NS, cc_t);
+        r
+    };
+    // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
+    // private_data holds the UnixSocket Arc installed at open. `count`
+    // is at most RW_CHUNK (the dispatcher's guard): one bounded segment
+    // allocation per call, same heap discipline as the generic staging.
+    let socket = match unix_of_file(file) {
+        Some(s) => s,
+        None => return cc_out(-9), // EBADF
+    };
+    if *socket.shut_wr.lock() {
+        return cc_out(-32); // EPIPE
+    }
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.sndtimeo_deadline();
+
+    // Framework staged copy (uaccess_safe::copy_in_vec_exact): exact
+    // reservation, EFAULT with nothing sent on a fault — the exact
+    // contract the generic staged path had (its staged copy_in returned
+    // EFAULT on a first-chunk fault, no short send).
+    let kbuf = match crate::arch::uaccess_safe::copy_in_vec_exact(src as usize, count) {
+        Some(v) => v,
+        None => return cc_out(-14), // EFAULT
+    };
+    match unix_send(&socket, kbuf, Vec::new(), None, None, nonblock, deadline) {
+        Ok(n) => cc_out(n as isize),
+        Err(e) => cc_out(e as isize),
+    }
+}
+
+/// writev(2) gather entry for DGRAM/SEQPACKET unix sockets: hand the
+/// already-gathered kernel buffer to the send engine OWNED (the generic
+/// fallback would route through write_slice → a second copy at the
+/// enqueue). Returns write(2)-style isize.
+pub fn unix_write_slice_owned(file: &File, gathered: alloc::vec::Vec<u8>) -> isize {
+    // SAFETY: dispatcher verified ops identity (unix_file_of_file in
+    // sys_writev) — private_data holds the UnixSocket Arc.
+    let socket = match unix_of_file(file) {
+        Some(s) => s,
+        None => return -9,
+    };
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.sndtimeo_deadline();
+    match unix_send(&socket, gathered, Vec::new(), None, None, nonblock, deadline) {
+        Ok(n) => n as isize,
+        Err(e) => e as isize,
+    }
+}
+
+// ============================================================================
+// read(2)-on-socket direct-drain fast path (perf-audit leg 46, ledger
+// 8.10.15's lever)
+// ============================================================================
+
+/// True when `file` is an AF_UNIX socket description (UNIX_SOCKET_OPS) —
+/// lets sys_read take the direct-drain fast path below, mirroring
+/// `is_pipe_file`.
+pub fn is_unix_file(file: &File) -> bool {
+    file.get_ops()
+        .is_some_and(|ops| core::ptr::eq(ops as *const _, &UNIX_SOCKET_OPS as *const _))
+}
+
+/// oh67: diagnostic readiness snapshot for a parked poll's unix-socket
+/// fd — (bound name, recv segments, recv charge bytes, peer alive,
+/// accept backlog). Census contexts only; read-only.
+pub fn oh67_unix_ready(file: &File) -> Option<(String, usize, usize, bool, usize)> {
+    if !is_unix_file(file) {
+        return None;
+    }
+    // UNIX_SOCKET_OPS files carry an Arc<UnixSocket> in private_data,
+    // installed at creation; private() is the audited resolver.
+    let sk: &UnixSocket = file
+        .private_data_ptr()
+        .map(|p| {
+            // INV-NET-ARCREF-1b: ops-identity-checked private_data
+            // deref (net_edges audited_deref).
+            crate::net::net_edges::audited_deref(p as *const UnixSocket)
+        })?;
+    let name = sk
+        .bound_name
+        .lock()
+        .clone()
+        .unwrap_or_else(|| "?".into());
+    let (segs, charge) = {
+        let q = sk.recv_queue.lock();
+        (q.segs.len(), q.charge)
+    };
+    let peer_alive = sk.peer.lock().as_ref().and_then(|w| w.upgrade()).is_some();
+    let accept_n = sk.accept_queue.lock().len();
+    Some((name, segs, charge, peer_alive, accept_n))
+}
+
+/// Size of the on-stack drain bounce (see unix_read_user). Kernel-stack
+/// safe; covers hilogd-class records (74 B), the pbench p5 record shape,
+/// and the few-segment queue depths the serialized regime produces.
+const READ_BOUNCE: usize = 1024;
+
+/// read(2)-on-socket fast path: drain the receive queue DIRECTLY into
+/// the user buffer with an on-stack bounce — no per-call heap staging
+/// (the generic path allocs min(count, RW_CHUNK) = up to 64 KB and
+/// double-copies on every call).
+///
+/// Why this shape (leg 46, perf-report 8.10.15): the 40-44 us
+/// cross-process class is per-send serialization onto a SLEEPING
+/// receiver's drain cycle — when sender and receiver share one CPU,
+/// every sendto waits out the receiver's whole receive syscall, and the
+/// staged alloc + double copy are the part of that cycle the kernel
+/// owns. The reverted b99b70f8 routed read(2) around the wrapper but
+/// KEPT the 64 KB staging (zero benefit, withdrawn); the lever is
+/// DIRECTNESS, not dispatch. pin_r4k's warning applies: continuation
+/// engine calls are NONBLOCKING — after the first byte the loop never
+/// blocks for more data (POSIX read(2): return what is available), so
+/// a faster drain cannot multiply sleep cycles the way the generic
+/// chunk loop's blocking second read did.
+///
+/// Semantics preserved vs the generic staged path:
+/// - Stream: everything queued up to `count`, one bounce at a time
+///   (short-read on queue-empty; blocking only until the first byte
+///   when the socket is blocking).
+/// - Dgram/Seqpacket: ONE record per read(2), truncated to min(count,
+///   record) — the single-record contract. A count larger than the
+///   bounce (rare for read(2)-on-dgram) takes the old one-shot heap
+///   stage so a big record is still returned whole up to count.
+/// - EOF (peer closed, queue empty) returns 0; O_NONBLOCK empty queue
+///   returns EAGAIN; SO_RCVTIMEO expiry surfaces as EAGAIN; a pending
+///   signal returns the partial count when bytes already landed.
+/// - Ancillary data is discarded (unix_file_read's existing contract).
+///
+/// Safe entry for the syscall capsule layer (kernel): `dst` may be
+/// ANY address — every store to it goes through the exception-table
+/// copy, so a bad range surfaces as EFAULT instead of a kernel fault.
+/// The historical `# Safety` contract (caller-validated dst) is now
+/// advisory only: it preserves the EFAULT-before-side-effect errno
+/// ordering the read(2) entry points produce.
+pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
+    // cctx probe (closegap lane): whole-op recv sum for lat_unix (the
+    // body has many return points — wrap instead of threading stamps).
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::UR_N);
+    let r = unix_read_user_inner(file, dst, count);
+    crate::dfx::cctx::add(&crate::dfx::cctx::UR_NS, cc_t);
+    r
+}
+
+fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
+    // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
+    // private_data holds the UnixSocket Arc installed at open.
+    let socket = match unix_of_file(file) {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.rcvtimeo_deadline();
+
+    // STREAM with a count above the bounce: direct drain (gap-net /
+    // bw_unix). The 1 KiB bounce loop below priced a 64 KiB read(2) at 64
+    // engine rounds — each with its own recv_queue lock pair, a
+    // seg->bounce copy, a bounce->user copy, a wait-queue wake and a peer
+    // epoll re-arm — and double-copied every byte. This path pops whole
+    // segments (one short lock pair each) and copies each segment
+    // STRAIGHT to user: one copy per byte total, one wake per syscall,
+    // no staging allocation. Semantics identical to the bounce loop
+    // (same contract list below); read(2) discards ancillary data.
+    if matches!(socket.kind, UnixKind::Stream) && count > READ_BOUNCE {
+        return unix_recv_stream_user(&socket, dst, count, nonblock, deadline);
+    }
+
+    // Dgram/Seqpacket with a count above the bounce: one-shot staged
+    // receive so a large record still returns whole (single record per
+    // call; the bounce loop would split it across records — wrong).
+    if !matches!(socket.kind, UnixKind::Stream) && count > READ_BOUNCE {
+        let stage = count.min(crate::syscall::support::RW_CHUNK);
+        let mut kbuf = alloc::vec![0u8; stage];
+        return match unix_recv_ctl(&socket, &mut kbuf, nonblock, deadline, false) {
+            Ok(r) => {
+                if r.len == 0 {
+                    return 0; // EOF
+                }
+                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
+                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                }
+                // dst was access_ok-validated by the caller;
+                // r.len <= stage <= count.
+                if crate::arch::uaccess_safe::copy_out(dst as usize, &kbuf[..r.len]) != 0 {
+                    return -14; // EFAULT
+                }
+                r.len as isize
+            }
+            Err(e) => e as isize,
+        };
+    }
+
+    let mut bounce = [0u8; READ_BOUNCE];
+    let mut total: usize = 0;
+    let mut user_ptr = dst as usize;
+    let mut remaining = count;
+    loop {
+        let chunk = remaining.min(READ_BOUNCE);
+        if chunk == 0 {
+            break;
+        }
+        // First engine call honors the socket's blocking semantics;
+        // continuations NEVER block (read(2) returns what arrived —
+        // blocking again mid-call is the pin_r4k cycle-multiplier).
+        let call_nonblock = total > 0 || nonblock;
+        let call_deadline = if total > 0 { None } else { deadline };
+        match unix_recv_ctl(
+            &socket,
+            &mut bounce[..chunk],
+            call_nonblock,
+            call_deadline,
+            false,
+        ) {
+            Ok(r) => {
+                let n = r.len;
+                if n == 0 {
+                    break; // peer EOF
+                }
+                // scmtap: read(2) cannot report ancillary data — the
+                // queued fds are released here (Linux closes them the
+                // same way). A fd-carrying segment touched by a plain
+                // read is the dbus "message refers to more unix fds
+                // than were sent" corruption shape, so make the loss
+                // visible when hunting (rux:scmtap (retired dfx=scmtap)).
+                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
+                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                }
+                // user_ptr stays within the access_ok-validated
+                // [dst, dst+count) window; only the n bytes unix_recv
+                // wrote are read out of the bounce.
+                if crate::arch::uaccess_safe::copy_out(user_ptr, &bounce[..n]) != 0 {
+                    // Partial fault: report what already landed (POSIX
+                    // partial-read semantics), like the generic path.
+                    return if total > 0 { total as isize } else { -14 };
+                }
+                total += n;
+                remaining -= n;
+                // Bounded offset arithmetic — stays within the
+                // count-wide window that began at dst.
+                user_ptr += n;
+                if !matches!(socket.kind, UnixKind::Stream) {
+                    break; // one record per read(2)
+                }
+                if n < chunk {
+                    break; // queue drained — short read
+                }
+            }
+            Err(e) => {
+                // EAGAIN/EINTR on a continuation is a short read, not an
+                // error (bytes already landed); on the first call it
+                // propagates.
+                return if total > 0 { total as isize } else { e as isize };
+            }
+        }
+    }
+    total as isize
+}
+
+/// STREAM read(2) direct drain into the user buffer (gap-net / bw_unix).
+///
+/// Contract — identical to the bounce loop it replaces for large counts:
+/// - Everything queued up to `count`, one segment-granularity exception
+///   copy each; blocking only until the first byte (continuations never
+///   block — POSIX short-read).
+/// - EOF (peer closed / SHUT_RD, queue empty) returns 0; O_NONBLOCK on
+///   an empty queue returns EAGAIN; SO_RCVTIMEO expiry surfaces as
+///   EAGAIN; a pending signal returns the partial count when bytes
+///   already landed (unix_wait_round reports EINTR only while total
+///   is zero, matching the bounce path's first-call propagation).
+/// - Ancillary data is taken first-touch and discarded (read(2) cannot
+///   report cmsgs — same as the bounce path; scmtap notes the drop).
+/// - A fault mid-copy returns the bytes that landed (POSIX partial
+///   read); the unconsumed remainder of the torn segment stays queued.
+fn unix_recv_stream_user(
+    sock: &Arc<UnixSocket>,
+    dst: *mut u8,
+    count: usize,
+    nonblock: bool,
+    deadline: Option<u64>,
+) -> isize {
+    use crate::arch::uaccess::copy_to_user;
+    let mut user_ptr = dst as usize;
+    let mut remaining = count;
+    let mut total: usize = 0;
+    let mut files: Vec<Arc<File>> = Vec::new();
+    let mut cred: Option<UnixCred> = None;
+    let mut anc_seen = false;
+    loop {
+        // === Drain phase: pop segments (short lock) and copy each out
+        // with the queue lock RELEASED — a user-page fault must never be
+        // resolved under the recv_queue spinlock. ===
+        let mut drained_any = false;
+        let mut buffer_full = false;
+        let mut fault_tail: Option<(usize, usize)> = None; // (good, bad)
+        while !buffer_full {
+            let popped = {
+                let mut q = sock.recv_queue.lock();
+                let seg = q.segs.pop_front();
+                if let Some(sg) = seg.as_ref() {
+                    q.charge -= sg.charge;
+                }
+                seg
+            };
+            let Some(mut seg) = popped else { break };
+            drained_any = true;
+            // Charge just dropped: reference consume_skb -> sock_wfree ->
+            // unix_write_space per consumed skb (nr_exclusive = 1). ONE
+            // parked sender per freed segment off our peer_wait.
+            sock.peer_wait.wake_up_one();
+            // First-touch ancillary pickup (mirror of the engine drain).
+            if !anc_seen && (!seg.files.is_empty() || seg.cred.is_some()) {
+                anc_seen = true;
+                files.extend(seg.files.drain(..));
+                cred = seg.cred.take();
+            } else {
+                seg.files.clear();
+                seg.cred = None;
+            }
+            let take = seg.data.len().min(remaining);
+            // user_ptr stays inside the access_ok-validated
+            // [dst, dst+count) window; exactly `take` bytes are read
+            // out of the popped (owned) segment.
+            let uncopied = crate::arch::uaccess_safe::copy_out(user_ptr, &seg.data[..take]);
+            if uncopied > 0 {
+                let good = take - uncopied;
+                total += good;
+                remaining -= good;
+                fault_tail = Some((good, uncopied));
+                // Keep the unconsumed remainder queued for the retry the
+                // caller will issue (Linux leaves the skb readable the
+                // same way after a short copy fault).
+                push_back_remainder(sock, seg.data, good, seg.src.clone());
+                break;
+            }
+            total += take;
+            remaining -= take;
+            // Bounded offset arithmetic within the count window.
+            user_ptr += take;
+            if take < seg.data.len() {
+                // Buffer filled mid-segment: remainder stays queued (fds
+                // already taken — delivered, first-touch semantics).
+                push_back_remainder(sock, seg.data, take, seg.src.clone());
+                buffer_full = true;
+                break;
+            }
+            if remaining == 0 {
+                buffer_full = true;
+            }
+        }
+        if drained_any {
+            // Sender-side readiness: the reference's write_space fires on
+            // the SENDER's sk_sleep (its parked pollers/readers). Our
+            // parked senders were already woken per segment above; this
+            // delivers the EPOLLOUT edge to the peer's parked pollers.
+            if let Some(peer) = sock.peer_arc() {
+                peer.wait_queue.wake_up_one();
+                let fid = peer.file_id.load(Ordering::Acquire);
+                if fid != 0 {
+                    crate::fs::event_notify::epoll_notify_file(fid);
+                }
+            }
+            if !files.is_empty() {
+                if crate::dfx::scmtap::enabled() {
+                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", files.len());
+                }
+                let _ = cred;
+            }
+            if fault_tail.is_some() && total == 0 {
+                // Whole first copy faulted with nothing landed.
+                return -14; // EFAULT
+            }
+            return total as isize;
+        }
+        // Nothing queued. Empty-queue semantics (mirror of unix_recv's
+        // tail): EOF, ENOTCONN, EAGAIN, or one blocking wait round.
+        // 111st: one-way latch mirrors (see unix_recvmsg_empty_tail).
+        if sock.eof_m.load(Ordering::Acquire) || sock.closed_m.load(Ordering::Acquire) {
+            return 0; // EOF after drain
+        }
+        let state = *sock.state.lock();
+        if state == UnixState::Unconnected || state == UnixState::Listening {
+            return -107; // ENOTCONN
+        }
+        if nonblock {
+            return -11; // EAGAIN
+        }
+        let s = sock.clone();
+        // STREAM reader: non-exclusive (reference unix_stream_data_wait).
+        match unix_wait_round(&s.wait_queue, false, &|| sock_recv_ready(&s), deadline) {
+            Ok(()) => continue,
+            Err(e) => return e as isize,
+        }
+    }
+}
+
+/// Push the unconsumed tail of a partially-drained segment back onto the
+/// FRONT of the receive queue (direct-drain path): `consumed` bytes are
+/// dropped from the front of `data`, the rest keeps its flow-control
+/// charge and (for a full-drain caller's interest) the original src
+/// stamp. Ancillary data is never re-queued — first-touch delivery
+/// already consumed it.
+fn push_back_remainder(
+    sock: &Arc<UnixSocket>,
+    data: Vec<u8>,
+    consumed: usize,
+    src: Option<Arc<str>>,
+) {
+    let mut rest = data;
+    rest.drain(..consumed);
+    if rest.is_empty() {
+        return;
+    }
+    let charge = seg_charge(rest.len());
+    let mut q = sock.recv_queue.lock();
+    q.charge += charge;
+    q.segs.push_front(UnixSeg {
+        data: rest,
+        files: Vec::new(),
+        cred: None,
+        src,
+        charge,
+    });
+}
+
+fn unix_file_close(file: &File) -> i32 {
+    // INV-NETARC-1: recover the stored Arc, run close, drop the ref.
+    if let Some(socket) = crate::net::file_arc::<UnixSocket>(file) {
+        unix_close(&socket);
+        drop(socket);
+        crate::net::take_file_arc::<UnixSocket>(file);
+    }
+    0
+}
+
+fn unix_file_poll(file: &File, events: u16) -> u16 {
+    use crate::fs::event_notify::poll_events::*;
+    // SAFETY: ops identity was verified (see unix_file_read).
+    let socket = match unix_of_file(file) {
+        Some(s) => s,
+        None => return POLLERR,
+    };
+    let mut ready = 0u16;
+
+    if events & POLLIN != 0 {
+        if socket.recv_ready() {
+            ready |= POLLIN | POLLRDNORM;
+        }
+        // Listener with pending connections is readable. A listener NEVER
+        // reports POLLHUP (Linux: no sk_pair, no SHUTDOWN_MASK) — GNOME
+        // main loops treat an unexpected POLLHUP as fatal.
+        if *socket.state.lock() == UnixState::Listening && socket.accept_ready() {
+            ready |= POLLIN | POLLRDNORM;
+        }
+    }
+    if events & POLLOUT != 0 {
+        if socket.send_ready() {
+            ready |= POLLOUT | POLLWRNORM;
+        }
+    }
+    // Pending socket error (peer closed with unread data — the reference
+    // sk_err): POLLERR is reported regardless of the requested mask.
+    if socket.err.load() != 0 {
+        ready |= POLLERR;
+    }
+    // Peer of a connection-mode socket fully CLOSED (or its fd dropped):
+    // POLLHUP — unconditionally, while queued data stays readable through
+    // POLLIN (Linux sets SHUTDOWN_MASK at peer release time, not after the
+    // queue drains). POLLHUP/POLLERR are reported regardless of `events`.
+    if matches!(socket.kind, UnixKind::Stream | UnixKind::Seqpacket) && socket.peer_gone() {
+        ready |= POLLHUP;
+        if events & POLLIN != 0 {
+            ready |= POLLIN | POLLRDNORM; // data/EOF still readable
+        }
+    }
+    ready
+}
+
+/// AF_UNIX socket file operations.
+pub static UNIX_SOCKET_OPS: FileOps = FileOps::builder()
+    .read(unix_file_read)
+    .write(unix_file_write)
+    .close(unix_file_close)
+    .poll(unix_file_poll)
+    .build();
+
+// ============================================================================
+// Poll-wait registration (P3: event-driven poll/select)
+// ============================================================================
+
+/// Register `task` on the socket's wait queue (NON-exclusive — reference
+/// poll_wait; the wake budget passes over non-exclusive entries, so every
+/// wake of this queue reaches every registered poller). Readiness events
+/// that wake this queue: data arrival (sk_data_ready), connect queued on
+/// a listener, peer EOF/HUP (close/shutdown wake_all), and for STREAM the
+/// peer-side per-drain write_space wake. Room-freed events for DGRAM
+/// reach the parked senders on peer_wait only (the reference's
+/// unix_dgram_peer_wake relay — which would additionally route them to a
+/// dgram POLLOUT poller's own queue — is not ported; epoll watchers are
+/// covered by the direct epoll_notify_file re-arm on every drain).
+pub fn unix_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+    // SAFETY: ops identity was verified by the dispatcher (UNIX_SOCKET_OPS)
+    // before this is called; private_data holds Arc::into_raw(UnixSocket)
+    // and the caller's Arc<File> keeps the socket alive.
+    match unix_of_file(file) {
+        Some(socket) => {
+            socket
+                .wait_queue
+                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Remove a registration added by unix_poll_wait.
+pub fn unix_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+    // SAFETY: same identity/ownership contract as unix_poll_wait.
+    if let Some(socket) = unix_of_file(file) {
+        socket.wait_queue.remove(task);
+    }
+}
+
+/// rux:socksnap (retired dfx=socksnap) (appspawn wedge hunt, b15): one console line per
+/// LISTENING socket in the namespace — registry key, accept-queue depth,
+/// backlog cap, and the open-file-description id that epoll registrations
+/// key on. Cross-reference the printed file id against the epoll interest
+/// dump (syscall::misc::epoll_interest_snapshot) to decide whether a
+/// wedged server's listener is still registered anywhere. Purely
+/// diagnostic; self-gated, OFF unless rux:socksnap (retired dfx=socksnap) is on the cmdline.
+pub fn unix_listener_snapshot() {
+    if !crate::trace::EVENT_SOCKSNAP.armed() {
+        return;
+    }
+    let table = UNIX_TABLE.lock();
+    for (key, sock) in table.iter() {
+        if *sock.state.lock() != UnixState::Listening {
+            continue;
+        }
+        let q = sock.accept_queue.lock().len();
+        let bk = *sock.backlog.lock();
+        let fid = sock.file_id.load(core::sync::atomic::Ordering::Acquire);
+        // bound_name is the sun_path the server bound (display name);
+        // the registry key is an inode identity for fs sockets. Show
+        // the NAME — the launcher-chain hunt needs "which server is
+        // which" (AppSpawn vs hilogInput vs ...) without a guest shell.
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| String::from(key_shown(key)));
+        crate::pr_info!(
+            "socksnap: LISTEN name={} q={} backlog={} fid={:#x}",
+            key_shown(&name),
+            q,
+            bk,
+            fid
+        );
+    }
+}
+
+// ============================================================================
+// Socket creation / fd plumbing
+// ============================================================================
+
+/// Create the File + fd for a UnixSocket.
+/// `nonblock`/`cloexec` come from the socket() type flags.
+fn unix_socket_install(
+    socket: &Arc<UnixSocket>,
+    nonblock: bool,
+    cloexec: bool,
+) -> Result<usize, i32> {
+    let flags = FileFlags::O_RDWR | if nonblock { FileFlags::O_NONBLOCK } else { 0 };
+    let file = Arc::new(File::new(FileFlags::new(flags)));
+    file.set_ops(&UNIX_SOCKET_OPS);
+    file.set_private_data(Arc::into_raw(socket.clone()) as *mut u8);
+    // Stamp the socket with its file description's identity so data
+    // arrival can re-arm edge-triggered epoll watchers (see unix_send).
+    socket
+        .file_id
+        .store(file.file_id, Ordering::Release);
+
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(t) => t,
+        None => {
+            unwind_unix_file(&file);
+            return Err(-9); // EBADF
+        }
+    };
+    let fd = match fdtable.alloc_fd() {
+        Some(f) => f,
+        None => {
+            unwind_unix_file(&file);
+            return Err(-24); // EMFILE
+        }
+    };
+    if fdtable.install_fd(fd, file.clone()).is_err() {
+        unwind_unix_file(&file);
+        return Err(-24);
+    }
+    if cloexec {
+        fdtable.set_fd_cloexec(fd, true);
+    }
+    // 66th (rux:pctlmon (retired dfx=pctlmon)): init accepted a param-service client — the
+    // accept half of the lifecycle (PCTL-CONNECT named the connect).
+    // fd/file_id bind the server-side interest init's epoll will watch.
+    if pctlmon_on()
+        && socket.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0
+    {
+        static PCTL_A_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = PCTL_A_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 200 {
+            crate::pr_warn!(
+                "PCTL-ACCEPT #{} pid={} fd={} fid={:#x}",
+                n,
+                crate::process::current_pid(),
+                fd,
+                file.file_id
+            );
+        }
+    }
+    Ok(fd)
+}
+
+/// Release the raw Arc<UnixSocket> stashed in a failed File.
+fn unwind_unix_file(file: &Arc<File>) {
+    // The slot holds the sole Arc reference (create failed before the
+    // fd was published): take and drop it (INV-NETARC-1).
+    crate::net::take_file_arc::<UnixSocket>(file);
+}
+
+/// socket(AF_UNIX, type, protocol) — entry from sys_socket_create.
+pub fn unix_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
+    const KNOWN_TYPE_FLAGS: i32 = SOCK_NONBLOCK_FLAG | SOCK_CLOEXEC_FLAG;
+    if type_ & !(SOCK_TYPE_MASK | KNOWN_TYPE_FLAGS) != 0 {
+        return Err(-22); // EINVAL
+    }
+    let kind = match type_ & SOCK_TYPE_MASK {
+        SOCK_STREAM => UnixKind::Stream,
+        SOCK_SEQPACKET => UnixKind::Seqpacket,
+        SOCK_DGRAM => UnixKind::Dgram,
+        _ => return Err(-94), // ESOCKTNOSUPPORT
+    };
+    if protocol != 0 {
+        return Err(-92); // EPROTONOSUPPORT
+    }
+    let nonblock = (type_ & SOCK_NONBLOCK_FLAG) != 0;
+    let cloexec = (type_ & SOCK_CLOEXEC_FLAG) != 0;
+    let socket = Arc::new(UnixSocket::new(kind));
+    unix_socket_install(&socket, nonblock, cloexec)
+}
+
+/// socketpair(AF_UNIX, type, protocol, sv) — a pre-connected pair.
+/// Returns the two fds.
+pub fn unix_socketpair(type_: i32) -> Result<(usize, usize), i32> {
+    const KNOWN_TYPE_FLAGS: i32 = SOCK_NONBLOCK_FLAG | SOCK_CLOEXEC_FLAG;
+    if type_ & !(SOCK_TYPE_MASK | KNOWN_TYPE_FLAGS) != 0 {
+        return Err(-22); // EINVAL
+    }
+    let kind = match type_ & SOCK_TYPE_MASK {
+        SOCK_STREAM => UnixKind::Stream,
+        SOCK_SEQPACKET => UnixKind::Seqpacket,
+        SOCK_DGRAM => UnixKind::Dgram,
+        _ => return Err(-94), // ESOCKTNOSUPPORT
+    };
+    let nonblock = (type_ & SOCK_NONBLOCK_FLAG) != 0;
+    let cloexec = (type_ & SOCK_CLOEXEC_FLAG) != 0;
+
+    let a = Arc::new(UnixSocket::new(kind));
+    let b = Arc::new(UnixSocket::new(kind));
+    *a.state.lock() = UnixState::Connected;
+    *b.state.lock() = UnixState::Connected;
+    // Weak links both ways — the two fds are the strong owners, so closing
+    // one side drops its Arc and the other side's upgrade() starts failing
+    // (EOF/EPIPE) without a reference cycle.
+    *a.peer.lock() = Some(Arc::downgrade(&b));
+    *b.peer.lock() = Some(Arc::downgrade(&a));
+    a.has_peer_m.store(true, Ordering::Release);
+    b.has_peer_m.store(true, Ordering::Release);
+    // DGRAM pairs deliver through the peer link too (unix_send checks the
+    // peer before the connected name).
+
+    let fd0 = unix_socket_install(&a, nonblock, cloexec)?;
+    match unix_socket_install(&b, nonblock, cloexec) {
+        Ok(fd1) => Ok((fd0, fd1)),
+        Err(e) => {
+            // Unwind the first fd so neither side leaks.
+            // SAFETY: close_file_fd operates on the current task's fd
+            // table; fd0 was just installed by unix_socket_install.
+            let _ = crate::fs::file::close_file_fd(fd0);
+            Err(e)
+        }
+    }
+}
+
+/// Wrap an accepted child socket into a new process fd (accept4 path).
+/// `flags` carries accept4()'s SOCK_CLOEXEC / SOCK_NONBLOCK.
+pub fn unix_install_accepted(sock: &Arc<UnixSocket>, flags: i32) -> Result<usize, i32> {
+    let nonblock = (flags & SOCK_NONBLOCK_FLAG) != 0;
+    let cloexec = (flags & SOCK_CLOEXEC_FLAG) != 0;
+    unix_socket_install(sock, nonblock, cloexec)
+}
+
+/// Resolve a process fd to its UnixSocket (identity-checked).
+pub fn unix_socket_from_fd(fd: usize) -> Option<Arc<UnixSocket>> {
+    let fdtable = crate::sched::get_current_fdtable()?;
+    let file = fdtable.get_file(fd)?;
+    {
+        let ops = file.get_ops();
+        match ops {
+            Some(ops) if core::ptr::eq(ops, &UNIX_SOCKET_OPS) => {}
+            _ => return None,
+        }
+    }
+    // SAFETY: ops identity confirmed; private_data is a leaked
+    // Arc<UnixSocket> from Arc::into_raw.
+    unix_of_file(&file)
+}
+
+/// (UnixSocket, file O_NONBLOCK) for a fd.
+pub fn unix_file_of(fd: usize) -> Option<(Arc<UnixSocket>, bool)> {
+    let fdtable = crate::sched::get_current_fdtable()?;
+    let file = fdtable.get_file(fd)?;
+    unix_file_of_file(&file)
+}
+
+/// Leg-52 lever A (perf-audit): the sendto/recvfrom/recvmsg/writev
+/// classification ladders resolved the SAME fd up to five times
+/// (get_file_fd + one *_file_of per family, each a fresh get_file —
+/// 132-144M get_file calls/boot against ~40-60M fd syscalls). The
+/// ladder heads now resolve the File ONCE and pass it down through
+/// these &_of_file variants; the fd-shaped wrappers stay for cold
+/// callers. Same identity check, same (socket, nonblock) product.
+pub fn unix_file_of_file(file: &Arc<File>) -> Option<(Arc<UnixSocket>, bool)> {
+    {
+        let ops = file.get_ops();
+        match ops {
+            Some(ops) if core::ptr::eq(ops, &UNIX_SOCKET_OPS) => {}
+            _ => return None,
+        }
+    }
+    let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
+    // SAFETY: ops identity confirmed above.
+    let socket = unix_of_file(file)?;
+    Some((socket, nonblock))
+}
+
+// ============================================================================
+// getsockopt / setsockopt (minimal SOL_SOCKET set)
+// ============================================================================
+
+/// unix setsockopt — mirrors the AF_INET SOL_SOCKET handling for the
+/// options stored in SocketOptions. Returns 0 or a negative errno.
+/// `read_i32` reads an int option value from user memory (None = bad).
+/// `read_timeval_us` reads a struct timeval as microseconds.
+pub fn unix_setsockopt(
+    sock: &Arc<UnixSocket>,
+    level: i32,
+    optname: i32,
+    read_i32: &dyn Fn() -> Option<i32>,
+    read_timeval_us: &dyn Fn() -> Option<u64>,
+) -> i32 {
+    const SO_REUSEADDR: i32 = 2;
+    const SO_SNDBUF: i32 = 7;
+    const SO_RCVBUF: i32 = 8;
+    const SO_RCVTIMEO: i32 = 20;
+    const SO_SNDTIMEO: i32 = 21;
+    // OH/Android SELinux socket label option (OH musl: value 33). OH
+    // init sets the service socket's security context through it before
+    // bind (init_service_socket.c:81) and treats failure as fatal —
+    // ENOPROTOOPT aborted every socket-owning service child (hilogd,
+    // faultloggerd) with "Service error 97 ... failed to create service
+    // socket". Rux has no LSM: accept and drop the label.
+    const SO_SECURITYCONTEXT: i32 = 33;
+    const SO_PASSCRED: i32 = 16;
+    // Timestamp/aux-data receive options: Linux accepts them on every
+    // socket family. Rux does not timestamp unix datagrams -- accept and
+    // ignore. journald's socket setup treats setsockopt(SO_TIMESTAMP)
+    // failure as FATAL (server_open_native_socket -> "SO_TIMESTAMP
+    // failed" -> exit 1), so every option systemd/journald sets at boot
+    // must return 0:
+    //   29 SO_TIMESTAMP   (journald native + PID1 socket units)
+    //   34 SO_PASSSEC     (PID1 journald*.socket "ignoring" path)
+    //   35 SO_TIMESTAMPNS (glibc socket_enable_timestamp)
+    //   37 SO_TIMESTAMPING
+    //   63/64/65 SO_{TIMESTAMP,TIMESTAMPNS,TIMESTAMPING}_NEW
+    //      (y2038-safe spellings from 64-bit time_t builds)
+    const SO_TIMESTAMP: i32 = 29;
+    const SO_PASSSEC: i32 = 34;
+    const SO_TIMESTAMPNS: i32 = 35;
+    const SO_TIMESTAMPING: i32 = 37;
+    const SO_TIMESTAMP_NEW: i32 = 63;
+    const SO_TIMESTAMPNS_NEW: i32 = 64;
+    const SO_TIMESTAMPING_NEW: i32 = 65;
+    if level != SOL_SOCKET {
+        return -92; // ENOPROTOOPT for unknown levels (97 is EAFNOSUPPORT)
+    }
+    match optname {
+        SO_SECURITYCONTEXT => 0,
+        SO_TIMESTAMP | SO_PASSSEC | SO_TIMESTAMPNS | SO_TIMESTAMPING
+        | SO_TIMESTAMP_NEW | SO_TIMESTAMPNS_NEW | SO_TIMESTAMPING_NEW => 0,
+        // SO_PASSCRED (init's second mandatory service-socket option,
+        // init_service_socket.c:81): store the flag — the recvmsg side
+        // attaches creds cmsgs when it is set (shared SocketOptions
+        // field, same as the netlink path). The atomic mirror lets the
+        // send path apply unix_maybe_add_creds semantics without the
+        // options lock pair (perf-r3).
+        SO_PASSCRED => {
+            let v = match read_i32() {
+                Some(v) => v,
+                None => return -22,
+            };
+            sock.options.lock().passcred = v != 0;
+            sock.passcred_flag.store(v != 0, Ordering::Release);
+            0
+        }
+        SO_RCVTIMEO | SO_SNDTIMEO => {
+            let us = match read_timeval_us() {
+                Some(us) => us,
+                None => return -22,
+            };
+            let mut opts = sock.options.lock();
+            if optname == SO_RCVTIMEO {
+                opts.rcvtimeo_us = us;
+                drop(opts);
+                // 111st mirror publish (per-recv hot read).
+                sock.rcvtimeo_us_m.store(us, Ordering::Release);
+            } else {
+                opts.sndtimeo_us = us;
+                drop(opts);
+                // 111st mirror publish (per-send hot read).
+                sock.sndtimeo_us_m.store(us, Ordering::Release);
+            }
+            0
+        }
+        SO_REUSEADDR => {
+            let v = match read_i32() {
+                Some(v) => v,
+                None => return -22,
+            };
+            sock.options.lock().reuseaddr = v != 0;
+            0
+        }
+        SO_SNDBUF | SO_RCVBUF => {
+            let v = match read_i32() {
+                Some(v) => v,
+                None => return -22,
+            };
+            let mut opts = sock.options.lock();
+            let doubled = (v.saturating_mul(2).max(2048)) as u32;
+            if optname == SO_SNDBUF {
+                opts.sndbuf = doubled;
+                drop(opts);
+                // 111st mirror publish (per-send cap read).
+                sock.sndbuf_m.store(doubled, Ordering::Release);
+            } else {
+                opts.rcvbuf = doubled;
+            }
+            0
+        }
+        _ => -92, // ENOPROTOOPT (SO_TYPE/SO_ERROR are read-only)
+    }
+}
+
+/// unix getsockopt — returns the i32 option value or a negative errno.
+/// Timeval options report their microseconds part only when `timeval` is
+/// set by the caller's writeback logic (kept simple: SO_RCVTIMEO /
+/// SO_SNDTIMEO report (sec, usec) through the same i64 path in network.rs).
+pub fn unix_getsockopt(sock: &Arc<UnixSocket>, level: i32, optname: i32) -> Result<i32, i32> {
+    const SO_TYPE: i32 = 3;
+    const SO_ERROR: i32 = 4;
+    const SO_REUSEADDR: i32 = 2;
+    const SO_SNDBUF: i32 = 7;
+    const SO_RCVBUF: i32 = 8;
+    const SO_RCVLOWAT: i32 = 18;
+    const SO_RCVTIMEO: i32 = 20;
+    const SO_SNDTIMEO: i32 = 21;
+    const SO_ACCEPTCONN: i32 = 30;
+    const SO_PROTOCOL: i32 = 38;
+    const SO_DOMAIN: i32 = 39;
+    if level != SOL_SOCKET {
+        return Err(-97);
+    }
+    match optname {
+        SO_TYPE => Ok(match sock.kind {
+            UnixKind::Stream => SOCK_STREAM,
+            UnixKind::Seqpacket => SOCK_SEQPACKET,
+            UnixKind::Dgram => SOCK_DGRAM,
+        }),
+        SO_ERROR => {
+            // The pending socket error, read-and-clear (reference
+            // sock_error semantics): the ECONNRESET a stream peer sees
+            // after the other end closed with unread data, or the
+            // options-level error slot.
+            let e = sock.err.load();
+            if e != 0 {
+                sock.err.store(0);
+                return Ok(e);
+            }
+            Ok(sock.options.lock().error)
+        }
+        SO_REUSEADDR => Ok(sock.options.lock().reuseaddr as i32),
+        SO_SNDBUF => Ok(sock.options.lock().sndbuf as i32),
+        SO_RCVBUF => Ok(sock.options.lock().rcvbuf as i32),
+        SO_RCVLOWAT => Ok(1),
+        SO_RCVTIMEO => Ok(sock.options.lock().rcvtimeo_us as i32),
+        SO_SNDTIMEO => Ok(sock.options.lock().sndtimeo_us as i32),
+        SO_ACCEPTCONN => Ok((*sock.state.lock() == UnixState::Listening) as i32),
+        SO_PROTOCOL => Ok(0),
+        SO_DOMAIN => Ok(AF_UNIX),
+        _ => Err(-97),
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+
+/// 53rd session (hilogd drain hunt): park-side AF_UNIX wait-object audit.
+///
+/// For every S-state task parked in a socket syscall (recvfrom/recvmsg/
+/// sendto/writev), resolve the fd to its UnixSocket and print the
+/// socket's receive-queue depth (segments + charge) TOGETHER with the
+/// socket wait-queue census (entries + woken flags) at park time.
+///
+/// The discriminator this buys (reference: af_unix.c readers wait on
+/// sk->sk_wq and every enqueue wakes them — a parked reader with a
+/// NON-EMPTY recvq is a lost wake; a parked reader with an empty recvq
+/// and parked writers on the peer is a drain-side freeze):
+///   recvq=0 + peer writers parked      -> the DRAIN is the problem
+///   recvq>0 + reader asleep + woken=0  -> LOST WAKE (our bug)
+///   recvq>0 + reader asleep + woken=1  -> sticky-skip W1 class
+///
+/// Piggybacks on rux:sleepsnap (retired dfx=sleepsnap) (same hunting boots; zero cost off).
+/// Deduped on (tid, sys, fd, segs, charge): a queue that GROWS while
+/// its reader sleeps reprints — that line is the smoking gun.
+pub fn unix_park_audit() {
+    if !crate::trace::EVENT_SLEEPSNAP.armed() {
+        return;
+    }
+    use core::fmt::Write as _;
+    let mut out = alloc::string::String::new();
+    crate::sched::for_each_task(|task| {
+        // SAFETY: callback runs under the pid-hash bucket lock (same
+        // contract as sleep_snapshot); reads confined to the task's own
+        // fields, its entry frame, its fdtable and the socket objects.
+        let tk = task;
+        let tk = &*task;
+        if tk.pid() == 0 {
+            return;
+        }
+        if !tk.state().contains(crate::process::task::TaskState::INTERRUPTIBLE) {
+            return;
+        }
+        let Some(top) = tk.kernel_stack_top_checked() else {
+            return;
+        };
+        if top == 0 {
+            return;
+        }
+        // Framework edge (sched::edges::pt_regs_at_top, INV-SCE-9): the
+        // task's entry frame at the top of its kernel stack; the unified
+        // accessors replace the per-arch field reads (x86 orig_rax/rdi,
+        // riscv a7/a0 — same values, aarch64 now covered too).
+        let regs = crate::sched::edges::pt_regs_at_top(top);
+        let sys = regs.syscall_nr() as u64;
+        let a0 = regs.syscall_args()[0];
+        // x86_64: 45=recvfrom 47=recvmsg 44=sendto 20=writev.
+        // riscv: 207=recvfrom 211=recvmsg 206=sendto 66=writev.
+        #[cfg(feature = "x86_64")]
+        let wanted = matches!(sys, 45 | 47 | 44 | 20);
+        #[cfg(feature = "riscv64")]
+        let wanted = matches!(sys, 207 | 211 | 206 | 66);
+        #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+        let wanted = false;
+        if !wanted {
+            return;
+        }
+        let fd = a0 as usize;
+        let Some(fdt) = tk.try_fdtable() else {
+            return;
+        };
+        let Some(file) = fdt.get_file(fd) else {
+            return;
+        };
+        let Some(sock) = unix_of_file_diag(&file) else {
+            return;
+        };
+        let (segs, charge) = {
+            let q = sock.recv_queue.lock();
+            (q.segs.len(), q.charge)
+        };
+        let (wq_total, wq_woken) = sock.wait_queue.vw_queue_census();
+        // Dedup ring: (tid, sys, fd, segs, charge).
+        {
+            const N: usize = 128;
+            static P: [core::sync::atomic::AtomicU64; N] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; N];
+            static C: [core::sync::atomic::AtomicU64; N] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; N];
+            static CUR: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let tid = tk.pid() as u64;
+            let packed = (tid << 32) | ((sys & 0xff) << 24) | ((fd as u64 & 0xff) << 16) | (segs as u64 & 0xffff);
+            for i in 0..N {
+                if P[i].load(core::sync::atomic::Ordering::Relaxed) == packed
+                    && C[i].load(core::sync::atomic::Ordering::Relaxed) == charge as u64
+                {
+                    return;
+                }
+            }
+            let idx = CUR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % N;
+            P[idx].store(packed, core::sync::atomic::Ordering::Relaxed);
+            C[idx].store(charge as u64, core::sync::atomic::Ordering::Relaxed);
+        }
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| String::from("?"));
+        let peer = sock
+            .dgram_peer
+            .lock()
+            .clone()
+            .unwrap_or_else(|| String::from("-"));
+        let comm = tk.comm();
+        let name_s = core::str::from_utf8(&comm[..])
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let _ = writeln!(
+            out,
+            "upark: tid {} {} sys={} fd={} name={} peer={} segs={} charge={} wq={}/{}",
+            tk.pid(),
+            name_s,
+            sys,
+            fd,
+            key_shown(&name),
+            key_shown(&peer),
+            segs,
+            charge,
+            wq_woken,
+            wq_total
+        );
+    });
+    if !out.is_empty() {
+        let mut rest = out.as_str();
+        while !rest.is_empty() {
+            let mut cut = rest.len().min(240);
+            if cut < rest.len() {
+                // ohc47: boundary backoff BEFORE the rfind slice (a
+                // multi-byte char straddling cut panics rest[..cut]).
+                while cut > 0 && !rest.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                if let Some(nl) = rest[..cut].rfind('\n') {
+                    if nl + 1 > 0 {
+                        cut = nl + 1;
+                    }
+                }
+            }
+            let (chunk, tail) = rest.split_at(cut);
+            crate::pr_info!("{}", chunk);
+            rest = tail;
+        }
+    }
+}
+
+/// 118th param-sender hunt: resolve the connected PEER of a unix-socket
+/// File as a strong Arc (None = not a unix socket / no live peer). Read
+/// diag contract: own locks only, no allocation.
+pub fn unix_peer_of_file(file: &crate::fs::File) -> Option<alloc::sync::Arc<UnixSocket>> {
+    unix_of_file_diag(file).and_then(|s| s.peer_arc())
+}

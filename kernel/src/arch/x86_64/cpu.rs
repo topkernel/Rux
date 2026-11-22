@@ -5,9 +5,21 @@
 //! x86_64 CPU primitives: port I/O, control registers, MSRs,
 //! interrupt-state management.
 
+// ============================================================================
+// Port I/O (INV-XE-PIO-1)
+//
+// The six word-width port primitives are SAFE by the same rule as
+// clts/stts/invlpg (round 1): the instructions touch only registers —
+// no kernel memory operand exists in `in`/`out`, so no port value can
+// violate Rust memory safety. Device-side ordering effects (a stray outb
+// reprogramming a PIC or UART) are a driver-protocol concern the callers
+// own, exactly like the reference kernel's C inlines (arch/x86/include/
+// asm/io.h), which carry no annotation either.
+// ============================================================================
+
 /// Read a byte from an I/O port
 #[inline]
-pub unsafe fn inb(port: u16) -> u8 {
+pub fn inb(port: u16) -> u8 {
     let value: u8;
     unsafe {
         core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
@@ -17,7 +29,7 @@ pub unsafe fn inb(port: u16) -> u8 {
 
 /// Write a byte to an I/O port
 #[inline]
-pub unsafe fn outb(port: u16, value: u8) {
+pub fn outb(port: u16, value: u8) {
     unsafe {
         core::arch::asm!("out dx, al", in("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
     }
@@ -25,7 +37,7 @@ pub unsafe fn outb(port: u16, value: u8) {
 
 /// Read a word (16-bit) from an I/O port
 #[inline]
-pub unsafe fn inw(port: u16) -> u16 {
+pub fn inw(port: u16) -> u16 {
     let value: u16;
     unsafe {
         core::arch::asm!("in ax, dx", out("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
@@ -35,7 +47,7 @@ pub unsafe fn inw(port: u16) -> u16 {
 
 /// Write a word (16-bit) to an I/O port
 #[inline]
-pub unsafe fn outw(port: u16, value: u16) {
+pub fn outw(port: u16, value: u16) {
     unsafe {
         core::arch::asm!("out dx, ax", in("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
     }
@@ -43,7 +55,7 @@ pub unsafe fn outw(port: u16, value: u16) {
 
 /// Read a dword (32-bit) from an I/O port
 #[inline]
-pub unsafe fn inl(port: u16) -> u32 {
+pub fn inl(port: u16) -> u32 {
     let value: u32;
     unsafe {
         core::arch::asm!("in eax, dx", out("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
@@ -53,7 +65,7 @@ pub unsafe fn inl(port: u16) -> u32 {
 
 /// Write a dword (32-bit) to an I/O port
 #[inline]
-pub unsafe fn outl(port: u16, value: u32) {
+pub fn outl(port: u16, value: u32) {
     unsafe {
         core::arch::asm!("out dx, eax", in("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
     }
@@ -92,6 +104,9 @@ pub fn read_cr0() -> u64 {
 ///
 /// # Safety
 /// The value must keep PE/PG/PAE as required by the current mode.
+/// IRREDUCIBLE F-ROW (F-CR-1): control-register writes (CR0/CR3/CR4)
+/// and MSRs — reference kernel arch/x86/include/asm/special_insns.h;
+/// no safe Rust shape exists (inline asm is the only access).
 pub unsafe fn write_cr0(value: u64) {
     // SAFETY: caller keeps the mode-defining bits intact.
     unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) };
@@ -527,7 +542,7 @@ pub fn wfi() {
 /// calibration, busy delays) use [`read_counter`] + [`get_counter_freq`].
 #[inline]
 pub fn read_time() -> u64 {
-    crate::drivers::timer::read_time()
+    crate::timer::read_time()
 }
 
 /// Instruction serialization barrier

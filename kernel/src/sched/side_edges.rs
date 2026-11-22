@@ -29,11 +29,11 @@ unsafe impl Sync for crate::sched::deadline::DlRunQueue {}
 /// store; the array is a fixed static; an overrun clobbers the oldest
 /// record (counted in EV_LOST, never a correctness object).
 #[inline]
-pub fn evring_slot_mut(
-    ring: &crate::sched::sched_ev::EvRing,
+pub fn evring_slot_mut<T, const N: usize>(
+    ring: &EvRing<T, N>,
     slot: usize,
-) -> &mut crate::sched::sched_ev::SchedEv {
-    debug_assert!(slot < crate::sched::sched_ev::EV_RING_SLOTS);
+) -> &mut T {
+    debug_assert!(slot < N);
     // SAFETY: INV-SCHED-EVRING-1 — owned reserved slot in the fixed
     // static array.
     unsafe { &mut (*ring.0.get())[slot] }
@@ -44,17 +44,29 @@ pub fn evring_slot_mut(
 /// INV-SCHED-EVRING-1 (read arm): read-only diagnostic access; the
 /// caller validates `pub_seq` before trusting any field.
 #[inline]
-pub fn evring_slot_ref(
-    ring: &crate::sched::sched_ev::EvRing,
+pub fn evring_slot_ref<T, const N: usize>(
+    ring: &EvRing<T, N>,
     slot: usize,
-) -> &crate::sched::sched_ev::SchedEv {
-    debug_assert!(slot < crate::sched::sched_ev::EV_RING_SLOTS);
+) -> &T {
+    debug_assert!(slot < N);
     // SAFETY: INV-SCHED-EVRING-1 — shared diagnostic read of a slot the
     // pub_seq protocol validates.
     unsafe { &(*ring.0.get())[slot] }
 }
 
+/// The event-ring substrate (the S1b buffer.rs pattern): the UnsafeCell
+/// ring + its Sync proof live FRAMEWORK-side; the policy crate owns the
+/// cell type and aliases this generic.
+pub struct EvRing<T, const N: usize>(pub core::cell::UnsafeCell<[T; N]>);
+
+impl<T, const N: usize> EvRing<T, N> {
+    /// Construct over a fully-initialized backing array (type aliases
+    /// do not carry tuple constructors — this is the alias-visible ctor).
+    pub const fn new(arr: [T; N]) -> Self {
+        Self(core::cell::UnsafeCell::new(arr))
+    }
+}
 // SAFETY: the EvRing slot protocol (fetch_add reservation + pub_seq
 // publication) is the same lock-free discipline the printk ring uses;
 // at most one writer owns a slot at a time.
-unsafe impl Sync for crate::sched::sched_ev::EvRing {}
+unsafe impl<T, const N: usize> Sync for EvRing<T, N> {}

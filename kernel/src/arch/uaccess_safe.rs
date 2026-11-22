@@ -19,6 +19,10 @@
 //! service files (`syscall/**` first) can carry
 //! `#![forbid(unsafe_code)]` while still doing user I/O.
 
+// (INV-UACCESS-SAFE-1: the capsule's own edges — each safe wrapper
+// holds exactly one audited call into the per-arch exception-table
+// primitive (INV-UACCESS-1); the UserPtr/UserSlice cell rows carry
+// the address/len pair discipline.)
 use super::uaccess;
 
 /// Copy `src` (kernel memory) out to the user address `dst_user`.
@@ -47,6 +51,28 @@ pub fn copy_in(dst: &mut [u8], src_user: usize) -> usize {
     // and faults through the exception table inside the primitive; any
     // src_user value is sound to pass.
     unsafe { uaccess::copy_from_user(dst.as_mut_ptr(), src_user as *const u8, dst.len()) }
+}
+
+/// Staged user→Vec copy with EXACT reservation (no zero-fill pass on
+/// the send hot paths): `n` bytes copied into a fresh Vec; `None` on
+/// any fault (no partial buffer is returned — the EFAULT contract the
+/// unix-socket staged send had: a first-fault returns EFAULT with
+/// nothing sent).
+pub fn copy_in_vec_exact(src_user: usize, n: usize) -> Option<alloc::vec::Vec<u8>> {
+    let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    v.try_reserve_exact(n).ok()?;
+    // SAFETY: try_reserve_exact(n) guarantees n writable (uninitialized)
+    // bytes at v.as_mut_ptr(); the uaccess primitive writes at most n of
+    // them and zero-fills any uncopied tail on fault, so set_len(n) below
+    // only ever exposes bytes the primitive wrote or zeroed.
+    unsafe {
+        let uncopied = uaccess::copy_from_user(v.as_mut_ptr(), src_user as *const u8, n);
+        if uncopied > 0 {
+            return None;
+        }
+        v.set_len(n);
+    }
+    Some(v)
 }
 
 /// Read one `Copy` value from user memory at `src_user`.

@@ -72,6 +72,10 @@
 //! alone. All REGISTRY takes are `lock_irqsave()` uniformly, so no
 //! holder can ever be interrupted into a path that wants it.
 
+// (INV-PERF-EV-1: the perf-event family — the registry's Box<PerfEvent>
+// pointers are valid while registered (the registry maps id->Box and
+// removes before drop); every &PerfEvent/&mut read rides registry
+// membership; the mmap rows pin through the event's own refcount.)
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -830,7 +834,7 @@ fn header(type_: u32, misc: u16, size: u16) -> [u8; 8] {
 }
 
 fn now_ns() -> u64 {
-    crate::drivers::timer::monotonic_ns_since_boot()
+    crate::timer::monotonic_ns_since_boot()
 }
 
 // ==================== Sampling (softirq) ====================
@@ -1326,7 +1330,7 @@ fn perf_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 /// poll(2): readable while unwritten ring data exists.
 fn perf_poll(file: &crate::fs::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
     let Some(ev) = event_of(file) else { return POLLERR };
     if events & POLLIN != 0 {
@@ -1420,14 +1424,14 @@ fn perf_close(file: &crate::fs::File) -> i32 {
 }
 
 /// perf event file operations (read/poll/close).
-pub(crate) static PERF_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub static PERF_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(perf_read)
     .close(perf_close)
     .poll(perf_poll)
     .build();
 
 /// Poll-wait registration (event-driven poll, misc dispatcher).
-pub(crate) fn perf_poll_wait(
+pub fn perf_poll_wait(
     file: &crate::fs::File,
     task: *mut crate::process::task::Task,
 ) -> bool {
@@ -1437,7 +1441,7 @@ pub(crate) fn perf_poll_wait(
     true
 }
 
-pub(crate) fn perf_poll_unwait(
+pub fn perf_poll_unwait(
     file: &crate::fs::File,
     task: *mut crate::process::task::Task,
 ) {

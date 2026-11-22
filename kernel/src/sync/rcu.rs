@@ -10,6 +10,10 @@
 //! Grace period: all CPUs must pass through at least one quiescent state
 //! (context switch, idle loop, or return to user mode).
 
+// (INV-RCU-1: the RCU family — grace-period state is per-CPU
+// counters under the gp lock; the callback trampolines' raw fn words
+// are published before the gp flip and only invoked after it (the
+// wait/flip discipline the module documents.)
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::config::MAX_CPUS;
 use crate::list::ListHead;
@@ -343,6 +347,14 @@ pub fn synchronize_rcu_forced(max_ms: u64, site: &'static str) -> bool {
 static GP_IN_FLIGHT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Public twin for the async reap drainer: open (or latch) one shared
+/// grace target for a batch of deferrals. The bump happens strictly
+/// after the callers' reader-window-closing removals, so a full round
+/// at this target covers every window that predates the batch.
+pub fn shared_grace_target_pub() -> u32 {
+    shared_grace_target()
+}
+
 fn shared_grace_target() -> u32 {
     if GP_IN_FLIGHT
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -366,6 +378,62 @@ fn shared_grace_target() -> u32 {
 /// one.
 fn shared_grace_done() {
     GP_IN_FLIGHT.store(false, Ordering::Release);
+}
+
+/// Public twin for the async reap drainer: release the shared-grace
+/// in-flight slot after a POLLED round completes (or is abandoned) —
+/// without this the next target only ever latches the finished gen.
+pub fn shared_grace_done_pub() {
+    shared_grace_done();
+}
+
+/// Public twin: hold the waiter count while a polled grace round is
+/// pending. rcu_note_context_switch SUPPRESSES its QS store when
+/// RCU_WAITERS == 0 — a poller that never holds the count starves its
+/// own round (the drainer's cap-exhaustion root cause, 2026-11-21).
+pub fn grace_waiter_hold() {
+    RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Public twin for the async reap drainer: report THIS cpu as
+/// quiescent at the current generation (the boot-118 fix — the
+/// drainer's tick context is outside every RCU read-side section, so
+/// its own report is sound; a round whose only laggard is a cpu that
+/// reports via switches alone could stall for the whole storm when
+/// that cpu runs long user-mode stretches between switches).
+pub fn report_self_quiescent() {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    if RCU_WAITERS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let gen = RCU_GEN.load(Ordering::Acquire);
+    RCU_QS_GEN[cpu].store(gen, Ordering::Release);
+}
+
+/// Public twin: release the held waiter count.
+pub fn grace_waiter_release() {
+    RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// Public twin: the CPUs holding a polled round at `target` back —
+/// online, not idle, QS below target. The drainer's expedited nudge
+/// (resched IPI per the reference's synchronize_rcu_expedited shape)
+/// targets exactly these.
+pub fn grace_lagging_cpus(target: u32) -> alloc::vec::Vec<usize> {
+    let mut v = alloc::vec::Vec::new();
+    for i in 0..MAX_CPUS {
+        if !crate::sched::sched::cpu_online(i) {
+            continue;
+        }
+        if cpu_quiescent(i, target) {
+            continue;
+        }
+        v.push(i);
+    }
+    v
 }
 
 /// Forced grace period with SLEEPING polls — the fd-table reaper's form.
@@ -423,7 +491,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
     use crate::process::task::TaskState;
 
     let hz = crate::drivers::timer::HZ as u64;
-    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
+    let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
 
     loop {
         if all_online_cpus_reported(gen) {
@@ -432,7 +500,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             GP_CONSEC_FAIL.store(0, Ordering::Relaxed);
             return true;
         }
-        if crate::drivers::timer::get_jiffies() >= deadline {
+        if crate::timer::get_jiffies() >= deadline {
             shared_grace_done();
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             static SGP_N: core::sync::atomic::AtomicUsize =
@@ -641,7 +709,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             crate::sched::schedule();
             continue;
         }
-        let target = crate::drivers::timer::get_jiffies() + 1;
+        let target = crate::timer::get_jiffies() + 1;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
         if timer_id != 0 {
             // SAFETY: current is this task's own pointer.
@@ -671,7 +739,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             }
             // Re-check the one-shot AFTER marking sleeping: it may have
             // fired between arming and set_state (khungtaskd lesson).
-            if crate::drivers::timer::get_jiffies() >= target {
+            if crate::timer::get_jiffies() >= target {
                 // SAFETY: current is this task's own pointer.
                 unsafe {
                     (*current).set_state(TaskState::new(TaskState::RUNNING));
@@ -698,6 +766,13 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
 
 /// Whether every online CPU has reported a quiescent state at or after
 /// generation `gen`.
+/// Public twin for the async reap drainer: poll (never sleep) whether
+/// the shared-grace round at `target` has completed on every online
+/// CPU. Same predicate `wait_qs_sleepy` loops on.
+pub fn all_online_cpus_reported_pub(gen: u32) -> bool {
+    all_online_cpus_reported(gen)
+}
+
 fn all_online_cpus_reported(gen: u32) -> bool {
     for i in 0..MAX_CPUS {
         if !crate::sched::sched::cpu_online(i) {
@@ -734,7 +809,7 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
     rcu_note_context_switch();
 
     let hz = crate::drivers::timer::HZ as u64;
-    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
+    let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
 
     loop {
         let mut all_qs = true;
@@ -753,7 +828,7 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             return true;
         }
-        if crate::drivers::timer::get_jiffies() >= deadline {
+        if crate::timer::get_jiffies() >= deadline {
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             static GPB_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);

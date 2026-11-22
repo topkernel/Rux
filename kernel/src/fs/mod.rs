@@ -7,6 +7,7 @@
 
 pub mod file;
 pub mod unsafe_edges;
+pub mod event_notify;
 pub mod fdreap;
 pub mod inode;
 pub mod dentry;
@@ -20,6 +21,10 @@ pub mod path;
 pub mod permission;
 pub mod superblock;
 pub mod mount;
+pub mod mount_table;
+pub mod notify_hooks;
+pub mod file_hooks;
+pub mod lock_hooks;
 pub mod rootfs;
 pub mod tmpfs;
 pub mod ext4;

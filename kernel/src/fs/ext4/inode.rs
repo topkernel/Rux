@@ -5,6 +5,10 @@
 
 //! ext4 inode operations
 
+// (INV-EXT4-INODEIO-1: the on-disk inode IO family — read/write/
+// write_disk operate on bread-pinned table blocks (INV-BIO-BH's pin)
+// with fixed-offset field writes bounds-checked against the block;
+// callers hold EXT4_BIG_LOCK.)
 use core::mem;
 use alloc::vec::Vec;
 
@@ -71,8 +75,9 @@ pub struct Ext4InodeOnDisk {
 
 impl Default for Ext4InodeOnDisk {
     fn default() -> Self {
-        // SAFETY: Ext4InodeOnDisk is #[repr(C)] with all fields being integer types;
-        // zeroed memory is a valid representation for a default inode.
+        // INV-EXT4-INODE-ZP: #[repr(C)] all-integer on-disk struct —
+        // the zero bit pattern is a valid value for every field.
+        // SAFETY: as documented (the one audited zeroed of this type).
         unsafe { mem::zeroed() }
     }
 }
@@ -441,12 +446,9 @@ pub fn read_inode(
 
     // Read inode from block buffer
     let mut inode_on_disk = Ext4InodeOnDisk::default();
-    let inode_bytes = unsafe {
-        core::slice::from_raw_parts_mut(
-            &mut inode_on_disk as *mut _ as *mut u8,
-            copy_len,
-        )
-    };
+    // Byte image of the on-disk struct head (INV-CBYTES-1); the tail
+    // stays zeroed (read_inode's clamp discipline).
+    let inode_bytes = &mut crate::safety::bytes::bytes_of_mut(&mut inode_on_disk)[..copy_len];
 
     // metadata_csum: verify the inode's crc32c over the FULL inode_size
     // bytes from the buffer (the 128..inode_size extra bytes are part of
@@ -571,15 +573,10 @@ pub fn write_inode(
     // up to 44 bytes past the end of the block buffer (out of bounds).
     // The struct tail stays zeroed, matching read_inode's clamp.
     let mut inode_on_disk = Ext4InodeOnDisk::default();
-    // SAFETY: bounds checked above; in_block_offset + copy_len <= data.len().
+    // Bounds checked above; in_block_offset + copy_len <= data.len().
     {
         let src = &data[in_block_offset..in_block_offset + copy_len];
-        let dst = unsafe {
-            core::slice::from_raw_parts_mut(
-                &mut inode_on_disk as *mut _ as *mut u8,
-                copy_len,
-            )
-        };
+        let dst = &mut crate::safety::bytes::bytes_of_mut(&mut inode_on_disk)[..copy_len];
         dst.copy_from_slice(src);
     }
 
@@ -598,14 +595,9 @@ pub fn write_inode(
     inode_on_disk.i_block = inode.block;
     inode_on_disk.i_size_high = (inode.size >> 32) as u32;
 
-    // Write inode to block buffer
-    // SAFETY: bounds checked above; in_block_offset + copy_len <= data.len().
-    let inode_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &inode_on_disk as *const _ as *const u8,
-            copy_len,
-        )
-    };
+    // Write inode to block buffer: bounds checked above;
+    // in_block_offset + copy_len <= data.len() (INV-CBYTES-1).
+    let inode_bytes = &crate::safety::bytes::bytes_of(&inode_on_disk)[..copy_len];
     data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
 
     // metadata_csum write path: recompute the slot's crc32c over the
@@ -817,15 +809,9 @@ pub fn write_inode_disk(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    // Write inode to block buffer
-    // SAFETY: inode is a reference to an Ext4InodeOnDisk; copy_len bytes
-    // fit within the block starting at in_block_offset (bounds-checked above).
-    let inode_bytes = unsafe {
-        core::slice::from_raw_parts(
-            inode as *const _ as *const u8,
-            copy_len,
-        )
-    };
+    // Write inode to block buffer: copy_len bytes fit within the block
+    // starting at in_block_offset (bounds-checked above; INV-CBYTES-1).
+    let inode_bytes = &crate::safety::bytes::bytes_of(inode)[..copy_len];
     data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
 
     // metadata_csum write path: re-seal the full inode slot (see

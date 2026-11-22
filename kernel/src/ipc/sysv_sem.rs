@@ -837,7 +837,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
             sub_jiffy_timeout = true;
             None
         } else {
-            Some(crate::drivers::timer::get_jiffies() + timeout_jiffies)
+            Some(crate::timer::get_jiffies() + timeout_jiffies)
         }
     } else {
         None
@@ -1032,7 +1032,7 @@ fn semop_blocking_loop(
 
                             // Check timeout
                             if let Some(dl) = deadline {
-                                if crate::drivers::timer::get_jiffies() >= dl {
+                                if crate::timer::get_jiffies() >= dl {
                                     // Timeout expiry is EAGAIN, matching the
                                     // reference sleep loop (`if (timed_out)
                                     // error = -EAGAIN;`) and man semop(2)
@@ -1200,7 +1200,7 @@ fn semop_blocking_loop(
                                     (*current).pid() as u64,
                                     (*current).preempt_count() as u32 as u64,
                                     (*current).state().bits() as u64,
-                                    crate::drivers::timer::get_jiffies(),
+                                    crate::timer::get_jiffies(),
                                 );
                             }
                             crate::sched::schedule();
@@ -1210,7 +1210,7 @@ fn semop_blocking_loop(
                                     (*current).pid() as u64,
                                     (*current).preempt_count() as u32 as u64,
                                     (*current).state().bits() as u64,
-                                    crate::drivers::timer::get_jiffies(),
+                                    crate::timer::get_jiffies(),
                                 );
                             }
                             if timer_id != 0 {
@@ -1453,7 +1453,7 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
                 caller_pid as u64,
                 v0 | (n0 << 8),
                 v1 | (n1 << 8),
-                crate::drivers::timer::get_jiffies(),
+                crate::timer::get_jiffies(),
             );
         }
 

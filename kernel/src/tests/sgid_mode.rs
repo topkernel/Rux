@@ -16,6 +16,20 @@ use super::{test_fail, test_group_start, test_pass};
 pub fn test_sgid_mode() {
     test_group_start("sgid_mode");
 
+    // Precondition control (State B fix): the strip cases assert "root,
+    // no group, no CAP_FSETID" — previously an UNGATED earlier test's
+    // setgroups/cred side effects happened to establish that state by
+    // accident. Own it explicitly: save, clear, restore.
+    let saved = crate::sched::current().map(|t| {
+        let c = t.cred();
+        (c.groups.clone(), c.cap_effective)
+    });
+    if let Some(t) = crate::sched::current() {
+        let c = t.cred_mut();
+        c.groups.clear();
+        c.cap_effective = crate::security::capability::Cap::EMPTY;
+    }
+
     // The strip rule engages only when the request has BOTH S_ISGID and
     // S_IXGRP (a mandatory-lock-style file), the parent dir is setgid,
     // and the caller is outside the dir's group without CAP_FSETID.
@@ -55,5 +69,10 @@ pub fn test_sgid_mode() {
     // regression run: root creates in its OWN setgid dir keeps the bit.)
     let _ = (S_ISGID, S_IXGRP);
 
+    if let (Some(t), Some((groups, caps))) = (crate::sched::current(), saved) {
+        let c = t.cred_mut();
+        c.groups = groups;
+        c.cap_effective = caps;
+    }
     test_pass("sgid_mode group complete");
 }

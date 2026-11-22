@@ -381,10 +381,10 @@ fn load_and_setup_elf(
     // Pinned vm_file identities for the PID-1 segment VMAs (vm_file
     // semantics — same as sys_execve): best-effort VFS opens; a None
     // only drops the /proc/<pid>/maps path column.
-    let init_file_arc = crate::syscall::process::open_file_arc(init_path);
+    let init_file_arc = crate::fs::vfs::open_file_arc_nofd(init_path);
     let interp_file_arc = ElfLoader::get_interpreter(program_data)
         .and_then(|p| core::str::from_utf8(p).ok())
-        .and_then(crate::syscall::process::open_file_arc);
+        .and_then(crate::fs::vfs::open_file_arc_nofd);
 
     // SAFETY: task_ptr points to the freshly built PID 1 task (static
     // INIT_TASK_STORAGE) — one typed-borrow edge for the loader call; the

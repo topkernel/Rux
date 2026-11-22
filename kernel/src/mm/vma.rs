@@ -931,8 +931,8 @@ pub enum VmaError {
     Invalid,
 }
 
-unsafe impl Send for VmaManager {}
-unsafe impl Sync for VmaManager {}
+// Send/Sync proofs live in mm::edges (same contracts the inline impls
+// documented).
 
 
 // ============================================================================

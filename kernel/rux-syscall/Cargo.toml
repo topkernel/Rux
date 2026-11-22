@@ -1,0 +1,19 @@
+[package]
+name = "rux-syscall"
+version = "0.1.0"
+edition = "2021"
+
+# The SYSCALL SERVICE CRATE (crate-flip M2, 2026-11-22): the 12 service
+# files, #[path]-included from the framework side with ZERO moves; the
+# crate-level forbid is the compiler-enforced service boundary.
+#
+# A member of the kernel-dir workspace (crate-flip M3-B).
+[dependencies]
+rux = { path = "..", default-features = false }
+rux-net = { path = "../rux-net", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64", "rux-net/riscv64"]
+x86_64 = ["rux/x86_64", "rux-net/x86_64"]
+aarch64 = ["rux/aarch64", "rux-net/aarch64"]

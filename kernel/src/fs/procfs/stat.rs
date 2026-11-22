@@ -174,7 +174,7 @@ fn procs_blocked() -> u64 {
 /// monotonic time zero, i.e. the moment the kernel started counting —
 /// exactly what Linux reports in btime.
 fn btime() -> u64 {
-    crate::syscall::time::wall_epoch_offset_ns() / 1_000_000_000
+    crate::timer::wall_epoch_offset_ns() / 1_000_000_000
 }
 
 /// Generate /proc/stat content (Linux layout).

@@ -788,7 +788,7 @@ pub fn sys_syslog(args: [u64; 6]) -> i64 {
     // SIGSEGVd).
     let len_signed = args[2] as u32 as i32 as i64;
     if len_signed < 0 {
-        return -(crate::syscall::errno::EINVAL as i64);
+        return -(crate::errno::constants::EINVAL as i64);
     }
     let len = len_signed as usize;
 
@@ -798,7 +798,7 @@ pub fn sys_syslog(args: [u64; 6]) -> i64 {
     // address leaks), wipe them, or silence the console.
     if !matches!(action, 0 | 1 | 10) {
         if !crate::security::capable(crate::security::CAP_SYSLOG) {
-            return -(crate::syscall::errno::EPERM as i64);
+            return -(crate::errno::constants::EPERM as i64);
         }
     }
 
@@ -837,7 +837,7 @@ pub fn sys_syslog(args: [u64; 6]) -> i64 {
         8 => {
             let new_level = args[2] as u32 as i32;
             if !(0..=loglevel::KERN_DEBUG as i32).contains(&new_level) {
-                return -(crate::syscall::errno::EINVAL as i64);
+                return -(crate::errno::constants::EINVAL as i64);
             }
             CONSOLE_LOGLEVEL.store(new_level as u8, Ordering::Relaxed);
             0
@@ -854,7 +854,7 @@ pub fn sys_syslog(args: [u64; 6]) -> i64 {
         // Return total buffer size
         10 => (RING_BUFFER_CAPACITY * RECORD_TEXT_SIZE) as i64,
 
-        _ => -(crate::syscall::errno::EINVAL as i64),
+        _ => -(crate::errno::constants::EINVAL as i64),
     }
 }
 
@@ -1087,13 +1087,13 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
     // successful empty read (LTP syslog11 calls read/read_all with
     // len=0 and expects >= 0).
     if bufp.is_null() {
-        return -(crate::syscall::errno::EINVAL as i64);
+        return -(crate::errno::constants::EINVAL as i64);
     }
     if maxlen == 0 {
         return 0;
     }
     if !crate::arch::uaccess::access_ok(bufp as usize, maxlen) {
-        return -(crate::syscall::errno::EFAULT as i64);
+        return -(crate::errno::constants::EFAULT as i64);
     }
     // Bound the transfer: maxlen is user-controlled and must never drive an
     // unbounded heap allocation (alloc failure panics the kernel). Callers
@@ -1151,7 +1151,7 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
     if produced > 0 {
         let uncopied = crate::arch::uaccess_safe::copy_out(bufp as usize, &kbuf[..produced]);
         if uncopied > 0 {
-            return -(crate::syscall::errno::EFAULT as i64);
+            return -(crate::errno::constants::EFAULT as i64);
         }
         // Advance read cursor only after a successful copy
         RING_BUFFER.lock_irqsave().read_seq = next_read_seq;
@@ -1165,13 +1165,13 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
     // Same as the sequential read: NULL buffer is EINVAL, zero length
     // is a successful empty read.
     if bufp.is_null() {
-        return -(crate::syscall::errno::EINVAL as i64);
+        return -(crate::errno::constants::EINVAL as i64);
     }
     if maxlen == 0 {
         return 0;
     }
     if !crate::arch::uaccess::access_ok(bufp as usize, maxlen) {
-        return -(crate::syscall::errno::EFAULT as i64);
+        return -(crate::errno::constants::EFAULT as i64);
     }
     // Bound the transfer and stage into a kernel buffer: writing directly to
     // user memory while holding the printk spinlock (irqs off) would
@@ -1239,7 +1239,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
     if produced > 0 {
         let uncopied = crate::arch::uaccess_safe::copy_out(bufp as usize, &kbuf[..produced]);
         if uncopied > 0 {
-            return -(crate::syscall::errno::EFAULT as i64);
+            return -(crate::errno::constants::EFAULT as i64);
         }
     }
 
@@ -1545,13 +1545,13 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                 drop(rb);
                 if nonblock {
                     KMSG_N_EAGAIN.fetch_add(1, Ordering::Relaxed);
-                    return -(crate::syscall::errno::EAGAIN) as isize;
+                    return -(crate::errno::constants::EAGAIN) as isize;
                 }
                 // Block until a record lands. prepare→re-check→schedule
                 // (lost-wake discipline, same as signalfd_read).
                 let current = match crate::sched::current() {
                     Some(t) => t,
-                    None => return -(crate::syscall::errno::EAGAIN) as isize,
+                    None => return -(crate::errno::constants::EAGAIN) as isize,
                 };
                 KMSG_READ_WQ.prepare_to_wait(current, false, true);
                 {
@@ -1710,7 +1710,7 @@ fn kmsg_console_allows_echo() -> bool {
         kmsg_console::ON => true,
         kmsg_console::OFF => false,
         _ => {
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             // Start a new window when the previous one expired (or when
             // the limiter was never armed yet).
             let window = KMSG_RL_WINDOW.load(Ordering::Relaxed);
@@ -1762,7 +1762,7 @@ fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
 /// epoll treats that as permanently ready, so every kmsg waiter
 /// woke, read EOF, and re-armed in a tight loop.
 fn kmsg_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 {
         let rb = RING_BUFFER.lock_irqsave();
@@ -1798,7 +1798,7 @@ fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> 
             file.set_pos(next_seq);
             next_seq as isize
         }
-        _ => -crate::syscall::errno::EINVAL as isize,
+        _ => -crate::errno::constants::EINVAL as isize,
     }
 }
 
@@ -1840,7 +1840,7 @@ static PROC_KMSG_OPEN: AtomicBool = AtomicBool::new(false);
 /// /proc/kmsg open hook (called from procfs_open instead of snapshotting).
 pub fn proc_kmsg_open() -> i32 {
     if PROC_KMSG_OPEN.swap(true, Ordering::AcqRel) {
-        return -crate::syscall::errno::EBUSY;
+        return -crate::errno::constants::EBUSY;
     }
     0
 }
@@ -1929,7 +1929,7 @@ fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
         if !kmsg_poll_sleep(10) {
             // No timer available (pool exhausted): fail soft rather
             // than hot-spin — the caller retries like EAGAIN.
-            return -(crate::syscall::errno::EAGAIN as isize);
+            return -(crate::errno::constants::EAGAIN as isize);
         }
     }
 }
@@ -1942,7 +1942,7 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
     use crate::process::task::{Task, TaskState};
 
     let target =
-        crate::drivers::timer::get_jiffies() + crate::drivers::timer::msecs_to_jiffies(ms);
+        crate::timer::get_jiffies() + crate::timer::msecs_to_jiffies(ms);
 
     // The running-task borrow is re-derived at each use window and never
     // held across schedule() — the reborrow discipline that replaces the
@@ -1959,14 +1959,14 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
     }
 
     loop {
-        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+        if crate::timer::get_jiffies() >= target || crate::signal::signal_pending() {
             crate::timer::del_timer(timer_id);
             return true;
         }
         // Mark INTERRUPTIBLE BEFORE the final re-check (state-first
         // lost-wakeup discipline, same as sys_nanosleep).
         crate::sched::current().map(|c| c.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
-        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+        if crate::timer::get_jiffies() >= target || crate::signal::signal_pending() {
             if let Some(c) = crate::sched::current() {
                 c.set_state(TaskState::new(TaskState::RUNNING));
                 // A racing wake may have enqueued us while still executing —
@@ -1987,7 +1987,7 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
 /// /proc/kmsg poll: POLLIN iff unconsumed records exist; always writable
 /// (matches kmsg_file_poll's shape; epoll waiters need the edge).
 fn proc_kmsg_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let rb = RING_BUFFER.lock_irqsave();
     let readable = rb.read_seq < RING_NEXT_SEQ.load(Ordering::Relaxed);
     drop(rb);
@@ -2003,7 +2003,7 @@ fn proc_kmsg_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
 
 /// /proc/kmsg lseek: the stream is unseekable (Linux no_llseek → ESPIPE).
 fn proc_kmsg_lseek(_file: &crate::fs::file::File, _offset: isize, _whence: i32) -> isize {
-    -(crate::syscall::errno::ESPIPE as isize)
+    -(crate::errno::constants::ESPIPE as isize)
 }
 
 /// FileOps for the /proc/kmsg stream (attached by procfs_get_file_ops
@@ -2323,7 +2323,7 @@ mod persistent_log {
                 Some(t) => t.pid(),
                 None => break,
             };
-            let target = crate::drivers::timer::get_jiffies() + interval_jiffies;
+            let target = crate::timer::get_jiffies() + interval_jiffies;
             let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
             if timer_id != 0 {
                 // Re-derive the running-task borrow per window (never held
@@ -2334,7 +2334,7 @@ mod persistent_log {
                 // have fired between arming and set_state — either its wake
                 // captured the INTERRUPTIBLE state, or the deadline is
                 // already visible.
-                if crate::drivers::timer::get_jiffies() >= target {
+                if crate::timer::get_jiffies() >= target {
                     if let Some(t) = crate::sched::current() {
                         t.set_state(TaskState::new(TaskState::RUNNING));
                         // NEW-C2: a racing wake may have enqueued us while we

@@ -103,6 +103,8 @@ pub fn enable_interrupts() {
 /// - Otherwise consider it as task_struct pointer
 ///
 /// In S-mode, we cannot access mhartid CSR (only accessible from M-mode).
+// IRREDUCIBLE F-ROW (F-CSR-R2): the mod-level cpu_id/init CSR register
+// reads — reference arch/riscv's csr accesses; no safe CSR shape.
 pub fn cpu_id() -> u64 {
     // SAFETY: Reading tp is a pure register read. When tp < 0x1000 it holds a
     // hart_id set by boot.S; otherwise it points to the current task_struct

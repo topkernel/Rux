@@ -28,22 +28,35 @@ pub use fbdev::{
 
 use crate::sync::spinlock::Spinlock;
 
-/// Global framebuffer information storage
-/// Used for user-space access to framebuffer via mmap
-static FRAMEBUFFER_INFO: Spinlock<Option<FrameBufferInfo>> = Spinlock::new(None);
-
 /// Global GPU device storage
 /// Used for flushing framebuffer
 static GPU_DEVICE: Spinlock<Option<VirtioGpuDevice>> = Spinlock::new(None);
 
-/// Set global framebuffer info (called during GPU initialization)
+// (FRAMEBUFFER_INFO registry hoisted to crate::console — rung4 prep
+// move 3; the driver-side twins delegate so historical callers compile.)
+
+/// Set global framebuffer info (delegates to the console registry).
 pub fn set_framebuffer_info(info: FrameBufferInfo) {
-    *FRAMEBUFFER_INFO.lock() = Some(info);
+    crate::console::set_framebuffer_info(crate::console::FramebufferInfo {
+        addr: info.addr,
+        size: info.size,
+        width: info.width,
+        height: info.height,
+        stride: info.stride,
+        format: info.format,
+    });
 }
 
-/// Get global framebuffer info (used during mmap)
+/// Get global framebuffer info (delegates to the console registry).
 pub fn get_framebuffer_info() -> Option<FrameBufferInfo> {
-    FRAMEBUFFER_INFO.lock().clone()
+    crate::console::get_framebuffer_info().map(|i| FrameBufferInfo {
+        addr: i.addr,
+        size: i.size,
+        width: i.width,
+        height: i.height,
+        stride: i.stride,
+        format: i.format,
+    })
 }
 
 /// Set global GPU device (called during initialization)

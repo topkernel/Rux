@@ -51,7 +51,7 @@ pub struct SchedEv {
     pub jif: u64,
     /// Publication marker: 0 = being written, else record index + 1
     /// (the same one-word discipline as the printk ring).
-    pub_seq: AtomicU64,
+    pub pub_seq: AtomicU64,
 }
 
 impl SchedEv {
@@ -67,10 +67,14 @@ impl SchedEv {
     }
 }
 
-pub(crate) struct EvRing(pub(crate) UnsafeCell<[SchedEv; EV_RING_SLOTS]>);
+/// The ring substrate is the framework's generic (S1b): the Sync proof
+/// and the UnsafeCell live side_edges-side; this alias binds the cell
+/// type (the dual compilations share the framework type — identity
+/// holds across the seam).
+pub(crate) type EvRing = crate::sched::side_edges::EvRing<SchedEv, EV_RING_SLOTS>;
 // The Sync proof lives in side_edges.rs (this file carries zero unsafe).
 
-static EV_RING: EvRing = EvRing(UnsafeCell::new([const { SchedEv::empty() }; EV_RING_SLOTS]));
+static EV_RING: EvRing = EvRing::new([const { SchedEv::empty() }; EV_RING_SLOTS]);
 
 /// Reservation cursor: each `fetch_add` result is a unique record index.
 static EV_CUR: AtomicU64 = AtomicU64::new(0);
@@ -118,7 +122,7 @@ pub fn sched_ev(tag: u32, pid: u32, a: u64, b: u64) {
     ev.pid = pid;
     ev.a = a;
     ev.b = b;
-    ev.jif = crate::drivers::timer::get_jiffies();
+    ev.jif = crate::timer::get_jiffies();
     ev.pub_seq.store(idx + 1, Ordering::Release);
 }
 

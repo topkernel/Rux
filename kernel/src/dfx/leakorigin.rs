@@ -166,7 +166,7 @@ pub fn note_acquire(
     slot.task.store(task as usize, Ordering::Release);
     slot.site.store(loc as *const Location as usize, Ordering::Release);
     slot.jif
-        .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+        .store(crate::timer::get_jiffies(), Ordering::Release);
     slot.cnt_after.store(cnt_after, Ordering::Release);
     slot.reported.store(false, Ordering::Release);
     // Outermost base acquire (base field 0->1): record the leak-origin
@@ -176,7 +176,7 @@ pub fn note_acquire(
         slot.otask.store(task as usize, Ordering::Release);
         slot.osite.store(loc as *const Location as usize, Ordering::Release);
         slot.ojif
-            .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+            .store(crate::timer::get_jiffies(), Ordering::Release);
         let cpu = crate::arch::cpu_id() as u32;
         slot.ocpu.store(cpu, Ordering::Release);
         // tp-vs-slot divergence at acquire time: the sched slot names
@@ -636,7 +636,7 @@ pub fn note_hardirq_acquire(
     slot.task.store(task as usize, Ordering::Release);
     slot.hsite.store(loc as *const Location as usize, Ordering::Release);
     slot.hjif
-        .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+        .store(crate::timer::get_jiffies(), Ordering::Release);
     slot.cnt_after.store(cnt_after, Ordering::Release);
     slot.reported.store(false, Ordering::Release);
 }
@@ -658,7 +658,7 @@ pub fn note_softirq_acquire(
     slot.task.store(task as usize, Ordering::Release);
     slot.ssite.store(loc as *const Location as usize, Ordering::Release);
     slot.sjif
-        .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+        .store(crate::timer::get_jiffies(), Ordering::Release);
     let cpu = crate::arch::cpu_id() as u32;
     slot.scpu.store(cpu, Ordering::Release);
     let mis = if (cpu as usize) < crate::config::MAX_CPUS {
@@ -747,7 +747,7 @@ pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
         putchar(c);
     }
     putd(
-        crate::drivers::timer::get_jiffies()
+        crate::timer::get_jiffies()
             .wrapping_sub(slot.hjif.load(Ordering::Acquire)),
     );
     putchar(b'\n');
@@ -835,7 +835,7 @@ pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::Task) {
         putchar(c);
     }
     putd(
-        crate::drivers::timer::get_jiffies()
+        crate::timer::get_jiffies()
             .wrapping_sub(slot.sjif.load(Ordering::Acquire)),
     );
     putchar(b'\n');
@@ -869,7 +869,7 @@ pub fn check_user_return() {
     if slot.reported.swap(true, Ordering::AcqRel) {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = slot.urrep_jif.load(Ordering::Acquire);
     if now.wrapping_sub(last) < 50 {
         return;
@@ -1043,7 +1043,7 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
         putchar(c);
     }
     putd(
-        crate::drivers::timer::get_jiffies()
+        crate::timer::get_jiffies()
             .wrapping_sub(slot.ojif.load(Ordering::Acquire)),
     );
     putchar(b'\n');
@@ -1083,7 +1083,7 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
         }
     }
     let slot = slot_of(task);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     for &c in tag {
         putchar(c);
     }

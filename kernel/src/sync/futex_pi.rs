@@ -808,9 +808,9 @@ fn my_task() -> Option<*mut Task> {
 /// broke the kernel-writer contract; glibc re-issues LOCK_PI).
 /// Caller holds the PI bucket lock.
 fn handed_fixup(uaddr: usize, mytid: u32) -> i64 {
-    use crate::syscall::errno::{EAGAIN, EFAULT, EOWNERDEAD};
+    use crate::errno::constants::{EAGAIN, EFAULT, EOWNERDEAD};
     fn death_take(uaddr: usize, uval: u32, mytid: u32) -> i64 {
-        use crate::syscall::errno::{EAGAIN, EFAULT};
+        use crate::errno::constants::{EAGAIN, EFAULT};
         // Reference contract (kernel/futex/pi.c has NO EOWNERDEAD
         // return): LOCK_PI returns 0 while the word carries
         // FUTEX_OWNER_DIED beside the new owner TID — glibc's robust
@@ -857,11 +857,11 @@ fn handed_fixup(uaddr: usize, mytid: u32) -> i64 {
 /// robust recovery reads the flag from the word), -EDEADLK on
 /// self/cycle, -ETIMEDOUT / -EINTR as usual.
 pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
-    use crate::syscall::errno::{
+    use crate::errno::constants::{
         EAGAIN, EDEADLK, EFAULT, EINTR, EOWNERDEAD, ETIMEDOUT,
     };
     let Some(current) = my_task() else {
-        return -(crate::syscall::errno::EFAULT as i64);
+        return -(crate::errno::constants::EFAULT as i64);
     };
     let mytid = crate::sched::edges::task_shared(current).pid() as u32;
 
@@ -1028,7 +1028,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         // `handed` on a freed (possibly reused) waiter slot and hand
         // the word to a task that already left.
         let timed = deadline.is_some_and(|dl| {
-            crate::drivers::timer::get_jiffies() >= dl
+            crate::timer::get_jiffies() >= dl
         });
         {
             let mut walk_from: *mut Task = core::ptr::null_mut();
@@ -1062,7 +1062,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
 
 /// FUTEX_TRYLOCK_PI: non-blocking acquire attempt.
 pub fn futex_trylock_pi(uaddr: usize, shared: bool) -> i64 {
-    use crate::syscall::errno::{EAGAIN, EDEADLK, EFAULT, EOWNERDEAD};
+    use crate::errno::constants::{EAGAIN, EDEADLK, EFAULT, EOWNERDEAD};
     let Some(current) = my_task() else {
         return -(EFAULT as i64);
     };
@@ -1092,7 +1092,7 @@ pub fn futex_trylock_pi(uaddr: usize, shared: bool) -> i64 {
 
 /// FUTEX_UNLOCK_PI: release, handing ownership to the top waiter.
 pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
-    use crate::syscall::errno::{EAGAIN, EFAULT, EPERM, ESRCH};
+    use crate::errno::constants::{EAGAIN, EFAULT, EPERM, ESRCH};
     let Some(current) = my_task() else {
         return -(EFAULT as i64);
     };

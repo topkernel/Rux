@@ -118,41 +118,20 @@ const TRACK_FAIL_ESCAPE: u64 = 10;
 /// otherwise, burying the serial console for every other consumer).
 static ESCAPE_PRINT_JIFFIES: AtomicU64 = AtomicU64::new(0);
 
-/// jiffies — global tick counter (advanced from the timer IRQ)
-static JIFFIES: AtomicU64 = AtomicU64::new(0);
-/// timebase value at the first LAPIC-tick jiffies update (grid origin).
-static JIFFIES_BASE: AtomicU64 = AtomicU64::new(0);
+// (jiffies statics + get_jiffies + conversions + the tick-grid
+// derivation HOISTED to crate::timer — the rung4 prep move; this driver
+// keeps read_time (the TSC/HPET clocksource) and re-exports the
+// framework items for its historical callers.)
 
-/// Get current jiffies value (ticks since boot)
-#[inline]
-pub fn get_jiffies() -> u64 {
-    JIFFIES.load(Ordering::Acquire)
-}
+pub use crate::timer::{
+    get_jiffies, jiffies_to_msecs, msecs_to_jiffies,
+};
 
-/// Test-only deterministic jiffy advance (unit-test harness): the tests
-/// run with the timer interrupt disabled and — since R87 keeps secondary
-/// harts interrupt-less until boot_complete — nothing increments JIFFIES
-/// during the suite. Tests that need "time has passed" semantics (e.g.
-/// the tcp-karn RTT-sampling control) bump the counter explicitly
-/// instead of relying on incidental ticks.
-#[cfg(feature = "unit-test")]
-pub fn test_advance_jiffies(n: u64) {
-    JIFFIES.fetch_add(n, core::sync::atomic::Ordering::Release);
-}
-
-/// Floor-map an absolute timebase value onto the jiffy grid — the
-/// read side of increment_jiffies_from_timebase's
-/// `floor((now - base) / period)` derivation (0 before the grid origin
-/// is established). The timer wheel uses this to derive an hres
-/// entry's first-check jiffy from its precise time-CSR deadline, so
-/// routing never trusts caller-supplied jiffy bookkeeping.
+/// Floor-map onto the jiffy grid (the framework derivation; the x86
+/// period is TSC-nominal TIME_SLICE_TICKS).
 #[inline]
 pub fn jiffy_floor_of_time(t: u64) -> u64 {
-    let base = JIFFIES_BASE.load(Ordering::Acquire);
-    if base == 0 {
-        return 0;
-    }
-    t.saturating_sub(base) / TIME_SLICE_TICKS
+    crate::timer::jiffy_floor_of_time(t, TIME_SLICE_TICKS)
 }
 
 /// Coarse time in nanoseconds since boot, snapped to the nominal tick
@@ -162,17 +141,9 @@ pub fn coarse_ns_since_boot() -> u64 {
     read_time() / TIME_SLICE_TICKS * (1_000_000_000 / HZ)
 }
 
-/// Convert jiffies to milliseconds
-#[inline]
-pub const fn jiffies_to_msecs(jiffies: u64) -> u64 {
-    jiffies * 1000 / HZ
-}
-
-/// Convert milliseconds to jiffies
-#[inline]
-pub const fn msecs_to_jiffies(msecs: u64) -> u64 {
-    msecs * HZ / 1000
-}
+/// Test-only jiffy advance (framework static).
+#[cfg(feature = "unit-test")]
+pub use crate::timer::test_advance_jiffies;
 
 /// High-resolution nanoseconds since boot (see the riscv64 twin).
 #[inline]
@@ -541,24 +512,7 @@ pub fn pre_hpet_time() -> u64 {
 /// the trap handler turns into the light no-tick-duty exit).
 #[inline]
 fn increment_jiffies_from_timebase() -> u64 {
-    let now = read_time();
-    // Establish the grid origin on the first call.
-    if JIFFIES_BASE.load(Ordering::Acquire) == 0 {
-        JIFFIES_BASE
-            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire)
-            .ok();
-    }
-    let base = JIFFIES_BASE.load(Ordering::Acquire);
-    let nominal = now.saturating_sub(base) / TIME_SLICE_TICKS;
-    // Monotonic: only ever move forward.
-    let mut cur = JIFFIES.load(Ordering::Acquire);
-    while nominal > cur {
-        match JIFFIES.compare_exchange_weak(cur, nominal, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => break,
-            Err(actual) => cur = actual,
-        }
-    }
-    nominal.saturating_sub(cur)
+    crate::timer::jiffies_update_from_timebase(read_time(), TIME_SLICE_TICKS)
 }
 
 /// Clock interrupt handler (called from the x86_64 trap entry).
@@ -585,8 +539,7 @@ pub fn timer_interrupt_handler() -> u64 {
     } else {
         // PIT phase: the free-running channel 0 makes every IRQ exactly
         // one tick (single-CPU boot fallback).
-        JIFFIES.fetch_add(1, Ordering::AcqRel);
-        1
+        crate::timer::jiffies_bump()
     };
 
     // RT-2X item 4 (paired-test queue): expire due high-resolution
@@ -616,7 +569,7 @@ pub fn timer_interrupt_handler() -> u64 {
     // behavior-identical minus the wasted dispatch. count() is a
     // high-water mark: once any TCP socket has existed the raise
     // resumes unconditionally (and the handler then has real work).
-    if crate::net::tcp::get_tcp_socket_table().count() > 0 {
+    if crate::net::net_hooks::tcp_table_nonempty() {
         crate::interrupt::softirq::raise_softirq_irqoff(
             crate::interrupt::softirq::SoftirqIndex::Timer as usize,
         );

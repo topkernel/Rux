@@ -96,7 +96,7 @@ pub struct PosixMq {
     /// SIGEV_THREAD target: the netlink socket musl/glibc's helper
     /// registered (sigev_signo carries its fd). Linux delivers the
     /// notification by pushing a 32-byte message onto that socket.
-    notify_sock: Spinlock<Option<alloc::sync::Arc<crate::net::netlink::NetlinkSocket>>>,
+    notify_sock: Spinlock<Option<alloc::sync::Arc<crate::fs::file::File>>>,
 }
 
 impl PosixMq {
@@ -497,13 +497,13 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     // returns ETIMEDOUT immediately (Linux's behaviour). The
     // sub-jiffy remainder is rounded UP so the call never returns
     // ETIMEDOUT before the requested instant.
-    let (now_sec, now_nsec) = crate::syscall::time::realtime_secs_nanos();
+    let (now_sec, now_nsec) = crate::timer::realtime_secs_nanos();
     let now_ns = (now_sec as i128) * 1_000_000_000i128 + (now_nsec as i128);
     let target_ns = (ts_sec as i128) * 1_000_000_000i128 + (ts_nsec as i128);
     let delta_ns = if target_ns > now_ns { target_ns - now_ns } else { 0 };
     let hz = crate::drivers::timer::HZ as u128;
     let timeout_jiffies = ((delta_ns as u128 * hz + 999_999_999u128) / 1_000_000_000u128) as u64;
-    Ok(Some(crate::drivers::timer::get_jiffies() + timeout_jiffies))
+    Ok(Some(crate::timer::get_jiffies() + timeout_jiffies))
 }
 
 /// sys_mq_timedsend — Send a message to a message queue (NR 182)
@@ -609,7 +609,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
                     if let Some(sock) = mq.notify_sock.lock().take() {
                         let mut msg = [0u8; 32];
                         msg[31] = 1;
-                        sock.push_kernel_message(msg.to_vec());
+                        crate::net::net_hooks::netlink_push_kernel_message(&sock, msg);
                     }
                     let signo = mq.notify_signo.load(Ordering::Relaxed);
                     if signo > 0 {
@@ -650,7 +650,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
         }
 
         if let Some(dl) = deadline {
-            if crate::drivers::timer::get_jiffies() >= dl {
+            if crate::timer::get_jiffies() >= dl {
                 return -(errno::ETIMEDOUT as i64);
             }
         }
@@ -811,7 +811,7 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
         }
 
         if let Some(dl) = deadline {
-            if crate::drivers::timer::get_jiffies() >= dl {
+            if crate::timer::get_jiffies() >= dl {
                 return -(errno::ETIMEDOUT as i64);
             }
         }
@@ -999,7 +999,13 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         // sigev_signo is the helper's netlink socket fd (Linux
         // sockfd_lookup): EBADF for a bad fd, EINVAL for a non-netlink
         // file.
-        match crate::net::netlink::netlink_socket_from_fd(sev.sigev_signo as usize) {
+        // The helper's netlink socket, kept alive by its File (the
+        // ops-identity probe decides netlink vs other file vs bad fd —
+        // the same EINVAL/EBADF split Linux's sockfd_lookup makes).
+        let sock_file = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(sev.sigev_signo as usize))
+            .filter(|f| f.get_ops().map(|o| crate::net::net_hooks::is_netlink_ops(o)).unwrap_or(false));
+        match sock_file {
             Some(sock) => {
                 mq.notify_pid.store(my_pid, Ordering::Relaxed);
                 mq.notify_signo.store(0, Ordering::Relaxed);
@@ -1008,8 +1014,6 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
                 return 0;
             }
             None => {
-                // Distinguish bad fd from wrong file type the cheap way:
-                // an fd that exists but is not a netlink socket is EINVAL.
                 let exists = crate::sched::get_current_fdtable()
                     .map(|ft| ft.get_file(sev.sigev_signo as usize).is_some())
                     .unwrap_or(false);

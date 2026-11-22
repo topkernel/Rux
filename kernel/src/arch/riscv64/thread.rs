@@ -92,6 +92,9 @@ pub struct ThreadStruct {
     pub debug_flag: bool,
 }
 
+// IRREDUCIBLE F-ROW (F-CSR-R1, file-level): the sstatus CSR read/write
+// pairs sprinkled through the FPU wrappers — reference kernel
+// arch/riscv's csr.h CSRS/CSRC macros; CSR access has no safe shape.
 impl ThreadStruct {
     /// Create new thread structure
     pub const fn new() -> Self {
@@ -317,6 +320,9 @@ impl ThreadStruct {
     #[inline]
     // Runs with FS verified Dirty; the fsd targets are this struct's own
     // [u64; 32] array.
+    // IRREDUCIBLE F-ROW (F-FPU-1): the x32 fsd save — reference
+    // kernel arch/riscv/kernel/entry.S's fstate_save; no safe Rust
+    // shape touches the FP register file.
     fn __fstate_save(&mut self) {
         // SAFETY: temporary FS enable (register RMW).
         unsafe { asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack)) };
@@ -377,6 +383,8 @@ impl ThreadStruct {
     #[inline]
     // Runs with fs != OFF so the saved state is valid; the fld sources
     // are this struct's own [u64; 32] array.
+    // IRREDUCIBLE F-ROW (F-FPU-2): the x32 fld restore — reference
+    // kernel entry.S's fstate_restore.
     fn __fstate_restore(&mut self) {
         // SAFETY: temporary FS enable (register RMW).
         unsafe { asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack)) };
@@ -461,6 +469,9 @@ impl Default for ThreadStruct {
 /// Called when process first uses FPU
 #[inline]
 /// Once per CPU before FPU use (register-level init).
+/// IRREDUCIBLE F-ROW (F-FPU-3): zeroing the live FP register file —
+/// reference kernel fpu.S's fstate_clean; register-file init has no
+/// safe shape.
 pub fn fpu_init() {
     // SAFETY: sstatus CSR RMW (FS field).
     unsafe {

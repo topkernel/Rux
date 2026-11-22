@@ -116,8 +116,10 @@ impl<'a> DioReadDst<'a> {
             DioReadDst::User { va, .. } => {
                 // SAFETY: exception-table copy into the access_ok'd
                 // user window; uncopied tail truncates (short read).
-                let uncopied =
-                    unsafe { crate::arch::uaccess::copy_to_user((*va + off) as *mut u8, src.as_ptr(), src.len()) };
+                let uncopied = crate::arch::uaccess_safe::copy_out(
+                    (*va + off) as usize,
+                    src,
+                );
                 if uncopied >= src.len() {
                     None
                 } else {
@@ -158,9 +160,10 @@ impl<'a> DioReadDst<'a> {
     fn first_ptr(&mut self, off: usize) -> *mut u8 {
         match self {
             DioReadDst::Staging(buf) => {
-                // SAFETY: off <= buf.len() (callers pass in-range dst
-                // offsets); the pointer is used within this borrow.
-                unsafe { (**buf).as_mut_ptr().add(off) }
+                // off <= buf.len() (callers pass in-range dst
+                // offsets); the pointer is used within this borrow
+                // (wrapping: the edge's in-range contract).
+                (**buf).as_mut_ptr().wrapping_add(off)
             }
             DioReadDst::User { pins, .. } => pins.first_ptr(off) as *mut u8,
         }
@@ -501,7 +504,7 @@ fn ext4_dio_read_batched(
                 }
 
                 // ---- Phase 2: one kick, then wait in order ----
-                crate::drivers::virtio::pci_blk_kick_all();
+                crate::drivers::blkdev::kick_all_pending_disks();
                 for c in 0..chains {
                     let mut ok = false;
                     if chain_armed[c] {
@@ -837,7 +840,7 @@ impl ReadDst {
     /// # Safety
     /// `src` must hold `bytes` readable bytes; Kernel variant pointer must
     /// have `len` writable bytes, User variant must be access_ok-validated.
-    unsafe fn put(&self, off: usize, src: *const u8, bytes: usize) -> Result<usize, i32> {
+    fn put(&self, off: usize, src: *const u8, bytes: usize) -> Result<usize, i32> {
         match self {
             ReadDst::Kernel(dst, _) => {
                 // SAFETY: caller guarantees dst+off+bytes is in bounds.
@@ -865,17 +868,15 @@ impl ReadDst {
     /// Zero-fill `bytes` at `off` (sparse holes). Returns bytes filled;
     /// `Err(EFAULT)` on an immediate full user fault.
     ///
-    /// # Safety
-    /// Same destination validity as `put`.
-    unsafe fn put_zeroes(&self, off: usize, bytes: usize) -> Result<usize, i32> {
+    /// Destination validity contract as `put` (INV-EXT4-DIO-1).
+    fn put_zeroes(&self, off: usize, bytes: usize) -> Result<usize, i32> {
         // The zero page: ext4 block_size-sized static is overkill — copy in
         // 4 KiB chunks from a small const zero block.
         static ZEROS: [u8; 4096] = [0u8; 4096];
         let mut done = 0usize;
         while done < bytes {
             let n = core::cmp::min(4096, bytes - done);
-            // SAFETY: same destination validity as put.
-            let c = unsafe { self.put(off + done, ZEROS.as_ptr(), n)? };
+            let c = self.put(off + done, ZEROS.as_ptr(), n)?;
             if c < n {
                 break; // user fault: short read
             }
@@ -926,7 +927,7 @@ impl WriteSrc {
     /// (a page-cache frame span). Never call this with a spinlock held:
     /// the User arm's fault path can sleep (mapped-but-not-resident user
     /// pages are demand-filled by the trap handler).
-    unsafe fn copy_to_frame(&self, off: usize, dst: *mut u8, n: usize) -> usize {
+    fn copy_to_frame(&self, off: usize, dst: *mut u8, n: usize) -> usize {
         match self {
             // SAFETY: caller guarantees the kernel source pointer and
             // destination validity.
@@ -1201,9 +1202,10 @@ fn ext4_file_read_cached_dst(
                     );
                     let avail = block_size_usize - page_offset;
                     let copy_len = core::cmp::min(remaining, avail);
-                    // SAFETY: the audited ReadDst::put span — the raw
-                    // window add + user/kernel copy ride its contract.
-                    match unsafe { dst.put(buf_offset, data.as_ptr().add(page_offset), copy_len) } {
+                    // The audited ReadDst::put span — the raw window
+                    // add rides its in-range contract (page_offset <
+                    // block_size <= data.len()).
+                    match dst.put(buf_offset, data.as_ptr().wrapping_add(page_offset), copy_len) {
                         Ok(copied) => {
                             total_read += copied;
                             buf_offset += copied;
@@ -1232,7 +1234,7 @@ fn ext4_file_read_cached_dst(
             let avail = block_size_usize - page_offset;
             let zero_len = core::cmp::min(remaining, avail);
             // SAFETY: dst validity documented on ReadDst::put_zeroes.
-            let copied = match unsafe { dst.put_zeroes(buf_offset, zero_len) } {
+            let copied = match dst.put_zeroes(buf_offset, zero_len) {
                 Ok(c) => c,
                 Err(e) => return if total_read == 0 { Err(e) } else { Ok(total_read) },
             };
@@ -1480,7 +1482,7 @@ fn drain_batch(
     let mut status = [0i32; MAX_BATCH_DRAIN];
     // One device kick for the whole quietly-submitted batch (see
     // pci_submit_read_async): publish N chains, notify once, then wait.
-    crate::drivers::virtio::pci_blk_kick_all();
+    crate::drivers::blkdev::kick_all_pending_disks();
     for i in 0..count {
         status[i] = bio::bread_wait(bh_ptrs[i], &completions[i]);
     }
@@ -1698,7 +1700,7 @@ impl GupWriteChains {
         if self.n == 0 {
             return 0;
         }
-        crate::drivers::virtio::pci_blk_kick_all();
+        crate::drivers::blkdev::kick_all_pending_disks();
         let mut first_err = 0i32;
         for i in 0..self.n {
             let rc = self.completions[i].wait();
@@ -2827,27 +2829,12 @@ pub fn allocate_indirect_block(
                 let double_block = allocator.alloc_block(goal_group)?;
                 inode.block[13] = double_block as u32;
 
-                // Zero double indirect block
-                // SAFETY: bio::bread returns a valid BufferHead; b_data is a
-                // block-sized writable buffer. We zero it to initialize all
-                // second-level pointers.
-                unsafe {
-                    let bh = bio::bread(fs.device, double_block)
-                        .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-                    for byte in bio::bh_data_mut(&bh).iter_mut() {
-                        *byte = 0;
-                    }
-
-                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
-                    // Family b: journal registration (metadata zeroing).
-                    if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-                    }
-                    let sync_res = bio::sync_dirty_buffer(bh);
-                    bio::brelse(bh);
-                    sync_res?;
-                }
+                // Zero double indirect block: the block-update edge
+                // owns pin/dirty/journal/sync/release (INV-BIO-BLOCKUPD).
+                bio::with_block_mut(fs.device, double_block, |data, _| {
+                    data.fill(0);
+                    Ok(())
+                })?;
             }
 
             // First level index
@@ -2865,27 +2852,12 @@ pub fn allocate_indirect_block(
                 // Need to allocate single indirect block
                 indirect_block = allocator.alloc_block(goal_group)?;
 
-                // Zero single indirect block
-                // SAFETY: bio::bread returns a valid BufferHead; b_data is a
-                // block-sized writable buffer. We zero it to initialize block
-                // pointers.
-                unsafe {
-                    let bh = bio::bread(fs.device, indirect_block)
-                        .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-                    for byte in bio::bh_data_mut(&bh).iter_mut() {
-                        *byte = 0;
-                    }
-
-                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
-                    // Family b: journal registration (metadata zeroing).
-                    if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-                        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-                    }
-                    let sync_res = bio::sync_dirty_buffer(bh);
-                    bio::brelse(bh);
-                    sync_res?;
-                }
+                // Zero single indirect block: same block-update edge
+                // (INV-BIO-BLOCKUPD).
+                bio::with_block_mut(fs.device, indirect_block, |data, _| {
+                    data.fill(0);
+                    Ok(())
+                })?;
 
                 // Update double indirect block
                 indirect::write_indirect_block(
@@ -3658,9 +3630,7 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
                     // serializes writers, and readers of atime tolerate
                     // torn u32 values (advisory field). stamp_atime_
                     // relatime is the audited write span.
-                    unsafe {
-                        stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
-                    }
+                    stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
                 }
                 read_bytes as isize
             }
@@ -3707,9 +3677,7 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
                 // (stamp_atime_relatime doc).
                 // INV-EXT4-ATIME: same contract as ext4_file_read_vfs
                 // (advisory field, io_lock serializes writers).
-                unsafe {
-                    stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
-                }
+                stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
                 // inotify IN_ACCESS, same as the staged read path below
                 // (line ~1240): this fast path bypasses File::read, so
                 // without an explicit notify every read(2) on an ext4
@@ -3822,12 +3790,9 @@ pub fn ext4_file_read_dio_user_vfs(file: &File, dst: *mut u8, count: usize) -> O
         // atime + IN_ACCESS: same discipline as ext4_file_read_user_vfs
         // (INV-EXT4-ATIME: the sb Box lives for the inode; io_lock
         // serializes; stamp_atime_relatime is the audited write span).
-        unsafe {
-            stamp_atime_relatime(
-                ext4_inode as *const super::inode::Ext4Inode
-                    as *mut super::inode::Ext4Inode,
-            );
-        }
+        stamp_atime_relatime(
+            ext4_inode as *const super::inode::Ext4Inode as *mut super::inode::Ext4Inode,
+        );
         crate::fs::inotify::notify_file(file, crate::fs::inotify::inotify_events::IN_ACCESS);
     }
     Some(n as isize)
@@ -3870,15 +3835,17 @@ pub fn ext4_file_pread_dio_user_vfs(
         // syscall layer dispatches here INSTEAD of it, so mirror the
         // entry it replaces (none fired for the O_DIRECT arm).
         let atime = crate::drivers::rtc::wall_secs() as u32;
-        // SAFETY: audited advisory-field store (INV-EXT4-ATIME); the sb
-        // Box is exclusively ours while io_lock is held.
-        unsafe {
-            core::ptr::write_volatile(
-                &mut (*(ext4_inode as *const super::inode::Ext4Inode
-                    as *mut super::inode::Ext4Inode))
-                    .atime,
-                atime,
+        // Audited advisory-field store (INV-EXT4-ATIME); the sb Box
+        // is exclusively ours while io_lock is held. Volatile by the
+        // same discipline as stamp_atime_relatime.
+        {
+            let i = crate::syscall::edges::boxed_mut(
+                ext4_inode as *const super::inode::Ext4Inode
+                    as *mut super::inode::Ext4Inode,
             );
+            // SAFETY: INV-EXT4-ATIME — one volatile store of the
+            // advisory u32; readers tolerate torn values.
+            unsafe { core::ptr::write_volatile(&mut i.atime, atime) };
         }
     }
     Some(n as isize)
@@ -3983,16 +3950,13 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         && inode.mode.is_regular_file()
         && !fs.read_only
     {
-        // SAFETY: the audited ext4_buffered_write span (kernel-source
-        // staging slice, page-cache copy discipline).
-        unsafe {
-            ext4_buffered_write(
-                fs,
-                inode,
-                offset,
-                WriteSrc::Kernel(buf.as_ptr(), buf.len()),
-            )
-        }
+        // ext4_buffered_write is a safe fn (the audited write span).
+        ext4_buffered_write(
+            fs,
+            inode,
+            offset,
+            WriteSrc::Kernel(buf.as_ptr(), buf.len()),
+        )
     } else {
         ext4_write_at_core(
             fs,
@@ -4048,7 +4012,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
 /// description — the write twin of the R71 read race.
 ///
 /// SAFETY: file.inode.get() fields written at open time, read-only after.
-pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, count: usize) -> isize {
+pub fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, count: usize) -> isize {
     if file.flags().is_readonly() {
         return -9; // EBADF
     }
@@ -4058,9 +4022,9 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
         }
         return errno::Errno::IOError.as_neg_i32() as isize;
     };
-    // SAFETY: the fn's own contract — `buf` holds `count` readable bytes
-    // (the caller's raw-pointer write_at boundary).
-    let data = core::slice::from_raw_parts(buf, count);
+    // The fn's own contract — `buf` holds `count` readable bytes (the
+    // caller's raw-pointer write_at boundary); INV-EXT4-WAVFS.
+    let data = crate::syscall::edges::slice_of_kernel_bytes(buf, count);
     // Same routing as write(2): plain buffered writes take the
     // delayed-allocation page-cache path (pwrite/mmap-writeback flushes
     // still come through ext4_write_at_core directly).
@@ -4069,15 +4033,12 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
             | crate::fs::file::FileFlags::O_DSYNC
             | crate::fs::file::FileFlags::O_DIRECT);
     if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
-        // SAFETY: unsafe fn body — the audited ext4_buffered_write span.
-        unsafe {
-            ext4_buffered_write(
-                fs,
-                inode,
-                offset,
-                WriteSrc::Kernel(data.as_ptr(), data.len()),
-            )
-        }
+        ext4_buffered_write(
+            fs,
+            inode,
+            offset,
+            WriteSrc::Kernel(data.as_ptr(), data.len()),
+        )
     } else {
         let written = ext4_write_at_core(
             fs,
@@ -4179,14 +4140,14 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
     let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
         // SAFETY: the audited ext4_buffered_write span (user-source copy
         // contract: wsrc is access_ok-validated by the syscall layer).
-        unsafe { ext4_buffered_write(fs, inode, offset, wsrc) }
+        ext4_buffered_write(fs, inode, offset, wsrc)
     } else {
         // Safety net (the syscall layer does not dispatch durable
         // writes here): stage the user bytes once and run the
         // write-through core, exactly like the staged path would.
         let mut staged = alloc::vec![0u8; wsrc.len()];
         // SAFETY: staged is a valid kernel destination of wsrc.len().
-        let uncopied = unsafe { wsrc.copy_to_frame(0, staged.as_mut_ptr(), staged.len()) };
+        let uncopied = wsrc.copy_to_frame(0, staged.as_mut_ptr(), staged.len());
         if uncopied > 0 {
             let landed = staged.len() - uncopied;
             if landed == 0 {
@@ -4248,7 +4209,7 @@ pub fn ext4_file_pwrite_user_vfs(file: &File, offset: u64, src: *const u8, count
     let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
         // SAFETY: the audited ext4_buffered_write span (user-source copy
         // contract: wsrc is access_ok-validated by the syscall layer).
-        unsafe { ext4_buffered_write(fs, inode, offset, WriteSrc::User(src, count)) }
+        ext4_buffered_write(fs, inode, offset, WriteSrc::User(src, count))
     } else {
         // Safety net (the syscall layer does not dispatch durable
         // pwrites here): stage once, run the write-through core —
@@ -4256,7 +4217,7 @@ pub fn ext4_file_pwrite_user_vfs(file: &File, offset: u64, src: *const u8, count
         let mut staged = alloc::vec![0u8; count];
         // SAFETY: staged is a valid kernel destination of count bytes.
         let uncopied =
-            unsafe { WriteSrc::User(src, count).copy_to_frame(0, staged.as_mut_ptr(), count) };
+            WriteSrc::User(src, count).copy_to_frame(0, staged.as_mut_ptr(), count);
         if uncopied > 0 {
             let landed = count - uncopied;
             if landed == 0 {
@@ -5065,7 +5026,7 @@ fn ext4_buffered_write(
             )
             .is_ok()
     {
-        let t0 = crate::drivers::timer::get_jiffies();
+        let t0 = crate::timer::get_jiffies();
         // Flush THIS writer's inode first (the throttle proper — the
         // writer waits for its own data), then the system-wide recovery
         // pass: flush every dirty inode the windowed collect finds
@@ -5086,7 +5047,7 @@ fn ext4_buffered_write(
                 shrunk = page_cache::get_page_cache().writeback_recover(shortfall);
             }
         }
-        let dt = crate::drivers::timer::get_jiffies().saturating_sub(t0);
+        let dt = crate::timer::get_jiffies().saturating_sub(t0);
         WRITER_FLUSH_IN_FLIGHT.store(false, core::sync::atomic::Ordering::Release);
         // Bounded tuning print (the first 40 watermark flushes per boot):
         // names the flush cost class on the repro rigs; silent otherwise.
@@ -6122,10 +6083,11 @@ unsafe fn stamp_write_tail(ino: *mut super::inode::Ext4Inode, pub_end: u64, now:
     }
 }
 
-unsafe fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
-    // SAFETY: caller pins the Box; the time fields are u32s read-only
-    // here and written once below.
-    let i = unsafe { &mut *ino };
+fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
+    // INV-EXT4-ATIME: the caller pins the Box (io_lock-held read paths;
+    // the sb box lives for the inode); the time fields are u32s
+    // read-only here and written once below.
+    let i = crate::syscall::edges::boxed_mut(ino);
     let now = {
         let cached = crate::drivers::rtc::cached_wall_secs();
         if cached != 0 {
@@ -6258,14 +6220,16 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
     };
     if atime_pending {
         let atime = crate::drivers::rtc::wall_secs() as u32;
-        // SAFETY: the cached Ext4Inode in inode.sb is a Box owned
-        // by this VFS inode; advisory field, plain volatile write
-        // (INV-EXT4-ATIME, same discipline as ext4_file_read_vfs).
-        unsafe {
-            core::ptr::write_volatile(
-                &mut (*(inode.sb.unwrap() as *mut super::inode::Ext4Inode)).atime,
-                atime,
+        // The cached Ext4Inode in inode.sb is a Box owned by this
+        // VFS inode; advisory field (INV-EXT4-ATIME, same discipline
+        // as ext4_file_read_vfs).
+        {
+            let i = crate::syscall::edges::boxed_mut(
+                inode.sb.unwrap() as *mut super::inode::Ext4Inode,
             );
+            // SAFETY: INV-EXT4-ATIME — one volatile store of the
+            // advisory u32; readers tolerate torn values.
+            unsafe { core::ptr::write_volatile(&mut i.atime, atime) };
         }
     }
     ret

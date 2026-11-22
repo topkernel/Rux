@@ -234,19 +234,18 @@ pub struct NodeStats {
 
 /// Global node array (static storage)
 /// For UMA systems, we only have node 0
-static mut NODE_DATA: [Option<PglistData>; MAX_NUMNODES] = [None];
+pub(super) static mut NODE_DATA: [Option<PglistData>; MAX_NUMNODES] = [None];
+
 
 /// Node count
 static NODE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Initialize node data
 ///
-/// # Safety
-/// Must be called only during early boot, before other CPUs are online
-pub unsafe fn init_node_data() {
-    // SAFETY: called only during early boot (single-threaded), before any other
-    // access to NODE_DATA.
-    NODE_DATA[0] = Some(PglistData::new(0));
+/// Early boot only, before other CPUs are online (INV-MM-12 init arm
+/// via the edge).
+pub fn init_node_data() {
+    super::edges::node_data_init();
     NODE_COUNT.store(1, Ordering::Release);
 }
 

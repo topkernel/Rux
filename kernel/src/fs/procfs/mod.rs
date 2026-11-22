@@ -32,6 +32,9 @@
 //!     └── fd/      - File descriptors
 //! ```
 
+// (residue rows: the Send/Sync impls carry ProcFSNode's per-field
+// locking (children/override fields under their locks — same shape
+// as INV-FILE-SEND-1); procfs_kill_sb rides INV-SBTYPE-1.)
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
@@ -2397,7 +2400,7 @@ fn procfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 /// EPERM for poll-less files, so without this op the monitor's kernel
 /// source never armed.
 fn procfs_file_poll(_file: &crate::fs::File, events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
+    use crate::fs::event_notify::poll_events::*;
     let mut r = 0u16;
     if events & POLLIN != 0 {
         r |= POLLIN | POLLRDNORM;
@@ -2919,4 +2922,23 @@ fn partitions_generate() -> alloc::vec::Vec<u8> {
         &crate::drivers::loop_dev::partitions_lines(),
     ));
     out.into_bytes()
+}
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The proc mount entry (old mount.rs "proc"|"procfs" arm, verbatim).
+pub fn mount_proc(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data);
+    mount_procfs().map_err(|e| e as i32)?;
+    crate::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
+    crate::fs::mount::register_mount(fs_type, target, "proc", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["proc", "procfs"], mount_proc);
 }

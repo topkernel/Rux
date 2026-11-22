@@ -145,3 +145,74 @@ pub(crate) fn file_privdata_ref_mut<T>(file: &File) -> Option<&mut T> {
     // caller's serialization.
     Some(unsafe { &mut *(p as *mut T) })
 }
+
+
+/// INV-FS-FILEINODE-1: `File::inode` is an `UnsafeCell<Option<Arc<Inode>>>`
+/// installed once at open/create time and immutable for the open file
+/// description's lifetime (the Arc keeps the Inode alive; swaps happen
+/// only through rename-with-replace, which installs a NEW cell value at
+/// a different path's description). 30 call sites read it through
+/// `(&*file.inode.get()).as_ref()` — this edge owns that one audit.
+pub(crate) fn file_inode(file: &File) -> Option<&crate::fs::inode::Inode> {
+    // SAFETY: INV-FS-FILEINODE-1 — write-once cell; the shared read is
+    // sound for the description's whole lifetime (same shape as
+    // file_privdata_ref).
+    unsafe { (&*file.inode.get()).as_deref_ref() }
+}
+
+/// INV-FS-FILEINODE-2: the install twin of [`file_inode`] — writes the
+/// cell ONCE, before the File is published to any fd table (the
+/// constructor sites: open/create/procfs-memfile synth). No reader
+/// exists at install time by construction.
+pub(crate) fn file_inode_install(file: &File, inode: alloc::sync::Arc<crate::fs::inode::Inode>) {
+    // SAFETY: INV-FS-FILEINODE-2 — pre-publication exclusive write.
+    unsafe { *file.inode.get() = Some(inode) };
+}
+
+/// INV-FS-FILEPRIV-2: the take-and-reclaim twin of file_privdata_ref —
+/// `Arc::into_raw`'s partner on the close path. Exactly-once: the cell
+/// is emptied by the take, so a second call gets None; the from_raw
+/// consumes the strong reference this File held (install was
+/// Arc::into_raw — one strong count belongs to the cell).
+pub(crate) fn file_privdata_take_arc<T>(file: &File) -> Option<alloc::sync::Arc<T>> {
+    // SAFETY: INV-FS-FILEPRIV-1 (close-path exclusive ownership) +
+    // INV-FS-FILEPRIV-2 (the take is the cell's single read of the
+    // whole lifetime; from_raw's count ownership documented above).
+    let p = unsafe { *file.private_data.get() }?;
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: type claim per INV-FS-FILEPRIV-1; the Arc count transfer
+    // per INV-FS-FILEPRIV-2.
+    Some(unsafe { alloc::sync::Arc::from_raw(p as *const T) })
+}
+
+/// The &'static twin of [`privdata_ref`] for LEAK-AT-INSTALL privdata
+/// (INV-FS-PRIVDATA-1 + the leak discipline): devfs entries are wrapped
+/// in Arc and deliberately leaked at install (never reclaimed), so the
+/// object outlives every file — the 'static borrow is sound for them.
+/// Every other filesystem's private_data MUST NOT use this edge.
+pub(crate) fn privdata_ref_leaked<T>(inode: &Inode) -> Option<&'static T> {
+    let p = inode.private_data?;
+    // SAFETY: INV-FS-PRIVDATA-1 (validity + type) + the caller's
+    // leak-at-install claim (the pointer's target lives forever).
+    Some(unsafe { &*(p as *const T) })
+}
+
+/// The Arc-clone twin of [`file_inode`] (INV-FS-FILEINODE-1): takes a
+/// strong reference for storage beyond the call.
+pub(crate) fn file_inode_arc(file: &File) -> Option<alloc::sync::Arc<crate::fs::inode::Inode>> {
+    // SAFETY: INV-FS-FILEINODE-1 (write-once cell); the clone is an
+    // ordinary Arc read.
+    unsafe { (*file.inode.get()).clone() }
+}
+
+// Helper only used by file_inode (Arc<Inode> -> &Inode).
+trait AsDerefRefExt<T> {
+    fn as_deref_ref(&self) -> Option<&T>;
+}
+impl<T> AsDerefRefExt<T> for Option<alloc::sync::Arc<T>> {
+    fn as_deref_ref(&self) -> Option<&T> {
+        self.as_ref().map(|a| &**a)
+    }
+}

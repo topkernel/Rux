@@ -708,7 +708,7 @@ fn uart_rx_debug_magic(c: u8) {
     CAD_SEQ_POS.store(next, Ordering::Relaxed);
     if next == CAD_MAGIC.len() {
         CAD_SEQ_POS.store(0, Ordering::Relaxed);
-        crate::syscall::process::ctrl_alt_del_latch();
+        crate::process::reboot::ctrl_alt_del_latch();
     }
 }
 
@@ -773,7 +773,7 @@ static LAST_ISIG_JIFFY: core::sync::atomic::AtomicU64 = core::sync::atomic::Atom
 /// IRQ-context half of the ^C path: record an ISIG character (INTR ^C /
 /// QUIT ^\ / SUSP ^Z) for task-context delivery. Never sends directly.
 fn tty_isig_record(c: u8) {
-    let lflag = crate::syscall::io::tty_get_lflag();
+    let lflag = crate::fs::tty::console().lflag();
     const L_ISIG: u32 = 0x0001;
     if lflag & L_ISIG == 0 {
         return;
@@ -811,7 +811,7 @@ pub fn tty_isig_deliver_pending() {
 fn tty_isig_deliver(signo: i32) {
     // De-dup window: the same byte can traverse both the recorded-pending
     // path and process_input()'s consume-time send.
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last_s = LAST_ISIG_SIGNO.load(core::sync::atomic::Ordering::Acquire);
     let last_j = LAST_ISIG_JIFFY.load(core::sync::atomic::Ordering::Acquire);
     if last_s == signo && now.saturating_sub(last_j) < 4 {
@@ -821,7 +821,7 @@ fn tty_isig_deliver(signo: i32) {
     LAST_ISIG_JIFFY.store(now, core::sync::atomic::Ordering::Release);
 
     // Target the tty foreground process group; fall back to the caller's.
-    let mut pgid = crate::syscall::io::tty_get_fg_pgrp();
+    let mut pgid = crate::fs::tty::console().fg_pgrp.load(core::sync::atomic::Ordering::Acquire);
     if pgid == 0 {
         pgid = crate::process::current_pgid();
     }
@@ -1192,10 +1192,10 @@ pub fn uart_has_data() -> bool {
 
 /// Process input character: handle ISIG, echo, and newline translation.
 fn process_input(c: u8) -> Option<u8> {
-    let echo_enabled = crate::syscall::io::tty_echo_enabled();
+    let echo_enabled = crate::fs::tty::console().echo_enabled();
 
     // ISIG processing (signal generation characters)
-    let lflag = crate::syscall::io::tty_get_lflag();
+    let lflag = crate::fs::tty::console().lflag();
     const L_ISIG: u32 = 0x0001;
     if lflag & L_ISIG != 0 {
         let signo = match c {
@@ -1286,4 +1286,42 @@ impl fmt::Write for Uart {
         flush(&buf, n);
         Ok(())
     }
+}
+
+
+// ============================================================================
+// Framebuffer registry (rung4 prep move 3): the framework's one stop for
+// scanout geometry. Drivers (virtio-gpu today) register at probe; the
+// console/OOM-forensics/mmap-COW-exemption consumers read through here —
+// no framework file names a GPU driver. Mirrors the reference's
+// struct fb_info *registered_fb[FB_MAX] registry.
+// ============================================================================
+
+/// The scanout descriptor registered by the display driver.
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferInfo {
+    /// Physical base of the scanout aperture.
+    pub addr: u64,
+    /// Aperture size in bytes.
+    pub size: u32,
+    /// Visible width in pixels.
+    pub width: u32,
+    /// Visible height in pixels.
+    pub height: u32,
+    /// Row stride in bytes.
+    pub stride: u32,
+    /// DRM fourcc.
+    pub format: u32,
+}
+
+static FRAMEBUFFER_INFO: Spinlock<Option<FramebufferInfo>> = Spinlock::new(None);
+
+/// Driver probe registers the live scanout here.
+pub fn set_framebuffer_info(info: FramebufferInfo) {
+    *FRAMEBUFFER_INFO.lock() = Some(info);
+}
+
+/// The registered scanout, if a display driver probed.
+pub fn get_framebuffer_info() -> Option<FramebufferInfo> {
+    *FRAMEBUFFER_INFO.lock()
 }

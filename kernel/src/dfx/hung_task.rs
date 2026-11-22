@@ -82,7 +82,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             Some(t) => t.pid(),
             None => break,
         };
-        let target = crate::drivers::timer::get_jiffies() + interval_jiffies;
+        let target = crate::timer::get_jiffies() + interval_jiffies;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
 
         if timer_id != 0 {
@@ -93,7 +93,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             // Re-check AFTER marking sleeping: the one-shot timer may have
             // fired between arming and set_state — either its wake captured
             // the INTERRUPTIBLE state, or the deadline is already visible.
-            if crate::drivers::timer::get_jiffies() >= target {
+            if crate::timer::get_jiffies() >= target {
                 if let Some(t) = crate::sched::current() {
                     t.set_state(TaskState::new(TaskState::RUNNING));
                     // NEW-C2: a racing wake may have enqueued us while we
@@ -131,8 +131,8 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         // rux:socksnap (retired dfx=socksnap): AF_UNIX listener queue depths + every epoll
         // interest set (appspawn-server wedge hunt, b15) — self-gated.
-        crate::net::unix::unix_listener_snapshot();
-        crate::syscall::misc::epoll_interest_snapshot();
+        crate::net::net_hooks::unix_listener_snapshot();
+        crate::syscall::support::epoll_interest_snapshot();
     }
 
     RUNNING.store(false, Ordering::Release);

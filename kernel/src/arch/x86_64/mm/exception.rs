@@ -75,6 +75,20 @@ fn send_signal(sig: i32, _code: i32, _addr: u64, _rip: u64, _regs: &PtRegs) {
         let pid = current.pid();
         crate::signal::send_signal(pid, sig).ok();
 
+        // force_sig parity for hardware faults (the riscv64/aarch64
+        // twins and x86_64's own GP/trap arms call this; the #PF arms
+        // here missed it): a fault-generated SIGSEGV/SIGBUS pended on a
+        // thread that blocks the signal stays pending forever — do_signal's
+        // first_unmasked filter skips it, execution returns to the
+        // faulting rip, and the fault repeats: an unkillable livelock.
+        // Convicted on the LTP mmap05->shmdt01/mmap1 pair (2026-11-21):
+        // the child inherits a SIGSEGV-blocked mask, its first fault
+        // lands here, and the task refaults at the same rip until the
+        // runner's timeout (the user_segv_forensics dumps repeat, the
+        // VMA disappears under its own racing teardown). Linux delivers
+        // hardware-generated signals regardless of the mask.
+        crate::signal::force_unblock_current(sig);
+
         // Wake up process to handle signal (if it's sleeping)
         crate::signal::signal_wake_up(current as *mut _);
     }
@@ -157,11 +171,8 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     crate::mm::vmstat::note_fault();
     if regs.user_mode() {
         if let Some(task) = crate::sched::current() {
-            // SAFETY: current() returned a live task pointer; this
-            // only touches a per-task atomic counter.
-            unsafe {
-                (*task).min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            }
+            // Typed handle — per-task atomic counter only.
+            task.min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
     let cr2 = crate::arch::cpu::read_cr2();
@@ -296,7 +307,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         // Leg-15 pace: j0 captured at entry, counter ticked
                         // after return (no lock held — handle_cow_fault's
                         // pte_lock is released by then).
-                        let cow_j0 = crate::drivers::timer::get_jiffies();
+                        let cow_j0 = crate::timer::get_jiffies();
                         let cow_res = unsafe {
                             handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
                         };
@@ -492,15 +503,16 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         a += 8;
                     }
                 }
-                // SAFETY: read-only header walk via the pid hash.
-                unsafe {
-                    crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
-                        let bottom = (*task).kernel_stack_bottom() as u64;
-                        let top = (*task).kernel_stack_top() as u64;
-                        let sp = (*task).thread().sp;
+                // Read-only header walk via the pid hash (typed &Task
+                // callback — the wrapper's unsafe was stale).
+                crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+                    {
+                        let bottom = task.kernel_stack_bottom() as u64;
+                        let top = task.kernel_stack_top() as u64;
+                        let sp = task.thread().sp;
                         let rsp = regs.rsp;
                         let hit = rsp >= bottom && rsp < top;
-                        let dead = (*task).state().is_dead();
+                        let dead = task.state().is_dead();
                         // Only print tasks whose stack is near the fault
                         // (±4MB) or dead-with-stack — keeps the dump short.
                         if hit
@@ -508,7 +520,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                             || (rsp + 0x400000 > bottom && rsp < bottom + 0x400000)
                         {
                             ptag(b"KSO-T pid=");
-                            phex((*task).pid() as u64);
+                            phex(task.pid() as u64);
                             ptag(b" dead=");
                             ptag(if dead { b"Y" } else { b"N" });
                             ptag(b" kstack=[");
@@ -520,9 +532,9 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                             ptag(if hit { b" <RSP-IN-THIS-STACK" } else { b"" });
                             ptag(b"\n");
                         }
-                        // keep walking
-                    });
-                }
+                    // keep walking
+                    }
+                });
             }
             panic!(
                 "Kernel stack overflow in task {} (fault_addr={:#x}, rsp={:#x}, rip={:#x}, kstack=[{:#x},{:#x}])",
@@ -604,7 +616,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         MmFaultResult::CowPending => {
             // COW page, try copy-on-write
             // Leg-15 pace: j0 at entry, tick after return (pte_lock released).
-            let cow_j0 = crate::drivers::timer::get_jiffies();
+            let cow_j0 = crate::timer::get_jiffies();
             let cow_res =
                 unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
             crate::dfx::schb::note_cow(cow_j0);

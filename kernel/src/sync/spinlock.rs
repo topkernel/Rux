@@ -58,6 +58,11 @@
 //!   their locks and deliver wakes OUTSIDE them (timer.rs R12-3 pattern);
 //!   see drivers/virtio/mod.rs and `assert_no_virtio_lock`.
 
+// (INV-SPIN-1: the spinlock family — guards deref through the
+// held-lock lifetime; the panic/deadlock-warn rows are PANIC-TIME
+// BEST-EFFORT: they re-read the lock word and owner fields to print
+// diagnostics while the machine is already failing — correctness is
+// the pre-panic discipline, these reads tolerate garbage.)
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -143,7 +148,7 @@ pub fn note_acquire_evidence() {
     let ev = &ACQUIRE_EVIDENCE[cpu];
     ev.task.store(t, Ordering::Relaxed);
     ev.jiffies
-        .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+        .store(crate::timer::get_jiffies(), Ordering::Relaxed);
 }
 
 /// Does `task` (a Task pointer) have LIVE acquire-side evidence on
@@ -263,7 +268,7 @@ impl RawSpinlock {
         self.acq_pid.store(crate::process::current_pid(), Ordering::Relaxed);
         self.acq_site.store(ra, Ordering::Relaxed);
         self.acq_jiffies
-            .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+            .store(crate::timer::get_jiffies(), Ordering::Relaxed);
     }
 
     /// Clear the holder (dfx-lock-owner feature only).
@@ -618,7 +623,7 @@ impl RawSpinlock {
             let asite = l.acq_site.load(Ordering::Relaxed);
             let ajif = l.acq_jiffies.load(Ordering::Relaxed);
             let wv = l.locked.load(Ordering::Relaxed);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let msg = b"LOCK-ACQ: word=";
             for &b in msg {
                 crate::console::uart_putc_raw(b);

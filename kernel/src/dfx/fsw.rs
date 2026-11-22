@@ -225,7 +225,7 @@ pub fn open_exec_stamp() -> (u64, bool) {
     if !on() {
         return (0, false);
     }
-    let w0 = crate::drivers::timer::monotonic_ns_since_boot();
+    let w0 = crate::timer::monotonic_ns_since_boot();
     match crate::sched::current() {
         None => (w0, false),
         Some(t) => {
@@ -242,7 +242,7 @@ pub fn open_close(w0: u64, exec_armed: bool) {
     if w0 == 0 {
         return;
     }
-    let wall = crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(w0);
+    let wall = crate::timer::monotonic_ns_since_boot().saturating_sub(w0);
     max_update(&OPEN_WALL_MAX_NS, wall);
     if exec_armed {
         if let Some(t) = crate::sched::current() {
@@ -299,7 +299,7 @@ pub fn negmemo_on() -> bool {
 #[inline]
 pub fn pc_now() -> u64 {
     if on() {
-        crate::drivers::timer::monotonic_ns_since_boot()
+        crate::timer::monotonic_ns_since_boot()
     } else {
         0
     }
@@ -310,7 +310,7 @@ pub fn pc_now() -> u64 {
 pub fn pc_add(dst: &AtomicU64, t0: u64) {
     if t0 != 0 {
         dst.fetch_add(
-            crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0),
+            crate::timer::monotonic_ns_since_boot().saturating_sub(t0),
             Ordering::Relaxed,
         );
     }
@@ -670,7 +670,7 @@ pub fn dump() {
     if !on() {
         return; // shutdown-path dump hook: silent when the probe is off
     }
-    let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
+    let secs = crate::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
     crate::pr_warn!(
         // sd: sync_dirty calls / deferred-skips — the separator matters:
         // two concatenated u64s are unreadable (the pa59 route-1/control

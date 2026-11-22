@@ -555,7 +555,10 @@ pub fn loop_file_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
             Some(b) => b,
             None => break,
         };
-        // SAFETY: bh from bread; b_data writable and block-sized.
+        // F-BH-LOOP: bh from bread — the BufferHead API is raw-pointer
+        // by design (fs/bio.rs, L5's bio lane owns its conversion);
+        // b_data writable and block-sized here.
+        // SAFETY: as above.
         unsafe {
             {
                 let data = &mut (*bh).b_data;

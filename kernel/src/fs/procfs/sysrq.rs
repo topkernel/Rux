@@ -21,13 +21,16 @@
 //! explicit "not supported" line instead of silently doing nothing —
 //! a silent no-op would read as "the kernel has no such problem".
 
+// (INV-SYSRQ-1: the sysrq diagnostic family — task words/stacks
+// read through TaskBorrow/pins held across the print (the same
+// short-borrow contract as INV-TASKREF-1); diagnostics only.)
 use crate::errno;
 
 /// Execute one sysrq command. `cmd` is the command character.
 fn run_command(cmd: u8) {
     match cmd {
         // Restart the machine immediately.
-        b'b' => crate::syscall::process::force_reboot(),
+        b'b' => crate::process::reboot::force_reboot(),
         // Force a crash (a dump is created if crash dumping is configured).
         b'c' => {
             crate::println!("sysrq: crashing the kernel on request");
@@ -75,7 +78,7 @@ fn run_command(cmd: u8) {
             crate::println!("sysrq: making RT tasks nice-able is not supported");
         }
         // Power the system off.
-        b'o' => crate::syscall::process::force_power_off(),
+        b'o' => crate::process::reboot::force_power_off(),
         // Write the current registers and flags to the console.
         b'p' => crate::dfx::backtrace::dump_regs_inline(),
         // Display the armed per-CPU high-resolution timer lists.

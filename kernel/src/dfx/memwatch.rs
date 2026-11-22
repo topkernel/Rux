@@ -860,26 +860,22 @@ pub fn dump_mem() {
         // boot names the deadlock side (data-at-client-unread vs
         // data-never-arrived) in one line.
         {
-            let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
-            let tbl = crate::net::tcp::get_tcp_socket_table();
             taskdump_raw_line(b"\nTCPCEN ");
             let mut n = 0;
-            for fd in 0..crate::net::tcp::TCP_SOCKET_TABLE_SIZE {
-                if let Some(ts) = crate::net::tcp::tcp_socket_get(fd as i32) {
-                    taskdump_raw_line(b"[");
-                    taskdump_dec(fd as u64);
-                    taskdump_raw_line(b":st=");
-                    taskdump_dec(ts.state as u64);
-                    taskdump_raw_line(b",rx=");
-                    taskdump_dec(ts.recv_buffer.len() as u64);
-                    taskdump_raw_line(b",wnd=");
-                    taskdump_dec(ts.rcv_wnd as u64);
-                    taskdump_raw_line(b",lp=");
-                    taskdump_dec(ts.local_port.to_be() as u64);
-                    taskdump_raw_line(b"] ");
-                    n += 1;
-                    if n >= 8 { break; }
-                }
+            for row in crate::net::net_hooks::tcp_census_rows() {
+                taskdump_raw_line(b"[");
+                taskdump_dec(row.fd as u64);
+                taskdump_raw_line(b":st=");
+                taskdump_dec(row.state as u64);
+                taskdump_raw_line(b",rx=");
+                taskdump_dec(row.rx_len);
+                taskdump_raw_line(b",wnd=");
+                taskdump_dec(row.rcv_wnd);
+                taskdump_raw_line(b",lp=");
+                taskdump_dec(row.local_port.to_be() as u64);
+                taskdump_raw_line(b"] ");
+                n += 1;
+                if n >= 8 { break; }
             }
         }
         // r-strand instrument (lat_fs conviction round): the sync-wait

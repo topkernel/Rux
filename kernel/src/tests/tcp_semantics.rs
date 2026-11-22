@@ -351,8 +351,8 @@ fn test_karn_filter() {
     // deterministically instead — the karn-filter semantics under test
     // (retries == 0 samples, retries > 0 does not) need a positive delta,
     // not wall-clock luck.
-    crate::drivers::timer::test_advance_jiffies(8);
-    let ancient = crate::drivers::timer::get_jiffies() - 8;
+    crate::timer::test_advance_jiffies(8);
+    let ancient = crate::timer::get_jiffies() - 8;
     let mut s = established();
     s.snd_nxt = 3000;
     s.retrans_queue.push_back(rseg(1000, 600, 0, ancient));
