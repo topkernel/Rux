@@ -13,7 +13,9 @@ use rux::rust_main_impl;
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     // Service registration MUST precede the first syscall: the args/
-    // regs tables route every dispatch from here on.
+    // regs tables route every dispatch from here on. Drivers first:
+    // its DriverHooks rows are consumed from devfs populate onward.
+    rux_drivers::register_all();
     rux_net::register_all();
     rux_fs::register_all();
     rux_syscall::register_all();

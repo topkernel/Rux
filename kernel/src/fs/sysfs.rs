@@ -1324,7 +1324,7 @@ fn build_tree() -> Arc<KObject> {
         &net,
         "lo",
         1,
-        crate::drivers::net::get_loopback_device,
+        crate::drivers::hooks::get_loopback_device,
         [0, 0, 0, 0, 0, 0],
         65536,
         0x1 | 0x40 | 0x8 | 0x1000, // UP|RUNNING|LOOPBACK|MULTICAST

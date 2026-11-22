@@ -12,20 +12,11 @@
 //! - Simplified MMIO framebuffer (QEMU RISC-V virt)
 
 pub mod framebuffer;
-pub mod fb_simple;
-pub mod fbdev;
 pub mod virtio_cmd;
 pub mod virtio_gpu;
 
 pub use framebuffer::{FrameBuffer, FrameBufferInfo};
-pub use fb_simple::{probe_simple_framebuffer, create_framebuffer, SimpleFrameBufferInfo};
 pub use virtio_gpu::{VirtioGpuDevice, probe_virtio_gpu};
-pub use fbdev::{
-    fbdev_ioctl, create_fix_screeninfo, create_var_screeninfo,
-    FbFixScreeninfo, FbVarScreeninfo, FbBitfield,
-    FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIO_FLUSH,
-};
-
 use crate::sync::spinlock::Spinlock;
 
 /// Global GPU device storage

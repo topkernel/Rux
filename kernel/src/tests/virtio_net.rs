@@ -12,7 +12,8 @@
 //! - Loopback device functionality
 
 use alloc::format;
-use crate::drivers::net::{loopback, virtio_net};
+use crate::drivers::hooks;
+use crate::drivers::net::virtio_net;
 use crate::net::buffer::SkBuff;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
@@ -34,7 +35,9 @@ pub fn test_virtio_net() {
 
 /// Test loopback device initialization
 fn test_loopback_init() {
-    let device = loopback::loopback_init();
+    // Through the driver service seam (rung 4): the leaf lives in the
+    // rux-drivers crate; this test now pins the seam rows themselves.
+    let device = if hooks::loopback_init() { hooks::get_loopback_device() } else { None };
 
     match device {
         Some(dev) => {
@@ -56,8 +59,8 @@ fn test_loopback_init() {
 
 /// Test loopback device send
 fn test_loopback_send() {
-    // Initialize loopback device
-    let _device = loopback::loopback_init();
+    // Initialize loopback device (seam row; idempotent post-boot)
+    let _device = if hooks::loopback_init() { hooks::get_loopback_device() } else { None };
 
     // Create test packet
     let skb = match SkBuff::alloc(100) {
@@ -81,7 +84,7 @@ fn test_loopback_send() {
     }
 
     // Send packet
-    let result = loopback::loopback_send(skb);
+    let result = hooks::loopback_send(skb);
 
     if result == 0 {
         test_pass("loopback send");
@@ -92,7 +95,7 @@ fn test_loopback_send() {
 
 /// Test network device basic operations
 fn test_net_device_ops() {
-    let device = match loopback::get_loopback_device() {
+    let device = match hooks::get_loopback_device() {
         Some(dev) => dev,
         None => {
             test_fail("net device ops", "no device");

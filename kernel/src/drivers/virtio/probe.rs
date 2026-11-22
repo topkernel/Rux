@@ -186,7 +186,7 @@ fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
 /// # Notes
 /// Loopback device is always available as a fallback network device
 fn init_loopback_device() -> bool {
-    if crate::drivers::net::loopback::loopback_init().is_some() {
+    if crate::drivers::hooks::loopback_init() {
         // U3: registration-time uevent for "lo".
         crate::fs::sysfs::netdev_uevent("lo", "add");
         true
@@ -288,6 +288,36 @@ pub fn init_pci_net_devices() -> usize {
 ///
 /// # Returns
 /// 0 (devices already initialized)
+/// Register this family's probes on the R4 initcall table (the crate
+/// seam). Called by the boot core before `run_initcalls` — the named
+/// lib.rs call-graph's replacement. Negative probes (0 devices bound)
+/// are normal outcomes, never boot failures.
+pub fn register_probe_initcalls() {
+    crate::drivers::initcalls::register_initcall(crate::drivers::initcalls::DeviceInit {
+        name: "virtio-blk MMIO",
+        level: crate::drivers::initcalls::InitLevel::Early,
+        probe: init_block_devices_actual,
+    });
+    crate::drivers::initcalls::register_initcall(crate::drivers::initcalls::DeviceInit {
+        name: "virtio-blk PCI",
+        level: crate::drivers::initcalls::InitLevel::Device,
+        probe: init_pci_block_devices,
+    });
+    crate::drivers::initcalls::register_initcall(crate::drivers::initcalls::DeviceInit {
+        name: "virtio-net",
+        level: crate::drivers::initcalls::InitLevel::Late,
+        probe: init_network_devices,
+    });
+}
+
+/// The MMIO scan body (the historical init_block_devices BEFORE the
+/// double-init guard was folded in — the devices are probed by
+/// init_network_devices today, so the MMIO row registers the guarded
+/// count preserved as 0-negative-probe; see the note on the legacy fn).
+fn init_block_devices_actual() -> usize {
+    init_block_devices()
+}
+
 pub fn init_block_devices() -> usize {
     0
 }

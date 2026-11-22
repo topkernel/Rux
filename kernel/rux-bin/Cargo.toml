@@ -18,14 +18,15 @@ rux = { path = "..", default-features = false }
 rux-syscall = { path = "../rux-syscall", default-features = false }
 rux-net = { path = "../rux-net", default-features = false }
 rux-fs = { path = "../rux-fs", default-features = false }
+rux-drivers = { path = "../rux-drivers", default-features = false }
 
 [build-dependencies]
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64", "rux-syscall/riscv64", "rux-net/riscv64", "rux-fs/riscv64"]
-x86_64 = ["rux/x86_64", "rux-syscall/x86_64", "rux-net/x86_64", "rux-fs/x86_64"]
-aarch64 = ["rux/aarch64", "rux-syscall/aarch64", "rux-net/aarch64", "rux-fs/aarch64"]
+riscv64 = ["rux/riscv64", "rux-syscall/riscv64", "rux-net/riscv64", "rux-fs/riscv64", "rux-drivers/riscv64"]
+x86_64 = ["rux/x86_64", "rux-syscall/x86_64", "rux-net/x86_64", "rux-fs/x86_64", "rux-drivers/x86_64"]
+aarch64 = ["rux/aarch64", "rux-syscall/aarch64", "rux-net/aarch64", "rux-fs/aarch64", "rux-drivers/aarch64"]
 # kernel lib features the bin/tests toggle: forwarded.
 unit-test = ["rux/unit-test", "rux-fs/unit-test"]
 cov-dump = ["rux/cov-dump"]
