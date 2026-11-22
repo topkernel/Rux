@@ -361,6 +361,7 @@ dependencies = [
  "rux",
  "rux-drivers",
  "rux-fs",
+ "rux-mm",
  "rux-net",
  "rux-syscall",
 ]
@@ -374,6 +375,13 @@ dependencies = [
 
 [[package]]
 name = "rux-fs"
+version = "0.1.0"
+dependencies = [
+ "rux",
+]
+
+[[package]]
+name = "rux-mm"
 version = "0.1.0"
 dependencies = [
  "rux",
