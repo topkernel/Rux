@@ -822,7 +822,7 @@ pub fn generate_boot_id() -> Vec<u8> {
     let mut guard = BOOT_ID.lock();
     if guard.is_none() {
         let mut b = [0u8; 16];
-        crate::syscall::misc::kernel_random_bytes(&mut b);
+        crate::syscall::support::kernel_random_bytes(&mut b);
         *guard = Some(format_uuid_v4(&mut b).into_bytes());
     }
     guard.as_ref().map(|v| v.clone()).unwrap_or_default()
@@ -830,6 +830,6 @@ pub fn generate_boot_id() -> Vec<u8> {
 
 pub fn generate_uuid() -> Vec<u8> {
     let mut b = [0u8; 16];
-    crate::syscall::misc::kernel_random_bytes(&mut b);
+    crate::syscall::support::kernel_random_bytes(&mut b);
     format_uuid_v4(&mut b).into_bytes()
 }

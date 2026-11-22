@@ -2502,7 +2502,7 @@ pub fn oh67_poll_decode(
             .unwrap_or_else(|| alloc::string::String::from("closed"));
         let ready = file
             .as_ref()
-            .and_then(|f| crate::syscall::misc::oh67_fd_ready(f))
+            .and_then(|f| crate::syscall::support::oh67_fd_ready(f))
             .unwrap_or_default();
         let ops = file
             .as_ref()
@@ -7165,8 +7165,8 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // after schedule() returns.
         let wake = deadline.map(|dl| {
             let id = crate::timer::add_timer_wakeup_hres(
-                crate::syscall::misc::jiffies_covering_deadline(dl),
-                crate::syscall::misc::deadline_ns_to_hres_ticks(dl),
+                crate::syscall::support::jiffies_covering_deadline(dl),
+                crate::syscall::support::deadline_ns_to_hres_ticks(dl),
                 crate::sched::get_current_pid(),
             );
             crate::drivers::timer::rearm_for_hres();
@@ -9863,7 +9863,7 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
     if is(&crate::fs::inotify::INOTIFY_OPS) {
         return "inotify";
     }
-    if is(&crate::syscall::misc::EVENTFD_OPS) {
+    if file.get_ops().is_some_and(crate::syscall::support::is_eventfd_ops) {
         return "eventfd";
     }
     "other"

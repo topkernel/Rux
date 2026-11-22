@@ -690,7 +690,7 @@ crate::pr_err!(
                 // Replay this pid's full mmap history from the ring.
                 {
                     use core::sync::atomic::Ordering::Relaxed;
-                    use crate::syscall::memory::{MMAP_RING, MMAP_CURSOR};
+                    use crate::syscall::support::{MMAP_RING, MMAP_CURSOR};
                     let pid = crate::sched::get_current_pid();
                     let cur = MMAP_CURSOR.load(Relaxed);
                     crate::pr_err!("  MMAP ring cursor={}", cur);

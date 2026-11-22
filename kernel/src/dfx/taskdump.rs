@@ -1652,7 +1652,7 @@ pub fn sleep_snapshot_early() {
     crate::net::unix::unix_park_audit();
     // 53rd timer-drive hunt: armed timerfd wheel entries + waiter census
     // (self-gated on rux:sleepsnap (retired dfx=sleepsnap) inside).
-    crate::syscall::misc::timerfd_wheel_audit();
+    crate::syscall::support::timerfd_wheel_audit();
 }
 
 /// pid=1 RUNNING-spin audit (69th, rux:pid1spin (retired dfx=pid1spin)): ohw75 proved the
@@ -1692,7 +1692,7 @@ pub fn pid1spin_audit() {
     // interest, a stuck EPOLLOUT-only mask, and a scan divergence
     // (see pid1_epoll_interest_dump).
     if n % 10 == 0 {
-        crate::syscall::misc::pid1_epoll_interest_dump(1);
+        crate::syscall::support::pid1_epoll_interest_dump(1);
     }
     // Short diagnostic read of init (pid 1) — TaskBorrow's lookup
     // contract; reads only task fields + its mapped kernel stack

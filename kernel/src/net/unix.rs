@@ -3419,7 +3419,7 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
     // receive so a large record still returns whole (single record per
     // call; the bounce loop would split it across records — wrong).
     if !matches!(socket.kind, UnixKind::Stream) && count > READ_BOUNCE {
-        let stage = count.min(crate::syscall::io::RW_CHUNK);
+        let stage = count.min(crate::syscall::support::RW_CHUNK);
         let mut kbuf = alloc::vec![0u8; stage];
         return match unix_recv_ctl(&socket, &mut kbuf, nonblock, deadline, false) {
             Ok(r) => {

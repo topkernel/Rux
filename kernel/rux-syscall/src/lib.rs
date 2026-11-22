@@ -401,4 +401,25 @@ pub fn register_all() {
         (0, syscall::signal::sys_rt_sigreturn),
     ];
     syscall_register_tables(ARGS, REGS);
+    register_hooks();
+}
+
+/// The dfx/event hook table (State B): the diagnostics + eventfd
+/// identity that lib-side callers reach through
+/// rux::syscall::support — implemented here where the types live.
+fn register_hooks() {
+    use rux::syscall::support::{SyscallHooks, syscall_register_hooks};
+    let hooks = SyscallHooks {
+        epoll_interest_snapshot: syscall::misc::epoll_interest_snapshot,
+        timerfd_wheel_audit: syscall::misc::timerfd_wheel_audit,
+        pid1_epoll_interest_dump: syscall::misc::pid1_epoll_interest_dump,
+        kernel_random_bytes: syscall::misc::kernel_random_bytes,
+        oh67_fd_ready: syscall::misc::oh67_fd_ready,
+        jiffies_covering_deadline: syscall::misc::jiffies_covering_deadline,
+        deadline_ns_to_hres_ticks: syscall::misc::deadline_ns_to_hres_ticks,
+        timerfd_expire_notify: syscall::misc::timerfd_expire_notify,
+        param_stall_dump: syscall::misc::param_stall_dump,
+        is_eventfd_ops: |ops: &'static rux::fs::FileOps| core::ptr::eq(ops, &syscall::misc::EVENTFD_OPS),
+    };
+    syscall_register_hooks(hooks);
 }

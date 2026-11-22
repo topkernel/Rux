@@ -1456,14 +1456,14 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                             // HOTPATH-PRINT: one-shot at 240s
                             // (PS_DONE2 latch above).
                             crate::pr_warn!("=== SECOND DUMP (240s trend) ===");
-                            crate::syscall::misc::param_stall_dump();
+                            crate::syscall::support::param_stall_dump();
                         }
                         if !PS_DONE.load(core::sync::atomic::Ordering::Relaxed)
                             && crate::drivers::timer::get_jiffies() >= 18_000
                             && crate::trace::EVENT_SCHEDTRACE.armed()
                             && !PS_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
                         {
-                            crate::syscall::misc::param_stall_dump();
+                            crate::syscall::support::param_stall_dump();
                         }
                     }
                     crate::drivers::input::input_debug_tick();

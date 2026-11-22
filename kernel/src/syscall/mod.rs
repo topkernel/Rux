@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod seccomp;
+pub mod support;
 
 /// The seam registration hook (flip milestone shape): called by
 /// rust_main before the impl; the LIB-side default is a no-op — the

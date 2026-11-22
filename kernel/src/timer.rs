@@ -1434,7 +1434,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                 // counter) is accepted per the timerfd refcount audit.
                 // The address names the whole TimerFd so the notify hook can
                 // also wake readers blocked in timerfd_read (review批次1).
-                crate::syscall::misc::timerfd_expire_notify(tfd);
+                crate::syscall::support::timerfd_expire_notify(tfd);
             }
             Action::Signal { pid, signo } => {
                 let _ = crate::signal::send_signal(pid, signo);
