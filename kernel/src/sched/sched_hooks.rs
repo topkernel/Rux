@@ -298,8 +298,16 @@ pub fn sched_register_hooks(hooks: SchedHooks) {
 }
 
 #[inline]
-fn hooks() -> SchedHooks {
-    *SCHED_HOOKS.get().unwrap_or(&SchedHooks::EMPTY)
+fn hooks() -> &'static SchedHooks {
+    // Borrow, do not copy: SchedHooks is 111 fn pointers (~888 B); the
+    // by-value copy put that whole table on the stack on EVERY wrapper
+    // call (5-15 per context switch), which the p2_ctxsw gate row
+    // measured directly (2.19 vs 1.24 us med). Read the one field
+    // through the shared reference instead.
+    match SCHED_HOOKS.get() {
+        Some(h) => h,
+        None => &SchedHooks::EMPTY,
+    }
 }
 
 // The lib-side call surface.
