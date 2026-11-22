@@ -5968,7 +5968,7 @@ pub fn sys_readahead(_args: SyscallArgs) -> i64 {
 /// naming an existing object). A mkswap-style header ("SWAPSPACE2",
 /// version 1) at the carve start, when present, fixes the usable page
 /// count. Refuses when the carve would overlap the ext4 filesystem
-/// (see mm::swap::swap_activate).
+/// (see mm::mm_hooks::swap_activate).
 pub fn sys_swapon(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[0] as *const u8;
     let _swapflags = args[1] as i32;
@@ -5982,7 +5982,7 @@ pub fn sys_swapon(args: SyscallArgs) -> i64 {
     }
 
     // Only one swap area exists (SWAP_DEVICES[0]); refuse double-enable.
-    if crate::mm::swap::nr_active_swap() {
+    if crate::mm::mm_hooks::nr_active_swap() {
         return -(errno::EBUSY as i64);
     }
 
@@ -6001,12 +6001,12 @@ pub fn sys_swapon(args: SyscallArgs) -> i64 {
     }
 
     // Find the backing disk: first registered GenDisk (virtio-blk root).
-    let disk = match crate::mm::swap::swap_boot_disk() {
+    let disk = match crate::mm::mm_hooks::swap_boot_disk() {
         Some(d) => d,
         None => return -(errno::ENODEV as i64),
     };
 
-    match crate::mm::swap::swap_activate(disk) {
+    match crate::mm::mm_hooks::swap_activate(disk) {
         Ok(_) => 0,
         Err(e) => e as i64,
     }
@@ -6024,7 +6024,7 @@ pub fn sys_swapoff(_args: SyscallArgs) -> i64 {
     if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
         return -(errno::EPERM as i64);
     }
-    match crate::mm::swap::swap_deactivate() {
+    match crate::mm::mm_hooks::swap_deactivate() {
         Ok(()) => 0,
         Err(e) => e as i64,
     }

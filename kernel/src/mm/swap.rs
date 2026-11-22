@@ -19,52 +19,19 @@ use crate::sync::spinlock::Spinlock;
 use super::PAGE_SIZE;
 
 // ==================== Swap Entry Encoding ====================
+//
+// The PTE-entry codec is SEAM VOCABULARY (M1b): compiled in
+// mm_hooks.rs, named by both the arch fault mechanism and this policy
+// module. Re-exported here so the historical swap::/make_/is_ paths
+// keep resolving on both sides of the crate boundary.
 
-/// Signature bit in a swap PTE — distinguishes swap entries from
-/// genuinely-empty (zeroed) PTEs. Stored in bit 62.
-pub const SWAP_ENTRY_SIGNATURE: u64 = 1u64 << 62;
+pub use super::mm_hooks::{
+    is_migration_entry, is_swap_entry, make_migration_entry, make_swap_entry,
+    swap_entry_offset, swap_entry_type, MIGRATION_ENTRY_SIGNATURE, SWAP_ENTRY_SIGNATURE,
+};
 
 /// Maximum number of swap devices
 const MAX_SWAP_DEVICES: usize = 4;
-
-/// Build a swap entry value suitable for storing in a PTE.
-///
-/// Layout:
-///   Bit 62: signature (1)
-///   Bits [9:8]: swap type (up to 4 devices)
-///   Bits [53:10]: swap offset (up to 2^44 pages per device)
-///   Bit 0 (V): 0 (triggers page fault)
-#[inline]
-pub fn make_swap_entry(swap_type: u32, swap_offset: u64) -> u64 {
-    SWAP_ENTRY_SIGNATURE
-        | ((swap_type as u64 & 0x3) << 8)
-        | ((swap_offset & 0x003F_FFFF_FFFF) << 10)
-}
-
-/// Check whether a raw PTE value represents a swap entry.
-#[inline]
-pub fn is_swap_entry(pte: u64) -> bool {
-    (pte & SWAP_ENTRY_SIGNATURE) != 0
-}
-
-// ==================== Migration Entries (compaction, review 4.16) ====================
-
-/// Signature bit distinguishing a compaction migration entry from empty
-/// and swap-entry PTEs. Stored in bit 61 (V=0, so accessing it faults).
-pub const MIGRATION_ENTRY_SIGNATURE: u64 = 1u64 << 61;
-
-/// Build a migration-entry marker PTE (installed while a page is being
-/// relocated by compaction — see mm/compact.rs).
-#[inline]
-pub fn make_migration_entry() -> u64 {
-    MIGRATION_ENTRY_SIGNATURE
-}
-
-/// Check whether a raw PTE value is a migration marker.
-#[inline]
-pub fn is_migration_entry(pte: u64) -> bool {
-    (pte & MIGRATION_ENTRY_SIGNATURE) != 0
-}
 
 // ==================== In-flight swap-out tracking (review 4.12) ====================
 //
@@ -98,18 +65,6 @@ pub fn swap_slot_pending(swap_type: u32, offset: u64) -> bool {
         .lock()
         .iter()
         .any(|&(t, o)| t == swap_type && o == offset)
-}
-
-/// Extract the swap type from a swap entry.
-#[inline]
-pub fn swap_entry_type(pte: u64) -> u32 {
-    ((pte >> 8) & 0x3) as u32
-}
-
-/// Extract the swap offset from a swap entry.
-#[inline]
-pub fn swap_entry_offset(pte: u64) -> u64 {
-    (pte >> 10) & 0x003F_FFFF_FFFF
 }
 
 // ==================== Swap Device ====================
@@ -517,11 +472,9 @@ pub fn swap_write_census() -> (u64, u64, u64) {
     )
 }
 
-/// Swap statistics for /proc/meminfo.
-pub struct SwapStats {
-    pub swap_total: usize,
-    pub swap_free: usize,
-}
+// SwapStats is seam vocabulary (framework /proc consumers match on its
+// fields); re-exported so swap::SwapStats keeps resolving.
+pub use super::mm_hooks::SwapStats;
 
 /// Get swap statistics.
 pub fn swap_stats() -> SwapStats {

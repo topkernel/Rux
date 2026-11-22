@@ -747,7 +747,7 @@ pub fn oom_forensic_dump(site: &str) {
 
     // SP-5 round 4: the reclaim round's per-page cost driver.
     {
-        let (n, slow, max_ns) = super::swap::swap_write_census();
+        let (n, slow, max_ns) = super::mm_hooks::swap_write_census();
         // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::println!(
             "OOM-FORENSIC: swapwrite n={} slow={} max_ms={}",
@@ -885,7 +885,7 @@ pub fn oom_forensic_dump(site: &str) {
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: swap active={}",
-        super::swap::nr_active_swap()
+        super::mm_hooks::nr_active_swap()
     );
 
     // Seed-detector counters (see zone.rs)

@@ -194,7 +194,7 @@ impl MmStruct {
                     self as *const _ as usize,
                     virt_addr.bits() as usize,
                 );
-                crate::mm::lru::page_add_anon_lru(page);
+                crate::mm::mm_hooks::page_add_anon_lru(page);
             }
         }
 
@@ -1253,7 +1253,7 @@ pub fn handle_cow_fault(
                 mm as *const _ as usize,
                 virt_addr as usize,
             );
-            crate::mm::lru::page_add_anon_lru(new_page);
+            crate::mm::mm_hooks::page_add_anon_lru(new_page);
         }
         mm.add_rss(1);
     }

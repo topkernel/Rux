@@ -1219,7 +1219,7 @@ pub fn generate_oom_score(pid: u64) -> Vec<u8> {
         })
         .unwrap_or(0);
 
-    let score = unsafe { crate::mm::oom_kill::oom_badness(&*task, totalpages) };
+    let score = unsafe { crate::mm::mm_hooks::oom_badness(&*task, totalpages) };
     format!("{}\n", score).into_bytes()
 }
 

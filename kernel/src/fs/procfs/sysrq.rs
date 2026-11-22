@@ -50,7 +50,7 @@ fn run_command(cmd: u8) {
         b'e' => signal_all_except_init(crate::signal::Signal::SIGTERM as i32),
         // Invoke the OOM killer.
         b'f' => {
-            let killed = crate::mm::oom_kill::sysrq_oom_kill();
+            let killed = crate::mm::mm_hooks::sysrq_oom_kill();
             crate::println!(
                 "sysrq: OOM killer {}",
                 if killed { "killed a process" } else { "found nothing to kill" }

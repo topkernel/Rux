@@ -129,7 +129,7 @@ impl MmStruct {
                     self as *const _ as usize,
                     virt_addr.bits() as usize,
                 );
-                crate::mm::lru::page_add_anon_lru(page);
+                crate::mm::mm_hooks::page_add_anon_lru(page);
             }
         }
 
@@ -329,10 +329,10 @@ impl MmStruct {
                     // the PTE (the old read_pte_raw tail). A non-swap P=0
                     // leaf (PROT_NONE marker / migration entry) is left
                     // alone, exactly like the old body.
-                    if crate::mm::swap::is_swap_entry(raw) {
-                        crate::mm::swap::swap_free_slot(
-                            crate::mm::swap::swap_entry_type(raw),
-                            crate::mm::swap::swap_entry_offset(raw),
+                    if crate::mm::mm_hooks::is_swap_entry(raw) {
+                        crate::mm::mm_hooks::swap_free_slot(
+                            crate::mm::mm_hooks::swap_entry_type(raw),
+                            crate::mm::mm_hooks::swap_entry_offset(raw),
                         );
                         Self::unmap_clear_leaf(table1, idx, va);
                     }
@@ -513,10 +513,10 @@ impl MmStruct {
                     self.pgd,
                     VirtAddr::new(addr as u64),
                 ) {
-                    if crate::mm::swap::is_swap_entry(raw) {
-                        crate::mm::swap::swap_free_slot(
-                            crate::mm::swap::swap_entry_type(raw),
-                            crate::mm::swap::swap_entry_offset(raw),
+                    if crate::mm::mm_hooks::is_swap_entry(raw) {
+                        crate::mm::mm_hooks::swap_free_slot(
+                            crate::mm::mm_hooks::swap_entry_type(raw),
+                            crate::mm::mm_hooks::swap_entry_offset(raw),
                         );
                         self.clear_pte(addr as u64);
                     }
@@ -2100,7 +2100,7 @@ pub fn handle_cow_fault(
                     mm as *const _ as usize,
                     virt_addr as usize,
                 );
-                crate::mm::lru::page_add_anon_lru(np);
+                crate::mm::mm_hooks::page_add_anon_lru(np);
             }
             mm.add_rss(1);
         }
@@ -2307,8 +2307,8 @@ pub fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64, prot: 
         // Not populated at all, or a swap/migration entry (P=0 with the
         // signature bits) — the latter must survive for swap-in.
         if raw == 0
-            || crate::mm::swap::is_swap_entry(raw)
-            || crate::mm::swap::is_migration_entry(raw)
+            || crate::mm::mm_hooks::is_swap_entry(raw)
+            || crate::mm::mm_hooks::is_migration_entry(raw)
         {
             continue;
         }

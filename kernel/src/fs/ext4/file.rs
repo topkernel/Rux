@@ -5060,7 +5060,7 @@ fn ext4_buffered_write(
     // time: a contending writer skips — the winner's flush already
     // serves the watermark for both.
     if copied > 0
-        && crate::mm::vmscan::zone_below_dirty_writeback_mark()
+        && crate::mm::mm_hooks::zone_below_dirty_writeback_mark()
         && WRITER_FLUSH_IN_FLIGHT
             .compare_exchange(
                 false,
@@ -5085,7 +5085,7 @@ fn ext4_buffered_write(
         // (clean-only degrade) — see writeback_recover.
         let flushed = ext4_flush_dirty_inode(inode, 0, u64::MAX);
         let mut shrunk = 0usize;
-        if let Some((free, _mark, target)) = crate::mm::vmscan::zone_dirty_writeback_state() {
+        if let Some((free, _mark, target)) = crate::mm::mm_hooks::zone_dirty_writeback_state() {
             let shortfall = target.saturating_sub(free);
             if shortfall > 0 {
                 shrunk = page_cache::get_page_cache().writeback_recover(shortfall);
@@ -5101,7 +5101,7 @@ fn ext4_buffered_write(
             core::sync::atomic::AtomicUsize::new(0);
         if WB_PRINTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
             let (free_now, mark, _target) =
-                crate::mm::vmscan::zone_dirty_writeback_state().unwrap_or((0, 0, 0));
+                crate::mm::mm_hooks::zone_dirty_writeback_state().unwrap_or((0, 0, 0));
             crate::pr_info!(
                 "WB-WATERMARK fs={:x} ino={} wrote={}B flushed_pages={} shrunk={} took={}j free={}/mark={} dirty={}",
                 fs_id,

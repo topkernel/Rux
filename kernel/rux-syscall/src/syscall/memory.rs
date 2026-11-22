@@ -2606,7 +2606,7 @@ fn copy_old_to_new_pages(
                         new_virt as usize,
                     );
                 }
-                crate::mm::lru::page_add_anon_lru(page);
+                crate::mm::mm_hooks::page_add_anon_lru(page);
             }
         }
         offset += PAGE_SIZE as usize;
