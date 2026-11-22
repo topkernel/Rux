@@ -387,12 +387,12 @@ pub struct SchedEntity {
     /// hundreds of ms behind a low-duty wake-churn pack (ohw34: a 400ms
     /// link->pick on a worker BEFORE the wedge; the old placement preserved
     /// unbounded vruntime debt). GRQ-HELD (Cell): no lockless reader.
-    pub(crate) vlag: core::cell::Cell<i64>,
+    pub vlag: core::cell::Cell<i64>,
     /// 64th: false until this entity's first-ever link -- discriminates the
     /// 6.6 ENQUEUE_INITIAL placement (vruntime = avg_vruntime, lag zero)
     /// from a WAKE placement. GRQ-HELD. Fork children start false (fresh
     /// SchedEntity::new()), matching __sched_fork's vlag = 0.
-    pub(crate) ever_enqueued: core::cell::Cell<bool>,
+    pub ever_enqueued: core::cell::Cell<bool>,
 }
 
 impl SchedEntity {
@@ -750,7 +750,7 @@ pub struct CfsRunQueue {
     nr_running: AtomicU64,
 
     /// Total weight
-    pub(crate) load_weight: AtomicU64,
+    pub load_weight: AtomicU64,
 
     /// Next task ID (for generating unique keys)
     next_task_id: AtomicU64,

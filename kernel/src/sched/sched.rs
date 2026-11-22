@@ -1689,7 +1689,7 @@ pub struct GlobalRunQueue {
     /// Total runnable task count (read atomically for idle checks)
     pub nr_running: core::sync::atomic::AtomicUsize,
     /// Bitmap of idle CPUs: bit N = 1 means CPU N is idle
-    pub(crate) idle_cpus: core::sync::atomic::AtomicU32,
+    pub idle_cpus: core::sync::atomic::AtomicU32,
 }
 
 /// Rotating scan start for find_idle_cpu (review batch 8 — idle spreading).
@@ -1700,7 +1700,7 @@ unsafe impl Sync for GlobalRunQueue {}
 
 impl GlobalRunQueue {
     /// Create a new GlobalRunQueue (NOT const — BTreeMap::new() is not const).
-    fn new() -> Self {
+    pub     fn new() -> Self {
         Self {
             lock: crate::sync::spinlock::RawSpinlock::new(),
             dl_rq: crate::sched::deadline::DlRunQueue::new(),
@@ -2533,7 +2533,7 @@ fn grq_init() {
 }
 
 /// Get a shared reference to GRQ.
-pub(crate) fn grq() -> &'static GlobalRunQueue {
+pub fn grq() -> &'static GlobalRunQueue {
     if !crate::sched::edges::grq_is_ready() {
         panic!("GRQ accessed before initialization");
     }
@@ -2695,7 +2695,7 @@ static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { cor
 // from an orphaned one. Written only from __schedule on the local CPU
 // (set under the GRQ lock, cleared on the same hardware CPU after the
 // coroutine switch), so the waker's under-lock read is race-free.
-pub(crate) static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+pub static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
 
 
@@ -3005,7 +3005,7 @@ pub fn stale_mark_confirm(task: *mut Task, pid: u32, threshold: u64) -> bool {
 }
 
 /// Per-CPU reschedule flags
-pub(crate) static NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
+pub static NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
 
 /// Per-CPU polling-idle flags (closegap lane): set while the idle loop
 /// is inside its pre-halt poll window. `resched_cpu` reads this and
@@ -7632,7 +7632,7 @@ pub fn cpu_rq(_cpu_id: usize) -> Option<&'static crate::sync::spinlock::Spinlock
 
 /// Per-policy on_rq flag read (cheap, unlocked — a pre-filter only; the
 /// GRQ-locked paths never trust it).
-pub(crate) fn task_onrq_flag(t: &Task) -> bool {
+pub fn task_onrq_flag(t: &Task) -> bool {
     match t.policy() {
         SchedPolicy::Fifo | SchedPolicy::Rr => t.rt_entity().is_on_rq(),
         SchedPolicy::Deadline => t
@@ -7785,7 +7785,7 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
 /// n1-organic kill chain: gsettings aborted → group SIGKILL → the steal
 /// re-linked the mid-do_exit dconf worker → double-run → epc-on-own-stack
 /// illegal-instruction panic).
-pub(crate) fn task_is_dying(task: *mut Task) -> bool {
+pub fn task_is_dying(task: *mut Task) -> bool {
     use crate::process::task::task_flags::TaskFlags;
     if task.is_null() {
         return true;

@@ -1,6 +1,5 @@
 //! The SCHED POLICY SERVICE CRATE (crate-flip S1b): the scheduling
 //! classes (stop/dl/rt/fair/idle), the pick/enqueue/wake-placement/
-//! balance/tick/throttle decisions, cgroup scheduling policy, and the
 //! census/diagnostic walks — under a crate-level unsafe-forbid
 //! boundary. The framework keeps sched/sched.rs (the CORE half: GRQ +
 //! guards, the switch machinery, current/tp, NEED_RESCHED, task-slot
@@ -20,7 +19,7 @@
 // the service files' crate::X paths resolve unchanged (the proven shape
 // from rux-syscall and rux-net).
 pub use rux::{
-    arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, mm,
+    arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, list, mm,
     process, safety, sched, sync, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
@@ -36,7 +35,6 @@ pub mod sched_policy {
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/class.rs"] pub mod class;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/idle.rs"] pub mod idle;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/stop_task.rs"] pub mod stop_task;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/cgroup.rs"] pub mod cgroup;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/stats.rs"] pub mod stats;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/sched_ev.rs"] pub mod sched_ev;
     #[path = "/home/william/rux-agents/ur-L4/kernel/src/sched/wakewatch.rs"] pub mod wakewatch;

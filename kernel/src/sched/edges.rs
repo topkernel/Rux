@@ -416,13 +416,13 @@ pub fn rt_list_linked(task: *mut Task) -> bool {
 // blocks the pre-move code carried).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct VruntimeKey {
-    pub(crate) vruntime: u64,
+pub struct VruntimeKey {
+    pub vruntime: u64,
     pub(crate) task_id: u64, // Used to distinguish tasks with same vruntime
 }
 
 impl VruntimeKey {
-    pub(crate) fn new(vruntime: u64, task_id: u64) -> Self {
+    pub fn new(vruntime: u64, task_id: u64) -> Self {
         Self { vruntime, task_id }
     }
 }
@@ -471,7 +471,7 @@ impl VruntimeKey {
 /// `linked` is the authoritative physical-linkage flag (set by insert,
 /// cleared by erase — the stored key remains the ORDER key only).
 #[derive(Debug)]
-pub(crate) struct RbNode {
+pub struct RbNode {
     pub(crate) parent: *mut RbNode,
     pub(crate) left: *mut RbNode,
     pub(crate) right: *mut RbNode,
@@ -482,7 +482,7 @@ pub(crate) struct RbNode {
 impl RbNode {
     /// Safe field read for policy code: the physical-linkage flag of a
     /// (GRQ-pinned) node, with the poison range check the engine applies.
-    pub(crate) fn linked_at(node: *mut RbNode) -> bool {
+    pub fn linked_at(node: *mut RbNode) -> bool {
         if node.is_null() || !Self::node_ok_shared(node) {
             return false;
         }
@@ -495,7 +495,7 @@ impl RbNode {
     /// Detach a node during a timeline re-init sweep (INV-SCE-6):
     /// resets this node's link fields only — the successor was captured
     /// by the caller; the tree below/around is untouched.
-    pub(crate) fn detach_at(node: *mut RbNode, nil: *mut RbNode) {
+    pub fn detach_at(node: *mut RbNode, nil: *mut RbNode) {
         debug_assert!(!node.is_null());
         // SAFETY: INV-SCE-6 — GRQ-held, range-checked node.
         unsafe {
@@ -510,7 +510,7 @@ impl RbNode {
         crate::sched::sched::kernel_task_ptr_range_ok(node as *const u8)
     }
 
-    pub(crate) const fn unlinked() -> Self {
+    pub const fn unlinked() -> Self {
         Self {
             parent: core::ptr::null_mut(),
             left: core::ptr::null_mut(),
@@ -537,7 +537,7 @@ fn rb_nil() -> *mut RbNode {
 /// Container-of helpers between a Task and its embedded timeline node.
 /// `sched_entity` is pub(crate) in Task; run_node is the field above.
 #[inline]
-pub(crate) fn node_of_task(task: *mut Task) -> *mut RbNode {
+pub fn node_of_task(task: *mut Task) -> *mut RbNode {
     let off = core::mem::offset_of!(Task, sched_entity)
         + core::mem::offset_of!(SchedEntity, run_node);
     // SAFETY: pure pointer arithmetic, no dereference.
@@ -545,7 +545,7 @@ pub(crate) fn node_of_task(task: *mut Task) -> *mut RbNode {
 }
 
 #[inline]
-pub(crate) fn task_of_node(node: *mut RbNode) -> *mut Task {
+pub fn task_of_node(node: *mut RbNode) -> *mut Task {
     let off = core::mem::offset_of!(Task, sched_entity)
         + core::mem::offset_of!(SchedEntity, run_node);
     // SAFETY: pure pointer arithmetic, no dereference.
@@ -554,7 +554,7 @@ pub(crate) fn task_of_node(node: *mut RbNode) -> *mut Task {
 
 /// The order key stored on the entity owning `node`. GRQ-held.
 #[inline]
-pub(crate) fn node_key(node: *mut RbNode) -> VruntimeKey {
+pub fn node_key(node: *mut RbNode) -> VruntimeKey {
     let off = core::mem::offset_of!(SchedEntity, run_node);
     // SAFETY: caller guarantees node is a linked node of this timeline
     // (in-range, embedded in a Task whose entity carries a Some key).
@@ -574,13 +574,13 @@ pub(crate) fn node_key(node: *mut RbNode) -> VruntimeKey {
 /// (the reference's `struct rb_root_cached`). pub(crate): the unit-test
 /// suite drives a LOCAL instance (kernel/src/tests/fair_timeline.rs).
 #[derive(Debug)]
-pub(crate) struct RbTimeline {
-    pub(crate) root: *mut RbNode,
-    pub(crate) leftmost: *mut RbNode,
+pub struct RbTimeline {
+    pub root: *mut RbNode,
+    pub leftmost: *mut RbNode,
 }
 
 impl RbTimeline {
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             root: core::ptr::null_mut(),
             leftmost: core::ptr::null_mut(),
@@ -588,19 +588,19 @@ impl RbTimeline {
     }
 
     #[inline]
-    pub(crate) fn nil(&self) -> *mut RbNode {
+    pub fn nil(&self) -> *mut RbNode {
         rb_nil()
     }
 
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         let nil = self.nil();
         self.root == nil || self.root.is_null()
     }
 
     /// Validate a node pointer before dereference (poison discipline).
     #[inline]
-    pub(crate) fn node_ok(node: *mut RbNode) -> bool {
+    pub fn node_ok(node: *mut RbNode) -> bool {
         crate::sched::sched::kernel_task_ptr_range_ok(node as *const u8)
     }
 
@@ -619,7 +619,7 @@ impl RbTimeline {
     }
 
     /// In-order successor (rb_next). Returns NIL at the end.
-    pub(crate) fn next(&self, node: *mut RbNode) -> *mut RbNode {
+    pub fn next(&self, node: *mut RbNode) -> *mut RbNode {
         let nil = self.nil();
         if !Self::node_ok(node) {
             return nil;
@@ -687,7 +687,7 @@ impl RbTimeline {
     /// Allocation-free; O(log n) pointer chasing. Returns false (and
     /// touches nothing) when a descent hop lands on an out-of-range
     /// pointer — the poison discipline (caller reports).
-    pub(crate) fn insert(&mut self, key: VruntimeKey, node: *mut RbNode) -> bool {
+    pub fn insert(&mut self, key: VruntimeKey, node: *mut RbNode) -> bool {
         // (pub(crate)-visible for the unit-test tree driver)
         let nil = self.nil();
         if !Self::node_ok(node) {
@@ -784,7 +784,7 @@ impl RbTimeline {
     /// Unlink `node` (allocation-free). The leftmost cache is advanced to
     /// the node's successor BEFORE splicing. Returns false without
     /// touching the tree when a neighbor hop is out of range.
-    pub(crate) fn erase(&mut self, node: *mut RbNode) -> bool {
+    pub fn erase(&mut self, node: *mut RbNode) -> bool {
         let nil = self.nil();
         if !Self::node_ok(node) || !unsafe { (*node).linked } {
             return false;
