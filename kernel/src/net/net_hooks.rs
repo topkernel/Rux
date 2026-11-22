@@ -36,6 +36,14 @@ pub struct NetHooks {
     pub unix_socket_of_fd: fn(usize) -> Option<(alloc::string::String, bool)>,
     /// The futex fd-detail line for a unix socket (bound=... peer=...).
     pub unix_detail_of: fn(&File) -> Option<alloc::string::String>,
+    /// The futex wedge-hunt's unix diag probe (the latest site).
+    pub unix_diag_of_file: fn(&File) -> Option<alloc::string::String>,
+    /// vfs's socket stat overlay (socket_file_stat).
+    pub socket_file_stat: fn(&File, &mut crate::fs::Stat) -> Option<i32>,
+    /// memwatch's TCP table walk (the leak forensics snapshot).
+    pub tcp_walk: fn() -> Vec<(u32, u64, u64, u64)>, // (fd, refs, rx, tx)
+    /// The tcp timer softirq handler (the timer wheel's tick).
+    pub tcp_timer_softirq: fn(), // trampoline wraps to fn(usize) for SoftirqHandler
 }
 
 /// A /proc/net/tcp row (the socket-table getter's raw data; procfs
@@ -100,6 +108,10 @@ impl NetHooks {
         netlink_socket_from_fd: |_| None,
         unix_socket_of_fd: |_| None,
         unix_detail_of: |_| None,
+        unix_diag_of_file: |_| None,
+        socket_file_stat: |_, _| None,
+        tcp_walk: || Vec::new(),
+        tcp_timer_softirq: || {},
     };
 }
 
@@ -157,3 +169,17 @@ pub fn netlink_socket_from_fd(fd: usize) -> Option<usize> { (hooks().netlink_soc
 pub fn unix_socket_of_fd(fd: usize) -> Option<(alloc::string::String, bool)> { (hooks().unix_socket_of_fd)(fd) }
 #[inline]
 pub fn unix_socket_of(file: &File) -> Option<alloc::string::String> { (hooks().unix_detail_of)(file) }
+#[inline]
+pub fn unix_diag_of_file(file: &File) -> Option<alloc::string::String> { (hooks().unix_diag_of_file)(file) }
+#[inline]
+pub fn socket_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> { (hooks().socket_file_stat)(file, stat) }
+#[inline]
+pub fn tcp_walk() -> Vec<(u32, u64, u64, u64)> { (hooks().tcp_walk)() }
+#[inline]
+pub fn tcp_timer_softirq() { (hooks().tcp_timer_softirq)() }
+
+/// The softirq-table trampoline (the open_softirq registration needs a
+/// plain fn item; the hook's Option-dispatch lives inside).
+pub fn tcp_timer_softirq_trampoline(_vec: usize) {
+    tcp_timer_softirq();
+}

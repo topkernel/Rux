@@ -685,7 +685,7 @@ pub fn init() {
 
     open_softirq(
         SoftirqIndex::Timer as usize,
-        crate::net::tcp_timer::timer_softirq_handler,
+        crate::net::net_hooks::tcp_timer_softirq_trampoline,
     );
     open_softirq(
         SoftirqIndex::NetRx as usize,

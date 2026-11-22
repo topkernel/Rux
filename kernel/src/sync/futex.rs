@@ -10032,22 +10032,14 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                         }
                     }
                     "unix-sock" => {
-                        if let Some(us) = crate::net::unix::unix_of_file_diag(&f) {
-                            let (qb, qt, cap, ql) = us.diag_snapshot();
-                            let peer = us.dgram_peer.lock().clone();
-                            let bound = us.bound_name.lock().clone();
+                        if let Some(diag) = crate::net::net_hooks::unix_diag_of_file(&f) {
                             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
+                            // (rung 2: the unix diag rides the hook — the detail line is
+                            // pre-formatted service-side; the raw socket type does not cross.)
                             crate::pr_warn!(
-                                "KILLDUMP: tid {} unix kind={:?} bound={:?} dgram_peer={:?} queued={}B truesize={} sndbuf={} qlen={}",
+                                "KILLDUMP: tid {} unix {}",
                                 tk.pid(),
-                                us.kind,
-                                bound,
-                                peer,
-                                qb,
-                                qt,
-                                cap,
-                                ql
-                            );
+                                diag);
                         }
                     }
                     _ => {}

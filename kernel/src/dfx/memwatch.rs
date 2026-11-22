@@ -860,26 +860,28 @@ pub fn dump_mem() {
         // boot names the deadlock side (data-at-client-unread vs
         // data-never-arrived) in one line.
         {
-            let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
-            let tbl = crate::net::tcp::get_tcp_socket_table();
+            // (rung 2: the TCP census rides the hook — the table walk is
+            // net-stack internals; the hook returns (fd, state, rx, wnd)
+            // tuples the forensic dump prints.)
             taskdump_raw_line(b"\nTCPCEN ");
             let mut n = 0;
-            for fd in 0..crate::net::tcp::TCP_SOCKET_TABLE_SIZE {
-                if let Some(ts) = crate::net::tcp::tcp_socket_get(fd as i32) {
-                    taskdump_raw_line(b"[");
-                    taskdump_dec(fd as u64);
-                    taskdump_raw_line(b":st=");
-                    taskdump_dec(ts.state as u64);
-                    taskdump_raw_line(b",rx=");
-                    taskdump_dec(ts.recv_buffer.len() as u64);
-                    taskdump_raw_line(b",wnd=");
-                    taskdump_dec(ts.rcv_wnd as u64);
-                    taskdump_raw_line(b",lp=");
-                    taskdump_dec(ts.local_port.to_be() as u64);
-                    taskdump_raw_line(b"] ");
-                    n += 1;
-                    if n >= 8 { break; }
+            for (fd, st, rx, wnd) in crate::net::net_hooks::tcp_walk() {
+                taskdump_raw_line(b"[");
+                taskdump_dec(fd as u64);
+                taskdump_raw_line(b":st=");
+                taskdump_dec(st);
+                taskdump_raw_line(b",rx=");
+                taskdump_dec(rx);
+                taskdump_raw_line(b",wnd=");
+                taskdump_dec(wnd);
+                taskdump_raw_line(b"]");
+                n += 1;
+                if n >= 16 {
+                    break;
                 }
+            }
+            if n == 0 {
+                taskdump_raw_line(b"(no tcp sockets)");
             }
         }
         // r-strand instrument (lat_fs conviction round): the sync-wait
