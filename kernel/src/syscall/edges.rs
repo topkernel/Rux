@@ -531,3 +531,14 @@ pub fn arch_map_user_page(
         crate::arch::mm::map_user_page(root_ppn, virt, phys, flags)
     }
 }
+
+/// Byte-slice view of `count` kernel-readable bytes at `ptr`
+/// (INV-SYSC-9: the caller's raw-pointer boundary — a FileOps write_at
+/// entry receiving the syscall layer's (buf, count) pair; the length
+/// matches the caller's own validated count).
+#[inline]
+pub fn slice_of_kernel_bytes<'a>(ptr: *const u8, count: usize) -> &'a [u8] {
+    // SAFETY: INV-SYSC-9 — ptr non-null kernel buffer, count validated
+    // by the caller; the view lives for the call.
+    unsafe { core::slice::from_raw_parts(ptr, count) }
+}

@@ -3854,3 +3854,24 @@ pub(crate) fn with_block<T>(
     brelse(bh);
     Some(out)
 }
+
+/// Read-only block window: bread + shared data view + brelse (the
+/// read-side twin of [`with_block`]). No dirty, no journal, no sync —
+/// a pure reader.
+///
+/// INV-BIO-BLOCKRO (read arm of the with_block family): `device` is a
+/// live registered disk, `blocknr` any block on it; `bread` pins the
+/// buffer for the closure's scope and `brelse` releases exactly that
+/// pin on every path (the closure cannot early-return past the
+/// release — the release runs after `f` returns).
+pub(crate) fn with_block_ro<T>(
+    device: &'static crate::drivers::blkdev::GenDisk,
+    blocknr: u64,
+    f: impl FnOnce(&[u8]) -> T,
+) -> Option<T> {
+    let bh = bread(device, blocknr)?;
+    let data = bh_data(&bh);
+    let out = f(data);
+    brelse(bh);
+    Some(out)
+}
