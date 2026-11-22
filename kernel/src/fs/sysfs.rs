@@ -346,7 +346,12 @@ pub fn sysfs_root() -> Option<Arc<KObject>> {
 /// replay fed only the first binder and udevd still starved), so the
 /// replay is per-socket: duplicate adds re-run idempotent rules, fresh
 /// SEQNUMs, same DEVPATHs the trigger would have produced.
-pub fn coldboot_uevent_replay_into(sock: &alloc::sync::Arc<crate::net::netlink::NetlinkSocket>) {
+/// The push seam is caller-owned (crate-flip rung 2): the framework
+/// walks the tree and builds payloads; the SERVICE owns the socket
+/// type, so it supplies the push closure — the framework never names
+/// NetlinkSocket (the historical `_into(sock)` shape is why the two
+/// compilations of netlink.rs were type-incompatible).
+pub fn coldboot_uevent_replay(push: &mut dyn FnMut(&[u8])) {
     let Some(root) = sysfs_root() else { return };
     // Iterative DFS over the kobject tree; build "add" payloads for
     // every node carrying a device number (ttyS0, block devices, drm
@@ -359,7 +364,7 @@ pub fn coldboot_uevent_replay_into(sock: &alloc::sync::Arc<crate::net::netlink::
     while let Some(node) = stack.pop() {
         if node.devno.lock().is_some() {
             let (payload, _) = device_add_payload(&node);
-            crate::net::netlink::uevent_push_direct(sock, &payload);
+            push(&payload);
             fired += 1;
         }
         for child in node.children.lock().values() {
@@ -1450,7 +1455,7 @@ fn build_tree() -> Arc<KObject> {
     attr_ro(&fb0, "modes", move || {
         #[cfg(feature = "riscv64")]
         {
-            match crate::drivers::gpu::get_framebuffer_info() {
+            match crate::console::get_framebuffer_info() {
                 Some(info) => {
                     format!("U:{}x{}p-0\n", info.width, info.height).into_bytes()
                 }
@@ -1820,7 +1825,7 @@ pub fn uevent_send_full(
     extra_env: &[(&str, &str)],
 ) -> u64 {
     let (msg, seq) = uevent_payload_for(devpath, action, subsystem, extra_env);
-    crate::net::netlink::uevent_broadcast(&msg);
+    crate::net::net_hooks::uevent_broadcast(&msg);
     seq
 }
 
@@ -2487,3 +2492,41 @@ pub static SYSFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .poll(sysfs_file_poll)
     .close(sysfs_file_close)
     .build();
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The sysfs mount entry (old mount.rs arm, verbatim: build the KObject
+/// tree, prepare the mountpoint, link the dentry tree).
+pub fn mount_sys_instance(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data, fs_type);
+    init_sysfs().map_err(|e| e as i32)?;
+    mount_sysfs().map_err(|e| e as i32)?;
+    crate::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
+    crate::fs::mount::register_mount("sysfs", target, "sysfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+/// The pstore mount entry (old mount.rs "pstore" arm: mount the sysfs
+/// pstore subtree; fall back to an empty sysfs root).
+pub fn mount_pstore(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data);
+    let inode = match crate::fs::vfs::path_lookup("/sys/fs/pstore", 0) {
+        Ok(p) => match p.inode {
+            Some(i) => i,
+            None => create_root_inode(),
+        },
+        Err(_) => create_root_inode(),
+    };
+    crate::fs::vfs::vfs_mount(target, inode, mnt_flags);
+    crate::fs::mount::register_mount(fs_type, target, "pstore", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["sysfs"], mount_sys_instance);
+    crate::fs::mount_table::register(&["pstore"], mount_pstore);
+}

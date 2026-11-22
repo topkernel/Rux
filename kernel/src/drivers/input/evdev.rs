@@ -1719,16 +1719,16 @@ fn input_echo_budget(n: u64) -> bool {
 static HUNT_ECHO_LOCK: crate::sync::spinlock::Spinlock<()> =
     crate::sync::spinlock::Spinlock::new(());
 
-pub(crate) struct HuntLine {
+pub struct HuntLine {
     buf: [u8; 192],
     n: usize,
 }
 
 impl HuntLine {
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self { buf: [0; 192], n: 0 }
     }
-    pub(crate) fn push(&mut self, s: &[u8]) {
+    pub fn push(&mut self, s: &[u8]) {
         for &b in s {
             if self.n < self.buf.len() {
                 self.buf[self.n] = b;
@@ -1736,7 +1736,7 @@ impl HuntLine {
             }
         }
     }
-    pub(crate) fn u64(&mut self, v: u64) {
+    pub fn u64(&mut self, v: u64) {
         let mut tmp = [0u8; 20];
         let mut k = 0usize;
         let mut x = v;
@@ -1754,7 +1754,7 @@ impl HuntLine {
             self.push(&[tmp[i]]);
         }
     }
-    pub(crate) fn flush(&mut self) {
+    pub fn flush(&mut self) {
         if self.n == 0 {
             return;
         }

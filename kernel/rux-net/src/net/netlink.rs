@@ -511,8 +511,6 @@ pub struct NetlinkSocket {
     pub options: Spinlock<SocketOptions>,
 }
 
-// SAFETY: all mutable state is behind Spinlocks / atomics.
-unsafe impl Sync for NetlinkSocket {}
 
 impl NetlinkSocket {
     pub fn new(protocol: i32) -> Self {
@@ -1012,7 +1010,9 @@ pub fn netlink_bind(
         && groups & 1 != 0
         && !sock.coldboot_served.swap(true, core::sync::atomic::Ordering::AcqRel)
     {
-        crate::fs::sysfs::coldboot_uevent_replay_into(sock);
+        crate::fs::sysfs::coldboot_uevent_replay(&mut |payload| {
+            uevent_push_direct(sock, payload)
+        });
     }
     if nl_pid != 0 {
         let old = sock.portid.load(core::sync::atomic::Ordering::Relaxed);

@@ -938,27 +938,8 @@ static RECV: [RxSlot; 16] = [const { EMPTY_RX }; 16];
 /// pointer for host-side nm symbolization.
 fn recv_describe(fd: usize, out: &[AtomicU8; 96]) {
     let mut s = alloc::string::String::new();
-    if let Some((usock, nonblock)) = crate::net::unix::unix_file_of(fd) {
-        let kind = match usock.kind {
-            crate::net::unix::UnixKind::Stream => "stream",
-            _ => "dgram",
-        };
-        let bound = usock.bound_name.lock().clone().unwrap_or_default();
-        let peer_name = match usock.peer_cred() {
-            Some(c) => alloc::format!("pid {}", c.pid),
-            None => usock
-                .dgram_peer
-                .lock()
-                .clone()
-                .unwrap_or_else(|| "-".to_string()),
-        };
-        s = alloc::format!(
-            "unix:{} bound=[{}] peer=[{}]{}",
-            kind,
-            bound,
-            peer_name,
-            if nonblock { " O_NONBLOCK" } else { "" }
-        );
+    if let Some(desc) = crate::net::net_hooks::unix_recv_describe(fd) {
+        s = desc;
     } else if let Some(file) = crate::fs::get_file_fd(fd) {
         let ops = file.get_ops().map(|p| p as *const _ as u64).unwrap_or(0);
         let path = match file.get_dentry() {
@@ -1178,7 +1159,7 @@ static ERR_CENSUS: [ErrSlot; 96] = [const { EMPTY_ERR }; 96];
 
 /// Boot time in ms (the dump() clock, cheaper than a full time-of-day).
 fn boot_ms() -> u64 {
-    crate::drivers::timer::get_jiffies() as u64 * 1000
+    crate::timer::get_jiffies() as u64 * 1000
         / crate::config::KERNEL_HZ as u64
 }
 
@@ -1453,7 +1434,7 @@ pub fn note_read_eagain(file: &crate::fs::File) {
 #[inline]
 pub fn enter() -> Option<u64> {
     if on() {
-        Some(crate::drivers::timer::read_time())
+        Some(crate::timer::read_time())
     } else {
         None
     }
@@ -1527,7 +1508,7 @@ pub fn exit(nr: usize, t0: Option<u64>) {
         return;
     }
     flood_account(nr);
-    let dt = crate::drivers::timer::read_time().saturating_sub(t0);
+    let dt = crate::timer::read_time().saturating_sub(t0);
     let e = &TABLE[nr];
     e.count.fetch_add(1, Ordering::Relaxed);
     e.cyc.fetch_add(dt, Ordering::Relaxed);
@@ -1656,7 +1637,7 @@ pub fn tick(now_jiffies: u64) {
 pub fn dump() {
     // Nominal domain: 10 ticks per microsecond by definition.
     const US: u64 = 10;
-    let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
+    let secs = crate::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
 
     // 39th: AF_UNIX hot-path phase anatomy rides the same dump cadence
     // (no-op unless the unixrd=1 cmdline param is armed).

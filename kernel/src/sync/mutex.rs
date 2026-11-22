@@ -224,7 +224,7 @@ impl SleepMutex {
             st.locked = true;
             st.owner = pid;
             st.depth = 1;
-            st.acquired_at = crate::drivers::timer::get_jiffies();
+            st.acquired_at = crate::timer::get_jiffies();
             Some(SleepMutexGuard { lock: self })
         } else if st.locked && st.owner == pid {
             st.depth += 1;
@@ -254,7 +254,7 @@ impl SleepMutex {
             st.locked = true;
             st.owner = pid;
             st.depth = 1;
-            st.acquired_at = crate::drivers::timer::get_jiffies();
+            st.acquired_at = crate::timer::get_jiffies();
             Some(SleepMutexGuard { lock: self })
         } else if st.locked && st.owner == pid {
             st.depth += 1;
@@ -294,7 +294,7 @@ impl SleepMutex {
                 st.locked = true;
                 st.owner = pid;
                 st.depth = 1;
-                st.acquired_at = crate::drivers::timer::get_jiffies();
+                st.acquired_at = crate::timer::get_jiffies();
                 return OptimisticProbe::Acquired(SleepMutexGuard { lock: self });
             } else if st.locked && st.owner == pid {
                 st.depth += 1;
@@ -349,7 +349,7 @@ impl SleepMutex {
             st.locked = true;
             st.owner = pid;
             st.depth = 1;
-            st.acquired_at = crate::drivers::timer::get_jiffies();
+            st.acquired_at = crate::timer::get_jiffies();
             Some(SleepMutexGuard { lock: self })
         } else {
             None
@@ -602,7 +602,7 @@ impl SleepMutex {
             // epoch after we registered) belongs to nobody — take the
             // free lock now.
             {
-                let now = crate::drivers::timer::get_jiffies();
+                let now = crate::timer::get_jiffies();
                 let mut st = self.state.lock();
                 if !counted {
                     st.waiters += 1;
@@ -692,7 +692,7 @@ impl SleepMutex {
             // D-state against a free lock. Rate-limited to one line per
             // 10 s.
             {
-                let now = crate::drivers::timer::get_jiffies();
+                let now = crate::timer::get_jiffies();
                 let (owner, depth, held, nwaiters, locked) = {
                     let st = self.state.lock();
                     (
@@ -759,7 +759,7 @@ impl SleepMutex {
                 timer_id = 0;
             }
             timer_id = crate::timer::add_timer_wakeup(
-                crate::drivers::timer::get_jiffies() + Self::ANTI_STARVE_JIFFIES,
+                crate::timer::get_jiffies() + Self::ANTI_STARVE_JIFFIES,
                 pid,
             );
             crate::arch::cpu::restore_irq(true);

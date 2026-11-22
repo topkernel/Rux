@@ -14,33 +14,33 @@
 // (declared at the crate root via #[path] — see main.rs/lib root).
 #![forbid(unsafe_code)]
 
+pub mod seccomp;
+pub mod support;
+
+/// The seam registration hook (flip milestone shape): called by
+/// rust_main before the impl; the LIB-side default is a no-op — the
+/// service-crate composition (the bin) overrides it via the table's
+/// OnceSlot when rux-syscall lands. Exists so the call site is stable
+/// across the flip commits.
+pub fn seam_register_default() {}
+
 // The audited-edge escape: declared at the crate root (outside this
 // forbid tree) and re-exported under the historical path.
-pub(crate) use crate::syscall_edges as edges;
+pub use crate::syscall_edges as edges;
 pub mod dispatch;
-pub mod io;
-pub mod process;
-pub mod memory;
-pub mod file;
-pub mod signal;
-pub mod time;
-pub mod network;
-pub mod sched;
-pub mod misc;
-#[cfg(feature = "x86_64")]
-pub mod x86_compat;
+// pub mod io; — MOVED to the rux-syscall service crate (State B final)
+// pub mod process; — MOVED to the rux-syscall service crate (State B final)
+// pub mod memory; — MOVED to the rux-syscall service crate (State B final)
+// pub mod file; — MOVED to the rux-syscall service crate (State B final)
+// pub mod signal; — MOVED to the rux-syscall service crate (State B final)
+// pub mod time; — MOVED to the rux-syscall service crate (State B final)
+// pub mod network; — MOVED to the rux-syscall service crate (State B final)
+// pub mod sched; — MOVED to the rux-syscall service crate (State B final)
+// pub mod misc; — MOVED to the rux-syscall service crate (State B final)
+// pub mod x86_compat; — MOVED to the rux-syscall service crate (State B final) (x86_64-only file)
 
 // Re-export common types and functions
 pub use dispatch::{syscall_handler, SyscallArgs};
-pub use io::*;
-pub use process::*;
-pub use memory::*;
-pub use file::*;
-pub use signal::*;
-pub use time::*;
-pub use network::*;
-pub use sched::*;
-pub use misc::*;
 
 /// System call number definitions
 #[allow(dead_code)]

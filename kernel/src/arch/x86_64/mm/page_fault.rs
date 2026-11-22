@@ -546,7 +546,7 @@ pub fn handle_mm_fault(
             static LAST_COW_JIFFY: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let page = fault_addr.bits() & !0xFFF;
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let last_page = LAST_COW_PAGE.load(core::sync::atomic::Ordering::Relaxed);
             let last_j = LAST_COW_JIFFY.load(core::sync::atomic::Ordering::Relaxed);
             let repeat = last_page == page && now.saturating_sub(last_j) < 25;
@@ -587,15 +587,42 @@ pub fn handle_mm_fault(
         return MmFaultResult::PermissionDenied;
     }
 
-    // Find VMA
-    let vma_mgr = addr_space.vma_read();
-    let vma = match vma_mgr.find(page_virt_addr) {
-        Some(v) => v,
-        None => {
+    // Find VMA. DEFECT-C FIX (LTP mmap1 false-kill class): Rux drops the
+    // VMA read guard before the fill (the R73 EXT4_BIG_LOCK pinch rule),
+    // so a sibling thread's munmap can complete between the faulting
+    // instruction and this lookup — the find sees absence for a mapping
+    // that WAS live at fault time, and the old code killed the task
+    // (SIGSEGV via try_expand_stack's site-1). Linux holds mmap_read
+    // from before lookup through fill, so the unmap cannot interleave.
+    // Our shape cannot hold the guard across the file read; instead, on
+    // a miss we RETRY the find once under a fresh guard before refusing:
+    // if the mapping is back (the remap churn of the racing thread) or
+    // the first find lost a snapshot race, the fill proceeds. Only a
+    // mapping that is absent on BOTH lookups refuses.
+    let mut vma_mgr = addr_space.vma_read();
+    let mut vma = vma_mgr.find(page_virt_addr);
+    if vma.is_none() {
+        drop(vma_mgr);
+        vma_mgr = addr_space.vma_read();
+        vma = vma_mgr.find(page_virt_addr);
+        if vma.is_none() {
             drop(vma_mgr);
+            // Defect-C budget print (12/boot): the refusal inputs after
+            // the retry — both finds missed, the expansion fallback
+            // decides (stack growth or SIGSEGV).
+            static MISS_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if MISS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+                crate::pr_err!(
+                    "UFILL-MISS2 pid={} addr={:#x} — absent on retry",
+                    crate::process::current_pid(),
+                    fault_addr.as_usize()
+                );
+            }
             return try_expand_stack(addr_space, fault_addr, flags, root_ppn);
         }
-    };
+    }
+    let vma = vma.unwrap();
 
     // Get VMA attributes
     let vma_flags = vma.flags();

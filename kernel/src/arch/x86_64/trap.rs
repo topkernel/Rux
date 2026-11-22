@@ -1399,7 +1399,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         core::sync::atomic::Ordering::Relaxed,
                     );
                     crate::interrupt::preempt::TICK_ENTRY_JIF[cpu_id].store(
-                        crate::drivers::timer::get_jiffies(),
+                        crate::timer::get_jiffies(),
                         core::sync::atomic::Ordering::Relaxed,
                     );
                     // 118th param-stall conviction dump (one-shot once
@@ -1440,7 +1440,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                                 crate::pr_warn!(
                                     "WW-P1-WATCH-ADD task={:#x} landed at jiffies={}",
                                     t as usize,
-                                    crate::drivers::timer::get_jiffies()
+                                    crate::timer::get_jiffies()
                                 );
                             }
                         }
@@ -1449,24 +1449,24 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         static PS_DONE2: core::sync::atomic::AtomicBool =
                             core::sync::atomic::AtomicBool::new(false);
                         if !PS_DONE2.load(core::sync::atomic::Ordering::Relaxed)
-                            && crate::drivers::timer::get_jiffies() >= 24_000
+                            && crate::timer::get_jiffies() >= 24_000
                             && crate::trace::EVENT_SCHEDTRACE.armed()
                             && !PS_DONE2.swap(true, core::sync::atomic::Ordering::AcqRel)
                         {
                             // HOTPATH-PRINT: one-shot at 240s
                             // (PS_DONE2 latch above).
                             crate::pr_warn!("=== SECOND DUMP (240s trend) ===");
-                            crate::syscall::misc::param_stall_dump();
+                            crate::syscall::support::param_stall_dump();
                         }
                         if !PS_DONE.load(core::sync::atomic::Ordering::Relaxed)
-                            && crate::drivers::timer::get_jiffies() >= 18_000
+                            && crate::timer::get_jiffies() >= 18_000
                             && crate::trace::EVENT_SCHEDTRACE.armed()
                             && !PS_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
                         {
-                            crate::syscall::misc::param_stall_dump();
+                            crate::syscall::support::param_stall_dump();
                         }
                     }
-                    crate::drivers::input::input_debug_tick();
+                    crate::timer::input_debug_tick();
                     crate::interrupt::preempt::irq_enter();
                     // LAPIC EOI FIRST (same discipline as the PIC path):
                     // the scheduler call below can switch tasks, and the
@@ -1567,7 +1567,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 /// measured. 200 jiffies restores the documented 2 s cadence.
 fn ww_irqwin_budget_ok() -> bool {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(core::sync::atomic::Ordering::Acquire);
     if now.wrapping_sub(last) < 200 {
         return false;
@@ -2179,7 +2179,7 @@ fn handle_syscall(regs: &mut PtRegs) {
     // the stub stored it in the frame's rip slot.
 
     // Seccomp gate before any dispatch (U1c; same as the twin).
-    if let Some(rv) = crate::syscall::process::seccomp_syscall_gate(syscall_num, regs) {
+    if let Some(rv) = crate::syscall::seccomp::seccomp_syscall_gate(syscall_num, regs) {
         regs.rax = rv as u64;
         return;
     }
@@ -2320,9 +2320,11 @@ fn handle_general_protection(regs: &mut PtRegs) {
         // full report (bounded: 6 full dumps then one-liners) plus a
         // register-memory dump — perf-record-shaped bytes in the heap
         // metadata would name the ring writer as the corrupting agent.
-        user_segv_forensics(regs, regs.rip);
-        gp_regmem_dump(regs);
-        gp_mmhistory_dump(regs);
+        // DEATH-ONLY (kallsyms conviction, 2026-11-22): the dumps moved
+        // below the handler check — a HANDLED #GP (crash catcher,
+        // deliberate probe) must not pay the full forensic decode; LTP's
+        // kallsyms deliberately faults through a handler and the
+        // per-fault dump turned it into a 90s-timeout SIGKILL.
         // Handler-first routing (same as the page-fault Segfault path):
         // debuggers/crash catchers must see the SIGSEGV; the default
         // disposition kills here. A fault inside the (blocked) SIGSEGV
@@ -2343,6 +2345,9 @@ fn handle_general_protection(regs: &mut PtRegs) {
             crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
             return;
         }
+        user_segv_forensics(regs, regs.rip);
+        gp_regmem_dump(regs);
+        gp_mmhistory_dump(regs);
         let _ = crate::signal::send_signal_with_info_directed(pid, gp_info);
         // huks-wedge lane (hw5): group death (Linux do_group_exit).
         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
@@ -2848,7 +2853,7 @@ fn segv_hist_note(fault_addr: u64) {
     // Upper 32 bits carry cr2's low 32 (page id for correlation); lower
     // 32 carry jiffies (age at exit-print time).
     SEGV_HIST_J[i].store(
-        ((fault_addr & 0xffff_ffff) << 32) | (crate::drivers::timer::get_jiffies() & 0xffff_ffff),
+        ((fault_addr & 0xffff_ffff) << 32) | (crate::timer::get_jiffies() & 0xffff_ffff),
         core::sync::atomic::Ordering::Relaxed,
     );
 }
@@ -2856,7 +2861,7 @@ fn segv_hist_note(fault_addr: u64) {
 /// Age (in jiffies) of this tid's most recent delivered SIGSEGV, plus
 /// that fault's cr2, if the tid ever took one.
 pub fn segv_hist_age(tid: u32) -> Option<(u64, u64)> {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let mut best_j = 0u64;
     let mut best_addr = 0u64;
     let mut found = false;
@@ -3712,7 +3717,15 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // carries the full forensics.
             static SEGV_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
-            if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            // Defect-C: the FIRST refusal per task (the static gets
+            // overwritten by successive faults; later prints mislead).
+            let first_for_task = crate::dfx::forensics_edges::mark_first_refusal(
+                crate::sched::get_current_pid() as u64,
+            );
+            // HOTPATH-PRINT: budget-gated — 8 total (SEGV_N) + the first
+            // refusal per task (defect-C's one-per-pid); the fault path is
+            // per-task-fatal, never a loop rate.
+            if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 || first_for_task {
             crate::pr_err!(
                 "pagefault: Segfault at {:#x}, rip={:#x}, rsp={:#x}, pid={}, mode={}, fill_site={}",
                 fault_addr,
@@ -3736,7 +3749,6 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // demand-maps the faulting page (FFRT arenas, GC guards)
                 // installs the WRONG page and the instruction re-faults
                 // forever (the 0x7ff1 OH fault-loop family).
-                user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
                 let info = crate::signal::SigInfo::fault(
                     crate::signal::Signal::SIGSEGV as i32,
@@ -3747,6 +3759,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     let _ = crate::signal::send_signal_with_info_directed(pid, info);
                     return;
                 }
+                // DEATH-ONLY forensics (kallsyms conviction, 2026-11-22):
+                // the dump fires ONLY on the default disposition. Fired
+                // before the handler check it taxed every HANDLED fault —
+                // LTP's kallsyms probes 37k kernel addresses through a
+                // SIGSEGV+siglongjmp handler and drowned in dumps until
+                // the harness timeout SIGKILLed it (FAIL->CRASH(137)).
+                user_segv_forensics(regs, fault_addr);
                 let _ = crate::signal::send_signal_with_info_directed(pid, info);
                 // huks-wedge lane (hw5): GROUP death — a synchronous
                 // SIGSEGV with default disposition terminates the whole
@@ -3791,7 +3810,6 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // SEGV_ACCERR (permission denied, the PROT_NONE class)
                 // with si_addr = cr2 — FFRT's arena handler maps exactly
                 // this page (arena-mmap lane 2026-11-14).
-                user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
                 let info = crate::signal::SigInfo::fault(
                     crate::signal::Signal::SIGSEGV as i32,
@@ -3802,6 +3820,9 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     let _ = crate::signal::send_signal_with_info_directed(pid, info);
                     return;
                 }
+                // DEATH-ONLY forensics (kallsyms conviction, 2026-11-22):
+                // see the SEGV_MAPERR arm — handled faults skip the dump.
+                user_segv_forensics(regs, fault_addr);
                 let _ = crate::signal::send_signal_with_info_directed(pid, info);
                 // huks-wedge lane (hw5): group death (Linux do_group_exit)
                 // — see the SEGV_MAPERR arm above for the full rationale.

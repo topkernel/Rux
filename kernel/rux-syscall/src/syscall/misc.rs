@@ -852,7 +852,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                 )
             {
                 use core::sync::atomic::{AtomicU64, Ordering};
-                static PR_N: AtomicU64 = AtomicU64::new(0);
+                pub static PR_N: AtomicU64 = AtomicU64::new(0);
                 let n = PR_N.fetch_add(1, Ordering::Relaxed);
                 if n < 400 || n % 10 == 0 {
                     let mut l = crate::drivers::input::evdev::HuntLine::new();
@@ -1009,7 +1009,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                     let want = has_evdev
                         || crate::drivers::input::evdev::evdev_opener_pid(my_pid);
                     if want {
-                        static PP_N: AtomicU64 = AtomicU64::new(0);
+                        pub static PP_N: AtomicU64 = AtomicU64::new(0);
                         let n = PP_N.fetch_add(1, Ordering::Relaxed);
                         if n < 400 || n % 10 == 0 {
                             let mut l =
@@ -1236,7 +1236,7 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
     if is(&TIMERFD_OPS) {
         return Some((timerfd_poll_wait, timerfd_poll_unwait));
     }
-    if is(&super::EVENTFD_OPS) {
+    if is(&EVENTFD_OPS) {
         return Some((eventfd_poll_wait, eventfd_poll_unwait));
     }
     // pidfds (pidfd_open files and /proc/<pid> dir fds): exit readiness

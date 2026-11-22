@@ -481,7 +481,7 @@ pub fn series_tick() {
     if !crate::trace::EVENT_LEDGER.armed() {
         return;
     }
-    let current = crate::drivers::timer::get_jiffies();
+    let current = crate::timer::get_jiffies();
     if current.saturating_sub(LAST_SERIES.load(Ordering::Relaxed)) < SERIES_PERIOD {
         return;
     }

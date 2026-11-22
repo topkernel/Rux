@@ -29,6 +29,24 @@ SAFETY-comment coverage 3,207/5,009 (64%); 157 Kani harnesses, 1,104
 proptests, 4 SPIN models, Miri on the verify crate (generated ledger:
 docs/development/tcb-ledger.md; security-design.md §0).
 
+**Crate-flip rung 2 (net service crate, 2026-11-22):** the network
+stack's 16 files compile solely in kernel/rux-net under
+`#![forbid(unsafe_code)]` (compiler-enforced, negative-probe verified)
+— the second service column after rux-syscall. The move left ZERO
+unsafe behind: the 24 substrate constructs (static-mut table refs,
+Arc-refcount probes, POD header views) were extracted to the framework
+edge module first (net/net_edges.rs, INV rows above), and the four
+historical `unsafe impl Sync` socket markers proved VESTIGIAL — the
+structs are auto-Sync (all-Spinlock/atomic fields; deletion verified
+by green triple-arch build), a repeat of the "fear marker, not hazard"
+class. One safety improvement rode the extraction: pod_view/pod_view_mut
+CHECK ALIGNMENT (the old inline header casts never did — a misaligned
+skb buffer was silent UB, now the packet drops). Unsafe census:
+kernel/src net tree = the framework zone only (buffer + edges +
+wrappers, all INV-ledgered); the service files carry none. Battery:
+make test 886/886, riscv boot + /proc/net readback, fio 3-case verify
+battery PASS (same rig as baseline).
+
 **INV-UACCESS-1 (user-copy soundness, unsafe-slim round, 2026-11-19):**
 user-memory access outside `arch/` routes through `arch::uaccess_safe`
 (`copy_out`/`copy_in`/`read_user`/`write_user`/`clear_user`/
@@ -251,6 +269,49 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   one-step-kill/panic class, 11 items (83d0b691), and the get_cwd UB
   + UTF-8 cmdline panic fix (830e3f8c). Test-harness-only panics
   (unit-test Vec drop) are excluded by method.
+
+### 2.3 The `expect`/`unwrap` population is a fail-fast surface, not a defect class
+
+A kernel-wide scan (2026-11-22) counts **286 `expect`/`unwrap` sites in
+production code** (tests/ excluded): binder 76, vfs 20, bio 16,
+sysv_sem 15, rootfs 11, and the rest in smaller clusters. They are NOT
+a defect class, and the review proposal to convert them all to
+`match`-plus-error-code would make the kernel worse. They split into
+three kinds:
+
+1. **Unreachable invariant assertions** — the majority. Examples:
+   `w.as_ref().unwrap()` on the WORLD guard (WORLD is initialized
+   before any binder call), `g.get(&k).expect("contains_key")` right
+   after a `contains_key` on the same map under the same lock
+   (`fs/page_cache.rs`, the map is `entry.lock`-guarded for the whole
+   block), `group.iter().min().unwrap()` on a slice the caller just
+   proved non-empty (`ipc/binder.rs`), `try_fdtable().unwrap()` right
+   after `try_fdtable()` returned Some in the same expression chain.
+   In a kernel, an unreachable invariant that stops to panic is the
+   correct behaviour: it turns a silent corruption into a loud,
+   attributable oops. Converting these to error returns would turn
+   "the kernel state is broken" into "one syscall returns -EIO",
+   which is strictly harder to diagnose and hides the corruption from
+   the bug detector.
+2. **Contract assertions on a caller-guaranteed precondition** — the
+   same reasoning; the contract is documented at the call site.
+3. **Genuinely optional lookups** — a small residue that must return
+   an error rather than panic. These are the ones worth changing, and
+   each change needs its own case-by-case reading (the map may be
+   concurrently mutated, the lookup may be absent by design).
+
+The TOCTOU subset — presence check followed by `get().expect()` with a
+mutation window in between — was scanned mechanically across
+kernel/src: **2 sites, both in `fs/page_cache.rs`, both inside the
+`entry.lock` guard** (the map cannot be mutated concurrently there),
+so neither can fire. The residue is therefore an unreachable set, not
+a latent panic family.
+
+Rule of thumb recorded here: a panic is a defect when its PRECONDITION
+can be broken by user input or by a concurrent actor. It is a
+detector when the precondition is an internal invariant. The review
+sweep should be re-run against that distinction, not against the
+syntactic presence of `expect`.
 
 ## 3. Performance, measured (each fast path IS a safe path)
 - lmbench, same host, same accel, both kernels under one q35+KVM rig
@@ -495,6 +556,10 @@ line per id; the contract lives in the owning module.
 - **INV-MMIO-1** — MmioRegion register windows (kernel/src/safety/mmio.rs)
 - **INV-MMIO-2** — MmioRegion register windows (kernel/src/safety/mmio.rs)
 - **INV-MMIO-3** — MmioRegion register windows (kernel/src/safety/mmio.rs)
+- **INV-NET-ARCREF-1** — net framework edges: Arc-refcount probe + audited deref (net/net_edges.rs, L1)
+- **INV-NET-CONTAINEROF-1** — net framework edges: field-ptr container_of (net/net_edges.rs, L1)
+- **INV-NET-HDRVIEW-1** — net framework edges: POD header views, alignment-checked (net/net_edges.rs, L1)
+- **INV-NET-SOCKTAB-1** — net framework edges: static-mut table ref formation (net/net_edges.rs, L1)
 - **INV-NETARC-1** — socket-file Arc recovery (net/mod.rs, L5)
 - **INV-PCP-1** — primitive contract (see owning module)
 - **INV-RING-1** — SpscRing lock-free ring (kernel/src/safety/ring.rs)
@@ -1218,6 +1283,11 @@ their job on the checker infrastructure itself):
 | INV-VDSO-DATA-1 | `mm/vdso.rs` | (INV-VDSO-DATA-1: the vDSO data page family — the page is a fixed |
 
 | INV-SKB-1 | `net/buffer.rs` | sk_buff family: allocator-owned heads, headroom-tracked data spans, bounds-checked slices |
+| INV-NET-SOCKTAB-1 | `net/net_edges.rs` | rung-2 framework edge: static_table_ref/_mut form refs from addr_of_mut! on the stack's static-mut socket/route tables; callers hold the per-table serialization the sites document (crate-flip: rux-net is forbid) |
+| INV-NET-ARCREF-1 | `net/net_edges.rs` | rung-2 framework edge: arc_refcount_probe (volatile strong/weak reads at data-16/8, forensics only) + audited_deref (ops-identity-validated live Arc-backed ptr) |
+| INV-NET-HDRVIEW-1 | `net/net_edges.rs` | rung-2 framework edge: pod_view/pod_view_mut wire-header views; length AND ALIGNMENT checked (the old inline casts never checked alignment — misaligned skb buffers were silent UB, now drop) |
+| INV-RD-CLAIM | `sched/reapdrain.rs` | reap-claim family: ReapClaim carries the NonNull<Task> page-identity TCB handle; Send is the reaper-lock exclusivity (PENDING/GRACE_BATCH statics); the NonNull is dereferenced only by the reaper under the reap lock |
+| INV-NET-CONTAINEROF-1 | `net/net_edges.rs` | rung-2 framework edge: container_of maps a wait-queue FIELD ptr back to its UnixSocket via offset_of!; diagnostic-only sites |
 | INV-VDSO-DATA-1 | `mm/vdso.rs` | vDSO data page: fixed static mapping, page-constant offsets, seqlock write discipline |
 | INV-RWLOCK-1 | `sync/rwlock.rs` | rwlock family: atomic reader counts + writer word with documented pairing; guards ride the held lifetime; panic rows best-effort |
 | INV-SPIN-1 | `sync/spinlock.rs` | spinlock guards ride the held-lock lifetime; panic/deadlock-warn rows are PANIC-TIME BEST-EFFORT (tolerate garbage; the machine is already failing) |
@@ -1258,6 +1328,15 @@ their job on the checker infrastructure itself):
 | INV-XE-PIO-1 | `arch/x86_64/cpu.rs` | Port I/O (INV-XE-PIO-1) |
 | INV-XE-ZP | `arch/x86_64/mm/unsafe_edges.rs` | frame exclusively — INV-XE-ZP in mmu_init). |
 
+## Round-D contract addendum (milestone-1 drift)
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-FS-FILEINODE-1 | `fs/unsafe_edges.rs` | INV-FS-FILEINODE-1: `File::inode` is an `UnsafeCell<Option<Arc<Inode>>>` |
+| INV-FS-FILEINODE-2 | `fs/unsafe_edges.rs` | INV-FS-FILEINODE-2: the install twin of [`file_inode`] — writes the |
+| INV-FS-FILEPRIV-2 | `fs/unsafe_edges.rs` | INV-FS-FILEPRIV-2: the take-and-reclaim twin of file_privdata_ref — |
+
+| INV-PC-WIN | `fs/page_cache.rs` | byte window over one exclusively-owned page frame (fill_from/BufView family) |
 **Round-5 conversion receipts (what this register is the residue of):**
 blkdev fn-pointer ABI de-signed (registration is the audited edge,
 INV-BLKDEV-2/3); OnceSlot (INV-SLOT-1/2/3) owns every publish-once

@@ -136,9 +136,9 @@ fn report(tag: &[u8], task: *mut Task, bad: &Fields) {
     pmsg(b"\nR83-VICTIM tag=");
     pmsg(tag);
     pmsg(b" jiffies=");
-    pdec(crate::drivers::timer::get_jiffies());
+    pdec(crate::timer::get_jiffies());
     pmsg(b" time=0x");
-    phex(crate::drivers::timer::read_time());
+    phex(crate::timer::read_time());
     pmsg(b" by=cpu:");
     pdec(crate::arch::cpu_id() as u64);
     pmsg(b"/pid:");
@@ -273,7 +273,7 @@ unsafe fn bad_fields(task: *mut Task) -> Fields {
 /// reports the first implausible header it sees.
 pub fn audit_tick() {
     static LAST: AtomicU64 = AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(Ordering::Acquire);
     if now.wrapping_sub(last) < 4 {
         return;
@@ -340,7 +340,7 @@ pub fn waitwatch_report(task: *mut Task, old: &WatchSnap, new: &WatchSnap) {
     }
     REPORTS.fetch_add(1, Ordering::Relaxed);
     pmsg(b"\nR83-WAITWATCH jiffies=");
-    pdec(crate::drivers::timer::get_jiffies());
+    pdec(crate::timer::get_jiffies());
     pmsg(b" task=0x");
     phex(task as u64);
     pmsg(b" pid=");
@@ -432,7 +432,7 @@ pub fn sched_tick_audit() {
     // (2) Full pid-hash walk every 4 jiffies, one CPU at a time (CAS).
     {
         static LAST: AtomicU64 = AtomicU64::new(0);
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::timer::get_jiffies();
         let last = LAST.load(Ordering::Acquire);
         if now.wrapping_sub(last) >= 4 {
             if LAST
@@ -464,7 +464,7 @@ pub fn sched_tick_audit() {
         }
         static LAST: AtomicU64 = AtomicU64::new(0);
         static NEXT_OFF: AtomicU64 = AtomicU64::new(0);
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::timer::get_jiffies();
         let last = LAST.load(Ordering::Acquire);
         if now.wrapping_sub(last) >= 64 {
             if LAST
@@ -530,9 +530,9 @@ fn magic_report(addr: u64, v: u64) {
     }
     REPORTS.fetch_add(1, Ordering::Relaxed);
     pmsg(b"\nR84-MAGIC jiffies=");
-    pdec(crate::drivers::timer::get_jiffies());
+    pdec(crate::timer::get_jiffies());
     pmsg(b" time=0x");
-    phex(crate::drivers::timer::read_time());
+    phex(crate::timer::read_time());
     pmsg(b" at=0x");
     phex(addr);
     pmsg(b" v=0x");
@@ -584,9 +584,9 @@ pub extern "C" fn r84_ksp_trap(site: u64, val: u64, tp: u64, sepc: u64) {
     pmsg(b" sepc=0x");
     phex(sepc);
     pmsg(b" jiffies=");
-    pdec(crate::drivers::timer::get_jiffies());
+    pdec(crate::timer::get_jiffies());
     pmsg(b" time=0x");
-    phex(crate::drivers::timer::read_time());
+    phex(crate::timer::read_time());
     if tp >= 0x8000_0000_0000_0000 {
         // SAFETY: diagnostic pid read of the (validated kernel-half) task.
         let pid = rq32(tp as *mut Task, offs::TASK_PID);

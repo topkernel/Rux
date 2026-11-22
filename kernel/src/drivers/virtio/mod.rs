@@ -714,11 +714,22 @@ impl VirtIOBlkDevice {
     }
 }
 
+/// Per-disk kick (rung4 prep move 2): resolves the disk's PCI slot from
+/// its private data and doorbells that queue if quietly-submitted
+/// chains are pending. Registered in VIRTIO_BLK_OPS.kick.
+fn virtio_blk_kick_op(disk: &crate::drivers::blkdev::GenDisk) {
+    // The registered private data is the slot index as a raw pointer
+    // (set_private_data(slot as *mut u8) — INV-BLKDEV-2/3).
+    let slot = disk.private_data.map(|p| p as usize).unwrap_or(usize::MAX);
+    pci_blk_kick(slot);
+}
+
 /// VirtIO block device operations
 static VIRTIO_BLK_OPS: BlockDeviceOps = BlockDeviceOps {
     open: None,
     release: None,
     getgeo: None,
+    kick: Some(virtio_blk_kick_op),
 };
 
 // Async I/O methods (added in a separate impl block)
@@ -3559,7 +3570,9 @@ pub fn register_pci_gen_disk(slot: usize) {
         8 + slot as u32, // major number (unique per disk in the manager)
         1,               // minors
         512,             // block size
-        None as Option<&BlockDeviceOps>,
+        Some(&VIRTIO_BLK_OPS), // rung4 prep move 2: the ops table carries
+                               // the kick so the block layer's drains
+                               // never name this driver.
     ));
     disk.set_private_data(slot as *mut u8);
 

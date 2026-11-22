@@ -42,3 +42,13 @@ Estimated: two focused lane-days after the syscall flip.
 2. net — this page: measured, priced, sequenced after 1.
 3. fs service files, drivers — same method, measure when their turn
    comes (fs's forbid coverage already strong from L4's rounds).
+
+## Closure (2026-11-22)
+
+RUNG 2 CLOSED. The estimate held: the reverse surface resolved exactly
+as priced (procfs rows + dfx/futex diagnostics + the entry/init seam ->
+one 26-row hook table; the futex "wake helpers" were diagnostic
+consumers, not hooks). The syscall/network 223-site class stayed
+forward as predicted. One unpriced cost: the substrate extraction
+(24 unsafe constructs -> framework edges) had to land BEFORE the move —
+the crate forbid admits no migration allows.

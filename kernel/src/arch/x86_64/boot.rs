@@ -15,6 +15,13 @@
 //! any of that happens.
 
 /// Multiboot info as provided by QEMU (multiboot1, 32-bit fields).
+// (crate-flip M2) the BIN crate owns rust_main; declared extern here
+// so the inline-asm sym reference compiles, resolved by the linker.
+extern "C" {
+    fn rust_main() -> !;
+}
+
+
 #[repr(C)]
 struct MultibootInfo {
     flags: u32,
@@ -257,5 +264,11 @@ __x86_64_start:
 .size __x86_64_start, . - __x86_64_start
 "#,
     early_boot_init = sym early_boot_init,
-    rust_main = sym crate::rust_main,
+    // (lib/bin split): the symbol now lives in the BIN crate; the asm
+    // sym reference goes through the lib's forwarding declaration.
+    // (crate-flip M2): the entry symbol now lives in the BIN crate; an
+    // extern declaration gives the compile-time sym path and the
+    // linker binds it to the bin's definition (registration runs there
+    // before any syscall).
+    rust_main = sym rust_main,
 );

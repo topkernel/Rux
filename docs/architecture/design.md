@@ -95,8 +95,14 @@ All external interfaces, system calls, and user-visible data structures must be 
   - Unified interrupt handling framework
   - Unified device driver interface
 
-**Note**: ARM64 (aarch64) architecture has been removed and is no longer
-maintained. x86_64 (q35) is supported since 2026-10-07 alongside riscv64.
+**Note**: three architectures are built and gated — riscv64 (primary),
+x86_64 (q35, supported since 2026-10-07) and aarch64 (QEMU virt, booted
+since 2026-10-30). The per-architecture details live in
+`docs/architecture/riscv64.md`, `docs/architecture/x86_64.md` and
+`docs/architecture/aarch64.md`; the design divergences from the
+reference kernel are registered in
+`docs/architecture/design-divergences.md` (D-1 single GRQ, D-29 PI
+futex and the rest).
 
 ### 4. **Modular Design**
 
@@ -317,5 +323,6 @@ When implementing any feature, must verify:
 
 ---
 
-**Document Version**: v5.0.0
-**Last Updated**: 2026-11-01 (principles unchanged since April; divergence bridge added)
+**Document Version**: v5.1.0
+**Last Updated**: 2026-11-22 (three-architecture statement corrected;
+the aarch64 port landed 2026-10-30)

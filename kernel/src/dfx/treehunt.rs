@@ -49,7 +49,7 @@ pub fn tick() {
         return;
     }
     // Rate window: 64 lines per 60 s.
-    let now = crate::drivers::timer::get_jiffies() as u64;
+    let now = crate::timer::get_jiffies() as u64;
     let w0 = WINDOW_START.load(Ordering::Relaxed);
     if now.wrapping_sub(w0) >= 6000 {
         if WINDOW_START

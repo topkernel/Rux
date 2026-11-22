@@ -1027,3 +1027,43 @@ pub static CGROUP_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .lseek(cgroupfs_file_lseek)
     .close(cgroupfs_file_close)
     .build();
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The cgroup mount entry (old mount.rs "cgroup2"|"cgroup" arm,
+/// verbatim including the v1 controller-parity EINVAL gate).
+pub fn mount_cgroup(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, mnt_flags);
+    // cgroup v1 controller parity (launcher-errno lane): the reference
+    // kernel exposes the MEMORY controller only — every other
+    // controller token answers EINVAL (see the moved arm's history in
+    // micro-core-design §4 / the mount.rs git log).
+    if fs_type == "cgroup" {
+        if let Some(opts) = data {
+            let disallowed = opts.split(',').any(|tok| {
+                let tok = tok.trim();
+                !tok.is_empty()
+                    && tok != "memory"
+                    && !tok.starts_with("name=")
+                    && !matches!(
+                        tok,
+                        "nodev" | "noexec" | "nosuid" | "rw" | "ro" | "remount"
+                    )
+            });
+            if disallowed {
+                return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
+            }
+        }
+    }
+    init_cgroupfs().map_err(|e| e as i32)?;
+    mount_cgroupfs(target).map_err(|e| e as i32)?;
+    Ok(())
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["cgroup2", "cgroup"], mount_cgroup);
+}

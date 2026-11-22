@@ -435,7 +435,7 @@ pub fn note_kstack_freed(bottom: usize, top: usize, pid: u32) {
     g.0[idx].bottom = bottom;
     g.0[idx].top = top;
     g.0[idx].pid = pid;
-    g.0[idx].free_jiffies = crate::drivers::timer::get_jiffies();
+    g.0[idx].free_jiffies = crate::timer::get_jiffies();
     g.1 = (idx + 1) % 32;
 }
 
@@ -443,7 +443,7 @@ pub fn note_kstack_freed(bottom: usize, top: usize, pid: u32) {
 /// range contains `sp`, if any.
 pub fn freed_stack_containing(sp: usize) -> Option<(usize, u32, u64)> {
     let g = FREED_STACKS.lock();
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let mut best: Option<(u64, usize, u32, u64)> = None;
     for r in g.0.iter() {
         if r.bottom != 0 && sp >= r.bottom && sp < r.top {
@@ -2005,7 +2005,7 @@ impl Task {
             wait_last_ns: AtomicU64::new(0),
             wait_sum_ns: AtomicU64::new(0),
             wait_max_ns: AtomicU64::new(0),
-            start_jiffies: AtomicU64::new(crate::drivers::timer::get_jiffies()),
+            start_jiffies: AtomicU64::new(crate::timer::get_jiffies()),
             cmaxrss_kb: AtomicU64::new(0),
             exit_maxrss_kb: AtomicU64::new(0),
             tracer_pid: AtomicU32::new(0),
@@ -2462,7 +2462,7 @@ impl Task {
                     for &b in b" st=0x" { putchar(b); }
                     ph(old_state.bits() as u64);
                     for &b in b" jif=" { putchar(b); }
-                    ph(crate::drivers::timer::get_jiffies());
+                    ph(crate::timer::get_jiffies());
                     putchar(b'\n');
                 }
             }
@@ -3460,7 +3460,7 @@ fn preempt_underflow_report(
     site: usize,
 ) {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(core::sync::atomic::Ordering::Acquire);
     if now.wrapping_sub(last) < crate::config::KERNEL_HZ as u64 {
         return;
@@ -4433,7 +4433,7 @@ impl Task {
             #[cfg(feature = "x86_64")]
             let recycle_ok = {
                 const SFR_RSP0_WAIT_JIFFIES: u64 = 3;
-                let sfr_armed_at = crate::drivers::timer::get_jiffies();
+                let sfr_armed_at = crate::timer::get_jiffies();
                 loop {
                     let mut stale_cpu: usize = usize::MAX;
                     for c in 0..crate::config::MAX_CPUS {
@@ -4448,7 +4448,7 @@ impl Task {
                     if stale_cpu == usize::MAX {
                         break true;
                     }
-                    if crate::drivers::timer::get_jiffies()
+                    if crate::timer::get_jiffies()
                         .wrapping_sub(sfr_armed_at)
                         >= SFR_RSP0_WAIT_JIFFIES
                     {

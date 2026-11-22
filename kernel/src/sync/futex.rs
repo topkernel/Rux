@@ -243,7 +243,7 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
                 // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
                 crate::pr_warn!(
                     "FUXWATCH-WAKE j={} tid={} tgid={} comm='{}' op={} uaddr={:#x} ret={}",
-                    crate::drivers::timer::get_jiffies(),
+                    crate::timer::get_jiffies(),
                     tid2,
                     tgid2,
                     comm,
@@ -262,7 +262,7 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
     let mut g = FUXW_RINGS[r].lock();
     let (idx, arr) = &mut *g;
     arr[*idx] = FuxWakeOp {
-        j: crate::drivers::timer::get_jiffies(),
+        j: crate::timer::get_jiffies(),
         tid,
         tgid,
         uaddr,
@@ -1304,7 +1304,7 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
     FUXPARK_TID.store(tid, Relaxed);
     FUXPARK_TGID.store(tgid, Relaxed);
     if prev == 0 {
-        FUXPARK_J.store(crate::drivers::timer::get_jiffies() as u32, Relaxed);
+        FUXPARK_J.store(crate::timer::get_jiffies() as u32, Relaxed);
     }
     // ---- watch-slot assignment (sticky, per tgid) ----
     let arm_print = |slot: u8, w: u64| {
@@ -1568,7 +1568,7 @@ pub fn fuxwatch_arm_round() {
         return;
     }
     if addr != 0
-        && crate::drivers::timer::get_jiffies() < FUXWATCH_DELAY_S.load(Relaxed) * 100
+        && crate::timer::get_jiffies() < FUXWATCH_DELAY_S.load(Relaxed) * 100
     {
         return;
     }
@@ -1807,7 +1807,7 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     }) {
         FUXWATCH_OWNER_TID.store(tid, core::sync::atomic::Ordering::Relaxed);
         FUXWATCH_OWNER_J
-            .store(crate::drivers::timer::get_jiffies() as u32, core::sync::atomic::Ordering::Relaxed);
+            .store(crate::timer::get_jiffies() as u32, core::sync::atomic::Ordering::Relaxed);
         // oh68: latch the writer's ctx->task at the acquire instant (the
         // only moment a coroutine holder is provably executing); exact =
         // this IS the watched lock word's acquire, not a page-mate write.
@@ -2502,7 +2502,7 @@ pub fn oh67_poll_decode(
             .unwrap_or_else(|| alloc::string::String::from("closed"));
         let ready = file
             .as_ref()
-            .and_then(|f| crate::syscall::misc::oh67_fd_ready(f))
+            .and_then(|f| crate::syscall::support::oh67_fd_ready(f))
             .unwrap_or_default();
         let ops = file
             .as_ref()
@@ -3254,7 +3254,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
     {
         static SLAB_LAST_J: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
-        let nowj = crate::drivers::timer::get_jiffies() as u32;
+        let nowj = crate::timer::get_jiffies() as u32;
         let lj = SLAB_LAST_J.load(Relaxed);
         if nowj.wrapping_sub(lj) >= 3000 {
             SLAB_LAST_J.store(nowj, Relaxed);
@@ -3655,7 +3655,7 @@ pub fn sqwalk_slice() {
     if tgid == 0 || !sqw_canon(word) {
         return;
     }
-    let nowj = crate::drivers::timer::get_jiffies() as u32;
+    let nowj = crate::timer::get_jiffies() as u32;
     let lj = SQW_LAST_J.load(Relaxed);
     if nowj.wrapping_sub(lj) < 50 && SQW_CURSOR.load(Relaxed) != SQW_LO {
         return; // mid-slice: one burst per ~2 censusd rounds (250 ms)
@@ -4658,7 +4658,7 @@ pub fn futex_stuck_census() {
     if !crate::trace::EVENT_FUXSTUCK.armed() {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     // One burst per 5 s (500 jiffies at HZ=100); first call fires.
     static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     let last = LAST.load(Relaxed);
@@ -6480,7 +6480,7 @@ fn alloc_waiter() -> Option<usize> {
     // wedge-time pool-full means FUTEX_WAITs spin in backoff retries,
     // invisible to the bucket-walk census.
     FUX_POOL_FULL_J.store(
-        crate::drivers::timer::get_jiffies(),
+        crate::timer::get_jiffies(),
         core::sync::atomic::Ordering::Relaxed,
     );
     None
@@ -6505,7 +6505,7 @@ fn pool_full_backoff() {
         Some(c) => c as *mut Task,
         None => return,
     };
-    let target = crate::drivers::timer::get_jiffies() + 1;
+    let target = crate::timer::get_jiffies() + 1;
     let pid = crate::sched::edges::task_shared(current).pid();
     // arch-s5: typed one-shot guard — the scope-exit Drop cancels the
     // registration (the old explicit trailing del_timer).
@@ -6513,14 +6513,14 @@ fn pool_full_backoff() {
         return; // no timer slot: busy retry (rare, bounded by wakers)
     };
     loop {
-        if crate::drivers::timer::get_jiffies() >= target {
+        if crate::timer::get_jiffies() >= target {
             break;
         }
         // Mark INTERRUPTIBLE BEFORE the final re-check (state-first
         // lost-wakeup discipline, same as sys_nanosleep).
         // SAFETY: current is the running task's pointer.
         crate::sched::edges::task_shared(current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        if crate::drivers::timer::get_jiffies() >= target {
+        if crate::timer::get_jiffies() >= target {
             // SAFETY: current is the running task's pointer.
             crate::sched::edges::task_shared(current).set_state(TaskState::new(TaskState::RUNNING));
             // A racing wake may have enqueued us while still executing —
@@ -6999,7 +6999,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // Deadline already passed while we were re-checking?
         // 63rd: deadlines are absolute monotonic ns now (was: jiffies).
         if let Some(dl) = deadline {
-            if crate::drivers::timer::monotonic_ns_since_boot() >= dl {
+            if crate::timer::monotonic_ns_since_boot() >= dl {
                 return -ETIMEDOUT as i64;
             }
         }
@@ -7041,7 +7041,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 w.task = current;
                 w.bitset = bitset;
                 w.woken = false;
-                w.park_j = crate::drivers::timer::get_jiffies();
+                w.park_j = crate::timer::get_jiffies();
                 w.bucket = bucket_idx;
                 w.next = None;
             }
@@ -7165,8 +7165,8 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // after schedule() returns.
         let wake = deadline.map(|dl| {
             let id = crate::timer::add_timer_wakeup_hres(
-                crate::syscall::misc::jiffies_covering_deadline(dl),
-                crate::syscall::misc::deadline_ns_to_hres_ticks(dl),
+                crate::syscall::support::jiffies_covering_deadline(dl),
+                crate::syscall::support::deadline_ns_to_hres_ticks(dl),
                 crate::sched::get_current_pid(),
             );
             crate::drivers::timer::rearm_for_hres();
@@ -7239,7 +7239,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                     // returning success here broke every timed waiter.
                     // 63rd: absolute monotonic-ns deadlines.
                     if let Some(dl) = deadline {
-                        if crate::drivers::timer::monotonic_ns_since_boot() >= dl {
+                        if crate::timer::monotonic_ns_since_boot() >= dl {
                             return -ETIMEDOUT as i64;
                         }
                     }
@@ -7533,7 +7533,7 @@ pub fn futex_parse_timeout_ns(
         // Relative (FUTEX_WAIT, futex(2) WAIT): Linux futex_init_timeout
         // adds ktime_get() regardless of FUTEX_CLOCK_REALTIME.
         return Ok(Some(
-            crate::drivers::timer::monotonic_ns_since_boot().saturating_add(spec_ns),
+            crate::timer::monotonic_ns_since_boot().saturating_add(spec_ns),
         ));
     }
     if clock_realtime {
@@ -8205,7 +8205,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             if let Some(t) = crate::sched::current() {
                 // SAFETY: read-only pid/tgid of the current task.
                 let (tid, tgid) = { (t.pid() as u32, t.tgid() as u32) };
-                let now = crate::drivers::timer::get_jiffies() as u32;
+                let now = crate::timer::get_jiffies() as u32;
                 let mut slot = usize::MAX;
                 let mut fire = false;
                 for i in 0..CTDE_SLOTS {
@@ -8276,7 +8276,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         },
                         uaddr,
                         val,
-                        crate::drivers::timer::get_jiffies(),
+                        crate::timer::get_jiffies(),
                     );
                 }
                 break;
@@ -8363,12 +8363,12 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                     FUXWATCH_ADDR.store(uaddr as u64, Relaxed);
                     crate::dfx::taskdump::ensure_defer_thread();
                     // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-                    crate::pr_warn!("FXDV-ARM slot1={:#x} jif={}", uaddr, crate::drivers::timer::get_jiffies());
+                    crate::pr_warn!("FXDV-ARM slot1={:#x} jif={}", uaddr, crate::timer::get_jiffies());
                 } else if (s1 as usize) != uaddr && FUXWATCH2_ADDR.load(Relaxed) == 0 {
                     FUXWATCH2_ADDR.store(uaddr as u64, Relaxed);
                     crate::dfx::taskdump::ensure_defer_thread();
                     // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-                    crate::pr_warn!("FXDV-ARM slot2={:#x} jif={}", uaddr, crate::drivers::timer::get_jiffies());
+                    crate::pr_warn!("FXDV-ARM slot2={:#x} jif={}", uaddr, crate::timer::get_jiffies());
                 }
                 // 70th (ohw86): birth-curve sampler — on every traced devmgr
                 // futex, sample slot1's word AND its +0x94 neighbor (the
@@ -8393,7 +8393,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                                         if k == 0 { 0 } else { 0x94 },
                                         prev,
                                         w,
-                                        crate::drivers::timer::get_jiffies(),
+                                        crate::timer::get_jiffies(),
                                         crate::sched::edges::task_shared(t).pid()
                                     );
                                 }
@@ -8420,7 +8420,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                                 uaddr,
                                 w,
                                 val,
-                                crate::drivers::timer::get_jiffies()
+                                crate::timer::get_jiffies()
                             );
                         }
                     }
@@ -8453,7 +8453,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                             },
                             uaddr,
                             val,
-                            crate::drivers::timer::get_jiffies(),
+                            crate::timer::get_jiffies(),
                         );
                     }
                 }
@@ -8504,7 +8504,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                     },
                     uaddr,
                     val,
-                    crate::drivers::timer::get_jiffies(),
+                    crate::timer::get_jiffies(),
                 );
             }
         }
@@ -8655,7 +8655,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         uaddr,
                         val,
                         ret,
-                        crate::drivers::timer::get_jiffies(),
+                        crate::timer::get_jiffies(),
                     );
                 }
                 break;
@@ -8694,7 +8694,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 .unwrap_or(false);
             if mine
                 && crate::trace::EVENT_TXNHANG.armed()
-                && crate::drivers::timer::get_jiffies() <= 7000
+                && crate::timer::get_jiffies() <= 7000
             {
                 static SMW_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
@@ -9090,30 +9090,11 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     let kind = match f.get_ops() {
                                         Some(ops) => {
                                             let p = ops as *const crate::fs::FileOps;
-                                            if core::ptr::eq(
-                                                p,
-                                                &crate::net::unix::UNIX_SOCKET_OPS,
-                                            ) {
-                                                match crate::net::unix::unix_file_of(
+                                            if crate::net::net_hooks::is_unix_socket_ops(ops) {
+                                                match crate::net::net_hooks::unix_fd_bound_peer(
                                                     fd as usize,
                                                 ) {
-                                                    Some((sock, _)) => {
-                                                        let bn = sock
-                                                            .bound_name
-                                                            .lock()
-                                                            .clone()
-                                                            .unwrap_or_else(|| {
-                                                                alloc::string::String::from(
-                                                                    "unbound",
-                                                                )
-                                                            });
-                                                        let peer =
-                                                            crate::net::unix::unix_peer_bound_name(
-                                                                &sock,
-                                                            )
-                                                            .unwrap_or_else(|| {
-                                                                alloc::string::String::from("-")
-                                                            });
+                                                    Some((bn, peer)) => {
                                                         alloc::format!(
                                                             "unix bound={} peer={}",
                                                             bn, peer
@@ -9121,18 +9102,13 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                                     }
                                                     None => "unix".into(),
                                                 }
-                                            } else if core::ptr::eq(
-                                                p,
-                                                &crate::net::socket::SOCKET_OPS,
+                                            } else if crate::net::net_hooks::is_inet_socket_ops(
+                                                ops,
                                             ) {
                                                 "inet-socket".into()
-                                            } else if core::ptr::eq(
-                                                p,
-                                                &crate::net::netlink::NETLINK_OPS,
-                                            ) {
+                                            } else if crate::net::net_hooks::is_netlink_ops(ops) {
                                                 "netlink".into()
-                                            } else if core::ptr::eq(p, &crate::net::raw::RAW_OPS)
-                                            {
+                                            } else if crate::net::net_hooks::is_raw_ops(ops) {
                                                 "raw-socket".into()
                                             } else if core::ptr::eq(
                                                 p,
@@ -9278,7 +9254,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             // park time (the appconn hex was unreadable —
                             // strncpy stopped at the abstract NUL).
                             if n == 0 {
-                                for line in crate::net::unix::registry_snapshot() {
+                                for line in crate::net::net_hooks::unix_registry_snapshot() {
                                     // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!("{}", line);
                                 }
@@ -9622,7 +9598,7 @@ static EXIT_RING: Spinlock<(usize, [ExitRec; 256])> = Spinlock::new((0, [const {
 /// a reader that exits without the count decrementing is caught in the
 /// act. The page-table read is skipped under the ring lock.
 pub fn note_task_unlink(pid: u32, tgid: u32) {
-    let j = crate::drivers::timer::get_jiffies() as u64;
+    let j = crate::timer::get_jiffies() as u64;
     let mut g = EXIT_RING.lock_irqsave();
     let (ref mut head, ref mut ring) = *g;
     ring[*head % 256] = ExitRec { j, pid, tgid };
@@ -9840,10 +9816,11 @@ pub fn kill_dump_tgid(tgid: u32) {
 /// sc97: type name for a File by fops identity (the kernel-image symbol
 /// at the ops address names any not listed here, offline via nm).
 fn kd_fd_type(file: &crate::fs::File) -> &'static str {
-    let ops = match file.get_ops() {
-        Some(o) => o as *const crate::fs::FileOps as *const (),
+    let ops_ref = match file.get_ops() {
+        Some(o) => o,
         None => return "no-ops",
     };
+    let ops = ops_ref as *const crate::fs::FileOps as *const ();
     let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
     if is(&crate::fs::pipe::PIPE_OPS) {
         return "pipe";
@@ -9851,10 +9828,10 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
     if is(&crate::fs::fifo::FIFO_OPS) {
         return "fifo";
     }
-    if is(&crate::net::unix::UNIX_SOCKET_OPS) {
+    if crate::net::net_hooks::is_unix_socket_ops(ops_ref) {
         return "unix-sock";
     }
-    if is(&crate::net::socket::SOCKET_OPS) {
+    if crate::net::net_hooks::is_inet_socket_ops(ops_ref) {
         return "inet-sock";
     }
     if is(&crate::ipc::binder::BINDER_OPS) {
@@ -9863,7 +9840,7 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
     if is(&crate::fs::inotify::INOTIFY_OPS) {
         return "inotify";
     }
-    if is(&crate::syscall::misc::EVENTFD_OPS) {
+    if file.get_ops().is_some_and(crate::syscall::support::is_eventfd_ops) {
         return "eventfd";
     }
     "other"
@@ -10062,21 +10039,18 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                         }
                     }
                     "unix-sock" => {
-                        if let Some(us) = crate::net::unix::unix_of_file_diag(&f) {
-                            let (qb, qt, cap, ql) = us.diag_snapshot();
-                            let peer = us.dgram_peer.lock().clone();
-                            let bound = us.bound_name.lock().clone();
+                        if let Some(us) = crate::net::net_hooks::unix_file_diag(&f) {
                             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!(
-                                "KILLDUMP: tid {} unix kind={:?} bound={:?} dgram_peer={:?} queued={}B truesize={} sndbuf={} qlen={}",
+                                "KILLDUMP: tid {} unix kind={} bound={:?} dgram_peer={:?} queued={}B truesize={} sndbuf={} qlen={}",
                                 tk.pid(),
                                 us.kind,
-                                bound,
-                                peer,
-                                qb,
-                                qt,
-                                cap,
-                                ql
+                                us.bound,
+                                us.peer,
+                                us.queued_bytes,
+                                us.truesize,
+                                us.sndbuf,
+                                us.qlen
                             );
                         }
                     }
@@ -10779,7 +10753,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
         tag,
         tgid,
         word,
-        crate::drivers::timer::get_jiffies()
+        crate::timer::get_jiffies()
     );
     if cfg!(not(target_arch = "x86_64")) {
         let _ = writeln!(w, "CTD-END (x86_64-only)");
@@ -12627,7 +12601,7 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
 
 /// sc82: one tgid's full park-stack dump (comm/state/syscall/rip + 8
 /// byte-verified user-stack frames per thread). Pure diagnostics.
-pub(crate) fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
+pub fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
     let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
     crate::sched::for_each_task(|t| {
         // SAFETY: same contract as sleep_snapshot.

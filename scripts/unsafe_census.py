@@ -16,7 +16,11 @@ function, and category tags from regex heuristics. Word occurrences of
 
 Outputs:
   * run/unsafe-census.json        raw census (machine truth)
-  * summary to stdout
+  * summary to stdout (incl. the pattern-shape histogram)
+  * run/unsafe-census-histogram.txt  one CI-diffable histogram line
+    (Layer 4.2): counts per pattern category over all regions, the
+    layer-split variant, and the untagged remainder — shape drift
+    between releases is a plain diff of this file.
 
 With --ledger, regenerates docs/development/unsafe-verification.md from
 the census plus the artifact sidecar
@@ -42,6 +46,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL_SRC = ROOT / "kernel" / "src"
 CENSUS_JSON = ROOT / "run" / "unsafe-census.json"
+HIST_FILE = ROOT / "run" / "unsafe-census-histogram.txt"
 LEDGER_MD = ROOT / "docs" / "development" / "unsafe-verification.md"
 ARTIFACTS_TSV = ROOT / "docs" / "development" / "unsafe-verification-artifacts.tsv"
 
@@ -317,6 +322,19 @@ CATEGORIES = [
 ]
 
 
+SAFETY_MARKERS = ("SAFETY:", "safety:")
+
+
+def has_safety_note(region_text: str) -> bool:
+    """Whether the region carries a SAFETY justification comment.
+
+    The convention in this tree is a `// SAFETY: ...` line on (or just
+    above) the unsafe block. Measuring it turns "the comments are not
+    everywhere" from a review impression into a tracked number.
+    """
+    return any(m in region_text for m in SAFETY_MARKERS)
+
+
 def categorize(region_text):
     cats = []
     for name, rx in CATEGORIES:
@@ -343,6 +361,16 @@ def scan_texts(texts):
             if r["kind"] == "unsafe-extern" and "ffi" not in cats:
                 cats.append("ffi")
             r["categories"] = cats
+            # SAFETY-note coverage: the note conventionally sits on the
+            # line ABOVE the unsafe block, so look at the preceding
+            # lines as well as the region body.
+            # The SAFETY note is a COMMENT — the masked text has it
+            # blanked out, so the detection must run on the ORIGINAL
+            # source lines (the mask preserves line numbering).
+            orig_lines = text.split("\n")
+            lo = max(0, r["line"] - 6)
+            window = "\n".join(orig_lines[lo:r["end_line"] + 1])
+            r["safety_note"] = has_safety_note(window)
             regions.append(r)
     return regions
 
@@ -453,6 +481,9 @@ def write_ledger(regions, artifacts):
     total = len(regions)
     verified = sum(1 for r in regions if artifacts.get(r["id"], "GAP") != "GAP")
     cat_counter = Counter(c for r in regions for c in r.get("categories", []))
+    noted = sum(1 for r in regions if r.get("safety_note"))
+    print(f"SAFETY-note coverage: {noted}/{len(regions)} "
+          f"({100.0 * noted / max(len(regions), 1):.1f}%)")
     kind_counter = Counter(r["kind"] for r in regions)
 
     out = []
@@ -517,6 +548,139 @@ def write_ledger(regions, artifacts):
 
 
 # ============================================================
+# Pattern-shape histogram (Layer 4.2)
+# ============================================================
+
+# The framekernel layer rules, verbatim from gen_tcb_ledger.classify
+# (path prefix -> layer; longest prefix wins; default service). Kept as
+# a copy so the census has no cross-script import; when the ledger's
+# rules move, move these with them.
+_LAYER_RULES = [
+    ("arch/aarch64/", "unbuilt"),
+    ("arch/", "framework"),
+    ("mm/", "framework"),
+    ("sync/spinlock.rs", "framework"),
+    ("sync/rwlock.rs", "framework"),
+    ("sync/seqlock.rs", "framework"),
+    ("sync/percpu.rs", "framework"),
+    ("sync/rcu.rs", "framework"),
+    ("sync/lockkey.rs", "framework"),
+    ("sync/", "service"),
+    ("interrupt/", "framework"),
+    ("drivers/virtio/", "framework"),
+    ("drivers/intc/", "framework"),
+    ("drivers/timer/", "framework"),
+    ("drivers/pci/", "framework"),
+    ("drivers/", "service"),
+    ("dfx/", "diagnostics"),
+    ("tests/", "test"),
+    ("console.rs", "framework"),
+    ("printk.rs", "framework"),
+    ("sbi.rs", "framework"),
+    ("main.rs", "framework"),
+]
+
+
+def layer_map():
+    """Sorted (prefix, layer) rules; longest-prefix match wins."""
+    return sorted(_LAYER_RULES, key=lambda r: -len(r[0]))
+
+
+def layer_of(relpath, layers):
+    # Census paths are repo-rooted (kernel/src/<module>/...); the layer
+    # rules are kernel-src-rooted (gen_tcb_ledger's shape). Strip the
+    # kernel/src/ prefix so both worlds line up.
+    rel = relpath
+    if rel.startswith("kernel/src/"):
+        rel = rel[len("kernel/src/"):]
+    for prefix, layer in layers:
+        if rel.startswith(prefix):
+            return layer
+    return "service"
+
+
+def pattern_histogram(regions, layers):
+    """Counts per pattern category, overall and per framekernel layer.
+
+    Returns (hist_total, hist_by_layer) where hist_total maps category
+    -> region count (untagged regions counted under "-") and
+    hist_by_layer maps (layer, category) -> count. Every region counts
+    once per tag it carries (regions carry 0..n tags — same semantics
+    as the ledger's category column); the untagged remainder makes the
+    tally balance-checkable: sum(tags) + untagged == len(regions).
+    """
+    hist_total = Counter()
+    hist_by_layer = Counter()
+    for r in regions:
+        cats = r.get("categories") or []
+        if not cats:
+            hist_total["-"] += 1
+            hist_by_layer[(layer_of(r["file"], layers), "-")] += 1
+            continue
+        lay = layer_of(r["file"], layers)
+        for c in cats:
+            hist_total[c] += 1
+            hist_by_layer[(lay, c)] += 1
+    return hist_total, hist_by_layer
+
+
+def write_histogram_file(hist_total, hist_by_layer):
+    """Emit run/unsafe-census-histogram.txt — the per-release artifact
+    CI diffs. Format: one `cat=count` line per category (sorted), the
+    layer-split block below it, and the balance check at the end."""
+    lines = ["# pattern-shape histogram (Layer 4.2) — diff between "
+             "releases to see shape drift", ""]
+    lines.append("total:")
+    for cat in sorted(hist_total):
+        lines.append(f"  {cat}={hist_total[cat]}")
+    lines.append("")
+    lines.append("by-layer:")
+    for (lay, cat) in sorted(hist_by_layer):
+        lines.append(f"  {lay}/{cat}={hist_by_layer[(lay, cat)]}")
+    try:
+        HIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HIST_FILE.write_text("\n".join(lines) + "\n")
+        print(f"histogram: {HIST_FILE}")
+    except OSError as e:
+        print(f"  [warn] histogram not written: {e}", file=sys.stderr)
+
+
+def report_drift(old_json_path, hist_total, hist_by_layer):
+    """Diff this run's histogram against a previous census JSON."""
+    try:
+        old_regions = json.loads(Path(old_json_path).read_text())
+    except (OSError, ValueError) as e:
+        print(f"drift: cannot read {old_json_path}: {e}", file=sys.stderr)
+        return
+    layers = layer_map()
+    old_total, old_by_layer = pattern_histogram(old_regions, layers)
+    deltas = []
+    for cat in sorted(set(old_total) | set(hist_total)):
+        d = hist_total.get(cat, 0) - old_total.get(cat, 0)
+        if d:
+            deltas.append((cat, d))
+    if not deltas:
+        print("drift: NONE (pattern shapes unchanged)")
+        return
+    print(f"drift vs {old_json_path}:")
+    for cat, d in deltas:
+        print(f"  {cat}: {'+' if d > 0 else ''}{d} "
+              f"({old_total.get(cat, 0)} -> {hist_total.get(cat, 0)})")
+    # layer moves for the biggest absolute shifts (the "where did the
+    # mass go" half of the drift question)
+    layer_deltas = Counter()
+    for key in set(old_by_layer) | set(hist_by_layer):
+        d = hist_by_layer.get(key, 0) - old_by_layer.get(key, 0)
+        if d:
+            layer_deltas[key] = d
+    if layer_deltas:
+        print("  layer moves (top 8):")
+        for (lay, cat), d in sorted(layer_deltas.items(),
+                                    key=lambda x: -abs(x[1]))[:8]:
+            print(f"    {lay}/{cat}: {'+' if d > 0 else ''}{d}")
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -524,6 +688,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", metavar="PATH", help="also write raw census JSON")
     ap.add_argument("--ledger", action="store_true", help="regenerate ledger + sidecar")
+    ap.add_argument("--drift", metavar="OLDJSON",
+                    help="compare this run's pattern histogram against a "
+                         "previous census JSON and print the deltas "
+                         "(the CI shape-drift check)")
     args = ap.parse_args()
 
     regions = full_census()
@@ -544,11 +712,27 @@ def main():
 
     print(f"unsafe regions: {len(regions)} across "
           f"{len(set(r['file'] for r in regions))} files")
+    noted = sum(1 for r in regions if r.get("safety_note"))
+    print(f"SAFETY-note coverage: {noted}/{len(regions)} "
+          f"({100.0 * noted / max(len(regions), 1):.1f}%)")
     print("per-subsystem:")
     for s, n in sorted(per_sys.items(), key=lambda x: -x[1]):
         print(f"  {s:12s} {n}")
     print("categories:", ", ".join(f"{k}={v}" for k, v in
                                    sorted(cat_counter.items(), key=lambda x: -x[1])))
+
+    # ---- pattern-shape histogram (Layer 4.2; unsafe-hardening plan §4.2)
+    # One stable, CI-diffable line per release: the per-category counts
+    # over ALL regions, the same counts split by the framekernel layer
+    # (the gen_tcb_ledger path rules), and the untagged remainder — a
+    # release that shifts mass between shapes (say ptr-ops growing at
+    # the service layer) shows up as a plain diff of the histogram file.
+    layers = layer_map()
+    hist_total, hist_by_layer = pattern_histogram(regions, layers)
+    write_histogram_file(hist_total, hist_by_layer)
+
+    if args.drift:
+        report_drift(args.drift, hist_total, hist_by_layer)
 
     if args.ledger:
         artifacts = load_artifacts()

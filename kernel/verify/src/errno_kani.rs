@@ -87,6 +87,14 @@ fn verify_key_discriminants() {
 }
 
 /// INV-ERRNO-K5: all key errno values are positive and distinct.
+// Unwind bound: the two pairwise loops over the 6-element array take
+// at most 6 body trips each (the j-loop's worst case at i=0). The
+// original HashSet shape parked: hashbrown's RawTable probe loop made
+// the harness unresolvable inside the 6-minute ceiling even at
+// unwind(10) — the pairwise form verifies the SAME property (all
+// values positive, all pairwise distinct) with no hash structure in
+// the proof at all.
+#[kani::unwind(7)]
 #[kani::proof]
 fn verify_positive_distinct() {
     let vals = [
@@ -97,9 +105,10 @@ fn verify_positive_distinct() {
         Errno::OutOfMemory.as_i32(),
         Errno::TryAgain.as_i32(),
     ];
-    let mut seen = std::collections::HashSet::new();
-    for &v in &vals {
-        assert!(v > 0);
-        assert!(seen.insert(v));
+    for i in 0..vals.len() {
+        assert!(vals[i] > 0);
+        for j in (i + 1)..vals.len() {
+            assert!(vals[i] != vals[j], "errno values must be distinct");
+        }
     }
 }

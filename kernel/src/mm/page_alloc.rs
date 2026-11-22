@@ -146,7 +146,7 @@ pub static RECLAIM_PROGRESS: AtomicU64 = AtomicU64::new(0);
 /// softirq starvation, unlike the 1 Hz census).
 #[inline]
 fn gate_release(holder: usize) {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let age = now.saturating_sub(GATE_TAKEN_J.load(Ordering::Relaxed));
     if age >= 200 {
         GATE_LONGHOLDS.fetch_add(1, Ordering::Relaxed);
@@ -189,7 +189,7 @@ fn gate_holder_is_me() -> bool {
 pub fn gate_note_phase(p: usize) {
     if gate_holder_is_me() {
         GATE_PHASE.store(p, Ordering::Relaxed);
-        GATE_PHASE_J.store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+        GATE_PHASE_J.store(crate::timer::get_jiffies(), Ordering::Relaxed);
     }
 }
 
@@ -226,7 +226,7 @@ pub fn reclaim_gate_census() {
     if holder == 0 || holder == usize::MAX {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let taken = GATE_TAKEN_J.load(Ordering::Relaxed);
     // Taken==0 can mean "never" only when the gate is also free; a
     // holder implies a successful CAS wrote a nonzero stamp (jiffies
@@ -536,7 +536,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         if holder != usize::MAX {
                             GATE_LAST_EXH_PID.store(holder as u64, Ordering::Relaxed);
                             GATE_LAST_EXH_J
-                                .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+                                .store(crate::timer::get_jiffies(), Ordering::Relaxed);
                         }
                     }
                     } // !nested_holder_alloc
@@ -545,7 +545,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         // then follow the holder's phases.
                         GATE_ACQS.fetch_add(1, Ordering::Relaxed);
                         GATE_TAKEN_J.store(
-                            crate::drivers::timer::get_jiffies(),
+                            crate::timer::get_jiffies(),
                             Ordering::Relaxed,
                         );
                         GATE_ROUNDS.store(0, Ordering::Relaxed);
@@ -721,11 +721,11 @@ pub fn oom_forensic_dump(site: &str) {
         GATE_WAITERS.load(Ordering::Relaxed),
         GATE_EXHAUSTED.load(Ordering::Relaxed),
         GATE_SELF.load(Ordering::Relaxed),
-        crate::drivers::timer::get_jiffies()
+        crate::timer::get_jiffies()
             .saturating_sub(GATE_TAKEN_J.load(Ordering::Relaxed)),
         GATE_ACQS.load(Ordering::Relaxed),
         GATE_LONGHOLDS.load(Ordering::Relaxed),
-        crate::drivers::timer::get_jiffies(),
+        crate::timer::get_jiffies(),
         GATE_TAKEN_J.load(Ordering::Relaxed),
         RECLAIM_PROGRESS.load(Ordering::Relaxed)
     );
@@ -735,7 +735,7 @@ pub fn oom_forensic_dump(site: &str) {
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: clock tb={} irq0={} irq1={}",
-        crate::drivers::timer::read_time(),
+        crate::timer::read_time(),
         crate::timer::WW_TICK_IRQ[0].load(core::sync::atomic::Ordering::Relaxed),
         crate::timer::WW_TICK_IRQ[1].load(core::sync::atomic::Ordering::Relaxed),
     );

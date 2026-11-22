@@ -136,6 +136,8 @@ fn aligned_addr(base: usize) -> usize {
 }
 
 /// INV-VMA-K1: Two non-overlapping adds both succeed.
+// Unwind bound: 2-entry BTreeMap: std tree walk/insert loops are height-bounded (<= 4 levels at this size); manager loops are straight-line. 25 with headroom.
+#[kani::unwind(25)]
 #[kani::proof]
 fn verify_vma_no_overlap() {
     let mut mgr = VmaManager::new();
@@ -158,6 +160,8 @@ fn verify_vma_no_overlap() {
 }
 
 /// INV-VMA-K2: Overlapping add is rejected.
+// Unwind bound: 2-entry BTreeMap as K1; the rejection path is one range lookup. 25 with headroom.
+#[kani::unwind(25)]
 #[kani::proof]
 fn verify_vma_overlap_rejected() {
     let mut mgr = VmaManager::new();
@@ -180,6 +184,8 @@ fn verify_vma_overlap_rejected() {
 }
 
 /// INV-VMA-K3: Iteration yields VMAs sorted by start address.
+// Unwind bound: 3-entry BTreeMap + iter().map().collect() (3 pushes, capacity-4 growth) + windows(2) check (2 trips). 25 with headroom.
+#[kani::unwind(25)]
 #[kani::proof]
 fn verify_vma_sorted() {
     let mut mgr = VmaManager::new();

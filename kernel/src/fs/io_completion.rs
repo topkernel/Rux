@@ -14,7 +14,7 @@
 #![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use crate::drivers::timer::msecs_to_jiffies;
+use crate::timer::msecs_to_jiffies;
 use crate::process::wait::WaitQueueHead;
 
 /// Status returned by [`IoCompletion::wait`] when the bounded wait deadline
@@ -246,7 +246,7 @@ impl IoCompletion {
             // memory after we return. Callers must likewise NOT free the
             // I/O's DMA buffers on ETIMEDOUT.
             if !deadline_armed && !poll_fallback {
-                deadline = crate::drivers::timer::get_jiffies()
+                deadline = crate::timer::get_jiffies()
                     .saturating_add(msecs_to_jiffies(10_000));
                 // Arm a wakeup AT THE DEADLINE itself. The deadline check
                 // below only runs after schedule() returns, so without this
@@ -293,7 +293,7 @@ impl IoCompletion {
             // here is caught by the loop-top check on the next iteration
             // only if we get woken — the deadline timer covers that too.
             if (deadline_armed || poll_fallback)
-                && crate::drivers::timer::get_jiffies() >= deadline
+                && crate::timer::get_jiffies() >= deadline
             {
                 self.wait_queue.finish_wait(current);
                 // Same R36-B2 compensation as the recheck exit: a racing
@@ -302,7 +302,7 @@ impl IoCompletion {
                 // Final chance (GSD fix): kick the queue and drain
                 // completions once — recovers lost-kick stalls.
                 crate::drivers::virtio::vw_report("async-deadline");
-                crate::drivers::virtio::pci_blk_kick_all();
+                crate::drivers::blkdev::kick_all_pending_disks();
                 crate::drivers::virtio::pci_process_async_completions();
                 if self.done.load(Ordering::Acquire) {
                     crate::pr_err!("io_completion: recovered by final kick/drain");
@@ -333,7 +333,7 @@ impl IoCompletion {
                 // Re-arm a 1-jiffy wake so the deadline check above runs
                 // every jiffy even without a completion wake.
                 let pid = crate::sched::get_current_pid();
-                let dl = crate::drivers::timer::get_jiffies().saturating_add(1);
+                let dl = crate::timer::get_jiffies().saturating_add(1);
                 let id = crate::timer::add_timer_wakeup(dl, pid);
                 if id != 0 {
                     // R54: schedule() now restores the caller's SIE state;
@@ -372,7 +372,7 @@ impl IoCompletion {
                 const ASYNC_RECOVER_MS: u64 = 250;
                 let rid = {
                     let pid = crate::sched::get_current_pid();
-                    let at = crate::drivers::timer::get_jiffies()
+                    let at = crate::timer::get_jiffies()
                         .saturating_add(msecs_to_jiffies(ASYNC_RECOVER_MS));
                     crate::timer::add_timer_wakeup(at, pid)
                 };

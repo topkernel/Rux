@@ -33,6 +33,29 @@ pub mod arch {
             v
         }
     }
+
+    /// Host shim: the generic no-MPK fallback, same shape as the
+    /// kernel's non-x86_64 twin (kernel/src/arch/mod.rs). dma.rs's
+    /// guarded-window path calls these; with guard_on() == false the
+    /// zone_open/zone_close pair is never taken, which is exactly the
+    /// unguarded-host semantics Miri should exercise.
+    pub mod mpk {
+        #[inline]
+        pub fn guard_on() -> bool {
+            false
+        }
+        #[inline]
+        pub fn zone_open() -> u32 {
+            0
+        }
+        #[inline]
+        pub fn zone_close(_prev: u32) {}
+        pub fn tag_kernel_pages(_va: usize, _len: usize) -> usize {
+            0
+        }
+        pub fn untag_kernel_pages(_va: usize, _len: usize) {
+        }
+    }
 }
 
 // std links `alloc` implicitly; the kernel sources under test use

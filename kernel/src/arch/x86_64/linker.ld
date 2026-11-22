@@ -71,11 +71,13 @@ SECTIONS
     .text : AT(KERNEL_LMA)
     {
         __stext = .;
+        _stext = .;
         KEEP(*(.text.boot64))          /* first instructions in the high map */
         *(.text .text.*)
         KEEP(*(.trampoline))           /* AP SMP trampoline (copied to 0x8000) */
         . = ALIGN(4096);
         __etext = .;
+        _etext = .;
     }
 
     .rodata :

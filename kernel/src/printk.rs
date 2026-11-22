@@ -1710,7 +1710,7 @@ fn kmsg_console_allows_echo() -> bool {
         kmsg_console::ON => true,
         kmsg_console::OFF => false,
         _ => {
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             // Start a new window when the previous one expired (or when
             // the limiter was never armed yet).
             let window = KMSG_RL_WINDOW.load(Ordering::Relaxed);
@@ -1942,7 +1942,7 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
     use crate::process::task::{Task, TaskState};
 
     let target =
-        crate::drivers::timer::get_jiffies() + crate::drivers::timer::msecs_to_jiffies(ms);
+        crate::timer::get_jiffies() + crate::timer::msecs_to_jiffies(ms);
 
     // The running-task borrow is re-derived at each use window and never
     // held across schedule() — the reborrow discipline that replaces the
@@ -1959,14 +1959,14 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
     }
 
     loop {
-        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+        if crate::timer::get_jiffies() >= target || crate::signal::signal_pending() {
             crate::timer::del_timer(timer_id);
             return true;
         }
         // Mark INTERRUPTIBLE BEFORE the final re-check (state-first
         // lost-wakeup discipline, same as sys_nanosleep).
         crate::sched::current().map(|c| c.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
-        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+        if crate::timer::get_jiffies() >= target || crate::signal::signal_pending() {
             if let Some(c) = crate::sched::current() {
                 c.set_state(TaskState::new(TaskState::RUNNING));
                 // A racing wake may have enqueued us while still executing —
@@ -2323,7 +2323,7 @@ mod persistent_log {
                 Some(t) => t.pid(),
                 None => break,
             };
-            let target = crate::drivers::timer::get_jiffies() + interval_jiffies;
+            let target = crate::timer::get_jiffies() + interval_jiffies;
             let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
             if timer_id != 0 {
                 // Re-derive the running-task borrow per window (never held
@@ -2334,7 +2334,7 @@ mod persistent_log {
                 // have fired between arming and set_state — either its wake
                 // captured the INTERRUPTIBLE state, or the deadline is
                 // already visible.
-                if crate::drivers::timer::get_jiffies() >= target {
+                if crate::timer::get_jiffies() >= target {
                     if let Some(t) = crate::sched::current() {
                         t.set_state(TaskState::new(TaskState::RUNNING));
                         // NEW-C2: a racing wake may have enqueued us while we

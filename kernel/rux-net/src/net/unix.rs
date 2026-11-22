@@ -318,8 +318,6 @@ pub struct UnixSocket {
     pub file_id: AtomicU64,
 }
 
-// SAFETY: all mutable state is behind Spinlocks.
-unsafe impl Sync for UnixSocket {}
 
 impl UnixSocket {
     pub fn new(kind: UnixKind) -> Self {
@@ -962,7 +960,11 @@ fn unix_wait_round(
         if n < 24 || n % 200 == 0 {
             let sock_of_queue = (queue as *const _ as usize)
                 .wrapping_sub(core::mem::offset_of!(UnixSocket, wait_queue));
-            let q = unsafe { &*(sock_of_queue as *const UnixSocket) };
+            // INV-NET-CONTAINEROF-1: wait_queue field ptr -> socket.
+            let q = crate::net::net_edges::container_of::<UnixSocket>(
+                queue as *const _ as usize,
+                core::mem::offset_of!(UnixSocket, wait_queue),
+            );
             static LAST_J: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let now = crate::drivers::timer::get_jiffies();
@@ -1734,7 +1736,7 @@ pub fn unix_connect(
                     // the epoll_pwait wedge; 5060e524 fixed the purge —
                     // this verifies the listener interest now survives
                     // spawn-child exits).
-                    crate::syscall::misc::epoll_dump_for_file(fid);
+                    crate::syscall::support::epoll_dump_for_file(fid);
                 }
             }
             Ok(())
@@ -3257,21 +3259,14 @@ pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.sndtimeo_deadline();
 
-    let mut kbuf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-    if kbuf.try_reserve_exact(count).is_err() {
-        return cc_out(-12); // ENOMEM
-    }
-    // SAFETY: capacity is exactly count; copy_from_user fills it before
-    // set_len exposes the bytes. A partial copy is EFAULT with nothing
-    // sent — the exact contract the generic staged path had (its staged
-    // copy_in returned EFAULT on a first-chunk fault, no short send).
-    unsafe {
-        let uncopied = copy_from_user(kbuf.as_mut_ptr(), src, count);
-        if uncopied > 0 {
-            return cc_out(-14); // EFAULT
-        }
-        kbuf.set_len(count);
-    }
+    // Framework staged copy (uaccess_safe::copy_in_vec_exact): exact
+    // reservation, EFAULT with nothing sent on a fault — the exact
+    // contract the generic staged path had (its staged copy_in returned
+    // EFAULT on a first-chunk fault, no short send).
+    let kbuf = match crate::arch::uaccess_safe::copy_in_vec_exact(src as usize, count) {
+        Some(v) => v,
+        None => return cc_out(-14), // EFAULT
+    };
     match unix_send(&socket, kbuf, Vec::new(), None, None, nonblock, deadline) {
         Ok(n) => cc_out(n as isize),
         Err(e) => cc_out(e as isize),
@@ -3322,9 +3317,9 @@ pub fn oh67_unix_ready(file: &File) -> Option<(String, usize, usize, bool, usize
     let sk: &UnixSocket = file
         .private_data_ptr()
         .map(|p| {
-            // SAFETY: UNIX_SOCKET_OPS files carry an Arc<UnixSocket>
-            // installed at creation (file-lifetime; read-only here).
-            unsafe { &*(p as *const UnixSocket) }
+            // INV-NET-ARCREF-1b: ops-identity-checked private_data
+            // deref (net_edges audited_deref).
+            crate::net::net_edges::audited_deref(p as *const UnixSocket)
         })?;
     let name = sk
         .bound_name
@@ -3419,7 +3414,7 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
     // receive so a large record still returns whole (single record per
     // call; the bounce loop would split it across records — wrong).
     if !matches!(socket.kind, UnixKind::Stream) && count > READ_BOUNCE {
-        let stage = count.min(crate::syscall::io::RW_CHUNK);
+        let stage = count.min(crate::syscall::support::RW_CHUNK);
         let mut kbuf = alloc::vec![0u8; stage];
         return match unix_recv_ctl(&socket, &mut kbuf, nonblock, deadline, false) {
             Ok(r) => {
@@ -4195,115 +4190,103 @@ pub fn unix_park_audit() {
         // SAFETY: callback runs under the pid-hash bucket lock (same
         // contract as sleep_snapshot); reads confined to the task's own
         // fields, its entry frame, its fdtable and the socket objects.
-        unsafe {
-            let tk = &*task;
-            if tk.pid() == 0 {
-                return;
-            }
-            if !tk.state().contains(crate::process::task::TaskState::INTERRUPTIBLE) {
-                return;
-            }
-            let Some(top) = tk.kernel_stack_top_checked() else {
-                return;
-            };
-            if top == 0 {
-                return;
-            }
-            #[cfg(feature = "x86_64")]
-            let (sys, a0) = {
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                // SAFETY: diagnostic read of this task's own entry frame.
-                ((*regs).orig_rax, (*regs).rdi)
-            };
-            #[cfg(feature = "riscv64")]
-            let (sys, a0) = {
-                let regs = (top.wrapping_sub(
-                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                // SAFETY: same contract, riscv64.
-                ((*regs).a7, (*regs).a0)
-            };
-            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-            let (sys, a0) = (0u64, 0u64);
-            // x86_64: 45=recvfrom 47=recvmsg 44=sendto 20=writev.
-            // riscv: 207=recvfrom 211=recvmsg 206=sendto 66=writev.
-            #[cfg(feature = "x86_64")]
-            let wanted = matches!(sys, 45 | 47 | 44 | 20);
-            #[cfg(feature = "riscv64")]
-            let wanted = matches!(sys, 207 | 211 | 206 | 66);
-            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-            let wanted = false;
-            if !wanted {
-                return;
-            }
-            let fd = a0 as usize;
-            let Some(fdt) = tk.try_fdtable() else {
-                return;
-            };
-            let Some(file) = fdt.get_file(fd) else {
-                return;
-            };
-            let Some(sock) = unix_of_file_diag(&file) else {
-                return;
-            };
-            let (segs, charge) = {
-                let q = sock.recv_queue.lock();
-                (q.segs.len(), q.charge)
-            };
-            let (wq_total, wq_woken) = sock.wait_queue.vw_queue_census();
-            // Dedup ring: (tid, sys, fd, segs, charge).
-            {
-                const N: usize = 128;
-                static P: [core::sync::atomic::AtomicU64; N] =
-                    [const { core::sync::atomic::AtomicU64::new(0) }; N];
-                static C: [core::sync::atomic::AtomicU64; N] =
-                    [const { core::sync::atomic::AtomicU64::new(0) }; N];
-                static CUR: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                let tid = tk.pid() as u64;
-                let packed = (tid << 32) | ((sys & 0xff) << 24) | ((fd as u64 & 0xff) << 16) | (segs as u64 & 0xffff);
-                for i in 0..N {
-                    if P[i].load(core::sync::atomic::Ordering::Relaxed) == packed
-                        && C[i].load(core::sync::atomic::Ordering::Relaxed) == charge as u64
-                    {
-                        return;
-                    }
-                }
-                let idx = CUR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % N;
-                P[idx].store(packed, core::sync::atomic::Ordering::Relaxed);
-                C[idx].store(charge as u64, core::sync::atomic::Ordering::Relaxed);
-            }
-            let name = sock
-                .bound_name
-                .lock()
-                .clone()
-                .unwrap_or_else(|| String::from("?"));
-            let peer = sock
-                .dgram_peer
-                .lock()
-                .clone()
-                .unwrap_or_else(|| String::from("-"));
-            let comm = tk.comm();
-            let name_s = core::str::from_utf8(&comm[..])
-                .unwrap_or("")
-                .trim_end_matches('\0');
-            let _ = writeln!(
-                out,
-                "upark: tid {} {} sys={} fd={} name={} peer={} segs={} charge={} wq={}/{}",
-                tk.pid(),
-                name_s,
-                sys,
-                fd,
-                key_shown(&name),
-                key_shown(&peer),
-                segs,
-                charge,
-                wq_woken,
-                wq_total
-            );
+        let tk = task;
+        let tk = &*task;
+        if tk.pid() == 0 {
+            return;
         }
+        if !tk.state().contains(crate::process::task::TaskState::INTERRUPTIBLE) {
+            return;
+        }
+        let Some(top) = tk.kernel_stack_top_checked() else {
+            return;
+        };
+        if top == 0 {
+            return;
+        }
+        // Framework edge (sched::edges::pt_regs_at_top, INV-SCE-9): the
+        // task's entry frame at the top of its kernel stack; the unified
+        // accessors replace the per-arch field reads (x86 orig_rax/rdi,
+        // riscv a7/a0 — same values, aarch64 now covered too).
+        let regs = crate::sched::edges::pt_regs_at_top(top);
+        let sys = regs.syscall_nr() as u64;
+        let a0 = regs.syscall_args()[0];
+        // x86_64: 45=recvfrom 47=recvmsg 44=sendto 20=writev.
+        // riscv: 207=recvfrom 211=recvmsg 206=sendto 66=writev.
+        #[cfg(feature = "x86_64")]
+        let wanted = matches!(sys, 45 | 47 | 44 | 20);
+        #[cfg(feature = "riscv64")]
+        let wanted = matches!(sys, 207 | 211 | 206 | 66);
+        #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+        let wanted = false;
+        if !wanted {
+            return;
+        }
+        let fd = a0 as usize;
+        let Some(fdt) = tk.try_fdtable() else {
+            return;
+        };
+        let Some(file) = fdt.get_file(fd) else {
+            return;
+        };
+        let Some(sock) = unix_of_file_diag(&file) else {
+            return;
+        };
+        let (segs, charge) = {
+            let q = sock.recv_queue.lock();
+            (q.segs.len(), q.charge)
+        };
+        let (wq_total, wq_woken) = sock.wait_queue.vw_queue_census();
+        // Dedup ring: (tid, sys, fd, segs, charge).
+        {
+            const N: usize = 128;
+            static P: [core::sync::atomic::AtomicU64; N] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; N];
+            static C: [core::sync::atomic::AtomicU64; N] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; N];
+            static CUR: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let tid = tk.pid() as u64;
+            let packed = (tid << 32) | ((sys & 0xff) << 24) | ((fd as u64 & 0xff) << 16) | (segs as u64 & 0xffff);
+            for i in 0..N {
+                if P[i].load(core::sync::atomic::Ordering::Relaxed) == packed
+                    && C[i].load(core::sync::atomic::Ordering::Relaxed) == charge as u64
+                {
+                    return;
+                }
+            }
+            let idx = CUR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % N;
+            P[idx].store(packed, core::sync::atomic::Ordering::Relaxed);
+            C[idx].store(charge as u64, core::sync::atomic::Ordering::Relaxed);
+        }
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| String::from("?"));
+        let peer = sock
+            .dgram_peer
+            .lock()
+            .clone()
+            .unwrap_or_else(|| String::from("-"));
+        let comm = tk.comm();
+        let name_s = core::str::from_utf8(&comm[..])
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let _ = writeln!(
+            out,
+            "upark: tid {} {} sys={} fd={} name={} peer={} segs={} charge={} wq={}/{}",
+            tk.pid(),
+            name_s,
+            sys,
+            fd,
+            key_shown(&name),
+            key_shown(&peer),
+            segs,
+            charge,
+            wq_woken,
+            wq_total
+        );
     });
     if !out.is_empty() {
         let mut rest = out.as_str();

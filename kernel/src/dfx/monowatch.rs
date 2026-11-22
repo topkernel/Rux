@@ -89,7 +89,7 @@ pub fn tick(current_jiffies: u64) {
     if current_jiffies.saturating_sub(last_j) < OBSERVE_JIFFIES && last_j != 0 {
         return;
     }
-    let now = crate::drivers::timer::read_time();
+    let now = crate::timer::read_time();
     let last = LAST.load(Ordering::Acquire);
 
     if last == 0 {

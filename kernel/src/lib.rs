@@ -2,8 +2,11 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
+// The FRAMEWORK LIBRARY crate (crate-flip step: lib/bin split). This
+// file was kernel/src/main.rs; the binary is now the thin composition
+// shim (kernel/src/main.rs) that registers the service crate's entry
+// and tail-calls rust_main_impl below.
 #![no_std]
-#![no_main]
 // The trace event table is declared through the `tracepoints!`
 // token-muncher (kernel/src/trace/mod.rs): one recursion level per
 // event, so the default 128 needs headroom for the growing table
@@ -17,7 +20,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 use alloc::format;
 
-mod arch;
+pub mod arch;
 
 /// Print initialization status message
 ///
@@ -105,48 +108,48 @@ pub fn print_status_ex(module: &str, desc: &str, success: Option<bool>) {
 }
 
 #[cfg(feature = "riscv64")]
-mod sbi;
-mod mm;
-mod safety;
-mod console;
-mod print;
-mod printk;
-mod drivers;
-mod config;
-mod list;
-mod process;
-mod sched;
-mod fs;
-mod signal;
-mod security;
-mod sync;
-mod errno;
-mod net;
-mod cmdline;
-mod init;
-mod boot_edges;
-mod initrd;
-mod syscall;
+pub mod sbi;
+pub mod mm;
+pub mod safety;
+pub mod console;
+pub mod print;
+pub mod printk;
+pub mod drivers;
+pub mod config;
+pub mod list;
+pub mod process;
+pub mod sched;
+pub mod fs;
+pub mod signal;
+pub mod security;
+pub mod sync;
+pub mod errno;
+pub mod net;
+pub mod cmdline;
+pub mod init;
+pub mod boot_edges;
+pub mod initrd;
+pub mod syscall;
 // The syscall tree is #![forbid(unsafe_code)] (the Layer-1 structural
 // boundary); the subsystem's audited unsafe edges live OUTSIDE the
 // tree — same file, declared here so the forbid does not apply to it.
 // syscall::edges re-exports it so existing paths stay valid.
 #[path = "syscall/edges.rs"]
-pub(crate) mod syscall_edges;
-mod interrupt;
-mod dfx;
-mod ipc;
-mod io_uring;
-mod timer;
-mod panic_policy;
-mod trace;
-mod perf;
-mod module;
+pub mod syscall_edges;
+pub mod interrupt;
+pub mod dfx;
+pub mod ipc;
+pub mod io_uring;
+pub mod timer;
+pub mod panic_policy;
+pub mod trace;
+pub mod perf;
+pub mod module;
 #[cfg(feature = "cov-dump")]
-mod cov;
+pub mod cov;
 
 #[cfg(feature = "unit-test")]
-mod tests;
+pub mod tests;
 
 // Allocation error handler for no_std
 //
@@ -712,6 +715,11 @@ pub fn rust_main_tail() -> ! {
             // the lookup fails; udev's DEVPATH walks need it too. runit
             // and other minimal inits never mount it themselves.
             {
+                // Rung-3 MOUNT SEAM: register every leaf's mount names
+                // before any mount(2) can arrive (the boot chain mounts
+                // sysfs directly below; user mounts go through do_mount
+                // -> mount_table::lookup).
+                fs::mount_table::register_builtin_handlers();
                 let sysfs_init = fs::sysfs::init_sysfs();
                 let sysfs_mount = sysfs_init.and_then(|_| fs::sysfs::mount_sysfs());
                 let ok = sysfs_mount
@@ -871,9 +879,12 @@ pub fn rust_main_tail() -> ! {
             // packet can arrive: RX/softirq paths dereference them
             // unconditionally, and the timer softirq ticks from the first
             // clock interrupt (review NET NEW-C4 — init was never called).
-            crate::net::tcp::init_tcp_manager();
-            crate::net::tcp_timer::init_tcp_timer_manager();
-            crate::net::ipv4::route::route_init();
+            // Net bring-up rides the NetHooks registration (the
+            // composition bin registers the service crate's fns before
+            // rust_main_impl — the crate-flip rung-2 entry seam).
+            crate::net::net_hooks::init_tcp();
+            crate::net::net_hooks::init_tcp_timer();
+            crate::net::net_hooks::init_route();
             // P2 vDSO: build the vDSO ELF page and prime the time-data
             // page — must run before the first execve maps it.
             crate::mm::vdso::vdso_init();
@@ -890,7 +901,7 @@ pub fn rust_main_tail() -> ! {
             // line — replaces hardcoding for non-default QEMU networks.
             if let Some(ip_str) = cmdline::get_param("ip") {
                 if let Some(ip) = cmdline::parse_ipv4_addr(&ip_str) {
-                    crate::net::arp::set_local_ip(ip);
+                    crate::net::net_hooks::set_local_ip(ip);
                     let a = (ip >> 24) & 0xFF;
                     let b = (ip >> 16) & 0xFF;
                     let c = (ip >> 8) & 0xFF;
@@ -906,7 +917,7 @@ pub fn rust_main_tail() -> ! {
             }
             // P1 IPv6: SLAAC link-local (fe80::/64 + EUI-64) + Router
             // Solicitation. No NIC is fine — the stack simply stays v4-only.
-            crate::net::ipv6::ipv6_init();
+            crate::net::net_hooks::ipv6_init();
         }
 
         // Initialize security subsystem (before scheduler / process creation)
@@ -1229,9 +1240,9 @@ pub fn rust_main_tail() -> ! {
         // above (enable_timer_interrupt); jiffies must advance under it.
         #[cfg(feature = "x86_64")]
         {
-            let t0 = drivers::timer::get_jiffies();
+            let t0 = timer::get_jiffies();
             drivers::intc::apic::delay_ms(150);
-            let t1 = drivers::timer::get_jiffies();
+            let t1 = timer::get_jiffies();
             print_status(
                 "timer",
                 &format!("lapic tick check: {} jiffies / 150ms", t1 - t0),
@@ -1358,8 +1369,17 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-// LAYOUT-7 GAP FIX: 0x81c0_0000 -> 0x81e0_0000 (the 28MB window end).
-const KERNEL_HEAP_PHYS: usize = 0x81e0_0000;
+// RUX-RISCV-LAYOUT-9 (M3-B1 hotfix): 0x81e0_0000 -> 0x8220_0000 —
+// completes the LAYOUT-8 move that updated the reserve (34MB), the
+// buddy's heap window, and boot.S's tables but MISSED this const (the
+// guard tripped when the M3-B merge's dual-compilation image reached
+// 0x81edb000 over the stale 0x81e0_0000 base; the linker window
+// already allows _end <= 0x82000000). TRANSITION NOTE: the
+// dual-compilation bloat (in-lib service copies + the rux-syscall
+// rlib) is the documented migration state; State B (the in-lib file
+// deletion) removes it — if the image then fits comfortably, a follow
+// -up may walk this back, with the layout gate re-verified either way.
+const KERNEL_HEAP_PHYS: usize = 0x8220_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 // aarch64: kernel window is [0x4008_0000, 0x4280_0000) (32MB; the
@@ -1404,9 +1424,12 @@ fn x86_dump_regions() {
     }
 }
 
-// Kernel main function
-#[no_mangle]
-pub extern "C" fn rust_main() -> ! {
+// Kernel main function (the rust_main ENTRY now lives in the BIN —
+// kernel/src/main.rs — which registers the service seams then calls
+// rust_main_impl below; the arch entries bind the symbol at link time.)
+
+/// The framework entry body (everything the old rust_main did).
+pub extern "C" fn rust_main_impl() -> ! {
     // Initialize SMP (multi-core support) - must run first!
     // On QEMU virt, OpenSBI only starts one hart into S-mode.
     // Other harts will be started later via SBI HSM.

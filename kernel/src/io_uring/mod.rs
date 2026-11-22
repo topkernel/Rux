@@ -684,7 +684,7 @@ fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
     let buf = sqe.addr as usize;
     // Cap the transfer length: sqe.len is user-controlled (up to 4GB) and the
     // kernel heap cannot satisfy huge allocations (alloc failure would panic).
-    let len = (sqe.len as usize).min(crate::syscall::io::MAX_RW_COUNT);
+    let len = (sqe.len as usize).min(crate::arch::uaccess::MAX_RW_COUNT);
     let off = sqe.off as i64;
 
     if len == 0 { return 0; }
@@ -727,7 +727,7 @@ fn do_read(file: &Arc<File>, buf: usize, len: usize) -> i32 {
     // a time — a single `vec![0u8; len]` with user len up to MAX_RW_COUNT
     // (2GB) far exceeds the kernel heap and panics on allocation failure.
     // Matches the chunked staging the syscall read/write paths already use.
-    const RW_CHUNK: usize = crate::syscall::io::RW_CHUNK;
+    const RW_CHUNK: usize = crate::syscall::support::RW_CHUNK;
     let mut kbuf = alloc::vec![0u8; len.min(RW_CHUNK)];
     let mut total = 0usize;
 
@@ -764,7 +764,7 @@ fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
     let buf = sqe.addr as usize;
     // Cap the transfer length: sqe.len is user-controlled (up to 4GB) and the
     // kernel heap cannot satisfy huge allocations (alloc failure would panic).
-    let len = (sqe.len as usize).min(crate::syscall::io::MAX_RW_COUNT);
+    let len = (sqe.len as usize).min(crate::arch::uaccess::MAX_RW_COUNT);
     let off = sqe.off as i64;
 
     if len == 0 { return 0; }
@@ -803,7 +803,7 @@ fn do_write(file: &Arc<File>, buf: usize, len: usize) -> i32 {
     };
 
     // R20-FS9: chunked staging, same rationale as do_read.
-    const RW_CHUNK: usize = crate::syscall::io::RW_CHUNK;
+    const RW_CHUNK: usize = crate::syscall::support::RW_CHUNK;
     let mut kbuf = alloc::vec![0u8; len.min(RW_CHUNK)];
     let mut total = 0usize;
 
@@ -1163,9 +1163,7 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
                 Some(f) => f,
                 None => return -(9i64) as u64,
             };
-            if !efile.get_ops().is_some_and(|o| core::ptr::eq(
-                o, &crate::syscall::misc::EVENTFD_OPS as *const _,
-            )) {
+            if !efile.get_ops().is_some_and(crate::syscall::support::is_eventfd_ops) {
                 return -(22i64) as u64; // EINVAL
             }
             ring.eventfd_fd.store(eventfd_fd, core::sync::atomic::Ordering::Release);

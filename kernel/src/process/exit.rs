@@ -263,7 +263,7 @@ pub fn kill_other_threads(current: &Task) {
                     let tdl = m
                         .timed_sleep_deadline
                         .load(core::sync::atomic::Ordering::Relaxed);
-                    let nowt = crate::drivers::timer::read_time();
+                    let nowt = crate::timer::read_time();
                     let linked = match m.policy() {
                         crate::process::task::SchedPolicy::Fifo
                         | crate::process::task::SchedPolicy::Rr => false,
@@ -325,7 +325,7 @@ pub fn kill_other_threads(current: &Task) {
                                 core::sync::atomic::Ordering::Relaxed,
                             ) as u64);
                             for &b in b")j-ago=" { putchar(b); }
-                            pd(crate::drivers::timer::get_jiffies().saturating_sub(
+                            pd(crate::timer::get_jiffies().saturating_sub(
                                 crate::timer::FWT_JIF[k].load(
                                     core::sync::atomic::Ordering::Relaxed,
                                 ),
@@ -360,7 +360,7 @@ pub fn kill_other_threads(current: &Task) {
                                     core::sync::atomic::Ordering::Relaxed,
                                 ) as u64);
                                 for &b in b"/" { putchar(b); }
-                                pd(crate::drivers::timer::get_jiffies().saturating_sub(
+                                pd(crate::timer::get_jiffies().saturating_sub(
                                     crate::timer::FWHOW_JIF[d].load(
                                         core::sync::atomic::Ordering::Relaxed,
                                     ),
@@ -569,7 +569,7 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
         // loop in the same exit context); IRQs are already enabled here.
         const FDM_SPIN_BATCH: u32 = 100_000;
         let mut spins: u32 = 0;
-        let mut armed_at = crate::drivers::timer::get_jiffies();
+        let mut armed_at = crate::timer::get_jiffies();
         // R87 (tail window): the wait must ALSO cover the SWITCHING_OUT
         // marker. on_cpu (the asm release store) clears BEFORE the
         // register restore — the switching CPU still executes its final
@@ -611,7 +611,7 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
                 }
                 crate::dfx::taskdump::taskdump_raw_line(b"\n");
             }
-            if crate::drivers::timer::get_jiffies()
+            if crate::timer::get_jiffies()
                 .wrapping_sub(armed_at)
                 >= FDM_STALE_RELEASE_JIFFIES
             {
@@ -624,7 +624,7 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
                     deferred = true;
                     break;
                 }
-                armed_at = crate::drivers::timer::get_jiffies();
+                armed_at = crate::timer::get_jiffies();
             }
             spins = spins.wrapping_add(1);
             if spins % FDM_SPIN_BATCH == 0 {
@@ -868,7 +868,7 @@ pub(crate) fn release_task(task: *mut Task) {
     // dying member's sweep_dead_threads (see the finisher there), and
     // the reaper RETURNS. A wedged member then leaks its group (loudly
     // printed) instead of wedging pid 1.
-    let deadline = crate::drivers::timer::get_jiffies() + RELEASE_DRAIN_JIFFIES;
+    let deadline = crate::timer::get_jiffies() + RELEASE_DRAIN_JIFFIES;
     let mut deferred = false;
     loop {
         // One try_lock'd pass: free the DEAD members in place, leaving
@@ -939,7 +939,7 @@ pub(crate) fn release_task(task: *mut Task) {
         if drained {
             break;
         }
-        if crate::drivers::timer::get_jiffies() >= deadline {
+        if crate::timer::get_jiffies() >= deadline {
             // Budget spent: DEFER the storage free. The members stay
             // parked on this task's dead_threads list; the finisher is
             // the last dying member's sweep (and if a member never
@@ -1185,14 +1185,14 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
     // knowledge.
     crate::arch::cpu::restore_irq(true);
     const RTS_SWITCH_WAIT_JIFFIES: u64 = 300;
-    let rts_armed_at = crate::drivers::timer::get_jiffies();
+    let rts_armed_at = crate::timer::get_jiffies();
     while t.on_cpu()
         || crate::sched::sched::switching_out_names(task)
         || !t
             .terminal_switch_done
             .load(core::sync::atomic::Ordering::Acquire)
     {
-        if crate::drivers::timer::get_jiffies()
+        if crate::timer::get_jiffies()
             .wrapping_sub(rts_armed_at)
             >= RTS_SWITCH_WAIT_JIFFIES
         {
@@ -2965,7 +2965,7 @@ pub fn wait4_park_audit() {
 
     // 1 Hz self-gate (one relaxed load per tick when quiet).
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(O::Relaxed);
     if now.wrapping_sub(last) < 100 {
         return;
@@ -3543,7 +3543,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         {
             use core::sync::atomic::{AtomicU64, Ordering as O2};
             static LAST_EJ: AtomicU64 = AtomicU64::new(0);
-            let j = crate::drivers::timer::get_jiffies() as u64;
+            let j = crate::timer::get_jiffies() as u64;
             let last = LAST_EJ.load(O2::Relaxed);
             if j.saturating_sub(last) >= 100
                 && LAST_EJ
@@ -3613,7 +3613,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
                 static LAST_J: AtomicU64 = AtomicU64::new(0);
                 static CALLS: AtomicU64 = AtomicU64::new(0);
                 let calls = CALLS.fetch_add(1, O2::Relaxed);
-                let j = crate::drivers::timer::get_jiffies() as u64;
+                let j = crate::timer::get_jiffies() as u64;
                 let last = LAST_J.load(O2::Relaxed);
                 if j.saturating_sub(last) >= 100
                     && LAST_J

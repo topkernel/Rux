@@ -1612,7 +1612,7 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
             Some(t) => t.pid(),
             None => return 0,
         };
-        let wake_at = crate::drivers::timer::get_jiffies() + 25;
+        let wake_at = crate::timer::get_jiffies() + 25;
         let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
         // Re-derived borrow (never held across schedule() below).
         crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
@@ -1634,7 +1634,7 @@ pub fn sleep_snapshot_early() {
     use core::sync::atomic::Ordering;
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    let now = crate::drivers::timer::get_jiffies() as u64;
+    let now = crate::timer::get_jiffies() as u64;
     let last = LAST.load(Ordering::Relaxed);
     if now.saturating_sub(last) < 500 || N.load(Ordering::Relaxed) >= 12 {
         return;
@@ -1649,10 +1649,10 @@ pub fn sleep_snapshot_early() {
     crate::ipc::binder::sleep_snapshot();
     // 53rd drain hunt: park-side AF_UNIX queue/wait census on the same
     // cadence (self-gated on rux:sleepsnap (retired dfx=sleepsnap) inside).
-    crate::net::unix::unix_park_audit();
+    crate::net::net_hooks::unix_park_audit();
     // 53rd timer-drive hunt: armed timerfd wheel entries + waiter census
     // (self-gated on rux:sleepsnap (retired dfx=sleepsnap) inside).
-    crate::syscall::misc::timerfd_wheel_audit();
+    crate::syscall::support::timerfd_wheel_audit();
 }
 
 /// pid=1 RUNNING-spin audit (69th, rux:pid1spin (retired dfx=pid1spin)): ohw75 proved the
@@ -1675,7 +1675,7 @@ pub fn pid1spin_audit() {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     static PREV_RIP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies() as u64;
+    let now = crate::timer::get_jiffies() as u64;
     let last = LAST.load(Ordering::Relaxed);
     if now.saturating_sub(last) < 200 {
         return;
@@ -1692,7 +1692,7 @@ pub fn pid1spin_audit() {
     // interest, a stuck EPOLLOUT-only mask, and a scan divergence
     // (see pid1_epoll_interest_dump).
     if n % 10 == 0 {
-        crate::syscall::misc::pid1_epoll_interest_dump(1);
+        crate::syscall::support::pid1_epoll_interest_dump(1);
     }
     // Short diagnostic read of init (pid 1) — TaskBorrow's lookup
     // contract; reads only task fields + its mapped kernel stack

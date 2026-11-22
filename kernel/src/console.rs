@@ -811,7 +811,7 @@ pub fn tty_isig_deliver_pending() {
 fn tty_isig_deliver(signo: i32) {
     // De-dup window: the same byte can traverse both the recorded-pending
     // path and process_input()'s consume-time send.
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last_s = LAST_ISIG_SIGNO.load(core::sync::atomic::Ordering::Acquire);
     let last_j = LAST_ISIG_JIFFY.load(core::sync::atomic::Ordering::Acquire);
     if last_s == signo && now.saturating_sub(last_j) < 4 {
@@ -1286,4 +1286,42 @@ impl fmt::Write for Uart {
         flush(&buf, n);
         Ok(())
     }
+}
+
+
+// ============================================================================
+// Framebuffer registry (rung4 prep move 3): the framework's one stop for
+// scanout geometry. Drivers (virtio-gpu today) register at probe; the
+// console/OOM-forensics/mmap-COW-exemption consumers read through here —
+// no framework file names a GPU driver. Mirrors the reference's
+// struct fb_info *registered_fb[FB_MAX] registry.
+// ============================================================================
+
+/// The scanout descriptor registered by the display driver.
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferInfo {
+    /// Physical base of the scanout aperture.
+    pub addr: u64,
+    /// Aperture size in bytes.
+    pub size: u32,
+    /// Visible width in pixels.
+    pub width: u32,
+    /// Visible height in pixels.
+    pub height: u32,
+    /// Row stride in bytes.
+    pub stride: u32,
+    /// DRM fourcc.
+    pub format: u32,
+}
+
+static FRAMEBUFFER_INFO: Spinlock<Option<FramebufferInfo>> = Spinlock::new(None);
+
+/// Driver probe registers the live scanout here.
+pub fn set_framebuffer_info(info: FramebufferInfo) {
+    *FRAMEBUFFER_INFO.lock() = Some(info);
+}
+
+/// The registered scanout, if a display driver probed.
+pub fn get_framebuffer_info() -> Option<FramebufferInfo> {
+    *FRAMEBUFFER_INFO.lock()
 }

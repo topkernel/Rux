@@ -112,7 +112,7 @@ pub static WV_SEND_NS: AtomicU64 = AtomicU64::new(0);
 #[inline]
 pub fn now() -> u64 {
     if on() {
-        crate::drivers::timer::monotonic_ns_since_boot()
+        crate::timer::monotonic_ns_since_boot()
     } else {
         0
     }
@@ -123,7 +123,7 @@ pub fn now() -> u64 {
 pub fn add(dst: &AtomicU64, t0: u64) {
     if t0 != 0 {
         dst.fetch_add(
-            crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0),
+            crate::timer::monotonic_ns_since_boot().saturating_sub(t0),
             Relaxed,
         );
     }
@@ -190,7 +190,7 @@ pub fn dump() {
     if !on() {
         return;
     }
-    let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
+    let secs = crate::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
     // recvmsg AF_UNIX phases. iov/alloc sum over ALL recvmsg families
     // (shared code above the family dispatch) — the storm boot is
     // unix-dominated, so sum/N vs the AF_UNIX count reads as an upper

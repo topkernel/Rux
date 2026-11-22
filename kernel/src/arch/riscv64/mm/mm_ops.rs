@@ -846,7 +846,7 @@ impl MmStruct {
                 // put_page/free them (accounting corruption otherwise).
                 {
                     let phys = (ppn_val as u64) << 12;
-                    let fb = crate::drivers::gpu::get_framebuffer_info()
+                    let fb = crate::console::get_framebuffer_info()
                         .map_or(false, |i| phys >= i.addr && phys < i.addr + i.size as u64);
                     if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
                         // SAFETY: addr is a page-aligned user address whose
@@ -932,7 +932,7 @@ impl MmStruct {
         // drm GEM dumb-buffer backing. Clear the PTE only.
         {
             let phys = (ppn_val as u64) << 12;
-            let fb = crate::drivers::gpu::get_framebuffer_info()
+            let fb = crate::console::get_framebuffer_info()
                 .map_or(false, |i| phys >= i.addr && phys < i.addr + i.size as u64);
             if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
                 self.clear_pte(va as u64);
@@ -2101,7 +2101,7 @@ pub fn copy_page_table_cow(
     // as well. This mirrors Linux fbdev, which maps the scanout with
     // VM_IO|VM_SHARED semantics regardless of MAP_PRIVATE — writes from
     // any mapper always reach the device memory.
-    let fb_frame_range: Option<(u64, u64)> = crate::drivers::gpu::get_framebuffer_info()
+    let fb_frame_range: Option<(u64, u64)> = crate::console::get_framebuffer_info()
         .map(|i| (i.addr >> 12, (i.addr + i.size as u64 + 0xFFF) >> 12));
 
     if parent_root_ppn == 0 {

@@ -1864,6 +1864,53 @@ fn devfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u
 /// backed. Allocation failure returns what is already backed (possibly
 /// 0); the fault hook treats a short backing as "not shared" and the
 /// generic path serves the fault.
+/// A byte window over one shared-store page (INV-DEVFS-SHARED): `kva`
+/// names a live page of a DevfsEntry's shared backing (the entry's
+/// page list holds it; the caller holds the entry lock or the file's
+/// fault serialization); every copy is clamped in-page by the callers'
+/// chunk math. The one audited edge for the shared_* kva family.
+struct SharedPageWindow {
+    kva: *mut u8,
+}
+
+impl SharedPageWindow {
+    /// INV-DEVFS-SHARED construction.
+    #[inline]
+    fn new(kva: usize) -> Self {
+        SharedPageWindow { kva: kva as *mut u8 }
+    }
+
+    /// Copy INTO the page at `in_page` from a kernel slice
+    /// (INV-DEVFS-SHARED; chunk in-page by the caller).
+    #[inline]
+    fn copy_in(&mut self, src: &[u8], in_page: usize) {
+        // SAFETY: INV-DEVFS-SHARED — live shared page; the caller's
+        // chunk math keeps [in_page, in_page+len) inside PAGE_SIZE.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.kva.add(in_page), src.len()) };
+    }
+
+    /// Copy OUT of the page at `in_page` into a caller slice
+    /// (INV-DEVFS-SHARED; same chunk discipline).
+    #[inline]
+    fn copy_out(&self, dst: &mut [u8], in_page: usize) {
+        // SAFETY: INV-DEVFS-SHARED — same argument, read direction.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                (self.kva as *const u8).add(in_page),
+                dst.as_mut_ptr(),
+                dst.len(),
+            )
+        };
+    }
+
+    /// Zero a region of the page (INV-DEVFS-SHARED).
+    #[inline]
+    fn zero(&mut self, in_page: usize, len: usize) {
+        // SAFETY: INV-DEVFS-SHARED — bounded by the caller's math.
+        unsafe { core::ptr::write_bytes(self.kva.add(in_page), 0, len) };
+    }
+}
+
 fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
     let page = crate::mm::page::PAGE_SIZE as usize;
     let mut guard = entry.shared_pages.lock_irqsave();
@@ -1909,14 +1956,7 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
             .as_usize() as *mut u8;
             let in_page = off % page;
             let chunk = core::cmp::min(page - in_page, snap.len() - off);
-            // SAFETY: kva is a live shared page; chunk is in-page.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    snap[off..].as_ptr(),
-                    kva.add(in_page),
-                    chunk,
-                );
-            }
+            SharedPageWindow::new(kva as usize).copy_in(&snap[off..off + chunk], in_page);
             off += chunk;
         }
     }
@@ -1947,8 +1987,8 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
 /// fs_id + S_IFREG gate rejects every foreign inode BEFORE
 /// private_data is dereferenced; a NULL private_data is rejected too.
 pub fn devfs_reg_current_size(file: &crate::fs::File) -> Option<u64> {
-    // SAFETY: caller passes a valid File; only stable fields are read.
-    unsafe {
+    // Caller passes a valid File; only stable fields are read.
+    {
         let inode = crate::fs::unsafe_edges::file_inode(file)?;
         if inode.fs_id != crate::fs::inode::FS_ID_DEVFS
             || !inode.mode.is_regular_file()
@@ -1965,23 +2005,19 @@ pub fn devfs_reg_current_size(file: &crate::fs::File) -> Option<u64> {
 /// activating/growing the shared backing on demand. None → the caller
 /// falls back to the generic private-page path.
 pub fn shared_fault_file_page(file: &crate::fs::File, file_off: usize) -> Option<u64> {
-    // SAFETY: fault-path caller passes the pinned vm_file; only the
-    // inode pointer field and its stable private_data are read.
-    let entry = unsafe {
-        let inode = crate::fs::unsafe_edges::file_inode(file)?;
-        // Same identity gate as devfs_reg_current_size: private_data is
-        // only a DevfsEntry pointer on devfs inodes (foreign filesystems
-        // store table indices/pids there — see that function's comment).
-        if inode.fs_id != crate::fs::inode::FS_ID_DEVFS
-            || !inode.mode.is_regular_file()
-        {
-            return None;
-        }
-        crate::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode)?
-    };
-    let inode_size = unsafe {
-        (*file.inode.get()).as_ref().map(|i| i.get_size() as usize).unwrap_or(0)
-    };
+    // Fault-path caller passes the pinned vm_file; the edges are safe
+    // fns (FILEINODE-1 / PRIVDATA-1).
+    let inode = crate::fs::unsafe_edges::file_inode(file)?;
+    // Same identity gate as devfs_reg_current_size: private_data is
+    // only a DevfsEntry pointer on devfs inodes (foreign filesystems
+    // store table indices/pids there — see that function's comment).
+    if inode.fs_id != crate::fs::inode::FS_ID_DEVFS
+        || !inode.mode.is_regular_file()
+    {
+        return None;
+    }
+    let entry = crate::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode)?;
+    let inode_size = inode.get_size() as usize;
     // Entry-authoritative size: the mapper's inode snapshot may predate
     // the ftruncate that sized the workspace (see devfs_reg_current_size).
     let inode_size = inode_size.max(
@@ -2056,15 +2092,7 @@ fn shared_read_off(entry: &DevfsEntry, logical: usize, off: usize, buf: &mut [u8
         .as_usize() as *mut u8;
         let in_page = (off + done) % page;
         let chunk = core::cmp::min(page - in_page, n - done);
-        // SAFETY: kva is a live shared page; the chunk is in-page and the
-        // destination slice is caller-valid.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                kva.add(in_page) as *const u8,
-                buf.as_mut_ptr().add(done),
-                chunk,
-            );
-        }
+        SharedPageWindow::new(kva as usize).copy_out(&mut buf[done..done + chunk], in_page);
         done += chunk;
     }
     done
@@ -2096,15 +2124,7 @@ fn shared_write_off(
         .as_usize() as *mut u8;
         let in_page = (off + done) % page;
         let chunk = core::cmp::min(page - in_page, buf.len() - done);
-        // SAFETY: kva is a live shared page; the chunk is in-page; the
-        // source slice is caller-valid.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                buf.as_ptr().add(done),
-                kva.add(in_page),
-                chunk,
-            );
-        }
+        SharedPageWindow::new(kva as usize).copy_in(&buf[done..done + chunk], in_page);
         done += chunk;
     }
     if done > 0 && (off + done) as u64 > inode.get_size() {
@@ -2451,4 +2471,27 @@ pub fn create_root_inode(root_entry: &Arc<DevfsEntry>) -> alloc::sync::Arc<Inode
     inode.ops = Some(&DEVFS_INODE_OPS);
     inode.private_data = Some(Arc::into_raw(Arc::clone(root_entry)) as *mut u8);
     alloc::sync::Arc::new(inode)
+}
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The devtmpfs mount entry (old mount.rs "devfs"|"devtmpfs" arm).
+pub fn mount_devtmpfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data);
+    init();
+    if let Some(root_entry) = get_root_entry() {
+        crate::fs::vfs::vfs_mount(target, create_root_inode(&root_entry), mnt_flags);
+        crate::fs::mount::register_mount(fs_type, target, "devtmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        Ok(())
+    } else {
+        Err(crate::errno::Errno::NoSuchDevice.as_neg_i32())
+    }
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["devfs", "devtmpfs"], mount_devtmpfs);
 }

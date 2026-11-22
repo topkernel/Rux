@@ -53,6 +53,28 @@ pub fn copy_in(dst: &mut [u8], src_user: usize) -> usize {
     unsafe { uaccess::copy_from_user(dst.as_mut_ptr(), src_user as *const u8, dst.len()) }
 }
 
+/// Staged user→Vec copy with EXACT reservation (no zero-fill pass on
+/// the send hot paths): `n` bytes copied into a fresh Vec; `None` on
+/// any fault (no partial buffer is returned — the EFAULT contract the
+/// unix-socket staged send had: a first-fault returns EFAULT with
+/// nothing sent).
+pub fn copy_in_vec_exact(src_user: usize, n: usize) -> Option<alloc::vec::Vec<u8>> {
+    let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    v.try_reserve_exact(n).ok()?;
+    // SAFETY: try_reserve_exact(n) guarantees n writable (uninitialized)
+    // bytes at v.as_mut_ptr(); the uaccess primitive writes at most n of
+    // them and zero-fills any uncopied tail on fault, so set_len(n) below
+    // only ever exposes bytes the primitive wrote or zeroed.
+    unsafe {
+        let uncopied = uaccess::copy_from_user(v.as_mut_ptr(), src_user as *const u8, n);
+        if uncopied > 0 {
+            return None;
+        }
+        v.set_len(n);
+    }
+    Some(v)
+}
+
 /// Read one `Copy` value from user memory at `src_user`.
 ///
 /// Returns `None` when the access fails (rejected range or fault); the

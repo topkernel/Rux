@@ -392,7 +392,12 @@ impl VirtQueue {
     }
 
     /// Notify device of new request
-    pub fn notify(&self) {
+    // IRREDUCIBLE F-ROW (F-VIO-NOTIFY): the queue-notify store is the
+// virtio device doorbell — W16 for virtio-pci, W32 for virtio-mmio
+// (QEMU drops != 4-byte accesses there); reference kernel
+// drivers/virtio/virtio_ring.c vring_notify. A register-width device
+// store has no safe shape (the width IS the protocol).
+pub fn notify(&self) {
         // Disable external interrupts during MMIO operations.
         // NOTE: SEIE is bit 9 of sie — beyond csrci's 5-bit immediate. The
         // old "csrci sie, 9" wrote mask 0b01001 (bits 0 and 3, both WPRI)

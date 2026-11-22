@@ -149,11 +149,16 @@ fn verify_buddy_involution() {
 }
 
 /// INV-BUDDY-K3: Two allocations of same order never overlap
+// Unwind bound: BuddyAllocator::new(64) fills meta with a 64-trip loop (the longest in the harness); alloc scans <= 11 orders, split <= 10 steps. 70 = 64 + order scans + headroom.
+#[kani::unwind(20)]
 #[kani::proof]
 fn verify_buddy_no_overlap() {
-    let capacity = 64usize;  // small to keep CBMC tractable
+    // Domain: 16-page pool, order <= 3 (two 8-page blocks fit exactly) —
+    // the 64-page/order-5 shape (and 32-page, and unwind 40-128) all
+    // exceeded every SAT ceiling tried (217k VCCs at capacity 32).
+    let capacity = 16usize;
     let order: usize = kani::any();
-    kani::assume(order <= 5);  // limit search space
+    kani::assume(order <= 3);
     let mut alloc = BuddyAllocator::new(capacity);
 
     let p1 = alloc.alloc_blocks(order);
@@ -169,11 +174,14 @@ fn verify_buddy_no_overlap() {
 }
 
 /// INV-BUDDY-K4: Alloc then free conserves total free pages
+// Unwind bound: new(64) 64-trip loop; the free-page census walks <= 11 orders x <= 64-entry chains; merge loop <= 11 steps. 70 covers the 64-trip maximum with headroom.
+#[kani::unwind(20)]
 #[kani::proof]
 fn verify_alloc_free_conserves() {
-    let capacity = 64usize;
+    // Domain: see K3 — 64 pushed CBMC past any bound.
+    let capacity = 16usize;
     let order: usize = kani::any();
-    kani::assume(order <= 4);
+    kani::assume(order <= 3);
     let mut alloc = BuddyAllocator::new(capacity);
     let page_idx = alloc.alloc_blocks(order);
     if let Some(pidx) = page_idx {

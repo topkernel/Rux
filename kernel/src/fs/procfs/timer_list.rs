@@ -55,7 +55,7 @@ pub fn generate() -> Vec<u8> {
 
     out.push_str("Timer List Version: v0.10\n");
     out.push_str("HRTIMER_MAX_CLOCK_BASES: 8\n");
-    let now_ns = crate::drivers::timer::monotonic_ns_since_boot();
+    let now_ns = crate::timer::monotonic_ns_since_boot();
     out.push_str(&format!("now at {} nsecs\n\n", now_ns));
 
     // One section per online CPU, each carrying all

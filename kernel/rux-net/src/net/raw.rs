@@ -111,8 +111,6 @@ impl Default for RawSockOptions {
     }
 }
 
-// SAFETY: all mutable state is behind Spinlocks.
-unsafe impl Sync for RawSocket {}
 
 impl RawSocket {
     fn new(kind: RawKind, protocol: i32) -> Self {

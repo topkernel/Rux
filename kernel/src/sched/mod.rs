@@ -21,6 +21,7 @@
 pub mod edges;
 pub mod reapdrain;
 pub mod sched;
+pub mod sched_policy;
 pub mod sched_ev;
 pub mod class;
 pub mod rt;

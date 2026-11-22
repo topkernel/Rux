@@ -400,7 +400,7 @@ pub fn dump() {
     if !on() {
         return;
     }
-    let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
+    let secs = crate::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
     // Top-8 unix senders by n. Bounded scratch, no allocation tricks.
     let mut idx: [usize; 8] = [usize::MAX; 8];
     let mut top: [u64; 8] = [0; 8];
