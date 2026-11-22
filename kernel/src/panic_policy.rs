@@ -87,9 +87,9 @@ pub fn apply() -> ! {
             // while the timer interrupt runs, so a panic inside an
             // interrupt context cannot honour the timeout — it parks
             // like the default does.
-            let deadline = crate::drivers::timer::get_jiffies()
+            let deadline = crate::timer::get_jiffies()
                 + (seconds as u64) * crate::config::KERNEL_HZ as u64;
-            while crate::drivers::timer::get_jiffies() < deadline {
+            while crate::timer::get_jiffies() < deadline {
                 crate::arch::cpu::wfi();
             }
             crate::process::reboot::panic_reboot();

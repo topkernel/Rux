@@ -834,7 +834,7 @@ fn header(type_: u32, misc: u16, size: u16) -> [u8; 8] {
 }
 
 fn now_ns() -> u64 {
-    crate::drivers::timer::monotonic_ns_since_boot()
+    crate::timer::monotonic_ns_since_boot()
 }
 
 // ==================== Sampling (softirq) ====================

@@ -1182,8 +1182,8 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errn
     }
     let break_secs = LEASE_BREAK_TIME.load(Ordering::Relaxed);
     let break_msecs = (break_secs as u64).saturating_mul(1000).max(1);
-    let deadline = crate::drivers::timer::get_jiffies()
-        + crate::drivers::timer::msecs_to_jiffies(break_msecs);
+    let deadline = crate::timer::get_jiffies()
+        + crate::timer::msecs_to_jiffies(break_msecs);
 
     // One-shot timer so a holder that never releases cannot wedge us.
     let my_pid = current_tgid();
@@ -1193,7 +1193,7 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errn
         if !lease_conflicts(inode, writer) {
             break Ok(());
         }
-        if crate::drivers::timer::get_jiffies() >= deadline {
+        if crate::timer::get_jiffies() >= deadline {
             // Lease-break-time expired: break the conflicting leases by
             // force (Linux break_lease → generic_break_lease).
             let mut table = LEASE_TABLE.lock();
@@ -1210,7 +1210,7 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errn
         }
         crate::wait_event_interruptible!(&LEASE_WAIT, {
             !lease_conflicts(inode, writer)
-                || crate::drivers::timer::get_jiffies() >= deadline
+                || crate::timer::get_jiffies() >= deadline
         });
         // wait_event_interruptible returns 0/-ERESTARTSYS; loop re-checks.
     };

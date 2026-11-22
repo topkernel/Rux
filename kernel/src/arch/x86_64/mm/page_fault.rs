@@ -546,7 +546,7 @@ pub fn handle_mm_fault(
             static LAST_COW_JIFFY: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let page = fault_addr.bits() & !0xFFF;
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let last_page = LAST_COW_PAGE.load(core::sync::atomic::Ordering::Relaxed);
             let last_j = LAST_COW_JIFFY.load(core::sync::atomic::Ordering::Relaxed);
             let repeat = last_page == page && now.saturating_sub(last_j) < 25;

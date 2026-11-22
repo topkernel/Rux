@@ -503,7 +503,7 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     let delta_ns = if target_ns > now_ns { target_ns - now_ns } else { 0 };
     let hz = crate::drivers::timer::HZ as u128;
     let timeout_jiffies = ((delta_ns as u128 * hz + 999_999_999u128) / 1_000_000_000u128) as u64;
-    Ok(Some(crate::drivers::timer::get_jiffies() + timeout_jiffies))
+    Ok(Some(crate::timer::get_jiffies() + timeout_jiffies))
 }
 
 /// sys_mq_timedsend — Send a message to a message queue (NR 182)
@@ -650,7 +650,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
         }
 
         if let Some(dl) = deadline {
-            if crate::drivers::timer::get_jiffies() >= dl {
+            if crate::timer::get_jiffies() >= dl {
                 return -(errno::ETIMEDOUT as i64);
             }
         }
@@ -811,7 +811,7 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
         }
 
         if let Some(dl) = deadline {
-            if crate::drivers::timer::get_jiffies() >= dl {
+            if crate::timer::get_jiffies() >= dl {
                 return -(errno::ETIMEDOUT as i64);
             }
         }

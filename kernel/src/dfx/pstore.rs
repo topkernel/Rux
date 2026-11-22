@@ -342,7 +342,7 @@ fn write_record(kind: u32, hw: &HeadWriter) {
         core::ptr::write_volatile(&mut (*hdr).version, VERSION);
         core::ptr::write_volatile(
             &mut (*hdr).jiffies,
-            crate::drivers::timer::get_jiffies() as u32,
+            crate::timer::get_jiffies() as u32,
         );
         core::ptr::write_volatile(&mut (*hdr).kind, kind);
         core::ptr::write_volatile(&mut (*hdr)._reserved, [0; 2]);

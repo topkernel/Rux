@@ -5065,7 +5065,7 @@ fn ext4_buffered_write(
             )
             .is_ok()
     {
-        let t0 = crate::drivers::timer::get_jiffies();
+        let t0 = crate::timer::get_jiffies();
         // Flush THIS writer's inode first (the throttle proper — the
         // writer waits for its own data), then the system-wide recovery
         // pass: flush every dirty inode the windowed collect finds
@@ -5086,7 +5086,7 @@ fn ext4_buffered_write(
                 shrunk = page_cache::get_page_cache().writeback_recover(shortfall);
             }
         }
-        let dt = crate::drivers::timer::get_jiffies().saturating_sub(t0);
+        let dt = crate::timer::get_jiffies().saturating_sub(t0);
         WRITER_FLUSH_IN_FLIGHT.store(false, core::sync::atomic::Ordering::Release);
         // Bounded tuning print (the first 40 watermark flushes per boot):
         // names the flush cost class on the repro rigs; silent otherwise.

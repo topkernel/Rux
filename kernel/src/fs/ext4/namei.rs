@@ -1419,7 +1419,7 @@ fn ext4_mkdir_inner(
     mode: u16,
 ) -> Result<u32, i32> {
     // fsw op-cost anatomy: whole-bracket duration (guard to stop), us.
-    let t0 = crate::drivers::timer::monotonic_ns_since_boot();
+    let t0 = crate::timer::monotonic_ns_since_boot();
     // Serialize entry mutations BEFORE the journal bracket (see
     // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
     let _entry_guard = ENTRY_MUTEX.guard();
@@ -1436,7 +1436,7 @@ fn ext4_mkdir_inner(
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
     crate::dfx::fsw::note_mkdir_us(
-        (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
+        (crate::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
     );
     result
 }
@@ -2130,7 +2130,7 @@ pub fn ext4_unlink(
     // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
     let _entry_guard = ENTRY_MUTEX.guard();
     // fsw op-cost anatomy: whole-bracket duration (us).
-    let t0 = crate::drivers::timer::monotonic_ns_since_boot();
+    let t0 = crate::timer::monotonic_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -2139,7 +2139,7 @@ pub fn ext4_unlink(
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
     crate::dfx::fsw::note_unlink_us(
-        (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
+        (crate::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
     );
     result
 }
@@ -2283,7 +2283,7 @@ pub fn ext4_rmdir(
     // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
     let _entry_guard = ENTRY_MUTEX.guard();
     // fsw op-cost anatomy: whole-bracket duration (us).
-    let t0 = crate::drivers::timer::monotonic_ns_since_boot();
+    let t0 = crate::timer::monotonic_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 10)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -2292,7 +2292,7 @@ pub fn ext4_rmdir(
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
     crate::dfx::fsw::note_rmdir_us(
-        (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
+        (crate::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
     );
     result
 }
@@ -2311,7 +2311,7 @@ fn ext4_rmdir_inner(
     }
 
     // fsw op-cost anatomy: per-phase nanosecond marks (FSW3 rmd1-rmd5).
-    let p0 = crate::drivers::timer::monotonic_ns_since_boot();
+    let p0 = crate::timer::monotonic_ns_since_boot();
     // Find the directory entry first
     let parent_inode = super::inode::read_inode(fs, dir_ino)?;
     let (parent_dir_block, _, target_ino) = find_dir_entry(fs, &parent_inode, name)?;
@@ -2328,11 +2328,11 @@ fn ext4_rmdir_inner(
     if !is_dir_empty(fs, &target_inode)? {
         return Err(errno::Errno::DirectoryNotEmpty.as_neg_i32());
     }
-    let p1 = crate::drivers::timer::monotonic_ns_since_boot();
+    let p1 = crate::timer::monotonic_ns_since_boot();
 
     // Delete directory entry from parent
     ext4_delete_entry_locked(fs, dir_ino, name)?;
-    let p2 = crate::drivers::timer::monotonic_ns_since_boot();
+    let p2 = crate::timer::monotonic_ns_since_boot();
 
     // CRASH-SAFETY (delete side, deferred): the entry removal must be
     // persisted BEFORE the inode/bitmap/block frees below (see
@@ -2351,19 +2351,19 @@ fn ext4_rmdir_inner(
     target.i_links_count = 0;
     target.i_dtime = 1; // TODO: get current time
     super::inode::write_inode_disk(fs, target_ino, &target)?;
-    let p3 = crate::drivers::timer::monotonic_ns_since_boot();
+    let p3 = crate::timer::monotonic_ns_since_boot();
 
     // Free inode in bitmap
     free_inode(fs, target_ino)?;
     // a2: a referenced directory left this group.
     update_group_desc_used_dirs(fs, (target_ino - 1) / fs.inodes_per_group, -1);
-    let p4 = crate::drivers::timer::monotonic_ns_since_boot();
+    let p4 = crate::timer::monotonic_ns_since_boot();
 
     // Free data blocks
     free_inode_blocks(fs, target_ino, &target)?;
     // R107: erase the stale map (see erase_dead_inode_map).
     erase_dead_inode_map(fs, target_ino, &mut target)?;
-    let p5 = crate::drivers::timer::monotonic_ns_since_boot();
+    let p5 = crate::timer::monotonic_ns_since_boot();
 
     crate::dfx::fsw::note_rmdir_phases(
         p1.saturating_sub(p0), p2.saturating_sub(p1), p3.saturating_sub(p2),

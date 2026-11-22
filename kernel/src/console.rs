@@ -811,7 +811,7 @@ pub fn tty_isig_deliver_pending() {
 fn tty_isig_deliver(signo: i32) {
     // De-dup window: the same byte can traverse both the recorded-pending
     // path and process_input()'s consume-time send.
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last_s = LAST_ISIG_SIGNO.load(core::sync::atomic::Ordering::Acquire);
     let last_j = LAST_ISIG_JIFFY.load(core::sync::atomic::Ordering::Acquire);
     if last_s == signo && now.saturating_sub(last_j) < 4 {

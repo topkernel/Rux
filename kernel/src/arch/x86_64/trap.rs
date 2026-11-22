@@ -1399,7 +1399,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         core::sync::atomic::Ordering::Relaxed,
                     );
                     crate::interrupt::preempt::TICK_ENTRY_JIF[cpu_id].store(
-                        crate::drivers::timer::get_jiffies(),
+                        crate::timer::get_jiffies(),
                         core::sync::atomic::Ordering::Relaxed,
                     );
                     // 118th param-stall conviction dump (one-shot once
@@ -1440,7 +1440,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                                 crate::pr_warn!(
                                     "WW-P1-WATCH-ADD task={:#x} landed at jiffies={}",
                                     t as usize,
-                                    crate::drivers::timer::get_jiffies()
+                                    crate::timer::get_jiffies()
                                 );
                             }
                         }
@@ -1449,7 +1449,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         static PS_DONE2: core::sync::atomic::AtomicBool =
                             core::sync::atomic::AtomicBool::new(false);
                         if !PS_DONE2.load(core::sync::atomic::Ordering::Relaxed)
-                            && crate::drivers::timer::get_jiffies() >= 24_000
+                            && crate::timer::get_jiffies() >= 24_000
                             && crate::trace::EVENT_SCHEDTRACE.armed()
                             && !PS_DONE2.swap(true, core::sync::atomic::Ordering::AcqRel)
                         {
@@ -1459,7 +1459,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                             crate::syscall::support::param_stall_dump();
                         }
                         if !PS_DONE.load(core::sync::atomic::Ordering::Relaxed)
-                            && crate::drivers::timer::get_jiffies() >= 18_000
+                            && crate::timer::get_jiffies() >= 18_000
                             && crate::trace::EVENT_SCHEDTRACE.armed()
                             && !PS_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
                         {
@@ -1567,7 +1567,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 /// measured. 200 jiffies restores the documented 2 s cadence.
 fn ww_irqwin_budget_ok() -> bool {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(core::sync::atomic::Ordering::Acquire);
     if now.wrapping_sub(last) < 200 {
         return false;
@@ -2848,7 +2848,7 @@ fn segv_hist_note(fault_addr: u64) {
     // Upper 32 bits carry cr2's low 32 (page id for correlation); lower
     // 32 carry jiffies (age at exit-print time).
     SEGV_HIST_J[i].store(
-        ((fault_addr & 0xffff_ffff) << 32) | (crate::drivers::timer::get_jiffies() & 0xffff_ffff),
+        ((fault_addr & 0xffff_ffff) << 32) | (crate::timer::get_jiffies() & 0xffff_ffff),
         core::sync::atomic::Ordering::Relaxed,
     );
 }
@@ -2856,7 +2856,7 @@ fn segv_hist_note(fault_addr: u64) {
 /// Age (in jiffies) of this tid's most recent delivered SIGSEGV, plus
 /// that fault's cr2, if the tid ever took one.
 pub fn segv_hist_age(tid: u32) -> Option<(u64, u64)> {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let mut best_j = 0u64;
     let mut best_addr = 0u64;
     let mut found = false;

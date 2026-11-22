@@ -49,7 +49,7 @@ pub fn cad_deliver_pending() {
     if !PENDING_CAD.swap(false, core::sync::atomic::Ordering::AcqRel) {
         return; // another CPU claimed it
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST_CAD_JIFFY.load(core::sync::atomic::Ordering::Acquire);
     if now.saturating_sub(last) < CAD_RATELIMIT_JIFFIES {
         return; // duplicate within the window
@@ -230,9 +230,9 @@ pub fn shutdown_cascade(cmd: u32) {
         let _ = crate::signal::send_signal(1, crate::signal::Signal::SIGTERM as i32);
 
         // --- 2. Wait for PID 1 to exit (bounded) ---
-        let deadline = crate::drivers::timer::get_jiffies()
-            + crate::drivers::timer::msecs_to_jiffies(SHUTDOWN_PID1_TIMEOUT_SECS * 1000);
-        while crate::drivers::timer::get_jiffies() < deadline {
+        let deadline = crate::timer::get_jiffies()
+            + crate::timer::msecs_to_jiffies(SHUTDOWN_PID1_TIMEOUT_SECS * 1000);
+        while crate::timer::get_jiffies() < deadline {
             if pid1_exited() {
                 crate::println!("reboot: init exited");
                 break;
@@ -338,7 +338,7 @@ pub(crate) fn sleep_one_tick() {
     };
     // current is the running task's reference (we are it).
     let pid = current.pid();
-    let wake_at = crate::drivers::timer::get_jiffies() + 1;
+    let wake_at = crate::timer::get_jiffies() + 1;
     let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
     // Setting our own task's state.
     current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));

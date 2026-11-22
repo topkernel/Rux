@@ -136,7 +136,7 @@ pub fn try_defer(ptr: *mut u8, layout: &Layout) -> bool {
     if !matched {
         return false;
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let deadline = now.saturating_add(DEFER_MS);
     let _g = POOL_LOCK.lock_irqsave();
     // INV-MM-8: the lock is held.
@@ -175,7 +175,7 @@ pub fn try_defer(ptr: *mut u8, layout: &Layout) -> bool {
 /// has passed (one relaxed load otherwise).
 #[inline]
 pub fn drain_if_due() {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     if now >= EARLIEST_DEADLINE.load(Ordering::Relaxed) {
         drain(now);
     }

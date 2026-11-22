@@ -1612,7 +1612,7 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
             Some(t) => t.pid(),
             None => return 0,
         };
-        let wake_at = crate::drivers::timer::get_jiffies() + 25;
+        let wake_at = crate::timer::get_jiffies() + 25;
         let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
         // Re-derived borrow (never held across schedule() below).
         crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
@@ -1634,7 +1634,7 @@ pub fn sleep_snapshot_early() {
     use core::sync::atomic::Ordering;
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    let now = crate::drivers::timer::get_jiffies() as u64;
+    let now = crate::timer::get_jiffies() as u64;
     let last = LAST.load(Ordering::Relaxed);
     if now.saturating_sub(last) < 500 || N.load(Ordering::Relaxed) >= 12 {
         return;
@@ -1675,7 +1675,7 @@ pub fn pid1spin_audit() {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     static PREV_RIP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies() as u64;
+    let now = crate::timer::get_jiffies() as u64;
     let last = LAST.load(Ordering::Relaxed);
     if now.saturating_sub(last) < 200 {
         return;

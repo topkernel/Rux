@@ -1235,9 +1235,9 @@ pub fn rust_main_tail() -> ! {
         // above (enable_timer_interrupt); jiffies must advance under it.
         #[cfg(feature = "x86_64")]
         {
-            let t0 = drivers::timer::get_jiffies();
+            let t0 = timer::get_jiffies();
             drivers::intc::apic::delay_ms(150);
-            let t1 = drivers::timer::get_jiffies();
+            let t1 = timer::get_jiffies();
             print_status(
                 "timer",
                 &format!("lapic tick check: {} jiffies / 150ms", t1 - t0),

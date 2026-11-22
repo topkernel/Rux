@@ -335,7 +335,7 @@ pub fn try_to_free_pages(order: i32) -> usize {
     // Leg-15 pace: cumulative round count + jiffies spent here, read by
     // the schbd heartbeat (rux:schb (retired dfx=schb)). No lock held; note_drct is a
     // counter tick unless the switch is off.
-    let j0 = crate::drivers::timer::get_jiffies();
+    let j0 = crate::timer::get_jiffies();
     super::page_alloc::gate_note_phase(super::page_alloc::GATE_PHASE_ROUND);
     let r = balance_pgdat(order);
     // SP-5 census: round progress + pages freed by the gate holder (the
@@ -444,7 +444,7 @@ pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
     // dying. The counters above keep the full accounting.
     static LAST_PRINT_J: core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST_PRINT_J.load(Ordering::Relaxed);
     if now.saturating_sub(last) >= 10
         && LAST_PRINT_J

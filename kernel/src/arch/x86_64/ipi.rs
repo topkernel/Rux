@@ -334,7 +334,7 @@ fn snapshot_self() {
             crate::drivers::intc::apic::TIMER_ARM_SEQ[cpu].load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
-        SNAP_TB[cpu].store(crate::drivers::timer::read_time(), Ordering::Relaxed);
+        SNAP_TB[cpu].store(crate::timer::read_time(), Ordering::Relaxed);
     }
     SNAP_DONE[cpu].store(req, Ordering::Release);
 }
@@ -702,11 +702,11 @@ pub fn smp_call_function_timeout(
     );
 
     let hz = crate::drivers::timer::HZ as u64;
-    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
+    let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
     // SAFETY: csd is a valid allocation we own until done is observed;
     // done is set only by the target after detaching the node.
     while !unsafe { (*csd).done.load(Ordering::Acquire) } {
-        if crate::drivers::timer::get_jiffies() >= deadline {
+        if crate::timer::get_jiffies() >= deadline {
             return false; // node stays linked + leaked; see doc comment
         }
         crate::sched::cond_resched();

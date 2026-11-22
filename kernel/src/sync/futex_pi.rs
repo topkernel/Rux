@@ -1028,7 +1028,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         // `handed` on a freed (possibly reused) waiter slot and hand
         // the word to a task that already left.
         let timed = deadline.is_some_and(|dl| {
-            crate::drivers::timer::get_jiffies() >= dl
+            crate::timer::get_jiffies() >= dl
         });
         {
             let mut walk_from: *mut Task = core::ptr::null_mut();

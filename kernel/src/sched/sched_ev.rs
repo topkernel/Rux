@@ -122,7 +122,7 @@ pub fn sched_ev(tag: u32, pid: u32, a: u64, b: u64) {
     ev.pid = pid;
     ev.a = a;
     ev.b = b;
-    ev.jif = crate::drivers::timer::get_jiffies();
+    ev.jif = crate::timer::get_jiffies();
     ev.pub_seq.store(idx + 1, Ordering::Release);
 }
 

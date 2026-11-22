@@ -491,7 +491,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
     use crate::process::task::TaskState;
 
     let hz = crate::drivers::timer::HZ as u64;
-    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
+    let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
 
     loop {
         if all_online_cpus_reported(gen) {
@@ -500,7 +500,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             GP_CONSEC_FAIL.store(0, Ordering::Relaxed);
             return true;
         }
-        if crate::drivers::timer::get_jiffies() >= deadline {
+        if crate::timer::get_jiffies() >= deadline {
             shared_grace_done();
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             static SGP_N: core::sync::atomic::AtomicUsize =
@@ -709,7 +709,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             crate::sched::schedule();
             continue;
         }
-        let target = crate::drivers::timer::get_jiffies() + 1;
+        let target = crate::timer::get_jiffies() + 1;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
         if timer_id != 0 {
             // SAFETY: current is this task's own pointer.
@@ -739,7 +739,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             }
             // Re-check the one-shot AFTER marking sleeping: it may have
             // fired between arming and set_state (khungtaskd lesson).
-            if crate::drivers::timer::get_jiffies() >= target {
+            if crate::timer::get_jiffies() >= target {
                 // SAFETY: current is this task's own pointer.
                 unsafe {
                     (*current).set_state(TaskState::new(TaskState::RUNNING));
@@ -809,7 +809,7 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
     rcu_note_context_switch();
 
     let hz = crate::drivers::timer::HZ as u64;
-    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
+    let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
 
     loop {
         let mut all_qs = true;
@@ -828,7 +828,7 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             return true;
         }
-        if crate::drivers::timer::get_jiffies() >= deadline {
+        if crate::timer::get_jiffies() >= deadline {
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             static GPB_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
