@@ -540,6 +540,9 @@ line per id; the contract lives in the owning module.
 - **INV-BLKDEV-1** — GenDisk registry + driver ABI (drivers/blkdev, L5)
 - **INV-CBYTES-1** — CopyBytes byte-image family (kernel/src/safety/bytes.rs)
 - **INV-CBYTES-2** — CopyBytes byte-image family (kernel/src/safety/bytes.rs)
+- **INV-CBYTES-4** — pinned-frame window (kernel/src/safety/bytes.rs)
+- **INV-CBYTES-5** — advisory volatile store (kernel/src/safety/bytes.rs)
+- **INV-CBYTES-6** — pinned-frame run window (kernel/src/safety/bytes.rs)
 - **INV-DMA-1** — DmaBlock device-shared carve (kernel/src/safety/dma.rs)
 - **INV-DMA-2** — DmaBlock device-shared carve (kernel/src/safety/dma.rs)
 - **INV-DMA-3** — DmaBlock device-shared carve (kernel/src/safety/dma.rs)
@@ -1986,6 +1989,33 @@ registered per the data-corruption doctrine.
   1555/1555 fresh rootfs; triple-arch rc=0. [lane worktree oh-launch
   run/OH-LAUNCH.md round 13]
 
+### bytes-p0 (2026-11-23): the INV-CBYTES-4 contract was narrower than the audited caller — run arm split out as INV-CBYTES-6
+
+The family-6 merge (52861d115) wrapped the ext4 merged copyout's
+page-crossing span in pinned_frame_bytes, whose INV-CBYTES-4 debug
+assert (`off+len <= PAGE_SIZE`) then panicked every beget-image quiet
+boot mid-execve (bytes.rs:132; /tmp/perf-gate/pa-r4-merged-serial.log).
+Convicted at the source with a pre-assert probe boot: the firing span
+was ino=285 (= /system/bin/init, 439,888 B), off=0 len=8192 — a
+2-frame merged group inside do_execve's 16 KiB read_file_via chunk
+(pa-p0probe-serial.log line 99). The span was SOUND all along: the
+merged copyout (7b8de4918, predates the primitive by 3 weeks) merges
+only frames whose adjacency it verified (`run[j].1 == run[j-1].1 +
+block`), and get_range_with_entry pins EVERY frame it returns — so a
+release build (assert compiled out) served the same bytes with no
+corruption; the defect was the contract, not the data. Verdict (b):
+the primitive, not the caller. Fix: pinned_frame_run_bytes
+(INV-CBYTES-6, "pinned-frame run window") carries the multi-frame
+contract with the caller-side adjacency check named as the
+contiguity enforcement; the single-frame primitive keeps its tight
+assert for its 4 in-page sites. Regression gate: a real order-1
+buddy block painted with a position pattern, read across the frame
+boundary (test_safety_primitives_frame_run; riscv make test green).
+A/B control (pristine main, assert bypassed only) confirmed the
+LATER storage_daemon/init wild-RIP oops past this point is a
+pre-existing separate defect, not this fix's (pa-p0ctl-serial.log vs
+pa-p0final-serial.log). [lane worktree bytes-p0]
+
 ## Primitive INV index (literal ids — machine-greppable)
 
 Every id below is spelled literally for the unsafe_gate artifact
@@ -1996,6 +2026,9 @@ comment carries the full contract text.
 - INV-CBYTES-1 (byte image) — safety/bytes.rs: a `T: Copy` value's byte image is exactly its object representation.
 - INV-CBYTES-2 (bounds/alignment) — safety/bytes.rs: sub-object accessors re-derive offsets from the same `T`, checked in-bounds and aligned.
 - INV-CBYTES-3 (liveness) — safety/bytes.rs: every accessor takes a reference, so the underlying value is live for the call.
+- INV-CBYTES-4 (pinned frame span) — safety/bytes.rs: [off, off+len) lies inside ONE caller-pinned PAGE_SIZE page-cache frame.
+- INV-CBYTES-5 (volatile field store) — safety/bytes.rs: advisory volatile store through a live &mut to POD.
+- INV-CBYTES-6 (pinned frame run span) — safety/bytes.rs: the span covers caller-pinned, caller-verified-adjacent (direct-map neighbor) PAGE_SIZE frames.
 - INV-RING-1 (capacity) — safety/ring.rs: N is a power of two; the mask derives from N, an index can never leave the array.
 - INV-RING-2 (SPSC with a CAS consumer) — safety/ring.rs: one producer (the IRQ handler) advances tail; consumers CAS head; put never blocks.
 - INV-RING-3 (static liveness) — safety/ring.rs: the ring is a machine-lifetime static of MaybeUninit<T: Copy> cells; volatile cross-hart slot access.
