@@ -2701,7 +2701,7 @@ fn world_lock_try() -> Option<crate::sync::spinlock::SpinlockIrqGuard<'static, O
 /// can only be created by borrowing through the live WorldGuard, so its
 /// lifetime pins the lock hold.
 #[allow(clippy::mut_from_ref)]
-fn pm<'a>(_held: &World, p: &Arc<BinderProc>) -> &'a mut BinderProc {
+fn pm<'a>(_held: &World, p: &Arc<BinderProc>) -> &'a BinderProc {
     let ptr = Arc::as_ptr(p);
     // Dead-proc diagnostic (unchanged): membership check against the
     // world the guard carries.
@@ -2720,7 +2720,7 @@ fn pm<'a>(_held: &World, p: &Arc<BinderProc>) -> &'a mut BinderProc {
     }
     // SAFETY: WORLD held (token proof); single mutator at a time; the Arc
     // pins the object.
-    unsafe { &mut *(ptr as *mut BinderProc) }
+    unsafe { &*(ptr as *const BinderProc) }
 }
 
 fn proc_alive(world: &World, p: &Arc<BinderProc>) -> bool {
