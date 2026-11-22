@@ -1978,7 +1978,7 @@ pub fn tick_trap_report(site: &str) {
     let (idle_phase_self, pid_self) = {
         let cur = crate::sched::current();
         let p = cur.map(|t| t.pid()).unwrap_or(0);
-        (crate::sched::sched::WW_IDLE_PHASE[me].load(Ordering::Relaxed), p)
+        (crate::sched::sched_hooks::ww_idle_phase(me), p)
     };
     match &snap_self {
         Some(s) => crate::println!(
@@ -1986,7 +1986,7 @@ pub fn tick_trap_report(site: &str) {
             site, me,
             s.lvt, s.tmict, s.tmcct, s.svr, s.tpr, s.irr7, s.isr7,
             if_self, pid_self, idle_phase_self,
-            crate::sched::sched::SCHED_CS_PHASE[me].load(Ordering::Relaxed),
+            crate::sched::sched_hooks::sched_cs_phase(me),
             apic::tick_trap_adjudicate(s),
             apic::TIMER_ARM_SEQ[me].load(Ordering::Relaxed),
             apic::TIMER_ARM_OP[me].load(Ordering::Relaxed),
@@ -2049,7 +2049,7 @@ pub fn tick_trap_report(site: &str) {
                 ww_tick_age_ms(cpu),
                 apic::TIMER_ARM_SEQ[cpu].load(Ordering::Relaxed),
                 apic::TIMER_ARM_OP[cpu].load(Ordering::Relaxed),
-                crate::sched::sched::SCHED_CS_PHASE[cpu].load(Ordering::Relaxed),
+                crate::sched::sched_hooks::sched_cs_phase(cpu),
                 match crate::dfx::syscost::open_cli_segment(cpu) {
                     Some((file, line, age_raw)) => alloc::format!(
                         "{}:{} age_ms~{}",
