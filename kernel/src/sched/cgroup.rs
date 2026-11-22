@@ -44,6 +44,12 @@
 //! allocation alive), so raw `cgroup_ptr`s in tasks and leaked
 //! cgroupfs inodes can never dangle.
 
+
+// S1 pre-work (2026-11-22): zero unsafe remains (the Send/Sync markers were
+// vestigial — auto-derived; deletion verified by green check). Tree-level
+// forbid until the S1 crate split.
+#![forbid(unsafe_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -311,9 +317,9 @@ impl CgroupNode {
 }
 
 // SAFETY: all shared mutable state is behind irqsave Spinlocks or atomics.
-unsafe impl Send for CgroupNode {}
+
 // SAFETY: see above — no data race is possible across CPUs.
-unsafe impl Sync for CgroupNode {}
+
 
 // ============================================================================
 // Global root

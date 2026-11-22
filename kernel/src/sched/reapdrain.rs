@@ -111,7 +111,7 @@ static CLAIM_DROPPED: core::sync::atomic::AtomicU32 =
 // burns); the exclusivity is the linear type itself plus the
 // unreachability contract minted on — the same Send/Sync declaration
 // every queue handle in this subsystem carries.
-unsafe impl Send for ReapClaim {}
+
 
 impl ReapClaim {
     /// Mint the storage-free obligation for `task`.
@@ -184,6 +184,14 @@ struct PendingReap {
     /// Past the switch stage, waiting for the batch grace target.
     grace: bool,
 }
+
+
+// ReapClaim carries a NonNull<Task> (the terminal-switch protocol's
+// page-identity TCB handle); PendingReap wraps the claim, so this Send
+// is what lets the PENDING/GRACE_BATCH statics exist (INV-RD-CLAIM).
+// SAFETY: the claim's NonNull is only dereferenced by the reaper under
+// the reap lock; ownership is exclusive (no concurrent access).
+unsafe impl Send for ReapClaim {}
 
 static PENDING: crate::sync::spinlock::Spinlock<Vec<PendingReap>> =
     crate::sync::spinlock::Spinlock::new(Vec::new());

@@ -2105,8 +2105,6 @@ bcbc4136a6b9	kernel/src/safety/ptr.rs	get	229		INV:INV-SREF-1
 96c388aa730b	kernel/src/safety/slot.rs	get_mut_locked	108		INV:INV-SLOT-1
 cf8d6c7c915d	kernel/src/sbi.rs	sbi_system_reset	62	asm	INV:F16
 e7cf147a1188	kernel/src/sbi.rs	send_ipi	98	asm	INV:F16
-51b5083c3c46	kernel/src/sched/cgroup.rs	<module>	314		INV:INV-SENDSYNC-1
-33bccb345f52	kernel/src/sched/cgroup.rs	<module>	316		INV:INV-SENDSYNC-1
 c83c88e2d6ea	kernel/src/sched/edges.rs	idle_task_ptr	53		INV:INV-SCE-4
 a50ea5c53c87	kernel/src/sched/edges.rs	idle_task_storage_base	62		INV:INV-SCE-4
 9afb2cd9dec1	kernel/src/sched/edges.rs	task_mut	92		INV:INV-SCE-1
@@ -2190,12 +2188,8 @@ eab8b8269849	kernel/src/sched/edges.rs	per_cpu_shared	1059		INV:INV-SCE-10
 52c0cfa3a0d7	kernel/src/sched/edges.rs	secondary_idle_publish	1086		INV:INV-SCE-4
 95988dda1a9c	kernel/src/sched/edges.rs	secondary_idle_table_base	1093		INV:INV-SCE-4
 51ae407563d7	kernel/src/sched/edges.rs	secondary_idle_task	1099		INV:INV-SCE-4
-2a410d9d924c	kernel/src/sched/fair.rs	<module>	3231		INV:INV-SCE-6
-21af558e2b05	kernel/src/sched/fair.rs	<module>	3232		INV:INV-SCE-6
-bc5fcaf2857e	kernel/src/sched/reapdrain.rs	<module>	114		INV:INV-TL-1
 613f1c542f50	kernel/src/sched/reapdrain.rs	task	147		INV:INV-SCE-2
-828a6d4903f6	kernel/src/sched/rt.rs	<module>	649		INV:INV-SCE-1
-0030893faa67	kernel/src/sched/rt.rs	<module>	650		INV:INV-SCE-1
+63f7c3ddb59c	kernel/src/sched/reapdrain.rs	<module>	194		INV:INV-RD-CLAIM
 e6dd4f64b434	kernel/src/sched/sched.rs	<module>	92		INV:INV-SENDSYNC-1
 6b03a27aa0d1	kernel/src/sched/sched.rs	grq_current_fp	870	asm	INV:INV-SCE-3
 1252ff9dd71b	kernel/src/sched/sched.rs	grq_current_fp	875	asm	INV:INV-SCE-3

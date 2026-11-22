@@ -24,6 +24,12 @@
 //! - idle_sched_class is for per-CPU idle tasks (pid=0) only
 //! - SCHED_IDLE policy tasks use this class with minimal weight
 
+
+// S1 pre-work (2026-11-22): zero unsafe remains (the Send/Sync markers were
+// vestigial — auto-derived; deletion verified by green check). Tree-level
+// forbid until the S1 crate split.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 
 // Use config values for scheduler timing
@@ -3228,8 +3234,8 @@ impl Default for CfsRunQueue {
     }
 }
 
-unsafe impl Send for CfsRunQueue {}
-unsafe impl Sync for CfsRunQueue {}
+
+
 
 /// Calculate time slice (milliseconds)
 ///
