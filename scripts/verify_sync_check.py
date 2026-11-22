@@ -257,7 +257,7 @@ MAPPINGS = [
         "transforms": [
             (r'\s*let mut st = self\.state\.lock\(\);\s*\n?', '\n'),   # spinlock guard
             (r'\s*let st = self\.state\.lock\(\);\s*\n?', '\n'),        # read-only guard
-            (r'crate::drivers::timer::get_jiffies\(\)', 'now'),          # jiffies env hook
+            (r'crate::timer::get_jiffies\(\)', 'now'),          # jiffies env hook
             (r'Some\(SleepMutexGuard \{ lock: self \}\)', 'true'),       # guard -> bool
             (r'\bNone\b', 'false'),
             (r'Self::ANTI_STARVE_JIFFIES', 'anti_starve'),               # bound -> param
@@ -273,7 +273,7 @@ MAPPINGS = [
                 # acquisition rework); the registration region lives in
                 # lock_inner's body.
                 "in_fn": "lock_inner",
-                "start": "let now = crate::drivers::timer::get_jiffies();",
+                "start": "let now = crate::timer::get_jiffies();",
                 "end": "drop(st);",
                 "post": [(r'\s*let now = now;\s*\n?', '\n'), (r';\s*$', '; take')],
             },
@@ -336,7 +336,7 @@ MAPPINGS = [
     {
         "name": "net/route_entry",
         "verify": "kernel/verify/src/net/route_test.rs",
-        "kernel": "kernel/src/net/ipv4/route.rs",
+        "kernel": "kernel/rux-net/src/net/ipv4/route.rs",  # crate-flip rung 2: net service files moved
         "type": "RouteEntry",
         "compare": ["new", "is_gateway", "is_host", "is_network", "matches"],
         "skip": [],
@@ -345,7 +345,7 @@ MAPPINGS = [
     {
         "name": "net/route_flags",
         "verify": "kernel/verify/src/net/route_test.rs",
-        "kernel": "kernel/src/net/ipv4/route.rs",
+        "kernel": "kernel/rux-net/src/net/ipv4/route.rs",  # crate-flip rung 2: net service files moved
         "type": "RouteFlags",
         "compare": [],
         "skip": [],
@@ -354,7 +354,7 @@ MAPPINGS = [
     {
         "name": "net/arp_entry",
         "verify": "kernel/verify/src/net/arp_test.rs",
-        "kernel": "kernel/src/net/arp.rs",
+        "kernel": "kernel/rux-net/src/net/arp.rs",  # crate-flip rung 2
         "type": "ArpEntry",
         "compare": ["new", "is_expired"],
         "skip": [],
@@ -364,7 +364,7 @@ MAPPINGS = [
     {
         "name": "net/arp_packet",
         "verify": "kernel/verify/src/net/arp_test.rs",
-        "kernel": "kernel/src/net/arp.rs",
+        "kernel": "kernel/rux-net/src/net/arp.rs",  # crate-flip rung 2
         "type": "ArpPacket",
         "compare": ["is_request", "is_reply", "sender_mac", "sender_ip", "target_mac", "target_ip"],
         "skip": ["from_bytes"],  # kernel uses &'static, verify uses &
@@ -373,7 +373,7 @@ MAPPINGS = [
     {
         "name": "net/checksum",
         "verify": "kernel/verify/src/net/checksum_test.rs",
-        "kernel": "kernel/src/net/ipv4/checksum.rs",
+        "kernel": "kernel/rux-net/src/net/ipv4/checksum.rs",
         "type": None,  # free functions, not impl methods
         "compare": [
             "ip_checksum", "verify_ip_checksum", "pseudo_header_checksum",
@@ -524,7 +524,7 @@ MAPPINGS = [
     {
         "name": "net/tcp_rtt",
         "verify": "kernel/verify/src/net/tcp_test.rs",
-        "kernel": "kernel/src/net/tcp.rs",
+        "kernel": "kernel/rux-net/src/net/tcp.rs",
         "type": "TcpRttEstimator",
         "compare": ["new", "update", "backoff", "reset"],
         "skip": [],
@@ -533,7 +533,7 @@ MAPPINGS = [
     {
         "name": "net/tcp_congestion",
         "verify": "kernel/verify/src/net/tcp_test.rs",
-        "kernel": "kernel/src/net/tcp.rs",
+        "kernel": "kernel/rux-net/src/net/tcp.rs",
         "type": "TcpCongestion",
         "compare": ["new", "on_ack", "on_dup_ack", "on_timeout", "reset", "seq_before"],
         "skip": [],
@@ -542,7 +542,7 @@ MAPPINGS = [
     {
         "name": "net/tcp_hdr",
         "verify": "kernel/verify/src/net/tcp_test.rs",
-        "kernel": "kernel/src/net/tcp.rs",
+        "kernel": "kernel/rux-net/src/net/tcp.rs",
         "type": "TcpHdr",
         "compare": [
             "dof", "header_len", "syn", "ack", "fin", "rst", "psh", "window",
@@ -558,7 +558,7 @@ MAPPINGS = [
     {
         "name": "net/ethernet",
         "verify": "kernel/verify/src/net/ethernet_test.rs",
-        "kernel": "kernel/src/net/ethernet.rs",
+        "kernel": "kernel/rux-net/src/net/ethernet.rs",
         "type": None,  # free functions
         "compare": [
             "eth_is_valid_unicast_addr", "eth_is_multicast_addr",
@@ -615,7 +615,7 @@ MAPPINGS = [
     {
         "name": "net/ipv4_hdr",
         "verify": "kernel/verify/src/net/ipv4_udp_test.rs",
-        "kernel": "kernel/src/net/ipv4/mod.rs",
+        "kernel": "kernel/rux-net/src/net/ipv4/mod.rs",
         "type": "IpHdr",
         "compare": [],  # verify defines its own accessor methods; kernel IpHdr only has from_bytes/compute_checksum/is_valid_checksum
         "skip": ["from_bytes", "compute_checksum", "is_valid_checksum"],  # use &'static and kernel types
@@ -624,7 +624,7 @@ MAPPINGS = [
     {
         "name": "net/udp_hdr",
         "verify": "kernel/verify/src/net/ipv4_udp_test.rs",
-        "kernel": "kernel/src/net/udp.rs",
+        "kernel": "kernel/rux-net/src/net/udp.rs",
         "type": "UdpHdr",
         "compare": ["source", "dest", "len", "check"],
         "skip": ["from_bytes"],  # kernel uses &'static Self
@@ -1035,7 +1035,7 @@ MAPPINGS = [
     {
         "name": "net/icmp_hdr",
         "verify": "kernel/verify/src/net/icmp_test.rs",
-        "kernel": "kernel/src/net/icmp.rs",
+        "kernel": "kernel/rux-net/src/net/icmp.rs",
         "type": "IcmpHdr",
         "compare": [],
         "skip": [],  # struct-only, methods not copied
@@ -1184,7 +1184,7 @@ MAPPINGS = [
     {
         "name": "net/tcp_state",
         "verify": "kernel/verify/src/net/tcp_state_test.rs",
-        "kernel": "kernel/src/net/tcp.rs",
+        "kernel": "kernel/rux-net/src/net/tcp.rs",
         "type": None,  # enum constants + free functions
         # tcp_dof / tcp_header_len / tcp_syn / tcp_ack / tcp_fin /
         # tcp_rst / tcp_psh helpers were removed from the kernel's
@@ -1198,7 +1198,7 @@ MAPPINGS = [
     {
         "name": "net/socket",
         "verify": "kernel/verify/src/net/socket_test.rs",
-        "kernel": "kernel/src/net/socket.rs",
+        "kernel": "kernel/rux-net/src/net/socket.rs",
         "type": "SockAddrIn",
         "compare": ["port", "addr"],
         "skip": [],
@@ -1467,7 +1467,7 @@ MAPPINGS = [
     {
         "name": "net/transport_checksum",
         "verify": "kernel/verify/src/net/transport_checksum_test.rs",
-        "kernel": "kernel/src/net/udp.rs",
+        "kernel": "kernel/rux-net/src/net/udp.rs",
         "type": None,  # UDP/ICMP/TCP checksum functions extracted (uses ip_checksum for ICMP)
         "compare": [],
         "skip": [],
@@ -1476,7 +1476,7 @@ MAPPINGS = [
     {
         "name": "net/checksum_verify",
         "verify": "kernel/verify/src/net/checksum_verify_test.rs",
-        "kernel": "kernel/src/net/ipv4/checksum.rs",
+        "kernel": "kernel/rux-net/src/net/ipv4/checksum.rs",
         "type": None,  # ip_checksum extracted
         "compare": [],
         "skip": [],
@@ -1560,7 +1560,7 @@ MAPPINGS = [
     {
         "name": "syscall/clamp_rw_count",
         "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",
-        "kernel": "kernel/src/syscall/io.rs",
+        "kernel": "kernel/rux-syscall/src/syscall/io.rs",
         "type": None,
         "compare": ["clamp_rw_count"],
         "skip": [],

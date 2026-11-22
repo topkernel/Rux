@@ -33,6 +33,7 @@ TESTS_DIR = KERNEL_SRC / "tests"
 # fake time / expose fixtures the tests drive). Exact (relpath, name) pairs.
 ALLOWLIST = {
     ("kernel/src/drivers/timer/riscv64.rs", "test_advance_jiffies"),
+    ("kernel/src/timer.rs", "test_advance_jiffies"),  # top-level twin of the per-arch fakes
     ("kernel/src/drivers/timer/x86_64.rs", "test_advance_jiffies"),
     ("kernel/src/drivers/timer/aarch64.rs", "test_advance_jiffies"),
     ("kernel/src/timer/wheel.rs", "test_shared"),
@@ -56,6 +57,7 @@ ATTR_TEST_RE = re.compile(r'#\[test\]')
 CFG_ALLOWLIST_FILES = {
     "kernel/src/main.rs",                    # mod tests; + run_all_tests wiring
     "kernel/src/drivers/timer/riscv64.rs",   # test_advance_jiffies fake
+    "kernel/src/timer.rs",                    # top-level test_advance_jiffies twin
     "kernel/src/drivers/timer/x86_64.rs",
     "kernel/src/drivers/timer/aarch64.rs",
     "kernel/src/timer/wheel.rs",             # test_shared fixture
