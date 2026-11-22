@@ -20,11 +20,15 @@
 // root so the service files' crate::X paths resolve unchanged.
 pub use rux::{
     arch, config, console, dfx, drivers, errno, fs, io_uring, ipc, list,
-    mm, module, net, perf, printk, process, safety, sched, security,
+    mm, module, perf, printk, process, safety, sched, security,
     signal, sync, timer, trace,
 };
 // The print macros (macro_rules exported at the framework root).
 pub use rux::{pr_debug, pr_err, pr_info, pr_warn, println};
+// The net service tree (crate-flip rung 2): re-exported at the crate
+// root so the syscall service files' `crate::net::*` paths stay valid —
+// the sibling-service dependency (syscall -> net) is one-way.
+pub use rux_net::net;
 // The alloc crate (no_std extern): re-exported at the root so the
 // service files' alloc:: paths resolve.
 extern crate alloc;

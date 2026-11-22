@@ -8,8 +8,6 @@ edition = "2021"
 # service column. Depends on the rux framework lib (re-exports +
 # hook table + socket-call surface from rux-syscall's sibling).
 
-[workspace]
-
 [dependencies]
 rux = { path = "..", default-features = false }
 

@@ -4,8 +4,9 @@
 //! net/net_hooks.rs (the hook table) and the drivers consume the
 //! stack's packet-ingress surface downward.
 //!
-//! The files are #[path]-included from kernel/src/net/ with ZERO moves
-//! (the migration state; the sole-copy move follows the rung-1 recipe).
+//! Sole-copy state (the rung-1 recipe's final step): the service files
+//! LIVE in this crate (src/net/); the framework keeps net_hooks,
+//! file_arc, net_edges and buffer.
 
 // FORBID since the substrate extraction: the socket-table reference
 // formation, Arc-refcount probes, validated derefs and POD header
@@ -32,7 +33,7 @@ extern crate alloc;
 // The net tree, nested under crate::net (the historical paths).
 pub mod net {
     // the service files
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/arp.rs"] pub mod arp;
+    #[path = "arp.rs"] pub mod arp;
     // buffer.rs (the raw-memory substrate: allocator calls, pointer
     // arithmetic, slice construction — 22 unsafe constructs) stays
     // FRAMEWORK-side (the edges.rs pattern); the crate consumes it
@@ -43,17 +44,17 @@ pub mod net {
     pub use rux::net::file_arc::take_file_arc as reclaim_file_arc;
     pub use rux::net::file_arc::take_file_arc;
     pub use rux::net::net_edges;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/ethernet.rs"] pub mod ethernet;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/icmp.rs"] pub mod icmp;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/netlink.rs"] pub mod netlink;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/raw.rs"] pub mod raw;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/socket.rs"] pub mod socket;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/tcp.rs"] pub mod tcp;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/tcp_timer.rs"] pub mod tcp_timer;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/udp.rs"] pub mod udp;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/unix.rs"] pub mod unix;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/ipv4/mod.rs"] pub mod ipv4;
-    #[path = "/home/william/rux-agents/ur-L4/kernel/src/net/ipv6/mod.rs"] pub mod ipv6;
+    #[path = "ethernet.rs"] pub mod ethernet;
+    #[path = "icmp.rs"] pub mod icmp;
+    #[path = "netlink.rs"] pub mod netlink;
+    #[path = "raw.rs"] pub mod raw;
+    #[path = "socket.rs"] pub mod socket;
+    #[path = "tcp.rs"] pub mod tcp;
+    #[path = "tcp_timer.rs"] pub mod tcp_timer;
+    #[path = "udp.rs"] pub mod udp;
+    #[path = "unix.rs"] pub mod unix;
+    #[path = "ipv4/mod.rs"] pub mod ipv4;
+    #[path = "ipv6/mod.rs"] pub mod ipv6;
 
     // The framework's whole-module globs (the old shared mod.rs's shape).
     pub use crate::arch::*;

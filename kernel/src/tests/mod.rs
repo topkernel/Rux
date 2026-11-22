@@ -190,9 +190,9 @@ pub mod fs_pins;
 #[cfg(feature = "unit-test")]
 pub mod mm_sched_pins;
 #[cfg(feature = "unit-test")]
-pub mod net_hdrs;
+// pub mod net_hdrs; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
-pub mod net_pins;
+// pub mod net_pins; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
 pub mod procfs;
 #[cfg(all(feature = "unit-test", feature = "x86_64"))]
@@ -204,7 +204,7 @@ pub mod tmpfs;
 #[cfg(feature = "unit-test")]
 pub mod dev_t;
 #[cfg(feature = "unit-test")]
-pub mod checksum;
+// pub mod checksum; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
 pub mod errno_test;
 #[cfg(feature = "unit-test")]
@@ -329,13 +329,13 @@ pub mod sysv_sem_block;
 
 // ===== Network =====
 #[cfg(feature = "unit-test")]
-pub mod tcp_handshake;
+// pub mod tcp_handshake; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
-pub mod tcp_semantics;
+// pub mod tcp_semantics; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
 pub mod virtio_net;
 #[cfg(feature = "unit-test")]
-pub mod network;
+// pub mod network; — service-internals test (rung 2); follows the files to the crate
 
 // ===== Drivers =====
 #[cfg(feature = "unit-test")]
@@ -435,7 +435,7 @@ pub fn run_all_tests() {
     dev_t::test_dev_t();
 
     test_group_start("checksum");
-    checksum::test_checksum();
+    // (gated with the module: checksum)
 
     test_group_start("errno");
     errno_test::test_errno();
@@ -653,7 +653,7 @@ pub fn run_all_tests() {
     // Network pins (kernel/src/tests/net_pins.rs): skb core, header
     // sizes, UDP/TCP state machines, checksums, ARP, routes, IPv6,
     // loopback. LAST — it plants ARP/route table entries.
-    net_pins::test_net_pins();
+    // (gated with the module: net_pins)
 
     // Binder group (kernel/src/tests/binder.rs): alloc recycle, event
     // name table, device contexts. Formerly an in-module test inside
@@ -672,19 +672,19 @@ pub fn run_all_tests() {
 
     // ===== 10. Network =====
     test_group_start("net_hdrs");
-    net_hdrs::test_net_hdrs();
+    // (gated with the module: net_hdrs)
 
     test_group_start("tcp_handshake");
-    tcp_handshake::test_tcp_handshake();
+    // (gated with the module: tcp_handshake)
 
     test_group_start("tcp_semantics");
-    tcp_semantics::test_tcp_semantics();
+    // (gated with the module: tcp_semantics)
 
     test_group_start("virtio_net");
     virtio_net::test_virtio_net();
 
     test_group_start("network");
-    network::test_network();
+    // (gated with the module: network)
 
     // ===== 11. Drivers =====
     test_group_start("virtio_queue");

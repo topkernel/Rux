@@ -1770,7 +1770,7 @@ a20bf887b77c	kernel/src/ipc/binder.rs	user_task_park_stack_w	8064		INV:INV-BINDE
 afec4f690353	kernel/src/ipc/binder.rs	bc_corruption_snapshot	9461	raw-construct	INV:INV-BINDER-PROBE
 9e76f199ab6f	kernel/src/ipc/binder.rs	get	13076		INV:INV-BINDER-PINTASK
 bfae3af3cc5c	kernel/src/ipc/keys.rs	sys_keyctl	1421	ptr-ops	INV:INV-UACCESS-SAFE-1
-e503b71d162b	kernel/src/ipc/posix_mq.rs	mq_fds_cleanup	1210		INV:INV-KTASK-1
+e6670a2f8a73	kernel/src/ipc/posix_mq.rs	mq_fds_cleanup	1214		INV:INV-KTASK-1
 0ddc0e1b769e	kernel/src/ipc/sysv_msg.rs	sys_msgsnd	752		INV:INV-SYSV-UAPI-2
 397b22664996	kernel/src/ipc/sysv_msg.rs	sys_msgrcv	875	ptr-ops	INV:INV-SYSV-UAPI-2
 36551e266ec0	kernel/src/ipc/sysv_msg.rs	sys_msgrcv	882	ptr-ops	INV:INV-SYSV-UAPI-2
@@ -1780,7 +1780,7 @@ e503b71d162b	kernel/src/ipc/posix_mq.rs	mq_fds_cleanup	1210		INV:INV-KTASK-1
 f7a295a8d542	kernel/src/ipc/sysv_sem.rs	sem_undo_exit	1515		INV:INV-SYSV-UAPI-2
 2a6833798be7	kernel/src/ipc/sysv_shm.rs	drop	99		INV:INV-SYSV-UAPI-2
 94ccd5ae0d70	kernel/src/ipc/sysv_shm.rs	sys_shmat	1037		INV:INV-SYSV-UAPI-2
-0faa24cbfe1d	kernel/src/lib.rs	rust_main_impl	1763	asm	INV:INV-BOOT-ZEROPAGE-1
+e8028a36f02f	kernel/src/lib.rs	rust_main_impl	1766	asm	INV:INV-BOOT-ZEROPAGE-1
 0953597665ba	kernel/src/list.rs	<module>	73		INV:INV-LIST-1
 d018f0b94a39	kernel/src/list.rs	<module>	92		INV:INV-LIST-1
 c48b7421a0d8	kernel/src/list.rs	<module>	108	ptr-ops	INV:INV-LIST-1
@@ -1918,9 +1918,9 @@ cb41001f2c27	kernel/src/net/buffer.rs	skb_copy_bits	564	ptr-ops	INV:INV-SKB-1
 53d041b24aee	kernel/src/net/buffer.rs	hdr_view_mut	626	ptr-ops	INV:INV-SKB-1
 35f48b04ebe8	kernel/src/net/file_arc.rs	file_arc	12	ptr-ops	INV:INV-NETARC-1
 ef8f5fa0c8ae	kernel/src/net/file_arc.rs	take_file_arc	27	ptr-ops	INV:INV-NETARC-1
-1648c36c6b73	kernel/src/net/mod.rs	file_arc	54		INV:INV-NETARC-1
-01eb958f6874	kernel/src/net/mod.rs	reclaim_file_arc	70		INV:INV-NETARC-1
-e75b7da209e3	kernel/src/net/mod.rs	take_file_arc	80		INV:INV-NETARC-1
+1eabf805d45d	kernel/src/net/mod.rs	file_arc	50		INV:INV-NETARC-1
+393ed7a299af	kernel/src/net/mod.rs	reclaim_file_arc	66		INV:INV-NETARC-1
+e1c4dcc418d7	kernel/src/net/mod.rs	take_file_arc	76		INV:INV-NETARC-1
 8d65f94566ae	kernel/src/net/net_edges.rs	static_table_ref	24		INV:INV-NET-SOCKTAB-1
 e145dbdda764	kernel/src/net/net_edges.rs	static_table_mut	31		INV:INV-NET-SOCKTAB-1
 8073c8422f1c	kernel/src/net/net_edges.rs	arc_refcount_probe	43	volatile,ptr-ops	INV:INV-NET-ARCREF-1

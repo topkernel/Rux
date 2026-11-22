@@ -80,13 +80,6 @@ kernel/src/mm/page.rs
 kernel/src/mm/pagemap.rs
 kernel/src/mm/unwatch.rs
 kernel/src/mm/vmstat.rs
-kernel/src/net/arp.rs
-kernel/src/net/ethernet.rs
-kernel/src/net/icmp.rs
-kernel/src/net/ipv4/checksum.rs
-kernel/src/net/ipv4/defrag.rs
-kernel/src/net/ipv6/icmpv6.rs
-kernel/src/net/tcp_timer.rs
 kernel/src/panic_policy.rs
 kernel/src/print.rs
 kernel/src/process/coredump.rs
