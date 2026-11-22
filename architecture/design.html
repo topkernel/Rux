@@ -111,12 +111,12 @@
     <h3>与同谱系工作的差异(Framekernel / RedLeaf)</h3>
     <div class="tbl-wrap"><table>
       <thead><tr><th>维度</th><th>Asterinas(Framekernel)</th><th>RedLeaf(PLOS'23)</th><th>Rux 晶核</th></tr></thead><tbody>
-        <tr><td>隔离的执行者</td><td>单 crate 内惯例+评审的 framework/service 分层</td><td>类型系统,域间零拷贝 RPC</td><td><b>编译器 crate 粒度强制</b>:逐 crate forbid(负探针验证)+Cargo 包 DAG 拒环(依赖无环性机器检查)+CI 棘轮</td></tr>
-        <tr><td>边界形态</td><td>二进制内函数调用</td><td>类型化 RPC 通道(协议层)</td><td>跨 crate 普通函数调用,LTO 内联 —— 比 RPC 薄一整层</td></tr>
-        <tr><td>类型健全性失守</td><td>无后备</td><td>无后备(其明示赌注)</td><td><b>MPK 硬件后备</b>(47–49 周期/窗口,故障注入实证)</td></tr>
-        <tr><td>TCB 形态</td><td>framework 区,评审审计</td><td>小验证运行时</td><td><b>~3,000 行逐项列表</b>(每行带参考对应物+F 行编号)+验证栈覆盖+台账(97%+ 区域有审计工件)</td></tr>
-        <tr><td>此处独有</td><td>—</td><td>—</td><td>census/INV/F 行台账;S1/M1 策略劈分;测量先行+搁置即成功的翻转梯子</td></tr>
-        <tr><td>对方领先(诚实)</td><td>更早交付完整 Linux 系统调用面</td><td>零拷贝 RPC 形式化更完整</td><td>—</td></tr>
+        <tr><td>内存安全隔离的 enforcement 机制</td><td>单一 crate 内按惯例划分 framework/service 边界,依赖代码评审维护</td><td>类型系统隔离,域间经零拷贝 RPC 通信</td><td>编译器在 crate 粒度静态强制:每个服务 crate 声明 <code>#![forbid(unsafe_code)]</code>(插入 unsafe 即编译失败,经对抗性验证);Cargo 依赖图拒绝环形依赖(依赖无环性由构建系统静态检查);CI 对属性集合做单调性检查(移除属性即构建失败)</td></tr>
+        <tr><td>跨边界调用的形态与开销</td><td>同一二进制内的普通函数调用</td><td>类型化 RPC 通道,存在序列化/协议层开销</td><td>跨 crate 直接函数调用,链接时优化(LTO)可跨 crate 内联 —— 无协议层,调用开销与单体内核相同</td></tr>
+        <tr><td>类型系统 soundness 漏洞的容错</td><td>无硬件后备</td><td>无硬件后备(论文明示接受此风险)</td><td>Intel MPK(保护密钥)硬件后备:核心元数据页标记保护密钥,越权访问触发硬件缺页异常;WRPKRU 密钥切换实测 47–49 个 CPU 周期(10 万次 TSC 计时),经故障注入验证</td></tr>
+        <tr><td>TCB 的构成与审计方式</td><td>framework 区域,人工代码评审</td><td>小型经验证的运行时</td><td>约 3,000 行逐项登记(每项标注参考实现中的对应代码与不可缩减理由);Kani 全输入证明 + Miri 未定义行为检查 + Verus 无界算术引理覆盖;持久化审计清单记录每个 unsafe 区域的验证工件(97%+ 区域有对应审计条目)</td></tr>
+        <tr><td>本设计特有</td><td>—</td><td>—</td><td>按类别的 unsafe 计数与逐块不可缩减性证明;调度/内存的机制与策略分离(S1/M1);先测量反向依赖再执行的迁移流程,不可分解时记录数据后搁置</td></tr>
+        <tr><td>对方领先之处(如实)</td><td>更早交付完整 Linux 系统调用接口</td><td>零拷贝 RPC 的形式化验证更完整</td><td>—</td></tr>
       </tbody></table></div>
     <h3>分级落地数字</h3>
     <p>当前 ~10,300 双计 → Rung 1 闭合(系统调用 crate,库内副本删除,结构性变化)→ +网络级+S1/M1 劈分(−~750)→ +文件系统/驱动级(−~2,770)→ +dfx 仪器退役评审(−600~1,000)→ <b>终态 = rux-core 尺寸 ≈4,000–4,700</b>。每级门禁:三架构构建+全量套件+fio 三案例+冒烟+forbid 负探针。设计正本:<code>docs/architecture/micro-core-design.md</code>(绑定梯子与中止判据);翻转机制:<code>crate-plan.md</code>。</p>>
