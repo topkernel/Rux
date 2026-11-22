@@ -5991,7 +5991,7 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 // with EBADF and userspace same-file checks misbehaved
                 // (coreutils cat: "input file is output file" on every
                 // `x | cat` pipeline, silently dropping the data).
-                if crate::fs::pipe::pipe_file_stat(&file, stat).is_some() {
+                if crate::fs::file_hooks::pipe_stat(&file, stat).is_some() {
                     return Ok(());
                 }
                 // Sockets (all families) install inode-less Files too;
@@ -6003,7 +6003,7 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 if crate::net::net_hooks::socket_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }
-                if crate::fs::char_dev::char_dev_file_stat(&file, stat).is_some() {
+                if crate::fs::file_hooks::char_dev_stat(&file, stat).is_some() {
                     return Ok(());
                 }
                 // DRM nodes + exported prime (dma-buf) fds: dma-buf must
@@ -6316,7 +6316,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 file.set_flags(crate::fs::file::FileFlags::new(new_flags));
                 // O_ASYNC bit changed: refresh the pipe fasync registration
                 // (registering enables SIGIO delivery, clearing disables).
-                crate::fs::pipe::oasync_register_pipe(&file, fd as i32);
+                crate::fs::file_hooks::oasync_register(&file, fd as i32);
 
                 Ok(0)  // Return 0 on success
             }
@@ -6538,7 +6538,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 } else {
                     *file.f_owner.lock() = crate::fs::file::FileOwner::none();
                 }
-                crate::fs::pipe::oasync_register_pipe(&file, fd as i32);
+                crate::fs::file_hooks::oasync_register(&file, fd as i32);
                 Ok(0)
             }
 
@@ -6579,7 +6579,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     return Err(errno::Errno::InvalidArgument.as_neg_i32());
                 }
                 file.f_signum.store(sig, core::sync::atomic::Ordering::Relaxed);
-                crate::fs::pipe::oasync_register_pipe(&file, fd as i32);
+                crate::fs::file_hooks::oasync_register(&file, fd as i32);
                 Ok(0)
             }
 
@@ -6666,7 +6666,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     kind,
                     id: resolved.unwrap_or(opid),
                 };
-                crate::fs::pipe::oasync_register_pipe(&file, fd as i32);
+                crate::fs::file_hooks::oasync_register(&file, fd as i32);
                 Ok(0)
             }
 
@@ -6730,14 +6730,14 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                crate::fs::pipe::pipe_set_sz(&file, arg)
+                crate::fs::file_hooks::pipe_set_sz(&file, arg)
             }
             fcntl::F_GETPIPE_SZ => {
                 let file = match get_file_fd(fd) {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                match crate::fs::pipe::pipe_get_sz(&file) {
+                match crate::fs::file_hooks::pipe_get_sz(&file) {
                     Some(sz) => Ok(sz),
                     None => Err(errno::Errno::InvalidArgument.as_neg_i32()),
                 }
@@ -7610,10 +7610,10 @@ pub fn pipe_fcntl(file: &File, cmd: usize, arg: usize) -> Result<i64, i32> {
     const F_GETPIPE_SZ: usize = 1032;
     const F_SETPIPE_SZ: usize = 1031;
     match cmd {
-        F_GETPIPE_SZ => Ok(crate::fs::pipe::pipe_get_sz(file)
+        F_GETPIPE_SZ => Ok(crate::fs::file_hooks::pipe_get_sz(file)
             .ok_or(-(crate::errno::constants::EINVAL as i32))? as i64),
         F_SETPIPE_SZ => {
-            crate::fs::pipe::pipe_set_sz(file, arg).map(|sz| sz as i64)
+            crate::fs::file_hooks::pipe_set_sz(file, arg).map(|sz| sz as i64)
         }
         _ => Err(-22),
     }

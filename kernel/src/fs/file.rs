@@ -1027,7 +1027,7 @@ impl Drop for File {
         // lease this description holds (wakes blocked lease breakers).
         crate::fs::locks::inode_open_unregister(self);
         // O_ASYNC registry entry (pipes), if any.
-        crate::fs::pipe::oasync_unregister_file(self.file_id);
+        crate::fs::file_hooks::oasync_unregister(self.file_id);
         // P0-4 inotify: IN_CLOSE_WRITE / IN_CLOSE_NOWRITE fires when the
         // last reference to the description goes away (Linux fires it
         // from fput, i.e. dup'd fds defer it — same discipline).
