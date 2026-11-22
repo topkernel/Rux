@@ -815,3 +815,40 @@ pub fn inotify_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
         instance.wait_queue.remove(task);
     }
 }
+
+// ============================================================================
+// Rung-3 NOTIFY SEAM: the fs-framework notify hooks.
+//
+// vfs.rs and file.rs must not reference inotify by name; they call
+// through this hook table instead. inotify_self_register() runs from
+// mount_table::register_builtin_handlers (the same boot seam point).
+// Zero behavior change: the hook fns ARE the old direct calls.
+// ============================================================================
+
+/// The framework-facing notify entry: parent+inode event (fsnotify
+/// shape — create/unlink/rename/move...).
+pub(crate) fn hook_notify(
+    parent: Option<&crate::fs::inode::Inode>,
+    inode: Option<&crate::fs::inode::Inode>,
+    mask: u32,
+    name: Option<&[u8]>,
+    cookie: u32,
+) {
+    notify(parent, inode, mask, name, cookie);
+}
+
+/// The framework-facing file-event entry (inotify_file_event shape —
+/// IN_ACCESS/IN_MODIFY on read/write).
+pub(crate) fn hook_notify_file(file: &crate::fs::file::File, mask: u32) {
+    notify_file(file, mask);
+}
+
+/// The framework-facing close-event entry.
+pub(crate) fn hook_notify_file_close(file: &crate::fs::file::File) {
+    notify_file_close(file);
+}
+
+/// The framework-facing cookie allocator (event pairing).
+pub(crate) fn hook_alloc_cookie() -> u32 {
+    alloc_cookie()
+}

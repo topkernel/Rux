@@ -1721,4 +1721,107 @@ pub static DEVPTS_INODE_OPS: INodeOps = INodeOps {
     destroy_inode: Some(tmpfs_destroy_inode),
 };
 
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
 
+/// The tmpfs-family mount entries (tmpfs/shm, ramfs/rootfs, devpts,
+/// securityfs, configfs, mqueue — all tmpfs instances, differing only
+/// in the type tag and pre-population). Bodies are the old mount.rs
+/// arms, verbatim.
+pub fn mount_tmpfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = source;
+    // P0-6: each mount creates an INDEPENDENT tmpfs instance (own inode
+    // number space + icache fs_id). Register the fs type so the
+    // registry-based mount path also accepts "tmpfs".
+    ensure_registered();
+    let root_inode = create_mount_instance(data);
+    crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+    crate::fs::mount::register_mount("tmpfs", target, "tmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_ramfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = source;
+    // ramfs/rootfs: tmpfs-instance alias (systemd's /run/credentials).
+    ensure_registered();
+    let root_inode = create_mount_instance(data);
+    crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+    crate::fs::mount::register_mount(fs_type, target, fs_type, if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_devpts(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, target);
+    // devpts: an isolated tmpfs instance typed DEVPTS (the pty node
+    // source stays devfs's /dev/pts; options tolerated and ignored).
+    ensure_registered();
+    let mut root_inode = create_mount_instance(data);
+    tag_mount_instance_type(&mut root_inode, &DEVPTS_INODE_OPS);
+    crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+    crate::fs::mount::register_mount(fs_type, target, "devpts", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_securityfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, fs_type);
+    // securityfs: the empty-instance treatment (sys-kernel-security.mount).
+    ensure_registered();
+    let mut root_inode = create_mount_instance(data);
+    tag_mount_instance_type(&mut root_inode, &SECURITYFS_INODE_OPS);
+    crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+    crate::fs::mount::register_mount("securityfs", target, "securityfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_mqueue(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, fs_type);
+    // POSIX mqueue: empty tmpfs instance typed MQUEUE_MAGIC (statfs).
+    ensure_registered();
+    let mut root_inode = create_mount_instance(data);
+    tag_mount_instance_type(&mut root_inode, &MQUEUE_INODE_OPS);
+    crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+    crate::fs::mount::register_mount("mqueue", target, "mqueue", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_configfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, fs_type);
+    // configfs: tmpfs instance tagged CONFIGFS_MAGIC, pre-populated with
+    // the hmdfs/sharefs subsystem dirs (the reference's driver-registered
+    // configfs groups) — created INSIDE the instance before the mount.
+    ensure_registered();
+    let mut root_inode = create_mount_instance(data);
+    tag_mount_instance_type(&mut root_inode, &CONFIGFS_INODE_OPS);
+    if let Some(ops) = root_inode.ops {
+        if ops.mkdir.is_some() {
+            let _ = ops.call_mkdir(
+                &root_inode,
+                b"hmdfs",
+                crate::fs::inode::InodeMode::new(0o755),
+                Err(crate::errno::Errno::ReadOnlyFileSystem),
+            );
+            let _ = ops.call_mkdir(
+                &root_inode,
+                b"sharefs",
+                crate::fs::inode::InodeMode::new(0o755),
+                Err(crate::errno::Errno::ReadOnlyFileSystem),
+            );
+        }
+    }
+    crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+    crate::fs::mount::register_mount("configfs", target, "configfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+/// Register the whole tmpfs family's mount names (the mount seam's
+/// tmpfs-family row; called from mount_table::register_builtin_handlers).
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["tmpfs", "shm"], mount_tmpfs);
+    crate::fs::mount_table::register(&["ramfs", "rootfs"], mount_ramfs);
+    crate::fs::mount_table::register(&["devpts"], mount_devpts);
+    crate::fs::mount_table::register(&["securityfs"], mount_securityfs);
+    crate::fs::mount_table::register(&["mqueue"], mount_mqueue);
+    crate::fs::mount_table::register(&["configfs"], mount_configfs);
+}

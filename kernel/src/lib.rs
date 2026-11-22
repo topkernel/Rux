@@ -715,6 +715,11 @@ pub fn rust_main_tail() -> ! {
             // the lookup fails; udev's DEVPATH walks need it too. runit
             // and other minimal inits never mount it themselves.
             {
+                // Rung-3 MOUNT SEAM: register every leaf's mount names
+                // before any mount(2) can arrive (the boot chain mounts
+                // sysfs directly below; user mounts go through do_mount
+                // -> mount_table::lookup).
+                fs::mount_table::register_builtin_handlers();
                 let sysfs_init = fs::sysfs::init_sysfs();
                 let sysfs_mount = sysfs_init.and_then(|_| fs::sysfs::mount_sysfs());
                 let ok = sysfs_mount

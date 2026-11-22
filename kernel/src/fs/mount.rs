@@ -261,6 +261,15 @@ pub fn do_mount(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    // Rung-3 MOUNT SEAM: consult the registration table first; the
+    // leaf's mount_instance holds the old arm's body verbatim. ext4
+    // (the rung-5 family) keeps its arm below for now.
+    if fs_type != "ext4" && fs_type != "ext3" {
+        if let Some(mount_fn) = crate::fs::mount_table::lookup(fs_type) {
+            return mount_fn(source, target, fs_type, data, mnt_flags);
+        }
+    }
+
     match fs_type {
         "ext4" | "ext3" => {
             // ext3: ext4-driver alias (reference >= 4.3). (6a4d6733.)
@@ -348,231 +357,12 @@ pub fn do_mount(
             crate::fs::vfs::vfs_mount(target, crate::fs::ext4::create_root_inode(), mnt_flags);
             register_mount("/dev/vda", target, fs_type, if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
-        // devpts (OpenHarmony Phase 1): init mounts devpts on /dev/pts.
-        // The kernel's pty devices live in devfs under pts/; an independent
-        // tmpfs-style instance keeps each mount isolated while the devfs
-        // /dev/pts directory (populated by pty allocation) stays the node
-        // source when the target is /dev/pts. Tolerated options
-        // (gid=,mode=,ptmxmode=,newinstance) are accepted and ignored.
-        "devpts" => {
-            crate::fs::tmpfs::ensure_registered();
-            // devpts mount data (gid=/mode=/ptmxmode=/newinstance) carries
-            // no page budget; pass it through so a hypothetical future
-            // size= is honored too, same as tmpfs.
-            let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root_inode,
-                &crate::fs::tmpfs::DEVPTS_INODE_OPS,
-            );
-            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-            register_mount(fs_type, target, "devpts", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
-        // selinuxfs (OpenHarmony Phase 1): a minimal read-only pseudo fs so
-        // mount("selinuxfs", "/sys/fs/selinux") succeeds and load_policy's
-        // open(".../load"/".../enforce") paths find nodes. Permissive by
-        // construction: "enforce" reads 0, "disable" reads 0; policy bytes
-        // written to "load" are accepted and discarded. This is S2
-        // insurance — OH init tolerates the mount failing, but a working
-        // mount keeps its failure-path retries quiet.
-        "selinuxfs" => {
-            let root_inode = crate::fs::selinuxfs::create_root_inode();
-            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-            register_mount(fs_type, target, "selinuxfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
-        "proc" | "procfs" => {
-            crate::fs::procfs::mount_procfs()
-                .map_err(|e| e as i32)?;
-            crate::fs::vfs::vfs_mount(target, crate::fs::procfs::create_root_inode(), mnt_flags);
-            register_mount(fs_type, target, "proc", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
-        "devfs" | "devtmpfs" => {
-            crate::fs::devfs::init();
-            if let Some(root_entry) = crate::fs::devfs::get_root_entry() {
-                crate::fs::vfs::vfs_mount(target,
-                    crate::fs::devfs::create_root_inode(&root_entry), mnt_flags);
-                register_mount(fs_type, target, "devtmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-            } else {
-                return Err(errno::Errno::NoSuchDevice.as_neg_i32());
-            }
-        }
-        "sysfs" => {
-            // U1a: sysfs device model + uevent. Build the KObject tree
-            // (idempotent), prepare the /sys mountpoint, then link the
-            // dentry tree.
-            crate::fs::sysfs::init_sysfs()
-                .map_err(|e| e as i32)?;
-            crate::fs::sysfs::mount_sysfs()
-                .map_err(|e| e as i32)?;
-            crate::fs::vfs::vfs_mount(target, crate::fs::sysfs::create_root_inode(), mnt_flags);
-            register_mount("sysfs", target, "sysfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
-        "cgroup2" | "cgroup" => {
-            // U1b: cgroup v2 unified hierarchy. init is idempotent;
-            // mount_cgroupfs links the dentry tree at the target.
-            // "cgroup" (v1) mounts share the same tree — systemd's named
-            // hierarchy "name=systemd" is the only v1 consumer on this
-            // rootfs, and it just needs the mount to succeed so the
-            // cgroup.procs interface works (noble-desktop, 2026-11-13).
-            //
-            // cgroup v1 controller parity (launcher-errno lane, OH 6.6
-            // reference boot error stream): controller-bound v1 mounts
-            // FAIL with EINVAL on the reference — its kernel exposes
-            // the MEMORY controller only. OH init mounts /dev/cpuctl
-            // cpu, /dev/cpuset cpuset, /dev/pids pids and /dev/frz
-            // freezer (all EINVAL, logged and tolerated) plus
-            // /dev/memcg memory (succeeds). Our old behavior accepted
-            // every controller, so every follow-up chmod/chown/open row
-            // diverged (real cgroupfs nodes answering EPERM vs plain
-            // ENOENT on the reference's tmpfs dirs) — an ours-only
-            // error family. Mirror the reference: only the memory
-            // controller and generic mount tokens mount; any other
-            // controller token answers EINVAL.
-            if fs_type == "cgroup" {
-                if let Some(opts) = data {
-                    let disallowed = opts.split(',').any(|tok| {
-                        let tok = tok.trim();
-                        !tok.is_empty()
-                            && tok != "memory"
-                            && !tok.starts_with("name=")
-                            && !matches!(
-                                tok,
-                                "nodev" | "noexec" | "nosuid" | "rw" | "ro" | "remount"
-                            )
-                    });
-                    if disallowed {
-                        return Err(errno::Errno::InvalidArgument.as_neg_i32());
-                    }
-                }
-            }
-            crate::fs::cgroup::init_cgroupfs()
-                .map_err(|e| e as i32)?;
-            crate::fs::cgroup::mount_cgroupfs(target)
-                .map_err(|e| e as i32)?;
-        }
-        "tmpfs" | "shm" => {
-            // P0-6: each mount creates an INDEPENDENT tmpfs instance
-            // (own inode number space + icache fs_id). Register the fs type
-            // so the registry-based mount path also accepts "tmpfs".
-            crate::fs::tmpfs::ensure_registered();
-            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-            register_mount("tmpfs", target, "tmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
-        // ramfs/rootfs: tmpfs-instance alias. systemd mounts ramfs on
-        // /run/credentials/<unit> (target given as /proc/self/fd/N) at
-        // every unit start; refusing it made every service log
-        // "Failed to set up mount namespacing" and dropped credentials
-        // dirs (gdm's first failure family).
-        "ramfs" | "rootfs" => {
-            crate::fs::tmpfs::ensure_registered();
-            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-            register_mount(fs_type, target, fs_type, if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
         // POSIX mqueue: no queue semantics in Rux yet (mq_* syscalls
         // answer ENOSYS on their own); an empty tmpfs instance satisfies
         // dev-mqueue.mount so sysinit does not fail. mqueue(7) users that
         // actually open a queue surface the syscall gap unchanged.
         // securityfs: same empty-instance treatment -- sysinit's
         // sys-kernel-security.mount must not fail local-fs.
-        "securityfs" => {
-            crate::fs::tmpfs::ensure_registered();
-            let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root_inode,
-                &crate::fs::tmpfs::SECURITYFS_INODE_OPS,
-            );
-            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-            register_mount("securityfs", target, "securityfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
-        // configfs (launcher-errno lane): OH's storage_daemon.cfg mounts
-        // configfs at /config and chowns /config/{hmdfs,sharefs} — on
-        // the reference the mount succeeds (a second mount answers
-        // EBUSY) and the two SUBSYSTEM dirs exist because the hmdfs /
-        // sharefs drivers register configfs subsystems. Rux has neither
-        // driver; the mount previously failed EINVAL, an ours-only
-        // error family (mount + both chowns + every later row). Mount
-        // a tmpfs instance tagged CONFIGFS_MAGIC, pre-populated with
-        // the two subsystem dirs, so the chown/chmod path matches.
-        // Divergence: userspace mkdir/rmdir inside the subsystem dirs
-        // behaves like tmpfs, not configfs (no subsystem item
-        // semantics) — no boot-path component on the OH image creates
-        // configfs items (audited oh-robot).
-        "configfs" => {
-            crate::fs::tmpfs::ensure_registered();
-            let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root_inode,
-                &crate::fs::tmpfs::CONFIGFS_INODE_OPS,
-            );
-            // Pre-create the hmdfs/sharefs subsystem dirs (the
-            // reference's driver-registered configfs groups) INSIDE the
-            // instance, before it is published by the mount.
-            if let Some(ops) = root_inode.ops {
-                if ops.mkdir.is_some() {
-                    // INV-VFSOPS-1 dispatcher (root_inode is the freshly
-                    // created instance root; mkdir is the tmpfs mkdir
-                    // twin).
-                    let _ = ops.call_mkdir(
-                        &root_inode,
-                        b"hmdfs",
-                        crate::fs::inode::InodeMode::new(0o755),
-                        Err(crate::errno::Errno::ReadOnlyFileSystem),
-                    );
-                    let _ = ops.call_mkdir(
-                        &root_inode,
-                        b"sharefs",
-                        crate::fs::inode::InodeMode::new(0o755),
-                        Err(crate::errno::Errno::ReadOnlyFileSystem),
-                    );
-                }
-            }
-            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-            register_mount("configfs", target, "configfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
-        "mqueue" => {
-            crate::fs::tmpfs::ensure_registered();
-            let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
-            // Type tag: statfs on the mount must report MQUEUE_MAGIC —
-            // systemd verifies dev-mqueue.mount by statfs f_type AFTER
-            // mount(2) and failed the unit even with mount(2) == 0
-            // (ub2404 sysinit, the st_dev follow-on).
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root_inode,
-                &crate::fs::tmpfs::MQUEUE_INODE_OPS,
-            );
-            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-            register_mount("mqueue", target, "mqueue", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
-        // debugfs/tracefs from userspace (sys-kernel-debug.mount /
-        // sys-kernel-tracing.mount in the sysinit chain). The boot path
-        // mounts the canonical instances; a userspace mount request
-        // either mounts the boot instance at the requested point or, if
-        // boot did not create it (feature-gated), creates it now.
-        "debugfs" => {
-            // Single-instance semantics (launcher-errno lane): the
-            // kernel automounts debugfs at /sys/kernel/debug; on the OH
-            // reference init's later `mount debugfs ... /sys/kernel/
-            // debug` answers EBUSY (err 16 in the reference boot error
-            // stream) and the kernel's own submounts under it — the
-            // tracefs instance at /sys/kernel/debug/tracing — stay
-            // visible. Our old arm stacked a second debugfs mount that
-            // SHADOWED the tracefs alias (every /sys/kernel/debug/
-            // tracing chmod then ENOENT — an ours-only error family).
-            if mounted_as("debugfs", target) {
-                return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
-            }
-            if crate::fs::debugfs::debugfs_root().is_none() {
-                crate::fs::debugfs::init_debugfs()?;
-            }
-            let _ = crate::fs::vfs::path_lookup(target, 0);
-            crate::fs::vfs::vfs_mount(
-                target,
-                crate::fs::debugfs::create_root_inode(),
-                mnt_flags,
-            );
-            register_mount("debugfs", target, "debugfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
         // pstore (why-slow lane): OH init.virt.cfg mounts pstore on
         // /sys/fs/pstore every boot; Linux's pstore fs is built-in, so
         // the reference's mount succeeds and ours answered EINVAL — an
@@ -580,31 +370,6 @@ pub fn do_mount(
         // EXISTING sysfs pstore subtree (pstore-lite already publishes
         // the previous boot's record there, named like the reference's
         // ramoops backends) so content survives the mount-over.
-        "pstore" => {
-            // Prefer the sysfs pstore subtree (pstore-lite record files);
-            // fall back to an empty sysfs root when the lookup misses.
-            let inode = match crate::fs::vfs::path_lookup("/sys/fs/pstore", 0) {
-                Ok(p) => match p.inode {
-                    Some(i) => i,
-                    None => crate::fs::sysfs::create_root_inode(),
-                },
-                Err(_) => crate::fs::sysfs::create_root_inode(),
-            };
-            crate::fs::vfs::vfs_mount(target, inode, mnt_flags);
-            register_mount(fs_type, target, "pstore", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
-        "tracefs" => {
-            if crate::fs::tracefs::tracefs_root().is_none() {
-                crate::fs::tracefs::init_tracefs()?;
-            }
-            let _ = crate::fs::vfs::path_lookup(target, 0);
-            crate::fs::vfs::vfs_mount(
-                target,
-                crate::fs::tracefs::create_root_inode(),
-                mnt_flags,
-            );
-            register_mount("tracefs", target, "tracefs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
         _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
     }
 

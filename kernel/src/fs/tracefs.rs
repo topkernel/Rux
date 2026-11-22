@@ -700,3 +700,25 @@ pub static TRACEFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .lseek(tracefs_file_lseek)
     .close(tracefs_file_close)
     .build();
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The tracefs mount entry (old mount.rs arm, verbatim).
+pub fn mount_tracefs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data, fs_type);
+    if tracefs_root().is_none() {
+        init_tracefs()?;
+    }
+    let _ = crate::fs::vfs::path_lookup(target, 0);
+    crate::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
+    crate::fs::mount::register_mount("tracefs", target, "tracefs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["tracefs"], mount_tracefs);
+}

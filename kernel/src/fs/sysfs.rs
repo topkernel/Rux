@@ -2492,3 +2492,41 @@ pub static SYSFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .poll(sysfs_file_poll)
     .close(sysfs_file_close)
     .build();
+
+
+// ============================================================================
+// Rung-3 MOUNT SEAM: the mount.rs match-arm body moved here verbatim
+// (zero behavior change); `mount_register` hands it to fs::mount_table.
+// ============================================================================
+
+/// The sysfs mount entry (old mount.rs arm, verbatim: build the KObject
+/// tree, prepare the mountpoint, link the dentry tree).
+pub fn mount_sys_instance(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data, fs_type);
+    init_sysfs().map_err(|e| e as i32)?;
+    mount_sysfs().map_err(|e| e as i32)?;
+    crate::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
+    crate::fs::mount::register_mount("sysfs", target, "sysfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+/// The pstore mount entry (old mount.rs "pstore" arm: mount the sysfs
+/// pstore subtree; fall back to an empty sysfs root).
+pub fn mount_pstore(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let _ = (source, data);
+    let inode = match crate::fs::vfs::path_lookup("/sys/fs/pstore", 0) {
+        Ok(p) => match p.inode {
+            Some(i) => i,
+            None => create_root_inode(),
+        },
+        Err(_) => create_root_inode(),
+    };
+    crate::fs::vfs::vfs_mount(target, inode, mnt_flags);
+    crate::fs::mount::register_mount(fs_type, target, "pstore", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    Ok(())
+}
+
+pub fn mount_register() {
+    crate::fs::mount_table::register(&["sysfs"], mount_sys_instance);
+    crate::fs::mount_table::register(&["pstore"], mount_pstore);
+}
