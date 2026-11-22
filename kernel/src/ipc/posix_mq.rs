@@ -96,7 +96,7 @@ pub struct PosixMq {
     /// SIGEV_THREAD target: the netlink socket musl/glibc's helper
     /// registered (sigev_signo carries its fd). Linux delivers the
     /// notification by pushing a 32-byte message onto that socket.
-    notify_sock: Spinlock<Option<alloc::sync::Arc<crate::net::netlink::NetlinkSocket>>>,
+    notify_sock: Spinlock<Option<alloc::sync::Arc<crate::fs::file::File>>>,
 }
 
 impl PosixMq {
@@ -609,7 +609,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
                     if let Some(sock) = mq.notify_sock.lock().take() {
                         let mut msg = [0u8; 32];
                         msg[31] = 1;
-                        sock.push_kernel_message(msg.to_vec());
+                        crate::net::net_hooks::netlink_push_kernel_message(&sock, msg);
                     }
                     let signo = mq.notify_signo.load(Ordering::Relaxed);
                     if signo > 0 {
@@ -999,7 +999,13 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         // sigev_signo is the helper's netlink socket fd (Linux
         // sockfd_lookup): EBADF for a bad fd, EINVAL for a non-netlink
         // file.
-        match crate::net::netlink::netlink_socket_from_fd(sev.sigev_signo as usize) {
+        // The helper's netlink socket, kept alive by its File (the
+        // ops-identity probe decides netlink vs other file vs bad fd —
+        // the same EINVAL/EBADF split Linux's sockfd_lookup makes).
+        let sock_file = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(sev.sigev_signo as usize))
+            .filter(|f| f.get_ops().map(|o| crate::net::net_hooks::is_netlink_ops(o)).unwrap_or(false));
+        match sock_file {
             Some(sock) => {
                 mq.notify_pid.store(my_pid, Ordering::Relaxed);
                 mq.notify_signo.store(0, Ordering::Relaxed);
@@ -1008,8 +1014,6 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
                 return 0;
             }
             None => {
-                // Distinguish bad fd from wrong file type the cheap way:
-                // an fd that exists but is not a netlink socket is EINVAL.
                 let exists = crate::sched::get_current_fdtable()
                     .map(|ft| ft.get_file(sev.sigev_signo as usize).is_some())
                     .unwrap_or(false);

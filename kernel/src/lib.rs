@@ -874,9 +874,12 @@ pub fn rust_main_tail() -> ! {
             // packet can arrive: RX/softirq paths dereference them
             // unconditionally, and the timer softirq ticks from the first
             // clock interrupt (review NET NEW-C4 — init was never called).
-            crate::net::tcp::init_tcp_manager();
-            crate::net::tcp_timer::init_tcp_timer_manager();
-            crate::net::ipv4::route::route_init();
+            // Net bring-up rides the NetHooks registration (the
+            // composition bin registers the service crate's fns before
+            // rust_main_impl — the crate-flip rung-2 entry seam).
+            crate::net::net_hooks::init_tcp();
+            crate::net::net_hooks::init_tcp_timer();
+            crate::net::net_hooks::init_route();
             // P2 vDSO: build the vDSO ELF page and prime the time-data
             // page — must run before the first execve maps it.
             crate::mm::vdso::vdso_init();
@@ -893,7 +896,7 @@ pub fn rust_main_tail() -> ! {
             // line — replaces hardcoding for non-default QEMU networks.
             if let Some(ip_str) = cmdline::get_param("ip") {
                 if let Some(ip) = cmdline::parse_ipv4_addr(&ip_str) {
-                    crate::net::arp::set_local_ip(ip);
+                    crate::net::net_hooks::set_local_ip(ip);
                     let a = (ip >> 24) & 0xFF;
                     let b = (ip >> 16) & 0xFF;
                     let c = (ip >> 8) & 0xFF;
@@ -909,7 +912,7 @@ pub fn rust_main_tail() -> ! {
             }
             // P1 IPv6: SLAAC link-local (fe80::/64 + EUI-64) + Router
             // Solicitation. No NIC is fine — the stack simply stays v4-only.
-            crate::net::ipv6::ipv6_init();
+            crate::net::net_hooks::ipv6_init();
         }
 
         // Initialize security subsystem (before scheduler / process creation)

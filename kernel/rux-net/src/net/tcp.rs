@@ -3499,9 +3499,9 @@ pub fn get_tcp_socket_table() -> &'static mut TcpSocketTable {
 /// The one consolidated &mut TCP_SOCKET_TABLE reference formation (see
 /// get_tcp_socket_table / tcp_socket_table_ref for the contracts).
 fn tcp_socket_table_mut() -> &'static mut TcpSocketTable {
-    // SAFETY: caller-serialized (TCP_TABLE_LOCK or the documented
-    // single-threaded init paths).
-    unsafe { &mut TCP_SOCKET_TABLE }
+    // INV-NET-SOCKTAB-1: caller-serialized (TCP_TABLE_LOCK or the
+    // documented single-threaded init paths) — net_edges formation.
+    crate::net::net_edges::static_table_mut(core::ptr::addr_of_mut!(TCP_SOCKET_TABLE))
 }
 
 /// Get TCP socket
@@ -3590,9 +3590,9 @@ pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
 /// holds TCP_TABLE_LOCK or the softirq/syscall serialization it
 /// documents).
 fn tcp_socket_table_ref() -> &'static TcpSocketTable {
-    // SAFETY: read-only view of the global table; caller-serialized
-    // against mutation (same contract as get_tcp_socket_table).
-    unsafe { &TCP_SOCKET_TABLE }
+    // INV-NET-SOCKTAB-1: read-only view, caller-serialized against
+    // mutation — net_edges formation.
+    crate::net::net_edges::static_table_ref(core::ptr::addr_of_mut!(TCP_SOCKET_TABLE))
 }
 
 /// R32-N9 helper: another live (non-CLOSE) socket already bound to `port`?
@@ -4036,6 +4036,31 @@ pub fn tcp_dump() -> alloc::vec::Vec<TcpSlotInfo> {
     }
     out
 }
+
+/// memwatch's TCPCEN census (the crate-flip rung-2 hook row): up to 8
+/// live slots as (fd, state, rx len, advertised window, local port) —
+/// the bwslow zero-window hunt's row shape.
+pub fn tcp_census_dump() -> alloc::vec::Vec<crate::net::net_hooks::TcpCensusRow> {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    let table = tcp_socket_table_ref();
+    let mut out = alloc::vec::Vec::new();
+    for (fd, slot) in table.sockets.iter().take(table.count).enumerate() {
+        if let Some(s) = slot.as_ref() {
+            out.push(crate::net::net_hooks::TcpCensusRow {
+                fd: fd as u32,
+                state: s.state as u8,
+                rx_len: s.recv_buffer.len() as u64,
+                rcv_wnd: s.rcv_wnd as u64,
+                local_port: s.local_port,
+            });
+            if out.len() >= 8 {
+                break;
+            }
+        }
+    }
+    out
+}
+
 
 /// Read-and-clear the slot's pending protocol error (SO_ERROR semantics).
 pub fn tcp_take_pending_error(fd: i32) -> i32 {

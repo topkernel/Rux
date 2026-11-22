@@ -385,12 +385,9 @@ impl Ipv6Hdr {
         if data[0] >> 4 != 6 {
             return None;
         }
-        // SAFETY: data has at least IPV6_HDR_LEN bytes; the lifetime is
-        // 'static because it aliases skb data which lives until the packet
-        // is freed (same convention as IpHdr::from_bytes).
-        unsafe {
-            Some(&*(data.as_ptr() as *const Ipv6Hdr))
-        }
+        // INV-NET-HDRVIEW-1: length + alignment checked net_edges-side
+        // (same convention as IpHdr::from_bytes).
+        crate::net::net_edges::pod_view::<Ipv6Hdr>(data)
     }
 
     /// Version nibble (host order view of ver_tc_flow)
@@ -429,23 +426,23 @@ pub fn ipv6_push_header(
     }
     let ptr = skb.skb_push(IPV6_HDR_LEN as u32).ok_or(())?;
 
-    // SAFETY: skb_push returned a valid, properly aligned pointer covering
-    // at least IPV6_HDR_LEN bytes; writing the repr(C) fields is
-    // well-defined.
-    unsafe {
-        let hdr = &mut *(ptr as *mut Ipv6Hdr);
-        // Version=6, traffic class 0, flow label 0.
-        hdr.ver_tc_flow = (6u32 << 28).to_be();
-        hdr.payload_len = (payload_len as u16).to_be();
-        hdr.next_header = next_hdr;
-        hdr.hop_limit = if hop_limit == 0 {
-            IPV6_DEFAULT_HOP_LIMIT
-        } else {
-            hop_limit
-        };
-        hdr.saddr = *saddr;
-        hdr.daddr = *daddr;
-    }
+    // INV-NET-HDRVIEW-1 (write arm): skb_push returned a valid pointer
+    // covering at least IPV6_HDR_LEN bytes; alignment is checked
+    // net_edges-side (a misaligned push drops the packet, never UB).
+    let Some(hdr) = crate::net::net_edges::pod_view_mut::<Ipv6Hdr>(ptr) else {
+        return Err(());
+    };
+    // Version=6, traffic class 0, flow label 0.
+    hdr.ver_tc_flow = (6u32 << 28).to_be();
+    hdr.payload_len = (payload_len as u16).to_be();
+    hdr.next_header = next_hdr;
+    hdr.hop_limit = if hop_limit == 0 {
+        IPV6_DEFAULT_HOP_LIMIT
+    } else {
+        hop_limit
+    };
+    hdr.saddr = *saddr;
+    hdr.daddr = *daddr;
     Ok(())
 }
 

@@ -9090,13 +9090,21 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     let kind = match f.get_ops() {
                                         Some(ops) => {
                                             let p = ops as *const crate::fs::FileOps;
-                                            let _ = p;
                                             if crate::net::net_hooks::is_unix_socket_ops(ops) {
-                                                match crate::net::net_hooks::unix_socket_of(&f) {
-                                                    Some(detail) => detail,
+                                                match crate::net::net_hooks::unix_fd_bound_peer(
+                                                    fd as usize,
+                                                ) {
+                                                    Some((bn, peer)) => {
+                                                        alloc::format!(
+                                                            "unix bound={} peer={}",
+                                                            bn, peer
+                                                        )
+                                                    }
                                                     None => "unix".into(),
                                                 }
-                                            } else if crate::net::net_hooks::is_inet_socket_ops(ops) {
+                                            } else if crate::net::net_hooks::is_inet_socket_ops(
+                                                ops,
+                                            ) {
                                                 "inet-socket".into()
                                             } else if crate::net::net_hooks::is_netlink_ops(ops) {
                                                 "netlink".into()
@@ -9808,10 +9816,11 @@ pub fn kill_dump_tgid(tgid: u32) {
 /// sc97: type name for a File by fops identity (the kernel-image symbol
 /// at the ops address names any not listed here, offline via nm).
 fn kd_fd_type(file: &crate::fs::File) -> &'static str {
-    let ops = match file.get_ops() {
-        Some(o) => o as *const crate::fs::FileOps as *const (),
+    let ops_ref = match file.get_ops() {
+        Some(o) => o,
         None => return "no-ops",
     };
+    let ops = ops_ref as *const crate::fs::FileOps as *const ();
     let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
     if is(&crate::fs::pipe::PIPE_OPS) {
         return "pipe";
@@ -9819,13 +9828,11 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
     if is(&crate::fs::fifo::FIFO_OPS) {
         return "fifo";
     }
-    if let Some(ops) = file.get_ops() {
-        if crate::net::net_hooks::is_unix_socket_ops(ops) {
-            return "unix-sock";
-        }
-        if crate::net::net_hooks::is_inet_socket_ops(ops) {
-            return "inet-sock";
-        }
+    if crate::net::net_hooks::is_unix_socket_ops(ops_ref) {
+        return "unix-sock";
+    }
+    if crate::net::net_hooks::is_inet_socket_ops(ops_ref) {
+        return "inet-sock";
     }
     if is(&crate::ipc::binder::BINDER_OPS) {
         return "binder";
@@ -10032,14 +10039,19 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                         }
                     }
                     "unix-sock" => {
-                        if let Some(diag) = crate::net::net_hooks::unix_diag_of_file(&f) {
+                        if let Some(us) = crate::net::net_hooks::unix_file_diag(&f) {
                             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-                            // (rung 2: the unix diag rides the hook — the detail line is
-                            // pre-formatted service-side; the raw socket type does not cross.)
                             crate::pr_warn!(
-                                "KILLDUMP: tid {} unix {}",
+                                "KILLDUMP: tid {} unix kind={} bound={:?} dgram_peer={:?} queued={}B truesize={} sndbuf={} qlen={}",
                                 tk.pid(),
-                                diag);
+                                us.kind,
+                                us.bound,
+                                us.peer,
+                                us.queued_bytes,
+                                us.truesize,
+                                us.sndbuf,
+                                us.qlen
+                            );
                         }
                     }
                     _ => {}

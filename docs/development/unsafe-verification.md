@@ -19,17 +19,17 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2497**
-- with artifact (non-GAP): **2413** (96.6%)
-- GAP: **84**
-- by kind: block=2217, unsafe-extern=7, unsafe-fn=118, unsafe-impl=155
-- by category (regions carry 0..n tags): ptr-ops=642, asm=273, volatile=165, raw-construct=58, addr-arith=35, no-preempt=14, ffi=11, static-mut=5, layout-meta=5, transmute=4
+- unsafe regions: **2481**
+- with artifact (non-GAP): **2394** (96.5%)
+- GAP: **87**
+- by kind: block=2205, unsafe-extern=7, unsafe-fn=118, unsafe-impl=151
+- by category (regions carry 0..n tags): ptr-ops=638, asm=273, volatile=164, raw-construct=57, addr-arith=35, no-preempt=14, ffi=11, static-mut=5, layout-meta=5, transmute=4
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
-| arch | 773 | 754 | 19 |
+| arch | 774 | 755 | 19 |
 | fs | 630 | 574 | 56 |
 | dfx | 128 | 128 | 0 |
 | drivers | 115 | 111 | 4 |
@@ -38,11 +38,11 @@ census id is accounted for here.
 | tests | 105 | 105 | 0 |
 | mm | 100 | 100 | 0 |
 | process | 80 | 77 | 3 |
-| ipc | 67 | 67 | 0 |
-| <top> | 64 | 64 | 0 |
-| net | 53 | 51 | 2 |
+| ipc | 67 | 66 | 1 |
+| <top> | 64 | 63 | 1 |
 | safety | 51 | 51 | 0 |
 | perf | 40 | 40 | 0 |
+| net | 36 | 33 | 3 |
 | syscall | 20 | 20 | 0 |
 | io_uring | 19 | 19 | 0 |
 | interrupt | 16 | 16 | 0 |
@@ -685,26 +685,27 @@ census id is accounted for here.
 | 238 | vstate_save | block | asm | INV:F19 | `fe4568953cc3` |
 | 328 | vstate_restore | block | asm | INV:F19 | `1c8b906f22fa` |
 
-### kernel/src/arch/uaccess_safe.rs (16)
+### kernel/src/arch/uaccess_safe.rs (17)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 39 | copy_out | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `ecec1a3d4984` |
 | 53 | copy_in | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `9b8ddd50d321` |
-| 65 | read_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `d5678d38b9ed` |
-| 75 | write_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `6ff48813162a` |
-| 85 | clear_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `58c1fb249f27` |
-| 95 | strnlen_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `e13bb16f8ffe` |
-| 105 | futex_cmpxchg_u32 | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `19ac2db642f3` |
-| 122 | copy_in_t | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `e663417d971f` |
-| 138 | copy_out_t | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `dd9836b5c384` |
-| 193 | read | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `9c07b4bb4e45` |
-| 201 | write | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `61c461dc3ee6` |
-| 274 | copy_in | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `8a97a9c557f3` |
-| 285 | copy_out | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `508b8fc53685` |
-| 292 | clear | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `81664be21d00` |
-| 305 | read_at | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `607e9ac88a3d` |
-| 318 | write_at | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `9558706b6c26` |
+| 68 | copy_in_vec_exact | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `e06b9bdee5be` |
+| 87 | read_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `d877b0a0c55a` |
+| 97 | write_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `3bae809b3985` |
+| 107 | clear_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `5fe49f922ad8` |
+| 117 | strnlen_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `ecfd95fce7b4` |
+| 127 | futex_cmpxchg_u32 | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `d4c4967fa6f9` |
+| 144 | copy_in_t | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `f3f144b9060f` |
+| 160 | copy_out_t | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `b4f23925528c` |
+| 215 | read | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `b3a9c448b079` |
+| 223 | write | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `710b6822d674` |
+| 296 | copy_in | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `5f101485ea02` |
+| 307 | copy_out | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `b15c2f3fdeb4` |
+| 314 | clear | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `f324e8470bcf` |
+| 327 | read_at | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `f553a140e623` |
+| 340 | write_at | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `cb0b69d916b1` |
 
 ### kernel/src/arch/x86_64/boot.rs (21)
 
@@ -1905,10 +1906,10 @@ census id is accounted for here.
 |------|----|------|------------|----------|----|
 | 186 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `3203ea4367e2` |
 | 187 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `6f9232bf0265` |
-| 1956 | sysfs_kill_sb | block | ptr-ops | INV:INV-SBTYPE-1 | `de849946b899` |
-| 2330 | sysfs_destroy_inode | block | ptr-ops | INV:INV-FS-PRIVDATA-1 | `6f104c97e5a3` |
-| 2415 | sysfs_file_write | block | - | INV:INV-FS-PRIVDATA-1 | `16326ffc63ae` |
-| 2420 | sysfs_file_write | block | - | INV:INV-FS-PRIVDATA-1 | `ac8f6892d9ee` |
+| 1961 | sysfs_kill_sb | block | ptr-ops | INV:INV-SBTYPE-1 | `b9470596eafd` |
+| 2335 | sysfs_destroy_inode | block | ptr-ops | INV:INV-FS-PRIVDATA-1 | `7c8957d0d418` |
+| 2420 | sysfs_file_write | block | - | INV:INV-FS-PRIVDATA-1 | `11d8155b66cb` |
+| 2425 | sysfs_file_write | block | - | INV:INV-FS-PRIVDATA-1 | `26efa73ba286` |
 
 ### kernel/src/fs/tmpfs.rs (17)
 
@@ -3315,7 +3316,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1210 | mq_fds_cleanup | block | - | INV:INV-KTASK-1 | `e503b71d162b` |
+| 1214 | mq_fds_cleanup | block | - | GAP | `e6670a2f8a73` |
 
 ### kernel/src/ipc/sysv_msg.rs (4)
 
@@ -3409,7 +3410,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1763 | rust_main_impl | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `0faa24cbfe1d` |
+| 1766 | rust_main_impl | block | asm | GAP | `e8028a36f02f` |
 
 ### kernel/src/list.rs (7)
 
@@ -3466,111 +3467,6 @@ census id is accounted for here.
 | 1362 | deliver_fired | block | - | INV:INV-KTASK-1 | `efe216e05a3d` |
 | 1387 | deliver_fired | block | - | INV:INV-KTASK-1 | `b8157e830131` |
 | 1778 | ww_heartbeat | block | volatile,ptr-ops | INV:INV-KTASK-1 | `488897077299` |
-
-## net
-
-### kernel/src/net/buffer.rs (24)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 131 | <module> | unsafe-impl | - | INV:INV-SKB-1 | `c199dd65972c` |
-| 132 | <module> | unsafe-impl | - | INV:INV-SKB-1 | `ef14f3555220` |
-| 179 | alloc | block | - | INV:INV-SKB-1 | `47dc809c9b7d` |
-| 185 | alloc | block | - | INV:INV-SKB-1 | `3d88d9635152` |
-| 188 | alloc | block | - | INV:INV-SKB-1 | `a262901af321` |
-| 228 | release | block | - | INV:INV-SKB-1 | `fdaaa6aef7e5` |
-| 260 | skb_put | block | - | INV:INV-SKB-1 | `d8651b37d9b7` |
-| 283 | skb_push | block | - | INV:INV-SKB-1 | `7768320c41d1` |
-| 305 | skb_pull | block | - | INV:INV-SKB-1 | `5b298bcc1f41` |
-| 331 | skb_reserve | block | - | INV:INV-SKB-1 | `467be5061495` |
-| 352 | skb_put_data | block | ptr-ops | INV:INV-SKB-1 | `e254d67bc4fd` |
-| 427 | data_slice | block | raw-construct | INV:INV-SKB-1 | `c88695a2e05c` |
-| 439 | data_slice_at | block | raw-construct | INV:INV-SKB-1 | `4a63bdeb2d4f` |
-| 439 | data_slice_at | block | raw-construct | INV:INV-SKB-1 | `33e683c6236f` |
-| 452 | hdr | block | ptr-ops | INV:INV-SKB-1 | `b0c403c44ca7` |
-| 464 | hdr_mut | block | ptr-ops | INV:INV-SKB-1 | `207a0af997a9` |
-| 479 | hdr_and_tail | block | raw-construct,ptr-ops | INV:INV-SKB-1 | `b68f3312bd13` |
-| 501 | push_hdr | block | - | INV:INV-SKB-1 | `fc711e3b8a81` |
-| 513 | put_hdr | block | - | INV:INV-SKB-1 | `3ab5e2c2abf8` |
-| 524 | push_bytes | block | ptr-ops | INV:INV-SKB-1 | `decc6bf84076` |
-| 534 | push_hdr_val | block | ptr-ops | INV:INV-SKB-1 | `37aaadcff015` |
-| 564 | skb_copy_bits | block | ptr-ops | INV:INV-SKB-1 | `cb41001f2c27` |
-| 616 | hdr_view | block | ptr-ops | INV:INV-SKB-1 | `480b739ccfb0` |
-| 626 | hdr_view_mut | block | ptr-ops | INV:INV-SKB-1 | `53d041b24aee` |
-
-### kernel/src/net/ipv4/route.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 192 | route_lookup | block | - | INV:INV-SENDSYNC-1 | `d5bcc5061d37` |
-| 227 | route_add | block | - | INV:INV-SENDSYNC-1 | `1f878e70e27c` |
-| 241 | route_remove | block | - | INV:INV-SENDSYNC-1 | `a0a93d496c52` |
-| 248 | route_clear | block | - | INV:INV-SENDSYNC-1 | `9b8c387afc2b` |
-| 255 | route_dump | block | - | INV:INV-SENDSYNC-1 | `b709a3bcc5f7` |
-
-### kernel/src/net/ipv6/mod.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 391 | from_bytes | block | ptr-ops | INV:INV-SENDSYNC-1 | `5a450cff93a1` |
-| 435 | ipv6_push_header | block | ptr-ops | INV:INV-SENDSYNC-1 | `282c4d0a5b2d` |
-
-### kernel/src/net/mod.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 52 | file_arc | block | - | GAP | `7e356930c393` |
-| 65 | take_file_arc | block | - | GAP | `00f71a3ad02d` |
-
-### kernel/src/net/netlink.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 515 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `eb396fff1d48` |
-
-### kernel/src/net/raw.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 115 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `7381115d08fc` |
-
-### kernel/src/net/socket.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 298 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `f1f73f496b2e` |
-| 1438 | checked_socket_ptr | block | volatile,ptr-ops | INV:INV-SENDSYNC-1 | `04398b981b32` |
-| 1439 | checked_socket_ptr | block | volatile,ptr-ops | INV:INV-SENDSYNC-1 | `18191190540e` |
-| 1496 | socket_borrow | block | ptr-ops | INV:INV-SENDSYNC-1 | `2bcb0c9a889f` |
-| 1632 | socket_close | block | ptr-ops | INV:INV-NETARC-1 | `f8d0aa39eb73` |
-
-### kernel/src/net/tcp.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 3504 | tcp_socket_table_mut | block | - | INV:INV-SLOT-3 | `95363a269569` |
-| 3595 | tcp_socket_table_ref | block | - | INV:INV-SKB-1 | `079294f662c3` |
-
-### kernel/src/net/udp.rs (6)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 42 | from_bytes | block | ptr-ops | INV:INV-SENDSYNC-1 | `efbbdf35dfa8` |
-| 315 | udp_socket_get | block | - | INV:INV-SENDSYNC-1 | `a460c2a8a672` |
-| 325 | udp_socket_read | block | - | INV:INV-SENDSYNC-1 | `bbe9bd3cf980` |
-| 335 | udp_table_mut | block | - | INV:INV-SENDSYNC-1 | `ece64b0dbdc9` |
-| 340 | udp_table_ref | block | - | INV:INV-SENDSYNC-1 | `d5b271f93721` |
-| 1499 | udp_rcv | block | raw-construct | INV:INV-SENDSYNC-1 | `50103f045ed3` |
-
-### kernel/src/net/unix.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 322 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `2148c63c6805` |
-| 965 | unix_wait_round | block | ptr-ops | INV:INV-SENDSYNC-1 | `84209e430f36` |
-| 3268 | unix_write_user | block | ptr-ops | INV:INV-NETARC-1 | `0abb6c86c8c2` |
-| 3327 | oh67_unix_ready | block | ptr-ops | INV:INV-NETARC-1 | `83750d4e6f27` |
-| 4198 | unix_park_audit | block | ptr-ops | INV:INV-SENDSYNC-1 | `f719f9b45dc2` |
 
 ## safety
 
@@ -3711,6 +3607,64 @@ census id is accounted for here.
 | 2085 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `204b845be929` |
 | 2098 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `db300777e7e6` |
 | 2103 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `f7371cf5593f` |
+
+## net
+
+### kernel/src/net/buffer.rs (24)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 131 | <module> | unsafe-impl | - | INV:INV-SKB-1 | `c199dd65972c` |
+| 132 | <module> | unsafe-impl | - | INV:INV-SKB-1 | `ef14f3555220` |
+| 179 | alloc | block | - | INV:INV-SKB-1 | `47dc809c9b7d` |
+| 185 | alloc | block | - | INV:INV-SKB-1 | `3d88d9635152` |
+| 188 | alloc | block | - | INV:INV-SKB-1 | `a262901af321` |
+| 228 | release | block | - | INV:INV-SKB-1 | `fdaaa6aef7e5` |
+| 260 | skb_put | block | - | INV:INV-SKB-1 | `d8651b37d9b7` |
+| 283 | skb_push | block | - | INV:INV-SKB-1 | `7768320c41d1` |
+| 305 | skb_pull | block | - | INV:INV-SKB-1 | `5b298bcc1f41` |
+| 331 | skb_reserve | block | - | INV:INV-SKB-1 | `467be5061495` |
+| 352 | skb_put_data | block | ptr-ops | INV:INV-SKB-1 | `e254d67bc4fd` |
+| 427 | data_slice | block | raw-construct | INV:INV-SKB-1 | `c88695a2e05c` |
+| 439 | data_slice_at | block | raw-construct | INV:INV-SKB-1 | `4a63bdeb2d4f` |
+| 439 | data_slice_at | block | raw-construct | INV:INV-SKB-1 | `33e683c6236f` |
+| 452 | hdr | block | ptr-ops | INV:INV-SKB-1 | `b0c403c44ca7` |
+| 464 | hdr_mut | block | ptr-ops | INV:INV-SKB-1 | `207a0af997a9` |
+| 479 | hdr_and_tail | block | raw-construct,ptr-ops | INV:INV-SKB-1 | `b68f3312bd13` |
+| 501 | push_hdr | block | - | INV:INV-SKB-1 | `fc711e3b8a81` |
+| 513 | put_hdr | block | - | INV:INV-SKB-1 | `3ab5e2c2abf8` |
+| 524 | push_bytes | block | ptr-ops | INV:INV-SKB-1 | `decc6bf84076` |
+| 534 | push_hdr_val | block | ptr-ops | INV:INV-SKB-1 | `37aaadcff015` |
+| 564 | skb_copy_bits | block | ptr-ops | INV:INV-SKB-1 | `cb41001f2c27` |
+| 616 | hdr_view | block | ptr-ops | INV:INV-SKB-1 | `480b739ccfb0` |
+| 626 | hdr_view_mut | block | ptr-ops | INV:INV-SKB-1 | `53d041b24aee` |
+
+### kernel/src/net/file_arc.rs (2)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 12 | file_arc | block | ptr-ops | INV:INV-NETARC-1 | `35f48b04ebe8` |
+| 27 | take_file_arc | block | ptr-ops | INV:INV-NETARC-1 | `ef8f5fa0c8ae` |
+
+### kernel/src/net/mod.rs (3)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 50 | file_arc | block | - | GAP | `1eabf805d45d` |
+| 66 | reclaim_file_arc | block | - | GAP | `393ed7a299af` |
+| 76 | take_file_arc | block | - | GAP | `e1c4dcc418d7` |
+
+### kernel/src/net/net_edges.rs (7)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 24 | static_table_ref | block | - | INV:INV-NET-SOCKTAB-1 | `8d65f94566ae` |
+| 31 | static_table_mut | block | - | INV:INV-NET-SOCKTAB-1 | `e145dbdda764` |
+| 43 | arc_refcount_probe | block | volatile,ptr-ops | INV:INV-NET-ARCREF-1 | `8073c8422f1c` |
+| 56 | audited_deref | block | - | INV:INV-NET-ARCREF-1 | `67b92813e401` |
+| 66 | container_of | block | ptr-ops | INV:INV-NET-CONTAINEROF-1 | `f3d67adc6d0a` |
+| 83 | pod_view | block | ptr-ops | INV:INV-NET-HDRVIEW-1 | `053e8c59a416` |
+| 97 | pod_view_mut | block | ptr-ops | INV:INV-NET-HDRVIEW-1 | `92c8d339ebfb` |
 
 ## syscall
 

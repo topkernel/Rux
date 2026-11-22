@@ -346,7 +346,12 @@ pub fn sysfs_root() -> Option<Arc<KObject>> {
 /// replay fed only the first binder and udevd still starved), so the
 /// replay is per-socket: duplicate adds re-run idempotent rules, fresh
 /// SEQNUMs, same DEVPATHs the trigger would have produced.
-pub fn coldboot_uevent_replay_into(sock: &alloc::sync::Arc<crate::net::netlink::NetlinkSocket>) {
+/// The push seam is caller-owned (crate-flip rung 2): the framework
+/// walks the tree and builds payloads; the SERVICE owns the socket
+/// type, so it supplies the push closure — the framework never names
+/// NetlinkSocket (the historical `_into(sock)` shape is why the two
+/// compilations of netlink.rs were type-incompatible).
+pub fn coldboot_uevent_replay(push: &mut dyn FnMut(&[u8])) {
     let Some(root) = sysfs_root() else { return };
     // Iterative DFS over the kobject tree; build "add" payloads for
     // every node carrying a device number (ttyS0, block devices, drm
@@ -359,7 +364,7 @@ pub fn coldboot_uevent_replay_into(sock: &alloc::sync::Arc<crate::net::netlink::
     while let Some(node) = stack.pop() {
         if node.devno.lock().is_some() {
             let (payload, _) = device_add_payload(&node);
-            crate::net::netlink::uevent_push_direct(sock, &payload);
+            push(&payload);
             fired += 1;
         }
         for child in node.children.lock().values() {
@@ -1820,7 +1825,7 @@ pub fn uevent_send_full(
     extra_env: &[(&str, &str)],
 ) -> u64 {
     let (msg, seq) = uevent_payload_for(devpath, action, subsystem, extra_env);
-    crate::net::netlink::uevent_broadcast(&msg);
+    crate::net::net_hooks::uevent_broadcast(&msg);
     seq
 }
 

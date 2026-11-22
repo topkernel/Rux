@@ -38,10 +38,9 @@ impl UdpHdr {
             return None;
         }
 
-        // SAFETY: data has at least UDP_HLEN bytes and is aligned to UdpHdr layout.
-        unsafe {
-            Some(&*(data.as_ptr() as *const UdpHdr))
-        }
+        // INV-NET-HDRVIEW-1: length + alignment checked net_edges-side
+        // (the old inline cast never checked alignment).
+        crate::net::net_edges::pod_view::<UdpHdr>(data)
     }
 
     /// Get source port
@@ -311,18 +310,15 @@ pub fn udp_socket_free(fd: i32) {
 /// # Returns
 /// Socket reference
 pub fn udp_socket_get(fd: i32) -> Option<&'static mut UdpSocket> {
-    // SAFETY: UDP_SOCKET_TABLE is a global; caller ensures no concurrent access.
-    unsafe {
-        UDP_SOCKET_TABLE.get_mut(fd as usize)
-    }
+    // INV-NET-SOCKTAB-1: caller-serialized global table (net_edges).
+    crate::net::net_edges::static_table_mut(core::ptr::addr_of_mut!(UDP_SOCKET_TABLE)).get_mut(fd as usize)
 }
 
 /// Read-only view of the UDP protocol-table slot (the same liveness
 /// contract as udp_socket_get: global table, caller-serialized).
 pub fn udp_socket_read(fd: i32) -> Option<&'static UdpSocket> {
-    // SAFETY: read-only access to the global table; caller ensures no
-    // concurrent mutation (same contract as udp_socket_get).
-    unsafe { UDP_SOCKET_TABLE.get(fd as usize) }
+    // INV-NET-SOCKTAB-1: read-only view, caller-serialized (net_edges).
+    crate::net::net_edges::static_table_ref(core::ptr::addr_of_mut!(UDP_SOCKET_TABLE)).get(fd as usize)
 }
 
 /// Whole-table views for the scans (bind-conflict walk, udp_rcv
@@ -330,14 +326,14 @@ pub fn udp_socket_read(fd: i32) -> Option<&'static UdpSocket> {
 /// table writers (UDP_TABLE_LOCK or the softirq/syscall discipline the
 /// scan sites already document).
 pub fn udp_table_mut() -> &'static mut UdpSocketTable {
-    // SAFETY: no re-entrancy inside (pure reference formation); the
-    // caller holds the documented serialization.
-    unsafe { &mut UDP_SOCKET_TABLE }
+    // INV-NET-SOCKTAB-1: reference formation only; caller-serialized
+    // (net_edges).
+    crate::net::net_edges::static_table_mut(core::ptr::addr_of_mut!(UDP_SOCKET_TABLE))
 }
 
 pub fn udp_table_ref() -> &'static UdpSocketTable {
-    // SAFETY: read-only view; caller-serialized against mutation.
-    unsafe { &UDP_SOCKET_TABLE }
+    // INV-NET-SOCKTAB-1: read-only view; caller-serialized (net_edges).
+    crate::net::net_edges::static_table_ref(core::ptr::addr_of_mut!(UDP_SOCKET_TABLE))
 }
 
 /// Bind socket to local address and port
@@ -1494,12 +1490,9 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // Get UDP data (after header)
     let data_len = (udp_hdr.len() as usize).saturating_sub(UDP_HLEN);
     let data = if data_len > 0 {
-        // SAFETY: skb.data + UDP_HLEN is within the skb's valid data range
-        // since udp_parse_packet validated the length.
-        unsafe {
-            let data_ptr = skb.data.add(UDP_HLEN);
-            core::slice::from_raw_parts(data_ptr, data_len)
-        }
+        // Framework substrate (buffer.rs data_slice_at): bounds are
+        // checked helper-side against the skb's valid range.
+        skb.data_slice_at(UDP_HLEN as u32, data_len as u32)
     } else {
         &[]
     };

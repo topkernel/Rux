@@ -242,7 +242,7 @@ pub fn timer_interrupt_handler() {
     //    sc184 (lane 2, perf-audit F1): gated on the table's high-water
     //    count — the handler early-returns when it is 0, so the raise
     //    was pure irq-exit dispatch overhead (x86_64 twin has details).
-    if crate::net::tcp::get_tcp_socket_table().count() > 0 {
+    if crate::net::net_hooks::tcp_table_nonempty() {
         crate::interrupt::softirq::raise_softirq_irqoff(
             crate::interrupt::softirq::SoftirqIndex::Timer as usize,
         );

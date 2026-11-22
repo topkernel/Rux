@@ -359,7 +359,15 @@ name = "rux-bin"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-net",
  "rux-syscall",
+]
+
+[[package]]
+name = "rux-net"
+version = "0.1.0"
+dependencies = [
+ "rux",
 ]
 
 [[package]]
@@ -367,6 +375,7 @@ name = "rux-syscall"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-net",
 ]
 
 [[package]]

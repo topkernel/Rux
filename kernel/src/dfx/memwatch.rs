@@ -860,28 +860,22 @@ pub fn dump_mem() {
         // boot names the deadlock side (data-at-client-unread vs
         // data-never-arrived) in one line.
         {
-            // (rung 2: the TCP census rides the hook — the table walk is
-            // net-stack internals; the hook returns (fd, state, rx, wnd)
-            // tuples the forensic dump prints.)
             taskdump_raw_line(b"\nTCPCEN ");
             let mut n = 0;
-            for (fd, st, rx, wnd) in crate::net::net_hooks::tcp_walk() {
+            for row in crate::net::net_hooks::tcp_census_rows() {
                 taskdump_raw_line(b"[");
-                taskdump_dec(fd as u64);
+                taskdump_dec(row.fd as u64);
                 taskdump_raw_line(b":st=");
-                taskdump_dec(st);
+                taskdump_dec(row.state as u64);
                 taskdump_raw_line(b",rx=");
-                taskdump_dec(rx);
+                taskdump_dec(row.rx_len);
                 taskdump_raw_line(b",wnd=");
-                taskdump_dec(wnd);
-                taskdump_raw_line(b"]");
+                taskdump_dec(row.rcv_wnd);
+                taskdump_raw_line(b",lp=");
+                taskdump_dec(row.local_port.to_be() as u64);
+                taskdump_raw_line(b"] ");
                 n += 1;
-                if n >= 16 {
-                    break;
-                }
-            }
-            if n == 0 {
-                taskdump_raw_line(b"(no tcp sockets)");
+                if n >= 8 { break; }
             }
         }
         // r-strand instrument (lat_fs conviction round): the sync-wait
