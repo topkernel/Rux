@@ -24,18 +24,12 @@ use rux::fs::file::File;
 /// framework fs item (glob re-export — the framework no longer
 /// declares the moved leaves, so no name conflicts).
 pub mod fs {
-    #[path = "../../../src/fs/pipe.rs"]
     pub mod pipe;
-    #[path = "../../../src/fs/fifo.rs"]
     pub mod fifo;
-    #[path = "../../../src/fs/inotify.rs"]
     pub mod inotify;
-    #[path = "../../../src/fs/memfd.rs"]
     pub mod memfd;
-    #[path = "../../../src/fs/selinuxfs.rs"]
     pub mod selinuxfs;
     #[cfg(feature = "unit-test")]
-    #[path = "pipe2_test.rs"]
     pub mod pipe2_test;
     pub use rux::fs::*;
 }
@@ -53,7 +47,6 @@ pub fn run_unit_tests() {
 /// The boot-time registration (rux-bin calls this before kmain):
 /// the mount names + the FsHooks slots. THE composition contract.
 pub fn register_all() {
-    crate::fs::selinuxfs::mount_register();
     rux::fs::fs_hooks::fs_register_hooks(rux::fs::fs_hooks::FsHooks {
         notify: crate::fs::inotify::notify,
         notify_file: crate::fs::inotify::notify_file,
@@ -85,6 +78,11 @@ pub fn register_all() {
             crate::fs::inotify::MAX_QUEUED_EVENTS_SYSCTL.store(v, core::sync::atomic::Ordering::Release)
         },
         inotify_fdinfo_watches: crate::fs::inotify::fdinfo_watches,
+        // Registered as a hook row so the FRAMEWORK invokes it at the
+        // register_builtin_handlers boot point (mount table ready); a
+        // direct call here would run before any init (x86_64 wedges in
+        // a 'R'-beacon reboot loop — convicted 2026-11-23).
+        leaf_mount_register: crate::fs::selinuxfs::mount_register,
     });
 }
 

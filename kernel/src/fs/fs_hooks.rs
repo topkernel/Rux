@@ -49,6 +49,13 @@ pub struct FsHooks {
     pub inotify_set_max_queued_events: fn(usize),
     /// procfs fdinfo: an inotify fd's watch rows.
     pub inotify_fdinfo_watches: fn(&File) -> Option<alloc::vec::Vec<(i32, u64, u64, u32)>>,
+    /// The service crate's mount-table row registrations (selinuxfs's
+    /// mount_register today). MUST run at the register_builtin_handlers
+    /// boot point — NOT at rust_main time: the mount table and the
+    /// allocator are not up yet that early (an early call panics on
+    /// x86_64 before the console exists: only the boot.S 'R' beacon
+    /// prints, in a reboot loop).
+    pub leaf_mount_register: fn(),
 }
 
 impl FsHooks {
@@ -76,6 +83,7 @@ impl FsHooks {
         inotify_max_queued_events: || 16384,
         inotify_set_max_queued_events: |_| {},
         inotify_fdinfo_watches: |_| None,
+        leaf_mount_register: || {},
     };
 }
 

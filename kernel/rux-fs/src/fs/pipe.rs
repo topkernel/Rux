@@ -1324,12 +1324,20 @@ pub fn pipe_file_poll(file: &File, events: u16) -> u16 {
 }
 
 fn pipe_file_close(file: &File) -> i32 {
-    if let Some(pipe) = file_pipe_private(file) {
-        file.clear_private_data();
-        // The take edge consumes the slot's Arc refcount; when the last
+    if file_pipe_private(file).is_some() {
+        // Take edge FIRST: read + Arc-reconstruct in one step, BEFORE
+        // the clear empties the cell. The previous order (clear ->
+        // take) re-read an emptied cell, so the expect panicked on
+        // EVERY pipe close ("pipe close on pipe file") — convicted on
+        // the x86_64 pbench boot 2026-11-23; the framework version
+        // saved the raw pointer before clearing (same invariant).
+        // The take consumes the slot's Arc refcount; when the last
         // close drops the last Arc, the Pipe is freed.
         let pipe = crate::fs::unsafe_edges::file_privdata_take_arc::<Pipe>(file)
             .expect("pipe close on pipe file");
+        // The take reads but does not empty the cell: clear it so any
+        // later reader sees None, matching the framework version.
+        file.clear_private_data();
 
         // Check file flags to determine whether to close read or write end
         if file.flags().is_readonly() || file.flags().is_rdwr() {
