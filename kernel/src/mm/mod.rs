@@ -29,7 +29,6 @@ pub mod page_alloc;
 pub mod rmap;
 pub mod lru;
 pub mod vmscan;
-pub mod oom_kill;
 pub mod vmemmap;
 pub mod swap;
 pub mod compact;

@@ -339,16 +339,16 @@ impl MmPolicyHooks {
         kswapd_init: no_policy_kswapd_init,
         kswapd_enable_oom: no_policy_kswapd_enable_oom,
         wakeup_kswapd: no_policy_wakeup_kswapd,
+        fault_oom_kill_or_retry: no_policy_fault_oom_kill_or_retry,
+        kernel_fault_oom_kill: no_policy_kernel_fault_oom_kill,
+        sysrq_oom_kill: no_policy_sysrq_oom_kill,
+        oom_badness: no_policy_oom_badness,
         try_to_free_pages: no_policy_try_to_free_pages,
         drain_file_cache_before_oom: no_policy_drain_file_cache_before_oom,
         vscan_heartbeat: no_policy_vscan_heartbeat,
         vscan_census_line: no_policy_vscan_census_line,
         zone_dirty_writeback_state: no_policy_zone_dirty_writeback_state,
         zone_below_dirty_writeback_mark: no_policy_zone_below_dirty_writeback_mark,
-        fault_oom_kill_or_retry: no_policy_fault_oom_kill_or_retry,
-        kernel_fault_oom_kill: no_policy_kernel_fault_oom_kill,
-        sysrq_oom_kill: no_policy_sysrq_oom_kill,
-        oom_badness: no_policy_oom_badness,
         migration_in_progress: no_policy_migration_in_progress,
         compact_zone: no_policy_compact_zone,
         swap_init: no_policy_swap_init,
@@ -484,7 +484,7 @@ fn policy_hooks() -> &'static MmPolicyHooks {
 /// the composition bin's registration — OnceSlot first-wins, so a
 /// flipped file's crate rows prevail over these).
 pub fn register_in_tree_mm_policy() {
-    // Flipped families (kswapd) serve from the rux-mm crate, whose
+    // Flipped families (kswapd, oom_kill) serve from the rux-mm crate, whose
     // registration ran earlier in the composition bin (OnceSlot
     // first-wins) — their rows here stay at the EMPTY defaults and
     // never execute.
@@ -492,16 +492,16 @@ pub fn register_in_tree_mm_policy() {
         kswapd_init: no_policy_kswapd_init,
         kswapd_enable_oom: no_policy_kswapd_enable_oom,
         wakeup_kswapd: no_policy_wakeup_kswapd,
+        fault_oom_kill_or_retry: no_policy_fault_oom_kill_or_retry,
+        kernel_fault_oom_kill: no_policy_kernel_fault_oom_kill,
+        sysrq_oom_kill: no_policy_sysrq_oom_kill,
+        oom_badness: no_policy_oom_badness,
         try_to_free_pages: crate::mm::vmscan::try_to_free_pages,
         drain_file_cache_before_oom: crate::mm::vmscan::drain_file_cache_before_oom,
         vscan_heartbeat: crate::mm::vmscan::vscan_heartbeat,
         vscan_census_line: crate::mm::vmscan::vscan_census_line,
         zone_dirty_writeback_state: crate::mm::vmscan::zone_dirty_writeback_state,
         zone_below_dirty_writeback_mark: crate::mm::vmscan::zone_below_dirty_writeback_mark,
-        fault_oom_kill_or_retry: crate::mm::oom_kill::fault_oom_kill_or_retry,
-        kernel_fault_oom_kill: crate::mm::oom_kill::kernel_fault_oom_kill,
-        sysrq_oom_kill: crate::mm::oom_kill::sysrq_oom_kill,
-        oom_badness: crate::mm::oom_kill::oom_badness,
         migration_in_progress: crate::mm::compact::migration_in_progress,
         compact_zone: crate::mm::compact::compact_zone,
         swap_init: crate::mm::swap::swap_init,

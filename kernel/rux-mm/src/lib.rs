@@ -24,7 +24,7 @@
 // framework; `syscall` is added for the compact/swap edges consumers.)
 pub use rux::{
     arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, ipc,
-    process, safety, sched, sync, syscall, timer, trace,
+    process, safety, sched, security, signal, sync, syscall, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;
@@ -77,10 +77,10 @@ pub fn register_all() {
         vscan_census_line: rux::mm::vmscan::vscan_census_line,
         zone_dirty_writeback_state: rux::mm::vmscan::zone_dirty_writeback_state,
         zone_below_dirty_writeback_mark: rux::mm::vmscan::zone_below_dirty_writeback_mark,
-        fault_oom_kill_or_retry: rux::mm::oom_kill::fault_oom_kill_or_retry,
-        kernel_fault_oom_kill: rux::mm::oom_kill::kernel_fault_oom_kill,
-        sysrq_oom_kill: rux::mm::oom_kill::sysrq_oom_kill,
-        oom_badness: rux::mm::oom_kill::oom_badness,
+        fault_oom_kill_or_retry: crate::mm::oom_kill::fault_oom_kill_or_retry,
+        kernel_fault_oom_kill: crate::mm::oom_kill::kernel_fault_oom_kill,
+        sysrq_oom_kill: crate::mm::oom_kill::sysrq_oom_kill,
+        oom_badness: crate::mm::oom_kill::oom_badness,
         migration_in_progress: rux::mm::compact::migration_in_progress,
         compact_zone: rux::mm::compact::compact_zone,
         swap_init: rux::mm::swap::swap_init,
