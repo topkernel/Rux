@@ -26,7 +26,37 @@ Level 0 (outermost): IRQ disable (irq_save / save_and_disable_irq)
         +-- Level 2c: inode lock (kernel/src/fs/)
         |
         +-- Level 2d: dentry cache lock (kernel/src/fs/)
+        |
+        +-- Level 2e: binder WORLD lock (kernel/src/ipc/binder.rs: WORLD)
+              |
+              +-- (no nested acquisition) — WORLD is a leaf-most
+                  global lock: while it is held, do NOT take the
+                  inode/dentry/VMA/page-table locks. A binder path
+                  that needs one of those must release WORLD first
+                  and re-take it afterwards (see the binder section
+                  below).
 ```
+
+### binder WORLD (Level 2e)
+
+`WORLD` (`kernel/src/ipc/binder.rs`) is the single global spinlock that
+serializes every binder state transition: the proc/node tables, the
+transaction queues, the thread states, and the allocation bookkeeping.
+It is acquired by `world_lock()` (which also disables interrupts) and
+held for the whole of a binder operation.
+
+Ordering rule: WORLD sits at Level 2e — outside the inode/dentry/VMA
+locks. A binder operation that must reach into the filesystem (binder
+mmap's VMA insert, the fd-table update on binder_open/close) takes the
+filesystem lock only with WORLD RELEASED; taking it under WORLD would
+invert the order against the fs paths that take inode/dentry locks and
+then (for the mmap path) the mm locks.
+
+Practical consequence: `binder_mmap_handler` must not call into the
+VMA manager while holding WORLD. The invariant is enforced by the
+`&World` token parameter (`pm()`/`st()` take `_held: &World`), which
+makes the lock hold compiler-visible at the call sites that mutate
+binder state.
 
 ## Sleeping mutexes (outside the spinlock hierarchy)
 
