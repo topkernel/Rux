@@ -3186,14 +3186,12 @@ fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 /// whole algorithm into sync/mutex.rs unchanged so the tree has ONE
 /// mutex primitive and no yielding spinlock anywhere.
 ///
-/// Task-recursive: a loop device backed by a file on ANOTHER ext4
-/// instance re-enters ext4 from inside the block layer (ext4#2's create
-/// writes metadata through /dev/loopN into ext4#1, which takes the same
-/// lock). Nested acquire by the SAME task is legal; the outermost guard
-/// releases. do_exit() force-drops via release_if_owner (R73) since
-/// RAII never runs through do_exit.
-pub static EXT4_BIG_LOCK: crate::sync::SleepMutex =
-    crate::sync::SleepMutex::new_rt("EXT4-BIGLOCK", true);
+/// The lock PROTOCOL is sync-floor (micro-core §2): the static moved
+/// framework-side (fs/journal_lock.rs, rung-5) so the exit path, the
+/// virtio VW watchdog and dfx taskdump reach it without a hook row.
+/// This re-export keeps the historical path working for ext4/jbd2
+/// bodies (which consume it as their serialization primitive).
+pub use crate::fs::journal_lock::EXT4_BIG_LOCK;
 
 /// Ext4 inode operations table
 /// Ext4 now supports write operations through namei module

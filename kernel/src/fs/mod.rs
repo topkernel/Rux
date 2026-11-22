@@ -54,6 +54,11 @@ pub mod pidfd;
 // pub mod fifo; — MOVED to the rux-fs service crate (rung 3)
 pub mod cgroup;
 pub mod fsctx;
+// The rung-5 ext4 seam: the framework's ext4/jbd2 hook table (the
+// service crate registers at boot; the ext4/jbd2 module lines above
+// stay until the rux-ext4 flip deletes them).
+pub mod ext4_hooks;
+pub mod journal_lock;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, close_file_fd_report, set_cloexec_fd};
 pub use fs_struct::FsStruct;

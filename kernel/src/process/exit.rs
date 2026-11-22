@@ -1995,7 +1995,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // starved). The dying task can make no forward progress in its
         // section; drop the lock and wake all waiters so the filesystem
         // survives the kill.
-        crate::fs::ext4::EXT4_BIG_LOCK.release_if_owner(current_pid);
+        crate::fs::journal_lock::EXT4_BIG_LOCK.release_if_owner(current_pid);
 
         // ===== VFS mutation lock force-release =====
         // Same leak family: do_exit does not unwind Rust guards, so a
