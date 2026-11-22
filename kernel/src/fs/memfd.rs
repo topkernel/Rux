@@ -205,13 +205,9 @@ fn inode_seals(inode: &Inode) -> u32 {
 
 /// destroy_inode hook: free the MemfdState Box.
 fn memfd_destroy_inode(inode: &mut Inode) {
-    if let Some(p) = inode.private_data.take() {
-        // SAFETY: the Box was created by memfd_create and is exclusively
-        // owned by this inode; the last Arc<Inode> is dropping now.
-        // SAFETY: private_data holds the Box leaked by into_raw at inode
-        // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { alloc::boxed::Box::from_raw(p as *mut MemfdState) });
-    }
+    // The Box was created by memfd_create and is exclusively owned by
+    // this inode; the edge takes and reclaims it (INV-FS-PRIVDATA-1).
+    crate::fs::unsafe_edges::privdata_take_box::<MemfdState>(inode);
 }
 
 static MEMFD_INODE_OPS: INodeOps = INodeOps {

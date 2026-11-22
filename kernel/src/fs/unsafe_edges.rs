@@ -216,3 +216,84 @@ impl<T> AsDerefRefExt<T> for Option<alloc::sync::Arc<T>> {
         self.as_ref().map(|a| &**a)
     }
 }
+
+// ==================== Rung-3 flip teardown edges ====================
+
+/// destroy_inode's Box reclaim: take the inode's private_data slot and
+/// drop it as the `Box<T>` the leaf leaked at creation
+/// (INV-FS-PRIVDATA-1's take-twin; the Drop-time single reclaim).
+pub(crate) fn privdata_take_box<T>(inode: &mut Inode) -> Option<()> {
+    // SAFETY: INV-FS-PRIVDATA-1 — the leaf stored a Box<T> via
+    // into_raw at inode creation; this Drop-path take is the single
+    // reclaim (the cell is emptied first, making a second impossible).
+    if let Some(ptr) = inode.private_data.take() {
+        drop(unsafe { alloc::boxed::Box::from_raw(ptr as *mut T) });
+        Some(())
+    } else {
+        None
+    }
+}
+
+/// destroy_inode's Arc drop: take the private_data slot and drop the
+/// `Arc<T>` reference the leaf stored (the last-ref case frees).
+pub(crate) fn privdata_drop_arc<T>(inode: &mut Inode) {
+    // SAFETY: INV-FS-FILEPRIV-1 shape on the inode slot — the stored
+    // value is an Arc::into_raw of the leaf's node type.
+    if let Some(ptr) = inode.private_data.take() {
+        drop(unsafe { alloc::sync::Arc::from_raw(ptr as *const T) });
+    }
+}
+
+/// kill_sb's Box reclaim: the superblock pointer a mount callback
+/// returned via Box::into_raw, reclaimed at unmount (null-safe).
+pub(crate) fn kill_sb_reclaim_box<T>(sb: *mut crate::fs::superblock::SuperBlock) {
+    if !sb.is_null() {
+        // SAFETY: the mount callback stored a Box<T> via into_raw; this
+        // unmount-path call is the single reclaim.
+        drop(unsafe { alloc::boxed::Box::from_raw(sb as *mut T) });
+    }
+}
+
+/// Clone the File's private-data Arc WITHOUT consuming the slot
+/// (increment + from_raw; the slot keeps its single reference — the
+/// pty/inotify instance-recovery shape). INV-FS-FILEPRIV-1 + the
+/// stored value being an Arc::into_raw of `T`.
+pub(crate) fn file_privdata_arc_clone<T>(file: &File) -> Option<alloc::sync::Arc<T>> {
+    let ptr = file.private_data_ptr()? as *const T;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the stored value is a live Arc::into_raw of T; the
+    // increment balances the from_raw below (the slot keeps its ref).
+    unsafe {
+        alloc::sync::Arc::increment_strong_count(ptr);
+        Some(alloc::sync::Arc::from_raw(ptr))
+    }
+}
+
+/// Zero-and-set-len a pre-sized Vec (the fresh-ring-buffer shape):
+/// `with_capacity(n)` then zero-fill then `set_len(n)` — INV-CBYTES-2
+/// (the capacity is exactly n, so set_len stays in bounds).
+pub(crate) fn vec_zeroed_sized(n: usize) -> alloc::vec::Vec<u8> {
+    let mut data = alloc::vec::Vec::<u8>::with_capacity(n);
+    // SAFETY: the allocation holds n initialized bytes for the Vec's
+    // purposes (zeroed right here); capacity is exactly n.
+    unsafe {
+        core::ptr::write_bytes(data.as_mut_ptr(), 0, n);
+        data.set_len(n);
+    }
+    data
+}
+
+/// Build a shared slice from a raw kernel pointer + len (the FileOps
+/// raw-slice call shape — the caller owns the readable span).
+pub(crate) fn kernel_slice<'a>(p: *const u8, len: usize) -> &'a [u8] {
+    // SAFETY: the caller's FileOps slice contract — p..p+len readable.
+    unsafe { core::slice::from_raw_parts(p, len) }
+}
+
+/// Build an exclusive slice from a raw kernel pointer + len (twin).
+pub(crate) fn kernel_slice_mut<'a>(p: *mut u8, len: usize) -> &'a mut [u8] {
+    // SAFETY: as kernel_slice, exclusive.
+    unsafe { core::slice::from_raw_parts_mut(p, len) }
+}

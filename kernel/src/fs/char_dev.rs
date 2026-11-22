@@ -174,8 +174,9 @@ pub fn char_dev_file_stat(file: &crate::fs::File, stat: &mut crate::fs::Stat) ->
     // SAFETY: ops identity confirms a UART File; private_data points at the
     // static CharDev installed by init_std_fds_for_task (or equivalent).
     let ptr = file.private_data_ptr()?;
-    // SAFETY: the &'static CharDev init_std_fds stored (file-lifetime).
-    let dev = unsafe { &*(ptr as *const CharDev) };
+    // The &'static CharDev init_std_fds stored (file-lifetime) — the
+    // shared-slot edge (INV-FS-FILEPRIV-1).
+    let dev = crate::fs::unsafe_edges::file_privdata_ref::<CharDev>(file)?;
     stat.st_dev = CHAR_DEV_STAT_DEV;
     stat.st_ino = ptr as usize as u64;
     stat.st_nlink = 1;
@@ -201,22 +202,16 @@ fn uart_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         }
     }
 
-    if let Some(priv_data) = file.private_data_ptr() {
-        // SAFETY: init_std_fds stored a &'static CharDev (file-lifetime).
-        let char_dev = unsafe { &*(priv_data as *const CharDev) };
-        char_dev.read(buf)
-    } else {
-        -9  // EBADF
+    match crate::fs::unsafe_edges::file_privdata_ref::<CharDev>(file) {
+        Some(char_dev) => char_dev.read(buf),
+        None => -9,  // EBADF
     }
 }
 
 fn uart_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
-    if let Some(priv_data) = file.private_data_ptr() {
-        // SAFETY: as uart_file_read.
-        let char_dev = unsafe { &*(priv_data as *const CharDev) };
-        char_dev.write(buf)
-    } else {
-        -9  // EBADF
+    match crate::fs::unsafe_edges::file_privdata_ref::<CharDev>(file) {
+        Some(char_dev) => char_dev.write(buf),
+        None => -9,  // EBADF
     }
 }
 

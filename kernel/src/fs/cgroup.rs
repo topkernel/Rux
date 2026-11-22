@@ -502,8 +502,7 @@ fn cgroup2_kill_sb(sb: *mut SuperBlock) {
         // The boot-created superblock is shared; only free private mounts.
         let current = GLOBAL_CGROUP2_SB.load(Ordering::Acquire);
         if current != sb {
-            // SAFETY: the Box the mount callback stored (unmount path).
-            drop(unsafe { alloc::boxed::Box::from_raw(sb) });
+            crate::fs::unsafe_edges::kill_sb_reclaim_box::<SuperBlock>(sb);
         }
     }
 }

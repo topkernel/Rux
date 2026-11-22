@@ -419,7 +419,7 @@ pub fn notify_file(file: &File, mask: u32) {
         Some(i) => i,
         None => return,
     };
-    let dentry = unsafe { (*file.dentry.get()).clone() };
+    let dentry = file.get_dentry().cloned();
     let mut mask = mask;
     if inode.mode.is_directory() {
         mask |= IN_ISDIR;
@@ -502,14 +502,9 @@ fn instance_of(file: &File) -> Option<Arc<InotifyInstance>> {    let ops = file.
     if !core::ptr::eq(ops as *const _, &INOTIFY_OPS as *const _) {
         return None;
     }
-    // SAFETY: private_data was installed by inotify_init1 as
-    // Arc::into_raw and stays valid while the File exists; the recovered
-    // Arc reference is cloned and re-forgotten, never dropped.
-    let ptr = unsafe { *file.private_data.get() }?;
-    let arc = unsafe { Arc::from_raw(ptr as *const InotifyInstance) };
-    let cloned = Arc::clone(&arc);
-    core::mem::forget(arc);
-    Some(cloned)
+    // The instance Arc stays in the slot; the clone edge recovers an
+    // independent reference (INV-FS-FILEPRIV-1).
+    crate::fs::unsafe_edges::file_privdata_arc_clone::<InotifyInstance>(file)
 }
 
 /// inotify_add_watch: register (or update) a watch for `path`.
@@ -762,11 +757,9 @@ fn inotify_poll(file: &File, _events: u16) -> u16 {
 }
 
 fn inotify_close(file: &File) -> i32 {
-    // SAFETY: private_data.take() hands us the Arc::into_raw'd reference
-    // exactly once (close runs once, at last reference).
-    let ptr = unsafe { file.private_data.get().replace(None) };
-    if let Some(ptr) = ptr {
-        let instance = unsafe { Arc::from_raw(ptr as *const InotifyInstance) };
+    // The take edge hands us the Arc exactly once (close runs once,
+    // at last reference).
+    if let Some(instance) = crate::fs::unsafe_edges::file_privdata_take_arc::<InotifyInstance>(file) {
         // Watches die with the fd: drop every registry entry of this
         // instance (retain matches on Arc identity — no inner lock
         // needed, so no registry -> inner nesting here).
