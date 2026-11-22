@@ -2320,9 +2320,11 @@ fn handle_general_protection(regs: &mut PtRegs) {
         // full report (bounded: 6 full dumps then one-liners) plus a
         // register-memory dump — perf-record-shaped bytes in the heap
         // metadata would name the ring writer as the corrupting agent.
-        user_segv_forensics(regs, regs.rip);
-        gp_regmem_dump(regs);
-        gp_mmhistory_dump(regs);
+        // DEATH-ONLY (kallsyms conviction, 2026-11-22): the dumps moved
+        // below the handler check — a HANDLED #GP (crash catcher,
+        // deliberate probe) must not pay the full forensic decode; LTP's
+        // kallsyms deliberately faults through a handler and the
+        // per-fault dump turned it into a 90s-timeout SIGKILL.
         // Handler-first routing (same as the page-fault Segfault path):
         // debuggers/crash catchers must see the SIGSEGV; the default
         // disposition kills here. A fault inside the (blocked) SIGSEGV
@@ -2343,6 +2345,9 @@ fn handle_general_protection(regs: &mut PtRegs) {
             crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
             return;
         }
+        user_segv_forensics(regs, regs.rip);
+        gp_regmem_dump(regs);
+        gp_mmhistory_dump(regs);
         let _ = crate::signal::send_signal_with_info_directed(pid, gp_info);
         // huks-wedge lane (hw5): group death (Linux do_group_exit).
         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
@@ -3744,7 +3749,6 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // demand-maps the faulting page (FFRT arenas, GC guards)
                 // installs the WRONG page and the instruction re-faults
                 // forever (the 0x7ff1 OH fault-loop family).
-                user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
                 let info = crate::signal::SigInfo::fault(
                     crate::signal::Signal::SIGSEGV as i32,
@@ -3755,6 +3759,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     let _ = crate::signal::send_signal_with_info_directed(pid, info);
                     return;
                 }
+                // DEATH-ONLY forensics (kallsyms conviction, 2026-11-22):
+                // the dump fires ONLY on the default disposition. Fired
+                // before the handler check it taxed every HANDLED fault —
+                // LTP's kallsyms probes 37k kernel addresses through a
+                // SIGSEGV+siglongjmp handler and drowned in dumps until
+                // the harness timeout SIGKILLed it (FAIL->CRASH(137)).
+                user_segv_forensics(regs, fault_addr);
                 let _ = crate::signal::send_signal_with_info_directed(pid, info);
                 // huks-wedge lane (hw5): GROUP death — a synchronous
                 // SIGSEGV with default disposition terminates the whole
@@ -3799,7 +3810,6 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // SEGV_ACCERR (permission denied, the PROT_NONE class)
                 // with si_addr = cr2 — FFRT's arena handler maps exactly
                 // this page (arena-mmap lane 2026-11-14).
-                user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
                 let info = crate::signal::SigInfo::fault(
                     crate::signal::Signal::SIGSEGV as i32,
@@ -3810,6 +3820,9 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     let _ = crate::signal::send_signal_with_info_directed(pid, info);
                     return;
                 }
+                // DEATH-ONLY forensics (kallsyms conviction, 2026-11-22):
+                // see the SEGV_MAPERR arm — handled faults skip the dump.
+                user_segv_forensics(regs, fault_addr);
                 let _ = crate::signal::send_signal_with_info_directed(pid, info);
                 // huks-wedge lane (hw5): group death (Linux do_group_exit)
                 // — see the SEGV_MAPERR arm above for the full rationale.
