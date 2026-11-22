@@ -823,15 +823,22 @@ pub fn rust_main_tail() -> ! {
             }
         }
 
-        // Initialize block devices (for rootfs)
+        // Initialize block devices (for rootfs) — through the R4
+        // initcall table (the crate seam): the probe family registers
+        // its rows first, then each level drains in registration order.
+        // A 0-device probe is a NEGATIVE probe (no such device on this
+        // machine) — normal, unreported, never fatal; the boot-report
+        // lines below fire only for bound devices, byte-identical to
+        // the named-call era.
         {
+            drivers::virtio::probe::register_probe_initcalls();
             // First scan MMIO devices (virtio-blk-device)
-            let mmio_count = drivers::probe::init_block_devices();
+            let mmio_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Early);
             if mmio_count > 0 {
                 print_status("driver", &format!("virtio-blk MMIO x{}", mmio_count), true);
             }
             // Then scan PCI devices (virtio-blk-pci)
-            let pci_count = drivers::probe::init_pci_block_devices();
+            let pci_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Device);
             if pci_count > 0 {
                 print_status("driver", &format!("virtio-blk PCI x{}", pci_count), true);
                 print_status("driver", "GenDisk registered", true);
@@ -869,9 +876,9 @@ pub fn rust_main_tail() -> ! {
             );
         }
 
-        // Initialize network devices
+        // Initialize network devices (the Late initcall level)
         {
-            let device_count = drivers::probe::init_network_devices();
+            let device_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Late);
             if device_count > 0 {
                 print_status("driver", &format!("virtio-net x{}", device_count), true);
             }

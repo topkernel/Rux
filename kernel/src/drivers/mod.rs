@@ -23,6 +23,7 @@ pub mod loop_dev;
 pub mod ashmem;
 pub mod access_tokenid;
 pub mod watchdog;
+pub mod initcalls;
 pub mod drm;
 
 // Re-export VirtIO probe module for backward compatibility
