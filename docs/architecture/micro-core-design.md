@@ -126,8 +126,8 @@ rux-core          (≈3,000-3,500 dual lines; the entire TCB)
   safety/  sync-primitives  task-lifecycle  timer-core  printk-ring
   ← verification stack: Kani 12/12, Miri 0-UB, Verus narrow-adopt
 
-rux-sched-policy  forbid-safe  (CFS/RT/fairness/wakeup/deadline logic)
-rux-mm-policy     forbid-safe  (VMA tree, mmap/COW/fault DECISIONS, brk)
+rux-sched         forbid-safe  (CFS/RT/fairness/wakeup/deadline policy)
+rux-mm            forbid-safe  (VMA tree, mmap/COW/fault DECISIONS, brk)
 rux-syscall       forbid-safe  (DONE at M3; the pattern-proven first rung)
 rux-fs-svc        forbid-safe  (VFS glue, page cache, leaf filesystems)
 rux-ext4          forbid-safe  (deepest fs consumer)
@@ -152,7 +152,20 @@ them.
 
 ### Rung S1 — sched policy / core split
 
-- MOVES to `rux-sched-policy` (forbid): CFS/RT/deadline decision logic,
+**S1 is the worked exemplar of MECHANISM/POLICY SEPARATION** (the classic
+OS principle, here enforced by the compiler): the MECHANISM (context
+switch, GRQ lock discipline, tp derivation, task-slot lifecycle — the
+state-manipulating machinery that owns the invariants) stays in the core
+under audit; the POLICY (which task next, where to place a wake, when to
+throttle — the DECISIONS that consume the mechanism's safe API) moves
+out under forbid. The compiler draws the line the principle only
+described: policy code literally cannot express the mechanism's unsafe,
+so the age-old "separate mechanism from policy" becomes a build error
+when violated, not a review comment. The seam artifacts (the hook table,
+the 33-item private-surface API) are the mechanism's PUBLISHED CONTRACT
+— the policy's entire view of the core. M1 repeats the shape for mm.
+
+- MOVES to `rux-sched` (forbid): CFS/RT/deadline decision logic,
   fairness math, wakeup placement policy, load-balancing decisions,
   cgroup scheduling policy, idle balancing, the census/diagnostic walks.
 - STAYS in core: `__switch_to` + tp derivation + stack switch (F-CS/F-TP),
@@ -169,7 +182,7 @@ them.
 
 ### Rung M1 — mm policy / core split
 
-- MOVES to `rux-mm-policy` (forbid): the VMA tree and its lock protocol's
+- MOVES to `rux-mm` (forbid): the VMA tree and its lock protocol's
   policy side, mmap/munmap/mprotect DECISIONS, COW/fork mapping policy,
   fault ROUTING (which arm), brk policy, oom/kill policy, compaction
   decisions, kswapd policy.
