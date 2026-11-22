@@ -192,9 +192,11 @@ Landed, per the five-step recipe:
    unmap_pages, perm_to_flags, PageTableWalker::walk, map_page_noflush,
    textfree_owner_maps, release_cache_mapping_pin, the fill family,
    read/write_pte_raw, l1_table_for, FILL_REFUSAL_SITE.
-5. aarch64: still in-tree-registered through the same table (its carve
-   is the next commit of this lane; aa mm_ops has no
-   remove_vma_piece/find_free_area_32bit and its page_fault is 683 ln).
+5. aarch64 carve (1d70a7c7d): kernel/src/mm/policy/aarch64.rs (1,268
+   ln, 0 unsafe) — the same fn set (minus set_range_permissions/
+   remove_vma_piece/find_free_area_32bit, which aa never had) plus
+   protnone_represent. All three registrars now empty; every arch's mm
+   policy serves from rux_bin -> rux_mm::register_all.
 
 Gates: triple-arch rc=0 after every step; riscv64 suite 886/886 at the
 seam, 886/886 with the x86 carve, 886/886 with the rv carve (the rv
