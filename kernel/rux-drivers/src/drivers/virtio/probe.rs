@@ -6,7 +6,10 @@
 //!
 //! Used to probe and initialize VirtIO devices
 
-#![forbid(unsafe_code)]
+// Unsafe boundary: the CRATE-level #![forbid(unsafe_code)] in
+// rux-drivers/src/lib.rs owns this file's guarantee (the file-level
+// attribute it carried framework-side was dropped in the move so the
+// crate boundary is the only and testable guard).
 use crate::println;
 use crate::config::ENABLE_VIRTIO_NET_PROBE;
 use crate::sync::spinlock::Spinlock;

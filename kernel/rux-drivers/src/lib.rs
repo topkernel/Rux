@@ -3,29 +3,43 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! The DRIVERS SERVICE CRATE (crate-flip rung 4): the leaf driver
-//! files — watchdog, access_tokenid, the loopback netdev, and the
-//! simple-framebuffer/fbdev display leaves — under a crate-level
-//! unsafe-deny boundary. The framework keeps the mechanism drivers
-//! (virtio transports + virtio device families, intc, timer/
-//! clockevent machinery, rtc timekeeping, pci, the netdev/block/GPU
-//! registries, DRM's GEM allocator, the framebuffer pixel substrate)
-//! and the two seams: drivers/hooks.rs (the DriverHooks table this
-//! crate fills) and drivers/initcalls.rs (the leveled device-init
-//! table).
+//! files — watchdog, access_tokenid, the loopback netdev, the
+//! simple-framebuffer/fbdev display leaves, and the virtio probe
+//! orchestrator — under a crate-level unsafe-deny boundary. The
+//! framework keeps the mechanism drivers (virtio transports + virtio
+//! device families, intc, timer/clockevent machinery, rtc timekeeping,
+//! pci, the netdev/block/GPU registries, DRM's GEM allocator, the
+//! framebuffer pixel substrate) and the two seams: drivers/hooks.rs
+//! (the DriverHooks table this crate fills) and drivers/initcalls.rs
+//! (the leveled device-init table).
 //!
 //! Sole-copy state (the rung-1 recipe's final step): the service files
 //! LIVE in this crate (src/drivers/); the framework keeps every
 //! registry, transport and substrate those files consume.
 //!
-//! Why these five files are leaves (the flip's measurement): every
-//! unsafe construct in them is zero — their raw edges (MMIO windows,
-//! uaccess, devno identity) already sit on audited framework edges —
-//! and their framework-facing surface is exactly the DriverHooks row
-//! set. Files whose unsafe IS the device protocol (virtio queues,
-//! intc register walks) or whose consumers are framework machinery
-//! (rtc: the timer tree; loop_dev: the mount/page-cache path) stay in
-//! the framework — the rung's flip commit message carries the full
-//! movable-vs-stays census with the numbers.
+//! Why these files are leaves (the flip's measurement): every unsafe
+//! construct in them is zero — their raw edges (MMIO windows, uaccess,
+//! devno identity) already sit on audited framework edges — and their
+//! framework-facing surface is exactly the DriverHooks row set. Files
+//! whose unsafe IS the device protocol (virtio queues, intc register
+//! walks) or whose consumers are framework machinery (rtc: the timer
+//! tree; loop_dev: the mount/page-cache path) stay in the framework —
+//! the rung's flip commit message carries the full movable-vs-stays
+//! census with the numbers.
+//!
+//! Rung-4 tranche 2 (the probe orchestrator): virtio/probe.rs is pure
+//! orchestration — it consumes the framework's virtio/pci/netdev
+//! mechanisms downward and its only two upward callers are cold (the
+//! boot core's initcall registration point and the /sys/bus/pci/rescan
+//! sysfs attribute), both now DriverHooks rows. The other zero-unsafe
+//! candidates measured and STAYED framework-side (see the tranche's
+//! commit message for the numbers): virtio_pci.rs (the VirtIOPCI type
+//! names 1 framework static array + signatures in 4 staying files; its
+//! queue ops are on the block-I/O and fsync paths), pci/mod.rs and
+//! offset.rs (consumed by those same staying files), hpet.rs and
+//! plic.rs (hot timekeeping/IRQ-entry call sites), iostat.rs (block
+//! completion accounting), input/{event,ps2}.rs and virtio_cmd.rs
+//! (consumed by the staying framework input/gpu/drm trees).
 #![forbid(unsafe_code)]
 #![no_std]
 #![feature(alloc_error_handler, linkage)]
@@ -42,7 +56,7 @@ pub use rux::{
 // view (moved policy + the framework-staying process modules) —
 // crate::process::X paths keep resolving, one-way dependency.
 pub use rux_process::process;
-pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
+pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println, print_status};
 // The ipc service tree (crate-flip rung: rux-ipc): the merged view
 // (service policy + framework binder) — access_tokenid consumes the
 // access_token registry through it.
@@ -56,13 +70,21 @@ pub mod drivers {
     // `crate::drivers::timer`, `crate::drivers::net::space` etc.
     // resolve for the service files.
     pub use rux::drivers::{blkdev, drm, hooks, initcalls, input,
-        intc, loop_dev, pci, rtc, timer, virtio};
+        intc, loop_dev, pci, rtc, timer};
     pub use rux::drivers::ashmem;
-    pub use rux::drivers::probe;
 
     // The service files (sole copy: src/drivers/, historical paths).
     pub mod watchdog;
     pub mod access_tokenid;
+
+    // The virtio leaf (rung-4 tranche 2): the framework keeps the
+    // virtio mechanism tree (the mod.rs core + queues + the virtio_pci
+    // transport + the offset consts); the probe orchestrator joins
+    // here (sole copy: src/drivers/virtio/probe.rs).
+    pub mod virtio {
+        pub use rux::drivers::virtio::*;
+        pub mod probe;
+    }
 
     // The net leaf: the framework keeps net/{space,virtio_net} (the
     // netdev registry + the virtio protocol driver); loopback joins
@@ -135,5 +157,15 @@ pub fn register_all() {
         watchdog_ioctl: drivers::watchdog::watchdog_file_ioctl,
         tokenid_ioctl: drivers::access_tokenid::tokenid_file_ioctl,
         mark_fb_user_mapped: drivers::gpu::fbdev::mark_fb_user_mapped,
+        // The virtio probe family's initcall registration (rung-4
+        // tranche 2). NOT called here: the row is dispatched by the
+        // boot core at the family's historical registration point
+        // (inside rust_main_tail, after arch::smp::init), because the
+        // row body takes the initcall table's Spinlock — a register_all
+        // call site (pre-rust_main_impl, pre-per-CPU on x86_64) would
+        // fault. The rescan row is filled here and dispatched from the
+        // sysfs rescan attribute (cold, user-triggered).
+        register_probe_initcalls: drivers::virtio::probe::register_probe_initcalls,
+        pci_rescan_block_hotplug: drivers::virtio::probe::pci_rescan_block_hotplug,
     });
 }
