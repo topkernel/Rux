@@ -51,6 +51,7 @@ pub mod fs {
     pub mod tmpfs;
     pub mod devfs;
     pub mod procfs;
+    pub mod xattr;
     pub use rux::fs::*;
 }
 

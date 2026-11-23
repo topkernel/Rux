@@ -50,7 +50,7 @@ pub mod locks;
 // pub mod tty; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub mod vt;
 // pub mod pty; — MOVED to the rux-fs service crate (fs-substrate tranche)
-pub mod xattr;
+// pub mod xattr; — MOVED to the rux-fs service crate (fs-rest tranche)
 // pub mod memfd; — MOVED to the rux-fs service crate (rung 3)
 pub mod pidfd;
 // pub mod selinuxfs; — MOVED to the rux-fs service crate (rung 3)
