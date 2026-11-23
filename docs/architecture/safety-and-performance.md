@@ -2016,6 +2016,76 @@ LATER storage_daemon/init wild-RIP oops past this point is a
 pre-existing separate defect, not this fix's (pa-p0ctl-serial.log vs
 pa-p0final-serial.log). [lane worktree bytes-p0]
 
+### Unsafe-ledger re-bank procedure (2026-11-23, ledger-recover lane): annotations follow the code, and a drop is loud
+
+What went wrong, established from the sidecar's own history (71
+distinct sidecar+tree versions, walked with the new remap):
+
+- Region ids are `sha1(path:line:snippet)`, so a sidecar describes
+  exactly one tree — but git merges it as text. After the 2026-11-23
+  crate merges the committed sidecar described neither parent's tree.
+  `--ledger` carried artifacts by exact id only (it never had a content
+  remap; its whole history is id carry), so every region whose line or
+  path had moved re-entered as GAP, which the gate counts as
+  accounted. Re-banked on main at ccb0cabf6: 2099 regions, 1591
+  annotated (75.8%), 508 GAP.
+- The per-lane re-banks before that attached some artifacts to the
+  wrong regions. From 3e276af08 (2026-11-21 16:52) on, artifacts moved
+  between neighbouring files in the sidecar's sort order — consistent
+  with re-banks that paired rows by position instead of content. All
+  55 `arch/*/uaccess.rs` regions, for example, carry F19 (the trap
+  entry/exit row) where every earlier sidecar has INV-UACCESS-1.
+  Adjudicated groups and their evidence:
+  docs/development/unsafe-verification-decisions.tsv.
+
+The rule the tools enforce now:
+
+- `scripts/unsafe_census.py --ledger` remaps annotations by content
+  from reference versions of the ledger (a sidecar plus the tree it was
+  written against): same owner item, same kind, identical
+  comment-stripped text, paired one-to-one and order-preserving; the
+  same pairing across git rename records, and for a whole item whose
+  fingerprint is unique on both sides. The default references are HEAD,
+  MERGE_HEAD and the parents of a merge commit; `--reference REV` and
+  `--reference-history` add more. A region is recovered only where
+  every reference that annotates that code agrees; a disagreement stays
+  GAP and is listed.
+- The re-bank prints, per file, the annotated count before and after,
+  and exits with status 2 without writing when a file's count would
+  drop, unless `--allow-drop FILE` names the file.
+- `scripts/unsafe_gate.py --check` fails on any per-file drop in
+  annotated count against HEAD, MERGE_HEAD, the parents of a merge
+  commit and the previous commit, unless
+  docs/development/unsafe-verification-exemptions.tsv carries a row for
+  that file, that count, a floor and a reason. Run at each of the ten
+  2026-11-23 merge commits, it fails with 1 to 44 unexempted per-file
+  drops against a merge parent.
+- The tools never rewrite a by-id row. A reviewed change goes in the
+  decisions file (`--decide`): one row per group of regions, the value
+  it replaces, an exact region count the tool verifies against the
+  tree, and the reason.
+
+Limits, stated so that nobody reads a green gate as more than it is.
+Both checks count ANNOTATED regions; neither can see a wrong artifact.
+The re-bank report's self-check (by-id rows the references annotate
+differently) and citation check (does the site's own comment name the
+ledger's contract) are what speak to whether an annotation is right,
+and the artifact count alone was never proof of that. [lane worktree
+ledger-recover]
+
+Outcome of the 2026-11-23 recovery on that incident, same lane: 2099
+regions, 1591 -> 2053 with artifact (97.8%), 46 GAP, in three reviewed
+steps — 415 recovered by reference consensus, 47 contested sites
+decided by hand (docs/development/unsafe-verification-decisions.tsv;
+two left GAP because both historical tags contradict the code), and 153
+by-id rows repaired. The evidence contradicted 349 annotated regions in
+total: 40 decided with the contested batch, 153 repaired, 119 read and
+adjudicated as already correct, 37 kept as undetermined (both tags
+imperfect — arch/x86_64/boot.rs x21, safety/mmio.rs x8, dma/frame x3,
+ashmem, mm/edges, smp:597, context.rs publish x2; the list is in the
+lane report). Before those commits the "75.8% with artifact" this file
+reported included those 349: the count was never the verification.
+
 ## Primitive INV index (literal ids — machine-greppable)
 
 Every id below is spelled literally for the unsafe_gate artifact
