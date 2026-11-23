@@ -334,6 +334,58 @@ separation to mm.
   policy's decision logic reads raw task pointers in more than a handful
   of sites that cannot ride `task_shared`, the rung shelves with numbers.
 
+#### S1 case study: the seam-cost regression and its fix (BOTH guarantees held)
+
+S1 landed with a performance regression that the merge gate refused to
+wave through, and its resolution is the standing proof that this design
+guarantees safety AND performance together — neither is traded for the
+other. The record, with numbers:
+
+1. **The regression.** After the flip, pbench p2_ctxsw read 2.149 µs
+   against 1.718 µs on same-window main (+25.1%) — outside the ±20%
+   sched guarded-domain band. The merge was held until fixed (gate
+   policy: functionally correct but performance-regressing does not
+   merge).
+2. **Root cause — NOT "cross-crate calls are slow".** Direct
+   cross-crate calls inline fine (rlib metadata carries MIR; LTO
+   completes it). The cost was the SEAM SHAPE: upward calls
+   (core→policy) ride a registered function-pointer table, and a call
+   through a function pointer is indirect — the callee is a runtime
+   value loaded from the table, invisible to the compiler, NOT
+   inlinable by LTO or anything else. The first SchedHooks table
+   exposed 111 rows, and observability dominated: per context switch
+   ~40 rows fired (sched_cs_stamp ×4/schedule, pick_trace ×2-3/switch,
+   pick_gen publish/retire, ww_record, wake census, vr_canary, class
+   counters), each paying shim → wrapper → slot load → indirect call.
+   At ~10 ns each in the debug class that is ~400 ns — the measured
+   delta (431 ns) to within noise.
+3. **The fix — make the hot calls direct again.** Three moves, no
+   behavior change: (a) the 33 observability rows LEFT the table —
+   their statics now live framework-side (entities.rs) and the
+   framework calls them as direct static calls, which inline; counters
+   record identically. (b) The genuinely dynamic dispatch collapsed to
+   ONE fat entry: pick_next_task — the whole pick walk runs policy-side
+   inside a single crossing, not one crossing per step. (c) The three
+   conditional diagnostic rows became arm-gated wrappers (the wrapper
+   checks the same framework-side flag the body checks; disarmed boots
+   never touch the seam). Armed-mode output verified byte-identical
+   (the exact 40-line WWTICK budget).
+4. **Result.** p2_ctxsw 1.758 vs same-window main 1.728 = **+1.7%,
+   in band**; P4 storm rows +2.6%; zero panics across 10 measurement
+   boots + the armed boot; rux-sched's forbid untouched — the fix cost
+   ZERO unsafe: it moved plain-safe state and reshaped call sites.
+5. **The rule extracted** (crate-plan §3a, binding for every future
+   seam): fn-pointer table rows are for COLD paths only; a hot path
+   takes (a) the whole loop behind one fat entry so the boundary is
+   crossed once, (b) an existing vtable FIELD (FileOps.fault/write_at —
+   field dispatch, R5's read/write paths at zero new indirection), or
+   (c) direct static calls over framework-side statics. Observability
+   statics live framework-side by default.
+
+The lesson stated once, plainly: the crate boundary's safety is free;
+the SEAM's shape is what costs. Design the seam, measure it, and if it
+regresses, fix the seam — never the safety property.
+
 ### Rung M1 — mm policy / core split
 
 - MOVES to `rux-mm` (forbid): the VMA tree and its lock protocol's
