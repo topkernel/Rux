@@ -56,25 +56,18 @@ pub mod process {
     // files living in the framework tree; they are this crate's sole
     // compilation copies — the framework's mod.rs no longer declares
     // them)
-    #[path = "../../../src/process/fork.rs"]
     pub mod fork;
-    #[path = "../../../src/process/kthread.rs"]
     pub mod kthread;
-    #[path = "../../../src/process/pid.rs"]
     pub mod pid;
-    #[path = "../../../src/process/ptrace.rs"]
     pub mod ptrace;
-    #[path = "../../../src/process/coredump.rs"]
     pub mod coredump;
-    #[path = "../../../src/process/reboot.rs"]
     pub mod reboot;
-    #[path = "../../../src/process/task_helpers.rs"]
     pub mod task_helpers;
 
     // exec: the ELF policy (this crate) merged with the
     // framework-side stack-zero ring at the historical path — so
     // crate::process::exec::X keeps resolving for both halves' users.
-    #[path = "../../../src/process/exec.rs"]
+    #[path = "exec.rs"]
     pub mod exec_policy;
     pub mod exec {
         pub use crate::process::exec_policy::*;
@@ -86,9 +79,7 @@ pub mod process {
     // do_exit_group / wake_group_chldexit — hot-name-called by the
     // traps, signal delivery and the scheduler reap path; they reach
     // the teardown through the ExitHooks rows).
-    #[path = "../../../src/process/exit_wait.rs"]
     pub mod exit_wait;
-    #[path = "../../../src/process/exit_teardown.rs"]
     pub mod exit_teardown;
     pub mod exit {
         pub use crate::process::exit_wait::*;
