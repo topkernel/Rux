@@ -273,7 +273,7 @@ pub fn init() {
         return;
     }
     let started =
-        crate::process::kthread::kthread_run(schbd_fn, core::ptr::null_mut(), "schbd").is_some();
+        crate::process::process_hooks::kthread_run(schbd_fn, core::ptr::null_mut(), "schbd").is_some();
     if started {
         RUNNING.store(true, Ordering::Release);
         crate::pr_err!(
@@ -309,7 +309,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
     let mut drained_seq: u64 = 0;
 
     loop {
-        if crate::process::kthread::kthread_should_stop() {
+        if crate::process::process_hooks::kthread_should_stop() {
             break;
         }
 

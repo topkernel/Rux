@@ -24,7 +24,7 @@ static WAKE_PROBE_PHASE: core::sync::atomic::AtomicU32 =
 extern "C" fn wake_probe_fn(_arg: *mut core::ffi::c_void) -> i32 {
     use core::sync::atomic::Ordering;
     loop {
-        if crate::process::kthread::kthread_should_stop() {
+        if crate::process::process_hooks::kthread_should_stop() {
             return 0;
         }
         match WAKE_PROBE_PHASE.load(Ordering::Acquire) {
@@ -97,7 +97,7 @@ pub fn test_sleep_and_wakeup() {
     // REAL kernel thread: it parks exactly once (state=INTERRUPTIBLE +
     // schedule), and after its first wake it never parks again, so the
     // second wake deterministically observes a RUNNING target.
-    let kt = match crate::process::kthread::kthread_run(
+    let kt = match crate::process::process_hooks::kthread_run(
         wake_probe_fn,
         core::ptr::null_mut(),
         "waketest",
@@ -122,7 +122,7 @@ pub fn test_sleep_and_wakeup() {
     if !parked {
         test_fail("wake_up sleeping task", "probe never parked");
         WAKE_PROBE_PHASE.store(2, core::sync::atomic::Ordering::Release);
-        let _ = crate::process::kthread::kthread_stop(kt);
+        let _ = crate::process::process_hooks::kthread_stop(kt);
         return;
     }
 
@@ -148,7 +148,7 @@ pub fn test_sleep_and_wakeup() {
     // check; kthread_stop sets should_stop (belt and braces) and waits
     // for the terminal state.
     WAKE_PROBE_PHASE.store(2, core::sync::atomic::Ordering::Release);
-    let _code = crate::process::kthread::kthread_stop(kt);
+    let _code = crate::process::process_hooks::kthread_stop(kt);
 
     // Test 4: Verify sleep function exists
     test_pass("sleep function available");

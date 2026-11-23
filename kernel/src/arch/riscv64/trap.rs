@@ -1270,7 +1270,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
         if let Some(task) = crate::sched::current() {
             if (*task).single_step_active() && regs.epc == (*task).single_step_addr() {
                 let saved = (*task).single_step_saved_insn();
-                let restored = crate::process::ptrace::write_target_word(
+                let restored = crate::process::ptrace_core::write_target_word(
                     task, regs.epc, saved,
                 );
                 (*task).clear_single_step();
@@ -1283,7 +1283,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                 if (*task).tracer_pid() != 0 {
                     // SAFETY: task is the current task in its trap path.
                     unsafe {
-                        crate::process::ptrace::ptrace_stop(
+                        crate::process::ptrace_core::ptrace_stop(
                             task,
                             crate::signal::Signal::SIGTRAP as i32,
                             crate::signal::SigInfo::new(
@@ -1320,7 +1320,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                 regs.epc += 4;
                 // SAFETY: task is the current task in its trap path.
                 unsafe {
-                    crate::process::ptrace::ptrace_stop(
+                    crate::process::ptrace_core::ptrace_stop(
                         task,
                         crate::signal::Signal::SIGTRAP as i32,
                         crate::signal::SigInfo::new(

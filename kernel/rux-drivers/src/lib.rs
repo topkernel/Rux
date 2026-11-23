@@ -36,8 +36,12 @@
 // shape).
 pub use rux::{
     arch, cmdline, config, console, debug, errno, fs, interrupt, mm,
-    net, process, safety, sched, security, signal, sync, timer, trace,
+    net,  safety, sched, security, signal, sync, timer, trace,
 };
+// The process service tree (crate-flip rung: process): the merged
+// view (moved policy + the framework-staying process modules) —
+// crate::process::X paths keep resolving, one-way dependency.
+pub use rux_process::process;
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 // The ipc service tree (crate-flip rung: rux-ipc): the merged view
 // (service policy + framework binder) — access_tokenid consumes the

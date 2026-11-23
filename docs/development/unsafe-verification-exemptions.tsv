@@ -26,3 +26,9 @@ kernel/src/tests/tmpfs_mknod.rs	2	0	test file moved to kernel/src/tests/services
 # Per-file annotated-count drops that were reviewed and accepted. Read by scripts/unsafe_gate.py --check.
 #   reason why the annotations left with their regions
 #   to     the count it may come down to, and no further (one row never covers a second loss)
+kernel/src/arch/riscv64/trap.rs	51	49	regions shifted/deleted by the carve; carried by id, remainder GAP
+kernel/src/process/mod.rs	3	0	regions shifted/deleted by the carve; carried by id, remainder GAP
+kernel/src/process/ptrace.rs	1	0	regions moved to the rux-process crate (forbid; the regions no longer exist in kernel/src)
+kernel/src/signal.rs	13	12	regions shifted/deleted by the carve; carried by id, remainder GAP
+kernel/src/arch/riscv64/trap.rs	54	49	regions shifted by the process carve edits; carried by id, remainder recoverable from history
+kernel/src/signal.rs	15	12	regions shifted by the carve edits; carried by id, remainder recoverable from history

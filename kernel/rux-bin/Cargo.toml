@@ -15,23 +15,24 @@ path = "src/main.rs"
 
 [dependencies]
 rux = { path = "..", default-features = false }
-rux-syscall = { path = "../rux-syscall", default-features = false }
-rux-net = { path = "../rux-net", default-features = false }
-rux-sched = { path = "../rux-sched", default-features = false }
-rux-fs = { path = "../rux-fs", default-features = false }
-rux-drivers = { path = "../rux-drivers", default-features = false }
-rux-mm = { path = "../rux-mm", default-features = false }
-rux-ext4 = { path = "../rux-ext4", default-features = false }
-rux-ipc = { path = "../rux-ipc", default-features = false }
-rux-signal = { path = "../rux-signal", default-features = false }
 
 [build-dependencies]
 
+rux-drivers = { path = "../rux-drivers", default-features = false }
+rux-ext4 = { path = "../rux-ext4", default-features = false }
+rux-fs = { path = "../rux-fs", default-features = false }
+rux-ipc = { path = "../rux-ipc", default-features = false }
+rux-mm = { path = "../rux-mm", default-features = false }
+rux-net = { path = "../rux-net", default-features = false }
+rux-process = { path = "../rux-process", default-features = false }
+rux-sched = { path = "../rux-sched", default-features = false }
+rux-signal = { path = "../rux-signal", default-features = false }
+rux-syscall = { path = "../rux-syscall", default-features = false }
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64", "rux-syscall/riscv64", "rux-net/riscv64", "rux-fs/riscv64", "rux-drivers/riscv64", "rux-mm/riscv64", "rux-sched/riscv64", "rux-ext4/riscv64", "rux-ipc/riscv64", "rux-signal/riscv64"]
-x86_64 = ["rux/x86_64", "rux-syscall/x86_64", "rux-net/x86_64", "rux-fs/x86_64", "rux-drivers/x86_64", "rux-mm/x86_64", "rux-sched/x86_64", "rux-ext4/x86_64", "rux-ipc/x86_64", "rux-signal/x86_64"]
-aarch64 = ["rux/aarch64", "rux-syscall/aarch64", "rux-net/aarch64", "rux-fs/aarch64", "rux-drivers/aarch64", "rux-mm/aarch64", "rux-sched/aarch64", "rux-ext4/aarch64", "rux-ipc/aarch64", "rux-signal/aarch64"]
+riscv64 = ["rux/riscv64", "rux-syscall/riscv64", "rux-net/riscv64", "rux-fs/riscv64", "rux-drivers/riscv64", "rux-mm/riscv64", "rux-sched/riscv64", "rux-ext4/riscv64", "rux-ipc/riscv64", , "rux-process/riscv64""]
+x86_64 = ["rux/x86_64", "rux-syscall/x86_64", "rux-net/x86_64", "rux-fs/x86_64", "rux-drivers/x86_64", "rux-mm/x86_64", "rux-sched/x86_64", "rux-ext4/x86_64", "rux-ipc/x86_64", , "rux-process/x86_64""]
+aarch64 = ["rux/aarch64", "rux-syscall/aarch64", "rux-net/aarch64", "rux-fs/aarch64", "rux-drivers/aarch64", "rux-mm/aarch64", "rux-sched/aarch64", "rux-ext4/aarch64", "rux-ipc/aarch64", , "rux-process/aarch64""]
 # kernel lib features the bin/tests toggle: forwarded.
 unit-test = ["rux/unit-test", "rux-fs/unit-test", "rux-mm/unit-test", "rux-net/unit-test", "rux-sched/unit-test", "rux-ext4/unit-test", "rux-ipc/unit-test", "rux-signal/unit-test"]
 cov-dump = ["rux/cov-dump"]

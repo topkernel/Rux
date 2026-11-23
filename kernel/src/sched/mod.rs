@@ -118,8 +118,10 @@ pub use sched::{
     sched_hist_armed,
 };
 
-// Re-export process lifecycle functions from process::exit for backward compatibility
-pub use crate::process::exit::{do_exit, do_wait, do_wait_nonblock};
+// Re-export of process::exit::{do_exit, do_wait, do_wait_nonblock} REMOVED
+// (process rung): zero callers at the flip; do_exit/do_exit_group stay
+// reachable at crate::process::exit::, the wait family moved to the
+// rux-process crate.
 
 // Re-export send_signal from signal module for backward compatibility
 pub use crate::signal::send_signal;

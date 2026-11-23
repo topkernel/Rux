@@ -41,7 +41,7 @@ pub fn init() {
     }
 
     // Start khungtaskd kernel thread
-    let result = crate::process::kthread::kthread_run(
+    let result = crate::process::process_hooks::kthread_run(
         khungtaskd_fn,
         core::ptr::null_mut(),
         "khungtaskd",
@@ -68,7 +68,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
     loop {
         // Check for stop request
-        if crate::process::kthread::kthread_should_stop() {
+        if crate::process::process_hooks::kthread_should_stop() {
             break;
         }
 

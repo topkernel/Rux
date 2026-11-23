@@ -128,7 +128,7 @@ impl ReapClaim {
     /// transiently through the ladder's re-verified checks. `None`
     /// means null input (caller bug — the release path never passes
     /// one).
-    pub(crate) fn mint(task: *mut Task) -> Option<Self> {
+    pub fn mint(task: *mut Task) -> Option<Self> {
         // SAFETY: NonNull::new is the null check; the unreachability
         // contract is the caller's (documented above, one call site).
         core::ptr::NonNull::new(task).map(ReapClaim)
@@ -158,7 +158,7 @@ impl ReapClaim {
     /// is lock-disciplined raw (typing IT needs the Task field change
     /// in the process lane's active zone; see the coverage map).
     #[inline]
-    pub(crate) fn into_parked(self) -> *mut Task {
+    pub fn into_parked(self) -> *mut Task {
         let p = self.0.as_ptr();
         core::mem::forget(self);
         p

@@ -41,6 +41,10 @@ pub extern "C" fn rust_main() -> ! {
     // the mount-table rows land at register_builtin_handlers (the
     // row body self-guards that boot point).
     rux_ext4::register_all();
+    // The process policy rows (process rung) after sched/mm — the
+    // kthread/pid/lifecycle rows are consumed from devfs populate, the
+    // boot exec and every kthread spawn onward.
+    rux_process::register_all();
     // Guest tests that flipped out with a service crate (pipe2 with
     // rux-fs, net_hdrs with rux-net, the fair pins + timeline with
     // rux-sched) run via the framework's SERVICE-TEST SEAM, in
@@ -59,6 +63,10 @@ pub extern "C" fn rust_main() -> ! {
         // rux-ipc's entries run at the LATE seam point (post-fs_io, the
         // sysv family's historical position).
         rux::tests::register_service_tests_late(rux_ipc::run_unit_tests);
+        // rux-process's families (fork/boundary/pid/smp_schedule) run at
+        // the early seam point (their historical positions were early;
+        // boundary was last in-framework but is destructive-safe there).
+        rux::tests::register_service_tests(rux_process::run_unit_tests);
     }
     rust_main_impl()
 }

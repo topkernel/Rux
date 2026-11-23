@@ -2464,7 +2464,7 @@ fn handle_debug(regs: &mut PtRegs) {
             if (*task).tracer_pid() != 0 {
                 // SAFETY: task is the current task in its trap path.
                 unsafe {
-                    crate::process::ptrace::ptrace_stop(
+                    crate::process::ptrace_core::ptrace_stop(
                         task,
                         crate::signal::Signal::SIGTRAP as i32,
                         crate::signal::SigInfo::new(
@@ -2529,7 +2529,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
             let step_addr = (*task).single_step_addr();
             if (*task).single_step_active() && regs.rip == step_addr.wrapping_add(1) {
                 let saved = (*task).single_step_saved_insn();
-                let restored = crate::process::ptrace::write_target_word(task, step_addr, saved);
+                let restored = crate::process::ptrace_core::write_target_word(task, step_addr, saved);
                 (*task).clear_single_step();
                 if !restored {
                     // Tracee's text is gone racing the step — kill it.
@@ -2543,7 +2543,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                 if (*task).tracer_pid() != 0 {
                     // SAFETY: task is the current task in its trap path.
                     unsafe {
-                        crate::process::ptrace::ptrace_stop(
+                        crate::process::ptrace_core::ptrace_stop(
                             task,
                             crate::signal::Signal::SIGTRAP as i32,
                             crate::signal::SigInfo::new(
@@ -2565,7 +2565,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
             if (*task).tracer_pid() != 0 {
                 // SAFETY: task is the current task in its trap path.
                 unsafe {
-                    crate::process::ptrace::ptrace_stop(
+                    crate::process::ptrace_core::ptrace_stop(
                         task,
                         crate::signal::Signal::SIGTRAP as i32,
                         crate::signal::SigInfo::new(
