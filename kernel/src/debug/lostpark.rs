@@ -28,9 +28,11 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// Ring entries (keep modest: dumped on one serial line each).
 pub const RING_LEN: usize = 64;
 
-static SEQ: AtomicU64 = AtomicU64::new(0);
+/// PUB peek surface (crate-flip rung rux-obs): the rux-obs report
+/// half reads the ring.
+pub static SEQ: AtomicU64 = AtomicU64::new(0);
 static DUMPED: AtomicBool = AtomicBool::new(false);
-static RING: [AtomicU64; RING_LEN * 5] = [const { AtomicU64::new(0) }; RING_LEN * 5];
+pub static RING: [AtomicU64; RING_LEN * 5] = [const { AtomicU64::new(0) }; RING_LEN * 5];
 
 /// Whether the ring is armed (fast record gate).
 #[inline]
@@ -52,44 +54,9 @@ pub fn record(event: u64, pid: u64, a: u64, b: u64, jiffies: u64) {
     RING[i + 3].store(a, Ordering::Relaxed);
     RING[i + 4].store(b | (jiffies << 32), Ordering::Relaxed);
 }
-
-/// Dump the ring once (called from the wakewatch heartbeat's frozen-state
-/// branch — a printk-safe softirq context). One line per entry, ordered
-/// by seq; `tag` prefixes the block.
+/// Dump the ring once (moved to the rux-obs crate): same-named wrapper
+/// for the wakewatch heartbeat's frozen-state branch; dispatches the
+/// hook row.
 pub fn dump_once(tag: &[u8]) {
-    if !armed() || DUMPED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    crate::trace::trace_lostpark(0, 0, SEQ.load(Ordering::Relaxed).min(RING_LEN as u64), 0);
-    let mut idx = [0usize; RING_LEN];
-    for k in 0..RING_LEN {
-        idx[k] = k;
-    }
-    let seq_of = |k: usize| RING[k * 5].load(Ordering::Relaxed);
-    idx.sort_by_key(|&k| seq_of(k));
-    let mut tag_s = [0u8; 16];
-    let tn = tag.len().min(16);
-    tag_s[..tn].copy_from_slice(&tag[..tn]);
-    let tag_str = core::str::from_utf8(&tag_s[..tn]).unwrap_or("frozen");
-    crate::pr_info!("=== LOSTPARK RING ({}) ===", tag_str);
-    for k in idx {
-        let s = RING[k * 5].load(Ordering::Relaxed);
-        let ev = RING[k * 5 + 1].load(Ordering::Relaxed);
-        let pid = RING[k * 5 + 2].load(Ordering::Relaxed);
-        let a = RING[k * 5 + 3].load(Ordering::Relaxed);
-        let bj = RING[k * 5 + 4].load(Ordering::Relaxed);
-        if s == 0 && ev == 0 {
-            continue;
-        }
-        crate::pr_info!(
-            "LP seq={} ev={} pid={} a={:#x} b={:#x} j={}",
-            s,
-            ev,
-            pid,
-            a,
-            bj & 0xFFFF_FFFF,
-            bj >> 32
-        );
-    }
-    crate::pr_info!("=== LOSTPARK RING END ===");
+    crate::debug::obs_hooks::lostpark_dump_once(tag);
 }

@@ -23,9 +23,18 @@
 //!
 //! Dump: periodic (timer heartbeat, every MMPROF_DUMP_SECS) + the
 //! shutdown cascade. Lines: MMPROF <name> n= avg=us max=us.
+//!
+//! CRATE-FLIP RUNG rux-obs: the mmprofd dump kthread and the rotating
+//! MMPROF-A/B/C report lines moved to the rux-obs service crate
+//! (kernel/rux-obs/src/mmprof.rs). THIS file keeps the per-op RECORD
+//! half — now/add/bump/bucket_len/bump_comm and the statics they write
+//! (mmap/mprotect/munmap paths call them directly) — the cadence gate
+//! (tick), and the same-named wrappers (ensure_dump_thread,
+//! report_line) that dispatch the hook rows. The statics are the pub
+//! peek surface the crate's report reads.
 
 #![forbid(unsafe_code)]
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 // ---- phase slots ----
 pub const M_TOTAL: usize = 0; // sys_mmap_inner whole body
@@ -69,10 +78,13 @@ pub const B_NAMES: [&str; B_N] = ["len<=64K", "len<=1M", "len<=16M", "len>16M"];
 // ---- per-comm issuer attribution (mmap count) ----
 pub const COMM_SLOTS: usize = 8;
 
-struct PhaseStat {
-    count: AtomicU64,
-    cyc: AtomicU64,
-    max: AtomicU64,
+/// PUB peek surface (crate-flip rung rux-obs): the rux-obs report
+/// crate's stat()/report_line read these. All-atomic slots; writes stay
+/// in THIS module's record fns by construction.
+pub struct PhaseStat {
+    pub count: AtomicU64,
+    pub cyc: AtomicU64,
+    pub max: AtomicU64,
 }
 
 const EMPTY: PhaseStat = PhaseStat {
@@ -81,19 +93,20 @@ const EMPTY: PhaseStat = PhaseStat {
     max: AtomicU64::new(0),
 };
 
-static STATS: [PhaseStat; P_COUNT] = [EMPTY; P_COUNT];
-static SCALARS: [AtomicU64; P_SCALARS] = [const { AtomicU64::new(0) }; P_SCALARS];
-static BUCKETS: [PhaseStat; B_N] = [EMPTY; B_N];
+pub static STATS: [PhaseStat; P_COUNT] = [EMPTY; P_COUNT];
+pub static SCALARS: [AtomicU64; P_SCALARS] = [const { AtomicU64::new(0) }; P_SCALARS];
+pub static BUCKETS: [PhaseStat; B_N] = [EMPTY; B_N];
 
-struct CommEnt {
-    comm: [AtomicU8; 16],
-    n: AtomicU64,
+/// PUB peek surface (crate-flip rung rux-obs; see PhaseStat).
+pub struct CommEnt {
+    pub comm: [AtomicU8; 16],
+    pub n: AtomicU64,
 }
 const EMPTY_COMM: CommEnt = CommEnt {
     comm: [const { AtomicU8::new(0) }; 16],
     n: AtomicU64::new(0),
 };
-static COMMS: [CommEnt; COMM_SLOTS] = [EMPTY_COMM; COMM_SLOTS];
+pub static COMMS: [CommEnt; COMM_SLOTS] = [EMPTY_COMM; COMM_SLOTS];
 
 static ARMED: AtomicU8 = AtomicU8::new(0);
 
@@ -226,9 +239,10 @@ pub fn bump_comm() {
 
 const MMPROF_DUMP_SECS: u64 = 60;
 static LAST_DUMP: AtomicU64 = AtomicU64::new(0);
-static DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Timer-heartbeat hook (next to syscost::tick) — periodic dump.
+/// Timer-heartbeat hook (next to syscost::tick) — periodic dump. The
+/// line emission lives in the rux-obs crate's mmprofd kthread; the
+/// cadence gate stays here (hot tick site, one jiffies compare).
 pub fn tick(now_jiffies: u64) {
     if !on() {
         return;
@@ -246,159 +260,16 @@ pub fn tick(now_jiffies: u64) {
     ensure_dump_thread();
 }
 
-// ---- dump kthread ----
-static DUMP_THREAD_ON: AtomicBool = AtomicBool::new(false);
-
-/// Spawn the task-context dump thread (once; called from the timer
-/// softirq tick and from debug::init — either way the thread starts once).
+/// Spawn the task-context dump thread (moved to the rux-obs crate):
+/// same-named wrapper for the tick cadence gate and debug::init;
+/// dispatches the hook row (idempotent inside the crate body).
 pub fn ensure_dump_thread() {
-    if DUMP_THREAD_ON.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    crate::process::kthread::kthread_run(
-        mmprof_dump_fn,
-        core::ptr::null_mut(),
-        "mmprofd",
-    );
+    crate::debug::obs_hooks::mmprof_ensure_dump_thread();
 }
 
-extern "C" fn mmprof_dump_fn(_arg: *mut core::ffi::c_void) -> i32 {
-    use crate::process::task::{Task, TaskState};
-    loop {
-        if crate::process::kthread::kthread_should_stop() {
-            break;
-        }
-        // Sleep MMPROF_DUMP_SECS of jiffies (nanosleep discipline:
-        // one-shot wakeup timer + INTERRUPTIBLE schedule).
-        let current = match crate::sched::current() {
-            Some(t) => t,
-            None => return 0, // no task context
-        };
-        // current() is the safe handle to the running task (we are it).
-        let pid = current.pid();
-        let wake_at = crate::timer::get_jiffies()
-            + MMPROF_DUMP_SECS * crate::config::KERNEL_HZ as u64;
-        let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
-        current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        // Re-arm IRQs so the timer tick reaches this CPU (R54).
-        crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
-        if timer_id != 0 {
-            crate::timer::del_timer(timer_id);
-        }
-        let k = DUMP_SEQ.fetch_add(1, Ordering::Relaxed) % 3;
-        report_line(k);
-    }
-    0
-}
-
-/// Print ONE compact stat as `name=avg/max(n)` inside a caller's line.
-fn fmt_cell(out: &mut alloc::string::String, name: &str, c: u64, cyc: u64, max: u64, per_us: u64) {
-    if c == 0 {
-        if cyc != 0 {
-            out.push_str(&alloc::format!(" {}=s{}", name, cyc));
-        }
-        return;
-    }
-    let avg = cyc / c.max(1) / per_us;
-    let mx = max / per_us;
-    out.push_str(&alloc::format!(" {}={}/{}(n{})", name, avg, mx, c));
-}
-
-fn stat(i: usize) -> (u64, u64, u64) {
-    let s = &STATS[i];
-    (
-        s.count.load(Ordering::Relaxed),
-        s.cyc.load(Ordering::Relaxed),
-        s.max.load(Ordering::Relaxed),
-    )
-}
-
-/// Emit ONE line per 60s dump, rotating through three variants.
-/// Console discipline: the printk emit-lock carries a 100us budget in
-/// softirq context and the OH boot floods at ~700us per UART line, so a
-/// multi-line burst loses all but 1-2 lines (lb332 evidence). One
-/// short line per dump survives; the full table completes every 3 min.
+/// Emit ONE line of the rotating report (moved to the rux-obs crate):
+/// same-named wrapper for the shutdown cascade's report_line(0) call;
+/// dispatches the hook row.
 pub fn report_line(k: u64) {
-    if !on() {
-        return;
-    }
-    #[cfg(feature = "x86_64")]
-    let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
-    #[cfg(not(feature = "x86_64"))]
-    let hz = 0; // cycle-domain report only on the other ports
-    let per_us = if hz > 1_000_000 { hz / 1_000_000 } else { 1 };
-    let secs = crate::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
-    match k {
-        0 => {
-            // A: mmap + mprotect stages
-            let mut l = alloc::format!("MMPROF-A t={}s mmap:", secs);
-            let (c, cy, mx) = stat(M_TOTAL);
-            fmt_cell(&mut l, "tot", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(M_LOCKWAIT);
-            fmt_cell(&mut l, "lock", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(M_FINDFREE);
-            fmt_cell(&mut l, "find", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(M_ADD);
-            fmt_cell(&mut l, "add", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(M_FIXEDMUN);
-            fmt_cell(&mut l, "fixmun", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(MP_TOTAL);
-            fmt_cell(&mut l, "| mprot-tot", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(MP_LOCK);
-            fmt_cell(&mut l, "mplock", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(MP_COVER);
-            fmt_cell(&mut l, "mpcov", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(MP_PTE);
-            fmt_cell(&mut l, "mppte", c, cy, mx, per_us);
-            crate::pr_warn!("{}", l);
-        }
-        1 => {
-            // B: munmap stages + placement scalars
-            let mut l = alloc::format!("MMPROF-B t={}s munmap:", secs);
-            let (c, cy, mx) = stat(MU_BODY);
-            fmt_cell(&mut l, "body", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(MU_SURG);
-            fmt_cell(&mut l, "surg", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(MU_WALK);
-            fmt_cell(&mut l, "walk", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(MU_TLB);
-            fmt_cell(&mut l, "tlb", c, cy, mx, per_us);
-            let (c, cy, mx) = stat(MU_YIELD);
-            fmt_cell(&mut l, "yld", c, cy, mx, per_us);
-            crate::pr_warn!(
-                "{} | fixed={} hint={} anon0={} unpg={} unempty={} munloops={}",
-                l,
-                SCALARS[S_FIXED].load(Ordering::Relaxed),
-                SCALARS[S_HINT].load(Ordering::Relaxed),
-                SCALARS[S_ANON0].load(Ordering::Relaxed),
-                SCALARS[S_UNPAGES].load(Ordering::Relaxed),
-                SCALARS[S_UNEMPTY].load(Ordering::Relaxed),
-                SCALARS[S_MUNLOOPS].load(Ordering::Relaxed)
-            );
-        }
-        _ => {
-            // C: length buckets + issuers
-            let mut l = alloc::format!("MMPROF-C t={}s", secs);
-            for b in 0..B_N {
-                let s = &BUCKETS[b];
-                fmt_cell(&mut l, B_NAMES[b], s.count.load(Ordering::Relaxed), s.cyc.load(Ordering::Relaxed), s.max.load(Ordering::Relaxed), per_us);
-            }
-            l.push_str(" | iss:");
-            for slot in COMMS.iter() {
-                let n = slot.n.load(Ordering::Relaxed);
-                if n == 0 {
-                    continue;
-                }
-                let mut comm = [0u8; 16];
-                for (i, b) in comm.iter_mut().enumerate() {
-                    *b = slot.comm[i].load(Ordering::Relaxed);
-                }
-                let end = comm.iter().position(|&c| c == 0).unwrap_or(16);
-                let name = core::str::from_utf8(&comm[..end]).unwrap_or("?");
-                l.push_str(&alloc::format!(" {}={}", name, n));
-            }
-            crate::pr_warn!("{}", l);
-        }
-    }
+    crate::debug::obs_hooks::mmprof_report_line(k);
 }

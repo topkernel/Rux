@@ -365,6 +365,7 @@ dependencies = [
  "rux-ipc",
  "rux-mm",
  "rux-net",
+ "rux-obs",
  "rux-sched",
  "rux-syscall",
 ]
@@ -390,6 +391,7 @@ version = "0.1.0"
 dependencies = [
  "rux",
  "rux-ext4",
+ "rux-obs",
 ]
 
 [[package]]
@@ -411,6 +413,14 @@ name = "rux-net"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-obs",
+]
+
+[[package]]
+name = "rux-obs"
+version = "0.1.0"
+dependencies = [
+ "rux",
 ]
 
 [[package]]
@@ -428,6 +438,7 @@ dependencies = [
  "rux-fs",
  "rux-ipc",
  "rux-net",
+ "rux-obs",
 ]
 
 [[package]]

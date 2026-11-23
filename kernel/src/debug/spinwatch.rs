@@ -41,22 +41,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 pub fn on() -> bool {
     crate::trace::EVENT_SPINWATCH.armed()
 }
-
-/// Compatibility arm (boot, before trace_event= is applied): the old
-/// bespoke cmdline token `spinwatch=1` now just flips the unified
-/// events' enable switches — same running state as
-/// `trace_event=rux:spinwatch,rux:spinwatch_fd`.
+/// Compatibility arm (moved to the rux-obs crate): same-named wrapper
+/// for the boot arming site; dispatches the hook row.
 pub fn compat_arm() {
-    if crate::cmdline::get_cmdline().is_none() {
-        return;
-    }
-    if crate::cmdline::get_param("spinwatch").as_deref() == Some("1") {
-        crate::trace::EVENT_SPINWATCH.enabled.store(true, Relaxed);
-        crate::trace::EVENT_SPINWATCH_FD.enabled.store(true, Relaxed);
-        crate::pr_warn!(
-            "spinwatch: compat token spinwatch=1 armed (rux:spinwatch + rux:spinwatch_fd)"
-        );
-    }
+    crate::debug::obs_hooks::spinwatch_compat_arm();
 }
 
 /// The window count of the LAST report (set by `record` right before it

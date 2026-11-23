@@ -54,7 +54,7 @@ pub(crate) fn adopt_task(task: *const Task) -> Option<&'static Task> {
 }
 
 /// Stale task pid read (INV-FOR-1; the commonest hunt line).
-pub(crate) fn t_pid(task: *const Task) -> u32 {
+pub fn t_pid(task: *const Task) -> u32 {
     // SAFETY: INV-FOR-1 — pid is stable for the struct's lifetime and
     // never torn down before the final put.
     unsafe { (*task).pid() }
@@ -68,7 +68,7 @@ pub(crate) fn t_comm(task: *const Task) -> &'static [u8; 16] {
 }
 
 /// Stale task preempt-count read (INV-FOR-1).
-pub(crate) fn t_preempt_count(task: *const Task) -> i32 {
+pub fn t_preempt_count(task: *const Task) -> i32 {
     // SAFETY: INV-FOR-1.
     unsafe { (*task).preempt_count() }
 }
@@ -106,7 +106,7 @@ pub(crate) fn raw_u32(addr: u64) -> u32 {
 /// INV-FOR-3 (location key): `key` was stored from a real
 /// `core::panic::Location` reference (whose storage is the binary's
 /// rodata, machine-lifetime); the table only ever stores such values.
-pub(crate) fn location(key: usize) -> &'static core::panic::Location<'static> {
+pub fn location(key: usize) -> &'static core::panic::Location<'static> {
     // SAFETY: INV-FOR-3 — the stored value is a rodata-backed Location
     // reference; the relabel adds no lifetime the value lacks.
     unsafe { &*(key as *const core::panic::Location<'static>) }

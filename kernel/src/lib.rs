@@ -980,9 +980,10 @@ pub fn rust_main_tail() -> ! {
 
         // The reference's trace_event= boot parameter: comma-separated
         // set_event tokens applied before the first userspace
-        // instruction (kernel/trace/trace_events.c __setup).
+        // instruction (kernel/trace/trace_events.c __setup). The file
+        // set lives in the rux-obs crate now; the row applies it.
         {
-            trace::files::init_from_cmdline();
+            debug::obs_hooks::trace_files_init_from_cmdline();
         }
 
         // __setup("nohz_full=") — the full-dynticks CPU list

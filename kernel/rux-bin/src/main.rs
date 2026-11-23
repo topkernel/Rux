@@ -35,6 +35,10 @@ pub extern "C" fn rust_main() -> ! {
     // the mount-table rows land at register_builtin_handlers (the
     // row body self-guards that boot point).
     rux_ext4::register_all();
+    // The observability report/init/publish rows (rung rux-obs): the
+    // syscost/fsw/mmprof dumps, schbd, the reaper arms, the tracefs
+    // files — OnceSlot publication only, safe before SMP init.
+    rux_obs::register_all();
     // Guest tests that flipped out with a service crate (pipe2 with
     // rux-fs, net_hdrs with rux-net, the fair pins + timeline with
     // rux-sched) run via the framework's SERVICE-TEST SEAM, in
