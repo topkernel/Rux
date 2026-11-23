@@ -43,19 +43,29 @@
 //! Locking: one Spinlock per map; sections are short copy in/out. The
 //! timer-softirq scan uses the try-variant of the pid-hash walk (a
 //! partial snapshot is fine — the next second retries).
+//!
+//! CRATE-FLIP RUNG rux-obs: the SPAWN/ZEXIT/REAP4/REAPW/POLL print
+//! arms moved to the rux-obs service crate (kernel/rux-obs/src/
+//! reaper.rs) — every arm fires only through these same-named wrappers,
+//! whose call sites (do_exit, exec, the wait4/waitid syscall bodies)
+//! pre-gate on reaper::on(), so the row dispatch is armed-boot-only.
+//! THIS file keeps the on() gate, the 1 Hz ZLINGER scan (timer
+//! softirq) and the EXIT_MAP/NAME_MAP statics (pub peek + write
+//! surface for the crate's arms).
 
 #![forbid(unsafe_code)]
 use core::sync::atomic::Ordering;
 
 /// Name-set (SPAWN) tracking capacity. Small: only com.*-prefixed names
 /// are recorded (OH bundle names — appspawn children + a handful of
-/// services), dozens per boot.
-const NAME_MAP_LEN: usize = 32;
+/// services), dozens per boot. PUB: the rux-obs arms index it.
+pub const NAME_MAP_LEN: usize = 32;
 
 /// Zombie exit-time map capacity (pid → exit jiffies + code), for
 /// ZLINGER age. Rotating overwrite: the ZEXIT prints carry the same
 /// data durably; the map only has to survive the 10 s linger window.
-const EXIT_MAP_LEN: usize = 96;
+/// PUB: the rux-obs arms index it.
+pub const EXIT_MAP_LEN: usize = 96;
 
 /// A zombie un-reaped longer than this is reported as lingering.
 const ZLINGER_AFTER_SECS: u64 = 10;
@@ -63,33 +73,31 @@ const ZLINGER_AFTER_SECS: u64 = 10;
 /// Re-report a still-lingering zombie at this cadence (age growth).
 const ZLINGER_REPEAT_SECS: u64 = 30;
 
-/// Print budgets per arm (runaway pollers / exit storms must not eat
-/// the serial; 240 s of app-cycle traffic sits far below all of them).
-const MAX_SPAWN_PRINTS: u32 = 200;
-const MAX_ZEXIT_PRINTS: u32 = 400;
-const MAX_REAP4_PRINTS: u32 = 400;
-const MAX_REAPW_PRINTS: u32 = 500;
-const MAX_POLL_PRINTS: u32 = 12;
+/// Print budget for the ZLINGER arm (runaway exit storms must not eat
+/// the serial).
 const MAX_ZLINGER_PRINTS: u32 = 96;
 
+/// PUB write/peek surface (crate-flip rung rux-obs): the rux-obs crate's
+/// SPAWN/ZEXIT arms lock and write these maps; the ZLINGER scan below
+/// reads EXIT_MAP under the same lock.
 #[derive(Clone, Copy)]
-struct NameRec {
-    pid: u32,
-    t_set: u64,
+pub struct NameRec {
+    pub pid: u32,
+    pub t_set: u64,
 }
 
 #[derive(Clone, Copy)]
-struct ExitRec {
-    pid: u32,
-    t_exit: u64,
-    code: i32,
-    last_report: u64,
+pub struct ExitRec {
+    pub pid: u32,
+    pub t_exit: u64,
+    pub code: i32,
+    pub last_report: u64,
 }
 
-static NAME_MAP: crate::sync::spinlock::Spinlock<[NameRec; NAME_MAP_LEN]> =
+pub static NAME_MAP: crate::sync::spinlock::Spinlock<[NameRec; NAME_MAP_LEN]> =
     crate::sync::spinlock::Spinlock::new([NameRec { pid: 0, t_set: 0 }; NAME_MAP_LEN]);
 
-static EXIT_MAP: crate::sync::spinlock::Spinlock<[ExitRec; EXIT_MAP_LEN]> =
+pub static EXIT_MAP: crate::sync::spinlock::Spinlock<[ExitRec; EXIT_MAP_LEN]> =
     crate::sync::spinlock::Spinlock::new([ExitRec { pid: 0, t_exit: 0, code: 0, last_report: 0 }; EXIT_MAP_LEN]);
 
 /// The gate for every arm here (rux:schedtrace (retired debug=schedtrace)).
@@ -98,8 +106,9 @@ pub fn on() -> bool {
     crate::trace::EVENT_SCHEDTRACE.armed()
 }
 
-/// jiffies → "123.4s" seconds string (one decimal).
-fn secs(j: u64) -> alloc::string::String {
+/// jiffies → "123.4s" seconds string (one decimal). PUB: the rux-obs
+/// arms print with it.
+pub fn secs(j: u64) -> alloc::string::String {
     let hz = crate::config::KERNEL_HZ as u64;
     let whole = j / hz;
     let tenths = (j % hz) * 10 / hz;
@@ -107,8 +116,8 @@ fn secs(j: u64) -> alloc::string::String {
 }
 
 /// Decode this kernel's internal exit_code: `>= 0` = `(status<<8)`,
-/// `< 0` = death by signal `-code`.
-fn decode_kernel_code(code: i32) -> (&'static str, i32) {
+/// `< 0` = death by signal `-code`. PUB (rux-obs arms).
+pub fn decode_kernel_code(code: i32) -> (&'static str, i32) {
     if code < 0 {
         ("SIG", -code)
     } else {
@@ -116,8 +125,8 @@ fn decode_kernel_code(code: i32) -> (&'static str, i32) {
     }
 }
 
-/// Decode a wait4 wstatus (Linux wait-status layout).
-fn decode_wstatus(st: i32) -> (&'static str, i32) {
+/// Decode a wait4 wstatus (Linux wait-status layout). PUB (rux-obs arms).
+pub fn decode_wstatus(st: i32) -> (&'static str, i32) {
     let sig = st & 0x7f;
     if sig == 0 && st & 0xff00 != 0 {
         ("exit", (st >> 8) & 0xff)
@@ -130,175 +139,47 @@ fn decode_wstatus(st: i32) -> (&'static str, i32) {
     }
 }
 
-/// Decode a waitid si_code (CLD_*).
-fn decode_si_code(c: i32) -> &'static str {
+/// Decode a waitid si_code (CLD_*). PUB (rux-obs arms).
+pub fn decode_si_code(c: i32) -> &'static str {
     match c {
         1 => "CLD_EXITED",
         2 => "CLD_KILLED",
         3 => "CLD_DUMPED",
         5 => "CLD_STOPPED",
         6 => "CLD_CONTINUED",
-        _ => "CLD_?",
+        _ => "CLD-?",
     }
 }
 
-/// comm bytes → printable &str (NUL-trimmed, lossy).
-fn comm_str(raw: &[u8]) -> &str {
+/// comm bytes → printable &str (NUL-trimmed, lossy). PUB (rux-obs arms).
+pub fn comm_str(raw: &[u8]) -> &str {
     let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
     core::str::from_utf8(&raw[..len]).unwrap_or("?")
 }
 
-/// SPAWN arm: a task named itself (PR_SET_NAME or exec basename). Only
-/// OH-ish names are tracked — the observed first-boot shapes are the
-/// 15-byte comm truncations "m.ohos.systemui" / "m.ohos.launcher" (the
-/// runtime passes a 17-byte "com.ohos.<name>" whose comm-15 window
-/// starts two bytes in) plus "com."-prefixed variants; a bare contains
-/// match on "ohos" covers both without following every daemon rename.
+/// SPAWN arm (moved to the rux-obs crate): same-named wrapper; the call
+/// sites (exec basename / PR_SET_NAME) pre-gate on on().
 pub fn note_nameset(pid: u32, comm: &[u8]) {
-    use core::sync::atomic::AtomicU32;
-
-    let name = comm_str(comm);
-    if !(name.contains("ohos") || name.starts_with("com.")) {
-        return;
-    }
-
-    let now = crate::timer::get_jiffies();
-    {
-        let mut map = NAME_MAP.lock();
-        if let Some(slot) = map.iter_mut().find(|r| r.pid == pid) {
-            slot.t_set = now;
-        } else if let Some(slot) = map.iter_mut().find(|r| r.pid == 0) {
-            slot.pid = pid;
-            slot.t_set = now;
-        } else {
-            // Full: steal the oldest slot (forensic map, lossy is fine).
-            let mut oldest = 0;
-            for i in 1..NAME_MAP_LEN {
-                if map[i].t_set < map[oldest].t_set {
-                    oldest = i;
-                }
-            }
-            map[oldest] = NameRec { pid, t_set: now };
-        }
-    }
-
-    static N: AtomicU32 = AtomicU32::new(0);
-    if N.fetch_add(1, Ordering::Relaxed) < MAX_SPAWN_PRINTS {
-        // Parent pid at nameset time (appspawn for app children).
-        let ppid = crate::process::find_task_by_pid(pid)
-            .map(|p| p.ppid())
-            .unwrap_or(0);
-        let pname = crate::process::find_task_by_pid(ppid)
-            .map(|p| comm_str(p.comm()))
-            .unwrap_or("?");
-        crate::pr_warn!(
-            "SPAWN t={} pid={} comm='{}' parent={}('{}')",
-            secs(now),
-            pid,
-            name,
-            ppid,
-            pname
-        );
-    }
+    crate::debug::obs_hooks::reaper_note_nameset(pid, comm)
 }
 
-/// SPAWN lookup: nameset jiffies for a pid (age at exit).
-fn nameset_of(pid: u32) -> Option<u64> {
-    let map = NAME_MAP.lock();
-    map.iter().find(|r| r.pid == pid).map(|r| r.t_set)
-}
-
-/// ZEXIT arm: a LEADER task entered ZOMBIE. Called from do_exit right
-/// after the ZOMBIE store + notify resolution — the task is still
-/// linked and its fields readable. `code` is this kernel's internal
-/// exit_code; `last_nr`/`last_a0` are the task's always-on pre-translate
-/// last-syscall latch (what it was in when it died).
+/// ZEXIT arm (moved to the rux-obs crate): same-named wrapper; called
+/// from do_exit right after the ZOMBIE store + notify resolution (the
+/// call site pre-gates on on()).
 pub fn on_zombie(pid: u32, code: i32, parent_pid: u32, comm: &[u8; 16], last_nr: u32, last_a0: u64) {
-    use core::sync::atomic::AtomicU32;
-
-    let now = crate::timer::get_jiffies();
-    {
-        let mut map = EXIT_MAP.lock();
-        if let Some(slot) = map.iter_mut().find(|r| r.pid == pid) {
-            slot.t_exit = now;
-            slot.code = code;
-            slot.last_report = 0;
-        } else if let Some(slot) = map.iter_mut().find(|r| r.pid == 0) {
-            slot.pid = pid;
-            slot.t_exit = now;
-            slot.code = code;
-            slot.last_report = 0;
-        } else {
-            let mut oldest = 0;
-            for i in 1..EXIT_MAP_LEN {
-                if map[i].t_exit < map[oldest].t_exit {
-                    oldest = i;
-                }
-            }
-            map[oldest] = ExitRec { pid, t_exit: now, code, last_report: 0 };
-        }
-    }
-
-    static N: AtomicU32 = AtomicU32::new(0);
-    if N.fetch_add(1, Ordering::Relaxed) >= MAX_ZEXIT_PRINTS {
-        return;
-    }
-    let (kind, val) = decode_kernel_code(code);
-    let age = match nameset_of(pid) {
-        Some(t0) => alloc::format!(" age={}", secs(now.saturating_sub(t0))),
-        None => alloc::string::String::new(),
-    };
-    let pname = crate::process::find_task_by_pid(parent_pid)
-        .map(|p| comm_str(p.comm()))
-        .unwrap_or("?");
-    crate::pr_warn!(
-        "ZEXIT t={} pid={} comm='{}' parent={}('{}') {}={}{} lastsys={} a0={:#x}",
-        secs(now),
-        pid,
-        comm_str(comm),
-        parent_pid,
-        pname,
-        kind,
-        val,
-        age,
-        last_nr,
-        last_a0
-    );
+    crate::debug::obs_hooks::reaper_on_zombie(pid, code, parent_pid, comm, last_nr, last_a0)
 }
 
-/// The reaper's comm (lookup — the reaper is the CALLING task, alive).
-fn comm_of(pid: u32) -> alloc::string::String {
-    crate::process::find_task_by_pid(pid)
-        .map(|p| alloc::string::String::from(comm_str(p.comm())))
-        .unwrap_or_else(|| alloc::string::String::from("?"))
-}
-
-/// REAP arm: successful wait4 reap. `nohang` distinguishes the blocking
-/// do_wait path (REAP4) from the WNOHANG do_wait_nonblock path (REAP4N)
-/// the first leg did not cover.
+/// REAP arm: successful wait4 reap (moved to the rux-obs crate):
+/// same-named wrapper; `nohang` distinguishes the blocking do_wait path
+/// (REAP4) from the WNOHANG do_wait_nonblock path (REAP4N).
 pub fn on_reap_wait4(reaper: u32, child: u32, wstatus: i32, nohang: bool) {
-    use core::sync::atomic::AtomicU32;
-
-    static N: AtomicU32 = AtomicU32::new(0);
-    if N.fetch_add(1, Ordering::Relaxed) >= MAX_REAP4_PRINTS {
-        return;
-    }
-    let (kind, val) = decode_wstatus(wstatus);
-    crate::pr_warn!(
-        "REAP4{} t={} reaper={}('{}') child={} wstatus={:#x} {}={}",
-        if nohang { "N" } else { "" },
-        secs(crate::timer::get_jiffies()),
-        reaper,
-        comm_of(reaper),
-        child,
-        wstatus as u32 as i32,
-        kind,
-        val
-    );
+    crate::debug::obs_hooks::reaper_on_reap_wait4(reaper, child, wstatus, nohang)
 }
 
-/// REAP arm: successful waitid event. `wnowait` marks a peek that left
-/// the child reapable; `via_pidfd` marks the pidfd idtype arm.
+/// REAP arm: successful waitid event (moved to the rux-obs crate):
+/// same-named wrapper; `wnowait` marks a peek that left the child
+/// reapable; `via_pidfd` marks the pidfd idtype arm.
 pub fn on_reap_waitid(
     reaper: u32,
     si_pid: u32,
@@ -310,58 +191,23 @@ pub fn on_reap_waitid(
     wnowait: bool,
     via_pidfd: bool,
 ) {
-    use core::sync::atomic::AtomicU32;
-
-    static N: AtomicU32 = AtomicU32::new(0);
-    if N.fetch_add(1, Ordering::Relaxed) >= MAX_REAPW_PRINTS {
-        return;
-    }
-    crate::pr_warn!(
-        "REAPW{} t={} reaper={}('{}') idtype={} id={} opts={:#x} si_pid={} {} status={}{}",
-        if wnowait { "-nw" } else { "" },
-        secs(crate::timer::get_jiffies()),
+    crate::debug::obs_hooks::reaper_on_reap_waitid(
         reaper,
-        comm_of(reaper),
-        if via_pidfd { -1 } else { idtype },
-        id,
-        options,
         si_pid,
-        decode_si_code(si_code),
+        si_code,
         si_status,
-        if via_pidfd { " via=pidfd" } else { "" }
-    );
-}
-
-/// Sampled no-event waitid print: proves the poll shape (who polls,
-/// with what options) without flooding — rate-limited, hard-capped.
-pub fn poll_note(reaper: u32, idtype: i32, id: i32, options: i32) {
-    use core::sync::atomic::{AtomicU32, AtomicU64};
-
-    static N: AtomicU32 = AtomicU32::new(0);
-    static LAST: AtomicU64 = AtomicU64::new(0);
-    let now = crate::timer::get_jiffies();
-    let last = LAST.load(Ordering::Relaxed);
-    if now.saturating_sub(last) < 5 * crate::config::KERNEL_HZ as u64 {
-        return;
-    }
-    if LAST
-        .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        return;
-    }
-    if N.fetch_add(1, Ordering::Relaxed) >= MAX_POLL_PRINTS {
-        return;
-    }
-    crate::pr_warn!(
-        "REAPW-POLL t={} reaper={}('{}') idtype={} id={} opts={:#x} (no event)",
-        secs(now),
-        reaper,
-        comm_of(reaper),
         idtype,
         id,
-        options
-    );
+        options,
+        wnowait,
+        via_pidfd,
+    )
+}
+
+/// Sampled no-event waitid print (moved to the rux-obs crate):
+/// same-named wrapper; proves the poll shape without flooding.
+pub fn poll_note(reaper: u32, idtype: i32, id: i32, options: i32) {
+    crate::debug::obs_hooks::reaper_poll_note(reaper, idtype, id, options)
 }
 
 /// ZLINGER arm: 1 Hz zombie scan, called from the timer softirq under

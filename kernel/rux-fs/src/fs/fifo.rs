@@ -255,12 +255,12 @@ fn fifo_file_close(file: &File) -> i32 {
             if last_writer {
                 // scmtap (gdm session-fifo hunt): the EPOLLHUP moment for
                 // every reader of this fifo (logind's session dispatcher).
-                if crate::debug::scmtap::enabled() {
+                if rux_obs::scmtap::enabled() {
                     let (fs_id, ino) = inode_opt
                         .as_ref()
                         .map(|i| (i.fs_id, i.ino))
                         .unwrap_or((0, 0));
-                    crate::debug::scmtap::tap_fifo_last_writer(fs_id, ino);
+                    rux_obs::scmtap::tap_fifo_last_writer(fs_id, ino);
                 }
                 pipe.close_write();
             }

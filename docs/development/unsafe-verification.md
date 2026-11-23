@@ -35,9 +35,9 @@ FILE` owns one), and the gate fails on a drop that
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1950**
-- recovered from reference versions: **28** (same-file 23, edited-site 5, file-move 0, moved-item 0)
-- references consulted: HEAD, MERGE_HEAD, history:e1d3f7876, history:e497c5b5a, history:5ad692052, history:3613721eb, history:96f2848b1, history:c01487587, history:0c8feb835, history:2a071cdf2, history:ccb0cabf6, history:78d73d4f6, history:938f1b41d, history:1d70a7c7d, history:e00a6cc4e, history:e78a5858b, history:33aa88454, history:67293fdcb, history:0db1981fd, history:7008a1cb1, history:d754f9e12, history:ff2d5ddb5, history:4741d627f, history:3f3f85760, history:05fb38075, history:2deea9ed7, history:f1900270e, history:d84fee492, history:82575b3b0, history:3e276af08, history:9b50aaff4, history:76ebff8e0, history:1e20375ab, history:25890277e, history:f035c2899, history:74d365f3f, history:9655f809c, history:82a7a7d0f, history:e255599d1, history:59a3f909a, history:07f730e64, history:de0a6071a, history:a09e7ab08, history:b8389cc06, history:2ed1470aa, history:c55875dfe, history:c187e1c35, history:e64dcfd36, history:1e687d251, history:10c8dc368, history:015823366, history:d878cd32c, history:3208bc9bb, history:65960c4e0, history:d5f2a4b29, history:b9d69b73c, history:db2da4975, history:a557edd1b, history:ca1005987, history:368a855ed, history:1e1bd0494, history:8832e06c2, history:418a7238e, history:dfe6bab32, history:64620c9c7, history:70794b235, history:46eadfea4, history:1c36a7a3c, history:d8ece4b39, history:2fe07a5a3, history:045a9f3a2, history:8f82e1326, history:1d518a966, history:d969cb7e9, history:dbdafa0a8, history:00bafaf99, history:6709b12cb, history:361701a15, history:5727de2f9, history:98658ba3e
+- artifacts kept by id: **1942**
+- recovered from reference versions: **36** (same-file 34, edited-site 2, file-move 0, moved-item 0)
+- references consulted: HEAD, MERGE_HEAD, history:234ba9d54, history:e1d3f7876, history:d453d070a, history:e497c5b5a, history:5ad692052, history:3613721eb, history:96f2848b1, history:c01487587, history:0c8feb835, history:2a071cdf2, history:ccb0cabf6, history:78d73d4f6, history:938f1b41d, history:1d70a7c7d, history:e00a6cc4e, history:e78a5858b, history:33aa88454, history:67293fdcb, history:0db1981fd, history:7008a1cb1, history:d754f9e12, history:ff2d5ddb5, history:4741d627f, history:3f3f85760, history:05fb38075, history:2deea9ed7, history:f1900270e, history:d84fee492, history:82575b3b0, history:3e276af08, history:9b50aaff4, history:76ebff8e0, history:1e20375ab, history:25890277e, history:f035c2899, history:74d365f3f, history:9655f809c, history:82a7a7d0f, history:e255599d1, history:59a3f909a, history:07f730e64, history:de0a6071a, history:a09e7ab08, history:b8389cc06, history:2ed1470aa, history:c55875dfe, history:c187e1c35, history:e64dcfd36, history:1e687d251, history:10c8dc368, history:015823366, history:d878cd32c, history:3208bc9bb, history:65960c4e0, history:d5f2a4b29, history:b9d69b73c, history:db2da4975, history:a557edd1b, history:ca1005987, history:368a855ed, history:1e1bd0494, history:8832e06c2, history:418a7238e, history:dfe6bab32, history:64620c9c7, history:70794b235, history:46eadfea4, history:1c36a7a3c, history:d8ece4b39, history:2fe07a5a3, history:045a9f3a2, history:8f82e1326, history:1d518a966, history:d969cb7e9, history:dbdafa0a8, history:00bafaf99, history:6709b12cb, history:361701a15, history:5727de2f9, history:98658ba3e
 - annotated regions, baseline -> this bank: **2065 -> 1978**
 
 ## Per-subsystem
@@ -1793,11 +1793,11 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 275 | register_debugfs_knobs | block | volatile | INV:F10 | `d63fdb446137` |
-| 286 | register_debugfs_knobs | block | asm | INV:F10 | `ab11c0c96de0` |
-| 292 | register_debugfs_knobs | block | asm | INV:F10 | `0ab458bbe25e` |
-| 385 | walk_read | block | - | INV:F10 | `51fdea369ce3` |
-| 387 | walk_read | block | volatile,ptr-ops | INV:F10 | `c8d2b3f58325` |
+| 284 | register_debugfs_knobs | block | volatile | INV:F10 | `f2eb578e4605` |
+| 295 | register_debugfs_knobs | block | asm | INV:F10 | `ec354d455aef` |
+| 301 | register_debugfs_knobs | block | asm | INV:F10 | `196d2c31241d` |
+| 394 | walk_read | block | - | INV:F10 | `69f3f53e0362` |
+| 396 | walk_read | block | volatile,ptr-ops | INV:F10 | `c63f60caa793` |
 
 ### kernel/src/debug/oops.rs (1)
 
@@ -2639,7 +2639,7 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1811 | rust_main_impl | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `29c8249b10b8` |
+| 1812 | rust_main_impl | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `cea188621a4a` |
 
 ### kernel/src/list.rs (7)
 
@@ -3092,12 +3092,12 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 96 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `d67977f74c18` |
-| 97 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `e78ed1628925` |
-| 2967 | <module> | unsafe-impl | - | INV:INV-TRACERING-1 | `cf00ffda21bf` |
-| 2968 | <module> | unsafe-impl | - | INV:INV-TRACERING-1 | `3c6094b0e773` |
-| 2978 | slot | block | - | INV:INV-TRACERING-1 | `5595de31aaff` |
-| 2989 | slot_mut | block | - | INV:INV-TRACERING-1 | `12c43ba6b1c4` |
+| 99 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `08fefb18cda0` |
+| 100 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `d129a4eb4ddd` |
+| 2970 | <module> | unsafe-impl | - | INV:INV-TRACERING-1 | `c3f986b5e958` |
+| 2971 | <module> | unsafe-impl | - | INV:INV-TRACERING-1 | `039e96513b66` |
+| 2981 | slot | block | - | INV:INV-TRACERING-1 | `cb79ddec7056` |
+| 2992 | slot_mut | block | - | INV:INV-TRACERING-1 | `e56f922965e6` |
 
 ## module
 

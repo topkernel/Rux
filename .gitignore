@@ -16,7 +16,7 @@ build/.config.bak
 .claude/
 # Contains mutation testing data
 # C sources are tarball-packed, not tracked (stats policy 2026-10-31);
-debug/
+/debug/
 /debug_qemu.gdb
 # Disk image files
 # disk images and extracted guest trees never live in the repo

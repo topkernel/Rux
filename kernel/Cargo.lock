@@ -365,9 +365,8 @@ dependencies = [
  "rux-ipc",
  "rux-mm",
  "rux-net",
- "rux-process",
+ "rux-obs",
  "rux-sched",
- "rux-signal",
  "rux-syscall",
 ]
 
@@ -377,7 +376,6 @@ version = "0.1.0"
 dependencies = [
  "rux",
  "rux-ipc",
- "rux-process",
 ]
 
 [[package]]
@@ -393,6 +391,7 @@ version = "0.1.0"
 dependencies = [
  "rux",
  "rux-ext4",
+ "rux-obs",
 ]
 
 [[package]]
@@ -407,7 +406,6 @@ name = "rux-mm"
 version = "0.1.0"
 dependencies = [
  "rux",
- "rux-process",
 ]
 
 [[package]]
@@ -415,11 +413,11 @@ name = "rux-net"
 version = "0.1.0"
 dependencies = [
  "rux",
- "rux-fs",
+ "rux-obs",
 ]
 
 [[package]]
-name = "rux-process"
+name = "rux-obs"
 version = "0.1.0"
 dependencies = [
  "rux",
@@ -427,14 +425,6 @@ dependencies = [
 
 [[package]]
 name = "rux-sched"
-version = "0.1.0"
-dependencies = [
- "rux",
- "rux-process",
-]
-
-[[package]]
-name = "rux-signal"
 version = "0.1.0"
 dependencies = [
  "rux",
@@ -448,7 +438,7 @@ dependencies = [
  "rux-fs",
  "rux-ipc",
  "rux-net",
- "rux-process",
+ "rux-obs",
 ]
 
 [[package]]
