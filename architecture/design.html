@@ -99,7 +99,7 @@
         <tr><td>引导表+寄存器 IO+SBI/hypercall/GIC</td><td class="num">~750</td><td>head.S / special_insns.h / io.h / kvm.c / irq-gic-v3.c</td></tr>
         <tr><td>同步原语内部+safety/ 原语+任务页生命周期+定时器核</td><td class="num">~420</td><td>spinlock.c 内部等</td></tr>
       </tbody></table></div>
-    <p>对照 Linux 全树 TCB,比例约 <b>1 : 9,000</b>。调度与内存管理不做整 crate:两者均为<b>可判定策略骑在小 unsafe 核上</b>,S1/M1 机制与策略分离后策略层 forbid、机制留核 —— 切换/tp/锁原语/页表原子写是 TCB,CFS 数学不是。</p>
+    <p>对照 Linux 全树 TCB,比例约 <b>1 : 9,000</b>。调度与内存管理不做整 crate:两者均为<b>可判定策略骑在小 unsafe 核上</b>,S1/M1 机制与策略分离后策略层 forbid、机制留核 —— 切换/tp/锁原语/页表原子写是 TCB,CFS 数学不是。S1/M1 均已落地:rux-sched(策略 5,488 行)与 rux-mm(策略 10,582 行,两轮)在 crate 级 forbid 下零 unsafe,机制留在核心逐行审计。</p>
     <h3>三层防线(各层实测成本)</h3>
     <div class="tbl-wrap"><table>
       <thead><tr><th>层</th><th>机制</th><th class="num">边界成本</th><th>买到什么</th></tr></thead><tbody>
@@ -109,7 +109,18 @@
       </tbody></table></div>
     <p><p><b>调度子系统的机制与策略隔离(S1)是"mechanism/policy separation"这一经典操作系统设计原则的首次编译器级强制实现。</b>机制(mechanism)指执行状态变更的底层操作 —— 上下文切换、全局运行队列的锁协议、当前任务指针的寄存器读取、任务槽位的分配与回收 —— 这些操作直接维护内核的数据结构不变量,保留在核心 crate 中接受逐行审计。策略(policy)指基于机制做出的调度决策 —— 选择下一个运行的任务、决定唤醒任务的放置 CPU、计算节流阈值 —— 这些决策仅通过机制暴露的类型安全接口访问数据,移入独立的服务 crate 并声明 <code>#![forbid(unsafe_code)]</code>。传统上这一分离仅靠代码评审维护;此处由编译器静态保证:策略代码中的任何 unsafe 使用都是编译错误。回调函数表与私有接口 API 构成机制向策略发布的完整调用契约。内存管理子系统(M1)采用相同的分离方法。</p>
     <p>微内核(如 seL4、L4 系列)通过为每个服务分配独立地址空间实现故障隔离,代价是每次跨服务通信(IPC)约 1,000 个 CPU 周期(最优快速路径),且沿"缺页处理→驱动→文件服务"调用链逐级累积 —— 这是 Mach 内核的历史教训。晶核架构的三层防线总边界开销为 0(类型层,编译期)+ 约 50 周期(硬件层,每次窗口切换)+ 0(验证层,离线),且隔离粒度更细:MPK 保护密钥精确到单个物理页,而地址空间隔离只能到进程粒度。</p>
-    <h3>与同谱系工作的差异(Framekernel / RedLeaf)</h3>
+    <h3>业界 Rust 内核四种架构路线,与晶核的综合位置</h3>
+    <p>业界 Rust 内核对"unsafe 放在哪、TCB 怎么划"有四类回答。<b>微内核路线</b>(Redox/Tock/Hubris):靠硬件隔离(MMU/MPU),内核极小,但每个新增组件扩大 TCB(Tock 实测 TCB 占比 ~43.8%),且每次跨组件通信付 IPC 开销。<b>Framekernel 路线</b>(Asterinas,与晶核最接近):单一地址空间内按逻辑分 Framework(唯一允许 unsafe 的层)与 Services(全 Safe Rust),服务间调用就是函数调用;TCB 占比 ~14.0%,性能接近单体内核(LMBench 几何均值 1.08×)。但其 Framework 是<b>约定与评审维护的逻辑分层</b>,不是构建系统层面的硬边界。<b>叶子式路线</b>(参考单体内核中的 Rust 叶子模块):不重写内核,核心子系统仍是 C,Rust 只写新叶子;TCB 仍是整个 C 内核;其价值在抽象手法 —— 刻意最小化的 trait 设计、静态分发优先、薄而机械的错误映射。<b>单地址空间 cell 路线</b>(Theseus):以 crate 为隔离单元动态加载,主张把资源记账交给编译器;TCB 占比 ~62.4%;其"单地址空间匹配 Rust 编译器执行模型"的论断为晶核的机制留核决策提供了独立佐证。</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>架构路线</th><th>代表</th><th>隔离机制</th><th>unsafe 所在</th><th class="num">TCB 占比</th></tr></thead><tbody>
+        <tr><td>微内核</td><td>Redox / Tock / Hubris</td><td>MMU/MPU + 用户态</td><td>极小的内核核心</td><td class="num">Tock ~43.8%</td></tr>
+        <tr><td>Framekernel</td><td>Asterinas</td><td>编译器 + 单一地址空间</td><td>Framework 逻辑层</td><td class="num">~14.0%</td></tr>
+        <tr><td>叶子式</td><td>单体内核中的 Rust 叶子</td><td>C 内核 + Safe Rust 叶子</td><td>整个 C 内核</td><td class="num">不适用</td></tr>
+        <tr><td>单地址空间 cell</td><td>Theseus</td><td>编译器 + crate 动态加载</td><td>受信组件</td><td class="num">~62.4%</td></tr>
+        <tr><td><b>晶核(Rux)</b></td><td><b>Rux</b></td><td><b>编译器 crate 粒度 + Cargo 依赖图 + 硬件后备</b></td><td><b>逐项登记的 ~3,000 行底线(INV 契约/F 行)</b></td><td class="num"><b>服务列构造性为 0;核心=登记清单</b></td></tr>
+      </tbody></table></div>
+    <p>晶核不是某一路线的极端化,而是<b>综合各路线的优势并补上它们共同缺失的一环</b>:取微内核的最小信任核纪律(底线逐行登记而非分区)、取 Framekernel 的单一地址空间与零 IPC 边界(跨 crate 直接函数调用,LTO 内联,比 RPC 薄整整一个协议层)、取 Theseus 的 crate 即隔离单元、取叶子式的抽象手法控制跨 crate 接口的间接调用开销。而<b>业界没有一个 Rust 内核把边界放进构建系统</b> —— 包括 Asterinas 在内:晶核的每服务 crate <code>#![forbid(unsafe_code)]</code> 让在服务代码写 unsafe 成为<b>编译错误</b>而非评审发现(对抗性验证),Cargo 依赖图让分层违规成为<b>构建失败</b>,CI 单调性检查防止属性被移除,类型层之后还有 MPK 硬件后备。逻辑分层会因约定松弛而腐蚀;编译错误根本写不出来。这就是晶核的主张:<b>单体内核级性能、比上表所有实测占比更小的 TCB、以及唯一由工具链而非流程守护的边界</b>。</p>
+    <h3>与最近两个同谱系工作的逐项差异(Framekernel / RedLeaf)</h3>
     <div class="tbl-wrap"><table>
       <thead><tr><th>维度</th><th>Asterinas(Framekernel)</th><th>RedLeaf(PLOS'23)</th><th>Rux 晶核</th></tr></thead><tbody>
         <tr><td>内存安全隔离的 enforcement 机制</td><td>单一 crate 内按惯例划分 framework/service 边界,依赖代码评审维护</td><td>类型系统隔离,域间经零拷贝 RPC 通信</td><td>编译器在 crate 粒度静态强制:每个服务 crate 声明 <code>#![forbid(unsafe_code)]</code>(插入 unsafe 即编译失败,经对抗性验证);Cargo 依赖图拒绝环形依赖(依赖无环性由构建系统静态检查);CI 对属性集合做单调性检查(移除属性即构建失败)</td></tr>
@@ -119,8 +130,9 @@
         <tr><td>本设计特有</td><td>—</td><td>—</td><td>按类别的 unsafe 计数与逐块不可缩减性证明;调度/内存的机制与策略分离(S1/M1);先测量反向依赖再执行的迁移流程,不可分解时记录数据后搁置</td></tr>
         <tr><td>对方领先之处(如实)</td><td>更早交付完整 Linux 系统调用接口</td><td>零拷贝 RPC 的形式化验证更完整</td><td>—</td></tr>
       </tbody></table></div>
-    <h3>分级落地数字</h3>
-    <p>当前 ~10,300 双计 → Rung 1 闭合(系统调用 crate,库内副本删除,结构性变化)→ +网络级+S1/M1 机制与策略分离(−~750)→ +文件系统/驱动级(−~2,770)→ +dfx 仪器退役评审(−600~1,000)→ <b>终态 = rux-core 尺寸 ≈4,000–4,700</b>。每级门禁:三架构构建+全量套件+fio 三案例+冒烟+forbid 对抗性验证。设计正本:<code>docs/architecture/micro-core-design.md</code>(绑定迁移顺序与中止判据);crate 化迁移机制:<code>crate-plan.md</code>。</p>>
+    <h3>落地状态(2026-11-23)</h3>
+    <p><b>八个服务 crate 已全部落地并为结构性零 unsafe</b>(对抗性验证:向任一 crate 注入 unsafe 必使其自身构建失败):rux-syscall(~38k 行)、rux-net(~20k)、rux-ext4(ext4+jbd2,~24k,含日志)、rux-sched(S1 策略 5,488 行)、rux-ipc(SysV/POSIX IPC 策略 ~5.9k)、rux-mm(M1a+M1b 两轮策略 10,582 行)、rux-fs、rux-drivers —— 合计约 105k 行,服务列 unsafe 计数恒为 0。遗留 unsafe 全部收在框架侧 1,956 个块+270 个 unsafe fn/impl,逐块带 INV 契约登记;不可缩减者逐项入 F 行登记表。每级迁移门禁:三架构构建 + 全量测试套件(当前 879 项全过)+ 性能基线对比(±20% 带)+ 启动冒烟 + forbid 对抗性验证。</p>
+    <p><b>安全与性能同时成立的最强证据(S1 实测)</b>:调度策略移出核心后,回调接口的间接调用一度使上下文切换中位数劣化 +25.1%(每次切换约 40 个经函数指针分发的观测调用,函数指针对编译器不可见、LTO 无法内联)—— 性能门禁拒绝合并;修复方式是重构接口的分发方式(观测计数的静态数据移回框架侧直接调用、选择循环整体留在策略侧单次跨 crate 调用、三行条件调用加武装门控),<b>零 unsafe 代价</b>回到 +1.7%(带内)。结论:crate 边界的安全性本身零开销;开销来自接口的间接调用 —— 回归了修分发方式,不动安全属性。设计正本:<code>docs/architecture/seed-core-design.md</code>(绑定迁移顺序与中止判据,S1 案例专节在内);crate 化迁移机制与跨 crate 接口设计规则:<code>crate-plan.md</code>。</p>>
     <p>Rux 是一份源码树服务三种架构(riscv64 / x86_64 / aarch64),约 90% 代码架构无关。对外以 349 个系统调用对齐Linux ABI;对内是净室设计 —— 每一项与主流实现不同的内部决策都登记在<a href="#divergences">设计分歧登记表</a>并携带兼容性证据。</p>
     <div class="tbl-wrap">
       <table>
