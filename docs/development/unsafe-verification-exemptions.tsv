@@ -32,3 +32,4 @@ kernel/src/process/ptrace.rs	1	0	regions moved to the rux-process crate (forbid;
 kernel/src/signal.rs	13	12	regions shifted/deleted by the carve; carried by id, remainder GAP
 kernel/src/arch/riscv64/trap.rs	54	49	regions shifted by the process carve edits; carried by id, remainder recoverable from history
 kernel/src/signal.rs	15	12	regions shifted by the carve edits; carried by id, remainder recoverable from history
+kernel/src/process/mod.rs	2	0	lines shifted by the kthread re-export edit; carried by id
