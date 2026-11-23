@@ -212,6 +212,36 @@ replacement comments and trap.rs hook); dfx/ tree 39 → 37 files; trace
 event table 109 → 107 rows; dfx= switch table unchanged at 6 permanent
 switches (monotonicity preserved — nothing added).
 
+Battery (branch dfx-retire @ d297e39d8, base 02bfede71):
+
+- Debug builds: x86_64 rc=0, riscv64 rc=0, aarch64 rc=0.
+- Release builds: x86_64 rc=0, riscv64 rc=0; aarch64 release FAILS
+  with a pre-existing linker error ALSO PRESENT ON THE BASE
+  (R_AARCH64_CONDBR19 out of range in aarch64_vectors →
+  aarch64_bad_user_frame, 3,127,628 bytes on the base vs 3,119,272 on
+  this branch — the standing gate builds aarch64 DEBUG only, which is
+  green). Not caused by the retirement; recorded as a gap for the
+  aarch64 lane.
+- Debug-feature builds: make build LOCKOWNER=1 rc=0 on riscv64 (after
+  fixing a pre-existing build/Makefile bug — the riscv64 arm dropped
+  the --features flag, commit d297e39d8); cargo check clean with
+  dfx-taskdump-bt, dfx-grq-wedge (riscv64) and
+  dfx-aa64-uaccess-selftest (aarch64); dfx-futex-trace has 3
+  pre-existing E0308s on the base (fork.rs:824 / futex.rs:8069,
+  identical on origin/main) — outside this lane's scope, recorded as
+  a gap.
+- riscv make test: ALL TESTS PASSED, 801/801 (fresh minimal rootfs).
+- Tracepoint boot proof (run/traceproof_boot.py, riscv64 TCG, minimal
+  rootfs, trace_event=sched:sched_switch,rux:slowtask,rux:monowatch):
+  shell reached, cd /proc rc=0, set_event readback names all three
+  armed events, the trace ring shows sched_switch records in the
+  reference format, ZERO panics. (An x86_64+KVM variant of the same
+  boot wedges in the ksoftirqd STRAND-ID / VW-WEDGE detector spam —
+  verified IDENTICAL on the base kernel, i.e. the known pre-existing
+  idle-boot detector noise, not a retirement regression; the minimal
+  rootfs itself is riscv64-only, mkrootfs.sh hardcodes the riscv64
+  toolchain.)
+
 Re-verification during execution (beyond the review's face-evidence
 method): a fresh all-tree reference census INCLUDING the path-included
 service crates (`kernel/rux-*/src`, which a `kernel/src/`-only grep
