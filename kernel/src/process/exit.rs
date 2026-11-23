@@ -2216,7 +2216,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::sync::futex_pi::futex_pi_exit_cleanup(cur);
 
         // ===== Clean up POSIX MQ fd entries =====
-        crate::ipc::posix_mq::mq_fds_cleanup(cur);
+        crate::ipc::ipc_hooks::mq_fds_cleanup(cur);
 
         // ===== Disarm interval timers (ITIMER_REAL/VIRTUAL/PROF) =====
         for i in 0..3 {

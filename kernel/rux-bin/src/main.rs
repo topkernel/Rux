@@ -21,6 +21,10 @@ pub extern "C" fn rust_main() -> ! {
     rux_sched::register_all();
     rux_net::register_all();
     rux_fs::register_all();
+    // The ipc policy rows (sysv/posix_mq/keys/access_token) before
+    // rust_main_impl: devfs populate and exit/exec/fork/sysctl paths
+    // ride the IpcHooks table from their first use.
+    rux_ipc::register_all();
     rux_syscall::register_all();
     // The mm policy rows (M1a): carve-live on x86_64, still in-tree on
     // riscv64/aarch64 (their register_in_tree fills the table inside
@@ -42,6 +46,9 @@ pub extern "C" fn rust_main() -> ! {
         rux::tests::register_service_tests(rux_net::run_unit_tests);
         rux::tests::register_service_tests(rux_sched::run_unit_tests);
         rux::tests::register_service_tests(rux_ext4::run_unit_tests);
+        // rux-ipc's entries run at the LATE seam point (post-fs_io, the
+        // sysv family's historical position).
+        rux::tests::register_service_tests_late(rux_ipc::run_unit_tests);
     }
     rust_main_impl()
 }

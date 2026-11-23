@@ -150,6 +150,25 @@ pub fn copy_in_t<T: Copy>(dst: &mut T, src_user: usize) -> usize {
     }
 }
 
+/// Copy `dst.len()` elements of `T` in from user memory at `src_user`.
+///
+/// The element-typed slice twin of `copy_in_t` (same contract: `T: Copy`
+/// with no bit-pattern validity constraint beyond its bytes, `dst`
+/// initialized). Returns the number of bytes NOT copied (0 = complete
+/// success); on failure the uncopied tail is zero-filled by the
+/// primitive.
+#[inline]
+pub fn copy_in_t_slice<T: Copy>(dst: &mut [T], src_user: usize) -> usize {
+    let len = dst.len().checked_mul(core::mem::size_of::<T>()).unwrap_or(usize::MAX);
+    // SAFETY: the kernel side is a live `&mut [T]` (`len` writable bytes
+    // proven by the type system); the user side is access_ok-checked and
+    // faults through the exception table inside the primitive, so any
+    // src_user value is sound to pass.
+    unsafe {
+        uaccess::copy_from_user(dst.as_mut_ptr() as *mut u8, src_user as *const u8, len)
+    }
+}
+
 /// Copy one `T` out from kernel memory to user address `dst_user`.
 ///
 /// Returns the number of bytes NOT copied (0 = complete success).

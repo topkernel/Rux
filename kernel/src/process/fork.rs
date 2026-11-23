@@ -1021,9 +1021,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         child.set_access_token(current.access_token());
         child.set_access_ftoken(0);
         {
-            if let Some((ptok, _)) = crate::ipc::access_token::registered_token_of(current.tgid() as u32) {
+            if let Some((ptok, _)) = crate::ipc::ipc_hooks::at_registered_token_of(current.tgid() as u32) {
                 if ptok != 0 {
-                    crate::ipc::access_token::mirror_set(child.tgid() as u32, false, ptok);
+                    crate::ipc::ipc_hooks::at_mirror_set(child.tgid() as u32, false, ptok);
                 }
             }
         }

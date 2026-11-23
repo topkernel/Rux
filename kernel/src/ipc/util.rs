@@ -219,7 +219,9 @@ pub struct IpcObjectEntry<T> {
 pub struct IpcIds<T> {
     pub slots: Spinlock<[Option<alloc::boxed::Box<IpcObjectEntry<T>>>; IPC_IDS_MAX]>,
     next_seq: AtomicU32,
-    pub(crate) count: AtomicUsize,
+    // pub (visibility tax of the rux-ipc flip): sysv_shm's destroy
+    // paths decrement the live-object count under the slots lock.
+    pub count: AtomicUsize,
 }
 
 impl<T> IpcIds<T> {
@@ -525,6 +527,7 @@ pub fn ipc_current_time() -> i64 {
 
 /// Per-process semaphore undo entry.
 /// Records an adjustment made to a semaphore so it can be reversed on process exit.
+/// (Type substrate of Task's sem_undo field — lives with the framework.)
 #[derive(Clone, Copy)]
 pub struct SemUndoEntry {
     /// Semaphore set ID.
@@ -533,4 +536,10 @@ pub struct SemUndoEntry {
     pub sem_num: u16,
     /// Adjustment value (the sem_op that was applied).
     pub adjustment: i32,
+}
+
+/// The registry bound the /proc/sys/kernel/shmmni clamp consults
+/// (IpcHooks row; the framework sysctl cannot name the service const).
+pub fn ipc_ids_max() -> u64 {
+    IPC_IDS_MAX as u64
 }

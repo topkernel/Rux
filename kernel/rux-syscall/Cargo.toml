@@ -10,6 +10,7 @@ edition = "2021"
 # A member of the kernel-dir workspace (crate-flip M3-B).
 [dependencies]
 rux = { path = "..", default-features = false }
+rux-ipc = { path = "../rux-ipc", default-features = false }
 rux-fs = { path = "../rux-fs", default-features = false }
 rux-net = { path = "../rux-net", default-features = false }
 

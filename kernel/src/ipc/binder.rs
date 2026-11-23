@@ -8941,7 +8941,9 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                     }
                 }
                 drop(w);
-                let (t, f) = crate::ipc::access_token::token_of(token_src);
+                // The access_token registry consult rides the IpcHooks row
+                // (the registry lives in the service crate; cold ioctl path).
+                let (t, f) = crate::ipc::ipc_hooks::at_token_of(token_src);
                 if trace {
                     crate::pr_debug!(
                         "btx: GET_SENDER_INFO sender pid {} token {:#x} ftoken {:#x}",

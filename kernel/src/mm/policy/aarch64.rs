@@ -1214,7 +1214,7 @@ pub fn handle_mm_fault(
                     }
                     // Shared-memory attachments: increment nattch.
                     if vma_type == crate::mm::vma::VmaType::SharedMemory && file_fd >= 0 {
-                        crate::ipc::sysv_shm::shm_attach_vma(file_fd);
+                        crate::ipc::ipc_hooks::shm_attach_vma(file_fd);
                     }
                     let copied_pages = new_vma.page_count() as u64;
                     let _ = new_vma_mgr.add(new_vma);

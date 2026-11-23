@@ -362,6 +362,7 @@ dependencies = [
  "rux-drivers",
  "rux-ext4",
  "rux-fs",
+ "rux-ipc",
  "rux-mm",
  "rux-net",
  "rux-sched",
@@ -373,6 +374,7 @@ name = "rux-drivers"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-ipc",
 ]
 
 [[package]]
@@ -388,6 +390,13 @@ version = "0.1.0"
 dependencies = [
  "rux",
  "rux-ext4",
+]
+
+[[package]]
+name = "rux-ipc"
+version = "0.1.0"
+dependencies = [
+ "rux",
 ]
 
 [[package]]
@@ -417,6 +426,7 @@ version = "0.1.0"
 dependencies = [
  "rux",
  "rux-fs",
+ "rux-ipc",
  "rux-net",
 ]
 

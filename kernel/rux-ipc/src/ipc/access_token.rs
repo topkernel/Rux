@@ -170,7 +170,7 @@ fn enotty() -> i64 {
 }
 
 fn access_token_ioctl(request: u32, arg: usize) -> i64 {
-    use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user};
+    use crate::arch::uaccess::access_ok;
 
     // Key the registry by TGID, not the ioctl caller's tid. Tokens are
     // per-PROCESS: init's service child calls SET between fork and exec
@@ -403,4 +403,11 @@ pub static ACCESS_TOKEN_OPS: FileOps = FileOps::builder()
 pub fn register() {
     let _ = registry::register_char_device(DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS);
     crate::pr_info!("atid: /dev/access_token_id registered");
+}
+
+/// The devfs registration row (IpcHooks): the framework's devfs
+/// populate asks for the char-device number + ops static instead of
+/// naming them directly.
+pub fn char_device() -> Option<(crate::fs::dev_t::DevNo, &'static crate::fs::file::FileOps)> {
+    Some((DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS))
 }

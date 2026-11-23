@@ -6,7 +6,7 @@
 //!
 //! Implements shmget, shmctl, shmat, shmdt following the Linux kernel design.
 
-use crate::arch::uaccess::{access_ok, clear_user, copy_to_user, put_user};
+use crate::arch::uaccess::access_ok;
 use crate::arch::mm::map_user_page;
 use crate::arch::mm::memory_layout::{VirtAddr as MmVirtAddr, PhysAddr as MmPhysAddr};
 use crate::mm::page::{PAGE_SIZE, PAGE_MASK, VirtAddr};
@@ -89,16 +89,11 @@ impl Drop for ShmPages {
         // put_page frees it (review 2R.6 — raw free_pages here used to
         // hand buddy pages that were still mapped).
         for p in &self.pages {
-            let page = crate::mm::pfn_to_page_mut(
-                crate::mm::phys_to_pfn(*p),
-            );
-            let freed_by_us = if page.is_null() {
-                true
-            } else {
-                // SAFETY: descriptor exists for this in-RAM page.
-                unsafe { (*page).put_page() == 0 }
-            };
-            if freed_by_us {
+            // The audited descriptor touch lives in the framework edge
+            // (ipc::edges::shm_page_put, INV-IPC-PAGEOP-1); the null
+            // (torn-teardown) arm reports "we own the free decision",
+            // exactly the historical Drop behavior.
+            if crate::ipc::edges::shm_page_put(*p) {
                 free_pages(*p, 0);
             }
         }
@@ -193,6 +188,22 @@ pub fn shm_ctlni() -> u64 {
 }
 pub fn shm_ctlall() -> u64 {
     SHM_CTLALL.load(Ordering::Relaxed)
+}
+
+/// The sysctl setter rows (IpcHooks): the statics are service-owned,
+/// the framework's /proc/sys writers route through these.
+pub fn set_shm_ctlmax(v: u64) {
+    SHM_CTLMAX.store(v, Ordering::Release);
+}
+/// The fixed slot table caps the real limit at IPC_IDS_MAX; clamp so
+/// the file never promises more than the kernel has (the historical
+/// sysctl-side clamp, moved with the static it governs).
+pub fn set_shm_ctlni(v: u64) {
+    let capped = v.min(super::util::IPC_IDS_MAX as u64);
+    SHM_CTLNI.store(capped, Ordering::Release);
+}
+pub fn set_shm_ctlall(v: u64) {
+    SHM_CTLALL.store(v, Ordering::Release);
 }
 
 /// Total pages currently held by live segments (SHM_INFO/SHMALL accounting).
@@ -1031,12 +1042,13 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             }
             return -(errno::ENOMEM as i64);
         }
-        // SAFETY: attach_addr + i*PAGE_SIZE is page-aligned and within the
-        // newly allocated VMA range; phys is a valid page from get_zeroed_page;
-        // root_ppn is the current process's page table root.
-        unsafe {
-            // R7-A5: map+refcount under the PTE lock (same discipline as
-            // the demand-fault paths).
+        // R7-A5: map+refcount under the PTE lock (same discipline as
+        // the demand-fault paths). The one raw operation (the vmemmap
+        // descriptor get_page) rides the framework edge
+        // ipc::edges::shm_page_get (INV-IPC-PAGEOP-1); everything else
+        // here is a safe primitive call (MM_CTX store, PTE lock,
+        // map_user_page).
+        {
             crate::arch::mm::mm_ops::MM_CTX.store(1, core::sync::atomic::Ordering::Relaxed);
         #[cfg(feature = "x86_64")]
         let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
@@ -1052,10 +1064,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             // per-attachment reference so shmdt/exit's put_page cannot free
             // a page the segment still owns (review 2R.6). Segments free
             // their pages only when every attachment is gone.
-            let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(phys));
-            if !page.is_null() {
-                (*page).get_page();
-            }
+            crate::ipc::edges::shm_page_get(phys);
             drop(_pte_guard);
         }
     }

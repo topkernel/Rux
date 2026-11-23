@@ -6,8 +6,7 @@
 //!
 //! Implements semget, semctl, semop, semtimedop following the Linux kernel design.
 
-use crate::arch::uaccess::{access_ok, copy_to_user, get_user, put_user};
-use crate::process::wait::WaitQueueHead;
+use crate::arch::uaccess::access_ok;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
@@ -855,28 +854,19 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     assert!(nsops <= MAX_SOPS);
     let mut sops_small: [SemBuf; MAX_SOPS_FAST] =
         [SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; MAX_SOPS_FAST];
-    let mut sops_big: alloc::vec::Vec<SemBuf>;
-    let sops_dst: *mut u8 = if nsops <= MAX_SOPS_FAST {
-        sops_small.as_mut_ptr() as *mut u8
-    } else {
-        sops_big = alloc::vec![SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; nsops];
-        sops_big.as_mut_ptr() as *mut u8
-    };
     // sops_ptr was access_ok-validated for nsops * size_of::<SemBuf>()
     // above; exactly nsops entries are written. The copy and the slice
     // view are the two audited edges of the staging (dst is a
     // pre-filled owned local; copy_in_t's failure path zero-fills, so
     // the entries stay initialized).
     let sops: &[SemBuf] = if nsops <= MAX_SOPS_FAST {
-        // SAFETY: dst is the owned stack array of at least nsops
-        // entries; the byte-length matches nsops * size_of::<SemBuf>().
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(
-                sops_small.as_mut_ptr() as *mut u8,
-                sops_ptr as *const u8,
-                nsops * core::mem::size_of::<SemBuf>(),
-            )
-        } != 0
+        // The typed-slice safe copy (uaccess_safe::copy_in_t_slice —
+        // exception-table path, tail zero-filled on fault; dst is the
+        // owned pre-filled stack array of at least nsops entries).
+        if crate::arch::uaccess_safe::copy_in_t_slice(
+            &mut sops_small[..nsops],
+            sops_ptr as usize,
+        ) != 0
         {
             return -(errno::EFAULT as i64);
         }
@@ -884,14 +874,8 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     } else {
         let mut big =
             alloc::vec![SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; nsops];
-        // SAFETY: big is an owned Vec of exactly nsops entries.
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(
-                big.as_mut_ptr() as *mut u8,
-                sops_ptr as *const u8,
-                nsops * core::mem::size_of::<SemBuf>(),
-            )
-        } != 0
+        if crate::arch::uaccess_safe::copy_in_t_slice(&mut big[..], sops_ptr as usize)
+            != 0
         {
             return -(errno::EFAULT as i64);
         }
@@ -1502,18 +1486,14 @@ fn find_blocking_op(idx: usize, sops: &[SemBuf]) -> Option<usize> {
 }
 
 /// Reverse all SEM_UNDO adjustments for a process exiting.
-/// Called from do_exit() during process cleanup.
-pub fn sem_undo_exit(task: *mut crate::process::Task) {
-    if task.is_null() {
-        return;
-    }
-
+/// Called from do_exit() during process cleanup (through the IpcHooks
+/// exit row). The reference form replaces the historical raw task
+/// pointer — do_exit holds the task alive across the cleanup calls.
+pub fn sem_undo_exit(task: &crate::process::Task) {
     // Take the undo table (replaces with empty Vec)
     let entries: alloc::vec::Vec<super::util::SemUndoEntry>;
-    // SAFETY: task was null-checked above and is a valid pointer to the exiting
-    // task passed from do_exit; sem_undo lock is safe to acquire here.
-    unsafe {
-        let mut undo_table = (*task).sem_undo.lock();
+    {
+        let mut undo_table = task.sem_undo.lock();
         entries = core::mem::take(&mut *undo_table);
     }
 

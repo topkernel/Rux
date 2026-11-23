@@ -254,7 +254,33 @@ rux-drivers       forbid-safe  (DONE 2026-11-23, origin 8672a0ebf:
                   virtio/intc/timer/pci/drm stay on the floor with
                   per-family reasons; 12 DriverHooks rows + the leveled
                   initcall table)
-rux-ipc           forbid-safe
+rux-ipc           forbid-safe  (DONE 2026-11-23, ipc-flip lane: the
+                  movable policy — sysv_msg/sysv_shm/posix_mq/keys/
+                  access_token, 5,406 lines — sole-copied under crate
+                  forbid; the unsafe blocks converted via the
+                  uaccess_safe typed twins (+copy_in_t_slice), live
+                  &Task exit signatures, and framework ipc/edges.rs
+                  (INV-IPC-PAGEOP-1); IpcHooks 24 rows, all COLD paths.
+                  SHELVED with numbers: binder.rs — 46 blocks + 10
+                  unsafe impls in 7 floor-shaped clusters (TxnBlock
+                  block-view windows INV-BINDER-BLOCKVIEW ~14 sites,
+                  UnsafeCell interiors 4, Send/Sync markers on the
+                  raw-pointer object model 10, intrusive
+                  key/container_of 2, file->Arc adoption 4, trap-regs/
+                  page-table diagnostic walkers 15, task raw derefs 5);
+                  needs a binder_substrate extraction + object-model
+                  Send/Sync restructure, a lane of its own.
+                  sysv_sem + util — SHELVED on a BEHAVIORAL finding:
+                  sysv_sem compiled in the crate deadlocks the
+                  sysv_sem_block cross-task test (helper kthread
+                  linked/on_rq/vruntime=0, never scheduled; boot task
+                  park-loops with instant schedule() returns; 4/4
+                  repro, position- and load-independent) while the
+                  byte-identical source in-tree (seam state) passes
+                  809/809 and fork-point base 801/801 — the delta is
+                  the crate packaging alone; root cause open, taskdump
+                  evidence in the lane record. util stays framework as
+                  the shared substrate both sides consume)
 rux-dfx-svc       forbid-safe  (subject to §7 retirement review)
 ```
 

@@ -131,6 +131,12 @@ static SERVICE_TESTS: Spinlock<[Option<ServiceTestFn>; MAX_SERVICE_TESTS]> =
 static SERVICE_TEST_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// Register a service crate's guest-test entry (called from rux-bin).
+/// `late`: run at the POST-fs_io seam point instead of the early one —
+/// the rux-ipc flip's finding: the sysv_sem BLOCKING test's cross-task
+/// handoff depends on the post-fs_io machine state (the family's
+/// historical position was after fs_io/fs_pins); running it early
+/// parks the boot task forever. rux-fs (pipe2) stays early (its
+/// family's original position).
 #[cfg(feature = "unit-test")]
 pub fn register_service_tests(f: ServiceTestFn) {
     let mut table = SERVICE_TESTS.lock();
@@ -141,11 +147,41 @@ pub fn register_service_tests(f: ServiceTestFn) {
     }
 }
 
+/// Register into the LATE table (the post-fs_io seam point).
+#[cfg(feature = "unit-test")]
+pub fn register_service_tests_late(f: ServiceTestFn) {
+    let mut table = SERVICE_TESTS_LATE.lock();
+    let i = SERVICE_TEST_LATE_LEN.load(Ordering::Relaxed);
+    if i < MAX_SERVICE_TESTS {
+        table[i] = Some(f);
+        SERVICE_TEST_LATE_LEN.store(i + 1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "unit-test")]
+static SERVICE_TESTS_LATE: Spinlock<[Option<ServiceTestFn>; MAX_SERVICE_TESTS]> =
+    Spinlock::new([None; MAX_SERVICE_TESTS]);
+#[cfg(feature = "unit-test")]
+static SERVICE_TEST_LATE_LEN: AtomicUsize = AtomicUsize::new(0);
+
 /// Run the registered service tests (called from run_all_tests).
 #[cfg(feature = "unit-test")]
 fn run_registered_service_tests() {
     let n = SERVICE_TEST_LEN.load(Ordering::Relaxed);
     let table = SERVICE_TESTS.lock();
+    for i in 0..n {
+        if let Some(f) = table[i] {
+            f();
+        }
+    }
+}
+
+/// Run the LATE service tests (the post-fs_io point — the rux-ipc
+/// family's historical position).
+#[cfg(feature = "unit-test")]
+fn run_registered_service_tests_late() {
+    let n = SERVICE_TEST_LATE_LEN.load(Ordering::Relaxed);
+    let table = SERVICE_TESTS_LATE.lock();
     for i in 0..n {
         if let Some(f) = table[i] {
             f();
@@ -359,7 +395,8 @@ pub mod signal_procmask;
 
 // ===== IPC System V =====
 #[cfg(feature = "unit-test")]
-pub mod ipc_sysv;
+// pub mod ipc_sysv; — MOVED to the rux-ipc service crate (this rung;
+// runs through the SERVICE-TEST SEAM, same pass/fail counters)
 #[cfg(feature = "unit-test")]
 pub mod sysv_sem_block;
 
@@ -679,8 +716,8 @@ pub fn run_all_tests() {
     test_group_start("ipc_eventfd");
 // (gated with the module: ipc_eventfd)
 
-    test_group_start("ipc_sysv");
-    ipc_sysv::test_ipc_sysv();
+    // (gated with the module: ipc_sysv — moved to rux-ipc, runs via
+    // the SERVICE-TEST SEAM with the same group name/counters)
 
     // Real-filesystem test suite (kernel/src/tests/fs_io.rs): the ext4
     // root is mounted BEFORE the suite runs — drive it (create/write/
@@ -697,6 +734,12 @@ pub fn run_all_tests() {
     // flip and runs via the SERVICE-TEST SEAM.
     mm_pins::test_mm_pins();
 
+    // LATE SERVICE-TEST SEAM: the rux-ipc family's entries run here —
+    // the historical ipc_sysv/sysv_sem_block position (AFTER fs_io/
+    // fs_pins; the sysv sem blocking contract's cross-task handoff
+    // depends on the post-fs_io machine state).
+    run_registered_service_tests_late();
+
     // Network pins (kernel/src/tests/net_pins.rs): skb core, header
     // sizes, UDP/TCP state machines, checksums, ARP, routes, IPv6,
     // loopback. LAST — it plants ARP/route table entries.
@@ -707,6 +750,8 @@ pub fn run_all_tests() {
     // ipc/binder.rs — all binder unit tests live under kernel/src/tests/.
     binder::test_binder();
 
+    // sysv_sem_block stays an in-framework test (sysv_sem itself
+    // shelved framework-side with this rung — see the crate's record).
     test_group_start("sysv_sem_block");
     sysv_sem_block::test_sysv_sem_block();
 

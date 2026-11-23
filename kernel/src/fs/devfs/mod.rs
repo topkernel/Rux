@@ -638,18 +638,19 @@ fn devtmpfs_populate() {
     // and exec) and libbinder reads it back on every binder open; the
     // binder driver consults it for BINDER_GET_SENDER_INFO. Mode 0666:
     // the SET path permission-checks uid internally (root/3020).
-    let _ = registry::register_char_device(
-        crate::ipc::access_token::DEV_ACCESS_TOKEN,
-        &crate::ipc::access_token::ACCESS_TOKEN_OPS,
-    );
-    children.insert(
-        String::from("access_token_id"),
-        Arc::new(DevfsEntry::new_char_device_with_mode(
-            "access_token_id",
-            crate::ipc::access_token::DEV_ACCESS_TOKEN,
-            0o020000 | 0o666,
-        )),
-    );
+    // The access_token char device rides the IpcHooks row (the device
+    // number + ops static are service-owned; None = not registered).
+    if let Some((at_devno, at_ops)) = crate::ipc::ipc_hooks::at_char_device() {
+        let _ = registry::register_char_device(at_devno, at_ops);
+        children.insert(
+            String::from("access_token_id"),
+            Arc::new(DevfsEntry::new_char_device_with_mode(
+                "access_token_id",
+                at_devno,
+                0o020000 | 0o666,
+            )),
+        );
+    }
 
     for (name, devno, mode) in char_nodes.iter() {
         children.insert(
