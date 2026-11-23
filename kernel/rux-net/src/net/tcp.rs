@@ -113,7 +113,7 @@ fn tx_record_endpoints(
     }
 }
 
-/// rux:tcptrace (retired dfx=tcptrace): sequence-level segment forensics for the hdc
+/// rux:tcptrace (retired debug=tcptrace): sequence-level segment forensics for the hdc
 /// file-corruption hunt. Inbound lines print the receiver's post-parse
 /// view (nothing decoded yet); outbound lines print each emitted
 /// descriptor. Budget: 24000 lines per boot — enough for several full

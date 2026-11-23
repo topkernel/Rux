@@ -1389,7 +1389,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
     // si_code/si_pid distinguish a real sender (SI_USER/SI_TKILL
     // carry one) from a bare/stale bitmap bit (empty queue). The
     // storm's SIGKILLs bypassed every send-path print; this is the
-    // delivery-side ground truth. 110th: rides the rux:sigtrace tracepoint (retired token rux:sigtrace (retired dfx=sigtrace)) (the
+    // delivery-side ground truth. 110th: rides the rux:sigtrace tracepoint (retired token rux:sigtrace (retired debug=sigtrace)) (the
     // kill-storm census printed on the crash-restart loops of every
     // perf boot).
     if (sig == 9 || sig == 15)
@@ -1947,7 +1947,7 @@ fn setup_frame_aarch64(
             regs.regs[30],
             regs.pc
         );
-        // dfx-migrate: the frame row also records into the unified
+        // debug-migrate: the frame row also records into the unified
         // framework (rux:sigtrace kind=FRAME_SETUP — the event is also
         // the family's arm switch).
         crate::trace::trace_sigtrace(
@@ -2290,7 +2290,7 @@ fn restore_sigcontext_aarch64(
             regs.regs[29],
             regs.regs[0]
         );
-        // dfx-migrate: rux:sigtrace kind=FRAME_RESTORE.
+        // debug-migrate: rux:sigtrace kind=FRAME_RESTORE.
         crate::trace::trace_sigtrace(
             1,
             task.pid() as u32,
@@ -2442,7 +2442,7 @@ fn setup_frame_x86_64(
     // 114th): the frame reserve must count the fpstate area Linux
     // always places below the ucontext. Our old placement reserved
     // only the 600-byte rt_sigframe itself, so a handler entered
-    // ~3.3KB closer to the altstack top than under Linux; OH's DFX
+    // ~3.3KB closer to the altstack top than under Linux; OH's DEBUG
     // signal handler then did a 936-byte read at rsp+0x478 that
     // crossed ss_top and SEGV'd — deterministically, 4/4 boots —
     // while under Linux the same over-read lands inside the reserved
@@ -3080,11 +3080,11 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
     // 4000 budgeted lines ≈ 2.4 s of polled-16550 serial per boot (the
     // EXITGRP class, e2717687). The SIGTRAP hunt is closed; the 9/15
     // filter is restored. The next every-signal hunt should use a
-    // dfx-switched tracepoint instead.
+    // debug-switched tracepoint instead.
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGTERM as i32 {
         static TK_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        // OH boot lane 2026-11-12: dfx-gated (sigtrace). The OH churn
+        // OH boot lane 2026-11-12: debug-gated (sigtrace). The OH churn
         // delivers kill/term per service restart and FFRT group
         // teardown — every one paid the emit lock + serial line for
         // this CLOSED hunt (100th's fresh record: 3.7k samples through
@@ -3120,7 +3120,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             core::sync::atomic::AtomicU32::new(0);
         // oh-svc T1 abort-reason tap (known-gap 4): the dump walks the
         // exec-VMA map and scans the user stack — gated behind
-        // rux:ohhunt (retired dfx=ohhunt) so ordinary userspace aborts (glibc assertions in
+        // rux:ohhunt (retired debug=ohhunt) so ordinary userspace aborts (glibc assertions in
         // LTP runs included) cost nothing.
         if crate::trace::EVENT_OHHUNT.armed()
             && ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 8
@@ -3128,7 +3128,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             && ABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8
         {
             LAST_TGID.store(tid, core::sync::atomic::Ordering::Relaxed);
-            // dfx-migrate: the abort also records into the unified
+            // debug-migrate: the abort also records into the unified
             // framework (rux:ohhunt kind=SIGABRT — the event is also
             // the family's arm switch). a=the dying tid, b=the raiser.
             let raiser = crate::sched::current().map(|t| t.pid() as u64).unwrap_or(0);
@@ -3222,7 +3222,7 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGTERM as i32 {
         static KS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        // OH boot lane 2026-11-12: dfx-gated (sigtrace), same as the
+        // OH boot lane 2026-11-12: debug-gated (sigtrace), same as the
         // TKSIG twin — the OH install churn's kill/term volume put this
         // print on the hot path of every service restart.
         if crate::trace::EVENT_SIGTRACE.armed()
@@ -3362,7 +3362,7 @@ fn send_signal_locked_info(
     });
 
     // sc93 launcher gate: a cross-process SIGKILL to a wedged launcher
-    // means the AMS lifecycle timeout fired AND the userspace DFX dumper
+    // means the AMS lifecycle timeout fired AND the userspace DEBUG dumper
     // already failed on this process (every LIFECYCLE_TIMEOUT freeze
     // artifact reports "failed to fully dump due to timeout"). The
     // kernel dumps the wedged threads itself before they die — park
@@ -3391,7 +3391,7 @@ fn send_signal_locked_info(
     //
     // RETIRED (probe-retire): the trace was unconditional (it fired on
     // every systemd SIGTERM/SIGHUP of a service unit). It now lives
-    // behind the existing signal-family switch (rux:sigtrace (retired dfx=sigtrace)) — the same
+    // behind the existing signal-family switch (rux:sigtrace (retired debug=sigtrace)) — the same
     // gate the other signal forensics in this file use — so an ordinary
     // boot is silent and a signal hunt can still arm it.
     if crate::trace::EVENT_SIGTRACE.armed()
@@ -3512,7 +3512,7 @@ fn send_signal_locked_info(
     // send path — disposition, block state, pending-after. OH init blocks
     // SIGCHLD and reads it via signalfd; any silent drop here wedges the
     // whole service-restart machinery. Rate-limited. Serial-cleanliness:
-    // opt-in via rux:sfddbg (retired dfx=sfddbg) (every child exit reaches here on ordinary
+    // opt-in via rux:sfddbg (retired debug=sfddbg) (every child exit reaches here on ordinary
     // boots too).
     if task.pid() == 1
         && crate::trace::EVENT_SFDDBG.armed()
@@ -3801,8 +3801,8 @@ fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
 #[no_mangle]
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
     // forkprof trace: the trap-exit signal gate (every user return).
-    if crate::dfx::forkprof::trace_on() {
-        crate::dfx::forkprof::trace(13, crate::sched::get_current_pid()); // T_SIGCHECK
+    if crate::debug::forkprof::trace_on() {
+        crate::debug::forkprof::trace(13, crate::sched::get_current_pid()); // T_SIGCHECK
     }
     use crate::sched;
 

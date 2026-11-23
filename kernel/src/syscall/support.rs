@@ -23,7 +23,7 @@ pub fn clamp_rw_count(count: usize) -> usize {
     }
 }
 
-// ==================== the dfx/event hook table ====================
+// ==================== the debug/event hook table ====================
 
 /// The lib-consumed service hooks. Every entry defaults to a no-op (or
 /// false/None); rux-syscall::register_all publishes the real

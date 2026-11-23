@@ -245,7 +245,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         let pc = crate::interrupt::preempt::preempt_count();
         if pc < 0 {
             use core::fmt::Write;
-            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::backtrace::ConsoleWriter::new();
             let _ = write!(w,
                 "trap: PREEMPT-UNDERFLOW pid={} pc={:#x} — healed to 0\n",
                 crate::sched::get_current_pid(), pc);
@@ -376,7 +376,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 let cross_stack = !current.is_in_kernel_stack(regs.sp as usize);
                 if dying && cross_stack {
                     use core::fmt::Write;
-                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                     let _ = write!(w,
                         "trap: STALE-CONTEXT-PARK pid={} epc={:#x} sp={:#x} (dead task, foreign stack)\n",
                         current.pid(), regs.epc, regs.sp);
@@ -659,7 +659,7 @@ crate::pr_err!(
                     }
                 }
                 // Replay this pid's final syscalls from the global ring.
-                // Recorded only under rux:sysring (retired dfx=sysring) (perf lane 2026-11).
+                // Recorded only under rux:sysring (retired debug=sysring) (perf lane 2026-11).
                 if crate::trace::EVENT_SYSRING.armed() {
                     use core::sync::atomic::Ordering::Relaxed;
                     use crate::syscall::dispatch::{SYSCALL_RING, SYSCALL_CURSOR};
@@ -680,7 +680,7 @@ crate::pr_err!(
                         }
                     }
                 } else {
-                    crate::pr_err!("  SYSCALL ring off (boot with rux:sysring (retired dfx=sysring))");
+                    crate::pr_err!("  SYSCALL ring off (boot with rux:sysring (retired debug=sysring))");
                 }
                 // Replay this pid's full mmap history from the ring.
                 {

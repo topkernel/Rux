@@ -23,7 +23,7 @@ mount-table seam plus five narrow families:
 | fs/superblock.rs | 2 | is_mounted/unmount_ext4 | root unmount |
 | fs/file.rs, fs/fsctx.rs | 4 | EXT4_FILE_OPS identity, ext4_file_write_at_vfs, mount_loop_instance | ops-table + O_DIRECT seam |
 | lib.rs/init.rs | 6 | init/mount_ext4/get_ext4_fs/create_root_inode/read_file | boot mount (the R3 table's ext4 row) |
-| sync/futex.rs, process/{exit,reboot}.rs, drivers/{loop_dev,virtio}.rs, dfx/taskdump.rs, procfs/{mounts,sysrq}.rs | 9 | EXT4_BIG_LOCK release/census, shutdown_sync, loop_instance_invalidate, demand_read_stats, is_mounted | lifecycle/diagnostics |
+| sync/futex.rs, process/{exit,reboot}.rs, drivers/{loop_dev,virtio}.rs, debug/taskdump.rs, procfs/{mounts,sysrq}.rs | 9 | EXT4_BIG_LOCK release/census, shutdown_sync, loop_instance_invalidate, demand_read_stats, is_mounted | lifecycle/diagnostics |
 | tests/* | 5 | direct probes | exempt (test) |
 
 **Family decomposition + predicted relocations:**
@@ -37,7 +37,7 @@ mount-table seam plus five narrow families:
 | sync/flush (vfs sync_flushed_data/sync_inode_tables) | 2 | framework sync calls leaf fs syncs | 0: generic super_op (sync_fs) — the classic VFS slot |
 | mount/boot (mount.rs, lib/init, fsctx, superblock unmount) | 22 | name→mount dispatch + root lifecycle | 0: the R3 registration table (ext4 row) + root-mount helper DOWN |
 | FAULT SEAM (page_fault.rs x2 arches) | 8 | is_ext4_file + populate_cache | 0: FileOps.fault slot (populate is exactly a fault op); is_ext4_file via the same ops-id |
-| lifecycle/diagnostics long tail (BIG_LOCK census/release, shutdown_sync, loop invalidate, demand stats, is_mounted) | 15 | scattered single calls | ~5: shutdown_sync → super_op; BIG_LOCK release_if_owner → the generic "fs big lock" protocol already half-exists (EXT4_BIG_LOCK is ext4's only because ext4 is the only journaled fs); stats/census behind dfx registry slots; loop_instance_invalidate stays loop-dev-side (it owns loop disks) |
+| lifecycle/diagnostics long tail (BIG_LOCK census/release, shutdown_sync, loop invalidate, demand stats, is_mounted) | 15 | scattered single calls | ~5: shutdown_sync → super_op; BIG_LOCK release_if_owner → the generic "fs big lock" protocol already half-exists (EXT4_BIG_LOCK is ext4's only because ext4 is the only journaled fs); stats/census behind debug registry slots; loop_instance_invalidate stays loop-dev-side (it owns loop disks) |
 | panic path (printk) | 6 | emergency fs sync | 0: panic-path hook slot (one registration) |
 
 **Predicted relocation total: ~9 moves + 4 hook-table extensions

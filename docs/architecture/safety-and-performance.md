@@ -167,7 +167,7 @@ interior — 23 rows:*
 | 16 | do_exit woke the parent before schedule() — parent reaped (freed) the still-running child; the freed Task's ti_cpu (−1) sign-extended through trap.S `lw` into per-CPU index corruption | raw `*mut Task` protocol + trap.S | 3b39b73270c6 |
 | 17 | secondary CPU enabled timer IRQs before tp held a valid Task; the trap WFI-skip dereferenced garbage sepc (unmapped phys) — nested fault, loud panic (no silent read: the MMU caught it) | unchecked deref in trap path | 33b954a70b5a |
 | 18 | devfs stored `Arc::as_ptr` without an owning clone — dangles when the map entry drops (review-found) | safe storage → unsafe deref boundary | 69f456923298 (F7-02) |
-| 19 | KILLDUMP walked unpinned raw task pointers — freed mid-dump, poisoned tid printed, deepest boot page-faulted | dfx unsafe raw pointers | d14d9403bec7 |
+| 19 | KILLDUMP walked unpinned raw task pointers — freed mid-dump, poisoned tid printed, deepest boot page-faulted | debug unsafe raw pointers | d14d9403bec7 |
 | 20 | scheduler tick dereferenced a garbage cgroup_ptr (deterministic 0x652a... value; producer = the page-table teardown family of rows 8-11) | `unsafe { &*ptr }`, sched/cgroup.rs | 5393d3aa8a84 |
 | 21 | io_uring SQE index read from the user-shared ring used unchecked in `kvirt.add(idx * 64)` raw-pointer read (review-found) | unsafe raw-pointer arithmetic | 5465735f8999 (F15-12) |
 | 22 | ext4 write_group_descriptor `from_raw_parts` length taken from on-disk desc_size over a 32-byte struct — 64-byte read/write, on-disk descriptor fields corrupted | unsafe block, ext4 | 8bbb94fd534d |
@@ -258,7 +258,7 @@ the row ("index out of bounds: the len is 32 but the index is 32",
 165ee5fcebc0); the UTF-8 printer family on userspace comms
 (f0c57182 / 3ad32b9e); the stale negative-memo null-deref panic
 (ea26d923); the mmprof scalar-slot namespace indexing panic
-(276c2e70); the dfx switch-table array panic (363401cd); the memwatch
+(276c2e70); the debug switch-table array panic (363401cd); the memwatch
 PFN→site bound panic on >2G RAM (cbd41b40); R81 garbage-pid print
 hardening (2c044bb5); the R73 KERNPANIC stack-walk bound and dump
 latch (9777f195); the taskdump lockless-timeline scan panic
@@ -546,9 +546,9 @@ line per id; the contract lives in the owning module.
 - **INV-DMA-1** — DmaBlock device-shared carve (kernel/src/safety/dma.rs)
 - **INV-DMA-2** — DmaBlock device-shared carve (kernel/src/safety/dma.rs)
 - **INV-DMA-3** — DmaBlock device-shared carve (kernel/src/safety/dma.rs)
-- **INV-FOR-1** — hunt-era forensics edges (kernel/src/dfx/forensics_edges.rs, L5)
-- **INV-FOR-2** — hunt-era forensics edges (kernel/src/dfx/forensics_edges.rs, L5)
-- **INV-FOR-3** — hunt-era forensics edges (kernel/src/dfx/forensics_edges.rs, L5)
+- **INV-FOR-1** — hunt-era forensics edges (kernel/src/debug/forensics_edges.rs, L5)
+- **INV-FOR-2** — hunt-era forensics edges (kernel/src/debug/forensics_edges.rs, L5)
+- **INV-FOR-3** — hunt-era forensics edges (kernel/src/debug/forensics_edges.rs, L5)
 - **INV-KPTR-1** — KPtr owned allocation (kernel/src/safety/ptr.rs)
 - **INV-KPTR-2** — KPtr owned allocation (kernel/src/safety/ptr.rs)
 - **INV-KPTR-3** — KPtr owned allocation (kernel/src/safety/ptr.rs)
@@ -625,7 +625,7 @@ absents stated plainly. Each absent names what closing looks like.
   security/capability.rs) with UAPI numbering, exec transitions with
   rollback, no_new_privs; enforcement breadth partial (below).
 - Kernel-stack guard rails: per-slot canary (R18-2), KSTACK-HW depth
-  probe, freed-stack ring with 0xC3 free-paint (dfx-gated) — the
+  probe, freed-stack ring with 0xC3 free-paint (debug-gated) — the
   stack-protector + overflow-detection analog for kernel stacks.
 - Deferred-free quarantine for teardown-raced objects
   (mm/deferred_free.rs; the call_rcu idea, wall-clock so preempted
@@ -669,7 +669,7 @@ absents stated plainly. Each absent names what closing looks like.
   a measured boot/perf cost through the merge gate.
 - KASAN-style allocator poisoning breadth: today's poisoning is
   task-page paint + header audits + the buddy-meta shadow, all
-  dfx-gated (metawatch, R83); no redzones on small_alloc. Closing:
+  debug-gated (metawatch, R83); no redzones on small_alloc. Closing:
   build-flag redzones and poison-on-free in small_alloc/slab.
 - LSM surface: a Linux-like hook point exists; selinuxfs is a
   label-carrying compat mount, permissive by construction
@@ -686,7 +686,7 @@ absents stated plainly. Each absent names what closing looks like.
   print of a varying offset.
 - Kernel text/rodata W^X tightening: the image is mapped RWX
   (riscv64) / RW without NX (x86_64); no mark_rodata_ro pass exists
-  (posture row). Closing: post-init RO flip + a dfx page-table walk
+  (posture row). Closing: post-init RO flip + a debug page-table walk
   tripwire.
 - Compiler stack-protector / shadow-call-stack instrumentation: none
   today (the kernel-stack canary above is kernel-side, not
@@ -712,12 +712,12 @@ The per-block proofs the <=5,000-line plan requires: for every unsafe
 family that survived the round-5 conversion, what it reads, why no safe
 shape exists, the reference kernel's counterpart, and the containment.
 Owners are named files; the blocks live there and nowhere else.
-Territory context: lane L5 converted drivers/dfx/interrupt/net from
+Territory context: lane L5 converted drivers/debug/interrupt/net from
 5,036 dual lines to ~1,900; what follows is what could NOT convert and
 why, family by family.
 
 **F1. Stale-handle task forensics** — owner
-`kernel/src/dfx/forensics_edges.rs` (INV-FOR-1/2/3) + the hunt modules'
+`kernel/src/debug/forensics_edges.rs` (INV-FOR-1/2/3) + the hunt modules'
 walkers (scribble 192L, leakorigin 190L, r83hunt 107L, treehunt 78L,
 wildwatch 190L, softirq's bracket-leak, preempt's orphan/pair scans).
 *Reads:* `*mut Task` handles captured one tick ago by a census or IRQ
@@ -734,7 +734,7 @@ read is <=16 bytes, volatile, value-only (never re-dereferenced);
 callers gated by their `rux:` cmdline flag / tracepoint, all default-OFF
 in release; zero cost when disarmed (flag check only).
 
-**F2. backtrace (139L)** — owner `kernel/src/dfx/backtrace.rs`. *Reads:*
+**F2. backtrace (139L)** — owner `kernel/src/debug/backtrace.rs`. *Reads:*
 the caller's own frame pointer / return address (asm: `mv s0`, `mov
 rbp`, `ldr x29`), register save blocks, CSR dumps. *Why:* the frame
 chain and register file have no Rust-level representation at all — this
@@ -745,7 +745,7 @@ compiler hazard on the x86 side). *Reference:* `save_stack_trace` /
 explicit `dump_stack()` sites only; never on a measured hot path.
 
 **F3. memwatch fp-chain walks (101L, 3 arch twins)** — owner
-`kernel/src/dfx/memwatch.rs::walk_fp_chain`. *Reads:* frame-pointer
+`kernel/src/debug/memwatch.rs::walk_fp_chain`. *Reads:* frame-pointer
 chains through ARBITRARY tasks' kernel stacks mid-execution. *Why:* the
 chain is self-describing only in memory — each `fp` word names the next
 frame; a wrong or racing value yields garbage the walk must tolerate,
@@ -754,7 +754,7 @@ the task's stack region — the remaining rawness is the chain-follow
 itself. *Reference:* `save_stack_trace_tsk` under `try_to_unuse`-style
 best-effort discipline. *Containment:* `rux:memwatch` gated, cold path.
 
-**F4. pstore (60L)** — owner `kernel/src/dfx/pstore.rs`. *Reads/writes:*
+**F4. pstore (60L)** — owner `kernel/src/debug/pstore.rs`. *Reads/writes:*
 the reserved-RAM record header at a fixed physical window, EARLY in boot
 (before the allocator exists) and at panic time (when locks are
 unusable). *Why:* both ends run outside every subsystem — pre-heap boot
@@ -817,7 +817,7 @@ by the host display protocol (not a Rust object); the alloc edge pairs
 with a Drop that releases the host resource. *Reference:* GEM object
 pages. *Containment:* DRM ioctl paths only; the walks are clamped.
 
-**F10. oops-path fault probes** — owner `kernel/src/dfx/mod.rs`
+**F10. oops-path fault probes** — owner `kernel/src/debug/mod.rs`
 (register_debugfs_knobs: read of a poisoned const, `csrr x0`, `ud2`).
 *Why:* these edges exist to FAULT — deliberate fault-injection knobs
 exercising the oops/trap path; "safety" here means the trap, not the
@@ -934,9 +934,9 @@ already measured in place (SLOW-TXN families are gated on it).
 *Containment:* ipc/binder.rs only; world lock discipline per the
 guarded-domain notes.
 **F18. mm-forensics page-descriptor walkers** — owners
-`kernel/src/dfx/mmforensics.rs` (note_ref, capture_frame), 
-`kernel/src/dfx/ledger.rs` (the census walks), and
-`kernel/src/dfx/pathstash.rs` (per-tid static slot table).
+`kernel/src/debug/mmforensics.rs` (note_ref, capture_frame), 
+`kernel/src/debug/ledger.rs` (the census walks), and
+`kernel/src/debug/pathstash.rs` (per-tid static slot table).
 *Reads:* raw `*const Page` descriptors across the whole mapped vmemmap
 span (refcount/flags/type/mapping/index — value-only, never
 re-dereferenced), exactly like F1's stale-task reads but for PAGE
@@ -995,14 +995,14 @@ ids; the full text lives at the owner line.
 | INV-CS-3 | `arch/riscv64/context.rs` | ! - **INV-CS-3**: The MMU (satp) is switched via `switch_mm()` **before** |
 | INV-CS-4 | `arch/riscv64/context.rs` | ! - **INV-CS-4**: `__switch_to` does NOT enable SIE (interrupts). The caller |
 | INV-CS-5 | `arch/riscv64/context.rs` | ! - **INV-CS-5**: After `__switch_to`, the previous task's stack pointer |
-| INV-DFXWALK-1 | `dfx/mod.rs` | for the dfx family; INV-DFXWALK-1: `root` is the diagnosed task's own |
+| INV-DFXWALK-1 | `debug/mod.rs` | for the debug family; INV-DFXWALK-1: `root` is the diagnosed task's own |
 | INV-EXT4-SBRES-1 | `fs/ext4/file.rs` | The cached Ext4Inode box behind inode.sb (INV-EXT4-SBRES-1), |
 | INV-FDT-1 | `cmdline.rs` | (INV-FDT-1): boot.S maps the bootloader-provided DTB blob at its |
 | INV-FRAME-1 | `ipc/binder.rs` | INV-FRAME-1 typed descriptor (out-of-range -> None). |
 | INV-FS-FILEPRIV-1 | `io_uring/mod.rs` | (the cell discipline's close-path take, INV-FS-FILEPRIV-1), then we |
 | INV-FS-GLOBALSB-1 | `printk.rs` | GLOBAL) — resolved through the framework edge (INV-FS-GLOBALSB-1 |
 | INV-FS-PRIVDATA-1 | `fs/unsafe_edges.rs` | INV-FS-PRIVDATA-1: `inode.private_data`, when `Some(p)`, is a raw |
-| INV-HEAP-1 | `dfx/metawatch.rs` | ! cross-checks INV-HEAP-1/2/3. Pass 1 is lock-free (transient |
+| INV-HEAP-1 | `debug/metawatch.rs` | ! cross-checks INV-HEAP-1/2/3. Pass 1 is lock-free (transient |
 | INV-HEAP-2 | `mm/buddy_allocator.rs` | ! - **INV-HEAP-2**: `free_lists[order]` is either `EMPTY_LIST` or a valid |
 | INV-HEAP-3 | `mm/buddy_allocator.rs` | ! - **INV-HEAP-3** (session 5, wedge fix): the per-page FREE bit lives in |
 | INV-IOURING-RING-1 | `io_uring/mod.rs` | Write SQ ring header (INV-IOURING-RING-1: the region is in hand, |
@@ -1158,9 +1158,9 @@ already measured in place (SLOW-TXN families are gated on it).
 guarded-domain notes.
 
 **F18. mm-forensics page-descriptor walkers** — owners
-`kernel/src/dfx/mmforensics.rs` (note_ref, capture_frame), 
-`kernel/src/dfx/ledger.rs` (the census walks), and
-`kernel/src/dfx/pathstash.rs` (per-tid static slot table).
+`kernel/src/debug/mmforensics.rs` (note_ref, capture_frame), 
+`kernel/src/debug/ledger.rs` (the census walks), and
+`kernel/src/debug/pathstash.rs` (per-tid static slot table).
 *Reads:* raw `*const Page` descriptors across the whole mapped vmemmap
 span (refcount/flags/type/mapping/index — value-only, never
 re-dereferenced), exactly like F1's stale-task reads but for PAGE
@@ -1350,7 +1350,7 @@ leftovers, hpet, pci config, virtio-gpu config, framebuffer pixels,
 ACPI tables); the net header edges (INH-BUF-3/4) own every protocol
 parse/build; `File::private_data_ptr` + `net::file_arc` (INV-NETARC-1)
 own the file-slot Arc family; the uaccess_safe API owns every
-copy_in/copy_out; dfx/sbi_debug.rs deleted (dead hunt module, zero
+copy_in/copy_out; debug/sbi_debug.rs deleted (dead hunt module, zero
 consumers).
 
 ### 5.x e2fsck pre-existing findings (adjudicated 2026-11-18, fio-delalloc lane)
@@ -1378,18 +1378,18 @@ registered per the data-corruption doctrine.
 - Round-3 (2026-11-03): §2.1 taxonomy v1 landed (33 adjudicated
   memory-corruption rows, residency split 23/10, corrected headline
   claim); §5 gaps register v1; §3 pairing sentences completed.
-- Observability wave 3 (2026-11-04, dfx-trace3 merge): event catalog
+- Observability wave 3 (2026-11-04, debug-trace3 merge): event catalog
   37 → 51 (ext4:/jbd2: reference families + rux:epoll); disabled-site
   cost discipline held (39 kernel sites one-load, ASM-verified,
   addresses in the lane record); enabled cost opt-in at 13-35
   ns/record; events-off census A/B identical (TERM-DESCHED 8/8, 0
   panics both sides). Real bug fixed in the same change: the round-2
   alias CONSUMER (boot arming loop in DfxSwitch::set) was silently
-  dropped by a merge while its table survived — dfx= hunt boots had
+  dropped by a merge while its table survived — debug= hunt boots had
   armed nothing until restored. Lesson: table+consumer pairs
   reconcile as one unit; keeping the table and losing the call site
   is a silent observability outage, not a clean merge.
-  Source: dfx-trace3 TASK.md round-3 record (run/tr3-base-check.log,
+  Source: debug-trace3 TASK.md round-3 record (run/tr3-base-check.log,
   census A/B logs in the lane worktree).
 - Trace per-CPU sequencing round (2026-11-06, oh-tracepc): GLOBAL_SEQ
   (one atomic for every record on every CPU) replaced by per-ring
@@ -1685,7 +1685,7 @@ registered per the data-corruption doctrine.
     state; Full budget 50 ms irqs-on for dumps, Brief 100 µs for
     GRQ-held/IRQ-context hunt prints). hilogcensus/spinwatch moved
     to unified tracepoints (events 57-60: rux:hilog_census,
-    hilog_kmsg, spinwatch, spinwatch_fd) with the old dfx= tokens as
+    hilog_kmsg, spinwatch, spinwatch_fd) with the old debug= tokens as
     boot-time aliases; set_event arming now takes effect live (the
     cached tri-state froze the verdict until reboot). Known residual
     (documented, follow-up lane): brief-budget fallbacks can append
@@ -2093,6 +2093,6 @@ comment carries the full contract text.
 - INV-WINDOW-1 (bounds) — safety/frame.rs: the KernelStackWindow covers only the stack's own backing pages.
 - INV-WINDOW-2 (alignment) — safety/frame.rs: word reads require aligned addresses inside the window.
 - INV-WINDOW-3 (stale memory) — safety/frame.rs: reads are volatile — the bytes may be stale or concurrently written task stack.
-- INV-FOR-1 (stale adoption) — dfx/forensics_edges.rs: task came from a diagnostic slot; read-only view of a possibly-freed task, pid stable for the struct's lifetime.
-- INV-FOR-2 (raw word) — dfx/forensics_edges.rs: addr names memory the producer believes mapped; single volatile read of mapped-or-guarded memory.
-- INV-FOR-3 (location key) — dfx/forensics_edges.rs: key was stored from a real event; the value is a rodata-backed Location.
+- INV-FOR-1 (stale adoption) — debug/forensics_edges.rs: task came from a diagnostic slot; read-only view of a possibly-freed task, pid stable for the struct's lifetime.
+- INV-FOR-2 (raw word) — debug/forensics_edges.rs: addr names memory the producer believes mapped; single volatile read of mapped-or-guarded memory.
+- INV-FOR-3 (location key) — debug/forensics_edges.rs: key was stored from a real event; the value is a rodata-backed Location.

@@ -35,32 +35,32 @@ unit-test = []  # Enable unit tests (only used during testing)
 # end-of-suite .profraw writer. Only meaningful together with
 # RUSTFLAGS="-C instrument-coverage -Zno-profiler-runtime" (make coverage).
 cov-dump = ["dep:minicov"]
-# DFX: spinlock holder tracking (two atomic stores per lock/unlock pair).
+# DEBUG: spinlock holder tracking (two atomic stores per lock/unlock pair).
 # Zero-cost when off; enabled when hunting lock deadlocks
 # (see test/hunt-wedge.sh and docs/guides/debugging.md).
-dfx-lock-owner = []
-# DFX: per-task stack backtrace lines in taskdump (read_volatile scan).
+debug-lock-owner = []
+# DEBUG: per-task stack backtrace lines in taskdump (read_volatile scan).
 # Off by default: the extra code shifts layout and measurably widens the
 # heap-lock race window; enable only when a wedge is being hunted.
-dfx-taskdump-bt = []
-# DFX: futex protocol tracer (one serial line per futex op / wake / return).
+debug-taskdump-bt = []
+# DEBUG: futex protocol tracer (one serial line per futex op / wake / return).
 # Diagnostic builds only.
-dfx-futex-trace = []
-# DFX (aarch64 bring-up): boot-time uaccess fault-containment self-check.
-# Probes the exception-table path with a poisoned user pointer at dfx
+debug-futex-trace = []
+# DEBUG (aarch64 bring-up): boot-time uaccess fault-containment self-check.
+# Probes the exception-table path with a poisoned user pointer at debug
 # init (before init exec): every access must return a short count /
-# -EFAULT with NO oops. Compile-time gated like dfx-lock-owner; the
+# -EFAULT with NO oops. Compile-time gated like debug-lock-owner; the
 # aarch64 cmdline falls back to the default string (the DTB pointer is
-# clobbered by the EL2 trampoline), so a dfx= switch cannot be armed on
+# clobbered by the EL2 trampoline), so a debug= switch cannot be armed on
 # that board yet.
-dfx-aa64-uaccess-selftest = []
-# DFX (grq-lock-1st): the reproducible GRQ wedge injection — one cpu takes
+debug-aa64-uaccess-selftest = []
+# DEBUG (grq-lock-1st): the reproducible GRQ wedge injection — one cpu takes
 # the GRQ and spins inside the critical section forever, so the
 # holder-naming rig can be PROVED to name the holder (and its stack).
 # Compile-time gated: the shipping build carries none of it, while the
 # rig it verifies (the per-CPU GRQ site stamp + the crime-scene dump) is
 # always on.
-dfx-grq-wedge = []
+debug-grq-wedge = []
 
 [profile.dev]
 panic = "abort"

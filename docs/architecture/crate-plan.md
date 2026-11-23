@@ -11,7 +11,7 @@ rux/ (the framework crate — "kernel/src" minus services)
  ├── arch/{x86_64,riscv64,aarch64}/ entry, pt-tables, uaccess, traps
  ├── sched/ mm/ sync/ timer/ interrupt/ the machine core
  ├── fs/ (framework side: VFS core, bio, page cache, journal)
- ├── process/ ipc/ dfx/ net/ (core) drivers/ (framework side)
+ ├── process/ ipc/ debug/ net/ (core) drivers/ (framework side)
  ├── safety/ the typed primitives (KPtr, MmioRegion, ...)
  └── */edges.rs, */unsafe_edges.rs the audited unsafe zones (INV contracts)
 
@@ -106,7 +106,7 @@ SHELVED with the numbers — the ladder does not force a bad interface.
 
 arch entry/trap/uaccess/pt-walks, context switch, the scheduler and mm
 core, sync primitives, the poll/epoll notify core, journal/bio/page-cache
-core, binder (its block-view edges are framework-shaped), dfx instruments,
+core, binder (its block-view edges are framework-shaped), debug instruments,
 `safety/`, and every `edges.rs`/`unsafe_edges.rs`. These ARE the TCB; the
 crate plan does not shrink them, it makes everything ELSE structurally
 outside.

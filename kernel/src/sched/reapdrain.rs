@@ -391,11 +391,11 @@ pub fn reap_drain_tick() {
             }
             let n = R85_FREED.fetch_add(1, Ordering::Relaxed);
             if n < 32 {
-                crate::dfx::taskdump::taskdump_raw_line(b"REAP-R85-FREE #");
-                crate::dfx::taskdump::taskdump_dec(n as u64);
-                crate::dfx::taskdump::taskdump_raw_line(b" pid=");
-                crate::dfx::taskdump::taskdump_dec(e.claim.task().pid() as u64);
-                crate::dfx::taskdump::taskdump_raw_line(b"\n");
+                crate::debug::taskdump::taskdump_raw_line(b"REAP-R85-FREE #");
+                crate::debug::taskdump::taskdump_dec(n as u64);
+                crate::debug::taskdump::taskdump_raw_line(b" pid=");
+                crate::debug::taskdump::taskdump_dec(e.claim.task().pid() as u64);
+                crate::debug::taskdump::taskdump_raw_line(b"\n");
             }
         }
         e.grace = true;
@@ -523,15 +523,15 @@ pub fn reap_drain_tick() {
                     core::sync::atomic::AtomicU32::new(0);
                 let n = NUDGE_N.fetch_add(1, Ordering::Relaxed);
                 if n < 32 {
-                    crate::dfx::taskdump::taskdump_raw_line(b"REAP-GP-NUDGE #");
-                    crate::dfx::taskdump::taskdump_dec(n as u64);
-                    crate::dfx::taskdump::taskdump_raw_line(b" gen=");
-                    crate::dfx::taskdump::taskdump_dec(target as u64);
-                    crate::dfx::taskdump::taskdump_raw_line(b" laggards=");
+                    crate::debug::taskdump::taskdump_raw_line(b"REAP-GP-NUDGE #");
+                    crate::debug::taskdump::taskdump_dec(n as u64);
+                    crate::debug::taskdump::taskdump_raw_line(b" gen=");
+                    crate::debug::taskdump::taskdump_dec(target as u64);
+                    crate::debug::taskdump::taskdump_raw_line(b" laggards=");
                     for b in names.as_bytes() {
-                        crate::dfx::taskdump::taskdump_raw_line(&[*b]);
+                        crate::debug::taskdump::taskdump_raw_line(&[*b]);
                     }
-                    crate::dfx::taskdump::taskdump_raw_line(b"\n");
+                    crate::debug::taskdump::taskdump_raw_line(b"\n");
                 }
             }
             // Re-arm: one nudge burst per GRACE_NUDGE_RUNS window.

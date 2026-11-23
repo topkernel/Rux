@@ -19,7 +19,7 @@
 // so the service files' crate::X paths resolve unchanged (the net/fs
 // crate recipe).
 pub use rux::{
-    arch, config, console, dfx, drivers, errno, interrupt, mm,
+    arch, config, console, debug, drivers, errno, interrupt, mm,
     net, printk, process, safety, sched, security, signal, sync,
     timer, trace,
 };

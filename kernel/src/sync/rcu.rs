@@ -675,9 +675,9 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                     }
                 }
                 if stuck != usize::MAX {
-                    crate::dfx::taskdump::dump_frozen_cpu_truth(stuck);
+                    crate::debug::taskdump::dump_frozen_cpu_truth(stuck);
                 }
-                crate::dfx::taskdump::dump_all_tasks("rcu-gp-frozen-cpu");
+                crate::debug::taskdump::dump_all_tasks("rcu-gp-frozen-cpu");
             }
             return false;
         }

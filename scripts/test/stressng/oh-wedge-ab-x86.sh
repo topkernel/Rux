@@ -30,7 +30,7 @@ for i in 1 2 3 4 5; do
     LOG="$OHRIG/run/oh-${TAG}-serial.log"
     echo "=== $(date +%H:%M:%S) roll $TAG (kernel ${KERN[$side]}) ==="
     ( cd "$OHRIG" && env $RECIPE python3 run/lb-boot.py "$TAG" "$SECS" "$SYSIMG" \
-        "${KERN[$side]}" " dfx=ams46,txnhunt,fuxstuck,slowtask negmemo=1" \
+        "${KERN[$side]}" " debug=ams46,txnhunt,fuxstuck,slowtask negmemo=1" \
         > /dev/null 2>&1 )
     echo "=== $(date +%H:%M:%S) roll $TAG done: $(wc -l < "$LOG" 2>/dev/null || echo NOLOG) serial lines ==="
     # small cool-down so the next roll's QEMU never overlaps this one's teardown

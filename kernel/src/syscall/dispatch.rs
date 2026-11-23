@@ -150,7 +150,7 @@ fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
     regs.set_return_value(value);
 }
 
-/// rux:strace1 (retired dfx=strace1): one console line per loader-relevant syscall of PID 1.
+/// rux:strace1 (retired debug=strace1): one console line per loader-relevant syscall of PID 1.
 ///
 /// Numbers are the GENERIC (asm-generic) dispatch numbers — the x86_64
 /// native numbers were translated before the dispatch match.
@@ -247,20 +247,20 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
 ///
 /// Called by trap.rs, dispatches to specific system call handlers.
 /// perf-audit wrapper: whole-syscall wall-time accounting
-/// (dfx/syscost.rs, cmdline `syscost=1`) around the real dispatcher.
+/// (debug/syscost.rs, cmdline `syscost=1`) around the real dispatcher.
 /// Diverging paths (do_exit on exit_group / fatal signals) skip the
 /// exit hook, so those calls are undercounted — acceptable for a
 /// ranking probe.
 /// Whether the per-task LASTSYS latch runs on every syscall (perf:
 /// 1 per-CPU load + 3 stores; the reference carries this in
 /// thread_info flags that are only set under ptrace/audit). Turned on
-/// by taskdump / dfx when a dump is requested; off = zero cost.
+/// by taskdump / debug when a dump is requested; off = zero cost.
 static LASTSYS_LATCH_ON: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// 118th ladder-stall hunt: arm the LASTSYS latch from the first syscall
 /// when schedtrace is armed (debug hunt boots only — the per-syscall cost
-/// is 3 stores, acceptable under dfx) so EVERY parked task's true syscall
+/// is 3 stores, acceptable under debug) so EVERY parked task's true syscall
 /// is visible at dump time. Without this, pid 1 parks BEFORE the first
 /// taskdump runs and its row reads lastsys=? — and the ladder break is
 /// exactly "which syscall is init's main thread parked in".
@@ -270,7 +270,7 @@ pub fn lastsys_latch_arm() {
 
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_nr = syscall_get_nr(regs) as usize;
-    let sc_t0 = crate::dfx::syscost::enter();
+    let sc_t0 = crate::debug::syscost::enter();
     // The raw_syscalls:sys_enter / sys_exit tracepoints, recorded
     // through the generated typed call functions. (gap-net) The six-word
     // argument marshal is guarded by the armed check itself — the typed
@@ -293,7 +293,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     if crate::trace::EVENT_SYS_EXIT.armed() {
         crate::trace::trace_sys_exit(sc_nr as i64, syscall_get_return(regs) as i64);
     }
-    // 118th EIO hunt (rux:eiotrace (retired dfx=eiotrace) rides DfxSwitch::EpollTrace): name the
+    // 118th EIO hunt (rux:eiotrace (retired debug=eiotrace) rides DfxSwitch::EpollTrace): name the
     // EXACT syscall returning -EIO ('init_hisysevent.c:140 Failed to write
     // event ret -5' — the write(2) path logger never fired, so the -5 rides
     // a different syscall). Budgeted direct-console line: nr, args head,
@@ -310,10 +310,10 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // per-(nr, errno) census. Two compares when syscost is off.
         if rv < 0 && rv != -11 {
             let sc_args = syscall_get_arguments(regs);
-            crate::dfx::syscost::note_errno(sc_nr, rv, sc_args[0], sc_args[1]);
+            crate::debug::syscost::note_errno(sc_nr, rv, sc_args[0], sc_args[1]);
         }
     }
-    crate::dfx::syscost::exit(sc_nr, sc_t0);
+    crate::debug::syscost::exit(sc_nr, sc_t0);
     // pa15 recv-family fd census (hilogd.server dual-drain evidence for
     // the ipc lane; fd/flags/ret profile per (comm, nr), zero cost when
     // syscost off). x86_64 native nrs 47=recvmsg 45=recvfrom.
@@ -323,7 +323,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // recvmsg(fd, msg, flags) -> flags at a[2]; recvfrom(fd, buf,
         // len, flags, ...) -> flags at a[3].
         let flags = if sc_nr == 47 { a[2] } else { a[3] } as i32;
-        crate::dfx::syscost::recv_census(sc_nr, a[0] as usize, flags, regs.rax as i64);
+        crate::debug::syscost::recv_census(sc_nr, a[0] as usize, flags, regs.rax as i64);
     }
 }
 
@@ -527,7 +527,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // lastsys= field reads the per-task latch.
     // (perf-syscall lane) Both the ring record and this SECOND latch
     // (post-translate numbers) are hunt instrumentation — 12 atomics
-    // per syscall — and now sit behind rux:sysforensic (retired dfx=sysforensic). The
+    // per syscall — and now sit behind rux:sysforensic (retired debug=sysforensic). The
     // pre-translate latch above stays always-on: it is what makes a
     // parked task's taskdump show the syscall it is parked IN, and it
     // costs 3 stores.
@@ -618,10 +618,10 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     //
     // RETIRED (probe-retire): the trace was unconditional (37 lines per
     // ub2404 boot). It now lives behind the existing OH hunt-print
-    // master gate (rux:ohhunt (retired dfx=ohhunt)); the switch is checked only on the
+    // master gate (rux:ohhunt (retired debug=ohhunt)); the switch is checked only on the
     // EFAULT return path, so the hot path is untouched.
     if result == -(errno::EFAULT as i64)
-        && crate::dfx::switches::oh_hunt_prints_on()
+        && crate::debug::switches::oh_hunt_prints_on()
     {
         static EFT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -644,10 +644,10 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // whole budget before the implemented-but-ENOSYS families printed.
     //
     // RETIRED (probe-retire): unconditional (budget 200 lines/boot);
-    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
+    // behind the existing OH hunt-print master gate (rux:ohhunt (retired debug=ohhunt)).
     if result == -(38i64)
         && !unknown_nr
-        && crate::dfx::switches::oh_hunt_prints_on()
+        && crate::debug::switches::oh_hunt_prints_on()
     {
         static ENOSYS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -662,7 +662,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
     }
 
-    // STRACE1 (loader hunts, rux:strace1 (retired dfx=strace1)): one line per file/memory
+    // STRACE1 (loader hunts, rux:strace1 (retired debug=strace1)): one line per file/memory
     // syscall of PID 1, with the pathname decoded for path-taking calls.
     // musl ld.so's "Error loading shared library" carries no errno — this
     // turns that into "which step failed" (search-open, fstat, mmap,
@@ -675,10 +675,10 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
 
     syscall_set_return_value(regs, result);
 
-    // STEPTRACE (rux:steptrace (retired dfx=steptrace)): one line per syscall return. Left
+    // STEPTRACE (rux:steptrace (retired debug=steptrace)): one line per syscall return. Left
     // ungated this flooded the emulated UART (2.7GB per OH boot) and the
     // printing alone slowed services enough to lose races — see the
-    // switch catalog note in dfx/switches.rs.
+    // switch catalog note in debug/switches.rs.
     if crate::trace::EVENT_STEPTRACE.armed() {
         crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
             crate::process::current_pid(), syscall_no, result,
@@ -747,14 +747,14 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // last_calls/init_calls/birth rings, the fail-tail ring and the
     // sc-series comm-gated hooks (appioctl/applog/appconn/prctl-einval/
     // missstat/openmiss) — is hunt instrumentation costing ~15 atomics
-    // plus comm scans on EVERY syscall. Gated behind rux:sysforensic (retired dfx=sysforensic);
+    // plus comm scans on EVERY syscall. Gated behind rux:sysforensic (retired debug=sysforensic);
     // quiet boots pay one atomic load.
     if !crate::trace::EVENT_SYSFORENSIC.armed() {
         return;
     }
 
     // FORENSIC ring: last N syscalls per boot (pid, nr, a0, a1, ret).
-    // Same rux:sysring (retired dfx=sysring) gate as the entry-side record — see above.
+    // Same rux:sysring (retired debug=sysring) gate as the entry-side record — see above.
     if crate::trace::EVENT_SYSRING.armed() {
         SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
             .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
@@ -888,7 +888,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             || comm == "appspawn"
             || comm.contains("foundation")
             || comm.contains("sa_main");
-        // rux:writetrace (retired dfx=writetrace): the fd3 hilog writev capture settled the
+        // rux:writetrace (retired debug=writetrace): the fd3 hilog writev capture settled the
         // chain questions (sandbox narration, SA-501 attempts); in
         // milestone boots it only adds ~2.4k kernel lines for
         // hilogd.rd_kmsg to copy (the b128/b129 vCPU lesson).

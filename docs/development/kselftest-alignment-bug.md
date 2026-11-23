@@ -14,7 +14,7 @@ alignment check in debug builds) during the userspace coverage battery
 boot (`init=/test/kselftest`).
 
 The printed Sepc/registers are the PANIC HANDLER's own state (the
-handler calls dfx::backtrace::save_regs itself), so the original
+handler calls debug::backtrace::save_regs itself), so the original
 offending site cannot be symbolized from the log — the panic overwrites
 it. Two independent signatures observed:
 

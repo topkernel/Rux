@@ -1,11 +1,11 @@
-# DFX Retirement Review (seed-core-design §7 — the census-math input)
+# DEBUG Retirement Review (seed-core-design §7 — the census-math input)
 
 Date: 2026-11-22. Reviewer: the fixverify reverification lane.
-EXECUTED 2026-11-23 by the dfx-retire lane (branch dfx-retire, on top
+EXECUTED 2026-11-23 by the debug-retire lane (branch debug-retire, on top
 of the s1-closure merge 02bfede71): Phase 1 below landed as two commits
-(r83hunt, treehunt — see "Execution record"); the dfx→debug rename of
+(r83hunt, treehunt — see "Execution record"); the debug→debug rename of
 §8 is DEFERRED with its precondition re-stated (it edits the six
-service crates' `crate::dfx::` path tokens, which the retirement lane
+service crates' `crate::debug::` path tokens, which the retirement lane
 does not own).
 
 Method: git archaeology (intro commit → convictions → fixes) crossed with
@@ -13,7 +13,7 @@ face evidence from the four most recent full LTP scans on record
 (prefix@344ef0efb 957, post-RTS-DEFER@a09e7ab08 984, P4-rescan@10adeaf69
 955 — all in `run/` of the fixverify worktree — plus the r27 census).
 
-Prior adjudication on record: fa94cb7a6 (the ur-L4c dfx sweep) verified
+Prior adjudication on record: fa94cb7a6 (the ur-L4c debug sweep) verified
 all five hunt modules ALIVE and registered them as the F1-F4/F10 floor.
 That verdict predates the two-bug corruption fixes (fc5f23d47 +
 2e9755c67, merged a557edd1b) and the RTS-DEFER chain — the class
@@ -110,7 +110,7 @@ ksp faces in any of the four recent scans (the module is flag-gated
 `rux:r83scan`, but the CLASS faces it was built to pre-empt are
 always-visible when they occur, and are gone).
 
-Action: delete `kernel/src/dfx/r83hunt.rs` (684 lines), its 8 call-site
+Action: delete `kernel/src/debug/r83hunt.rs` (684 lines), its 8 call-site
 stubs, and its `forensics_edges` consumer registration; keep the fix
 references above in the safety ledger.
 
@@ -151,7 +151,7 @@ defensive range check that first stopped the fault: 740ca427.
 
 Face evidence: zero E8-REPAR / stale-ancestor faces in any recent scan.
 
-Action: delete `kernel/src/dfx/treehunt.rs` (231 lines) and its single
+Action: delete `kernel/src/debug/treehunt.rs` (231 lines) and its single
 call-site stub.
 
 ## 6. forensics_edges — KEEP (shared plumbing with standing consumers)
@@ -159,8 +159,8 @@ call-site stub.
 `forensics_edges.rs` (121 lines, the L5 consolidation 8fd1b97d2) is the
 shared raw stale-handle read layer (adopt_task / t_pid / t_comm /
 t_preempt_count / raw_qword / raw_u32 / location) for the whole hunt
-family. Consumers on main: interrupt/preempt.rs, dfx/syscost.rs,
-dfx/softlockup.rs, dfx/leakorigin.rs, dfx/r83hunt.rs. Retiring r83hunt
+family. Consumers on main: interrupt/preempt.rs, debug/syscost.rs,
+debug/softlockup.rs, debug/leakorigin.rs, debug/r83hunt.rs. Retiring r83hunt
 removes one consumer; syscost/softlockup/preempt are standing
 instruments — the file stays regardless of any hunt retirements, and
 survives with the KEEP trio. The "stale-handle trio" census reduction
@@ -180,9 +180,9 @@ Phase 1 lands inside the −600..1,000 band the plan called for; the
 KEEP trio's retirement is evidence-gated on the live race family, not
 on preference.
 
-## 7a. Execution record (2026-11-23, dfx-retire lane)
+## 7a. Execution record (2026-11-23, debug-retire lane)
 
-Phase 1 landed as two commits on branch `dfx-retire` (rebased on
+Phase 1 landed as two commits on branch `debug-retire` (rebased on
 02bfede71, the s1-closure merge):
 
 - **r83hunt retirement**: −784/+89 across 10 files (net −695). The +89
@@ -205,14 +205,14 @@ Phase 1 landed as two commits on branch `dfx-retire` (rebased on
   (kept as the churn regression rig, TREE-* regex stays as a
   regression tripwire).
 
-Net: **−915 dfx/ lines** (git-tracked: 19,123 → 18,208, exactly the
+Net: **−915 debug/ lines** (git-tracked: 19,123 → 18,208, exactly the
 two modules; the wider −945/−1,062 diffstat numbers include the
 call-site stub removals in sched/sync/timer/trace and the +89/+28
-replacement comments and trap.rs hook); dfx/ tree 39 → 37 files; trace
-event table 109 → 107 rows; dfx= switch table unchanged at 6 permanent
+replacement comments and trap.rs hook); debug/ tree 39 → 37 files; trace
+event table 109 → 107 rows; debug= switch table unchanged at 6 permanent
 switches (monotonicity preserved — nothing added).
 
-Battery (branch dfx-retire @ d297e39d8, base 02bfede71):
+Battery (branch debug-retire @ d297e39d8, base 02bfede71):
 
 - Debug builds: x86_64 rc=0, riscv64 rc=0, aarch64 rc=0.
 - Release builds: x86_64 rc=0, riscv64 rc=0; aarch64 release FAILS
@@ -225,8 +225,8 @@ Battery (branch dfx-retire @ d297e39d8, base 02bfede71):
 - Debug-feature builds: make build LOCKOWNER=1 rc=0 on riscv64 (after
   fixing a pre-existing build/Makefile bug — the riscv64 arm dropped
   the --features flag, commit d297e39d8); cargo check clean with
-  dfx-taskdump-bt, dfx-grq-wedge (riscv64) and
-  dfx-aa64-uaccess-selftest (aarch64); dfx-futex-trace has 3
+  debug-taskdump-bt, debug-grq-wedge (riscv64) and
+  debug-aa64-uaccess-selftest (aarch64); debug-futex-trace has 3
   pre-existing E0308s on the base (fork.rs:824 / futex.rs:8069,
   identical on origin/main) — outside this lane's scope, recorded as
   a gap.
@@ -245,17 +245,17 @@ Battery (branch dfx-retire @ d297e39d8, base 02bfede71):
 Re-verification during execution (beyond the review's face-evidence
 method): a fresh all-tree reference census INCLUDING the path-included
 service crates (`kernel/rux-*/src`, which a `kernel/src/`-only grep
-misses) confirmed every other dfx module has live call sites — scmtap
+misses) confirmed every other debug module has live call sites — scmtap
 in particular (20 emit sites across rux-fs/fifo and
 rux-syscall/network) is ALIVE as an EVENT_SCMTAP echo consumer, not
 dead; an earlier `kernel/src/`-only census had misread it as orphaned.
 
 ## 7b. End state after Phase 1 (the documented KEEP-LEGACY rump)
 
-The §7 end state chose the rump over dissolution: `kernel/src/dfx/`
+The §7 end state chose the rump over dissolution: `kernel/src/debug/`
 stays (rename deferred, below) holding —
 
-- **6 permanent dfx= switches** (claiminject, oncpuinject,
+- **6 permanent debug= switches** (claiminject, oncpuinject,
   scribblepark, scribblepid1, scribblesweep, wildwatch): fault
   injectors, gdb-park actions, and the PTE-mutating detector —
   behavior changers with no tracepoint form (switches.rs documents
@@ -266,8 +266,8 @@ stays (rename deferred, below) holding —
   forensics_edges) with the evidence-gated exit criteria in §§1/2/4.
 - **The migrated echo-consumer instruments** (allocwatch, driftwatch,
   filerd, lostpark, monowatch, metawatch, slowtask, reaper, schb,
-  scmtap, ...): gates are `rux:` trace events since dfx-migrate
-  rounds 4/4b/5; the dfx= tokens are gone (no aliases, per the
+  scmtap, ...): gates are `rux:` trace events since debug-migrate
+  rounds 4/4b/5; the debug= tokens are gone (no aliases, per the
   2026-11-17 user directive). They retire family-by-family when their
   hunts close, the same way r83hunt/treehunt just did.
 - **Standing debug infrastructure, not hunt instruments at all**:
@@ -276,25 +276,25 @@ stays (rename deferred, below) holding —
   mmforensics/ledger/pathstash/memwatch — perf-gate tooling (syscost
   is REQUIRED by the merge gate), LTP-facing debug surfaces, and
   pstore/oops which are boot-critical. Cmdline-gated (syscost=1 style)
-  or always-available; no dfx= switch involved.
+  or always-available; no debug= switch involved.
 
 The rename (§8) is the only remaining mechanical step and is blocked
-on lane ownership, not on evidence: `crate::dfx::` appears in
+on lane ownership, not on evidence: `crate::debug::` appears in
 kernel/rux-fs, rux-syscall, rux-net, rux-mm, rux-drivers,
 rux-sched-policy (as of the s1-closure base) — six crates the
-dfx-retire lane does not own. It needs one coordinated mechanical
+debug-retire lane does not own. It needs one coordinated mechanical
 commit when the crate lanes are quiet; the recipe in §8 is unchanged
 and remains valid.
 
-## 8. MERGE PLAN — dfx/ → debug/ (DEFERRED: needs crate-lane coordination)
+## 8. MERGE PLAN — debug/ → debug/ (DEFERRED: needs crate-lane coordination)
 
-The 11-06 dfx→debug rename never reached the module directory:
-`kernel/src/dfx/` still holds the module while it is declared
-`pub mod dfx` (lib.rs). As of the Phase-1 execution (2026-11-23, on
+The 11-06 debug→debug rename never reached the module directory:
+`kernel/src/debug/` still holds the module while it is declared
+`pub mod debug` (lib.rs). As of the Phase-1 execution (2026-11-23, on
 the s1-closure base) that is 37 git-tracked files / 18,208 lines
 (plus the build-generated, gitignored ksyms_generated.rs). S1 has
 closed, but a NEW blocker replaces the sequencing one: the
-`crate::dfx::` path token now lives inside the six path-included
+`crate::debug::` path token now lives inside the six path-included
 service crates (rux-fs, rux-syscall, rux-net, rux-mm, rux-drivers,
 rux-sched) — the rename is a one-commit mechanical rewrite across
 trees the retirement lane does not own, so it waits for a quiet
@@ -302,13 +302,13 @@ window across the crate lanes. Steps, one mechanical commit:
 
 1. ~~Execute Phase 1 retirements above (r83hunt, treehunt)~~ DONE
    2026-11-23 (§7a).
-2. `git mv kernel/src/dfx/*.rs kernel/src/debug/` (the 37 surviving
+2. `git mv kernel/src/debug/*.rs kernel/src/debug/` (the 37 surviving
    files, ksyms_generated.rs included; drop the old directory).
-3. lib.rs: `pub mod dfx;` → `pub mod debug;`; same for any `#[path]`
-   references and build.rs/Makefile paths that name `src/dfx`
+3. lib.rs: `pub mod debug;` → `pub mod debug;`; same for any `#[path]`
+   references and build.rs/Makefile paths that name `src/debug`
    (ksyms.bin embed, any doc tooling).
-4. Tree-wide mechanical path rewrite: `crate::dfx::` → `crate::debug::`
-   (plus `dfx::` in the few `use dfx::` forms), INCLUDING the service
+4. Tree-wide mechanical path rewrite: `crate::debug::` → `crate::debug::`
+   (plus `debug::` in the few `use debug::` forms), INCLUDING the service
    crates' sources. No signature changes, no logic changes — the diff
    must be path-tokens only.
 5. Gate: dual-arch build rc=0, riscv suite green, one quiet syscost
@@ -317,4 +317,4 @@ window across the crate lanes. Steps, one mechanical commit:
 6. Bookkeeping in the same change: docs/architecture/ unsafe-ledger
    row re-banks for the renamed file paths (same-region same-class
    ordinal match, per the ca1005987 precedent), and the design-divergence
-   register if any row cites a dfx path.
+   register if any row cites a debug path.

@@ -62,7 +62,7 @@ pub fn do_execve_elf(
         create_user_address_space,
         PAGE_SIZE, PageTableEntry, phys_to_virt, PhysAddr,
     };
-    // EXECCOST (rux:execcost (retired dfx=execcost)): image-side stage stamps, raw read_time()
+    // EXECCOST (rux:execcost (retired debug=execcost)): image-side stage stamps, raw read_time()
     // ticks. Paired with the ladder line (EXECCOST) from do_execve — same
     // switch, its own rate-limit counter (approximate lockstep; both lines
     // carry pid+path for pairing).
@@ -97,7 +97,7 @@ pub fn do_execve_elf(
 
     // Linux setup_new_exec(): comm becomes the executable's basename (max
     // TASK_COMM_LEN-1 = 15 chars). Without this every post-exec task keeps
-    // the FORK-inherited comm — /proc/[pid]/comm, ps and the DFX task dumps
+    // the FORK-inherited comm — /proc/[pid]/comm, ps and the DEBUG task dumps
     // showed empty names for nearly every process (only PR_SET_NAME users
     // like glib's gdbus/InputThread threads were identifiable).
     {
@@ -112,9 +112,9 @@ pub fn do_execve_elf(
         // create/inherit discipline lives here.
         crate::ipc::ipc_hooks::exec_clear_thread_keyring();
         // 125th waitid leg: SPAWN clock for com.*-named executables (the
-        // OH bundle-name convention); rux:schedtrace (retired dfx=schedtrace)-gated (dfx/reaper.rs).
-        if crate::dfx::reaper::on() {
-            crate::dfx::reaper::note_nameset(task.pid(), &name);
+        // OH bundle-name convention); rux:schedtrace (retired debug=schedtrace)-gated (debug/reaper.rs).
+        if crate::debug::reaper::on() {
+            crate::debug::reaper::note_nameset(task.pid(), &name);
         }
         // perf COMM sideband (hiperf process tracking; no-op when no
         // perf event asks for comm records).

@@ -85,7 +85,7 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 /// reclamation latency knob — no semantics.
 const WAKE_BATCH: usize = 16;
 
-/// DFX gauges: parked Weaks currently awaiting grace, and grace waits
+/// DEBUG gauges: parked Weaks currently awaiting grace, and grace waits
 /// that exceeded their budget (the monopolist-window family — see
 /// synchronize_rcu_bounded). A non-zero RETIRED_DEPTH on a standard
 /// boot should drain to zero within a grace period; sustained growth

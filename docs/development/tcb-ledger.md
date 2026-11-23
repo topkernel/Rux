@@ -46,7 +46,7 @@ documented in the script header; the important ones:
   column is the honest total.  The block-only series is kept for trend
   continuity.
 - Generated sources (`kernel/src/config.rs`,
-  `kernel/src/dfx/ksyms_generated.rs`) are excluded so a bare checkout
+  `kernel/src/debug/ksyms_generated.rs`) are excluded so a bare checkout
   and a built tree produce the same table.
 - **Scope rule (2026-11-20)**: the ledger counts the files git tracks,
   not whatever the working directory happens to contain. A stale
@@ -73,7 +73,7 @@ documented in the script header; the important ones:
 | (top-level files) | 14 | 15181 | 150 | 1368 | 9.0% | 34 | 2043 | 3298 | 21.7% |
 | arch/aarch64 | 20 | 9636 | 185 | 1458 | 15.1% | 58 | 1676 | 2493 | 25.9% |
 | drivers | 40 | 26280 | 296 | 1189 | 4.5% | 64 | 1174 | 2330 | 8.9% |
-| dfx | 40 | 19097 | 214 | 1434 | 7.5% | 11 | 586 | 1979 | 10.4% |
+| debug | 40 | 19097 | 214 | 1434 | 7.5% | 11 | 586 | 1979 | 10.4% |
 | sync | 13 | 21022 | 391 | 860 | 4.1% | 59 | 1141 | 1968 | 9.4% |
 | mm | 31 | 20126 | 182 | 805 | 4.0% | 59 | 1171 | 1928 | 9.6% |
 | net | 18 | 20560 | 243 | 1571 | 7.6% | 17 | 216 | 1766 | 8.6% |
@@ -103,7 +103,7 @@ Lane A delta vs its fork point: drivers 2985 -> 1189 unsafe block-lines (-60%, u
 | arch/aarch64 | 20 | 9636 | 185 | 1458 | 15.1% | 58 | 1676 | 2493 | 25.9% |
 | drivers | 40 | 26280 | 296 | 1189 | 4.5% | 64 | 1174 | 2330 | 8.9% |
 | syscall | 12 | 41041 | 473 | 1962 | 4.8% | 5 | 103 | 2064 | 5.0% |
-| dfx | 40 | 19097 | 214 | 1434 | 7.5% | 11 | 586 | 1979 | 10.4% |
+| debug | 40 | 19097 | 214 | 1434 | 7.5% | 11 | 586 | 1979 | 10.4% |
 | sync | 13 | 21022 | 391 | 860 | 4.1% | 59 | 1141 | 1968 | 9.4% |
 | mm | 31 | 20126 | 182 | 805 | 4.0% | 59 | 1171 | 1928 | 9.6% |
 | net | 18 | 20637 | 165 | 670 | 3.2% | 8 | 18 | 688 | 3.3% |
@@ -142,7 +142,7 @@ ledger counts git-tracked sources only.
 | (top-level files) | 14 | 14933 | 147 | 1357 | 9.1% | 33 | 2042 | 3286 | 22.0% |
 | mm | 31 | 20132 | 204 | 1376 | 6.8% | 59 | 1171 | 2499 | 12.4% |
 | arch/aarch64 | 20 | 9636 | 185 | 1458 | 15.1% | 58 | 1676 | 2493 | 25.9% |
-| dfx | 40 | 18937 | 211 | 1428 | 7.5% | 11 | 586 | 1973 | 10.4% |
+| debug | 40 | 18937 | 211 | 1428 | 7.5% | 11 | 586 | 1973 | 10.4% |
 | sync | 13 | 20748 | 388 | 857 | 4.1% | 59 | 1141 | 1965 | 9.5% |
 | net | 18 | 20460 | 239 | 1563 | 7.6% | 16 | 144 | 1694 | 8.3% |
 | interrupt | 9 | 3255 | 52 | 239 | 7.3% | 0 | 0 | 239 | 7.3% |

@@ -134,7 +134,7 @@ pub const KERNEL_ENTRY: u64 = 0x80200000;
 /// together. The riscv64 linker.ld ASSERTs _end against the window so the
 /// next outgrowth is a build error.
 ///
-/// RUX-RISCV-LAYOUT-3 (dfx): the kernel symbol table (ksyms — the backing
+/// RUX-RISCV-LAYOUT-3 (debug): the kernel symbol table (ksyms — the backing
 /// store for /proc/kallsyms and symbolized backtraces) moved into the
 /// default image: the full table is ~3.1MB of .rodata (2.4MB of names +
 /// 0.7MB of index at ~22.6k text symbols), and only 1.45MB remained under

@@ -324,24 +324,24 @@ pub fn alloc_page_table() -> Option<u64> {
                 return None;
             }
 
-            // DFX memwatch: page-table frames bypass page_alloc::alloc_pages
+            // DEBUG memwatch: page-table frames bypass page_alloc::alloc_pages
             // (direct zone.alloc_pages above) — feed them to the page-level
             // site table from THIS frame so the chain names the mapping path
             // (map_page / create_user_address_space / ...).
-            if crate::dfx::memwatch::armed() {
-                let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-                    [0; crate::dfx::memwatch::SITE_FRAMES];
+            if crate::debug::memwatch::armed() {
+                let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
+                    [0; crate::debug::memwatch::SITE_FRAMES];
                 // SAFETY: reading rbp is register-only; the frame-pointer
-                // chain walk is the dfx edge (guarded against wild frames).
+                // chain walk is the debug edge (guarded against wild frames).
                 let mw_bp: u64 = unsafe {
                     let v;
                     core::arch::asm!("mov {}, rbp", out(reg) v, options(nomem, nostack));
                     v
                 };
-                // SAFETY: the chain walk is the dfx stack-forensics edge;
+                // SAFETY: the chain walk is the debug stack-forensics edge;
                 // mw_bp is this frame's own frame pointer.
-                unsafe { crate::dfx::memwatch::walk_fp_chain(mw_bp, &mut mw_frames) };
-                crate::dfx::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
+                unsafe { crate::debug::memwatch::walk_fp_chain(mw_bp, &mut mw_frames) };
+                crate::debug::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
             }
 
             // FORENSIC ledger: stamp every Late-stage table allocation.
@@ -375,7 +375,7 @@ fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_ppn: u64) {
                     // rather than wired into two live trees
         }
     }
-    crate::dfx::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // 0xb9 canary (oh-launch round 7): scan the table's content BEFORE
     // the free for flags-only entries — PRESENT with zero address bits
     // (phys page 0 is never a legal target; the x86 boot reserves
@@ -618,7 +618,7 @@ pub fn pt_pending_drain() {
     }
 }
 
-/// Number of entries currently pending (DFX/observability).
+/// Number of entries currently pending (DEBUG/observability).
 pub fn pt_pending_count() -> usize {
     let list = PT_PENDING.lock();
     list.iter().filter(|s| s.is_some()).count()
@@ -859,7 +859,7 @@ impl PtLedger {
         // mmforensics: deep capture at the double/foreign free refusal
         // (own report cap + switch gate; no locks needed here — the
         // refusal path runs before any frame-state transition).
-        crate::dfx::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
+        crate::debug::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
         // Double-tracked frame: quarantine.
         Self::poison_table(ppn);
         false
@@ -1085,7 +1085,7 @@ pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
     use core::sync::atomic::Ordering::Relaxed;
     // Hot path (every user PTE install — a fork copies hundreds of them):
     // the ring writes are forensic-only and cost 4 emulated atomics per
-    // copied PTE under TCG. Behind the rux:mmforensics (retired dfx=mmforensics) runtime switch.
+    // copied PTE under TCG. Behind the rux:mmforensics (retired debug=mmforensics) runtime switch.
     if !crate::trace::EVENT_MMFORENSICS.armed() {
         return;
     }
@@ -1113,7 +1113,7 @@ pub fn free_user_page_tables(
     vma_ranges: &[(u64, u64)],
 ) {
     use crate::mm::{page_desc, phys_to_pfn, phys_valid, free_pages};
-    crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // hp89 hunt: dying-mm teardown is a whole-domain PTE-clearing pass
     // (the fork-child-exit face) — record it for post-hoc #GP attribution.
     crate::mm::unwatch::note(
@@ -1125,7 +1125,7 @@ pub fn free_user_page_tables(
     // Double-teardown detector: the same root walked twice means two
     // MmStructs ended up owning one page-table tree — the second walk
     // chases recycled frames full of foreign data. Behind the
-    // rux:mmforensics (retired dfx=mmforensics) runtime switch (see pte_install_log).
+    // rux:mmforensics (retired debug=mmforensics) runtime switch (see pte_install_log).
     if crate::trace::EVENT_MMFORENSICS.armed() {
         use core::sync::atomic::Ordering::Relaxed;
         for k in 0..FUT_RING.len() {
@@ -1137,7 +1137,7 @@ pub fn free_user_page_tables(
                         FUT_RING[k].pid.load(Relaxed),
                         crate::sched::get_current_pid()
                     );
-                    // dfx-migrate: the double-teardown hit also records
+                    // debug-migrate: the double-teardown hit also records
                     // into the unified framework (rux:mmforensics
                     // kind=FUT_REPEAT; b packs prev<<32|now pid).
                     crate::trace::trace_mmforensics(
@@ -1257,7 +1257,7 @@ pub fn free_user_page_tables(
                         if page.is_mapped() {
                             crate::mm::rmap::page_remove_rmap(page);
                         }
-                        let new_ref = page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L3);
+                        let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_X86_L3);
                         if new_ref == 0 {
                             // Cache-backed leaf: leak, never hand the live
                             // cache frame to the zone (pcachewedge lane).
@@ -1267,7 +1267,7 @@ pub fn free_user_page_tables(
                                     "teardown-l3",
                                 );
                             } else {
-                                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                                 free_pages(phys_addr as usize, 0);
                             }
                         }
@@ -1333,7 +1333,7 @@ pub fn free_user_page_tables(
                         if page.is_mapped() {
                             crate::mm::rmap::page_remove_rmap(page);
                         }
-                        let new_ref = page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L2);
+                        let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_X86_L2);
                         if new_ref == 0 {
                             // Cache-backed leaf: leak, never hand the live
                             // cache frame to the zone (pcachewedge lane).
@@ -1343,7 +1343,7 @@ pub fn free_user_page_tables(
                                     "teardown-l2",
                                 );
                             } else {
-                                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                                 free_pages(phys_addr as usize, 0);
                             }
                         }
@@ -1446,7 +1446,7 @@ pub fn free_user_page_tables(
                     // page_remove_rmap above (mapcount dec) is its whole
                     // teardown.
                     if pte1.bits() & super::mm_ops::cow_flags::PCACHE_RO == 0 {
-                        let new_ref = page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L1);
+                        let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_X86_L1);
                         if new_ref == 0 {
                             // Cache-backed leaf: leak, never hand the live
                             // cache frame to the zone (pcachewedge lane).
@@ -1456,7 +1456,7 @@ pub fn free_user_page_tables(
                                     "teardown-l1",
                                 );
                             } else {
-                                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                                 free_pages(phys_addr as usize, 0);
                             }
                         }
@@ -1629,7 +1629,7 @@ pub fn free_user_page_tables(
     // stale-tree census witness — bounded reverse scan answers who else
     // still references it).
     if stale_count > 0 {
-        crate::dfx::mmforensics::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
+        crate::debug::mmforensics::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
     }
 
     // Free root table (PML4)
@@ -1993,7 +1993,7 @@ pub fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u6
                 // which path is mapping now. The frame walk names the
                 // actual caller — b86 lost render_service to a 2-page
                 // heap overwrite at 0x1f000 whose ctx label was useless.
-                crate::dfx::backtrace::dump_stack();
+                crate::debug::backtrace::dump_stack();
             }
         }
     }
@@ -2728,7 +2728,7 @@ pub fn get_kernel_page_table_ppn() -> u64 {
 /// residual): the frame is double-tracked, and the referencing tree that
 /// is NOT the stamping root holds the stale pointer.
 ///
-/// Safety shape (forensic, gated by rux:mmforensics (retired dfx=mmforensics), <= a few/boot):
+/// Safety shape (forensic, gated by rux:mmforensics (retired debug=mmforensics), <= a few/boot):
 /// - task set snapshotted with `for_each_task_try` (non-blocking; held
 ///   pid-hash buckets are skipped and reported);
 /// - each task's root is read with a single-field unsafe peek
@@ -2746,7 +2746,7 @@ pub fn get_kernel_page_table_ppn() -> u64 {
 /// Returns (hits, tasks_scanned, skipped_buckets, entries_read).
 pub fn forensics_scan_trees(
     target_ppn: u64,
-    out: &mut [crate::dfx::mmforensics::TreeHit],
+    out: &mut [crate::debug::mmforensics::TreeHit],
 ) -> (usize, usize, usize, usize) {
     const MAX_TASKS: usize = 128;
     let mut roots = [(0u32, 0u64); MAX_TASKS];
@@ -2779,7 +2779,7 @@ pub fn forensics_scan_trees(
 
     let mut push = |pid: u32, root: u64, level: u8, i0: u32, i1: u32| {
         if nh < out.len() {
-            out[nh] = crate::dfx::mmforensics::TreeHit {
+            out[nh] = crate::debug::mmforensics::TreeHit {
                 pid,
                 root_ppn: root,
                 level,

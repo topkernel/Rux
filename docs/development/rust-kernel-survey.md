@@ -209,7 +209,7 @@ design: no unbounded/dynamic allocation in steady state, message-passing
 tasks with supervisor restart, and *lease-based* peripheral access where
 borrowing a device has a scoped lifetime. We are not a microkernel, but
 two ideas transfer: (1) interrupt and panic paths must not allocate —
-worth auditing our trap/dfx paths for; (2) driver lifetimes read better
+worth auditing our trap/debug paths for; (2) driver lifetimes read better
 when expressed as borrows with scopes, not init/exit flag pairs.
 
 **Redox OS** (2015–, the longest-running pure-Rust kernel) proves the

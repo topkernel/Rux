@@ -102,8 +102,8 @@ pub struct SchedHooks {
     pub ww_slot_mismatch_counters: fn() -> [u64; MAX_CPUS],
     pub ww_sched_snapshot: fn() -> [u64; 10],
     pub ww_stalled_cpu_state: fn(cpu: usize) -> (u64, u64, u64),
-    pub dfx_claim_inject: fn() -> usize,
-    pub dfx_oncpu_inject: fn() -> usize,
+    pub debug_claim_inject: fn() -> usize,
+    pub debug_oncpu_inject: fn() -> usize,
     pub ww_heals: fn() -> (u64, u64),
     pub ww_subgate_counts: fn() -> (u64, u64, u64),
     pub ww_rt_pick_stats: fn() -> (u64, u64, u64),
@@ -186,8 +186,8 @@ impl SchedHooks {
         ww_slot_mismatch_counters: || Default::default(),
         ww_sched_snapshot: || Default::default(),
         ww_stalled_cpu_state: |cpu| Default::default(),
-        dfx_claim_inject: || Default::default(),
-        dfx_oncpu_inject: || Default::default(),
+        debug_claim_inject: || Default::default(),
+        debug_oncpu_inject: || Default::default(),
         ww_heals: || Default::default(),
         ww_subgate_counts: || Default::default(),
         ww_rt_pick_stats: || Default::default(),
@@ -359,10 +359,10 @@ pub fn ww_sched_snapshot() -> [u64; 10] { (hooks().ww_sched_snapshot)() }
 pub fn ww_stalled_cpu_state(cpu: usize) -> (u64, u64, u64) { (hooks().ww_stalled_cpu_state)(cpu) }
 
 #[inline]
-pub fn dfx_claim_inject() -> usize { (hooks().dfx_claim_inject)() }
+pub fn debug_claim_inject() -> usize { (hooks().debug_claim_inject)() }
 
 #[inline]
-pub fn dfx_oncpu_inject() -> usize { (hooks().dfx_oncpu_inject)() }
+pub fn debug_oncpu_inject() -> usize { (hooks().debug_oncpu_inject)() }
 
 #[inline]
 pub fn ww_heals() -> (u64, u64) { (hooks().ww_heals)() }

@@ -155,7 +155,7 @@ static PC_DRAIN_DEFERS: AtomicUsize = AtomicUsize::new(0);
 // Relaxed fetch_adds on the reclaim/evict paths only; standard boots
 // accrue a handful of counts and the OOM-FORENSIC block prints them only
 // on the doomed path. These are census counters on the existing forensic
-// surfaces (SP-5/SP-7 shape), not a new dfx switch.
+// surfaces (SP-5/SP-7 shape), not a new debug switch.
 //
 // shrink_reclaim faces:
 pub(crate) static SR_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -3889,7 +3889,7 @@ fn release_page_frame(pfn: usize) {
         && crate::arch::mm::mmu_init::PtLedger::is_poisoned(pfn as u64)
     {
         use core::sync::atomic::Ordering::Relaxed;
-        crate::dfx::driftwatch::MM_POISON_FREES.fetch_add(1, Relaxed);
+        crate::debug::driftwatch::MM_POISON_FREES.fetch_add(1, Relaxed);
         return;
     }
 
@@ -3897,7 +3897,7 @@ fn release_page_frame(pfn: usize) {
         && crate::arch::mm::mmu_init::PtLedger::is_live_table(pfn as u64)
     {
         use core::sync::atomic::Ordering::Relaxed;
-        crate::dfx::driftwatch::PCACHE_LIVE_PT_REFUSED
+        crate::debug::driftwatch::PCACHE_LIVE_PT_REFUSED
             .fetch_add(1, Relaxed);
         static REPORTS: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -3907,20 +3907,20 @@ fn release_page_frame(pfn: usize) {
                 "page-cache release of LIVE PT frame pfn={:#x} REFUSED — leaking (double-owned cache entry; RAW-FREE cascade guard)",
                 pfn
             );
-            crate::dfx::backtrace::dump_stack();
+            crate::debug::backtrace::dump_stack();
         }
         // mmforensics: deep capture at the producer-side refusal (the
         // capture takes no page-cache locks — it only reads descriptors,
         // rings and foreign trees — so running it from this lock-held
         // context is safe).
-        crate::dfx::mmforensics::capture_frame(pfn, "pcache-live-pt-refused");
+        crate::debug::mmforensics::capture_frame(pfn, "pcache-live-pt-refused");
         // QUARANTINE the frame (mmforensics lane): the capture evidence
         // showed such frames keep colliding with re-allocation for the
         // rest of the boot (one frame re-stamped by five trees); the
         // poison bit makes every later free of it impossible, so the
         // surviving references dangle inertly.
         crate::arch::mm::mmu_init::PtLedger::poison_table(pfn as u64);
-        crate::dfx::driftwatch::MM_POISONED.fetch_add(1, Relaxed);
+        crate::debug::driftwatch::MM_POISONED.fetch_add(1, Relaxed);
         // The caller has already removed the map entry and unlinked the
         // LRU member; the leaked frame is an untracked orphan. Its
         // stale PageCache descriptor is unreachable from the LRU walk,

@@ -25,7 +25,7 @@ sched             29.5%   2719/9229      28.7%    37.7%     12
 tests             80.8%   7237/8954      75.5%    94.5%     87
 mm                43.2%   3642/8434      45.1%    52.0%     31
 process           47.9%   3870/8071      43.4%    51.9%     12
-dfx                9.2%    727/7869       8.3%    27.7%     41
+debug                9.2%    727/7869       8.3%    27.7%     41
 arch              37.0%   2351/6351      35.3%    44.2%     63
 <top>             47.9%   2711/5657      47.5%    58.7%     15
 trace              6.3%    109/1735       5.2%     2.6%      2
@@ -51,14 +51,14 @@ worst files (lines% ascending, files with any coverage):
     0.0%       0/26     kernel/src/fs/procfs/configgz.rs
     0.0%       0/26     kernel/src/fs/procfs/softirqs.rs
     0.0%       0/28     kernel/src/fs/procfs/diskstats.rs
-    0.0%       0/29     kernel/src/dfx/bug.rs
+    0.0%       0/29     kernel/src/debug/bug.rs
     0.0%       0/29     kernel/src/panic_policy.rs
     0.0%       0/41     kernel/src/fs/procfs/timer_list.rs
     0.0%       0/41     kernel/src/sched/stop_task.rs
     0.0%       0/42     kernel/src/fs/procfs/vmstat.rs
     0.0%       0/42     kernel/src/sched/idle.rs
     0.0%       0/43     kernel/src/sync/condvar.rs
-    0.0%       0/44     kernel/src/dfx/sbi_debug.rs
-    0.0%       0/46     kernel/src/dfx/hexdump.rs
-    0.0%       0/47     kernel/src/dfx/ksyms.rs
+    0.0%       0/44     kernel/src/debug/sbi_debug.rs
+    0.0%       0/46     kernel/src/debug/hexdump.rs
+    0.0%       0/47     kernel/src/debug/ksyms.rs
     0.0%       0/48     kernel/src/fs/jbd2/types.rs
