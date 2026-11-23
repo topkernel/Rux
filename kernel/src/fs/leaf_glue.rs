@@ -257,6 +257,59 @@ pub mod pty {
     }
 }
 
+// ---- rootfs (boot ramfs root) ----
+
+pub mod rootfs {
+    use super::*;
+
+    pub fn init_rootfs() -> Result<(), i32> {
+        (hooks().rootfs_init)()
+    }
+
+    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
+        (hooks().rootfs_create_root_inode)()
+    }
+
+    /// procfs/cgroup/sysfs's typed sb view (interim until they join the
+    /// crate).
+    pub fn get_sb_ref_interim() -> Option<&'static dyn InitrdRamfs> {
+        (hooks().rootfs_sb_ref_interim)()
+    }
+
+    /// Presence + kind probe (tests' verify step).
+    pub fn lookup_kind(path: &str) -> Option<bool> {
+        get_sb_ref_interim().and_then(|sb| sb.rfs_lookup_kind(path))
+    }
+
+    /// Seed a file into the RAM root (tests' setup step).
+    pub fn seed_file(path: &str, data: Vec<u8>) -> Option<()> {
+        get_sb_ref_interim().map(|sb| {
+            let _ = sb.rfs_seed_file(path, data);
+        })
+    }
+}
+
+/// The initrd unpack target: the rootfs superblock's path-shaped API
+/// as a framework-owned trait (the cpio unpacker stays framework-side;
+/// the rootfs leaf lives in the rux-fs crate and implements this).
+/// Flattened to path strings — no node handles cross the seam.
+pub trait InitrdRamfs {
+    fn rfs_mkdir(&self, path: &str) -> Result<(), i32>;
+    /// procfs/cgroup/sysfs's mount-point creation (with mode).
+    fn rfs_create_dir(&self, path: &str, mode: u32) -> Result<(), i32>;
+    fn rfs_symlink(&self, target: &str, path: &str) -> Result<(), i32>;
+    fn rfs_link(&self, first: &str, path: &str) -> Result<(), i32>;
+    fn rfs_create_file(&self, path: &str, data: Vec<u8>) -> Result<(), i32>;
+    /// Replace-step for overwrite semantics: drop `base` under `parent`.
+    fn rfs_remove_child(&self, parent: &str, base: &str);
+    /// Apply permission bits + mtime to the node at `path`.
+    fn rfs_set_node_meta(&self, path: &str, mode: u32, mtime: u64);
+    /// Presence + kind probe (None = absent; Some(true) = directory).
+    fn rfs_lookup_kind(&self, path: &str) -> Option<bool>;
+    /// Seed a file (tests' create_file path).
+    fn rfs_seed_file(&self, path: &str, data: Vec<u8>) -> Result<(), i32>;
+}
+
 /// The input-device registration record (evdev -> sysfs uevent + tree).
 /// Framework-owned DTO: the drivers fill it, the rux-fs sysfs leaf
 /// consumes it through the hook row (plain data — no leaf types cross

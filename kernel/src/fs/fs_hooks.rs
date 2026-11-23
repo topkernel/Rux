@@ -120,6 +120,16 @@ pub struct FsHooks {
     pub pty_devno_is_ptmx: fn(crate::fs::dev_t::DevNo) -> bool,
     pub pty_dev_ptmx_devno: fn() -> crate::fs::dev_t::DevNo,
     pub pty_slave_major: fn() -> u32,
+    // ---- rootfs rows ----
+    /// lib.rs boot's init_rootfs().
+    pub rootfs_init: fn() -> Result<(), i32>,
+    pub rootfs_create_root_inode: fn() -> Option<alloc::sync::Arc<Inode>>,
+    /// initrd's unpack target (the InitrdRamfs view of the global sb).
+    pub rootfs_initrd_sb: fn() -> Option<&'static dyn super::leaf_glue::InitrdRamfs>,
+    /// The legacy read_file_from_rootfs (init.rs's config probe).
+    pub rootfs_read_file: fn(&str) -> Option<alloc::vec::Vec<u8>>,
+    /// procfs's mounts view (interim until procfs joins the crate).
+    pub rootfs_sb_ref_interim: fn() -> Option<&'static dyn super::leaf_glue::InitrdRamfs>,
 }
 
 impl FsHooks {
@@ -191,6 +201,11 @@ impl FsHooks {
         pty_devno_is_ptmx: |_| false,
         pty_dev_ptmx_devno: || crate::fs::dev_t::DevNo::new(5, 2),
         pty_slave_major: || 136,
+        rootfs_init: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        rootfs_create_root_inode: || None,
+        rootfs_initrd_sb: || None,
+        rootfs_read_file: |_| None,
+        rootfs_sb_ref_interim: || None,
     };
 }
 

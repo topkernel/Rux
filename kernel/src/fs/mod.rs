@@ -28,7 +28,7 @@ pub mod leaf_glue;
 pub mod lock_hooks;
 pub mod fs_hooks;
 pub mod notify_events;
-pub mod rootfs;
+// pub mod rootfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub mod tmpfs;
 // pub mod ext4; — MOVED to the rux-ext4 service crate (rung 5)
 pub mod stat;
@@ -67,36 +67,13 @@ pub use fs_struct::FsStruct;
 pub use stat::{copy_stat_to_user, user_stat_size, Stat};
 // pub use pipe::create_pipe; — MOVED to the rux-fs service crate (rung 3)
 // pub use char_dev::CharDev; — MOVED to the rux-fs service crate (fs-substrate tranche)
-pub use rootfs::get_rootfs;
+// pub use rootfs::get_rootfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub use vfs::{file_open, file_close, file_stat, file_fcntl, fcntl, file_mkdir, file_rmdir, file_unlink, file_link, stat_file_by_path};
 
+/// Read a file's bytes from the ramfs root (init.rs's config probe).
+/// The body lives in the rux-fs crate now (rootfs leaf); forwards
+/// through the registered row.
 pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
-    use alloc::vec::Vec;
-    use crate::println;
-
-    // Simplified implementation: directly access global RootFS
-    // Note: This is a temporary solution, should access through VFS interface in the future
-
-    // SAFETY: get_rootfs() returns a raw pointer to the global RootFS instance
-    // which is initialized once during boot and never freed; null check follows.
-    let rootfs = unsafe { get_rootfs() };
-    if rootfs.is_null() {
-        return None;
-    }
-
-    // SAFETY: rootfs is non-null (checked above) and points to the global RootFS
-    // instance which is valid for the lifetime of the kernel.
-    let node = unsafe { (*rootfs).lookup(filename) };
-    let node = match node {
-        Some(n) => n,
-        None => {
-            return None;
-        }
-    };
-
-    // Read file data (the shared buffer behind the node's lock — see the
-    // rootfs hard-link shared-semantics change)
-    let data = node.data.lock();
-    Some(data.clone())
+    (fs_hooks::hooks().rootfs_read_file)(filename)
 }
 

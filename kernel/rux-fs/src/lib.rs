@@ -12,10 +12,14 @@
 // Root re-exports: the framework modules appear at THIS crate's root so
 // the service files' crate::X paths resolve unchanged (the net recipe).
 pub use rux::{
-    arch, cmdline, config, console, dfx, drivers, errno, interrupt, mm,
-    net, printk, process, safety, sched, security, signal, sync, timer,
-    trace,
+    arch, cmdline, config, console, dfx, drivers, errno, initrd, interrupt,
+    mm, net, printk, process, safety, sched, security, signal, sync,
+    timer, trace,
 };
+// The guest-test counters (unit-test builds only — the framework gates
+// the module behind its own feature).
+#[cfg(feature = "unit-test")]
+pub use rux::tests;
 // The framework macros the moved leaves invoke as `crate::X!` —
 // macro re-exports resolve at this crate's root.
 pub use rux::wait_event_interruptible;
@@ -39,16 +43,15 @@ pub mod fs {
     pub mod debugfs;
     pub mod tracefs;
     pub mod cgroup;
-<<<<<<< HEAD
-    pub mod sysfs;)
-=======
     pub mod sysfs;
     pub mod tty;
     pub mod pty;
     pub mod char_dev;
+    pub mod rootfs;
     #[cfg(feature = "unit-test")]
-    pub mod pipe2_test;
->>>>>>> 5486c4c10 (fs: move char_dev+tty+pty into the rux-fs forbid crate (fs-substrate tranche))
+    pub mod initrd_test;
+    #[cfg(feature = "unit-test")]
+    pub mod rootfs_test;
     pub use rux::fs::*;
 }
 
@@ -65,6 +68,10 @@ pub mod pipe2_test;
 pub fn run_unit_tests() {
     rux::tests::test_group_start("pipe2");
     crate::pipe2_test::test_pipe2();
+    rux::tests::test_group_start("initrd");
+    crate::fs::initrd_test::test_initrd();
+    rux::tests::test_group_start("fs_pins/rootfs");
+    crate::fs::rootfs_test::test_rootfs_pins();
 }
 
 /// The boot-time registration (rux-bin calls this before kmain):
@@ -161,6 +168,11 @@ pub fn register_all() {
         sysfs_uevent_send_full: crate::fs::sysfs::uevent_send_full,
         char_dev_init_std_fds: crate::fs::char_dev::init_std_fds_for_task,
         char_dev_file_stat: crate::fs::char_dev::char_dev_file_stat,
+        rootfs_init: crate::fs::rootfs::init_rootfs,
+        rootfs_create_root_inode: || Some(crate::fs::rootfs::create_root_inode()),
+        rootfs_initrd_sb: || crate::fs::rootfs::initrd_sb_view(),
+        rootfs_read_file: crate::fs::rootfs::read_file,
+        rootfs_sb_ref_interim: crate::fs::rootfs::initrd_sb_view,
         char_dev_uart_write: crate::fs::char_dev::uart_write,
         tty_console_lflag: || crate::fs::tty::console().lflag(),
         tty_console_echo_enabled: || crate::fs::tty::console().echo_enabled(),

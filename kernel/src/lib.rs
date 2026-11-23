@@ -675,11 +675,21 @@ pub fn rust_main_tail() -> ! {
             print_status("fs", "ext4 driver loaded", true);
 
             // Initialize RootFS
-            let rootfs_result = fs::rootfs::init_rootfs();
+            let rootfs_result = fs::leaf_glue::rootfs::init_rootfs();
             print_status("fs", "ramfs mounted /", rootfs_result.is_ok());
             if rootfs_result.is_ok() {
-                // Build dentry tree for rootfs
-                fs::vfs::vfs_mount("/", fs::rootfs::create_root_inode(),
+                // Build dentry tree for rootfs (fallback: a minimal root
+                // node — the pre-flip create_root_inode's own fallback
+                // arm, for the not-yet-initialized corner).
+                let rootfs_root = fs::leaf_glue::rootfs::create_root_inode()
+                    .unwrap_or_else(|| {
+                        use crate::fs::inode::{Inode, InodeMode};
+                        alloc::sync::Arc::new(Inode::new(
+                            1,
+                            InodeMode::new(InodeMode::S_IFDIR | 0o755),
+                        ))
+                    });
+                fs::vfs::vfs_mount("/", rootfs_root,
                     fs::mount::MntFlags::new(0));
 
                 // OH Phase 1 prereq: unpack the boot initrd (gzip cpio

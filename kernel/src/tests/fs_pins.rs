@@ -7,7 +7,11 @@
 //! kernel/src/fs/ext4/{csum,indirect}.rs per the test-layout policy
 //! (those host-side blocks never compiled in this no_std crate).
 
-use crate::fs::rootfs::{RootFSNode, RootFSSuperBlock};
+use crate::fs::ext4::csum::{
+    crc32c, group_desc_csum_ok, group_desc_csum_set, inode_csum_ok, inode_csum_set,
+    superblock_csum_ok, superblock_csum_set, CRC32C_TABLE,
+};
+use crate::fs::ext4::indirect::{get_indirect_level, max_file_size, Ext4BlockIterator};
 use crate::fs::stat::Stat;
 use crate::fs::superblock::{
     get_fs_type, register_filesystem, unregister_filesystem, FileSystemType, SuperBlock,
@@ -23,9 +27,10 @@ pub fn test_fs_pins() {
     test_stat_pins();
     test_superblock_pins();
     test_vt_pins();
-    test_rootfs_pins();
     // The ext4 csum/indirect pins flipped WITH the rux-ext4 crate
-    // (rung 5; they run via the service-test seam now).
+    // (rung 5; they run via the service-test seam now); the rootfs pins
+    // moved WITH the rootfs leaf (fs-substrate tranche — SERVICE-TEST
+    // SEAM).
 }
 
 // ---- fs/stat.rs --------------------------------------------------------
@@ -115,6 +120,7 @@ fn test_vt_pins() {
     crate::tests::test_pass("fs-vt");
 }
 
+<<<<<<< HEAD
 // ---- fs/rootfs.rs ------------------------------------------------------
 
 fn test_rootfs_pins() {
@@ -150,4 +156,85 @@ fn test_rootfs_pins() {
     crate::test_assert!(names.contains(&&b"file1.txt"[..]), "file1 listed");
     crate::test_assert!(names.contains(&&b"file2.txt"[..]), "file2 listed");
     crate::tests::test_pass("fs-rootfs");
+=======
+// ---- fs/ext4/csum.rs ----------------------------------------------------
+
+fn test_ext4_csum_pins() {
+    // Castagnoli table prefix.
+    crate::test_assert_eq!(CRC32C_TABLE[0], 0, "crc32c table[0]");
+    // The dead block pinned table[1] == 0x82F6_3B78 — that is the POLYNOMIAL
+    // constant, not the table entry. The standard reflected Castagnoli
+    // table has T[1] = 0xF26B8303 / T[255] = 0xAD7D5351, and the RFC 3720
+    // iSCSI vector below passes, so the kernel table is correct.
+    crate::test_assert_eq!(CRC32C_TABLE[1], 0xF26B_8303, "crc32c table[1]");
+    crate::test_assert_eq!(CRC32C_TABLE[255], 0xAD7D_5351, "crc32c table[255]");
+
+    // set/ok round-trips per object size class.
+    for size in [128usize, 256] {
+        let mut raw = alloc::vec![0u8; size];
+        for (i, b) in raw.iter_mut().enumerate() {
+            *b = (i * 7 + 3) as u8;
+        }
+        inode_csum_set(0x1234_5678, 42, &mut raw);
+        crate::test_assert!(inode_csum_ok(0x1234_5678, 42, &raw), "inode csum ok size {size}");
+        raw[8] ^= 0xFF;
+        crate::test_assert!(!inode_csum_ok(0x1234_5678, 42, &raw), "inode csum breaks on flip size {size}");
+    }
+    for dsize in [32usize, 64] {
+        let mut desc = alloc::vec![0u8; dsize];
+        for (i, b) in desc.iter_mut().enumerate() {
+            *b = (i * 13 + 5) as u8;
+        }
+        group_desc_csum_set(0x9ABC_DEF0u32, 7, &mut desc);
+        crate::test_assert!(group_desc_csum_ok(0x9ABC_DEF0u32, 7, &desc), "desc csum ok size {dsize}");
+        desc[4] ^= 0x01;
+        crate::test_assert!(!group_desc_csum_ok(0x9ABC_DEF0u32, 7, &desc), "desc csum breaks on flip size {dsize}");
+    }
+    let mut sb = alloc::vec![0u8; 1024];
+    for (i, b) in sb.iter_mut().enumerate().take(0x3FC) {
+        *b = (i * 31 + 11) as u8;
+    }
+    superblock_csum_set(&mut sb);
+    crate::test_assert!(superblock_csum_ok(&sb), "superblock csum ok");
+    sb[0] ^= 0x80;
+    crate::test_assert!(!superblock_csum_ok(&sb), "superblock csum breaks on flip");
+
+    // RFC 3720 / iSCSI vector: crc32c("123456789").
+    let raw = crc32c(0xFFFF_FFFFu32, b"123456789");
+    crate::test_assert_eq!(raw ^ 0xFFFF_FFFFu32, 0xE306_9283u32, "iSCSI crc32c vector");
+    crate::tests::test_pass("ext4-csum");
+}
+
+// ---- fs/ext4/indirect.rs -------------------------------------------------
+
+fn test_ext4_indirect_pins() {
+    let block_size = 4096u64;
+    let max_size = max_file_size(block_size);
+    crate::test_assert!(max_size > 4_000_000_000_000, "max file size over 4TB");
+
+    crate::test_assert_eq!(get_indirect_level(48 * 1024, block_size), 0, "direct only");
+    crate::test_assert_eq!(get_indirect_level(100 * 1024, block_size), 1, "single indirect");
+    crate::test_assert_eq!(get_indirect_level(4 * 1024 * 1024, block_size), 1, "still single");
+    crate::test_assert_eq!(get_indirect_level(5 * 1024 * 1024, block_size), 2, "double indirect");
+    crate::test_assert_eq!(get_indirect_level(4 * 1024 * 1024 * 1024, block_size), 2, "still double");
+    crate::test_assert_eq!(get_indirect_level(5 * 1024 * 1024 * 1024u64, block_size), 3, "triple indirect");
+
+    let mut iter = Ext4BlockIterator::new(20);
+    let mut ok = true;
+    for i in 0..12 {
+        match iter.next_mapping() {
+            Some((level, offset)) => ok &= level == 0 && offset == i,
+            None => ok = false,
+        }
+    }
+    for i in 0..8 {
+        match iter.next_mapping() {
+            Some((level, offset)) => ok &= level == 1 && offset == i,
+            None => ok = false,
+        }
+    }
+    ok &= iter.next_mapping().is_none();
+    crate::test_assert!(ok, "block iterator level/offset walk");
+    crate::tests::test_pass("ext4-indirect");
+>>>>>>> 30f5e3247 (fs: move rootfs into the rux-fs forbid crate (fs-substrate tranche))
 }

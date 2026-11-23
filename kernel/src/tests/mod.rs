@@ -432,7 +432,7 @@ pub mod sgid_mode;
 
 // ===== initrd (gzip inflate + cpio newc unpack) =====
 #[cfg(feature = "unit-test")]
-pub mod initrd;
+// pub mod initrd; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 
 // ===== tmpfs mknod (OH Phase 1b: device nodes on a tmpfs /dev) =====
 #[cfg(feature = "unit-test")]
@@ -522,8 +522,8 @@ pub fn run_all_tests() {
     test_group_start("config");
     config_test::test_config();
 
-    test_group_start("initrd");
-    initrd::test_initrd();
+    // initrd: MOVED to the rux-fs crate (fs-substrate) — runs through
+    // the SERVICE-TEST SEAM (rux_fs::run_unit_tests).
 
     test_group_start("tmpfs-mknod");
     tmpfs_mknod::test_tmpfs_mknod();

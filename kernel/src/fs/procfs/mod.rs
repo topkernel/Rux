@@ -1469,16 +1469,15 @@ pub fn init_procfs() -> Result<(), i32> {
 
 /// Mount ProcFS to /proc
 pub fn mount_procfs() -> Result<(), i32> {
-    // Get RootFS superblock
-    let rootfs_sb = match crate::fs::rootfs::get_rootfs_sb() {
+    // RootFS must be up (the trait view through the row — the interim
+    // seam until procfs joins the crate).
+    let rootfs_sb = match crate::fs::leaf_glue::rootfs::get_sb_ref_interim() {
         Some(sb) => sb,
         None => return Err(-1),
     };
 
     // Try to create /proc directory in RootFS (ignore error if already exists)
-    if let Some(sb) = crate::fs::rootfs::get_rootfs_sb_ref() {
-        let _ = sb.create_dir("/proc", 0o755);
-    }
+    let _ = rootfs_sb.rfs_create_dir("/proc", 0o755);
 
     // Create mount point
     let procfs_sb_ptr = GLOBAL_PROCFS_SB.load(Ordering::Acquire);

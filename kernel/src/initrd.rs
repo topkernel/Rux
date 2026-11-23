@@ -26,7 +26,7 @@
 //! small, allocation-light, and sufficient for the one-shot boot unpack.
 //! (zstd/xz/lz4 initrds are not supported yet.)
 
-use crate::fs::rootfs::RootFSSuperBlock;
+use crate::fs::leaf_glue::InitrdRamfs;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -109,8 +109,10 @@ pub fn load() -> Result<CpioStats, &'static str> {
         CpioSource::Borrowed(raw)
     };
 
-    // The global-sb typed view (INV-FS-GLOBALSB-1 through the edge).
-    let sb = crate::fs::rootfs::get_rootfs_sb_ref().ok_or("rootfs not initialized")?;
+    // The global-sb typed view through the hook row (the rootfs leaf
+    // lives in the rux-fs crate; the trait is the seam).
+    let sb = (crate::fs::fs_hooks::hooks().rootfs_initrd_sb)()
+        .ok_or("rootfs not initialized")?;
 
     let stats = unpack_newc(cpio.as_slice(), sb)?;
     INITRD_LOADED.store(true, Ordering::Release);
@@ -583,7 +585,7 @@ const MAX_LINK_MEMO: usize = 8192;
 /// symlinks, hard links (same c_ino with filesize=0 after the first).
 /// Device nodes, fifos and sockets are counted but skipped. Public for
 /// the boot-time unit test suite (fresh RootFSSuperBlock as target).
-pub fn unpack_newc(data: &[u8], sb: &RootFSSuperBlock) -> Result<CpioStats, &'static str> {
+pub fn unpack_newc(data: &[u8], sb: &dyn InitrdRamfs) -> Result<CpioStats, &'static str> {
     let mut stats = CpioStats::default();
     let mut link_memo: Vec<(u32, alloc::string::String)> = Vec::new();
     // cpio newc stores the DATA with the LAST entry of a hardlink group;
@@ -680,7 +682,7 @@ pub fn unpack_newc(data: &[u8], sb: &RootFSSuperBlock) -> Result<CpioStats, &'st
                 let target_bytes = &data[data_off..data_off + filesize];
                 if let Ok(target) = core::str::from_utf8(target_bytes) {
                     if mkdir_p_parents(sb, &path).is_ok()
-                        && sb.symlink(target, &path).is_ok()
+                        && sb.rfs_symlink(target, &path).is_ok()
                     {
                         stats.symlinks += 1;
                         set_node_meta(sb, &path, mode, mtime);
@@ -702,7 +704,7 @@ pub fn unpack_newc(data: &[u8], sb: &RootFSSuperBlock) -> Result<CpioStats, &'st
     let mut unresolved = 0usize;
     for (ino, path) in deferred_links.iter() {
         if let Some((_, first)) = link_memo.iter().find(|(i, _)| i == ino) {
-            if sb.link(first, path).is_ok() {
+            if sb.rfs_link(first, path).is_ok() {
                 stats.hardlinks += 1;
             }
         } else {
@@ -727,9 +729,9 @@ pub fn unpack_newc(data: &[u8], sb: &RootFSSuperBlock) -> Result<CpioStats, &'st
 }
 
 /// mkdir -p semantics over the rootfs superblock.
-fn mkdir_p(sb: &RootFSSuperBlock, path: &str) -> Result<(), i32> {
+fn mkdir_p(sb: &dyn InitrdRamfs, path: &str) -> Result<(), i32> {
     mkdir_p_parents(sb, path)?;
-    match sb.mkdir(path) {
+    match sb.rfs_mkdir(path) {
         Ok(()) => Ok(()),
         Err(e) if e == -crate::errno::Errno::FileExists.as_neg_i32() => Ok(()),
         Err(e) => Err(e),
@@ -737,13 +739,13 @@ fn mkdir_p(sb: &RootFSSuperBlock, path: &str) -> Result<(), i32> {
 }
 
 /// Create every parent directory of `path` (not path itself).
-fn mkdir_p_parents(sb: &RootFSSuperBlock, path: &str) -> Result<(), i32> {
+fn mkdir_p_parents(sb: &dyn InitrdRamfs, path: &str) -> Result<(), i32> {
     let mut prefix = alloc::string::String::new();
     let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
     for c in &comps[..comps.len().saturating_sub(1)] {
         prefix.push('/');
         prefix.push_str(c);
-        match sb.mkdir(&prefix) {
+        match sb.rfs_mkdir(&prefix) {
             Ok(()) => {}
             Err(e) if e == -crate::errno::Errno::FileExists.as_neg_i32() => {}
             Err(e) => return Err(e),
@@ -753,26 +755,20 @@ fn mkdir_p_parents(sb: &RootFSSuperBlock, path: &str) -> Result<(), i32> {
 }
 
 /// Create (or replace) a regular file with `data` at `path`.
-fn create_file(sb: &RootFSSuperBlock, path: &str, data: Vec<u8>) -> Result<(), i32> {
+fn create_file(sb: &dyn InitrdRamfs, path: &str, data: Vec<u8>) -> Result<(), i32> {
     mkdir_p_parents(sb, path)?;
     // Replace an existing entry (later archive entries win, matching
     // Linux initramfs overwrite semantics).
     if let Some(parent) = path.rfind('/').map(|i| if i == 0 { "/" } else { &path[..i] }) {
-        if let Some(dir) = sb.lookup(parent) {
-            let base = path.rsplit('/').next().unwrap_or("");
-            dir.remove_child(base.as_bytes());
-        }
+        let base = path.rsplit('/').next().unwrap_or("");
+        sb.rfs_remove_child(parent, base);
     }
-    sb.create_file(path, data)
+    sb.rfs_create_file(path, data)
 }
 
 /// Apply cpio mode (permission bits) and mtime to a freshly created node.
-fn set_node_meta(sb: &RootFSSuperBlock, path: &str, mode: u32, mtime: u64) {
-    if let Some(node) = sb.lookup(path) {
-        // Keep the node's own type bits; apply only the permission bits.
-        let mut m = node.mode.lock();
-        *m = (*m & !0o7777) | (mode & 0o7777);
-        drop(m);
-        node.mtime.store(mtime, Ordering::Release);
-    }
+fn set_node_meta(sb: &dyn InitrdRamfs, path: &str, mode: u32, mtime: u64) {
+    // Keep the node's own type bits; apply only the permission bits
+    // (the body moved onto the trait — crate-side impl).
+    sb.rfs_set_node_meta(path, mode, mtime);
 }
