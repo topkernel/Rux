@@ -19,25 +19,25 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2099**
-- with artifact (non-GAP): **1591** (75.8%)
-- GAP: **508**
-- by kind: block=1853, unsafe-extern=7, unsafe-fn=98, unsafe-impl=141
-- by category (regions carry 0..n tags): ptr-ops=500, asm=267, volatile=154, raw-construct=30, addr-arith=28, no-preempt=14, ffi=11, static-mut=5, transmute=5, layout-meta=2
+- unsafe regions: **2029**
+- with artifact (non-GAP): **1537** (75.8%)
+- GAP: **492**
+- by kind: block=1796, unsafe-extern=7, unsafe-fn=97, unsafe-impl=129
+- by category (regions carry 0..n tags): ptr-ops=486, asm=267, volatile=154, raw-construct=31, addr-arith=28, no-preempt=14, ffi=11, static-mut=5, transmute=5, layout-meta=2
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
-| arch | 712 | 637 | 75 |
-| fs | 360 | 180 | 180 |
+| arch | 712 | 634 | 78 |
+| fs | 304 | 143 | 161 |
 | drivers | 115 | 67 | 48 |
 | debug | 109 | 87 | 22 |
 | sched | 108 | 23 | 85 |
 | sync | 106 | 95 | 11 |
 | mm | 98 | 94 | 4 |
-| tests | 82 | 80 | 2 |
 | process | 80 | 18 | 62 |
+| tests | 68 | 66 | 2 |
 | <top> | 65 | 60 | 5 |
 | ipc | 58 | 53 | 5 |
 | safety | 55 | 51 | 4 |
@@ -552,60 +552,60 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 51 | current_task_pt_regs | block | ptr-ops | INV:F19 | `4f2fb3196ddf` |
-| 105 | pt_regs_rip_for_cpu | block | - | INV:F19 | `5b837f53c42b` |
-| 112 | init | block | asm,ptr-ops,ffi | INV:F19 | `d2697afcdbca` |
-| 144 | enable_timer_interrupt | block | asm | INV:F19 | `c73292ecd366` |
-| 158 | enable_timer_interrupt | block | asm | INV:F19 | `6a2953de1dc3` |
-| 168 | disable_timer_interrupt | block | - | INV:F19 | `1f18b84e370f` |
-| 183 | enable_external_interrupt | block | asm | INV:F19 | `25c7d91d7f02` |
-| 232 | trap_handler | block | - | INV:F19 | `7b02536f5a22` |
-| 267 | trap_handler | block | - | INV:F19 | `613488ec85a6` |
-| 274 | trap_handler | block | volatile,ptr-ops | INV:F19 | `bf9df498a455` |
-| 370 | trap_handler | block | no-preempt | INV:F19 | `73cb07f989c9` |
-| 374 | trap_handler | block | ptr-ops | INV:F19 | `a2c7ad2e55b5` |
-| 379 | trap_handler | block | ptr-ops | INV:F19 | `828a30e22366` |
-| 392 | trap_handler | block | - | INV:F19 | `35917f6903d6` |
-| 393 | trap_handler | block | - | INV:F19 | `f31a8e957d35` |
-| 420 | trap_handler | block | no-preempt | INV:F19 | `ac8c79d8c0db` |
-| 428 | trap_handler | block | - | INV:F19 | `9a3e496175a3` |
-| 429 | trap_handler | block | - | INV:F19 | `85a3aadd076e` |
-| 450 | trap_handler | block | no-preempt | INV:F19 | `4e5d27774717` |
-| 458 | trap_handler | block | - | INV:F19 | `260ee04bade7` |
-| 459 | trap_handler | block | - | INV:F19 | `1c3ecd0c410e` |
-| 503 | trap_handler | block | volatile,ptr-ops | INV:F19 | `db76bfb04d48` |
-| 505 | trap_handler | block | volatile,ptr-ops | INV:F19 | `3e814e2c63f3` |
-| 699 | handle_timer_interrupt | block | - | INV:F19 | `96dedbfabf19` |
-| 745 | handle_software_interrupt | block | asm | INV:F19 | `ad40d3bdc8a1` |
-| 787 | handle_syscall | block | asm | INV:F19 | `3fc5fd202c34` |
-| 820 | handle_syscall | block | ptr-ops | INV:F19 | `89a5a58af91a` |
-| 872 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `4592abd4a411` |
-| 908 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `5a2fce9b104e` |
-| 952 | handle_illegal_instruction | block | - | INV:F19 | `cc03b0095d71` |
-| 990 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `3bf73ca2d436` |
-| 1003 | handle_illegal_instruction | block | - | INV:F19 | `2db2dd4ee26b` |
-| 1028 | handle_illegal_instruction | block | - | INV:F19 | `d89ad04bf893` |
-| 1160 | sigill_mapping_forensics | block | volatile,ptr-ops,addr-arith | INV:F19 | `a7b2dfe0808a` |
-| 1173 | sigill_mapping_forensics | block | volatile,ptr-ops,addr-arith | INV:F19 | `612ed05cbcc7` |
-| 1215 | sigill_mapping_forensics | block | volatile,ptr-ops | INV:F19 | `0e1d7d3a2cf6` |
-| 1286 | handle_breakpoint | block | - | INV:F19 | `6ff21bf71a34` |
-| 1323 | handle_breakpoint | block | - | INV:F19 | `8b31ee7bd680` |
-| 1362 | sigsegv_has_handler | block | - | INV:F19 | `20c877e34d95` |
-| 1382 | sigbus_has_handler | block | - | INV:F19 | `b9c608b770a6` |
-| 1394 | riscv_bad_user_frame | block | - | INV:F19 | `e9c6257a4208` |
-| 1421 | riscv_bad_user_frame | block | asm | INV:F19 | `5043aefaad91` |
-| 1558 | handle_page_fault | block | - | INV:F19 | `a568b3c522f3` |
-| 1567 | handle_page_fault | block | - | INV:F19 | `6a09ba1ffe78` |
-| 1572 | handle_page_fault | block | - | INV:F19 | `3d67e79c6628` |
-| 1800 | handle_page_fault | block | asm | INV:F19 | `947c1870b970` |
-| 1832 | handle_page_fault | block | - | INV:F19 | `4c32dceefb55` |
-| 1841 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `0c122a759f20` |
-| 1866 | handle_page_fault | block | ptr-ops | INV:F19 | `ac89de705515` |
-| 1869 | handle_page_fault | block | no-preempt | INV:F19 | `c21eb21091ef` |
-| 1902 | handle_page_fault | block | volatile | INV:F19 | `78a348e996b3` |
-| 1908 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `e989e9bdb53f` |
-| 1909 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `36f471a82761` |
-| 1932 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `45015f04422f` |
+| 50 | current_task_pt_regs | block | ptr-ops | INV:F19 | `b33557082dfa` |
+| 104 | pt_regs_rip_for_cpu | block | - | INV:F19 | `7113d0b3d286` |
+| 111 | init | block | asm,ptr-ops,ffi | INV:F19 | `9e3d82860d80` |
+| 143 | enable_timer_interrupt | block | asm | INV:F19 | `099a2d279215` |
+| 157 | enable_timer_interrupt | block | asm | INV:F19 | `25b8165eb0e6` |
+| 167 | disable_timer_interrupt | block | - | INV:F19 | `297b573f92ed` |
+| 182 | enable_external_interrupt | block | asm | INV:F19 | `3465e22bee17` |
+| 231 | trap_handler | block | - | INV:F19 | `3edfa0675e07` |
+| 266 | trap_handler | block | - | INV:F19 | `a1fbeb9e652c` |
+| 273 | trap_handler | block | volatile,ptr-ops | INV:F19 | `9bf284cc80d2` |
+| 369 | trap_handler | block | no-preempt | GAP | `d4c108205875` |
+| 373 | trap_handler | block | ptr-ops | INV:F19 | `5d3a4a5cfaa2` |
+| 378 | trap_handler | block | ptr-ops | INV:F19 | `ed2874d7977e` |
+| 391 | trap_handler | block | - | INV:F19 | `55443bf38967` |
+| 392 | trap_handler | block | - | INV:F19 | `77b81a5459a9` |
+| 419 | trap_handler | block | no-preempt | GAP | `e4c816aa8f94` |
+| 427 | trap_handler | block | - | INV:F19 | `0cb5dd0e1de7` |
+| 428 | trap_handler | block | - | INV:F19 | `c2b832d71e3b` |
+| 449 | trap_handler | block | no-preempt | INV:F19 | `fc158dd2c19e` |
+| 457 | trap_handler | block | - | INV:F19 | `f921516705c0` |
+| 458 | trap_handler | block | - | INV:F19 | `9951a7d9738d` |
+| 502 | trap_handler | block | volatile,ptr-ops | INV:F19 | `6c0deb07210d` |
+| 504 | trap_handler | block | volatile,ptr-ops | INV:F19 | `2f964530804f` |
+| 698 | handle_timer_interrupt | block | - | INV:F19 | `2331a1c1ef99` |
+| 744 | handle_software_interrupt | block | asm | INV:F19 | `e15b8cb3c0f7` |
+| 786 | handle_syscall | block | asm | INV:F19 | `530b81058329` |
+| 819 | handle_syscall | block | ptr-ops | INV:F19 | `4c18fa33cfcb` |
+| 871 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `efa340da45a8` |
+| 907 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `6ac1dc5d45bd` |
+| 951 | handle_illegal_instruction | block | - | INV:F19 | `8d630725a838` |
+| 989 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `a7e6a602bf90` |
+| 1002 | handle_illegal_instruction | block | - | INV:F19 | `c44a3daec66c` |
+| 1027 | handle_illegal_instruction | block | - | INV:F19 | `e9ff7ce936ae` |
+| 1159 | sigill_mapping_forensics | block | volatile,ptr-ops,addr-arith | GAP | `7750f9595c3a` |
+| 1172 | sigill_mapping_forensics | block | volatile,ptr-ops,addr-arith | INV:F19 | `93637b0a19c6` |
+| 1214 | sigill_mapping_forensics | block | volatile,ptr-ops | INV:F19 | `c3e19f6b1969` |
+| 1285 | handle_breakpoint | block | - | INV:F19 | `32368445472e` |
+| 1322 | handle_breakpoint | block | - | INV:F19 | `478a5f7325ad` |
+| 1361 | sigsegv_has_handler | block | - | INV:F19 | `8db096cf686f` |
+| 1381 | sigbus_has_handler | block | - | INV:F19 | `80978aaf8639` |
+| 1393 | riscv_bad_user_frame | block | - | INV:F19 | `f07fff8e3663` |
+| 1420 | riscv_bad_user_frame | block | asm | INV:F19 | `6a3fe44e150d` |
+| 1557 | handle_page_fault | block | - | INV:F19 | `5653af9d285e` |
+| 1566 | handle_page_fault | block | - | INV:F19 | `752109ce221f` |
+| 1571 | handle_page_fault | block | - | INV:F19 | `90e78779417b` |
+| 1799 | handle_page_fault | block | asm | INV:F19 | `5dc56ea0fd08` |
+| 1831 | handle_page_fault | block | - | INV:F19 | `847385acc552` |
+| 1840 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `98dac8f29459` |
+| 1865 | handle_page_fault | block | ptr-ops | INV:F19 | `eef51dde8f91` |
+| 1868 | handle_page_fault | block | no-preempt | INV:F19 | `7833fa7dad8b` |
+| 1901 | handle_page_fault | block | volatile | INV:F19 | `adba47010328` |
+| 1907 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `4617c8b73e5d` |
+| 1908 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `4cd46fe0c2b1` |
+| 1931 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `4860867a3134` |
 
 ### kernel/src/arch/riscv64/uaccess.rs (12)
 
@@ -1130,14 +1130,6 @@ census id is accounted for here.
 | 427 | write | block | - | GAP | `b88716778efd` |
 | 466 | resize | block | ptr-ops | GAP | `0d1b27dcf541` |
 
-### kernel/src/fs/debugfs.rs (3)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 85 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `16d407bf9a71` |
-| 86 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `1c8f75269c25` |
-| 485 | debugfs_destroy_inode | block | ptr-ops | INV:INV-FS-PRIVDATA-1 | `193f20d35347` |
-
 ### kernel/src/fs/dentry.rs (22)
 
 | line | fn | kind | categories | artifact | id |
@@ -1164,17 +1156,6 @@ census id is accounted for here.
 | 1059 | big_memo_ensure_locked | block | - | INV:INV-DENTRY-MEMO-1 | `b43ca18cb0f5` |
 | 1403 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `90dabfb680a1` |
 | 1404 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `1d6b1c3c26a7` |
-
-### kernel/src/fs/devfs/mod.rs (6)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 1573 | devfs_destroy_inode | block | ptr-ops | GAP | `7579b2fdd7c2` |
-| 1763 | devfs_link | block | ptr-ops | GAP | `84922d1a082f` |
-| 1903 | copy_in | block | ptr-ops | GAP | `df2a5309d2bf` |
-| 1911 | copy_out | block | ptr-ops | GAP | `aff5b3d9d70f` |
-| 1924 | zero | block | ptr-ops | GAP | `2705df56bca8` |
-| 1949 | shared_grow_locked | block | ptr-ops | GAP | `36d66131ad15` |
 
 ### kernel/src/fs/elf.rs (1)
 
@@ -1280,20 +1261,20 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 390 | fsctx_close | block | - | GAP | `a866bbee65dc` |
-| 391 | fsctx_close | block | ptr-ops | GAP | `a0962ad8df10` |
-| 392 | fsctx_close | block | - | GAP | `ad4a6fbf6799` |
-| 409 | fsctx_of | block | - | GAP | `b10c4a3605b1` |
-| 410 | fsctx_of | block | ptr-ops | GAP | `3b7f487e9037` |
-| 422 | fsctx_of_mut | block | - | GAP | `acdf8fc53a09` |
-| 423 | fsctx_of_mut | block | ptr-ops | GAP | `260c8edb400a` |
-| 434 | mountfd_close | block | - | GAP | `44bfa2d0837d` |
-| 435 | mountfd_close | block | ptr-ops | GAP | `f16fa67d718c` |
-| 436 | mountfd_close | block | - | GAP | `e3da7894395f` |
-| 452 | mountfd_of | block | - | GAP | `3274d5d86f47` |
-| 453 | mountfd_of | block | ptr-ops | GAP | `13b1251e4ff5` |
-| 469 | treepath_dentry | block | - | GAP | `07ab4b6c5f50` |
-| 500 | make_detached_mount | block | ptr-ops | GAP | `2f864cfd6761` |
+| 394 | fsctx_close | block | - | GAP | `b1585ad47e01` |
+| 395 | fsctx_close | block | ptr-ops | GAP | `8adab53934a9` |
+| 396 | fsctx_close | block | - | GAP | `ec19ed0b7832` |
+| 413 | fsctx_of | block | - | GAP | `121db1653005` |
+| 414 | fsctx_of | block | ptr-ops | GAP | `67290c52b71c` |
+| 426 | fsctx_of_mut | block | - | GAP | `fdbd45e61693` |
+| 427 | fsctx_of_mut | block | ptr-ops | GAP | `274701b1de43` |
+| 438 | mountfd_close | block | - | GAP | `e98484a2c041` |
+| 439 | mountfd_close | block | ptr-ops | GAP | `9d73b7086010` |
+| 440 | mountfd_close | block | - | GAP | `4a4476609504` |
+| 456 | mountfd_of | block | - | GAP | `534cc81b3fc1` |
+| 457 | mountfd_of | block | ptr-ops | GAP | `15bfa28afec0` |
+| 473 | treepath_dentry | block | - | GAP | `7bea2447e8c3` |
+| 504 | make_detached_mount | block | ptr-ops | GAP | `5a446143c1f8` |
 
 ### kernel/src/fs/inode.rs (8)
 
@@ -1314,13 +1295,6 @@ census id is accounted for here.
 |------|----|------|------------|----------|----|
 | 156 | <module> | unsafe-impl | - | GAP | `282784d87f2e` |
 | 158 | <module> | unsafe-impl | - | GAP | `4bf3e7a5532b` |
-
-### kernel/src/fs/mod.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 81 | read_file_from_rootfs | block | - | GAP | `9258ac347a74` |
-| 88 | read_file_from_rootfs | block | - | GAP | `f184c7885eb5` |
 
 ### kernel/src/fs/mount.rs (2)
 
@@ -1383,83 +1357,6 @@ census id is accounted for here.
 | 193 | pidfd_close | block | - | INV:INV-FS-FILEPRIV-1 | `01925da03920` |
 | 196 | pidfd_close | block | - | INV:INV-FS-FILEPRIV-1 | `26a4dd6286a9` |
 
-### kernel/src/fs/procfs/mod.rs (3)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 564 | <module> | unsafe-impl | - | INV:INV-PROCFS-SEND-1 | `267a2eb5e14a` |
-| 567 | <module> | unsafe-impl | - | INV:INV-PROCFS-SEND-1 | `5c4290311f3e` |
-| 1240 | procfs_kill_sb | block | ptr-ops | INV:INV-SBTYPE-1 | `33a6021833d4` |
-
-### kernel/src/fs/procfs/pid.rs (14)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 156 | get | block | - | INV:INV-PROC-PIN-1 | `9e9ea9a84460` |
-| 321 | generate_status | block | - | INV:INV-PROC-PIN-1 | `636b035bf975` |
-| 486 | read_target_user_mm | block | - | INV:INV-PROC-PIN-1 | `556a180ee350` |
-| 494 | read_target_user_mm | block | raw-construct | INV:INV-PROC-PIN-1 | `3bf31874c664` |
-| 626 | generate_stat | block | - | INV:INV-PROC-PIN-1 | `0ae2c9b630bd` |
-| 847 | generate_smaps | block | - | INV:INV-PROC-PIN-1 | `ed58e4fb6b20` |
-| 1004 | generate_maps | block | - | INV:INV-PROC-PIN-1 | `f60b86304315` |
-| 1023 | generate_maps | block | - | INV:INV-PROC-PIN-1 | `14a79db0f975` |
-| 1028 | generate_maps | block | - | INV:INV-PROC-PIN-1 | `4c31ce97657b` |
-| 1130 | get_fd_path | block | - | INV:INV-PROC-PIN-1 | `2cdcc40ff2b0` |
-| 1139 | get_fd_path | block | - | INV:INV-PROC-PIN-1 | `7896c0a512d1` |
-| 1209 | generate_oom_score | block | - | INV:INV-PROC-PIN-1 | `c8bfe923da13` |
-| 1222 | generate_oom_score | block | - | INV:INV-PROC-PIN-1 | `cc7431592c11` |
-| 1244 | generate_oom_score_adj | block | - | INV:INV-PROC-PIN-1 | `344e6eaea734` |
-
-### kernel/src/fs/procfs/self_proc.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 36 | get_thread_self_link | block | - | INV:INV-KTASK-1 | `88faa275147e` |
-
-### kernel/src/fs/procfs/stat.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 163 | procs_blocked | block | - | INV:INV-KTASK-1 | `c39593be6931` |
-
-### kernel/src/fs/procfs/sysrq.rs (4)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 135 | signal_all_except_init | block | - | INV:INV-SYSRQ-1 | `098cc21331b8` |
-| 160 | dump_all_cpu_stacks | block | - | INV:INV-SYSRQ-1 | `2e7934717310` |
-| 204 | print_task_stack_words | block | volatile | INV:INV-SYSRQ-1 | `f23c0e6f8e42` |
-| 223 | dump_blocked_tasks | block | - | INV:INV-SYSRQ-1 | `621de486f74a` |
-
-### kernel/src/fs/procfs/vmstat.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 48 | nr_free_pages | block | - | INV:INV-STATIC-CELL-1 | `e62c9fc06356` |
-| 151 | generate_buddyinfo | block | - | INV:INV-STATIC-CELL-1 | `f87350a7cf4c` |
-
-### kernel/src/fs/pty.rs (4)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 713 | copy_out | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `8c958f40292a` |
-| 720 | copy_in | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `1cbe9d1331e4` |
-| 960 | pty_ioctl | block | - | INV:INV-FS-FILEPRIV-1 | `9038f0cf3c90` |
-| 961 | pty_ioctl | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `25be3865f450` |
-
-### kernel/src/fs/rootfs.rs (8)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 72 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `4e75d887470b` |
-| 75 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `cf205e01e29d` |
-| 308 | <module> | unsafe-impl | - | INV:INV-FS-GLOBALSB-1 | `304f2029e9bf` |
-| 311 | <module> | unsafe-impl | - | INV:INV-FS-GLOBALSB-1 | `c2314620ba22` |
-| 339 | name | block | - | INV:INV-FS-GLOBALSB-1 | `47d754c7e258` |
-| 402 | set_name | block | - | INV:INV-FS-GLOBALSB-1 | `9b68fd404e2b` |
-| 1290 | init_rootfs | block | - | INV:INV-FS-GLOBALSB-1 | `970ac14c1bc9` |
-| 1910 | rootfs_destroy_inode | block | ptr-ops | INV:INV-FS-PRIVDATA-1 | `aa94dcb290bf` |
-
 ### kernel/src/fs/stat.rs (2)
 
 | line | fn | kind | categories | artifact | id |
@@ -1476,29 +1373,7 @@ census id is accounted for here.
 | 219 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `89a73dfdc608` |
 | 220 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `f0d45dde0878` |
 
-### kernel/src/fs/tmpfs.rs (17)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 98 | drop | block | - | INV:INV-TMPFS-SB-1 | `7b64feaa6a47` |
-| 108 | <module> | unsafe-impl | - | INV:INV-TMPFS-SB-1 | `db30928ace57` |
-| 169 | <module> | unsafe-impl | - | INV:INV-TMPFS-SB-1 | `0de4c6fa9fa3` |
-| 170 | <module> | unsafe-impl | - | INV:INV-TMPFS-SB-1 | `fc97e479dc32` |
-| 185 | new | block | - | INV:INV-TMPFS-SB-1 | `a3721b42e5fe` |
-| 213 | name | block | - | INV:INV-TMPFS-SB-1 | `8af4e2581b16` |
-| 219 | set_name | block | - | INV:INV-TMPFS-SB-1 | `28f3762f8421` |
-| 306 | read_at | block | ptr-ops | GAP | `20e6da32d26c` |
-| 626 | reserve_page | block | - | GAP | `57ab6733821a` |
-| 703 | <module> | unsafe-fn | ptr-ops | GAP | `30112785d1df` |
-| 802 | <module> | unsafe-impl | - | GAP | `a5f4aa2c8216` |
-| 817 | create_mount_instance | block | - | GAP | `4febd8e48cb1` |
-| 821 | create_mount_instance | block | - | GAP | `5db4212cc748` |
-| 997 | tmpfs_symlink | block | ptr-ops | GAP | `7c253db7e910` |
-| 1084 | tmpfs_link | block | - | GAP | `cf7e6e8bbf4e` |
-| 1223 | tmpfs_getattr | block | - | GAP | `1d7e711dec90` |
-| 1376 | tmpfs_destroy_inode | block | ptr-ops | GAP | `c89c242af3dd` |
-
-### kernel/src/fs/unsafe_edges.rs (29)
+### kernel/src/fs/unsafe_edges.rs (39)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -1528,11 +1403,21 @@ census id is accounted for here.
 | 285 | file_privdata_arc_clone | block | - | GAP | `85a93422bac0` |
 | 298 | vec_zeroed_sized | block | ptr-ops | GAP | `1023ac52b317` |
 | 309 | kernel_slice | block | raw-construct | GAP | `f94fc78099f7` |
-| 315 | kernel_slice_mut | block | - | GAP | `52dac6a0081c` |
-| 323 | file_close | block | - | GAP | `012cdc2f6b6b` |
-| 337 | file_privdata_arc_static | block | - | GAP | `028178a8eacc` |
+| 315 | kernel_slice_mut | block | - | GAP | `abe9485f0fa1` |
+| 326 | file_dentry | block | - | INV:INV-FS-FILEDENTRY-1 | `42d1abc9122f` |
+| 337 | task_group_leader | block | - | INV:INV-PROC-TGL-1 | `e242082009a0` |
+| 350 | user_page_slice | block | raw-construct | INV:INV-PROC-USERPAGE-1 | `a328da808289` |
+| 359 | diag_read_u64 | block | volatile | INV:INV-PROC-DIAG-1 | `6a89f0a9e04a` |
+| 369 | diag_task_ref | block | - | INV:INV-PROC-DIAG-1 | `139782cff4ea` |
+| 384 | privdata_arc_clone | block | - | INV:INV-FS-PRIVDATA-1 | `6b18609376cb` |
+| 397 | kva_copy_to | block | ptr-ops | INV:INV-DEVFS-SHARED-1 | `c5eaf45aa635` |
+| 403 | kva_copy_from | block | ptr-ops | INV:INV-DEVFS-SHARED-1 | `bc13c6119c1c` |
+| 410 | kva_zero | block | ptr-ops | INV:INV-DEVFS-SHARED-1 | `db06c6eec829` |
+| 419 | kernel_slice_at | block | raw-construct | INV:INV-FS-KSLICE-1 | `f52aa63ba4f6` |
+| 427 | file_close | block | - | GAP | `3d66e6b4e434` |
+| 441 | file_privdata_arc_static | block | - | GAP | `7b9bcb3ec98c` |
 
-### kernel/src/fs/vfs.rs (28)
+### kernel/src/fs/vfs.rs (27)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -1557,13 +1442,12 @@ census id is accounted for here.
 | 3402 | path_lookup | block | - | GAP | `761a0f382f58` |
 | 3407 | path_lookup | block | - | GAP | `8c186263f3ad` |
 | 5428 | file_open_tmpfile | block | - | GAP | `5637bd94786f` |
-| 7132 | mem_file_content | block | - | GAP | `628f70a0de29` |
-| 7133 | mem_file_content | block | ptr-ops | GAP | `8e7a6437414b` |
-| 7139 | mem_file_content_mut | block | - | GAP | `e188f6593745` |
-| 7140 | mem_file_content_mut | block | ptr-ops | GAP | `f8659df27f81` |
-| 7146 | mem_file_take_owned | block | - | GAP | `9f85d055ed36` |
-| 7147 | mem_file_take_owned | block | ptr-ops | GAP | `2efa8416b426` |
-| 7325 | vfs_fallocate | block | ptr-ops | GAP | `6eb20adeedd1` |
+| 7129 | mem_file_content | block | - | GAP | `a4dba64e1b91` |
+| 7130 | mem_file_content | block | ptr-ops | GAP | `e77334c0e849` |
+| 7136 | mem_file_content_mut | block | - | GAP | `b682118a7f94` |
+| 7137 | mem_file_content_mut | block | ptr-ops | GAP | `8fba36454f1d` |
+| 7143 | mem_file_take_owned | block | - | GAP | `0e486a6f71b3` |
+| 7144 | mem_file_take_owned | block | ptr-ops | GAP | `b9bdfd1ef9ab` |
 
 ### kernel/src/fs/vt.rs (12)
 
@@ -1650,12 +1534,12 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 591 | device_of_file | block | ptr-ops | INV:INV-SREF-1 | `5cc3bbccd741` |
-| 671 | node_of_file | block | ptr-ops | INV:INV-SREF-1 | `6e74b52dceef` |
-| 845 | evdev_file_close | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `235d3412a83d` |
-| 861 | evdev_file_close | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `5b58552d4585` |
-| 947 | evdev_poll_wait | block | - | INV:INV-KTASK-1 | `df1c1f7fcad8` |
-| 992 | evdev_poll_unwait | block | - | INV:INV-KTASK-1 | `984f71a920f4` |
+| 590 | device_of_file | block | ptr-ops | INV:INV-SREF-1 | `41ee5e5fa620` |
+| 670 | node_of_file | block | ptr-ops | INV:INV-SREF-1 | `b882992413fc` |
+| 844 | evdev_file_close | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `f0e752e41902` |
+| 860 | evdev_file_close | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `4f72d0827781` |
+| 946 | evdev_poll_wait | block | - | INV:INV-KTASK-1 | `f7a78601472a` |
+| 991 | evdev_poll_unwait | block | - | INV:INV-KTASK-1 | `7b10adc65e21` |
 
 ### kernel/src/drivers/input/mod.rs (1)
 
@@ -1712,10 +1596,10 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 481 | loop_devno_of | block | ptr-ops | INV:INV-BLKDEV-2 | `0c0f76e6b19f` |
-| 515 | loop_file_read | block | ptr-ops | INV:INV-BLKDEV-2 | `94570756bf03` |
-| 562 | loop_file_write | block | ptr-ops | GAP | `8ef3dd1df67a` |
-| 726 | loop_file_ioctl | block | ptr-ops | GAP | `ab586a1c0487` |
+| 478 | loop_devno_of | block | ptr-ops | INV:INV-BLKDEV-2 | `658531b14870` |
+| 512 | loop_file_read | block | ptr-ops | INV:INV-BLKDEV-2 | `8033ed979de5` |
+| 559 | loop_file_write | block | ptr-ops | GAP | `40ca8127344d` |
+| 720 | loop_file_ioctl | block | ptr-ops | GAP | `4af74575432c` |
 
 ### kernel/src/drivers/net/space.rs (2)
 
@@ -2408,6 +2292,108 @@ census id is accounted for here.
 | 449 | vdso_data_tick | block | - | INV:INV-MM-4 | `d972e9554f3e` |
 | 1490 | vdso_init | block | - | INV:INV-MM-4 | `26992aac7262` |
 
+## process
+
+### kernel/src/process/mod.rs (3)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 82 | set_user_tls | block | - | GAP | `f58c14ff6fd8` |
+| 112 | current_pgid | block | - | GAP | `960935ebc3fe` |
+| 133 | find_task_by_pid | block | - | GAP | `4e7c258628b9` |
+
+### kernel/src/process/ptrace.rs (1)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 368 | sys_ptrace | block | ptr-ops | INV:INV-PROC-BORROW-1 | `933975afa1e8` |
+
+### kernel/src/process/task_ref.rs (5)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 78 | <module> | unsafe-fn | - | INV:INV-TASKREF-1 | `b4a45dfecc65` |
+| 91 | deref | block | - | INV:INV-TASKREF-1 | `66f9b55e364b` |
+| 101 | deref_mut | block | - | INV:INV-TASKREF-1 | `d205ba0b4367` |
+| 158 | deref | block | - | INV:INV-TASKREF-1 | `4a7d2d54e167` |
+| 166 | deref_mut | block | - | INV:INV-TASKREF-1 | `8ebb43e27f18` |
+
+### kernel/src/process/unsafe_edges.rs (71)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 55 | borrow_task | block | - | INV:INV-PROC-BORROW-1 | `2beaa1051168` |
+| 72 | borrow_task_mut | block | - | INV:INV-PROC-BORROW-1 | `7e183034b210` |
+| 107 | place_task | block | - | INV:INV-PROC-PLACE-2 | `36403cdf6b01` |
+| 148 | dump_read_page | block | - | INV:INV-PROC-COREDUMP-1 | `8e8d1c42bc8b` |
+| 159 | dump_read_page | block | ptr-ops | INV:INV-PROC-COREDUMP-1 | `ba65a672fa36` |
+| 174 | file_private_data_ref | block | - | INV:INV-PROC-NSFILE-1 | `1147a3c17197` |
+| 175 | file_private_data_ref | block | ptr-ops | INV:INV-PROC-NSFILE-1 | `86fb980532dc` |
+| 189 | file_private_data_take_boxed | block | - | INV:INV-PROC-NSFILE-2 | `a94702b4b993` |
+| 190 | file_private_data_take_boxed | block | ptr-ops | INV:INV-PROC-NSFILE-2 | `3774c99e046d` |
+| 205 | file_private_data_mut | block | - | INV:INV-PROC-NSFILE-1 | `385f00f307fe` |
+| 206 | file_private_data_mut | block | ptr-ops | INV:INV-PROC-NSFILE-1 | `ddee7370ee00` |
+| 220 | read_volatile_u64 | block | volatile | INV:INV-PROC-DIAG-1 | `41a8a08b0b04` |
+| 261 | journal_handle | block | - | GAP | `34d7229e9014` |
+| 294 | free_fork_pt_regs | block | ptr-ops | GAP | `1d9783c20de7` |
+| 308 | switch_to_kernel_root_on_exit | block | - | GAP | `f0fe644473e9` |
+| 313 | switch_to_kernel_root_on_exit | block | - | GAP | `c6ebae7ffbc3` |
+| 327 | apppark_rets | block | - | GAP | `251f5738f12d` |
+| 343 | freelist_next | block | ptr-ops | GAP | `1fa4f839037c` |
+| 353 | freelist_link | block | ptr-ops | GAP | `36f6904403df` |
+| 366 | heap_alloc | block | - | GAP | `1e446560f7d1` |
+| 376 | heap_dealloc | block | - | GAP | `93036d850858` |
+| 386 | slot_ptr | block | - | GAP | `1c2b11f640f7` |
+| 397 | zero_bytes | block | ptr-ops | GAP | `b61a6220f60b` |
+| 407 | write_volatile_u64 | block | volatile | GAP | `2a5a657a027d` |
+| 415 | <module> | unsafe-impl | - | GAP | `68394320515f` |
+| 419 | <module> | unsafe-impl | - | GAP | `82257b96fdac` |
+| 428 | read_volatile_u32 | block | volatile | GAP | `2627e91bdd29` |
+| 443 | borrow_active_mm | block | - | GAP | `8c4a28ce1ad2` |
+| 462 | list_add_tail | block | - | GAP | `fced08337c05` |
+| 472 | list_del | block | - | GAP | `8a34f268d98d` |
+| 486 | list_for_each | block | - | GAP | `c55f0803cd3b` |
+| 506 | store_pick_qword | block | ptr-ops | GAP | `3daacc34f83e` |
+| 519 | paint_bytes | block | ptr-ops | GAP | `31ee974f7c44` |
+| 539 | frame_mut | block | - | GAP | `289aa43ac16e` |
+| 551 | frame_ref | block | - | GAP | `1abc378a08b9` |
+| 577 | exec_copy_user_image | block | - | GAP | `3a2f39958ba8` |
+| 588 | exec_copy_user_image | block | ptr-ops | GAP | `0cbe7512f232` |
+| 609 | exec_phdr_at | block | - | GAP | `d4c9f8468752` |
+| 619 | exec_ehdr_from | block | - | GAP | `811453db8a49` |
+| 631 | exec_map_user_range | block | - | GAP | `d17490921287` |
+| 650 | exec_map_user_region_static | block | - | GAP | `ad3c35771755` |
+| 661 | exec_probe_read_u64 | block | - | GAP | `a6911324816a` |
+| 666 | exec_probe_read_u64 | block | volatile,ptr-ops | GAP | `e4721764ba9f` |
+| 680 | exec_free_user_page_trees | block | - | GAP | `4269129be677` |
+| 698 | exec_write_sigtramp | block | volatile,ptr-ops | GAP | `c21f10cd3cac` |
+| 712 | exec_mm_new_user | block | - | GAP | `5a53d097927d` |
+| 725 | exec_switch_address_space | block | - | GAP | `73e2772c1d47` |
+| 760 | exec_set_leaf_flags_range | block | - | GAP | `7f2e8732d245` |
+| 807 | exec_set_leaf_flags_range | block | - | GAP | `634932bb5826` |
+| 866 | exec_set_leaf_flags_range | block | - | GAP | `ee1e3ff7a2b8` |
+| 886 | fork_save_parent_fpu | block | - | GAP | `a13705dffce9` |
+| 897 | fork_save_parent_vstate | block | - | GAP | `1bf798093a9f` |
+| 908 | fork_save_parent_fpu | block | - | GAP | `593878f82042` |
+| 917 | fork_fpu_save_for_switch | block | - | GAP | `c18168a96e75` |
+| 928 | fork_pt_walk | block | - | GAP | `3562ce6b38e0` |
+| 941 | fork_handle_cow_fault | block | - | GAP | `ffee5a672d8f` |
+| 961 | fork_write_child_tid | block | volatile,ptr-ops | GAP | `4c54f5e44779` |
+| 974 | read_user_tp_register | block | asm | GAP | `318d2e3519dd` |
+| 994 | page_refcount | block | - | GAP | `1bd6ea89493d` |
+| 1004 | <module> | unsafe-impl | - | GAP | `606b3c438273` |
+| 1006 | <module> | unsafe-impl | - | GAP | `3b41c10ac489` |
+| 1025 | pid_hash_unlink_store | block | - | GAP | `8859b8da73db` |
+| 1045 | ptrace_translate | block | - | GAP | `95678d71ca06` |
+| 1056 | ptrace_read_word | block | volatile,ptr-ops | GAP | `4a4c61fe0601` |
+| 1067 | ptrace_write_word | block | volatile,ptr-ops | GAP | `26e69e152a54` |
+| 1080 | ptrace_copy_chunk | block | ptr-ops | GAP | `e7c13a34fc4f` |
+| 1098 | ptrace_flush_icache | block | asm | GAP | `e593ef113da5` |
+| 1114 | ptrace_flush_icache | block | asm | GAP | `2c1ba9cc2662` |
+| 1139 | ptrace_read_gregset | block | ptr-ops | GAP | `3a94b81cc5c0` |
+| 1157 | ptrace_write_gregset | block | ptr-ops | GAP | `2bb6b493d55b` |
+| 1172 | zeroed_siginfo | block | - | GAP | `cfe67ea2ff3f` |
+
 ## tests
 
 ### kernel/src/tests/fdtable.rs (2)
@@ -2416,17 +2402,6 @@ census id is accounted for here.
 |------|----|------|------------|----------|----|
 | 43 | test_fdtable | block | - | INV:INV-TESTHARNESS-1 | `76754ff85f8d` |
 | 57 | test_fdtable | block | - | INV:INV-TESTHARNESS-1 | `200b69884485` |
-
-### kernel/src/tests/file_open.rs (6)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 29 | test_file_open | block | - | INV:INV-TESTHARNESS-1 | `3715df32f4a1` |
-| 71 | test_file_open | block | - | INV:INV-TESTHARNESS-1 | `cbb2e64105e2` |
-| 85 | test_file_open | block | - | INV:INV-TESTHARNESS-1 | `491f8329f8a6` |
-| 97 | test_file_open | block | - | INV:INV-TESTHARNESS-1 | `b73447e3a0a6` |
-| 118 | test_file_open | block | - | INV:INV-TESTHARNESS-1 | `dea4b7a64fa7` |
-| 144 | test_file_open | block | - | INV:INV-TESTHARNESS-1 | `11b2be3f1ce3` |
 
 ### kernel/src/tests/framebuffer.rs (1)
 
@@ -2456,17 +2431,6 @@ census id is accounted for here.
 | 97 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `562cca85bbb7` |
 | 111 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `b7ae15f070dc` |
 | 113 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `e03eb824bf91` |
-
-### kernel/src/tests/mkdir_unlink.rs (6)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 39 | test_mkdir | block | - | INV:INV-TESTHARNESS-1 | `50f7655522f7` |
-| 41 | test_mkdir | block | - | INV:INV-TESTHARNESS-1 | `c0d8224d47eb` |
-| 95 | test_rmdir | block | - | INV:INV-TESTHARNESS-1 | `c20584d48b87` |
-| 97 | test_rmdir | block | - | INV:INV-TESTHARNESS-1 | `98693563d5c8` |
-| 163 | test_unlink | block | - | INV:INV-TESTHARNESS-1 | `8971a83c7789` |
-| 165 | test_unlink | block | - | INV:INV-TESTHARNESS-1 | `faa3b2f6a714` |
 
 ### kernel/src/tests/mod.rs (1)
 
@@ -2591,13 +2555,6 @@ census id is accounted for here.
 | 289 | test_sys_clock_getres | block | ptr-ops | INV:INV-TESTHARNESS-1 | `d520e4ae4888` |
 | 290 | test_sys_clock_getres | block | ptr-ops | INV:INV-TESTHARNESS-1 | `bdd4f78fc6ba` |
 
-### kernel/src/tests/tmpfs_mknod.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 141 | test_tmpfs_mknod | block | - | INV:INV-TESTHARNESS-1 | `addd3f1855e8` |
-| 166 | test_tmpfs_mknod | block | - | INV:INV-TESTHARNESS-1 | `90d3f6f11526` |
-
 ### kernel/src/tests/virtio_net.rs (1)
 
 | line | fn | kind | categories | artifact | id |
@@ -2611,108 +2568,6 @@ census id is accounted for here.
 | 56 | test_wait4_no_child | block | ptr-ops | INV:INV-TESTHARNESS-1 | `fb9c85803dff` |
 | 66 | test_wait4_wnohang_no_child | block | ptr-ops | INV:INV-TESTHARNESS-1 | `2c4f27fc545a` |
 | 81 | test_wait4_wnohang_after_fork | block | ptr-ops | INV:INV-TESTHARNESS-1 | `2973f32af239` |
-
-## process
-
-### kernel/src/process/mod.rs (3)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 82 | set_user_tls | block | - | GAP | `f58c14ff6fd8` |
-| 112 | current_pgid | block | - | GAP | `960935ebc3fe` |
-| 133 | find_task_by_pid | block | - | GAP | `4e7c258628b9` |
-
-### kernel/src/process/ptrace.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 368 | sys_ptrace | block | ptr-ops | INV:INV-PROC-BORROW-1 | `933975afa1e8` |
-
-### kernel/src/process/task_ref.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 78 | <module> | unsafe-fn | - | INV:INV-TASKREF-1 | `b4a45dfecc65` |
-| 91 | deref | block | - | INV:INV-TASKREF-1 | `66f9b55e364b` |
-| 101 | deref_mut | block | - | INV:INV-TASKREF-1 | `d205ba0b4367` |
-| 158 | deref | block | - | INV:INV-TASKREF-1 | `4a7d2d54e167` |
-| 166 | deref_mut | block | - | INV:INV-TASKREF-1 | `8ebb43e27f18` |
-
-### kernel/src/process/unsafe_edges.rs (71)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 55 | borrow_task | block | - | INV:INV-PROC-BORROW-1 | `2beaa1051168` |
-| 72 | borrow_task_mut | block | - | INV:INV-PROC-BORROW-1 | `7e183034b210` |
-| 107 | place_task | block | - | INV:INV-PROC-PLACE-2 | `36403cdf6b01` |
-| 148 | dump_read_page | block | - | INV:INV-PROC-COREDUMP-1 | `8e8d1c42bc8b` |
-| 159 | dump_read_page | block | ptr-ops | INV:INV-PROC-COREDUMP-1 | `ba65a672fa36` |
-| 174 | file_private_data_ref | block | - | INV:INV-PROC-NSFILE-1 | `1147a3c17197` |
-| 175 | file_private_data_ref | block | ptr-ops | INV:INV-PROC-NSFILE-1 | `86fb980532dc` |
-| 189 | file_private_data_take_boxed | block | - | INV:INV-PROC-NSFILE-2 | `a94702b4b993` |
-| 190 | file_private_data_take_boxed | block | ptr-ops | INV:INV-PROC-NSFILE-2 | `3774c99e046d` |
-| 205 | file_private_data_mut | block | - | INV:INV-PROC-NSFILE-1 | `385f00f307fe` |
-| 206 | file_private_data_mut | block | ptr-ops | INV:INV-PROC-NSFILE-1 | `ddee7370ee00` |
-| 220 | read_volatile_u64 | block | volatile | INV:INV-PROC-DIAG-1 | `41a8a08b0b04` |
-| 261 | journal_handle | block | - | GAP | `34d7229e9014` |
-| 294 | free_fork_pt_regs | block | ptr-ops | GAP | `1d9783c20de7` |
-| 308 | switch_to_kernel_root_on_exit | block | - | GAP | `f0fe644473e9` |
-| 313 | switch_to_kernel_root_on_exit | block | - | GAP | `c6ebae7ffbc3` |
-| 327 | apppark_rets | block | - | GAP | `251f5738f12d` |
-| 343 | freelist_next | block | ptr-ops | GAP | `1fa4f839037c` |
-| 353 | freelist_link | block | ptr-ops | GAP | `36f6904403df` |
-| 366 | heap_alloc | block | - | GAP | `1e446560f7d1` |
-| 376 | heap_dealloc | block | - | GAP | `93036d850858` |
-| 386 | slot_ptr | block | - | GAP | `1c2b11f640f7` |
-| 397 | zero_bytes | block | ptr-ops | GAP | `b61a6220f60b` |
-| 407 | write_volatile_u64 | block | volatile | GAP | `2a5a657a027d` |
-| 415 | <module> | unsafe-impl | - | GAP | `68394320515f` |
-| 419 | <module> | unsafe-impl | - | GAP | `82257b96fdac` |
-| 428 | read_volatile_u32 | block | volatile | GAP | `2627e91bdd29` |
-| 443 | borrow_active_mm | block | - | GAP | `8c4a28ce1ad2` |
-| 462 | list_add_tail | block | - | GAP | `fced08337c05` |
-| 472 | list_del | block | - | GAP | `8a34f268d98d` |
-| 486 | list_for_each | block | - | GAP | `c55f0803cd3b` |
-| 506 | store_pick_qword | block | ptr-ops | GAP | `3daacc34f83e` |
-| 519 | paint_bytes | block | ptr-ops | GAP | `31ee974f7c44` |
-| 539 | frame_mut | block | - | GAP | `289aa43ac16e` |
-| 551 | frame_ref | block | - | GAP | `1abc378a08b9` |
-| 577 | exec_copy_user_image | block | - | GAP | `3a2f39958ba8` |
-| 588 | exec_copy_user_image | block | ptr-ops | GAP | `0cbe7512f232` |
-| 609 | exec_phdr_at | block | - | GAP | `d4c9f8468752` |
-| 619 | exec_ehdr_from | block | - | GAP | `811453db8a49` |
-| 631 | exec_map_user_range | block | - | GAP | `d17490921287` |
-| 650 | exec_map_user_region_static | block | - | GAP | `ad3c35771755` |
-| 661 | exec_probe_read_u64 | block | - | GAP | `a6911324816a` |
-| 666 | exec_probe_read_u64 | block | volatile,ptr-ops | GAP | `e4721764ba9f` |
-| 680 | exec_free_user_page_trees | block | - | GAP | `4269129be677` |
-| 698 | exec_write_sigtramp | block | volatile,ptr-ops | GAP | `c21f10cd3cac` |
-| 712 | exec_mm_new_user | block | - | GAP | `5a53d097927d` |
-| 725 | exec_switch_address_space | block | - | GAP | `73e2772c1d47` |
-| 760 | exec_set_leaf_flags_range | block | - | GAP | `7f2e8732d245` |
-| 807 | exec_set_leaf_flags_range | block | - | GAP | `634932bb5826` |
-| 866 | exec_set_leaf_flags_range | block | - | GAP | `ee1e3ff7a2b8` |
-| 886 | fork_save_parent_fpu | block | - | GAP | `a13705dffce9` |
-| 897 | fork_save_parent_vstate | block | - | GAP | `1bf798093a9f` |
-| 908 | fork_save_parent_fpu | block | - | GAP | `593878f82042` |
-| 917 | fork_fpu_save_for_switch | block | - | GAP | `c18168a96e75` |
-| 928 | fork_pt_walk | block | - | GAP | `3562ce6b38e0` |
-| 941 | fork_handle_cow_fault | block | - | GAP | `ffee5a672d8f` |
-| 961 | fork_write_child_tid | block | volatile,ptr-ops | GAP | `4c54f5e44779` |
-| 974 | read_user_tp_register | block | asm | GAP | `318d2e3519dd` |
-| 994 | page_refcount | block | - | GAP | `1bd6ea89493d` |
-| 1004 | <module> | unsafe-impl | - | GAP | `606b3c438273` |
-| 1006 | <module> | unsafe-impl | - | GAP | `3b41c10ac489` |
-| 1025 | pid_hash_unlink_store | block | - | GAP | `8859b8da73db` |
-| 1045 | ptrace_translate | block | - | GAP | `95678d71ca06` |
-| 1056 | ptrace_read_word | block | volatile,ptr-ops | GAP | `4a4c61fe0601` |
-| 1067 | ptrace_write_word | block | volatile,ptr-ops | GAP | `26e69e152a54` |
-| 1080 | ptrace_copy_chunk | block | ptr-ops | GAP | `e7c13a34fc4f` |
-| 1098 | ptrace_flush_icache | block | asm | GAP | `e593ef113da5` |
-| 1114 | ptrace_flush_icache | block | asm | GAP | `2c1ba9cc2662` |
-| 1139 | ptrace_read_gregset | block | ptr-ops | GAP | `3a94b81cc5c0` |
-| 1157 | ptrace_write_gregset | block | ptr-ops | GAP | `2bb6b493d55b` |
-| 1172 | zeroed_siginfo | block | - | GAP | `cfe67ea2ff3f` |
 
 ## <top>
 
@@ -2765,12 +2620,12 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 36 | init_task_storage_addr | block | - | INV:F12 | `9797c931014d` |
-| 188 | create_and_start_init_process | block | - | INV:F12 | `5273da69150a` |
-| 379 | load_and_setup_elf | block | - | INV:F12 | `4f61a30133d8` |
-| 395 | load_and_setup_elf | block | - | INV:F12 | `3f2ef49433bf` |
-| 420 | load_and_setup_elf | block | - | INV:F12 | `a03a8777a330` |
-| 428 | load_and_setup_elf | block | ffi | INV:F12 | `92625e6084ba` |
+| 35 | init_task_storage_addr | block | - | INV:F12 | `7a4fb441fdf7` |
+| 187 | create_and_start_init_process | block | - | INV:F12 | `5288c084adef` |
+| 378 | load_and_setup_elf | block | - | INV:F12 | `f716e0754263` |
+| 394 | load_and_setup_elf | block | - | INV:F12 | `30e80c9f82fb` |
+| 419 | load_and_setup_elf | block | - | INV:F12 | `4b6d74e4ac95` |
+| 427 | load_and_setup_elf | block | ffi | INV:F12 | `a999bb1950fd` |
 
 ### kernel/src/initrd.rs (1)
 
@@ -2803,7 +2658,7 @@ census id is accounted for here.
 | 111 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `7d9e01d58276` |
 | 130 | ring_rec | block | - | INV:INV-STATIC-CELL-1 | `49d3b72c6b32` |
 | 142 | ring_rec_mut | block | - | INV:INV-STATIC-CELL-1 | `7065f11b4033` |
-| 2134 | init_logger | block | - | INV:INV-FS-GLOBALSB-1 | `0f71f7e1f40d` |
+| 2133 | init_logger | block | - | INV:INV-FS-GLOBALSB-1 | `5e6b013d89f9` |
 
 ### kernel/src/sbi.rs (2)
 
@@ -3243,10 +3098,10 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 367 | sys_init_module_impl | block | ptr-ops | INV:INV-STATIC-CELL-1 | `52943d9a2124` |
-| 404 | sys_finit_module_impl | block | - | INV:INV-STATIC-CELL-1 | `b4bc10a3f4ca` |
-| 417 | sys_finit_module_impl | block | - | INV:INV-STATIC-CELL-1 | `86c8618086f5` |
-| 450 | sys_delete_module_impl | block | ptr-ops | INV:INV-STATIC-CELL-1 | `57f2aefee6f0` |
+| 341 | sys_init_module_impl | block | ptr-ops | INV:INV-STATIC-CELL-1 | `6ff10b88102a` |
+| 378 | sys_finit_module_impl | block | - | INV:INV-STATIC-CELL-1 | `5b11c332e19e` |
+| 391 | sys_finit_module_impl | block | - | INV:INV-STATIC-CELL-1 | `8cade39f390a` |
+| 424 | sys_delete_module_impl | block | ptr-ops | INV:INV-STATIC-CELL-1 | `824530ad70e1` |
 
 ## timer
 

@@ -1,3 +1,7 @@
+// The crate-level forbid at rux-fs/src/lib.rs is the boundary; this
+// file-level attribute satisfies the forbid-registry ratchet.
+#![forbid(unsafe_code)]
+
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang

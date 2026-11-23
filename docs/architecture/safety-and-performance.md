@@ -1313,6 +1313,15 @@ their job on the checker infrastructure itself):
 | INV-SYSV-UAPI-2 | `ipc/sysv_*.rs` | residual uaccess staging rows (sops copy edges + shm page ops) on the capsule boundary |
 | INV-KTASK-1 | cross-file | (*task)/task-ref rows where the source is a typed &Task/&mut Task or a pinned handle (pid_hash/current callers) — the cargo-cult audit applies, adopt rows ride INV-TASKREF-1 |
 
+## Round-D contract addendum (fs-substrate tranche edges)
+
+| INV id | owner file | contract (headline) |
+|---|---|---|
+| INV-FS-FILEDENTRY-1 | `fs/unsafe_edges.rs` | `File::dentry` is a write-once `UnsafeCell<Option<Arc<Dentry>>>` installed at open; shared reads for the description's lifetime (FILEINODE-1's shape on the dentry cell) |
+| INV-PROC-TGL-1 | `fs/unsafe_edges.rs` | `group_leader_ptr` yields self or the clone-time leader; the leader outlives any referencing thread (thread-group refcount) |
+| INV-PROC-USERPAGE-1 | `fs/unsafe_edges.rs` | `ppn<<12+off` is a mapped user page of the PINNED target task; readable through the kernel linear map for `len` bytes |
+| INV-FS-KSLICE-1 | `fs/unsafe_edges.rs` | offset+slice of a pinned PAGE_SIZE cache frame; off+len <= PAGE_SIZE by the caller's page math (F-TMPFS-CACHE row) |
+
 ## Round-D contract addendum (flip-window drift)
 
 | INV id | owner file | contract (headline) |
