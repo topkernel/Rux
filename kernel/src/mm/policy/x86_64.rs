@@ -3346,7 +3346,7 @@ fn handle_swap_fault(
                     }
                     // Increment nattch for shared memory attachments inherited by child
                     if vma_type == crate::mm::vma::VmaType::SharedMemory && file_fd >= 0 {
-                        crate::ipc::sysv_shm::shm_attach_vma(file_fd);
+                        crate::ipc::ipc_hooks::shm_attach_vma(file_fd);
                     }
                     // Fork copy: the child's mapping carries the same
                     // virtual size as the parent's (the reference kernel

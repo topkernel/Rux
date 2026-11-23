@@ -1355,7 +1355,7 @@ impl Drop for MmStruct {
                     if vma.vma_type() == crate::mm::vma::VmaType::SharedMemory {
                         let shmid = vma.file_fd();
                         if shmid >= 0 {
-                            crate::ipc::sysv_shm::shm_detach_vma(shmid);
+                            crate::ipc::ipc_hooks::shm_detach_vma(shmid);
                         }
                     }
                 }

@@ -523,14 +523,13 @@ pub fn ipc_current_time() -> i64 {
     crate::drivers::rtc::wall_secs() as i64
 }
 
-/// Per-process semaphore undo entry.
-/// Records an adjustment made to a semaphore so it can be reversed on process exit.
-#[derive(Clone, Copy)]
-pub struct SemUndoEntry {
-    /// Semaphore set ID.
-    pub semid: i32,
-    /// Semaphore number within the set.
-    pub sem_num: u16,
-    /// Adjustment value (the sem_op that was applied).
-    pub adjustment: i32,
+// SemUndoEntry MOVED to the framework root (ipc/mod.rs): Task's
+// sem_undo field names it, so the type substrate stays framework-side
+// (the vma/mm_struct shelving lesson). Historical path preserved:
+pub use super::SemUndoEntry;
+
+/// The registry bound the /proc/sys/kernel/shmmni clamp consults
+/// (IpcHooks row; the framework sysctl cannot name the service const).
+pub fn ipc_ids_max() -> u64 {
+    IPC_IDS_MAX as u64
 }

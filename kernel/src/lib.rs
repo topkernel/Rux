@@ -1018,7 +1018,7 @@ pub fn rust_main_tail() -> ! {
 
         // Initialize IPC subsystem
         {
-            ipc::init();
+            ipc::ipc_hooks::init();
             print_status("ipc", "System V + POSIX MQ", true);
         }
 

@@ -190,6 +190,22 @@ pub fn shm_ctlall() -> u64 {
     SHM_CTLALL.load(Ordering::Relaxed)
 }
 
+/// The sysctl setter rows (IpcHooks): the statics are service-owned,
+/// the framework's /proc/sys writers route through these.
+pub fn set_shm_ctlmax(v: u64) {
+    SHM_CTLMAX.store(v, Ordering::Release);
+}
+/// The fixed slot table caps the real limit at IPC_IDS_MAX; clamp so
+/// the file never promises more than the kernel has (the historical
+/// sysctl-side clamp, moved with the static it governs).
+pub fn set_shm_ctlni(v: u64) {
+    let capped = v.min(super::util::IPC_IDS_MAX as u64);
+    SHM_CTLNI.store(capped, Ordering::Release);
+}
+pub fn set_shm_ctlall(v: u64) {
+    SHM_CTLALL.store(v, Ordering::Release);
+}
+
 /// Total pages currently held by live segments (SHM_INFO/SHMALL accounting).
 fn shm_total_pages() -> u64 {
     let mut total: u64 = 0;

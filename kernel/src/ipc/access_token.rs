@@ -404,3 +404,10 @@ pub fn register() {
     let _ = registry::register_char_device(DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS);
     crate::pr_info!("atid: /dev/access_token_id registered");
 }
+
+/// The devfs registration row (IpcHooks): the framework's devfs
+/// populate asks for the char-device number + ops static instead of
+/// naming them directly.
+pub fn char_device() -> Option<(crate::fs::dev_t::DevNo, &'static crate::fs::file::FileOps)> {
+    Some((DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS))
+}

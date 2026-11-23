@@ -191,6 +191,28 @@ pub static ROOT_MAXBYTES: AtomicI32 = AtomicI32::new(25_000_000);
 pub static MAXKEYS: AtomicI32 = AtomicI32::new(200);
 pub static MAXBYTES: AtomicI32 = AtomicI32::new(20_000);
 
+/// The /proc/sys/kernel/keys quota rows (IpcHooks): the framework's
+/// sysctl generates/writes through these instead of touching the
+/// service-owned statics directly.
+pub fn key_quota(q: crate::ipc::ipc_hooks::KeyQuota) -> i32 {
+    let s = match q {
+        crate::ipc::ipc_hooks::KeyQuota::RootMaxKeys => &ROOT_MAXKEYS,
+        crate::ipc::ipc_hooks::KeyQuota::RootMaxBytes => &ROOT_MAXBYTES,
+        crate::ipc::ipc_hooks::KeyQuota::MaxKeys => &MAXKEYS,
+        crate::ipc::ipc_hooks::KeyQuota::MaxBytes => &MAXBYTES,
+    };
+    s.load(core::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_key_quota(q: crate::ipc::ipc_hooks::KeyQuota, v: i32) {
+    let s = match q {
+        crate::ipc::ipc_hooks::KeyQuota::RootMaxKeys => &ROOT_MAXKEYS,
+        crate::ipc::ipc_hooks::KeyQuota::RootMaxBytes => &ROOT_MAXBYTES,
+        crate::ipc::ipc_hooks::KeyQuota::MaxKeys => &MAXKEYS,
+        crate::ipc::ipc_hooks::KeyQuota::MaxBytes => &MAXBYTES,
+    };
+    s.store(v, core::sync::atomic::Ordering::Relaxed);
+}
+
 fn alloc_serial() -> u32 {
     // Serial 0 is never a valid key ID (key_serial_t 0 = "no key").
     NEXT_SERIAL.fetch_add(1, Ordering::Relaxed).max(1)

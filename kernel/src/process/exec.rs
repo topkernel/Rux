@@ -110,7 +110,7 @@ pub fn do_execve_elf(
         // (process and session keyrings persist). Nothing on the boot
         // images sets a thread keyring yet, but keyctl(THREAD_KEYRING)
         // create/inherit discipline lives here.
-        crate::ipc::keys::exec_clear_thread_keyring();
+        crate::ipc::ipc_hooks::exec_clear_thread_keyring();
         // 125th waitid leg: SPAWN clock for com.*-named executables (the
         // OH bundle-name convention); rux:schedtrace (retired dfx=schedtrace)-gated (dfx/reaper.rs).
         if crate::dfx::reaper::on() {

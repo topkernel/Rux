@@ -396,7 +396,7 @@ pub fn write_pipe_user_pages_hard(input: &[u8]) -> i32 {
 /// /proc/sys/kernel/msgmni — System V message queue count limit. Matches
 /// the IPC_IDS_MAX slots the ipc table offers.
 pub fn generate_msgmni() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::sysv_msg::msgmni()).into_bytes()
+    alloc::format!("{}\n", crate::ipc::ipc_hooks::msgmni()).into_bytes()
 }
 
 /// /proc/sys/kernel/msgmni write — LTP msgget03 lowers MSGMNI and expects
@@ -404,7 +404,7 @@ pub fn generate_msgmni() -> Vec<u8> {
 pub fn write_msgmni(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v) => {
-            if v > i32::MAX as u64 || !crate::ipc::sysv_msg::set_msgmni(v as i32) {
+            if v > i32::MAX as u64 || !crate::ipc::ipc_hooks::set_msgmni(v as i32) {
                 return -(crate::errno::constants::EINVAL as i32);
             }
             0
@@ -480,13 +480,13 @@ pub fn write_printk_devkmsg(input: &[u8]) -> i32 {
 /// check and shmctl(IPC_INFO) both consult it (writable; LTP shmget02
 /// lowers it to 8192, shmctl03 asserts IPC_INFO equality).
 pub fn generate_shmmax() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::sysv_shm::shm_ctlmax()).into_bytes()
+    alloc::format!("{}\n", crate::ipc::ipc_hooks::shm_ctlmax()).into_bytes()
 }
 
 pub fn write_shmmax(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v) => {
-            crate::ipc::sysv_shm::SHM_CTLMAX.store(v, Ordering::Release);
+            crate::ipc::ipc_hooks::set_shm_ctlmax(v);
             0
         }
         Err(e) => e,
@@ -496,16 +496,15 @@ pub fn write_shmmax(input: &[u8]) -> i32 {
 /// /proc/sys/kernel/shmmni — max segments system-wide (LTP shmget03 reads
 /// it and creates exactly that many segments).
 pub fn generate_shmmni() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::sysv_shm::shm_ctlni()).into_bytes()
+    alloc::format!("{}\n", crate::ipc::ipc_hooks::shm_ctlni()).into_bytes()
 }
 
 pub fn write_shmmni(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v) => {
-            // The fixed slot table caps the real limit at IPC_IDS_MAX;
-            // clamp so the file never promises more than the kernel has.
-            let capped = v.min(crate::ipc::util::IPC_IDS_MAX as u64);
-            crate::ipc::sysv_shm::SHM_CTLNI.store(capped, Ordering::Release);
+            // The clamp at IPC_IDS_MAX moved with the static into
+            // the service setter (set_shm_ctlni).
+            crate::ipc::ipc_hooks::set_shm_ctlni(v);
             0
         }
         Err(e) => e,
@@ -514,13 +513,13 @@ pub fn write_shmmni(input: &[u8]) -> i32 {
 
 /// /proc/sys/kernel/shmall — total shm page budget (ENOSPC past it).
 pub fn generate_shmall() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::sysv_shm::shm_ctlall()).into_bytes()
+    alloc::format!("{}\n", crate::ipc::ipc_hooks::shm_ctlall()).into_bytes()
 }
 
 pub fn write_shmall(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v) => {
-            crate::ipc::sysv_shm::SHM_CTLALL.store(v, Ordering::Release);
+            crate::ipc::ipc_hooks::set_shm_ctlall(v);
             0
         }
         Err(e) => e,
@@ -529,13 +528,13 @@ pub fn write_shmall(input: &[u8]) -> i32 {
 
 /// /proc/sys/fs/mqueue/queues_max — writable POSIX mq count limit.
 pub fn generate_mq_queues_max() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::posix_mq::queues_max()).into_bytes()
+    alloc::format!("{}\n", crate::ipc::ipc_hooks::queues_max()).into_bytes()
 }
 
 pub fn write_mq_queues_max(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v) => {
-            if v > i32::MAX as u64 || !crate::ipc::posix_mq::set_queues_max(v as i32) {
+            if v > i32::MAX as u64 || !crate::ipc::ipc_hooks::set_queues_max(v as i32) {
                 return -(crate::errno::constants::EINVAL as i32);
             }
             0
@@ -753,14 +752,14 @@ pub fn write_perf_event_mlock_kb(input: &[u8]) -> i32 {
 // read back their stored value and accept writes like the reference.
 // ============================================================================
 
-fn generate_key_quota(v: &core::sync::atomic::AtomicI32) -> Vec<u8> {
-    alloc::format!("{}\n", v.load(core::sync::atomic::Ordering::Relaxed)).into_bytes()
+fn generate_key_quota(q: crate::ipc::ipc_hooks::KeyQuota) -> Vec<u8> {
+    alloc::format!("{}\n", crate::ipc::ipc_hooks::key_quota(q)).into_bytes()
 }
 
-fn write_key_quota(v: &core::sync::atomic::AtomicI32, input: &[u8]) -> i32 {
+fn write_key_quota(q: crate::ipc::ipc_hooks::KeyQuota, input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(n) if n <= i32::MAX as u64 => {
-            v.store(n as i32, core::sync::atomic::Ordering::Relaxed);
+            crate::ipc::ipc_hooks::set_key_quota(q, n as i32);
             0
         }
         _ => -(crate::errno::constants::EINVAL as i32),
@@ -768,28 +767,28 @@ fn write_key_quota(v: &core::sync::atomic::AtomicI32, input: &[u8]) -> i32 {
 }
 
 pub fn generate_root_maxkeys() -> Vec<u8> {
-    generate_key_quota(&crate::ipc::keys::ROOT_MAXKEYS)
+    generate_key_quota(crate::ipc::ipc_hooks::KeyQuota::RootMaxKeys)
 }
 pub fn write_root_maxkeys(input: &[u8]) -> i32 {
-    write_key_quota(&crate::ipc::keys::ROOT_MAXKEYS, input)
+    write_key_quota(crate::ipc::ipc_hooks::KeyQuota::RootMaxKeys, input)
 }
 pub fn generate_root_maxbytes() -> Vec<u8> {
-    generate_key_quota(&crate::ipc::keys::ROOT_MAXBYTES)
+    generate_key_quota(crate::ipc::ipc_hooks::KeyQuota::RootMaxBytes)
 }
 pub fn write_root_maxbytes(input: &[u8]) -> i32 {
-    write_key_quota(&crate::ipc::keys::ROOT_MAXBYTES, input)
+    write_key_quota(crate::ipc::ipc_hooks::KeyQuota::RootMaxBytes, input)
 }
 pub fn generate_maxkeys() -> Vec<u8> {
-    generate_key_quota(&crate::ipc::keys::MAXKEYS)
+    generate_key_quota(crate::ipc::ipc_hooks::KeyQuota::MaxKeys)
 }
 pub fn write_maxkeys(input: &[u8]) -> i32 {
-    write_key_quota(&crate::ipc::keys::MAXKEYS, input)
+    write_key_quota(crate::ipc::ipc_hooks::KeyQuota::MaxKeys, input)
 }
 pub fn generate_maxbytes() -> Vec<u8> {
-    generate_key_quota(&crate::ipc::keys::MAXBYTES)
+    generate_key_quota(crate::ipc::ipc_hooks::KeyQuota::MaxBytes)
 }
 pub fn write_maxbytes(input: &[u8]) -> i32 {
-    write_key_quota(&crate::ipc::keys::MAXBYTES, input)
+    write_key_quota(crate::ipc::ipc_hooks::KeyQuota::MaxBytes, input)
 }
 
 // ============================================================================
