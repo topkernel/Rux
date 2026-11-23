@@ -33,122 +33,245 @@ leftovers is abolished; what remains in the core is there because it
 ### 1a. The size criterion (user directive 2026-11-23): the core is as
 small as possible, performance unchanged
 
-The criterion above settles where UNSAFE lives. It does not settle how
+The criterion above settles where UNSAFE lives. It did not settle how
 much SAFE code stays in the core, and by 2026-11-23 the answer was "most
-of it": kernel/src held 286,139 lines with only 1,838 unsafe blocks and
-238 unsafe fn/impl bodies. The directive for the rest of the campaign:
+of it": kernel/src held 286,139 lines with 1,838 unsafe blocks and 238
+unsafe fn/impl bodies. The directive for the rest of the campaign:
 
 > The core's code should be as small as possible, as long as
 > performance is unaffected. Code that leaves the core is organized by
 > subsystem.
 
-Two measured facts define the method.
+#### 1a.1 Why the core must not depend on a service crate
 
-**Fact 1 — what actually has to stay is small, and the direction of
-the call is what decides it.** Two things force code to stay in the
-core:
+The rule "services depend on the core, never the reverse" is usually
+justified by the build graph. The real reason is what it does to the
+argument that the core is correct.
 
-1. a function that a hot-path site calls directly by name. After the
-   move that call would have to go through the hook table (an indirect
-   call the compiler cannot inline), so the function stays where the
-   hot caller can reach it directly;
-2. a FIELD that a hot path reads or writes directly. Cargo forbids
-   core -> service, so a field the switch or fault path touches must
-   live in the core. This is a constraint on fields, not on whole
-   types: a service crate uses a core-defined type freely (service ->
-   core is the allowed direction), and a type's cold fields can live
-   outside the core behind a pointer the hot fields never follow.
-   Measured 2026-11-23 on `Task` (105 fields): the context switch
-   touches 7 (thread, kernel_stack_bottom, address_space, state, pid,
-   on_cpu, pick_state), the trap path 10, the scheduler 6, the VFS
-   walk 7 — about 20 in all. The other ~85 (ptrace state, robust list,
+The core maintains the kernel's data-structure invariants: the task-slot
+life cycle, the run-queue locking protocol, atomic page-table updates,
+reference counts. To argue that an invariant holds, one has to know
+everything that can change the state it constrains, in what order, and
+under which lock.
+
+If the core called a service crate directly, that argument would not
+close. To show that `__schedule()` preserves the run-queue protocol one
+would have to follow the call into the scheduler policy crate, and that
+crate changes with every wake-up or load-balance edit — each edit could
+remove a premise the core's proof relied on. The core's trusted
+computing base would then be its own code plus every line it can reach,
+a set that grows with the service crates and has no fixed boundary.
+
+With the dependency pointing the other way, the core reaches a service
+only through a callback table whose signatures the core defines. A row
+such as `pick_next_task: fn(&CpuRunQueue) -> TaskRef` says what the
+callee is able to do: read the run queue, return a task reference. It
+cannot reach the lock's internal state, alter the queue's structure, or
+touch a context that is being switched — not because its code was
+reviewed, but because the published types do not express those
+operations. The core's argument becomes closed: whatever a callback
+does, it acts only through the interfaces the core publishes, so the
+core's invariants hold independently of the service crates' contents.
+
+| | core depends on a crate | core depends on nothing |
+|---|---|---|
+| the core's trusted computing base | the core plus every line it can call | the core alone |
+| after a change to a service crate | the core's invariants must be re-argued | the core's argument is unaffected |
+| the invariants rest on | the service code happening not to interfere | interfaces that cannot express interference |
+
+The callback table is therefore not only an indirect-call layer with a
+performance cost (§4, the S1 case study). It is the machine-checked
+statement of the service's entire view of the core.
+
+This also answers why hot-path FIELDS stay in the core (1a.2, rule 3):
+a field that a hot path updates under the core's lock protocol must not
+be reachable through any type a callback can obtain, or the callback
+could change it outside that protocol.
+
+#### 1a.2 What has to stay in the core
+
+Four things force code to stay; everything else can leave.
+
+1. **A function a hot-path site calls by name.** Hot-path sites are the
+   trap entry and return, the context switch, the page-fault path, the
+   VFS walk, bio and the page cache, the allocator entry points, the
+   lock primitives, the timer tick, IRQ dispatch. After a move, that
+   call would have to go through the callback table — an indirect call
+   the compiler cannot inline (a function pointer's target is a runtime
+   value). The function stays where the hot caller reaches it directly.
+
+2. **A function an existing service crate calls by name.** A service
+   crate reaches the core, not another service crate (a lateral edge is
+   a dependency between subsystems that Cargo would have to order, and
+   a cycle is refused). A function `rux-syscall` uses therefore has to
+   be in the core. `restore_sigcontext`, called from
+   `sys_rt_sigreturn`, is the case the signal lane found on 2026-11-23.
+
+3. **A field a hot path reads or writes directly.** This is a
+   constraint on FIELDS, not on types. A service crate uses a
+   core-defined type freely (service -> core is the allowed direction);
+   what must stay is the set of fields the hot paths touch, because
+   Cargo forbids core -> service. Measured on `Task` (105 fields):
+
+   | hot path | fields touched |
+   |---|---|
+   | context switch (7) | thread, kernel_stack_bottom, address_space, state, pid, on_cpu, pick_state |
+   | trap path (10) | pt_regs, address_space, kernel_stack_bottom, preempt_count, sigmask, pid, tgid, utime_ticks, stime_ticks, comm |
+   | scheduler (6) | ti_cpu, ti_flags, state, sched_entity, rt_entity, pid |
+   | VFS walk (7) | cred, fs_arc, pgid, rlimit, try_fdtable, ns_pid, umask |
+
+   About 20 in all. The other ~85 (ptrace state, robust list,
    syscall/exit/reap bookkeeping, statistics) are never read on a hot
-   path. Splitting such a type into a core block (the hot fields, same
-   offsets, same cache-line neighbours as today) and a service block
-   reached by one pointer costs the hot paths nothing, because they
-   follow only core-block fields. That split is structural work across
-   every subsystem and comes AFTER the function-level moves; until
-   then a type with any hot field stays whole in the core, and the
-   lanes move its cold METHODS out as free functions.
+   path. Such a type can be split into a core block holding the hot
+   fields — same offsets, same cache-line neighbours as today — and a
+   service block reached by one pointer the hot paths never follow.
+   That costs the hot paths nothing: every field they access is still
+   in the core block at its present offset. The split is structural
+   work across every subsystem and comes AFTER the function-level moves;
+   until then a type with any hot field stays whole, and its cold
+   METHODS leave as free functions.
 
-Everything else leaves. A function that hot paths do not call is
-reached only from cold sites, and cold upward calls through the table
-are fine; the moved code's own calls INTO the core are direct
-cross-crate calls that inline (crate-plan §3a). The service -> core
-direction costs nothing. Only core -> service costs, and only on hot
-paths.
+4. **A function that is unsafe and on the F-row floor** — pt_regs
+   writes, building the signal frame on the user stack, the switch
+   itself. No name-based scan sees this; the lane that owns the function
+   keeps it and records why.
 
-Measured on the 2026-11-23 tree (scripts/core_size_map.py; hot-path
-files are the trap/switch/fault/walk/lock/alloc/tick files; a call in
-a hot file that names a function defined elsewhere is an upward hot
-call):
+Everything else leaves. A function that neither a hot path nor a
+service crate calls is reached only from cold sites, and a cold upward
+call through the table is acceptable. The moved code's own calls INTO
+the core are direct cross-crate calls that inline. The two directions
+are not symmetric:
 
-| | conservative scan | path-resolved scan |
+| direction | mechanism | cost |
 |---|---|---|
-| function bodies in kernel/src (tests excluded) | 228,305 | 237,908 |
-| must stay in the core (in a hot file, or called upward from one) | ~97,000 (42%) | 76,194 (32%) |
-| leaves the core | ~131,000 (58%) | 159,714 (68%) |
+| service -> core | direct call, cross-crate inlining (rlib metadata carries MIR; LTO completes it) | none |
+| core -> service, cold site | one indirect call through the table | negligible on a cold path |
+| core -> service, hot site | one indirect call per site, not inlinable | the S1 regression: +25.1% on context switch |
 
-Both scans over-keep: any call a hot file writes to a name defined
-elsewhere counts as upward. The path-resolved scan is stricter about
-which calls actually reach the callee and so keeps less. The true
-figure lies at or below the lower one and is settled per subsystem as
-each lane moves it — a function the scans call cold but that turns out
-to sit on a hot path stays, and the lane records why. The working
-target is therefore: **the core shrinks from 286k lines to under
-100k**, the rest organized into per-subsystem service crates.
+#### 1a.3 Interface design: what makes the closed argument true
 
-**Fact 2 — files are mixed, so the unit of the move is the function,
-not the file.** Only 34 files (7,122 lines) have no hot-called function
-at all. 93 more files are under 25% hot: a few hot functions and a
-large cold remainder in the same file. Moving whole files therefore
-caps out far below the target. Every subsystem is split at the
-function boundary:
+The closed argument in 1a.1 holds only if the published interfaces
+actually express the constraint. A callback typed `fn(*mut Task)` gives
+the callee the whole task through a raw pointer and guarantees nothing;
+the table would be a formality. The interface rules that make the
+boundary real:
 
-- hot functions stay in the core, in the subsystem's core-side file
-  (the existing `*_edges.rs` pattern, or `<subsystem>_hot.rs`), where
-  hot callers reach them by direct call and the compiler can inline;
-- every other function of that subsystem moves to the subsystem's
-  service crate: `rux-sync`, `rux-process`, `rux-signal`, `rux-debug`,
-  `rux-ipc`, `rux-drivers`, `rux-fs`, `rux-mm`, `rux-sched`, … one crate
-  per subsystem, so a reader finds the scheduler's policy in
-  `rux-sched` and the futex protocol logic in `rux-sync`, not in a
-  bin of miscellaneous leftovers.
+- **Types carry the precondition.** The core publishes typed handles
+  (`TaskRef`, `TaskBorrow`, `Arc<T>`), not raw pointers. A service that
+  needs the file's private data calls
+  `fs::unsafe_edges::file_privdata_take_arc::<T>(file) -> Option<Arc<T>>`;
+  the borrow checker keeps working on the result. It cannot write
+  `unsafe { &*p }` — the crate forbids it — and it has no `p` to write.
+- **Visibility is the boundary.** Inside one crate, `pub(crate)` is
+  reachable from everywhere. Across crates, a service sees only what
+  the core marks `pub`, and a `pub` item is a deliberate publication
+  with a name, a signature and an INV contract. When the filesystem
+  leaves moved into the forbid crate (2026-11-23), their scattered raw
+  pointer accesses had to converge on a handful of typed functions in
+  `unsafe_edges.rs`: the accesses did not disappear, they became a
+  short, enumerable list that can be audited one by one.
+- **The hot path never calls into a service crate through the table.** crate-plan §3a rule 2: an interface
+  on a data path takes an existing vtable field (`FileOps.fault`,
+  `FileOps.write_at` — field dispatch the caller already performs) or
+  a direct `#[inline]` wrapper over a framework-side static, never a
+  new fn-pointer row. Table rows are for cold paths and may be
+  skipped at the call site when the instrument is not enabled.
+- **The table is the service's whole view.** A service reaches the
+  core only through published functions and the rows it is handed. If
+  a service needs something the table does not offer, the answer is to
+  add a typed core function or a row — not to widen a type's
+  visibility, and never to let a row's body call the wrapper that
+  dispatches that same row (the self-recursion that stalled the
+  scheduler migration).
+- **Nothing that runs before the per-CPU area exists may take a lock.**
+  Every `Spinlock::lock()` here reads per-CPU state (the preempt count,
+  the holder's cpu id), which on x86_64 is `%gs`-relative with the GS
+  base still 0 during `rust_main`. Registration at that point publishes
+  through `OnceSlot` or a plain atomic. The first version of the
+  service-test registry took a `Spinlock` there and the x86_64
+  unit-test kernel faulted before its first print (2026-11-23).
 
-**The performance rule that makes this free.** The boundary is placed
-so that hot callers never cross it upward. A function that a hot path
-calls directly is, by definition, in the core. What moves is what hot
-paths do not call: cold upward calls may go through the hook table
-(crate-plan §3a rule 2), and the crate calls DOWN into the core
-freely — a direct cross-crate call, inlinable. The S1 case study (§4)
-is the record of what happens when this rule is broken and how it is
-fixed; every lane measures its hot rows before and after.
+#### 1a.4 The size, measured
 
-Per subsystem, the cold remainder measured on 2026-11-23 with the
-path-resolved scan (lines of function bodies not called upward from
-any hot-path file and not defined inside one):
+`scripts/core_size_map.py` scans by NAME with a path check, not with a
+resolved call graph, so its result bounds rather than measures. It
+keeps a function when it is defined in a hot-path file, called by name
+from one, or called by name from any service crate. Measured on
+the 2026-11-23 tree (function bodies in kernel/src, tests excluded):
 
-| subsystem | stays | leaves |
+| | lines |
+|---|---|
+| function bodies | 236,207 |
+| stay in the core (the three name rules) | 118,893 |
+| leave the core | 117,314 |
+
+The scan over-keeps: a name that one service crate or hot-path file uses keeps
+every same-named function in the tree, and it cannot see whether a
+call resolves to the callee it credits. It under-keeps only on rule 4,
+which the lanes apply by hand. The true figure is therefore at or below
+118,893 and is settled per subsystem as each lane moves it; every
+disagreement between a lane's reading of the code and the scan is
+recorded (the debug lane's audit of 441 functions is the first such
+record).
+
+Only 34 files (7,122 lines) have no hot-called function at all, and 93
+more are under 25% hot: a few hot functions and a large cold remainder
+in the same file. Moving whole files caps out far below the target, so
+the unit of the move is the function.
+
+Per subsystem, by the scan (stay / leave):
+
+| subsystem | stay | leave |
 |---|---|---|
-| fs | 22,977 | 24,609 |
-| mm | 9,509 | 13,682 |
-| sync | 3,098 | 17,434 |
-| drivers | 409 | 18,100 |
-| process | 3,056 | 15,263 |
-| debug | 254 | 15,064 |
-| arch (three architectures) | 17,235 | 18,848 |
-| root files (signal.rs, console.rs, cmdline.rs, …) | 2,738 | 12,292 |
-| sched | 12,542 | 2,960 |
-| ipc | 0 | 9,857 |
-| syscall table, timer, io_uring, net, module | 0 | 6,607 |
-| trace, perf, security | 429 | 4,528 |
+| fs | 28,128 | 19,458 |
+| mm | 15,593 | 7,598 |
+| sched | 14,386 | 1,116 |
+| sync | 6,933 | 13,599 |
+| drivers | 4,816 | 13,693 |
+| debug | 7,421 | 7,897 |
+| arch/x86_64 | 8,486 | 8,186 |
+| arch/riscv64 | 5,665 | 6,475 |
+| arch/aarch64 | 3,084 | 4,204 |
+| process | 10,372 | 7,947 |
+| root files (signal.rs, console.rs, cmdline.rs, …) | 4,546 | 10,783 |
+| ipc | 2,569 | 7,288 |
+| syscall, timer, io_uring, net | 2,472 | 3,782 |
+| trace, perf, security, module | 475 | 4,951 |
 | safety, interrupt | 3,947 | 0 |
 
-The numbers are a map, not a promise: a "cold" function that turns out
-to be on a path the measurement missed stays, and the lane that finds
-it records why. What is binding is the direction — every subsystem's
-cold majority leaves the core, organized by subsystem, with no hot
-call made indirect.
+What the numbers establish is the scale: **the core shrinks from 286k
+lines to about 119k or less — a reduction of at least 58% — with the
+rest organized into per-subsystem service crates.** The worklist under
+`docs/development/core-size/<subsystem>.md` lists every function with
+file, line, size and stay/leave, regenerated by the script.
+
+#### 1a.5 What this does and does not guarantee
+
+Honest limits, so the claim is not read for more than it is worth. Two
+terms used below, defined at first use: the audit ledger is the
+record that maps every unsafe region to its INV contract or F-row; the
+published surface is the set of functions and types the core marks
+`pub` for the service crates.
+
+- The dependency direction does not make unsafe impossible; it makes
+  the service crates' zero-unsafe REAL. `#![forbid(unsafe_code)]` alone
+  is bypassable — a crate that may not write `unsafe` can call one that
+  may. Because the core depends on no service, a service cannot reach
+  any code that writes `unsafe` except the core's published functions.
+- Service code can still call those published functions, some of which
+  are unsafe inside. The guarantee is that every such call passes
+  through a named, typed function with an INV contract, and those
+  functions are the only way across — not that
+  service code can do no harm.
+- A function having a contract does not make the contract correct. On
+  2026-11-23 the audit of that record found that 349 of 1,591 existing
+  annotations contradicted the code they described. The audit freeze
+  (§8) is where the published surface is checked function by function:
+  whether each signature states its precondition or merely documents
+  it.
+- The core that remains is still a trusted computing base. It is now
+  bounded, named, and unable to grow silently; it is not exempt from
+  the INV/F-row discipline or the verification stack.
 
 ## 2. The irreducible floor (what stays in rux-core, and why)
 

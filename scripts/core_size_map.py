@@ -4,14 +4,24 @@
 Regenerates docs/development/core-size/<subsystem>.md (design of record:
 docs/architecture/seed-core-design.md §1a).
 
-A function STAYS in the core when one of two things holds: it is
-defined inside a hot-path file (the trap/switch/fault/walk/lock/alloc/
-tick files, HOT_FILES below), or a hot-path file calls it by name and
-it is defined elsewhere — an UPWARD call from a hot site, which would
-become an indirect call through the hook table after a move. Every
-other function LEAVES for its subsystem's service crate: its callers
-are cold, and its own calls into the core are direct cross-crate calls
-that inline.
+A function STAYS in the core when any of three things holds:
+
+1. it is defined inside a hot-path file (the trap/switch/fault/walk/
+   lock/alloc/tick files, HOT_FILES below);
+2. a hot-path file calls it by name and it is defined elsewhere — an
+   UPWARD call from a hot site, which would become an indirect call
+   through the hook table after a move;
+3. an existing service crate calls its name (rule added after the
+   rux-signal lane: restore_sigcontext is called from rux-syscall, so
+   it cannot leave the core without a service -> service edge).
+
+Every other function LEAVES for its subsystem's service crate: its
+callers are cold, and its own calls into the core are direct
+cross-crate calls that inline.
+
+The scan cannot see unsafe content: a function that must stay because
+it is unsafe and on the F-row floor (pt_regs writes, user-stack frame
+building) is marked by its lane, not here.
 
 The call resolution is name-level with a path check, not a resolved
 call graph: a cold function that a hot file reaches through a pointer,
@@ -49,6 +59,11 @@ FN = re.compile(
 CALL = re.compile(
     r"((?:crate|super|self|rux)::(?:[a-zA-Z_][a-zA-Z0-9_]*::)*)?"
     r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
+# Subsystems that already have a service crate: only there does a name a
+# service crate calls force the function to stay.
+HAS_CRATE = {"fs", "drivers", "mm", "sched", "ipc", "syscall", "net", "debug",
+             "(root)", "process", "sync", "timer", "io_uring"}
+
 NESTED = {"fs", "drivers", "mm", "arch", "process", "ipc", "sched", "debug",
           "sync", "interrupt", "timer", "trace", "perf", "syscall", "safety",
           "net", "io_uring", "module"}
@@ -103,7 +118,15 @@ def main():
     def modpath(p):
         return "crate::" + os.path.relpath(p, src)[:-3].replace("/", "::")
 
-    # STAY = defined in a hot-path file, OR called upward by name from one.
+    # Names any service crate calls (rule 3): a service crate reaches the
+    # core, not another service crate, so a function a service crate
+    # uses must stay in the core.
+    svc_used = set()
+    for p in glob.glob(os.path.join(ROOT, "kernel", "rux-*", "src", "**", "*.rs"), recursive=True):
+        svc_used.update(m.group(2) for m in CALL.finditer(strip(open(p, errors="replace").read())))
+
+    # STAY = defined in a hot-path file, OR called upward by name from one,
+    # OR called by name from a service crate.
     # A site in a hot file is an upward call when the callee is defined in
     # ANOTHER file and the written path reaches that file's module. This
     # is the direction that would cost an indirect call after a move;
@@ -144,7 +167,8 @@ def main():
     rows = collections.defaultdict(list)
     for p, name, start, end in fns:
         rel = os.path.relpath(p, src)
-        rows[subsystem(rel)].append((rel, name, start, end, stay.get((p, name, start), False)))
+        hot = stay.get((p, name, start), False) or (name in svc_used and subsystem(rel) in HAS_CRATE)
+        rows[subsystem(rel)].append((rel, name, start, end, hot))
 
     summary_only = "--summary" in sys.argv
     if not summary_only:

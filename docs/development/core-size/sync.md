@@ -7,17 +7,17 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# sync — hot 3098 lines (stay) / cold 17434 lines (leave)
+# sync — hot 6933 lines (stay) / cold 13599 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
 | sync/condvar.rs | `new` | 64 | 8 | yes |
-| sync/condvar.rs | `init` | 71 | 29 |  |
-| sync/condvar.rs | `wait` | 99 | 61 |  |
+| sync/condvar.rs | `init` | 71 | 29 | yes |
+| sync/condvar.rs | `wait` | 99 | 61 | yes |
 | sync/condvar.rs | `wait_interruptible` | 159 | 59 |  |
 | sync/condvar.rs | `signal` | 217 | 41 |  |
 | sync/condvar.rs | `broadcast` | 257 | 14 |  |
-| sync/condvar.rs | `default` | 270 | 5 |  |
+| sync/condvar.rs | `default` | 270 | 5 | yes |
 | sync/edges.rs | `read_bytes_via_task` | 38 | 34 | yes |
 | sync/edges.rs | `read_cstr_via_task` | 71 | 21 | yes |
 | sync/edges.rs | `read_u32_via_task` | 91 | 22 | yes |
@@ -32,13 +32,13 @@ records why.
 | sync/futex.rs | `fxrs_word_add` | 109 | 25 |  |
 | sync/futex.rs | `fxrs_word_watched` | 133 | 58 |  |
 | sync/futex.rs | `fuxw_push` | 190 | 103 |  |
-| sync/futex.rs | `fxrs_latch` | 292 | 38 |  |
+| sync/futex.rs | `fxrs_latch` | 292 | 38 | yes |
 | sync/futex.rs | `rwfz_exit_watch_tgid` | 329 | 80 |  |
 | sync/futex.rs | `resolve_futex_phys` | 408 | 54 |  |
 | sync/futex.rs | `new` | 461 | 13 | yes |
 | sync/futex.rs | `vma_is_shared` | 473 | 24 |  |
 | sync/futex.rs | `new_user` | 496 | 44 |  |
-| sync/futex.rs | `matches` | 539 | 24 |  |
+| sync/futex.rs | `matches` | 539 | 24 | yes |
 | sync/futex.rs | `task_futex_mm_id` | 562 | 20 |  |
 | sync/futex.rs | `current_futex_mm_id` | 581 | 12 |  |
 | sync/futex.rs | `ftx_trace` | 592 | 18 |  |
@@ -56,20 +56,20 @@ records why.
 | sync/futex.rs | `fuxwatch2_parse` | 1538 | 24 |  |
 | sync/futex.rs | `fuxwatch_arm_round` | 1561 | 118 |  |
 | sync/futex.rs | `fuxwatch_arm_round` | 1678 | 5 |  |
-| sync/futex.rs | `fuxwatch_page_matches` | 1682 | 12 |  |
-| sync/futex.rs | `fuxwatch_mm_armed` | 1693 | 9 |  |
+| sync/futex.rs | `fuxwatch_page_matches` | 1682 | 12 | yes |
+| sync/futex.rs | `fuxwatch_mm_armed` | 1693 | 9 | yes |
 | sync/futex.rs | `fuxwatch_over_budget` | 1701 | 10 |  |
-| sync/futex.rs | `fuxwatch_log_write` | 1710 | 121 |  |
+| sync/futex.rs | `fuxwatch_log_write` | 1710 | 121 | yes |
 | sync/futex.rs | `fuxw_word_wake_summary` | 1830 | 44 |  |
 | sync/futex.rs | `fuxw_owner_park_state` | 1873 | 42 |  |
 | sync/futex.rs | `fuxw_word_shape` | 1914 | 67 |  |
 | sync/futex.rs | `deep_ufw` | 1980 | 75 |  |
 | sync/futex.rs | `fuxwatch_read_word` | 2054 | 25 |  |
-| sync/futex.rs | `fuxwatch_take_step` | 2078 | 18 |  |
-| sync/futex.rs | `fuxwatch_page_watched` | 2095 | 14 |  |
-| sync/futex.rs | `fuxwatch_read_word_at` | 2108 | 16 |  |
-| sync/futex.rs | `fuxwatch_addr` | 2123 | 6 |  |
-| sync/futex.rs | `fuxwatch2_addr` | 2128 | 13 |  |
+| sync/futex.rs | `fuxwatch_take_step` | 2078 | 18 | yes |
+| sync/futex.rs | `fuxwatch_page_watched` | 2095 | 14 | yes |
+| sync/futex.rs | `fuxwatch_read_word_at` | 2108 | 16 | yes |
+| sync/futex.rs | `fuxwatch_addr` | 2123 | 6 | yes |
+| sync/futex.rs | `fuxwatch2_addr` | 2128 | 13 | yes |
 | sync/futex.rs | `rd_word` | 2140 | 18 |  |
 | sync/futex.rs | `heap_class` | 2157 | 17 |  |
 | sync/futex.rs | `ffrt_lock_region_scan` | 2173 | 278 |  |
@@ -91,30 +91,30 @@ records why.
 | sync/futex.rs | `ffrt_mutex_heap_map_rearm` | 4339 | 16 |  |
 | sync/futex.rs | `ffrt_mutex_heap_map` | 4354 | 151 |  |
 | sync/futex.rs | `ffrt_lock_holder_scan` | 4504 | 151 |  |
-| sync/futex.rs | `futex_stuck_census` | 4654 | 1803 |  |
+| sync/futex.rs | `futex_stuck_census` | 4654 | 1803 | yes |
 | sync/futex.rs | `alloc_waiter` | 6456 | 34 |  |
 | sync/futex.rs | `free_waiter` | 6489 | 12 |  |
 | sync/futex.rs | `pool_full_backoff` | 6500 | 39 |  |
 | sync/futex.rs | `futex_hash` | 6538 | 41 |  |
 | sync/futex.rs | `futex_wake` | 6578 | 16 |  |
 | sync/futex.rs | `futex_wake_in_mm` | 6593 | 162 |  |
-| sync/futex.rs | `ph` | 6754 | 193 |  |
+| sync/futex.rs | `ph` | 6754 | 193 | yes |
 | sync/futex.rs | `futex_wait` | 6946 | 6 |  |
 | sync/futex.rs | `futex_wait_timeout` | 6951 | 178 |  |
-| sync/futex.rs | `ph` | 7128 | 156 |  |
+| sync/futex.rs | `ph` | 7128 | 156 | yes |
 | sync/futex.rs | `remove_waiter` | 7283 | 102 |  |
 | sync/futex.rs | `futex_cleanup` | 7384 | 83 |  |
-| sync/futex.rs | `futex_wait_bitset` | 7466 | 39 |  |
-| sync/futex.rs | `futex_parse_timeout_ns` | 7504 | 50 |  |
-| sync/futex.rs | `futex_wake_bitset` | 7553 | 6 |  |
-| sync/futex.rs | `futex_to_flags` | 7558 | 37 |  |
+| sync/futex.rs | `futex_wait_bitset` | 7466 | 39 | yes |
+| sync/futex.rs | `futex_parse_timeout_ns` | 7504 | 50 | yes |
+| sync/futex.rs | `futex_wake_bitset` | 7553 | 6 | yes |
+| sync/futex.rs | `futex_to_flags` | 7558 | 37 | yes |
 | sync/futex.rs | `futex_requeue` | 7594 | 340 |  |
 | sync/futex.rs | `futex_wake_op_decode` | 7933 | 23 |  |
 | sync/futex.rs | `sign_extend12` | 7955 | 12 |  |
 | sync/futex.rs | `futex_wake_op` | 7966 | 73 |  |
 | sync/futex.rs | `debug_dump_futex_state` | 8038 | 72 |  |
 | sync/futex.rs | `do_futex` | 8109 | 622 |  |
-| sync/futex.rs | `sys_futex_handler` | 8730 | 817 |  |
+| sync/futex.rs | `sys_futex_handler` | 8730 | 817 | yes |
 | sync/futex.rs | `rwfrz_tgid_frozen` | 9546 | 45 |  |
 | sync/futex.rs | `note_task_unlink` | 9590 | 32 |  |
 | sync/futex.rs | `exit_ring_dump_tgid` | 9621 | 33 |  |
@@ -130,7 +130,7 @@ records why.
 | sync/futex.rs | `ctd_decode` | 10701 | 532 |  |
 | sync/futex.rs | `ctd_label` | 11232 | 44 |  |
 | sync/futex.rs | `probe_file_path` | 11275 | 23 |  |
-| sync/futex.rs | `apppark_rets_public` | 11297 | 9 |  |
+| sync/futex.rs | `apppark_rets_public` | 11297 | 9 | yes |
 | sync/futex.rs | `apppark_rets` | 11305 | 91 |  |
 | sync/futex.rs | `rwfz_emit_prio` | 11395 | 28 |  |
 | sync/futex.rs | `rwfz_emit` | 11422 | 10 |  |
@@ -139,7 +139,7 @@ records why.
 | sync/futex.rs | `rwlock_frozen_shape` | 11720 | 10 |  |
 | sync/futex.rs | `freeze_scan` | 11729 | 722 |  |
 | sync/futex.rs | `rwfz_neighbor_dump` | 12450 | 143 |  |
-| sync/futex.rs | `rwfz_dump_tgid` | 12592 | 50 |  |
+| sync/futex.rs | `rwfz_dump_tgid` | 12592 | 50 | yes |
 | sync/futex_pi.rs | `key_is_kernel` | 101 | 6 |  |
 | sync/futex_pi.rs | `kernel_key` | 106 | 18 |  |
 | sync/futex_pi.rs | `task_live_rank` | 123 | 48 |  |
@@ -203,7 +203,7 @@ records why.
 | sync/mutex.rs | `lock_killable` | 391 | 5 |  |
 | sync/mutex.rs | `lock_inner` | 395 | 365 |  |
 | sync/mutex.rs | `rt_leave` | 759 | 14 |  |
-| sync/mutex.rs | `guard` | 772 | 5 |  |
+| sync/mutex.rs | `guard` | 772 | 5 | yes |
 | sync/mutex.rs | `release` | 776 | 89 |  |
 | sync/mutex.rs | `release_if_owner` | 864 | 60 |  |
 | sync/mutex.rs | `vw_state` | 923 | 25 |  |
@@ -219,11 +219,11 @@ records why.
 | sync/percpu.rs | `deref_mut` | 279 | 8 | yes |
 | sync/percpu.rs | `drop` | 286 | 14 | yes |
 | sync/rcu.rs | `new` | 45 | 9 | yes |
-| sync/rcu.rs | `init` | 53 | 38 |  |
-| sync/rcu.rs | `rcu_read_lock` | 90 | 9 |  |
-| sync/rcu.rs | `rcu_read_unlock` | 98 | 22 |  |
+| sync/rcu.rs | `init` | 53 | 38 | yes |
+| sync/rcu.rs | `rcu_read_lock` | 90 | 9 | yes |
+| sync/rcu.rs | `rcu_read_unlock` | 98 | 22 | yes |
 | sync/rcu.rs | `call_rcu` | 119 | 55 |  |
-| sync/rcu.rs | `rcu_note_context_switch` | 173 | 19 |  |
+| sync/rcu.rs | `rcu_note_context_switch` | 173 | 19 | yes |
 | sync/rcu.rs | `synchronize_rcu` | 191 | 58 |  |
 | sync/rcu.rs | `synchronize_rcu_bounded` | 248 | 17 |  |
 | sync/rcu.rs | `synchronize_rcu_bounded_checked` | 264 | 18 |  |
@@ -248,7 +248,7 @@ records why.
 | sync/rcu.rs | `cpu_quiescent` | 830 | 9 |  |
 | sync/rcu.rs | `announce_and_wait` | 838 | 51 |  |
 | sync/rcu.rs | `rcu_softirq_handler` | 888 | 51 |  |
-| sync/rcu.rs | `init` | 938 | 21 |  |
+| sync/rcu.rs | `init` | 938 | 21 | yes |
 | sync/rcu.rs | `lock_cb_list` | 958 | 11 |  |
 | sync/rcu.rs | `unlock_cb_list` | 968 | 4 |  |
 | sync/rwlock.rs | `new` | 56 | 9 | yes |
@@ -324,9 +324,9 @@ records why.
 | sync/rwsem.rs | `cond_wake_waiter` | 922 | 20 |  |
 | sync/rwsem.rs | `down_write_slowpath` | 941 | 129 |  |
 | sync/rwsem.rs | `debug_state` | 1069 | 14 |  |
-| sync/rwsem.rs | `name` | 1082 | 9 |  |
-| sync/rwsem.rs | `pid_hash_lookup_pinned` | 1090 | 9 |  |
-| sync/rwsem.rs | `task_put` | 1098 | 6 |  |
+| sync/rwsem.rs | `name` | 1082 | 9 | yes |
+| sync/rwsem.rs | `pid_hash_lookup_pinned` | 1090 | 9 | yes |
+| sync/rwsem.rs | `task_put` | 1098 | 6 | yes |
 | sync/rwsem.rs | `owner_pid_on_cpu` | 1103 | 13 |  |
 | sync/rwsem.rs | `preempt_disable_at` | 1115 | 9 | yes |
 | sync/rwsem.rs | `preempt_enable` | 1123 | 6 | yes |
@@ -347,19 +347,19 @@ records why.
 | sync/rwsem.rs | `drop` | 1277 | 5 | yes |
 | sync/semaphore.rs | `cas_take` | 24 | 47 |  |
 | sync/semaphore.rs | `new` | 70 | 12 | yes |
-| sync/semaphore.rs | `init` | 81 | 24 |  |
-| sync/semaphore.rs | `down` | 104 | 90 |  |
+| sync/semaphore.rs | `init` | 81 | 24 | yes |
+| sync/semaphore.rs | `down` | 104 | 90 | yes |
 | sync/semaphore.rs | `down_interruptible` | 193 | 93 |  |
 | sync/semaphore.rs | `down_trylock` | 285 | 29 |  |
-| sync/semaphore.rs | `up` | 313 | 20 |  |
-| sync/semaphore.rs | `count` | 332 | 32 |  |
+| sync/semaphore.rs | `up` | 313 | 20 | yes |
+| sync/semaphore.rs | `count` | 332 | 32 | yes |
 | sync/semaphore.rs | `new` | 363 | 20 | yes |
 | sync/semaphore.rs | `lock` | 382 | 28 | yes |
 | sync/semaphore.rs | `try_lock` | 409 | 16 | yes |
 | sync/semaphore.rs | `unlock` | 424 | 29 | yes |
 | sync/semaphore.rs | `new` | 452 | 8 | yes |
 | sync/semaphore.rs | `drop` | 459 | 24 | yes |
-| sync/semaphore.rs | `guard` | 482 | 5 |  |
+| sync/semaphore.rs | `guard` | 482 | 5 | yes |
 | sync/seqlock.rs | `new` | 44 | 9 | yes |
 | sync/seqlock.rs | `write_lock` | 52 | 20 | yes |
 | sync/seqlock.rs | `write_unlock` | 71 | 7 | yes |

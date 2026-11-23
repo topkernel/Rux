@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# mm — hot 9509 lines (stay) / cold 13682 lines (leave)
+# mm — hot 15593 lines (stay) / cold 7598 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -58,9 +58,9 @@ records why.
 | mm/buddy_allocator.rs | `dealloc` | 1711 | 19 | yes |
 | mm/deferred_free.rs | `register_deferred_size` | 91 | 22 |  |
 | mm/deferred_free.rs | `deferred_size` | 112 | 10 |  |
-| mm/deferred_free.rs | `try_defer` | 121 | 57 |  |
-| mm/deferred_free.rs | `drain_if_due` | 177 | 14 |  |
-| mm/deferred_free.rs | `drain` | 190 | 54 |  |
+| mm/deferred_free.rs | `try_defer` | 121 | 57 | yes |
+| mm/deferred_free.rs | `drain_if_due` | 177 | 14 | yes |
+| mm/deferred_free.rs | `drain` | 190 | 54 | yes |
 | mm/edges.rs | `first_node_mut` | 37 | 10 | yes |
 | mm/edges.rs | `first_node` | 46 | 9 | yes |
 | mm/edges.rs | `page_of` | 54 | 15 | yes |
@@ -104,18 +104,18 @@ records why.
 | mm/gup.rs | `head_off` | 79 | 6 |  |
 | mm/gup.rs | `page_of` | 84 | 8 | yes |
 | mm/gup.rs | `piece` | 91 | 19 |  |
-| mm/gup.rs | `for_each_piece` | 109 | 32 |  |
-| mm/gup.rs | `range_pinned` | 140 | 18 |  |
-| mm/gup.rs | `next_piece` | 157 | 41 |  |
+| mm/gup.rs | `for_each_piece` | 109 | 32 | yes |
+| mm/gup.rs | `range_pinned` | 140 | 18 | yes |
+| mm/gup.rs | `next_piece` | 157 | 41 | yes |
 | mm/gup.rs | `page_end_off` | 197 | 9 |  |
-| mm/gup.rs | `first_ptr` | 205 | 10 |  |
+| mm/gup.rs | `first_ptr` | 205 | 10 | yes |
 | mm/gup.rs | `copy_into_pinned` | 214 | 17 |  |
 | mm/gup.rs | `copy_from_pinned` | 230 | 15 |  |
-| mm/gup.rs | `pinned_pages` | 244 | 6 |  |
-| mm/gup.rs | `page_count` | 249 | 6 |  |
+| mm/gup.rs | `pinned_pages` | 244 | 6 | yes |
+| mm/gup.rs | `page_count` | 249 | 6 | yes |
 | mm/gup.rs | `unpin` | 254 | 16 |  |
 | mm/gup.rs | `drop` | 269 | 18 | yes |
-| mm/gup.rs | `pin_user_pages` | 286 | 86 |  |
+| mm/gup.rs | `pin_user_pages` | 286 | 86 | yes |
 | mm/gup.rs | `pin_one_faulted` | 371 | 63 |  |
 | mm/gup.rs | `handle_mm_fault_checked` | 433 | 8 |  |
 | mm/layout.rs | `heap_region_end` | 90 | 10 |  |
@@ -126,7 +126,7 @@ records why.
 | mm/layout.rs | `kernel_layout` | 312 | 11 |  |
 | mm/layout.rs | `is_kernel_layout_initialized` | 322 | 9 |  |
 | mm/layout.rs | `phys_memory_base` | 330 | 7 |  |
-| mm/layout.rs | `phys_memory_size` | 336 | 7 |  |
+| mm/layout.rs | `phys_memory_size` | 336 | 7 | yes |
 | mm/layout.rs | `kernel_start` | 342 | 7 |  |
 | mm/layout.rs | `kernel_end` | 348 | 7 |  |
 | mm/layout.rs | `heap_start` | 354 | 7 |  |
@@ -143,26 +143,26 @@ records why.
 | mm/layout.rs | `assert_memblock_consistency` | 431 | 47 |  |
 | mm/memblock.rs | `new` | 65 | 10 | yes |
 | mm/memblock.rs | `with_flags` | 74 | 12 |  |
-| mm/memblock.rs | `end` | 85 | 7 |  |
+| mm/memblock.rs | `end` | 85 | 7 | yes |
 | mm/memblock.rs | `contains` | 91 | 7 | yes |
 | mm/memblock.rs | `base_pfn` | 97 | 7 |  |
 | mm/memblock.rs | `end_pfn` | 103 | 7 | yes |
-| mm/memblock.rs | `page_count` | 109 | 18 |  |
+| mm/memblock.rs | `page_count` | 109 | 18 | yes |
 | mm/memblock.rs | `new` | 126 | 18 | yes |
 | mm/memblock.rs | `insert_and_merge_all` | 143 | 79 |  |
 | mm/memblock.rs | `add` | 221 | 14 | yes |
 | mm/memblock.rs | `add_reserved` | 234 | 6 |  |
-| mm/memblock.rs | `remove` | 239 | 16 |  |
+| mm/memblock.rs | `remove` | 239 | 16 | yes |
 | mm/memblock.rs | `iter` | 254 | 7 | yes |
 | mm/memblock.rs | `len` | 260 | 7 | yes |
 | mm/memblock.rs | `is_empty` | 266 | 7 | yes |
 | mm/memblock.rs | `total_size` | 272 | 6 |  |
-| mm/memblock.rs | `find` | 277 | 6 |  |
+| mm/memblock.rs | `find` | 277 | 6 | yes |
 | mm/memblock.rs | `find_first_available` | 282 | 23 |  |
 | mm/memblock.rs | `new` | 304 | 13 | yes |
 | mm/memblock.rs | `init` | 316 | 9 | yes |
 | mm/memblock.rs | `add_memory` | 324 | 13 |  |
-| mm/memblock.rs | `reserve` | 336 | 13 |  |
+| mm/memblock.rs | `reserve` | 336 | 13 | yes |
 | mm/memblock.rs | `reserve_nomap` | 348 | 7 |  |
 | mm/memblock.rs | `get_available_region` | 354 | 32 |  |
 | mm/memblock.rs | `total_memory` | 385 | 7 |  |
@@ -193,7 +193,7 @@ records why.
 | mm/meminfo.rs | `default` | 78 | 27 | yes |
 | mm/meminfo.rs | `format` | 104 | 12 |  |
 | mm/meminfo.rs | `fmt` | 115 | 35 |  |
-| mm/meminfo.rs | `get_basic_memory_info` | 149 | 28 |  |
+| mm/meminfo.rs | `get_basic_memory_info` | 149 | 28 | yes |
 | mm/meminfo.rs | `get_memory_info` | 176 | 34 |  |
 | mm/meminfo.rs | `print_memory_info` | 209 | 20 |  |
 | mm/meminfo.rs | `get_memory_summary` | 228 | 23 |  |
@@ -205,15 +205,15 @@ records why.
 | mm/mm_hooks.rs | `no_policy_find_free_area` | 134 | 4 |  |
 | mm/mm_hooks.rs | `no_policy_zap_page_range` | 137 | 4 |  |
 | mm/mm_hooks.rs | `no_policy_fork` | 140 | 12 |  |
-| mm/mm_hooks.rs | `mm_register_hooks` | 151 | 6 |  |
+| mm/mm_hooks.rs | `mm_register_hooks` | 151 | 6 | yes |
 | mm/mm_hooks.rs | `hooks` | 156 | 8 |  |
-| mm/mm_hooks.rs | `handle_mm_fault` | 163 | 6 |  |
-| mm/mm_hooks.rs | `mmap` | 168 | 14 |  |
-| mm/mm_hooks.rs | `munmap` | 181 | 6 |  |
-| mm/mm_hooks.rs | `find_free_area` | 186 | 6 |  |
-| mm/mm_hooks.rs | `zap_page_range` | 191 | 10 |  |
+| mm/mm_hooks.rs | `handle_mm_fault` | 163 | 6 | yes |
+| mm/mm_hooks.rs | `mmap` | 168 | 14 | yes |
+| mm/mm_hooks.rs | `munmap` | 181 | 6 | yes |
+| mm/mm_hooks.rs | `find_free_area` | 186 | 6 | yes |
+| mm/mm_hooks.rs | `zap_page_range` | 191 | 10 | yes |
 | mm/mm_hooks.rs | `fork` | 200 | 37 |  |
-| mm/mm_hooks.rs | `make_swap_entry` | 236 | 9 |  |
+| mm/mm_hooks.rs | `make_swap_entry` | 236 | 9 | yes |
 | mm/mm_hooks.rs | `is_swap_entry` | 244 | 7 |  |
 | mm/mm_hooks.rs | `make_migration_entry` | 250 | 7 |  |
 | mm/mm_hooks.rs | `is_migration_entry` | 256 | 7 |  |
@@ -250,7 +250,7 @@ records why.
 | mm/mm_hooks.rs | `no_policy_lru_activate_young` | 457 | 4 |  |
 | mm/mm_hooks.rs | `no_policy_lru_tail` | 460 | 4 |  |
 | mm/mm_hooks.rs | `no_policy_lru_demote_active_file_oldest` | 463 | 10 |  |
-| mm/mm_hooks.rs | `mm_register_policy_hooks` | 472 | 6 |  |
+| mm/mm_hooks.rs | `mm_register_policy_hooks` | 472 | 6 | yes |
 | mm/mm_hooks.rs | `policy_hooks` | 477 | 10 |  |
 | mm/mm_hooks.rs | `register_in_tree_mm_policy` | 486 | 46 |  |
 | mm/mm_hooks.rs | `kswapd_init` | 531 | 5 |  |
@@ -258,46 +258,46 @@ records why.
 | mm/mm_hooks.rs | `wakeup_kswapd` | 539 | 5 | yes |
 | mm/mm_hooks.rs | `try_to_free_pages` | 543 | 5 | yes |
 | mm/mm_hooks.rs | `drain_file_cache_before_oom` | 547 | 5 | yes |
-| mm/mm_hooks.rs | `vscan_heartbeat` | 551 | 5 |  |
+| mm/mm_hooks.rs | `vscan_heartbeat` | 551 | 5 | yes |
 | mm/mm_hooks.rs | `vscan_census_line` | 555 | 5 | yes |
-| mm/mm_hooks.rs | `zone_dirty_writeback_state` | 559 | 5 |  |
-| mm/mm_hooks.rs | `zone_below_dirty_writeback_mark` | 563 | 5 |  |
-| mm/mm_hooks.rs | `fault_oom_kill_or_retry` | 567 | 5 |  |
-| mm/mm_hooks.rs | `kernel_fault_oom_kill` | 571 | 5 |  |
-| mm/mm_hooks.rs | `sysrq_oom_kill` | 575 | 5 |  |
-| mm/mm_hooks.rs | `oom_badness` | 579 | 5 |  |
-| mm/mm_hooks.rs | `migration_in_progress` | 583 | 5 |  |
+| mm/mm_hooks.rs | `zone_dirty_writeback_state` | 559 | 5 | yes |
+| mm/mm_hooks.rs | `zone_below_dirty_writeback_mark` | 563 | 5 | yes |
+| mm/mm_hooks.rs | `fault_oom_kill_or_retry` | 567 | 5 | yes |
+| mm/mm_hooks.rs | `kernel_fault_oom_kill` | 571 | 5 | yes |
+| mm/mm_hooks.rs | `sysrq_oom_kill` | 575 | 5 | yes |
+| mm/mm_hooks.rs | `oom_badness` | 579 | 5 | yes |
+| mm/mm_hooks.rs | `migration_in_progress` | 583 | 5 | yes |
 | mm/mm_hooks.rs | `compact_zone` | 587 | 5 | yes |
-| mm/mm_hooks.rs | `swap_init` | 591 | 5 |  |
-| mm/mm_hooks.rs | `swap_activate` | 595 | 5 |  |
-| mm/mm_hooks.rs | `swap_deactivate` | 599 | 5 |  |
-| mm/mm_hooks.rs | `swap_boot_disk` | 603 | 5 |  |
+| mm/mm_hooks.rs | `swap_init` | 591 | 5 | yes |
+| mm/mm_hooks.rs | `swap_activate` | 595 | 5 | yes |
+| mm/mm_hooks.rs | `swap_deactivate` | 599 | 5 | yes |
+| mm/mm_hooks.rs | `swap_boot_disk` | 603 | 5 | yes |
 | mm/mm_hooks.rs | `nr_active_swap` | 607 | 5 | yes |
-| mm/mm_hooks.rs | `swap_free_slot` | 611 | 5 |  |
-| mm/mm_hooks.rs | `swap_stats` | 615 | 5 |  |
+| mm/mm_hooks.rs | `swap_free_slot` | 611 | 5 | yes |
+| mm/mm_hooks.rs | `swap_stats` | 615 | 5 | yes |
 | mm/mm_hooks.rs | `swap_write_census` | 619 | 5 | yes |
-| mm/mm_hooks.rs | `page_add_anon_lru` | 623 | 5 |  |
-| mm/mm_hooks.rs | `page_remove_lru` | 627 | 5 |  |
-| mm/mm_hooks.rs | `page_add_file_lru` | 631 | 5 |  |
-| mm/mm_hooks.rs | `page_add_file_lru_young` | 635 | 5 |  |
-| mm/mm_hooks.rs | `page_add_file_lru_young_batch` | 639 | 5 |  |
-| mm/mm_hooks.rs | `lru_activate_young` | 643 | 5 |  |
-| mm/mm_hooks.rs | `lru_tail` | 647 | 5 |  |
-| mm/mm_hooks.rs | `lru_demote_active_file_oldest` | 651 | 4 |  |
+| mm/mm_hooks.rs | `page_add_anon_lru` | 623 | 5 | yes |
+| mm/mm_hooks.rs | `page_remove_lru` | 627 | 5 | yes |
+| mm/mm_hooks.rs | `page_add_file_lru` | 631 | 5 | yes |
+| mm/mm_hooks.rs | `page_add_file_lru_young` | 635 | 5 | yes |
+| mm/mm_hooks.rs | `page_add_file_lru_young_batch` | 639 | 5 | yes |
+| mm/mm_hooks.rs | `lru_activate_young` | 643 | 5 | yes |
+| mm/mm_hooks.rs | `lru_tail` | 647 | 5 | yes |
+| mm/mm_hooks.rs | `lru_demote_active_file_oldest` | 651 | 4 | yes |
 | mm/mm_struct.rs | `new` | 70 | 7 | yes |
-| mm/mm_struct.rs | `lock` | 76 | 7 |  |
+| mm/mm_struct.rs | `lock` | 76 | 7 | yes |
 | mm/mm_struct.rs | `lock_irqsave` | 82 | 15 | yes |
 | mm/mm_struct.rs | `new` | 96 | 18 | yes |
-| mm/mm_struct.rs | `lock` | 113 | 10 |  |
+| mm/mm_struct.rs | `lock` | 113 | 10 | yes |
 | mm/mm_struct.rs | `lock_irqsave` | 122 | 261 | yes |
 | mm/mm_struct.rs | `new` | 382 | 90 | yes |
 | mm/mm_struct.rs | `new_shared` | 471 | 11 |  |
 | mm/mm_struct.rs | `new_with_type` | 481 | 6 |  |
 | mm/mm_struct.rs | `new_kernel` | 486 | 6 |  |
 | mm/mm_struct.rs | `new_user` | 491 | 11 |  |
-| mm/mm_struct.rs | `set_exe_text_key` | 501 | 8 |  |
+| mm/mm_struct.rs | `set_exe_text_key` | 501 | 8 | yes |
 | mm/mm_struct.rs | `inherit_exe_text` | 508 | 12 |  |
-| mm/mm_struct.rs | `pgd` | 519 | 7 |  |
+| mm/mm_struct.rs | `pgd` | 519 | 7 | yes |
 | mm/mm_struct.rs | `root_ppn` | 525 | 7 | yes |
 | mm/mm_struct.rs | `asid` | 531 | 7 |  |
 | mm/mm_struct.rs | `set_asid` | 537 | 10 |  |
@@ -307,7 +307,7 @@ records why.
 | mm/mm_struct.rs | `alloc_asid` | 593 | 26 |  |
 | mm/mm_struct.rs | `free_asid` | 618 | 19 |  |
 | mm/mm_struct.rs | `pte_lock` | 636 | 23 |  |
-| mm/mm_struct.rs | `mm_surgery_guard` | 658 | 9 |  |
+| mm/mm_struct.rs | `mm_surgery_guard` | 658 | 9 | yes |
 | mm/mm_struct.rs | `space_type` | 666 | 9 |  |
 | mm/mm_struct.rs | `start_code` | 674 | 7 |  |
 | mm/mm_struct.rs | `set_start_code` | 680 | 7 |  |
@@ -317,15 +317,15 @@ records why.
 | mm/mm_struct.rs | `set_start_data` | 704 | 7 |  |
 | mm/mm_struct.rs | `end_data` | 710 | 7 |  |
 | mm/mm_struct.rs | `set_end_data` | 716 | 9 |  |
-| mm/mm_struct.rs | `start_brk` | 724 | 7 |  |
+| mm/mm_struct.rs | `start_brk` | 724 | 7 | yes |
 | mm/mm_struct.rs | `set_start_brk` | 730 | 14 |  |
-| mm/mm_struct.rs | `brk` | 743 | 7 |  |
-| mm/mm_struct.rs | `set_brk_val` | 749 | 10 |  |
-| mm/mm_struct.rs | `brk_lock` | 758 | 9 |  |
-| mm/mm_struct.rs | `start_stack` | 766 | 7 |  |
+| mm/mm_struct.rs | `brk` | 743 | 7 | yes |
+| mm/mm_struct.rs | `set_brk_val` | 749 | 10 | yes |
+| mm/mm_struct.rs | `brk_lock` | 758 | 9 | yes |
+| mm/mm_struct.rs | `start_stack` | 766 | 7 | yes |
 | mm/mm_struct.rs | `set_start_stack` | 772 | 7 |  |
 | mm/mm_struct.rs | `stack_limit` | 778 | 7 |  |
-| mm/mm_struct.rs | `set_stack_limit` | 784 | 9 |  |
+| mm/mm_struct.rs | `set_stack_limit` | 784 | 9 | yes |
 | mm/mm_struct.rs | `arg_start` | 792 | 7 |  |
 | mm/mm_struct.rs | `set_arg_start` | 798 | 7 |  |
 | mm/mm_struct.rs | `arg_end` | 804 | 7 |  |
@@ -334,8 +334,8 @@ records why.
 | mm/mm_struct.rs | `set_env_start` | 822 | 7 |  |
 | mm/mm_struct.rs | `env_end` | 828 | 7 |  |
 | mm/mm_struct.rs | `set_env_end` | 834 | 9 |  |
-| mm/mm_struct.rs | `total_vm` | 842 | 7 |  |
-| mm/mm_struct.rs | `add_total_vm` | 848 | 12 |  |
+| mm/mm_struct.rs | `total_vm` | 842 | 7 | yes |
+| mm/mm_struct.rs | `add_total_vm` | 848 | 12 | yes |
 | mm/mm_struct.rs | `sub_total_vm` | 859 | 20 |  |
 | mm/mm_struct.rs | `release_unmapped_pages` | 878 | 18 |  |
 | mm/mm_struct.rs | `locked_vm` | 895 | 7 |  |
@@ -343,8 +343,8 @@ records why.
 | mm/mm_struct.rs | `data_vm` | 907 | 7 |  |
 | mm/mm_struct.rs | `exec_vm` | 913 | 7 |  |
 | mm/mm_struct.rs | `stack_vm` | 919 | 9 |  |
-| mm/mm_struct.rs | `rss` | 927 | 7 |  |
-| mm/mm_struct.rs | `add_rss` | 933 | 8 |  |
+| mm/mm_struct.rs | `rss` | 927 | 7 | yes |
+| mm/mm_struct.rs | `add_rss` | 933 | 8 | yes |
 | mm/mm_struct.rs | `sub_rss` | 940 | 13 |  |
 | mm/mm_struct.rs | `mmap_base` | 952 | 7 |  |
 | mm/mm_struct.rs | `set_mmap_base` | 958 | 7 |  |
@@ -359,20 +359,20 @@ records why.
 | mm/mm_struct.rs | `mm_count_dec_and_test` | 1067 | 7 |  |
 | mm/mm_struct.rs | `mm_count` | 1073 | 9 |  |
 | mm/mm_struct.rs | `flags` | 1081 | 7 | yes |
-| mm/mm_struct.rs | `set_flags` | 1087 | 7 |  |
-| mm/mm_struct.rs | `has_flag` | 1093 | 9 |  |
+| mm/mm_struct.rs | `set_flags` | 1087 | 7 | yes |
+| mm/mm_struct.rs | `has_flag` | 1093 | 9 | yes |
 | mm/mm_struct.rs | `owner_pid` | 1101 | 7 |  |
 | mm/mm_struct.rs | `set_owner_pid` | 1107 | 12 |  |
-| mm/mm_struct.rs | `vma_read` | 1118 | 11 |  |
+| mm/mm_struct.rs | `vma_read` | 1118 | 11 | yes |
 | mm/mm_struct.rs | `vma_try_read` | 1128 | 11 |  |
 | mm/mm_struct.rs | `vma_rwsem_diag` | 1138 | 8 |  |
-| mm/mm_struct.rs | `pin_vma_file` | 1145 | 6 |  |
-| mm/mm_struct.rs | `unpin_vma_file` | 1150 | 7 |  |
-| mm/mm_struct.rs | `get_vma_file` | 1156 | 8 |  |
+| mm/mm_struct.rs | `pin_vma_file` | 1145 | 6 | yes |
+| mm/mm_struct.rs | `unpin_vma_file` | 1150 | 7 | yes |
+| mm/mm_struct.rs | `get_vma_file` | 1156 | 8 | yes |
 | mm/mm_struct.rs | `try_get_vma_file` | 1163 | 14 |  |
-| mm/mm_struct.rs | `vma_write` | 1176 | 6 |  |
-| mm/mm_struct.rs | `find_vma` | 1181 | 7 |  |
-| mm/mm_struct.rs | `add_vma` | 1187 | 17 |  |
+| mm/mm_struct.rs | `vma_write` | 1176 | 6 | yes |
+| mm/mm_struct.rs | `find_vma` | 1181 | 7 | yes |
+| mm/mm_struct.rs | `add_vma` | 1187 | 17 | yes |
 | mm/mm_struct.rs | `remove_vma` | 1203 | 20 |  |
 | mm/mm_struct.rs | `setup_segment_layout` | 1222 | 29 |  |
 | mm/mm_struct.rs | `setup_stack` | 1250 | 13 |  |
@@ -384,16 +384,16 @@ records why.
 | mm/mod.rs | `alloc_and_map_user_table` | 118 | 21 | yes |
 | mm/mod.rs | `alloc_and_map_user_memory` | 138 | 30 |  |
 | mm/mod.rs | `switch_address_space` | 167 | 13 | yes |
-| mm/mod.rs | `flush_tlb_page_local` | 179 | 63 |  |
+| mm/mod.rs | `flush_tlb_page_local` | 179 | 63 | yes |
 | mm/page.rs | `new` | 30 | 5 | yes |
-| mm/page.rs | `as_usize` | 34 | 5 |  |
+| mm/page.rs | `as_usize` | 34 | 5 | yes |
 | mm/page.rs | `is_aligned` | 38 | 5 |  |
 | mm/page.rs | `floor` | 42 | 5 |  |
 | mm/page.rs | `ceil` | 46 | 5 |  |
 | mm/page.rs | `frame_number` | 50 | 6 | yes |
 | mm/page.rs | `ppn` | 55 | 7 |  |
 | mm/page.rs | `new` | 61 | 5 | yes |
-| mm/page.rs | `as_usize` | 65 | 5 |  |
+| mm/page.rs | `as_usize` | 65 | 5 | yes |
 | mm/page.rs | `is_aligned` | 69 | 5 |  |
 | mm/page.rs | `floor` | 73 | 5 |  |
 | mm/page.rs | `ceil` | 77 | 5 |  |
@@ -532,7 +532,7 @@ records why.
 | mm/page_desc.rs | `get_page` | 1329 | 10 | yes |
 | mm/page_desc.rs | `get_page_mut` | 1338 | 16 | yes |
 | mm/page_desc.rs | `page_desc` | 1353 | 12 | yes |
-| mm/pagemap.rs | `from` | 40 | 38 |  |
+| mm/pagemap.rs | `from` | 40 | 38 | yes |
 | mm/pcp.rs | `new` | 67 | 34 | yes |
 | mm/pcp.rs | `with_row` | 100 | 26 |  |
 | mm/pcp.rs | `alloc_order0` | 125 | 83 | yes |
@@ -569,30 +569,30 @@ records why.
 | mm/pglist.rs | `print_zoneinfo` | 362 | 29 |  |
 | mm/policy/aarch64.rs | `try_expand_stack` | 35 | 156 |  |
 | mm/policy/aarch64.rs | `protnone_represent` | 190 | 97 |  |
-| mm/policy/aarch64.rs | `handle_mm_fault` | 286 | 309 |  |
+| mm/policy/aarch64.rs | `handle_mm_fault` | 286 | 309 | yes |
 | mm/policy/aarch64.rs | `map_vma` | 594 | 24 |  |
-| mm/policy/aarch64.rs | `set_brk` | 617 | 121 |  |
-| mm/policy/aarch64.rs | `mmap` | 737 | 166 |  |
-| mm/policy/aarch64.rs | `find_free_area` | 902 | 8 |  |
+| mm/policy/aarch64.rs | `set_brk` | 617 | 121 | yes |
+| mm/policy/aarch64.rs | `mmap` | 737 | 166 | yes |
+| mm/policy/aarch64.rs | `find_free_area` | 902 | 8 | yes |
 | mm/policy/aarch64.rs | `find_free_area_locked` | 909 | 45 |  |
-| mm/policy/aarch64.rs | `munmap` | 953 | 144 |  |
-| mm/policy/aarch64.rs | `zap_page_range` | 1096 | 13 |  |
+| mm/policy/aarch64.rs | `munmap` | 953 | 144 | yes |
+| mm/policy/aarch64.rs | `zap_page_range` | 1096 | 13 | yes |
 | mm/policy/aarch64.rs | `do_brk` | 1108 | 6 |  |
 | mm/policy/aarch64.rs | `allocate_stack` | 1113 | 27 |  |
 | mm/policy/aarch64.rs | `fork` | 1139 | 121 |  |
 | mm/policy/riscv64.rs | `try_expand_stack` | 47 | 223 |  |
 | mm/policy/riscv64.rs | `pte_counts_as_mapped` | 269 | 6 |  |
-| mm/policy/riscv64.rs | `handle_mm_fault` | 274 | 771 |  |
+| mm/policy/riscv64.rs | `handle_mm_fault` | 274 | 771 | yes |
 | mm/policy/riscv64.rs | `anon_faultaround_forward` | 1044 | 81 |  |
 | mm/policy/riscv64.rs | `is_protnone_marker` | 1124 | 21 |  |
 | mm/policy/riscv64.rs | `handle_swap_fault` | 1144 | 159 |  |
 | mm/policy/riscv64.rs | `map_vma` | 1302 | 23 |  |
-| mm/policy/riscv64.rs | `set_brk` | 1324 | 131 |  |
-| mm/policy/riscv64.rs | `mmap` | 1454 | 220 |  |
-| mm/policy/riscv64.rs | `find_free_area` | 1673 | 8 |  |
+| mm/policy/riscv64.rs | `set_brk` | 1324 | 131 | yes |
+| mm/policy/riscv64.rs | `mmap` | 1454 | 220 | yes |
+| mm/policy/riscv64.rs | `find_free_area` | 1673 | 8 | yes |
 | mm/policy/riscv64.rs | `find_free_area_locked` | 1680 | 46 |  |
-| mm/policy/riscv64.rs | `munmap` | 1725 | 176 |  |
-| mm/policy/riscv64.rs | `zap_page_range` | 1900 | 15 |  |
+| mm/policy/riscv64.rs | `munmap` | 1725 | 176 | yes |
+| mm/policy/riscv64.rs | `zap_page_range` | 1900 | 15 | yes |
 | mm/policy/riscv64.rs | `munmap_legacy` | 1914 | 46 |  |
 | mm/policy/riscv64.rs | `set_range_permissions` | 1959 | 55 |  |
 | mm/policy/riscv64.rs | `do_brk` | 2013 | 6 |  |
@@ -600,18 +600,18 @@ records why.
 | mm/policy/riscv64.rs | `fork` | 2041 | 126 |  |
 | mm/policy/x86_64.rs | `try_expand_stack` | 84 | 201 |  |
 | mm/policy/x86_64.rs | `pte_counts_as_mapped` | 284 | 6 |  |
-| mm/policy/x86_64.rs | `handle_mm_fault` | 289 | 1626 |  |
+| mm/policy/x86_64.rs | `handle_mm_fault` | 289 | 1626 | yes |
 | mm/policy/x86_64.rs | `is_protnone_marker` | 1914 | 19 |  |
 | mm/policy/x86_64.rs | `handle_swap_fault` | 1932 | 157 |  |
 | mm/policy/x86_64.rs | `map_vma` | 2088 | 24 |  |
-| mm/policy/x86_64.rs | `set_brk` | 2111 | 124 |  |
-| mm/policy/x86_64.rs | `mmap` | 2234 | 324 |  |
+| mm/policy/x86_64.rs | `set_brk` | 2111 | 124 | yes |
+| mm/policy/x86_64.rs | `mmap` | 2234 | 324 | yes |
 | mm/policy/x86_64.rs | `find_free_area_32bit` | 2557 | 9 |  |
 | mm/policy/x86_64.rs | `find_free_area_32bit_locked` | 2565 | 38 |  |
-| mm/policy/x86_64.rs | `find_free_area` | 2602 | 10 |  |
+| mm/policy/x86_64.rs | `find_free_area` | 2602 | 10 | yes |
 | mm/policy/x86_64.rs | `find_free_area_locked` | 2611 | 43 |  |
-| mm/policy/x86_64.rs | `munmap` | 2653 | 269 |  |
-| mm/policy/x86_64.rs | `zap_page_range` | 2921 | 17 |  |
+| mm/policy/x86_64.rs | `munmap` | 2653 | 269 | yes |
+| mm/policy/x86_64.rs | `zap_page_range` | 2921 | 17 | yes |
 | mm/policy/x86_64.rs | `remove_vma_piece` | 2937 | 72 |  |
 | mm/policy/x86_64.rs | `range_is_pte_empty` | 3008 | 156 |  |
 | mm/policy/x86_64.rs | `set_range_permissions` | 3163 | 73 |  |
@@ -620,21 +620,21 @@ records why.
 | mm/policy/x86_64.rs | `fork` | 3263 | 161 |  |
 | mm/rmap.rs | `new` | 51 | 11 | yes |
 | mm/rmap.rs | `get` | 61 | 7 | yes |
-| mm/rmap.rs | `put` | 67 | 6 |  |
+| mm/rmap.rs | `put` | 67 | 6 | yes |
 | mm/rmap.rs | `refcount` | 72 | 6 | yes |
 | mm/rmap.rs | `set_vma` | 77 | 6 |  |
 | mm/rmap.rs | `get_vma` | 82 | 25 |  |
 | mm/rmap.rs | `page_add_anon_rmap` | 106 | 31 |  |
 | mm/rmap.rs | `page_add_file_rmap` | 136 | 24 |  |
 | mm/rmap.rs | `page_remove_rmap` | 159 | 30 |  |
-| mm/rmap.rs | `page_mapped` | 188 | 11 |  |
+| mm/rmap.rs | `page_mapped` | 188 | 11 | yes |
 | mm/rmap.rs | `page_get_mappings` | 198 | 16 |  |
-| mm/rmap.rs | `page_referenced` | 213 | 7 |  |
+| mm/rmap.rs | `page_referenced` | 213 | 7 | yes |
 | mm/rmap.rs | `page_clear_referenced` | 219 | 12 |  |
 | mm/rmap.rs | `try_to_unmap` | 230 | 12 |  |
-| mm/rmap.rs | `try_to_unmap_with_swap` | 241 | 14 |  |
-| mm/rmap.rs | `page_record_mapping` | 254 | 56 |  |
-| mm/rmap.rs | `try_to_unmap_migration` | 309 | 9 |  |
+| mm/rmap.rs | `try_to_unmap_with_swap` | 241 | 14 | yes |
+| mm/rmap.rs | `page_record_mapping` | 254 | 56 | yes |
+| mm/rmap.rs | `try_to_unmap_migration` | 309 | 9 | yes |
 | mm/rmap.rs | `try_to_unmap_inner` | 317 | 204 |  |
 | mm/rmap.rs | `rmap_stats` | 520 | 5 |  |
 | mm/slab.rs | `new` | 79 | 35 | yes |
@@ -691,14 +691,14 @@ records why.
 | mm/small_alloc.rs | `is_userva` | 994 | 79 | yes |
 | mm/small_alloc.rs | `census_line` | 1072 | 32 | yes |
 | mm/unwatch.rs | `note` | 72 | 17 |  |
-| mm/unwatch.rs | `dump_tail` | 88 | 37 |  |
-| mm/unwatch.rs | `covered_by_unmap` | 124 | 33 |  |
+| mm/unwatch.rs | `dump_tail` | 88 | 37 | yes |
+| mm/unwatch.rs | `covered_by_unmap` | 124 | 33 | yes |
 | mm/vdso.rs | `vdso_ehdr` | 80 | 29 |  |
 | mm/vdso.rs | `vdso_seq` | 108 | 10 |  |
-| mm/vdso.rs | `vdso_data_tick` | 117 | 90 |  |
-| mm/vdso.rs | `bump` | 206 | 10 |  |
+| mm/vdso.rs | `vdso_data_tick` | 117 | 90 | yes |
+| mm/vdso.rs | `bump` | 206 | 10 | yes |
 | mm/vdso.rs | `bump_pub` | 215 | 11 |  |
-| mm/vdso.rs | `rd` | 225 | 9 |  |
+| mm/vdso.rs | `rd` | 225 | 9 | yes |
 | mm/vdso.rs | `wr` | 233 | 15 |  |
 | mm/vdso.rs | `read_tsc_ordered` | 247 | 31 |  |
 | mm/vdso.rs | `tsc_delta_nominal` | 277 | 12 |  |
@@ -709,13 +709,13 @@ records why.
 | mm/vdso.rs | `tsc_anchor_step_back` | 347 | 19 |  |
 | mm/vdso.rs | `tsc_anchor_peek` | 365 | 42 |  |
 | mm/vdso.rs | `tsc_track_now_nominal` | 406 | 43 |  |
-| mm/vdso.rs | `vdso_data_tick` | 448 | 48 |  |
+| mm/vdso.rs | `vdso_data_tick` | 448 | 48 | yes |
 | mm/vdso.rs | `vdso_pages_phys` | 495 | 26 |  |
 | mm/vdso.rs | `vdso_pages_phys` | 520 | 11 |  |
 | mm/vdso.rs | `is_vdso_phys` | 530 | 32 |  |
 | mm/vdso.rs | `new` | 561 | 8 | yes |
 | mm/vdso.rs | `label` | 568 | 4 |  |
-| mm/vdso.rs | `emit` | 571 | 5 |  |
+| mm/vdso.rs | `emit` | 571 | 5 | yes |
 | mm/vdso.rs | `br` | 575 | 6 |  |
 | mm/vdso.rs | `jal_rel` | 580 | 5 |  |
 | mm/vdso.rs | `finish` | 584 | 13 |  |
@@ -755,64 +755,64 @@ records why.
 | mm/vdso.rs | `build_code_page` | 1159 | 328 |  |
 | mm/vdso.rs | `vdso_init` | 1486 | 11 |  |
 | mm/vma.rs | `new` | 70 | 6 | yes |
-| mm/vma.rs | `from_bits` | 75 | 6 |  |
+| mm/vma.rs | `from_bits` | 75 | 6 | yes |
 | mm/vma.rs | `bits` | 80 | 6 | yes |
 | mm/vma.rs | `contains` | 85 | 6 | yes |
-| mm/vma.rs | `insert` | 90 | 6 |  |
-| mm/vma.rs | `remove` | 95 | 7 |  |
-| mm/vma.rs | `is_readable` | 101 | 7 |  |
-| mm/vma.rs | `is_writable` | 107 | 7 |  |
-| mm/vma.rs | `is_executable` | 113 | 7 |  |
-| mm/vma.rs | `is_shared` | 119 | 7 |  |
+| mm/vma.rs | `insert` | 90 | 6 | yes |
+| mm/vma.rs | `remove` | 95 | 7 | yes |
+| mm/vma.rs | `is_readable` | 101 | 7 | yes |
+| mm/vma.rs | `is_writable` | 107 | 7 | yes |
+| mm/vma.rs | `is_executable` | 113 | 7 | yes |
+| mm/vma.rs | `is_shared` | 119 | 7 | yes |
 | mm/vma.rs | `is_private` | 125 | 17 |  |
-| mm/vma.rs | `to_page_perm` | 141 | 22 |  |
+| mm/vma.rs | `to_page_perm` | 141 | 22 | yes |
 | mm/vma.rs | `default` | 162 | 96 | yes |
-| mm/vma.rs | `from_bits` | 257 | 7 |  |
+| mm/vma.rs | `from_bits` | 257 | 7 | yes |
 | mm/vma.rs | `set_creator` | 263 | 7 |  |
 | mm/vma.rs | `mark_forked` | 269 | 6 |  |
 | mm/vma.rs | `bits` | 274 | 7 | yes |
-| mm/vma.rs | `creator_name` | 280 | 19 |  |
-| mm/vma.rs | `is_forked` | 298 | 7 |  |
+| mm/vma.rs | `creator_name` | 280 | 19 | yes |
+| mm/vma.rs | `is_forked` | 298 | 7 | yes |
 | mm/vma.rs | `default` | 304 | 8 | yes |
 | mm/vma.rs | `new` | 311 | 20 | yes |
-| mm/vma.rs | `start` | 330 | 7 |  |
-| mm/vma.rs | `end` | 336 | 7 |  |
+| mm/vma.rs | `start` | 330 | 7 | yes |
+| mm/vma.rs | `end` | 336 | 7 | yes |
 | mm/vma.rs | `size` | 342 | 7 | yes |
-| mm/vma.rs | `page_count` | 348 | 7 |  |
+| mm/vma.rs | `page_count` | 348 | 7 | yes |
 | mm/vma.rs | `flags` | 354 | 6 | yes |
-| mm/vma.rs | `set_flags` | 359 | 7 |  |
-| mm/vma.rs | `vma_type` | 365 | 6 |  |
-| mm/vma.rs | `set_type` | 370 | 7 |  |
+| mm/vma.rs | `set_flags` | 359 | 7 | yes |
+| mm/vma.rs | `vma_type` | 365 | 6 | yes |
+| mm/vma.rs | `set_type` | 370 | 7 | yes |
 | mm/vma.rs | `contains` | 376 | 6 | yes |
-| mm/vma.rs | `overlaps` | 381 | 7 |  |
-| mm/vma.rs | `set_offset` | 387 | 7 |  |
-| mm/vma.rs | `offset` | 393 | 6 |  |
-| mm/vma.rs | `set_file_fd` | 398 | 7 |  |
-| mm/vma.rs | `file_fd` | 404 | 6 |  |
-| mm/vma.rs | `set_file_size` | 409 | 7 |  |
-| mm/vma.rs | `file_size` | 415 | 7 |  |
-| mm/vma.rs | `origin` | 421 | 7 |  |
-| mm/vma.rs | `set_origin` | 427 | 8 |  |
-| mm/vma.rs | `split` | 434 | 49 |  |
+| mm/vma.rs | `overlaps` | 381 | 7 | yes |
+| mm/vma.rs | `set_offset` | 387 | 7 | yes |
+| mm/vma.rs | `offset` | 393 | 6 | yes |
+| mm/vma.rs | `set_file_fd` | 398 | 7 | yes |
+| mm/vma.rs | `file_fd` | 404 | 6 | yes |
+| mm/vma.rs | `set_file_size` | 409 | 7 | yes |
+| mm/vma.rs | `file_size` | 415 | 7 | yes |
+| mm/vma.rs | `origin` | 421 | 7 | yes |
+| mm/vma.rs | `set_origin` | 427 | 8 | yes |
+| mm/vma.rs | `split` | 434 | 49 | yes |
 | mm/vma.rs | `can_merge` | 482 | 25 |  |
 | mm/vma.rs | `merge` | 506 | 11 |  |
 | mm/vma.rs | `merge_at_end` | 516 | 7 |  |
 | mm/vma.rs | `fmt` | 522 | 27 |  |
 | mm/vma.rs | `new` | 548 | 24 | yes |
 | mm/vma.rs | `add` | 571 | 108 | yes |
-| mm/vma.rs | `find` | 678 | 21 |  |
-| mm/vma.rs | `find_mut` | 698 | 27 |  |
-| mm/vma.rs | `remove` | 724 | 17 |  |
+| mm/vma.rs | `find` | 678 | 21 | yes |
+| mm/vma.rs | `find_mut` | 698 | 27 | yes |
+| mm/vma.rs | `remove` | 724 | 17 | yes |
 | mm/vma.rs | `iter` | 740 | 8 | yes |
-| mm/vma.rs | `iter_after` | 747 | 15 |  |
+| mm/vma.rs | `iter_after` | 747 | 15 | yes |
 | mm/vma.rs | `last_at_or_before` | 761 | 11 |  |
 | mm/vma.rs | `has_vma_starting_within` | 771 | 7 |  |
-| mm/vma.rs | `count` | 777 | 6 |  |
+| mm/vma.rs | `count` | 777 | 6 | yes |
 | mm/vma.rs | `get` | 782 | 6 | yes |
 | mm/vma.rs | `get_mut` | 787 | 6 | yes |
-| mm/vma.rs | `first` | 792 | 6 |  |
-| mm/vma.rs | `last` | 797 | 6 |  |
-| mm/vma.rs | `find_vma_after` | 802 | 6 |  |
+| mm/vma.rs | `first` | 792 | 6 | yes |
+| mm/vma.rs | `last` | 797 | 6 | yes |
+| mm/vma.rs | `find_vma_after` | 802 | 6 | yes |
 | mm/vma.rs | `clear` | 807 | 8 | yes |
 | mm/vma.rs | `max_end` | 814 | 19 |  |
 | mm/vma.rs | `expand_downwards` | 832 | 62 |  |
@@ -835,7 +835,7 @@ records why.
 | mm/vmemmap.rs | `is_vmemmap_initialized` | 78 | 17 |  |
 | mm/vmemmap.rs | `init_vmemmap` | 94 | 117 |  |
 | mm/vmemmap.rs | `vmemmap_stats` | 210 | 17 | yes |
-| mm/vmstat.rs | `note_fault` | 48 | 9 |  |
+| mm/vmstat.rs | `note_fault` | 48 | 9 | yes |
 | mm/vmstat.rs | `note_major_fault` | 56 | 6 |  |
 | mm/vmstat.rs | `note_free` | 61 | 6 |  |
 | mm/vmstat.rs | `note_alloc` | 66 | 12 |  |
@@ -876,8 +876,8 @@ records why.
 | mm/zone.rs | `add_to_free_list` | 917 | 30 | yes |
 | mm/zone.rs | `add_to_free_list_init` | 946 | 21 | yes |
 | mm/zone.rs | `remove_from_free_list` | 966 | 53 | yes |
-| mm/zone.rs | `alloc_single_page` | 1018 | 9 |  |
-| mm/zone.rs | `has_free_block` | 1026 | 17 |  |
+| mm/zone.rs | `alloc_single_page` | 1018 | 9 | yes |
+| mm/zone.rs | `has_free_block` | 1026 | 17 | yes |
 | mm/zone.rs | `forensic_free_report` | 1042 | 32 | yes |
 | mm/zone.rs | `stats` | 1073 | 78 |  |
 | mm/zone.rs | `zone_type` | 1150 | 18 | yes |

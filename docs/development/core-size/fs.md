@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# fs — hot 22977 lines (stay) / cold 24609 lines (leave)
+# fs — hot 28128 lines (stay) / cold 19458 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -181,7 +181,7 @@ records why.
 | fs/char_dev.rs | `read` | 39 | 9 | yes |
 | fs/char_dev.rs | `write` | 47 | 9 | yes |
 | fs/char_dev.rs | `uart_read` | 55 | 43 |  |
-| fs/char_dev.rs | `uart_write_kernel` | 97 | 16 |  |
+| fs/char_dev.rs | `uart_write_kernel` | 97 | 16 | yes |
 | fs/char_dev.rs | `uart_write` | 112 | 25 |  |
 | fs/char_dev.rs | `uart_file_poll` | 136 | 33 |  |
 | fs/char_dev.rs | `char_dev_file_stat` | 168 | 26 |  |
@@ -191,13 +191,13 @@ records why.
 | fs/debugfs.rs | `next_ino` | 91 | 6 |  |
 | fs/debugfs.rs | `debugfs_root` | 96 | 13 |  |
 | fs/debugfs.rs | `create_dir` | 108 | 43 |  |
-| fs/debugfs.rs | `create_file` | 150 | 79 |  |
+| fs/debugfs.rs | `create_file` | 150 | 79 | yes |
 | fs/debugfs.rs | `debugfs_mount_cb` | 228 | 13 |  |
 | fs/debugfs.rs | `debugfs_kill_sb` | 240 | 12 |  |
 | fs/debugfs.rs | `init_debugfs` | 251 | 34 |  |
-| fs/debugfs.rs | `is_mounted` | 284 | 7 |  |
+| fs/debugfs.rs | `is_mounted` | 284 | 7 | yes |
 | fs/debugfs.rs | `mount_debugfs` | 290 | 17 |  |
-| fs/debugfs.rs | `create_root_inode` | 306 | 32 |  |
+| fs/debugfs.rs | `create_root_inode` | 306 | 32 | yes |
 | fs/debugfs.rs | `entry_of` | 337 | 6 |  |
 | fs/debugfs.rs | `resolve_child` | 342 | 11 |  |
 | fs/debugfs.rs | `debugfs_lookup` | 352 | 11 |  |
@@ -213,7 +213,7 @@ records why.
 | fs/debugfs.rs | `debugfs_file_lseek` | 569 | 22 |  |
 | fs/debugfs.rs | `debugfs_file_close` | 590 | 24 |  |
 | fs/debugfs.rs | `mount_debugfs_instance` | 613 | 15 |  |
-| fs/debugfs.rs | `mount_register` | 627 | 4 |  |
+| fs/debugfs.rs | `mount_register` | 627 | 4 | yes |
 | fs/dentry.rs | `new` | 40 | 5 | yes |
 | fs/dentry.rs | `is_hashed` | 44 | 5 | yes |
 | fs/dentry.rs | `is_unhashed` | 48 | 5 | yes |
@@ -289,8 +289,8 @@ records why.
 | fs/dev_t.rs | `new` | 29 | 6 | yes |
 | fs/dev_t.rs | `from_u64` | 34 | 9 |  |
 | fs/dev_t.rs | `to_u64` | 42 | 10 |  |
-| fs/dev_t.rs | `to_user_dev` | 51 | 12 |  |
-| fs/dev_t.rs | `from_user_dev` | 62 | 10 |  |
+| fs/dev_t.rs | `to_user_dev` | 51 | 12 | yes |
+| fs/dev_t.rs | `from_user_dev` | 62 | 10 | yes |
 | fs/dev_t.rs | `default` | 71 | 79 | yes |
 | fs/devfs/mod.rs | `new_dir` | 126 | 17 |  |
 | fs/devfs/mod.rs | `new_file` | 142 | 21 |  |
@@ -298,11 +298,11 @@ records why.
 | fs/devfs/mod.rs | `new_char_device` | 178 | 17 |  |
 | fs/devfs/mod.rs | `new_char_device_with_mode` | 194 | 19 |  |
 | fs/devfs/mod.rs | `new_block_device` | 212 | 17 |  |
-| fs/devfs/mod.rs | `is_dir` | 228 | 6 |  |
-| fs/devfs/mod.rs | `is_char_device` | 233 | 6 |  |
-| fs/devfs/mod.rs | `is_block_device` | 238 | 6 |  |
-| fs/devfs/mod.rs | `is_regular_file` | 243 | 6 |  |
-| fs/devfs/mod.rs | `is_symlink` | 248 | 18 |  |
+| fs/devfs/mod.rs | `is_dir` | 228 | 6 | yes |
+| fs/devfs/mod.rs | `is_char_device` | 233 | 6 | yes |
+| fs/devfs/mod.rs | `is_block_device` | 238 | 6 | yes |
+| fs/devfs/mod.rs | `is_regular_file` | 243 | 6 | yes |
+| fs/devfs/mod.rs | `is_symlink` | 248 | 18 | yes |
 | fs/devfs/mod.rs | `nulldev_read` | 265 | 5 |  |
 | fs/devfs/mod.rs | `nulldev_write` | 269 | 8 |  |
 | fs/devfs/mod.rs | `nulldev_poll` | 276 | 23 |  |
@@ -318,19 +318,19 @@ records why.
 | fs/devfs/mod.rs | `randdev_poll` | 428 | 33 |  |
 | fs/devfs/mod.rs | `root_disk_present` | 460 | 19 |  |
 | fs/devfs/mod.rs | `devtmpfs_populate` | 478 | 230 |  |
-| fs/devfs/mod.rs | `mknod_user` | 707 | 16 |  |
+| fs/devfs/mod.rs | `mknod_user` | 707 | 16 | yes |
 | fs/devfs/mod.rs | `evict_dev_dentry` | 722 | 24 |  |
 | fs/devfs/mod.rs | `devtmpfs_register_device` | 745 | 33 |  |
 | fs/devfs/mod.rs | `devtmpfs_unregister_device` | 777 | 23 |  |
-| fs/devfs/mod.rs | `init` | 799 | 149 |  |
-| fs/devfs/mod.rs | `mknod` | 947 | 72 |  |
+| fs/devfs/mod.rs | `init` | 799 | 149 | yes |
+| fs/devfs/mod.rs | `mknod` | 947 | 72 | yes |
 | fs/devfs/mod.rs | `remove_node` | 1018 | 65 |  |
 | fs/devfs/mod.rs | `mkdir` | 1082 | 51 |  |
-| fs/devfs/mod.rs | `lookup` | 1132 | 46 |  |
-| fs/devfs/mod.rs | `is_mounted` | 1177 | 6 |  |
+| fs/devfs/mod.rs | `lookup` | 1132 | 46 | yes |
+| fs/devfs/mod.rs | `is_mounted` | 1177 | 6 | yes |
 | fs/devfs/mod.rs | `get_root_entry` | 1182 | 15 |  |
-| fs/devfs/mod.rs | `list_dir` | 1196 | 49 |  |
-| fs/devfs/mod.rs | `parse_dev_path` | 1244 | 21 |  |
+| fs/devfs/mod.rs | `list_dir` | 1196 | 49 | yes |
+| fs/devfs/mod.rs | `parse_dev_path` | 1244 | 21 | yes |
 | fs/devfs/mod.rs | `devfs_lookup` | 1264 | 22 |  |
 | fs/devfs/mod.rs | `devfs_iget` | 1285 | 58 |  |
 | fs/devfs/mod.rs | `devfs_getattr` | 1342 | 48 |  |
@@ -340,17 +340,17 @@ records why.
 | fs/devfs/mod.rs | `devfs_readdir` | 1527 | 38 |  |
 | fs/devfs/mod.rs | `devfs_destroy_inode` | 1564 | 17 |  |
 | fs/devfs/mod.rs | `devfs_rel_path` | 1580 | 2 |  |
-| fs/devfs/mod.rs | `walk` | 1581 | 29 |  |
+| fs/devfs/mod.rs | `walk` | 1581 | 29 | yes |
 | fs/devfs/mod.rs | `devfs_mkdir` | 1609 | 38 |  |
 | fs/devfs/mod.rs | `devfs_create` | 1646 | 35 |  |
 | fs/devfs/mod.rs | `devfs_symlink` | 1680 | 37 |  |
 | fs/devfs/mod.rs | `devfs_readlink` | 1716 | 22 |  |
 | fs/devfs/mod.rs | `devfs_link` | 1737 | 57 |  |
 | fs/devfs/mod.rs | `devfs_rename` | 1793 | 98 |  |
-| fs/devfs/mod.rs | `new` | 1890 | 8 |  |
-| fs/devfs/mod.rs | `copy_in` | 1897 | 10 |  |
-| fs/devfs/mod.rs | `copy_out` | 1906 | 14 |  |
-| fs/devfs/mod.rs | `zero` | 1919 | 7 |  |
+| fs/devfs/mod.rs | `new` | 1890 | 8 | yes |
+| fs/devfs/mod.rs | `copy_in` | 1897 | 10 | yes |
+| fs/devfs/mod.rs | `copy_out` | 1906 | 14 | yes |
+| fs/devfs/mod.rs | `zero` | 1919 | 7 | yes |
 | fs/devfs/mod.rs | `shared_grow_locked` | 1925 | 76 |  |
 | fs/devfs/mod.rs | `devfs_reg_current_size` | 2000 | 19 |  |
 | fs/devfs/mod.rs | `shared_fault_file_page` | 2018 | 52 |  |
@@ -364,65 +364,65 @@ records why.
 | fs/devfs/mod.rs | `devfs_unlink` | 2290 | 33 |  |
 | fs/devfs/mod.rs | `devfs_rmdir` | 2322 | 51 |  |
 | fs/devfs/mod.rs | `devfs_setattr` | 2372 | 108 |  |
-| fs/devfs/mod.rs | `create_root_inode` | 2479 | 16 |  |
+| fs/devfs/mod.rs | `create_root_inode` | 2479 | 16 | yes |
 | fs/devfs/mod.rs | `mount_devtmpfs` | 2494 | 13 |  |
-| fs/devfs/mod.rs | `mount_register` | 2506 | 4 |  |
-| fs/devfs/registry.rs | `new` | 27 | 19 |  |
-| fs/devfs/registry.rs | `register_char_device` | 45 | 14 |  |
+| fs/devfs/mod.rs | `mount_register` | 2506 | 4 | yes |
+| fs/devfs/registry.rs | `new` | 27 | 19 | yes |
+| fs/devfs/registry.rs | `register_char_device` | 45 | 14 | yes |
 | fs/devfs/registry.rs | `unregister_char_device` | 58 | 13 |  |
 | fs/devfs/registry.rs | `get_char_device_ops` | 70 | 7 |  |
 | fs/devfs/registry.rs | `is_device_registered` | 76 | 7 |  |
 | fs/devfs/registry.rs | `device_count` | 82 | 5 |  |
 | fs/elf.rs | `from_bytes` | 348 | 48 | yes |
-| fs/elf.rs | `is_executable` | 395 | 7 |  |
+| fs/elf.rs | `is_executable` | 395 | 7 | yes |
 | fs/elf.rs | `is_dynamic` | 401 | 6 |  |
 | fs/elf.rs | `check_machine` | 406 | 17 |  |
-| fs/elf.rs | `get_program_headers` | 422 | 12 |  |
+| fs/elf.rs | `get_program_headers` | 422 | 12 | yes |
 | fs/elf.rs | `get_program_header` | 433 | 21 |  |
 | fs/elf.rs | `is_load` | 453 | 6 |  |
-| fs/elf.rs | `is_readable` | 458 | 6 |  |
-| fs/elf.rs | `is_writable` | 463 | 6 |  |
-| fs/elf.rs | `is_executable` | 468 | 25 |  |
-| fs/elf.rs | `validate` | 492 | 26 |  |
-| fs/elf.rs | `get_entry` | 517 | 8 |  |
-| fs/elf.rs | `get_program_headers` | 524 | 16 |  |
+| fs/elf.rs | `is_readable` | 458 | 6 | yes |
+| fs/elf.rs | `is_writable` | 463 | 6 | yes |
+| fs/elf.rs | `is_executable` | 468 | 25 | yes |
+| fs/elf.rs | `validate` | 492 | 26 | yes |
+| fs/elf.rs | `get_entry` | 517 | 8 | yes |
+| fs/elf.rs | `get_program_headers` | 524 | 16 | yes |
 | fs/elf.rs | `load` | 539 | 86 | yes |
 | fs/elf.rs | `load_segment` | 624 | 35 |  |
-| fs/elf.rs | `get_interpreter` | 658 | 51 |  |
-| fs/event_notify.rs | `list_first` | 77 | 8 |  |
-| fs/event_notify.rs | `list_next` | 84 | 7 |  |
-| fs/event_notify.rs | `list_link_tail` | 90 | 9 |  |
-| fs/event_notify.rs | `list_unlink` | 98 | 8 |  |
-| fs/event_notify.rs | `boxed_mut` | 105 | 7 |  |
-| fs/event_notify.rs | `boxed_drop` | 111 | 8 |  |
-| fs/event_notify.rs | `list_entry_mut` | 118 | 8 |  |
-| fs/event_notify.rs | `list_entry_pub` | 125 | 6 |  |
-| fs/event_notify.rs | `list_entry` | 130 | 13 |  |
+| fs/elf.rs | `get_interpreter` | 658 | 51 | yes |
+| fs/event_notify.rs | `list_first` | 77 | 8 | yes |
+| fs/event_notify.rs | `list_next` | 84 | 7 | yes |
+| fs/event_notify.rs | `list_link_tail` | 90 | 9 | yes |
+| fs/event_notify.rs | `list_unlink` | 98 | 8 | yes |
+| fs/event_notify.rs | `boxed_mut` | 105 | 7 | yes |
+| fs/event_notify.rs | `boxed_drop` | 111 | 8 | yes |
+| fs/event_notify.rs | `list_entry_mut` | 118 | 8 | yes |
+| fs/event_notify.rs | `list_entry_pub` | 125 | 6 | yes |
+| fs/event_notify.rs | `list_entry` | 130 | 13 | yes |
 | fs/event_notify.rs | `notify_pin_acquire` | 142 | 3 |  |
 | fs/event_notify.rs | `notify_pin_release` | 144 | 3 |  |
 | fs/event_notify.rs | `rearm_edge` | 146 | 3 |  |
 | fs/event_notify.rs | `wake_waiters` | 148 | 5 |  |
-| fs/event_notify.rs | `boxed_ref` | 152 | 52 |  |
+| fs/event_notify.rs | `boxed_ref` | 152 | 52 | yes |
 | fs/event_notify.rs | `locked_head` | 203 | 5 |  |
-| fs/event_notify.rs | `init_once` | 207 | 37 |  |
+| fs/event_notify.rs | `init_once` | 207 | 37 | yes |
 | fs/event_notify.rs | `epoll_shard_index` | 243 | 8 |  |
-| fs/event_notify.rs | `epoll_wake_shard` | 250 | 22 |  |
-| fs/event_notify.rs | `epoll_notify_file` | 271 | 86 |  |
+| fs/event_notify.rs | `epoll_wake_shard` | 250 | 22 | yes |
+| fs/event_notify.rs | `epoll_notify_file` | 271 | 86 | yes |
 | fs/event_notify.rs | `no_wake` | 356 | 76 |  |
-| fs/event_notify.rs | `epoll_wake_register` | 431 | 54 |  |
-| fs/event_notify.rs | `epoll_wake_unregister_all` | 484 | 53 |  |
-| fs/event_notify.rs | `epoll_wake_unregister` | 536 | 54 |  |
+| fs/event_notify.rs | `epoll_wake_register` | 431 | 54 | yes |
+| fs/event_notify.rs | `epoll_wake_unregister_all` | 484 | 53 | yes |
+| fs/event_notify.rs | `epoll_wake_unregister` | 536 | 54 | yes |
 | fs/event_notify.rs | `signalfd_notify_task` | 589 | 28 |  |
-| fs/event_notify.rs | `signalfd_register` | 616 | 11 |  |
-| fs/event_notify.rs | `signalfd_unregister` | 626 | 11 |  |
-| fs/ext4_edges.rs | `typed_ref` | 23 | 11 |  |
-| fs/ext4_edges.rs | `typed_ref_mut` | 33 | 14 |  |
-| fs/ext4_edges.rs | `typed_slice` | 46 | 21 |  |
-| fs/ext4_edges.rs | `typed_slice_mut` | 66 | 24 |  |
-| fs/ext4_edges.rs | `u32_array_ref` | 89 | 12 |  |
-| fs/ext4_edges.rs | `u32_array_ref_mut` | 100 | 18 |  |
-| fs/ext4_edges.rs | `zeroed_on_disk` | 117 | 6 |  |
-| fs/ext4_hooks.rs | `ext4_register_hooks` | 164 | 6 |  |
+| fs/event_notify.rs | `signalfd_register` | 616 | 11 | yes |
+| fs/event_notify.rs | `signalfd_unregister` | 626 | 11 | yes |
+| fs/ext4_edges.rs | `typed_ref` | 23 | 11 | yes |
+| fs/ext4_edges.rs | `typed_ref_mut` | 33 | 14 | yes |
+| fs/ext4_edges.rs | `typed_slice` | 46 | 21 | yes |
+| fs/ext4_edges.rs | `typed_slice_mut` | 66 | 24 | yes |
+| fs/ext4_edges.rs | `u32_array_ref` | 89 | 12 | yes |
+| fs/ext4_edges.rs | `u32_array_ref_mut` | 100 | 18 | yes |
+| fs/ext4_edges.rs | `zeroed_on_disk` | 117 | 6 | yes |
+| fs/ext4_hooks.rs | `ext4_register_hooks` | 164 | 6 | yes |
 | fs/ext4_hooks.rs | `hooks` | 169 | 7 |  |
 | fs/ext4_hooks.rs | `init` | 175 | 4 | yes |
 | fs/ext4_hooks.rs | `mount_root` | 178 | 4 |  |
@@ -434,29 +434,29 @@ records why.
 | fs/ext4_hooks.rs | `boot_read_file` | 196 | 4 |  |
 | fs/ext4_hooks.rs | `fsctx_mount_instance` | 199 | 4 |  |
 | fs/ext4_hooks.rs | `mount_rows_register` | 202 | 4 |  |
-| fs/ext4_hooks.rs | `sync_flushed_data` | 205 | 4 |  |
-| fs/ext4_hooks.rs | `sync_inode_tables` | 208 | 4 |  |
+| fs/ext4_hooks.rs | `sync_flushed_data` | 205 | 4 | yes |
+| fs/ext4_hooks.rs | `sync_inode_tables` | 208 | 4 | yes |
 | fs/ext4_hooks.rs | `shutdown_sync` | 211 | 4 |  |
-| fs/ext4_hooks.rs | `remount_ro_latch` | 214 | 4 |  |
-| fs/ext4_hooks.rs | `fallocate` | 217 | 4 |  |
+| fs/ext4_hooks.rs | `remount_ro_latch` | 214 | 4 | yes |
+| fs/ext4_hooks.rs | `fallocate` | 217 | 4 | yes |
 | fs/ext4_hooks.rs | `default_inode_ops` | 220 | 4 |  |
-| fs/ext4_hooks.rs | `is_ext4_inode_ops` | 223 | 4 |  |
-| fs/ext4_hooks.rs | `is_ext4_lookup` | 226 | 4 |  |
-| fs/ext4_hooks.rs | `is_ext4_file` | 229 | 4 |  |
-| fs/ext4_hooks.rs | `writeback_flush` | 232 | 4 |  |
+| fs/ext4_hooks.rs | `is_ext4_inode_ops` | 223 | 4 | yes |
+| fs/ext4_hooks.rs | `is_ext4_lookup` | 226 | 4 | yes |
+| fs/ext4_hooks.rs | `is_ext4_file` | 229 | 4 | yes |
+| fs/ext4_hooks.rs | `writeback_flush` | 232 | 4 | yes |
 | fs/ext4_hooks.rs | `kmsg_resolve` | 235 | 4 |  |
 | fs/ext4_hooks.rs | `kmsg_write_at` | 238 | 4 |  |
-| fs/ext4_hooks.rs | `journal_dirty` | 241 | 4 |  |
-| fs/ext4_hooks.rs | `journal_forget` | 244 | 4 |  |
+| fs/ext4_hooks.rs | `journal_dirty` | 241 | 4 | yes |
+| fs/ext4_hooks.rs | `journal_forget` | 244 | 4 | yes |
 | fs/ext4_hooks.rs | `exit_journal_unwind` | 247 | 4 |  |
-| fs/ext4_hooks.rs | `exthunt_phys_watched` | 250 | 4 |  |
-| fs/ext4_hooks.rs | `exthunt_evict_unhash` | 253 | 4 |  |
-| fs/ext4_hooks.rs | `exthunt_evict_done` | 256 | 4 |  |
-| fs/ext4_hooks.rs | `exthunt_fab` | 259 | 4 |  |
-| fs/ext4_hooks.rs | `exthunt_bc_blind` | 262 | 4 |  |
-| fs/ext4_hooks.rs | `exthunt_rxbhit` | 265 | 4 |  |
-| fs/ext4_hooks.rs | `demand_read_stats` | 268 | 4 |  |
-| fs/fdreap.rs | `retire_complete` | 132 | 38 |  |
+| fs/ext4_hooks.rs | `exthunt_phys_watched` | 250 | 4 | yes |
+| fs/ext4_hooks.rs | `exthunt_evict_unhash` | 253 | 4 | yes |
+| fs/ext4_hooks.rs | `exthunt_evict_done` | 256 | 4 | yes |
+| fs/ext4_hooks.rs | `exthunt_fab` | 259 | 4 | yes |
+| fs/ext4_hooks.rs | `exthunt_bc_blind` | 262 | 4 | yes |
+| fs/ext4_hooks.rs | `exthunt_rxbhit` | 265 | 4 | yes |
+| fs/ext4_hooks.rs | `demand_read_stats` | 268 | 4 | yes |
+| fs/fdreap.rs | `retire_complete` | 132 | 38 | yes |
 | fs/fdreap.rs | `drain_with_grace` | 169 | 32 |  |
 | fs/fdreap.rs | `init` | 200 | 61 | yes |
 | fs/file.rs | `new` | 71 | 5 | yes |
@@ -560,33 +560,33 @@ records why.
 | fs/file.rs | `dir_read_eisdir` | 2040 | 5 | yes |
 | fs/file.rs | `dir_close` | 2044 | 10 | yes |
 | fs/file.rs | `dir_file_lseek` | 2053 | 24 | yes |
-| fs/file_hooks.rs | `pipe_stat` | 11 | 6 |  |
-| fs/file_hooks.rs | `pipe_get_sz` | 16 | 6 |  |
-| fs/file_hooks.rs | `pipe_set_sz` | 21 | 9 |  |
-| fs/file_hooks.rs | `oasync_register` | 29 | 4 |  |
-| fs/file_hooks.rs | `oasync_unregister` | 32 | 6 |  |
-| fs/file_hooks.rs | `char_dev_stat` | 37 | 8 |  |
-| fs/file_hooks.rs | `fifo_forget` | 44 | 6 |  |
-| fs/file_hooks.rs | `fifo_open` | 49 | 10 |  |
-| fs/file_hooks.rs | `memfd_add_seals` | 58 | 4 |  |
-| fs/file_hooks.rs | `memfd_get_seals` | 61 | 4 |  |
-| fs/fs_hooks.rs | `fs_register_hooks` | 94 | 6 |  |
+| fs/file_hooks.rs | `pipe_stat` | 11 | 6 | yes |
+| fs/file_hooks.rs | `pipe_get_sz` | 16 | 6 | yes |
+| fs/file_hooks.rs | `pipe_set_sz` | 21 | 9 | yes |
+| fs/file_hooks.rs | `oasync_register` | 29 | 4 | yes |
+| fs/file_hooks.rs | `oasync_unregister` | 32 | 6 | yes |
+| fs/file_hooks.rs | `char_dev_stat` | 37 | 8 | yes |
+| fs/file_hooks.rs | `fifo_forget` | 44 | 6 | yes |
+| fs/file_hooks.rs | `fifo_open` | 49 | 10 | yes |
+| fs/file_hooks.rs | `memfd_add_seals` | 58 | 4 | yes |
+| fs/file_hooks.rs | `memfd_get_seals` | 61 | 4 | yes |
+| fs/fs_hooks.rs | `fs_register_hooks` | 94 | 6 | yes |
 | fs/fs_hooks.rs | `hooks` | 99 | 5 |  |
-| fs/fs_hooks.rs | `notify` | 103 | 4 |  |
-| fs/fs_hooks.rs | `notify_file` | 106 | 4 |  |
-| fs/fs_hooks.rs | `notify_file_close` | 109 | 4 |  |
-| fs/fs_hooks.rs | `alloc_cookie` | 112 | 6 |  |
+| fs/fs_hooks.rs | `notify` | 103 | 4 | yes |
+| fs/fs_hooks.rs | `notify_file` | 106 | 4 | yes |
+| fs/fs_hooks.rs | `notify_file_close` | 109 | 4 | yes |
+| fs/fs_hooks.rs | `alloc_cookie` | 112 | 6 | yes |
 | fs/fs_hooks.rs | `is_pipe_ops` | 117 | 2 |  |
 | fs/fs_hooks.rs | `is_fifo_ops` | 118 | 2 |  |
 | fs/fs_hooks.rs | `is_inotify_ops` | 119 | 2 |  |
 | fs/fs_hooks.rs | `is_memfd_ops` | 120 | 2 |  |
 | fs/fs_hooks.rs | `pipe_diag_snapshot` | 121 | 2 |  |
-| fs/fs_hooks.rs | `memfd_name_by_ino` | 122 | 2 |  |
+| fs/fs_hooks.rs | `memfd_name_by_ino` | 122 | 2 | yes |
 | fs/fs_struct.rs | `new` | 68 | 14 | yes |
 | fs/fs_struct.rs | `with_cwd` | 81 | 16 |  |
 | fs/fs_struct.rs | `get_cwd` | 96 | 17 | yes |
-| fs/fs_struct.rs | `set_cwd` | 112 | 9 |  |
-| fs/fs_struct.rs | `set_cwd_with_dentry` | 120 | 8 |  |
+| fs/fs_struct.rs | `set_cwd` | 112 | 9 | yes |
+| fs/fs_struct.rs | `set_cwd_with_dentry` | 120 | 8 | yes |
 | fs/fs_struct.rs | `cwd_dentry` | 127 | 6 | yes |
 | fs/fs_struct.rs | `cwd_slice` | 132 | 10 |  |
 | fs/fs_struct.rs | `get_root` | 141 | 16 | yes |
@@ -594,34 +594,34 @@ records why.
 | fs/fs_struct.rs | `set_root` | 166 | 10 |  |
 | fs/fs_struct.rs | `set_root_with_dentry` | 175 | 7 | yes |
 | fs/fs_struct.rs | `root_dentry` | 181 | 7 | yes |
-| fs/fs_struct.rs | `set_pivot_put_old` | 187 | 6 |  |
-| fs/fs_struct.rs | `pivot_put_old` | 192 | 6 |  |
-| fs/fs_struct.rs | `clear_pivot_put_old` | 197 | 7 |  |
+| fs/fs_struct.rs | `set_pivot_put_old` | 187 | 6 | yes |
+| fs/fs_struct.rs | `pivot_put_old` | 192 | 6 | yes |
+| fs/fs_struct.rs | `clear_pivot_put_old` | 197 | 7 | yes |
 | fs/fs_struct.rs | `root_is_pivot` | 203 | 6 |  |
-| fs/fs_struct.rs | `set_root_is_pivot` | 208 | 10 |  |
+| fs/fs_struct.rs | `set_root_is_pivot` | 208 | 10 | yes |
 | fs/fs_struct.rs | `copy_fs_from` | 217 | 17 |  |
 | fs/fs_struct.rs | `get_umask` | 233 | 6 | yes |
-| fs/fs_struct.rs | `set_umask` | 238 | 6 |  |
+| fs/fs_struct.rs | `set_umask` | 238 | 6 | yes |
 | fs/fs_struct.rs | `apply_umask` | 243 | 7 |  |
 | fs/fs_struct.rs | `default` | 249 | 8 | yes |
-| fs/fsctx.rs | `fs_type_known` | 111 | 32 |  |
-| fs/fsctx.rs | `param_key_known` | 142 | 80 |  |
+| fs/fsctx.rs | `fs_type_known` | 111 | 32 | yes |
+| fs/fsctx.rs | `param_key_known` | 142 | 80 | yes |
 | fs/fsctx.rs | `new` | 221 | 16 | yes |
-| fs/fsctx.rs | `new_reconfigure` | 236 | 18 |  |
-| fs/fsctx.rs | `data_string` | 253 | 40 |  |
-| fs/fsctx.rs | `create_fs_root` | 292 | 96 |  |
+| fs/fsctx.rs | `new_reconfigure` | 236 | 18 | yes |
+| fs/fsctx.rs | `data_string` | 253 | 40 | yes |
+| fs/fsctx.rs | `create_fs_root` | 292 | 96 | yes |
 | fs/fsctx.rs | `fsctx_close` | 387 | 16 |  |
-| fs/fsctx.rs | `fsctx_of` | 402 | 13 |  |
-| fs/fsctx.rs | `fsctx_of_mut` | 414 | 18 |  |
+| fs/fsctx.rs | `fsctx_of` | 402 | 13 | yes |
+| fs/fsctx.rs | `fsctx_of_mut` | 414 | 18 | yes |
 | fs/fsctx.rs | `mountfd_close` | 431 | 16 |  |
-| fs/fsctx.rs | `mountfd_of` | 446 | 18 |  |
-| fs/fsctx.rs | `treepath_dentry` | 463 | 12 |  |
-| fs/fsctx.rs | `make_detached_mount` | 474 | 35 |  |
-| fs/fsctx.rs | `install_fd_with` | 508 | 25 |  |
-| fs/fsctx.rs | `mount_attr_apply` | 532 | 45 |  |
-| fs/fsctx.rs | `validate_mount_attr` | 576 | 28 |  |
-| fs/fsctx.rs | `validate_mount_attr_pair` | 603 | 31 |  |
-| fs/fsctx.rs | `attr_flags_to_mnt` | 633 | 4 |  |
+| fs/fsctx.rs | `mountfd_of` | 446 | 18 | yes |
+| fs/fsctx.rs | `treepath_dentry` | 463 | 12 | yes |
+| fs/fsctx.rs | `make_detached_mount` | 474 | 35 | yes |
+| fs/fsctx.rs | `install_fd_with` | 508 | 25 | yes |
+| fs/fsctx.rs | `mount_attr_apply` | 532 | 45 | yes |
+| fs/fsctx.rs | `validate_mount_attr` | 576 | 28 | yes |
+| fs/fsctx.rs | `validate_mount_attr_pair` | 603 | 31 | yes |
+| fs/fsctx.rs | `attr_flags_to_mnt` | 633 | 4 | yes |
 | fs/inode.rs | `new` | 128 | 5 | yes |
 | fs/inode.rs | `is_regular_file` | 132 | 5 | yes |
 | fs/inode.rs | `is_directory` | 136 | 5 | yes |
@@ -629,7 +629,7 @@ records why.
 | fs/inode.rs | `is_block_device` | 144 | 5 | yes |
 | fs/inode.rs | `is_fifo` | 148 | 5 | yes |
 | fs/inode.rs | `is_symlink` | 152 | 5 | yes |
-| fs/inode.rs | `is_socket` | 156 | 5 |  |
+| fs/inode.rs | `is_socket` | 156 | 5 | yes |
 | fs/inode.rs | `bits` | 160 | 164 | yes |
 | fs/inode.rs | `call_lookup` | 323 | 14 | yes |
 | fs/inode.rs | `call_create` | 336 | 15 | yes |
@@ -651,11 +651,11 @@ records why.
 | fs/inode.rs | `call_iget` | 516 | 17 | yes |
 | fs/inode.rs | `call_destroy_inode` | 532 | 73 |  |
 | fs/inode.rs | `stat_dev_for_fs` | 604 | 36 |  |
-| fs/inode.rs | `stat_dev_user` | 639 | 105 |  |
+| fs/inode.rs | `stat_dev_user` | 639 | 105 | yes |
 | fs/inode.rs | `drop` | 743 | 24 | yes |
 | fs/inode.rs | `dir_mut_gen_bump` | 766 | 7 | yes |
 | fs/inode.rs | `dir_mut_gen_load` | 772 | 15 | yes |
-| fs/inode.rs | `update_cached_mode` | 786 | 12 |  |
+| fs/inode.rs | `update_cached_mode` | 786 | 12 | yes |
 | fs/inode.rs | `new` | 797 | 29 | yes |
 | fs/inode.rs | `with_superblock` | 825 | 28 |  |
 | fs/inode.rs | `read_data` | 852 | 20 | yes |
@@ -694,14 +694,14 @@ records why.
 | fs/inode.rs | `record_eviction` | 1174 | 5 | yes |
 | fs/inode.rs | `get_hit_rate` | 1178 | 26 | yes |
 | fs/inode.rs | `clone` | 1203 | 42 | yes |
-| fs/inode.rs | `icache_regen` | 1244 | 13 |  |
+| fs/inode.rs | `icache_regen` | 1244 | 13 | yes |
 | fs/inode.rs | `icache_init` | 1256 | 35 |  |
 | fs/inode.rs | `icache_stats_arm` | 1290 | 8 |  |
 | fs/inode.rs | `inode_hash` | 1297 | 17 |  |
-| fs/inode.rs | `icache_lookup` | 1313 | 41 |  |
-| fs/inode.rs | `icache_add` | 1353 | 55 |  |
+| fs/inode.rs | `icache_lookup` | 1313 | 41 | yes |
+| fs/inode.rs | `icache_add` | 1353 | 55 | yes |
 | fs/inode.rs | `icache_evict_lru` | 1407 | 39 |  |
-| fs/inode.rs | `icache_remove` | 1445 | 28 |  |
+| fs/inode.rs | `icache_remove` | 1445 | 28 | yes |
 | fs/inode.rs | `icache_stats` | 1472 | 12 |  |
 | fs/inode.rs | `icache_stats_detailed` | 1483 | 18 |  |
 | fs/inode.rs | `icache_flush` | 1500 | 19 |  |
@@ -718,27 +718,27 @@ records why.
 | fs/io_completion.rs | `reset` | 429 | 10 | yes |
 | fs/io_completion.rs | `wait_for_all` | 438 | 11 |  |
 | fs/journal_seam.rs | `new` | 71 | 14 | yes |
-| fs/journal_seam.rs | `begin_pre_capture` | 84 | 12 |  |
-| fs/journal_seam.rs | `take_pre_capture` | 95 | 15 |  |
-| fs/journal_seam.rs | `begin_post_capture` | 109 | 10 |  |
-| fs/journal_seam.rs | `end_post_capture` | 118 | 9 |  |
+| fs/journal_seam.rs | `begin_pre_capture` | 84 | 12 | yes |
+| fs/journal_seam.rs | `take_pre_capture` | 95 | 15 | yes |
+| fs/journal_seam.rs | `begin_post_capture` | 109 | 10 | yes |
+| fs/journal_seam.rs | `end_post_capture` | 118 | 9 | yes |
 | fs/journal_seam.rs | `pre_push` | 126 | 10 | yes |
-| fs/journal_seam.rs | `current_handle_raw` | 135 | 27 |  |
+| fs/journal_seam.rs | `current_handle_raw` | 135 | 27 | yes |
 | fs/journal_seam.rs | `empty` | 161 | 5 | yes |
 | fs/journal_seam.rs | `get` | 165 | 4 | yes |
 | fs/journal_seam.rs | `is_some` | 168 | 4 | yes |
 | fs/journal_seam.rs | `set` | 171 | 4 | yes |
 | fs/journal_seam.rs | `clear` | 174 | 5 | yes |
-| fs/lock_hooks.rs | `inode_open_register` | 19 | 6 |  |
-| fs/lock_hooks.rs | `inode_open_unregister` | 24 | 6 |  |
-| fs/lock_hooks.rs | `flock_release_file` | 29 | 6 |  |
-| fs/lock_hooks.rs | `ofd_release_file` | 34 | 6 |  |
-| fs/lock_hooks.rs | `break_lease` | 39 | 9 |  |
-| fs/lock_hooks.rs | `posix_test_lock` | 47 | 12 |  |
-| fs/lock_hooks.rs | `posix_set_lock` | 58 | 13 |  |
-| fs/lock_hooks.rs | `set_lease` | 70 | 7 |  |
-| fs/lock_hooks.rs | `get_lease` | 76 | 6 |  |
-| fs/lock_hooks.rs | `inode_text_hold_count` | 81 | 4 |  |
+| fs/lock_hooks.rs | `inode_open_register` | 19 | 6 | yes |
+| fs/lock_hooks.rs | `inode_open_unregister` | 24 | 6 | yes |
+| fs/lock_hooks.rs | `flock_release_file` | 29 | 6 | yes |
+| fs/lock_hooks.rs | `ofd_release_file` | 34 | 6 | yes |
+| fs/lock_hooks.rs | `break_lease` | 39 | 9 | yes |
+| fs/lock_hooks.rs | `posix_test_lock` | 47 | 12 | yes |
+| fs/lock_hooks.rs | `posix_set_lock` | 58 | 13 | yes |
+| fs/lock_hooks.rs | `set_lease` | 70 | 7 | yes |
+| fs/lock_hooks.rs | `get_lease` | 76 | 6 | yes |
+| fs/lock_hooks.rs | `inode_text_hold_count` | 81 | 4 | yes |
 | fs/locks.rs | `snapshot_locks` | 75 | 75 |  |
 | fs/locks.rs | `dump_held_locks` | 149 | 48 |  |
 | fs/locks.rs | `file_lock_key` | 196 | 12 |  |
@@ -746,7 +746,7 @@ records why.
 | fs/locks.rs | `current_tgid` | 213 | 40 |  |
 | fs/locks.rs | `note_flock_len` | 252 | 9 |  |
 | fs/locks.rs | `flock_conflicts` | 260 | 11 |  |
-| fs/locks.rs | `flock_lock` | 270 | 74 |  |
+| fs/locks.rs | `flock_lock` | 270 | 74 | yes |
 | fs/locks.rs | `flock_conflicts_locked` | 343 | 15 |  |
 | fs/locks.rs | `flock_release_file` | 357 | 39 |  |
 | fs/locks.rs | `report_pid` | 395 | 53 |  |
@@ -767,20 +767,20 @@ records why.
 | fs/locks.rs | `note_lease_len` | 885 | 24 |  |
 | fs/locks.rs | `inode_open_register` | 908 | 14 |  |
 | fs/locks.rs | `inode_open_unregister` | 921 | 39 |  |
-| fs/locks.rs | `inode_write_open_count` | 959 | 16 |  |
-| fs/locks.rs | `inode_text_hold_key` | 974 | 6 |  |
-| fs/locks.rs | `inode_text_hold_acquire_key` | 979 | 8 |  |
+| fs/locks.rs | `inode_write_open_count` | 959 | 16 | yes |
+| fs/locks.rs | `inode_text_hold_key` | 974 | 6 | yes |
+| fs/locks.rs | `inode_text_hold_acquire_key` | 979 | 8 | yes |
 | fs/locks.rs | `inode_text_hold_release` | 986 | 14 |  |
 | fs/locks.rs | `inode_text_hold_count` | 999 | 9 |  |
 | fs/locks.rs | `set_lease` | 1007 | 101 |  |
 | fs/locks.rs | `get_lease` | 1107 | 29 |  |
 | fs/locks.rs | `lease_conflicts` | 1135 | 22 |  |
 | fs/locks.rs | `break_lease` | 1156 | 73 |  |
-| fs/mod.rs | `read_file_from_rootfs` | 72 | 31 |  |
-| fs/mount.rs | `register_mount` | 41 | 21 |  |
+| fs/mod.rs | `read_file_from_rootfs` | 72 | 31 | yes |
+| fs/mount.rs | `register_mount` | 41 | 21 | yes |
 | fs/mount.rs | `mounted_as` | 61 | 10 |  |
 | fs/mount.rs | `get_global_mounts` | 70 | 15 |  |
-| fs/mount.rs | `get_mounts` | 84 | 12 |  |
+| fs/mount.rs | `get_mounts` | 84 | 12 | yes |
 | fs/mount.rs | `get_mount_entries` | 95 | 25 |  |
 | fs/mount.rs | `new` | 119 | 5 | yes |
 | fs/mount.rs | `is_readonly` | 123 | 5 | yes |
@@ -791,15 +791,15 @@ records why.
 | fs/mount.rs | `get_superblock` | 168 | 5 |  |
 | fs/mount.rs | `set_superblock` | 172 | 20 |  |
 | fs/mount.rs | `translate_mnt_flags` | 191 | 14 |  |
-| fs/mount.rs | `translate_mnt_flags_public` | 204 | 13 |  |
-| fs/mount.rs | `do_mount` | 216 | 38 |  |
-| fs/mount_table.rs | `register` | 33 | 16 |  |
-| fs/mount_table.rs | `lookup` | 48 | 16 |  |
+| fs/mount.rs | `translate_mnt_flags_public` | 204 | 13 | yes |
+| fs/mount.rs | `do_mount` | 216 | 38 | yes |
+| fs/mount_table.rs | `register` | 33 | 16 | yes |
+| fs/mount_table.rs | `lookup` | 48 | 16 | yes |
 | fs/mount_table.rs | `register_builtin_handlers` | 63 | 20 |  |
-| fs/notify_hooks.rs | `notify` | 22 | 12 |  |
-| fs/notify_hooks.rs | `notify_file` | 33 | 6 |  |
-| fs/notify_hooks.rs | `notify_file_close` | 38 | 6 |  |
-| fs/notify_hooks.rs | `alloc_cookie` | 43 | 4 |  |
+| fs/notify_hooks.rs | `notify` | 22 | 12 | yes |
+| fs/notify_hooks.rs | `notify_file` | 33 | 6 | yes |
+| fs/notify_hooks.rs | `notify_file_close` | 38 | 6 | yes |
+| fs/notify_hooks.rs | `alloc_cookie` | 43 | 4 | yes |
 | fs/page_cache.rs | `max_cached_pages` | 105 | 84 | yes |
 | fs/page_cache.rs | `dirty_account_transition` | 188 | 15 | yes |
 | fs/page_cache.rs | `dirty_account_removed` | 202 | 8 | yes |
@@ -887,7 +887,7 @@ records why.
 | fs/page_cache.rs | `page_cache_cap_pages` | 3967 | 25 | yes |
 | fs/page_cache.rs | `shared_file_fault_page` | 3991 | 51 | yes |
 | fs/path.rs | `new` | 55 | 9 | yes |
-| fs/path.rs | `name` | 63 | 6 |  |
+| fs/path.rs | `name` | 63 | 6 | yes |
 | fs/path.rs | `is_current` | 68 | 6 |  |
 | fs/path.rs | `is_parent` | 73 | 6 |  |
 | fs/path.rs | `is_root` | 78 | 6 |  |
@@ -903,16 +903,16 @@ records why.
 | fs/path.rs | `next` | 177 | 22 | yes |
 | fs/path.rs | `filename_parentname` | 198 | 22 |  |
 | fs/path.rs | `path_normalize` | 219 | 72 | yes |
-| fs/permission.rs | `generic_permission` | 22 | 82 |  |
+| fs/permission.rs | `generic_permission` | 22 | 82 | yes |
 | fs/permission.rs | `inode_permission` | 103 | 18 | yes |
 | fs/pidfd.rs | `exit_notify_all_waiters` | 54 | 16 |  |
 | fs/pidfd.rs | `pin_leader` | 69 | 25 |  |
-| fs/pidfd.rs | `make_pidfd_data` | 93 | 7 |  |
+| fs/pidfd.rs | `make_pidfd_data` | 93 | 7 | yes |
 | fs/pidfd.rs | `free_pidfd_data` | 99 | 13 |  |
-| fs/pidfd.rs | `attach` | 111 | 10 |  |
+| fs/pidfd.rs | `attach` | 111 | 10 | yes |
 | fs/pidfd.rs | `data_of` | 120 | 19 |  |
 | fs/pidfd.rs | `fdinfo_pid_of` | 138 | 15 |  |
-| fs/pidfd.rs | `resolve_alive` | 152 | 15 |  |
+| fs/pidfd.rs | `resolve_alive` | 152 | 15 | yes |
 | fs/pidfd.rs | `target_exited` | 166 | 15 |  |
 | fs/pidfd.rs | `pidfd_poll` | 180 | 10 |  |
 | fs/pidfd.rs | `pidfd_close` | 189 | 18 |  |
@@ -921,21 +921,21 @@ records why.
 | fs/pidfd.rs | `pidfd_dir_close` | 224 | 6 |  |
 | fs/pidfd.rs | `pidfd_dir_poll` | 229 | 4 |  |
 | fs/procfs/cmdline.rs | `generate` | 17 | 16 |  |
-| fs/procfs/cmdline.rs | `get_cmdline` | 32 | 9 |  |
+| fs/procfs/cmdline.rs | `get_cmdline` | 32 | 9 | yes |
 | fs/procfs/configgz.rs | `crc32_ieee` | 38 | 17 |  |
 | fs/procfs/configgz.rs | `generate` | 54 | 21 |  |
 | fs/procfs/cpuinfo.rs | `generate` | 63 | 70 |  |
 | fs/procfs/diskstats.rs | `generate` | 32 | 66 |  |
-| fs/procfs/interrupts.rs | `timer_inc` | 38 | 8 |  |
-| fs/procfs/interrupts.rs | `soft_inc` | 45 | 12 |  |
-| fs/procfs/interrupts.rs | `timer_count` | 56 | 10 |  |
+| fs/procfs/interrupts.rs | `timer_inc` | 38 | 8 | yes |
+| fs/procfs/interrupts.rs | `soft_inc` | 45 | 12 | yes |
+| fs/procfs/interrupts.rs | `timer_count` | 56 | 10 | yes |
 | fs/procfs/interrupts.rs | `soft_count` | 65 | 11 |  |
 | fs/procfs/interrupts.rs | `total_interrupt_count` | 75 | 22 |  |
 | fs/procfs/interrupts.rs | `plic_inc` | 96 | 6 |  |
 | fs/procfs/interrupts.rs | `plic_count` | 101 | 10 |  |
 | fs/procfs/interrupts.rs | `generate` | 110 | 67 |  |
 | fs/procfs/kallsyms.rs | `generate` | 45 | 19 |  |
-| fs/procfs/loadavg.rs | `update_load_avg` | 73 | 41 |  |
+| fs/procfs/loadavg.rs | `update_load_avg` | 73 | 41 | yes |
 | fs/procfs/loadavg.rs | `fmt_load` | 113 | 10 |  |
 | fs/procfs/loadavg.rs | `generate` | 122 | 27 |  |
 | fs/procfs/locks.rs | `generate` | 33 | 7 |  |
@@ -962,18 +962,18 @@ records why.
 | fs/procfs/mod.rs | `new_dynamic_symlink` | 340 | 25 |  |
 | fs/procfs/mod.rs | `new_sysctl_file` | 364 | 29 |  |
 | fs/procfs/mod.rs | `new_symlink` | 392 | 25 |  |
-| fs/procfs/mod.rs | `is_dir` | 416 | 6 |  |
+| fs/procfs/mod.rs | `is_dir` | 416 | 6 | yes |
 | fs/procfs/mod.rs | `is_file` | 421 | 6 |  |
-| fs/procfs/mod.rs | `is_symlink` | 426 | 6 |  |
+| fs/procfs/mod.rs | `is_symlink` | 426 | 6 | yes |
 | fs/procfs/mod.rs | `get_content` | 431 | 50 |  |
 | fs/procfs/mod.rs | `get_link_target` | 480 | 21 |  |
-| fs/procfs/mod.rs | `size` | 500 | 10 |  |
+| fs/procfs/mod.rs | `size` | 500 | 10 | yes |
 | fs/procfs/mod.rs | `find_child` | 509 | 27 |  |
 | fs/procfs/mod.rs | `add_child` | 535 | 7 |  |
 | fs/procfs/mod.rs | `list_children` | 541 | 10 |  |
-| fs/procfs/mod.rs | `get` | 550 | 8 |  |
-| fs/procfs/mod.rs | `put` | 557 | 25 |  |
-| fs/procfs/mod.rs | `new` | 581 | 13 |  |
+| fs/procfs/mod.rs | `get` | 550 | 8 | yes |
+| fs/procfs/mod.rs | `put` | 557 | 25 | yes |
+| fs/procfs/mod.rs | `new` | 581 | 13 | yes |
 | fs/procfs/mod.rs | `alloc_ino` | 593 | 6 |  |
 | fs/procfs/mod.rs | `init_default_files` | 598 | 102 |  |
 | fs/procfs/mod.rs | `init_net_tree` | 699 | 58 |  |
@@ -983,17 +983,17 @@ records why.
 | fs/procfs/mod.rs | `create_static_file` | 1106 | 12 |  |
 | fs/procfs/mod.rs | `create_dynamic_symlink` | 1117 | 12 |  |
 | fs/procfs/mod.rs | `create_symlink` | 1128 | 12 |  |
-| fs/procfs/mod.rs | `lookup` | 1139 | 43 |  |
-| fs/procfs/mod.rs | `read_file` | 1181 | 13 |  |
-| fs/procfs/mod.rs | `list_dir` | 1193 | 34 |  |
+| fs/procfs/mod.rs | `lookup` | 1139 | 43 | yes |
+| fs/procfs/mod.rs | `read_file` | 1181 | 13 | yes |
+| fs/procfs/mod.rs | `list_dir` | 1193 | 34 | yes |
 | fs/procfs/mod.rs | `procfs_mount` | 1226 | 10 |  |
 | fs/procfs/mod.rs | `procfs_kill_sb` | 1235 | 9 |  |
 | fs/procfs/mod.rs | `get_procfs_sb` | 1243 | 12 |  |
-| fs/procfs/mod.rs | `mount_table_regen` | 1254 | 25 |  |
-| fs/procfs/mod.rs | `read_file` | 1278 | 120 |  |
-| fs/procfs/mod.rs | `is_mounted` | 1397 | 8 |  |
-| fs/procfs/mod.rs | `create_root_inode` | 1404 | 26 |  |
-| fs/procfs/mod.rs | `list_dir` | 1429 | 6 |  |
+| fs/procfs/mod.rs | `mount_table_regen` | 1254 | 25 | yes |
+| fs/procfs/mod.rs | `read_file` | 1278 | 120 | yes |
+| fs/procfs/mod.rs | `is_mounted` | 1397 | 8 | yes |
+| fs/procfs/mod.rs | `create_root_inode` | 1404 | 26 | yes |
+| fs/procfs/mod.rs | `list_dir` | 1429 | 6 | yes |
 | fs/procfs/mod.rs | `exists` | 1434 | 13 |  |
 | fs/procfs/mod.rs | `init_procfs` | 1446 | 23 |  |
 | fs/procfs/mod.rs | `mount_procfs` | 1468 | 37 |  |
@@ -1023,17 +1023,17 @@ records why.
 | fs/procfs/mod.rs | `generate_vmallocinfo` | 2902 | 5 |  |
 | fs/procfs/mod.rs | `partitions_generate` | 2906 | 25 |  |
 | fs/procfs/mod.rs | `mount_proc` | 2930 | 9 |  |
-| fs/procfs/mod.rs | `mount_register` | 2938 | 4 |  |
+| fs/procfs/mod.rs | `mount_register` | 2938 | 4 | yes |
 | fs/procfs/mounts.rs | `boot_mounts` | 45 | 58 |  |
 | fs/procfs/mounts.rs | `generate` | 102 | 45 |  |
 | fs/procfs/mounts.rs | `generate_filesystems` | 146 | 19 |  |
 | fs/procfs/mounts.rs | `mount_point_prefix` | 164 | 18 |  |
-| fs/procfs/mounts.rs | `mount_id_for` | 181 | 32 |  |
+| fs/procfs/mounts.rs | `mount_id_for` | 181 | 32 | yes |
 | fs/procfs/mounts.rs | `generate_mountinfo` | 212 | 51 |  |
 | fs/procfs/net.rs | `hex_addr_v4` | 27 | 12 |  |
 | fs/procfs/net.rs | `hex_port` | 38 | 8 |  |
 | fs/procfs/net.rs | `hex_addr_v6` | 45 | 17 |  |
-| fs/procfs/net.rs | `dev_rows` | 61 | 12 |  |
+| fs/procfs/net.rs | `dev_rows` | 61 | 12 | yes |
 | fs/procfs/net.rs | `generate_dev` | 72 | 41 |  |
 | fs/procfs/net.rs | `sock_table_header` | 112 | 7 |  |
 | fs/procfs/net.rs | `sock_row` | 118 | 22 |  |
@@ -1049,32 +1049,32 @@ records why.
 | fs/procfs/net.rs | `generate_sockstat` | 321 | 41 |  |
 | fs/procfs/net.rs | `generate_unix` | 361 | 9 |  |
 | fs/procfs/pid.rs | `is_pid_dir` | 25 | 9 |  |
-| fs/procfs/pid.rs | `is_valid_pid` | 33 | 11 |  |
+| fs/procfs/pid.rs | `is_valid_pid` | 33 | 11 | yes |
 | fs/procfs/pid.rs | `parse_pid` | 43 | 23 |  |
 | fs/procfs/pid.rs | `task_state_char` | 65 | 14 |  |
 | fs/procfs/pid.rs | `task_state_str` | 78 | 23 |  |
 | fs/procfs/pid.rs | `task_comm` | 100 | 49 |  |
-| fs/procfs/pid.rs | `lookup` | 148 | 5 |  |
-| fs/procfs/pid.rs | `get` | 152 | 9 |  |
-| fs/procfs/pid.rs | `drop` | 160 | 7 |  |
+| fs/procfs/pid.rs | `lookup` | 148 | 5 | yes |
+| fs/procfs/pid.rs | `get` | 152 | 9 | yes |
+| fs/procfs/pid.rs | `drop` | 160 | 7 | yes |
 | fs/procfs/pid.rs | `generate_comm` | 166 | 61 |  |
 | fs/procfs/pid.rs | `generate_cgroup` | 226 | 33 |  |
 | fs/procfs/pid.rs | `generate_status` | 258 | 201 |  |
 | fs/procfs/pid.rs | `read_target_user_mm` | 458 | 49 |  |
-| fs/procfs/pid.rs | `environ_access_allowed` | 506 | 14 |  |
+| fs/procfs/pid.rs | `environ_access_allowed` | 506 | 14 | yes |
 | fs/procfs/pid.rs | `generate_cmdline` | 519 | 46 |  |
 | fs/procfs/pid.rs | `generate_schedstat` | 564 | 23 |  |
 | fs/procfs/pid.rs | `generate_stat` | 586 | 135 |  |
-| fs/procfs/pid.rs | `generate_exe_link` | 720 | 25 |  |
+| fs/procfs/pid.rs | `generate_exe_link` | 720 | 25 | yes |
 | fs/procfs/pid.rs | `generate_cwd_link` | 744 | 25 |  |
 | fs/procfs/pid.rs | `generate_environ` | 768 | 46 |  |
 | fs/procfs/pid.rs | `generate_smaps` | 813 | 84 |  |
 | fs/procfs/pid.rs | `re_header` | 896 | 15 |  |
 | fs/procfs/pid.rs | `generate_maps` | 910 | 169 |  |
-| fs/procfs/pid.rs | `get_fd_file` | 1078 | 19 |  |
-| fs/procfs/pid.rs | `list_fds` | 1096 | 32 |  |
+| fs/procfs/pid.rs | `get_fd_file` | 1078 | 19 | yes |
+| fs/procfs/pid.rs | `list_fds` | 1096 | 32 | yes |
 | fs/procfs/pid.rs | `get_fd_path` | 1127 | 31 |  |
-| fs/procfs/pid.rs | `generate_fd_link` | 1157 | 33 |  |
+| fs/procfs/pid.rs | `generate_fd_link` | 1157 | 33 | yes |
 | fs/procfs/pid.rs | `generate_oom_score` | 1189 | 40 |  |
 | fs/procfs/pid.rs | `generate_oom_score_adj` | 1228 | 47 |  |
 | fs/procfs/pid.rs | `trim_label` | 1274 | 40 |  |
@@ -1088,8 +1088,8 @@ records why.
 | fs/procfs/procfile.rs | `render_kvtab` | 114 | 16 |  |
 | fs/procfs/procfile.rs | `render_kvtab_pad` | 129 | 23 |  |
 | fs/procfs/procfile.rs | `render_cols` | 151 | 87 |  |
-| fs/procfs/schedstat.rs | `note_yield` | 52 | 8 |  |
-| fs/procfs/schedstat.rs | `note_sched_run` | 59 | 8 |  |
+| fs/procfs/schedstat.rs | `note_yield` | 52 | 8 | yes |
+| fs/procfs/schedstat.rs | `note_sched_run` | 59 | 8 | yes |
 | fs/procfs/schedstat.rs | `generate` | 66 | 54 |  |
 | fs/procfs/self_proc.rs | `get_self_link` | 16 | 8 |  |
 | fs/procfs/self_proc.rs | `generate` | 23 | 10 |  |
@@ -1097,9 +1097,9 @@ records why.
 | fs/procfs/softirqs.rs | `generate` | 36 | 27 |  |
 | fs/procfs/softirqs.rs | `total_raised` | 62 | 14 |  |
 | fs/procfs/softirqs.rs | `raised_count` | 75 | 4 |  |
-| fs/procfs/stat.rs | `new` | 61 | 31 |  |
-| fs/procfs/stat.rs | `charge_tick` | 91 | 25 |  |
-| fs/procfs/stat.rs | `note_switch` | 115 | 23 |  |
+| fs/procfs/stat.rs | `new` | 61 | 31 | yes |
+| fs/procfs/stat.rs | `charge_tick` | 91 | 25 | yes |
+| fs/procfs/stat.rs | `note_switch` | 115 | 23 | yes |
 | fs/procfs/stat.rs | `note_fork` | 137 | 6 |  |
 | fs/procfs/stat.rs | `total_context_switches` | 142 | 6 |  |
 | fs/procfs/stat.rs | `total_forks` | 147 | 6 |  |
@@ -1108,8 +1108,8 @@ records why.
 | fs/procfs/stat.rs | `btime` | 176 | 15 |  |
 | fs/procfs/stat.rs | `generate` | 190 | 139 |  |
 | fs/procfs/swaps.rs | `generate` | 20 | 21 |  |
-| fs/procfs/sysctl.rs | `new` | 84 | 12 |  |
-| fs/procfs/sysctl.rs | `as_bytes` | 95 | 14 |  |
+| fs/procfs/sysctl.rs | `new` | 84 | 12 | yes |
+| fs/procfs/sysctl.rs | `as_bytes` | 95 | 14 | yes |
 | fs/procfs/sysctl.rs | `generate_hostname` | 108 | 9 |  |
 | fs/procfs/sysctl.rs | `generate_domainname` | 116 | 9 |  |
 | fs/procfs/sysctl.rs | `generate_osrelease` | 124 | 5 |  |
@@ -1197,7 +1197,7 @@ records why.
 | fs/procfs/sysrq.rs | `print_help` | 246 | 21 |  |
 | fs/procfs/sysrq.rs | `write_trigger` | 266 | 24 |  |
 | fs/procfs/timer_list.rs | `generate` | 53 | 63 |  |
-| fs/procfs/uptime.rs | `account_idle_cycles` | 23 | 8 |  |
+| fs/procfs/uptime.rs | `account_idle_cycles` | 23 | 8 | yes |
 | fs/procfs/uptime.rs | `total_idle_cycles` | 30 | 13 |  |
 | fs/procfs/uptime.rs | `generate` | 42 | 25 |  |
 | fs/procfs/uptime.rs | `read_time_cycles` | 66 | 6 |  |
@@ -1241,11 +1241,11 @@ records why.
 | fs/pty.rs | `pty_slave_write` | 555 | 89 |  |
 | fs/pty.rs | `pty_slave_poll` | 643 | 24 |  |
 | fs/pty.rs | `pty_slave_close` | 666 | 45 |  |
-| fs/pty.rs | `copy_out` | 710 | 8 |  |
-| fs/pty.rs | `copy_in` | 717 | 7 |  |
-| fs/pty.rs | `pty_ioctl` | 723 | 266 |  |
+| fs/pty.rs | `copy_out` | 710 | 8 | yes |
+| fs/pty.rs | `copy_in` | 717 | 7 | yes |
+| fs/pty.rs | `pty_ioctl` | 723 | 266 | yes |
 | fs/readahead.rs | `new` | 53 | 13 | yes |
-| fs/readahead.rs | `on_read` | 65 | 41 |  |
+| fs/readahead.rs | `on_read` | 65 | 41 | yes |
 | fs/rootfs.rs | `new` | 53 | 31 | yes |
 | fs/rootfs.rs | `path_cache_init` | 83 | 29 |  |
 | fs/rootfs.rs | `stamp_tree` | 111 | 9 |  |
@@ -1253,7 +1253,7 @@ records why.
 | fs/rootfs.rs | `path_cache_add` | 140 | 19 |  |
 | fs/rootfs.rs | `path_cache_flush` | 158 | 13 |  |
 | fs/rootfs.rs | `rootfs_path_hash` | 170 | 12 |  |
-| fs/rootfs.rs | `wall_secs` | 181 | 6 |  |
+| fs/rootfs.rs | `wall_secs` | 181 | 6 | yes |
 | fs/rootfs.rs | `rootfs_count_links` | 186 | 14 |  |
 | fs/rootfs.rs | `count_links_in` | 199 | 17 |  |
 | fs/rootfs.rs | `rootfs_subtree_contains` | 215 | 15 |  |
@@ -1261,7 +1261,7 @@ records why.
 | fs/rootfs.rs | `get_rootfs_sb_ref` | 241 | 5 |  |
 | fs/rootfs.rs | `get_root_mount` | 245 | 71 |  |
 | fs/rootfs.rs | `new` | 315 | 22 | yes |
-| fs/rootfs.rs | `name` | 336 | 8 |  |
+| fs/rootfs.rs | `name` | 336 | 8 | yes |
 | fs/rootfs.rs | `new_dir` | 343 | 6 |  |
 | fs/rootfs.rs | `new_file` | 348 | 8 |  |
 | fs/rootfs.rs | `new_symlink` | 355 | 8 |  |
@@ -1273,7 +1273,7 @@ records why.
 | fs/rootfs.rs | `rename_child` | 406 | 12 |  |
 | fs/rootfs.rs | `find_child` | 417 | 13 |  |
 | fs/rootfs.rs | `list_children` | 429 | 8 |  |
-| fs/rootfs.rs | `is_dir` | 436 | 6 |  |
+| fs/rootfs.rs | `is_dir` | 436 | 6 | yes |
 | fs/rootfs.rs | `is_file` | 441 | 6 |  |
 | fs/rootfs.rs | `is_symlink` | 446 | 6 | yes |
 | fs/rootfs.rs | `get_link_target` | 451 | 6 |  |
@@ -1282,12 +1282,12 @@ records why.
 | fs/rootfs.rs | `new` | 502 | 18 | yes |
 | fs/rootfs.rs | `get_root` | 519 | 7 | yes |
 | fs/rootfs.rs | `alloc_ino` | 525 | 6 |  |
-| fs/rootfs.rs | `create_file` | 530 | 45 |  |
+| fs/rootfs.rs | `create_file` | 530 | 45 | yes |
 | fs/rootfs.rs | `create_dir` | 574 | 61 |  |
 | fs/rootfs.rs | `link` | 634 | 90 |  |
-| fs/rootfs.rs | `lookup` | 723 | 45 |  |
+| fs/rootfs.rs | `lookup` | 723 | 45 | yes |
 | fs/rootfs.rs | `lookup_walk` | 767 | 39 |  |
-| fs/rootfs.rs | `list_dir` | 805 | 13 |  |
+| fs/rootfs.rs | `list_dir` | 805 | 13 | yes |
 | fs/rootfs.rs | `mkdir` | 817 | 44 |  |
 | fs/rootfs.rs | `unlink` | 860 | 53 |  |
 | fs/rootfs.rs | `rmdir` | 912 | 58 |  |
@@ -1299,8 +1299,8 @@ records why.
 | fs/rootfs.rs | `rootfs_mount` | 1245 | 18 |  |
 | fs/rootfs.rs | `init_rootfs` | 1262 | 43 |  |
 | fs/rootfs.rs | `get_root_node` | 1304 | 9 |  |
-| fs/rootfs.rs | `get_rootfs` | 1312 | 7 |  |
-| fs/rootfs.rs | `create_root_inode` | 1318 | 25 |  |
+| fs/rootfs.rs | `get_rootfs` | 1312 | 7 | yes |
+| fs/rootfs.rs | `create_root_inode` | 1318 | 25 | yes |
 | fs/rootfs.rs | `rootfs_lookup` | 1342 | 18 |  |
 | fs/rootfs.rs | `rootfs_mkdir` | 1359 | 40 |  |
 | fs/rootfs.rs | `rootfs_unlink` | 1398 | 42 |  |
@@ -1326,22 +1326,22 @@ records why.
 | fs/stat.rs | `set_directory` | 120 | 6 |  |
 | fs/stat.rs | `set_char_device` | 125 | 6 |  |
 | fs/stat.rs | `set_block_device` | 130 | 6 |  |
-| fs/stat.rs | `set_fifo` | 135 | 6 |  |
+| fs/stat.rs | `set_fifo` | 135 | 6 | yes |
 | fs/stat.rs | `set_symlink` | 140 | 6 |  |
-| fs/stat.rs | `set_socket` | 145 | 6 |  |
+| fs/stat.rs | `set_socket` | 145 | 6 | yes |
 | fs/stat.rs | `is_regular_file` | 150 | 6 | yes |
 | fs/stat.rs | `is_directory` | 155 | 6 | yes |
 | fs/stat.rs | `is_char_device` | 160 | 6 | yes |
 | fs/stat.rs | `is_block_device` | 165 | 6 | yes |
 | fs/stat.rs | `is_fifo` | 170 | 6 | yes |
 | fs/stat.rs | `is_symlink` | 175 | 6 | yes |
-| fs/stat.rs | `is_socket` | 180 | 6 |  |
+| fs/stat.rs | `is_socket` | 180 | 6 | yes |
 | fs/stat.rs | `set_mode` | 185 | 9 |  |
 | fs/stat.rs | `get_mode` | 193 | 7 |  |
 | fs/stat.rs | `default` | 199 | 39 | yes |
 | fs/stat.rs | `from` | 237 | 27 | yes |
-| fs/stat.rs | `user_stat_size` | 263 | 11 |  |
-| fs/stat.rs | `copy_stat_to_user` | 273 | 95 |  |
+| fs/stat.rs | `user_stat_size` | 263 | 11 | yes |
+| fs/stat.rs | `copy_stat_to_user` | 273 | 95 | yes |
 | fs/stat.rs | `new` | 367 | 30 | yes |
 | fs/stat.rs | `default` | 396 | 6 | yes |
 | fs/superblock.rs | `new` | 45 | 5 | yes |
@@ -1349,7 +1349,7 @@ records why.
 | fs/superblock.rs | `is_active` | 53 | 5 |  |
 | fs/superblock.rs | `bits` | 57 | 33 | yes |
 | fs/superblock.rs | `new` | 89 | 24 | yes |
-| fs/superblock.rs | `set_type` | 112 | 6 |  |
+| fs/superblock.rs | `set_type` | 112 | 6 | yes |
 | fs/superblock.rs | `set_fs_info` | 117 | 6 |  |
 | fs/superblock.rs | `set_flags` | 122 | 19 | yes |
 | fs/superblock.rs | `new` | 140 | 34 | yes |
@@ -1357,13 +1357,13 @@ records why.
 | fs/superblock.rs | `mount_fs` | 189 | 19 |  |
 | fs/superblock.rs | `kill_super` | 207 | 17 |  |
 | fs/superblock.rs | `new` | 223 | 9 | yes |
-| fs/superblock.rs | `register` | 231 | 17 |  |
+| fs/superblock.rs | `register` | 231 | 17 | yes |
 | fs/superblock.rs | `unregister` | 247 | 19 |  |
 | fs/superblock.rs | `get` | 265 | 18 | yes |
-| fs/superblock.rs | `register_filesystem` | 282 | 5 |  |
+| fs/superblock.rs | `register_filesystem` | 282 | 5 | yes |
 | fs/superblock.rs | `unregister_filesystem` | 286 | 5 |  |
 | fs/superblock.rs | `get_fs_type` | 290 | 5 |  |
-| fs/superblock.rs | `do_mount` | 294 | 21 |  |
+| fs/superblock.rs | `do_mount` | 294 | 21 | yes |
 | fs/superblock.rs | `do_umount` | 314 | 16 |  |
 | fs/sysfs.rs | `subsystem` | 121 | 67 |  |
 | fs/sysfs.rs | `new_root` | 187 | 16 |  |
@@ -1377,9 +1377,9 @@ records why.
 | fs/sysfs.rs | `path` | 276 | 33 | yes |
 | fs/sysfs.rs | `alloc_ino` | 308 | 12 |  |
 | fs/sysfs.rs | `sysfs_root` | 319 | 30 |  |
-| fs/sysfs.rs | `coldboot_uevent_replay` | 348 | 28 |  |
+| fs/sysfs.rs | `coldboot_uevent_replay` | 348 | 28 | yes |
 | fs/sysfs.rs | `device_add_payload` | 375 | 22 |  |
-| fs/sysfs.rs | `lookup_path` | 396 | 14 |  |
+| fs/sysfs.rs | `lookup_path` | 396 | 14 | yes |
 | fs/sysfs.rs | `mk_dir` | 409 | 8 |  |
 | fs/sysfs.rs | `mk_link` | 416 | 8 |  |
 | fs/sysfs.rs | `attr_ro` | 423 | 9 |  |
@@ -1408,15 +1408,15 @@ records why.
 | fs/sysfs.rs | `subsystem_from_devpath` | 1851 | 17 |  |
 | fs/sysfs.rs | `uevent_send` | 1867 | 8 |  |
 | fs/sysfs.rs | `kobject_uevent` | 1874 | 26 |  |
-| fs/sysfs.rs | `netdev_uevent` | 1899 | 8 |  |
+| fs/sysfs.rs | `netdev_uevent` | 1899 | 8 | yes |
 | fs/sysfs.rs | `uevent_seqnum` | 1906 | 32 |  |
 | fs/sysfs.rs | `sysfs_mount_cb` | 1937 | 13 |  |
 | fs/sysfs.rs | `sysfs_kill_sb` | 1949 | 6 |  |
 | fs/sysfs.rs | `get_sysfs_sb` | 1954 | 7 |  |
 | fs/sysfs.rs | `init_sysfs` | 1960 | 28 |  |
 | fs/sysfs.rs | `mount_sysfs` | 1987 | 23 |  |
-| fs/sysfs.rs | `is_mounted` | 2009 | 6 |  |
-| fs/sysfs.rs | `create_root_inode` | 2014 | 53 |  |
+| fs/sysfs.rs | `is_mounted` | 2009 | 6 | yes |
+| fs/sysfs.rs | `create_root_inode` | 2014 | 53 | yes |
 | fs/sysfs.rs | `entry_of` | 2066 | 13 |  |
 | fs/sysfs.rs | `resolve_child` | 2078 | 26 |  |
 | fs/sysfs.rs | `sysfs_lookup` | 2103 | 11 |  |
@@ -1436,22 +1436,22 @@ records why.
 | fs/sysfs.rs | `sysfs_file_poll` | 2466 | 22 |  |
 | fs/sysfs.rs | `mount_sys_instance` | 2487 | 12 |  |
 | fs/sysfs.rs | `mount_pstore` | 2498 | 15 |  |
-| fs/sysfs.rs | `mount_register` | 2512 | 5 |  |
-| fs/tmpfs.rs | `wall_secs` | 63 | 23 |  |
+| fs/sysfs.rs | `mount_register` | 2512 | 5 | yes |
+| fs/tmpfs.rs | `wall_secs` | 63 | 23 | yes |
 | fs/tmpfs.rs | `new` | 85 | 12 | yes |
 | fs/tmpfs.rs | `drop` | 96 | 79 | yes |
 | fs/tmpfs.rs | `new` | 174 | 37 | yes |
-| fs/tmpfs.rs | `name` | 210 | 8 |  |
+| fs/tmpfs.rs | `name` | 210 | 8 | yes |
 | fs/tmpfs.rs | `set_name` | 217 | 6 |  |
-| fs/tmpfs.rs | `is_dir` | 222 | 5 |  |
+| fs/tmpfs.rs | `is_dir` | 222 | 5 | yes |
 | fs/tmpfs.rs | `is_file` | 226 | 5 |  |
 | fs/tmpfs.rs | `is_symlink` | 230 | 5 | yes |
 | fs/tmpfs.rs | `add_child` | 234 | 5 | yes |
 | fs/tmpfs.rs | `remove_child` | 238 | 11 | yes |
 | fs/tmpfs.rs | `find_child` | 248 | 6 |  |
 | fs/tmpfs.rs | `list_children` | 253 | 5 |  |
-| fs/tmpfs.rs | `file_size` | 257 | 6 |  |
-| fs/tmpfs.rs | `page_count` | 262 | 20 |  |
+| fs/tmpfs.rs | `file_size` | 257 | 6 | yes |
+| fs/tmpfs.rs | `page_count` | 262 | 20 | yes |
 | fs/tmpfs.rs | `read_at` | 281 | 63 | yes |
 | fs/tmpfs.rs | `write_at` | 343 | 111 | yes |
 | fs/tmpfs.rs | `fallocate_alloc` | 453 | 33 | yes |
@@ -1470,7 +1470,7 @@ records why.
 | fs/tmpfs.rs | `ensure_registered` | 877 | 14 |  |
 | fs/tmpfs.rs | `node_of` | 890 | 11 |  |
 | fs/tmpfs.rs | `tmpfs_count_links` | 900 | 2 |  |
-| fs/tmpfs.rs | `walk` | 901 | 16 |  |
+| fs/tmpfs.rs | `walk` | 901 | 16 | yes |
 | fs/tmpfs.rs | `tmpfs_subtree_contains` | 916 | 16 |  |
 | fs/tmpfs.rs | `tmpfs_lookup` | 931 | 13 |  |
 | fs/tmpfs.rs | `tmpfs_create` | 943 | 21 |  |
@@ -1500,18 +1500,18 @@ records why.
 | fs/tmpfs.rs | `mount_securityfs` | 1765 | 12 |  |
 | fs/tmpfs.rs | `mount_mqueue` | 1776 | 12 |  |
 | fs/tmpfs.rs | `mount_configfs` | 1787 | 32 |  |
-| fs/tmpfs.rs | `mount_register` | 1818 | 9 |  |
+| fs/tmpfs.rs | `mount_register` | 1818 | 9 | yes |
 | fs/tracefs.rs | `next_ino` | 50 | 6 |  |
 | fs/tracefs.rs | `tracefs_root` | 55 | 13 |  |
 | fs/tracefs.rs | `create_dir` | 67 | 43 |  |
-| fs/tracefs.rs | `create_file` | 109 | 16 |  |
+| fs/tracefs.rs | `create_file` | 109 | 16 | yes |
 | fs/tracefs.rs | `create_file_inner` | 124 | 69 |  |
 | fs/tracefs.rs | `create_stream_file` | 192 | 25 |  |
 | fs/tracefs.rs | `tracefs_mount_cb` | 216 | 14 |  |
 | fs/tracefs.rs | `tracefs_kill_sb` | 229 | 12 |  |
 | fs/tracefs.rs | `init_tracefs` | 240 | 36 |  |
 | fs/tracefs.rs | `mount_at` | 275 | 16 |  |
-| fs/tracefs.rs | `create_root_inode` | 290 | 46 |  |
+| fs/tracefs.rs | `create_root_inode` | 290 | 46 | yes |
 | fs/tracefs.rs | `entry_of` | 335 | 6 |  |
 | fs/tracefs.rs | `resolve_child` | 340 | 11 |  |
 | fs/tracefs.rs | `tracefs_lookup` | 350 | 11 |  |
@@ -1527,15 +1527,15 @@ records why.
 | fs/tracefs.rs | `tracefs_file_lseek` | 664 | 22 |  |
 | fs/tracefs.rs | `tracefs_file_close` | 685 | 23 |  |
 | fs/tracefs.rs | `mount_tracefs` | 707 | 12 |  |
-| fs/tracefs.rs | `mount_register` | 718 | 4 |  |
+| fs/tracefs.rs | `mount_register` | 718 | 4 | yes |
 | fs/tty.rs | `default` | 132 | 27 | yes |
 | fs/tty.rs | `canonical` | 158 | 16 |  |
-| fs/tty.rs | `termios_to_kernel_bytes` | 173 | 13 |  |
-| fs/tty.rs | `termios_from_kernel_bytes` | 185 | 19 |  |
+| fs/tty.rs | `termios_to_kernel_bytes` | 173 | 13 | yes |
+| fs/tty.rs | `termios_from_kernel_bytes` | 185 | 19 | yes |
 | fs/tty.rs | `termios_to_user_bytes` | 203 | 16 |  |
 | fs/tty.rs | `termios_from_user_bytes` | 218 | 19 |  |
-| fs/tty.rs | `termios_to_termio_bytes` | 236 | 15 |  |
-| fs/tty.rs | `termios_from_termio_bytes` | 250 | 28 |  |
+| fs/tty.rs | `termios_to_termio_bytes` | 236 | 15 | yes |
+| fs/tty.rs | `termios_from_termio_bytes` | 250 | 28 | yes |
 | fs/tty.rs | `default` | 277 | 11 | yes |
 | fs/tty.rs | `to_le_bytes` | 287 | 10 | yes |
 | fs/tty.rs | `from_le_bytes` | 296 | 37 | yes |
@@ -1544,55 +1544,55 @@ records why.
 | fs/tty.rs | `uncommitted_len` | 353 | 6 |  |
 | fs/tty.rs | `erase_last` | 358 | 11 |  |
 | fs/tty.rs | `kill_line` | 368 | 6 |  |
-| fs/tty.rs | `commit` | 373 | 5 |  |
+| fs/tty.rs | `commit` | 373 | 5 | yes |
 | fs/tty.rs | `set_eof` | 377 | 6 |  |
 | fs/tty.rs | `readable_len` | 382 | 7 |  |
 | fs/tty.rs | `read` | 388 | 32 | yes |
 | fs/tty.rs | `isig_char` | 419 | 29 |  |
 | fs/tty.rs | `new` | 447 | 16 | yes |
 | fs/tty.rs | `set_output_ctx` | 462 | 8 |  |
-| fs/tty.rs | `get_termios` | 469 | 6 |  |
-| fs/tty.rs | `set_termios` | 474 | 6 |  |
+| fs/tty.rs | `get_termios` | 469 | 6 | yes |
+| fs/tty.rs | `set_termios` | 474 | 6 | yes |
 | fs/tty.rs | `lflag` | 479 | 5 |  |
 | fs/tty.rs | `echo_enabled` | 483 | 5 |  |
-| fs/tty.rs | `get_winsize` | 487 | 6 |  |
-| fs/tty.rs | `set_winsize` | 492 | 9 |  |
-| fs/tty.rs | `send_sigwinch` | 500 | 13 |  |
+| fs/tty.rs | `get_winsize` | 487 | 6 | yes |
+| fs/tty.rs | `set_winsize` | 492 | 9 | yes |
+| fs/tty.rs | `send_sigwinch` | 500 | 13 | yes |
 | fs/tty.rs | `receive_byte` | 512 | 123 |  |
 | fs/tty.rs | `send_isig` | 634 | 14 |  |
 | fs/tty.rs | `fionread_count` | 647 | 7 |  |
 | fs/tty.rs | `input_poll_ready` | 653 | 8 |  |
 | fs/tty.rs | `read_input` | 660 | 76 |  |
-| fs/tty.rs | `flush_input` | 735 | 12 |  |
+| fs/tty.rs | `flush_input` | 735 | 12 | yes |
 | fs/tty.rs | `output_translates_nl` | 746 | 7 |  |
 | fs/tty.rs | `write_output_raw` | 752 | 21 |  |
 | fs/tty.rs | `console_output` | 772 | 18 |  |
 | fs/tty.rs | `set_console_sink_quiet` | 789 | 12 |  |
-| fs/tty.rs | `console` | 800 | 20 |  |
-| fs/tty.rs | `file_is_tty` | 819 | 17 |  |
+| fs/tty.rs | `console` | 800 | 20 | yes |
+| fs/tty.rs | `file_is_tty` | 819 | 17 | yes |
 | fs/unsafe_edges.rs | `privdata_ref` | 35 | 19 |  |
 | fs/unsafe_edges.rs | `file_privdata_ref` | 53 | 12 |  |
 | fs/unsafe_edges.rs | `file_privdata_take` | 64 | 20 |  |
-| fs/unsafe_edges.rs | `static_ref` | 83 | 14 |  |
-| fs/unsafe_edges.rs | `static_ref_unchecked` | 96 | 9 |  |
+| fs/unsafe_edges.rs | `static_ref` | 83 | 14 | yes |
+| fs/unsafe_edges.rs | `static_ref_unchecked` | 96 | 9 | yes |
 | fs/unsafe_edges.rs | `file_privdata_arc_ref` | 104 | 16 |  |
 | fs/unsafe_edges.rs | `file_privdata_arc_take` | 119 | 18 |  |
 | fs/unsafe_edges.rs | `file_privdata_ref_mut` | 136 | 24 |  |
-| fs/unsafe_edges.rs | `file_inode` | 159 | 12 |  |
-| fs/unsafe_edges.rs | `file_inode_install` | 170 | 11 |  |
+| fs/unsafe_edges.rs | `file_inode` | 159 | 12 | yes |
+| fs/unsafe_edges.rs | `file_inode_install` | 170 | 11 | yes |
 | fs/unsafe_edges.rs | `file_privdata_take_arc` | 180 | 19 |  |
 | fs/unsafe_edges.rs | `privdata_ref_leaked` | 198 | 10 |  |
-| fs/unsafe_edges.rs | `file_inode_arc` | 207 | 13 |  |
-| fs/unsafe_edges.rs | `file_ra_state_mut` | 219 | 11 |  |
+| fs/unsafe_edges.rs | `file_inode_arc` | 207 | 13 | yes |
+| fs/unsafe_edges.rs | `file_ra_state_mut` | 219 | 11 | yes |
 | fs/unsafe_edges.rs | `as_deref_ref` | 229 | 4 |  |
 | fs/unsafe_edges.rs | `as_deref_ref` | 232 | 11 |  |
 | fs/unsafe_edges.rs | `privdata_take_box` | 242 | 15 |  |
 | fs/unsafe_edges.rs | `privdata_drop_arc` | 256 | 11 |  |
 | fs/unsafe_edges.rs | `kill_sb_reclaim_box` | 266 | 13 |  |
 | fs/unsafe_edges.rs | `file_privdata_arc_clone` | 278 | 17 |  |
-| fs/unsafe_edges.rs | `vec_zeroed_sized` | 294 | 14 |  |
-| fs/unsafe_edges.rs | `kernel_slice` | 307 | 7 |  |
-| fs/unsafe_edges.rs | `kernel_slice_mut` | 313 | 8 |  |
+| fs/unsafe_edges.rs | `vec_zeroed_sized` | 294 | 14 | yes |
+| fs/unsafe_edges.rs | `kernel_slice` | 307 | 7 | yes |
+| fs/unsafe_edges.rs | `kernel_slice_mut` | 313 | 8 | yes |
 | fs/unsafe_edges.rs | `file_close` | 320 | 11 | yes |
 | fs/unsafe_edges.rs | `file_privdata_arc_static` | 330 | 10 |  |
 | fs/vfs.rs | `new` | 110 | 10 | yes |
@@ -1730,10 +1730,10 @@ records why.
 | fs/vt.rs | `vtdev_write` | 179 | 5 |  |
 | fs/vt.rs | `vtdev_poll` | 183 | 9 |  |
 | fs/vt.rs | `vtdev_close` | 191 | 27 |  |
-| fs/vt.rs | `vt_file_ioctl` | 217 | 224 |  |
+| fs/vt.rs | `vt_file_ioctl` | 217 | 224 | yes |
 | fs/xattr.rs | `check_name` | 68 | 29 |  |
 | fs/xattr.rs | `may_set` | 96 | 66 |  |
 | fs/xattr.rs | `set` | 161 | 68 | yes |
 | fs/xattr.rs | `get` | 228 | 43 | yes |
-| fs/xattr.rs | `list` | 270 | 34 |  |
+| fs/xattr.rs | `list` | 270 | 34 | yes |
 | fs/xattr.rs | `remove` | 303 | 18 | yes |

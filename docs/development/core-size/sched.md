@@ -7,14 +7,14 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# sched — hot 12542 lines (stay) / cold 2960 lines (leave)
+# sched — hot 14386 lines (stay) / cold 1116 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
 | sched/cgroup.rs | `new` | 112 | 73 | yes |
 | sched/cgroup.rs | `new_root` | 184 | 21 |  |
 | sched/cgroup.rs | `new_child` | 204 | 24 |  |
-| sched/cgroup.rs | `path` | 227 | 30 |  |
+| sched/cgroup.rs | `path` | 227 | 30 | yes |
 | sched/cgroup.rs | `for_each_ancestor` | 256 | 32 |  |
 | sched/cgroup.rs | `chain_throttled` | 287 | 13 |  |
 | sched/cgroup.rs | `populated` | 299 | 6 |  |
@@ -27,26 +27,26 @@ records why.
 | sched/cgroup.rs | `cgroup_rmdir` | 390 | 34 |  |
 | sched/cgroup.rs | `cgroup_lookup_child` | 423 | 23 |  |
 | sched/cgroup.rs | `task_cgroup` | 445 | 42 |  |
-| sched/class.rs | `name` | 57 | 9 |  |
+| sched/class.rs | `name` | 57 | 9 | yes |
 | sched/class.rs | `enqueue_task` | 65 | 12 | yes |
 | sched/class.rs | `dequeue_task` | 76 | 4 | yes |
-| sched/class.rs | `yield_task` | 79 | 9 |  |
-| sched/class.rs | `wakeup_preempt` | 87 | 11 |  |
+| sched/class.rs | `yield_task` | 79 | 9 | yes |
+| sched/class.rs | `wakeup_preempt` | 87 | 11 | yes |
 | sched/class.rs | `pick_next_task` | 97 | 11 | yes |
-| sched/class.rs | `put_prev_task` | 107 | 11 |  |
-| sched/class.rs | `set_next_task` | 117 | 13 |  |
-| sched/class.rs | `balance` | 129 | 12 |  |
-| sched/class.rs | `select_task_rq` | 140 | 11 |  |
-| sched/class.rs | `task_tick` | 150 | 7 |  |
+| sched/class.rs | `put_prev_task` | 107 | 11 | yes |
+| sched/class.rs | `set_next_task` | 117 | 13 | yes |
+| sched/class.rs | `balance` | 129 | 12 | yes |
+| sched/class.rs | `select_task_rq` | 140 | 11 | yes |
+| sched/class.rs | `task_tick` | 150 | 7 | yes |
 | sched/class.rs | `update_curr` | 156 | 11 | yes |
-| sched/class.rs | `get_rr_interval` | 166 | 10 |  |
-| sched/class.rs | `has_runnable` | 175 | 6 |  |
-| sched/class.rs | `next_class` | 180 | 22 |  |
+| sched/class.rs | `get_rr_interval` | 166 | 10 | yes |
+| sched/class.rs | `has_runnable` | 175 | 6 | yes |
+| sched/class.rs | `next_class` | 180 | 22 | yes |
 | sched/class.rs | `to_class` | 201 | 16 |  |
 | sched/class.rs | `task_sched_class` | 216 | 19 | yes |
 | sched/class.rs | `new` | 234 | 11 | yes |
 | sched/class.rs | `next` | 244 | 15 | yes |
-| sched/class.rs | `from` | 258 | 11 |  |
+| sched/class.rs | `from` | 258 | 11 | yes |
 | sched/class.rs | `next` | 268 | 7 | yes |
 | sched/edges.rs | `idle_task_ptr` | 48 | 13 | yes |
 | sched/edges.rs | `idle_task_storage_base` | 60 | 28 | yes |
@@ -116,9 +116,9 @@ records why.
 | sched/entities.rs | `new_const` | 182 | 12 |  |
 | sched/entities.rs | `init` | 193 | 9 | yes |
 | sched/entities.rs | `nr_running` | 201 | 7 | yes |
-| sched/entities.rs | `bitmap_word` | 207 | 12 |  |
-| sched/entities.rs | `highest_linked_user_prio` | 218 | 40 |  |
-| sched/entities.rs | `walk_prio` | 257 | 27 |  |
+| sched/entities.rs | `bitmap_word` | 207 | 12 | yes |
+| sched/entities.rs | `highest_linked_user_prio` | 218 | 40 | yes |
+| sched/entities.rs | `walk_prio` | 257 | 27 | yes |
 | sched/entities.rs | `is_empty` | 283 | 10 | yes |
 | sched/entities.rs | `rt_nr_dec` | 292 | 18 |  |
 | sched/entities.rs | `rr_nr_dec` | 309 | 15 |  |
@@ -127,72 +127,72 @@ records why.
 | sched/entities.rs | `dequeue` | 410 | 64 | yes |
 | sched/entities.rs | `is_linked` | 473 | 20 | yes |
 | sched/entities.rs | `force_unlink` | 492 | 61 | yes |
-| sched/entities.rs | `pick_next` | 552 | 25 |  |
-| sched/entities.rs | `peek_next` | 576 | 36 |  |
+| sched/entities.rs | `pick_next` | 552 | 25 | yes |
+| sched/entities.rs | `peek_next` | 576 | 36 | yes |
 | sched/entities.rs | `new` | 611 | 14 | yes |
 | sched/entities.rs | `from_nice` | 624 | 13 |  |
 | sched/entities.rs | `update_inv_weight` | 636 | 12 |  |
-| sched/entities.rs | `default` | 647 | 66 |  |
+| sched/entities.rs | `default` | 647 | 66 | yes |
 | sched/entities.rs | `new` | 712 | 18 | yes |
 | sched/entities.rs | `from_nice` | 729 | 18 |  |
-| sched/entities.rs | `set_nice` | 746 | 7 |  |
-| sched/entities.rs | `get_vruntime` | 752 | 7 |  |
+| sched/entities.rs | `set_nice` | 746 | 7 | yes |
+| sched/entities.rs | `get_vruntime` | 752 | 7 | yes |
 | sched/entities.rs | `set_vruntime` | 758 | 7 |  |
-| sched/entities.rs | `add_vruntime` | 764 | 12 |  |
+| sched/entities.rs | `add_vruntime` | 764 | 12 | yes |
 | sched/entities.rs | `update_exec_runtime` | 775 | 40 | yes |
 | sched/entities.rs | `calc_delta_fair` | 814 | 26 |  |
 | sched/entities.rs | `update_vruntime` | 839 | 9 | yes |
 | sched/entities.rs | `is_on_rq` | 847 | 7 | yes |
-| sched/entities.rs | `set_on_rq` | 853 | 8 |  |
+| sched/entities.rs | `set_on_rq` | 853 | 8 | yes |
 | sched/entities.rs | `timeline_key` | 860 | 9 | yes |
 | sched/entities.rs | `set_timeline_key` | 868 | 7 |  |
 | sched/entities.rs | `get_slice` | 874 | 7 |  |
 | sched/entities.rs | `set_slice` | 880 | 7 |  |
 | sched/entities.rs | `get_exec_start` | 886 | 7 |  |
 | sched/entities.rs | `set_exec_start` | 892 | 6 | yes |
-| sched/entities.rs | `default` | 897 | 6 |  |
-| sched/entities.rs | `clone` | 902 | 34 |  |
+| sched/entities.rs | `default` | 897 | 6 | yes |
+| sched/entities.rs | `clone` | 902 | 34 | yes |
 | sched/entities.rs | `new` | 935 | 10 | yes |
 | sched/entities.rs | `is_on_rq` | 944 | 7 | yes |
-| sched/entities.rs | `set_on_rq` | 950 | 7 |  |
-| sched/entities.rs | `get_time_slice` | 956 | 7 |  |
+| sched/entities.rs | `set_on_rq` | 950 | 7 | yes |
+| sched/entities.rs | `get_time_slice` | 956 | 7 | yes |
 | sched/entities.rs | `set_time_slice` | 962 | 7 | yes |
 | sched/entities.rs | `dec_time_slice` | 968 | 13 | yes |
 | sched/entities.rs | `reset_time_slice` | 980 | 6 | yes |
-| sched/entities.rs | `default` | 985 | 48 |  |
+| sched/entities.rs | `default` | 985 | 48 | yes |
 | sched/entities.rs | `new` | 1032 | 18 | yes |
 | sched/entities.rs | `is_on_rq` | 1049 | 6 | yes |
 | sched/entities.rs | `get_bw` | 1054 | 13 |  |
-| sched/entities.rs | `update_deadline` | 1066 | 15 |  |
-| sched/entities.rs | `replenish_runtime` | 1080 | 14 |  |
+| sched/entities.rs | `update_deadline` | 1066 | 15 | yes |
+| sched/entities.rs | `replenish_runtime` | 1080 | 14 | yes |
 | sched/entities.rs | `consume_runtime` | 1093 | 16 | yes |
-| sched/entities.rs | `default` | 1108 | 54 |  |
+| sched/entities.rs | `default` | 1108 | 54 | yes |
 | sched/entities.rs | `fmt` | 1161 | 43 |  |
 | sched/entities.rs | `new` | 1203 | 12 | yes |
 | sched/entities.rs | `is_empty` | 1214 | 7 | yes |
 | sched/entities.rs | `nr_running` | 1220 | 8 | yes |
-| sched/entities.rs | `dl_nr_dec` | 1227 | 19 |  |
+| sched/entities.rs | `dl_nr_dec` | 1227 | 19 | yes |
 | sched/entities.rs | `enqueue` | 1245 | 62 | yes |
 | sched/entities.rs | `dequeue` | 1306 | 57 | yes |
 | sched/entities.rs | `is_linked` | 1362 | 9 | yes |
-| sched/entities.rs | `pick_next` | 1370 | 27 |  |
-| sched/entities.rs | `peek_next` | 1396 | 15 |  |
-| sched/entities.rs | `pick_next_cpu` | 1410 | 83 |  |
+| sched/entities.rs | `pick_next` | 1370 | 27 | yes |
+| sched/entities.rs | `peek_next` | 1396 | 15 | yes |
+| sched/entities.rs | `pick_next_cpu` | 1410 | 83 | yes |
 | sched/entities.rs | `new` | 1492 | 17 | yes |
 | sched/entities.rs | `leftmost_entry` | 1508 | 31 |  |
 | sched/entities.rs | `avg_vruntime` | 1538 | 31 |  |
 | sched/entities.rs | `capture_sleep_vlag` | 1568 | 42 | yes |
 | sched/entities.rs | `timeline_insert` | 1609 | 15 |  |
 | sched/entities.rs | `ph` | 1623 | 58 | yes |
-| sched/entities.rs | `timeline_remove` | 1680 | 24 |  |
+| sched/entities.rs | `timeline_remove` | 1680 | 24 | yes |
 | sched/entities.rs | `ph` | 1703 | 31 | yes |
 | sched/entities.rs | `nr_running` | 1733 | 15 | yes |
-| sched/entities.rs | `nr_running_dec` | 1747 | 71 |  |
-| sched/entities.rs | `load_weight_sub` | 1817 | 30 |  |
+| sched/entities.rs | `nr_running_dec` | 1747 | 71 | yes |
+| sched/entities.rs | `load_weight_sub` | 1817 | 30 | yes |
 | sched/entities.rs | `is_empty` | 1846 | 7 | yes |
-| sched/entities.rs | `get_min_vruntime` | 1852 | 8 |  |
-| sched/entities.rs | `leftmost_vruntime` | 1859 | 22 |  |
-| sched/entities.rs | `ww_tie_mass` | 1880 | 27 |  |
+| sched/entities.rs | `get_min_vruntime` | 1852 | 8 | yes |
+| sched/entities.rs | `leftmost_vruntime` | 1859 | 22 | yes |
+| sched/entities.rs | `ww_tie_mass` | 1880 | 27 | yes |
 | sched/entities.rs | `update_min_vruntime` | 1906 | 44 | yes |
 | sched/entities.rs | `enqueue` | 1949 | 9 | yes |
 | sched/entities.rs | `enqueue_migrate` | 1957 | 5 |  |
@@ -201,32 +201,32 @@ records why.
 | sched/entities.rs | `is_linked` | 2157 | 20 | yes |
 | sched/entities.rs | `resync_nr_running_from_timeline` | 2176 | 26 | yes |
 | sched/entities.rs | `timeline_head_diag` | 2201 | 46 | yes |
-| sched/entities.rs | `strand_wall_probe` | 2246 | 135 |  |
-| sched/entities.rs | `heal_report_budget_ok` | 2380 | 16 |  |
-| sched/entities.rs | `stale_heal_line` | 2395 | 37 |  |
-| sched/entities.rs | `stale_claim_healed` | 2431 | 20 |  |
-| sched/entities.rs | `pdec5` | 2450 | 65 |  |
-| sched/entities.rs | `stale_oncpu_healed` | 2514 | 64 |  |
-| sched/entities.rs | `put_dec` | 2577 | 29 |  |
-| sched/entities.rs | `claim_inject_scan` | 2605 | 34 |  |
-| sched/entities.rs | `oncpu_inject_scan` | 2638 | 62 |  |
+| sched/entities.rs | `strand_wall_probe` | 2246 | 135 | yes |
+| sched/entities.rs | `heal_report_budget_ok` | 2380 | 16 | yes |
+| sched/entities.rs | `stale_heal_line` | 2395 | 37 | yes |
+| sched/entities.rs | `stale_claim_healed` | 2431 | 20 | yes |
+| sched/entities.rs | `pdec5` | 2450 | 65 | yes |
+| sched/entities.rs | `stale_oncpu_healed` | 2514 | 64 | yes |
+| sched/entities.rs | `put_dec` | 2577 | 29 | yes |
+| sched/entities.rs | `claim_inject_scan` | 2605 | 34 | yes |
+| sched/entities.rs | `oncpu_inject_scan` | 2638 | 62 | yes |
 | sched/entities.rs | `claim_sweep` | 2699 | 125 | yes |
-| sched/entities.rs | `pick_next` | 2823 | 47 |  |
-| sched/entities.rs | `peek_next` | 2869 | 14 |  |
+| sched/entities.rs | `pick_next` | 2823 | 47 | yes |
+| sched/entities.rs | `peek_next` | 2869 | 14 | yes |
 | sched/entities.rs | `update_curr` | 2882 | 34 | yes |
 | sched/entities.rs | `sched_slice` | 2915 | 67 | yes |
 | sched/entities.rs | `check_preempt` | 2981 | 20 |  |
 | sched/entities.rs | `set_curr` | 3000 | 7 | yes |
 | sched/entities.rs | `get_curr` | 3006 | 6 | yes |
-| sched/entities.rs | `clear` | 3011 | 120 |  |
+| sched/entities.rs | `clear` | 3011 | 120 | yes |
 | sched/reapdrain.rs | `mint` | 131 | 9 |  |
-| sched/reapdrain.rs | `as_ptr` | 139 | 9 |  |
+| sched/reapdrain.rs | `as_ptr` | 139 | 9 | yes |
 | sched/reapdrain.rs | `task` | 147 | 15 |  |
 | sched/reapdrain.rs | `into_parked` | 161 | 10 |  |
 | sched/reapdrain.rs | `into_free` | 170 | 89 |  |
 | sched/reapdrain.rs | `defer_reap_storage` | 258 | 34 |  |
 | sched/reapdrain.rs | `switch_stage_done` | 291 | 46 |  |
-| sched/reapdrain.rs | `reap_drain_tick` | 336 | 215 |  |
+| sched/reapdrain.rs | `reap_drain_tick` | 336 | 215 | yes |
 | sched/reapdrain.rs | `notify_parent_if_any` | 550 | 10 |  |
 | sched/reapdrain.rs | `reap_storage_free` | 559 | 17 |  |
 | sched/sched.rs | `need_resched` | 40 | 14 | yes |
@@ -468,7 +468,7 @@ records why.
 | sched/sched.rs | `idle_guard_sp` | 9110 | 7 | yes |
 | sched/sched.rs | `idle_guard_report` | 9116 | 3 | yes |
 | sched/sched.rs | `ph` | 9118 | 310 | yes |
-| sched/sched_hooks.rs | `sched_register_hooks` | 249 | 6 |  |
+| sched/sched_hooks.rs | `sched_register_hooks` | 249 | 6 | yes |
 | sched/sched_hooks.rs | `hooks` | 254 | 16 |  |
 | sched/sched_hooks.rs | `r56_print_pid` | 269 | 4 | yes |
 | sched/sched_hooks.rs | `sched_clock` | 272 | 4 | yes |
@@ -526,7 +526,7 @@ records why.
 | sched/sched_hooks.rs | `psledger_jif` | 449 | 4 |  |
 | sched/sched_hooks.rs | `psledger_pk` | 452 | 4 |  |
 | sched/sched_hooks.rs | `ww_watch` | 455 | 3 |  |
-| sched/sched_hooks.rs | `ww_watch_slots` | 457 | 4 |  |
+| sched/sched_hooks.rs | `ww_watch_slots` | 457 | 4 | yes |
 | sched/sched_hooks.rs | `load_balance` | 460 | 6 | yes |
 | sched/sched_hooks.rs | `psledger_note_publish` | 465 | 9 | yes |
 | sched/sched_hooks.rs | `psledger_peek` | 473 | 4 | yes |
@@ -544,9 +544,9 @@ records why.
 | sched/sched_hooks.rs | `dl_sched_class` | 507 | 3 |  |
 | sched/sched_hooks.rs | `idle_sched_class` | 509 | 3 |  |
 | sched/sched_hooks.rs | `stop_sched_class` | 511 | 4 |  |
-| sched/sched_hooks.rs | `sched_ev` | 514 | 3 |  |
-| sched/sched_hooks.rs | `stale_oncpu_healed` | 516 | 9 |  |
-| sched/sched_hooks.rs | `vr_canary` | 524 | 7 |  |
-| sched/side_edges.rs | `evring_slot_mut` | 32 | 16 |  |
-| sched/side_edges.rs | `evring_slot_ref` | 47 | 19 |  |
+| sched/sched_hooks.rs | `sched_ev` | 514 | 3 | yes |
+| sched/sched_hooks.rs | `stale_oncpu_healed` | 516 | 9 | yes |
+| sched/sched_hooks.rs | `vr_canary` | 524 | 7 | yes |
+| sched/side_edges.rs | `evring_slot_mut` | 32 | 16 | yes |
+| sched/side_edges.rs | `evring_slot_ref` | 47 | 19 | yes |
 | sched/side_edges.rs | `new` | 65 | 9 | yes |

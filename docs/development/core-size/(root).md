@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# (root) — hot 2738 lines (stay) / cold 12292 lines (leave)
+# (root) — hot 4546 lines (stay) / cold 10783 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -29,11 +29,11 @@ records why.
 | cmdline.rs | `parse_initrd_region` | 499 | 11 |  |
 | cmdline.rs | `parse_chosen_u64_pair` | 509 | 12 |  |
 | cmdline.rs | `parse_chosen_prop` | 520 | 101 |  |
-| cmdline.rs | `init` | 620 | 37 |  |
+| cmdline.rs | `init` | 620 | 37 | yes |
 | cmdline.rs | `init_from` | 656 | 15 |  |
-| cmdline.rs | `install` | 670 | 43 |  |
-| cmdline.rs | `get_cmdline` | 712 | 32 |  |
-| cmdline.rs | `get_param` | 743 | 21 |  |
+| cmdline.rs | `install` | 670 | 43 | yes |
+| cmdline.rs | `get_cmdline` | 712 | 32 | yes |
+| cmdline.rs | `get_param` | 743 | 21 | yes |
 | cmdline.rs | `parse_ipv4_addr` | 763 | 32 |  |
 | cmdline.rs | `has_param` | 794 | 20 |  |
 | cmdline.rs | `get_all_params` | 813 | 24 |  |
@@ -55,7 +55,7 @@ records why.
 | console.rs | `early_init` | 472 | 35 |  |
 | console.rs | `early_init` | 506 | 18 |  |
 | console.rs | `early_init` | 523 | 4 |  |
-| console.rs | `init` | 526 | 9 |  |
+| console.rs | `init` | 526 | 9 | yes |
 | console.rs | `init_irq` | 534 | 50 |  |
 | console.rs | `init_irq` | 583 | 2 |  |
 | console.rs | `uart4_irq_line` | 584 | 29 |  |
@@ -73,9 +73,9 @@ records why.
 | console.rs | `puts` | 847 | 14 |  |
 | console.rs | `puts_bytes` | 860 | 7 |  |
 | console.rs | `lock` | 866 | 13 | yes |
-| console.rs | `putchar_no_lock` | 878 | 7 |  |
-| console.rs | `putchar_no_lock` | 884 | 8 |  |
-| console.rs | `uart_putc_raw` | 891 | 8 |  |
+| console.rs | `putchar_no_lock` | 878 | 7 | yes |
+| console.rs | `putchar_no_lock` | 884 | 8 | yes |
+| console.rs | `uart_putc_raw` | 891 | 8 | yes |
 | console.rs | `puts_no_lock` | 898 | 7 |  |
 | console.rs | `puts_no_lock` | 904 | 6 |  |
 | console.rs | `puts_bytes_no_lock` | 909 | 7 |  |
@@ -84,18 +84,18 @@ records why.
 | console.rs | `uart_data_ready` | 930 | 25 |  |
 | console.rs | `uart_rx_bridge_to_tty` | 954 | 14 |  |
 | console.rs | `getchar` | 967 | 84 |  |
-| console.rs | `read_waitq` | 1050 | 8 |  |
-| console.rs | `uart_has_data` | 1057 | 22 |  |
-| console.rs | `uart_has_data` | 1078 | 14 |  |
-| console.rs | `uart_has_data` | 1091 | 7 |  |
+| console.rs | `read_waitq` | 1050 | 8 | yes |
+| console.rs | `uart_has_data` | 1057 | 22 | yes |
+| console.rs | `uart_has_data` | 1078 | 14 | yes |
+| console.rs | `uart_has_data` | 1091 | 7 | yes |
 | console.rs | `pl011_rx_pending` | 1097 | 13 |  |
 | console.rs | `init_irq` | 1109 | 2 |  |
 | console.rs | `pl011_irq_handler` | 1110 | 74 |  |
-| console.rs | `uart_has_data` | 1183 | 12 |  |
+| console.rs | `uart_has_data` | 1183 | 12 | yes |
 | console.rs | `process_input` | 1194 | 66 |  |
 | console.rs | `write_str` | 1259 | 62 |  |
 | console.rs | `set_framebuffer_info` | 1320 | 6 |  |
-| console.rs | `get_framebuffer_info` | 1325 | 4 |  |
+| console.rs | `get_framebuffer_info` | 1325 | 4 | yes |
 | cov.rs | `cov_line` | 36 | 15 |  |
 | cov.rs | `trigger_write` | 50 | 9 |  |
 | cov.rs | `trigger_generate` | 58 | 13 |  |
@@ -104,12 +104,12 @@ records why.
 | cov.rs | `console_dump_active` | 105 | 5 |  |
 | cov.rs | `dump_inner` | 109 | 22 |  |
 | errno.rs | `as_i32` | 151 | 7 |  |
-| errno.rs | `as_neg_i32` | 157 | 14 |  |
-| errno.rs | `from_neg_i32` | 170 | 49 |  |
+| errno.rs | `as_neg_i32` | 157 | 14 | yes |
+| errno.rs | `from_neg_i32` | 170 | 49 | yes |
 | errno.rs | `as_neg_u64` | 218 | 155 |  |
 | errno.rs | `from` | 372 | 5 | yes |
-| init.rs | `init_task_storage_addr` | 33 | 29 |  |
-| init.rs | `init` | 61 | 41 |  |
+| init.rs | `init_task_storage_addr` | 33 | 29 | yes |
+| init.rs | `init` | 61 | 41 | yes |
 | init.rs | `init_candidates` | 101 | 46 |  |
 | init.rs | `load_init_program` | 146 | 38 |  |
 | init.rs | `create_and_start_init_process` | 183 | 106 |  |
@@ -123,7 +123,7 @@ records why.
 | initrd.rs | `region` | 56 | 12 |  |
 | initrd.rs | `loaded` | 67 | 23 |  |
 | initrd.rs | `load` | 89 | 39 | yes |
-| initrd.rs | `as_slice` | 127 | 22 |  |
+| initrd.rs | `as_slice` | 127 | 22 | yes |
 | initrd.rs | `new` | 148 | 13 | yes |
 | initrd.rs | `bits` | 160 | 17 | yes |
 | initrd.rs | `align_byte` | 176 | 18 |  |
@@ -141,36 +141,36 @@ records why.
 | initrd.rs | `unpack_newc` | 586 | 145 |  |
 | initrd.rs | `mkdir_p` | 730 | 11 |  |
 | initrd.rs | `mkdir_p_parents` | 740 | 17 |  |
-| initrd.rs | `create_file` | 756 | 15 |  |
+| initrd.rs | `create_file` | 756 | 15 | yes |
 | initrd.rs | `set_node_meta` | 770 | 10 |  |
 | lib.rs | `print_status` | 35 | 11 | yes |
-| lib.rs | `print_status_ex` | 45 | 14 |  |
-| lib.rs | `push` | 58 | 123 |  |
-| lib.rs | `alloc_error_handler` | 180 | 85 |  |
-| lib.rs | `format_hex` | 264 | 9 |  |
-| lib.rs | `rust_main_tail` | 272 | 1155 |  |
-| lib.rs | `x86_boot_memory_regions` | 1426 | 9 |  |
-| lib.rs | `x86_dump_regions` | 1434 | 398 |  |
-| lib.rs | `mount_root_filesystem` | 1831 | 54 |  |
-| lib.rs | `mount_boot_disk_ext4` | 1884 | 17 |  |
-| lib.rs | `mount_ext4_root_from` | 1900 | 44 |  |
-| lib.rs | `panic` | 1943 | 71 |  |
+| lib.rs | `print_status_ex` | 45 | 14 | yes |
+| lib.rs | `push` | 58 | 131 | yes |
+| lib.rs | `alloc_error_handler` | 188 | 85 |  |
+| lib.rs | `format_hex` | 272 | 9 |  |
+| lib.rs | `rust_main_tail` | 280 | 1155 |  |
+| lib.rs | `x86_boot_memory_regions` | 1434 | 9 |  |
+| lib.rs | `x86_dump_regions` | 1442 | 398 |  |
+| lib.rs | `mount_root_filesystem` | 1839 | 54 |  |
+| lib.rs | `mount_boot_disk_ext4` | 1892 | 17 |  |
+| lib.rs | `mount_ext4_root_from` | 1908 | 44 |  |
+| lib.rs | `panic` | 1951 | 71 |  |
 | list.rs | `new` | 38 | 13 | yes |
-| list.rs | `init` | 50 | 9 |  |
-| list.rs | `is_empty` | 58 | 14 |  |
-| list.rs | `add` | 71 | 20 |  |
+| list.rs | `init` | 50 | 9 | yes |
+| list.rs | `is_empty` | 58 | 14 | yes |
+| list.rs | `add` | 71 | 20 | yes |
 | list.rs | `add_tail` | 90 | 17 |  |
 | list.rs | `del` | 106 | 33 |  |
-| list.rs | `entry` | 138 | 17 |  |
+| list.rs | `entry` | 138 | 17 | yes |
 | list.rs | `for_each` | 154 | 39 |  |
 | list.rs | `first_entry` | 192 | 11 |  |
-| list.rs | `offset` | 202 | 9 |  |
-| list.rs | `offset` | 210 | 18 |  |
-| panic_policy.rs | `parse` | 50 | 17 |  |
-| panic_policy.rs | `current` | 66 | 10 |  |
+| list.rs | `offset` | 202 | 9 | yes |
+| list.rs | `offset` | 210 | 18 | yes |
+| panic_policy.rs | `parse` | 50 | 17 | yes |
+| panic_policy.rs | `current` | 66 | 10 | yes |
 | panic_policy.rs | `apply` | 75 | 25 |  |
 | print.rs | `write_str` | 22 | 75 |  |
-| printk.rs | `empty` | 86 | 40 |  |
+| printk.rs | `empty` | 86 | 40 | yes |
 | printk.rs | `ring_rec` | 125 | 14 |  |
 | printk.rs | `ring_rec_mut` | 138 | 11 |  |
 | printk.rs | `rec_text_len` | 148 | 50 |  |
@@ -178,7 +178,7 @@ records why.
 | printk.rs | `drop` | 211 | 10 | yes |
 | printk.rs | `set_console_loglevel` | 220 | 6 |  |
 | printk.rs | `get_console_loglevel` | 225 | 7 |  |
-| printk.rs | `init` | 231 | 14 |  |
+| printk.rs | `init` | 231 | 14 | yes |
 | printk.rs | `write_str` | 244 | 23 |  |
 | printk.rs | `printk` | 266 | 17 |  |
 | printk.rs | `printk_ring_always` | 282 | 15 |  |
@@ -193,8 +193,8 @@ records why.
 | printk.rs | `printk_ln` | 552 | 23 |  |
 | printk.rs | `printk_bytes` | 574 | 46 |  |
 | printk.rs | `printk_should_defer_output` | 619 | 29 |  |
-| printk.rs | `console_emit_pending_flag` | 647 | 15 |  |
-| printk.rs | `console_drain_pending` | 661 | 43 |  |
+| printk.rs | `console_emit_pending_flag` | 647 | 15 | yes |
+| printk.rs | `console_drain_pending` | 661 | 43 | yes |
 | printk.rs | `write_to_ring_buffer` | 703 | 76 |  |
 | printk.rs | `sys_syslog` | 778 | 97 |  |
 | printk.rs | `format_syslog_header` | 874 | 99 |  |
@@ -204,9 +204,9 @@ records why.
 | printk.rs | `syslog_clear` | 1250 | 19 |  |
 | printk.rs | `ring_tail` | 1268 | 91 |  |
 | printk.rs | `ring_tail_into` | 1358 | 2 |  |
-| printk.rs | `push` | 1359 | 78 |  |
+| printk.rs | `push` | 1359 | 78 | yes |
 | printk.rs | `generate_kmsg` | 1436 | 68 |  |
-| printk.rs | `service_deferred_kmsg_wake` | 1503 | 31 |  |
+| printk.rs | `service_deferred_kmsg_wake` | 1503 | 31 | yes |
 | printk.rs | `kmsg_file_read` | 1533 | 150 |  |
 | printk.rs | `set_kmsg_console_mode` | 1682 | 10 |  |
 | printk.rs | `kmsg_console_mode` | 1691 | 6 |  |
@@ -222,14 +222,14 @@ records why.
 | printk.rs | `kmsg_poll_sleep` | 1941 | 49 |  |
 | printk.rs | `proc_kmsg_poll` | 1989 | 17 |  |
 | printk.rs | `proc_kmsg_lseek` | 2005 | 97 |  |
-| printk.rs | `enabled` | 2101 | 11 |  |
+| printk.rs | `enabled` | 2101 | 11 | yes |
 | printk.rs | `log` | 2111 | 14 |  |
-| printk.rs | `flush` | 2124 | 8 |  |
+| printk.rs | `flush` | 2124 | 8 | yes |
 | printk.rs | `init_logger` | 2131 | 87 |  |
-| printk.rs | `push` | 2217 | 6 |  |
+| printk.rs | `push` | 2217 | 6 | yes |
 | printk.rs | `push_dec` | 2222 | 21 |  |
-| printk.rs | `is_running` | 2242 | 10 |  |
-| printk.rs | `init` | 2251 | 28 |  |
+| printk.rs | `is_running` | 2242 | 10 | yes |
+| printk.rs | `init` | 2251 | 28 | yes |
 | printk.rs | `resolve_file` | 2278 | 81 |  |
 | printk.rs | `flush_once` | 2358 | 105 |  |
 | printk.rs | `persistent_log_init` | 2462 | 6 |  |
@@ -246,89 +246,123 @@ records why.
 | signal.rs | `action` | 217 | 12 |  |
 | signal.rs | `has_handler` | 228 | 27 |  |
 | signal.rs | `new` | 254 | 8 | yes |
-| signal.rs | `is_empty` | 261 | 6 |  |
-| signal.rs | `enqueue` | 266 | 6 |  |
-| signal.rs | `dequeue` | 271 | 6 |  |
-| signal.rs | `peek` | 276 | 8 |  |
+| signal.rs | `is_empty` | 261 | 6 | yes |
+| signal.rs | `enqueue` | 266 | 6 | yes |
+| signal.rs | `dequeue` | 271 | 6 | yes |
+| signal.rs | `peek` | 276 | 8 | yes |
 | signal.rs | `new` | 283 | 9 | yes |
-| signal.rs | `add` | 291 | 23 |  |
+| signal.rs | `add` | 291 | 23 | yes |
 | signal.rs | `add_info` | 313 | 31 |  |
 | signal.rs | `peek_info` | 343 | 11 |  |
 | signal.rs | `rt_queued_count` | 353 | 7 |  |
 | signal.rs | `remove` | 359 | 22 | yes |
-| signal.rs | `has` | 380 | 10 |  |
-| signal.rs | `first` | 389 | 12 |  |
+| signal.rs | `has` | 380 | 10 | yes |
+| signal.rs | `first` | 389 | 12 | yes |
 | signal.rs | `first_unmasked` | 400 | 12 |  |
 | signal.rs | `first_info` | 411 | 6 |  |
-| signal.rs | `clear` | 416 | 8 |  |
-| signal.rs | `get_all` | 423 | 9 |  |
-| signal.rs | `remove_one` | 431 | 48 |  |
+| signal.rs | `clear` | 416 | 8 | yes |
+| signal.rs | `get_all` | 423 | 9 | yes |
+| signal.rs | `remove_one` | 431 | 48 | yes |
 | signal.rs | `new` | 478 | 23 | yes |
-| signal.rs | `set_action` | 500 | 24 |  |
-| signal.rs | `reset_all_handlers_default` | 523 | 10 |  |
-| signal.rs | `get_action` | 532 | 12 |  |
-| signal.rs | `ign_cgt_masks` | 543 | 16 |  |
-| signal.rs | `add_mask` | 558 | 10 |  |
-| signal.rs | `remove_mask` | 567 | 10 |  |
-| signal.rs | `is_masked` | 576 | 15 |  |
-| signal.rs | `flush_handlers` | 590 | 18 |  |
-| signal.rs | `clone` | 607 | 62 |  |
-| signal.rs | `new` | 668 | 16 | yes |
-| signal.rs | `set_value_bytes` | 683 | 18 |  |
-| signal.rs | `fault` | 700 | 9 |  |
-| signal.rs | `child` | 708 | 19 |  |
-| signal.rs | `child_exit` | 726 | 98 |  |
-| signal.rs | `default` | 823 | 8 |  |
-| signal.rs | `new` | 830 | 35 | yes |
-| signal.rs | `default` | 864 | 50 |  |
-| signal.rs | `zeroed` | 913 | 32 |  |
-| signal.rs | `default` | 944 | 15 |  |
-| signal.rs | `new` | 958 | 8 | yes |
-| signal.rs | `set_fpsimd` | 965 | 13 |  |
-| signal.rs | `get_fpsimd` | 977 | 41 |  |
-| signal.rs | `new` | 1017 | 29 | yes |
-| signal.rs | `size` | 1045 | 50 |  |
-| signal.rs | `new` | 1094 | 29 | yes |
-| signal.rs | `new` | 1122 | 10 | yes |
-| signal.rs | `is_disabled` | 1131 | 6 |  |
-| signal.rs | `is_on_stack` | 1136 | 57 |  |
-| signal.rs | `size` | 1192 | 38 |  |
-| signal.rs | `zeroed` | 1229 | 39 |  |
-| signal.rs | `zeroed` | 1267 | 34 |  |
-| signal.rs | `size` | 1300 | 32 |  |
-| signal.rs | `do_signal` | 1331 | 292 |  |
-| signal.rs | `restart_syscall_no_handler` | 1622 | 112 |  |
-| signal.rs | `setup_frame` | 1733 | 35 |  |
-| signal.rs | `setup_frame_aarch64` | 1767 | 198 |  |
-| signal.rs | `setup_frame_riscv64` | 1964 | 205 |  |
-| signal.rs | `restore_sigcontext` | 2168 | 32 |  |
-| signal.rs | `restore_sigcontext_aarch64` | 2199 | 111 |  |
-| signal.rs | `restore_sigcontext_riscv64` | 2309 | 109 |  |
-| signal.rs | `setup_frame_x86_64` | 2417 | 255 |  |
-| signal.rs | `restore_sigcontext_x86_64` | 2671 | 75 |  |
-| signal.rs | `handle_default_signal` | 2745 | 171 |  |
-| signal.rs | `send_signal_from_user` | 2915 | 38 |  |
-| signal.rs | `abort_reason_dump` | 2952 | 111 |  |
-| signal.rs | `send_signal_from_user_tkill` | 3062 | 112 |  |
-| signal.rs | `force_unblock_current` | 3173 | 10 |  |
-| signal.rs | `send_signal` | 3182 | 9 |  |
-| signal.rs | `send_signal_directed` | 3190 | 5 |  |
-| signal.rs | `send_signal_g` | 3194 | 70 |  |
-| signal.rs | `send_signal_locked` | 3263 | 26 |  |
-| signal.rs | `send_signal_locked_info` | 3288 | 350 |  |
-| signal.rs | `send_signal_info` | 3637 | 20 |  |
-| signal.rs | `with_sigval` | 3656 | 10 |  |
-| signal.rs | `set_band_fd` | 3665 | 17 |  |
-| signal.rs | `send_signal_with_info` | 3681 | 27 |  |
-| signal.rs | `send_signal_with_info_directed` | 3707 | 5 |  |
-| signal.rs | `send_signal_with_info_g` | 3711 | 23 |  |
-| signal.rs | `send_signal_to_pgid` | 3733 | 13 |  |
-| signal.rs | `park_stopped_task` | 3745 | 36 |  |
-| signal.rs | `is_unkillable_init` | 3780 | 95 |  |
-| signal.rs | `fatal_signal_pending` | 3874 | 28 |  |
-| signal.rs | `signal_pending` | 3901 | 46 |  |
-| signal.rs | `signal_wake_up_state` | 3946 | 61 |  |
-| signal.rs | `signal_wake_up` | 4006 | 5 |  |
+| signal.rs | `set_action` | 500 | 20 | yes |
+| signal.rs | `reset_all_handlers_default` | 519 | 6 |  |
+| signal.rs | `get_action` | 524 | 13 | yes |
+| signal.rs | `ign_cgt_masks` | 536 | 6 |  |
+| signal.rs | `add_mask` | 541 | 10 |  |
+| signal.rs | `remove_mask` | 550 | 10 |  |
+| signal.rs | `is_masked` | 559 | 16 |  |
+| signal.rs | `flush_handlers` | 574 | 9 |  |
+| signal.rs | `with_actions_mut` | 582 | 8 |  |
+| signal.rs | `clone` | 589 | 62 | yes |
+| signal.rs | `new` | 650 | 16 | yes |
+| signal.rs | `set_value_bytes` | 665 | 18 | yes |
+| signal.rs | `fault` | 682 | 9 | yes |
+| signal.rs | `child` | 690 | 19 |  |
+| signal.rs | `child_exit` | 708 | 98 |  |
+| signal.rs | `default` | 805 | 8 | yes |
+| signal.rs | `new` | 812 | 35 | yes |
+| signal.rs | `default` | 846 | 50 | yes |
+| signal.rs | `zeroed` | 895 | 32 |  |
+| signal.rs | `default` | 926 | 15 | yes |
+| signal.rs | `new` | 940 | 8 | yes |
+| signal.rs | `set_fpsimd` | 947 | 13 |  |
+| signal.rs | `get_fpsimd` | 959 | 41 |  |
+| signal.rs | `new` | 999 | 29 | yes |
+| signal.rs | `size` | 1027 | 50 | yes |
+| signal.rs | `new` | 1076 | 29 | yes |
+| signal.rs | `new` | 1104 | 10 | yes |
+| signal.rs | `is_disabled` | 1113 | 6 |  |
+| signal.rs | `is_on_stack` | 1118 | 57 | yes |
+| signal.rs | `size` | 1174 | 38 | yes |
+| signal.rs | `zeroed` | 1211 | 39 |  |
+| signal.rs | `zeroed` | 1249 | 34 |  |
+| signal.rs | `size` | 1282 | 32 | yes |
+| signal.rs | `do_signal` | 1313 | 279 |  |
+| signal.rs | `restart_syscall_no_handler` | 1591 | 112 |  |
+| signal.rs | `setup_frame` | 1702 | 35 |  |
+| signal.rs | `setup_frame_aarch64` | 1736 | 198 |  |
+| signal.rs | `setup_frame_riscv64` | 1933 | 205 |  |
+| signal.rs | `restore_sigcontext` | 2137 | 32 | yes |
+| signal.rs | `restore_sigcontext_aarch64` | 2168 | 111 |  |
+| signal.rs | `restore_sigcontext_riscv64` | 2278 | 109 |  |
+| signal.rs | `setup_frame_x86_64` | 2386 | 255 |  |
+| signal.rs | `restore_sigcontext_x86_64` | 2640 | 79 |  |
+| signal.rs | `handle_default_signal` | 2718 | 167 |  |
+| signal.rs | `send_signal_from_user` | 2884 | 17 | yes |
+| signal.rs | `send_signal_from_user_tkill` | 2900 | 17 | yes |
+| signal.rs | `force_unblock_current` | 2916 | 5 | yes |
+| signal.rs | `send_signal` | 2920 | 9 | yes |
+| signal.rs | `send_signal_directed` | 2928 | 5 | yes |
+| signal.rs | `send_signal_g` | 2932 | 76 |  |
+| signal.rs | `send_signal_info` | 3007 | 11 |  |
+| signal.rs | `with_sigval` | 3017 | 10 | yes |
+| signal.rs | `set_band_fd` | 3026 | 17 | yes |
+| signal.rs | `send_signal_with_info` | 3042 | 27 | yes |
+| signal.rs | `send_signal_with_info_directed` | 3068 | 5 | yes |
+| signal.rs | `send_signal_with_info_g` | 3072 | 23 |  |
+| signal.rs | `send_signal_to_pgid` | 3094 | 5 |  |
+| signal.rs | `park_stopped_task` | 3098 | 36 |  |
+| signal.rs | `is_unkillable_init` | 3133 | 95 |  |
+| signal.rs | `fatal_signal_pending` | 3227 | 28 |  |
+| signal.rs | `signal_pending` | 3254 | 46 | yes |
+| signal.rs | `signal_wake_up_state` | 3299 | 61 |  |
+| signal.rs | `signal_wake_up` | 3359 | 5 | yes |
+| signal_edges.rs | `abort_reason_dump` | 18 | 102 |  |
+| signal_hooks.rs | `no_policy_send_core` | 105 | 4 |  |
+| signal_hooks.rs | `no_policy_send_from_user` | 108 | 4 |  |
+| signal_hooks.rs | `no_policy_send_from_user_tkill` | 111 | 4 |  |
+| signal_hooks.rs | `no_policy_send_info` | 114 | 4 |  |
+| signal_hooks.rs | `no_policy_send_to_pgid` | 117 | 4 |  |
+| signal_hooks.rs | `no_policy_force_unblock` | 120 | 4 |  |
+| signal_hooks.rs | `no_policy_default_action_class` | 123 | 4 |  |
+| signal_hooks.rs | `no_policy_init_filter` | 126 | 4 |  |
+| signal_hooks.rs | `no_policy_flush_handlers` | 129 | 4 |  |
+| signal_hooks.rs | `no_policy_reset_all` | 132 | 4 |  |
+| signal_hooks.rs | `no_policy_ign_cgt_masks` | 135 | 15 |  |
+| signal_hooks.rs | `signal_register_hooks` | 149 | 6 | yes |
+| signal_hooks.rs | `hooks` | 154 | 11 |  |
+| signal_hooks.rs | `send_signal_core` | 164 | 11 |  |
+| signal_hooks.rs | `send_from_user` | 174 | 6 |  |
+| signal_hooks.rs | `send_from_user_tkill` | 179 | 6 |  |
+| signal_hooks.rs | `send_info` | 184 | 6 |  |
+| signal_hooks.rs | `send_to_pgid` | 189 | 6 |  |
+| signal_hooks.rs | `force_unblock_current` | 194 | 8 |  |
+| signal_hooks.rs | `default_action_class` | 201 | 8 |  |
+| signal_hooks.rs | `init_delivery_filter` | 208 | 6 |  |
+| signal_hooks.rs | `flush_handlers` | 213 | 6 |  |
+| signal_hooks.rs | `reset_all_handlers_default` | 218 | 6 |  |
+| signal_hooks.rs | `ign_cgt_masks` | 223 | 4 |  |
+| signal_policy.rs | `send_signal_from_user` | 31 | 42 | yes |
+| signal_policy.rs | `send_signal_from_user_tkill` | 72 | 112 | yes |
+| signal_policy.rs | `force_unblock_current` | 183 | 26 |  |
+| signal_policy.rs | `send_signal_core` | 208 | 350 |  |
+| signal_policy.rs | `send_signal_info` | 557 | 18 |  |
+| signal_policy.rs | `send_signal_to_pgid` | 574 | 23 |  |
+| signal_policy.rs | `default_action_class` | 596 | 34 |  |
+| signal_policy.rs | `init_delivery_filter` | 629 | 35 |  |
+| signal_policy.rs | `flush_handlers` | 663 | 25 |  |
+| signal_policy.rs | `reset_all_handlers_default` | 687 | 13 |  |
+| signal_policy.rs | `ign_cgt_masks` | 699 | 15 |  |
 | timer.rs | `get_jiffies` | 67 | 10 | yes |
 | timer.rs | `test_advance_jiffies` | 76 | 7 | yes |
 | timer.rs | `jiffies_to_msecs` | 82 | 7 | yes |
