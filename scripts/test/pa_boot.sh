@@ -67,7 +67,7 @@ APPEND="$APPEND ohos.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1
 APPEND="$APPEND ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required"
 # Default boot args: syscost instrumentation + the census token. The
 # TERM-DESCHED / WAKE-REFUSED / WW heartbeat families moved behind
-# dfx=wwcensus (serial-cleanliness mandate), so a census boot must pass
+# debug=wwcensus (serial-cleanliness mandate), so a census boot must pass
 # the token explicitly or the Tier-1 census checks read zero.
 APPEND="$APPEND ${APPEND_EXTRA:-syscost=1 trace_event=wwcensus}"
 

@@ -759,7 +759,7 @@ fn ext4_file_read_perblock(
         // block 0 (superblock-backup garbage) — review 5.5 (稀疏洞读盘 0,
         // 非缓存路径).
         if this_block == 0 {
-            // rux:exthunt (retired dfx=exthunt): O_DIRECT hole verdict — see exthunt_read_hole.
+            // rux:exthunt (retired debug=exthunt): O_DIRECT hole verdict — see exthunt_read_hole.
             crate::fs::ext4::extent::exthunt_read_hole(
                 inode.ino,
                 &inode.block,
@@ -784,7 +784,7 @@ fn ext4_file_read_perblock(
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
             let data = bio::bh_data(&bh);
-            // rux:exthunt (retired dfx=exthunt): O_DIRECT serve truth (see exthunt_rd_od).
+            // rux:exthunt (retired debug=exthunt): O_DIRECT serve truth (see exthunt_rd_od).
             crate::fs::ext4::extent::exthunt_rd_od(
                 inode.ino as u64,
                 block_index as u64,
@@ -1029,12 +1029,12 @@ fn ext4_file_read_cached_dst(
         // 4 KiB-read hot path under TCG.
         let mut run: [(u64, *const u8); 16] = [(0, core::ptr::null()); 16];
         let want = core::cmp::min(pages_wanted, run.len());
-        // rux:filerd (retired dfx=filerd): phase anatomy of the warm path (bw_file_rd 50x
+        // rux:filerd (retired debug=filerd): phase anatomy of the warm path (bw_file_rd 50x
         // attribution). The probe's copy bracket is skipped on the
         // user-fault early returns below — a diagnostic undercount on
         // the EFAULT path only, never on the benchmark's fast path.
-        let probe = crate::dfx::filerd::on();
-        let t_pin = if probe { crate::dfx::filerd::now() } else { 0 };
+        let probe = crate::debug::filerd::on();
+        let t_pin = if probe { crate::debug::filerd::now() } else { 0 };
         // oc-rc: claim the entry ONCE for the pin AND the unpin — the
         // second bank-claim + probe + strong-count pair the old
         // put_range re-paid per run was ~half the pin+unpin cost of a
@@ -1043,10 +1043,10 @@ fn ext4_file_read_cached_dst(
         let (run_len, entry) =
             cache.get_range_with_entry(fs_id, ino, page_index, &mut run[..want]);
         if probe {
-            crate::dfx::filerd::charge(&crate::dfx::filerd::PIN_CYCLES, t_pin);
+            crate::debug::filerd::charge(&crate::debug::filerd::PIN_CYCLES, t_pin);
         }
         if run_len > 0 {
-            let t_copy = if probe { crate::dfx::filerd::now() } else { 0 };
+            let t_copy = if probe { crate::debug::filerd::now() } else { 0 };
             // Copy the run in MERGED groups: physically-contiguous pinned
             // pages (direct-map neighbors, run[j].1 == run[j-1].1 + block)
             // are served by ONE dst.put — one copy_to_user (one AC bracket,
@@ -1061,7 +1061,7 @@ fn ext4_file_read_cached_dst(
             while i < run_len {
                 let in_page_off = if i == 0 { page_offset } else { 0 };
                 let remaining_now = to_read - total_read;
-                // rux:exthunt (retired dfx=exthunt): frame-hit truth for the run's first page
+                // rux:exthunt (retired debug=exthunt): frame-hit truth for the run's first page
                 // (a poisoned frame shows zeros here) — see exthunt_rd_hit.
                 if i == 0 {
                     // First two bytes of the run's pinned frame
@@ -1138,9 +1138,9 @@ fn ext4_file_read_cached_dst(
                 }
             }
             if probe {
-                crate::dfx::filerd::charge(&crate::dfx::filerd::COPY_CYCLES, t_copy);
+                crate::debug::filerd::charge(&crate::debug::filerd::COPY_CYCLES, t_copy);
             }
-            let t_unpin = if probe { crate::dfx::filerd::now() } else { 0 };
+            let t_unpin = if probe { crate::debug::filerd::now() } else { 0 };
             // run_len > 0 implies get_range_with_entry pinned this run
             // inside `entry` — the Option is always Some on this path
             // (unwrap is the loud failure if that invariant breaks).
@@ -1151,14 +1151,14 @@ fn ext4_file_read_cached_dst(
                 &run[..run_len],
             );
             if probe {
-                crate::dfx::filerd::charge(&crate::dfx::filerd::UNPIN_CYCLES, t_unpin);
+                crate::debug::filerd::charge(&crate::debug::filerd::UNPIN_CYCLES, t_unpin);
             }
             continue;
         }
 
-        // rux:filerd (retired dfx=filerd): this read call fell off the warm path.
+        // rux:filerd (retired debug=filerd): this read call fell off the warm path.
         if probe {
-            crate::dfx::filerd::note_miss();
+            crate::debug::filerd::note_miss();
         }
 
         // Cache miss on the first page: batch-fill from here. The window
@@ -1237,7 +1237,7 @@ fn ext4_file_read_cached_dst(
             if block_nr != 0 {
                 if let Some(bh) = bio::bread(fs.device, block_nr) {
                     let data = bio::bh_data(&bh);
-                    // rux:exthunt (retired dfx=exthunt): sync-fallback serve truth (see
+                    // rux:exthunt (retired debug=exthunt): sync-fallback serve truth (see
                     // exthunt_rd_serve).
                     crate::fs::ext4::extent::exthunt_rd_serve(
                         ino,
@@ -1382,7 +1382,7 @@ fn fill_page_cache_batch(
             Err(_) => break, // metadata failure: stop extending the batch
         };
         if block_nr == 0 {
-            // rux:exthunt (retired dfx=exthunt): the reader just verdict "hole" from the cached
+            // rux:exthunt (retired debug=exthunt): the reader just verdict "hole" from the cached
             // root — see exthunt_read_hole.
             crate::fs::ext4::extent::exthunt_read_hole(
                 inode.ino as u32,
@@ -1447,7 +1447,7 @@ fn fill_page_cache_batch(
 
         match bio::bread_async_multi(fs.device, block_nr, submit_blocks, &completions[count]) {
             Some(bh) => {
-                // rux:exthunt (retired dfx=exthunt): batch submit truth (see exthunt_rd_batch).
+                // rux:exthunt (retired debug=exthunt): batch submit truth (see exthunt_rd_batch).
                 crate::fs::ext4::extent::exthunt_rd_batch(
                     ino,
                     run_first,
@@ -2229,7 +2229,7 @@ fn ext4_file_write_src(
                             // a freshly allocated block whose disk contents
                             // are irrelevant — getblk_zero creates a zeroed
                             // dirty buffer without the disk read.
-                            // rux:exthunt (retired dfx=exthunt): unwritten-materialization zero.
+                            // rux:exthunt (retired debug=exthunt): unwritten-materialization zero.
                             crate::fs::ext4::extent::exthunt_zzero(
                                 "mat", inode.ino, block_index, phys,
                             );
@@ -2283,7 +2283,7 @@ fn ext4_file_write_src(
                             // SAFETY: freshly allocated block; getblk_zero
                             // fabricates the zeroed dirty buffer without a
                             // disk read (full-block overwrite follows).
-                            // rux:exthunt (retired dfx=exthunt): hole-fill allocation zero.
+                            // rux:exthunt (retired debug=exthunt): hole-fill allocation zero.
                             crate::fs::ext4::extent::exthunt_zzero(
                                 "hole", inode.ino, block_index, new_block,
                             );
@@ -2392,7 +2392,7 @@ fn ext4_file_write_src(
                 &mut data[block_offset..block_offset + write_in_block],
             );
 
-            // rux:exthunt (retired dfx=exthunt): the writer's (logical, phys, pattern) truth.
+            // rux:exthunt (retired debug=exthunt): the writer's (logical, phys, pattern) truth.
             crate::fs::ext4::extent::exthunt_wr_put(
                 inode.ino,
                 block_index,
@@ -3685,11 +3685,11 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
 /// `dst` must be access_ok-validated for `count` bytes. O_DIRECT falls back
 /// to the caller's staged path (rare, unaligned semantics kept simple).
 pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize {
-    // rux:filerd (retired dfx=filerd): outer bracket for the whole fast path (the lock /
+    // rux:filerd (retired debug=filerd): outer bracket for the whole fast path (the lock /
     // pin / copy / unpin / epilog phases are charged inside; the
     // residue vs their sum is resolution + ra_state + loop scaffolding).
-    let probe = crate::dfx::filerd::on();
-    let t_outer = if probe { crate::dfx::filerd::now() } else { 0 };
+    let probe = crate::debug::filerd::on();
+    let t_outer = if probe { crate::debug::filerd::now() } else { 0 };
     let Some((inode, fs, ext4_inode)) = file_ext4(file) else {
         if file_inode_missing(file) {
             return errno::Errno::BadFileNumber.as_neg_i32() as isize;
@@ -3697,11 +3697,11 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
         return errno::Errno::IOError.as_neg_i32() as isize;
     };
     // Same pos-race serialization as ext4_file_read_vfs (LTP fork07).
-    let t_lock = if probe { crate::dfx::filerd::now() } else { 0 };
+    let t_lock = if probe { crate::debug::filerd::now() } else { 0 };
     let _pos_guard = file.io_lock.guard();
     let offset = file.get_pos() as u64;
     if probe {
-        crate::dfx::filerd::charge(&crate::dfx::filerd::LOCK_CYCLES, t_lock);
+        crate::debug::filerd::charge(&crate::debug::filerd::LOCK_CYCLES, t_lock);
     }
 
     let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
@@ -3710,7 +3710,7 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
         ReadDst::User(dst, count), ra_state,
     ) {
         Ok(read_bytes) => {
-            let t_ep = if probe { crate::dfx::filerd::now() } else { 0 };
+            let t_ep = if probe { crate::debug::filerd::now() } else { 0 };
             file.set_pos(offset + read_bytes as u64);
             if read_bytes > 0 {
                 // atime via the reference-default relatime gate
@@ -3729,16 +3729,16 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
                 );
             }
             if probe {
-                crate::dfx::filerd::charge(&crate::dfx::filerd::EPILOG_CYCLES, t_ep);
-                crate::dfx::filerd::charge(&crate::dfx::filerd::OUTER_CYCLES, t_outer);
-                crate::dfx::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                crate::debug::filerd::charge(&crate::debug::filerd::EPILOG_CYCLES, t_ep);
+                crate::debug::filerd::charge(&crate::debug::filerd::OUTER_CYCLES, t_outer);
+                crate::debug::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             read_bytes as isize
         }
         Err(e) => {
             if probe {
-                crate::dfx::filerd::charge(&crate::dfx::filerd::OUTER_CYCLES, t_outer);
-                crate::dfx::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                crate::debug::filerd::charge(&crate::debug::filerd::OUTER_CYCLES, t_outer);
+                crate::debug::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             e as isize
         }

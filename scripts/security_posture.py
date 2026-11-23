@@ -213,7 +213,7 @@ ROWS = [
      "CONFIG_STRICT_KERNEL_RWX.",
      "project",
      "New tripwire: page-table walk asserting text pages RO after init "
-     "(gated dfx knob), any W+X page print"),
+     "(gated debug knob), any W+X page print"),
 
     ("memory safety",
      "user-pointer struct copies with embedded pointers",
@@ -264,8 +264,8 @@ ROWS = [
     ("information leaks",
      "kernel pointers in other /proc nodes",
      "NOT audited. /proc/[pid]/stat has kstkeip/kstkesp fields "
-     "(pid.rs) — check they are 0; /proc/[pid]/wchan, stack (dfx) "
-     "unaudited. DFX files under debugfs are root-gated by DAC only.",
+     "(pid.rs) — check they are 0; /proc/[pid]/wchan, stack (debug) "
+     "unaudited. DEBUG files under debugfs are root-gated by DAC only.",
      "Reference: kptr_restrict governs all of these.",
      "quick",
      "audit pass over procfs/pid.rs generators in this lane"),
@@ -283,13 +283,13 @@ ROWS = [
      "the per-syscall capability audit pass (privilege model row)"),
 
     ("attack surface",
-     "debugfs/dfx exposure",
-     "debugfs mounted only when requested (dfx= cmdline gates the "
+     "debugfs/debug exposure",
+     "debugfs mounted only when requested (debug= cmdline gates the "
      "instruments themselves; debugfs.rs reviewed by the coverage "
-     "lane). DFX switches default OFF. Root-only by DAC.",
+     "lane). DEBUG switches default OFF. Root-only by DAC.",
      "Reference: debugfs root-only; lockdown limits in lockdown modes.",
      "ok",
-     "dfx switch table unit rows"),
+     "debug switch table unit rows"),
 ]
 
 

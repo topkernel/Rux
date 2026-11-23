@@ -108,7 +108,7 @@ pub fn walk_fp_chain<const N: usize>(s0: u64, frames: &mut [u64; N]) {
     // SAFETY: INV-MM-2 diag arm — the walker is the audited
     // frame-pointer reader; s0 came from current_frame_pointer() on
     // this CPU's stack; N matches the caller's frame array.
-    unsafe { crate::dfx::memwatch::walk_fp_chain(s0, frames) }
+    unsafe { crate::debug::memwatch::walk_fp_chain(s0, frames) }
 }
 
 // ---------------------------------------------------------------------------

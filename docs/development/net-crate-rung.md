@@ -5,7 +5,7 @@ Method: the syscall pilot's (docs/development/syscall-crate-pilot.md).
 ## Forward surface (net → kernel; becomes the crate dependency)
 
 ~520 non-self refs: drivers 42 (virtio-net), sched 32, config 23,
-security 20, sync 14, safety 11, arch 11, process 10 + macros/dfx.
+security 20, sync 14, safety 11, arch 11, process 10 + macros/debug.
 PLUS 18 refs into fs/process/ipc (socket files touch fs/pipe-like and
 process credential surfaces) and 5 into syscall (mostly errno — the
 pilot's unification already gave net the framework errno path).
@@ -21,7 +21,7 @@ Cost: nothing — same direction as syscall's forward surface.
 | procfs/net.rs → net::generate_* (the /proc/net tables) | 10 | the generate_* table builders are framework-shaped — relocate to net/ as a `pub(crate) mod procfs_tables` OR procfs consumes a registration; single family, mechanical |
 | futex/futex_pi → net (wake helpers?) | 10 | inspect: likely socket-owner wake hooks — relocate or invert |
 | main.rs net init calls | 5 | entry seam (same class as syscall dispatch): net_init stays a kernel-side call into the crate — resolved by the same registration shape |
-| dfx/sysfs stragglers | 7 | per-owner relocations |
+| debug/sysfs stragglers | 7 | per-owner relocations |
 
 ## Verdict for rung 2
 
@@ -46,7 +46,7 @@ Estimated: two focused lane-days after the syscall flip.
 ## Closure (2026-11-22)
 
 RUNG 2 CLOSED. The estimate held: the reverse surface resolved exactly
-as priced (procfs rows + dfx/futex diagnostics + the entry/init seam ->
+as priced (procfs rows + debug/futex diagnostics + the entry/init seam ->
 one 26-row hook table; the futex "wake helpers" were diagnostic
 consumers, not hooks). The syscall/network 223-site class stayed
 forward as predicted. One unpriced cost: the substrate extraction

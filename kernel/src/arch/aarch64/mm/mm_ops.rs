@@ -271,7 +271,7 @@ impl MmStruct {
                         if (*page).is_mapped() {
                             crate::mm::rmap::page_remove_rmap(&*page);
                         }
-                        (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_RV);
+                        (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_RV);
                     }
                     // PCACHE mapping pin drop (kept for parity with the
                     // twin's filemap port; no aarch64 PCACHE producers
@@ -336,7 +336,7 @@ impl MmStruct {
             if page.is_mapped() {
                 crate::mm::rmap::page_remove_rmap(page);
             }
-            page.put_page_site(crate::dfx::driftwatch::S_UNMAP_RV);
+            page.put_page_site(crate::debug::driftwatch::S_UNMAP_RV);
             if pte_bits & cow_flags::PCACHE != 0 {
                 release_cache_mapping_pin(ppn_val as usize);
             }
@@ -547,7 +547,7 @@ pub fn create_user_address_space() -> Option<u64> {
 
 // ==================== Global mm context + PTE lock ====================
 
-/// Global mm context id (dfx parity)
+/// Global mm context id (debug parity)
 pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Global PTE modify lock (riscv64 twin: serializes fork walks against
@@ -1229,7 +1229,7 @@ pub fn handle_cow_fault(
     // Release our share of the old page: refcount AND mapcount (the
     // mapping moved to the copy; a leaked mapcount corrupts reclaim).
     if let Some(p) = old_page {
-        p.put_page_site(crate::dfx::driftwatch::S_COW_RV);
+        p.put_page_site(crate::debug::driftwatch::S_COW_RV);
         p.dec_mapcount();
         p.clear_flag(crate::mm::page_desc::PageFlag::Cow);
     }

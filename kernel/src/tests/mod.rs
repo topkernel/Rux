@@ -14,6 +14,7 @@
 //! ```
 
 use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 
 /// Direct UART output for test results.
@@ -113,79 +114,102 @@ static FAILED_TESTS: Spinlock<[FailedTest; MAX_FAILED_TESTS]> = Spinlock::new([c
 #[cfg(feature = "unit-test")]
 static FAILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-// SERVICE-TEST SEAM (crate-flip rung 3): guest tests that moved out with
-// their service leaves (pipe2 with rux-fs) register here at boot — the
-// composition bin (rux-bin) forwards them after register_all — and
+// SERVICE-TEST REGISTRATION (crate-flip rung 3): guest tests that moved
+// out with their service leaves register here at boot — the composition
+// bin (rux-bin) forwards them from rust_main, before any init — and
 // run_all_tests executes them in registration order at the position the
-// family used to occupy. Same shape as the FsHooks seam: the framework
+// family used to occupy. Same shape as the FsHooks table: the framework
 // owns the mechanism (registry + reporting counters), the service owns
 // the test bodies.
+//
+// Each entry is an OnceSlot (the audited write-once publication
+// primitive), and the table takes NO lock. It must not: registration
+// runs from rust_main, before arch::smp::init() establishes the
+// per-CPU area, and every Spinlock in this kernel reads per-CPU state
+// on acquisition (preempt_disable, the holder cpu id) — on x86_64
+// that is %gs-relative with the GS base still 0, which faulted the
+// unit-test kernel before its first print. Every crate's register_all
+// publishes through OnceSlot for the same reason; the first version of
+// this table used a Spinlock.
+//
+// INV-SVCTEST-1: a slot is written exactly once (publish, Release) by
+// the boot CPU before SMP start; readers take it with get() (Acquire)
+// from run_all_tests. INV-SVCTEST-2: the length counter is published
+// only after the slot it covers (Release), so index < len implies the
+// slot at that index is populated.
 #[cfg(feature = "unit-test")]
 pub type ServiceTestFn = fn();
 #[cfg(feature = "unit-test")]
 const MAX_SERVICE_TESTS: usize = 8;
 #[cfg(feature = "unit-test")]
-static SERVICE_TESTS: Spinlock<[Option<ServiceTestFn>; MAX_SERVICE_TESTS]> =
-    Spinlock::new([None; MAX_SERVICE_TESTS]);
+type ServiceTestTable = [crate::safety::slot::OnceSlot<ServiceTestFn>; MAX_SERVICE_TESTS];
 #[cfg(feature = "unit-test")]
-static SERVICE_TEST_LEN: AtomicUsize = AtomicUsize::new(0);
+const fn empty_service_test_table() -> ServiceTestTable {
+    [const { crate::safety::slot::OnceSlot::new() }; MAX_SERVICE_TESTS]
+}
 
-/// Register a service crate's guest-test entry (called from rux-bin).
-/// `late`: run at the POST-fs_io seam point instead of the early one —
-/// the rux-ipc flip's finding: the sysv_sem BLOCKING test's cross-task
-/// handoff depends on the post-fs_io machine state (the family's
-/// historical position was after fs_io/fs_pins); running it early
-/// parks the boot task forever. rux-fs (pipe2) stays early (its
-/// family's original position).
+/// Store `f` into the next free entry. Returns false when the table is
+/// full (the entry is then not registered — the suite size gate makes
+/// the resulting smaller suite fail make test).
+#[cfg(feature = "unit-test")]
+fn service_test_push(table: &ServiceTestTable, len: &AtomicUsize, f: ServiceTestFn) -> bool {
+    let i = len.load(Ordering::Relaxed);
+    if i >= table.len() || !table[i].publish(f) {
+        return false;
+    }
+    len.store(i + 1, Ordering::Release);
+    true
+}
+
+/// Read entry `i` (INV-SVCTEST-1/2).
+#[cfg(feature = "unit-test")]
+fn service_test_get(table: &ServiceTestTable, len: &AtomicUsize) -> Vec<ServiceTestFn> {
+    let n = len.load(Ordering::Acquire).min(table.len());
+    table[..n].iter().filter_map(|slot| slot.get().copied()).collect()
+}
+
+/// Register a service crate's guest-test entry (called from rux-bin's
+/// rust_main). `late`: run at the POST-fs_io point instead — the rux-ipc flip's
+/// finding: the sysv_sem BLOCKING test's cross-task handoff depends on
+/// the post-fs_io machine state (the family's historical position was
+/// after fs_io/fs_pins); running it early parks the boot task forever.
+/// rux-fs (pipe2) stays early (its family's original position).
 #[cfg(feature = "unit-test")]
 pub fn register_service_tests(f: ServiceTestFn) {
-    let mut table = SERVICE_TESTS.lock();
-    let i = SERVICE_TEST_LEN.load(Ordering::Relaxed);
-    if i < MAX_SERVICE_TESTS {
-        table[i] = Some(f);
-        SERVICE_TEST_LEN.store(i + 1, Ordering::Relaxed);
-    }
+    let _ = service_test_push(&SERVICE_TESTS, &SERVICE_TEST_LEN, f);
 }
 
-/// Register into the LATE table (the post-fs_io seam point).
+/// Register into the LATE table (the post-fs_io point).
 #[cfg(feature = "unit-test")]
 pub fn register_service_tests_late(f: ServiceTestFn) {
-    let mut table = SERVICE_TESTS_LATE.lock();
-    let i = SERVICE_TEST_LATE_LEN.load(Ordering::Relaxed);
-    if i < MAX_SERVICE_TESTS {
-        table[i] = Some(f);
-        SERVICE_TEST_LATE_LEN.store(i + 1, Ordering::Relaxed);
-    }
+    let _ = service_test_push(&SERVICE_TESTS_LATE, &SERVICE_TEST_LATE_LEN, f);
 }
 
 #[cfg(feature = "unit-test")]
-static SERVICE_TESTS_LATE: Spinlock<[Option<ServiceTestFn>; MAX_SERVICE_TESTS]> =
-    Spinlock::new([None; MAX_SERVICE_TESTS]);
+static SERVICE_TESTS: ServiceTestTable = empty_service_test_table();
+#[cfg(feature = "unit-test")]
+static SERVICE_TEST_LEN: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "unit-test")]
+static SERVICE_TESTS_LATE: ServiceTestTable = empty_service_test_table();
 #[cfg(feature = "unit-test")]
 static SERVICE_TEST_LATE_LEN: AtomicUsize = AtomicUsize::new(0);
 
-/// Run the registered service tests (called from run_all_tests).
+/// Run the registered service tests (called from run_all_tests). The
+/// entries are read out first: the test bodies run holding nothing, so
+/// a body cannot re-enter its own table.
 #[cfg(feature = "unit-test")]
 fn run_registered_service_tests() {
-    let n = SERVICE_TEST_LEN.load(Ordering::Relaxed);
-    let table = SERVICE_TESTS.lock();
-    for i in 0..n {
-        if let Some(f) = table[i] {
-            f();
-        }
+    for f in service_test_get(&SERVICE_TESTS, &SERVICE_TEST_LEN) {
+        f();
     }
 }
 
 /// Run the LATE service tests (the post-fs_io point — the rux-ipc
-/// family's historical position).
+/// family's historical position). Same read-then-run shape.
 #[cfg(feature = "unit-test")]
 fn run_registered_service_tests_late() {
-    let n = SERVICE_TEST_LATE_LEN.load(Ordering::Relaxed);
-    let table = SERVICE_TESTS_LATE.lock();
-    for i in 0..n {
-        if let Some(f) = table[i] {
-            f();
-        }
+    for f in service_test_get(&SERVICE_TESTS_LATE, &SERVICE_TEST_LATE_LEN) {
+        f();
     }
 }
 

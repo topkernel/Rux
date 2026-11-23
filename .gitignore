@@ -41,8 +41,8 @@ images/
 # Kani verification generated files
 kernel.bin
 kernel/src/config.rs
-kernel/src/dfx/ksyms.bin
-kernel/src/dfx/ksyms_generated.rs
+kernel/src/debug/ksyms.bin
+kernel/src/debug/ksyms_generated.rs
 kernel/verify/kani-output.txt
 kernel/verify/spin/pan
 kernel/verify/spin/pan.*

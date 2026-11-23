@@ -332,7 +332,7 @@ policy and matched by framework.
    edges −2 unsafe blocks)
 2. the M1b seam — MmPolicyHooks + codec + types + every framework call
    site re-pointed (lib.rs, timer, page_alloc, ext4, procfs, both traps,
-   all three arches' mm_ops/mmu_init, rmap, page_cache x21, dfx ledger,
+   all three arches' mm_ops/mmu_init, rmap, page_cache x21, debug ledger,
    rux-syscall swapon/swapoff/mmap); in-tree registrar fills rows
 3-9. per-file flips (hugepage → kswapd → oom_kill → vmscan → lru →
    compact → swap): sole-copy git mv into kernel/rux-mm/src/mm/, rows

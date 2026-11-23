@@ -75,7 +75,7 @@ pointers.
   staging (per-line batched TX under printk's console-emit lock,
   per-CPU stages — mangled task lines 1.7% → 0, ENQ hunt lines
   240/240 whole) and hilogcensus/spinwatch migrated to unified
-  tracepoints (events 57-60; old dfx= tokens as aliases; live
+  tracepoints (events 57-60; old debug= tokens as aliases; live
   set_event arming)
 - **Gate/infra**: Tier-1 volume baseline re-banked at 15.36M on the
   tok-r4fix vehicle (gate-infra, d8476534e); run-oh.sh/run-x86-ub.sh

@@ -104,7 +104,7 @@ zero canary hits; census exact hold across the gate boots.
 per-block tail waste; the ~15KB depth margin is arch-specific and thin.
 
 **Guard.** R18-2 canary at every slot bottom; KSTACK-HW depth probe
-(dfx=schb,ksprobe); SC-ANAT kb/ks packing columns; perf-gate allocator
+(debug=schb,ksprobe); SC-ANAT kb/ks packing columns; perf-gate allocator
 domain (Tier 1 census/ticks, Tier 2 fork rows).
 
 ---
@@ -141,7 +141,7 @@ that fix); dynamic-arity lines (interrupts/intr/softirqs) stay
 explicit by design.
 
 **Guard.** procfile-shape unit-test group + per-file order/snapshot
-pins; the DFX plan's adoption rule requires the macro for new files.
+pins; the DEBUG plan's adoption rule requires the macro for new files.
 
 ---
 

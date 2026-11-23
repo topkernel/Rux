@@ -218,17 +218,17 @@ pub struct RawSpinlock {
     /// AFTER acquiring / cleared BEFORE releasing, so a concurrent reader
     /// may briefly see a stale value — fine for the watchdog print, which
     /// only needs "who held it when everything wedged".
-    #[cfg(feature = "dfx-lock-owner")]
+    #[cfg(feature = "debug-lock-owner")]
     owner: AtomicUsize,
     /// oh-crash 91st (leak hunt): LAST-acquire forensics — pid + call
     /// site + jiffies of the most recent acquire. NOT cleared on unlock
     /// (they name the acquirer even after a leaked/dropped unlock), at
     /// one relaxed store each on the acquire path.
-    #[cfg(feature = "dfx-lock-owner")]
+    #[cfg(feature = "debug-lock-owner")]
     acq_pid: AtomicU32,
-    #[cfg(feature = "dfx-lock-owner")]
+    #[cfg(feature = "debug-lock-owner")]
     acq_site: AtomicUsize,
-    #[cfg(feature = "dfx-lock-owner")]
+    #[cfg(feature = "debug-lock-owner")]
     acq_jiffies: AtomicU64,
 }
 
@@ -246,20 +246,20 @@ impl RawSpinlock {
     pub const fn new() -> Self {
         Self {
             locked: AtomicU32::new(0),
-            #[cfg(feature = "dfx-lock-owner")]
+            #[cfg(feature = "debug-lock-owner")]
             owner: AtomicUsize::new(0),
-            #[cfg(feature = "dfx-lock-owner")]
+            #[cfg(feature = "debug-lock-owner")]
             acq_pid: AtomicU32::new(0),
-            #[cfg(feature = "dfx-lock-owner")]
+            #[cfg(feature = "debug-lock-owner")]
             acq_site: AtomicUsize::new(0),
-            #[cfg(feature = "dfx-lock-owner")]
+            #[cfg(feature = "debug-lock-owner")]
             acq_jiffies: AtomicU64::new(0),
         }
     }
 
-    /// Record the holder (dfx-lock-owner feature only).
+    /// Record the holder (debug-lock-owner feature only).
     #[inline]
-    #[cfg(feature = "dfx-lock-owner")]
+    #[cfg(feature = "debug-lock-owner")]
     fn record_owner(&self, ra: usize) {
         // cpu_id() is u64 on x86_64 / usize elsewhere — cast to the
         // owner slot's usize.
@@ -271,9 +271,9 @@ impl RawSpinlock {
             .store(crate::timer::get_jiffies(), Ordering::Relaxed);
     }
 
-    /// Clear the holder (dfx-lock-owner feature only).
+    /// Clear the holder (debug-lock-owner feature only).
     #[inline]
-    #[cfg(feature = "dfx-lock-owner")]
+    #[cfg(feature = "debug-lock-owner")]
     fn clear_owner(&self) {
         self.owner.store(0, Ordering::Relaxed);
     }
@@ -332,11 +332,11 @@ impl RawSpinlock {
     }
 
     #[inline]
-    #[cfg(not(feature = "dfx-lock-owner"))]
+    #[cfg(not(feature = "debug-lock-owner"))]
     fn record_owner(&self, _ra: usize) {}
 
     #[inline]
-    #[cfg(not(feature = "dfx-lock-owner"))]
+    #[cfg(not(feature = "debug-lock-owner"))]
     fn clear_owner(&self) {}
 
     /// Spinlock deadlock threshold (iterations before warning).
@@ -519,7 +519,7 @@ impl RawSpinlock {
 
         // R11 (deadlock-layer unblinding, the seventh blind printer): the
         // lock WORD value, always. The holder-identity block below is
-        // dfx-lock-owner-gated, so on standard builds every stuck lock
+        // debug-lock-owner-gated, so on standard builds every stuck lock
         // printed with NO holder datum at all — and the one value that
         // discriminates "a real holder the tracker missed" (word == 1)
         // from "the word itself was scribbled" (word ∉ {0,1}) was never
@@ -551,7 +551,7 @@ impl RawSpinlock {
         // holder, so this dump reads it without any interrupt.
         crate::sched::sched::grq_dump_holder("deadlock");
 
-        #[cfg(feature = "dfx-lock-owner")]
+        #[cfg(feature = "debug-lock-owner")]
         {
             let msg4 = b" holder=";
             for &b in msg4 {
@@ -609,13 +609,13 @@ impl RawSpinlock {
 
         crate::console::uart_putc_raw(b'\n');
 
-        // Leak forensics (dfx-lock-owner): the LAST acquirer's pid,
+        // Leak forensics (debug-lock-owner): the LAST acquirer's pid,
         // call site and acquire age — these persist past a cleared
         // owner word, so a leaked lock names who took it and when
         // even when the owner stamp is mid-handoff. Plus the raw
         // locked word (1 = genuinely held; anything else is a torn
         // or corrupted state worth seeing).
-        #[cfg(feature = "dfx-lock-owner")]
+        #[cfg(feature = "debug-lock-owner")]
         {
             // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
             let l = unsafe { &*lock_addr };
@@ -742,7 +742,7 @@ impl RawSpinlock {
             }
         }
         }
-        #[cfg(not(feature = "dfx-lock-owner"))]
+        #[cfg(not(feature = "debug-lock-owner"))]
         {
             crate::console::uart_putc_raw(b'\n');
 
@@ -783,12 +783,12 @@ impl RawSpinlock {
             }
         }
 
-        // rux:watchdog (retired dfx=watchdog) (dfx-migrate: rux:taskdump kind=WATCHDOG):
+        // rux:watchdog (retired debug=watchdog) (debug-migrate: rux:taskdump kind=WATCHDOG):
         // follow the warning with a full task-state snapshot
         // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
         if crate::trace::EVENT_TASKDUMP.armed() {
             crate::trace::trace_taskdump(2, 0);
-            crate::dfx::taskdump::dump_all_tasks("deadlock-watchdog");
+            crate::debug::taskdump::dump_all_tasks("deadlock-watchdog");
         }
     }
 

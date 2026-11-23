@@ -267,7 +267,7 @@ pub fn printk(level: u8, args: fmt::Arguments) {
     // Perf: filter BEFORE formatting (same rationale as printk_ln below —
     // discarded messages must not pay the fmt pass).
     if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
-        crate::dfx::syscost::note_printk_filtered(); // syscost probe
+        crate::debug::syscost::note_printk_filtered(); // syscost probe
         return;
     }
     printk_ring_always(level, args);
@@ -478,12 +478,12 @@ fn emit_to_console(text: &[u8]) {
     let uart = crate::console::Uart::new();
     uart.puts_batch(&buf[..n]);
     let emitted = n; // syscost probe
-    crate::dfx::syscost::note_printk_con(emitted); // syscost probe
+    crate::debug::syscost::note_printk_con(emitted); // syscost probe
     CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
 }
 
 /// Bounded best-effort acquire of the console emit lock for diagnostic
-/// writers that bypass printk (dfx `ConsoleWriter`: softlockup reports,
+/// writers that bypass printk (debug `ConsoleWriter`: softlockup reports,
 /// stack dumps). Keeps their output from interleaving mid-line with an
 /// in-flight printk record (b140's "…len BUG: soft lockup" garble).
 ///
@@ -701,7 +701,7 @@ pub fn console_drain_pending(budget: usize) -> usize {
 // ==================== Ring Buffer Write ====================
 
 fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
-    crate::dfx::syscost::note_printk_ring(text.len()); // syscost probe
+    crate::debug::syscost::note_printk_ring(text.len()); // syscost probe
     let pid = crate::process::current_pid() as u32;
     // Real CPU id (review批次8: hard-coded 0 attributed every message to
     // CPU 0, hiding cross-CPU issues in the logs).
@@ -1259,7 +1259,7 @@ fn syslog_clear() {
 
 /// Newest `n` records, oldest-first, syslog-style one line each.
 ///
-/// rux:schb wedge census (tracepoint; retired cmdline token was rux:schb (retired dfx=schb)) (sc-series quiet-quiet hunt): quietcon diverts
+/// rux:schb wedge census (tracepoint; retired cmdline token was rux:schb (retired debug=schb)) (sc-series quiet-quiet hunt): quietcon diverts
 /// the userspace /dev/console stream into this ring, so the tail around
 /// a soft-wedge is the userspace last-known-good boundary. Records are
 /// COPIED out under the ring lock (bounded hold) and formatted after it
@@ -1744,7 +1744,7 @@ fn kmsg_console_allows_echo() -> bool {
 /// modes, so hilog consumers lose nothing.
 fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
     // hilogcensus (cmdline hilogcensus=1): per-caller /dev/kmsg volume.
-    crate::dfx::hilogcensus::kmsg_write(buf);
+    crate::debug::hilogcensus::kmsg_write(buf);
     let text = core::str::from_utf8(buf).unwrap_or("<binary>");
     let (level, text) = match text.as_bytes() {
         [b'<', d, b'>', rest @ ..] if (b'0'..=b'7').contains(d) => {

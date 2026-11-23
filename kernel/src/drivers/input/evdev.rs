@@ -146,7 +146,7 @@ pub struct EvdevDevice {
     pub open_file_ids: Spinlock<[u64; 4]>,
     /// Number of valid entries in `open_file_ids`.
     pub open_file_count: core::sync::atomic::AtomicU32,
-    /// Events pushed since boot (rux:inputtrace (retired dfx=inputtrace) counter).
+    /// Events pushed since boot (rux:inputtrace (retired debug=inputtrace) counter).
     pub events_pushed: core::sync::atomic::AtomicU32,
     /// Device ID
     pub id: InputId,
@@ -272,7 +272,7 @@ impl EvdevDevice {
 /// Push event (called from softirq context)
 pub fn push_event(&self, event: InputEvent) {
         {
-            // rux:inputtrace (retired dfx=inputtrace): the input arrival trace (release-visible via
+            // rux:inputtrace (retired debug=inputtrace): the input arrival trace (release-visible via
             // the raw UART path — this is the datum that says whether the
             // guest's event source reaches the device at all). Line
             // rides the taskdump funnel (obs-hygiene): one atomic write,
@@ -294,7 +294,7 @@ pub fn push_event(&self, event: InputEvent) {
                         event.code,
                         event.value
                     );
-                    crate::dfx::taskdump::taskdump_raw_line(line.as_bytes());
+                    crate::debug::taskdump::taskdump_raw_line(line.as_bytes());
                 }
             }
         }
@@ -738,7 +738,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
                         itt_msg(b"\n");
                     }
                 }
-                // rux:inputtrace (retired dfx=inputtrace): the userspace READ hop — pid, which node,
+                // rux:inputtrace (retired debug=inputtrace): the userspace READ hop — pid, which node,
                 // how many events remained after this one. If this prints
                 // during a gesture the delivery chain is complete and any
                 // remaining failure is consumer-side semantics.
@@ -788,7 +788,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
 /// Backstop poll interval for the blocking read sleep.
 const EVDEV_READ_POLL_MS: u64 = 10;
 
-/// rux:inputtrace (retired dfx=inputtrace): announce which node the guest opened. Also records
+/// rux:inputtrace (retired debug=inputtrace): announce which node the guest opened. Also records
 /// input:evdev_open (hop 2a of the input chain — a consumer opened the
 /// node; pid/comm name the opener in the trace record header and the
 /// serial echo). `node` is the devfs minor (64/65/66).
@@ -798,7 +798,7 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
     if crate::trace::EVENT_EVDEV_OPEN.armed() {
         latch_opener_pid(crate::process::current_pid() as u32);
     }
-    // The tracepoint path first (it's the policy instrument; the dfx
+    // The tracepoint path first (it's the policy instrument; the debug
     // prints below are the frozen legacy view of the same event).
     if crate::trace::EVENT_EVDEV_OPEN.armed() {
         crate::trace::trace_evdev_open(node);
@@ -831,7 +831,7 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
         .collect();
     let s = alloc::format!("IN-OPEN pid={} name={} file_id={}\n", crate::process::current_pid(), String::from_utf8_lossy(&nm), file.file_id);
     // obs-hygiene: line-atomic funnel instead of per-byte raw writes.
-    crate::dfx::taskdump::taskdump_raw_line(s.as_bytes());
+    crate::debug::taskdump::taskdump_raw_line(s.as_bytes());
 }
 
 /// evdev close function
@@ -886,7 +886,7 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
         if device.has_event() {
             ready |= POLLIN | POLLRDNORM;
         }
-        // rux:inputtrace (retired dfx=inputtrace) (leg-9 epoll hunt): one line per POLL dispatch,
+        // rux:inputtrace (retired debug=inputtrace) (leg-9 epoll hunt): one line per POLL dispatch,
         // raw-console (loglevel-proof; pr_info is dropped at loglevel=3).
         // The r13ep2/r13ep3 A/B proved the virtqueues ARE drained during
         // an epoll-only boot (14 INPTRC) yet epoll_wait returned idle —
@@ -1090,7 +1090,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
         return None;
     }
 
-    // rux:inputtrace (retired dfx=inputtrace): the capability probe — what we hand to the input
+    // rux:inputtrace (retired debug=inputtrace): the capability probe — what we hand to the input
     // framework for classification. A device whose EVIOCGBIT(0) misses
     // EV_SYN/EV_KEY/EV_ABS, or whose name/id ioctls return garbage, is
     // rejected by consumers after open (opened-but-never-read is the
@@ -1595,7 +1595,7 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
         }
     }
 
-    // rux:inputtrace (retired dfx=inputtrace): payload trace to hunt phantom event streams. Prints
+    // rux:inputtrace (retired debug=inputtrace): payload trace to hunt phantom event streams. Prints
     // every event with a monotonically increasing ordinal so serial-log
     // frequency analysis works; rate-limited so a flooding stream cannot
     // wedge the serial console; gated by a runtime switch (default OFF).
@@ -1761,7 +1761,7 @@ impl HuntLine {
         // obs-hygiene: the burst rides the taskdump funnel's emit-lock
         // coordination (one atomic write vs printk records too — the
         // kmsg-flood splice class), not the bare per-byte raw writes.
-        crate::dfx::taskdump::line_atomic_write(&self.buf[..self.n]);
+        crate::debug::taskdump::line_atomic_write(&self.buf[..self.n]);
         self.n = 0;
     }
 }
@@ -1792,7 +1792,7 @@ fn itt_msg(msg: &[u8]) {
         st.buf[at] = b;
         st.n = at + 1;
         if b == b'\n' || st.n == st.buf.len() {
-            crate::dfx::taskdump::line_atomic_write(&st.buf[..st.n]);
+            crate::debug::taskdump::line_atomic_write(&st.buf[..st.n]);
             st.n = 0;
         }
     }
@@ -1837,7 +1837,7 @@ fn current_pid_tgid() -> (u64, u64) {
     }
 }
 
-// Raw-console writers for the rux:inputtrace (retired dfx=inputtrace) path (same shape as
+// Raw-console writers for the rux:inputtrace (retired debug=inputtrace) path (same shape as
 // sched/wakewatch's ww_msg/ww_u64): printk is unusable here because the
 // trace must survive loglevel=3 boots, and the callers can be in IRQ
 // context, so no printk locks.

@@ -2349,13 +2349,13 @@ fn handle_swap_fault(
             // with MAP_FIXED's multi-phase surgery dropped a live VMA
             // piece. Pick AND insert under ONE guard, like the hint path
             // below and the riscv64 twin.
-            let mp = crate::dfx::mmprof::on();
-            let mp_tl = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp = crate::debug::mmprof::on();
+            let mp_tl = if mp { crate::debug::mmprof::now() } else { 0 };
             let mut vma_mgr = mm.vma_write();
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_LOCKWAIT, mp_tl);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_LOCKWAIT, mp_tl);
             }
-            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_tf = if mp { crate::debug::mmprof::now() } else { 0 };
             let chosen = if map_flags & map::MAP_32BIT != 0 {
                 // Linux x86_64 arch_get_unmapped_area: MAP_32BIT forces
                 // the mapping into the FIRST 2GB, bottom-up from 1GB
@@ -2369,9 +2369,9 @@ fn handle_swap_fault(
                 find_free_area_locked(mm, &vma_mgr, aligned_size)?
             };
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_FINDFREE, mp_tf);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_FINDFREE, mp_tf);
             }
-            let mp_ta = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_ta = if mp { crate::debug::mmprof::now() } else { 0 };
             let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
@@ -2383,7 +2383,7 @@ fn handle_swap_fault(
             mm.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
             mm.update_highest_vm_end(chosen.as_usize() + aligned_size);
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_ADD, mp_ta);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_ADD, mp_ta);
             }
             vma_installed = true;
             chosen
@@ -2410,13 +2410,13 @@ fn handle_swap_fault(
             // an unaligned hint used to reach Vma::new and trip its
             // page-alignment assert (Vma::new asserts; Linux masks the
             // hint instead).
-            let mp = crate::dfx::mmprof::on();
-            let mp_tl = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp = crate::debug::mmprof::on();
+            let mp_tl = if mp { crate::debug::mmprof::now() } else { 0 };
             let mut vma_mgr = mm.vma_write();
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_LOCKWAIT, mp_tl);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_LOCKWAIT, mp_tl);
             }
-            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_tf = if mp { crate::debug::mmprof::now() } else { 0 };
             let chosen = if addr.as_usize() != 0 {
                 let hint = addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
                 let hint_end = hint.checked_add(aligned_size);
@@ -2445,9 +2445,9 @@ fn handle_swap_fault(
                 find_free_area_locked(mm, &vma_mgr, aligned_size)?
             };
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_FINDFREE, mp_tf);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_FINDFREE, mp_tf);
             }
-            let mp_ta = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_ta = if mp { crate::debug::mmprof::now() } else { 0 };
             let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
@@ -2459,7 +2459,7 @@ fn handle_swap_fault(
             mm.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
             mm.update_highest_vm_end(chosen.as_usize() + aligned_size);
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_ADD, mp_ta);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_ADD, mp_ta);
             }
             vma_installed = true;
             chosen
@@ -2498,8 +2498,8 @@ fn handle_swap_fault(
             // kernel permits any interleaving there too). The b89
             // piece-drop hole cannot recur: pieces are never held across
             // a guard drop by the chunked loop.
-            let mp = crate::dfx::mmprof::on();
-            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp = crate::debug::mmprof::on();
+            let mp_tf = if mp { crate::debug::mmprof::now() } else { 0 };
             let mut attempts = 0;
             loop {
                 munmap(mm, start, aligned_size)?;
@@ -2524,7 +2524,7 @@ fn handle_swap_fault(
                 mm.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
                 mm.update_highest_vm_end(end.as_usize());
                 if mp {
-                    crate::dfx::mmprof::add(crate::dfx::mmprof::M_FIXEDMUN, mp_tf);
+                    crate::debug::mmprof::add(crate::debug::mmprof::M_FIXEDMUN, mp_tf);
                 }
                 vma_installed = true;
                 break;
@@ -2737,8 +2737,8 @@ fn handle_swap_fault(
         // Whole-range fast path — see the block after the mp declarations
         // (mp/mp_t0 must exist before the fast path can record timings).
 
-        let mp = crate::dfx::mmprof::on();
-        let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+        let mp = crate::debug::mmprof::on();
+        let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
 
         // Whole-range fast path (gb-opt lane, 2026-11-15): glibc allocator
         // churn (large malloc/free pairs, thread-stack teardown, arena
@@ -2811,7 +2811,7 @@ fn handle_swap_fault(
                 );
                 crate::arch::mm::asid::flush_tlb_all();
                 if mp {
-                    crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
+                    crate::debug::mmprof::add(crate::debug::mmprof::MU_BODY, mp_t0);
                 }
                 // (fork-frag) post-flush drain: single-CPU mms' pending
                 // entries (targets empty) free right here.
@@ -2824,8 +2824,8 @@ fn handle_swap_fault(
             // path, which frees the pages piece by piece.
         }
 
-        let mp = crate::dfx::mmprof::on();
-        let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+        let mp = crate::debug::mmprof::on();
+        let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
 
         let mut cur = addr_us;
         while cur < end_addr {
@@ -2855,8 +2855,8 @@ fn handle_swap_fault(
             let chunk_end = seg_start + MUNMAP_CHUNK_BYTES.min(seg_end - seg_start);
 
             if mp {
-                crate::dfx::mmprof::bump(
-                    crate::dfx::mmprof::S_MUNLOOPS,
+                crate::debug::mmprof::bump(
+                    crate::debug::mmprof::S_MUNLOOPS,
                     1,
                 );
             }
@@ -2904,7 +2904,7 @@ fn handle_swap_fault(
         crate::arch::mm::mmu_init::pt_pending_drain();
 
         if mp {
-            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
+            crate::debug::mmprof::add(crate::debug::mmprof::MU_BODY, mp_t0);
         }
         Ok(())
     }
@@ -3276,8 +3276,8 @@ fn handle_swap_fault(
         // mm writers concurrent with fork.
         // forkprof (cmdline forkprof=1): phase split of the mm fork —
         // snapshot / COW walk / VMA replay. One relaxed load when off.
-        let fp = crate::dfx::forkprof::on();
-        let fp_t_snap = if fp { crate::dfx::forkprof::now() } else { 0 };
+        let fp = crate::debug::forkprof::on();
+        let fp_t_snap = if fp { crate::debug::forkprof::now() } else { 0 };
         let (cow_exempt, vma_snapshot, vma_ranges): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize, VmaOrigin)>, Vec<(u64, u64)>) = {
             let parent_vma_guard = mm.vma_read();
 
@@ -3316,9 +3316,9 @@ fn handle_swap_fault(
             (exempt, snapshot, ranges)
         };
         if fp {
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_SNAPSHOT, fp_t_snap);
-            crate::dfx::forkprof::bump(
-                crate::dfx::forkprof::S_FORKS_VMASES,
+            crate::debug::forkprof::add(crate::debug::forkprof::P_MM_SNAPSHOT, fp_t_snap);
+            crate::debug::forkprof::bump(
+                crate::debug::forkprof::S_FORKS_VMASES,
                 vma_snapshot.len() as u64,
             );
         }
@@ -3328,11 +3328,11 @@ fn handle_swap_fault(
         // The walk takes the PARENT's per-mm PTE section internally per leaf
         // table and may cond_resched between chunks (launcher wall fix — see
         // the function's own comment for the exclusion argument).
-        let fp_t_cow = if fp { crate::dfx::forkprof::now() } else { 0 };
+        let fp_t_cow = if fp { crate::debug::forkprof::now() } else { 0 };
         let new_root_ppn =
             copy_page_table_cow(mm, &cow_exempt, &vma_ranges).ok_or(MapError::OutOfMemory)?;
         if fp {
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_COW, fp_t_cow);
+            crate::debug::forkprof::add(crate::debug::forkprof::P_MM_COW, fp_t_cow);
         }
 
         // new_root_ppn was just returned from copy_page_table_cow, so it
@@ -3345,7 +3345,7 @@ fn handle_swap_fault(
         {
             // Everything after this point only touches the CHILD's manager
             // (the snapshot was taken before the walk — no parent lock held).
-            let fp_t_replay = if fp { crate::dfx::forkprof::now() } else { 0 };
+            let fp_t_replay = if fp { crate::debug::forkprof::now() } else { 0 };
             if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();
                 for (start, end, flags, vma_type, file_fd, file_size, offset, origin) in vma_snapshot {
@@ -3384,7 +3384,7 @@ fn handle_swap_fault(
                 }
             }
             if fp {
-                crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_REPLAY, fp_t_replay);
+                crate::debug::forkprof::add(crate::debug::forkprof::P_MM_REPLAY, fp_t_replay);
             }
         }
 

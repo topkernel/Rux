@@ -141,7 +141,7 @@ all 24k lines of syscall handlers at once.
 | Boot (before scheduler) | panic allowed — fail fast, print, halt |
 | Task context, invariant "impossible" | panic allowed (it is a kernel bug; want it loud) |
 | Task context, runtime failure | degrade: return error, or kill the offending task (OOM path already does this — `alloc_error_handler` design) |
-| IRQ / softirq / scheduler-internal | **panic forbidden**: no allocation in the message, use the raw-line printer (`dfx::taskdump_raw_line` style), then contain |
+| IRQ / softirq / scheduler-internal | **panic forbidden**: no allocation in the message, use the raw-line printer (`debug::taskdump_raw_line` style), then contain |
 | Per-task recoverable (bad user pointer) | never panic — EFAULT |
 
 Rule of thumb: *a user process must never be able to panic the kernel,
@@ -244,7 +244,7 @@ address space happens to include it.
 6. **Context rules**: IRQ and softirq context performs no allocation
    and takes no sleeping locks — this is reviewable by looking at
    what a path is *allowed* to call; keep the allowed-call lists in
-   the dfx docs.
+   the debug docs.
 
 ---
 

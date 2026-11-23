@@ -89,7 +89,7 @@ context switch.
 **How Rux already does it.** The layer map is the mechanism:
 `kernel-layers.md` classifies every module as *framework*
 (the `unsafe` interior: mm, sync), *service* (everything that may be
-made safe), *diagnostics* (dfx) or *test*. A service file that carries
+made safe), *diagnostics* (debug) or *test*. A service file that carries
 no `unsafe` gets `#![forbid(unsafe_code)]` — the compiler then
 enforces the boundary for it, permanently.
 
@@ -162,7 +162,7 @@ irrelevant for a per-subsystem-entry granularity and irrelevant for
 the hot paths (the allocator's fast path never changes keys).
 
 **Constraint to state plainly.** MPK is not emulated by the emulators
-in this rig, so any MPK work must be gated like the `dfx=` probes:
+in this rig, so any MPK work must be gated like the `debug=` probes:
 **off by default, enabled explicitly, with the unsafe-interior
 segmentation verified by construction** (the keys are a compile-time
 partition, not a runtime policy). The same applies to MTE on aarch64.
@@ -291,7 +291,7 @@ Order of work, by benefit-per-engineering-hour:
    TCB number meaningful.
 5. **Verus on the Framework core** — the page-flag/refcount algebra
    first.
-6. **MPK/MTE as opt-in segments** — gated like the dfx probes, verified
+6. **MPK/MTE as opt-in segments** — gated like the debug probes, verified
    by construction, never on by default.
 7. **Runtime mitigation channel** — last; it is a mitigation.
 

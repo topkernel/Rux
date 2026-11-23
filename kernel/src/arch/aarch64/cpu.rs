@@ -80,7 +80,7 @@ pub fn read_time() -> u64 {
 #[inline]
 #[track_caller]
 pub fn enable_irq() {
-    crate::dfx::syscost::irq_note_on();
+    crate::debug::syscost::irq_note_on();
     // SAFETY: msr daifclr atomically clears the DAIF mask bits; safe at
     /// any time.
     unsafe {
@@ -92,7 +92,7 @@ pub fn enable_irq() {
 #[inline]
 #[track_caller]
 pub fn disable_irq() {
-    crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
+    crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
     // SAFETY: msr daifset atomically sets the DAIF mask bits; safe at any
     /// time.
     unsafe {

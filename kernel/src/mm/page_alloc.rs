@@ -331,20 +331,20 @@ fn gfp_migratetype(g: GfpFlags) -> i32 {
 
 /// Allocate 2^order contiguous physical pages
 ///
-/// DFX memwatch wrapper: captures the caller chain (frame-pointer walk,
-/// valid at -O0) and feeds the page-level site table in dfx::memwatch —
+/// DEBUG memwatch wrapper: captures the caller chain (frame-pointer walk,
+/// valid at -O0) and feeds the page-level site table in debug::memwatch —
 /// net growth per call-site is the physical-page leak signature.
 pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
-    let phys = if !crate::dfx::memwatch::armed() {
+    let phys = if !crate::debug::memwatch::armed() {
         alloc_pages_inner(gfp_flags, order)
     } else {
-        let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
+        let mw_s0: u64 = crate::debug::backtrace::current_frame_pointer();
         let phys = alloc_pages_inner(gfp_flags, order);
         if phys != 0 {
-            let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-                [0; crate::dfx::memwatch::SITE_FRAMES];
+            let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
+                [0; crate::debug::memwatch::SITE_FRAMES];
             super::edges::walk_fp_chain(mw_s0, &mut mw_frames);
-            crate::dfx::memwatch::note_page_alloc(phys, order, &mw_frames);
+            crate::debug::memwatch::note_page_alloc(phys, order, &mw_frames);
         }
         phys
     };
@@ -422,8 +422,8 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     super::mm_hooks::wakeup_kswapd(order as i32);
                 }
                 // Leg-15 pace: one tick per slowpath entry (zone fastpath
-                // failed), rux:schb (retired dfx=schb)-gated counter only.
-                crate::dfx::schb::note_slow();
+                // failed), rux:schb (retired debug=schb)-gated counter only.
+                crate::debug::schb::note_slow();
 
                 // Synchronous direct reclaim (Linux __alloc_pages_slowpath):
                 // waking kswapd alone loses the race — the faulting task
@@ -698,10 +698,10 @@ pub fn oom_forensic_dump(site: &str) {
         return;
     }
 
-    // Full accounting ledger first (dfx/ledger.rs): where every managed
+    // Full accounting ledger first (debug/ledger.rs): where every managed
     // page went at this moment — the census + counter reconciliation that
     // attributes the "out of memory" to a category (or to drift).
-    super::super::dfx::ledger::dump(&alloc::format!("oom: {}", site));
+    super::super::debug::ledger::dump(&alloc::format!("oom: {}", site));
 
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!("==== OOM-FORENSIC #{} @ {} ====", DUMPS.load(Ordering::Relaxed), site);
@@ -959,7 +959,7 @@ pub fn oom_forensic_dump(site: &str) {
                 }
             }
         }
-        crate::dfx::ledger::oomfx_line(
+        crate::debug::ledger::oomfx_line(
             zf as u64,
             zw as u64,
             zm as u64,
@@ -1120,7 +1120,7 @@ fn report_free_refusal(detail_msg: &core::fmt::Arguments) {
 /// cache-backed leaf: the cache's release paths never run through
 /// put_page.
 pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
-    use crate::dfx::driftwatch;
+    use crate::debug::driftwatch;
     use core::sync::atomic::Ordering::Relaxed;
     driftwatch::PCACHE_LEAF_PHANTOM_PUT.fetch_add(1, Relaxed);
     static REPORTS: core::sync::atomic::AtomicUsize =
@@ -1133,7 +1133,7 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
             phys,
             site
         );
-        crate::dfx::backtrace::dump_stack();
+        crate::debug::backtrace::dump_stack();
     } else if (n + 1) % 4096 == 0 {
         // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::pr_err!(
@@ -1145,14 +1145,14 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
     // the moment the mapping's descriptor reference is proven missing.
     // The ref-transition ring replay in the capture names the path that
     // consumed it early. Takes no locks (PTE-lock context is fine).
-    crate::dfx::mmforensics::capture_frame(phys >> 12, "pcache-phantom-put");
+    crate::debug::mmforensics::capture_frame(phys >> 12, "pcache-phantom-put");
     // Intentionally NO free: the page cache owns the frame.
     // QUARANTINE (mmforensics lane): the mapping's reference was consumed
     // early — the frame is (or is about to be) double-tracked. Mark it so
     // no free path can ever hand it to a new owner while the surviving
     // references (cache entry, stale PTEs) still name it.
     crate::arch::mm::mmu_init::PtLedger::poison_table((phys >> 12) as u64);
-    crate::dfx::driftwatch::MM_POISONED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::driftwatch::MM_POISONED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Free contiguous physical pages
@@ -1161,7 +1161,7 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
 /// - `addr`: Physical address of the first page
 /// - `order`: Order of the allocation
 pub fn free_pages(addr: usize, order: usize) {
-    use crate::dfx::driftwatch as dw;
+    use crate::debug::driftwatch as dw;
     if addr == 0 {
         dw::FREE_NULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return;
@@ -1199,12 +1199,12 @@ pub fn free_pages(addr: usize, order: usize) {
                     pd_ref.map(|p| p.mapcount()).unwrap_or(0),
                     crate::process::current_pid()
                 );
-                crate::dfx::backtrace::dump_stack();
+                crate::debug::backtrace::dump_stack();
             }
             // mmforensics (early-put hunt): a free of a still-mapped
             // frame is the premature-free face of the same producer
             // family — capture names the frame and its referees.
-            crate::dfx::mmforensics::capture_frame(phys_to_pfn(addr), "free-while-mapped");
+            crate::debug::mmforensics::capture_frame(phys_to_pfn(addr), "free-while-mapped");
             return;
         }
     }
@@ -1218,7 +1218,7 @@ pub fn free_pages(addr: usize, order: usize) {
     // a teardown/unmap leaf put reaching 0 on a cache-owned frame — the
     // phantom-put's free face; first boot's capture #1 ring: PUT
     // old=1->0 with NO matching get since the frame's cache insert).
-    // Under rux:mmforensics (retired dfx=mmforensics): capture AT this moment (the rings still
+    // Under rux:mmforensics (retired debug=mmforensics): capture AT this moment (the rings still
     // hold the fresh evidence — the install sites, the transition
     // sequence) and REFUSE the free (quarantine-leak), so the frame
     // never re-enters circulation and scrambles the trail.
@@ -1240,13 +1240,13 @@ pub fn free_pages(addr: usize, order: usize) {
                         p.refcount(),
                         crate::process::current_pid()
                     );
-                    crate::dfx::backtrace::dump_stack();
+                    crate::debug::backtrace::dump_stack();
                 }
-                crate::dfx::mmforensics::capture_frame(
+                crate::debug::mmforensics::capture_frame(
                     phys_to_pfn(addr),
                     "free-of-live-cache-entry",
                 );
-                crate::dfx::driftwatch::MM_POISON_FREES
+                crate::debug::driftwatch::MM_POISON_FREES
                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return;
             }
@@ -1326,7 +1326,7 @@ pub fn free_pages(addr: usize, order: usize) {
     //       from free contexts wedges the box).
     //   owner != dying pid : foreign free — the frame may still be mapped
     //       by a live process (its r-x text); recycling it is the SIGILL
-    //       mechanism. Under rux:mmforensics (retired dfx=mmforensics) refuse the free (leak) and
+    //       mechanism. Under rux:mmforensics (retired debug=mmforensics) refuse the free (leak) and
     //       print the evidence; with the switch off, clear the stamp and
     //       keep the historical allocator behavior.
     // The walk-path (exit/unmap) frees are adjudicated properly in
@@ -1362,7 +1362,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     // Attribution: the dying context's page-table ROOT (to
                     // correlate with the FUT teardown ring / EARLY-ROOT-FREE
                     // witnesses) plus a symbolizable kernel backtrace via
-                    // the dfx unwinder (printk-free console writer, safe
+                    // the debug unwinder (printk-free console writer, safe
                     // under the locks this path can hold).
                     let root = crate::sched::current()
                         .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
@@ -1373,7 +1373,7 @@ pub fn free_pages(addr: usize, order: usize) {
                         pfn, order, owner_pid, owner_va, dying, root,
                         TEXT_OWN_FREES.load(core::sync::atomic::Ordering::Relaxed)
                     );
-                    crate::dfx::backtrace::dump_stack();
+                    crate::debug::backtrace::dump_stack();
                     dw::FREE_REFUSED_TEXT
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
@@ -1395,9 +1395,9 @@ pub fn free_pages(addr: usize, order: usize) {
         }
     }
 
-    // DFX memwatch: attribute the free back to the site that stamped this
-    // block (page-level leak accounting — see dfx::memwatch).
-    crate::dfx::memwatch::note_page_free(addr, order);
+    // DEBUG memwatch: attribute the free back to the site that stamped this
+    // block (page-level leak accounting — see debug::memwatch).
+    crate::debug::memwatch::note_page_free(addr, order);
 
     let pfn = phys_to_pfn(addr);
 

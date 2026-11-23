@@ -281,7 +281,7 @@ rux-ipc forbid-safe (DONE 2026-11-23, ipc-flip lane: the
  the crate packaging alone; root cause open, taskdump
  evidence in the lane record. util stays framework as
  the shared substrate both sides consume)
-rux-dfx-svc forbid-safe (subject to §7 retirement review)
+rux-debug-svc forbid-safe (subject to §7 retirement review)
 ```
 
 Cargo refuses cycles: services → core (and → lower services) only; the
@@ -430,30 +430,30 @@ Current: ~10,300 dual (whole kernel, single-crate census).
 | + M1 mm-policy split | mm policy column → 0 | −~250 |
 | + Rung 3 fs-svc + 5 ext4 | fs service columns → 0 | −~2,400 |
 | + Rung 4 drivers | drivers column → 0 | −~370 |
-| + dfx retirement review (§7) | dead instruments retire | −600~1,000 (EXECUTED 2026-11-23: −915 dfx/ lines, r83hunt+treehunt; record in docs/development/dfx-retirement-review.md §7a) |
+| + debug retirement review (§7) | dead instruments retire | −600~1,000 (EXECUTED 2026-11-23: −915 debug/ lines, r83hunt+treehunt; record in docs/development/debug-retirement-review.md §7a) |
 | **End state** | **= rux-core size** | **≈4,000-4,700** |
 
-The ≤5,000 target is met with margin iff the dfx review retires its
+The ≤5,000 target is met with margin iff the debug review retires its
 dead instruments; without it the landing is ≈5,000-5,400 and the review
 becomes decisive. The percentage target (≤1%) is met trivially at any
 of these values.
 
-## 7. The dfx retirement review (feeds §6)
+## 7. The debug retirement review (feeds §6)
 
 Per-instrument adjudication: hunt closed → instrument retires (delete);
-hunt alive → instrument moves to `rux-dfx-svc` behind its flag (forbid if
+hunt alive → instrument moves to `rux-debug-svc` behind its flag (forbid if
 its unsafe can ride core primitives; else core-adjacent with INV rows).
 Input: L4's alive-call-site census (scribble 49 sites, leakorigin 26,
 r83hunt 8, wildwatch 5, treehunt 1). Each verdict one line in §8's table.
 
-EXECUTED (2026-11-23, dfx-retire lane): the full adjudication record,
+EXECUTED (2026-11-23, debug-retire lane): the full adjudication record,
 per-family verdicts with evidence and exit criteria, lives in
-docs/development/dfx-retirement-review.md. Phase 1 landed (r83hunt and
+docs/development/debug-retirement-review.md. Phase 1 landed (r83hunt and
 treehunt deleted with their call-site stubs and gate events; −915
-dfx/ lines); the KEEP families (scribble, leakorigin, wildwatch +
-the 6 permanent switches) carry written exit criteria; the dfx→debug
+debug/ lines); the KEEP families (scribble, leakorigin, wildwatch +
+the 6 permanent switches) carry written exit criteria; the debug→debug
 directory rename is deferred on crate-lane coordination (it rewrites
-`crate::dfx::` tokens inside the six service crates), recipe current
+`crate::debug::` tokens inside the six service crates), recipe current
 in the review doc §8.
 
 ## 8. The execution ladder (order is binding; each rung = measure → design interface → flip → forbid → battery)
@@ -469,7 +469,7 @@ in the review doc §8.
 4. **R2 net**: the measured 35-site relocation + flip.
 5. **R3 fs-svc + R5 ext4**: the biggest mass; measured per crate-plan.
 6. **R4 drivers**: last service rung.
-7. **dfx review**: per §7.
+7. **debug review**: per §7.
 8. **Core audit freeze**: the final INV/F-row registry pass — every core
  line under a row; the per-block irreducibility proof (the D-round
  deliverable) then covers exactly rux-core.

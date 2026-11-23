@@ -171,7 +171,7 @@ static DENTRY_RET_DENTRY: Spinlock<Vec<Arc<Dentry>>> = Spinlock::new(Vec::new())
 /// — same parking discipline.
 static DENTRY_RET_INODE: Spinlock<Vec<Arc<Inode>>> = Spinlock::new(Vec::new());
 
-/// Drain give-up counter (dfx observability, FdTable discipline): a
+/// Drain give-up counter (debug observability, FdTable discipline): a
 /// drain that could not observe all banks at zero within its spin budget
 /// defers the retired drop to the next writer.
 pub static DENTRY_DRAIN_DEFERS: AtomicUsize = AtomicUsize::new(0);

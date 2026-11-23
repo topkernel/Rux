@@ -558,7 +558,7 @@ impl Ext4FileSystem {
 
     /// Read inode
     pub fn read_inode(&self, ino: u32) -> Result<inode::Ext4Inode, i32> {
-        crate::dfx::fsw::note_read_inode();
+        crate::debug::fsw::note_read_inode();
         if ino == 0 {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
@@ -730,7 +730,7 @@ impl Ext4FileSystem {
                 b
             }
         };
-        crate::dfx::fsw::note_dir_lookup(blocks.len());
+        crate::debug::fsw::note_dir_lookup(blocks.len());
 
         // Pathology probe (oh-svc cook1/cook2 wedge): a directory scan
         // whose block list is absurdly large means a corrupt inode
@@ -825,7 +825,7 @@ impl Ext4FileSystem {
                 b
             }
         };
-        crate::dfx::fsw::note_list_dir();
+        crate::debug::fsw::note_list_dir();
         // Pathology probe — see the twin in lookup().
         if blocks.len() > 1024 {
             crate::pr_err!(
@@ -3200,7 +3200,7 @@ fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 ///
 /// The lock PROTOCOL is sync-floor (micro-core §2): the static moved
 /// framework-side (fs/journal_lock.rs, rung-5) so the exit path, the
-/// virtio VW watchdog and dfx taskdump reach it without a hook row.
+/// virtio VW watchdog and debug taskdump reach it without a hook row.
 /// This re-export keeps the historical path working for ext4/jbd2
 /// bodies (which consume it as their serialization primitive).
 pub use crate::fs::journal_seam::EXT4_BIG_LOCK;
@@ -3656,7 +3656,7 @@ fn ext4_readdir_fill(
             b
         }
     };
-    crate::dfx::fsw::note_list_dir();
+    crate::debug::fsw::note_list_dir();
 
     let mut filled = 0usize;
     let mut cur = pos; // byte offset of the next candidate entry

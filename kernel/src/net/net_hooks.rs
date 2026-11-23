@@ -1,6 +1,6 @@
 //! Framework-side net SUPPORT surface (crate-flip rung 2): the
 //! lib-consumed net plumbing — ops-identity probes, the procfs stat
-//! getters, the dfx diagnostics — reached through a HOOK TABLE (the
+//! getters, the debug diagnostics — reached through a HOOK TABLE (the
 //! SyscallHooks pattern: nullable fns no-op until the service crate's
 //! register; the composition bin calls it before the framework impl).
 

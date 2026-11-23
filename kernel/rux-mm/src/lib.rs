@@ -23,7 +23,7 @@
 // the flipped §4 policy files and re-exports everything else from the
 // framework; `syscall` is added for the compact/swap edges consumers.)
 pub use rux::{
-    arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, ipc,
+    arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, ipc,
     process, safety, sched, security, signal, sync, syscall, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};

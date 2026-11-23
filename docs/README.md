@@ -132,7 +132,7 @@ docs/
 ├── guides/                # Development guides
 │   ├── getting-started.md # Getting started (refreshed 2026-11-01)
 │   ├── configuration.md   # Configuration system
-│   ├── debugging.md       # Debugging + the dfx= switch table
+│   ├── debugging.md       # Debugging + the debug= switch table
 │   └── ubuntu-image.md    # Ubuntu test image build
 ├── progress/              # Project progress
 │   ├── roadmap.md         # Development roadmap (kept per milestone)
@@ -141,7 +141,7 @@ docs/
 ├── development/           # Active engineering records
 │   ├── review-coverage.md # Line-by-line review coverage map (generated)
 │   ├── perf-gate-baseline.md / perf-report.md / perf-audit.md
-│   ├── openharmony-port-plan.md (status header 2026-11-01) / dfx-align-plan.md
+│   ├── openharmony-port-plan.md (status header 2026-11-01) / debug-align-plan.md
 │   ├── f4-ext4-route-map.md / wildwrite-hunt.md (active hunts)
 │   └── rust-kernel-best-practices.md / rust-kernel-survey.md / security-posture.md / tcb-ledger.md
 └── archive/               # Historical documents (60+ files, April-era reports,

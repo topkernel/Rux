@@ -185,7 +185,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
     let pid = crate::sched::current()
         .map(|t| t.tgid() as u32)
         .unwrap_or_else(crate::process::current_pid);
-    // rux:syscalltrace (retired dfx=syscalltrace): the per-ioctl trace. Ungated this is the
+    // rux:syscalltrace (retired debug=syscalltrace): the per-ioctl trace. Ungated this is the
     // highest-rate print of an OH boot — hdf_devmgr polls
     // GET_PERMISSION/GET_TOKENID in a tight loop from early boot on
     // (24k+ lines in boot b139), and hilogd.rd_kmsg then copies every
@@ -315,7 +315,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             if request == ACCESS_TOKENID_SET_PERMISSION {
                 // ioctl_set_get_perm_data.is_granted: bool at offset 8.
                 let granted = buf[8] != 0;
-                // rux:syscalltrace (retired dfx=syscalltrace) forensics (b8): which opcode the
+                // rux:syscalltrace (retired debug=syscalltrace) forensics (b8): which opcode the
                 // verifier's compiled g_permList computes vs the one
                 // ATM's pusher set.
                 if crate::trace::EVENT_SYSCALLTRACE.armed() {
@@ -364,7 +364,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             }
         }
         _ => {
-            // rux:syscalltrace (retired dfx=syscalltrace): same tight-loop economics as the entry
+            // rux:syscalltrace (retired debug=syscalltrace): same tight-loop economics as the entry
             // trace (4k+ of these per boot — hilogd probing TIOCGETD on
             // the device fd).
             if crate::trace::EVENT_SYSCALLTRACE.armed() {

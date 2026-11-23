@@ -296,7 +296,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
 ///
 /// - RISC-V: 222
 
-/// rux:vmap (retired dfx=vmap) line budget (leg-31B): the PROT_NONE-shape traces
+/// rux:vmap (retired debug=vmap) line budget (leg-31B): the PROT_NONE-shape traces
 /// (MPROTECT-DN, PROTNONE-MAP-S) share one cap so a hunting boot stays
 /// serial-bounded. The switch check lives here — call sites stay naked.
 fn vmap_budget_line(line: impl FnOnce()) {
@@ -311,8 +311,8 @@ fn vmap_budget_line(line: impl FnOnce()) {
 }
 
 pub fn sys_mmap(args: [u64; 6]) -> i64 {
-    let mp = crate::dfx::mmprof::on();
-    let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+    let mp = crate::debug::mmprof::on();
+    let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
     // hp89: whole-call mm-surgery section (see MmStruct::mm_surgery) —
     // the MAP_FIXED teardown+install arm and the perf/binder ring
     // placement+install run as multi-step surgery.
@@ -321,9 +321,9 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         .map(|mm| mm.mm_surgery_guard());
     let ret = sys_mmap_inner(args);
     if mp {
-        crate::dfx::mmprof::add(crate::dfx::mmprof::M_TOTAL, mp_t0);
+        crate::debug::mmprof::add(crate::debug::mmprof::M_TOTAL, mp_t0);
         if ret > 0 {
-            crate::dfx::mmprof::bucket_len(args[1] as usize, mp_t0);
+            crate::debug::mmprof::bucket_len(args[1] as usize, mp_t0);
         }
     }
     {
@@ -347,7 +347,7 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     // comm scan + fdtable path lookup + print ran on EVERY appspawn-
     // family mmap (~456 lines in the pre-launcher window alone, each
     // costing UART emit + hilogd drain).
-    if ret > 0 && crate::dfx::switches::oh_hunt_prints_on() {
+    if ret > 0 && crate::debug::switches::oh_hunt_prints_on() {
         let comm = crate::sched::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -416,15 +416,15 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // mmprof (cmdline mmprof=1, oh-launcher perf handoff): placement
     // scalars + issuer attribution (the whole-syscall bracket lives in
     // the sys_mmap wrapper so early EINVAL returns still count).
-    let mp = crate::dfx::mmprof::on();
+    let mp = crate::debug::mmprof::on();
     if mp {
-        crate::dfx::mmprof::bump_comm();
+        crate::debug::mmprof::bump_comm();
         if args[3] as u32 & map::MAP_FIXED != 0 || args[3] as u32 & 0x100000 != 0 {
-            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_FIXED, 1);
+            crate::debug::mmprof::bump(crate::debug::mmprof::S_FIXED, 1);
         } else if args[0] == 0 {
-            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_ANON0, 1);
+            crate::debug::mmprof::bump(crate::debug::mmprof::S_ANON0, 1);
         } else {
-            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_HINT, 1);
+            crate::debug::mmprof::bump(crate::debug::mmprof::S_HINT, 1);
         }
     }
 
@@ -469,7 +469,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     if fd >= 0
         && map_flags & map::MAP_ANONYMOUS == 0
         && map_flags & map::MAP_TYPE_MASK == map::MAP_SHARED
-        && crate::dfx::switches::oh_hunt_prints_on()
+        && crate::debug::switches::oh_hunt_prints_on()
     {
         static SHARED_FILE_MMAPS: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
@@ -835,7 +835,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
-                    crate::sched::cgroup::dfx_report_memory_refusal(comm, actual_length);
+                    crate::sched::cgroup::debug_report_memory_refusal(comm, actual_length);
                 }
                 return mmap_error::ENOMEM;
             }
@@ -1033,7 +1033,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     crate::drivers::drm::gem_mmap_resolve(&file, offset, actual_length)
                                 else {
                                     // oh-svc T1 attribution tap (known-gap 4):
-                                    // rux:ohhunt (retired dfx=ohhunt) gates it.
+                                    // rux:ohhunt (retired debug=ohhunt) gates it.
                                     if crate::trace::EVENT_OHHUNT.armed() {
                                         // HOTPATH-PRINT: drm mmap resolve-fail; EVENT_OHHUNT tracepoint gate
                                         crate::pr_warn!(
@@ -1065,7 +1065,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     // llvmpipe displaytarget_map failure class
                                     // (assert jit_tex->base) needs the
                                     // attribution. Budgeted + gated behind
-                                    // rux:ohhunt (retired dfx=ohhunt) (known-gap 4).
+                                    // rux:ohhunt (retired debug=ohhunt) (known-gap 4).
                                     Err(e) => {
                                         static PEMAP_N: core::sync::atomic::AtomicU32 =
                                             core::sync::atomic::AtomicU32::new(0);
@@ -1380,7 +1380,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // at 0x7ff000b86000 is carved by fixed RW
                             // mmaps — b93 showed the crash VMA starts
                             // exactly at the reserve base).
-                            // rux:syscalltrace (retired dfx=syscalltrace) only (see file.rs so-open
+                            // rux:syscalltrace (retired debug=syscalltrace) only (see file.rs so-open
                             // note: ungated trace volume feeds
                             // hilogd.rd_kmsg, which eats a whole vCPU) —
                             // EXCEPT the >=1GB reserves: those are musl's
@@ -1425,7 +1425,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     );
                                 }
                             }
-                            // rux:vmap (retired dfx=vmap) (leg-31B): small anonymous PROT_NONE
+                            // rux:vmap (retired debug=vmap) (leg-31B): small anonymous PROT_NONE
                             // mmaps — the musl pthread-stack construction
                             // (mmap PROT_NONE then RW-upgrade) leaves the
                             // guard with THIS origin; budget-shared with
@@ -1507,8 +1507,8 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
     // Serial-cleanliness (print-audit lane, 2026-11): glibc/musl thread
     // stacks are 8 MiB, so this fired UNGATED on EVERY thread exit —
     // one pr_info per join at ~0.5 ms of polled-16550 time each. Joins
-    // the rux:vmap (retired dfx=vmap) budget family (VmaProbe switch + the shared 600-line
-    // cap); the b91/b92 hunts re-arm with rux:vmap (retired dfx=vmap).
+    // the rux:vmap (retired debug=vmap) budget family (VmaProbe switch + the shared 600-line
+    // cap); the b91/b92 hunts re-arm with rux:vmap (retired debug=vmap).
     if length >= 0x8_0000 {
         vmap_budget_line(|| {
             // HOTPATH-PRINT: BIGMUNMAP report; >=512KB filter + vmap_budget_line 600-line cap
@@ -1577,11 +1577,11 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 /// # Description
 /// mprotect is used to change protection attributes of existing memory mapping
 pub fn sys_mprotect(args: [u64; 6]) -> i64 {
-    let mp = crate::dfx::mmprof::on();
-    let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+    let mp = crate::debug::mmprof::on();
+    let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
     let ret = sys_mprotect_inner(args);
     if mp {
-        crate::dfx::mmprof::add(crate::dfx::mmprof::MP_TOTAL, mp_t0);
+        crate::debug::mmprof::add(crate::debug::mmprof::MP_TOTAL, mp_t0);
     }
     // CFI-shadow hunt (perm-denied lane): OH musl's cross-DSO CFI fill
     // mprotects PROT_READ slices out of a 2GB PROT_NONE reserve and then
@@ -1590,7 +1590,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // DSO SIGSEGVs inside __cfi_slowpath. Failures are rare and always
     // interesting: log every one ungated. PROT_READ downgrades (RELRO,
     // the shadow's tmp before mremap) are entry/exit traced only under
-    // rux:syscalltrace (retired dfx=syscalltrace) (two lines per call, same gating as MREMAP).
+    // rux:syscalltrace (retired debug=syscalltrace) (two lines per call, same gating as MREMAP).
     if ret != 0 {
         // HOTPATH-PRINT: mprotect failure path only (rare, CFI-shadow hunt)
         crate::pr_info!(
@@ -1730,9 +1730,9 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     // Serial-cleanliness (print-audit lane, 2026-11): this fired
     // UNGATED on EVERY writable mprotect — one per thread-stack upgrade
     // (thread create), malloc arena extension and JIT RW flip, at
-    // ~0.4 ms of polled-16550 time per line. It joins the rux:vmap (retired dfx=vmap)
+    // ~0.4 ms of polled-16550 time per line. It joins the rux:vmap (retired debug=vmap)
     // budget family below (VmaProbe switch + shared 600-line cap); the
-    // b91-b93 hunts re-arm with rux:vmap (retired dfx=vmap).
+    // b91-b93 hunts re-arm with rux:vmap (retired debug=vmap).
     if prot & 0x2 != 0 {
         vmap_budget_line(|| {
             // HOTPATH-PRINT: MPROTECT-RW report; PROT_WRITE filter + vmap_budget_line 600-line cap
@@ -1745,7 +1745,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
         });
     }
 
-    // rux:vmap (retired dfx=vmap) (leg-31B): the PROT_NONE mprotect family — guard
+    // rux:vmap (retired debug=vmap) (leg-31B): the PROT_NONE mprotect family — guard
     // downgrades (mprotect(PROT_NONE) over a piece of a live RW mapping,
     // the stack-guard construction pattern; sc321B adjudication:
     // render_service's 2-page guards on top of thread stacks come from
@@ -1839,7 +1839,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                     // Serial-cleanliness (print-audit lane, 2026-11):
                     // every DSO's RELRO finalize walks this arm; a
                     // dlopen loop printed one line per load. Joins the
-                    // rux:vmap (retired dfx=vmap) budget family.
+                    // rux:vmap (retired debug=vmap) budget family.
                     vmap_budget_line(|| {
                         // HOTPATH-PRINT: MPROTECT-CFI report; RELRO-finalize filter + vmap_budget_line cap
                         crate::pr_info!(
@@ -1870,13 +1870,13 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // can interleave between them.
             // mmprof: the write-guard acquire wait + the coverage/EACCES
             // walk (mmprof=1; the guard spans the whole syscall body).
-            let mp2 = crate::dfx::mmprof::on();
-            let mp_t_lock = if mp2 { crate::dfx::mmprof::now() } else { 0 };
+            let mp2 = crate::debug::mmprof::on();
+            let mp_t_lock = if mp2 { crate::debug::mmprof::now() } else { 0 };
             let mut vma_mgr = addr_space.vma_write();
             if mp2 {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_LOCK, mp_t_lock);
+                crate::debug::mmprof::add(crate::debug::mmprof::MP_LOCK, mp_t_lock);
             }
-            let mp_t_cover = if mp2 { crate::dfx::mmprof::now() } else { 0 };
+            let mp_t_cover = if mp2 { crate::debug::mmprof::now() } else { 0 };
 
             // Linux mprotect: the ENTIRE [addr, addr+length) range must be
             // covered by VMAs — any gap fails the whole call with ENOMEM
@@ -1986,10 +1986,10 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
 
             // mmprof: coverage+EACCES walk done.
             if mp2 {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_COVER, mp_t_cover);
-                crate::dfx::mmprof::bump(crate::dfx::mmprof::S_MPPAGES, ((length + 4095) / 4096) as u64);
+                crate::debug::mmprof::add(crate::debug::mmprof::MP_COVER, mp_t_cover);
+                crate::debug::mmprof::bump(crate::debug::mmprof::S_MPPAGES, ((length + 4095) / 4096) as u64);
             }
-            let mp_t_pte = if mp2 { crate::dfx::mmprof::now() } else { 0 };
+            let mp_t_pte = if mp2 { crate::debug::mmprof::now() } else { 0 };
 
             // Get page table root
             let root_ppn = addr_space.root_ppn();
@@ -2081,14 +2081,14 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // Flush TLB after updating PTE permissions (still under the
             // PTE lock so no stale entry survives the section).
             if mp2 {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_PTE, mp_t_pte);
+                crate::debug::mmprof::add(crate::debug::mmprof::MP_PTE, mp_t_pte);
             }
-            let mp_t_tlb = if mp2 { crate::dfx::mmprof::now() } else { 0 };
+            let mp_t_tlb = if mp2 { crate::debug::mmprof::now() } else { 0 };
             // sfence.vma — flush_tlb_all is a safe fn (vestigial wrapper
             // removed).
             crate::arch::mm::asid::flush_tlb_all();
             if mp2 {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_TLB, mp_t_tlb);
+                crate::debug::mmprof::add(crate::debug::mmprof::MP_TLB, mp_t_tlb);
             }
             drop(_pte_guard);
 
@@ -2673,7 +2673,7 @@ fn mremap_carry_file_attrs(
 /// (MPROTECT/FIXED-MAP/BIGMUNMAP were all ruled out). Every mremap now
 /// logs its identity and arguments on entry and its result on exit —
 /// one boot ties any mystery VMA surgery to its caller.
-/// rux:syscalltrace (retired dfx=syscalltrace) only: ungated this is two lines per mremap, and
+/// rux:syscalltrace (retired debug=syscalltrace) only: ungated this is two lines per mremap, and
 /// hilogd.rd_kmsg eats a vCPU copying them (b128/b129).
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
     // hp89: whole-call mm-surgery section — the move arms run
@@ -2686,7 +2686,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
         .map(|mm| mm.mm_surgery_guard());
     let ret = sys_mremap_inner(args);
     // Failure returns are rare and always interesting (CFI-shadow hunt):
-    // log ungated, success only under rux:syscalltrace (retired dfx=syscalltrace).
+    // log ungated, success only under rux:syscalltrace (retired debug=syscalltrace).
     if ret < 0 {
         // HOTPATH-PRINT: mremap failure path only (rare, CFI-shadow hunt)
         crate::pr_info!(

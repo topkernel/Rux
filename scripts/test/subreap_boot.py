@@ -66,8 +66,8 @@ def main():
         WT, "target/x86_64-unknown-none/debug/bzImage"))
     ap.add_argument("--accel", default="kvm",
                     help="kvm (default; falls back to tcg) or tcg")
-    ap.add_argument("--dfx", default="",
-                    help="extra kernel cmdline (the retired dfx=treehunt "
+    ap.add_argument("--debug", default="",
+                    help="extra kernel cmdline (the retired debug=treehunt "
                          "default is gone; the probe was removed)")
     ap.add_argument("--keep-img", action="store_true")
     ap.add_argument("--show", action="store_true",
@@ -97,7 +97,7 @@ def main():
            "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
            "-kernel", args.kernel,
            "-append", f"root=/dev/vda rw init=/test/subreap_churn "
-                      f"console=ttyS0 {args.dfx}"]
+                      f"console=ttyS0 {args.debug}"]
     print("[boot]", " ".join(cmd[1:]), flush=True)
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT)

@@ -25,7 +25,7 @@ Sizes: reference binder.c 6955 lines / 106 functions; ours 11696 lines
 
 bwr_park_audit, ams46_* (6 fns), clear_live_bwr, latch_park_walk_*,
 sc161 child routing tiers, TXN_PQUEUED drain-arm shape — instruments
-are dfx-gated (acceptable); the sc161 tiers and the drain-arm are
+are debug-gated (acceptable); the sc161 tiers and the drain-arm are
 BEHAVIORAL inventions: each must be re-derived from the reference
 text or documented as a divergence with evidence (design-divergences
 register rule).
@@ -47,6 +47,6 @@ empty.
 | FDA fd lifetime (target-context install) | OPEN PROJECT: reference defers target fd_install to apply_fd_fixups in TARGET context; failure/undelivered paths fput cleanly. Our install-at-send leaves ghost fds on undelivered txns. Requires the txn-fail/undelivered path rework WITH the fail_txn_after_fixups rig — standalone change, not a drive-by. |
 | defer_copy ordering | ASSESSED LOW: ordering-only difference (reference copies SG after all object validation; we copy per-object with equivalent rollback via fail_txn_after_fixups) — same bytes, same destinations, both roll back. Documented; no action unless a corruption class appears. |
 | vma_close | EQUIVALENT PRESENT: our binder_close performs the alloc teardown; munmap→close window covered by the alloc's block-table lifetime. Verified by construction; no change. |
-| print_* family | NOT TAKEN (diagnostics; our dfx instruments supersede for campaign needs) |
+| print_* family | NOT TAKEN (diagnostics; our debug instruments supersede for campaign needs) |
 
 Gates for the two landed rows: see commit; x86_64 build rc=0 at each step.

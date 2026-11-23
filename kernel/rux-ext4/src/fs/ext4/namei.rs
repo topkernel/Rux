@@ -198,7 +198,7 @@ pub fn ext4_new_inode(
     // Find suitable group
     let is_dir = (mode & S_IFMT) == S_IFDIR;
     let group = find_group_orlov(fs, dir, is_dir)?;
-    crate::dfx::fsw::note_new_inode();
+    crate::debug::fsw::note_new_inode();
 
     // Get group descriptor
     let inode_bitmap_block = {
@@ -1414,7 +1414,7 @@ fn ext4_mkdir_no_journal(
     // lesson: deleting this drain WITHOUT the batch bound pushed the
     // deferred bill onto the next constrained writer (unlink 100x).
     // Durability points remain fsync/sync(2)/eviction/commit.
-    crate::dfx::fsw::note_pub_lazy();
+    crate::debug::fsw::note_pub_lazy();
 
     Ok(new_ino)
 }
@@ -1442,7 +1442,7 @@ fn ext4_mkdir_inner(
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
-    crate::dfx::fsw::note_mkdir_us(
+    crate::debug::fsw::note_mkdir_us(
         (crate::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
     );
     result
@@ -2145,7 +2145,7 @@ pub fn ext4_unlink(
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
-    crate::dfx::fsw::note_unlink_us(
+    crate::debug::fsw::note_unlink_us(
         (crate::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
     );
     result
@@ -2294,7 +2294,7 @@ pub fn ext4_rmdir(
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
-    crate::dfx::fsw::note_rmdir_us(
+    crate::debug::fsw::note_rmdir_us(
         (crate::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
     );
     result
@@ -2368,7 +2368,7 @@ fn ext4_rmdir_inner(
     erase_dead_inode_map(fs, target_ino, &mut target)?;
     let p5 = crate::timer::monotonic_ns_since_boot();
 
-    crate::dfx::fsw::note_rmdir_phases(
+    crate::debug::fsw::note_rmdir_phases(
         p1.saturating_sub(p0), p2.saturating_sub(p1), p3.saturating_sub(p2),
         p4.saturating_sub(p3), p5.saturating_sub(p4),
     );

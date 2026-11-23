@@ -8,7 +8,7 @@
 //! Before this module, every struct-to-byte reinterpretation in the
 //! kernel hand-rolled one `unsafe { core::slice::from_raw_parts(p as
 //! *const u8, n) }` (87 sites at the round-4 census: ext4 on-disk
-//! structs, journal tags, dfx record headers, command-line blobs) plus
+//! structs, journal tags, debug record headers, command-line blobs) plus
 //! one `unsafe { core::str::from_utf8_unchecked }` per reader. Each
 //! site re-proved the same three things: the pointer covers exactly
 //! `size_of::<T>()` bytes, the buffer is alive, and the length is

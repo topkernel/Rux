@@ -139,11 +139,11 @@ def normalize(text):
     # Remove crate::pr_warn!(...) calls (kernel-only logging)
     text = re.sub(r'\s*crate::pr_warn!.*?;\s*\n?', '\n', text, flags=re.DOTALL)
 
-    # Remove crate::dfx::... statement calls (kernel-only forensics probes,
+    # Remove crate::debug::... statement calls (kernel-only forensics probes,
     # e.g. mmforensics::note_ref). Single statements ending at the first
     # ';'. The trailing [ \t]*\n? eats exactly the statement's own newline
     # so the next line keeps its indentation.
-    text = re.sub(r'[ \t]*crate::dfx::[^;]*;[ \t]*\n?', '', text)
+    text = re.sub(r'[ \t]*crate::debug::[^;]*;[ \t]*\n?', '', text)
 
     # Remove preempt_count_add/sub balance pairs (kernel-only preemption
     # gating around spinlock critical sections; the verification models

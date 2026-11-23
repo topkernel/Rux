@@ -1609,7 +1609,7 @@ impl CfsRunQueue {
     /// when the poison discipline refused the link.
     #[inline]
     pub fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::Task) -> bool {
-        let t0 = crate::dfx::cctx::now();
+        let t0 = crate::debug::cctx::now();
         // nanosleep-loss conviction: inserting a node that is STILL
         // PHYSICALLY LINKED (a prior removal failed silently — pick_next
         // ignores timeline_remove's failure) corrupts the tree (the
@@ -1621,7 +1621,7 @@ impl CfsRunQueue {
                 static DI_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if DI_N.fetch_add(1, Ordering::Relaxed) < 12 {
-                    use crate::dfx::taskdump::putc_brief as putchar;
+                    use crate::debug::taskdump::putc_brief as putchar;
                     fn ph(mut v: u64) {
                         for _ in 0..8 {
                             let n = (v >> 28) as u8;
@@ -1653,8 +1653,8 @@ impl CfsRunQueue {
                     usize::MAX,
                     task as usize,
                 );
-                crate::dfx::cctx::add(&crate::dfx::cctx::FAIR_TL_NS, t0);
-                crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_TL_N);
+                crate::debug::cctx::add(&crate::debug::cctx::FAIR_TL_NS, t0);
+                crate::debug::cctx::bump(&crate::debug::cctx::FAIR_TL_N);
                 return false;
             }
         }
@@ -1668,8 +1668,8 @@ impl CfsRunQueue {
         let w = crate::sched::edges::task_shared(task).sched_entity().load.weight as i128;
         self.avg_vruntime_sum +=
             (key.vruntime as i128 - self.get_min_vruntime() as i128) * w;
-        crate::dfx::cctx::add(&crate::dfx::cctx::FAIR_TL_NS, t0);
-        crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_TL_N);
+        crate::debug::cctx::add(&crate::debug::cctx::FAIR_TL_NS, t0);
+        crate::debug::cctx::bump(&crate::debug::cctx::FAIR_TL_N);
         true
     }
 
@@ -1680,7 +1680,7 @@ impl CfsRunQueue {
     /// the unlink (node stays linked; counters stay paired).
     #[inline]
     pub fn timeline_remove(&mut self, key: &VruntimeKey, task: *mut crate::process::Task) -> bool {
-        let t0 = crate::dfx::cctx::now();
+        let t0 = crate::debug::cctx::now();
         // SAFETY: callers pass the task whose node is linked (or, on the
         // poison path, a null task — handled below).
         let ok = if task.is_null() {
@@ -1701,7 +1701,7 @@ impl CfsRunQueue {
                 && RbNode::linked_at(node_of_task(task))
                 && TRE_N.fetch_add(1, Ordering::Relaxed) < 12
             {
-                use crate::dfx::taskdump::putc_brief as putchar;
+                use crate::debug::taskdump::putc_brief as putchar;
                 fn ph(mut v: u64) {
                     for _ in 0..8 {
                         let n = (v >> 28) as u8;
@@ -1714,8 +1714,8 @@ impl CfsRunQueue {
                 putchar(b'\n');
             }
             crate::sched::sched::tl_poison_erase_inc();
-            crate::dfx::cctx::add(&crate::dfx::cctx::FAIR_TL_NS, t0);
-            crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_TL_N);
+            crate::debug::cctx::add(&crate::debug::cctx::FAIR_TL_NS, t0);
+            crate::debug::cctx::bump(&crate::debug::cctx::FAIR_TL_N);
             return false;
         }
         // SAFETY: unlinked now; valid Task.
@@ -1725,8 +1725,8 @@ impl CfsRunQueue {
             self.avg_vruntime_sum -=
                 (key.vruntime as i128 - self.get_min_vruntime() as i128) * w;
         }
-        crate::dfx::cctx::add(&crate::dfx::cctx::FAIR_TL_NS, t0);
-        crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_TL_N);
+        crate::debug::cctx::add(&crate::debug::cctx::FAIR_TL_NS, t0);
+        crate::debug::cctx::bump(&crate::debug::cctx::FAIR_TL_N);
         true
     }
 
@@ -1784,7 +1784,7 @@ impl CfsRunQueue {
             {
                 let loc = core::panic::Location::caller();
                 let pid = crate::sched::get_current_pid();
-                use crate::dfx::taskdump::putc_brief as putchar;
+                use crate::debug::taskdump::putc_brief as putchar;
                 for &b in b"\nNRUN-DOUBLE-DEC pid=0x" { putchar(b); }
                 let mut v = pid as u64;
                 for _ in 0..8 {
@@ -1831,7 +1831,7 @@ impl CfsRunQueue {
                 && LASTW.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
             {
                 let loc = core::panic::Location::caller();
-                use crate::dfx::taskdump::putc_brief as putchar;
+                use crate::debug::taskdump::putc_brief as putchar;
                 for &b in b"\nLWEIGHT-UNDERFLOW at " { putchar(b); }
                 let f = loc.file();
                 let base = f.rfind('/').map(|i| i + 1).unwrap_or(0);
@@ -2152,7 +2152,7 @@ impl CfsRunQueue {
     /// stale on_rq=true flag.
     ///
     /// INVARIANT: the timeline (including this read) is only touched
-    /// with the GRQ lock held (the DFX taskdump's try-lock calls obey
+    /// with the GRQ lock held (the DEBUG taskdump's try-lock calls obey
     /// the same rule). grq-10ns: linkage is the entity node's physical
     /// `linked` state — exactly "timeline_insert succeeded and no
     /// removal has run since" — visible as the stored ORDER key being
@@ -2397,7 +2397,7 @@ impl CfsRunQueue {
     /// One heal line prefix: TAG by_cpu=N pid=P from_claim=C[ pk=K] (no
     /// trailing newline — callers append their context tail first).
     pub fn stale_heal_line(tag: &[u8], cpu_id: usize, pid: u32, was: i32, pk: u32) {
-        use crate::dfx::taskdump::putc_brief as putchar;
+        use crate::debug::taskdump::putc_brief as putchar;
         for &b in tag {
             putchar(b);
         }
@@ -2450,9 +2450,9 @@ impl CfsRunQueue {
         // never scheduled: recycle-residue class) and the jiffy stamp —
         // pairs with ENQ-CLAIMED-SLOTBK jif= lines (same pid+claim).
         if !task.is_null() {
-            use crate::dfx::taskdump::putc_brief as putchar;
+            use crate::debug::taskdump::putc_brief as putchar;
             fn pdec5(mut v: u64) {
-                use crate::dfx::taskdump::putc_brief as p;
+                use crate::debug::taskdump::putc_brief as p;
                 let mut buf = [0u8; 20];
                 let mut n = 0;
                 if v == 0 {
@@ -2503,7 +2503,7 @@ impl CfsRunQueue {
                 pdec5(crate::timer::get_jiffies().wrapping_sub(pjif));
             }
         }
-        crate::dfx::taskdump::putc_brief(b'\n');
+        crate::debug::taskdump::putc_brief(b'\n');
     }
 
     /// R85 (tail-phase PICK-SKIP wedge): always-on, rate-limited report
@@ -2545,7 +2545,7 @@ impl CfsRunQueue {
             // owner masks at heal time (both must be 0 — that is the
             // adjudication's precondition; a nonzero mask here names a
             // racing owner).
-            use crate::dfx::taskdump::putc_brief as putchar;
+            use crate::debug::taskdump::putc_brief as putchar;
             const M: &[u8] = b" st=0x";
             for &b in M {
                 putchar(b);
@@ -2579,7 +2579,7 @@ impl CfsRunQueue {
 
     /// Decimal printer for the heal reports (R34: direct console writes).
     pub fn put_dec(v: u64) {
-        use crate::dfx::taskdump::putc_brief as putchar;
+        use crate::debug::taskdump::putc_brief as putchar;
         if v == 0 {
             putchar(b'0');
             return;
@@ -2598,7 +2598,7 @@ impl CfsRunQueue {
         }
     }
 
-    /// rux:claiminject (retired dfx=claiminject) adjudication scan (GNOME-wedge hunt): poison every
+    /// rux:claiminject (retired debug=claiminject) adjudication scan (GNOME-wedge hunt): poison every
     /// linked task that currently shows the fully-pickable ownership state
     /// {on_cpu=false, claim=-1} with a claim from CPU 7 — a CPU that does
     /// not exist on any board we boot, so no picker can ever own it. On an
@@ -2629,7 +2629,7 @@ impl CfsRunQueue {
         n
     }
 
-    /// rux:oncpuinject (retired dfx=oncpuinject) adjudication scan (R85 tail-wedge hunt): stamp the
+    /// rux:oncpuinject (retired debug=oncpuinject) adjudication scan (R85 tail-wedge hunt): stamp the
     /// FULL lost-release shape — {on_cpu=true, claim=7, pk=LIVE} via
     /// publish_pick_ownership — onto every linked task currently showing
     /// the pickable {on_cpu=false, claim=-1}. CPU 7 exists on no board we
@@ -2695,7 +2695,7 @@ impl CfsRunQueue {
     ///
     /// Returns the census tuple (linked, stale_reset, owned_claim,
     /// oncpu_marked, oncpu_pids, owned_pids) — printed by the tick hook
-    /// (rux:wwcensus (retired dfx=wwcensus)). owned_claim counts the lying-slot shape (a live
+    /// (rux:wwcensus (retired debug=wwcensus)). owned_claim counts the lying-slot shape (a live
     /// slot names the task): NOT healable here (that adjudication needs
     /// the frozen-exec-clock conviction against the SLOT's liveness, not
     /// just the task's), but the census names its pids so the next
@@ -2811,7 +2811,7 @@ impl CfsRunQueue {
                 crate::sched::sched::ww_claim_heal_inc();
                 if Self::heal_report_budget_ok() {
                     Self::stale_heal_line(b"SWEEP-CLAIM-RESET", cpu_id, tr.pid(), claim, u32::MAX);
-                    crate::dfx::taskdump::putc_brief(b'\n');
+                    crate::debug::taskdump::putc_brief(b'\n');
                 }
             }
         }
