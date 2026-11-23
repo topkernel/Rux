@@ -61,6 +61,34 @@ exec helpers — the pilot's relocations were exactly this rule applied).
 Every step is independently mergeable and gate-green; no step changes
 behavior — relocations and attributes only.
 
+### 3a. Seam-craft rules (the leaf-style lessons, adopted 2026-11-23)
+
+Three rules for designing any callback table or trait seam — the same
+principles the in-tree Rust leaf work in the reference monolithic
+kernel uses to keep its FFI-adjacent abstractions cheap. We derived
+them independently (paid for with measured regressions), and they are
+binding for every future flip:
+
+1. **Split by concern, never a mega-table.** One table per lifecycle/
+   consumer (the fs side has MountFn / notify / ops / relocation / FsHooks
+   as five separate tables; mm has MmHooks vs MmPolicyHooks). A table
+   whose rows exceed ~20 must either split or justify its width in the
+   seam's doc comment.
+2. **Static dispatch first on hot paths.** A seam on a data path takes
+   an existing vtable FIELD (e.g. FileOps.fault / FileOps.write_at —
+   field dispatch the caller already performs) or a direct `#[inline]`
+   wrapper over a static, NOT a new fn-pointer row. Receipts: S1's
+   ~40 indirect calls per switch cost p2_ctxsw +25.1% until
+   devirtualized to +1.7%; R5's read/write paths ride FileOps slots at
+   zero new indirection. Fn-pointer table rows are for COLD paths
+   (mount rows, procfs show, sysctl, exit/exec hooks) and may be
+   arm-gated at the call site when their body is diagnostic.
+3. **Thin mechanical adapters.** Seam signatures carry the native error
+   type (`Result<_, i32>` errno or the domain enum) and the adapter
+   layer contains ZERO logic — bodies move verbatim; conversions are
+   one line and mechanical. If a seam body needs logic, that logic
+   belongs on one side of the boundary, not in the seam.
+
 ## 4. The ladder (order = least-coupled first, each rung measured)
 
 | rung | crate | why this order |
