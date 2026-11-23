@@ -79,7 +79,6 @@ strip = true
 # exclude in the same change).
 [workspace]
 members = ["rux-syscall", "rux-net", "rux-sched", "rux-fs", "rux-drivers", "rux-mm", "rux-ext4", "rux-ipc", "rux-signal", "rux-process", "rux-bin"]
-members = ["rux-syscall", "rux-net", "rux-sched", "rux-fs", "rux-drivers", "rux-mm", "rux-ext4", "rux-ipc", "rux-process", "rux-bin"]
 
 [workspace.package]
 version = "0.1.0"
