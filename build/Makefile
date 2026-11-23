@@ -62,7 +62,10 @@ CARGO_FEATURE_FLAGS := --no-default-features --features aarch64$(LOCKOWNER_FEAT)
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else ifeq ($(PLATFORM),riscv64)
 CARGO_TARGET := riscv64gc-unknown-none-elf
-CARGO_FEATURE_FLAGS := $(if $(LOCKOWNER),dfx-lock-owner,)
+# (riscv64 is the default-features platform, so LOCKOWNER appends via a
+# --features of its own — the x86/aarch64 comma-form above rides the
+# --no-default-features base; a bare token here broke cargo's argv.)
+CARGO_FEATURE_FLAGS := $(if $(LOCKOWNER),--features dfx-lock-owner,)
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else
 $(error Unsupported platform '$(PLATFORM)' — run `make menuconfig`)
