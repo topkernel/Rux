@@ -170,7 +170,7 @@ fn enotty() -> i64 {
 }
 
 fn access_token_ioctl(request: u32, arg: usize) -> i64 {
-    use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user};
+    use crate::arch::uaccess::access_ok;
 
     // Key the registry by TGID, not the ioctl caller's tid. Tokens are
     // per-PROCESS: init's service child calls SET between fork and exec

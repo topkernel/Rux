@@ -19,10 +19,15 @@
 // Root re-exports: the framework crate's modules appear at THIS crate's
 // root so the service files' crate::X paths resolve unchanged.
 pub use rux::{
-    arch, config, console, dfx, drivers, errno, io_uring, ipc, list,
+    arch, config, console, dfx, drivers, errno, io_uring, list,
     mm, module, perf, printk, process, safety, sched, security,
     signal, sync, timer, trace,
 };
+// The ipc service tree (crate-flip rung: rux-ipc): the SERVICE crate's
+// merged ipc view (the movable policy + the framework's binder
+// re-export) re-exported at this root — the sibling-service
+// dependency (syscall -> ipc) is one-way, the net precedent.
+pub use rux_ipc::ipc;
 // The fs service tree (crate-flip rung 3): the SERVICE crate's merged
 // fs view (framework fs + the moved leaves) re-exported at this root —
 // the sibling-service dependency (syscall -> fs-svc) is one-way, the

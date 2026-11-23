@@ -7,7 +7,6 @@
 //! Implements semget, semctl, semop, semtimedop following the Linux kernel design.
 
 use crate::arch::uaccess::access_ok;
-use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};

@@ -24,7 +24,7 @@ pub extern "C" fn rust_main() -> ! {
     // The ipc policy rows (sysv/posix_mq/keys/access_token) before
     // rust_main_impl: devfs populate and exit/exec/fork/sysctl paths
     // ride the IpcHooks table from their first use.
-    rux::ipc::register_hooks();
+    rux_ipc::register_all();
     rux_syscall::register_all();
     // The mm policy rows (M1a): carve-live on x86_64, still in-tree on
     // riscv64/aarch64 (their register_in_tree fills the table inside
@@ -35,5 +35,7 @@ pub extern "C" fn rust_main() -> ! {
     // pass/fail counters as the in-framework suite.
     #[cfg(feature = "unit-test")]
     rux::tests::register_service_tests(rux_fs::run_unit_tests);
+    #[cfg(feature = "unit-test")]
+    rux::tests::register_service_tests(rux_ipc::run_unit_tests);
     rust_main_impl()
 }

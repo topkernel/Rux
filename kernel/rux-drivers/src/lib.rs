@@ -39,7 +39,10 @@ pub use rux::{
     net, process, safety, sched, security, signal, sync, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
-pub use rux::ipc;
+// The ipc service tree (crate-flip rung: rux-ipc): the merged view
+// (service policy + framework binder) — access_tokenid consumes the
+// access_token registry through it.
+pub use rux_ipc::ipc;
 extern crate alloc;
 
 // The driver tree, nested under crate::drivers (the historical paths).

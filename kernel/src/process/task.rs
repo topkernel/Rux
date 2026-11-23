@@ -1492,7 +1492,9 @@ pub struct Task {
     exe_path: alloc::boxed::Box<[u8]>,
     /// Per-process semaphore undo table.
     /// Records SEM_UNDO adjustments to be reversed on process exit.
-    pub(crate) sem_undo: Spinlock<alloc::vec::Vec<crate::ipc::util::SemUndoEntry>>,
+    // pub (visibility tax of the rux-ipc flip): the sysv_sem policy's
+    // exit cleanup reads/takes this table through the IpcHooks row.
+    pub sem_undo: Spinlock<alloc::vec::Vec<crate::ipc::SemUndoEntry>>,
 
     /// Interval timers (ITIMER_REAL=0, ITIMER_VIRTUAL=1, ITIMER_PROF=2).
     /// Each stores the kernel timer ID (0 = disarmed).

@@ -358,9 +358,10 @@ pub mod signal_procmask;
 
 // ===== IPC System V =====
 #[cfg(feature = "unit-test")]
-pub mod ipc_sysv;
+// pub mod ipc_sysv; — MOVED to the rux-ipc service crate (this rung;
+// runs through the SERVICE-TEST SEAM, same pass/fail counters)
 #[cfg(feature = "unit-test")]
-pub mod sysv_sem_block;
+// pub mod sysv_sem_block; — MOVED to the rux-ipc service crate (this rung)
 
 // ===== Memory syscalls =====
 #[cfg(feature = "unit-test")]
@@ -680,8 +681,8 @@ pub fn run_all_tests() {
     test_group_start("ipc_eventfd");
 // (gated with the module: ipc_eventfd)
 
-    test_group_start("ipc_sysv");
-    ipc_sysv::test_ipc_sysv();
+    // (gated with the module: ipc_sysv — moved to rux-ipc, runs via
+    // the SERVICE-TEST SEAM with the same group name/counters)
 
     // Real-filesystem test suite (kernel/src/tests/fs_io.rs): the ext4
     // root is mounted BEFORE the suite runs — drive it (create/write/
@@ -704,8 +705,7 @@ pub fn run_all_tests() {
     // ipc/binder.rs — all binder unit tests live under kernel/src/tests/.
     binder::test_binder();
 
-    test_group_start("sysv_sem_block");
-    sysv_sem_block::test_sysv_sem_block();
+    // (gated with the module: sysv_sem_block — moved to rux-ipc)
 
     // ===== 9. Memory syscalls =====
     test_group_start("mem_mmap");

@@ -14,9 +14,10 @@ edition = "2021"
 
 [dependencies]
 rux = { path = "..", default-features = false }
+rux-ipc = { path = "../rux-ipc", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64"]
-x86_64 = ["rux/x86_64"]
-aarch64 = ["rux/aarch64"]
+riscv64 = ["rux/riscv64", "rux-ipc/riscv64"]
+x86_64 = ["rux/x86_64", "rux-ipc/x86_64"]
+aarch64 = ["rux/aarch64", "rux-ipc/aarch64"]
