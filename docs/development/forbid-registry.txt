@@ -67,7 +67,7 @@ kernel/src/interrupt/domain.rs
 kernel/src/interrupt/irqchip.rs
 kernel/src/interrupt/irqthread.rs
 kernel/src/interrupt/ksoftirqd.rs
-kernel/src/ipc/access_token.rs
+kernel/rux-ipc/src/ipc/access_token.rs
 kernel/src/ipc/util.rs
 kernel/src/mm/allocator.rs
 kernel/rux-mm/src/mm/hugepage.rs
@@ -111,8 +111,8 @@ kernel/src/tests/dcache.rs
 kernel/src/tests/dev_t.rs
 kernel/src/tests/errno_test.rs
 kernel/src/tests/execve.rs
-kernel/rux-ext4/src/tests/ext4_allocator.rs
-kernel/rux-ext4/src/tests/ext4_file_write.rs
+kernel/src/tests/services/ext4_allocator.rs
+kernel/src/tests/services/ext4_file_write.rs
 kernel/src/tests/fcntl.rs
 kernel/src/tests/file_buffer.rs
 kernel/src/tests/file_flags.rs
