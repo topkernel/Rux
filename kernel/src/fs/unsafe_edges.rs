@@ -315,6 +315,15 @@ pub fn kernel_slice_mut<'a>(p: *mut u8, len: usize) -> &'a mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(p, len) }
 }
 
+/// Offset+slice twin of [`kernel_slice`] (the tmpfs cache-frame face:
+/// p is a pinned PAGE_SIZE frame, off+len <= PAGE_SIZE by the caller's
+/// page math — the F-TMPFS-CACHE audit row).
+pub fn kernel_slice_at<'a>(p: *const u8, off: usize, len: usize) -> &'a [u8] {
+    // SAFETY: the caller's readable-span contract at p+off (in-page
+    // by construction).
+    unsafe { core::slice::from_raw_parts(p.add(off), len) }
+}
+
 /// File::close for teardown paths (the framework's unsafe fn; the edge
 /// carries the caller's sole-reference contract).
 pub fn file_close(f: &mut File) -> i32 {

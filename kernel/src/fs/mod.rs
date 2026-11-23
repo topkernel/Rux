@@ -29,7 +29,7 @@ pub mod lock_hooks;
 pub mod fs_hooks;
 pub mod notify_events;
 // pub mod rootfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
-pub mod tmpfs;
+// pub mod tmpfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 // pub mod ext4; — MOVED to the rux-ext4 service crate (rung 5)
 pub mod stat;
 pub mod procfs;

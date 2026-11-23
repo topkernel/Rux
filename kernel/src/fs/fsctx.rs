@@ -295,42 +295,33 @@ pub fn create_fs_root(
     data: Option<&str>,
     ro: bool,
 ) -> Result<(Arc<Inode>, bool), i32> {
+    use crate::fs::leaf_glue::TmpfsTagKind;
     let src = source.unwrap_or("");
     match fs_type {
         "tmpfs" | "shm" => {
-            crate::fs::tmpfs::ensure_registered();
-            Ok((crate::fs::tmpfs::create_mount_instance(data), false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, None)
+                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "ramfs" | "rootfs" => {
-            crate::fs::tmpfs::ensure_registered();
-            Ok((crate::fs::tmpfs::create_mount_instance(data), false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, None)
+                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "devpts" => {
-            crate::fs::tmpfs::ensure_registered();
-            let mut root = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root,
-                &crate::fs::tmpfs::DEVPTS_INODE_OPS,
-            );
-            Ok((root, false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, Some(TmpfsTagKind::Devpts))
+                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "securityfs" => {
-            crate::fs::tmpfs::ensure_registered();
-            let mut root = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root,
-                &crate::fs::tmpfs::SECURITYFS_INODE_OPS,
-            );
-            Ok((root, false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, Some(TmpfsTagKind::Securityfs))
+                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "mqueue" => {
-            crate::fs::tmpfs::ensure_registered();
-            let mut root = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root,
-                &crate::fs::tmpfs::MQUEUE_INODE_OPS,
-            );
-            Ok((root, false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, Some(TmpfsTagKind::Mqueue))
+                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "selinuxfs" => Ok((
             (crate::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&crate::fs::fs_hooks::FsHooks::EMPTY).selinuxfs_root_inode)()

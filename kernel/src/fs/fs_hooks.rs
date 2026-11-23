@@ -10,6 +10,7 @@
 //! contract). The framework never names a service leaf.
 
 use crate::fs::file::File;
+use crate::fs::leaf_glue::TmpfsTagKind;
 use alloc::boxed::Box;
 use crate::fs::inode::Inode;
 
@@ -128,6 +129,15 @@ pub struct FsHooks {
     pub rootfs_initrd_sb: fn() -> Option<&'static dyn super::leaf_glue::InitrdRamfs>,
     /// The legacy read_file_from_rootfs (init.rs's config probe).
     pub rootfs_read_file: fn(&str) -> Option<alloc::vec::Vec<u8>>,
+    // ---- tmpfs rows ----
+    /// fsctx's mount-instance factory (devpts/securityfs/mqueue tag the
+    /// fresh root with a type-ops twin).
+    pub tmpfs_create_mount_instance: fn(Option<&str>, Option<TmpfsTagKind>) -> Option<alloc::sync::Arc<Inode>>,
+    pub tmpfs_ensure_registered: fn(),
+    /// mm/policy's file-identity probe (SHARED-fault routing).
+    pub tmpfs_is_file: fn(&File) -> bool,
+    /// vfs_fallocate's tmpfs arm (None = not tmpfs).
+    pub tmpfs_fallocate: fn(&Inode, i32, u64, u64) -> Option<Result<(), i32>>,
     /// procfs's mounts view (interim until procfs joins the crate).
     pub rootfs_sb_ref_interim: fn() -> Option<&'static dyn super::leaf_glue::InitrdRamfs>,
 }
@@ -205,6 +215,10 @@ impl FsHooks {
         rootfs_create_root_inode: || None,
         rootfs_initrd_sb: || None,
         rootfs_read_file: |_| None,
+        tmpfs_create_mount_instance: |_, _| None,
+        tmpfs_ensure_registered: || {},
+        tmpfs_is_file: |_| false,
+        tmpfs_fallocate: |_, _, _, _| None,
         rootfs_sb_ref_interim: || None,
     };
 }

@@ -7295,59 +7295,13 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
     }
 
-    // tmpfs: fallocate(2) with shmem semantics (falloc-wedge lane,
-    // 2026-11-16): mode=0 MATERIALIZES zero pages for the range under
-    // the mount's page budget (the reference allocates; Rux used to only
-    // grow the logical size, so a write into the "preallocated" range of
-    // a full tmpfs failed ENOSPC — LTP fallocate05/06's tmpfs
-    // iterations), PUNCH_HOLE|KEEP_SIZE discards the range's pages
-    // (byte-granular, budget returned — the dealloc step of the same
-    // tests). Other flag bits stay EOPNOTSUPP. journald v255's
-    // fallocate(fd, 0, 0, len) preallocation (the reason this arm
-    // exists) still succeeds — now with the pages actually reserved.
-    // FALLOC_FL_* are the stable Linux uapi constants (framework-side
-    // since rung 5; the leaf re-uses the same values).
-    const KEEP_SIZE: i32 = 0x01;
-    const PUNCH_HOLE: i32 = 0x02;
-    // The legacy None-ops default IS the ext4 table (seam row).
-    let effective_ops = inode
-        .ops
-        .or_else(crate::fs::ext4_hooks::default_inode_ops);
-    if effective_ops.is_some_and(|ops| {
-        core::ptr::eq(ops as *const _, &crate::fs::tmpfs::TMPFS_INODE_OPS as *const _)
-    }) {
-        if mode & !(KEEP_SIZE | PUNCH_HOLE) != 0 {
-            return Err(errno::Errno::OperationNotSupported.as_neg_i32());
-        }
-        // SAFETY: private_data holds an Arc<TmpfsNode> placed by
-        // tmpfs_make_inode; ManuallyDrop borrows the strong count
-        // without claiming it.
-        let node = core::mem::ManuallyDrop::new(unsafe {
-            alloc::sync::Arc::from_raw(
-                inode.private_data.unwrap() as *const crate::fs::tmpfs::TmpfsNode,
-            )
-        });
-        if mode & PUNCH_HOLE != 0 {
-            if mode & KEEP_SIZE == 0 {
-                // Linux: PUNCH_HOLE without KEEP_SIZE is EINVAL.
-                return Err(errno::Errno::InvalidArgument.as_neg_i32());
-            }
-            // Clamp to EOF (shmem_punch_range shape): bytes past the
-            // logical size are already holes.
-            let size = inode.size.load(core::sync::atomic::Ordering::Acquire);
-            let punched = core::cmp::min(len, size.saturating_sub(offset));
-            node.punch_hole(offset as usize, punched as usize);
-            return Ok(());
-        }
-        node.fallocate_alloc(offset as usize, len as usize)?;
-        if mode & KEEP_SIZE == 0 {
-            let end = offset.saturating_add(len);
-            if end > inode.size.load(core::sync::atomic::Ordering::Acquire) {
-                node.truncate(end as usize);
-                inode.size.store(end, core::sync::atomic::Ordering::Release);
-            }
-        }
-        return Ok(());
+    // tmpfs: fallocate(2) with shmem semantics — the arm's body moved
+    // into the tmpfs leaf (rux-fs crate) at the fs-substrate flip; the
+    // row answers None for non-tmpfs inodes (the ops identity uses the
+    // ext4_hooks None-ops default — rung 5's legacy shape) and this
+    // falls through to the filesystem-specific arm below.
+    if let Some(res) = crate::fs::leaf_glue::tmpfs::fallocate(inode, mode, offset, len) {
+        return res;
     }
 
     // Route to the filesystem implementation (ext4): the whole

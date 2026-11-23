@@ -289,6 +289,45 @@ pub mod rootfs {
     }
 }
 
+// ---- tmpfs (mount instances, fault routing, fallocate) ----
+
+pub mod tmpfs {
+    use super::*;
+
+    pub fn ensure_registered() {
+        (hooks().tmpfs_ensure_registered)()
+    }
+
+    pub fn create_mount_instance(
+        data: Option<&str>,
+        tag: Option<TmpfsTagKind>,
+    ) -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
+        (hooks().tmpfs_create_mount_instance)(data, tag)
+    }
+
+    pub fn is_tmpfs_file(file: &super::super::file::File) -> bool {
+        (hooks().tmpfs_is_file)(file)
+    }
+
+    pub fn fallocate(
+        inode: &super::super::inode::Inode,
+        mode: i32,
+        offset: u64,
+        len: u64,
+    ) -> Option<Result<(), i32>> {
+        (hooks().tmpfs_fallocate)(inode, mode, offset, len)
+    }
+}
+
+/// The fsctx mount-instance tag (devpts/securityfs/mqueue create tmpfs
+/// instances retagged with a type-ops twin).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TmpfsTagKind {
+    Devpts,
+    Securityfs,
+    Mqueue,
+}
+
 /// The initrd unpack target: the rootfs superblock's path-shaped API
 /// as a framework-owned trait (the cpio unpacker stays framework-side;
 /// the rootfs leaf lives in the rux-fs crate and implements this).

@@ -48,10 +48,13 @@ pub mod fs {
     pub mod pty;
     pub mod char_dev;
     pub mod rootfs;
+    pub mod tmpfs;
     #[cfg(feature = "unit-test")]
     pub mod initrd_test;
     #[cfg(feature = "unit-test")]
     pub mod rootfs_test;
+    #[cfg(feature = "unit-test")]
+    pub mod tmpfs_test;
     pub use rux::fs::*;
 }
 
@@ -72,6 +75,8 @@ pub fn run_unit_tests() {
     crate::fs::initrd_test::test_initrd();
     rux::tests::test_group_start("fs_pins/rootfs");
     crate::fs::rootfs_test::test_rootfs_pins();
+    rux::tests::test_group_start("tmpfs-mknod");
+    crate::fs::tmpfs_test::test_tmpfs_mknod();
 }
 
 /// The boot-time registration (rux-bin calls this before kmain):
@@ -118,6 +123,7 @@ pub fn register_all() {
             crate::fs::tracefs::mount_register,
             crate::fs::cgroup::mount_register,
             crate::fs::sysfs::mount_register,
+            crate::fs::tmpfs::mount_register,
         ],
         // ---- debugfs rows ----
         debugfs_create_dir: crate::fs::debugfs::create_dir,
@@ -173,6 +179,20 @@ pub fn register_all() {
         rootfs_initrd_sb: || crate::fs::rootfs::initrd_sb_view(),
         rootfs_read_file: crate::fs::rootfs::read_file,
         rootfs_sb_ref_interim: crate::fs::rootfs::initrd_sb_view,
+        tmpfs_create_mount_instance: |data, tag| {
+            use crate::fs::leaf_glue::TmpfsTagKind;
+            let mut root = crate::fs::tmpfs::create_mount_instance(data);
+            match tag {
+                Some(TmpfsTagKind::Devpts) => crate::fs::tmpfs::tag_mount_instance_type(&mut root, &crate::fs::tmpfs::DEVPTS_INODE_OPS),
+                Some(TmpfsTagKind::Securityfs) => crate::fs::tmpfs::tag_mount_instance_type(&mut root, &crate::fs::tmpfs::SECURITYFS_INODE_OPS),
+                Some(TmpfsTagKind::Mqueue) => crate::fs::tmpfs::tag_mount_instance_type(&mut root, &crate::fs::tmpfs::MQUEUE_INODE_OPS),
+                None => {}
+            }
+            Some(root)
+        },
+        tmpfs_ensure_registered: crate::fs::tmpfs::ensure_registered,
+        tmpfs_is_file: crate::fs::tmpfs::is_tmpfs_file,
+        tmpfs_fallocate: crate::fs::tmpfs::fallocate,
         char_dev_uart_write: crate::fs::char_dev::uart_write,
         tty_console_lflag: || crate::fs::tty::console().lflag(),
         tty_console_echo_enabled: || crate::fs::tty::console().echo_enabled(),

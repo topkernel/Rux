@@ -276,7 +276,7 @@ pub mod pt_regs;
 #[cfg(feature = "unit-test")]
 pub mod perf;
 #[cfg(feature = "unit-test")]
-pub mod tmpfs;
+// pub mod tmpfs; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 #[cfg(feature = "unit-test")]
 pub mod dev_t;
 #[cfg(feature = "unit-test")]
@@ -525,8 +525,8 @@ pub fn run_all_tests() {
     // initrd: MOVED to the rux-fs crate (fs-substrate) — runs through
     // the SERVICE-TEST SEAM (rux_fs::run_unit_tests).
 
-    test_group_start("tmpfs-mknod");
-    tmpfs_mknod::test_tmpfs_mknod();
+    // tmpfs(-mknod): MOVED to the rux-fs crate (fs-substrate) — runs
+    // through the SERVICE-TEST SEAM (rux_fs::run_unit_tests).
 
     // getdents64 listing cache (F4 route-4): stability + invalidation.
     getdents_cache::test_getdents_cache();

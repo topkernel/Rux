@@ -16,7 +16,7 @@ use core::sync::atomic::Ordering;
 // ========================================================================
 
 fn test_page_roundtrip() {
-    let sb = TmpfsSuperBlock::new(9001, 0);
+    let sb: &\'static TmpfsSuperBlock = alloc::boxed::Box::leak(alloc::boxed::Box::new(TmpfsSuperBlock::new(9001, 0)));
     let f = sb.new_node(b"file".to_vec(), TmpfsType::RegularFile);
     // Sparse write: page 0 and page 2, hole at page 1.
     f.write_at(0, b"hello");
@@ -35,7 +35,7 @@ fn test_page_roundtrip() {
 }
 
 fn test_truncate_zero_tail() {
-    let sb = TmpfsSuperBlock::new(9002, 0);
+    let sb: &\'static TmpfsSuperBlock = alloc::boxed::Box::leak(alloc::boxed::Box::new(TmpfsSuperBlock::new(9002, 0)));
     let f = sb.new_node(b"file".to_vec(), TmpfsType::RegularFile);
     f.write_at(0, &[0xAAu8; 64]);
     f.truncate(16);
@@ -49,7 +49,7 @@ fn test_truncate_zero_tail() {
 }
 
 fn test_dir_ops() {
-    let sb = TmpfsSuperBlock::new(9003, 0);
+    let sb: &\'static TmpfsSuperBlock = alloc::boxed::Box::leak(alloc::boxed::Box::new(TmpfsSuperBlock::new(9003, 0)));
     let root = sb.root_node.clone();
     let d = sb.new_node(b"d".to_vec(), TmpfsType::Directory);
     root.add_child(d.clone());
@@ -92,7 +92,7 @@ fn test_budget() {
     // ---- budget enforcement: short writes, ENOSPC shape -----------------
     // LTP preadv203 pattern: a 32MB-capped tmpfs fed ~118MB of writes
     // must stop granting pages, not eat the kernel heap.
-    let sb = TmpfsSuperBlock::new(9004, 2); // 2-page budget
+    let sb: &\'static TmpfsSuperBlock = alloc::boxed::Box::leak(alloc::boxed::Box::new(TmpfsSuperBlock::new(9004, 2))); // 2-page budget
     crate::test_assert_eq!(sb.page_limit_pages.load(Ordering::Relaxed), 2, "budget: limit stored");
     let f = sb.new_node(b"file".to_vec(), TmpfsType::RegularFile);
 
@@ -122,7 +122,7 @@ fn test_budget() {
 
     // ---- budget is per-MOUNT, shared across files -----------------------
     // Two files on one 1-page tmpfs cannot each take a page.
-    let sb = TmpfsSuperBlock::new(9005, 1);
+    let sb: &\'static TmpfsSuperBlock = alloc::boxed::Box::leak(alloc::boxed::Box::new(TmpfsSuperBlock::new(9005, 1)));
     let a = sb.new_node(b"a".to_vec(), TmpfsType::RegularFile);
     let b = sb.new_node(b"b".to_vec(), TmpfsType::RegularFile);
     crate::test_assert_eq!(a.write_at(0, &[1u8; 16]), 16, "shared: first file takes the page");
