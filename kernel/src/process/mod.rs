@@ -25,6 +25,10 @@ pub mod exit;
 // framework-side here (hot read, no hook row).
 pub mod exec_ring;
 // pub mod kthread; — moved to the rux-process service crate.
+// The wrapper surface for sibling crates and framework callers
+// (the hook-table indirection lives in process_hooks; these are the
+// #[inline] entry points).
+pub use process_hooks::{kthread_run, kthread_run_on_cpu, kthread_should_stop};
 // pub mod ptrace; — moved to the rux-process service crate; the two
 // entry points the trap files call by name stay core-side:
 pub mod ptrace_core;

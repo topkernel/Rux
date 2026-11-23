@@ -69,10 +69,10 @@ pub const B_NAMES: [&str; B_N] = ["len<=64K", "len<=1M", "len<=16M", "len>16M"];
 // ---- per-comm issuer attribution (mmap count) ----
 pub const COMM_SLOTS: usize = 8;
 
-struct PhaseStat {
-    count: AtomicU64,
-    cyc: AtomicU64,
-    max: AtomicU64,
+pub struct PhaseStat {
+    pub count: AtomicU64,
+    pub cyc: AtomicU64,
+    pub max: AtomicU64,
 }
 
 const EMPTY: PhaseStat = PhaseStat {
@@ -81,19 +81,19 @@ const EMPTY: PhaseStat = PhaseStat {
     max: AtomicU64::new(0),
 };
 
-static STATS: [PhaseStat; P_COUNT] = [EMPTY; P_COUNT];
-static SCALARS: [AtomicU64; P_SCALARS] = [const { AtomicU64::new(0) }; P_SCALARS];
-static BUCKETS: [PhaseStat; B_N] = [EMPTY; B_N];
+pub static STATS: [PhaseStat; P_COUNT] = [EMPTY; P_COUNT];
+pub static SCALARS: [AtomicU64; P_SCALARS] = [const { AtomicU64::new(0) }; P_SCALARS];
+pub static BUCKETS: [PhaseStat; B_N] = [EMPTY; B_N];
 
-struct CommEnt {
-    comm: [AtomicU8; 16],
-    n: AtomicU64,
+pub struct CommEnt {
+    pub comm: [AtomicU8; 16],
+    pub n: AtomicU64,
 }
 const EMPTY_COMM: CommEnt = CommEnt {
     comm: [const { AtomicU8::new(0) }; 16],
     n: AtomicU64::new(0),
 };
-static COMMS: [CommEnt; COMM_SLOTS] = [EMPTY_COMM; COMM_SLOTS];
+pub static COMMS: [CommEnt; COMM_SLOTS] = [EMPTY_COMM; COMM_SLOTS];
 
 static ARMED: AtomicU8 = AtomicU8::new(0);
 

@@ -91,16 +91,16 @@ const RING_TAIL: usize = 192;
 
 /// Depth of the binder-proc open ring (one slot per binder_open; an OH
 /// boot opens on the order of a hundred).
-const PROC_RING_LEN: usize = 128;
+pub const PROC_RING_LEN: usize = 128;
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// binder_open trace ring: (seq, pid, jiffies). Filled by `note_proc_open`
 /// from the opener's context (spinlock push only — no I/O there); drained
 /// and printed by schbd so every byte of UART cost stays off racer paths.
-static PROC_RING: crate::sync::spinlock::Spinlock<[(u64, u32, u64); PROC_RING_LEN]> =
+pub static PROC_RING: crate::sync::spinlock::Spinlock<[(u64, u32, u64); PROC_RING_LEN]> =
     crate::sync::spinlock::Spinlock::new([(0, 0, 0); PROC_RING_LEN]);
-static PROC_SEQ: AtomicU64 = AtomicU64::new(0);
+pub static PROC_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Record a binder-proc creation (called from `binder_open`). No-op
 /// unless `rux:schb (retired debug=schb)`. Bounded cost: one switch load + one spinlock store.
@@ -166,7 +166,7 @@ pub fn note_slow() {
 }
 
 /// Snapshot the pace counters for the beat line (schbd context only).
-fn pace_snapshot() -> (u64, u64, u64, u64, u64, u64) {
+pub fn pace_snapshot() -> (u64, u64, u64, u64, u64, u64) {
     (
         PACE_COW.load(Ordering::Relaxed),
         PACE_COW_J.load(Ordering::Relaxed),
