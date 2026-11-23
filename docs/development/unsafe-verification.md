@@ -2472,7 +2472,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 481 | setup_boot_task_fdtable | block | - | GAP | `d705cdec73af` |
+| 505 | setup_boot_task_fdtable | block | - | GAP | `b36caf829cd1` |
 
 ### kernel/src/tests/net_pins.rs (2)
 
