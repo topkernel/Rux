@@ -29,6 +29,7 @@ pub use rux::{
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 pub use rux::syscall; // the framework's syscall seam (support items)
 // Service-internal test lives CENTRALLY in kernel/src/tests/services/.
+#[cfg(feature = "unit-test")]
 #[path = "../../src/tests/services/net_hdrs_test.rs"]
 pub mod net_hdrs_test;
 
