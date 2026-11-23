@@ -26,9 +26,129 @@ crates**. The criterion for every line of code is a single question:
 - NO → it belongs in `rux-core`, carries an INV contract or F-row, and is
  covered by the verification stack (Kani/Miri/Verus).
 
-There is no third bucket. "Framework" as a catch-all for leftovers is
-abolished; what remains in the core is there because it *cannot* be safe,
-not because it was not yet converted.
+There is no third bucket for UNSAFE. "Framework" as a catch-all for
+leftovers is abolished; what remains in the core is there because it
+*cannot* be safe, not because it was not yet converted.
+
+### 1a. The size criterion (user directive 2026-11-23): the core is as
+small as possible, performance unchanged
+
+The criterion above settles where UNSAFE lives. It does not settle how
+much SAFE code stays in the core, and by 2026-11-23 the answer was "most
+of it": kernel/src held 286,139 lines with only 1,838 unsafe blocks and
+238 unsafe fn/impl bodies. The directive for the rest of the campaign:
+
+> The core's code should be as small as possible, as long as
+> performance is unaffected. Code that leaves the core is organized by
+> subsystem.
+
+Two measured facts define the method.
+
+**Fact 1 — what actually has to stay is small, and the direction of
+the call is what decides it.** Two things force code to stay in the
+core:
+
+1. a function that a hot-path site calls directly by name. After the
+   move that call would have to go through the hook table (an indirect
+   call the compiler cannot inline), so the function stays where the
+   hot caller can reach it directly;
+2. a FIELD that a hot path reads or writes directly. Cargo forbids
+   core -> service, so a field the switch or fault path touches must
+   live in the core. This is a constraint on fields, not on whole
+   types: a service crate uses a core-defined type freely (service ->
+   core is the allowed direction), and a type's cold fields can live
+   outside the core behind a pointer the hot fields never follow.
+   Measured 2026-11-23 on `Task` (105 fields): the context switch
+   touches 7 (thread, kernel_stack_bottom, address_space, state, pid,
+   on_cpu, pick_state), the trap path 10, the scheduler 6, the VFS
+   walk 7 — about 20 in all. The other ~85 (ptrace state, robust list,
+   syscall/exit/reap bookkeeping, statistics) are never read on a hot
+   path. Splitting such a type into a core block (the hot fields, same
+   offsets, same cache-line neighbours as today) and a service block
+   reached by one pointer costs the hot paths nothing, because they
+   follow only core-block fields. That split is structural work across
+   every subsystem and comes AFTER the function-level moves; until
+   then a type with any hot field stays whole in the core, and the
+   lanes move its cold METHODS out as free functions.
+
+Everything else leaves. A function that hot paths do not call is
+reached only from cold sites, and cold upward calls through the table
+are fine; the moved code's own calls INTO the core are direct
+cross-crate calls that inline (crate-plan §3a). The service -> core
+direction costs nothing. Only core -> service costs, and only on hot
+paths.
+
+Measured on the 2026-11-23 tree (scripts/core_size_map.py; hot-path
+files are the trap/switch/fault/walk/lock/alloc/tick files; a call in
+a hot file that names a function defined elsewhere is an upward hot
+call):
+
+| | conservative scan | path-resolved scan |
+|---|---|---|
+| function bodies in kernel/src (tests excluded) | 228,305 | 237,908 |
+| must stay in the core (in a hot file, or called upward from one) | ~97,000 (42%) | 76,194 (32%) |
+| leaves the core | ~131,000 (58%) | 159,714 (68%) |
+
+Both scans over-keep: any call a hot file writes to a name defined
+elsewhere counts as upward. The path-resolved scan is stricter about
+which calls actually reach the callee and so keeps less. The true
+figure lies at or below the lower one and is settled per subsystem as
+each lane moves it — a function the scans call cold but that turns out
+to sit on a hot path stays, and the lane records why. The working
+target is therefore: **the core shrinks from 286k lines to under
+100k**, the rest organized into per-subsystem service crates.
+
+**Fact 2 — files are mixed, so the unit of the move is the function,
+not the file.** Only 34 files (7,122 lines) have no hot-called function
+at all. 93 more files are under 25% hot: a few hot functions and a
+large cold remainder in the same file. Moving whole files therefore
+caps out far below the target. Every subsystem is split at the
+function boundary:
+
+- hot functions stay in the core, in the subsystem's core-side file
+  (the existing `*_edges.rs` pattern, or `<subsystem>_hot.rs`), where
+  hot callers reach them by direct call and the compiler can inline;
+- every other function of that subsystem moves to the subsystem's
+  service crate: `rux-sync`, `rux-process`, `rux-signal`, `rux-debug`,
+  `rux-ipc`, `rux-drivers`, `rux-fs`, `rux-mm`, `rux-sched`, … one crate
+  per subsystem, so a reader finds the scheduler's policy in
+  `rux-sched` and the futex protocol logic in `rux-sync`, not in a
+  bin of miscellaneous leftovers.
+
+**The performance rule that makes this free.** The boundary is placed
+so that hot callers never cross it upward. A function that a hot path
+calls directly is, by definition, in the core. What moves is what hot
+paths do not call: cold upward calls may go through the hook table
+(crate-plan §3a rule 2), and the crate calls DOWN into the core
+freely — a direct cross-crate call, inlinable. The S1 case study (§4)
+is the record of what happens when this rule is broken and how it is
+fixed; every lane measures its hot rows before and after.
+
+Per subsystem, the cold remainder measured on 2026-11-23 with the
+path-resolved scan (lines of function bodies not called upward from
+any hot-path file and not defined inside one):
+
+| subsystem | stays | leaves |
+|---|---|---|
+| fs | 22,977 | 24,609 |
+| mm | 9,509 | 13,682 |
+| sync | 3,098 | 17,434 |
+| drivers | 409 | 18,100 |
+| process | 3,056 | 15,263 |
+| debug | 254 | 15,064 |
+| arch (three architectures) | 17,235 | 18,848 |
+| root files (signal.rs, console.rs, cmdline.rs, …) | 2,738 | 12,292 |
+| sched | 12,542 | 2,960 |
+| ipc | 0 | 9,857 |
+| syscall table, timer, io_uring, net, module | 0 | 6,607 |
+| trace, perf, security | 429 | 4,528 |
+| safety, interrupt | 3,947 | 0 |
+
+The numbers are a map, not a promise: a "cold" function that turns out
+to be on a path the measurement missed stays, and the lane that finds
+it records why. What is binding is the direction — every subsystem's
+cold majority leaves the core, organized by subsystem, with no hot
+call made indirect.
 
 ## 2. The irreducible floor (what stays in rux-core, and why)
 

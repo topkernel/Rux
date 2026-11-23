@@ -1,0 +1,7 @@
+# Per-file annotated-count drops that were reviewed and accepted. Read by scripts/unsafe_gate.py --check.
+# One row per drop, tab-separated:
+#   file   the path as the census reports it (kernel/src/...)
+#   from   the file's annotated-region count at the baseline the gate compares against
+#   to     the count it may come down to, and no further (one row never covers a second loss)
+#   reason why the annotations left with their regions
+# A drop that has no matching row fails the gate. Remove a row once no baseline shows its drop.

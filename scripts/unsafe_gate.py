@@ -12,15 +12,38 @@ Enforces the unsafe-code accounting policy:
   * every non-GAP artifact must resolve (KANI/LOOM harness names exist in
     kernel/verify/src, PROPTEST/MIRI file paths exist, INV ids exist in
     docs/architecture/*.md);
+  * --check, per-file monotonicity: no file may hold fewer ANNOTATED
+    regions than it holds in the committed ledger. Region ids are
+    position-based, so a line shift or a file move used to turn every
+    annotation it touched back into GAP while the gate stayed green
+    (each new id entered the sidecar as an accounted GAP). The check
+    compares the working tree with the versions of the ledger a text
+    merge silently merges the sidecar across — HEAD, an in-progress
+    MERGE_HEAD, the parents of a merge commit, and the parent of an
+    ordinary commit — and fails on any drop that
+    docs/development/unsafe-verification-exemptions.tsv does not exempt
+    with a row for that file, that count and a reason. Fix a drop with
+    `python3 scripts/unsafe_census.py --ledger` (it remaps annotations
+    from those same versions by content);
   * --diff <git-rev>: fails when the diff introduces unsafe regions whose
     ids are missing from the sidecar (forward monotonicity: new unsafe
     must come with a ledger row, artifact or explicit GAP).
 
-Exit codes: 0 = accounted, 1 = unaccounted unsafe or dangling artifact.
+What this gate CANNOT see: a wrong artifact. It counts annotated
+regions; it does not know whether INV-X describes the code it is attached
+to. A re-bank that attaches a permuted or stale contract to every region
+passes here. A green gate means every region is accounted for and no
+annotation was lost, nothing more — the re-bank report's self-check and
+citation check (`unsafe_census.py --ledger --dry-run`) are what speak to
+whether the annotations are right.
+
+Exit codes: 0 = accounted, 1 = unaccounted unsafe, dangling artifact or
+an unexempted drop.
 
 Usage:
     python3 scripts/unsafe_gate.py --check
     python3 scripts/unsafe_gate.py --check -v          # list GAP ids per file
+    python3 scripts/unsafe_gate.py --check --base origin/main
     python3 scripts/unsafe_gate.py --diff HEAD~1       # vs a git revision
 """
 
@@ -32,7 +55,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from unsafe_census import (  # noqa: E402
-    ARTIFACTS_TSV, KERNEL_SRC, ROOT, full_census, load_artifacts, scan_texts)
+    ARTIFACTS_TSV, KERNEL_SRC, ROOT, Snapshot, fold_moves, full_census,
+    ledger_baselines, load_artifacts, scan_texts, git_tree_texts)
 
 ARCH_DOCS = [
     ROOT / "docs" / "architecture" / "lock-ordering.md",
@@ -41,24 +65,9 @@ ARCH_DOCS = [
     ROOT / "docs" / "architecture" / "rust-native-register.md",
 ]
 
+EXEMPTIONS_TSV = ROOT / "docs" / "development" / "unsafe-verification-exemptions.tsv"
+
 VALID_KINDS = {"GAP", "KANI", "PROPTEST", "LOOM", "MIRI", "INV"}
-
-
-def git_tree_texts(rev):
-    """{relpath: text} for kernel/src/**/*.rs at a git revision."""
-    out = subprocess.run(
-        ["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", rev, "kernel/src"],
-        capture_output=True, text=True, check=True).stdout
-    texts = {}
-    for rel in out.splitlines():
-        if not rel.endswith(".rs"):
-            continue
-        blob = subprocess.run(
-            ["git", "-C", str(ROOT), "show", f"{rev}:{rel}"],
-            capture_output=True, text=True, check=False)
-        if blob.returncode == 0:
-            texts[rel] = blob.stdout
-    return texts
 
 
 def verify_artifact(art):
@@ -192,10 +201,87 @@ def root_hygiene_check(failures):
                             f"{line[3:]} (scratch belongs in a worktree run/)")
 
 
+def load_exemptions(failures):
+    """[(file, from, to, reason)] — the reviewed per-file drops.
+
+    One TSV row per drop in EXEMPTIONS_TSV: file, from, to, reason. The
+    file's annotated count was `from` at the baseline and may come down
+    to `to` but no further, so one exemption can never cover a second
+    loss. A malformed row or an empty reason fails the gate."""
+    rows = []
+    if not EXEMPTIONS_TSV.exists():
+        return rows
+    for n, line in enumerate(EXEMPTIONS_TSV.read_text().splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        f = [x.strip() for x in line.split("\t")]
+        if len(f) < 4 or not f[1].isdigit() or not f[2].isdigit() or not f[3]:
+            failures.append(f"exemption file {EXEMPTIONS_TSV.name}:{n}: need "
+                            f"file, from, to and a non-empty reason, tab-separated")
+            continue
+        rows.append((f[0], int(f[1]), int(f[2]), f[3]))
+    return rows
+
+
+def annotated_by_file(regions, artifacts):
+    counts = Counter()
+    for r in regions:
+        if artifacts.get(r["id"], "GAP") != "GAP":
+            counts[r["file"]] += 1
+    return counts
+
+
+def annotated_count_check(regions, artifacts, base_args, failures):
+    """Per-file monotonicity on ANNOTATED counts (see the module docstring
+    for what it does and does not establish)."""
+    baselines = ledger_baselines(base_args, previous=True)
+    if not baselines:
+        return
+    now = annotated_by_file(regions, artifacts)
+    exemptions = load_exemptions(failures)
+    used = set()
+    for label, rev in baselines:
+        snap = Snapshot.at(label, rev)
+        if not snap.rows or not snap.regions:
+            print(f"  [warn] monotonicity baseline {label}: ledger or tree not readable at "
+                  f"{rev[:9]} (shallow clone?) — skipped")
+            continue
+        base = snap.annotated_by_file()
+        # A file git reports as renamed since the baseline keeps its
+        # annotations at the new path; credit them to the baseline's
+        # path so a move with the counts carried is not a drop.
+        folded = fold_moves(dict(now), rev)
+        drops = exempted = 0
+        for fname in sorted(base):
+            n = folded.get(fname, 0)
+            if n >= base[fname]:
+                continue
+            hit = next((i for i, (f, frm, to, _) in enumerate(exemptions)
+                        if f == fname and frm == base[fname] and n >= to), None)
+            if hit is None:
+                drops += 1
+                failures.append(f"annotated-count drop vs {label}: {fname} "
+                                f"{base[fname]} -> {n}")
+            else:
+                used.add(hit)
+                exempted += 1
+        print(f"annotated-count monotonicity vs {label} ({rev[:9]}): "
+              f"{len(base)} annotated file(s), {drops} unexempted drop(s), "
+              f"{exempted} exempted")
+    spare = [row for i, row in enumerate(exemptions) if i not in used]
+    if spare:
+        print(f"note: {len(spare)} exemption row(s) cover no drop at these baselines "
+              f"(no longer needed): "
+              + "; ".join(f"{f} {frm}->{to}" for f, frm, to, _ in spare[:8]))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--diff", metavar="REV", help="check a git revision against the sidecar")
+    ap.add_argument("--base", action="append", metavar="REV",
+                    help="with --check: compare annotated counts against this commit "
+                         "instead of HEAD / MERGE_HEAD / the merge parents; repeatable")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     if not args.check and not args.diff:
@@ -249,6 +335,8 @@ def main():
             failures.append(f"dangling artifact {rid} -> {art}: {reason}")
         if len(dangling) > 50:
             failures.append(f"... and {len(dangling) - 50} more dangling artifacts")
+
+        annotated_count_check(regions, artifacts, args.base, failures)
 
     if args.diff:
         rev = args.diff
