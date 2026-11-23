@@ -816,7 +816,7 @@ pub fn rust_main_tail() -> ! {
             // cg_pid_get_path() answers -ENOMEDIUM — udevd records no
             // cgroup and never sweeps.
             {
-                let cg_init = fs::cgroup::init_cgroupfs();
+                let cg_init = fs::leaf_glue::cgroup::init_cgroupfs();
                 print_status("cgroup", "v2 unified hierarchy init", cg_init.is_ok());
                 if cg_init.is_ok() && crate::cmdline::has_param("cgroup2pre") {
                     // The mount point chain must already exist in the
@@ -830,7 +830,7 @@ pub fn rust_main_tail() -> ! {
                     // dentry). Resolving the path first populates the
                     // chain through sysfs_lookup.
                     let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
-                    let cg_mount = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+                    let cg_mount = fs::leaf_glue::cgroup::mount_cgroupfs("/sys/fs/cgroup");
                     print_status("cgroup", "cgroup2 mounted /sys/fs/cgroup", cg_mount.is_ok());
                 }
             }
@@ -1938,7 +1938,7 @@ fn mount_ext4_root_from(disk: &'static drivers::blkdev::GenDisk) {
     // bare dentries if the overlay reset it.
     if crate::cmdline::has_param("cgroup2pre") {
         let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
-        let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+        let _ = fs::leaf_glue::cgroup::mount_cgroupfs("/sys/fs/cgroup");
     }
 }
 

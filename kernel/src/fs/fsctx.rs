@@ -366,8 +366,8 @@ pub fn create_fs_root(
             Ok((crate::fs::leaf_glue::tracefs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "cgroup2" | "cgroup" => {
-            crate::fs::cgroup::init_cgroupfs().map_err(|e| e as i32)?;
-            Ok((crate::fs::cgroup::create_root_inode(), false))
+            crate::fs::leaf_glue::cgroup::init_cgroupfs().map_err(|e| e as i32)?;
+            Ok((crate::fs::leaf_glue::cgroup::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         // ext2/ext3/ext4 from a loop device or a named vdX disk: the
         // separate-instance discipline (mount_loop_instance — no journal

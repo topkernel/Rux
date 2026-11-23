@@ -53,7 +53,7 @@ pub mod xattr;
 pub mod pidfd;
 // pub mod selinuxfs; — MOVED to the rux-fs service crate (rung 3)
 // pub mod fifo; — MOVED to the rux-fs service crate (rung 3)
-pub mod cgroup;
+// pub mod cgroup; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub mod fsctx;
 // The rung-5 ext4 seam: the framework's ext4/jbd2 hook table (the
 // service crate registers at boot; the ext4/jbd2 module lines above

@@ -67,7 +67,6 @@ pub fn register_builtin_handlers() {
     super::procfs::mount_register();
     super::devfs::mount_register();
     super::sysfs::mount_register();
-    super::cgroup::mount_register();
     // The moved substrate/boot leaves register from the rux-fs crate side
     // (FsHooks.leaf_mount_registers — one row per moved leaf, filled by
     // the crate's register_all; selinuxfs pioneered the shape).

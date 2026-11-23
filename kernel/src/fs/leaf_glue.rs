@@ -106,6 +106,24 @@ pub mod tracefs {
     }
 }
 
+// ---- cgroup (lib.rs boot + fsctx mount arm) ----
+
+pub mod cgroup {
+    use super::*;
+
+    pub fn init_cgroupfs() -> Result<(), i32> {
+        (hooks().cgroup_init_cgroupfs)()
+    }
+
+    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
+        (hooks().cgroup_create_root_inode)()
+    }
+
+    pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
+        (hooks().cgroup_mount_cgroupfs)(target)
+    }
+}
+
 // ---- sysfs registration (drivers + module loader) ----
 
 pub mod sysfs {

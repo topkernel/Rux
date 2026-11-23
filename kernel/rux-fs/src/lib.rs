@@ -34,6 +34,7 @@ pub mod fs {
     pub mod selinuxfs;
     pub mod debugfs;
     pub mod tracefs;
+    pub mod cgroup;
     pub use rux::fs::*;
 }
 
@@ -94,6 +95,7 @@ pub fn register_all() {
             crate::fs::selinuxfs::mount_register,
             crate::fs::debugfs::mount_register,
             crate::fs::tracefs::mount_register,
+            crate::fs::cgroup::mount_register,
         ],
         // ---- debugfs rows ----
         debugfs_create_dir: crate::fs::debugfs::create_dir,
@@ -127,10 +129,10 @@ pub fn register_all() {
         tracefs_init: crate::fs::tracefs::init_tracefs,
         tracefs_create_root_inode: || Some(crate::fs::tracefs::create_root_inode()),
         tracefs_mount_at: crate::fs::tracefs::mount_at,
-        // ---- cgroup rows (filled when cgroup moves) ----
-        cgroup_init_cgroupfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
-        cgroup_create_root_inode: || None,
-        cgroup_mount_cgroupfs: |_| Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        // ---- cgroup rows ----
+        cgroup_init_cgroupfs: crate::fs::cgroup::init_cgroupfs,
+        cgroup_create_root_inode: || Some(crate::fs::cgroup::create_root_inode()),
+        cgroup_mount_cgroupfs: crate::fs::cgroup::mount_cgroupfs,
         // ---- sysfs rows (filled when sysfs moves) ----
         sysfs_init_sysfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
         sysfs_mount_sysfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
