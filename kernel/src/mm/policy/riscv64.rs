@@ -1515,6 +1515,13 @@ fn handle_swap_fault(
             if start.as_usize() < user_addr::USER_START {
                 return Err(MapError::Invalid);
             }
+            // mmap_min_addr parity: the reference kernel refuses a
+            // MAP_FIXED below vm.mmap_min_addr. See the x86_64 twin
+            // for the full statement of scope (a hardening step, not
+            // the NOVMA-EXEC fix) and the deliberate differences.
+            if start.as_usize() < user_addr::MIN_MAP_ADDR {
+                return Err(MapError::Invalid);
+            }
             // Upper bound: a fixed mapping at or above USER_END would write
             // leaf PTEs into the kernel-shared L1/L0 tables (user page
             // tables copy the kernel PGD entries) — reject outright.

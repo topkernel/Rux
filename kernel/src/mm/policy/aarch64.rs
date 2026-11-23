@@ -780,6 +780,13 @@ pub fn handle_mm_fault(
             if start.as_usize() < user_addr::USER_START {
                 return Err(MapError::Invalid);
             }
+            // mmap_min_addr parity: the reference kernel refuses a
+            // MAP_FIXED below vm.mmap_min_addr. See the x86_64 twin
+            // for the full statement of scope (a hardening step, not
+            // the NOVMA-EXEC fix) and the deliberate differences.
+            if start.as_usize() < user_addr::MIN_MAP_ADDR {
+                return Err(MapError::Invalid);
+            }
             // Upper bound: user TASK_SIZE (256GB) — every user mapping
             // must stay under TTBR0 L0 entry 0.
             if start
