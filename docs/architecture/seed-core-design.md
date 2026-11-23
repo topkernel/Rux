@@ -582,8 +582,25 @@ rux-drivers forbid-safe (DONE 2026-11-23, origin 8672a0ebf:
  virtio/intc/timer/pci/drm stay on the floor with
  per-family reasons; 12 DriverHooks rows + the leveled
  initcall table)
-rux-ipc forbid-safe (DONE 2026-11-23, ipc-flip lane: the
- movable policy — sysv_msg/sysv_shm/posix_mq/keys/
+rux-ipc forbid-safe (DONE 2026-11-23, ipc-flip lane; COLD-FOUR
+ CARVE 2026-11-24: binder's cold diagnostic halves — the ~1 Hz
+ heartbeat audits (txn_hang 889l, bwr_park 787l, ams46 139l),
+ sleep_snapshot 584l, stall_report 486l + the schb/stall formatting
+ cluster, the latched-map walks, the BC decoder and
+ register_app_child_pid, 4,062 lines total — sole-copied to
+ src/ipc/binder_diag.rs; the trap-regs/page-table walkers became
+ framework ipc/binder_edges.rs (INV-BINDER-ENTRYFRAME/PROBE/
+ DIAG-COMM/DIAG-TASKREF); an 8-row BinderDiagHooks table carries the
+ heartbeat/taskdump call sites; the diagnostics' read surface of the
+ object model is published on binder.rs, 89 items, mechanism-only
+ writers; binder.rs 14,553 -> 10,396 lines. The txn mechanism itself
+ stays framework-side — the shelving verdict below still holds for
+ it. util.rs STAYS framework-side: sysv_sem (framework) consumes it —
+ the shared-substrate rule. sysv_sem verdict (cold-four lane):
+  decomposing around the open-root-cause deadlock is not verifiable —
+  ANY part of the blocking family in the crate risks the recorded
+  packaging-dependent hang; left entirely, framework-side.
+  Originally: the movable policy — sysv_msg/sysv_shm/posix_mq/keys/
  access_token, 5,406 lines — sole-copied under crate
  forbid; the unsafe blocks converted via the
  uaccess_safe typed twins (+copy_in_t_slice), live
