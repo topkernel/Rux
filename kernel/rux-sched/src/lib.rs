@@ -169,3 +169,25 @@ pub fn register_all() {
             sched_slice_to_ms: |ns| crate::sched::entities::sched_slice_to_ms(ns),
     });
 }
+
+/// Guest-test modules that moved with the S1b crate flip (SERVICE-TEST
+/// SEAM): the fair pins (the sched half of the old framework
+/// mm_sched_pins) and the grq-10ns timeline driver. This crate is
+/// #![forbid(unsafe_code)]: the timeline driver reaches the engine's
+/// raw-node internals only through the framework's SAFE debug_* helpers
+/// (sched/edges.rs).
+#[cfg(feature = "unit-test")]
+pub mod sched_tests {
+    pub mod fair_pins;
+    pub mod fair_timeline;
+}
+
+/// The guest-test entry (make test): the framework's run_all_tests
+/// invokes this through the SERVICE-TEST SEAM (rux-bin registers it at
+/// boot). Reporting goes through the framework's counters, so pass/fail
+/// lands in the same totals as the in-framework tests.
+#[cfg(feature = "unit-test")]
+pub fn run_unit_tests() {
+    crate::sched_tests::fair_pins::test_fair_pins();
+    crate::sched_tests::fair_timeline::test_fair_timeline();
+}

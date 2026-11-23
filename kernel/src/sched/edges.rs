@@ -418,7 +418,10 @@ pub fn rt_list_linked(task: *mut Task) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VruntimeKey {
     pub vruntime: u64,
-    pub(crate) task_id: u64, // Used to distinguish tasks with same vruntime
+    /// Tie-breaker distinguishing tasks with the same vruntime. pub:
+    /// the rux-sched guest test (fair_timeline, moved with the S1b
+    /// flip) reads it through the crate boundary.
+    pub task_id: u64,
 }
 
 impl VruntimeKey {
@@ -427,8 +430,8 @@ impl VruntimeKey {
     }
 }
 
-/// grq-10ns: unit-test key constructor (tests/fair_timeline.rs drives a
-/// local RbTimeline; the key type itself stays private to this module).
+/// grq-10ns: unit-test key constructor (the rux-sched fair_timeline
+/// guest test drives a local RbTimeline through the debug_* helpers).
 
 // ============================================================================
 // grq-10ns: entity-embedded intrusive red-black timeline (the reference
@@ -571,8 +574,9 @@ pub fn node_key(node: *mut RbNode) -> VruntimeKey {
 // ---- the tree itself -------------------------------------------------------
 
 /// Intrusive red-black timeline root with the cached leftmost pointer
-/// (the reference's `struct rb_root_cached`). pub(crate): the unit-test
-/// suite drives a LOCAL instance (kernel/src/tests/fair_timeline.rs).
+/// (the reference's `struct rb_root_cached`). pub: the rux-sched guest
+/// test (sched_tests/fair_timeline.rs, moved with the S1b flip) drives a
+/// LOCAL instance through the debug_* helpers below.
 #[derive(Debug)]
 pub struct RbTimeline {
     pub root: *mut RbNode,
@@ -1020,6 +1024,106 @@ impl RbTimeline {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// grq-10ns unit-test introspection (SERVICE-TEST SEAM, test-migrate
+// lane): SAFE test-only drivers for a LOCAL RbTimeline over heap
+// SchedEntity arrays. The fair_timeline guest test moved into the
+// rux-sched crate (S1b flip) — a #![forbid(unsafe_code)] crate — so
+// it drives the engine exclusively through these pub safe helpers;
+// the audited unsafe stays inside this file (one block per pointer
+// family, the same discipline as the engine ops above). Production
+// builds never see them (unit-test feature only).
+// ---------------------------------------------------------------------------
+#[cfg(feature = "unit-test")]
+impl RbTimeline {
+        /// Link `se`'s embedded node under `key` (the enqueue shape).
+        /// The caller stores the order key first (set_timeline_key).
+        pub fn debug_insert(&mut self, key: VruntimeKey, se: &mut SchedEntity) -> bool {
+            self.insert(key, core::ptr::addr_of_mut!(se.run_node))
+        }
+
+        /// Unlink `se`'s embedded node (the dequeue shape).
+        pub fn debug_erase(&mut self, se: &mut SchedEntity) -> bool {
+            self.erase(core::ptr::addr_of_mut!(se.run_node))
+        }
+
+        /// Unlink the current leftmost (the pick shape).
+        pub fn debug_erase_leftmost(&mut self) -> bool {
+            let n = self.leftmost;
+            self.erase(n)
+        }
+
+        /// The order key of the leftmost entity, None when the timeline
+        /// is empty (the pick peek).
+        pub fn debug_leftmost_key(&self) -> Option<VruntimeKey> {
+            let nil = self.nil();
+            if self.leftmost == nil || self.leftmost.is_null() {
+                return None;
+            }
+            Some(node_key(self.leftmost))
+        }
+
+        /// Successor walk from the leftmost: every stored key in tree
+        /// order. Stops at nil or the first poison bail-out (none
+        /// expected: test entities are heap addresses inside the linear
+        /// map, so the range checks pass).
+        pub fn debug_walk_keys(&self) -> alloc::vec::Vec<VruntimeKey> {
+            let nil = self.nil();
+            let mut node = self.leftmost;
+            let mut out = alloc::vec::Vec::new();
+            while node != nil && !node.is_null() {
+                out.push(node_key(node));
+                node = self.next(node);
+            }
+            out
+        }
+
+        /// Red-black invariant audit: root black, no red node with a
+        /// red child, equal black heights on every root-to-leaf path.
+        /// Returns the tree's black height. The reads are the same
+        /// range-checked derefs the engine ops perform.
+        pub fn debug_black_height(&self) -> Result<u64, &'static str> {
+            let nil = self.nil();
+            fn bh(node: *mut RbNode, nil: *mut RbNode) -> Result<u64, &'static str> {
+                if node == nil || node.is_null() {
+                    return Ok(0);
+                }
+                if !RbTimeline::node_ok(node) {
+                    return Err("out-of-range node in audit walk");
+                }
+                // SAFETY: range-checked above; read-only link/color
+                // fields of a linked node.
+                let (l, r, red) = unsafe { ((*node).left, (*node).right, (*node).red) };
+                if red {
+                    for c in [l, r] {
+                        if c != nil && !c.is_null() && RbTimeline::node_ok(c) {
+                            // SAFETY: range-checked in the guard.
+                            if unsafe { (*c).red } {
+                                return Err("red node with red child");
+                            }
+                        }
+                    }
+                }
+                let bl = bh(l, nil)?;
+                let br = bh(r, nil)?;
+                if bl != br {
+                    return Err("black-height mismatch");
+                }
+                Ok(bl + if red { 0 } else { 1 })
+            }
+            if self.root != nil && !self.root.is_null() {
+                if !RbTimeline::node_ok(self.root) {
+                    return Err("out-of-range root");
+                }
+                // SAFETY: range-checked above.
+                if unsafe { (*self.root).red } {
+                    return Err("root is red");
+                }
+            }
+            bh(self.root, nil)
+        }
 }
 
 /// Shared view of a stored GRQ pointer (INV-SCE-3 twin for the lock

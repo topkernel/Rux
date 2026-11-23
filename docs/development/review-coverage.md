@@ -684,7 +684,7 @@ when the tree gains a file the map does not know about.
 | `execve.rs` | 91 | ⬜ |  |
 | `ext4_allocator.rs` | 71 | ⬜ |  |
 | `ext4_file_write.rs` | 121 | ⬜ |  |
-| `fair_timeline.rs` | 331 | ⬜ |  |
+| `rux-sched/src/sched_tests/fair_timeline.rs` (moved from tests/, S1b flip) | 232 | ⬜ |  |
 | `fcntl.rs` | 187 | ⬜ |  |
 | `fdtable.rs` | 147 | ⬜ |  |
 | `file_buffer.rs` | 50 | ⬜ |  |
@@ -714,10 +714,10 @@ when the tree gains a file the map does not know about.
 | `mem_mmap.rs` | 160 | ⬜ |  |
 | `mkdir_unlink.rs` | 250 | ⬜ |  |
 | `mm_pcp.rs` | 175 | ⬜ |  |
-| `mm_sched_pins.rs` | 169 | ⬜ |  |
+| `mm_pins.rs` (sched half moved to rux-sched, S1b flip) | 148 | ⬜ |  |
 | `mod.rs` | 820 | ⬜ |  |
 | `mount_flags.rs` | 58 | ⬜ |  |
-| `net_hdrs.rs` | 39 | ⬜ |  |
+| `rux-net/src/net/net_hdrs_test.rs` (moved from tests/, rung-2 flip) | 45 | ⬜ |  |
 | `net_pins.rs` | 267 | ⬜ |  |
 | `network.rs` | 256 | ⬜ |  |
 | `page_allocator.rs` | 156 | ⬜ |  |

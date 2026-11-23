@@ -2,24 +2,24 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! MM + scheduler + cmdline pins — ported from the dead #[cfg(test)]
-//! blocks in kernel/src/mm/{slab,vma,page_desc}.rs, kernel/src/sched/fair.rs
-//! and kernel/src/cmdline.rs per the test-layout policy (host-side test
-//! blocks never compile in this no_std crate).
+//! MM + cmdline pins — ported from the dead #[cfg(test)] blocks in
+//! kernel/src/mm/{slab,vma,page_desc}.rs and kernel/src/cmdline.rs per
+//! the test-layout policy (host-side test blocks never compile in this
+//! no_std crate). Formerly mm_sched_pins.rs: the sched half (the fair
+//! LoadWeight/SchedEntity/CfsRunQueue pins) moved to the rux-sched
+//! crate with the S1b flip and runs via the SERVICE-TEST SEAM.
 
 use crate::cmdline::{get_all_params, get_init_program, get_root_device, has_param, is_root_readonly, CMDLINE_LEN, CMDLINE_PTR};
 use crate::mm::page_desc::{Page, PageFlag, PageFlags};
 use crate::mm::slab::SlabAllocator;
 use crate::mm::vma::{VirtAddr, Vma, VmaFlags, VmaOrigin};
-use crate::sched::fair::{CfsRunQueue, LoadWeight, SchedEntity};
 use core::sync::atomic::Ordering;
 
-pub fn test_mm_sched_pins() {
-    crate::tests::test_group_start("mm_sched_pins");
+pub fn test_mm_pins() {
+    crate::tests::test_group_start("mm_pins");
     test_slab_pins();
     test_vma_pins();
     test_page_desc_pins();
-    test_fair_pins();
     test_cmdline_pins();
 }
 
@@ -114,27 +114,6 @@ fn test_page_desc_pins() {
     page.sub_mapcount();
     crate::test_assert_eq!(page.mapcount(), 0, "sub -> 0");
     crate::tests::test_pass("mm-page-desc");
-}
-
-// ---- sched/fair.rs -----------------------------------------------------------
-
-fn test_fair_pins() {
-    let lw = LoadWeight::from_nice(0);
-    crate::test_assert_eq!(lw.weight, 1024, "nice 0 weight 1024");
-    let lw_high = LoadWeight::from_nice(-20);
-    crate::test_assert!(lw_high.weight > lw.weight, "nice -20 heavier");
-    let lw_low = LoadWeight::from_nice(19);
-    crate::test_assert!(lw_low.weight < lw.weight, "nice 19 lighter");
-
-    let se = SchedEntity::new();
-    let delta = 1_000_000u64; // 1ms
-    let vruntime = se.calc_delta_fair(delta);
-    crate::test_assert_eq!(vruntime, delta, "nice 0 vruntime equals runtime");
-
-    let rq = CfsRunQueue::new();
-    crate::test_assert!(rq.is_empty(), "fresh cfs rq empty");
-    crate::test_assert_eq!(rq.nr_running(), 0, "fresh cfs rq nr_running 0");
-    crate::tests::test_pass("sched-fair");
 }
 
 // ---- cmdline.rs -----------------------------------------------------------------

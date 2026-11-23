@@ -20,3 +20,6 @@ default = ["riscv64"]
 riscv64 = ["rux/riscv64"]
 x86_64 = ["rux/x86_64"]
 aarch64 = ["rux/aarch64"]
+# Gates the guest test modules + their run entry (make test forwards
+# this from rux-bin's unit-test through the SERVICE-TEST SEAM).
+unit-test = ["rux/unit-test"]

@@ -30,6 +30,6 @@ riscv64 = ["rux/riscv64", "rux-syscall/riscv64", "rux-net/riscv64", "rux-fs/risc
 x86_64 = ["rux/x86_64", "rux-syscall/x86_64", "rux-net/x86_64", "rux-fs/x86_64", "rux-drivers/x86_64", "rux-mm/x86_64", "rux-sched/x86_64"]
 aarch64 = ["rux/aarch64", "rux-syscall/aarch64", "rux-net/aarch64", "rux-fs/aarch64", "rux-drivers/aarch64", "rux-mm/aarch64", "rux-sched/aarch64"]
 # kernel lib features the bin/tests toggle: forwarded.
-unit-test = ["rux/unit-test", "rux-fs/unit-test", "rux-mm/unit-test"]
+unit-test = ["rux/unit-test", "rux-fs/unit-test", "rux-mm/unit-test", "rux-net/unit-test", "rux-sched/unit-test"]
 cov-dump = ["rux/cov-dump"]
 dfx-lock-owner = ["rux/dfx-lock-owner"]
