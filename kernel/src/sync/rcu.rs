@@ -395,6 +395,38 @@ pub fn grace_waiter_hold() {
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
 }
 
+/// Public twin for the async reap drainer: the CURRENT generation,
+/// observed WITHOUT bumping or latching (the mint-time snapshot for the
+/// per-entry grace bound — see reapdrain's needs field).
+pub fn rcu_gen_now() -> u32 {
+    RCU_GEN.load(Ordering::Acquire)
+}
+
+/// Public twin for the async reap drainer: the grace WATERMARK — the
+/// largest generation every online CPU has reported at or after (idle
+/// CPUs are permanently quiescent and do not bound it). This is
+/// `all_online_cpus_reported(T)` solved for T: an RCU reader window
+/// that opened BEFORE a removal at generation G is closed on every CPU
+/// once the watermark is >= G+1 (reports at G+1 can only have been
+/// taken at a round OPENED after that removal — the
+/// synchronize_rcu_forced discipline, per-entry).
+pub fn rcu_grace_watermark() -> u32 {
+    let mut wm = u32::MAX;
+    for i in 0..MAX_CPUS {
+        if !crate::sched::sched::cpu_online(i) {
+            continue;
+        }
+        if crate::sched::sched::cpu_running_idle(i) {
+            continue;
+        }
+        let g = RCU_QS_GEN[i].load(Ordering::Acquire);
+        if g < wm {
+            wm = g;
+        }
+    }
+    wm
+}
+
 /// Public twin for the async reap drainer: report THIS cpu as
 /// quiescent at the current generation (the boot-118 fix — the
 /// drainer's tick context is outside every RCU read-side section, so

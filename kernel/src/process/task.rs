@@ -172,6 +172,22 @@ static KSTACK_BLOCKS: Spinlock<KstackBlocks> = Spinlock::new(KstackBlocks {
     maps: alloc::vec::Vec::new(),
 });
 
+// P0 exit-reap (2026-11-23): KSTACK_BLOCKS and STACK_CACHE are taken
+// from TIMER-IRQ context (the async reap drainer's burn:
+// reap_drain_tick -> reap_storage_free -> free_kernel_stack ->
+// stack_cache_free -> kstack_slab_free). A lock reachable from IRQ
+// context must be irqsave on EVERY taker: a plain lock() held by a
+// task-context fork (kstack_slab_alloc under stack_cache_alloc) and
+// re-taken by the same CPU's tick drainer is a same-CPU recursion
+// deadlock — the holder is suspended by the very interrupt that now
+// spins on the lock (measured on the P4 storm, x86/KVM: pid 1 frozen
+// in kstack_slab_alloc, TIMER-SOFTIRQ-STALL age climbing past 190 s,
+// the sibling CPU alive; the drainer's burn path had NEVER run before
+// the retire-site fix landed — 0 completions — so this discipline
+// breach sat latent under the RTS-DEFER wedge). The leaf allocators
+// were already irqsafe (buddy lock_irqsave, small_alloc class locks);
+// these two intermediate locks are the whole gap.
+
 /// Carve one stack out of a packed block (or fall back to a whole
 /// order-5 buddy block when the slab cannot grow — keeps booting on
 /// heap exhaustion instead of dying).
@@ -179,7 +195,7 @@ static KSTACK_BLOCKS: Spinlock<KstackBlocks> = Spinlock::new(KstackBlocks {
 fn kstack_slab_alloc() -> *mut u8 {
     // Fast path: existing block with a free slot.
     {
-        let mut g = KSTACK_BLOCKS.lock();
+        let mut g = KSTACK_BLOCKS.lock_irqsave();
         for bi in 0..g.maps.len() {
             if g.maps[bi] == 0b111 {
                 continue;
@@ -204,7 +220,7 @@ fn kstack_slab_alloc() -> *mut u8 {
         return core::ptr::null_mut();
     }
     {
-        let mut g = KSTACK_BLOCKS.lock();
+        let mut g = KSTACK_BLOCKS.lock_irqsave();
         g.bases.push(block);
         g.maps.push(0b001); // slot 0 taken by this allocation
     }
@@ -220,7 +236,7 @@ fn kstack_slab_free(bottom: *mut u8) -> bool {
     let addr = bottom as usize;
     let mut free_block: *mut u8 = core::ptr::null_mut();
     {
-        let mut g = KSTACK_BLOCKS.lock();
+        let mut g = KSTACK_BLOCKS.lock_irqsave();
         let mut bi = 0usize;
         let mut found = false;
         while bi < g.bases.len() {
@@ -267,7 +283,7 @@ fn kstack_slab_free(bottom: *mut u8) -> bool {
 /// keeps the plain power-of-two buddy allocation and reports zeros.
 #[cfg(target_arch = "x86_64")]
 pub fn kstack_slab_stats() -> (u64, u64, u64) {
-    let g = KSTACK_BLOCKS.lock();
+    let g = KSTACK_BLOCKS.lock_irqsave();
     let mut live: u64 = 0;
     for bm in g.maps.iter() {
         live += bm.count_ones() as u64;
@@ -325,7 +341,7 @@ fn stack_cache_alloc() -> *mut u8 {
     // heap allocation (BUDDY nest) and the leg-16 probe zeroing run
     // OUTSIDE it — no 128KB memset under a spinlock.
     {
-        let mut cache = STACK_CACHE.lock();
+        let mut cache = STACK_CACHE.lock_irqsave();
         let _ = &mut cache;
     }
     // Leg-17: on x86_64 stacks come from the packed slab first (two
@@ -527,7 +543,7 @@ fn stack_cache_free(stack_bottom: *mut u8) {
     {
         KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
     }
-    let mut cache = STACK_CACHE.lock();
+    let mut cache = STACK_CACHE.lock_irqsave();
     // SAFETY: stack_bottom was allocated by stack_cache_alloc().
     cache.push(stack_bottom);
 }
