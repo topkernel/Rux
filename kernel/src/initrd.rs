@@ -83,7 +83,7 @@ pub struct CpioStats {
 
 /// Decompress (when gzipped) and unpack the initrd into the rootfs.
 ///
-/// Must run after `fs::rootfs::init_rootfs()` — the ramfs superblock is
+/// Must run after the RAM root is initialized — the superblock is
 /// the unpack target. Safe to call only once; subsequent calls are no-ops
 /// that report the already-loaded state.
 pub fn load() -> Result<CpioStats, &'static str> {
