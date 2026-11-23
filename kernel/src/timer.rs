@@ -195,12 +195,12 @@ pub fn input_debug_tick() {
 pub const MAX_TIMERS: usize = wheel::MAX_TIMERS;
 
 /// Global timer ID counter.
-static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
+pub static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Earliest outstanding high-resolution deadline (time CSR ticks);
 /// u64::MAX when none. Drives timer re-arming: the per-hart timer is
 /// programmed to min(next grid tick, this value).
-static HRES_NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
+pub static HRES_NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// sc184 (lane 2, perf-audit F1): monotonic "a timer has been armed at
 /// least once" latch. The timer-tick softirq raise for the Hrtimer
@@ -309,6 +309,30 @@ fn hres_horizon_for(precise: u64) -> u64 {
 /// ~66 KB of .bss (1024 slots × 64 B + bitmap + bucket arrays).
 static TIMER_TABLE: Spinlock<wheel::TimerWheel> =
     Spinlock::new(wheel::TimerWheel::new());
+
+/// Wheel census snapshot for the WW heartbeat report (the rux-timer
+/// crate's report half): (live entries, overdue hres backlog). One
+/// short lock taken at 1 Hz on the armed heartbeat only.
+
+/// Typed twin for the WW report's on-CPU census read (the rux-timer
+/// crate's heartbeat): the historical volatile qword read at the
+/// walked task's ti_on_cpu offset (AtomicBool + the 7 bytes the old
+/// instrument deliberately observed with it). Read-only, under the
+/// pid-hash walk's bucket lock.
+pub fn ww_task_on_cpu(task: &crate::process::task::Task) -> u64 {
+    // SAFETY: plain volatile read of shared state during the census
+    // walk (the read the WW heartbeat has always done; ti_on_cpu is
+    // 8-byte aligned — the Task layout assert above).
+    unsafe {
+        core::ptr::read_volatile(
+            core::ptr::addr_of!(task.ti_on_cpu) as *const u64)
+    }
+}
+
+pub fn wheel_census(now_time: u64) -> (usize, u64) {
+    let table = TIMER_TABLE.lock_irqsave();
+    (table.len(), table.overdue_hres(wheel::Time::from_time(now_time)))
+}
 
 /// A pending timer, as /proc/timer_list reports it.
 #[derive(Clone, Copy)]
@@ -586,18 +610,9 @@ pub static DELDM_RA: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
 pub static DELDM_JIF: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
 
 /// Was `id` deleted (and from which source line, how long ago)?
-pub fn del_lookup(id: u64) -> Option<(u64, u64)> {
-    for k in 0..64 {
-        if DEL_ID[k].load(Ordering::Relaxed) == id {
-            return Some((
-                DEL_RA[k].load(Ordering::Relaxed),
-                crate::timer::get_jiffies()
-                    .saturating_sub(DEL_JIF[k].load(Ordering::Relaxed)),
-            ));
-        }
-    }
-    None
-}
+// del_lookup — MOVED to the rux-timer service crate (cold-four lane):
+// the DEL_DM diagnostic ring's reader; its only caller is rux-process's
+// exit teardown. The DEL_* statics stay here (pub) with the marker side.
 
 pub fn timer_pending(id: u64) -> bool {
     let table = TIMER_TABLE.lock_irqsave();
@@ -694,7 +709,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // lines print only on rux:wwcensus (retired debug=wwcensus) boots; ordinary boots keep
             // a clean serial prompt.
             if crate::trace::EVENT_WWCENSUS.armed() {
-                ww_heartbeat(now_time);
+                crate::timer_hooks::ww_heartbeat(now_time);
             }
             // leg-27: in-flight binder txn hang audit (rux:txnhunt (retired debug=txnhunt),
             // self-gated + rate-capped inside). Runs on the same ~1 Hz
@@ -1622,23 +1637,23 @@ static WW_HRES_LAST: [AtomicU64; crate::config::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
 static WW_HRES_N: [AtomicU64; crate::config::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
-static WW_FIRE_N: AtomicU64 = AtomicU64::new(0);
-static WW_FIRE_LATE_MAX_MS: AtomicU64 = AtomicU64::new(0);
+pub static WW_FIRE_N: AtomicU64 = AtomicU64::new(0);
+pub static WW_FIRE_LATE_MAX_MS: AtomicU64 = AtomicU64::new(0);
 /// rt-r4 (R2 residual attribution): fire-lateness SUM in time ticks over
 /// the same population as WW_FIRE_N (every hres fire with late_ticks>0 —
 /// effectively ALL hres wake fires: any fire past its deadline by one
 /// tick counts). avg = SUM/N is the AVG side of the CYC-FIRE-LATE tail
 /// bracket (46 us cyclictest avg decomposition).
-static WW_FIRE_SUM_TICKS: AtomicU64 = AtomicU64::new(0);
+pub static WW_FIRE_SUM_TICKS: AtomicU64 = AtomicU64::new(0);
 /// rt-r4: cumulative max fire lateness in us (the existing MAX_MS is
 /// ms-granular — useless at the 10-1000 us class the residual lives in).
-static WW_FIRE_MAX_US: AtomicU64 = AtomicU64::new(0);
-static WW_FIRE_LATE_N: AtomicU64 = AtomicU64::new(0);
-static WW_PIDMISS_N: AtomicU64 = AtomicU64::new(0);
+pub static WW_FIRE_MAX_US: AtomicU64 = AtomicU64::new(0);
+pub static WW_FIRE_LATE_N: AtomicU64 = AtomicU64::new(0);
+pub static WW_PIDMISS_N: AtomicU64 = AtomicU64::new(0);
 static WW_LAST_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
 /// Wakewatch: nanosleep belt-and-braces re-arms (one-shot token
 /// consumed before deadline — the early-fire family).
-static WW_REARM_N: AtomicU64 = AtomicU64::new(0);
+pub static WW_REARM_N: AtomicU64 = AtomicU64::new(0);
 
 // nanosleep-loss hunt: deliver_fired per-wake outcome ring (module
 // statics so the heartbeat census can read them).
@@ -1707,26 +1722,9 @@ fn fw_record(pid: u32, ok: bool, on_rq: bool, key: bool, st: u32) {
 pub static NSL_TASK: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
 pub static NSL_ITER: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 
-#[inline]
-pub fn nsleep_iter_bump() {
-    let Some(t) = crate::sched::current() else { return };
-    let key = t as *mut crate::process::Task as usize;
-    for k in 0..16 {
-        if NSL_TASK[k].load(Ordering::Relaxed) == key {
-            NSL_ITER[k].fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-    }
-    for k in 0..16 {
-        if NSL_TASK[k]
-            .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            NSL_ITER[k].fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-    }
-}
+// nsleep_iter_bump — MOVED to the rux-timer service crate (cold-four
+// lane): its only caller is rux-syscall's nanosleep_impl; the NSL_*
+// marker statics stay here (pub) with the reader side (pdec).
 
 /// Reader: the task's timed-sleep loop-iteration count (0 = unseen).
 pub fn nsleep_iter_of(task: *mut crate::process::Task) -> u64 {
@@ -1793,283 +1791,14 @@ pub fn ww_hres_age_ms(cpu: usize) -> u64 {
     age * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ
 }
 
-/// Print one WW heartbeat line (called from the softirq, printk-safe
-/// context — the claim-inject probe above prints from here too).
-/// v2: adds the softirq-storm counters (per-vector dispatch deltas,
-/// softirq busy ticks), timer-IRQ rate, scheduler slots (per-CPU current
-/// pid/state/preempt_count, idle + need_resched masks, queue depths)
-/// and the wheel census (len, overdue backlog) — everything the wt1/wt2
-/// collapse discrimination needs on one line per second.
-fn ww_heartbeat(now_time: u64) {
-    use crate::interrupt::softirq::{WW_SOFTIRQ_RUNS, WW_SOFTIRQ_TICKS, WW_VEC_RUN};
-    static LAST_VEC: [AtomicU64; crate::interrupt::softirq::NR_SOFTIRQS] =
-        [const { AtomicU64::new(0) }; crate::interrupt::softirq::NR_SOFTIRQS];
-    static LAST_RUNS: AtomicU64 = AtomicU64::new(0);
-    static LAST_TICKS: AtomicU64 = AtomicU64::new(0);
-    static LAST_IRQ: [AtomicU64; crate::config::MAX_CPUS] =
-        [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+// ww_heartbeat — MOVED to the rux-timer service crate (cold-four lane):
+// the WW census REPORT half (formatting). Its markers and statics stay
+// framework-side (ww_note_*, WW_FIRE_*, WW_TICK_IRQ — written on the fire/
+// tick paths); the crate reads them and the wheel_census() accessor, and
+// is reached through the arm-gated timer_hooks::ww_heartbeat row (the
+// EVENT_WWCENSUS gate at the call site fires before the table is touched
+// — disarmed boots pay nothing).
 
-    let fire_n = WW_FIRE_N.load(Ordering::Relaxed);
-    let late_max = WW_FIRE_LATE_MAX_MS.load(Ordering::Relaxed);
-    let pidmiss = WW_PIDMISS_N.load(Ordering::Relaxed);
-
-    let runs_d = WW_SOFTIRQ_RUNS.load(Ordering::Relaxed)
-        .saturating_sub(LAST_RUNS.load(Ordering::Relaxed));
-    // Divide first: raw tick deltas can approach u64::MAX (e.g. HRES_NEXT
-    // sentinel) and a *1000 would overflow in the debug build.
-    let ticks_per_ms = crate::config::TIMER_CLOCK_FREQ_HZ / 1000;
-    let busy_ms = WW_SOFTIRQ_TICKS
-        .load(Ordering::Relaxed)
-        .saturating_sub(LAST_TICKS.load(Ordering::Relaxed))
-        / ticks_per_ms;
-    let mut vecs = [0u64; crate::interrupt::softirq::NR_SOFTIRQS];
-    for v in 0..crate::interrupt::softirq::NR_SOFTIRQS {
-        vecs[v] = WW_VEC_RUN[v].load(Ordering::Relaxed) as u64
-            - LAST_VEC[v].load(Ordering::Relaxed);
-        LAST_VEC[v].store(WW_VEC_RUN[v].load(Ordering::Relaxed) as u64, Ordering::Relaxed);
-    }
-    LAST_RUNS.store(WW_SOFTIRQ_RUNS.load(Ordering::Relaxed), Ordering::Relaxed);
-    LAST_TICKS.store(WW_SOFTIRQ_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
-
-    let mut irq_d = [0u64; crate::config::MAX_CPUS];
-    for c in 0..crate::config::MAX_CPUS {
-        let cur = WW_TICK_IRQ[c].load(Ordering::Relaxed);
-        irq_d[c] = cur.saturating_sub(LAST_IRQ[c].load(Ordering::Relaxed));
-        LAST_IRQ[c].store(cur, Ordering::Relaxed);
-    }
-
-    // s15 (A2 idle-mark/WFI hunt): idle-loop phase stamps + tp-vs-slot
-    // mismatch deltas. phase codes: 0=not-idle-loop 1=entering-schedule
-    // 2=marked+recheck 3=pre-WFI 4=inside-WFI 5=post-WFI-accounting;
-    // slotmm = per-second delta of tick-entry samples where the hardware
-    // tp register disagreed with cpu_state.current (lying slot).
-    static LAST_MM: [AtomicU64; crate::config::MAX_CPUS] =
-        [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
-    let mm = crate::sched::sched::ww_slot_mismatch_counters();
-    let mut mm_d = [0u64; 2];
-    for c in 0..2 {
-        mm_d[c] = mm[c].saturating_sub(LAST_MM[c].load(Ordering::Relaxed));
-        LAST_MM[c].store(mm[c], Ordering::Relaxed);
-    }
-    let phase0 = crate::sched::ww_idle_phase(0);
-    let phase1 = crate::sched::ww_idle_phase(1);
-
-    // Wheel census (short lock; heartbeat is 1 Hz and holds no timer
-    // locks at this point). Wheel-side: len + overdue hres backlog.
-    let (wheel_len, overdue) = {
-        let table = TIMER_TABLE.lock_irqsave();
-        (table.len(), table.overdue_hres(Time::from_time(now_time)))
-    };
-
-    let sched = crate::sched::sched::ww_sched_snapshot();
-
-    // nanosleep-loss hunt: arm/fire accounting — NEXT_TIMER_ID-1 is the
-    // total arms ever; fires + live entries + cancels must cover it. A
-    // gap = entries vanishing unfired.
-    {
-        use crate::debug::taskdump::putc_brief as putchar;
-        fn pdec9(mut v: u64) {
-            use crate::debug::taskdump::putc_brief as p;
-            let mut buf = [0u8; 20];
-            let mut n = 0;
-            if v == 0 { p(b'0'); return; }
-            while v > 0 && n < buf.len() { buf[n] = b'0' + (v % 10) as u8; v /= 10; n += 1; }
-            for k in (0..n).rev() { p(buf[k]); }
-        }
-        for &b in b"NSLPARK rescued=" { putchar(b); }
-        pdec9(crate::sched::sched::NSLPARK_RESCUED.load(Ordering::Relaxed));
-        putchar(b'\n');
-        for &b in b"ARMS id=" { putchar(b); }
-        pdec9(NEXT_TIMER_ID.load(Ordering::Relaxed).saturating_sub(1));
-        for &b in b" fires=" { putchar(b); }
-        pdec9(WW_FIRE_N.load(Ordering::Relaxed));
-        for &b in b" live=" { putchar(b); }
-        {
-            let table = TIMER_TABLE.lock_irqsave();
-            pdec9(table.len() as u64);
-        }
-        putchar(b'\n');
-    }
-    // nanosleep-loss lane (hunt): per-task pick-phase census — every
-    // heartbeat, one line per task: pid, last pick-phase (1 walk-unlink,
-    // 2 mark_picked, 3 slot-published, 4 repick-return, 5 wrapper-enter,
-    // 6 affirm-ok, 7 affirm-fail, 8 early-abort, 9 asm-abort), phase age
-    // (jiffies), ownership qword, pk, linked, state. A frozen task names
-    // its terminal phase directly.
-    {
-        use crate::debug::taskdump::putc_brief as putchar;
-        fn pdec(mut v: u64) {
-            use crate::debug::taskdump::putc_brief as p;
-            let mut buf = [0u8; 20];
-            let mut n = 0;
-            if v == 0 { p(b'0'); return; }
-            while v > 0 && n < buf.len() { buf[n] = b'0' + (v % 10) as u8; v /= 10; n += 1; }
-            for k in (0..n).rev() { p(buf[k]); }
-        }
-        static PTBUDGET: core::sync::atomic::AtomicU64 =
-            core::sync::atomic::AtomicU64::new(0);
-        // nanosleep-loss: CPU-0 only — the direct-console census writes
-        // garble when both CPUs print concurrently.
-        if crate::arch::cpu_id() as usize == 0
-            && PTBUDGET.fetch_add(1, Ordering::Relaxed) < 60 {
-            putchar(b'\n');
-            crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
-                // The walk hands &Task under the bucket lock — plain reads.
-                // Helper APIs taking raw identity get the safe &-to-raw cast.
-                let task_raw = task as *const crate::process::task::Task
-                    as *mut crate::process::task::Task;
-                {
-                let pid = task.pid();
-                if pid == 0 || pid == crate::sched::sched::TASK_POISON { return; }
-                let q = unsafe {
-                    core::ptr::read_volatile(
-                        core::ptr::addr_of!(task.ti_on_cpu) as *const u64)
-                };
-                let st = task.state().bits();
-                let linked = match task.policy() {
-                    crate::process::task::SchedPolicy::Fifo
-                    | crate::process::task::SchedPolicy::Rr => false,
-                    _ => task.sched_entity().timeline_key().is_some(),
-                };
-                let (ptc, ptj) =
-                    match crate::sched::sched::pick_trace_peek(task_raw) {
-                        Some(x) => x,
-                        None => (0, 0),
-                    };
-                for &b in b"PTC pid=" { putchar(b); }
-                pdec(pid as u64);
-                for &b in b" ph=" { putchar(b); }
-                pdec(ptc as u64);
-                for &b in b" ago=" { putchar(b); }
-                pdec(ptj);
-                for &b in b" q=0x" { putchar(b); }
-                pdec(q);
-                for &b in b" pk=" { putchar(b); }
-                pdec(task.pick_state() as u64);
-                for &b in b" lnk=" { putchar(b); }
-                pdec(linked as u64);
-                let tid = task.timed_sleep_timer_id.load(Ordering::Relaxed);
-                let tdl = task.timed_sleep_deadline.load(Ordering::Relaxed);
-                let tpend = crate::timer::timer_pending(tid);
-                for &b in b" tid=" { putchar(b); }
-                pdec(tid);
-                for &b in b" tp=" { putchar(b); }
-                pdec(tpend as u64);
-                for &b in b" tdl-now=" { putchar(b); }
-                let nowt = crate::timer::read_time();
-                if tdl > nowt {
-                    pdec((tdl - nowt) * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64);
-                } else {
-                    putchar(b'-');
-                    pdec((nowt - tdl) * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64);
-                }
-                for &b in b" st=0x" { putchar(b); }
-                pdec(st as u64);
-                for &b in b" itr=" { putchar(b); }
-                pdec(crate::timer::nsleep_iter_of(task_raw));
-                // last fire-record for this pid (per-pid table)
-                for k in 0..32 {
-                    if FWT_PID[k].load(Ordering::Relaxed) == pid {
-                        for &b in b" fwj=" { putchar(b); }
-                        pdec(crate::timer::get_jiffies().saturating_sub(
-                            FWT_JIF[k].load(Ordering::Relaxed)));
-                        for &b in b" fw=(ok:" { putchar(b); }
-                        pdec(FWT_OK[k].load(Ordering::Relaxed) as u64);
-                        for &b in b",onrq:" { putchar(b); }
-                        pdec(FWT_ONRQ[k].load(Ordering::Relaxed) as u64);
-                        for &b in b",key:" { putchar(b); }
-                        pdec(FWT_KEY[k].load(Ordering::Relaxed) as u64);
-                        for &b in b",st:0x" { putchar(b); }
-                        pdec(FWT_ST[k].load(Ordering::Relaxed) as u64);
-                        putchar(b')');
-                        break;
-                    }
-                }
-                putchar(b'\n');
-                }
-            });
-        }
-    }
-    // s16 (WW5, A2 census): pick-walk and heal deltas plus cumulative
-    // sub-gate strand counts — the counter-based adjudication of the
-    // msg-region strand family (see fair.rs WW_* counters). OWN pr_info:
-    // the WW..WW4 block above is already ~250 bytes and printk truncates
-    // at RECORD_TEXT_SIZE (256) — appending here silently cut the tail.
-    static LAST_WALKS: AtomicU64 = AtomicU64::new(0);
-    static LAST_OH: AtomicU64 = AtomicU64::new(0);
-    static LAST_CH: AtomicU64 = AtomicU64::new(0);
-    let walks_total = crate::sched::ww_pick_walks();
-    let walks_d = walks_total.saturating_sub(LAST_WALKS.load(Ordering::Relaxed));
-    LAST_WALKS.store(walks_total, Ordering::Relaxed);
-    let (oh, ch) = crate::sched::sched_hooks::ww_heals();
-    let oh_d = oh.saturating_sub(LAST_OH.load(Ordering::Relaxed));
-    let ch_d = ch.saturating_sub(LAST_CH.load(Ordering::Relaxed));
-    LAST_OH.store(oh, Ordering::Relaxed);
-    LAST_CH.store(ch, Ordering::Relaxed);
-    let (s250, s500, s750) = crate::sched::sched_hooks::ww_subgate_counts();
-    crate::pr_info!(
-        "WW5: walks={} oncpu_heal={} claim_heal={} s250={} s500={} s750={}",
-        walks_d, oh_d, ch_d, s250, s500, s750
-    );
-    // s16: WW4 (phase/slotmm) in its own pr_info too — as the TAIL of
-    // the big block it was the part most often garbled by the per-CPU
-    // wakewatch heartbeat racing the UART, and slotmm is the family-B
-    // standing watch (it must stay parseable).
-    crate::pr_info!(
-        "WW4: phase=[{},{}] slotmm=[{},{}]",
-        phase0,
-        phase1,
-        mm_d[0],
-        mm_d[1]
-    );
-
-    // rt-r4 (R2 residual attribution): the AVG side of the CYC brackets —
-    // cumulative hres fire-lateness mean/max plus the RT-class wake→pick
-    // mean/max. With a cyclictest FIFO run, cyclictest_avg ≈ fire_avg +
-    // rt_pick_avg + switch/user overhead; the residual attribution names
-    // the top term from these two lines. Divide-first tick→µs (the WW
-    // overflow discipline: sums can grow unbounded across a long boot).
-    {
-        let ticks_per_us = (crate::config::TIMER_CLOCK_FREQ_HZ / 1_000_000).max(1);
-        let f_n = WW_FIRE_N.load(Ordering::Relaxed);
-        let f_sum_us = WW_FIRE_SUM_TICKS.load(Ordering::Relaxed) / ticks_per_us;
-        let f_avg = if f_n > 0 { f_sum_us / f_n } else { 0 };
-        let (rt_n, rt_avg, rt_max) = crate::sched::sched_hooks::ww_rt_pick_stats();
-        crate::pr_info!(
-            "WW6: fire_n={} fire_avg={}us fire_max={}us rt_pick_n={} rt_pick_avg={}us rt_pick_max={}us",
-            f_n,
-            f_avg,
-            WW_FIRE_MAX_US.load(Ordering::Relaxed),
-            rt_n,
-            rt_avg,
-            rt_max
-        );
-    }
-
-    crate::pr_info!(
-        "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})",
-        fire_n,
-        late_max,
-        pidmiss,
-        WW_REARM_N.load(Ordering::Relaxed),
-        overdue,
-        wheel_len,
-        HRES_NEXT.load(Ordering::Acquire).saturating_sub(now_time) / ticks_per_ms,
-        runs_d,
-        busy_ms,
-        irq_d[0],
-        irq_d[1],
-        vecs[0], vecs[1], vecs[2], vecs[3], vecs[4],
-        vecs[5], vecs[6], vecs[7], vecs[8], vecs[9],
-        sched[0], sched[1], sched[2], sched[3],
-        sched[4], sched[5], sched[6],
-        sched[7], sched[8], sched[9]
-    );
-    crate::sched::sched_hooks::heartbeat();
-    // sc158 (Session R): one-shot park dump for wedged foundation/sa_main
-    // registrar threads - see wakewatch::stallwatch_tick.
-    crate::sched::sched_hooks::stallwatch_tick();
-}
 
 /// Rate-gated direct-console print for fire-lateness outliers (no GRQ
 /// held at the call site, but printk could interleave with GRQ-held
