@@ -58,6 +58,8 @@ pub mod fs {
     #[cfg(feature = "unit-test")]
     pub mod tmpfs_test;
     #[cfg(feature = "unit-test")]
+    pub mod tmpfs_mknod_test;
+    #[cfg(feature = "unit-test")]
     pub mod procfs_test;
     pub use rux::fs::*;
 }
@@ -80,7 +82,7 @@ pub fn run_unit_tests() {
     rux::tests::test_group_start("fs_pins/rootfs");
     crate::fs::rootfs_test::test_rootfs_pins();
     rux::tests::test_group_start("tmpfs-mknod");
-    crate::fs::tmpfs_test::test_tmpfs_mknod();
+    crate::fs::tmpfs_mknod_test::test_tmpfs_mknod();
     rux::tests::test_group_start("procfs");
     crate::fs::procfs_test::test_procfs();
 }

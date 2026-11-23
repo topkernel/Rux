@@ -43,6 +43,7 @@ fn test_mkdir() {
                     Some(false) => test_fail("mkdir", "not a directory"),
                     None => test_skip("mkdir verify", "directory created but lookup failed (dentry cache)"),
                 }
+            }
         }
         Err(e) => {
             test_fail("mkdir", &format!("error: {}", e));

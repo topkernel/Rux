@@ -16,7 +16,7 @@
 //!
 //! Runs on the boot task (root), so the CAP_MKNOD gate passes.
 
-use super::{test_fail, test_group_start, test_pass};
+use rux::tests::{test_fail, test_group_start, test_pass};
 use crate::fs::inode::InodeMode;
 use crate::fs::vfs::{file_read, file_write};
 
@@ -137,8 +137,9 @@ pub fn test_tmpfs_mknod() {
                 }
             }
         }
-        // SAFETY: fd is a valid directory descriptor from file_opendir.
-        unsafe { crate::fs::close_file_fd(fd); }
+        // fd is a valid directory descriptor from file_opendir (the
+        // safe close since the syscall-crate era).
+        let _ = crate::fs::close_file_fd(fd);
         Some(found)
     });
     if dtype_found == Some(true) {
@@ -163,7 +164,7 @@ pub fn test_tmpfs_mknod() {
                 r => test_fail("read via null ops", &alloc::format!("{:?}", r)),
             }
             // SAFETY: fd is a valid descriptor from file_open above.
-            unsafe { crate::fs::close_file_fd(fd); }
+            let _ = crate::fs::close_file_fd(fd);
         }
         Err(_) => test_fail("open tmpfs /dev/null (registry bind)", "file_open failed"),
     }

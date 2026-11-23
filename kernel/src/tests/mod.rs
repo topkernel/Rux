@@ -436,7 +436,7 @@ pub mod sgid_mode;
 
 // ===== tmpfs mknod (OH Phase 1b: device nodes on a tmpfs /dev) =====
 #[cfg(feature = "unit-test")]
-pub mod tmpfs_mknod;
+// pub mod tmpfs_mknod; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 
 // ===== getdents64 listing cache (F4 route-4) =====
 #[cfg(feature = "unit-test")]
@@ -544,7 +544,8 @@ pub fn run_all_tests() {
     // tails, dir ops, and the mount-option page budget. Formerly an
     // in-module unit-test fn plus a dead #[cfg(test)] block in
     // fs/tmpfs.rs — all tmpfs unit tests live under kernel/src/tests/.
-    tmpfs::test_tmpfs();
+    // tmpfs::test_tmpfs(): the tmpfs budget tests moved with the leaf
+    // into the rux-fs crate (tmpfs_test, SERVICE-TEST SEAM).
 
     test_group_start("vma_flags");
     vma_flags::test_vma_flags();
