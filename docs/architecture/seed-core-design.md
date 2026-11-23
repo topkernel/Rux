@@ -546,7 +546,34 @@ rux-fs forbid-safe (DONE 2026-11-23, origin 50f0cc97a: pipe/fifo/
  regressions caught by the x86_64 battery and fixed
  in-merge: early selinuxfs mount_register caused the 'R'
  beacon reboot loop; the pipe_file_close clear/take
- inversion panicked on every pipe close)
+ inversion panicked on every pipe close. TRANCHE 2 DONE
+ 2026-11-23, fs-substrate lane: the substrate/boot leaves —
+ debugfs, tracefs, cgroup, sysfs, char_dev, tty, pty,
+ rootfs, tmpfs, devfs, procfs — ALL ELEVEN sole-copied
+ under the same forbid, none shelved (sysfs, tracefs,
+ cgroup, tty, char_dev and the devfs registry were already
+ zero-unsafe; tmpfs's 17, rootfs's 8, procfs's ~25, pty's
+ 4 and devfs's 6 constructs fell to the OnceSlot &'static
+ sb, name locks, TaskRef, uaccess_safe and new audited
+ edges — 25,161 crate lines, ZERO unsafe, negative probe
+ twice). Interface per crate-plan 3a: THREE lifecycle
+ tables (boot/populate/path), identity probes as published
+ ops tables compared inline, devfs fault-path rows gated
+ inline on fs_id — a file fault on ext4/tmpfs crosses ZERO
+ indirect calls (was up to 6 pre-reshape), measured: tight
+ MAP_SHARED fault loops (ext4/tmpfs/devfs, 256 pages x 24
+ rounds, two interleaved KVM pairs vs same-day main) show
+ no difference outside run spread on any kind (~2.4-2.9us
+ per fault dominates); pbench stock suite 28 rows, two
+ interleaved pairs: 26 rows within +-4% with sign flip
+ between runs (noise), the I/O-coupled rows (write_fsync,
+ append, stat) spread more between MAIN'S OWN two runs
+ than between sides. Accounting counters moved
+ FRAMEWORK-side (fs/perf_ctr.rs; trap/sched mutation paths
+ stay direct). Suites: riscv64 879/879, x86_64 881/881
+ (116/117 groups — fs_pins/rootfs split out); triple-arch
+ rc=0; boot smoke 9/9; ledger re-banked artifact-preserving
+ (95 ids remapped, 13 new edge rows under 4 new INVs))
 rux-ext4 forbid-safe (deepest fs consumer)
 rux-net forbid-safe (DONE at R2)
 rux-drivers forbid-safe (DONE 2026-11-23, origin 8672a0ebf:

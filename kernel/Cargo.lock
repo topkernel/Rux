@@ -412,6 +412,7 @@ name = "rux-net"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-fs",
 ]
 
 [[package]]

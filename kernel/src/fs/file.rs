@@ -2039,7 +2039,7 @@ pub static REG_RO_FILE_OPS: FileOps = FileOps::builder()
 
 /// Directory file operations (shared by all FS types).
 /// Directories are read via getdents64, not via read().
-pub(crate) fn dir_read_eisdir(_file: &File, _buf: &mut [u8]) -> isize {
+pub fn dir_read_eisdir(_file: &File, _buf: &mut [u8]) -> isize {
     -21  // EISDIR
 }
 
@@ -2052,7 +2052,7 @@ fn dir_close(_file: &File) -> i32 {
 /// telldir/seekdir-style rewinds failed). The file position is the index of
 /// the next VfsDirEntry to be returned by getdents64 (which is also the
 /// d_off-1 value it reports), so SEEK_SET to a previous d_off value works.
-pub(crate) fn dir_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+pub fn dir_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     let current = file.get_pos() as i64;
     let new_pos = match whence {
         0 => offset as i64,               // SEEK_SET: absolute entry index

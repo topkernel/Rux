@@ -45,6 +45,7 @@
 use crate::fs::dentry::{Dentry, VfsMountInternal};
 use crate::fs::file::{FileFlags, FileOps};
 use crate::fs::inode::Inode;
+use crate::fs::leaf_glue::TmpfsTagKind;
 use crate::fs::mount::MntFlags;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -298,39 +299,42 @@ pub fn create_fs_root(
     let src = source.unwrap_or("");
     match fs_type {
         "tmpfs" | "shm" => {
-            crate::fs::tmpfs::ensure_registered();
-            Ok((crate::fs::tmpfs::create_mount_instance(data), false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, None), false))
         }
         "ramfs" | "rootfs" => {
-            crate::fs::tmpfs::ensure_registered();
-            Ok((crate::fs::tmpfs::create_mount_instance(data), false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, None), false))
         }
         "devpts" => {
-            crate::fs::tmpfs::ensure_registered();
-            let mut root = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root,
-                &crate::fs::tmpfs::DEVPTS_INODE_OPS,
-            );
-            Ok((root, false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((
+                crate::fs::leaf_glue::tmpfs::create_mount_instance(
+                    data,
+                    Some(TmpfsTagKind::Devpts),
+                ),
+                false,
+            ))
         }
         "securityfs" => {
-            crate::fs::tmpfs::ensure_registered();
-            let mut root = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root,
-                &crate::fs::tmpfs::SECURITYFS_INODE_OPS,
-            );
-            Ok((root, false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((
+                crate::fs::leaf_glue::tmpfs::create_mount_instance(
+                    data,
+                    Some(TmpfsTagKind::Securityfs),
+                ),
+                false,
+            ))
         }
         "mqueue" => {
-            crate::fs::tmpfs::ensure_registered();
-            let mut root = crate::fs::tmpfs::create_mount_instance(data);
-            crate::fs::tmpfs::tag_mount_instance_type(
-                &mut root,
-                &crate::fs::tmpfs::MQUEUE_INODE_OPS,
-            );
-            Ok((root, false))
+            crate::fs::leaf_glue::tmpfs::ensure_registered();
+            Ok((
+                crate::fs::leaf_glue::tmpfs::create_mount_instance(
+                    data,
+                    Some(TmpfsTagKind::Mqueue),
+                ),
+                false,
+            ))
         }
         "selinuxfs" => Ok((
             (crate::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&crate::fs::fs_hooks::FsHooks::EMPTY).selinuxfs_root_inode)()
@@ -338,36 +342,36 @@ pub fn create_fs_root(
             false,
         )),
         "proc" | "procfs" => {
-            crate::fs::procfs::mount_procfs().map_err(|e| e as i32)?;
-            Ok((crate::fs::procfs::create_root_inode(), false))
+            crate::fs::leaf_glue::procfs::mount_procfs().map_err(|e| e as i32)?;
+            Ok((crate::fs::leaf_glue::procfs::create_root_inode(), false))
         }
         "sysfs" => {
-            crate::fs::sysfs::init_sysfs().map_err(|e| e as i32)?;
-            crate::fs::sysfs::mount_sysfs().map_err(|e| e as i32)?;
-            Ok((crate::fs::sysfs::create_root_inode(), false))
+            crate::fs::leaf_glue::sysfs::init_sysfs().map_err(|e| e as i32)?;
+            crate::fs::leaf_glue::sysfs::mount_sysfs().map_err(|e| e as i32)?;
+            Ok((crate::fs::leaf_glue::sysfs::create_root_inode(), false))
         }
         "devfs" | "devtmpfs" => {
-            crate::fs::devfs::init();
-            match crate::fs::devfs::get_root_entry() {
-                Some(e) => Ok((crate::fs::devfs::create_root_inode(&e), false)),
+            crate::fs::leaf_glue::devfs::init();
+            match crate::fs::leaf_glue::devfs::create_root_inode() {
+                Some(e) => Ok((e, false)),
                 None => Err(crate::errno::Errno::NoSuchDevice.as_neg_i32()),
             }
         }
         "debugfs" => {
-            if crate::fs::debugfs::debugfs_root().is_none() {
-                crate::fs::debugfs::init_debugfs()?;
+            if !crate::fs::leaf_glue::debugfs::debugfs_root_present() {
+                crate::fs::leaf_glue::debugfs::init_debugfs()?;
             }
-            Ok((crate::fs::debugfs::create_root_inode(), false))
+            Ok((crate::fs::leaf_glue::debugfs::create_root_inode(), false))
         }
         "tracefs" => {
-            if crate::fs::tracefs::tracefs_root().is_none() {
-                crate::fs::tracefs::init_tracefs()?;
+            if !crate::fs::leaf_glue::tracefs::tracefs_root_present() {
+                crate::fs::leaf_glue::tracefs::init_tracefs()?;
             }
-            Ok((crate::fs::tracefs::create_root_inode(), false))
+            Ok((crate::fs::leaf_glue::tracefs::create_root_inode(), false))
         }
         "cgroup2" | "cgroup" => {
-            crate::fs::cgroup::init_cgroupfs().map_err(|e| e as i32)?;
-            Ok((crate::fs::cgroup::create_root_inode(), false))
+            crate::fs::leaf_glue::cgroup::init_cgroupfs().map_err(|e| e as i32)?;
+            Ok((crate::fs::leaf_glue::cgroup::create_root_inode(), false))
         }
         // ext2/ext3/ext4 from a loop device or a named vdX disk: the
         // separate-instance discipline (mount_loop_instance — no journal

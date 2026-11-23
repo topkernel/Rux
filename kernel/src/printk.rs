@@ -1814,11 +1814,10 @@ pub static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builde
 ///
 /// Must be called after devfs is initialized.
 pub fn init_kmsg_device() {
-    use crate::fs::devfs;
     use crate::fs::dev_t::DEV_KMSG;
 
-    devfs::registry::register_char_device(DEV_KMSG, &KMSG_OPS);
-    let _ = devfs::mknod("kmsg", DEV_KMSG, 0o666 | 0o20000);
+    crate::fs::leaf_glue::devfs::register_char_device(DEV_KMSG, &KMSG_OPS);
+    let _ = crate::fs::leaf_glue::devfs::mknod("kmsg", DEV_KMSG, 0o666 | 0o20000);
 }
 
 // ==================== /proc/kmsg Blocking Stream ====================

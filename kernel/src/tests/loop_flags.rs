@@ -19,7 +19,7 @@ fn make_loop_file(minor: u32) -> alloc::sync::Arc<crate::fs::file::File> {
     let file = alloc::sync::Arc::new(crate::fs::file::File::new(
         crate::fs::file::FileFlags::new(crate::fs::file::FileFlags::O_RDWR),
     ));
-    file.set_ops(&crate::fs::devfs::LOOP_FILE_OPS);
+    file.set_ops(crate::fs::leaf_glue::devfs::loop_file_ops());
     let devno = crate::fs::dev_t::DevNo::new(crate::fs::dev_t::LOOP_MAJOR, minor);
     let b = alloc::boxed::Box::new(devno);
     file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);

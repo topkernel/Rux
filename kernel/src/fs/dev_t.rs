@@ -84,6 +84,9 @@ pub const MEM_MAJOR: u32 = 1;
 pub const TTY_MAJOR: u32 = 4;
 /// TTY auxiliary major (/dev/tty = 5:0, /dev/console = 5:1 — Linux layout).
 pub const TTYAUX_MAJOR: u32 = 5;
+/// The virtio-blk major (the devfs leaf's registration target; lives
+/// here — the framework's dev_t block — since the drivers reference it).
+pub const VIRTIO_BLK_MAJOR: u32 = 254;
 
 /// Parallel ports
 pub const LP_MAJOR: u32 = 6;

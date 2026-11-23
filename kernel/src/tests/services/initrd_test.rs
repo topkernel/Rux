@@ -14,7 +14,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use super::{test_fail, test_group_start, test_pass};
+use rux::tests::{test_fail, test_group_start, test_pass};
 use crate::fs::rootfs::RootFSSuperBlock;
 
 const GZ_PLAIN: [u8; 345] = [

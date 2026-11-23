@@ -2486,25 +2486,25 @@ pub fn gem_mmap_resolve(
 /// Called after the GPU framebuffer came up (the flip path needs the
 /// virtio-gpu device).
 pub fn init_drm() -> Result<(), ()> {
-    crate::fs::devfs::registry::register_char_device(DEV_DRM_CARD0, &DRM_OPS)?;
-    crate::fs::devfs::registry::register_char_device(DEV_DRM_RENDER, &DRM_OPS)?;
+    crate::fs::leaf_glue::devfs::register_char_device(DEV_DRM_CARD0, &DRM_OPS)?;
+    crate::fs::leaf_glue::devfs::register_char_device(DEV_DRM_RENDER, &DRM_OPS)?;
 
-    crate::fs::devfs::mkdir("dri")?;
-    crate::fs::devfs::mknod("dri/card0", DEV_DRM_CARD0, 0o666)?;
-    crate::fs::devfs::mknod("dri/renderD128", DEV_DRM_RENDER, 0o666)?;
+    crate::fs::leaf_glue::devfs::mkdir("dri")?;
+    crate::fs::leaf_glue::devfs::mknod("dri/card0", DEV_DRM_CARD0, 0o666)?;
+    crate::fs::leaf_glue::devfs::mknod("dri/renderD128", DEV_DRM_RENDER, 0o666)?;
 
     // DrmDisplay::SetDisplayPowerStatus opens /dev/graphics/fb0 and
     // FBIOBLANKs it; alias the existing fb0 node (the OH power-state
     // path reports NOT_SUPPORT when it is missing).
-    crate::fs::devfs::mkdir("graphics")?;
-    crate::fs::devfs::mknod("graphics/fb0", crate::fs::dev_t::DEV_FB0, 0o666)?;
+    crate::fs::leaf_glue::devfs::mkdir("graphics")?;
+    crate::fs::leaf_glue::devfs::mknod("graphics/fb0", crate::fs::dev_t::DEV_FB0, 0o666)?;
 
     // sysfs class entries for the DRM nodes, rooted at the virtio-gpu
     // PCI function: /sys/class/drm/{card0,renderD128} +
     // /sys/dev/char/226:{0,128} + the PCI device dir libdrm's
     // drmGetDevice(fd) walk needs (see register_drm_device).
     let slot_name = gpu_pci_slot_name();
-    crate::fs::sysfs::register_drm_device(&slot_name);
+    crate::fs::leaf_glue::sysfs::register_drm_device(&slot_name);
 
     crate::pr_info!(
         "drm: /dev/dri/card0 + renderD128 registered (crtc={} conn={} enc={} plane={})",

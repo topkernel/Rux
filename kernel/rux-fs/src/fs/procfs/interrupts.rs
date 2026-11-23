@@ -25,50 +25,14 @@ const MAX_CPUS: usize = crate::config::MAX_CPUS;
 // ============================================================================
 
 /// Timer interrupt counters per CPU
-static TIMER_COUNT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-
-/// Software interrupt (IPI) counters per CPU
-static SOFT_COUNT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-
-// ============================================================================
-// Counter increment functions (called from trap handler)
-// ============================================================================
+// The counter CELLS and the trap-path mutation fns live framework-side
+// (fs::perf_ctr — the fs-substrate devirtualization: arch traps call
+// them directly, zero indirection); these are the procfs-side readers.
+pub use crate::fs::perf_ctr::{timer_inc, timer_count, soft_inc, soft_count};
 
 /// Increment timer interrupt counter
-pub fn timer_inc(cpu: usize) {
-    if cpu < MAX_CPUS {
-        TIMER_COUNT[cpu].fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-/// Increment software interrupt counter
-pub fn soft_inc(cpu: usize) {
-    if cpu < MAX_CPUS {
-        SOFT_COUNT[cpu].fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-// ============================================================================
-// Counter read functions
-// ============================================================================
-
-/// Get timer interrupt count
-pub fn timer_count(cpu: usize) -> u64 {
-    if cpu < MAX_CPUS {
-        TIMER_COUNT[cpu].load(Ordering::Relaxed)
-    } else {
-        0
-    }
-}
-
-/// Get software interrupt count
-pub fn soft_count(cpu: usize) -> u64 {
-    if cpu < MAX_CPUS {
-        SOFT_COUNT[cpu].load(Ordering::Relaxed)
-    } else {
-        0
-    }
-}
+// (The cells + trap-path incs + readers moved to fs::perf_ctr; the
+// re-export above keeps the historical paths alive for the generator.)
 
 /// Total interrupts since boot, summed over every source this file
 /// reports (Linux /proc/stat "intr").

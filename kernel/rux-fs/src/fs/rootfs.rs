@@ -67,12 +67,9 @@ struct RootFSPathCache {
     misses: AtomicU64,
 }
 
-// SAFETY: RootFSPathCache uses internal Spinlock for mutable access;
-// all fields are either locked or atomic.
-unsafe impl Send for RootFSPathCache {}
-// SAFETY: all shared mutable state is protected by the internal Spinlock;
-// no data races are possible across threads/CPUs.
-unsafe impl Sync for RootFSPathCache {}
+// (The pre-move `unsafe impl Send/Sync` markers were vestigial — every
+// field is lock-protected or atomic; deletion-verified by the crate's
+// forbid build.)
 
 /// Per-superblock path-cache methods. Linux dcache alignment: the cache
 /// lives on the RootFSSuperBlock instance (like the reference's dentry
@@ -267,8 +264,11 @@ const MAX_SYMLINKS: usize = crate::config::MAX_SYMLINKS;
 
 #[repr(C)]
 pub struct RootFSNode {
-    /// Node name (interior mutability: set_name requires exclusive parent-lock)
-    pub(crate) name: UnsafeCell<Vec<u8>>,
+    /// Node name (interior mutability under the node's own lock — the
+    /// forbid-crate conversion of the old UnsafeCell-under-parent-lock
+    /// discipline; the parent's children lock is still held by every
+    /// mutator, this lock adds the type-system guarantee).
+    pub(crate) name: Spinlock<Vec<u8>>,
     /// Node type
     pub node_type: RootFSType,
     /// Node data (if it's a file). The buffer lives behind its OWN lock so
@@ -303,12 +303,8 @@ pub struct RootFSNode {
     pub(crate) sb_back: AtomicPtr<RootFSSuperBlock>,
 }
 
-// SAFETY: RootFSNode's mutable fields (data, children) are protected by Spinlocks;
-// name uses UnsafeCell with callers ensuring exclusive access via parent-lock.
-unsafe impl Send for RootFSNode {}
-// SAFETY: all shared mutable state is protected by internal Spinlocks or UnsafeCell;
-// no data races are possible across threads/CPUs.
-unsafe impl Sync for RootFSNode {}
+// (The pre-move `unsafe impl Send/Sync` markers were vestigial after the
+// name cell conversion — every field is lock-protected or atomic.)
 
 impl RootFSNode {
     /// Create new node
@@ -319,7 +315,7 @@ impl RootFSNode {
             RootFSType::SymbolicLink => InodeMode::S_IFLNK | 0o777,
         };
         Self {
-            name: UnsafeCell::new(name),
+            name: Spinlock::new(name),
             node_type,
             data: alloc::sync::Arc::new(Spinlock::new(Vec::new())),
             mode: Spinlock::new(mode),
@@ -332,11 +328,17 @@ impl RootFSNode {
         }
     }
 
-    /// Get the node name as a byte slice.
-    pub fn name(&self) -> &[u8] {
-        // SAFETY: Name is only mutated via set_name(), which requires exclusive
-        // access (parent's children lock held). Reads are safe under that invariant.
-        unsafe { &*self.name.get() }
+    /// Byte-equality probe against the node's name — NO allocation (the
+    /// child-search hot path; the forbid-crate shape of the old shared
+    /// borrow).
+    pub fn name_eq(&self, b: &[u8]) -> bool {
+        *self.name.lock() == *b
+    }
+
+    /// The node name as an owned Vec (readdir/stat display paths — the
+    /// callers copied anyway).
+    pub fn name_vec(&self) -> alloc::vec::Vec<u8> {
+        self.name.lock().clone()
     }
 
     /// Create directory node
@@ -384,7 +386,7 @@ impl RootFSNode {
     /// Remove child node
     pub fn remove_child(&self, name: &[u8]) -> bool {
         let mut children = self.children.lock();
-        if let Some(pos) = children.iter().position(|c| c.as_ref().name() == name) {
+        if let Some(pos) = children.iter().position(|c| c.as_ref().name_eq(name)) {
             children.remove(pos);
             true
         } else {
@@ -398,14 +400,13 @@ impl RootFSNode {
     /// Caller must hold exclusive access to this node (typically the parent
     /// directory's children lock). No other thread may read the name field.
     pub fn set_name(&self, new_name: Vec<u8>) {
-        // SAFETY: Caller guarantees exclusive access (parent lock held).
-        unsafe { *self.name.get() = new_name; }
+        *self.name.lock() = new_name;
     }
 
     /// Rename child node
     pub fn rename_child(&self, old_name: &[u8], new_name: Vec<u8>) -> Result<(), ()> {
         let mut children = self.children.lock();
-        let pos = children.iter().position(|c| c.as_ref().name() == old_name).ok_or(())?;
+        let pos = children.iter().position(|c| c.as_ref().name_eq(old_name)).ok_or(())?;
 
         // SAFETY: We hold children lock, granting exclusive access to the child.
         children[pos].set_name(new_name);
@@ -417,7 +418,7 @@ impl RootFSNode {
     pub fn find_child(&self, name: &[u8]) -> Option<Arc<RootFSNode>> {
         let children = self.children.lock();
         for child in children.iter() {
-            if child.as_ref().name() == name {
+            if child.as_ref().name_eq(name) {
                 // Arc implements Clone trait
                 return Some(child.clone());
             }
@@ -1040,7 +1041,7 @@ impl RootFSSuperBlock {
                     return Err(errno::Errno::InvalidArgument.as_neg_i32());
                 }
                 // Walk up — find this node's parent by checking root's children
-                let found = self.root_node.find_child(check.name());
+                let found = self.root_node.find_child(&check.name_vec());
                 match found {
                     Some(p) if p.ino != check.ino => check = p,
                     _ => break,
@@ -1273,23 +1274,20 @@ pub fn init_rootfs() -> Result<(), i32> {
     // Save to global variable (protected with AtomicPtr)
     GLOBAL_ROOTFS_SB.store(rootfs_sb_ptr, Ordering::Release);
 
-    // Create root mount point and leak to static storage
-    let mount = Box::new(VfsMount::new(
+    // Create root mount point and leak to static storage. The root
+    // mount's ID is set BEFORE the Box::into_raw publish (the forbid-
+    // crate conversion of the old write-through-the-raw-pointer).
+    let mut mount = Box::new(VfsMount::new(
         b"/".to_vec(),      // Mount point
         b"/".to_vec(),      // Root directory
         MntFlags::new(0),   // No special flags
         Some(rootfs_sb_ptr as *mut u8),  // Superblock
     ));
+    mount.mnt_id = 1; // root mount point
     let mount_ptr = Box::into_raw(mount) as *mut VfsMount;
 
     // Save to global variable (protected with AtomicPtr)
     GLOBAL_ROOT_MOUNT.store(mount_ptr, Ordering::Release);
-
-    // Set mount point ID to 1 (root mount point)
-    // SAFETY: global pointer is valid once initialized during init
-    unsafe {
-        (*mount_ptr).mnt_id = 1;
-    }
 
     // Create essential directories on rootfs (fallback when ext4 is unavailable)
     // INV-FS-GLOBALSB-1: rootfs_sb_ptr was installed at mount init.
@@ -1892,7 +1890,7 @@ fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::Vfs
         };
         entries.push(crate::fs::inode::VfsDirEntry {
             ino: child.ino,
-            name: child.name().to_vec(),
+            name: child.name_vec(),
             file_type: dt,
         });
     }
@@ -1902,13 +1900,9 @@ fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::Vfs
 /// RootFS destroy_inode: reclaim the Arc<RootFSNode> stored in private_data.
 // SAFETY: VFS callback contract; called when the inode's refcount drops to zero.
 fn rootfs_destroy_inode(inode: &mut Inode) {
-    if let Some(ptr) = inode.private_data.take() {
-        // Reconstruct the Arc from the raw pointer and let it drop,
-        // decrementing the RootFSNode's reference count.
-        // SAFETY: private_data holds an Arc leaked by into_raw at inode
-        // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        let _ = unsafe { alloc::sync::Arc::from_raw(ptr as *const RootFSNode) };
-    }
+    // Reclaim the Arc reference and let it drop (INV-FS-PRIVDATA-1
+    // through the framework edge — the Drop-time single reclaim).
+    crate::fs::unsafe_edges::privdata_drop_arc::<RootFSNode>(inode);
 }
 
 /// RootFS inode operations table
@@ -1979,3 +1973,62 @@ fn rootfs_node_size(node: &RootFSNode) -> usize {
     }
 }
 
+
+// ============================================================================
+// The framework seams (fs-substrate flip): the initrd trait impl, the
+// read_file row body, and the trait-object view of the global sb.
+// ============================================================================
+
+impl crate::fs::leaf_glue::RamfsView for RootFSSuperBlock {
+    fn rfs_mkdir(&self, path: &str) -> Result<(), i32> {
+        self.mkdir(path)
+    }
+    fn rfs_create_dir(&self, path: &str, mode: u32) -> Result<(), i32> {
+        self.create_dir(path, mode)
+    }
+    fn rfs_symlink(&self, target: &str, path: &str) -> Result<(), i32> {
+        self.symlink(target, path)
+    }
+    fn rfs_link(&self, first: &str, path: &str) -> Result<(), i32> {
+        self.link(first, path)
+    }
+    fn rfs_create_file(&self, path: &str, data: alloc::vec::Vec<u8>) -> Result<(), i32> {
+        self.create_file(path, data)
+    }
+    fn rfs_remove_child(&self, parent: &str, base: &str) {
+        if let Some(dir) = self.lookup(parent) {
+            dir.remove_child(base.as_bytes());
+        }
+    }
+    fn rfs_lookup_kind(&self, path: &str) -> Option<bool> {
+        self.lookup(path).map(|n| n.is_dir())
+    }
+    fn rfs_seed_file(&self, path: &str, data: alloc::vec::Vec<u8>) -> Result<(), i32> {
+        self.create_file(path, data)
+    }
+    fn rfs_set_node_meta(&self, path: &str, mode: u32, mtime: u64) {
+        if let Some(node) = self.lookup(path) {
+            // Keep the node's own type bits; apply only the permission
+            // bits (the pre-flip initrd body, verbatim).
+            let mut m = node.mode.lock();
+            *m = (*m & !0o7777) | (mode & 0o7777);
+            drop(m);
+            node.mtime.store(mtime, Ordering::Release);
+        }
+    }
+}
+
+/// The initrd unpack target as the framework trait object (the global
+/// sb's 'static view — INV-FS-GLOBALSB-1 through the edge).
+pub fn ramfs_view() -> Option<&'static dyn crate::fs::leaf_glue::RamfsView> {
+    get_rootfs_sb_ref().map(|sb| sb as &'static dyn crate::fs::leaf_glue::RamfsView)
+}
+
+/// The legacy read_file_from_rootfs row body (the pre-flip fs::mod
+/// fn, verbatim — lookup + the shared buffer clone).
+pub fn read_file(filename: &str) -> Option<alloc::vec::Vec<u8>> {
+    let rootfs = get_rootfs_sb_ref()?;
+    let node = rootfs.lookup(filename)?;
+    let data = node.data.lock();
+    Some(data.clone())
+}

@@ -56,6 +56,11 @@ pub fn tracefs_root() -> Option<Arc<DebugFsNode>> {
     ROOT.lock().clone()
 }
 
+/// `tracefs_root().is_some()` — fsctx's lazy-init probe row.
+pub fn root_present() -> bool {
+    tracefs_root().is_some()
+}
+
 // ============================================================================
 // Population API (kernel side)
 // ============================================================================
@@ -717,4 +722,23 @@ pub fn mount_tracefs(source: &str, target: &str, fs_type: &str, data: Option<&st
 
 pub fn mount_register() {
     crate::fs::mount_table::register(&["tracefs"], mount_tracefs);
+}
+
+// The boxed-closure interface rows (the framework's adapter boxes the
+// kernel's generic closures); plain forwards, no logic.
+pub fn create_file_boxed(
+    path: &str,
+    mode: u32,
+    show: alloc::boxed::Box<dyn Fn() -> Vec<u8> + Send + Sync>,
+    store: Option<alloc::boxed::Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>,
+) -> bool {
+    create_file(path, mode, show, store)
+}
+
+pub fn create_stream_file_boxed(
+    path: &str,
+    mode: u32,
+    show: alloc::boxed::Box<dyn Fn() -> Vec<u8> + Send + Sync>,
+) -> bool {
+    create_stream_file(path, mode, show)
 }

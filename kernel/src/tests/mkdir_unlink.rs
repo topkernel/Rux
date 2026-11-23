@@ -35,21 +35,14 @@ fn test_mkdir() {
     let _ = file_rmdir(dirname1);
     match file_mkdir(dirname1, 0o755) {
         Ok(()) => {
-            // Verify directory exists
-            let sb = unsafe { crate::fs::rootfs::get_rootfs() };
-            if !sb.is_null() {
-                let node = unsafe { (*sb).lookup(dirname1) };
-                if let Some(n) = node {
-                    if n.is_dir() {
-                        test_pass("mkdir single level");
-                    } else {
-                        test_fail("mkdir", "not a directory");
-                    }
-                } else {
-                    test_skip("mkdir verify", "directory created but lookup failed (dentry cache)");
+            // Verify directory exists (rootfs-row view — the leaf lives
+            // in the rux-fs crate now)
+            {
+                match crate::fs::leaf_glue::rootfs::lookup_kind(dirname1) {
+                    Some(true) => test_pass("mkdir single level"),
+                    Some(false) => test_fail("mkdir", "not a directory"),
+                    None => test_skip("mkdir verify", "directory created but lookup failed (dentry cache)"),
                 }
-            } else {
-                test_skip("mkdir verify", "rootfs not available");
             }
         }
         Err(e) => {
@@ -91,11 +84,9 @@ fn test_rmdir() {
     // Remove empty directory
     match file_rmdir(dirname) {
         Ok(()) => {
-            // Verify directory is deleted
-            let sb = unsafe { crate::fs::rootfs::get_rootfs() };
-            if !sb.is_null() {
-                let node = unsafe { (*sb).lookup(dirname) };
-                if node.is_none() {
+            // Verify directory is deleted (rootfs-row view)
+            {
+                if crate::fs::leaf_glue::rootfs::lookup_kind(dirname).is_none() {
                     test_pass("rmdir empty directory");
                 } else {
                     test_fail("rmdir", "directory still exists");
@@ -159,11 +150,9 @@ fn test_unlink() {
             // Use unlink to delete file
             match file_unlink(filename) {
                 Ok(()) => {
-                    // Verify file is deleted
-                    let sb = unsafe { crate::fs::rootfs::get_rootfs() };
-                    if !sb.is_null() {
-                        let node = unsafe { (*sb).lookup(filename) };
-                        if node.is_none() {
+                    // Verify file is deleted (rootfs-row view)
+                    {
+                        if crate::fs::leaf_glue::rootfs::lookup_kind(filename).is_none() {
                             test_pass("unlink file");
                         } else {
                             test_fail("unlink", "file still exists");

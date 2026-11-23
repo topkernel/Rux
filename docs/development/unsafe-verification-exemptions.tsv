@@ -1,9 +1,28 @@
-# Per-file annotated-count drops that were reviewed and accepted. Read by scripts/unsafe_gate.py --check.
-# One row per drop, tab-separated:
+# A drop that has no matching row fails the gate. Remove a row once no baseline shows its drop.
 #   file   the path as the census reports it (kernel/src/...)
 #   from   the file's annotated-region count at the baseline the gate compares against
-#   to     the count it may come down to, and no further (one row never covers a second loss)
-#   reason why the annotations left with their regions
-# A drop that has no matching row fails the gate. Remove a row once no baseline shows its drop.
+kernel/src/arch/riscv64/trap.rs	54	51	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
+kernel/src/drivers/loop_dev.rs	4	2	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
+kernel/src/fs/debugfs.rs	3	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/devfs/mod.rs	3	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/fsctx.rs	14	0	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
+kernel/src/fs/mod.rs	2	0	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
+kernel/src/fs/procfs/mod.rs	3	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/procfs/pid.rs	14	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/procfs/self_proc.rs	1	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/procfs/stat.rs	1	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/procfs/sysrq.rs	4	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/procfs/vmstat.rs	2	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/pty.rs	4	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/rootfs.rs	8	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/tmpfs.rs	17	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/src/fs/vfs.rs	26	20	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
 kernel/src/signal.rs	15	13	rux-signal flip: abort_reason_dump's two regions moved to kernel/src/signal_edges.rs (moved-item provenance in the census remap; same INV:INV-TASKREF-1)
+kernel/src/tests/file_open.rs	6	0	test file moved to kernel/src/tests/services/ or rewritten for the forbid crate
+kernel/src/tests/mkdir_unlink.rs	6	0	test file moved to kernel/src/tests/services/ or rewritten for the forbid crate
 kernel/src/tests/signal.rs	1	0	rux-signal flip: the test moved to tests/services/signal_test.rs under the crate's forbid; its unsafe extern "C" fn definition region was replaced by a literal SigAction construction
+kernel/src/tests/tmpfs_mknod.rs	2	0	test file moved to kernel/src/tests/services/ or rewritten for the forbid crate
+# One row per drop, tab-separated:
+# Per-file annotated-count drops that were reviewed and accepted. Read by scripts/unsafe_gate.py --check.
+#   reason why the annotations left with their regions
+#   to     the count it may come down to, and no further (one row never covers a second loss)

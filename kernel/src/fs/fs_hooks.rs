@@ -8,6 +8,13 @@
 //! nullable table — no-op until the rux-fs crate registers at boot
 //! (rux-bin calls its register_all before kmain, the composition
 //! contract). The framework never names a service leaf.
+//!
+//! This is the rung-3 table only (pipe/fifo/inotify/memfd/selinuxfs).
+//! The substrate/boot leaves that moved later (fs-substrate tranche:
+//! tmpfs, procfs, rootfs, devfs, sysfs, debugfs, tracefs, cgroup, pty,
+//! tty, char_dev) cross through `fs::leaf_hooks` — three tables split
+//! by lifecycle (crate-plan §3a rule 1), including every leaf's
+//! mount-table registration.
 
 use crate::fs::file::File;
 use crate::fs::inode::Inode;
@@ -49,13 +56,6 @@ pub struct FsHooks {
     pub inotify_set_max_queued_events: fn(usize),
     /// procfs fdinfo: an inotify fd's watch rows.
     pub inotify_fdinfo_watches: fn(&File) -> Option<alloc::vec::Vec<(i32, u64, u64, u32)>>,
-    /// The service crate's mount-table row registrations (selinuxfs's
-    /// mount_register today). MUST run at the register_builtin_handlers
-    /// boot point — NOT at rust_main time: the mount table and the
-    /// allocator are not up yet that early (an early call panics on
-    /// x86_64 before the console exists: only the boot.S 'R' beacon
-    /// prints, in a reboot loop).
-    pub leaf_mount_register: fn(),
 }
 
 impl FsHooks {
@@ -83,7 +83,6 @@ impl FsHooks {
         inotify_max_queued_events: || 16384,
         inotify_set_max_queued_events: |_| {},
         inotify_fdinfo_watches: |_| None,
-        leaf_mount_register: || {},
     };
 }
 

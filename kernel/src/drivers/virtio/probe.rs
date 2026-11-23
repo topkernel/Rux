@@ -143,7 +143,7 @@ fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
     crate::drivers::net::virtio_net::enable_device_interrupt(base_addr);
     // U3: registration-time uevent — notify udev/mdev the netdev exists.
     // virtio_net::init names the device "eth0" (fixed, single-function).
-    crate::fs::sysfs::netdev_uevent("eth0", "add");
+    crate::fs::leaf_glue::sysfs::netdev_uevent("eth0", "add");
     Ok(())
 }
 
@@ -168,9 +168,9 @@ fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
         .map(|d| d.disk.get_capacity())
         .unwrap_or(0);
     let mmio_host = alloc::format!("{:x}.virtio_mmio", base_addr);
-    crate::fs::sysfs::register_block_disk_at(
+    crate::fs::leaf_glue::sysfs::register_block_disk_at(
         "vda",
-        crate::fs::devfs::VIRTIO_BLK_MAJOR,
+        crate::fs::dev_t::VIRTIO_BLK_MAJOR,
         0,
         capacity,
         &[("platform", "platform"), (mmio_host.as_str(), "platform")],
@@ -188,7 +188,7 @@ fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
 fn init_loopback_device() -> bool {
     if crate::drivers::hooks::loopback_init() {
         // U3: registration-time uevent for "lo".
-        crate::fs::sysfs::netdev_uevent("lo", "add");
+        crate::fs::leaf_glue::sysfs::netdev_uevent("lo", "add");
         true
     } else {
         false
@@ -259,7 +259,7 @@ pub fn init_pci_net_devices() -> usize {
                         device_count += 1;
                         // U3: registration-time uevent — notify udev/mdev
                         // the netdev exists (device is named "eth0").
-                        crate::fs::sysfs::netdev_uevent("eth0", "add");
+                        crate::fs::leaf_glue::sysfs::netdev_uevent("eth0", "add");
                         break; // single global net device
                     }
                     Err(e) => {
@@ -563,9 +563,9 @@ pub fn init_pci_block_devices() -> usize {
                                         .iter()
                                         .map(|(n, b)| (n.as_str(), *b))
                                         .collect();
-                                    crate::fs::sysfs::register_block_disk_at(
+                                    crate::fs::leaf_glue::sysfs::register_block_disk_at(
                                         &name,
-                                        crate::fs::devfs::VIRTIO_BLK_MAJOR,
+                                        crate::fs::dev_t::VIRTIO_BLK_MAJOR,
                                         (slot as u32) * 16,
                                         capacity,
                                         &chain,
@@ -749,9 +749,9 @@ pub fn pci_rescan_block_hotplug() -> usize {
         let hier = pci_dev_hierarchy(ecam_addr);
         let chain: alloc::vec::Vec<(&str, &str)> =
             hier.iter().map(|(n, b)| (n.as_str(), *b)).collect();
-        let seq = crate::fs::sysfs::register_block_disk_at(
+        let seq = crate::fs::leaf_glue::sysfs::register_block_disk_at(
             &name,
-            crate::fs::devfs::VIRTIO_BLK_MAJOR,
+            crate::fs::dev_t::VIRTIO_BLK_MAJOR,
             minor,
             capacity,
             &chain,
@@ -761,7 +761,7 @@ pub fn pci_rescan_block_hotplug() -> usize {
         crate::pr_info!(
             "virtio-blk hotplug: {} ({}:{}) {} sectors, uevent seq {}",
             name,
-            crate::fs::devfs::VIRTIO_BLK_MAJOR,
+            crate::fs::dev_t::VIRTIO_BLK_MAJOR,
             minor,
             capacity,
             seq

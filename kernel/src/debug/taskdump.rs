@@ -1036,7 +1036,7 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
             puts("FROZEN-CPU ticks cpu");
             put_dec(c as u64);
             puts(": n=");
-            put_dec(crate::fs::procfs::interrupts::timer_count(c));
+            put_dec(crate::fs::perf_ctr::timer_count(c));
             puts(" last_rip=");
             put_hex(
                 crate::interrupt::preempt::TICK_ENTRY_RIP[c]

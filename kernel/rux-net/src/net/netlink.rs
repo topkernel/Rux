@@ -234,7 +234,7 @@ fn iface_set_up(index: u32, up: bool) {
             dev.down();
         }
         // U1a uevent: notify udev of the link state change.
-        crate::fs::sysfs::netdev_uevent(&name, "change");
+        rux_fs::fs::sysfs::netdev_uevent(&name, "change");
     }
 }
 
@@ -1010,7 +1010,7 @@ pub fn netlink_bind(
         && groups & 1 != 0
         && !sock.coldboot_served.swap(true, core::sync::atomic::Ordering::AcqRel)
     {
-        crate::fs::sysfs::coldboot_uevent_replay(&mut |payload| {
+        rux_fs::fs::sysfs::coldboot_uevent_replay(&mut |payload| {
             uevent_push_direct(sock, payload)
         });
     }

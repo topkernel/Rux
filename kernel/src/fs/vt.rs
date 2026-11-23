@@ -173,15 +173,15 @@ fn wait_switch_round() -> Result<(), i32> {
 // ============================================================================
 
 fn vtdev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
-    crate::fs::devfs::condev_read(file, buf)
+    crate::fs::leaf_glue::devfs::condev_read(file, buf)
 }
 
 fn vtdev_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
-    crate::fs::devfs::condev_write(file, buf)
+    crate::fs::leaf_glue::devfs::condev_write(file, buf)
 }
 
 fn vtdev_poll(file: &crate::fs::file::File, events: u16) -> u16 {
-    crate::fs::devfs::condev_poll(file, events)
+    crate::fs::leaf_glue::devfs::condev_poll(file, events)
 }
 
 /// Last fd closed: release the VT in-use slot and free the stashed

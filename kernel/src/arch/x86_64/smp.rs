@@ -508,7 +508,7 @@ fn smp_selftest() {
         // counter as proof the per-CPU LAPIC timer ticks there.
         let cpu = crate::arch::cpu_id() as usize;
         REMOTE_TICKS.fetch_add(
-            crate::fs::procfs::interrupts::timer_count(cpu),
+            crate::fs::perf_ctr::timer_count(cpu),
             Ordering::SeqCst,
         );
         REMOTE_BUMPS.fetch_add(1, Ordering::SeqCst);

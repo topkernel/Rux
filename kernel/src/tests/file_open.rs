@@ -11,56 +11,55 @@ use crate::println;
 use alloc::vec::Vec;
 use crate::fs::vfs;
 use crate::fs::file::{FileFlags, close_file_fd};
-use crate::fs::rootfs;
 use crate::sched;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_file_open() {
     test_group_start("file_open() functionality");
 
-    // First get RootFS superblock
-    let sb_ptr = rootfs::get_rootfs();
-    if sb_ptr.is_null() {
+    // RootFS up? (the trait view through the row — rootfs lives in the
+    // rux-fs crate now)
+    if crate::fs::leaf_glue::rootfs::sb_view().is_none() {
         test_fail("RootFS initialization", "superblock is null");
         return;
     }
 
     // Initialize current task's fdtable (for testing)
-    unsafe {
+    {
         if sched::get_current_fdtable().is_none() {
             test_skip("fdtable tests", "no fdtable available");
 
-            let sb = &*sb_ptr;
-
-            // Test 1: File lookup
-            let _ = sb.create_file("/test_existing.txt", b"Hello, Rux!\n".to_vec());
-            match sb.lookup("/test_existing.txt") {
+            // Test 1: File lookup (rootfs-row views)
+            let _ = crate::fs::leaf_glue::rootfs::seed_file("/test_existing.txt", b"Hello, Rux!\n".to_vec());
+            match crate::fs::leaf_glue::rootfs::lookup_kind("/test_existing.txt") {
                 Some(_) => test_pass("RootFS lookup existing file"),
                 None => test_fail("RootFS lookup existing file", "not found"),
             }
 
             // Test 2: File does not exist
-            match sb.lookup("/nonexistent") {
+            match crate::fs::leaf_glue::rootfs::lookup_kind("/nonexistent") {
                 Some(_) => test_fail("RootFS lookup nonexistent", "should not find"),
                 None => test_pass("RootFS lookup nonexistent"),
             }
 
             // Test 3: O_CREAT create file
-            match sb.create_file("/test_new_file", Vec::new()) {
-                Ok(_) => test_pass("RootFS create_file"),
-                Err(e) => test_fail("RootFS create_file", "error"),
+            if crate::fs::leaf_glue::rootfs::seed_file("/test_new_file", Vec::new()).is_some() {
+                test_pass("RootFS create_file");
+            } else {
+                test_fail("RootFS create_file", "error");
             }
 
             // Test 4: Verify file was created
-            match sb.lookup("/test_new_file") {
+            match crate::fs::leaf_glue::rootfs::lookup_kind("/test_new_file") {
                 Some(_) => test_pass("RootFS verify created file"),
                 None => test_fail("RootFS verify created file", "not found"),
             }
 
             // Test 5: Create existing file (may succeed depending on implementation)
-            match sb.create_file("/test_new_file", Vec::new()) {
-                Ok(_) => test_skip("RootFS create existing", "implementation allows recreate"),
-                Err(_) => test_pass("RootFS create existing rejected"),
+            if crate::fs::leaf_glue::rootfs::seed_file("/test_new_file", Vec::new()).is_some() {
+                test_skip("RootFS create existing", "implementation allows recreate");
+            } else {
+                test_pass("RootFS create existing rejected");
             }
 
             return;
@@ -68,10 +67,9 @@ pub fn test_file_open() {
     }
 
     // If fdtable is available, run full tests
-    unsafe {
-        let sb = &*sb_ptr;
-        // Create /test_existing.txt
-        let _ = sb.create_file("/test_existing.txt", b"Hello, Rux!\n".to_vec());
+    {
+        // Create /test_existing.txt (rootfs-row seed)
+        let _ = crate::fs::leaf_glue::rootfs::seed_file("/test_existing.txt", b"Hello, Rux!\n".to_vec());
     }
     // The RAM rootfs superblock above is SHADOWED: ext4 is auto-mounted
     // over "/" during boot, so vfs::file_open resolves into the ext4
@@ -82,7 +80,7 @@ pub fn test_file_open() {
     // open test below uses.
     {
         match vfs::file_open("/test_existing.txt", FileFlags::O_CREAT | FileFlags::O_WRONLY | FileFlags::O_TRUNC, 0o644) {
-            Ok(fd) => { unsafe { let _ = close_file_fd(fd); } }
+            Ok(fd) => { let _ = close_file_fd(fd); }
             Err(_) => {
                 test_skip("open existing file", "cannot create /test_existing.txt");
                 return;
@@ -94,7 +92,7 @@ pub fn test_file_open() {
     match vfs::file_open("/test_existing.txt", FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
             test_pass("open existing file");
-            unsafe { let _ = close_file_fd(fd); }
+            let _ = close_file_fd(fd);
         }
         Err(_) => {
             test_fail("open existing file", "open failed");
@@ -115,7 +113,7 @@ pub fn test_file_open() {
     match vfs::file_open("/test_new_file", FileFlags::O_CREAT | FileFlags::O_WRONLY, 0) {
         Ok(fd) => {
             test_pass("O_CREAT new file");
-            unsafe { let _ = close_file_fd(fd); }
+            let _ = close_file_fd(fd);
         }
         Err(_) => {
             test_fail("O_CREAT new file", "create failed");
@@ -141,7 +139,7 @@ pub fn test_file_open() {
     match vfs::file_open("/test_excl_file", FileFlags::O_CREAT | FileFlags::O_EXCL | FileFlags::O_WRONLY, 0) {
         Ok(fd) => {
             test_pass("O_EXCL new file");
-            unsafe { let _ = close_file_fd(fd); }
+            let _ = close_file_fd(fd);
             let _ = crate::fs::file_unlink("/test_excl_file");
         }
         Err(_) => {

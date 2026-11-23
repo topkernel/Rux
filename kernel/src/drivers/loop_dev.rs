@@ -469,10 +469,7 @@ fn loop_request_fn_claimed(req: &mut Request, dev: &'static LoopDev, idx: usize)
 // ============================================================================
 
 fn loop_devno_of(file: &crate::fs::file::File) -> Option<DevNo> {
-    if !core::ptr::eq(
-        file.get_ops()? as *const _,
-        &crate::fs::devfs::LOOP_FILE_OPS as *const _,
-    ) {
+    if !crate::fs::leaf_glue::devfs::is_loop_ops(file.get_ops()?) {
         return None;
     }
     file.private_data_ptr().map(|pd| {
@@ -714,10 +711,7 @@ pub fn loop_file_ioctl(
 ) -> Option<i64> {
     use crate::arch::uaccess_safe as uaccess;
 
-    if !core::ptr::eq(
-        file.get_ops()? as *const _,
-        &crate::fs::devfs::LOOP_FILE_OPS as *const _,
-    ) {
+    if !crate::fs::leaf_glue::devfs::is_loop_ops(file.get_ops()?) {
         return None;
     }
     let Some(pd) = file.private_data_ptr() else { return None };

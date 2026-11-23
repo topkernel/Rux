@@ -80,10 +80,9 @@ pub struct DebugFsNode {
     pub streaming: bool,
 }
 
-// SAFETY: every mutable field sits behind a Spinlock; the closures are
-// required to be Send + Sync at construction.
-unsafe impl Send for DebugFsNode {}
-unsafe impl Sync for DebugFsNode {}
+// (The pre-move `unsafe impl Send/Sync` markers were vestigial: every
+// field is auto-Send+Sync (Spinlock-protected or Send+Sync boxed
+// closures) — deletion-verified by the crate-level forbid build.)
 
 static ROOT: Spinlock<Option<Arc<DebugFsNode>>> = Spinlock::new(None);
 static INO_COUNTER: AtomicU64 = AtomicU64::new(2);
@@ -95,6 +94,11 @@ fn next_ino() -> u64 {
 /// The debugfs root node (None before `init_debugfs`).
 pub fn debugfs_root() -> Option<Arc<DebugFsNode>> {
     ROOT.lock().clone()
+}
+
+/// `debugfs_root().is_some()` — fsctx's lazy-init probe row.
+pub fn root_present() -> bool {
+    debugfs_root().is_some()
 }
 
 // ============================================================================
@@ -139,6 +143,18 @@ pub fn create_dir(path: &str) -> bool {
         current = node;
     }
     true
+}
+
+/// The boxed-closure form of [`create_file`] — the interface row's
+/// shape (the framework's adapter boxes the kernel's generic closures);
+/// a plain forward, no logic.
+pub fn create_file_boxed(
+    path: &str,
+    mode: u32,
+    show: Box<dyn Fn() -> Vec<u8> + Send + Sync>,
+    store: Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>,
+) -> bool {
+    create_file(path, mode, show, store)
 }
 
 /// Create a regular file with a read generator and an optional write
@@ -476,14 +492,11 @@ fn debugfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileO
     }
 }
 
-/// debugfs destroy_inode: reclaim the leaked Box<DebugFsEntryData>.
-/// SAFETY: VFS callback contract; Drop-time hook.
+/// debugfs destroy_inode: reclaim the leaked Box<DebugFsEntryData>
+/// (INV-FS-PRIVDATA-1 through the framework edge — the Drop-time
+/// single reclaim).
 fn debugfs_destroy_inode(inode: &mut Inode) {
-    if let Some(ptr) = inode.private_data.take() {
-        // SAFETY: the Box was leaked by into_raw at inode creation
-        // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { Box::from_raw(ptr as *mut DebugFsEntryData) });
-    }
+    crate::fs::unsafe_edges::privdata_take_box::<DebugFsEntryData>(inode);
 }
 
 /// debugfs inode operations table.

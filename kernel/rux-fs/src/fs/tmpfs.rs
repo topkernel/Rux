@@ -78,11 +78,14 @@ fn wall_secs() -> u64 {
 /// cascade).
 pub(crate) struct TmpfsPage {
     data: Box<[u8; PAGE_SIZE]>,
-    sb: *const TmpfsSuperBlock,
+    /// The owning mount's leaked superblock (mount lifetime — INV-FS-
+    /// GLOBALSB-1 provenance; the forbid-crate conversion of the old
+    /// raw pointer).
+    sb: Option<&'static TmpfsSuperBlock>,
 }
 
 impl TmpfsPage {
-    fn new(sb: *const TmpfsSuperBlock) -> Self {
+    fn new(sb: Option<&'static TmpfsSuperBlock>) -> Self {
         // The caller must have reserved budget (used_pages already
         // incremented) — see TmpfsNode::write_at.
         Self {
@@ -94,18 +97,15 @@ impl TmpfsPage {
 
 impl Drop for TmpfsPage {
     fn drop(&mut self) {
-        if !self.sb.is_null() {
-            unsafe {
-                (*self.sb).used_pages.fetch_sub(1, Ordering::AcqRel);
-            }
+        if let Some(sb) = self.sb {
+            sb.used_pages.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
 
-// SAFETY: the raw superblock pointer is a leaked mount-lifetime
-// allocation (Box::into_raw in create_mount_instance); Drop only
-// touches an atomic through it.
-unsafe impl Send for TmpfsPage {}
+// (The pre-move `unsafe impl Send` marker is gone with the raw pointer:
+// Option<&'static TmpfsSuperBlock> is auto-Send when the superblock is
+// Sync, which the all-atomics/Arc field set gives it.)
 
 // ============================================================================
 // Node
@@ -125,8 +125,10 @@ pub enum TmpfsType {
 /// under the parent's children lock (identical discipline to RootFSNode).
 #[repr(C)]
 pub struct TmpfsNode {
-    /// Node name (mutated only via set_name with the parent lock held).
-    pub(crate) name: UnsafeCell<Vec<u8>>,
+    /// Node name (interior mutability under the node's own lock — the
+    /// forbid-crate conversion of the old UnsafeCell-under-parent-lock
+    /// discipline).
+    pub(crate) name: Spinlock<Vec<u8>>,
     pub node_type: TmpfsType,
     /// Page-granular contents. Shared `Arc` between hard links so writes
     /// through one link are visible through the others (POSIX semantics).
@@ -147,8 +149,13 @@ pub struct TmpfsNode {
     /// Instance identity (icache key low bits are in the node so iget can
     /// stamp VFS inodes without touching the superblock).
     pub fs_id: u64,
-    /// Owning superblock (leaked at mount; valid for the kernel's lifetime).
-    sb: *const TmpfsSuperBlock,
+    /// Owning superblock (leaked at mount; valid for the kernel's
+    /// lifetime), published through a write-once slot (INV-SLOT-1) —
+    /// the ROOT's back-pointer is stamped post-leak through the slot's
+    /// interior mutability (the pre-flip raw-pointer stamp); every
+    /// other node installs at construction. Empty only on the root
+    /// before mount setup.
+    sb: crate::safety::slot::OnceSlot<&'static TmpfsSuperBlock>,
     /// Device number for device-typed nodes (S_IFCHR/S_IFBLK), USERSPACE
     /// dev_t encoding (new_encode_dev — what mknod(2) passed and stat(2)
     /// reports). 0 for non-device nodes. OH Phase 1b: OH's init mounts a
@@ -163,15 +170,16 @@ pub struct TmpfsNode {
     gid: AtomicU32,
 }
 
-// SAFETY: mutable fields (pages/size/mode/children/atime/mtime) are protected
-// by Spinlocks or atomics; name uses UnsafeCell mutated only under the
-// parent's children lock.
-unsafe impl Send for TmpfsNode {}
-unsafe impl Sync for TmpfsNode {}
+// (The pre-move `unsafe impl Send/Sync` markers are gone: every field is
+// lock-protected, atomic, or a 'static shared reference.)
 
 impl TmpfsNode {
     /// Build a node of the given type with default modes (root-owned).
-    fn new(name: Vec<u8>, node_type: TmpfsType, ino: u64, fs_id: u64, sb: *const TmpfsSuperBlock) -> Self {
+    fn new(name: Vec<u8>, node_type: TmpfsType, ino: u64, fs_id: u64, sb: Option<&'static TmpfsSuperBlock>) -> Self {
+        let sb_slot = crate::safety::slot::OnceSlot::new();
+        if let Some(s) = sb {
+            sb_slot.publish(s);
+        }
         let mode = match node_type {
             TmpfsType::Directory => InodeMode::S_IFDIR | 0o777,
             TmpfsType::RegularFile => InodeMode::S_IFREG | 0o666,
@@ -181,14 +189,16 @@ impl TmpfsNode {
         // the real ones (same rule as ext4_new_inode).
         let (uid, gid) = match crate::sched::current() {
             Some(task) => {
-                // SAFETY: sched::current() yields a valid task reference.
-                let cred = unsafe { (*task).cred() };
+                // sched::current() yields a valid task reference (its
+                // own safe contract).
+                let cred = task.cred();
                 (cred.fsuid, cred.fsgid)
             }
             None => (0, 0),
         };
         Self {
-            name: UnsafeCell::new(name),
+            name: Spinlock::new(name),
+            sb: sb_slot,
             node_type,
             pages: Arc::new(Spinlock::new(BTreeMap::new())),
             size: AtomicU64::new(0),
@@ -199,24 +209,37 @@ impl TmpfsNode {
             children: Spinlock::new(Vec::new()),
             ino,
             fs_id,
-            sb,
             rdev: AtomicU64::new(0),
             uid: AtomicU32::new(uid),
             gid: AtomicU32::new(gid),
         }
     }
 
-    /// Node name as a byte slice.
-    pub fn name(&self) -> &[u8] {
-        // SAFETY: name is only mutated via set_name(), which requires the
-        // parent's children lock (exclusive access).
-        unsafe { &*self.name.get() }
+    /// Byte-equality probe against the node's name — NO allocation (the
+    /// child-search hot path; the forbid-crate shape of the old shared
+    /// borrow).
+    pub fn name_eq(&self, b: &[u8]) -> bool {
+        *self.name.lock() == *b
+    }
+
+    /// The node name as an owned Vec (readdir/stat display paths).
+    pub fn name_vec(&self) -> Vec<u8> {
+        self.name.lock().clone()
     }
 
     /// Rename in place. Caller must hold the parent's children lock.
     pub fn set_name(&self, new_name: Vec<u8>) {
-        // SAFETY: caller guarantees exclusive access (parent lock held).
-        unsafe { *self.name.get() = new_name; }
+        *self.name.lock() = new_name;
+    }
+
+    /// The owning superblock (published once — None only on the root
+    /// before mount setup).
+    pub fn owning_sb(&self) -> Option<&'static TmpfsSuperBlock> {
+        self.sb.get().copied()
+    }
+
+    fn set_sb(&self, sb: &'static TmpfsSuperBlock) {
+        self.sb.publish(sb);
     }
 
     pub fn is_dir(&self) -> bool {
@@ -237,7 +260,7 @@ impl TmpfsNode {
 
     pub fn remove_child(&self, name: &[u8]) -> bool {
         let mut children = self.children.lock();
-        if let Some(pos) = children.iter().position(|c| c.name() == name) {
+        if let Some(pos) = children.iter().position(|c| c.name_eq(name)) {
             children.remove(pos);
             true
         } else {
@@ -247,7 +270,7 @@ impl TmpfsNode {
 
     pub fn find_child(&self, name: &[u8]) -> Option<Arc<TmpfsNode>> {
         let children = self.children.lock();
-        children.iter().find(|c| c.name() == name).cloned()
+        children.iter().find(|c| c.name_eq(name)).cloned()
     }
 
     pub fn list_children(&self) -> Vec<Arc<TmpfsNode>> {
@@ -302,14 +325,10 @@ impl TmpfsNode {
                 // PAGE_SIZE readable bytes for the pin's lifetime;
                 // page_off + chunk <= PAGE_SIZE and done + chunk <=
                 // total by construction (F-TMPFS-CACHE: the single
-                // audited frame-face copy; reference shmem_read_mapping_page).
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        frame.add(page_off),
-                        buf.as_mut_ptr().add(done),
-                        chunk,
-                    );
-                }
+                // audited frame-face copy through the framework edge;
+                // reference shmem_read_mapping_page).
+                let src = crate::fs::unsafe_edges::kernel_slice_at(frame, page_off, chunk);
+                buf[done..done + chunk].copy_from_slice(src);
                 cache.put(self.fs_id, self.ino, page_idx as u64);
                 done += chunk;
                 continue;
@@ -360,7 +379,7 @@ impl TmpfsNode {
         // unused speculation (its Drop returns the budget slot).
         let first_idx = offset / PAGE_SIZE;
         let mut spec: Option<TmpfsPage> = if self.reserve_page() {
-            Some(TmpfsPage::new(self.sb))
+            Some(TmpfsPage::new(self.owning_sb()))
         } else {
             None // budget exhausted; the loop breaks at first need
         };
@@ -388,7 +407,7 @@ impl TmpfsNode {
                             if !self.reserve_page() {
                                 break; // budget exhausted
                             }
-                            TmpfsPage::new(self.sb)
+                            TmpfsPage::new(self.owning_sb())
                         }
                     };
                     pages.insert(page_idx, candidate);
@@ -468,7 +487,7 @@ impl TmpfsNode {
                 if !self.reserve_page() {
                     return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
                 }
-                pages.insert(idx, TmpfsPage::new(self.sb));
+                pages.insert(idx, TmpfsPage::new(self.owning_sb()));
             }
         }
         self.mtime.store(wall_secs(), Ordering::Release);
@@ -618,13 +637,12 @@ impl TmpfsNode {
     /// the caller must not allocate. Unlimited mounts (page_limit 0)
     /// always succeed and still count usage (statfs/df later).
     fn reserve_page(&self) -> bool {
-        if self.sb.is_null() {
-            // Root node before stamp_final_address: directories never
+        let Some(sb) = self.owning_sb() else {
+            // Root node before stamp_root_sb: directories never
             // take data pages, and the root is always a directory.
             return true;
-        }
-        unsafe {
-            let sb = &*self.sb;
+        };
+        {
             let limit = sb.page_limit_pages.load(Ordering::Acquire);
             if limit == 0 {
                 sb.used_pages.fetch_add(1, Ordering::AcqRel);
@@ -675,7 +693,7 @@ impl TmpfsSuperBlock {
             TmpfsType::Directory,
             1,
             fs_id,
-            core::ptr::null(), // patched by stamp_final_address() once boxed
+            None, // stamped by stamp_root_sb() once leaked to the final address
         ));
         let mut sb = SuperBlock::new(PAGE_SIZE as usize, TMPFS_MAGIC);
         sb.set_flags(SuperBlockFlags::new(SuperBlockFlags::SB_ACTIVE));
@@ -691,21 +709,20 @@ impl TmpfsSuperBlock {
     }
 
     /// Stamp the root node's back-pointer with the superblock's FINAL
-    /// address. Must be called after the value is placed at its permanent
-    /// home (Box) — a pointer taken to `self` before the move would be a
-    /// dangling stack address. No child nodes exist yet at mount time, so
-    /// only the root needs stamping (children get the correct `sb` from
-    /// `new_node`, which is only reachable through the final address).
-    ///
-    /// # Safety (caller obligations)
-    /// `self_ptr` must point at this superblock's final storage and the
-    /// tree must not yet be published to other threads.
-    unsafe fn stamp_final_address(self_ptr: *mut TmpfsSuperBlock) {
-        // SAFETY: caller guarantees self_ptr is the final, valid address.
-        let root = Arc::as_ptr(&(*self_ptr).root_node) as *mut TmpfsNode;
-        // SAFETY: the tree is unpublished; the root node is uniquely
-        // reachable from this thread.
-        (*root).sb = self_ptr as *const TmpfsSuperBlock;
+    /// address (the old stamp_final_address, made safe: the root is
+    /// taken OUT of the struct so the exclusive pre-publication access
+    /// rides Arc::get_mut, and the 'static shared reference is derived
+    /// only after the mutable phase). No child nodes exist yet at mount
+    /// time, so only the root needs stamping (children get the correct
+    /// `sb` from `new_node`, which is only reachable through the final
+    /// address).
+    fn stamp_root_sb(this: &'static mut Self) -> &'static Self {
+        // Publish through the root's own OnceSlot: the slot's interior
+        // mutability takes &self, so the 'static shared reference to
+        // the whole superblock never aliases a mutable field access
+        // (the pre-flip raw-pointer stamp, now type-safe).
+        this.root_node.set_sb(this);
+        this
     }
 
     fn alloc_ino(&self) -> u64 {
@@ -713,13 +730,18 @@ impl TmpfsSuperBlock {
     }
 
     /// Create a fresh node stamped with this instance's identity.
-    pub(crate) fn new_node(&self, name: Vec<u8>, node_type: TmpfsType) -> Arc<TmpfsNode> {
+    /// The `'static` self-bound is the mount-lifetime discipline as a
+    /// type: every superblock is leaked at mount (Box::leak in
+    /// create_mount_instance) and outlives its whole node tree, so the
+    /// nodes may carry the 'static reference. A caller holding a
+    /// shorter-lived superblock (a test fixture) must leak it first.
+    pub(crate) fn new_node(&'static self, name: Vec<u8>, node_type: TmpfsType) -> Arc<TmpfsNode> {
         Arc::new(TmpfsNode::new(
             name,
             node_type,
             self.alloc_ino(),
             self.fs_id,
-            self as *const TmpfsSuperBlock,
+            Some(self),
         ))
     }
 }
@@ -792,14 +814,11 @@ pub(crate) fn parse_size_pages(data: Option<&str>) -> u64 {
     0
 }
 
-/// Wrapper so the raw-pointer registry is `Send` (access only under the
-/// Spinlock; pointers are leaked mount-lifetime allocations, never freed).
+/// The leaked-superblock registry (mount lifetime; shared references —
+/// auto-Send, no marker needed post-conversion).
 struct TmpfsInstances {
-    list: Vec<*const TmpfsSuperBlock>,
+    list: Vec<&'static TmpfsSuperBlock>,
 }
-// SAFETY: the raw pointers are leaked superblocks (mount lifetime); they are
-// only copied out and dereferenced under the registry lock.
-unsafe impl Send for TmpfsInstances {}
 
 static TMPFS_INSTANCES: Spinlock<TmpfsInstances> =
     Spinlock::new(TmpfsInstances { list: Vec::new() });
@@ -810,16 +829,33 @@ static TMPFS_INSTANCES: Spinlock<TmpfsInstances> =
 pub fn create_mount_instance(data: Option<&str>) -> Arc<Inode> {
     let instance = TMPFS_INSTANCE_COUNTER.fetch_add(1, Ordering::AcqRel);
     let sb = Box::new(TmpfsSuperBlock::new(instance, parse_size_pages(data)));
-    let sb_ptr = Box::into_raw(sb) as *mut TmpfsSuperBlock; // leaked: mount lifetime
-    // Stamp the root's sb back-pointer with the FINAL (heap) address.
-    // SAFETY: sb_ptr is this superblock's final storage; the tree is not
-    // yet published (no dentry/inode references exist yet).
-    unsafe { TmpfsSuperBlock::stamp_final_address(sb_ptr); }
-    TMPFS_INSTANCES.lock_irqsave().list.push(sb_ptr as *const TmpfsSuperBlock);
+    // Leak to the mount-lifetime address, then stamp the root's
+    // back-pointer with the FINAL (heap) address — the tree is not yet
+    // published (no dentry/inode references exist yet).
+    let sb_ref: &'static TmpfsSuperBlock =
+        TmpfsSuperBlock::stamp_root_sb(Box::leak(sb));
+    TMPFS_INSTANCES.lock_irqsave().list.push(sb_ref);
 
-    // SAFETY: sb_ptr is a leaked, valid superblock.
-    let root_node = unsafe { (*sb_ptr).root_node.clone() };
+    let root_node = sb_ref.root_node.clone();
     tmpfs_make_inode(&root_node)
+}
+
+/// The interface row's tagged-instance form: create a mount instance
+/// and retag it with the requested filesystem-type ops twin (the tag
+/// logic lives crate-side; the framework passes a plain enum).
+pub fn create_tagged_mount_instance(
+    data: Option<&str>,
+    tag: crate::fs::leaf_glue::TmpfsTagKind,
+) -> Arc<Inode> {
+    let mut root = create_mount_instance(data);
+    let ops: &'static INodeOps = match tag {
+        crate::fs::leaf_glue::TmpfsTagKind::None => return root,
+        crate::fs::leaf_glue::TmpfsTagKind::Devpts => &DEVPTS_INODE_OPS,
+        crate::fs::leaf_glue::TmpfsTagKind::Securityfs => &SECURITYFS_INODE_OPS,
+        crate::fs::leaf_glue::TmpfsTagKind::Mqueue => &MQUEUE_INODE_OPS,
+    };
+    tag_mount_instance_type(&mut root, ops);
+    root
 }
 
 /// Retag a FRESH tmpfs mount root with a filesystem-type ops twin
@@ -951,7 +987,9 @@ fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>,
     }
     // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
     // provenance; resolved through the framework edge).
-    let sb = crate::fs::unsafe_edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
+    // The leaked mount-lifetime superblock (INV-FS-GLOBALSB-1; the
+    // published slot carries the provenance post-conversion).
+    let sb = node.owning_sb().expect("tmpfs node without superblock");
 
     let file = sb.new_node(name.to_vec(), TmpfsType::RegularFile);
     // Honor the caller's permission bits (umask is applied by the VFS layer).
@@ -971,7 +1009,9 @@ fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, 
     }
     // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
     // provenance; resolved through the framework edge).
-    let sb = crate::fs::unsafe_edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
+    // The leaked mount-lifetime superblock (INV-FS-GLOBALSB-1; the
+    // published slot carries the provenance post-conversion).
+    let sb = node.owning_sb().expect("tmpfs node without superblock");
 
     let d = sb.new_node(name.to_vec(), TmpfsType::Directory);
     *d.mode.lock() = InodeMode::S_IFDIR | (mode.bits() & 0o7777);
@@ -990,13 +1030,15 @@ fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, 
     }
     // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
     // provenance; resolved through the framework edge).
-    let sb = crate::fs::unsafe_edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
+    // The leaked mount-lifetime superblock (INV-FS-GLOBALSB-1; the
+    // published slot carries the provenance post-conversion).
+    let sb = node.owning_sb().expect("tmpfs node without superblock");
 
-    let link = sb.new_node(name.to_vec(), TmpfsType::SymbolicLink);
-    // SAFETY: link is exclusively owned here (not yet in the tree).
-    unsafe {
-        let link_mut = Arc::as_ptr(&link) as *mut TmpfsNode;
-        (*link_mut).link_target = Some(target.to_vec());
+    let mut link = sb.new_node(name.to_vec(), TmpfsType::SymbolicLink);
+    // Exclusively owned here (not yet in the tree) — the safe
+    // pre-publication mutation.
+    if let Some(l) = Arc::get_mut(&mut link) {
+        l.link_target = Some(target.to_vec());
     }
     node.add_child(link.clone());
     Ok(tmpfs_make_inode(&link))
@@ -1032,7 +1074,9 @@ fn tmpfs_mknod(
 
     // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
     // provenance; resolved through the framework edge).
-    let sb = crate::fs::unsafe_edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
+    // The leaked mount-lifetime superblock (INV-FS-GLOBALSB-1; the
+    // published slot carries the provenance post-conversion).
+    let sb = node.owning_sb().expect("tmpfs node without superblock");
 
     // Device nodes are stored as RegularFile nodes whose MODE word carries
     // the type (the same representation the ATTR_MODE retype path uses for
@@ -1072,18 +1116,16 @@ fn tmpfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
         target_node.node_type,
         target_node.ino,
         target_node.fs_id,
-        target_node.sb,
+        target_node.owning_sb(),
     );
     new_node.pages = target_node.pages.clone();
     new_node.size.store(target_node.file_size(), Ordering::Release);
     *new_node.mode.lock() = *target_node.mode.lock();
     new_node.rdev.store(target_node.rdev.load(Ordering::Acquire), Ordering::Release);
-    // SAFETY: link_target is set before publication (add_child).
-    let new_link = {
-        let p = &mut new_node as *mut TmpfsNode;
-        unsafe { (*p).link_target = target_node.link_target.clone(); }
-        Arc::new(new_node)
-    };
+    // link_target is set before publication (add_child) — a plain
+    // pre-move field write now that the raw-pointer dance is gone.
+    new_node.link_target = target_node.link_target.clone();
+    let new_link = Arc::new(new_node);
     dir_node.add_child(new_link);
     0
 }
@@ -1218,9 +1260,10 @@ fn tmpfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         2 + node.list_children().iter().filter(|c| c.is_dir()).count() as u32
     } else {
         // Hard links share the ino; count referencing entries.
-        let sb = node.sb as *const TmpfsSuperBlock;
-        // SAFETY: sb is a leaked mount-lifetime superblock.
-        unsafe { tmpfs_count_links(&(*sb).root_node, node.ino) }
+        match node.owning_sb() {
+            Some(sb) => tmpfs_count_links(&sb.root_node, node.ino),
+            None => 1,
+        }
     };
     stat.st_uid = node.uid.load(Ordering::Relaxed) as u32;
     stat.st_gid = node.gid.load(Ordering::Relaxed) as u32;
@@ -1341,7 +1384,7 @@ fn tmpfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
         };
         entries.push(VfsDirEntry {
             ino: child.ino,
-            name: child.name().to_vec(),
+            name: child.name_vec(),
             file_type: dt,
         });
     }
@@ -1369,12 +1412,9 @@ fn tmpfs_destroy_inode(inode: &mut Inode) {
     // the dead file's frames).
     crate::fs::page_cache::get_page_cache()
         .invalidate_inode(inode.fs_id, inode.ino as u64);
-    if let Some(ptr) = inode.private_data.take() {
-        // Reclaim the leaked Arc reference (idempotent via Option::take).
-        // SAFETY: private_data holds an Arc leaked by into_raw at inode
-        // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        let _ = unsafe { Arc::from_raw(ptr as *const TmpfsNode) };
-    }
+    // Reclaim the leaked Arc reference (idempotent; INV-FS-PRIVDATA-1
+    // through the framework edge — the Drop-time single reclaim).
+    crate::fs::unsafe_edges::privdata_drop_arc::<TmpfsNode>(inode);
 }
 
 // ============================================================================
@@ -1824,4 +1864,63 @@ pub fn mount_register() {
     crate::fs::mount_table::register(&["securityfs"], mount_securityfs);
     crate::fs::mount_table::register(&["mqueue"], mount_mqueue);
     crate::fs::mount_table::register(&["configfs"], mount_configfs);
+}
+
+// ============================================================================
+// The fallocate row body (moved from vfs.rs's tmpfs arm at the
+// fs-substrate flip — verbatim semantics).
+// ============================================================================
+
+/// tmpfs fallocate(2) with shmem semantics (falloc-wedge lane,
+/// 2026-11-16): mode=0 MATERIALIZES zero pages for the range under the
+/// mount's page budget (the reference allocates; Rux used to only grow
+/// the logical size, so a write into the "preallocated" range of a full
+/// tmpfs failed ENOSPC — LTP fallocate05/06's tmpfs iterations),
+/// PUNCH_HOLE|KEEP_SIZE discards the range's pages (byte-granular,
+/// budget returned — the dealloc step of the same tests). Other flag
+/// bits stay EOPNOTSUPP. journald v255's fallocate(fd, 0, 0, len)
+/// preallocation (the reason this arm exists) still succeeds — now
+/// with the pages actually reserved.
+///
+/// Returns None when the inode is NOT a tmpfs inode (the caller falls
+/// through to the filesystem-specific arm).
+pub fn fallocate(inode: &Inode, mode: i32, offset: u64, len: u64) -> Option<Result<(), i32>> {
+    if !core::ptr::eq(
+        inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _,
+        &TMPFS_INODE_OPS as *const _,
+    ) {
+        return None;
+    }
+    const KEEP_SIZE: i32 = crate::fs::ext4::FALLOC_FL_KEEP_SIZE;
+    const PUNCH_HOLE: i32 = crate::fs::ext4::FALLOC_FL_PUNCH_HOLE;
+    if mode & !(KEEP_SIZE | PUNCH_HOLE) != 0 {
+        return Some(Err(errno::Errno::OperationNotSupported.as_neg_i32()));
+    }
+    // private_data holds an Arc<TmpfsNode> placed by tmpfs_make_inode;
+    // the edge hands the shared view (INV-FS-PRIVDATA-1).
+    let node = crate::fs::unsafe_edges::privdata_ref::<TmpfsNode>(inode)?;
+    if mode & PUNCH_HOLE != 0 {
+        if mode & KEEP_SIZE == 0 {
+            // Linux: PUNCH_HOLE without KEEP_SIZE is EINVAL.
+            return Some(Err(errno::Errno::InvalidArgument.as_neg_i32()));
+        }
+        // Clamp to EOF (shmem_punch_range shape): bytes past the
+        // logical size are already holes.
+        let size = inode.size.load(core::sync::atomic::Ordering::Acquire);
+        let punched = core::cmp::min(len, size.saturating_sub(offset));
+        node.punch_hole(offset as usize, punched as usize);
+        return Some(Ok(()));
+    }
+    match node.fallocate_alloc(offset as usize, len as usize) {
+        Ok(()) => {}
+        Err(e) => return Some(Err(e)),
+    }
+    if mode & KEEP_SIZE == 0 {
+        let end = offset.saturating_add(len);
+        if end > inode.size.load(core::sync::atomic::Ordering::Acquire) {
+            node.truncate(end as usize);
+            inode.size.store(end, core::sync::atomic::Ordering::Release);
+        }
+    }
+    Some(Ok(()))
 }

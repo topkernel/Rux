@@ -315,6 +315,110 @@ pub fn kernel_slice_mut<'a>(p: *mut u8, len: usize) -> &'a mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(p, len) }
 }
 
+/// INV-FS-FILEDENTRY-1: `File::dentry` is an `UnsafeCell<Option<Arc<Dentry>>>`
+/// installed once at open/create time and immutable for the open file
+/// description's lifetime (the same write-once discipline as the inode
+/// cell, INV-FS-FILEINODE-1). Shared reads through a shared `&File` are
+/// race-free.
+pub fn file_dentry(file: &File) -> Option<&alloc::sync::Arc<crate::fs::dentry::Dentry>> {
+    // SAFETY: INV-FS-FILEDENTRY-1 — write-once cell; the shared read is
+    // sound for the description's whole lifetime.
+    unsafe { (&*file.dentry.get()).as_ref() }
+}
+
+/// The thread-group leader view (INV-PROC-TGL-1): `group_leader_ptr`
+/// returns either the task itself or the leader installed at clone
+/// time; the leader lives as long as ANY thread of the group exists
+/// (the thread-group keeps a reference), so a borrow sourced from a
+/// pinned/live task is valid for that borrow's scope.
+pub fn task_group_leader(t: &crate::process::task::Task) -> &crate::process::task::Task {
+    // SAFETY: INV-PROC-TGL-1 above (the source task's liveness covers
+    // the leader's).
+    unsafe { &*t.group_leader_ptr() }
+}
+
+/// INV-PROC-USERPAGE-1: `ppn<<12 + off` is a MAPPED user page of the
+/// pinned target task (the caller holds the TaskRef/PinnedTask or is
+/// the current task); the kernel linear mapping makes it readable for
+/// `len` bytes (the /proc/[pid]/{mem,environ,maps} read faces).
+pub fn user_page_slice<'a>(ppn: u64, off: usize, len: usize) -> &'a [u8] {
+    let p = crate::arch::mm::phys_to_virt(
+        crate::arch::mm::memory_layout::PhysAddr((ppn << 12) + off as u64),
+    )
+    .0 as *const u8;
+    // SAFETY: INV-PROC-USERPAGE-1 (mapped + pinned target page).
+    unsafe { core::slice::from_raw_parts(p, len) }
+}
+
+/// The sysrq stack-scanner read (INV-PROC-DIAG-1): a diagnostic,
+/// best-effort volatile u64 read inside the CURRENT task's kernel
+/// stack (the caller validated the range belongs to a live stack; a
+/// wrong guess reads garbage at worst — volatile, no UB on stale data).
+pub fn diag_read_u64(p: *const u64) -> u64 {
+    // SAFETY: INV-PROC-DIAG-1 — volatile diagnostic read.
+    unsafe { core::ptr::read_volatile(p) }
+}
+
+/// Adopt a validated per-CPU current-task pointer (the sysrq dump's
+/// grq_diag_cpu_currents rows): the GRQ keeps the referenced task page
+/// alive for the whole diagnostic walk (its queue/slot references pin
+/// it), so the borrow is valid for the caller's scope.
+pub fn diag_task_ref(p: *mut crate::process::task::Task) -> &'static crate::process::task::Task {
+    // SAFETY: the diag snapshot's task pages are pinned by their queue
+    // slots for the walk's duration (read-only diagnostics).
+    unsafe { &*p }
+}
+
+/// The inode-side Arc-clone twin of [`file_privdata_arc_clone`] (the
+/// devfs link path's target re-acquisition): clone the Arc the inode's
+/// private_data holds WITHOUT consuming the slot (increment + from_raw;
+/// the slot keeps its single reference). INV-FS-PRIVDATA-1 + the stored
+/// value being an Arc::into_raw of `T`.
+pub fn privdata_arc_clone<T>(inode: &Inode) -> Option<alloc::sync::Arc<T>> {
+    let ptr = inode.private_data? as *const T;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the stored value is a live Arc::into_raw of T; the
+    // increment balances the from_raw below (the slot keeps its ref).
+    unsafe {
+        alloc::sync::Arc::increment_strong_count(ptr);
+        Some(alloc::sync::Arc::from_raw(ptr))
+    }
+}
+
+/// INV-DEVFS-SHARED (kernel-VA window family): `kva` is the kernel
+/// linear-map address of a LIVE shared page owned by the devfs regular
+/// registry; [kva, kva+src.len()) is inside that page by the caller's
+/// in-page math. Copies src into the window.
+pub fn kva_copy_to(kva: *mut u8, src: &[u8]) {
+    // SAFETY: INV-DEVFS-SHARED — live shared page; the caller's chunk
+    // math keeps the span inside PAGE_SIZE.
+    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), kva, src.len()) };
+}
+
+/// The read-direction twin of [`kva_copy_to`] (INV-DEVFS-SHARED).
+pub fn kva_copy_from(kva: *const u8, dst: &mut [u8]) {
+    // SAFETY: INV-DEVFS-SHARED — same argument, read direction.
+    unsafe { core::ptr::copy_nonoverlapping(kva, dst.as_mut_ptr(), dst.len()) };
+}
+
+/// The zeroing twin of [`kva_copy_to`] (INV-DEVFS-SHARED; also the
+/// freshly-allocated-page shape — exclusively owned at the call).
+pub fn kva_zero(kva: *mut u8, len: usize) {
+    // SAFETY: INV-DEVFS-SHARED — bounded by the caller's math.
+    unsafe { core::ptr::write_bytes(kva, 0, len) };
+}
+
+/// Offset+slice twin of [`kernel_slice`] (the tmpfs cache-frame face:
+/// p is a pinned PAGE_SIZE frame, off+len <= PAGE_SIZE by the caller's
+/// page math — the F-TMPFS-CACHE audit row).
+pub fn kernel_slice_at<'a>(p: *const u8, off: usize, len: usize) -> &'a [u8] {
+    // SAFETY: the caller's readable-span contract at p+off (in-page
+    // by construction).
+    unsafe { core::slice::from_raw_parts(p.add(off), len) }
+}
+
 /// File::close for teardown paths (the framework's unsafe fn; the edge
 /// carries the caller's sole-reference contract).
 pub fn file_close(f: &mut File) -> i32 {

@@ -294,13 +294,13 @@ pub mod mm_pins;
 #[cfg(feature = "unit-test")]
 // pub mod net_pins; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
-pub mod procfs;
+// pub mod procfs; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 #[cfg(all(feature = "unit-test", feature = "x86_64"))]
 pub mod pt_regs;
 #[cfg(feature = "unit-test")]
 pub mod perf;
 #[cfg(feature = "unit-test")]
-pub mod tmpfs;
+// pub mod tmpfs; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 #[cfg(feature = "unit-test")]
 pub mod dev_t;
 #[cfg(feature = "unit-test")]
@@ -456,11 +456,11 @@ pub mod sgid_mode;
 
 // ===== initrd (gzip inflate + cpio newc unpack) =====
 #[cfg(feature = "unit-test")]
-pub mod initrd;
+// pub mod initrd; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 
 // ===== tmpfs mknod (OH Phase 1b: device nodes on a tmpfs /dev) =====
 #[cfg(feature = "unit-test")]
-pub mod tmpfs_mknod;
+// pub mod tmpfs_mknod; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 
 // ===== getdents64 listing cache (F4 route-4) =====
 #[cfg(feature = "unit-test")]
@@ -512,7 +512,7 @@ fn setup_boot_task_fdtable() {
         let console_file = Arc::new(crate::fs::File::new(
             crate::fs::file::FileFlags::new(crate::fs::file::FileFlags::O_RDWR),
         ));
-        console_file.set_ops(&crate::fs::devfs::CONDEV_OPS);
+        console_file.set_ops(crate::fs::leaf_glue::devfs::condev_ops());
         if let Some(ft) = (*task).try_fdtable() {
             if let Some(fd) = ft.alloc_fd() {
                 let _ = ft.install_fd(fd, console_file);
@@ -546,11 +546,11 @@ pub fn run_all_tests() {
     test_group_start("config");
     config_test::test_config();
 
-    test_group_start("initrd");
-    initrd::test_initrd();
+    // initrd: MOVED to the rux-fs crate (fs-substrate) — runs through
+    // the SERVICE-TEST SEAM (rux_fs::run_unit_tests).
 
-    test_group_start("tmpfs-mknod");
-    tmpfs_mknod::test_tmpfs_mknod();
+    // tmpfs(-mknod): MOVED to the rux-fs crate (fs-substrate) — runs
+    // through the SERVICE-TEST SEAM (rux_fs::run_unit_tests).
 
     // getdents64 listing cache (F4 route-4): stability + invalidation.
     getdents_cache::test_getdents_cache();
@@ -562,13 +562,14 @@ pub fn run_all_tests() {
     // procfs renderer pins (kernel/src/tests/procfs.rs): /proc/cpuinfo
     // per-arch key table + /proc/[pid]/status shape and order. Formerly
     // in-module cpuinfo_file_tests/status_file_tests blocks.
-    procfs::test_procfs();
+    // procfs: MOVED to the rux-fs crate (fs-substrate) — SERVICE-TEST SEAM
 
     // tmpfs group (kernel/src/tests/tmpfs.rs): page store, truncate
     // tails, dir ops, and the mount-option page budget. Formerly an
     // in-module unit-test fn plus a dead #[cfg(test)] block in
     // fs/tmpfs.rs — all tmpfs unit tests live under kernel/src/tests/.
-    tmpfs::test_tmpfs();
+    // tmpfs::test_tmpfs(): the tmpfs budget tests moved with the leaf
+    // into the rux-fs crate (tmpfs_test, SERVICE-TEST SEAM).
 
     test_group_start("vma_flags");
     vma_flags::test_vma_flags();

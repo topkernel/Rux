@@ -886,56 +886,11 @@ pub fn unregister_block_disk(name: &str, major: u32, minor: u32) -> u64 {
 /// driver serves through EVIOCGBIT — libinput computes ID_INPUT_KEYBOARD
 /// / ID_INPUT_MOUSE / ID_INPUT_TOUCHSCREEN tags from these uevent lines
 /// (via OH's libudev shim) and cross-checks them against the ioctl caps.
-#[derive(Debug, Clone)]
-pub struct InputEventReg {
-    /// input_dev kobject name ("input0")
-    pub input_name: String,
-    /// event node name ("event0")
-    pub event_name: String,
-    pub major: u32,
-    pub minor: u32,
-    /// input device name ("VirtIO Keyboard") — NAME= env + name attr
-    pub dev_name: String,
-    pub bustype: u32,
-    pub vendor: u32,
-    pub product: u32,
-    pub version: u32,
-    /// EV= bitmap string (Linux input_print_bitmap format: space-separated
-    /// lowercase-hex 64-bit words, most-significant first)
-    pub ev: String,
-    /// KEY= bitmap string, empty → line omitted (type not supported)
-    pub key: String,
-    /// REL= bitmap string, empty → omitted
-    pub rel: String,
-    /// ABS= bitmap string, empty → omitted
-    pub abs: String,
-}
+// The registration DTO is framework-owned (fs::leaf_glue::InputEventReg)
+// so the evdev driver stays framework-typed; this alias keeps the
+// historical path working crate-side.
+pub use crate::fs::leaf_glue::InputEventReg;
 
-impl InputEventReg {
-    /// The Linux `input_dev_uevent()` environment block for the input_dev
-    /// kobject (PRODUCT/NAME/PROP/EV/KEY/REL/ABS in kernel emit order).
-    fn dev_env(&self) -> Vec<(String, String)> {
-        let mut env: Vec<(String, String)> = Vec::new();
-        env.push((
-            String::from("PRODUCT"),
-            format!("{:x}/{:x}/{:x}/{:x}", self.bustype, self.vendor, self.product, self.version),
-        ));
-        // Linux quotes NAME in the uevent environment (NAME="%s").
-        env.push((String::from("NAME"), format!("\"{}\"", self.dev_name)));
-        env.push((String::from("PROP"), String::from("0")));
-        env.push((String::from("EV"), self.ev.clone()));
-        if !self.key.is_empty() {
-            env.push((String::from("KEY"), self.key.clone()));
-        }
-        if !self.rel.is_empty() {
-            env.push((String::from("REL"), self.rel.clone()));
-        }
-        if !self.abs.is_empty() {
-            env.push((String::from("ABS"), self.abs.clone()));
-        }
-        env
-    }
-}
 
 /// A uevent attribute whose environment is a fixed key=value set (the
 /// input_dev kobject: PRODUCT/NAME/PROP/EV/...; also the PCI function
@@ -2518,4 +2473,45 @@ pub fn mount_pstore(source: &str, target: &str, fs_type: &str, data: Option<&str
 pub fn mount_register() {
     crate::fs::mount_table::register(&["sysfs"], mount_sys_instance);
     crate::fs::mount_table::register(&["pstore"], mount_pstore);
+}
+
+// ============================================================================
+// Module-loader exposure (/sys/module/<name>) — the bodies moved from
+// module/mod.rs at the fs-substrate flip; the loader calls them through
+// the leaf_glue rows.
+// ============================================================================
+
+/// Publish /sys/module/<name> with the `initstate` ("live") and `refcnt`
+/// ("0") attributes (module load path).
+pub fn publish_module(name: &str) {
+    let root = match sysfs_root() {
+        Some(r) => r,
+        None => return,
+    };
+    let module_dir = match root.find_child(b"module") {
+        Some(d) => d,
+        None => return,
+    };
+    if module_dir.find_child(name.as_bytes()).is_some() {
+        return; // already published
+    }
+
+    let dir = KObject::new(name, KType::Module, NodeKind::Directory);
+    let initstate = String::from("live\n");
+    dir.set_attr("initstate", 0o444, Some(alloc::boxed::Box::new(move || {
+        initstate.as_bytes().to_vec()
+    })), None);
+    dir.set_attr("refcnt", 0o444, Some(alloc::boxed::Box::new(|| b"0\n".to_vec())), None);
+    module_dir.add_child(dir);
+}
+
+/// Remove /sys/module/<name> (delete_module path).
+pub fn unpublish_module(name: &str) {
+    let root = match sysfs_root() {
+        Some(r) => r,
+        None => return,
+    };
+    if let Some(module_dir) = root.find_child(b"module") {
+        module_dir.remove_child(name);
+    }
 }

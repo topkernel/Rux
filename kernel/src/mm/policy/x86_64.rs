@@ -492,7 +492,7 @@ pub fn handle_mm_fault(
     let effective_size = vm_file
         .as_ref()
         .and_then(|f| {
-            if let Some(live) = crate::fs::devfs::devfs_reg_current_size(f.as_ref()) {
+            if let Some(live) = crate::fs::leaf_glue::devfs::reg_current_size(f.as_ref()) {
                 return Some(live);
             }
             // SAFETY: inode cell written at open time; read-only.
@@ -635,7 +635,7 @@ pub fn handle_mm_fault(
                 && vma_flags.contains(crate::mm::vma::VmaFlags::SHARED)
                 && vm_file
                     .as_ref()
-                    .is_some_and(|f| crate::fs::tmpfs::is_tmpfs_file(f.as_ref()));
+                    .is_some_and(|f| crate::fs::leaf_glue::tmpfs::is_tmpfs_file(f.as_ref()));
             if fully_past && !tmpfs_shared_write {
                 crate::pr_err!(
                     "pagefault: SIGBUS forensics: addr {:#x} vma_start {:#x} vma_off {:#x} file_off {:#x} eff_size {:#x} mmap_snap_size {:#x} fd {} pid {} path {}",
@@ -664,15 +664,9 @@ pub fn handle_mm_fault(
             // service's write protocol (memcpy, no msync) requires.
             if vma_flags.contains(crate::mm::vma::VmaFlags::SHARED) {
                 if let Some(shared_phys) = vm_file.as_ref().and_then(|f| {
-                    let ops = f.get_ops()?;
-                    if !core::ptr::eq(
-                        ops as *const _,
-                        &crate::fs::devfs::DEVFS_REG_FILE_OPS as *const _,
-                    ) {
-                        return None;
-                    }
-                    // Page-granular offset within the file.
-                    crate::fs::devfs::shared_fault_file_page(
+                    // The ops-identity gate is folded into the row
+                    // (None for non-registry files).
+                    crate::fs::leaf_glue::devfs::shared_fault_file_page(
                         f.as_ref(),
                         (file_offset / (PAGE_SIZE as usize)) * (PAGE_SIZE as usize),
                     )
@@ -767,7 +761,7 @@ pub fn handle_mm_fault(
                 .or_else(|| crate::fs::get_file_fd(vma_file_fd as usize));
             if let Some(file) = file.filter(|f| {
                 f.get_ops().is_some_and(|ops| ops.fault.is_some())
-                    || crate::fs::tmpfs::is_tmpfs_file(f.as_ref())
+                    || crate::fs::leaf_glue::tmpfs::is_tmpfs_file(f.as_ref())
             }) {
                 // Fault-around for SHARED read faults (perf-gap-hunt
                 // 2026-11-04): the reference's filemap_map_pages serves
@@ -1159,7 +1153,7 @@ pub fn handle_mm_fault(
                         if mapped_total > 0 {
                             if want_w
                                 && (file.get_ops().is_some_and(|ops| ops.fault.is_some())
-                                    || crate::fs::tmpfs::is_tmpfs_file(file.as_ref()))
+                                    || crate::fs::leaf_glue::tmpfs::is_tmpfs_file(file.as_ref()))
                             {
                                 // Conservative v1 dirty mark (the
                                 // single-page arm's rule, applied to the
@@ -1195,7 +1189,7 @@ pub fn handle_mm_fault(
                 // exec. Frames have no disk writeback; read(2) stays
                 // on the node pages (documented deviation class, same
                 // as ext4's write(2) invalidation).
-                let cache_phys = if crate::fs::tmpfs::is_tmpfs_file(file.as_ref()) {
+                let cache_phys = if crate::fs::leaf_glue::tmpfs::is_tmpfs_file(file.as_ref()) {
                     crate::fs::page_cache::shared_file_fault_page(file.as_ref(), file_offset as u64)
                 } else {
                     filemap_pin_cache_page(file.as_ref(), file_offset, effective_size, true)
@@ -1247,7 +1241,7 @@ pub fn handle_mm_fault(
                     }
                     if want_w
                         && (file.get_ops().is_some_and(|ops| ops.fault.is_some())
-                            || crate::fs::tmpfs::is_tmpfs_file(file.as_ref()))
+                            || crate::fs::leaf_glue::tmpfs::is_tmpfs_file(file.as_ref()))
                     {
                         // Conservative v1 dirty mark, AFTER the mapping
                         // is installed (a failed/raced attempt leaves no

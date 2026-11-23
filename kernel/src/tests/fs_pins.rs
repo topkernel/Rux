@@ -7,7 +7,6 @@
 //! kernel/src/fs/ext4/{csum,indirect}.rs per the test-layout policy
 //! (those host-side blocks never compiled in this no_std crate).
 
-use crate::fs::rootfs::{RootFSNode, RootFSSuperBlock};
 use crate::fs::stat::Stat;
 use crate::fs::superblock::{
     get_fs_type, register_filesystem, unregister_filesystem, FileSystemType, SuperBlock,
@@ -23,9 +22,10 @@ pub fn test_fs_pins() {
     test_stat_pins();
     test_superblock_pins();
     test_vt_pins();
-    test_rootfs_pins();
     // The ext4 csum/indirect pins flipped WITH the rux-ext4 crate
-    // (rung 5; they run via the service-test seam now).
+    // (rung 5; they run via the service-test seam now); the rootfs pins
+    // moved WITH the rootfs leaf (fs-substrate tranche — SERVICE-TEST
+    // SEAM).
 }
 
 // ---- fs/stat.rs --------------------------------------------------------
@@ -115,39 +115,8 @@ fn test_vt_pins() {
     crate::tests::test_pass("fs-vt");
 }
 
-// ---- fs/rootfs.rs ------------------------------------------------------
+// ---- fs/rootfs.rs + fs/ext4/{csum,indirect}.rs -------------------------
 
-fn test_rootfs_pins() {
-    let dir = RootFSNode::new_dir(b"test".to_vec(), 1);
-    crate::test_assert!(dir.is_dir() && !dir.is_file(), "dir node type");
-    let file = RootFSNode::new_file(b"file.txt".to_vec(), b"hello".to_vec(), 2);
-    crate::test_assert!(file.is_file() && !dir.is_file(), "file node type");
-
-    let sb = RootFSSuperBlock::new();
-    crate::test_assert!(sb.get_root().map(|r| r.is_dir()).unwrap_or(false), "rootfs root is a dir");
-
-    crate::test_assert!(sb.create_file("/rux-test.txt", b"hello".to_vec()).is_ok(), "create file");
-    let f = sb.lookup("/rux-test.txt");
-    crate::test_assert!(f.is_some() && f.unwrap().is_file(), "lookup finds created file");
-
-    crate::test_assert!(
-        sb.create_file("/dir1/dir2/file.txt", b"data".to_vec()).is_err(),
-        "nested create without parent fails"
-    );
-
-    let sb = RootFSSuperBlock::new();
-    crate::test_assert!(sb.create_file("/file1.txt", b"data1".to_vec()).is_ok(), "create file1");
-    crate::test_assert!(sb.create_file("/file2.txt", b"data2".to_vec()).is_ok(), "create file2");
-    // list_dir("/") exercises the per-sb path cache. The old GLOBAL
-    // cache let this fresh test sb collide with the boot rootfs's cached
-    // "/" (the guest run returned a foreign node with 9 children — the
-    // dead block's "2 files" pin never matched for that reason). The
-    // cache is per-superblock now (Linux dcache alignment), so a fresh
-    // sb lists exactly its own two created files.
-    let children = sb.list_dir("/").unwrap();
-    let names: Vec<&[u8]> = children.iter().map(|c| c.name()).collect();
-    crate::test_assert_eq!(children.len(), 2, "fresh root lists exactly the created files");
-    crate::test_assert!(names.contains(&&b"file1.txt"[..]), "file1 listed");
-    crate::test_assert!(names.contains(&&b"file2.txt"[..]), "file2 listed");
-    crate::tests::test_pass("fs-rootfs");
-}
+// The rootfs pins moved WITH the rootfs leaf (fs-substrate tranche) and
+// the ext4 pins flipped WITH the rux-ext4 crate (rung 5) — both run
+// in-guest via the SERVICE-TEST SEAM.

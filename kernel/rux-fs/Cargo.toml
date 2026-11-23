@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 # The FS SERVICE CRATE (crate-flip rung 3): the movable filesystem
-# leaves — pipe, fifo, inotify, memfd, eventpoll, selinuxfs — compiled
-# under crate-level #![forbid(unsafe_code)] (the third service column).
-# Zero-move step: #[path]-includes of the existing framework files;
-# the substrate leaves (tmpfs/procfs/rootfs/devfs/sysfs) and the boot
-# leaves (cgroup/debugfs/tracefs/pty/tty/char_dev) plus locks stay in
-# the framework (the buffer.rs pattern) until their tranche.
+# leaves — pipe, fifo, inotify, memfd, eventpoll, selinuxfs, plus the
+# fs-substrate tranche (debugfs, tracefs, cgroup, sysfs, char_dev,
+# tty, pty, rootfs, tmpfs, devfs, procfs) — compiled under crate-level
+# #![forbid(unsafe_code)] (the third service column). The kernel-wide
+# accounting cells live framework-side (fs/perf_ctr.rs — arch traps
+# and the scheduler call them directly, zero indirection); locks stays
+# in the framework (the buffer.rs pattern).
 
 [dependencies]
 rux = { path = "..", default-features = false }
