@@ -1459,7 +1459,7 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // for samgr in ohc53). The dump's lines land IN the focus ring
         // this pass drains. Cheap when nothing is pending: two ring
         // scans of atomics.
-        crate::ipc::binder::dump_latched_maps_taskctx();
+        crate::ipc::binder_diag_hooks::dump_latched_maps_taskctx();
         // sc57 (57th): fuxwatch arm round — clears W on the watched
         // word's page in every mapping mm (kthread context; TLB
         // shootdown via flush_tlb_all is safe here).
@@ -1646,7 +1646,7 @@ pub fn sleep_snapshot_early() {
         return;
     }
     N.fetch_add(1, Ordering::Relaxed);
-    crate::ipc::binder::sleep_snapshot();
+    crate::ipc::binder_diag_hooks::sleep_snapshot();
     // 53rd drain hunt: park-side AF_UNIX queue/wait census on the same
     // cadence (self-gated on rux:sleepsnap (retired debug=sleepsnap) inside).
     crate::net::net_hooks::unix_park_audit();

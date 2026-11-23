@@ -435,6 +435,7 @@ name = "rux-obs"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-ipc",
 ]
 
 [[package]]

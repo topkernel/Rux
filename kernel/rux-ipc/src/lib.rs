@@ -42,6 +42,10 @@ pub mod ipc {
     pub mod posix_mq;
     pub mod keys;
     pub mod access_token;
+    // the binder COLD DIAGNOSTIC halves (cold-four lane; the txn
+    // mechanism stays framework-side in rux::ipc::binder — the rung's
+    // shelving verdict stands).
+    pub mod binder_diag;
 
     // The old framework mod.rs's `pub use util::*` — the IPC constants
     // (IPC_NOWAIT, SHM_REMAP, ...) re-exported at the ipc root so the
@@ -70,6 +74,7 @@ pub mod ipc {
     // rows, devfs, futex, the debug audits, the sibling service files'
     // `super::util` uses).
     pub use rux::ipc::binder;
+    pub use rux::ipc::binder_edges;
     pub use rux::ipc::sysv_sem;
     pub use rux::ipc::util;
     // the seam zones the service files consume (the hook table's
@@ -131,6 +136,21 @@ pub fn register_all() {
         at_token_of: ipc::access_token::token_of,
         init: || {},
     });
+    // The binder diagnostic rows (cold-four lane): the moved audits and
+    // census reports the framework's heartbeat slot / taskdump paths
+    // reach through the seam (OnceSlot-only publication).
+    rux::ipc::binder_diag_hooks::binder_diag_register_hooks(
+        rux::ipc::binder_diag_hooks::BinderDiagHooks {
+            txn_hang_audit: ipc::binder_diag::txn_hang_audit,
+            bwr_park_audit: ipc::binder_diag::bwr_park_audit,
+            ams46_audit: ipc::binder_diag::ams46_audit,
+            sleep_snapshot: ipc::binder_diag::sleep_snapshot,
+            stall_report: ipc::binder_diag::stall_report,
+            schb_beat: ipc::binder_diag::schb_beat,
+            schb_waiter_census: ipc::binder_diag::schb_waiter_census,
+            dump_latched_maps_taskctx: ipc::binder_diag::dump_latched_maps_taskctx,
+        },
+    );
 }
 
 /// The guest-test entry (make test): the framework's run_all_tests

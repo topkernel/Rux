@@ -20,7 +20,7 @@ edition = "2021"
 # later cosmetic step per the crate-plan recipe.
 
 [dependencies]
-rux-timer = { path = "../rux-timer" }
+rux-timer = { path = "../rux-timer", default-features = false }
 rux = { path = "..", default-features = false }
 
 [features]
