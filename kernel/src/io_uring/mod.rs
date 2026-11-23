@@ -24,13 +24,14 @@ use crate::sync::spinlock::Spinlock;
 
 // ==================== UAPI Constants ====================
 
-// Opcodes
-const IORING_OP_NOP:     u8 = 0;
-const IORING_OP_FSYNC:   u8 = 3;
-const IORING_OP_CLOSE:   u8 = 14;
-const IORING_OP_READ:    u8 = 22;
-const IORING_OP_WRITE:   u8 = 23;
-const IORING_OP_FADVISE: u8 = 28;
+// Opcodes (pub since the policy flip: the rux-io-uring crate's op
+// dispatch and register paths match on them)
+pub const IORING_OP_NOP:     u8 = 0;
+pub const IORING_OP_FSYNC:   u8 = 3;
+pub const IORING_OP_CLOSE:   u8 = 14;
+pub const IORING_OP_READ:    u8 = 22;
+pub const IORING_OP_WRITE:   u8 = 23;
+pub const IORING_OP_FADVISE: u8 = 28;
 
 // Features reported to userspace
 const IORING_FEAT_SINGLE_MMAP:   u32 = 1 << 0;
@@ -44,12 +45,12 @@ const IORING_OFF_CQ_RING:   u64 = 0x8000_0000;
 const IORING_OFF_SQES:      u64 = 0x1000_0000;
 const IORING_OFF_MMAP_MASK: u64 = 0xf800_0000;
 
-// io_uring_enter flags
-const IORING_ENTER_GETEVENTS: u32 = 1 << 0;
+// io_uring_enter flags (pub since the policy flip)
+pub const IORING_ENTER_GETEVENTS: u32 = 1 << 0;
 
-// Register opcodes
-const IORING_REGISTER_EVENTFD:   u32 = 4;
-const IORING_UNREGISTER_EVENTFD: u32 = 5;
+// Register opcodes (pub since the policy flip)
+pub const IORING_REGISTER_EVENTFD:   u32 = 4;
+pub const IORING_UNREGISTER_EVENTFD: u32 = 5;
 
 // Limits
 const IORING_MAX_ENTRIES: u32 = 4096;
@@ -192,7 +193,10 @@ pub struct IoUring {
 
 impl IoUring {
     /// Try to acquire a reference; fails if the ring is being destroyed.
-    fn try_ref(&self) -> bool {
+    /// `pub` since the io_uring POLICY flip: the rux-io-uring service
+    /// crate's sys_enter/sys_register call it under the lifecycle lock
+    /// (direct cross-crate call — service -> core, inlinable).
+    pub fn try_ref(&self) -> bool {
         let mut cur = self.refs.load(core::sync::atomic::Ordering::Acquire);
         loop {
             if cur == 0 {
@@ -326,8 +330,11 @@ fn free_ring_region(region: &RingRegion) {
 
 // ==================== Ring Creation ====================
 
-/// Create a new io_uring instance.
-fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUring>, i32> {
+/// Create a new io_uring instance. `pub` since the policy flip: the
+/// rux-io-uring crate's sys_io_uring_setup calls it (the ring layout
+/// and region assembly stay mechanism-side — this fn constructs the
+/// private-field IoUring and calls the unsafe region allocator).
+pub fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUring>, i32> {
     // Reject all setup flags (no SQPOLL, IOPOLL, etc.)
     if params.flags != 0 {
         return Err(-22); // EINVAL
@@ -442,6 +449,56 @@ fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUri
 }
 
 // ==================== FileOps ====================
+
+/// A pinned, refcounted ring reference for POLICY-side callers (the
+/// rux-io-uring crate's sys_enter/sys_register). Owns the RingRef, so
+/// the shared `&IoUring` it hands out stays valid for the struct's
+/// whole life (the final unref — which may free the ring — runs in
+/// RingRef's Drop, i.e. only when this struct is gone).
+/// SAFETY-CONTRACT (INV-IOURING-PIN): the interior &'static is sound
+/// because the guard field keeps `refs > 0` for as long as the struct
+/// exists; the raw ptr came from Box::into_raw at install time.
+pub struct PinnedRing {
+    ring: &'static IoUring,
+    _guard: RingRef,
+}
+
+impl PinnedRing {
+    /// The pinned ring (shared reference; valid while the guard lives).
+    pub fn ring(&self) -> &IoUring {
+        self.ring
+    }
+}
+
+/// Pin the ring of an ops-VERIFIED io_uring file: read private_data and
+/// try_ref INSIDE the lifecycle lock (R7-C4: the pointer read and the
+/// deref must not straddle a close()). `pub` since the policy flip —
+/// the crate's syscall sites call this directly (service -> core).
+pub fn pin_verified_ring(file: &File) -> Option<PinnedRing> {
+    let _guard = LIFECYCLE_LOCK.lock();
+    let ptr = file.get_private_data()? as *const IoUring;
+    // SAFETY: under the lifecycle lock close() cannot clear+free the
+    // ring between the read and try_ref (INV-IOURING-PIN).
+    let ring = unsafe { &*ptr };
+    if !ring.try_ref() {
+        return None;
+    }
+    Some(PinnedRing {
+        ring,
+        _guard: RingRef(ptr),
+    })
+}
+
+/// Audited edge (INV-IOURING-RING-2): release a ring whose
+/// Box::into_raw pointer could not be installed into the fd table
+/// (alloc_fd / install_fd failure in sys_io_uring_setup). Called by the
+/// rux-io-uring crate, which cannot write unsafe.
+pub fn ring_release_on_install_error(ring_ptr: *mut u8) {
+    // SAFETY: paired with the Box::into_raw in sys_io_uring_setup; the
+    // install failed, so no pin_ring reader can exist and no mapping
+    // took a page reference yet.
+    unsafe { drop(alloc::boxed::Box::from_raw(ring_ptr as *mut IoUring)); }
+}
 
 /// Serializes the private_data lifecycle: close() clears the pointer and
 /// drops the installation reference under this lock, while enter/register/
@@ -608,258 +665,14 @@ pub fn io_uring_mmap_handler(
 }
 
 // ==================== Submission Processing ====================
-
-/// Submit and process SQEs from the submission queue.
-fn submit_sqes(ring: &IoUring, to_submit: u32) -> u32 {
-    let mut submitted = 0u32;
-
-    // Read head and tail ONCE (per Linux io_uring_submit_sqes).  A malicious
-    // userspace could modify the shared ring between iterations (TOCTOU),
-    // causing double-processing or skipping of SQEs.  We advance a local
-    // counter and write back only after the loop finishes.
-    let sq = ring.sq_hdr();
-    let mut head = sq.read_u32(ring.sq_head_off);
-    let tail = sq.read_u32(ring.sq_tail_off);
-
-    // Cap to actual available SQEs
-    let available = tail.wrapping_sub(head);
-    let batch = core::cmp::min(to_submit, available);
-
-    for _ in 0..batch {
-        // Read SQE index from the array (window-checked read; the index
-        // itself is validated against sq_entries right below).
-        let sqe_idx = sq.read_u32(
-            ring.sq_array_off + (head & ring.sq_ring_mask) as usize * 4,
-        );
-
-        // Validate SQE index against sq_entries (per Linux:
-        // READ_ONCE(ring->array[i]) < ctx->sq_entries).
-        if sqe_idx >= ring.sq_entries {
-            break; // Invalid index — stop processing
-        }
-
-        // Read the SQE through the SQE-array view.
-        let sqe = ring.sqe_at(sqe_idx);
-
-        // Advance local head
-        head = head.wrapping_add(1);
-
-        // Execute operation synchronously
-        let res = io_uring_dispatch_op(&sqe);
-
-        // Post CQE
-        io_uring_post_cqe(ring, sqe.user_data, res, 0);
-
-        submitted += 1;
-    }
-
-    // Write back the advanced head only after all submissions are complete
-    if submitted > 0 {
-        sq.write_u32(ring.sq_head_off, head);
-    }
-
-    submitted
-}
-
-// ==================== Operation Dispatch ====================
-
-/// Dispatch a single SQE to the appropriate operation handler.
-fn io_uring_dispatch_op(sqe: &IoUringSqe) -> i32 {
-    match sqe.opcode {
-        IORING_OP_NOP => 0,
-        IORING_OP_READ => io_uring_op_read(sqe),
-        IORING_OP_WRITE => io_uring_op_write(sqe),
-        IORING_OP_FSYNC => io_uring_op_fsync(sqe),
-        IORING_OP_CLOSE => io_uring_op_close(sqe),
-        IORING_OP_FADVISE => io_uring_op_fadvise(sqe),
-        _ => -22, // EINVAL
-    }
-}
-
-/// IORING_OP_READ: read from fd into user buffer.
-fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
-    use crate::arch::uaccess::access_ok;
-
-    let fd = sqe.fd as usize;
-    let buf = sqe.addr as usize;
-    // Cap the transfer length: sqe.len is user-controlled (up to 4GB) and the
-    // kernel heap cannot satisfy huge allocations (alloc failure would panic).
-    let len = (sqe.len as usize).min(crate::arch::uaccess::MAX_RW_COUNT);
-    let off = sqe.off as i64;
-
-    if len == 0 { return 0; }
-    if !access_ok(buf, len) { return -14; } // EFAULT
-
-    let file = match crate::fs::file::get_file_fd(fd) {
-        Some(f) => f,
-        None => return -9, // EBADF
-    };
-
-    // Use file position if off == -1
-    let use_file_pos = off == -1;
-
-    if use_file_pos {
-        // read_fn (e.g. file_read in fs/file.rs) reads from file.pos and
-        // advances it by the number of bytes read. No manual pos update
-        // needed — the old code double-counted by adding result again.
-        do_read(&file, buf, len)
-    } else {
-        // pread: read from a specific offset without changing file position.
-        let saved_pos = file.get_pos();
-        let _ = file.set_pos(off as u64);
-        let result = do_read(&file, buf, len);
-        let _ = file.set_pos(saved_pos);
-        result
-    }
-}
-
-fn do_read(file: &Arc<File>, buf: usize, len: usize) -> i32 {
-    let ops = match file.get_ops() {
-        Some(o) => o,
-        None => return -9, // EBADF
-    };
-    let read_fn = match ops.read {
-        Some(f) => f,
-        None => return -22, // EINVAL
-    };
-
-    // R20-FS9 (SYSA-C1 family, io_uring leftover): stage at most RW_CHUNK at
-    // a time — a single `vec![0u8; len]` with user len up to MAX_RW_COUNT
-    // (2GB) far exceeds the kernel heap and panics on allocation failure.
-    // Matches the chunked staging the syscall read/write paths already use.
-    const RW_CHUNK: usize = crate::syscall::support::RW_CHUNK;
-    let mut kbuf = alloc::vec![0u8; len.min(RW_CHUNK)];
-    let mut total = 0usize;
-
-    while total < len {
-        let chunk = core::cmp::min(len - total, kbuf.len());
-        let n = read_fn(file, &mut kbuf[..chunk]);
-        if n <= 0 {
-            return if total > 0 { total as i32 } else { n as i32 };
-        }
-        let uncopied =
-            crate::arch::uaccess_safe::copy_out((buf + total) as usize, &kbuf[..n as usize]);
-        if uncopied != 0 {
-            return if total > 0 { total as i32 } else { -14 }; // EFAULT
-        }
-        total += n as usize;
-        // R24: short chunk means EOF or "nothing more available now" (pipe
-        // drained / socket drained) — sys_read's chunk loop breaks here;
-        // without the break an io_uring read larger than RW_CHUNK from a
-        // pipe blocks for a second fill instead of returning the partial
-        // data (do_write already had the matching short-write break).
-        if (n as usize) < chunk {
-            break;
-        }
-    }
-
-    total as i32
-}
-
-/// IORING_OP_WRITE: write from user buffer to fd.
-fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
-    use crate::arch::uaccess::access_ok;
-
-    let fd = sqe.fd as usize;
-    let buf = sqe.addr as usize;
-    // Cap the transfer length: sqe.len is user-controlled (up to 4GB) and the
-    // kernel heap cannot satisfy huge allocations (alloc failure would panic).
-    let len = (sqe.len as usize).min(crate::arch::uaccess::MAX_RW_COUNT);
-    let off = sqe.off as i64;
-
-    if len == 0 { return 0; }
-    if !access_ok(buf, len) { return -14; } // EFAULT
-
-    let file = match crate::fs::file::get_file_fd(fd) {
-        Some(f) => f,
-        None => return -9, // EBADF
-    };
-
-    let use_file_pos = off == -1;
-
-    if use_file_pos {
-        // write_fn (e.g. file_write in fs/file.rs) writes from file.pos and
-        // advances it. No manual pos update needed — the old code
-        // double-counted by adding result again.
-        do_write(&file, buf, len)
-    } else {
-        // pwrite: write at a specific offset without changing file position.
-        let saved_pos = file.get_pos();
-        let _ = file.set_pos(off as u64);
-        let result = do_write(&file, buf, len);
-        let _ = file.set_pos(saved_pos);
-        result
-    }
-}
-
-fn do_write(file: &Arc<File>, buf: usize, len: usize) -> i32 {
-    let ops = match file.get_ops() {
-        Some(o) => o,
-        None => return -9,
-    };
-    let write_fn = match ops.write {
-        Some(f) => f,
-        None => return -22,
-    };
-
-    // R20-FS9: chunked staging, same rationale as do_read.
-    const RW_CHUNK: usize = crate::syscall::support::RW_CHUNK;
-    let mut kbuf = alloc::vec![0u8; len.min(RW_CHUNK)];
-    let mut total = 0usize;
-
-    while total < len {
-        let chunk = core::cmp::min(len - total, kbuf.len());
-        let uncopied = crate::arch::uaccess_safe::copy_in(&mut kbuf[..chunk], (buf + total) as usize);
-        if uncopied != 0 {
-            return if total > 0 { total as i32 } else { -14 }; // EFAULT
-        }
-        let n = write_fn(file, &kbuf[..chunk]);
-        if n <= 0 {
-            return if total > 0 { total as i32 } else { n as i32 };
-        }
-        total += n as usize;
-        if (n as usize) < chunk {
-            break; // short write — stop
-        }
-    }
-
-    total as i32
-}
-
-/// IORING_OP_FSYNC: sync file to disk.
-fn io_uring_op_fsync(_sqe: &IoUringSqe) -> i32 {
-    // No real fsync in Rux (ramdisk/ramfs)
-    0
-}
-
-/// IORING_OP_CLOSE: close a file descriptor.
-///
-/// Rejects attempts to close the io_uring ring fd itself to prevent
-/// use-after-free of the ring structures.
-fn io_uring_op_close(sqe: &IoUringSqe) -> i32 {
-    let fd = sqe.fd as usize;
-
-    // Guard: refuse to close a file whose ops match IO_URING_OPS, as that
-    // would be the ring fd itself. Closing it would leave the ring mapped
-    // in user memory but with freed kernel structures — a UAF.
-    if let Some(file) = crate::fs::file::get_file_fd(fd) {
-        if let Some(ops) = file.get_ops() {
-            if core::ptr::eq(ops, &IO_URING_OPS as *const FileOps) {
-                return -22; // EINVAL
-            }
-        }
-    }
-
-    match crate::fs::file::close_file_fd(fd) {
-        Ok(()) => 0,
-        Err(e) => e,
-    }
-}
-
-/// IORING_OP_FADVISE: advise on file access pattern (ignored).
-fn io_uring_op_fadvise(_sqe: &IoUringSqe) -> i32 {
-    0
-}
+// MOVED to the rux-io-uring service crate (the cold-four lane): the
+// submit loop, the op dispatch and the READ/WRITE/FSYNC/CLOSE/FADVISE
+// handlers are syscall-context policy over the FileOps vtable — safe
+// code, reached only from sys_io_uring_enter (rux-syscall's wrapper
+// re-exports the crate). The ring views they consume stay here (the
+// INV-IOURING-RING-1 window protocol) and are reached through the pub
+// accessor surface above; the completion path (post_cqe +
+// signal_eventfd_file) stays here with the wakeup path.
 
 // ==================== Ring views (INV-IOURING-RING-1) ====================
 
@@ -874,14 +687,48 @@ fn io_uring_op_fadvise(_sqe: &IoUringSqe) -> i32 {
 /// through these (a firing window check is a kernel bug and panics,
 /// never an OOB on user-controlled data).
 impl IoUring {
-    fn sq_hdr(&self) -> crate::safety::mmio::MmioRegion {
+    /// The SQ-ring header view. `pub` since the policy flip: the
+    /// rux-io-uring crate's submit path reads head/tail/array through
+    /// it (INV-IOURING-RING-1 — the window bounds every access).
+    pub fn sq_hdr(&self) -> crate::safety::mmio::MmioRegion {
         crate::safety::mmio::MmioRegion::new(self.sq_ring.kvirt as usize, self.sq_ring.size)
     }
-    fn cq_hdr(&self) -> crate::safety::mmio::MmioRegion {
+    /// The CQ-ring header view (`pub` since the policy flip — the
+    /// crate's wait/ready-count paths read head/tail through it).
+    pub fn cq_hdr(&self) -> crate::safety::mmio::MmioRegion {
         crate::safety::mmio::MmioRegion::new(self.cq_ring.kvirt as usize, self.cq_ring.size)
     }
+    /// SQE count (the bound submit validates array indices against).
+    pub fn sq_entries(&self) -> u32 {
+        self.sq_entries
+    }
+    /// Head/tail/array offset accessors (setup-time constants; `pub`
+    /// since the policy flip for the crate-side submit loop).
+    pub fn sq_head_off(&self) -> usize { self.sq_head_off }
+    pub fn sq_tail_off(&self) -> usize { self.sq_tail_off }
+    pub fn sq_array_off(&self) -> usize { self.sq_array_off }
+    pub fn sq_ring_mask(&self) -> u32 { self.sq_ring_mask }
+    /// Set or clear the completion-notification eventfd
+    /// (sys_io_uring_register's policy side calls this; pub since the
+    /// flip — the fields stay private).
+    pub fn set_eventfd(&self, fd: i32, file: Option<alloc::sync::Arc<File>>) {
+        self.eventfd_fd.store(fd, core::sync::atomic::Ordering::Release);
+        *self.eventfd_file.lock() = file;
+    }
+
+    /// CQEs currently posted (tail - head through the window view).
+    /// Replaces the raw `read_volatile` pair sys_io_uring_enter carried
+    /// (same reads, now through the INV-IOURING-RING-1 bounds-checked
+    /// view — the typed-twin conversion of the flip).
+    pub fn cq_completed(&self) -> u32 {
+        let cq = self.cq_hdr();
+        let head = cq.read_u32(self.cq_head_off);
+        let tail = cq.read_u32(self.cq_tail_off);
+        tail.wrapping_sub(head)
+    }
     /// Read one SQE by index (caller validated `idx < sq_entries`).
-    fn sqe_at(&self, idx: u32) -> IoUringSqe {
+    /// `pub` since the policy flip (the crate's submit loop).
+    pub fn sqe_at(&self, idx: u32) -> IoUringSqe {
         let r = crate::safety::mmio::MmioRegion::new(
             self.sqes.kvirt as usize,
             self.sqes.size,
@@ -907,8 +754,10 @@ impl IoUring {
 
 // ==================== CQE Posting ====================
 
-/// Post a completion queue entry.
-fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
+/// Post a completion queue entry. `pub` since the policy flip: the
+/// rux-io-uring crate's submit loop calls it (completion-queue
+/// machinery — stays mechanism-side with the wakeup path).
+pub fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
     let _lock = ring.cq_lock.lock();
 
     let cq = ring.cq_hdr();
@@ -951,230 +800,19 @@ fn signal_eventfd_file(file: &alloc::sync::Arc<File>) {
     }
 }
 
-// ==================== CQ Wait ====================
-
-/// Wait for at least `min_complete` CQEs.
-///
-/// Since operations execute synchronously, CQEs are already posted
-/// before this is called. The first check will always succeed.
-fn wait_for_cqes(ring: &IoUring, min_complete: u32) -> i32 {
-    for _ in 0..1000 {
-        let cq = ring.cq_hdr();
-        let head = cq.read_u32(ring.cq_head_off);
-        let tail = cq.read_u32(ring.cq_tail_off);
-
-        let completed = tail.wrapping_sub(head);
-        if completed >= min_complete {
-            return completed as i32;
-        }
-
-        if crate::signal::signal_pending() {
-            return -4; // EINTR
-        }
-
-        crate::sched::yield_cpu();
-    }
-
-    // Timeout (should not happen with sync ops)
-    -110 // ETIMEDOUT
-}
-
-// ==================== Public Syscall API ====================
-
-/// sys_io_uring_setup — create a new io_uring instance (NR 425).
-pub fn sys_io_uring_setup(args: [u64; 6]) -> u64 {
-    use crate::arch::uaccess::{access_ok, get_user, put_user};
-
-    let entries = args[0] as u32;
-    let params_ptr = args[1] as *mut IoUringParams;
-
-    if params_ptr.is_null() {
-        return -(22i64) as u64; // EINVAL
-    }
-    if !access_ok(params_ptr as usize, core::mem::size_of::<IoUringParams>()) {
-        return -(14i64) as u64; // EFAULT
-    }
-
-    let mut params = match crate::arch::uaccess_safe::read_user::<IoUringParams>(params_ptr as usize) {
-        Some(p) => p,
-        None => return -(14i64) as u64,
-    };
-
-    let ring = match io_uring_create(entries, &mut params) {
-        Ok(r) => r,
-        // `e` is already a NEGATIVE errno (io_uring_create returns Err(-12)
-        // etc.) — do NOT negate again (review批次6 P2: the double negation
-        // turned ENOMEM into a fake "returned fd 12").
-        Err(e) => return (e as i64) as u64,
-    };
-
-    let fdtable = match crate::sched::get_current_fdtable() {
-        Some(ft) => ft,
-        None => return -(12i64) as u64, // ENOMEM
-    };
-
-    let ring_ptr = Box::into_raw(ring) as *mut u8;
-    let file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDWR)));
-    file.set_ops(&IO_URING_OPS);
-    file.set_private_data(ring_ptr);
-
-    let fd = match fdtable.alloc_fd() {
-        Some(fd) => fd,
-        None => {
-            unsafe { let _ = Box::from_raw(ring_ptr as *mut IoUring); }
-            return -(24i64) as u64; // EMFILE
-        }
-    };
-
-    match fdtable.install_fd(fd, file) {
-        Ok(()) => {}
-        Err(_) => {
-            unsafe { let _ = Box::from_raw(ring_ptr as *mut IoUring); }
-            return -(12i64) as u64;
-        }
-    }
-
-    // Copy updated params back
-    let _ = crate::arch::uaccess_safe::copy_out_t(params_ptr as usize, &params);
-
-    fd as u64
-}
-
-/// sys_io_uring_enter — submit SQEs and/or wait for CQEs (NR 426).
-pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
-    let fd = args[0] as i32;
-    let to_submit = args[1] as u32;
-    let min_complete = args[2] as u32;
-    let flags = args[3] as u32;
-
-    // Only IORING_ENTER_GETEVENTS is supported
-    if flags & !IORING_ENTER_GETEVENTS != 0 {
-        return -(22i64) as u64;
-    }
-
-    let file = match crate::fs::file::get_file_fd(fd as usize) {
-        Some(f) => f,
-        None => return -(9i64) as u64, // EBADF
-    };
-
-    // Verify the fd really is an io_uring instance before treating its
-    // private_data as a ring pointer — any other file type here would be a
-    // type confusion (arbitrary kernel read/write).
-    if !file.get_ops().is_some_and(|o| core::ptr::eq(o, &IO_URING_OPS as *const _)) {
-        return -(9i64) as u64; // EBADF
-    }
-
-    // R7-C4 (IOU-H1 completion): the private_data pointer must be read
-    // INSIDE the lifecycle lock — reading it before and dereferencing
-    // after let a concurrent close() free the ring in between. Same
-    // discipline as pin_ring().
-    let (ring, _ring_guard) = {
-        let _guard = LIFECYCLE_LOCK.lock();
-        let ring_ptr = match unsafe { *file.private_data.get() } {
-            Some(p) => p as *const IoUring,
-            None => return -(9i64) as u64, // EBADF
-        };
-        // SAFETY: under the lifecycle lock, close() cannot clear+free the
-        // ring between the read and try_ref.
-        let ring = unsafe { &*ring_ptr };
-        if !ring.try_ref() {
-            return -(9i64) as u64; // EBADF: ring being torn down
-        }
-        (ring, RingRef(ring_ptr))
-    };
-
-    // Submit SQEs
-    let submitted = submit_sqes(ring, to_submit);
-
-    // Wait for completions if requested
-    if flags & IORING_ENTER_GETEVENTS != 0 && min_complete > 0 {
-        let result = wait_for_cqes(ring, min_complete);
-        if result < 0 {
-            // result is already a negative errno — no double negation
-            // (review批次6 P2).
-            return (result as i64) as u64;
-        }
-    }
-
-    // Linux io_uring_enter returns the number of CQEs ready (post-wait)
-    // when nothing was submitted — previously a pure-enter wait call
-    // always returned 0 and callers could not distinguish "woke with N
-    // completions" from "timeout/nothing" (review批次6 M).
-    if submitted == 0 {
-        let head = unsafe {
-            core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_head_off) as *const u32)
-        };
-        let tail = unsafe {
-            core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_tail_off) as *const u32)
-        };
-        (tail.wrapping_sub(head)) as u64
-    } else {
-        submitted as u64
-    }
-}
-
-/// sys_io_uring_register — register buffers/files/eventfd (NR 427).
-pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
-    let fd = args[0] as i32;
-    let opcode = args[1] as u32;
-    let arg = args[2] as u64;
-    let nr_args = args[3] as u32;
-
-    let file = match crate::fs::file::get_file_fd(fd as usize) {
-        Some(f) => f,
-        None => return -(9i64) as u64, // EBADF
-    };
-
-    // Verify the fd really is an io_uring instance (type-confusion guard,
-    // same as sys_io_uring_enter).
-    if !file.get_ops().is_some_and(|o| core::ptr::eq(o, &IO_URING_OPS as *const _)) {
-        return -(9i64) as u64; // EBADF
-    }
-
-    // R7-C4 (IOU-H1 completion): the private_data pointer must be read
-    // INSIDE the lifecycle lock — reading it before and dereferencing
-    // after let a concurrent close() free the ring in between. Same
-    // discipline as pin_ring().
-    let (ring, _ring_guard) = {
-        let _guard = LIFECYCLE_LOCK.lock();
-        let ring_ptr = match unsafe { *file.private_data.get() } {
-            Some(p) => p as *const IoUring,
-            None => return -(9i64) as u64, // EBADF
-        };
-        // SAFETY: under the lifecycle lock, close() cannot clear+free the
-        // ring between the read and try_ref.
-        let ring = unsafe { &*ring_ptr };
-        if !ring.try_ref() {
-            return -(9i64) as u64; // EBADF: ring being torn down
-        }
-        (ring, RingRef(ring_ptr))
-    };
-
-    
-    match opcode {
-        IORING_REGISTER_EVENTFD => {
-            if nr_args != 1 { return -(22i64) as u64; }
-            let eventfd_fd = arg as i32;
-            if eventfd_fd < 0 { return -(9i64) as u64; }
-            // Hold the actual file reference (immune to fd reuse) and verify
-            // it really is an eventfd — anything else would make completion
-            // notification write garbage into an unrelated file.
-            let efile = match crate::fs::file::get_file_fd(eventfd_fd as usize) {
-                Some(f) => f,
-                None => return -(9i64) as u64,
-            };
-            if !efile.get_ops().is_some_and(crate::syscall::support::is_eventfd_ops) {
-                return -(22i64) as u64; // EINVAL
-            }
-            ring.eventfd_fd.store(eventfd_fd, core::sync::atomic::Ordering::Release);
-            *ring.eventfd_file.lock() = Some(efile);
-            0
-        }
-        IORING_UNREGISTER_EVENTFD => {
-            ring.eventfd_fd.store(-1, core::sync::atomic::Ordering::Release);
-            *ring.eventfd_file.lock() = None;
-            0
-        }
-        _ => -(22i64) as u64, // EINVAL
-    }
-}
+// ==================== CQ Wait / Public Syscall API ====================
+// MOVED to the rux-io-uring service crate (the cold-four lane):
+// wait_for_cqes, sys_io_uring_setup, sys_io_uring_enter and
+// sys_io_uring_register are syscall-context policy — their only callers
+// are rux-syscall's NR 425/426/427 wrappers, which now reach them
+// through THIS crate's re-export chain (rux-syscall -> rux-io-uring ->
+// rux, the allowed downward edge; the worklist marked them hot only
+// because the scanner cannot model the caller's import switch). The
+// unsafe the moved functions carried was converted at the flip:
+// - the error-path Box::from_raw pairs in sys_io_uring_setup ride the
+//   framework's audited ring_release_on_install_error edge
+//   (INV-IOURING-RING-2);
+// - the private_data reads in enter/register ride pin_verified_ring
+//   (the R7-C4 lock-discipline twin pin_ring already used);
+// - the raw read_volatile head/tail pair rides the cq_completed()
+//   window-checked accessor.

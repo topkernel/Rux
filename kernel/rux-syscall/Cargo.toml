@@ -15,9 +15,11 @@ rux-ipc = { path = "../rux-ipc", default-features = false }
 rux-fs = { path = "../rux-fs", default-features = false }
 rux-net = { path = "../rux-net", default-features = false }
 rux-process = { path = "../rux-process", default-features = false }
+rux-timer = { path = "../rux-timer", default-features = false }
+rux-io-uring = { path = "../rux-io-uring", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64", "rux-net/riscv64", "rux-fs/riscv64", "rux-obs/riscv64", "rux-process/riscv64"]
-x86_64 = ["rux/x86_64", "rux-net/x86_64", "rux-fs/x86_64", "rux-obs/x86_64", "rux-process/x86_64"]
-aarch64 = ["rux/aarch64", "rux-net/aarch64", "rux-fs/aarch64", "rux-obs/aarch64", "rux-process/aarch64"]
+riscv64 = ["rux/riscv64", "rux-net/riscv64", "rux-fs/riscv64", "rux-obs/riscv64", "rux-process/riscv64", "rux-timer/riscv64", "rux-io-uring/riscv64"]
+x86_64 = ["rux/x86_64", "rux-net/x86_64", "rux-fs/x86_64", "rux-obs/x86_64", "rux-process/x86_64", "rux-timer/x86_64", "rux-io-uring/x86_64"]
+aarch64 = ["rux/aarch64", "rux-net/aarch64", "rux-fs/aarch64", "rux-obs/aarch64", "rux-process/aarch64", "rux-timer/aarch64", "rux-io-uring/aarch64"]
