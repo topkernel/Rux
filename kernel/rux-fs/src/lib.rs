@@ -32,6 +32,8 @@ pub mod fs {
     pub mod inotify;
     pub mod memfd;
     pub mod selinuxfs;
+    pub mod debugfs;
+    pub mod tracefs;
     pub use rux::fs::*;
 }
 
@@ -84,11 +86,61 @@ pub fn register_all() {
             crate::fs::inotify::MAX_QUEUED_EVENTS_SYSCTL.store(v, core::sync::atomic::Ordering::Release)
         },
         inotify_fdinfo_watches: crate::fs::inotify::fdinfo_watches,
-        // Registered as a hook row so the FRAMEWORK invokes it at the
+        // Registered as hook rows so the FRAMEWORK invokes them at the
         // register_builtin_handlers boot point (mount table ready); a
         // direct call here would run before any init (x86_64 wedges in
         // a 'R'-beacon reboot loop — convicted 2026-11-23).
-        leaf_mount_register: crate::fs::selinuxfs::mount_register,
+        leaf_mount_registers: &[
+            crate::fs::selinuxfs::mount_register,
+            crate::fs::debugfs::mount_register,
+            crate::fs::tracefs::mount_register,
+        ],
+        // ---- debugfs rows ----
+        debugfs_create_dir: crate::fs::debugfs::create_dir,
+        debugfs_create_file: |path, mode, show, store| {
+            match (show, store) {
+                (Some(show), Some(store)) => crate::fs::debugfs::create_file(path, mode, show, Some(store)),
+                (Some(show), None) => crate::fs::debugfs::create_file(path, mode, show, None::<fn(&[u8]) -> i32>),
+                _ => false,
+            }
+        },
+        debugfs_init: crate::fs::debugfs::init_debugfs,
+        debugfs_root_present: || crate::fs::debugfs::debugfs_root().is_some(),
+        debugfs_create_root_inode: || Some(crate::fs::debugfs::create_root_inode()),
+        debugfs_mount_boot: crate::fs::debugfs::mount_debugfs,
+        // ---- tracefs rows ----
+        tracefs_create_dir: crate::fs::tracefs::create_dir,
+        tracefs_create_file: |path, mode, show, store| {
+            match (show, store) {
+                (Some(show), Some(store)) => crate::fs::tracefs::create_file(path, mode, show, Some(store)),
+                (Some(show), None) => crate::fs::tracefs::create_file(path, mode, show, None::<fn(&[u8]) -> i32>),
+                _ => false,
+            }
+        },
+        tracefs_create_stream_file: |path, mode, show| {
+            match show {
+                Some(show) => crate::fs::tracefs::create_stream_file(path, mode, show),
+                None => false,
+            }
+        },
+        tracefs_root_present: || crate::fs::tracefs::tracefs_root().is_some(),
+        tracefs_init: crate::fs::tracefs::init_tracefs,
+        tracefs_create_root_inode: || Some(crate::fs::tracefs::create_root_inode()),
+        tracefs_mount_at: crate::fs::tracefs::mount_at,
+        // ---- cgroup rows (filled when cgroup moves) ----
+        cgroup_init_cgroupfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        cgroup_create_root_inode: || None,
+        cgroup_mount_cgroupfs: |_| Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        // ---- sysfs rows (filled when sysfs moves) ----
+        sysfs_init_sysfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        sysfs_mount_sysfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        sysfs_create_root_inode: || None,
+        sysfs_publish_module: |_| {},
+        sysfs_unpublish_module: |_| {},
+        sysfs_register_drm_device: |_| {},
+        sysfs_netdev_uevent: |_, _| 0,
+        sysfs_register_block_disk_at: |_, _, _, _, _| 0,
+        sysfs_register_input_event: |_| 0,
     });
 }
 

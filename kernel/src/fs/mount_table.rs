@@ -61,15 +61,20 @@ pub fn lookup(fs_type: &str) -> Option<MountFn> {
 /// run at THIS point — the same seam the built-ins use — never at
 /// rust_main time (the mount table/allocator are not up yet there).
 pub fn register_builtin_handlers() {
+    // Still-framework leaves (they move in their own commits; each move
+    // deletes its line here and appends its row crate-side):
     super::tmpfs::mount_register();
     super::procfs::mount_register();
     super::devfs::mount_register();
     super::sysfs::mount_register();
     super::cgroup::mount_register();
-    super::debugfs::mount_register();
-    super::tracefs::mount_register();
+    // The moved substrate/boot leaves register from the rux-fs crate side
+    // (FsHooks.leaf_mount_registers — one row per moved leaf, filled by
+    // the crate's register_all; selinuxfs pioneered the shape).
     if let Some(hooks) = super::fs_hooks::FS_HOOKS.get() {
-        (hooks.leaf_mount_register)();
+        for f in hooks.leaf_mount_registers {
+            f();
+        }
     }
     // The ext4 service crate's mount rows (rung 5): the SAME boot
     // point as the leaves above — NOT at rust_main registration time

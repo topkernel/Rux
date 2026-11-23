@@ -80,10 +80,9 @@ pub struct DebugFsNode {
     pub streaming: bool,
 }
 
-// SAFETY: every mutable field sits behind a Spinlock; the closures are
-// required to be Send + Sync at construction.
-unsafe impl Send for DebugFsNode {}
-unsafe impl Sync for DebugFsNode {}
+// (The pre-move `unsafe impl Send/Sync` markers were vestigial: every
+// field is auto-Send+Sync (Spinlock-protected or Send+Sync boxed
+// closures) — deletion-verified by the crate-level forbid build.)
 
 static ROOT: Spinlock<Option<Arc<DebugFsNode>>> = Spinlock::new(None);
 static INO_COUNTER: AtomicU64 = AtomicU64::new(2);
@@ -476,14 +475,11 @@ fn debugfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileO
     }
 }
 
-/// debugfs destroy_inode: reclaim the leaked Box<DebugFsEntryData>.
-/// SAFETY: VFS callback contract; Drop-time hook.
+/// debugfs destroy_inode: reclaim the leaked Box<DebugFsEntryData>
+/// (INV-FS-PRIVDATA-1 through the framework edge — the Drop-time
+/// single reclaim).
 fn debugfs_destroy_inode(inode: &mut Inode) {
-    if let Some(ptr) = inode.private_data.take() {
-        // SAFETY: the Box was leaked by into_raw at inode creation
-        // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { Box::from_raw(ptr as *mut DebugFsEntryData) });
-    }
+    crate::fs::unsafe_edges::privdata_take_box::<DebugFsEntryData>(inode);
 }
 
 /// debugfs inode operations table.

@@ -54,7 +54,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::fs::tracefs;
+use crate::fs::leaf_glue::tracefs;
 use crate::trace;
 
 /// The directory the tracing files live in: the tracefs ROOT (tracefs

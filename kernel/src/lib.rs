@@ -751,10 +751,12 @@ pub fn rust_main_tail() -> ! {
             // not part of the stable userspace ABI — Rux uses it for the
             // DFX instrument switches (see dfx/mod.rs).
             {
-                let debugfs_init = fs::debugfs::init_debugfs();
-                let debugfs_mount = debugfs_init.and_then(|_| fs::debugfs::mount_debugfs());
+                let debugfs_init = fs::leaf_glue::debugfs::init_debugfs();
+                let debugfs_mount = debugfs_init.and_then(|_| fs::leaf_glue::debugfs::mount_debugfs());
                 let ok = debugfs_mount
-                    .map(|_| {
+                    .and_then(|_| fs::leaf_glue::debugfs::create_root_inode()
+                        .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()))
+                    .map(|debugfs_root| {
                         // The mount point must already exist in the dentry
                         // tree WITH an inode: vfs_mount walks the path and
                         // creates missing components as bare dentries,
@@ -764,7 +766,7 @@ pub fn rust_main_tail() -> ! {
                         let _ = fs::vfs::path_lookup("/sys/kernel/debug", 0);
                         fs::vfs::vfs_mount(
                             "/sys/kernel/debug",
-                            fs::debugfs::create_root_inode(),
+                            debugfs_root,
                             fs::mount::MntFlags::new(0),
                         );
                         fs::mount::register_mount(
@@ -792,10 +794,10 @@ pub fn rust_main_tail() -> ! {
             // 259-row ours-only error family vs the reference, whose
             // kernel automounts tracefs under its debugfs).
             {
-                fs::debugfs::create_dir("tracing");
-                let ok = fs::tracefs::init_tracefs()
-                    .and_then(|_| fs::tracefs::mount_at("/sys/kernel/tracing"))
-                    .and_then(|_| fs::tracefs::mount_at("/sys/kernel/debug/tracing"))
+                fs::leaf_glue::debugfs::create_dir("tracing");
+                let ok = fs::leaf_glue::tracefs::init_tracefs()
+                    .and_then(|_| fs::leaf_glue::tracefs::mount_at("/sys/kernel/tracing"))
+                    .and_then(|_| fs::leaf_glue::tracefs::mount_at("/sys/kernel/debug/tracing"))
                     .is_ok();
                 print_status("fs", "tracefs mounted /sys/kernel/tracing", ok);
             }

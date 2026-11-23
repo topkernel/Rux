@@ -10,6 +10,7 @@
 //! contract). The framework never names a service leaf.
 
 use crate::fs::file::File;
+use alloc::boxed::Box;
 use crate::fs::inode::Inode;
 
 /// The fs-service hook set.
@@ -49,13 +50,49 @@ pub struct FsHooks {
     pub inotify_set_max_queued_events: fn(usize),
     /// procfs fdinfo: an inotify fd's watch rows.
     pub inotify_fdinfo_watches: fn(&File) -> Option<alloc::vec::Vec<(i32, u64, u64, u32)>>,
-    /// The service crate's mount-table row registrations (selinuxfs's
-    /// mount_register today). MUST run at the register_builtin_handlers
-    /// boot point — NOT at rust_main time: the mount table and the
-    /// allocator are not up yet that early (an early call panics on
-    /// x86_64 before the console exists: only the boot.S 'R' beacon
-    /// prints, in a reboot loop).
-    pub leaf_mount_register: fn(),
+    /// The service crate's mount-table row registrations (every moved
+    /// leaf's mount_register, in registration order). MUST run at the
+    /// register_builtin_handlers boot point — NOT at rust_main time: the
+    /// mount table and the allocator are not up yet that early (an early
+    /// call panics on x86_64 before the console exists: only the boot.S
+    /// 'R' beacon prints, in a reboot loop).
+    pub leaf_mount_registers: &'static [fn()],
+    // ---- substrate/boot leaf rows (fs-substrate tranche) ----
+    /// debugfs: create_dir population entry.
+    pub debugfs_create_dir: fn(&str) -> bool,
+    /// debugfs: create_file population entry (boxed closures; the
+    /// framework's leaf_glue boxes the generic originals).
+    pub debugfs_create_file: fn(&str, u32, Option<Box<dyn Fn() -> alloc::vec::Vec<u8> + Send + Sync>>, Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>) -> bool,
+    pub debugfs_init: fn() -> Result<(), i32>,
+    /// debugfs_root().is_some() (the fsctx lazy-init probe).
+    pub debugfs_root_present: fn() -> bool,
+    pub debugfs_create_root_inode: fn() -> Option<alloc::sync::Arc<Inode>>,
+    /// lib.rs boot's mount_debugfs().
+    pub debugfs_mount_boot: fn() -> Result<(), i32>,
+    /// tracefs population rows (same shapes as debugfs).
+    pub tracefs_create_dir: fn(&str) -> bool,
+    pub tracefs_create_file: fn(&str, u32, Option<Box<dyn Fn() -> alloc::vec::Vec<u8> + Send + Sync>>, Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>) -> bool,
+    pub tracefs_create_stream_file: fn(&str, u32, Option<Box<dyn Fn() -> alloc::vec::Vec<u8> + Send + Sync>>) -> bool,
+    pub tracefs_root_present: fn() -> bool,
+    pub tracefs_init: fn() -> Result<(), i32>,
+    pub tracefs_create_root_inode: fn() -> Option<alloc::sync::Arc<Inode>>,
+    /// lib.rs boot's tracefs mount_at() (the two canonical locations).
+    pub tracefs_mount_at: fn(&str) -> Result<(), i32>,
+    /// cgroup rows.
+    pub cgroup_init_cgroupfs: fn() -> Result<(), i32>,
+    pub cgroup_create_root_inode: fn() -> Option<alloc::sync::Arc<Inode>>,
+    pub cgroup_mount_cgroupfs: fn(&str) -> Result<(), i32>,
+    /// sysfs rows.
+    pub sysfs_init_sysfs: fn() -> Result<(), i32>,
+    pub sysfs_mount_sysfs: fn() -> Result<(), i32>,
+    pub sysfs_create_root_inode: fn() -> Option<alloc::sync::Arc<Inode>>,
+    /// /sys/module/<name> publish/unpublish (module loader's exposure).
+    pub sysfs_publish_module: fn(&str),
+    pub sysfs_unpublish_module: fn(&str),
+    pub sysfs_register_drm_device: fn(&str),
+    pub sysfs_netdev_uevent: fn(&str, &str) -> u64,
+    pub sysfs_register_block_disk_at: fn(&str, u32, u32, u64, &[(&str, &str)]) -> u64,
+    pub sysfs_register_input_event: fn(&super::leaf_glue::InputEventReg) -> u64,
 }
 
 impl FsHooks {
@@ -83,7 +120,32 @@ impl FsHooks {
         inotify_max_queued_events: || 16384,
         inotify_set_max_queued_events: |_| {},
         inotify_fdinfo_watches: |_| None,
-        leaf_mount_register: || {},
+        leaf_mount_registers: &[],
+        debugfs_create_dir: |_| false,
+        debugfs_create_file: |_, _, _, _| false,
+        debugfs_init: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        debugfs_root_present: || false,
+        debugfs_create_root_inode: || None,
+        debugfs_mount_boot: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        tracefs_create_dir: |_| false,
+        tracefs_create_file: |_, _, _, _| false,
+        tracefs_create_stream_file: |_, _, _| false,
+        tracefs_root_present: || false,
+        tracefs_init: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        tracefs_create_root_inode: || None,
+        tracefs_mount_at: |_| Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        cgroup_init_cgroupfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        cgroup_create_root_inode: || None,
+        cgroup_mount_cgroupfs: |_| Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        sysfs_init_sysfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        sysfs_mount_sysfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        sysfs_create_root_inode: || None,
+        sysfs_publish_module: |_| {},
+        sysfs_unpublish_module: |_| {},
+        sysfs_register_drm_device: |_| {},
+        sysfs_netdev_uevent: |_, _| 0,
+        sysfs_register_block_disk_at: |_, _, _, _, _| 0,
+        sysfs_register_input_event: |_| 0,
     };
 }
 
@@ -96,7 +158,7 @@ pub fn fs_register_hooks(hooks: FsHooks) {
 }
 
 #[inline]
-fn hooks() -> &'static FsHooks {
+pub fn hooks() -> &'static FsHooks {
     FS_HOOKS.get().unwrap_or(&FsHooks::EMPTY)
 }
 

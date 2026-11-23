@@ -354,16 +354,16 @@ pub fn create_fs_root(
             }
         }
         "debugfs" => {
-            if crate::fs::debugfs::debugfs_root().is_none() {
-                crate::fs::debugfs::init_debugfs()?;
+            if !crate::fs::leaf_glue::debugfs::debugfs_root_present() {
+                crate::fs::leaf_glue::debugfs::init_debugfs()?;
             }
-            Ok((crate::fs::debugfs::create_root_inode(), false))
+            Ok((crate::fs::leaf_glue::debugfs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "tracefs" => {
-            if crate::fs::tracefs::tracefs_root().is_none() {
-                crate::fs::tracefs::init_tracefs()?;
+            if !crate::fs::leaf_glue::tracefs::tracefs_root_present() {
+                crate::fs::leaf_glue::tracefs::init_tracefs()?;
             }
-            Ok((crate::fs::tracefs::create_root_inode(), false))
+            Ok((crate::fs::leaf_glue::tracefs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "cgroup2" | "cgroup" => {
             crate::fs::cgroup::init_cgroupfs().map_err(|e| e as i32)?;
