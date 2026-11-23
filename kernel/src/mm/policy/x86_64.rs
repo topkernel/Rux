@@ -2300,24 +2300,31 @@ fn handle_swap_fault(
             if start.as_usize() < user_addr::USER_START {
                 return Err(MapError::Invalid);
             }
-            // mmap_min_addr parity (NOVMA-EXEC P0): a MAP_FIXED below
-            // MIN_MAP_ADDR is refused by the reference kernel's
-            // security_mmap_addr (mmap_min_addr sysctl). Our USER_START
-            // is 0, so the old bound accepted MAP_FIXED at 0 — and the
-            // fixed path's teardown munmap then carved everything from
-            // 0 up. Convicted chain (beget image, CARVE-EXEC tripwire):
-            // musl ld.so load_library computes a segment address that
-            // wraps to 0 for one ability-burst DSO and issues
-            // mmap(0, 0x3fbf0bb000, MAP_FIXED); on Linux that mmap
-            // FAILS (below mmap_min_addr) and musl takes its clean
-            // dlopen-error path; here it succeeded, munmapped
-            // [0, 0x3fbf0bb000) — vdso + interp R + libc text head —
-            // and the process wild-executed into the hole at its next
-            // libc call (the NOVMA-EXEC storm at 0x3fbf0add00). No
-            // mapping can exist below MIN_MAP_ADDR for a correct
-            // program (placement never puts one there, hints below it
-            // are already discarded), so the guard changes nothing for
-            // legitimate callers.
+            // mmap_min_addr parity: the reference kernel refuses a
+            // MAP_FIXED below vm.mmap_min_addr for callers without
+            // CAP_SYS_RAWIO (EPERM). Our USER_START is 0, so before
+            // this check a fixed mapping at address 0 was accepted and
+            // the null page was mappable (guest probe: the kernel
+            // without this check returned 0 for mmap(0, 4K, MAP_FIXED)).
+            // No correct program maps there (placement never puts a
+            // mapping below MIN_MAP_ADDR, lower hints are discarded),
+            // so the guard is unobservable to legitimate callers.
+            //
+            // Scope: a hardening step, NOT the fix for the NOVMA-EXEC
+            // storm. That storm's destroy is a direct
+            // munmap(0, 0x3fbf0bb000) syscall from the victim's
+            // userspace; it never enters this path (the kernel frame
+            // walk and the mm-op ring both show sys_munmap only) and
+            // it still reproduces with this check in place. Which
+            // caller issues it (application or libc internals) and why
+            // is not yet identified; that hunt is tracked separately.
+            //
+            // Deliberate divergence from the reference, for now: EINVAL
+            // instead of EPERM, and no CAP_SYS_RAWIO exemption — the
+            // refusal has to hold for every caller until the cause of
+            // the bogus munmap is found. MIN_MAP_ADDR (4 KiB) is this
+            // kernel's own floor; the reference's default sysctl value
+            // is 65536.
             if start.as_usize() < user_addr::MIN_MAP_ADDR {
                 return Err(MapError::Invalid);
             }
