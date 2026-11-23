@@ -13,7 +13,7 @@
 // the service files' crate::X paths resolve unchanged (the net recipe).
 pub use rux::{
     arch, cmdline, config, console, dfx, drivers, errno, initrd, interrupt,
-    mm, net, printk, process, safety, sched, security, signal, sync,
+    ipc, mm, net, printk, process, safety, sched, security, signal, sync,
     timer, trace,
 };
 // The guest-test counters (unit-test builds only — the framework gates
@@ -49,6 +49,7 @@ pub mod fs {
     pub mod char_dev;
     pub mod rootfs;
     pub mod tmpfs;
+    pub mod devfs;
     #[cfg(feature = "unit-test")]
     pub mod initrd_test;
     #[cfg(feature = "unit-test")]
@@ -124,6 +125,7 @@ pub fn register_all() {
             crate::fs::cgroup::mount_register,
             crate::fs::sysfs::mount_register,
             crate::fs::tmpfs::mount_register,
+            crate::fs::devfs::mount_register,
         ],
         // ---- debugfs rows ----
         debugfs_create_dir: crate::fs::debugfs::create_dir,
@@ -193,6 +195,27 @@ pub fn register_all() {
         tmpfs_ensure_registered: crate::fs::tmpfs::ensure_registered,
         tmpfs_is_file: crate::fs::tmpfs::is_tmpfs_file,
         tmpfs_fallocate: crate::fs::tmpfs::fallocate,
+        devfs_init: crate::fs::devfs::init,
+        devfs_create_root_inode: || crate::fs::devfs::get_root_entry().map(|e| crate::fs::devfs::create_root_inode(&e)),
+        devfs_mkdir: |path| crate::fs::devfs::mkdir(path).map_err(|_| crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        devfs_mknod: |path, devno, mode| crate::fs::devfs::mknod(path, devno, mode).map_err(|_| crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        devfs_register_char_device: crate::fs::devfs::registry::register_char_device,
+        devfs_reg_current_size: crate::fs::devfs::devfs_reg_current_size,
+        devfs_shared_fault_file_page: |file, off| {
+            // The ops-identity gate (folded from mm/policy's inline
+            // ptr::eq at the flip).
+            let ops = file.get_ops()?;
+            if !core::ptr::eq(ops as *const _, &crate::fs::devfs::DEVFS_REG_FILE_OPS as *const _) {
+                return None;
+            }
+            crate::fs::devfs::shared_fault_file_page(file, off)
+        },
+        devfs_condev_read: crate::fs::devfs::condev_read,
+        devfs_condev_write: crate::fs::devfs::condev_write,
+        devfs_condev_poll: crate::fs::devfs::condev_poll,
+        devfs_is_loop_ops: |ops| core::ptr::eq(ops as *const _, &crate::fs::devfs::LOOP_FILE_OPS as *const _),
+        devfs_loop_file_ops: || &crate::fs::devfs::LOOP_FILE_OPS,
+        devfs_condev_ops: || &crate::fs::devfs::CONDEV_OPS,
         char_dev_uart_write: crate::fs::char_dev::uart_write,
         tty_console_lflag: || crate::fs::tty::console().lflag(),
         tty_console_echo_enabled: || crate::fs::tty::console().echo_enabled(),

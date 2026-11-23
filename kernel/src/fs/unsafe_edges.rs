@@ -315,6 +315,47 @@ pub fn kernel_slice_mut<'a>(p: *mut u8, len: usize) -> &'a mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(p, len) }
 }
 
+/// The inode-side Arc-clone twin of [`file_privdata_arc_clone`] (the
+/// devfs link path's target re-acquisition): clone the Arc the inode's
+/// private_data holds WITHOUT consuming the slot (increment + from_raw;
+/// the slot keeps its single reference). INV-FS-PRIVDATA-1 + the stored
+/// value being an Arc::into_raw of `T`.
+pub fn privdata_arc_clone<T>(inode: &Inode) -> Option<alloc::sync::Arc<T>> {
+    let ptr = inode.private_data? as *const T;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the stored value is a live Arc::into_raw of T; the
+    // increment balances the from_raw below (the slot keeps its ref).
+    unsafe {
+        alloc::sync::Arc::increment_strong_count(ptr);
+        Some(alloc::sync::Arc::from_raw(ptr))
+    }
+}
+
+/// INV-DEVFS-SHARED (kernel-VA window family): `kva` is the kernel
+/// linear-map address of a LIVE shared page owned by the devfs regular
+/// registry; [kva, kva+src.len()) is inside that page by the caller's
+/// in-page math. Copies src into the window.
+pub fn kva_copy_to(kva: *mut u8, src: &[u8]) {
+    // SAFETY: INV-DEVFS-SHARED — live shared page; the caller's chunk
+    // math keeps the span inside PAGE_SIZE.
+    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), kva, src.len()) };
+}
+
+/// The read-direction twin of [`kva_copy_to`] (INV-DEVFS-SHARED).
+pub fn kva_copy_from(kva: *const u8, dst: &mut [u8]) {
+    // SAFETY: INV-DEVFS-SHARED — same argument, read direction.
+    unsafe { core::ptr::copy_nonoverlapping(kva, dst.as_mut_ptr(), dst.len()) };
+}
+
+/// The zeroing twin of [`kva_copy_to`] (INV-DEVFS-SHARED; also the
+/// freshly-allocated-page shape — exclusively owned at the call).
+pub fn kva_zero(kva: *mut u8, len: usize) {
+    // SAFETY: INV-DEVFS-SHARED — bounded by the caller's math.
+    unsafe { core::ptr::write_bytes(kva, 0, len) };
+}
+
 /// Offset+slice twin of [`kernel_slice`] (the tmpfs cache-frame face:
 /// p is a pinned PAGE_SIZE frame, off+len <= PAGE_SIZE by the caller's
 /// page math — the F-TMPFS-CACHE audit row).

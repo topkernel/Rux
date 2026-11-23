@@ -138,6 +138,28 @@ pub struct FsHooks {
     pub tmpfs_is_file: fn(&File) -> bool,
     /// vfs_fallocate's tmpfs arm (None = not tmpfs).
     pub tmpfs_fallocate: fn(&Inode, i32, u64, u64) -> Option<Result<(), i32>>,
+    // ---- devfs rows ----
+    pub devfs_init: fn(),
+    /// The boot /dev mount (get_root_entry + create_root_inode combined).
+    pub devfs_create_root_inode: fn() -> Option<alloc::sync::Arc<Inode>>,
+    pub devfs_mkdir: fn(&str) -> Result<(), i32>,
+    pub devfs_mknod: fn(&str, crate::fs::dev_t::DevNo, u32) -> Result<(), i32>,
+    pub devfs_register_char_device: fn(crate::fs::dev_t::DevNo, &'static crate::fs::FileOps) -> Result<(), ()>,
+    /// mm/policy's live-size probe for regular-registry files.
+    pub devfs_reg_current_size: fn(&File) -> Option<u64>,
+    /// mm/policy's SHARED fault page handoff (the ops-identity gate is
+    /// folded into the row: None for non-registry files).
+    pub devfs_shared_fault_file_page: fn(&File, usize) -> Option<u64>,
+    /// vt's console-device backing (read/write/poll).
+    pub devfs_condev_read: fn(&File, &mut [u8]) -> isize,
+    pub devfs_condev_write: fn(&File, &[u8]) -> isize,
+    pub devfs_condev_poll: fn(&File, u16) -> u16,
+    /// The loop-device ops identity probe + value (loop_dev's ioctl
+    /// dispatch and loop-control file).
+    pub devfs_is_loop_ops: fn(&'static crate::fs::FileOps) -> bool,
+    pub devfs_loop_file_ops: fn() -> &'static crate::fs::FileOps,
+    /// CONDEV_OPS for the test-suite console fd.
+    pub devfs_condev_ops: fn() -> &'static crate::fs::FileOps,
     /// procfs's mounts view (interim until procfs joins the crate).
     pub rootfs_sb_ref_interim: fn() -> Option<&'static dyn super::leaf_glue::InitrdRamfs>,
 }
@@ -219,6 +241,19 @@ impl FsHooks {
         tmpfs_ensure_registered: || {},
         tmpfs_is_file: |_| false,
         tmpfs_fallocate: |_, _, _, _| None,
+        devfs_init: || {},
+        devfs_create_root_inode: || None,
+        devfs_mkdir: |_| Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        devfs_mknod: |_, _, _| Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        devfs_register_char_device: |_, _| Err(()),
+        devfs_reg_current_size: |_| None,
+        devfs_shared_fault_file_page: |_, _| None,
+        devfs_condev_read: |_, _| 0,
+        devfs_condev_write: |_, _| 0,
+        devfs_condev_poll: |_, _| 0,
+        devfs_is_loop_ops: |_| false,
+        devfs_loop_file_ops: || &crate::fs::file::DIR_FILE_OPS,
+        devfs_condev_ops: || &crate::fs::file::DIR_FILE_OPS,
         rootfs_sb_ref_interim: || None,
     };
 }

@@ -338,9 +338,9 @@ pub fn create_fs_root(
             Ok((crate::fs::leaf_glue::sysfs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "devfs" | "devtmpfs" => {
-            crate::fs::devfs::init();
-            match crate::fs::devfs::get_root_entry() {
-                Some(e) => Ok((crate::fs::devfs::create_root_inode(&e), false)),
+            crate::fs::leaf_glue::devfs::init();
+            match crate::fs::leaf_glue::devfs::create_root_inode() {
+                Some(e) => Ok((e, false)),
                 None => Err(crate::errno::Errno::NoSuchDevice.as_neg_i32()),
             }
         }

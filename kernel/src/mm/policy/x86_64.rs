@@ -492,7 +492,7 @@ pub fn handle_mm_fault(
     let effective_size = vm_file
         .as_ref()
         .and_then(|f| {
-            if let Some(live) = crate::fs::devfs::devfs_reg_current_size(f.as_ref()) {
+            if let Some(live) = crate::fs::leaf_glue::devfs::reg_current_size(f.as_ref()) {
                 return Some(live);
             }
             // SAFETY: inode cell written at open time; read-only.
@@ -664,15 +664,9 @@ pub fn handle_mm_fault(
             // service's write protocol (memcpy, no msync) requires.
             if vma_flags.contains(crate::mm::vma::VmaFlags::SHARED) {
                 if let Some(shared_phys) = vm_file.as_ref().and_then(|f| {
-                    let ops = f.get_ops()?;
-                    if !core::ptr::eq(
-                        ops as *const _,
-                        &crate::fs::devfs::DEVFS_REG_FILE_OPS as *const _,
-                    ) {
-                        return None;
-                    }
-                    // Page-granular offset within the file.
-                    crate::fs::devfs::shared_fault_file_page(
+                    // The ops-identity gate is folded into the row
+                    // (None for non-registry files).
+                    crate::fs::leaf_glue::devfs::shared_fault_file_page(
                         f.as_ref(),
                         (file_offset / (PAGE_SIZE as usize)) * (PAGE_SIZE as usize),
                     )

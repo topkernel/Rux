@@ -1130,7 +1130,7 @@ pub fn rust_main_tail() -> ! {
             drivers::input::init();
 
             // Initialize devfs (must be before evdev initialization)
-            fs::devfs::init();
+            fs::leaf_glue::devfs::init();
             printk::init_kmsg_device();
             print_status("fs", "devfs mounted /dev", true);
             // /dev/fb0 — framebuffer char device (registered when the GPU
@@ -1150,8 +1150,8 @@ pub fn rust_main_tail() -> ! {
             }
 
             // Build dentry tree for devfs
-            if let Some(root_entry) = fs::devfs::get_root_entry() {
-                fs::vfs::vfs_mount("/dev", fs::devfs::create_root_inode(&root_entry),
+            if let Some(dev_root) = fs::leaf_glue::devfs::create_root_inode() {
+                fs::vfs::vfs_mount("/dev", dev_root,
                     fs::mount::MntFlags::new(0));
             }
 

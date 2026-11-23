@@ -34,7 +34,6 @@
 #![forbid(unsafe_code)]
 use alloc::collections::BTreeMap;
 
-use crate::fs::devfs::registry;
 use crate::fs::dev_t::DevNo;
 use crate::fs::FileOps;
 use crate::sync::spinlock::Spinlock;
@@ -401,7 +400,7 @@ pub static ACCESS_TOKEN_OPS: FileOps = FileOps::builder()
 
 /// Register the char device (called from devfs init, next to binder).
 pub fn register() {
-    let _ = registry::register_char_device(DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS);
+    let _ = crate::fs::leaf_glue::devfs::register_char_device(DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS);
     crate::pr_info!("atid: /dev/access_token_id registered");
 }
 

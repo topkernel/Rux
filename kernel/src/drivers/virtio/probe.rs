@@ -170,7 +170,7 @@ fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
     let mmio_host = alloc::format!("{:x}.virtio_mmio", base_addr);
     crate::fs::leaf_glue::sysfs::register_block_disk_at(
         "vda",
-        crate::fs::devfs::VIRTIO_BLK_MAJOR,
+        crate::fs::dev_t::VIRTIO_BLK_MAJOR,
         0,
         capacity,
         &[("platform", "platform"), (mmio_host.as_str(), "platform")],
@@ -565,7 +565,7 @@ pub fn init_pci_block_devices() -> usize {
                                         .collect();
                                     crate::fs::leaf_glue::sysfs::register_block_disk_at(
                                         &name,
-                                        crate::fs::devfs::VIRTIO_BLK_MAJOR,
+                                        crate::fs::dev_t::VIRTIO_BLK_MAJOR,
                                         (slot as u32) * 16,
                                         capacity,
                                         &chain,
@@ -751,7 +751,7 @@ pub fn pci_rescan_block_hotplug() -> usize {
             hier.iter().map(|(n, b)| (n.as_str(), *b)).collect();
         let seq = crate::fs::leaf_glue::sysfs::register_block_disk_at(
             &name,
-            crate::fs::devfs::VIRTIO_BLK_MAJOR,
+            crate::fs::dev_t::VIRTIO_BLK_MAJOR,
             minor,
             capacity,
             &chain,
@@ -761,7 +761,7 @@ pub fn pci_rescan_block_hotplug() -> usize {
         crate::pr_info!(
             "virtio-blk hotplug: {} ({}:{}) {} sectors, uevent seq {}",
             name,
-            crate::fs::devfs::VIRTIO_BLK_MAJOR,
+            crate::fs::dev_t::VIRTIO_BLK_MAJOR,
             minor,
             capacity,
             seq

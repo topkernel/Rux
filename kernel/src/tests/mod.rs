@@ -488,7 +488,7 @@ fn setup_boot_task_fdtable() {
         let console_file = Arc::new(crate::fs::File::new(
             crate::fs::file::FileFlags::new(crate::fs::file::FileFlags::O_RDWR),
         ));
-        console_file.set_ops(&crate::fs::devfs::CONDEV_OPS);
+        console_file.set_ops(crate::fs::leaf_glue::devfs::condev_ops());
         if let Some(ft) = (*task).try_fdtable() {
             if let Some(fd) = ft.alloc_fd() {
                 let _ = ft.install_fd(fd, console_file);

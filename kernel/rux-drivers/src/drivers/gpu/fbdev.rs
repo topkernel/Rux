@@ -345,11 +345,11 @@ pub fn is_fb_file(file: &crate::fs::File) -> bool {
 /// Register the fb char device and create /dev/fb0 (called from boot
 /// after devfs is up and the GPU framebuffer exists).
 pub fn init_fbdev() -> Result<(), ()> {
-    crate::fs::devfs::registry::register_char_device(
+    crate::fs::leaf_glue::devfs::register_char_device(
         crate::fs::dev_t::DEV_FB0,
         &FB_OPS,
     )?;
-    crate::fs::devfs::mknod("/fb0", crate::fs::dev_t::DEV_FB0, 0o666)?;
+    crate::fs::leaf_glue::devfs::mknod("/fb0", crate::fs::dev_t::DEV_FB0, 0o666).map_err(|_| ())?;
 
     // Auto-flush presenter for flush-less renderers (stock Xorg).
     let started = crate::process::kthread::kthread_run(

@@ -289,6 +289,67 @@ pub mod rootfs {
     }
 }
 
+// ---- devfs (device registry + node population + mm fault routing) ----
+
+pub mod devfs {
+    use super::*;
+
+    pub fn init() {
+        (hooks().devfs_init)()
+    }
+
+    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
+        (hooks().devfs_create_root_inode)()
+    }
+
+    pub fn mkdir(path: &str) -> Result<(), i32> {
+        (hooks().devfs_mkdir)(path)
+    }
+
+    pub fn mknod(path: &str, devno: super::super::dev_t::DevNo, mode: u32) -> Result<(), i32> {
+        (hooks().devfs_mknod)(path, devno, mode)
+    }
+
+    pub fn register_char_device(
+        devno: super::super::dev_t::DevNo,
+        ops: &'static super::super::file::FileOps,
+    ) -> Result<(), ()> {
+        (hooks().devfs_register_char_device)(devno, ops)
+    }
+
+    pub fn reg_current_size(file: &super::super::file::File) -> Option<u64> {
+        (hooks().devfs_reg_current_size)(file)
+    }
+
+    pub fn shared_fault_file_page(file: &super::super::file::File, file_off: usize) -> Option<u64> {
+        (hooks().devfs_shared_fault_file_page)(file, file_off)
+    }
+
+    pub fn condev_read(file: &super::super::file::File, buf: &mut [u8]) -> isize {
+        (hooks().devfs_condev_read)(file, buf)
+    }
+
+    pub fn condev_write(file: &super::super::file::File, buf: &[u8]) -> isize {
+        (hooks().devfs_condev_write)(file, buf)
+    }
+
+    pub fn condev_poll(file: &super::super::file::File, events: u16) -> u16 {
+        (hooks().devfs_condev_poll)(file, events)
+    }
+
+    pub fn is_loop_ops(ops: &'static super::super::file::FileOps) -> bool {
+        (hooks().devfs_is_loop_ops)(ops)
+    }
+
+    pub fn loop_file_ops() -> &'static super::super::file::FileOps {
+        (hooks().devfs_loop_file_ops)()
+    }
+
+    pub fn condev_ops() -> &'static super::super::file::FileOps {
+        (hooks().devfs_condev_ops)()
+    }
+}
+
 // ---- tmpfs (mount instances, fault routing, fallocate) ----
 
 pub mod tmpfs {

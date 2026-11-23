@@ -303,11 +303,11 @@ pub(crate) fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize
     // console::uart_rx_bridge_to_tty): the IRQ only fills the ring that
     // exec-provided stdin drains.
     crate::console::uart_rx_bridge_to_tty();
-    crate::fs::leaf_glue::tty::console_read_input(buf, nonblock)
+    crate::fs::tty::console().read_input(buf, nonblock)
 }
 
 pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
-    let onlcr = crate::fs::leaf_glue::tty::console_output_translates_nl();
+    let onlcr = crate::fs::tty::console().output_translates_nl();
     // Translate \n -> \r\n (OPOST|ONLCR) in 256-byte chunks so a single
     // console write stays atomic per chunk (R20-4 discipline).
     let mut chunk = [0u8; 256];
@@ -316,7 +316,7 @@ pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
         if *len == 0 {
             return 0;
         }
-        let n = crate::fs::leaf_glue::char_dev::uart_write(&chunk[..*len]);
+        let n = crate::fs::char_dev::uart_write(&chunk[..*len]);
         *len = 0;
         n
     };
@@ -352,7 +352,7 @@ pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
 pub(crate) fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
     use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
-    if events & POLLIN != 0 && crate::fs::leaf_glue::tty::console_input_poll_ready() {
+    if events & POLLIN != 0 && crate::fs::tty::console().input_poll_ready() {
         ready |= POLLIN | POLLRDNORM;
     }
     if events & POLLOUT != 0 {
@@ -453,7 +453,7 @@ pub(crate) static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileO
 /// and gives userspace actual kernel-log ingestion.
 
 /// virtio-blk major on this platform (matches sysfs /sys/class/block/vda).
-pub const VIRTIO_BLK_MAJOR: u32 = 254;
+pub use crate::fs::dev_t::VIRTIO_BLK_MAJOR;
 
 /// virtio-blk root disk name.
 const ROOT_DISK_NAME: &str = "vda";
@@ -770,7 +770,7 @@ pub fn devtmpfs_register_device(path: &str, devno: DevNo, is_block: bool) -> Res
     } else {
         format!("/class/tty/{}", name)
     };
-    crate::fs::leaf_glue::sysfs::uevent_send_full(&devpath, "add", subsystem, &extra);
+    crate::fs::sysfs::uevent_send_full(&devpath, "add", subsystem, &extra);
     Ok(())
 }
 
@@ -794,7 +794,7 @@ pub fn devtmpfs_unregister_device(path: &str, devno: DevNo, is_block: bool) -> R
     } else {
         format!("/class/tty/{}", name)
     };
-    crate::fs::leaf_glue::sysfs::uevent_send_full(&devpath, "remove", subsystem, &extra);
+    crate::fs::sysfs::uevent_send_full(&devpath, "remove", subsystem, &extra);
     Ok(())
 }
 
@@ -878,7 +878,7 @@ pub fn init() {
     // /dev/ptmx: every open allocates a new pty pair (fs/pty.rs ptmx_open).
     let ptmx_entry = Arc::new(DevfsEntry::new_char_device_with_mode(
         "ptmx",
-        crate::fs::leaf_glue::pty::dev_ptmx_devno(),
+        crate::fs::pty::DEV_PTMX,
         0o666 | 0o020000, // S_IFCHR | rw-rw-rw-
     ));
     root_entry
@@ -895,7 +895,7 @@ pub fn init() {
         .insert(String::from("pts"), pts_dir);
 
     // Register the ptmx device ops (slave ops are registered per-pair).
-    crate::fs::leaf_glue::pty::devfs_register();
+    crate::fs::pty::devfs_register();
 
     // /dev/shm: kernel-created directory inside devtmpfs — the
     // reference's devtmpfs carries it, and the boot-time tmpfs mount
@@ -1435,11 +1435,11 @@ fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         // (Linux struct ashmem_area in file->private_data).
         return crate::drivers::ashmem::ashmem_open(file);
     }
-    if crate::fs::leaf_glue::pty::devno_is_ptmx(entry.devno) {
-        return crate::fs::leaf_glue::pty::ptmx_open(file);
+    if entry.devno == crate::fs::pty::DEV_PTMX {
+        return crate::fs::pty::ptmx_open(file);
     }
-    if entry.devno.major == crate::fs::leaf_glue::pty::slave_major() {
-        return crate::fs::leaf_glue::pty::slave_open(file, entry.devno.minor);
+    if entry.devno.major == crate::fs::pty::PTY_SLAVE_MAJOR {
+        return crate::fs::pty::slave_open(file, entry.devno.minor);
     }
     // DRM node open trace (OH bring-up): the composer's first move is
     // open("/dev/dri/card0"), the gralloc's is open("/dev/dri/renderD128")
@@ -1562,16 +1562,11 @@ fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsD
     Some(entries)
 }
 
-/// DevFS destroy_inode: reclaim the Arc<DevfsEntry> stored in private_data.
-// SAFETY: VFS callback contract; called when the inode's refcount drops to zero.
+/// DevFS destroy_inode: reclaim the Arc<DevfsEntry> stored in
+/// private_data (INV-FS-PRIVDATA-1 through the framework edge — the
+/// Drop-time single reclaim).
 fn devfs_destroy_inode(inode: &mut Inode) {
-    if let Some(ptr) = inode.private_data.take() {
-        // Reconstruct the Arc from the raw pointer and let it drop,
-        // decrementing the DevfsEntry's reference count.
-        // SAFETY: private_data holds the Arc leaked by into_raw at inode
-        // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        let _ = unsafe { Arc::from_raw(ptr as *const DevfsEntry) };
-    }
+    crate::fs::unsafe_edges::privdata_drop_arc::<DevfsEntry>(inode);
 }
 
 // ============================================================================
@@ -1757,14 +1752,11 @@ fn devfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
         Some(p) => p,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
     };
-    // SAFETY: private_data holds a leaked Arc<DevfsEntry> (iget/create
-    // discipline); from_raw + clone + into_raw preserves the inode's
-    // own reference.
-    let target_arc = unsafe {
-        let arc = Arc::from_raw(target_ptr as *const DevfsEntry);
-        let cloned = Arc::clone(&arc);
-        let _ = Arc::into_raw(arc);
-        cloned
+    // The edge clones the Arc WITHOUT consuming the inode's slot
+    // (INV-FS-PRIVDATA-1; the from_raw+clone+into_raw dance as an edge).
+    let target_arc = match crate::fs::unsafe_edges::privdata_arc_clone::<DevfsEntry>(target) {
+        Some(a) => a,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
     };
     if target_arc.is_dir() {
         // link(2): directories cannot be hardlinked (EPERM).
@@ -1895,33 +1887,26 @@ impl SharedPageWindow {
     }
 
     /// Copy INTO the page at `in_page` from a kernel slice
-    /// (INV-DEVFS-SHARED; chunk in-page by the caller).
+    /// (INV-DEVFS-SHARED; chunk in-page by the caller — the edge owns
+    /// the audited copy).
     #[inline]
     fn copy_in(&mut self, src: &[u8], in_page: usize) {
-        // SAFETY: INV-DEVFS-SHARED — live shared page; the caller's
-        // chunk math keeps [in_page, in_page+len) inside PAGE_SIZE.
-        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.kva.add(in_page), src.len()) };
+        // wrapping_add is the safe offset arithmetic; the in-page bound
+        // is the caller's math (INV-DEVFS-SHARED).
+        crate::fs::unsafe_edges::kva_copy_to(self.kva.wrapping_add(in_page), src);
     }
 
     /// Copy OUT of the page at `in_page` into a caller slice
     /// (INV-DEVFS-SHARED; same chunk discipline).
     #[inline]
     fn copy_out(&self, dst: &mut [u8], in_page: usize) {
-        // SAFETY: INV-DEVFS-SHARED — same argument, read direction.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                (self.kva as *const u8).add(in_page),
-                dst.as_mut_ptr(),
-                dst.len(),
-            )
-        };
+        crate::fs::unsafe_edges::kva_copy_from((self.kva as *const u8).wrapping_add(in_page), dst);
     }
 
     /// Zero a region of the page (INV-DEVFS-SHARED).
     #[inline]
     fn zero(&mut self, in_page: usize, len: usize) {
-        // SAFETY: INV-DEVFS-SHARED — bounded by the caller's math.
-        unsafe { core::ptr::write_bytes(self.kva.add(in_page), 0, len) };
+        crate::fs::unsafe_edges::kva_zero(self.kva.wrapping_add(in_page), len);
     }
 }
 
@@ -1945,8 +1930,9 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
                     crate::arch::mm::memory_layout::PhysAddr(pa),
                 )
                 .as_usize() as *mut u8;
-                // SAFETY: freshly allocated page, exclusively owned here.
-                unsafe { core::ptr::write_bytes(kva, 0, page) };
+                // Freshly allocated page, exclusively owned here — the
+                // zeroing rides the INV-DEVFS-SHARED edge.
+                crate::fs::unsafe_edges::kva_zero(kva, page);
                 pfns.push((pa >> 12) as usize);
             }
             None => break,

@@ -23,7 +23,6 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::fs::file::{File, FileOps};
 use crate::fs::dev_t::{DevNo, DEV_EVDEV_KEYBOARD, DEV_EVDEV_POINTER};
-use crate::fs::devfs;
 
 // ============================================================================
 // evdev ioctl command decoding
@@ -1458,22 +1457,22 @@ pub fn init_evdev() {
     });
 
     // Register device operations
-    devfs::registry::register_char_device(DEV_EVDEV_KEYBOARD, &EVDEV_OPS)
+    crate::fs::leaf_glue::devfs::register_char_device(DEV_EVDEV_KEYBOARD, &EVDEV_OPS)
         .expect("Failed to register keyboard evdev");
-    devfs::registry::register_char_device(DEV_EVDEV_POINTER, &EVDEV_OPS)
+    crate::fs::leaf_glue::devfs::register_char_device(DEV_EVDEV_POINTER, &EVDEV_OPS)
         .expect("Failed to register pointer evdev");
-    devfs::registry::register_char_device(
+    crate::fs::leaf_glue::devfs::register_char_device(
         crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN,
         &EVDEV_OPS,
     )
     .expect("Failed to register touchscreen evdev");
 
     // Create device nodes
-    devfs::mknod("/input/event0", DEV_EVDEV_KEYBOARD, 0o666)
+    crate::fs::leaf_glue::devfs::mknod("/input/event0", DEV_EVDEV_KEYBOARD, 0o666)
         .expect("Failed to create /dev/input/event0");
-    devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
+    crate::fs::leaf_glue::devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
         .expect("Failed to create /dev/input/event1");
-    devfs::mknod("/input/event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, 0o666)
+    crate::fs::leaf_glue::devfs::mknod("/input/event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, 0o666)
         .expect("Failed to create /dev/input/event2");
 
     // U3: registration-time sysfs entries + "add" uevents. The

@@ -37,7 +37,7 @@ pub mod procfs;
 // pub mod debugfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 // pub mod tracefs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub mod dev_t;
-pub mod devfs;
+// pub mod devfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub mod fs_struct;
 // pub mod jbd2; — MOVED to the rux-ext4 service crate (rung 5)
 pub mod page_cache;
