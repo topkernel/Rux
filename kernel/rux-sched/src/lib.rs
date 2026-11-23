@@ -177,10 +177,15 @@ pub fn register_all() {
 /// raw-node internals only through the framework's SAFE debug_* helpers
 /// (sched/edges.rs).
 #[cfg(feature = "unit-test")]
-pub mod sched_tests {
-    pub mod fair_pins;
-    pub mod fair_timeline;
-}
+// Service-internal tests live CENTRALLY in kernel/src/tests/services/
+// (the project test-location rule); compiled HERE for crate visibility
+// (top-level #[path] resolves against this crate's src/).
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/fair_pins.rs"]
+pub mod fair_pins;
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/fair_timeline.rs"]
+pub mod fair_timeline;
 
 /// The guest-test entry (make test): the framework's run_all_tests
 /// invokes this through the SERVICE-TEST SEAM (rux-bin registers it at
@@ -188,6 +193,6 @@ pub mod sched_tests {
 /// lands in the same totals as the in-framework tests.
 #[cfg(feature = "unit-test")]
 pub fn run_unit_tests() {
-    crate::sched_tests::fair_pins::test_fair_pins();
-    crate::sched_tests::fair_timeline::test_fair_timeline();
+    crate::fair_pins::test_fair_pins();
+    crate::fair_timeline::test_fair_timeline();
 }

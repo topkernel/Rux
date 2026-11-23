@@ -28,6 +28,10 @@ pub use rux::{
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 pub use rux::syscall; // the framework's syscall seam (support items)
+// Service-internal test lives CENTRALLY in kernel/src/tests/services/.
+#[path = "../../src/tests/services/net_hdrs_test.rs"]
+pub mod net_hdrs_test;
+
 extern crate alloc;
 
 // The net tree, nested under crate::net (the historical paths).
@@ -60,8 +64,6 @@ pub mod net {
     // rux-bin registers run_unit_tests below; the framework's counters
     // are shared, so the pins land in the same suite totals).
     #[cfg(feature = "unit-test")]
-    #[path = "net_hdrs_test.rs"]
-    pub mod net_hdrs_test;
 
     // The framework's whole-module globs (the old shared mod.rs's shape).
     pub use crate::arch::*;
@@ -347,5 +349,5 @@ pub fn init_all() {
 /// lands in the same totals as the in-framework tests.
 #[cfg(feature = "unit-test")]
 pub fn run_unit_tests() {
-    crate::net::net_hdrs_test::test_net_hdrs();
+    crate::net_hdrs_test::test_net_hdrs();
 }

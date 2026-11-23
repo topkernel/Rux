@@ -29,10 +29,13 @@ pub mod fs {
     pub mod inotify;
     pub mod memfd;
     pub mod selinuxfs;
-    #[cfg(feature = "unit-test")]
-    pub mod pipe2_test;
     pub use rux::fs::*;
 }
+
+// Service-internal test lives CENTRALLY in kernel/src/tests/services/.
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/pipe2_test.rs"]
+pub mod pipe2_test;
 
 /// The guest-test entry (make test): the framework's run_all_tests
 /// invokes this through the SERVICE-TEST SEAM (rux-bin registers it at
@@ -41,7 +44,7 @@ pub mod fs {
 #[cfg(feature = "unit-test")]
 pub fn run_unit_tests() {
     rux::tests::test_group_start("pipe2");
-    crate::fs::pipe2_test::test_pipe2();
+    crate::pipe2_test::test_pipe2();
 }
 
 /// The boot-time registration (rux-bin calls this before kmain):
