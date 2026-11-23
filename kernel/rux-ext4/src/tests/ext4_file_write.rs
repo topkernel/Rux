@@ -7,8 +7,8 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::fs::ext4::indirect::{Ext4BlockIterator, POINTERS_PER_BLOCK, max_file_size, get_indirect_level};
-use super::{test_pass, test_fail, test_group_start};
+use rux_ext4::fs::ext4::indirect::{Ext4BlockIterator, POINTERS_PER_BLOCK, max_file_size, get_indirect_level};
+use rux::tests::{test_pass, test_fail, test_group_start};
 
 pub fn test_ext4_file_write() {
     test_group_start("ext4 file write");

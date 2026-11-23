@@ -2,6 +2,8 @@
 //! storage (sched/entities.rs owns CfsRunQueue + the entities; the pick
 //! core is a FREE fn here — the orphan rule bars crate-side impls).
 
+
+#![forbid(unsafe_code)]
 use crate::sched::entities::{CfsRunQueue, SchedEntity, LoadWeight, NICE_0_LOAD, StrandWallRow};
 use crate::sched::edges::{node_key, node_of_task, task_of_node};
 use crate::sched::sched_hooks::{CLASS_CFS_BIT, WW_EV_LINK, WW_EV_UNLINK_POISON};

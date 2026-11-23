@@ -1,6 +1,8 @@
 //! The RT class (S1b sole copy): the RT policy over the framework's
 //! RtRunQueue storage; the pick core is a FREE fn here.
 
+
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering};
 use crate::process::task::{Task, SchedPolicy};
 use crate::sched::class::{SchedClass, RunQueueRef};

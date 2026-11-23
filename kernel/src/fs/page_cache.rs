@@ -465,7 +465,7 @@ const PC_PARK_BATCH: usize = 8;
 type PcParkBatch = [Option<Arc<InodePageCache>>; PC_PARK_BATCH];
 
 /// Per-inode page cache: the lock-free lookup unit.
-pub(crate) struct InodePageCache {
+pub struct InodePageCache {
     /// Identity for the slot-table probe compare (== cache_key). Written
     /// once at construction, never mutated — lock-free readers compare it
     /// inside their claim window.

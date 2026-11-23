@@ -149,24 +149,26 @@ pub fn current_handle_raw() -> *mut () {
 /// pointer inside Journal is dereferenced only under the journal's own
 /// spinlocks (the jbd2 protocol), so sharing the Arc is sound. The
 /// wrapper exists because the crate cannot carry the `unsafe impl`.
-pub struct JournalSlot(pub Option<alloc::sync::Arc<crate::fs::jbd2::journal::Journal>>);
+pub struct AssertingSyncArc<T>(pub Option<alloc::sync::Arc<T>>);
+// SAFETY: INV-JSEAM-4 above — the assertion is the JOURNAL use's to
+// make (the only user is Ext4FileSystem::journal; the type stays
+// narrow-purposed and documented).
+unsafe impl<T> Send for AssertingSyncArc<T> {}
 // SAFETY: INV-JSEAM-4 above.
-unsafe impl Send for JournalSlot {}
-// SAFETY: INV-JSEAM-4 above.
-unsafe impl Sync for JournalSlot {}
+unsafe impl<T> Sync for AssertingSyncArc<T> {}
 
-impl JournalSlot {
+impl<T> AssertingSyncArc<T> {
     pub const fn empty() -> Self {
-        JournalSlot(None)
+        AssertingSyncArc(None)
     }
-    /// Clone the inner Arc (None when no journal is loaded).
-    pub fn get(&self) -> Option<alloc::sync::Arc<crate::fs::jbd2::journal::Journal>> {
+    /// Clone the inner Arc (None when none is loaded).
+    pub fn get(&self) -> Option<alloc::sync::Arc<T>> {
         self.0.clone()
     }
     pub fn is_some(&self) -> bool {
         self.0.is_some()
     }
-    pub fn set(&mut self, j: alloc::sync::Arc<crate::fs::jbd2::journal::Journal>) {
+    pub fn set(&mut self, j: alloc::sync::Arc<T>) {
         self.0 = Some(j);
     }
     pub fn clear(&mut self) {

@@ -436,11 +436,9 @@ pub fn register_all() {
         exthunt_rxbhit: super::extent::exthunt_rxbhit,
         demand_read_stats: super::file::demand_read_stats,
     });
-    // The mount-table rows: the boot consumption point is
-    // register_builtin_handlers (allocator + mount table up) — the
-    // rux-fs 'R'-loop lesson. ext4::init runs after bio::init inside
-    // rust_main_impl, so registering HERE is already past that point;
-    // at the flip the row moves to Ext4Hooks.mount_rows_register
-    // invoked FROM register_builtin_handlers.
-    mount_rows_register_row();
+    // The mount-table rows ride the mount_rows_register row: the
+    // framework invokes it at the register_builtin_handlers boot
+    // point (allocator + mount table up) — the rux-fs 'R'-loop
+    // lesson. Registering anything here (rust_main time, pre-console)
+    // wedged x86_64 in the 'R' beacon reboot loop.
 }

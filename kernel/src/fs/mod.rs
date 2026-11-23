@@ -29,7 +29,7 @@ pub mod fs_hooks;
 pub mod notify_events;
 pub mod rootfs;
 pub mod tmpfs;
-pub mod ext4;
+// pub mod ext4; — MOVED to the rux-ext4 service crate (rung 5)
 pub mod stat;
 pub mod procfs;
 pub mod sysfs;
@@ -38,7 +38,7 @@ pub mod tracefs;
 pub mod dev_t;
 pub mod devfs;
 pub mod fs_struct;
-pub mod jbd2;
+// pub mod jbd2; — MOVED to the rux-ext4 service crate (rung 5)
 pub mod page_cache;
 pub mod readahead;
 pub mod io_completion;

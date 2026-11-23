@@ -168,7 +168,9 @@ pub struct Ext4FileSystem {
     pub journal_ino: u32,
     /// JBD2 journal (initialized during mount). The asserting wrapper
     /// keeps the Sync derivation framework-side (INV-JSEAM-4).
-    pub journal: crate::fs::journal_seam::JournalSlot,
+    pub journal: crate::fs::journal_seam::AssertingSyncArc<
+        crate::fs::jbd2::journal::Journal,
+    >,
     /// Block preallocation state (for mballoc)
     pub prealloc: Spinlock<Option<crate::fs::ext4::allocator::PreallocState>>,
     /// metadata_csum (ro_compat 0x400): crc32c seed + verify on the read
@@ -215,7 +217,7 @@ impl Ext4FileSystem {
             total_blocks: 0,
             total_inodes: 0,
             journal_ino: 0,
-            journal: crate::fs::journal_seam::JournalSlot::empty(),
+            journal: crate::fs::journal_seam::AssertingSyncArc::empty(),
             prealloc: Spinlock::new(None),
             metadata_csum: false,
             csum_seed: 0,

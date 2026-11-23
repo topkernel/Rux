@@ -669,8 +669,9 @@ pub fn rust_main_tail() -> ! {
             fs::bio::init();
             print_status("bio", "buffer cache layer", true);
 
-            // Initialize ext4 file system (registers the rung-5 seam)
-            fs::ext4::init();
+            // Initialize ext4 file system (the crate's init row —
+            // rux-ext4's register_all filled the table before kmain)
+            fs::ext4_hooks::init();
             print_status("fs", "ext4 driver loaded", true);
 
             // Initialize RootFS
