@@ -89,6 +89,10 @@ pub fn run_unit_tests() {
     crate::rootfs_test::test_rootfs_pins();
     rux::tests::test_group_start("tmpfs-mknod");
     crate::tmpfs_mknod_test::test_tmpfs_mknod();
+    // tmpfs_test opens its own "tmpfs" group, as it did framework-side.
+    // The move landed the file without this call and the suite silently
+    // lost the group's 48 assertions (879 -> 831).
+    crate::tmpfs_test::test_tmpfs();
     rux::tests::test_group_start("procfs");
     crate::procfs_test::test_procfs();
 }
