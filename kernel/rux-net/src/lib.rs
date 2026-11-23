@@ -56,6 +56,13 @@ pub mod net {
     #[path = "ipv4/mod.rs"] pub mod ipv4;
     #[path = "ipv6/mod.rs"] pub mod ipv6;
 
+    // Guest tests that moved with the crate flip (SERVICE-TEST SEAM:
+    // rux-bin registers run_unit_tests below; the framework's counters
+    // are shared, so the pins land in the same suite totals).
+    #[cfg(feature = "unit-test")]
+    #[path = "net_hdrs_test.rs"]
+    pub mod net_hdrs_test;
+
     // The framework's whole-module globs (the old shared mod.rs's shape).
     pub use crate::arch::*;
     pub use crate::config;
@@ -332,4 +339,13 @@ pub fn init_all() {
     crate::net::tcp_timer::init_tcp_timer_manager();
     crate::net::ipv4::route::route_init();
     // (arp set_local_ip + ipv6_init are config-conditional at the caller)
+}
+
+/// The guest-test entry (make test): the framework's run_all_tests
+/// invokes this through the SERVICE-TEST SEAM (rux-bin registers it at
+/// boot). Reporting goes through the framework's counters, so pass/fail
+/// lands in the same totals as the in-framework tests.
+#[cfg(feature = "unit-test")]
+pub fn run_unit_tests() {
+    crate::net::net_hdrs_test::test_net_hdrs();
 }

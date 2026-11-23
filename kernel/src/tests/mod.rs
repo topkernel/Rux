@@ -229,8 +229,8 @@ pub mod fs_io;
 pub mod fs_pins;
 #[cfg(feature = "unit-test")]
 // pub mod mm_sched_pins; — service-internals test (S1b); follows the files to the crate
-#[cfg(feature = "unit-test")]
-// pub mod net_hdrs; — service-internals test (rung 2); follows the files to the crate
+// pub mod net_hdrs; — MOVED to the rux-net crate (rung-2 flip); runs in-guest
+// via the SERVICE-TEST SEAM below (registered by rux-bin, same counters)
 #[cfg(feature = "unit-test")]
 // pub mod net_pins; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
@@ -657,8 +657,8 @@ pub fn run_all_tests() {
     link::test_link();
 
     // SERVICE-TEST SEAM: the crate-flipped leaves' guest tests (pipe2
-    // moved with rux-fs; rux-bin registered the entry at boot) run in
-    // the family's original position.
+    // with rux-fs, net_hdrs with rux-net) run in registration order
+    // with the same counters — rux-bin registered the entries at boot.
     run_registered_service_tests();
 
     test_group_start("ext4_allocator");
@@ -715,8 +715,8 @@ pub fn run_all_tests() {
 // (gated with the module: mem_cow)
 
     // ===== 10. Network =====
-    test_group_start("net_hdrs");
-    // (gated with the module: net_hdrs)
+    // net_hdrs: MOVED to the rux-net crate (rung 2) — runs via the
+    // SERVICE-TEST SEAM (registration order, same counters).
 
     test_group_start("tcp_handshake");
     // (gated with the module: tcp_handshake)

@@ -717,7 +717,7 @@ when the tree gains a file the map does not know about.
 | `mm_sched_pins.rs` | 169 | ⬜ |  |
 | `mod.rs` | 820 | ⬜ |  |
 | `mount_flags.rs` | 58 | ⬜ |  |
-| `net_hdrs.rs` | 39 | ⬜ |  |
+| `rux-net/src/net/net_hdrs_test.rs` (moved from tests/, rung-2 flip) | 45 | ⬜ |  |
 | `net_pins.rs` | 267 | ⬜ |  |
 | `network.rs` | 256 | ⬜ |  |
 | `page_allocator.rs` | 156 | ⬜ |  |
