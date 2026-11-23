@@ -33,13 +33,18 @@
 //!      adjudication `free_dead_member` blesses for members, applied
 //!      to the reaped shape. No spinning anywhere: incomplete entries
 //!      simply retry next tick.
-//!    - **grace stage** — one shared-grace target per drained batch
-//!      (the existing `RCU_GEN` machinery, polled instead of slept):
-//!      when every online CPU has reported a quiescent state at or
-//!      after the target, every pid_hash reader window that opened
-//!      before this task's removal has closed, and the storage free
-//!      (kernel stack, fork PtRegs, Arc references, `task_put`) runs
-//!      in the drainer's context.
+//!    - **grace stage** — one shared-grace round handle open while
+//!      the batch is non-empty (the existing `RCU_GEN` machinery,
+//!      polled instead of slept), with a PER-ENTRY grace bound: each
+//!      entry records the first generation opened after its
+//!      pid_hash removal (`RCU_GEN at mint + 1`, the
+//!      `synchronize_rcu_forced` discipline) and frees when the grace
+//!      watermark — the largest generation every online CPU has
+//!      reported at or after — reaches it. A whole-batch target
+//!      cannot give this guarantee to entries minted while a round
+//!      was already open (their removals postdate the target; a CPU
+//!      whose last report predates the removal could satisfy
+//!      "reported >= target" — a free under a live pid_hash reader).
 //!
 //! Safety contract (the L6 wait4-NULL lesson): the storage free runs
 //! only on the strength of the conjunction re-verified AT FREE TIME —
@@ -183,6 +188,18 @@ struct PendingReap {
     r85_ticks: u32,
     /// Past the switch stage, waiting for the batch grace target.
     grace: bool,
+    /// P0 exit-reap (per-entry grace bound): the FIRST generation
+    /// OPENED AFTER this entry's pid_hash removal (RCU_GEN at mint +
+    /// 1). The entry frees only when the grace watermark reaches it —
+    /// a report at generation G can only have been taken at a round
+    /// opened after the removal, which is exactly the coverage the
+    /// free needs (the synchronize_rcu_forced discipline). The old
+    /// whole-batch target could not give this guarantee to entries
+    /// that minted WHILE a round was already open: their removals
+    /// postdate the target, and a CPU whose last report predates the
+    /// removal could still satisfy "reported >= target" — a free
+    /// under a live pid_hash reader.
+    needs: u32,
 }
 
 
@@ -262,6 +279,7 @@ pub fn defer_reap_storage(task: *mut Task, parent_pid: u32) -> bool {
         parent_pid,
         r85_ticks: 0,
         grace: false,
+        needs: crate::sync::rcu::rcu_gen_now().wrapping_add(1),
     });
     true
 }
@@ -404,12 +422,18 @@ pub fn reap_drain_tick() {
         }
     }
 
-    // ---- The grace stage (persistent batch, held-waiter protocol) ----
-    // Merge this run's graduates into the batch; open or reuse the
-    // target; hold the waiter count while the batch is non-empty
-    // (rcu_note_context_switch suppresses QS stores otherwise — the
-    // boot-42 stall root cause); on completion, free the whole batch
-    // and release GP_IN_FLIGHT (the boot-63 latch root cause).
+    // ---- The grace stage (persistent batch, held-waiter protocol,
+    // per-entry grace bound) ----
+    // Merge this run's graduates into the batch; hold the waiter count
+    // while the batch is non-empty (rcu_note_context_switch suppresses
+    // QS stores otherwise — the boot-42 stall root cause); keep ONE
+    // round handle open so generations advance (reports only reach a
+    // generation someone opened); free the entries whose per-entry
+    // `needs` the grace WATERMARK covers (P0: the old whole-batch
+    // "all reported >= target" free could free an entry whose
+    // pid_hash removal POSTDATED the target — see PendingReap.needs);
+    // on an empty batch, close the round and release GP_IN_FLIGHT
+    // (the boot-63 latch root cause).
     let cur_target = GRACE_TARGET.load(Ordering::Acquire);
     let target = if cur_target == 0 {
         let t = crate::sync::rcu::shared_grace_target_pub();
@@ -426,22 +450,42 @@ pub fn reap_drain_tick() {
         cur_target
     };
 
-    if crate::sync::rcu::all_online_cpus_reported_pub(target) {
-        // Round complete: free the whole batch, close the round.
-        let drained: Vec<PendingReap> = {
-            let mut gb = GRACE_BATCH.lock();
-            core::mem::replace(&mut *gb, Vec::new())
-        };
-        for e in drained {
-            let (pp, cp) = e.claim.into_free();
-            notify_parent_if_any(pp, cp);
+    // The per-entry completion: the watermark is the largest
+    // generation every online CPU has reported at/after — entries
+    // whose needs it covers are safe to free NOW; the rest wait for
+    // the next round (the round handle advances generations until it
+    // passes the oldest outstanding needs).
+    let watermark = crate::sync::rcu::rcu_grace_watermark();
+    {
+        let mut gb = GRACE_BATCH.lock();
+        let mut i = 0;
+        while i < gb.len() {
+            if gb[i].needs <= watermark {
+                let e = gb.swap_remove(i);
+                let (pp, cp) = e.claim.into_free();
+                notify_parent_if_any(pp, cp);
+            } else {
+                i += 1;
+            }
         }
+    }
+    let batch_empty = GRACE_BATCH.try_lock().map(|b| b.is_empty()).unwrap_or(false);
+
+    if batch_empty || crate::sync::rcu::all_online_cpus_reported_pub(target) {
+        // Close the round handle so the next tick opens a FRESH
+        // generation for any newer needs — never reuse a target that
+        // predates outstanding removals. Releasing the shared latch on
+        // an incomplete round is sound: GP_IN_FLIGHT only arbitrates
+        // who OPENS the next round; a waiter that latched this target
+        // polls all-reported(target) on its own, and reports at later
+        // generations still satisfy it.
         crate::sync::rcu::shared_grace_done_pub();
         GRACE_TARGET.store(0, Ordering::Release);
         GRACE_STALL_RUNS.store(0, Ordering::Release);
-        if GRACE_WAITER_HELD
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        if batch_empty
+            && GRACE_WAITER_HELD
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
         {
             crate::sync::rcu::grace_waiter_release();
         }
