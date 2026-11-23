@@ -95,6 +95,31 @@ pub struct FsHooks {
     pub sysfs_register_input_event: fn(&super::leaf_glue::InputEventReg) -> u64,
     /// devfs's uevent broadcast (framework-side until devfs itself moves).
     pub sysfs_uevent_send_full: fn(&str, &str, &str, &[(&str, &str)]) -> u64,
+    // ---- char_dev / tty / pty rows (the console cluster) ----
+    /// Boot stdio construction (init_std_fds_for_task's body).
+    pub char_dev_init_std_fds: fn(&crate::fs::FdTable),
+    /// file_hooks' stat fallback for char-device Files.
+    pub char_dev_file_stat: fn(&File, &mut crate::fs::Stat) -> Option<i32>,
+    /// devfs's console write bottom (interim until devfs joins the crate).
+    pub char_dev_uart_write: fn(&[u8]) -> isize,
+    /// The console tty's line discipline flags (ISIG/ECHO gating reads).
+    pub tty_console_lflag: fn() -> u32,
+    pub tty_console_echo_enabled: fn() -> bool,
+    /// Serial input ingest (per input byte — cold by baud rate).
+    pub tty_console_receive_byte: fn(u8),
+    /// The console tty's foreground process group (0 = none).
+    pub tty_console_fg_pgid: fn() -> u32,
+    pub tty_set_console_sink_quiet: fn(bool),
+    /// devfs console rows (interim until devfs joins the crate).
+    pub tty_console_read_input: fn(&mut [u8], bool) -> isize,
+    pub tty_console_output_translates_nl: fn() -> bool,
+    pub tty_console_input_poll_ready: fn() -> bool,
+    pub pty_devfs_register: fn(),
+    pub pty_ptmx_open: fn(&File) -> i32,
+    pub pty_slave_open: fn(&File, u32) -> i32,
+    pub pty_devno_is_ptmx: fn(crate::fs::dev_t::DevNo) -> bool,
+    pub pty_dev_ptmx_devno: fn() -> crate::fs::dev_t::DevNo,
+    pub pty_slave_major: fn() -> u32,
 }
 
 impl FsHooks {
@@ -149,6 +174,23 @@ impl FsHooks {
         sysfs_register_block_disk_at: |_, _, _, _, _| 0,
         sysfs_register_input_event: |_| 0,
         sysfs_uevent_send_full: |_, _, _, _| 0,
+        char_dev_init_std_fds: |_| {},
+        char_dev_file_stat: |_, _| None,
+        char_dev_uart_write: |_| 0,
+        tty_console_lflag: || 0,
+        tty_console_echo_enabled: || false,
+        tty_console_receive_byte: |_| {},
+        tty_console_fg_pgid: || 0,
+        tty_set_console_sink_quiet: |_| {},
+        tty_console_read_input: |_, _| 0,
+        tty_console_output_translates_nl: || false,
+        tty_console_input_poll_ready: || false,
+        pty_devfs_register: || {},
+        pty_ptmx_open: |_| -crate::errno::constants::ENOENT,
+        pty_slave_open: |_, _| -crate::errno::constants::ENOENT,
+        pty_devno_is_ptmx: |_| false,
+        pty_dev_ptmx_devno: || crate::fs::dev_t::DevNo::new(5, 2),
+        pty_slave_major: || 136,
     };
 }
 

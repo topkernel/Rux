@@ -692,7 +692,7 @@ fn install(cmdline: &'static str) {
     // dominant serial burn in the launcher-race decision window; see
     // fs/tty.rs `console_output` for the rationale.
     if has_param("quietcon") {
-        crate::fs::tty::set_console_sink_quiet(true);
+        crate::fs::leaf_glue::tty::set_console_sink_quiet(true);
     }
 
     // `printk.devkmsg=<on|ratelimit|off>` — the console-echo policy for

@@ -13,8 +13,12 @@
 // the service files' crate::X paths resolve unchanged (the net recipe).
 pub use rux::{
     arch, cmdline, config, console, dfx, drivers, errno, interrupt, mm,
-    net, process, safety, sched, security, signal, sync, timer, trace,
+    net, printk, process, safety, sched, security, signal, sync, timer,
+    trace,
 };
+// The framework macros the moved leaves invoke as `crate::X!` —
+// macro re-exports resolve at this crate's root.
+pub use rux::wait_event_interruptible;
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println, print, print_status};
 pub use rux::syscall;
 extern crate alloc;
@@ -35,7 +39,16 @@ pub mod fs {
     pub mod debugfs;
     pub mod tracefs;
     pub mod cgroup;
+<<<<<<< HEAD
     pub mod sysfs;)
+=======
+    pub mod sysfs;
+    pub mod tty;
+    pub mod pty;
+    pub mod char_dev;
+    #[cfg(feature = "unit-test")]
+    pub mod pipe2_test;
+>>>>>>> 5486c4c10 (fs: move char_dev+tty+pty into the rux-fs forbid crate (fs-substrate tranche))
     pub use rux::fs::*;
 }
 
@@ -146,6 +159,23 @@ pub fn register_all() {
         sysfs_register_block_disk_at: crate::fs::sysfs::register_block_disk_at,
         sysfs_register_input_event: crate::fs::sysfs::register_input_event,
         sysfs_uevent_send_full: crate::fs::sysfs::uevent_send_full,
+        char_dev_init_std_fds: crate::fs::char_dev::init_std_fds_for_task,
+        char_dev_file_stat: crate::fs::char_dev::char_dev_file_stat,
+        char_dev_uart_write: crate::fs::char_dev::uart_write,
+        tty_console_lflag: || crate::fs::tty::console().lflag(),
+        tty_console_echo_enabled: || crate::fs::tty::console().echo_enabled(),
+        tty_console_receive_byte: |c| crate::fs::tty::console().receive_byte(c),
+        tty_console_fg_pgid: || crate::fs::tty::console().fg_pgrp.load(core::sync::atomic::Ordering::Acquire),
+        tty_set_console_sink_quiet: crate::fs::tty::set_console_sink_quiet,
+        tty_console_read_input: |buf, nonblock| crate::fs::tty::console().read_input(buf, nonblock),
+        tty_console_output_translates_nl: || crate::fs::tty::console().output_translates_nl(),
+        tty_console_input_poll_ready: || crate::fs::tty::console().input_poll_ready(),
+        pty_devfs_register: crate::fs::pty::devfs_register,
+        pty_ptmx_open: crate::fs::pty::ptmx_open,
+        pty_slave_open: crate::fs::pty::slave_open,
+        pty_devno_is_ptmx: |devno| devno == crate::fs::pty::DEV_PTMX,
+        pty_dev_ptmx_devno: || crate::fs::pty::DEV_PTMX,
+        pty_slave_major: || crate::fs::pty::PTY_SLAVE_MAJOR,
     });
 }
 

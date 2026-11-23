@@ -708,16 +708,15 @@ pub static PTY_SLAVE_OPS: FileOps = FileOps::builder()
 /// each ioctl arm stay as the fast-path validation.
 #[inline]
 fn copy_out(arg: usize, buf: &[u8]) -> bool {
-    // SAFETY: exception-table copy; `arg` was access_ok-validated by
-    // the caller arm; returns true on fault (uncopied > 0).
-    unsafe { crate::arch::uaccess::copy_to_user(arg as *mut u8, buf.as_ptr(), buf.len()) > 0 }
+    // The safe exception-table copy (arch::uaccess_safe): returns the
+    // uncopied count; true here means faulted.
+    crate::arch::uaccess_safe::copy_out(arg, buf) > 0
 }
 
 #[inline]
 fn copy_in(arg: usize, buf: &mut [u8]) -> bool {
-    // SAFETY: exception-table copy into a kernel buffer of exactly
-    // buf.len(); returns true on fault.
-    unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), arg as *const u8, buf.len()) > 0 }
+    // The safe exception-table copy (arch::uaccess_safe).
+    crate::arch::uaccess_safe::copy_in(buf, arg) > 0
 }
 
 pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
@@ -955,11 +954,10 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                     // would never run to consume it) and undo the
                     // slave_refs bump with the same last-close
                     // discipline as pty_slave_close.
-                    // SAFETY: we exclusively own `file`; private_data
-                    // holds the Arc::into_raw pointer we just installed.
-                    if let Some(ptr) = unsafe { (*file.private_data.get()).take() } {
-                        drop(unsafe { Arc::from_raw(ptr as *const PtyPair) });
-                    }
+                    // The framework edge reads the cell BEFORE clearing
+                    // (INV-FS-FILEPRIV-1 close-path take — read-then-clear
+                    // order preserved by construction inside the edge).
+                    drop(crate::fs::unsafe_edges::file_privdata_arc_take::<PtyPair>(&file));
                     if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
                         pair.slave_closed.store(true, Ordering::Release);
                     }

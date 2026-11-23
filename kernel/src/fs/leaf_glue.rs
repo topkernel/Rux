@@ -177,6 +177,86 @@ pub mod sysfs {
     }
 }
 
+// ---- char_dev / tty / pty (the console cluster) ----
+
+pub mod char_dev {
+    use super::*;
+
+    pub fn init_std_fds_for_task(fdtable: &super::super::FdTable) {
+        (hooks().char_dev_init_std_fds)(fdtable)
+    }
+
+    /// devfs's console write bottom (interim).
+    pub fn uart_write(buf: &[u8]) -> isize {
+        (hooks().char_dev_uart_write)(buf)
+    }
+}
+
+pub mod tty {
+    use super::*;
+
+    pub fn console_lflag() -> u32 {
+        (hooks().tty_console_lflag)()
+    }
+
+    pub fn console_echo_enabled() -> bool {
+        (hooks().tty_console_echo_enabled)()
+    }
+
+    pub fn console_receive_byte(c: u8) {
+        (hooks().tty_console_receive_byte)(c)
+    }
+
+    pub fn console_fg_pgid() -> u32 {
+        (hooks().tty_console_fg_pgid)()
+    }
+
+    pub fn set_console_sink_quiet(q: bool) {
+        (hooks().tty_set_console_sink_quiet)(q)
+    }
+
+    // devfs-interim rows
+    pub fn console_read_input(buf: &mut [u8], nonblock: bool) -> isize {
+        (hooks().tty_console_read_input)(buf, nonblock)
+    }
+
+    pub fn console_output_translates_nl() -> bool {
+        (hooks().tty_console_output_translates_nl)()
+    }
+
+    pub fn console_input_poll_ready() -> bool {
+        (hooks().tty_console_input_poll_ready)()
+    }
+}
+
+pub mod pty {
+    use super::*;
+
+    pub fn devfs_register() {
+        (hooks().pty_devfs_register)()
+    }
+
+    pub fn ptmx_open(file: &super::super::file::File) -> i32 {
+        (hooks().pty_ptmx_open)(file)
+    }
+
+    pub fn slave_open(file: &super::super::file::File, minor: u32) -> i32 {
+        (hooks().pty_slave_open)(file, minor)
+    }
+
+    pub fn devno_is_ptmx(devno: super::super::dev_t::DevNo) -> bool {
+        (hooks().pty_devno_is_ptmx)(devno)
+    }
+
+    pub fn dev_ptmx_devno() -> super::super::dev_t::DevNo {
+        (hooks().pty_dev_ptmx_devno)()
+    }
+
+    pub fn slave_major() -> u32 {
+        (hooks().pty_slave_major)()
+    }
+}
+
 /// The input-device registration record (evdev -> sysfs uevent + tree).
 /// Framework-owned DTO: the drivers fill it, the rux-fs sysfs leaf
 /// consumes it through the hook row (plain data — no leaf types cross

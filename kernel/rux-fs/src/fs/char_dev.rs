@@ -250,3 +250,38 @@ pub fn char_dev_stat(file: &crate::fs::File, stat: &mut crate::fs::Stat) -> Opti
     }
     None
 }
+
+// ============================================================================
+// Boot stdio (moved from init.rs at the fs-substrate flip; the framework
+// calls it through the char_dev_init_std_fds row).
+// ============================================================================
+
+/// Initialize standard file descriptors for a task (stdin/stdout/stderr,
+/// all wired to the UART console device).
+pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
+    use crate::fs::{File, FileFlags};
+    use alloc::sync::Arc;
+
+    // Create UART character device (use static to avoid dangling pointer)
+    static UART_DEV: CharDev = CharDev::new(CharDevType::UartConsole, 0);
+
+    // Create stdin (fd=0)
+    let stdin = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
+    stdin.set_ops(&UART_OPS);
+    stdin.set_private_data(&UART_DEV as *const CharDev as *mut u8);
+
+    // Create stdout (fd=1)
+    let stdout = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
+    stdout.set_ops(&UART_OPS);
+    stdout.set_private_data(&UART_DEV as *const CharDev as *mut u8);
+
+    // Create stderr (fd=2)
+    let stderr = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
+    stderr.set_ops(&UART_OPS);
+    stderr.set_private_data(&UART_DEV as *const CharDev as *mut u8);
+
+    // Install standard file descriptors
+    let _ = fdtable.install_fd(0, stdin);
+    let _ = fdtable.install_fd(1, stdout);
+    let _ = fdtable.install_fd(2, stderr);
+}

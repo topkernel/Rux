@@ -303,11 +303,11 @@ pub(crate) fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize
     // console::uart_rx_bridge_to_tty): the IRQ only fills the ring that
     // exec-provided stdin drains.
     crate::console::uart_rx_bridge_to_tty();
-    crate::fs::tty::console().read_input(buf, nonblock)
+    crate::fs::leaf_glue::tty::console_read_input(buf, nonblock)
 }
 
 pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
-    let onlcr = crate::fs::tty::console().output_translates_nl();
+    let onlcr = crate::fs::leaf_glue::tty::console_output_translates_nl();
     // Translate \n -> \r\n (OPOST|ONLCR) in 256-byte chunks so a single
     // console write stays atomic per chunk (R20-4 discipline).
     let mut chunk = [0u8; 256];
@@ -316,7 +316,7 @@ pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
         if *len == 0 {
             return 0;
         }
-        let n = crate::fs::char_dev::uart_write(&chunk[..*len]);
+        let n = crate::fs::leaf_glue::char_dev::uart_write(&chunk[..*len]);
         *len = 0;
         n
     };
@@ -352,7 +352,7 @@ pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
 pub(crate) fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
     use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
-    if events & POLLIN != 0 && crate::fs::tty::console().input_poll_ready() {
+    if events & POLLIN != 0 && crate::fs::leaf_glue::tty::console_input_poll_ready() {
         ready |= POLLIN | POLLRDNORM;
     }
     if events & POLLOUT != 0 {
@@ -361,7 +361,7 @@ pub(crate) fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
     ready
 }
 
-pub(crate) static CONDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub static CONDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
     .read(condev_read)
     .write(condev_write)
     .poll(condev_poll)
@@ -878,7 +878,7 @@ pub fn init() {
     // /dev/ptmx: every open allocates a new pty pair (fs/pty.rs ptmx_open).
     let ptmx_entry = Arc::new(DevfsEntry::new_char_device_with_mode(
         "ptmx",
-        crate::fs::pty::DEV_PTMX,
+        crate::fs::leaf_glue::pty::dev_ptmx_devno(),
         0o666 | 0o020000, // S_IFCHR | rw-rw-rw-
     ));
     root_entry
@@ -895,7 +895,7 @@ pub fn init() {
         .insert(String::from("pts"), pts_dir);
 
     // Register the ptmx device ops (slave ops are registered per-pair).
-    crate::fs::pty::devfs_register();
+    crate::fs::leaf_glue::pty::devfs_register();
 
     // /dev/shm: kernel-created directory inside devtmpfs — the
     // reference's devtmpfs carries it, and the boot-time tmpfs mount
@@ -1435,11 +1435,11 @@ fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         // (Linux struct ashmem_area in file->private_data).
         return crate::drivers::ashmem::ashmem_open(file);
     }
-    if entry.devno == crate::fs::pty::DEV_PTMX {
-        return crate::fs::pty::ptmx_open(file);
+    if crate::fs::leaf_glue::pty::devno_is_ptmx(entry.devno) {
+        return crate::fs::leaf_glue::pty::ptmx_open(file);
     }
-    if entry.devno.major == crate::fs::pty::PTY_SLAVE_MAJOR {
-        return crate::fs::pty::slave_open(file, entry.devno.minor);
+    if entry.devno.major == crate::fs::leaf_glue::pty::slave_major() {
+        return crate::fs::leaf_glue::pty::slave_open(file, entry.devno.minor);
     }
     // DRM node open trace (OH bring-up): the composer's first move is
     // open("/dev/dri/card0"), the gralloc's is open("/dev/dri/renderD128")

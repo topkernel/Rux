@@ -12,7 +12,7 @@ pub mod fdreap;
 pub mod inode;
 pub mod dentry;
 // pub mod pipe; — MOVED to the rux-fs service crate (rung 3)
-pub mod char_dev;
+// pub mod char_dev; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub mod elf;
 pub mod buffer;
 pub mod bio;
@@ -45,9 +45,9 @@ pub mod readahead;
 pub mod io_completion;
 pub mod locks;
 // pub mod inotify; — MOVED to the rux-fs service crate (rung 3)
-pub mod tty;
+// pub mod tty; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub mod vt;
-pub mod pty;
+// pub mod pty; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub mod xattr;
 // pub mod memfd; — MOVED to the rux-fs service crate (rung 3)
 pub mod pidfd;
@@ -66,7 +66,7 @@ pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, cl
 pub use fs_struct::FsStruct;
 pub use stat::{copy_stat_to_user, user_stat_size, Stat};
 // pub use pipe::create_pipe; — MOVED to the rux-fs service crate (rung 3)
-pub use char_dev::CharDev;
+// pub use char_dev::CharDev; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub use rootfs::get_rootfs;
 pub use vfs::{file_open, file_close, file_stat, file_fcntl, fcntl, file_mkdir, file_rmdir, file_unlink, file_link, stat_file_by_path};
 

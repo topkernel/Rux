@@ -12,7 +12,6 @@
 //! - Running shell
 
 use crate::fs::elf::{ElfLoader, ElfError, Elf64Ehdr};
-use crate::fs::char_dev::CharDev;
 use crate::fs::FdTable;
 use crate::sched;
 use crate::process::task::{Task, SchedPolicy};
@@ -464,32 +463,9 @@ fn load_and_setup_elf(
 ///
 /// This function is public and can be reused by fork and other operations
 pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
-    use crate::fs::char_dev::{CharDev, CharDevType, UART_OPS};
-    use crate::fs::{File, FileFlags};
-    use alloc::sync::Arc;
-
-    // Create UART character device (use static to avoid dangling pointer)
-    static UART_DEV: CharDev = CharDev::new(CharDevType::UartConsole, 0);
-
-    // Create stdin (fd=0)
-    let stdin = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
-    stdin.set_ops(&UART_OPS);
-    stdin.set_private_data(&UART_DEV as *const CharDev as *mut u8);
-
-    // Create stdout (fd=1)
-    let stdout = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
-    stdout.set_ops(&UART_OPS);
-    stdout.set_private_data(&UART_DEV as *const CharDev as *mut u8);
-
-    // Create stderr (fd=2)
-    let stderr = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
-    stderr.set_ops(&UART_OPS);
-    stderr.set_private_data(&UART_DEV as *const CharDev as *mut u8);
-
-    // Install standard file descriptors
-    let _ = fdtable.install_fd(0, stdin);
-    let _ = fdtable.install_fd(1, stdout);
-    let _ = fdtable.install_fd(2, stderr);
+    // The body lives in the rux-fs crate now (char_dev leaf); this
+    // forwarding call keeps the historical name for the fork/exec paths.
+    (crate::fs::fs_hooks::hooks().char_dev_init_std_fds)(fdtable);
 }
 
 /// Halt the system
