@@ -2446,21 +2446,10 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:r83scan — the periodic 2 MiB-slice heap fingerprint scan (retired token
-    /// `rux:r83scan (retired dfx=r83scan)`; the event IS the gate for the magic_scan sweep).
-    /// Gate-only: hit prints stay serial.
-    EVENT_R83SCAN / r83scan_fmt / trace_r83scan :
-        "rux", "r83scan", 94,
-    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
-    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
-             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
-             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
-             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
-    call (kind: u32, pid: u32, a: u64, b: u64),
-    render |args: &[u64; TRACE_ARGS]| {
-        let kind = args[0];
-        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
-    };
+    // (2026-11-23, §7 retirement round: rux:r83scan REMOVED with
+    // dfx/r83hunt.rs — the event was gate-only and its gate died; the
+    // R74/R83 hunt closed with fix c1539f6ed plus the fc5f23d47 +
+    // 2e9755c67 corruption family.)
 
     /// rux:leakhunt — the preempt-leak origin probe (retired token `rux:leakhunt (retired dfx=leakhunt)`;
     /// the event IS the engine gate — the outermost-acquire side
@@ -2568,25 +2557,10 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:treehunt — the process-tree invariant validator (retired token
-    /// `rux:treehunt (retired dfx=treehunt)`; the event IS the gate for the ~1 Hz walk). One
-    /// row per flagged task: pid, a=parent snapshot, b=leader
-    /// parent.
-    EVENT_TREEHUNT / treehunt_fmt / trace_treehunt :
-        "rux", "treehunt", 101,
-    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"IMPLAUSIBLE\" }), REC->kind, REC->pid, REC->a, REC->b",
-    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
-             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
-             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
-             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
-    call (kind: u32, pid: u32, a: u64, b: u64),
-    render |args: &[u64; TRACE_ARGS]| {
-        let kind = match args[0] {
-            0 => "IMPLAUSIBLE",
-            _ => "?",
-        };
-        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
-    };
+    // (2026-11-23, §7 retirement round: rux:treehunt REMOVED with
+    // dfx/treehunt.rs — the E8-REPAR unlinked-snapshot hunt closed with
+    // the 7d4481320/6f5e397ad reparent fixes; the event's only emitter
+    // was the retired probe.)
 
     /// rux:tcptrace — the TCP per-segment forensics (retired token `rux:tcptrace (retired dfx=tcptrace)`;
     /// the event IS the gate for the seq/ack/len/flags lines).

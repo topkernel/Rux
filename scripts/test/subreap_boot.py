@@ -3,15 +3,14 @@
 # Copyright (c) 2026 Fei Wang
 
 """subreap_boot.py — boot the x86_64 Rux kernel with subreap_churn as
-init (musl static binary) and judge the E8-REPAR "unlinked snapshot"
-root-cause hunt (leg-29A).
+init (musl static binary). Originally the E8-REPAR "unlinked snapshot"
+hunt rig (leg-29A); the hunt closed with the 7d4481320/6f5e397ad
+reparent fixes and the treehunt probe retired (2026-11-23), so this now
+serves as the subreap-churn regression boot.
 
 Verdict discipline (exitwalk_boot.py family):
   SUBREAP-PASS                          -> rc 0
   SUBREAPFAIL-*                         -> rc 2 (probe-level fail)
-  TREE-PARENT-DEAD / TREE-SNAP-STALE /
-  TREE-UNLINKED (dfx=treehunt)          -> rc 2 (forensic: the
-                                           invariant violation drew)
   kernel panic / Oops / wedge           -> rc 2
   timeout (no PASS line)                -> rc 3
 
@@ -67,7 +66,9 @@ def main():
         WT, "target/x86_64-unknown-none/debug/bzImage"))
     ap.add_argument("--accel", default="kvm",
                     help="kvm (default; falls back to tcg) or tcg")
-    ap.add_argument("--dfx", default="dfx=treehunt")
+    ap.add_argument("--dfx", default="",
+                    help="extra kernel cmdline (the retired dfx=treehunt "
+                         "default is gone; the probe was removed)")
     ap.add_argument("--keep-img", action="store_true")
     ap.add_argument("--show", action="store_true",
                     help="stream raw serial to stdout too")

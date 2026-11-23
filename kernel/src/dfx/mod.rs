@@ -58,8 +58,10 @@ pub mod ledger;
 pub mod driftwatch;
 #[cfg(feature = "x86_64")]
 pub mod scribble;
-/// R83 (R74 producer hunt): live task-header audit + victim dumps.
-pub mod r83hunt;
+// (2026-11-23, §7 retirement round: dfx/r83hunt.rs DELETED — the R74/R83
+// task-header hunt closed with c1539f6ed (the trap.S producer) and the
+// fc5f23d47 + 2e9755c67 corruption family; the module's 8 call-site
+// stubs and its rux:r83scan gate event went with it.)
 /// CLOCK_MONOTONIC jump tripwire (rux:monowatch (retired dfx=monowatch)): samples the shared
 /// timebase ~1 Hz and reports backward motion or multi-second spikes
 /// with the active clocksource named.
@@ -118,11 +120,10 @@ pub mod leakorigin;
 /// hung server thread is stuck opening (leg-28 item 2: storage_daemon
 /// D-state open family); see dfx/pathstash.rs.
 pub mod pathstash;
-/// Process-tree invariant validator (rux:treehunt (retired dfx=treehunt), leg-29A): catches a
-/// live task whose parent pointer names released memory — the E8-REPAR
-/// "unlinked snapshot" class that produced the sc304 signal-Arc Oops —
-/// plus stale thread-group parent snapshots; see dfx/treehunt.rs.
-pub mod treehunt;
+// (2026-11-23, §7 retirement round: dfx/treehunt.rs DELETED — the
+// E8-REPAR unlinked-snapshot hunt closed with the 7d4481320/6f5e397ad
+// reparent fixes; its timer-tick stub, its rux:treehunt gate event and
+// the parent_children_head_ptr accessor went with it.)
 /// Slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), leg-33B): tasks stuck on the
 /// same syscall entry for >= 8 s get a line with args and the parked
 /// kernel-stack chain — attributes the leaf of nested-call cascades

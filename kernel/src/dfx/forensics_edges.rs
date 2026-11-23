@@ -7,10 +7,10 @@
 //!
 //! OWNERSHIP (the coordinator's framework-consolidation doctrine): every
 //! raw stale-handle read the dfx hunt family performs routes through
-//! THIS file. The modules that hunt (leakorigin, scribble, r83hunt,
-//! treehunt, wildwatch, memwatch's fp-chain, the preempt/softirq
-//! bracket diagnostics) stay in their own files; their raw pointer
-//! discipline lives here, named and audited once.
+//! THIS file. The modules that hunt (leakorigin, scribble, wildwatch,
+//! memwatch's fp-chain, the preempt/softirq bracket diagnostics) stay
+//! in their own files; their raw pointer discipline lives here, named
+//! and audited once.
 //!
 //! WHY THESE EDGES ARE RAW — the irreducibility argument (full proofs
 //! in docs/architecture/safety-and-performance.md §5.1):
