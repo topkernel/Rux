@@ -395,22 +395,10 @@ fn apply_mnt_flags(
     // write path does not maintain checksums).
     if let Some(root_inode) = mnt.root.get_inode() {
         if let Some(ops) = root_inode.ops {
-            if core::ptr::eq(
-                ops as *const _,
-                &crate::fs::ext4::EXT4_INODE_OPS as *const _,
-            ) {
-                if let Some(p) = root_inode.private_data {
-                    // SAFETY: the fs instance lives for the mount;
-                    // read_only is a plain bool whose only writers
-                    // are mount setup and this remount path.
-                    let forced_ro = unsafe {
-                        (*(p as *const crate::fs::ext4::Ext4FileSystem)).metadata_csum
-                    };
-                    unsafe {
-                        (*(p as *mut crate::fs::ext4::Ext4FileSystem)).read_only =
-                            new_flags.is_readonly() || forced_ro;
-                    }
-                }
+            if crate::fs::ext4_hooks::is_ext4_inode_ops(ops) {
+                // The leaf's ro latch sync (the fs instance and its
+                // metadata_csum downgrade policy are crate-side).
+                crate::fs::ext4_hooks::remount_ro_latch(new_flags.is_readonly());
             }
         }
     }
@@ -813,7 +801,7 @@ pub fn sync_dirty_filesystems() -> Result<(), i32> {
     // a file that claims 8 MB of data the device never received
     // (measured: the fiE3 crash-window boot — full size, full extent
     // map, ~35 % of the data). The data goes first; the metadata last.
-    let _ = crate::fs::ext4::sync_flushed_data(&flushed_targets);
+    let _ = crate::fs::ext4_hooks::sync_flushed_data(&flushed_targets);
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
     // INODE-TABLE BLOCKS (data-integrity lane, 2026-11-11): the size the
@@ -825,7 +813,7 @@ pub fn sync_dirty_filesystems() -> Result<(), i32> {
     // creation size (0 bytes, md5-of-empty) with its data blocks already
     // on the device. Synced AFTER the buffer-cache drain above, so the
     // metadata lands after the data it describes (ordered data).
-    let _ = crate::fs::ext4::sync_inode_tables(&flushed_targets);
+    let _ = crate::fs::ext4_hooks::sync_inode_tables(&flushed_targets);
     // And persist the disk's volatile cache (see sys_fsync).
     crate::drivers::virtio::flush_pci_blk().map(|_| ()).map_err(|_| -(errno::constants::EIO))
 }
@@ -3137,7 +3125,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                         // directories (dynamic filesystems
                                         // never memo).
                                         if crate::dfx::fsw::negmemo_on()
-                                            && ops.lookup == Some(crate::fs::ext4::ext4_lookup)
+                                            && crate::fs::ext4_hooks::is_ext4_lookup(ops)
                                         {
                                             let pgen = dir_inode.dir_mut_gen_load();
                                             cur_now.memo_negative(component, pgen);
@@ -7317,12 +7305,17 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
     // tests). Other flag bits stay EOPNOTSUPP. journald v255's
     // fallocate(fd, 0, 0, len) preallocation (the reason this arm
     // exists) still succeeds — now with the pages actually reserved.
-    if core::ptr::eq(
-        inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _,
-        &crate::fs::tmpfs::TMPFS_INODE_OPS as *const _,
-    ) {
-        const KEEP_SIZE: i32 = crate::fs::ext4::FALLOC_FL_KEEP_SIZE;
-        const PUNCH_HOLE: i32 = crate::fs::ext4::FALLOC_FL_PUNCH_HOLE;
+    // FALLOC_FL_* are the stable Linux uapi constants (framework-side
+    // since rung 5; the leaf re-uses the same values).
+    const KEEP_SIZE: i32 = 0x01;
+    const PUNCH_HOLE: i32 = 0x02;
+    // The legacy None-ops default IS the ext4 table (seam row).
+    let effective_ops = inode
+        .ops
+        .or_else(crate::fs::ext4_hooks::default_inode_ops);
+    if effective_ops.is_some_and(|ops| {
+        core::ptr::eq(ops as *const _, &crate::fs::tmpfs::TMPFS_INODE_OPS as *const _)
+    }) {
         if mode & !(KEEP_SIZE | PUNCH_HOLE) != 0 {
             return Err(errno::Errno::OperationNotSupported.as_neg_i32());
         }
@@ -7357,84 +7350,10 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
         return Ok(());
     }
 
-    // Route to the filesystem implementation (ext4).
-    let fs_ptr = inode.private_data
-        .ok_or(errno::Errno::FunctionNotImplemented.as_neg_i32())?;
-    // Only ext4 inodes carry a filesystem pointer we can dispatch through;
-    // verify via the ops table identity.
-    if !core::ptr::eq(inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _) {
-        return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
-    }
-    crate::fs::ext4::ext4_fallocate_on(
-        inode.ino as u32,
-        mode,
-        offset,
-        len,
-        Some(fs_ptr as *const crate::fs::ext4::Ext4FileSystem),
-    )?;
-
-    // Cache coherence: ext4_fallocate writes the on-disk inode directly —
-    // the VFS inode's size and the cached Ext4Inode box (inode.sb) still
-    // hold the pre-allocation size, so a subsequent read(2) through ANY
-    // open fd saw EOF at the old size (reads of a fallocated file
-    // returned 0 bytes). Refresh both caches. PUNCH included (falloc-wedge
-    // lane, 2026-11-16): the punch rebuilds the on-disk extent tree, but
-    // reads resolve through the cached Ext4Inode box — a stale cached
-    // tree kept serving the punched blocks' old bytes (LTP fallocate06's
-    // clear-check, run/shell-punch5: hole-nonzero=32 with the on-disk map
-    // already holed). Size refresh stays gated on !KEEP_SIZE (a KEEP_SIZE
-    // punch must not move the published size); the map/block-count
-    // refresh is unconditional.
-    //
-    // NO page-cache invalidation here (falloc-wedge root cause,
-    // 2026-11-16): this epilogue used to call invalidate_inode on the
-    // WHOLE inode after refreshing the map from disk. For a file with
-    // still-dirty DELAYED-ALLOCATION pages (written before the fallocate,
-    // not yet flushed) that dropped the only copy of already-acknowledged
-    // writes while the refreshed map reverted to the on-disk (blockless)
-    // state — reads returned zeros and the later fsync had nothing left
-    // to flush (punchprobe3: sample@0 goes 1 -> 0 across a plain mode-0
-    // fallocate with NO flush involved; identical on the root ext4 and on
-    // loop-stacked ext2; the LTP fallocate05/06 fail faces). The allocate
-    // path never changes the content of existing pages (Linux fallocate
-    // does not touch the page cache at all); the punch path owns its own
-    // RANGE-bounded cache discipline inside ext4_fallocate_on
-    // (invalidate_inode_span + writeback_update_range_stale — never the
-    // whole inode).
-    //
-    // Size refresh never SHRINKS the live size: buffered writes publish
-    // the VFS size immediately while the disk inode lags (delayed
-    // allocation), so the freshly-read disk size can be SMALLER than the
-    // live one — storing it would logically truncate the file and turn
-    // the dirty tail into past-EOF discards at the next flush (the same
-    // data-loss family, size-regression face).
-    {
-        let keep_size = mode & crate::fs::ext4::FALLOC_FL_KEEP_SIZE != 0;
-        let fs_ptr2 = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
-        // SAFETY: fs_ptr2 is the ext4 instance from inode.private_data.
-        if let Ok(fresh) = unsafe { (*fs_ptr2).read_inode(inode.ino as u32) } {
-            if !keep_size {
-                let live = inode.size.load(core::sync::atomic::Ordering::Acquire);
-                if fresh.size > live {
-                    inode.size.store(fresh.size, core::sync::atomic::Ordering::Release);
-                }
-            }
-            // SAFETY: inode.sb is the Box<Ext4Inode> cached at open.
-            if let Some(ptr) = inode.sb {
-                unsafe {
-                    let cached = &mut *(ptr as *mut crate::fs::ext4::inode::Ext4Inode);
-                    cached.block = fresh.block;
-                    if !keep_size && fresh.size > cached.size {
-                        cached.size = fresh.size;
-                    }
-                    cached.blocks = fresh.blocks;
-                    cached.mtime = fresh.mtime;
-                    cached.ctime = fresh.ctime;
-                }
-            }
-        }
-    }
-    Ok(())
+    // Route to the filesystem implementation (ext4): the whole
+    // dispatch + cache-refresh epilogue is the crate's (rung-5 seam
+    // row; the None-ops default IS the ext4 table — legacy shape).
+    crate::fs::ext4_hooks::fallocate(inode, mode, offset, len)
 }
 
 /// Filesystem-side utimensat: update atime/mtime of a path. `times` carries

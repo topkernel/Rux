@@ -2074,12 +2074,10 @@ impl PageCache {
                 // (the fi-lane sync(2) data loss: an 8 MB file's 2048
                 // dirty pages were collected and then skipped because
                 // the icache had evicted the inode).
-                if let Some(inode) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino) {
-                    let flushed =
-                        crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
-                    if flushed > 0 {
-                        flushed_targets.push((fs_id, ino));
-                    }
+                let flushed =
+                    crate::fs::ext4_hooks::writeback_flush(fs_id, ino, 0, u64::MAX);
+                if flushed > 0 {
+                    flushed_targets.push((fs_id, ino));
                 }
             }
             if guarded {
@@ -3458,9 +3456,7 @@ impl PageCache {
                 // uses (icache first, then a fresh inode from the
                 // live-instance registry) — a cache miss may cost
                 // performance, never data.
-                if let Some(inode) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino) {
-                    crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
-                }
+                crate::fs::ext4_hooks::writeback_flush(fs_id, ino, 0, u64::MAX);
                 // The pages this flush cleaned are THIS inode's — evict
                 // them directly instead of hoping the LRU tail reaches
                 // them past the rest of the balloon.
@@ -3595,13 +3591,12 @@ impl PageCache {
                 // evicted — a cache miss may cost performance, never
                 // data.
                 SR_FLUSH_INODES.fetch_add(1, Ordering::Relaxed);
-                if let Some(inode) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino) {
-                    crate::fs::ext4::file::ext4_flush_dirty_inode(
-                        &inode,
-                        first,
-                        last.min(first + WB_WINDOW - 1),
-                    );
-                }
+                crate::fs::ext4_hooks::writeback_flush(
+                    fs_id,
+                    ino,
+                    first,
+                    last.min(first + WB_WINDOW - 1),
+                );
             }
             WRITEBACK_GUARD.store(false, Ordering::Release);
             // Loop: the clean pass at the top of the next round evicts

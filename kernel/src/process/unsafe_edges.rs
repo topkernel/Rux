@@ -249,14 +249,15 @@ pub fn pt_user_pc(pr: &crate::arch::pt_regs::PtRegs) -> u64 {
 /// valid until [`clear_journal_handle`] — the handle outlives the
 /// dying task's syscall frame only because the unwind below is the
 /// next thing exit does with it.
-pub fn journal_handle(t: &Task) -> Option<&'static mut crate::fs::jbd2::Handle> {
-    let p = t.journal_handle.get();
+pub fn journal_handle<H>(t: &Task) -> Option<&'static mut H> {
+    let p = t.journal_handle.get() as *mut H;
     if p.is_null() {
         None
     } else {
         // SAFETY: INV-PROC-JOURNAL-1 — per-task exclusivity; the handle
         // is alive until the exit path clears the slot (the callee then
-        // drops the reference before returning).
+        // drops the reference before returning). The caller names the
+        // handle type (service-crate-owned since rung-5).
         Some(unsafe { &mut *p })
     }
 }

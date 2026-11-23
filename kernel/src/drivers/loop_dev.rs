@@ -234,7 +234,7 @@ pub fn loop_set_fd(idx: usize, file: Arc<File>) -> Result<(), i32> {
         // reused ext4 instance for this disk so the next mount reads the
         // device, never the stale in-memory superblock (see
         // ext4::mount_loop_instance's reuse block).
-        crate::fs::ext4::loop_instance_invalidate(disk);
+        crate::fs::ext4_hooks::loop_invalidate(disk);
     }
     Ok(())
 }
@@ -268,7 +268,7 @@ pub fn loop_clr_fd(idx: usize) -> Result<(), i32> {
                 disk.capacity.store(0, Ordering::Release);
                 // The device image is going away: a reused ext4 instance
                 // must not outlive its disk (see loop_set_fd).
-                crate::fs::ext4::loop_instance_invalidate(disk);
+                crate::fs::ext4_hooks::loop_invalidate(disk);
                 // Drop every cached buffer of this loop, dirty ones
                 // included (Linux invalidate_bdev on detach). A dirty
                 // buffer whose writeback failed cannot be synced against

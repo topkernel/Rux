@@ -29,6 +29,7 @@ pub mod namei;
 pub mod journal;
 pub mod csum;
 pub mod htree;
+pub mod seam;
 
 use crate::sync::spinlock::Spinlock;
 use alloc::boxed::Box;
@@ -1272,6 +1273,10 @@ fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<
 pub fn init() {
     // Register filesystem type
     let _ = crate::fs::superblock::register_filesystem(&EXT4_FS_TYPE);
+    // The rung-5 seam: fill the framework's Ext4Hooks table (in-tree
+    // interim; the rux-ext4 crate's register_all owns this at the
+    // flip). Idempotent.
+    seam::register_all();
 }
 
 /// Global ext4 filesystem instance
@@ -3191,7 +3196,7 @@ fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 /// virtio VW watchdog and dfx taskdump reach it without a hook row.
 /// This re-export keeps the historical path working for ext4/jbd2
 /// bodies (which consume it as their serialization primitive).
-pub use crate::fs::journal_lock::EXT4_BIG_LOCK;
+pub use crate::fs::journal_seam::EXT4_BIG_LOCK;
 
 /// Ext4 inode operations table
 /// Ext4 now supports write operations through namei module

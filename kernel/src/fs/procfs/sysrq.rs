@@ -91,7 +91,7 @@ fn run_command(cmd: u8) {
         }
         // Synchronize every mounted filesystem.
         b's' => {
-            if let Err(e) = crate::fs::ext4::ext4_shutdown_sync() {
+            if let Err(e) = crate::fs::ext4_hooks::shutdown_sync() {
                 crate::println!("sysrq: filesystem sync failed, err={}", e);
             } else {
                 crate::println!("sysrq: filesystems synced");

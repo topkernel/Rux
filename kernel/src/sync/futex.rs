@@ -9874,7 +9874,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
     // counters — deltas across consecutive launcher kills isolate this
     // child's share; rip pages symbolize via nm/addr2line.
     {
-        let (reads, misses, cycles, fills) = crate::fs::ext4::file::demand_read_stats();
+        let (reads, misses, cycles, fills) = crate::fs::ext4_hooks::demand_read_stats();
         let mhz = {
             #[cfg(feature = "x86_64")]
             {

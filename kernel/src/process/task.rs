@@ -1031,7 +1031,11 @@ pub struct Task {
     /// slot holding a pointer to a STACK-LOCAL handle — on SMP one CPU
     /// clobbered another's pointer and dereferenced a dead stack frame
     /// after the owner returned (Linux keeps this in task_struct).
-    pub journal_handle: core::cell::Cell<*mut crate::fs::jbd2::Handle>,
+    /// The current journal handle, TYPE-ERASED (rung-5): the jbd2
+    /// Handle type is service-crate-owned; readers dereference as the
+    /// fixed-offset capture header (INV-JSEAM-1) or hand the raw
+    /// pointer to the crate's journal hook rows.
+    pub journal_handle: core::cell::Cell<*mut ()>,
 
     /// NEW2 root-cause fix (R8-1b): true from pick time until __switch_to
     /// saves this task's context. A queued task with on_cpu set is not

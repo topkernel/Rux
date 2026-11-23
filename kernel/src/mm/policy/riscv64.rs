@@ -568,7 +568,9 @@ pub fn handle_mm_fault(
             });
             match file {
                 Some(f) => {
-                    if crate::fs::ext4::file::is_ext4_file(f.as_ref()) {
+                    // The demand-populate capability is the ext4 probe
+                    // (rung-5 fault seam — no fs named).
+                    if f.get_ops().is_some_and(|ops| ops.fault.is_some()) {
                         match filemap_pin_cache_page(f.as_ref(), file_offset, effective_size, true)
                         {
                             Some(phys) => {

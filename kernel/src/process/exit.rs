@@ -1978,12 +1978,10 @@ pub fn do_exit(exit_code: i32) -> ! {
         // The current-task handle owns this journalling slot; the
         // edges document their per-task exclusivity (INV-PROC-JOURNAL-1).
         {
-            if let Some(handle) = crate::process::unsafe_edges::journal_handle(cur) {
-                if let Some(txn) = handle.h_transaction.clone() {
-                    txn.t_updates.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
-                }
-                crate::process::unsafe_edges::clear_journal_handle(cur);
-            }
+            // The rung-5 seam row: the handle type is ext4-crate-owned;
+            // the row body does the refcount drop + slot clear
+            // (INV-PROC-JOURNAL-1 documented crate-side).
+            crate::fs::ext4_hooks::exit_journal_unwind();
         }
 
         // ===== Ext4 big lock force-release =====
@@ -1995,7 +1993,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // starved). The dying task can make no forward progress in its
         // section; drop the lock and wake all waiters so the filesystem
         // survives the kill.
-        crate::fs::journal_lock::EXT4_BIG_LOCK.release_if_owner(current_pid);
+        crate::fs::journal_seam::EXT4_BIG_LOCK.release_if_owner(current_pid);
 
         // ===== VFS mutation lock force-release =====
         // Same leak family: do_exit does not unwind Rust guards, so a

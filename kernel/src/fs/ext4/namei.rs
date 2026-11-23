@@ -39,7 +39,10 @@ use super::Ext4FileSystem;
 // aliasing exists by construction.)
 pub(crate) fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
     if let Some(task) = crate::sched::current() {
-        task.journal_handle.set(handle);
+        // The task slot is type-erased (rung-5); the raw-pointer cast
+        // between pointer types is safe — only the crate dereferences
+        // it typed (see process::unsafe_edges::journal_handle).
+        task.journal_handle.set(handle as *mut ());
     }
 }
 
@@ -53,7 +56,7 @@ pub(crate) fn clear_current_handle() {
 /// Get the current journal handle, if any
 pub(crate) fn get_current_handle() -> Option<*mut crate::fs::jbd2::Handle> {
     let task = crate::sched::current()?;
-    let ptr = task.journal_handle.get();
+    let ptr = task.journal_handle.get() as *mut crate::fs::jbd2::Handle;
     if ptr.is_null() { None } else { Some(ptr) }
 }
 

@@ -49,6 +49,10 @@ pub struct Ext4Hooks {
     pub loop_invalidate: fn(&GenDisk),
     /// Boot-conf read (init.rs): read a file from a disk before VFS.
     pub boot_read_file: fn(&'static GenDisk, &str) -> Option<alloc::vec::Vec<u8>>,
+    /// fsctx switch_root's ext-family instance mount: resolves the
+    /// source (loop idx or named disk) and mounts a second instance;
+    /// returns the root inode (the whole old fsctx match arm).
+    pub fsctx_mount_instance: fn(&str, bool) -> Result<(Arc<Inode>, bool), i32>,
     /// The mount-table row registration for ext4/ext3/ext2 — MUST run
     /// at the register_builtin_handlers boot point (mount table ready),
     /// never at rust_main time (the rux-fs 'R'-loop conviction).
@@ -126,6 +130,7 @@ impl Ext4Hooks {
         mount_instance: |_, _| Err(crate::errno::Errno::DeviceOrResourceBusy.as_neg_i32()),
         loop_invalidate: |_| (),
         boot_read_file: |_, _| None,
+        fsctx_mount_instance: |_, _| Err(crate::errno::Errno::NoSuchDevice.as_neg_i32()),
         mount_rows_register: || (),
         sync_flushed_data: |_| 0,
         sync_inode_tables: |_| 0,
@@ -190,6 +195,9 @@ pub fn loop_invalidate(disk: &GenDisk) {
 }
 pub fn boot_read_file(disk: &'static GenDisk, path: &str) -> Option<alloc::vec::Vec<u8>> {
     (hooks().boot_read_file)(disk, path)
+}
+pub fn fsctx_mount_instance(src: &str, ro: bool) -> Result<(Arc<Inode>, bool), i32> {
+    (hooks().fsctx_mount_instance)(src, ro)
 }
 pub fn mount_rows_register() {
     (hooks().mount_rows_register)()

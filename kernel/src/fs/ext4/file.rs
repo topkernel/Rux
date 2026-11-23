@@ -6157,7 +6157,17 @@ pub static EXT4_FILE_OPS: FileOps = FileOps::builder()
     .write(ext4_file_write_vfs)
     .lseek(reg_file_lseek)
     .read_at(ext4_file_read_at_vfs)
+    .write_at(ext4_file_write_at_slot)
+    .fault(ext4_fault_populate_cache)
     .build();
+
+/// The FileOps.write_at slot adapter: slice-typed front for
+/// ext4_file_write_at_vfs (same routing; the slot carries the kernel
+/// slice the pwrite boundary already resolved).
+
+pub fn ext4_file_write_at_slot(file: &File, offset: u64, buf: &[u8]) -> isize {
+    ext4_file_write_at_vfs(file, offset, buf.as_ptr(), buf.len())
+}
 
 /// ext4 positional read (R71): serve an explicit-offset read without
 /// touching the shared file position at all.

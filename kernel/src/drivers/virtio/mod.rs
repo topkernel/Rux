@@ -2706,7 +2706,7 @@ pub fn vw_report(tag: &str) {
     // children D-sleeping while the virtio rings are fully drained.
     {
         let (locked, owner, depth, queued, woken) =
-            crate::fs::journal_lock::EXT4_BIG_LOCK.vw_state();
+            crate::fs::journal_seam::EXT4_BIG_LOCK.vw_state();
         crate::pr_err!(
             "VW-EXT4LOCK {} locked={} owner={} depth={} queued={} wokenflag={}",
             tag,
