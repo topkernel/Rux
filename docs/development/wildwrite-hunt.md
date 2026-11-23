@@ -45,7 +45,7 @@ smashes into pointer-bearing statics.
    symbol + regs + stack to the gdb log and continues; legit writers
    (hpet::init pre-attach, heal paths) are a known small rip set —
    anything else IS the wild writer.
-2. **Kernel-side always-on tripwire (my territory): dfx=wildwatch
+2. **Kernel-side always-on tripwire (my territory): debug=wildwatch
    (switch bit 26) — LANDED and end-to-end validated (commit 42eb2006).**
    - The quiet-after-init timekeeper statics moved into a page-exclusive
      2-page `WildGuardCluster` (canary page + members page) in hpet.rs;
@@ -58,7 +58,7 @@ smashes into pointer-bearing statics.
    - Canary page verified from the 1 s timer cadence (DMA-class writers
      bypass PTEs).
    - Self-test (`wildwatch-selftest=1`): deliberate smash → trap fires →
-     dump symbolizes to `rux::dfx::wildwatch::x86::arm` ← `dfx::init` ←
+     dump symbolizes to `rux::debug::wildwatch::x86::arm` ← `debug::init` ←
      `rust_main_tail` — attribution chain proven.
 3. **If neither fires across a boot series:** broaden with a shadow
    checksum scan of the hpet/PER_CPU neighborhoods from the timer tick
@@ -83,7 +83,7 @@ smashes into pointer-bearing statics.
   kernel-side trace. This is a first-class suspect for the OH
   heap-corruption timeline's user-victim families ("kernel-side smoking
   gun", PTE-OVERWRITE-LIVE, foreign-content meta). Suggested probe for
-  that line: boot with WP=1 + `dfx=wildwatch` arming only WP (or a
+  that line: boot with WP=1 + `debug=wildwatch` arming only WP (or a
   dedicated wp=1 boot flag) and a supervisor-COW tripwire print.
 - **F2: the b77 "smash" value is the CORRECT device-alias VA.**
   `device_alias(0xFED00000)` = 0xffff8900_4ed00000 (alias window base
@@ -101,7 +101,7 @@ smashes into pointer-bearing statics.
   unaffected). This is the cheapest attribution surface for the NEXT
   captures: any store to the watched statics logs rip + regs + stack.
 - **F4: WP=1 is not bootable on the OH image today.** Arming WP
-  (dfx=wildwatch) collapses the OH boot into init's LoopEvent timeout
+  (debug=wildwatch) collapses the OH boot into init's LoopEvent timeout
   loop before any service starts (ww-long2/long3: 21/5 init-forks vs
   103 in a control boot; serial becomes a 987k-line cow-flood until the
   81dfcb42 rate-limit, then a pure LoopEvent spin). The COW faults
@@ -130,7 +130,7 @@ smashes into pointer-bearing statics.
 - ww-selftest4 (wildwatch-selftest=1): TRAP VALIDATED —
   `WILDWATCH-SELFTEST firing` → `KERNPANIC pfault badaddr=0xffffffff807c2000
   rip=0xffffffff8056e42b` → 24 stack words + 3 rbp frames →
-  addr2line: `rux::dfx::wildwatch::x86::arm` ← `rux::dfx::init` ←
+  addr2line: `rux::debug::wildwatch::x86::arm` ← `rux::debug::init` ←
   `rux::rust_main_tail` ← `boot_stack_continuation`.
 - ww-long2 (WP=1, 10 min): cow-flood wedge (987k cow lines), 21 init
   forks — F4. ww-ctrl (same binary, no wildwatch): healthy storm, 7.5k
@@ -338,7 +338,7 @@ no gdb): at ~23 min the boot fully froze — wakes frozen at 3.09M (+4 per
 257/258-260 for minutes, ticks halved, 0 KERNPANIC/ALLOCTHROW/forensics.
 Killed at ~28 min.
 
-ww-v2 (same binary, + dfx=taskdump,watchdog,periodic): wedge REPRODUCED at
+ww-v2 (same binary, + debug=taskdump,watchdog,periodic): wedge REPRODUCED at
 ~19 min (wakes frozen at 3.38M). The kernel probes named it, then a live
 gdbstub attach (port 12391, both CPUs interrupted) settled it:
 
@@ -407,7 +407,7 @@ regression mechanism in the commit — but the correlation stands at 2/2
 vs 0/8 and needs either more boots or the buddy-hold fix before the mm
 chunking rides into main. Candidate mm-side fixes (my territory, next
 session): cap/trim the per-level O(2^order) marking (the interior marks
-exist for the R9-14/R17 tripwires — they can be a debug/dfx-gated check
+exist for the R9-14/R17 tripwires — they can be a debug/debug-gated check
 instead of an always-on hot-path cost), and/or split the heap lock or
 make the marking amortized. The net-side trigger (TcpTxBatch growth to
 ~10^5 elements) belongs to whoever owns net/tcp.
@@ -445,7 +445,7 @@ windows — unchanged by chunking, as expected.
   mechanism; correlation only, unproven.
 - Next-session mm work, in order: (1) buddy free/merge marking cost —
   the O(2^order) mark-every-page loops under the single irqsave heap
-  lock are the grind; make interior marking a dfx-gated debug check or
+  lock are the grind; make interior marking a debug-gated debug check or
   amortize it (careful: R9-14/R17 tripwires rely on the marks);
   (2) per-mm locks (the wall endgame) once the wedge correlation is
   resolved; (3) if the engine capture lands, audit buddy meta and
@@ -497,7 +497,7 @@ rework if that file is touched again.
 ### Wedge re-verification (the merge gate for 7b7a82b5)
 
 Controlled boots, ww-boot.sh conditions (q35/smp2/4G/snapshot,
-dfx=taskdump,watchdog,periodic), worktree kernel = HEAD with the buddy
+debug=taskdump,watchdog,periodic), worktree kernel = HEAD with the buddy
 fix on top of the chunking:
 
 | boot | kernel | outcome |
@@ -665,7 +665,7 @@ carries ~2300 pre-existing).
   1024 from main's merge; unrelated). PREEMPT-LEAK prints at idle
   symbolize to `cpu::wfi` — the launcher line's tripwire noise from
   the merged main, not the PTE path.
-- x86_64 sanity (5.5 min, ww-boot.sh conditions + dfx=taskdump,
+- x86_64 sanity (5.5 min, ww-boot.sh conditions + debug=taskdump,
   watchdog,periodic): 0 panics, wakes 525k, storm healthy.
 - x86_64 v1 (45 min): run by session 7 (session 6's attempt was killed
   ~10 min in by the user pause) — see Session 7.
@@ -695,7 +695,7 @@ claim time; working tree clean.
   `pte_lock_for` re-inspected: returns the single `PTE_GLOBAL_HANDLE`
   (global-mode degradation) as designed.
 
-### The 45-min OH boots (ww-boot.sh conditions + dfx=taskdump,watchdog,
+### The 45-min OH boots (ww-boot.sh conditions + debug=taskdump,watchdog,
 ### periodic, KERNEL = worktree bzImage, no gdb)
 
 | boot | budget | wakes | panics | strand events | >5s | >60s | strand_max |
@@ -1117,7 +1117,7 @@ three paths: boot-exec (PID 1), execve, and loader overlays.
   a stale guest to a later probe's gdb). Start experiment QEMUs from a
   script file as a background task, kill only verified own PIDs.
 
-### buddy-meta shadow scan landed (dfx=metawatch, commit 434c2e69)
+### buddy-meta shadow scan landed (debug=metawatch, commit 434c2e69)
 
 The unified-engine hypothesis's buddy face (the ww-v2 order-18 grind)
 now has an in-kernel witness, per the session-4 next-step list:
@@ -1132,7 +1132,7 @@ now has an in-kernel witness, per the session-4 next-step list:
   classify into 9 kinds (LinkOob / OrderMismatch / FreeByteClear /
   Unaligned / PrevBroken / BitmapSetUnlisted / BitmapClearListed /
   DoubleListed / HopOverflow).
-- dfx/metawatch.rs (switch bit 27) drives it every 10 s from the timer
+- debug/metawatch.rs (switch bit 27) drives it every 10 s from the timer
   softirq: one METAWATCH-ARMED line per boot, ZERO traffic until a hit;
   transients counted silently. A confirmed hit prints META-SMASH with
   finding details — the buddy-face capture. NOTE: hunt boots that want
@@ -1271,7 +1271,7 @@ side while the launcher line owns the fs side. Implementation
   segments, mremap file-attr carry, loader overlay — all through the
   batch path).
 - ww-fa1 (fault-around kernel, 15-min OH soak, TCG smp2/4G,
-  dfx=taskdump,watchdog,periodic,metawatch): full budget, 822 forks
+  debug=taskdump,watchdog,periodic,metawatch): full budget, 822 forks
   (fd1 control class), wakes 4.40M advancing to the end, avg_run 4ms,
   ticks [100,100], **0 KERNPANIC / ALLOCTHROW / META-SMASH / SIGBUS
   forensics / Permission-denied / MM-DROP-CTX**. strand_max 144 s with
@@ -1417,7 +1417,7 @@ MUST use raw SYS_brk calls (MF4/MF5 do).
 - riscv64 in-kernel unit tests: **1085/1088**, byte-identical failure
   set to the session 6/7/9/12/13 baseline (the 3 pre-existing
   config_test.rs size asserts).
-- ww-mmf1 (OH soak, 15 min, worktree kernel, dfx=taskdump,watchdog,
+- ww-mmf1 (OH soak, 15 min, worktree kernel, debug=taskdump,watchdog,
   periodic,metawatch): full budget, 127289 serial lines, wakes 2.59M
   advancing to the end, avg_run 5ms, 801 forks (fa1/fd1 control
   class), strand_max 262s single-task monster with wakes never
@@ -1730,7 +1730,7 @@ fixed-kernel audit boot) is the decisive run.
 
 ### The zone-drain audit: ROOT CAUSE ATTRIBUTED (pt7, fixed instrumentation)
 
-pt7 (30-min rs-repro audit boot, kernel 8127f1cf, dfx=taskdump,watchdog,
+pt7 (30-min rs-repro audit boot, kernel 8127f1cf, debug=taskdump,watchdog,
 periodic,memwatch,ledger) survived TWO fake-OOM rounds (oom-killer killed
 ueventd score 556, then watchdog_servicene score 436) with zero panics —
 and the widened psite table + OWRS histogram named the drainer:
@@ -1828,7 +1828,7 @@ Consequences, in order of size:
 - riscv64 in-kernel unit tests (make test, file-captured per the s18
   lesson): **1085/1088** — byte-identical failure set to the s6/7/9/12/
   13/15/18 baseline (the 3 pre-existing config_test.rs size asserts);
-  no regression from 998e1c01's riscv OOM arms or this session's dfx
+  no regression from 998e1c01's riscv OOM arms or this session's debug
   changes. The post-summary PANIC is the test harness itself (main.rs:984).
 - riscv64 minimal-rootfs smoke (150 s console boot): /bin/sh loaded,
   mrsh prompt reached, **0 panics** (PREEMPT-LEAK lines = the known wfi
@@ -1848,7 +1848,7 @@ Consequences, in order of size:
 1. **The fake-OOM hunt is ANSWERED on the attribution level**: the
    drainer is the file-backed demand-fault copy semantics (both x86_64
    arms; the riscv64 twin has the same shape and needs the same audit
-   run — its psite sanitizer is the one dfx gap). The fix decision
+   run — its psite sanitizer is the one debug gap). The fix decision
    (filemap_fault parity vs interim flag hygiene) belongs to the next
    mm session + the main-session fake-OOM effort — the archive above
    carries the full evidence chain (psites, OWRS, census, code lines).
@@ -1904,7 +1904,7 @@ do_cow_fault semantics). Both x86_64 arms converted:
 - faultaround_boot.py **FAW-PASS x6**, loader_vma_boot.py **LVMAP-PASS**,
   mmapfix_boot.py **MMF-PASS x14** — through the new cache-mapping path
   (the probes' rootfs is mkfs.ext4, so `is_ext4_file` gates in).
-- **fm1** (30-min rs-repro audit boot, dfx=taskdump,watchdog,periodic,
+- **fm1** (30-min rs-repro audit boot, debug=taskdump,watchdog,periodic,
   memwatch,ledger): FULL budget, 97,123 lines, **0 KERNPANIC /
   0 ALLOCTHROW / 0 OOM events** (pt7 at the same wall-clock: TWO
   oom-killer rounds; pt5 OOM'd at ~3 min). The ledger series line at
@@ -1930,14 +1930,14 @@ do_cow_fault semantics). Both x86_64 arms converted:
   to /bin/sh, 0 panics. The riscv64 fault TWIN keeps the old
   private-copy shape for MAP_PRIVATE — port notes below.
 
-### Instrument note (dfx, not the fix)
+### Instrument note (debug, not the fix)
 
 The MEMLEDGER 30-s series lines are heavily garbled on these boots (the
 raw-UART writes interleave mid-printk — one line survived legible in 30
 min; grep on clean "MEMLEDGER" text finds nothing, search
 "memfree_pages=" fragments instead), and the series fired far less
 often than its 30-s period. The single legible line carried the
-decisive numbers; the cadence question belongs to the dfx line.
+decisive numbers; the cadence question belongs to the debug line.
 
 ### Session 23 close-out (chain stewardship + landing)
 
@@ -2068,7 +2068,7 @@ gnome-riscv.img is a plain Ubuntu server rootfs (no Xorg, no
 gnome-session, no /root/start-gnome.sh — its /usr/sbin/init is a
 symlink into the udesk family), and riscv-gnome's work/ubuntu-gui.img
 is the udesk desktop image (no /root chain either). fm24-gnome
-(45-min budget, repro-full shape, dfx=...,ledger) booted the fresh
+(45-min budget, repro-full shape, debug=...,ledger) booted the fresh
 Ubuntu rootfs: kernel reached /sbin/init load, then wedged in early
 userspace behind a PREEMPT-LEAK idle flood (1857 lines) — 0 panics,
 0 OOM events, no GNOME signal. Boot killed at ~11 min (own pid). The
@@ -2083,7 +2083,7 @@ test/filedrain.c + filedrain_boot.py — N rounds of mmap(160MB data
 file, MAP_PRIVATE) + full read-touch + checksum, every mapping KEPT
 ALIVE (the GNOME shape: every spawn's libs stay mapped), then fork
 children reading mapping 0 (pin duplication + teardown under load),
--m 2G smp2 MTTCG, dfx=taskdump,watchdog,periodic,memwatch,ledger.
+-m 2G smp2 MTTCG, debug=taskdump,watchdog,periodic,memwatch,ledger.
 Pre-port expectation: N x 160MB of unreclaimable unflagged private
 copies + 160MB cache → fake OOM near N=10. Post-port: all rounds
 share ONE 160MB pinned cache set (PTE tables only) → clean pass.
@@ -2189,10 +2189,10 @@ Design (staged; implement behind probes, mm territory only):
   finding (gnome-img/ + fire6.py gone; gnome-riscv.img and
   ubuntu-gui.img are NOT it) to the main session. (2) The MAP_SHARED
   design above is the next mm implementation item, x86_64 first, then
-  the riscv alias migration onto PCACHE. (3) The dfx MEMLEDGER series
+  the riscv alias migration onto PCACHE. (3) The debug MEMLEDGER series
   interleaving/garbling note from session 23 reproduces on riscv64
   serials (only 3 MEMLEDGER lines per boot survived legible in the
-  control run) — the dfx line's item.
+  control run) — the debug line's item.
 
 ## Session 25 (reconstructed from snapshot 46696158 — quota death at
 ## 07:07 Oct 23, no archive written at the time)
@@ -2312,7 +2312,7 @@ reachable).
 - Probe-script fix along the way: boot_once now re-reads the serial
   after guest exit (the probe powers down immediately after its verdict;
   the poll loop kept losing the race — the known filedrain class).
-- OH 45-min 0-panic soak (ww-fms1, dfx=taskdump,watchdog,periodic,
+- OH 45-min 0-panic soak (ww-fms1, debug=taskdump,watchdog,periodic,
   memwatch,ledger): see close-out below.
 - riscv64 in-kernel unit tests: the first run (early code) was killed
   by the 08:08 infra sweep with its pipe-tail buffer lost; rerun on the
@@ -2624,7 +2624,7 @@ irq-off pathology from the flush path.
   session-28 A/B "v2" binary; build/ helper dir was wiped by the
   reboot, target/ survived).
 - ww-v2soak2 (run/ww-v2soak2.sh): TAG=ww-v2soak2, worktree bzImage,
-  dfx=taskdump,watchdog,periodic,memwatch,ledger (same flags as the
+  debug=taskdump,watchdog,periodic,memwatch,ledger (same flags as the
   ww-fms2 45-min baseline so memfree_pages compares), SECS=2700,
   own port 12375, launched 17:16 as a script-file background task.
 
@@ -2685,10 +2685,10 @@ irq-off pathology from the flush path.
   a script a live driver was executing — bash reads scripts
   incrementally). Cumulative: **0 WW-HIT across r1-r52**, 0 META-SMASH.
 
-- **dfx=wildwatch now rides every hunt boot (r53+).** Discovery while
+- **debug=wildwatch now rides every hunt boot (r53+).** Discovery while
   auditing the 19-point coverage: the 2-page hpet guard cluster (8 KB)
   had 8 of 1024 qwords hardware-watched and NO kernel-side tripwire —
-  the dfx flag existed in the frozen kernel (42eb2006, pre-refreeze)
+  the debug flag existed in the frozen kernel (42eb2006, pre-refreeze)
   but was never added to EXTRA_APPEND, and the gdbscript doc even said
   "do NOT combine" (written when the cluster points WERE the watchset).
   With the tripwire armed the whole cluster is RO in every alias: any
@@ -2830,7 +2830,7 @@ Surface (private image, shared images untouched):
 - run/ww-loadboot.sh (ww-boot.sh clone pointing at the private image;
   ww-boot.sh itself untouched — a live driver executes it),
   run/ww-loadprobe.sh (ww-hunt.py-equivalent round driver: frozen kernel
-  + dfx=wildwatch + FULL 19-point ww-gdbscript.py set, own port 12381),
+  + debug=wildwatch + FULL 19-point ww-gdbscript.py set, own port 12381),
   run/ww-loadchain.sh (chain wrapper, same two-log capture-marker stop
   check as ww-chain2.sh plus a per-round sdc-cycle sanity count).
 
@@ -3095,7 +3095,7 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   rip at the wild writer's instruction. Triage before declaring a
   capture; a probe-crash round is a clean-restart, not a milestone.
 - Smoke validation: ww-pafix1 (330 s OH boot, worktree bzImage at
-  HEAD+fix, dfx=wildwatch, port 12377): full budget, 45933 lines, 713
+  HEAD+fix, debug=wildwatch, port 12377): full budget, 45933 lines, 713
   forks, 0 panics/canary/heals — and 456 IRQ-OFF-WINDOW firings with
   ZERO crashes: 50 through the new user-frame skip (rsp values in the
   pa15-geometry user stack-top region), 408 kernel walks. Both guard
@@ -3181,7 +3181,7 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   too). MAG_DEPTH=16, 4.3 KB of .bss.
 - Follow-up (this session, second commit): lock_holds counter per
   class + census_line extended with locks=, and the periodic taskdump
-  (dfx=taskdump) now carries the SMALLALLOC census — locks vs
+  (debug=taskdump) now carries the SMALLALLOC census — locks vs
   obj_allocs+obj_frees on the same line is the live traffic-ratio
   readout (pre-magazine, every op took the lock).
 
@@ -3197,13 +3197,13 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   FUTEX_HASH_SIZE), untouched by this change.
 - Both arches compile clean (make build, make build-x86).
 - OH x86_64 soak, full 2700 s (run/ww-magval.sh, private serial
-  run/magval1-serial.log, dfx=wildwatch, -smp 2, same images/geometry
+  run/magval1-serial.log, debug=wildwatch, -smp 2, same images/geometry
   as the chain boots, worktree bzImage 08:51 = magazine without the
   counter): **80458 lines, 0 KERNPANIC, 0 ALLOCTHROW, 0 heals/canary,
   1454 forks, wildwatch armed to the end** — the 45-min 0-panic gate
   PASSES. (WAKE-STRANDED 1001ms as last line = the documented
   >=3-QEMU contention class; not a capture marker.)
-- A/B lock-traffic boot (dfx=wildwatch,taskdump, 900 s): see the
+- A/B lock-traffic boot (debug=wildwatch,taskdump, 900 s): see the
   verdict block appended below.
 
 ### Chain ledger (s35 ownership)
@@ -3229,12 +3229,12 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   PID (own process, verified cmdline). Foreign samgr-callback QEMU
   untouched.
 
-### A/B lock-traffic verdict (magval-ab, 900 s, dfx=wildwatch,periodic)
+### A/B lock-traffic verdict (magval-ab, 900 s, debug=wildwatch,periodic)
 
-- First attempt used the WRONG flag (dfx=...,taskdump = the keyboard
+- First attempt used the WRONG flag (debug=...,taskdump = the keyboard
   dump key; the periodic dump switch is `periodic` — 3000 jiffies/30 s
   per timer.rs sc115). Killed by exact PID and relaunched with
-  dfx=wildwatch,periodic. Boot itself clean both times (0 panics).
+  debug=wildwatch,periodic. Boot itself clean both times (0 panics).
 - Final cumulative census at 900 s (29 blocks): total obj ops
   59,391,505 vs class-lock acquisitions 3,601,522 = **16.49x** — per
   class 16.5-16.6x across all eight, i.e. the MAG_DEPTH=16 (+1 first

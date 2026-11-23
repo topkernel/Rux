@@ -24,7 +24,7 @@
 // Root re-exports: the framework modules appear at THIS crate's root so
 // the service files' crate::X paths resolve unchanged (the net recipe).
 pub use rux::{
-    arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, mm,
+    arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, mm,
     process, safety, sched, security, signal, sync, syscall, timer, trace,
 };
 pub use rux::net;
@@ -67,7 +67,7 @@ pub mod ipc {
     // binder, sysv_sem and util stay FRAMEWORK-side (the rung's
     // verdicts — see the shelving records); re-exported so
     // `crate::ipc::X` paths keep resolving (rux-syscall's dispatch
-    // rows, devfs, futex, the dfx audits, the sibling service files'
+    // rows, devfs, futex, the debug audits, the sibling service files'
     // `super::util` uses).
     pub use rux::ipc::binder;
     pub use rux::ipc::sysv_sem;
@@ -85,7 +85,7 @@ pub mod ipc {
     pub use crate::arch::*;
     pub use crate::config;
     pub use crate::console;
-    pub use crate::dfx::*;
+    pub use crate::debug::*;
     pub use crate::drivers::*;
     pub use crate::errno;
     pub use crate::fs::*;

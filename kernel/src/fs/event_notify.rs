@@ -184,7 +184,7 @@ pub struct EpollWakeNode {
 /// ALLOCATED) inside the lock: an allocation whose per-CPU magazine row
 /// was empty takes the small_alloc class lock and can walk pages / touch
 /// the buddy under it — sections measured at 300 ms of real KVM time
-/// under OH-boot churn (rux:allocwatch (retired dfx=allocwatch), lb268). For that whole window
+/// under OH-boot churn (rux:allocwatch (retired debug=allocwatch), lb268). For that whole window
 /// every producer mapping to the shard spins IRQs-off in
 /// epoll_notify_file's lock_irqsave, no CPU on the box reports a
 /// quiescent state, and the fdreap grace round prints
@@ -297,7 +297,7 @@ pub fn epoll_notify_file(file_id: u64) {
     // shard), not O(total registry); the leak symptom the original hunt
     // chased (dead processes' epolls growing the registry) now shows up
     // as the TOTAL counter. Name sizes BEFORE taking the lock (printk
-    // discipline). 110th: the census print rides rux:epolltrace (retired dfx=epolltrace) (~57
+    // discipline). 110th: the census print rides rux:epolltrace (retired debug=epolltrace) (~57
     // lines per perf boot in the spawn window).
     {
         static EPN_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -590,7 +590,7 @@ pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
     let registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
     // SFDDBG (launcher bring-up): did the wake reach a pid-1-owned fd?
     // Zero bindings means the fd was never registered (or was closed).
-    // Serial-cleanliness: opt-in via rux:sfddbg (retired dfx=sfddbg).
+    // Serial-cleanliness: opt-in via rux:sfddbg (retired debug=sfddbg).
     if crate::process::unsafe_edges::task_pid_of(task) == 1
         && crate::trace::EVENT_SFDDBG.armed()
     {

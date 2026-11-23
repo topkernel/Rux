@@ -12,7 +12,7 @@
 // Root re-exports: the framework modules appear at THIS crate's root so
 // the service files' crate::X paths resolve unchanged (the net recipe).
 pub use rux::{
-    arch, cmdline, config, console, dfx, drivers, errno, interrupt, mm,
+    arch, cmdline, config, console, debug, drivers, errno, interrupt, mm,
     process, safety, sched, security, signal, sync, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println, print, print_status};

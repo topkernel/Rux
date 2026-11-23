@@ -211,7 +211,7 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::entities::RtRunQueue, cpu_id: usi
                         if cpu_id < crate::config::MAX_CPUS
                             && SKP[cpu_id].fetch_add(1, Ordering::Relaxed) < 48
                         {
-                            use crate::dfx::taskdump::putc_brief as putchar;
+                            use crate::debug::taskdump::putc_brief as putchar;
                             fn ph(mut v: u64) {
                                 for _ in 0..16 {
                                     let n = (v >> 60) as u8;

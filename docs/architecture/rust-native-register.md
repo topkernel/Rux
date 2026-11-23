@@ -389,10 +389,10 @@ numbers this register cites).
   and ENABLED recording costs +18-19 ns per record (guest
   differential, 4000×8K zero-reads, 3 reps min-of: 957.7-986.7 µs off
   vs 1107.8-1119.2 µs on). Image price +12,288 bytes (+0.12%). The
-  migration ledger maps the frozen 59-entry bespoke dfx= table to
+  migration ledger maps the frozen 59-entry bespoke debug= table to
   unified replacements; the sched/syscall/binder/kmem waves are
   ported with census A/B verified identical (commit feb54f0a).
-  Source: dfx-trace lane TASK.md round-1 verification record
+  Source: debug-trace lane TASK.md round-1 verification record
   (run/tr1-kvm-proof-serial.log).
 - **Reference-parity tracefs, event catalog 51** (kernel/src/trace/):
   rounds 2-3 grew the table to 51 events across 16 groups — the sched
@@ -407,11 +407,11 @@ numbers this register cites).
   13-19 ns/record (pure-write loop) and 28-35 ns/record (epoll
   ping-pong), round-1's 18-19 ns class; events-off census A/B
   identical (TERM-DESCHED 8/8, WAKE-REFUSED zero-class, 0 panics);
-  image price of round 3 +24,576 bytes (+0.182%). The bespoke dfx=
+  image price of round 3 +24,576 bytes (+0.182%). The bespoke debug=
   table stays frozen at 59 and arms reference events through the
   alias arm (whose merge-lost consumer was found and restored in the
-  same round — dfx= boots had silently armed nothing).
-  Source: dfx-trace3 lane TASK.md round-2/3 verification records
+  same round — debug= boots had silently armed nothing).
+  Source: debug-trace3 lane TASK.md round-2/3 verification records
   (run/tr2-kvm-proof-serial.log, run/tr3 round-3 battery).
 - **Census + heal: the kernel adjudicates its own concurrency model
   against observed reality** (sched/preempt + interrupt, commits
@@ -432,7 +432,7 @@ numbers this register cites).
   17-36/boot → 6/boot (lb21). The known limits are recorded in the
   same place: a holder frozen inside IF=0 is invisible to its own
   CPU's tick — only a cross-CPU observer can name it.
-- **allocwatch / lostpark: instruments built to exonerate** (dfx
+- **allocwatch / lostpark: instruments built to exonerate** (debug
   family, commits 47dc1901 / 6785a93f / ab756efe / fc04f6d9 /
   fcfbf949): the allocator-freeze hunt produced a cross-CPU holder
   watch (the waiter cannot self-report — printing allocates and it is

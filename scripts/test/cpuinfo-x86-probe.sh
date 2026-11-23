@@ -2,7 +2,7 @@
 # cpuinfo-x86-probe.sh — the x86 /proc/cpuinfo block-shape contract.
 #
 # Boots the x86 kernel with test/cpuinfo_x86probe.c as init (fresh
-# minimal ext4, the dfx-x86-probe recipe) and asserts:
+# minimal ext4, the debug-x86-probe recipe) and asserts:
 #   * `processor` appears exactly once per CPU block (Linux
 #     arch/x86/kernel/cpu/proc.c emits it once, as the block's first
 #     row; Rux used to duplicate it after cache_alignment);

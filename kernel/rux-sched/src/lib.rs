@@ -20,7 +20,7 @@
 // the service files' crate::X paths resolve unchanged (the proven shape
 // from rux-syscall and rux-net).
 pub use rux::{
-    arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, list, mm,
+    arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, list, mm,
     process, safety, sched, sync, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
@@ -42,7 +42,7 @@ pub mod sched_policy {
     // The framework globs (the service files' bare-name refs).
     pub use crate::arch::*;
     pub use crate::config;
-    pub use crate::dfx::*;
+    pub use crate::debug::*;
     pub use crate::drivers::*;
     pub use crate::errno;
     pub use crate::fs::*;
@@ -111,8 +111,8 @@ pub fn register_all() {
             ww_slot_mismatch_counters: sched_policy::sched_policy::ww_slot_mismatch_counters,
             ww_sched_snapshot: sched_policy::sched_policy::ww_sched_snapshot,
             ww_stalled_cpu_state: sched_policy::sched_policy::ww_stalled_cpu_state,
-            dfx_claim_inject: sched_policy::sched_policy::dfx_claim_inject,
-            dfx_oncpu_inject: sched_policy::sched_policy::dfx_oncpu_inject,
+            debug_claim_inject: sched_policy::sched_policy::debug_claim_inject,
+            debug_oncpu_inject: sched_policy::sched_policy::debug_oncpu_inject,
             ww_heals: sched_policy::fair::ww_heals,
             ww_subgate_counts: sched_policy::wakewatch::ww_subgate_counts,
             ww_rt_pick_stats: sched_policy::wakewatch::ww_rt_pick_stats,

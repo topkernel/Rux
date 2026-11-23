@@ -14,7 +14,7 @@ service layer's natural top of the stack.
 
 FORWARD surface (syscall → kernel; fine, services depend on
 framework): ~2,700 references — arch 711, fs 698, process 410,
-sched 310, net 279, dfx 261, security 144, mm 128, drivers 94...
+sched 310, net 279, debug 261, security 144, mm 128, drivers 94...
 
 REVERSE surface (kernel → syscall; the cycle blocker), measured
 before the pilot: ~130 sites, decomposed:

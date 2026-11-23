@@ -273,13 +273,13 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
             let ppn = pfn as u64;
             if crate::arch::mm::mmu_init::PtLedger::is_live_table(ppn) {
                 crate::arch::mm::mmu_init::PtLedger::poison_table(ppn);
-                crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
-                crate::dfx::driftwatch::MM_POISONED.fetch_add(1, Ordering::Relaxed);
-                crate::dfx::mmforensics::capture_frame(pfn, "pcp-raw-free-live-table");
+                crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+                crate::debug::driftwatch::MM_POISONED.fetch_add(1, Ordering::Relaxed);
+                crate::debug::mmforensics::capture_frame(pfn, "pcp-raw-free-live-table");
                 return true; // handled: leaked, never cached
             }
             if crate::arch::mm::mmu_init::PtLedger::is_poisoned(ppn) {
-                crate::dfx::driftwatch::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
+                crate::debug::driftwatch::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
                 return true; // handled: quarantined frames never re-enter
             }
         }
@@ -289,7 +289,7 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
             // R15-3 stance. No printk from this path (free contexts hold
             // locks; floods wedge the console — sc83 discipline).
             PCP_DOUBLE_FREE.fetch_add(1, Ordering::Relaxed);
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             return true;
         }
         // In use -> cached.

@@ -35,7 +35,7 @@
 // the service files' crate::X paths resolve unchanged (the rux-net
 // shape).
 pub use rux::{
-    arch, cmdline, config, console, dfx, errno, fs, interrupt, mm,
+    arch, cmdline, config, console, debug, errno, fs, interrupt, mm,
     net, process, safety, sched, security, signal, sync, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
@@ -82,7 +82,7 @@ pub mod drivers {
     pub use crate::arch::*;
     pub use crate::config;
     pub use crate::console;
-    pub use crate::dfx::*;
+    pub use crate::debug::*;
     pub use crate::errno;
     pub use crate::fs::*;
     pub use crate::interrupt;

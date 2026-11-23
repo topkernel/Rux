@@ -178,7 +178,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     let cr2 = crate::arch::cpu::read_cr2();
     let fault_addr = VirtAddr::new(cr2);
 
-    // Per-fault line gated behind rux:steptrace (retired dfx=steptrace): a full OH boot takes
+    // Per-fault line gated behind rux:steptrace (retired debug=steptrace): a full OH boot takes
     // millions of user faults (demand paging every .so page); left on,
     // these three lines per fault dominated the serial log and slowed
     // TCG enough to change service-start races.
@@ -311,7 +311,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         let cow_res = unsafe {
                             handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
                         };
-                        crate::dfx::schb::note_cow(cow_j0);
+                        crate::debug::schb::note_cow(cow_j0);
                         match cow_res {
                             crate::arch::mm::CowFaultResult::Resolved
                             | crate::arch::mm::CowFaultResult::Retry => {
@@ -411,7 +411,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         let fault_addr_usize = fault_addr.bits() as usize;
 
         if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.rsp as usize) {
-            // DFX (LTP chunk@700 panic hunt): the classification can be a
+            // DEBUG (LTP chunk@700 panic hunt): the classification can be a
             // false positive when `current` is stale (lying-slot family) or
             // when the fault is an unrelated NULL deref on a foreign rsp —
             // carry rip + both stack bounds so the dump names the faulting
@@ -452,7 +452,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     }
                 }
                 ptag(b"\n");
-                // DFX: adjudicate the freed-stack execution engine — is
+                // DEBUG: adjudicate the freed-stack execution engine — is
                 // the faulting rsp inside a recently FREED stack?
                 if let Some((top, fpid, age)) =
                     crate::process::task::freed_stack_containing(regs.rsp as usize)
@@ -465,7 +465,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     phex(age);
                     ptag(b"\n");
                 }
-                // DFX: live TSS.rsp0 per CPU — a kernel-mode fault whose
+                // DEBUG: live TSS.rsp0 per CPU — a kernel-mode fault whose
                 // rsp sits just below a CPU's rsp0 inside non-stack memory
                 // is the trap-entry-on-stale/scribbled-rsp0 engine.
                 for c in 0..crate::config::MAX_CPUS {
@@ -480,7 +480,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         ptag(b"\n");
                     }
                 }
-                // DFX: dump surviving kernel-text return addresses from the
+                // DEBUG: dump surviving kernel-text return addresses from the
                 // fault rsp up through the overflow zone into the legal
                 // stack (the deep recursion's frame chain names itself).
                 {
@@ -554,13 +554,13 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             regs.rip,
             crate::sched::get_current_pid()
         );
-        // rux:wildwatch (retired dfx=wildwatch) (wildwrite-hunt): a write fault inside a guarded
+        // rux:wildwatch (retired debug=wildwatch) (wildwrite-hunt): a write fault inside a guarded
         // region IS the wild writer caught in the act — banner it so the
         // serial line is unmissable, then let the normal printer below
         // carry rip + the rbp walk into the KERNPANIC dump.
         #[cfg(feature = "x86_64")]
         if (access_type & FaultFlags::WRITE) != 0
-            && crate::dfx::wildwatch::is_armed(fault_addr.bits() as usize)
+            && crate::debug::wildwatch::is_armed(fault_addr.bits() as usize)
         {
             println!(
                 "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
@@ -619,7 +619,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             let cow_j0 = crate::timer::get_jiffies();
             let cow_res =
                 unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
-            crate::dfx::schb::note_cow(cow_j0);
+            crate::debug::schb::note_cow(cow_j0);
             match cow_res {
                 crate::arch::mm::CowFaultResult::Resolved => {
                     MmFaultResult::Handled

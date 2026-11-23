@@ -408,13 +408,13 @@ impl WaitQueueHead {
                     };
                     if !woke {
                         entry.clear_woken();
-                        // Lost-park ring (rux:lostpark tracepoint; retired token rux:lostpark (retired dfx=lostpark)): the refused-wake
+                        // Lost-park ring (rux:lostpark tracepoint; retired token rux:lostpark (retired debug=lostpark)): the refused-wake
                         // token return — pid, state bits, preempt_count.
-                        if crate::dfx::lostpark::armed() {
+                        if crate::debug::lostpark::armed() {
                             let st = crate::process::unsafe_edges::borrow_task(task).state();
                             let pc = crate::process::unsafe_edges::borrow_task(task).preempt_count();
                             let pid = crate::process::unsafe_edges::borrow_task(task).pid();
-                            crate::dfx::lostpark::record(
+                            crate::debug::lostpark::record(
                                 4,
                                 pid as u64,
                                 st.bits() as u64,

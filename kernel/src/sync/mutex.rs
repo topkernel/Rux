@@ -395,7 +395,7 @@ impl SleepMutex {
     fn lock_inner(&'static self, killable: bool) -> Option<SleepMutexGuard> {
         let pid = crate::process::current_pid();
         if self.fsw_notes {
-            crate::dfx::fsw::note_biglock();
+            crate::debug::fsw::note_biglock();
         }
 
         // Adaptive optimistic spin (reference mutex discipline): the
@@ -448,7 +448,7 @@ impl SleepMutex {
         let can_sleep = crate::sched::current().is_some()
             && crate::interrupt::preempt::preempt_count() == 0;
         if self.fsw_notes {
-            crate::dfx::fsw::note_biglock_contend();
+            crate::debug::fsw::note_biglock_contend();
         }
         let cur = match crate::sched::current() {
             Some(t) if can_sleep => t,
@@ -944,8 +944,8 @@ impl SleepMutex {
     /// the lock's own state (zero STALL prints while every service sat
     /// D-parked). Try-locks only (taskdump context may be the watchdog);
     /// busy locks print as '?' fields, never block.
-    pub fn dfx_census_line(&'static self) {
-        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    pub fn debug_census_line(&'static self) {
+        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
         let (locked, owner, depth, waiters, epoch) = match self.state.try_lock() {
             Some(st) => (st.locked, st.owner, st.depth, st.waiters, st.handoff_epoch),
             None => (false, u32::MAX, 0, u32::MAX, u64::MAX),

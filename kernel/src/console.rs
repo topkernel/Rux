@@ -158,13 +158,13 @@ static UART_RX_BUF: crate::safety::ring::SpscRing<u8, UART_RX_BUF_SIZE> =
 static UART_IRQ_ARMED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Rolling match position for the DFX "DUMP!" magic (RX IRQ context only).
+/// Rolling match position for the DEBUG "DUMP!" magic (RX IRQ context only).
 /// Atomics instead of `static mut`: the RX IRQ is the only writer, but a
 /// plain atomic removes the shared-mutable-static hazard outright.
 static DUMP_MAGIC_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Rolling-match position for the "LEDGER!" accounting-census magic
-/// (the ledger trigger; retired cmdline token rux:ledger (retired dfx=ledger)). The RX handler only latches dfx::ledger::PENDING — the
+/// (the ledger trigger; retired cmdline token rux:ledger (retired debug=ledger)). The RX handler only latches debug::ledger::PENDING — the
 /// census itself runs from the timer softirq (see ledger.rs).
 static LEDGER_MAGIC_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
@@ -216,7 +216,7 @@ impl Uart {
         // is staged for the persistent record. One relaxed load on the
         // disarmed path (the UART store dominates this function either
         // way).
-        crate::dfx::pstore::sink(c);
+        crate::debug::pstore::sink(c);
 
         #[cfg(feature = "aarch64")]
         // SAFETY: uart_virt_addr() is the PL011 fixmap VA once the early
@@ -253,7 +253,7 @@ impl Uart {
             // (EFLAGS): an IF=1 putc must not touch the zone stack (it
             // is preemptible and can migrate); an IF=0 putc cannot
             // migrate, so the push/pop pair is balanced by construction.
-            let probe = crate::dfx::syscost::on();
+            let probe = crate::debug::syscost::on();
             let t0 = if probe {
                 crate::arch::cpu::read_counter()
             } else {
@@ -261,7 +261,7 @@ impl Uart {
             };
             let if0 = probe && !crate::arch::cpu::get_interrupts_state();
             if if0 {
-                crate::dfx::syscost::zone_uart_push();
+                crate::debug::syscost::zone_uart_push();
             }
             let mut polls: u64 = 0;
             'putc: {
@@ -319,11 +319,11 @@ impl Uart {
                  write_reg(COM1_BASE, UART_THR, c) ;
             }
             if if0 {
-                crate::dfx::syscost::zone_uart_pop();
+                crate::debug::syscost::zone_uart_pop();
             }
             if probe {
                 let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
-                crate::dfx::syscost::uart_putc_note(dt, polls, if0);
+                crate::debug::syscost::uart_putc_note(dt, polls, if0);
             }
         }
     }
@@ -345,7 +345,7 @@ impl Uart {
         }
         // pstore-lite must still see every byte (plain stores, no IO).
         for &b in bytes {
-            crate::dfx::pstore::sink(b);
+            crate::debug::pstore::sink(b);
         }
         #[cfg(feature = "riscv64")]
         {
@@ -385,11 +385,11 @@ impl Uart {
         #[cfg(feature = "x86_64")]
         {
             const FIFO_BURST: usize = 16;
-            let probe = crate::dfx::syscost::on();
+            let probe = crate::debug::syscost::on();
             let t0 = if probe { crate::arch::cpu::read_counter() } else { 0 };
             let if0 = probe && !crate::arch::cpu::get_interrupts_state();
             if if0 {
-                crate::dfx::syscost::zone_uart_push();
+                crate::debug::syscost::zone_uart_push();
             }
             let mut polls: u64 = 0;
             let mut consumed: usize = 0;
@@ -448,11 +448,11 @@ impl Uart {
                 consumed += chunk.len();
             }
             if if0 {
-                crate::dfx::syscost::zone_uart_pop();
+                crate::debug::syscost::zone_uart_pop();
             }
             if probe {
                 let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
-                crate::dfx::syscost::uart_putc_note(dt, polls, if0);
+                crate::debug::syscost::uart_putc_note(dt, polls, if0);
             }
         }
     }
@@ -645,7 +645,7 @@ fn read_reg(base: u16, offset: usize) -> u8 {
 
 /// RX-byte debug magics shared by both arch UART RX paths.
 ///
-/// - "DUMP!" (armed by the rux:taskdump tracepoint (retired token rux:taskdump (retired dfx=taskdump))): the RX interrupt is the only code
+/// - "DUMP!" (armed by the rux:taskdump tracepoint (retired token rux:taskdump (retired debug=taskdump))): the RX interrupt is the only code
 ///   guaranteed to still run when every task is wedged (silent-hang form —
 ///   no spinlock to trip the deadlock watchdog), which is exactly when a
 ///   task snapshot is needed. Rolling-window match so the sequence may
@@ -657,7 +657,7 @@ fn read_reg(base: u16, offset: usize) -> u8 {
 fn uart_rx_debug_magic(c: u8) {
     // RX-IRQ context only (single writer per matcher); the rolling
     // positions are plain atomics, so this whole function is safe code.
-    // DFX taskdump magic trigger (dfx-migrate: the rux:taskdump
+    // DEBUG taskdump magic trigger (debug-migrate: the rux:taskdump
     // event IS the gate; kind=SYSRQ fires when the magic lands).
     if crate::trace::EVENT_TASKDUMP.armed() {
         const MAGIC: &[u8; 5] = b"DUMP!";
@@ -673,12 +673,12 @@ fn uart_rx_debug_magic(c: u8) {
         if next == MAGIC.len() {
             DUMP_MAGIC_POS.store(0, Ordering::Relaxed);
             crate::drivers::virtio::vw_report("dump");
-            crate::dfx::taskdump::dump_all_tasks("uart-magic");
+            crate::debug::taskdump::dump_all_tasks("uart-magic");
             crate::ipc::binder::binder_dfx_dump();
         }
     }
 
-    // Accounting-ledger magic trigger (the ledger trigger; retired cmdline token rux:ledger (retired dfx=ledger)): latch only — the
+    // Accounting-ledger magic trigger (the ledger trigger; retired cmdline token rux:ledger (retired debug=ledger)): latch only — the
     // census is printk-heavy and runs from the timer softirq.
     if crate::trace::EVENT_LEDGER.armed() {
         const LMAGIC: &[u8; 7] = b"LEDGER!";
@@ -693,7 +693,7 @@ fn uart_rx_debug_magic(c: u8) {
         LEDGER_MAGIC_POS.store(next, Ordering::Relaxed);
         if next == LMAGIC.len() {
             LEDGER_MAGIC_POS.store(0, Ordering::Relaxed);
-            crate::dfx::ledger::PENDING.store(true, core::sync::atomic::Ordering::Release);
+            crate::debug::ledger::PENDING.store(true, core::sync::atomic::Ordering::Release);
         }
     }
 
@@ -885,7 +885,7 @@ pub fn putchar_no_lock(_c: u8) {}
 
 /// Raw single-character UART write that is NOT compiled out in release.
 ///
-/// Reserved for explicitly dfx-gated diagnostics (taskdump and friends)
+/// Reserved for explicitly debug-gated diagnostics (taskdump and friends)
 /// that must be readable on production-config boots — the same legs the
 /// putchar_no_lock no-op gate blinded. Not for general console output.
 pub fn uart_putc_raw(c: u8) {
@@ -1129,7 +1129,7 @@ pub fn init_irq() {
                 core::sync::atomic::AtomicBool::new(false);
             if !FIRST_RX.swap(true, core::sync::atomic::Ordering::Relaxed) {
                 use core::fmt::Write;
-                let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                let mut w = crate::debug::backtrace::ConsoleWriter::new();
                 let _ = write!(w, "PL011: first RX irq, {} bytes\n", received);
             }
             UART_READ_WAITQ.wake_up_one();
@@ -1171,7 +1171,7 @@ pub fn init_irq() {
     // chain hangs on this arm result.
     {
         use core::fmt::Write;
-        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+        let mut w = crate::debug::backtrace::ConsoleWriter::new();
         let _ = write!(w, "PL011: RX irq {}\n",
             if UART_IRQ_ARMED.load(Ordering::Acquire) { "registered" } else { "FAILED" });
     }
@@ -1260,7 +1260,7 @@ impl fmt::Write for Uart {
         // Batched (perf-console): coalesce runs between newlines into a
         // stack buffer and flush via puts_batch — one register-IO pass
         // per burst instead of per byte. fmt fragments arriving here are
-        // small, but crash/DFX writers dump whole stack dumps through
+        // small, but crash/DEBUG writers dump whole stack dumps through
         // this impl one fmt piece at a time.
         let mut buf = [0u8; 128];
         let mut n = 0usize;

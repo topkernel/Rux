@@ -986,10 +986,10 @@ pub fn netlink_bind(
     // behalf, which is easy to misread as "udevd subscribed".
     //
     // RETIRED (probe-retire): unconditional (19 lines per ub2404 boot);
-    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) and
+    // behind the existing OH hunt-print master gate (rux:ohhunt (retired debug=ohhunt)) and
     // budgeted.
     if sock.protocol == NETLINK_KOBJECT_UEVENT
-        && crate::dfx::switches::oh_hunt_prints_on()
+        && crate::debug::switches::oh_hunt_prints_on()
     {
         static UEBIND_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -1187,8 +1187,8 @@ pub fn uevent_broadcast(payload: &[u8]) {
     // head. Budgeted.
     //
     // RETIRED (probe-retire): unconditional (26 lines per ub2404 boot);
-    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
-    if crate::dfx::switches::oh_hunt_prints_on() {
+    // behind the existing OH hunt-print master gate (rux:ohhunt (retired debug=ohhunt)).
+    if crate::debug::switches::oh_hunt_prints_on() {
         static UEB_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UEB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {

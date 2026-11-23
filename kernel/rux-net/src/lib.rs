@@ -23,7 +23,7 @@
 // Root re-exports: the framework modules appear at THIS crate's root so
 // the service files' crate::X paths resolve unchanged (the proven shape).
 pub use rux::{
-    arch, cmdline, config, console, dfx, drivers, errno, fs, interrupt, mm,
+    arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, mm,
     process, safety, sched, security, signal, sync, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
@@ -70,7 +70,7 @@ pub mod net {
     pub use crate::arch::*;
     pub use crate::config;
     pub use crate::console;
-    pub use crate::dfx::*;
+    pub use crate::debug::*;
     pub use crate::drivers::*;
     pub use crate::errno;
     pub use crate::fs::*;

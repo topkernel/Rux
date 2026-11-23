@@ -7,7 +7,7 @@
 //!
 //! 1. `EXT4_BIG_LOCK` — the fs big-lock protocol is sync-floor per the
 //!    micro-core design (§2): the exit path, the virtio VW watchdog and
-//!    dfx taskdump touch the static directly; the service crate
+//!    debug taskdump touch the static directly; the service crate
 //!    consumes it as a pub API.
 //!
 //! 2. `JournalCaptureState` — the deferred-publication capture window

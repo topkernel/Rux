@@ -19,7 +19,7 @@
 // Root re-exports: the framework crate's modules appear at THIS crate's
 // root so the service files' crate::X paths resolve unchanged.
 pub use rux::{
-    arch, config, console, dfx, drivers, errno, io_uring, list,
+    arch, config, console, debug, drivers, errno, io_uring, list,
     mm, module, perf, printk, process, safety, sched, security,
     signal, sync, timer, trace,
 };
@@ -135,7 +135,7 @@ pub const FD_SETSIZE: i32 = 1024;
     pub use crate::arch::*;
     pub use crate::config;
     pub use crate::console;
-    pub use crate::dfx::*;
+    pub use crate::debug::*;
     pub use crate::drivers::*;
     pub use crate::fs::*;
     pub use crate::io_uring::*;
@@ -563,7 +563,7 @@ pub fn register_all() {
     register_hooks();
 }
 
-/// The dfx/event hook table (State B): the diagnostics + eventfd
+/// The debug/event hook table (State B): the diagnostics + eventfd
 /// identity that lib-side callers reach through
 /// rux::syscall::support — implemented here where the types live.
 fn register_hooks() {

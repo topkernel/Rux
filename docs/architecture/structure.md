@@ -40,7 +40,7 @@ make up the remainder of the kernel/ totals above.*
 | **net/** | 18 | 20,637 | 5.7% | TCP/UDP/unix/netlink stack (tcp 5,250, unix 4,372) |
 | **sched/** | 12 | 20,576 | 5.7% | Global run queue scheduler |
 | **mm/** | 31 | 20,126 | 5.6% | Memory (zones, pcp pagesets, VMA, page cache glue, swap) |
-| **dfx/** | 40 | 19,097 | 5.3% | Observability (syscost, kallsyms, debugfs, taskdump, watchdog, traces) |
+| **debug/** | 40 | 19,097 | 5.3% | Observability (syscost, kallsyms, debugfs, taskdump, watchdog, traces) |
 | **process/** | 13 | 18,723 | 5.2% | Process management (fork/exec/exit, signals) |
 | **tests/** | 88 | 17,615 | 4.6% | In-kernel guest test suite |
 | **other** | 14 | 15,241 | 4.2% | interrupt, timer, io_uring, perf, security, module + 13 top-level files |
@@ -359,7 +359,7 @@ Rux/
 |   |   |   +-- ksoftirqd.rs # Per-CPU softirq daemon
 |   |   |   +-- preempt.rs   # Preempt count and context tracking
 |   |   |
-|   |   +-- dfx/          # Diagnostics and debugging
+|   |   +-- debug/          # Diagnostics and debugging
 |   |   |   +-- mod.rs       # Module export
 |   |   |   +-- backtrace.rs # Stack backtrace
 |   |   |   +-- bug.rs       # BUG/WARN macros

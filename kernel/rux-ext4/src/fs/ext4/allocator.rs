@@ -76,7 +76,7 @@ impl<'a> BlockAllocator<'a> {
         // (buffered write, fallocate) re-enter harmlessly.
         let _alloc_guard = super::EXT4_BIG_LOCK.lock();
         let block_groups = self.fs.group_count;
-        crate::dfx::fsw::note_alloc_run();
+        crate::debug::fsw::note_alloc_run();
 
         // Phase 1: Try goal_group first
         if goal_group < block_groups {
@@ -119,7 +119,7 @@ impl<'a> BlockAllocator<'a> {
     pub fn alloc_block_run(&self, goal_group: u32, want: u32) -> Result<Option<(u64, u32)>, i32> {
         let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // see alloc_block: bitmap RMW race
         let block_groups = self.fs.group_count;
-        crate::dfx::fsw::note_alloc_run();
+        crate::debug::fsw::note_alloc_run();
 
         if let Some(run) = self.try_alloc_run_from_group(goal_group, want)? {
             return Ok(Some(run));
@@ -294,7 +294,7 @@ impl<'a> BlockAllocator<'a> {
             return Ok(());
         }
         let blocks_per_group = self.fs.blocks_per_group as u64;
-        crate::dfx::fsw::note_free_run();
+        crate::debug::fsw::note_free_run();
 
         // A run may cross group boundaries — free it group-segment by
         // group-segment (each segment: one bitmap round trip).

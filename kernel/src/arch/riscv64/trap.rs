@@ -385,7 +385,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                     // changed but the cpu_state slot did (the s13 producer
                     // signature — bookings split across two tasks).
                     use core::fmt::Write;
-                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                     let _ = write!(w,
                         "IRQ-BRACKET-LEAK timer cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry={:#x} (pid={}) cs_exit={:#x} (pid={}) when={} epc_ctx={:#x}\n",
                         cpu_id, tp_entry,
@@ -421,7 +421,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                         ((*a).preempt_count(), (*b).preempt_count())
                     };
                     use core::fmt::Write;
-                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                     let _ = write!(w,
                         "IRQ-BRACKET-LEAK soft cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry={:#x} cs_exit={:#x} when={}\n",
                         cpu_id, tp_entry,
@@ -451,7 +451,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                         ((*a).preempt_count(), (*b).preempt_count())
                     };
                     use core::fmt::Write;
-                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                     let _ = write!(w,
                         "IRQ-BRACKET-LEAK ext cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry={:#x} cs_exit={:#x} when={}\n",
                         cpu_id, tp_entry,
@@ -480,7 +480,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                     // to the linear-map page.
                     {
                         use core::fmt::Write;
-                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         let _ = w.write_str("SR-REGS:\n");
                         let _ = write!(w, "  epc={:#x} ra={:#x} sp={:#x}\n",
                             regs_ref.epc, regs_ref.ra, regs_ref.sp);
@@ -516,9 +516,9 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                     // panic (interrupt context / oops=panic / idle) or
                     // task death (Tranche 5); skipping the instruction
                     // was never an option either way.
-                    crate::dfx::oops::oops(
-                        crate::dfx::oops::Kind::IllegalInstruction,
-                        &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                    crate::debug::oops::oops(
+                        crate::debug::oops::Kind::IllegalInstruction,
+                        &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                             oops_show_regs(w, regs_ref);
                         },
                     );
@@ -555,7 +555,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
         CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
     }
 
-    // Leak-origin tripwire (rux:leakhunt (retired dfx=leakhunt)): this frame returns to
+    // Leak-origin tripwire (rux:leakhunt (retired debug=leakhunt)): this frame returns to
     // userspace, so the task's preempt_count must be exactly 0 (no
     // in-flight IRQ, every syscall-path guard dropped). A nonzero count
     // here is a leaked PREEMPT_OFFSET caught at the earliest possible
@@ -569,7 +569,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
         // syscall-heavy CPUs complete grace periods without waiting for
         // their scheduler tick. Fast-pathed on RCU_WAITERS (one load).
         crate::sync::rcu::rcu_note_context_switch();
-        crate::dfx::leakorigin::check_user_return();
+        crate::debug::leakorigin::check_user_return();
     }
 }
 
@@ -701,22 +701,22 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
                 use core::sync::atomic::Ordering::Relaxed;
                 if regs.user_mode() {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
-                    crate::dfx::syscost::tick_user();
+                    crate::debug::syscost::tick_user();
                     // perf events (PERF_TYPE_SOFTWARE sampling): stash the
                     // interrupted PC for the softirq charger. Lock-free.
                     crate::perf::note_tick(regs.epc, crate::perf::MODE_USER, (*task).pid());
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
-                    crate::dfx::syscost::tick_kern(regs.epc);
+                    crate::debug::syscost::tick_kern(regs.epc);
                     crate::perf::note_tick(regs.epc, crate::perf::MODE_KERNEL, (*task).pid());
                 }
             } else {
-                crate::dfx::syscost::tick_idle();
+                crate::debug::syscost::tick_idle();
                 crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
             }
         }
     } else {
-        crate::dfx::syscost::tick_idle();
+        crate::debug::syscost::tick_idle();
         crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
     }
 
@@ -727,7 +727,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     crate::sched::scheduler_tick();
 
     // 3. Check for soft lockups
-    crate::dfx::softlockup::check();
+    crate::debug::softlockup::check();
 
     // 4. Reschedule if needed
     if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
@@ -1861,7 +1861,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
                 // (0xffffffd6...) and static idle tasks (0xffffffff...).
                 let kernel_tp = (tp >> 63) == 1;
                 use core::fmt::Write;
-                let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                let mut w = crate::debug::backtrace::ConsoleWriter::new();
                 if kernel_tp {
                     let task = unsafe {
                         &*(tp as *const crate::process::task::Task)
@@ -1951,9 +1951,9 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
             // real panic (interrupt context, oops=panic, idle task —
             // pstore + panic= apply) or the faulting task dies with
             // SIGSEGV and the machine keeps running.
-            crate::dfx::oops::oops(
-                crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+            crate::debug::oops::oops(
+                crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                     oops_show_regs(w, regs);
                 },
             );
@@ -1968,7 +1968,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
 /// x-order, then the status/badaddr/cause line. Rendered from the trap
 /// frame, not `save_regs()` — the SR-PROBE lesson: a save_regs capture
 /// shows the printer's frame, not the faulting one.
-fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
+fn oops_show_regs(w: &mut crate::debug::backtrace::ConsoleWriter, regs: &PtRegs) {
     use core::fmt::Write;
     let cells: [(&str, u64); 32] = [
         ("epc", regs.epc),
@@ -2044,9 +2044,9 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
         // corrupts state. The Oops path prints the report and applies
         // the policy (panic in interrupt context / oops=panic / idle;
         // task death otherwise — Tranche 5).
-        crate::dfx::oops::oops(
-            crate::dfx::oops::Kind::UnknownException { cause: cause as u64 },
-            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+        crate::debug::oops::oops(
+            crate::debug::oops::Kind::UnknownException { cause: cause as u64 },
+            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                 oops_show_regs(w, regs);
             },
         );
@@ -2113,7 +2113,7 @@ pub extern "C" fn debug_trap_exit(_sp: u64, _tp: u64) {
 /// containment gates whenever the value fails the kernel-half test and the
 /// gate anchors sp at the task's own kernel-stack top instead.
 ///
-/// The hunt that owned this report (dfx/r83hunt.rs) retired with its
+/// The hunt that owned this report (debug/r83hunt.rs) retired with its
 /// class closed (fix c1539f6ed + the fc5f23d47/2e9755c67 corruption
 /// family); the ASM GATES stay as defensive containment, so the report
 /// target moved here in compact form. Same discipline as the original:

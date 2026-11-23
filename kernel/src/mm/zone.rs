@@ -752,7 +752,7 @@ impl Zone {
                 // Reads the frame-pointer chain of the current stack
                 // (INV-MM-2 diag arm: this CPU's own stack).
                 {
-                    let s0 = crate::dfx::backtrace::current_frame_pointer();
+                    let s0 = crate::debug::backtrace::current_frame_pointer();
                     super::edges::walk_fp_chain(s0, &mut frames);
                 }
                 for f in frames.iter() {
@@ -767,7 +767,7 @@ impl Zone {
             // bounded reverse scan of every live tree for links naming
             // this pfn (the stale-pointer origin). Runs BEFORE the zone
             // lock is taken; internally gated + rate-limited.
-            crate::dfx::mmforensics::capture_frame(pfn, "raw-free-live-table");
+            crate::debug::mmforensics::capture_frame(pfn, "raw-free-live-table");
             // mmforensics fix (2026-11-15): REFUSE the free and QUARANTINE
             // the frame. The capture evidence (pfn 0x6bd1 boot) showed the
             // old print-then-free behavior is the double-availability
@@ -822,7 +822,7 @@ impl Zone {
                     // lock; raw putchar / printk here can wedge the
                     // console path (same discipline as the heap
                     // buddy's R43 tripwires).
-                    crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                    crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
                     DOUBLE_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
@@ -834,8 +834,8 @@ impl Zone {
         // collision. Silent + taint + counter (zone lock held — same
         // discipline as R15-3 above).
         if crate::arch::mm::mmu_init::PtLedger::is_poisoned(pfn as u64) {
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
-            crate::dfx::driftwatch::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+            crate::debug::driftwatch::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
             return;
         }
         // Member-state invariant for high-order frees (review 4.4):

@@ -42,7 +42,7 @@ menuconfig:
 # falling back to Kernel.toml's default_platform. Override per-invocation
 # with `make PLATFORM=x86_64` (same spirit as Linux's ARCH=).
 PLATFORM := $(shell $(BUILD_DIR)/current-platform.sh)
-# LOCKOWNER=1 appends the dfx-lock-owner feature (RawSpinlock holder
+# LOCKOWNER=1 appends the debug-lock-owner feature (RawSpinlock holder
 # stamps: owner cpu + acquirer pid/site/jiffies, printed by the
 # deadlock_warn path + one remote-BT of the holder per stuck lock) —
 # HUNT boots only: ~4 relaxed stores per raw acquire on the hottest
@@ -51,7 +51,7 @@ PLATFORM := $(shell $(BUILD_DIR)/current-platform.sh)
 # print was holder-anonymous because these forensics were compiled out
 # of every standard build.
 comma := ,
-LOCKOWNER_FEAT := $(if $(LOCKOWNER),$(comma)dfx-lock-owner,)
+LOCKOWNER_FEAT := $(if $(LOCKOWNER),$(comma)debug-lock-owner,)
 ifeq ($(PLATFORM),x86_64)
 CARGO_TARGET := x86_64-unknown-none
 CARGO_FEATURE_FLAGS := --no-default-features --features x86_64$(LOCKOWNER_FEAT)
@@ -65,7 +65,7 @@ CARGO_TARGET := riscv64gc-unknown-none-elf
 # (riscv64 is the default-features platform, so LOCKOWNER appends via a
 # --features of its own — the x86/aarch64 comma-form above rides the
 # --no-default-features base; a bare token here broke cargo's argv.)
-CARGO_FEATURE_FLAGS := $(if $(LOCKOWNER),--features dfx-lock-owner,)
+CARGO_FEATURE_FLAGS := $(if $(LOCKOWNER),--features debug-lock-owner,)
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else
 $(error Unsupported platform '$(PLATFORM)' — run `make menuconfig`)
@@ -75,7 +75,7 @@ endif
 build:
 	@echo "Building Rux kernel (platform=$(PLATFORM))..."
 	@cd $(PROJECT_ROOT) && CARGO_TARGET_DIR=$(PROJECT_ROOT)/target cargo build --manifest-path $(PROJECT_ROOT)/kernel/Cargo.toml -p rux-bin --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
-	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(KERNEL_BIN) $(CARGO_TARGET) kernel/src/dfx/ksyms_generated.rs
+	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(KERNEL_BIN) $(CARGO_TARGET) kernel/src/debug/ksyms_generated.rs
 	@cd $(PROJECT_ROOT) && CARGO_TARGET_DIR=$(PROJECT_ROOT)/target cargo build --manifest-path $(PROJECT_ROOT)/kernel/Cargo.toml -p rux-bin --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
 ifeq ($(PLATFORM),x86_64)
 	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(KERNEL_BIN) $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/bzImage
@@ -92,7 +92,7 @@ endif
 build-release:
 	@echo "Building Rux kernel (Release, platform=$(PLATFORM))..."
 	@cd $(PROJECT_ROOT) && CARGO_TARGET_DIR=$(PROJECT_ROOT)/target cargo build --manifest-path $(PROJECT_ROOT)/kernel/Cargo.toml -p rux-bin --release --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
-	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(CARGO_TARGET) kernel/src/dfx/ksyms_generated.rs
+	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(CARGO_TARGET) kernel/src/debug/ksyms_generated.rs
 	@cd $(PROJECT_ROOT) && CARGO_TARGET_DIR=$(PROJECT_ROOT)/target cargo build --manifest-path $(PROJECT_ROOT)/kernel/Cargo.toml -p rux-bin --release --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
 ifeq ($(PLATFORM),x86_64)
 	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/bzImage

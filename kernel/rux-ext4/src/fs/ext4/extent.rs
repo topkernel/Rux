@@ -658,7 +658,7 @@ pub fn ext4_ext_get_block(
     }
 
     let r = find_block_in_extent_tree(fs, i_block, logical_block, 0);
-    // rux:exthunt (retired dfx=exthunt): a read-side miss on a DEEP tree (depth >= 1) — the
+    // rux:exthunt (retired debug=exthunt): a read-side miss on a DEEP tree (depth >= 1) — the
     // reader is about to serve a hole for a file that grew past its
     // root. Print the root view so a stale cached root (old depth /
     // fewer entries) is distinguishable from a broken index block.
@@ -683,7 +683,7 @@ pub fn ext4_ext_get_block(
     r
 }
 
-/// rux:exthunt (retired dfx=exthunt) read-side companion to EXT-HUNT-MISS: call wherever a read
+/// rux:exthunt (retired debug=exthunt) read-side companion to EXT-HUNT-MISS: call wherever a read
 /// path concludes "hole" (mapping 0) and is about to zero-fill — the page
 /// cache batch fill, the synchronous fallback, and the O_DIRECT reader all
 /// map through the CACHED inode's root, NOT through ext4_ext_get_block,
@@ -717,7 +717,7 @@ pub fn exthunt_read_hole(ino: u32, i_block: &[u32; 15], logical_block: u64) {
     );
 }
 
-// ---- rux:exthunt (retired dfx=exthunt) write/read adjudication probes (ltp-fix-b leg-10) ----
+// ---- rux:exthunt (retired debug=exthunt) write/read adjudication probes (ltp-fix-b leg-10) ----
 //
 // The ftest04/zzprobe4 all-zeros family needs the write-side vs read-side
 // (logical -> phys) story on ONE boot: which physical block each side
@@ -890,7 +890,7 @@ pub fn exthunt_rd_hit(ino: u64, logical: u64, b0: u8, b1: u8) {
     );
 }
 
-// ---- rux:exthunt (retired dfx=exthunt) block-cache eviction/fabrication tracers (leg-11) ----
+// ---- rux:exthunt (retired debug=exthunt) block-cache eviction/fabrication tracers (leg-11) ----
 //
 // The last open gap between EXT-HUNT-WRPUT pat=XX and EXT-HUNT-RDHIT
 // b0=0000 on identical (logical, phys): a read DMA that races an
@@ -1156,7 +1156,7 @@ fn find_block_in_external_extent_ex(
         if header.eh_magic != EXT4_EXT_MAGIC
             || header.eh_entries > header.eh_max
         {
-            // rux:exthunt (retired dfx=exthunt): the walk below the root just failed — the
+            // rux:exthunt (retired debug=exthunt): the walk below the root just failed — the
             // reader will turn this Err into a hole (zeros). Dump the
             // block header + first bytes so zeros / foreign data / a
             // reverted header are distinguishable.
@@ -1708,7 +1708,7 @@ pub fn ext4_ext_append(
             slot2.ei_leaf_hi = (split.child >> 32) as u16;
             slot2.ei_unused = 0;
             node_header_mut(&mut root).eh_entries = 2;
-            // rux:exthunt (retired dfx=exthunt): the tree just grew one level — the event the
+            // rux:exthunt (retired debug=exthunt): the tree just grew one level — the event the
             // ftest04/zzprobe4 all-zeros family correlates with.
             if crate::trace::EVENT_EXTHUNT.armed() {
                 use core::sync::atomic::{AtomicUsize, Ordering};

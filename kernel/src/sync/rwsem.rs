@@ -149,7 +149,7 @@ fn time_after(now: u64, then: u64) -> bool {
     now.wrapping_sub(then) < (1u64 << 63)
 }
 
-/// Stall tripwire (SleepMutex STALL precedent — print-only DFX, no
+/// Stall tripwire (SleepMutex STALL precedent — print-only DEBUG, no
 /// semantic effect): a waiter parked longer than this names itself in
 /// a rate-limited print. Normal parking lasts microseconds-to-
 /// milliseconds; 3 s means the grant is not reaching this waiter.
@@ -888,7 +888,7 @@ impl RwSemaphore {
                 && time_after(crate::timer::get_jiffies(), first_park + STALL_WAITER_JIFFIES)
                 && stall_report_ok()
             {
-                let (count, owner, queued) = self.dfx_state();
+                let (count, owner, queued) = self.debug_state();
                 crate::pr_err!(
                     "RWSEM-STALL-R {} waiter={} waited={}j count={:#x} owner={:#x} queued={} (reader parked without grant)",
                     self.name,
@@ -1020,7 +1020,7 @@ impl RwSemaphore {
                 && time_after(crate::timer::get_jiffies(), first_park + STALL_WAITER_JIFFIES)
                 && stall_report_ok()
             {
-                let (count, owner, queued) = self.dfx_state();
+                let (count, owner, queued) = self.debug_state();
                 // Owner liveness: a writer bit with a dead owner pid is a
                 // leaked section; a live owner is a genuinely slow holder.
                 let owner_pid = (owner & OWNER_PID_MASK) as u32;
@@ -1066,7 +1066,7 @@ impl RwSemaphore {
     /// Diagnostic snapshot (fuxstuck census / taskdump shape,
     /// try-locks only): (count, owner, queued; queued == usize::MAX
     /// means the wait lock was busy).
-    pub fn dfx_state(&self) -> (i64, usize, usize) {
+    pub fn debug_state(&self) -> (i64, usize, usize) {
         let queued = match self.wait_lock.try_lock() {
             Some(l) => l.len(),
             None => usize::MAX,

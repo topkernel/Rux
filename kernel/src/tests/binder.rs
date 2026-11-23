@@ -111,7 +111,7 @@ fn test_alloc_recycle() {
 }
 
 /// ev_name must resolve every defined event id to its stable name — the
-/// dfx/trace layers and the OH crash hunts key on these strings.
+/// debug/trace layers and the OH crash hunts key on these strings.
 fn test_ev_names() {
     const CASES: &[(u8, &str)] = &[
         (EV_TXN_SENT, "TXN_SENT"),

@@ -278,7 +278,7 @@ fn kstack_slab_free(bottom: *mut u8) -> bool {
     true
 }
 
-/// Packed-slab state for the SC-ANAT beat line (rux:schb (retired dfx=schb)):
+/// Packed-slab state for the SC-ANAT beat line (rux:schb (retired debug=schb)):
 /// (blocks, live slots, fallback note). x86_64 only — every other arch
 /// keeps the plain power-of-two buddy allocation and reports zeros.
 #[cfg(target_arch = "x86_64")]
@@ -298,7 +298,7 @@ pub fn kstack_slab_stats() -> (u64, u64, u64) {
     (0, 0, 0)
 }
 
-// Leg-16 kernel-heap anatomy (rux:schb (retired dfx=schb)): live kernel-stack count and the
+// Leg-16 kernel-heap anatomy (rux:schb (retired debug=schb)): live kernel-stack count and the
 // boot-max stack high-water in bytes. The high-water probe ZEROES each
 // fresh stack at alloc (outside every lock) and scans for the first
 // nonzero word from the bottom at free time — the depth distribution is
@@ -309,7 +309,7 @@ static KSTACK_LIVE: AtomicU64 = AtomicU64::new(0);
 static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
 
 /// Leg-16 anatomy: (live kernel-stack count, boot-max high-water bytes).
-/// Both stay 0 unless rux:schb (retired dfx=schb) armed the probe at alloc time.
+/// Both stay 0 unless rux:schb (retired debug=schb) armed the probe at alloc time.
 pub fn kstack_anat() -> (u64, u64) {
     (KSTACK_LIVE.load(Ordering::Relaxed), KSTACK_HW.load(Ordering::Relaxed))
 }
@@ -432,7 +432,7 @@ fn stack_cache_alloc() -> *mut u8 {
     bottom
 }
 
-/// DFX (LTP chunk@700 hunt, 2026-11-02): ring of recently freed kernel
+/// DEBUG (LTP chunk@700 hunt, 2026-11-02): ring of recently freed kernel
 /// stacks, so a kernel fault with rsp inside a freed-but-recycled stack
 /// names the freer. Diagnostic only; cold path.
 pub struct FreedStackRec {
@@ -507,7 +507,7 @@ fn stack_cache_free(stack_bottom: *mut u8) {
                 while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
                 while kk > 0 { kk -= 1; putchar(dd[kk]); }
                 // frame walk naming the deepest live frames
-                crate::dfx::backtrace::walk_stack_trace(&mut |pc, _fp| {
+                crate::debug::backtrace::walk_stack_trace(&mut |pc, _fp| {
                     let _ = pc;
                 });
             }
@@ -535,7 +535,7 @@ fn stack_cache_free(stack_bottom: *mut u8) {
             }
         }
     }
-    // Leg-16 anatomy (rux:schb (retired dfx=schb),ksprobe): the high-water scan + record
+    // Leg-16 anatomy (rux:schb (retired debug=schb),ksprobe): the high-water scan + record
     // stash lives in free_kernel_stack (needs self for comm/pid); this
     // side only keeps the live count honest for the SC-ANAT kN column.
     if crate::trace::EVENT_SCHB.armed()
@@ -1119,7 +1119,7 @@ pub struct Task {
     /// forensic ring overwrites a parked waiter's record within
     /// milliseconds under system-wide traffic, so per-task storage is
     /// the only form that survives. Written at dispatch entry (Relaxed
-    /// stores); read by the DFX taskdump.
+    /// stores); read by the DEBUG taskdump.
     pub last_syscall_nr: core::sync::atomic::AtomicU32,
     pub last_syscall_a0: AtomicU64,
     pub last_syscall_a1: AtomicU64,
@@ -1583,7 +1583,7 @@ pub struct Task {
     /// evidence, kept ON the task so no address-keyed side table can
     /// steal it mid-strand (the 61st's 256-slot SKIP_HIST collided).
     /// All writes are gated behind sched::sched_hist_armed()
-    /// (rux:fuxstuck (retired dfx=fuxstuck)|schedtrace) and happen under the GRQ lock; the
+    /// (rux:fuxstuck (retired debug=fuxstuck)|schedtrace) and happen under the GRQ lock; the
     /// census reads them lock-free. Ring entries pack
     /// kind:4|why:8|jiffies:30|aux:22 (kind: 1=link 2=refuse 3=pick
     /// 4=heal-claim 5=heal-oncpu; see sched::sched_hist_ring).
@@ -2183,10 +2183,10 @@ impl Task {
             }
             return false;
         }
-        // Scribble hunter (rux:scribble (retired dfx=scribble)): track this Task's scheduling
+        // Scribble hunter (rux:scribble (retired debug=scribble)): track this Task's scheduling
         // fields from birth. No-op unless the runtime switch is on.
         #[cfg(feature = "x86_64")]
-        crate::dfx::scribble::register(ptr);
+        crate::debug::scribble::register(ptr);
         true
     }
 
@@ -2369,7 +2369,7 @@ impl Task {
     ) -> bool {
         if task.is_null() {
             // WAKE-REFUSE-PT1 (runq-strand hunt) — RETIRED (probe-retire):
-            // behind rux:schedtrace (retired dfx=schedtrace) like the rest of the refusal-point
+            // behind rux:schedtrace (retired debug=schedtrace) like the rest of the refusal-point
             // family; also fixes a latent null-deref in the print itself.
             if crate::trace::EVENT_SCHEDTRACE.armed() {
                 static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -2410,7 +2410,7 @@ impl Task {
                 v <<= 4;
             }
             putchar(b'\n');
-            // WAKE-REFUSE-PT2 — RETIRED (probe-retire): rux:schedtrace (retired dfx=schedtrace)
+            // WAKE-REFUSE-PT2 — RETIRED (probe-retire): rux:schedtrace (retired debug=schedtrace)
             // gates the refusal-point family; the wild-pointer DROP itself
             // stays unconditional (crash-class guard above).
             if crate::trace::EVENT_SCHEDTRACE.armed() {
@@ -2435,7 +2435,7 @@ impl Task {
                 use crate::console::putchar;
                 const MSG: &[u8] = b"WAKE-POISONED-TASK dropped\n";
                 for &b in MSG { putchar(b); }
-                // WAKE-REFUSE-PT3 — RETIRED (probe-retire): rux:schedtrace (retired dfx=schedtrace)
+                // WAKE-REFUSE-PT3 — RETIRED (probe-retire): rux:schedtrace (retired debug=schedtrace)
                 // gates the refusal-point family; the poison DROP stays.
                 if crate::trace::EVENT_SCHEDTRACE.armed() {
                     static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -2471,7 +2471,7 @@ impl Task {
                 static WUG: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if WUG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-                    use crate::dfx::taskdump::putc_brief as putchar;
+                    use crate::debug::taskdump::putc_brief as putchar;
                     fn ph(mut v: u64) {
                         for _ in 0..16 {
                             let n = (v >> 60) as u8;
@@ -2496,19 +2496,19 @@ impl Task {
             if old_state.is_sleeping() || old_state.contains(TaskState::STOPPED) {
                 // forkprof (cmdline forkprof=1): waker-side body cost and
                 // the stamp consumed at the wakee's switch-in.
-                let fp = crate::dfx::forkprof::on();
-                let fp_t_wake = if fp { crate::dfx::forkprof::now() } else { 0 };
+                let fp = crate::debug::forkprof::on();
+                let fp_t_wake = if fp { crate::debug::forkprof::now() } else { 0 };
                 // cctx probe (closegap lane): select / enqueue / dispatch
                 // phase sums for the sleeping-target wake path.
-                let cc = crate::dfx::cctx::on();
-                let cc_t_sel = if cc { crate::dfx::cctx::now() } else { 0 };
-                crate::dfx::cctx::bump(&crate::dfx::cctx::WK_N);
+                let cc = crate::debug::cctx::on();
+                let cc_t_sel = if cc { crate::debug::cctx::now() } else { 0 };
+                crate::debug::cctx::bump(&crate::debug::cctx::WK_N);
                 // Select best CPU for this task (wake-affine / least-loaded)
                 let sched_class = crate::sched::class::task_sched_class(t);
                 let prev_cpu = t.ti_cpu();
                 let target_cpu = sched_class.select_task_rq(task, prev_cpu, 0);
-                crate::dfx::cctx::add(&crate::dfx::cctx::WK_SEL_NS, cc_t_sel);
-                let cc_t_enq = crate::dfx::cctx::now();
+                crate::debug::cctx::add(&crate::debug::cctx::WK_SEL_NS, cc_t_sel);
+                let cc_t_enq = crate::debug::cctx::now();
 
                 // Update task's CPU if it changed.
                 // R13-5: never steer a task that is still executing (on_cpu
@@ -2636,7 +2636,7 @@ impl Task {
                         // W2 print + monopolist capture — RETIRED
                         // (probe-retire): the wake-refusal census COUNTERS
                         // stay always-on (merge-gate band); the per-event
-                        // serial lines move behind rux:schedtrace (retired dfx=schedtrace).
+                        // serial lines move behind rux:schedtrace (retired debug=schedtrace).
                         if crate::trace::EVENT_SCHEDTRACE.armed()
                             && !mid_pick
                             && W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
@@ -2657,7 +2657,7 @@ impl Task {
                                 t.ti_cpu(),
                                 w2
                             );
-                            // dfx-migrate: the refusal also records into
+                            // debug-migrate: the refusal also records into
                             // the unified framework (rux:schedtrace
                             // kind=WAKE_REFUSED — the event is also the
                             // family's arm switch).
@@ -2698,7 +2698,7 @@ impl Task {
                             }
                         }
                     // WAKE-REFUSE-PT4 — RETIRED (probe-retire):
-                    // rux:schedtrace (retired dfx=schedtrace) gates the refusal-point family.
+                    // rux:schedtrace (retired debug=schedtrace) gates the refusal-point family.
                     if crate::trace::EVENT_SCHEDTRACE.armed() {
                         static RF4: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                         let rn = RF4.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -2733,8 +2733,8 @@ impl Task {
                 // (pipe echo, futex handoff) still gets the in-place
                 // handoff from its own schedule().
                 let allowed = t.cpus_allowed();
-                crate::dfx::cctx::add(&crate::dfx::cctx::WK_ENQ_NS, cc_t_enq);
-                let cc_t_disp = crate::dfx::cctx::now();
+                crate::debug::cctx::add(&crate::debug::cctx::WK_ENQ_NS, cc_t_enq);
+                let cc_t_disp = crate::debug::cctx::now();
                 // 105th wake-dispatch census (see sched::WAKE_DISP): the
                 // dispatch outcome + idle mask at wake entry, read back by
                 // the binder QPICK hunt. Relaxed stores; diagnostic only.
@@ -2787,7 +2787,7 @@ impl Task {
                         }
                     }
                 }
-                crate::dfx::cctx::add(&crate::dfx::cctx::WK_DISP_NS, cc_t_disp);
+                crate::debug::cctx::add(&crate::debug::cctx::WK_DISP_NS, cc_t_disp);
 
                 // sched:sched_wakeup — the enqueue succeeded, the task is
                 // runnable on target_cpu (the reference's post-enqueue
@@ -2812,8 +2812,8 @@ impl Task {
                 }
 
                 if fp {
-                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WAKE_BODY, fp_t_wake);
-                    crate::dfx::forkprof::stamp_wake(pid as u32);
+                    crate::debug::forkprof::add(crate::debug::forkprof::P_WAKE_BODY, fp_t_wake);
+                    crate::debug::forkprof::stamp_wake(pid as u32);
                 }
                 true
             } else {
@@ -2865,7 +2865,7 @@ impl Task {
                     // WAKE-REFUSE-PT5 — RETIRED (probe-retire): this is
                     // the loudest refusal-point arm (a benign scheduler
                     // race outcome, ~12 lines every ordinary boot); behind
-                    // rux:schedtrace (retired dfx=schedtrace). The heal + resched logic is unchanged.
+                    // rux:schedtrace (retired debug=schedtrace). The heal + resched logic is unchanged.
                     if crate::trace::EVENT_SCHEDTRACE.armed() {
                         static RF5: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                         let rn = RF5.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -3150,7 +3150,7 @@ impl Task {
     }
 
     // (2026-11-23, §7 retirement round: the parent_children_head_ptr
-    // diagnostic accessor retired with dfx/treehunt.rs — it was the
+    // diagnostic accessor retired with debug/treehunt.rs — it was the
     // probe's only consumer. The parent_children_head field itself is
     // live list machinery and stays.)
 
@@ -3539,7 +3539,7 @@ fn preempt_underflow_report(
     // the phantom's home site. Rate-gate already passed above.
     if crate::trace::EVENT_LEAKHUNT.armed() {
         if let Some(task) = crate::sched::current() {
-            crate::dfx::leakorigin::report_outermost(
+            crate::debug::leakorigin::report_outermost(
                 b"UNDERFLOW-ORIGIN",
                 task as *mut Task,
             );
@@ -3684,7 +3684,7 @@ impl Task {
         if val == crate::interrupt::preempt::PREEMPT_OFFSET
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
-            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            crate::debug::leakorigin::note_release(self as *const Task as *mut Task);
             // phantom-bits / stress-port r3: a LIVE outermost pair just
             // completed — re-arm the run counter the tick-side heal
             // actually gates on. (The pb3 re-arm stored the superseded
@@ -3703,7 +3703,7 @@ impl Task {
         if val == crate::interrupt::preempt::SOFTIRQ_OFFSET
             && (prev & crate::interrupt::preempt::SOFTIRQ_MASK) == crate::interrupt::preempt::SOFTIRQ_OFFSET
         {
-            crate::dfx::leakorigin::note_softirq_release(self as *const Task as *mut Task);
+            crate::debug::leakorigin::note_softirq_release(self as *const Task as *mut Task);
             self.ti_pc_sirq_present_run.store(
                 0,
                 core::sync::atomic::Ordering::Relaxed,
@@ -3787,7 +3787,7 @@ impl Task {
         if val == crate::interrupt::preempt::PREEMPT_OFFSET
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
-            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            crate::debug::leakorigin::note_release(self as *const Task as *mut Task);
             // phantom-bits / stress-port r3: live pair completed — re-arm
             // the run counter the heal gates on (see sub_preempt_count_at;
             // the old store hit the superseded ti_pc_zero_jif field).
@@ -4168,7 +4168,7 @@ impl Task {
         ) {
             Ok(_) => {
                 crate::sched::sched::pick_trace(self as *const Task as *mut Task, 6);
-                // Wakewatch (rux:schedtrace (retired dfx=schedtrace)): the switch-in affirm — the
+                // Wakewatch (rux:schedtrace (retired debug=schedtrace)): the switch-in affirm — the
                 // pick materialized into a register restore.
                 crate::sched::sched::ww_record(
                     self as *const Task as *mut Task,
@@ -4342,7 +4342,7 @@ impl Task {
                 }
             }
 
-            // Leg-16 anatomy (rux:schb (retired dfx=schb),ksprobe): high-water scan + record
+            // Leg-16 anatomy (rux:schb (retired debug=schb),ksprobe): high-water scan + record
             // stash. The stack is dead (on_cpu cleared + RCU waited
             // upstream), no locks held — safe to walk. Records stash the
             // surviving return addresses for the next schbd beat (the
@@ -4417,7 +4417,7 @@ impl Task {
                 }
             }
 
-            // DFX (LTP chunk@700 panic hunt, 2026-11-02) + R87 CLOSURE
+            // DEBUG (LTP chunk@700 panic hunt, 2026-11-02) + R87 CLOSURE
             // (oh-launch round 10): if any CPU's live TSS.rsp0 still
             // points at THIS stack's top, every later user-origin trap
             // entry on that CPU pushes its frame into freed-and-recycled
@@ -4471,25 +4471,25 @@ impl Task {
                         let n = RSP0_SEEN
                             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         if n < 64 {
-                            crate::dfx::taskdump::taskdump_raw_line(
+                            crate::debug::taskdump::taskdump_raw_line(
                                 b"STACKFREE-LIVE-RSP0 cpu=",
                             );
-                            crate::dfx::taskdump::taskdump_dec(stale_cpu as u64);
-                            crate::dfx::taskdump::taskdump_raw_line(b" top=0x");
+                            crate::debug::taskdump::taskdump_dec(stale_cpu as u64);
+                            crate::debug::taskdump::taskdump_raw_line(b" top=0x");
                             let mut v = stack_top as u64;
                             let mut sh: i32 = 64;
                             while sh > 0 {
                                 sh -= 4;
                                 let nb = ((v >> sh) & 0xF) as u8;
-                                crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 {
+                                crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 {
                                     b'0' + nb
                                 } else {
                                     b'a' + nb - 10
                                 })]);
                             }
-                            crate::dfx::taskdump::taskdump_raw_line(b" freeing_pid=");
-                            crate::dfx::taskdump::taskdump_dec(self.pid() as u64);
-                            crate::dfx::taskdump::taskdump_raw_line(
+                            crate::debug::taskdump::taskdump_raw_line(b" freeing_pid=");
+                            crate::debug::taskdump::taskdump_dec(self.pid() as u64);
+                            crate::debug::taskdump::taskdump_raw_line(
                                 b" (recycle WITHHELD - leaked, never re-carved)\n",
                             );
                         }
@@ -4501,7 +4501,7 @@ impl Task {
             #[cfg(not(feature = "x86_64"))]
             let recycle_ok = true;
 
-            // DFX: record for the freed-stack execution detector.
+            // DEBUG: record for the freed-stack execution detector.
             note_kstack_freed(
                 stack_bottom as usize,
                 stack_top as usize,

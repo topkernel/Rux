@@ -227,7 +227,7 @@ pub fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs) {
                 static RIP: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if RIP.fetch_add(1, Ordering::Relaxed) < 200 {
-                    use crate::dfx::taskdump::putc_brief as putchar;
+                    use crate::debug::taskdump::putc_brief as putchar;
                     for &b in b"RESCHED-IPI-RECV cpu=0 rip=0x" {
                         putchar(b);
                     }
@@ -405,7 +405,7 @@ fn remote_bt_self(regs: &crate::arch::pt_regs::PtRegs) {
     if regs.kernel_mode() {
         BT_RBP[cpu].store(regs.rbp, Ordering::Relaxed);
         // Frame-pointer walk from the interrupted rbp — the same
-        // validation discipline as dfx::backtrace::walk_stack_trace
+        // validation discipline as debug::backtrace::walk_stack_trace
         // (8-aligned, kernel range, strictly ascending, sane gap), but
         // starting from the INTERRUPTED frame so the walk is the live
         // chain of whatever the CPU was executing, not this handler's.
@@ -467,7 +467,7 @@ pub fn remote_backtrace(target: usize, why: &str) -> bool {
     while BT_DONE[target].load(Ordering::Acquire) != req {
         spins = spins.wrapping_add(1);
         if spins > 200_000_000 {
-            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::backtrace::ConsoleWriter::new();
             let _ = core::fmt::Write::write_fmt(
                 &mut w,
                 format_args!("REMOTE-BT[{}]: cpu={} TIMEOUT (not servicing IPIs)\n", why, target),
@@ -481,7 +481,7 @@ pub fn remote_backtrace(target: usize, why: &str) -> bool {
     let rsp = BT_RSP[target].load(Ordering::Relaxed);
     let rbp = BT_RBP[target].load(Ordering::Relaxed);
     let n = BT_NFRAMES[target].load(Ordering::Relaxed) as usize;
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::backtrace::ConsoleWriter::new();
     // Target's current task pid/comm (best-effort; comm is fixed-size
     // bytes, no allocation).
     let cur = unsafe { crate::sched::sched::cpu_state(target).current };

@@ -34,4 +34,4 @@ aarch64 = ["rux/aarch64", "rux-syscall/aarch64", "rux-net/aarch64", "rux-fs/aarc
 # kernel lib features the bin/tests toggle: forwarded.
 unit-test = ["rux/unit-test", "rux-fs/unit-test", "rux-mm/unit-test", "rux-net/unit-test", "rux-sched/unit-test", "rux-ext4/unit-test", "rux-ipc/unit-test"]
 cov-dump = ["rux/cov-dump"]
-dfx-lock-owner = ["rux/dfx-lock-owner"]
+debug-lock-owner = ["rux/debug-lock-owner"]
