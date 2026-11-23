@@ -399,9 +399,8 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut crate::fs
 
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
-    // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
-    unsafe {
-        let blocknr = (*bio_bh).b_blocknr;
+    {
+        let blocknr = crate::fs::bio::bh_blocknr(&bio_bh);
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         // Keyed map (perf-gaps G3): O(log n) membership instead of the
@@ -432,9 +431,8 @@ pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut crate::f
 
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
-    // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
-    unsafe {
-        let blocknr = (*bio_bh).b_blocknr;
+    {
+        let blocknr = crate::fs::bio::bh_blocknr(&bio_bh);
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         if dirty_bufs.contains_key(&blocknr) {
             return Ok(()); // Already tracked
@@ -460,9 +458,8 @@ pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut crate::fs::
 
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
-    // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
-    unsafe {
-        let blocknr = (*bio_bh).b_blocknr;
+    {
+        let blocknr = crate::fs::bio::bh_blocknr(&bio_bh);
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         crate::dfx::fsw::note_j_dedup(1);
@@ -482,9 +479,8 @@ pub fn jbd2_journal_forget(handle: &mut Handle, bio_bh: *mut crate::fs::bio::Buf
 
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
-    // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
-    unsafe {
-        let blocknr = (*bio_bh).b_blocknr;
+    {
+        let blocknr = crate::fs::bio::bh_blocknr(&bio_bh);
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         dirty_bufs.remove(&blocknr);
     }

@@ -162,47 +162,9 @@ impl ListHead {
         self.next == self as *const _ as *mut _
     }
 
-    /// Add entry to list
-    pub fn add(&mut self, new: *mut ListHead) {
-        // SAFETY: Caller must ensure `new` is a valid, live pointer to a
-        // ListHead and that `self.next` (if non-null) is also valid. We are
-        // inserting `new` between `self` and `self.next` in the list.
-        unsafe {
-            (*new).next = self.next;
-            (*new).prev = self as *mut _;
-            if !self.next.is_null() {
-                (*self.next).prev = new;
-            }
-            self.next = new;
-        }
-    }
-
-    /// Add entry to tail of list
-    pub fn add_tail(&mut self, new: *mut ListHead) {
-        // SAFETY: Caller must ensure `new` is a valid, live pointer to a
-        // ListHead and that `self.prev` (if non-null) is also valid. We are
-        // inserting `new` between `self.prev` and `self` in the list.
-        unsafe {
-            (*new).next = self as *mut _;
-            (*new).prev = self.prev;
-            if !self.prev.is_null() {
-                (*self.prev).next = new;
-            }
-            self.prev = new;
-        }
-    }
-
-    /// Remove entry from list
-    pub fn remove(entry: *mut ListHead) {
-        // SAFETY: Caller must ensure `entry` is currently linked in a list,
-        // so `entry.next` and `entry.prev` are valid pointers (or null sentinel).
-        unsafe {
-            if !(*entry).next.is_null() && !(*entry).prev.is_null() {
-                (*(*entry).next).prev = (*entry).prev;
-                (*(*entry).prev).next = (*entry).next;
-            }
-        }
-    }
+    // (The add/add_tail/remove link-surgery methods were DEAD — the
+    // journal's lists are Vec/Spinlock-shaped in this implementation;
+    // deleted at rung 5 rather than converted, compiler-verified.)
 }
 
 // ============================================================================
