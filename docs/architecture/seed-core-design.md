@@ -52,10 +52,24 @@ core:
    move that call would have to go through the hook table (an indirect
    call the compiler cannot inline), so the function stays where the
    hot caller can reach it directly;
-2. a type whose fields or methods a hot path touches (`Task`, `Vma`,
-   `Dentry`, the wait-queue and lock types), with its inherent impls —
-   Cargo forbids core -> service, so a type the switch or fault path
-   needs cannot live in a service crate.
+2. a FIELD that a hot path reads or writes directly. Cargo forbids
+   core -> service, so a field the switch or fault path touches must
+   live in the core. This is a constraint on fields, not on whole
+   types: a service crate uses a core-defined type freely (service ->
+   core is the allowed direction), and a type's cold fields can live
+   outside the core behind a pointer the hot fields never follow.
+   Measured 2026-11-23 on `Task` (105 fields): the context switch
+   touches 7 (thread, kernel_stack_bottom, address_space, state, pid,
+   on_cpu, pick_state), the trap path 10, the scheduler 6, the VFS
+   walk 7 — about 20 in all. The other ~85 (ptrace state, robust list,
+   syscall/exit/reap bookkeeping, statistics) are never read on a hot
+   path. Splitting such a type into a core block (the hot fields, same
+   offsets, same cache-line neighbours as today) and a service block
+   reached by one pointer costs the hot paths nothing, because they
+   follow only core-block fields. That split is structural work across
+   every subsystem and comes AFTER the function-level moves; until
+   then a type with any hot field stays whole in the core, and the
+   lanes move its cold METHODS out as free functions.
 
 Everything else leaves. A function that hot paths do not call is
 reached only from cold sites, and cold upward calls through the table
