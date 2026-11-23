@@ -785,11 +785,11 @@ c1548b37b8b2	kernel/src/debug/memwatch.rs	note_page_free	727		INV:F3
 ad69632a83f2	kernel/src/debug/memwatch.rs	kroot_pollution	782		INV:F3
 0eff00bdf7b3	kernel/src/debug/mmforensics.rs	note_ref	102		INV:F18
 c2bc1ae04469	kernel/src/debug/mmforensics.rs	capture_frame	333		INV:F18
-d63fdb446137	kernel/src/debug/mod.rs	register_debugfs_knobs	275	volatile	INV:F10
-ab11c0c96de0	kernel/src/debug/mod.rs	register_debugfs_knobs	286	asm	INV:F10
-0ab458bbe25e	kernel/src/debug/mod.rs	register_debugfs_knobs	292	asm	INV:F10
-51fdea369ce3	kernel/src/debug/mod.rs	walk_read	385		INV:F10
-c8d2b3f58325	kernel/src/debug/mod.rs	walk_read	387	volatile,ptr-ops	INV:F10
+f2eb578e4605	kernel/src/debug/mod.rs	register_debugfs_knobs	284	volatile	INV:F10
+ec354d455aef	kernel/src/debug/mod.rs	register_debugfs_knobs	295	asm	INV:F10
+196d2c31241d	kernel/src/debug/mod.rs	register_debugfs_knobs	301	asm	INV:F10
+69f3f53e0362	kernel/src/debug/mod.rs	walk_read	394		INV:F10
+c63f60caa793	kernel/src/debug/mod.rs	walk_read	396	volatile,ptr-ops	INV:F10
 06cb087c460b	kernel/src/debug/oops.rs	oops	116		INV:F18
 7070d3e14421	kernel/src/debug/pathstash.rs	stash_file	80		INV:F18
 dc35a7176d51	kernel/src/debug/pathstash.rs	lookup_file	110		INV:F18
@@ -1420,7 +1420,7 @@ c0f33176cc5d	kernel/src/ipc/binder.rs	bc_corruption_snapshot	9463	raw-construct	
 22f581c6362a	kernel/src/ipc/binder.rs	get	13078		INV:INV-BINDER-PINTASK
 81cb048abc4a	kernel/src/ipc/edges.rs	shm_page_get	24		GAP
 dde5b3003b47	kernel/src/ipc/edges.rs	shm_page_put	39		GAP
-49c8a9be39bb	kernel/src/lib.rs	rust_main_impl	1803	asm	INV:INV-BOOT-ZEROPAGE-1
+a0d8953be6b6	kernel/src/lib.rs	rust_main_impl	1804	asm	INV:INV-BOOT-ZEROPAGE-1
 0953597665ba	kernel/src/list.rs	<module>	73		INV:INV-LIST-1
 d018f0b94a39	kernel/src/list.rs	<module>	92		INV:INV-LIST-1
 c48b7421a0d8	kernel/src/list.rs	<module>	108	ptr-ops	INV:INV-LIST-1
@@ -2092,9 +2092,9 @@ a2965e5560e3	kernel/src/timer.rs	deliver_fired	1508		INV:INV-KTASK-1
 1e7b05297c28	kernel/src/timer.rs	ww_heartbeat	1924	volatile,ptr-ops	INV:INV-KTASK-1
 f60564a41229	kernel/src/timer/nohz.rs	can_stop_full_tick	208		INV:INV-KTASK-1
 c993112e1141	kernel/src/timer/wheel.rs	test_shared	1096		INV:INV-SCHED-EVRING-1
-d67977f74c18	kernel/src/trace/mod.rs	<module>	96		INV:INV-SENDSYNC-1
-e78ed1628925	kernel/src/trace/mod.rs	<module>	97		INV:INV-SENDSYNC-1
-cf00ffda21bf	kernel/src/trace/mod.rs	<module>	2967		INV:INV-TRACERING-1
-3c6094b0e773	kernel/src/trace/mod.rs	<module>	2968		INV:INV-TRACERING-1
-5595de31aaff	kernel/src/trace/mod.rs	slot	2978		INV:INV-TRACERING-1
-12c43ba6b1c4	kernel/src/trace/mod.rs	slot_mut	2989		INV:INV-TRACERING-1
+08fefb18cda0	kernel/src/trace/mod.rs	<module>	99		INV:INV-SENDSYNC-1
+d129a4eb4ddd	kernel/src/trace/mod.rs	<module>	100		INV:INV-SENDSYNC-1
+c3f986b5e958	kernel/src/trace/mod.rs	<module>	2970		INV:INV-TRACERING-1
+039e96513b66	kernel/src/trace/mod.rs	<module>	2971		INV:INV-TRACERING-1
+cb79ddec7056	kernel/src/trace/mod.rs	slot	2981		INV:INV-TRACERING-1
+e56f922965e6	kernel/src/trace/mod.rs	slot_mut	2992		INV:INV-TRACERING-1
