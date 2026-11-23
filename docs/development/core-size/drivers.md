@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# drivers — hot 4816 lines (stay) / cold 13693 lines (leave)
+# drivers — hot 5314 lines (stay) / cold 12477 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -25,7 +25,7 @@ records why.
 | drivers/ashmem.rs | `ashmem_file_lseek` | 344 | 29 |  |
 | drivers/ashmem.rs | `ashmem_file_close` | 372 | 21 |  |
 | drivers/ashmem.rs | `is_ashmem_file` | 392 | 9 | yes |
-| drivers/ashmem.rs | `ashmem_open` | 400 | 14 |  |
+| drivers/ashmem.rs | `ashmem_open` | 400 | 14 | yes |
 | drivers/ashmem.rs | `ashmem_file_ioctl` | 413 | 14 | yes |
 | drivers/ashmem.rs | `ashmem_ioctl` | 426 | 161 |  |
 | drivers/ashmem.rs | `ashmem_mmap` | 586 | 163 | yes |
@@ -33,7 +33,7 @@ records why.
 | drivers/blkdev/iostat.rs | `note_io` | 106 | 23 |  |
 | drivers/blkdev/iostat.rs | `note_start` | 128 | 9 |  |
 | drivers/blkdev/iostat.rs | `note_end` | 136 | 9 |  |
-| drivers/blkdev/iostat.rs | `snapshot` | 144 | 20 |  |
+| drivers/blkdev/iostat.rs | `snapshot` | 144 | 20 | yes |
 | drivers/blkdev/mod.rs | `new` | 111 | 26 | yes |
 | drivers/blkdev/mod.rs | `set_capacity` | 136 | 6 |  |
 | drivers/blkdev/mod.rs | `get_capacity` | 141 | 6 | yes |
@@ -175,87 +175,91 @@ records why.
 | drivers/gpu/virtio_gpu.rs | `get_framebuffer` | 916 | 17 |  |
 | drivers/gpu/virtio_gpu.rs | `drop` | 932 | 13 | yes |
 | drivers/gpu/virtio_gpu.rs | `probe_virtio_gpu` | 944 | 11 |  |
-| drivers/hooks.rs | `no_char_rows` | 79 | 4 |  |
-| drivers/hooks.rs | `no_loopback_init` | 82 | 4 |  |
-| drivers/hooks.rs | `no_loopback_device` | 85 | 4 |  |
-| drivers/hooks.rs | `no_loopback_send` | 88 | 4 |  |
-| drivers/hooks.rs | `no_loopback_poll` | 91 | 4 |  |
-| drivers/hooks.rs | `no_loopback_stats` | 94 | 4 |  |
-| drivers/hooks.rs | `no_init_fbdev` | 97 | 4 |  |
-| drivers/hooks.rs | `no_fb_file` | 100 | 4 |  |
-| drivers/hooks.rs | `no_fbdev_ioctl` | 103 | 4 |  |
-| drivers/hooks.rs | `no_mark_fb_user_mapped` | 106 | 2 |  |
-| drivers/hooks.rs | `no_watchdog_ioctl` | 107 | 4 |  |
-| drivers/hooks.rs | `no_tokenid_ioctl` | 110 | 31 |  |
-| drivers/hooks.rs | `register_driver_hooks` | 140 | 6 | yes |
-| drivers/hooks.rs | `hooks` | 145 | 10 |  |
-| drivers/hooks.rs | `devfs_char_rows` | 154 | 6 |  |
-| drivers/hooks.rs | `loopback_init` | 159 | 6 | yes |
-| drivers/hooks.rs | `get_loopback_device` | 164 | 6 | yes |
-| drivers/hooks.rs | `loopback_send` | 169 | 6 | yes |
-| drivers/hooks.rs | `loopback_poll` | 174 | 6 | yes |
-| drivers/hooks.rs | `loopback_stats` | 179 | 6 | yes |
-| drivers/hooks.rs | `init_fbdev` | 184 | 6 | yes |
-| drivers/hooks.rs | `is_fb_file` | 189 | 6 | yes |
-| drivers/hooks.rs | `fbdev_ioctl` | 194 | 6 | yes |
-| drivers/hooks.rs | `mark_fb_user_mapped` | 199 | 6 | yes |
-| drivers/hooks.rs | `watchdog_ioctl` | 204 | 6 | yes |
-| drivers/hooks.rs | `tokenid_ioctl` | 209 | 4 | yes |
-| drivers/initcalls.rs | `register_initcall` | 66 | 21 |  |
+| drivers/hooks.rs | `no_char_rows` | 93 | 4 |  |
+| drivers/hooks.rs | `no_loopback_init` | 96 | 4 |  |
+| drivers/hooks.rs | `no_loopback_device` | 99 | 4 |  |
+| drivers/hooks.rs | `no_loopback_send` | 102 | 4 |  |
+| drivers/hooks.rs | `no_loopback_poll` | 105 | 4 |  |
+| drivers/hooks.rs | `no_loopback_stats` | 108 | 4 |  |
+| drivers/hooks.rs | `no_init_fbdev` | 111 | 4 |  |
+| drivers/hooks.rs | `no_fb_file` | 114 | 4 |  |
+| drivers/hooks.rs | `no_fbdev_ioctl` | 117 | 4 |  |
+| drivers/hooks.rs | `no_mark_fb_user_mapped` | 120 | 2 |  |
+| drivers/hooks.rs | `no_register_probe_initcalls` | 121 | 2 |  |
+| drivers/hooks.rs | `no_pci_rescan_block_hotplug` | 122 | 4 |  |
+| drivers/hooks.rs | `no_watchdog_ioctl` | 125 | 4 |  |
+| drivers/hooks.rs | `no_tokenid_ioctl` | 128 | 33 |  |
+| drivers/hooks.rs | `register_driver_hooks` | 160 | 6 | yes |
+| drivers/hooks.rs | `hooks` | 165 | 10 |  |
+| drivers/hooks.rs | `devfs_char_rows` | 174 | 6 | yes |
+| drivers/hooks.rs | `loopback_init` | 179 | 6 | yes |
+| drivers/hooks.rs | `get_loopback_device` | 184 | 6 | yes |
+| drivers/hooks.rs | `loopback_send` | 189 | 6 | yes |
+| drivers/hooks.rs | `loopback_poll` | 194 | 6 | yes |
+| drivers/hooks.rs | `loopback_stats` | 199 | 6 | yes |
+| drivers/hooks.rs | `init_fbdev` | 204 | 6 | yes |
+| drivers/hooks.rs | `is_fb_file` | 209 | 6 | yes |
+| drivers/hooks.rs | `fbdev_ioctl` | 214 | 6 | yes |
+| drivers/hooks.rs | `mark_fb_user_mapped` | 219 | 6 | yes |
+| drivers/hooks.rs | `watchdog_ioctl` | 224 | 6 | yes |
+| drivers/hooks.rs | `tokenid_ioctl` | 229 | 7 | yes |
+| drivers/hooks.rs | `register_probe_initcalls` | 235 | 6 | yes |
+| drivers/hooks.rs | `pci_rescan_block_hotplug` | 240 | 4 | yes |
+| drivers/initcalls.rs | `register_initcall` | 66 | 21 | yes |
 | drivers/initcalls.rs | `run_initcalls` | 86 | 21 |  |
 | drivers/initcalls.rs | `level_summary` | 106 | 13 |  |
-| drivers/input/evdev.rs | `ioc_nr` | 57 | 6 |  |
-| drivers/input/evdev.rs | `ioc_size` | 62 | 6 |  |
-| drivers/input/evdev.rs | `ioc_dir` | 67 | 49 |  |
-| drivers/input/evdev.rs | `evtype_bitmap` | 115 | 68 |  |
-| drivers/input/evdev.rs | `new` | 182 | 28 | yes |
-| drivers/input/evdev.rs | `set_ev_bits` | 209 | 10 |  |
-| drivers/input/evdev.rs | `set_absinfo` | 218 | 21 |  |
-| drivers/input/evdev.rs | `register_open_file` | 238 | 17 |  |
-| drivers/input/evdev.rs | `unregister_open_file` | 254 | 21 |  |
-| drivers/input/evdev.rs | `push_event` | 274 | 90 |  |
-| drivers/input/evdev.rs | `wake_pollq_probed` | 363 | 94 |  |
-| drivers/input/evdev.rs | `pop_event` | 456 | 31 |  |
-| drivers/input/evdev.rs | `has_event` | 486 | 31 |  |
-| drivers/input/evdev.rs | `evdev_keyboard` | 516 | 4 |  |
-| drivers/input/evdev.rs | `evdev_pointer` | 519 | 4 |  |
-| drivers/input/evdev.rs | `evdev_touchscreen` | 522 | 8 |  |
-| drivers/input/evdev.rs | `file_id_is_input` | 529 | 19 | yes |
-| drivers/input/evdev.rs | `latch_opener_pid` | 547 | 17 |  |
-| drivers/input/evdev.rs | `evdev_opener_pid` | 563 | 9 | yes |
-| drivers/input/evdev.rs | `device_of_devno` | 571 | 18 |  |
-| drivers/input/evdev.rs | `device_of_file` | 588 | 27 |  |
-| drivers/input/evdev.rs | `sleep_ms_interruptible` | 614 | 55 |  |
-| drivers/input/evdev.rs | `node_of_file` | 668 | 24 |  |
-| drivers/input/evdev.rs | `evdev_file_read` | 691 | 106 |  |
-| drivers/input/evdev.rs | `trace_open` | 796 | 44 |  |
-| drivers/input/evdev.rs | `evdev_file_close` | 839 | 34 |  |
-| drivers/input/evdev.rs | `evdev_file_poll` | 872 | 56 |  |
-| drivers/input/evdev.rs | `evdev_poll_wait` | 927 | 45 |  |
-| drivers/input/evdev.rs | `evdev_poll_unwait` | 971 | 58 |  |
-| drivers/input/evdev.rs | `evdev_file_write` | 1028 | 57 |  |
-| drivers/input/evdev.rs | `evdev_file_ioctl` | 1084 | 47 | yes |
-| drivers/input/evdev.rs | `copy_out` | 1130 | 194 | yes |
-| drivers/input/evdev.rs | `format_input_bitmap` | 1323 | 2 |  |
-| drivers/input/evdev.rs | `word_at` | 1324 | 35 |  |
-| drivers/input/evdev.rs | `sysfs_registration` | 1358 | 51 |  |
-| drivers/input/evdev.rs | `init_evdev` | 1408 | 101 |  |
-| drivers/input/evdev.rs | `fill_capabilities` | 1508 | 51 |  |
-| drivers/input/evdev.rs | `push_input_event` | 1558 | 150 |  |
-| drivers/input/evdev.rs | `input_echo_budget` | 1707 | 20 |  |
-| drivers/input/evdev.rs | `new` | 1726 | 4 | yes |
-| drivers/input/evdev.rs | `push` | 1729 | 9 | yes |
-| drivers/input/evdev.rs | `u64` | 1737 | 19 | yes |
-| drivers/input/evdev.rs | `flush` | 1755 | 32 | yes |
-| drivers/input/evdev.rs | `itt_msg` | 1786 | 15 |  |
-| drivers/input/evdev.rs | `itt_u64` | 1800 | 19 |  |
-| drivers/input/evdev.rs | `itt_i64` | 1818 | 14 |  |
-| drivers/input/evdev.rs | `current_pid_tgid` | 1831 | 13 |  |
-| drivers/input/evdev.rs | `it_msg` | 1843 | 9 |  |
-| drivers/input/evdev.rs | `it_u64` | 1851 | 21 |  |
-| drivers/input/evdev.rs | `it_i64` | 1871 | 26 |  |
-| drivers/input/evdev.rs | `cad_detect` | 1896 | 28 |  |
-| drivers/input/evdev.rs | `poll_virtio_events` | 1923 | 22 |  |
+| drivers/input/evdev.rs | `ioc_nr` | 56 | 6 |  |
+| drivers/input/evdev.rs | `ioc_size` | 61 | 6 |  |
+| drivers/input/evdev.rs | `ioc_dir` | 66 | 49 |  |
+| drivers/input/evdev.rs | `evtype_bitmap` | 114 | 68 |  |
+| drivers/input/evdev.rs | `new` | 181 | 28 | yes |
+| drivers/input/evdev.rs | `set_ev_bits` | 208 | 10 |  |
+| drivers/input/evdev.rs | `set_absinfo` | 217 | 21 |  |
+| drivers/input/evdev.rs | `register_open_file` | 237 | 17 | yes |
+| drivers/input/evdev.rs | `unregister_open_file` | 253 | 21 |  |
+| drivers/input/evdev.rs | `push_event` | 273 | 90 |  |
+| drivers/input/evdev.rs | `wake_pollq_probed` | 362 | 94 |  |
+| drivers/input/evdev.rs | `pop_event` | 455 | 31 |  |
+| drivers/input/evdev.rs | `has_event` | 485 | 31 |  |
+| drivers/input/evdev.rs | `evdev_keyboard` | 515 | 4 |  |
+| drivers/input/evdev.rs | `evdev_pointer` | 518 | 4 |  |
+| drivers/input/evdev.rs | `evdev_touchscreen` | 521 | 8 |  |
+| drivers/input/evdev.rs | `file_id_is_input` | 528 | 19 | yes |
+| drivers/input/evdev.rs | `latch_opener_pid` | 546 | 17 |  |
+| drivers/input/evdev.rs | `evdev_opener_pid` | 562 | 9 | yes |
+| drivers/input/evdev.rs | `device_of_devno` | 570 | 18 | yes |
+| drivers/input/evdev.rs | `device_of_file` | 587 | 27 |  |
+| drivers/input/evdev.rs | `sleep_ms_interruptible` | 613 | 55 |  |
+| drivers/input/evdev.rs | `node_of_file` | 667 | 24 |  |
+| drivers/input/evdev.rs | `evdev_file_read` | 690 | 106 |  |
+| drivers/input/evdev.rs | `trace_open` | 795 | 44 | yes |
+| drivers/input/evdev.rs | `evdev_file_close` | 838 | 34 |  |
+| drivers/input/evdev.rs | `evdev_file_poll` | 871 | 56 |  |
+| drivers/input/evdev.rs | `evdev_poll_wait` | 926 | 45 |  |
+| drivers/input/evdev.rs | `evdev_poll_unwait` | 970 | 58 |  |
+| drivers/input/evdev.rs | `evdev_file_write` | 1027 | 57 |  |
+| drivers/input/evdev.rs | `evdev_file_ioctl` | 1083 | 47 | yes |
+| drivers/input/evdev.rs | `copy_out` | 1129 | 194 | yes |
+| drivers/input/evdev.rs | `format_input_bitmap` | 1322 | 2 |  |
+| drivers/input/evdev.rs | `word_at` | 1323 | 35 |  |
+| drivers/input/evdev.rs | `sysfs_registration` | 1357 | 51 |  |
+| drivers/input/evdev.rs | `init_evdev` | 1407 | 101 |  |
+| drivers/input/evdev.rs | `fill_capabilities` | 1507 | 51 |  |
+| drivers/input/evdev.rs | `push_input_event` | 1557 | 150 |  |
+| drivers/input/evdev.rs | `input_echo_budget` | 1706 | 20 |  |
+| drivers/input/evdev.rs | `new` | 1725 | 4 | yes |
+| drivers/input/evdev.rs | `push` | 1728 | 9 | yes |
+| drivers/input/evdev.rs | `u64` | 1736 | 19 | yes |
+| drivers/input/evdev.rs | `flush` | 1754 | 32 | yes |
+| drivers/input/evdev.rs | `itt_msg` | 1785 | 15 |  |
+| drivers/input/evdev.rs | `itt_u64` | 1799 | 19 |  |
+| drivers/input/evdev.rs | `itt_i64` | 1817 | 14 |  |
+| drivers/input/evdev.rs | `current_pid_tgid` | 1830 | 13 |  |
+| drivers/input/evdev.rs | `it_msg` | 1842 | 9 |  |
+| drivers/input/evdev.rs | `it_u64` | 1850 | 21 |  |
+| drivers/input/evdev.rs | `it_i64` | 1870 | 26 |  |
+| drivers/input/evdev.rs | `cad_detect` | 1895 | 28 |  |
+| drivers/input/evdev.rs | `poll_virtio_events` | 1922 | 22 |  |
 | drivers/input/event.rs | `new` | 201 | 16 | yes |
 | drivers/input/event.rs | `key_event` | 216 | 6 |  |
 | drivers/input/event.rs | `rel_event` | 221 | 6 |  |
@@ -409,8 +413,8 @@ records why.
 | drivers/intc/plic.rs | `self_addr_enable` | 381 | 5 |  |
 | drivers/intc/plic.rs | `read_threshold` | 385 | 9 |  |
 | drivers/loop_dev.rs | `new` | 105 | 27 | yes |
-| drivers/loop_dev.rs | `is_loop_devno` | 131 | 8 |  |
-| drivers/loop_dev.rs | `init_loops` | 138 | 48 |  |
+| drivers/loop_dev.rs | `is_loop_devno` | 131 | 8 | yes |
+| drivers/loop_dev.rs | `init_loops` | 138 | 48 | yes |
 | drivers/loop_dev.rs | `loop_disk` | 185 | 9 | yes |
 | drivers/loop_dev.rs | `loop_static_name` | 193 | 6 |  |
 | drivers/loop_dev.rs | `loop_get_free` | 198 | 14 |  |
@@ -424,19 +428,19 @@ records why.
 | drivers/loop_dev.rs | `return_errno` | 350 | 8 |  |
 | drivers/loop_dev.rs | `loop_request_fn` | 357 | 60 |  |
 | drivers/loop_dev.rs | `loop_request_fn_claimed` | 416 | 56 |  |
-| drivers/loop_dev.rs | `loop_devno_of` | 471 | 17 |  |
-| drivers/loop_dev.rs | `loop_file_read` | 487 | 45 |  |
-| drivers/loop_dev.rs | `loop_file_write` | 531 | 56 |  |
-| drivers/loop_dev.rs | `partitions_lines` | 586 | 59 |  |
-| drivers/loop_dev.rs | `loop_status_of` | 644 | 33 |  |
-| drivers/loop_dev.rs | `loop_change_fd` | 676 | 20 |  |
-| drivers/loop_dev.rs | `loop_set_capacity` | 695 | 16 |  |
-| drivers/loop_dev.rs | `loop_file_ioctl` | 710 | 312 | yes |
-| drivers/loop_dev.rs | `fd_backing_path` | 1021 | 7 |  |
-| drivers/loop_dev.rs | `loop_offset_of` | 1027 | 10 |  |
-| drivers/loop_dev.rs | `loop_sizelimit_of` | 1036 | 9 |  |
-| drivers/loop_dev.rs | `set_loop_geometry` | 1044 | 14 |  |
-| drivers/loop_dev.rs | `loop_file_lseek` | 1057 | 24 |  |
+| drivers/loop_dev.rs | `loop_devno_of` | 471 | 14 |  |
+| drivers/loop_dev.rs | `loop_file_read` | 484 | 45 |  |
+| drivers/loop_dev.rs | `loop_file_write` | 528 | 56 |  |
+| drivers/loop_dev.rs | `partitions_lines` | 583 | 59 | yes |
+| drivers/loop_dev.rs | `loop_status_of` | 641 | 33 |  |
+| drivers/loop_dev.rs | `loop_change_fd` | 673 | 20 |  |
+| drivers/loop_dev.rs | `loop_set_capacity` | 692 | 16 |  |
+| drivers/loop_dev.rs | `loop_file_ioctl` | 707 | 309 | yes |
+| drivers/loop_dev.rs | `fd_backing_path` | 1015 | 7 |  |
+| drivers/loop_dev.rs | `loop_offset_of` | 1021 | 10 |  |
+| drivers/loop_dev.rs | `loop_sizelimit_of` | 1030 | 9 |  |
+| drivers/loop_dev.rs | `set_loop_geometry` | 1038 | 14 |  |
+| drivers/loop_dev.rs | `loop_file_lseek` | 1051 | 24 |  |
 | drivers/net/space.rs | `set_address` | 138 | 7 |  |
 | drivers/net/space.rs | `get_name` | 144 | 16 | yes |
 | drivers/net/space.rs | `xmit` | 159 | 6 | yes |
@@ -469,10 +473,10 @@ records why.
 | drivers/net/virtio_net.rs | `get_device_base_addr` | 812 | 11 |  |
 | drivers/net/virtio_net.rs | `interrupt_handler` | 822 | 30 |  |
 | drivers/net/virtio_net.rs | `net_rx_softirq_handler` | 851 | 8 |  |
-| drivers/net/virtio_net.rs | `enable_device_interrupt` | 858 | 39 |  |
+| drivers/net/virtio_net.rs | `enable_device_interrupt` | 858 | 39 | yes |
 | drivers/net/virtio_net.rs | `pci_select_queue` | 896 | 17 |  |
 | drivers/net/virtio_net.rs | `pci_set_queue_size` | 912 | 15 |  |
-| drivers/net/virtio_net.rs | `init_pci` | 926 | 154 |  |
+| drivers/net/virtio_net.rs | `init_pci` | 926 | 154 | yes |
 | drivers/net/virtio_net.rs | `intx_net_service` | 1079 | 12 |  |
 | drivers/net/virtio_net.rs | `interrupt_handler_pci` | 1090 | 19 |  |
 | drivers/pci/mod.rs | `empty` | 85 | 12 | yes |
@@ -503,7 +507,7 @@ records why.
 | drivers/pci/mod.rs | `command` | 404 | 6 |  |
 | drivers/pci/mod.rs | `enable_bus_master` | 409 | 62 |  |
 | drivers/pci/mod.rs | `ecam_base` | 470 | 5 |  |
-| drivers/pci/mod.rs | `find_ecam_devices` | 474 | 40 |  |
+| drivers/pci/mod.rs | `find_ecam_devices` | 474 | 40 | yes |
 | drivers/pci/mod.rs | `enumerate_virtio_devices` | 513 | 56 |  |
 | drivers/rtc.rs | `read_reg` | 61 | 10 |  |
 | drivers/rtc.rs | `rtc_init_alias` | 70 | 16 |  |
@@ -578,46 +582,33 @@ records why.
 | drivers/timer/x86_64.rs | `pre_hpet_time` | 502 | 13 |  |
 | drivers/timer/x86_64.rs | `increment_jiffies_from_timebase` | 514 | 9 |  |
 | drivers/timer/x86_64.rs | `timer_interrupt_handler` | 522 | 69 | yes |
-| drivers/virtio/mod.rs | `new` | 94 | 14 | yes |
-| drivers/virtio/mod.rs | `init` | 107 | 209 | yes |
-| drivers/virtio/mod.rs | `get_capacity` | 315 | 8 | yes |
-| drivers/virtio/mod.rs | `handle_request` | 322 | 40 |  |
-| drivers/virtio/mod.rs | `read_block` | 361 | 182 |  |
-| drivers/virtio/mod.rs | `write_block` | 542 | 179 |  |
-| drivers/virtio/mod.rs | `virtio_blk_kick_op` | 720 | 30 |  |
-| drivers/virtio/mod.rs | `submit_read_async` | 749 | 137 |  |
-| drivers/virtio/mod.rs | `submit_write_async` | 885 | 121 |  |
-| drivers/virtio/mod.rs | `async_read_fn` | 1005 | 18 |  |
-| drivers/virtio/mod.rs | `async_write_fn` | 1022 | 75 |  |
-| drivers/virtio/mod.rs | `io_buf_alloc` | 1096 | 22 |  |
-| drivers/virtio/mod.rs | `io_buf_free` | 1117 | 23 |  |
-| drivers/virtio/mod.rs | `io_buf_init` | 1139 | 26 |  |
-| drivers/virtio/mod.rs | `io_buf_release` | 1164 | 20 |  |
-| drivers/virtio/mod.rs | `begin_delivery` | 1183 | 7 |  |
-| drivers/virtio/mod.rs | `deliver_completion` | 1189 | 84 |  |
-| drivers/virtio/mod.rs | `pci_blk_acquire_site` | 1272 | 24 |  |
-| drivers/virtio/mod.rs | `wedge_put` | 1295 | 9 |  |
-| drivers/virtio/mod.rs | `wedge_hex` | 1303 | 20 |  |
-| drivers/virtio/mod.rs | `wedge_dec` | 1322 | 22 |  |
-| drivers/virtio/mod.rs | `pci_blk_contended_forensics` | 1343 | 80 |  |
-| drivers/virtio/mod.rs | `arm` | 1422 | 27 |  |
-| drivers/virtio/mod.rs | `drop` | 1448 | 14 | yes |
-| drivers/virtio/mod.rs | `pci_blk_lock` | 1461 | 40 |  |
-| drivers/virtio/mod.rs | `pci_blk_lock_defer` | 1500 | 21 |  |
-| drivers/virtio/mod.rs | `pci_blk_holder_watchdog` | 1520 | 44 |  |
-| drivers/virtio/probe.rs | `virtio_mmio_va` | 56 | 15 |  |
-| drivers/virtio/probe.rs | `virtio_probe_devices` | 70 | 71 |  |
-| drivers/virtio/probe.rs | `init_virtio_net` | 140 | 18 |  |
-| drivers/virtio/probe.rs | `init_virtio_blk` | 157 | 32 |  |
-| drivers/virtio/probe.rs | `init_loopback_device` | 188 | 20 |  |
-| drivers/virtio/probe.rs | `init_network_devices` | 207 | 33 |  |
-| drivers/virtio/probe.rs | `init_pci_net_devices` | 239 | 57 |  |
-| drivers/virtio/probe.rs | `register_probe_initcalls` | 295 | 23 |  |
-| drivers/virtio/probe.rs | `init_block_devices_actual` | 317 | 5 |  |
-| drivers/virtio/probe.rs | `init_block_devices` | 321 | 26 |  |
-| drivers/virtio/probe.rs | `init_pci_block_devices` | 346 | 282 |  |
-| drivers/virtio/probe.rs | `pci_dev_hierarchy` | 627 | 47 |  |
-| drivers/virtio/probe.rs | `pci_rescan_block_hotplug` | 673 | 104 |  |
+| drivers/virtio/mod.rs | `new` | 93 | 14 | yes |
+| drivers/virtio/mod.rs | `init` | 106 | 209 | yes |
+| drivers/virtio/mod.rs | `get_capacity` | 314 | 8 | yes |
+| drivers/virtio/mod.rs | `handle_request` | 321 | 40 |  |
+| drivers/virtio/mod.rs | `read_block` | 360 | 182 |  |
+| drivers/virtio/mod.rs | `write_block` | 541 | 179 |  |
+| drivers/virtio/mod.rs | `virtio_blk_kick_op` | 719 | 30 |  |
+| drivers/virtio/mod.rs | `submit_read_async` | 748 | 137 |  |
+| drivers/virtio/mod.rs | `submit_write_async` | 884 | 121 |  |
+| drivers/virtio/mod.rs | `async_read_fn` | 1004 | 18 |  |
+| drivers/virtio/mod.rs | `async_write_fn` | 1021 | 75 |  |
+| drivers/virtio/mod.rs | `io_buf_alloc` | 1095 | 22 |  |
+| drivers/virtio/mod.rs | `io_buf_free` | 1116 | 23 |  |
+| drivers/virtio/mod.rs | `io_buf_init` | 1138 | 26 |  |
+| drivers/virtio/mod.rs | `io_buf_release` | 1163 | 20 |  |
+| drivers/virtio/mod.rs | `begin_delivery` | 1182 | 7 |  |
+| drivers/virtio/mod.rs | `deliver_completion` | 1188 | 84 |  |
+| drivers/virtio/mod.rs | `pci_blk_acquire_site` | 1271 | 24 |  |
+| drivers/virtio/mod.rs | `wedge_put` | 1294 | 9 |  |
+| drivers/virtio/mod.rs | `wedge_hex` | 1302 | 20 |  |
+| drivers/virtio/mod.rs | `wedge_dec` | 1321 | 22 |  |
+| drivers/virtio/mod.rs | `pci_blk_contended_forensics` | 1342 | 80 |  |
+| drivers/virtio/mod.rs | `arm` | 1421 | 27 |  |
+| drivers/virtio/mod.rs | `drop` | 1447 | 14 | yes |
+| drivers/virtio/mod.rs | `pci_blk_lock` | 1460 | 40 |  |
+| drivers/virtio/mod.rs | `pci_blk_lock_defer` | 1499 | 21 |  |
+| drivers/virtio/mod.rs | `pci_blk_holder_watchdog` | 1519 | 44 |  |
 | drivers/virtio/queue.rs | `used_ring_idx` | 156 | 15 |  |
 | drivers/virtio/queue.rs | `used_ring_elem_id` | 170 | 17 |  |
 | drivers/virtio/queue.rs | `resp_done` | 186 | 7 |  |

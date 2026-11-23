@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# sync — hot 6933 lines (stay) / cold 13599 lines (leave)
+# sync — hot 7139 lines (stay) / cold 13393 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -39,7 +39,7 @@ records why.
 | sync/futex.rs | `vma_is_shared` | 473 | 24 |  |
 | sync/futex.rs | `new_user` | 496 | 44 |  |
 | sync/futex.rs | `matches` | 539 | 24 | yes |
-| sync/futex.rs | `task_futex_mm_id` | 562 | 20 |  |
+| sync/futex.rs | `task_futex_mm_id` | 562 | 20 | yes |
 | sync/futex.rs | `current_futex_mm_id` | 581 | 12 |  |
 | sync/futex.rs | `ftx_trace` | 592 | 18 |  |
 | sync/futex.rs | `ftx_opname` | 609 | 14 |  |
@@ -97,7 +97,7 @@ records why.
 | sync/futex.rs | `pool_full_backoff` | 6500 | 39 |  |
 | sync/futex.rs | `futex_hash` | 6538 | 41 |  |
 | sync/futex.rs | `futex_wake` | 6578 | 16 |  |
-| sync/futex.rs | `futex_wake_in_mm` | 6593 | 162 |  |
+| sync/futex.rs | `futex_wake_in_mm` | 6593 | 162 | yes |
 | sync/futex.rs | `ph` | 6754 | 193 | yes |
 | sync/futex.rs | `futex_wait` | 6946 | 6 |  |
 | sync/futex.rs | `futex_wait_timeout` | 6951 | 178 |  |
@@ -228,7 +228,7 @@ records why.
 | sync/rcu.rs | `synchronize_rcu_bounded` | 248 | 17 |  |
 | sync/rcu.rs | `synchronize_rcu_bounded_checked` | 264 | 18 |  |
 | sync/rcu.rs | `synchronize_rcu_bounded_sleepy` | 281 | 26 |  |
-| sync/rcu.rs | `synchronize_rcu_bounded_pollfirst` | 306 | 24 |  |
+| sync/rcu.rs | `synchronize_rcu_bounded_pollfirst` | 306 | 24 | yes |
 | sync/rcu.rs | `synchronize_rcu_forced` | 329 | 26 |  |
 | sync/rcu.rs | `shared_grace_target_pub` | 354 | 5 |  |
 | sync/rcu.rs | `shared_grace_target` | 358 | 22 |  |
