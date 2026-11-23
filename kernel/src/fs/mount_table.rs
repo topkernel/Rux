@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The rung-3 MOUNT SEAM (micro-core-design §4, crate-plan step 3).
+//! The rung-3 MOUNT SEAM (seed-core-design §4, crate-plan step 3).
 //!
 //! The VFS framework (mount.rs) must not reference filesystem leaves by
 //! name; each leaf's mount logic lives leaf-side as a `mount_instance`

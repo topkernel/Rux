@@ -105,18 +105,104 @@ The end-state defense stack, each layer at its measured cost:
 A microkernel spends ~1,000 cycles per boundary to buy (1); this design
 buys (1)+(2)+(3) for 0+~50+0.
 
-## 2b. Lineage and deltas (vs Asterinas Framekernel, vs RedLeaf)
+## 2b. The landscape: industry Rust kernels, and where Seed-Core stands
 
-Same family — language-isolated kernels — three different bet structures:
+Industry Rust kernels fall into four broad families. Each answers "where
+does unsafe live, and how is the TCB drawn" differently. Seed-Core
+(defined in §1) is not one family carried to an extreme — it COMBINES
+the specific strengths of several of them and hardens the one thing
+none of them machine-checks.
 
-| Axis | Asterinas (Framekernel, USENIX ATC'25) | RedLeaf (PLOS'23) | This design |
+**Family 1 — microkernels: Redox, Tock, Hubris.** Redox is a
+MINIX-inspired microkernel (~16,000-line kernel; drivers and services
+run in userspace, isolated by the MMU). Tock targets embedded: a
+minimal trusted kernel with drivers compiled in as "capsules" written
+in Safe Rust, user processes protected by the MPU — at the price that
+every added capsule grows the TCB (measured TCB share ~43.8%). Hubris
+(Oxide) assigns all tasks statically at build time; kernel, drivers,
+and tasks live in separate protection domains enforced by hardware
+memory protection. Common position: isolation by HARDWARE (MMU/MPU), a
+tiny kernel, and an IPC cost on every cross-component call.
+
+**Family 2 — the framekernel: Asterinas (the closest relative).**
+A framekernel (the term comes from Asterinas, USENIX ATC'25) splits the
+kernel LOGICALLY into a Framework (the only zone allowed unsafe) and
+Services (all Safe Rust), in ONE address space and privilege level —
+service calls are plain function calls, no IPC overhead. Measured:
+TCB share ~14.0% (vs Tock 43.8%, Theseus 62.4%, RedLeaf 66.1%);
+LMBench geometric mean 1.08x of the reference monolithic, Nginx 1.17,
+Redis 1.31. This is structurally the same mechanism/policy split our
+design implements — the difference is that Asterinas' Framework is a
+LOGICAL layer held by convention and review inside one crate, while we
+draw the boundary on the CRATE COMPILATION UNIT and let the toolchain
+check it. That is a difference in enforcement hardness, not style.
+
+**Family 3 — leaf-style: the in-tree Rust leaf work in the reference
+monolithic.** No kernel rewrite: scheduler, mm, VFS, and RCU remain C;
+Rust lives in the leaves (drivers, file-system modules, binder-class
+subsystems). The unsafe boundary is the safe wrapper set the kernel
+crate exports; underneath it is FFI into C. The TCB is the ENTIRE C
+kernel — the Rust-side guarantees cover only newly written leaves. Its
+reference value for us is not architecture but ABSTRACTION CRAFT:
+deliberately minimal traits (FileSystem, Operations, INodeOperations
+kept separate rather than one 50-method mega-trait), static dispatch
+preferred over trait objects, thin mechanical error mapping. We use
+exactly these techniques to keep our seam costs low.
+
+**Family 4 — single-address-space cells: Theseus.** One address space,
+one privilege level; the thesis is "intralingual design" — hand as
+much OS bookkeeping as possible to the Rust compiler itself — with
+components as crates ("cells") that can load dynamically, to avoid
+state spill (persistent state changes caused by component interaction
+that make fault isolation and live update hard). TCB share ~62.4%,
+higher than Asterinas because more stays trusted. Theseus explicitly
+justifies the single-address-space, single-privilege model as matching
+the Rust compiler's execution model — an independent endorsement of
+our mechanism-stays-in-core decision.
+
+| Family | Representative | Isolation mechanism | Where unsafe lives | TCB share |
+|---|---|---|---|---|
+| Microkernel | Redox / Tock / Hubris | MMU/MPU + userspace | A very small kernel core | Tock ~43.8% |
+| Framekernel | Asterinas | Compiler + one address space | The Framework layer | ~14.0% |
+| Leaf-style | RfL in the monolithic | C kernel + Safe Rust leaves | The entire C kernel | n/a |
+| Single-address-space cells | Theseus | Compiler + dynamically loaded crates | Trusted components | ~62.4% |
+| **Seed-Core (ours)** | **Rux** | **Compiler at crate granularity + Cargo DAG + hardware backstop** | **An itemized ~3,000-line floor under the INV/F-row ledger** | **services 0 by construction; core = the ledger** |
+
+**What Seed-Core takes from each family, and what it adds.** From the
+microkernels: the discipline of a minimal trusted core — our floor is
+itemized line by line with a reference counterpart and an F-row id per
+entry, not a zone. From the framekernel: the single address space and
+the zero-IPC boundary — cross-crate calls are plain function calls,
+LTO-inlined, a full protocol layer thinner than RPC; where a seam's
+indirect-call cost surfaced, we engineered it away (context-switch
++25.1% recovered to +1.7% by devirtualization) rather than accepting
+it. From Theseus: the crate as THE isolation unit, and the
+single-address-space execution model as the one the compiler itself
+understands. From the leaf-style work: the minimal-trait,
+static-dispatch, thin-error-mapping craft that keeps our hook tables
+cheap. What NO other Rust kernel does — Asterinas included — is put
+the boundary in the BUILD SYSTEM: per-crate `#![forbid(unsafe_code)]`
+(writing unsafe in the service crates is a COMPILE ERROR, not a review
+finding — negative-probe verified), Cargo's package DAG refusing
+dependency cycles (layering as a build constraint), a CI ratchet on
+the attribute set, and an MPK hardware backstop behind the type layer
+(WRPKRU at 47-49 measured cycles, fault-injection proven) where the
+type-soundness bets of the other families have none. A logical layer
+erodes by convention; a build error cannot be written. That is the
+claim: monolithic-class performance, a TCB smaller than every measured
+share above, and the only boundary in the space defended by the
+toolchain rather than the process.
+
+### 2b-1. Focused deltas vs the two closest relatives
+
+| Axis | Asterinas (Framekernel, USENIX ATC'25) | RedLeaf (PLOS'23) | Seed-Core (this design) |
 |---|---|---|---|
 | Isolation enforced by | Convention + review inside ONE kernel crate | The type system, via inter-domain zero-copy RPC | The COMPILER at crate granularity: per-crate `#![forbid(unsafe_code)]` (negative-probe verified) + Cargo's package DAG refusing cycles (dependency-direction acyclicity machine-checked) + a CI ratchet on the attribute set |
 | Boundary shape | Intra-binary function calls | Typed RPC channels over domain boundaries | Plain cross-crate function calls, LTO-inlined — thinner than RPC by a whole protocol layer |
 | Type-soundness failure mode | No backstop | No backstop (their stated bet) | MPK hardware backstop: pkey-tagged core metadata pages fault outside their window (WRPKRU at 47-49 measured cycles; fault-injection proven) |
 | TCB form | The framework zone (review-audited) | A small verified runtime | ~3,000 lines ITEMIZED (each with reference counterpart + F-row id), covered by the verification stack (Kani all-input proofs, Miri zero-UB, Verus narrow-adopt for unbounded arithmetic lemmas) |
 | Unique here | — | — | The census/INV/F-row ledger (97%+ artifact coverage: the audit surface is a ledger, not a code read); the policy/core splits S1/M1 (decision logic exits the core, mechanism stays); the binding measure-first flip ladder with shelving-as-success |
-| Where they lead | Full Linux syscall surface shipped earlier | Complete zero-copy-RPC formalism | — (honest) |
+| Where they lead | Full syscall surface shipped earlier | Complete zero-copy-RPC formalism | — (honest) |
 
 ## 3. The end-state topology
 

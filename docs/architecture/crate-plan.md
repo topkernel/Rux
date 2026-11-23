@@ -1,6 +1,6 @@
 # The crate plan — Layer 1's end state
 
-Status: EXTRACTION MECHANICS (2026-11-21; the five-step flip recipe below is binding). The END-STATE is now governed by docs/architecture/micro-core-design.md (2026-11-22, user directive: minimal TCB, all-else safe crates) — this file's §1 topology and §5 keep-list are superseded by that document's §3 and §2.
+Status: EXTRACTION MECHANICS (2026-11-21; the five-step flip recipe below is binding). The END-STATE is now governed by docs/architecture/seed-core-design.md (2026-11-22, user directive: minimal TCB, all-else safe crates) — this file's §1 topology and §5 keep-list are superseded by that document's §3 and §2.
 
 ## 1. Target end state
 

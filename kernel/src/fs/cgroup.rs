@@ -1040,7 +1040,7 @@ pub fn mount_cgroup(source: &str, target: &str, fs_type: &str, data: Option<&str
     // cgroup v1 controller parity (launcher-errno lane): the reference
     // kernel exposes the MEMORY controller only — every other
     // controller token answers EINVAL (see the moved arm's history in
-    // micro-core-design §4 / the mount.rs git log).
+    // seed-core-design §4 / the mount.rs git log).
     if fs_type == "cgroup" {
         if let Some(opts) = data {
             let disallowed = opts.split(',').any(|tok| {

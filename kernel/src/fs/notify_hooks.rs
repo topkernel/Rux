@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Rung-3 NOTIFY SEAM: the framework-side notify hook table
-//! (micro-core-design §4). The VFS framework calls inode/file
+//! (seed-core-design §4). The VFS framework calls inode/file
 //! lifecycle notifications through THIS table; inotify registers its
 //! implementations at boot (via mount_table::register_builtin_handlers,
 //! the same seam point). When rux-fs flips, inotify's registration

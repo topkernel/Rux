@@ -1,4 +1,4 @@
-# DFX Retirement Review (micro-core-design §7 — the census-math input)
+# DFX Retirement Review (seed-core-design §7 — the census-math input)
 
 Date: 2026-11-22. Reviewer: the fixverify reverification lane.
 EXECUTED 2026-11-23 by the dfx-retire lane (branch dfx-retire, on top
