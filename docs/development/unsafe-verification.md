@@ -19,11 +19,11 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **2099**
-- with artifact (non-GAP): **1591** (75.8%)
+- unsafe regions: **2098**
+- with artifact (non-GAP): **1590** (75.8%)
 - GAP: **508**
-- by kind: block=1853, unsafe-extern=7, unsafe-fn=98, unsafe-impl=141
-- by category (regions carry 0..n tags): ptr-ops=500, asm=267, volatile=154, raw-construct=30, addr-arith=28, no-preempt=14, ffi=11, static-mut=5, transmute=5, layout-meta=2
+- by kind: block=1853, unsafe-extern=6, unsafe-fn=98, unsafe-impl=141
+- by category (regions carry 0..n tags): ptr-ops=500, asm=267, volatile=154, raw-construct=30, addr-arith=28, no-preempt=14, ffi=10, static-mut=5, transmute=5, layout-meta=2
 
 ## Per-subsystem
 
@@ -36,7 +36,7 @@ census id is accounted for here.
 | sched | 108 | 23 | 85 |
 | sync | 106 | 95 | 11 |
 | mm | 98 | 94 | 4 |
-| tests | 82 | 80 | 2 |
+| tests | 81 | 79 | 2 |
 | process | 80 | 18 | 62 |
 | <top> | 65 | 60 | 5 |
 | ipc | 58 | 53 | 5 |
@@ -2523,12 +2523,6 @@ census id is accounted for here.
 | 50 | test_scheduler | block | - | INV:INV-TESTHARNESS-1 | `6129a9005500` |
 | 58 | test_scheduler | block | - | INV:INV-TESTHARNESS-1 | `51fd2f996967` |
 
-### kernel/src/tests/signal.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 54 | test_signal | unsafe-extern | ffi | INV:INV-TESTHARNESS-1 | `640d5429f129` |
-
 ### kernel/src/tests/small_alloc.rs (9)
 
 | line | fn | kind | categories | artifact | id |
@@ -2782,7 +2776,7 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1803 | rust_main_impl | block | asm | GAP | `49c8a9be39bb` |
+| 1811 | rust_main_impl | block | asm | GAP | `29c8249b10b8` |
 
 ### kernel/src/list.rs (7)
 
@@ -2812,25 +2806,30 @@ census id is accounted for here.
 | 62 | sbi_system_reset | block | asm | INV:F16 | `cf8d6c7c915d` |
 | 98 | send_ipi | block | asm | INV:F16 | `e7cf147a1188` |
 
-### kernel/src/signal.rs (15)
+### kernel/src/signal.rs (13)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 152 | <module> | unsafe-extern | ffi | INV:INV-TASKREF-1 | `77543acc7a19` |
 | 250 | <module> | unsafe-impl | - | INV:INV-TASKREF-1 | `bb61c3274310` |
 | 251 | <module> | unsafe-impl | - | INV:INV-TASKREF-1 | `319c85df582f` |
-| 1346 | do_signal | block | - | INV:INV-TASKREF-1 | `a2fb3416789f` |
-| 1468 | do_signal | block | - | INV:INV-TASKREF-1 | `805706d02651` |
-| 1634 | restart_syscall_no_handler | block | - | INV:INV-TASKREF-1 | `6fd35f232873` |
-| 2222 | restore_sigcontext_aarch64 | block | - | INV:INV-PROC-FRAME-1 | `bb36993612a3` |
-| 2333 | restore_sigcontext_riscv64 | block | - | INV:INV-PROC-FRAME-1 | `0668989f79c4` |
-| 2691 | restore_sigcontext_x86_64 | block | - | INV:INV-PROC-FRAME-1 | `b1a077509734` |
-| 2800 | handle_default_signal | block | ptr-ops | INV:INV-TASKREF-1 | `9c474d1343a3` |
-| 2844 | handle_default_signal | block | ptr-ops | INV:INV-TASKREF-1 | `8bce7348cc09` |
-| 2990 | abort_reason_dump | block | - | INV:INV-TASKREF-1 | `16d218de9cdc` |
-| 3023 | abort_reason_dump | block | - | INV:INV-TASKREF-1 | `a68e17280390` |
-| 3761 | park_stopped_task | block | - | INV:INV-TASKREF-1 | `9d63af90ad84` |
-| 3963 | signal_wake_up_state | block | - | INV:INV-TASKREF-1 | `6abdda5e89b3` |
+| 1327 | do_signal | block | - | GAP | `d2566db39429` |
+| 1449 | do_signal | block | - | GAP | `360a4d3e49c6` |
+| 1602 | restart_syscall_no_handler | block | - | GAP | `71f56eaed208` |
+| 2190 | restore_sigcontext_aarch64 | block | - | GAP | `de55d2d8cc0b` |
+| 2301 | restore_sigcontext_riscv64 | block | - | GAP | `9c1ecc99c642` |
+| 2659 | restore_sigcontext_x86_64 | block | - | GAP | `8a7646deb905` |
+| 2772 | handle_default_signal | block | ptr-ops | GAP | `d8371ff7d84f` |
+| 2816 | handle_default_signal | block | ptr-ops | GAP | `f67a90efefbf` |
+| 3112 | park_stopped_task | block | - | GAP | `fae1538bde9c` |
+| 3314 | signal_wake_up_state | block | - | GAP | `abfe6054511d` |
+
+### kernel/src/signal_edges.rs (2)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 49 | abort_reason_dump | block | - | GAP | `5264bf70bd2a` |
+| 82 | abort_reason_dump | block | - | GAP | `51dc58685112` |
 
 ### kernel/src/timer.rs (4)
 

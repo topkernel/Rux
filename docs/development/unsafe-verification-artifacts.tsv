@@ -1420,7 +1420,7 @@ c0f33176cc5d	kernel/src/ipc/binder.rs	bc_corruption_snapshot	9463	raw-construct	
 22f581c6362a	kernel/src/ipc/binder.rs	get	13078		GAP
 81cb048abc4a	kernel/src/ipc/edges.rs	shm_page_get	24		GAP
 dde5b3003b47	kernel/src/ipc/edges.rs	shm_page_put	39		GAP
-49c8a9be39bb	kernel/src/lib.rs	rust_main_impl	1803	asm	GAP
+29c8249b10b8	kernel/src/lib.rs	rust_main_impl	1811	asm	GAP
 0953597665ba	kernel/src/list.rs	<module>	73		INV:INV-LIST-1
 d018f0b94a39	kernel/src/list.rs	<module>	92		INV:INV-LIST-1
 c48b7421a0d8	kernel/src/list.rs	<module>	108	ptr-ops	INV:INV-LIST-1
@@ -1865,18 +1865,18 @@ c6cf5be8265c	kernel/src/security/lsm.rs	security_hook_call	154		INV:INV-STATIC-C
 77543acc7a19	kernel/src/signal.rs	<module>	152	ffi	INV:INV-TASKREF-1
 bb61c3274310	kernel/src/signal.rs	<module>	250		INV:INV-TASKREF-1
 319c85df582f	kernel/src/signal.rs	<module>	251		INV:INV-TASKREF-1
-a2fb3416789f	kernel/src/signal.rs	do_signal	1346		INV:INV-TASKREF-1
-805706d02651	kernel/src/signal.rs	do_signal	1468		INV:INV-TASKREF-1
-6fd35f232873	kernel/src/signal.rs	restart_syscall_no_handler	1634		INV:INV-TASKREF-1
-bb36993612a3	kernel/src/signal.rs	restore_sigcontext_aarch64	2222		INV:INV-PROC-FRAME-1
-0668989f79c4	kernel/src/signal.rs	restore_sigcontext_riscv64	2333		INV:INV-PROC-FRAME-1
-b1a077509734	kernel/src/signal.rs	restore_sigcontext_x86_64	2691		INV:INV-PROC-FRAME-1
-9c474d1343a3	kernel/src/signal.rs	handle_default_signal	2800	ptr-ops	INV:INV-TASKREF-1
-8bce7348cc09	kernel/src/signal.rs	handle_default_signal	2844	ptr-ops	INV:INV-TASKREF-1
-16d218de9cdc	kernel/src/signal.rs	abort_reason_dump	2990		INV:INV-TASKREF-1
-a68e17280390	kernel/src/signal.rs	abort_reason_dump	3023		INV:INV-TASKREF-1
-9d63af90ad84	kernel/src/signal.rs	park_stopped_task	3761		INV:INV-TASKREF-1
-6abdda5e89b3	kernel/src/signal.rs	signal_wake_up_state	3963		INV:INV-TASKREF-1
+d2566db39429	kernel/src/signal.rs	do_signal	1327		INV:INV-TASKREF-1
+360a4d3e49c6	kernel/src/signal.rs	do_signal	1449		INV:INV-TASKREF-1
+71f56eaed208	kernel/src/signal.rs	restart_syscall_no_handler	1602		INV:INV-TASKREF-1
+de55d2d8cc0b	kernel/src/signal.rs	restore_sigcontext_aarch64	2190		INV:INV-PROC-FRAME-1
+9c1ecc99c642	kernel/src/signal.rs	restore_sigcontext_riscv64	2301		INV:INV-PROC-FRAME-1
+8a7646deb905	kernel/src/signal.rs	restore_sigcontext_x86_64	2659		INV:INV-PROC-FRAME-1
+d8371ff7d84f	kernel/src/signal.rs	handle_default_signal	2772	ptr-ops	INV:INV-TASKREF-1
+f67a90efefbf	kernel/src/signal.rs	handle_default_signal	2816	ptr-ops	INV:INV-TASKREF-1
+fae1538bde9c	kernel/src/signal.rs	park_stopped_task	3112		INV:INV-TASKREF-1
+abfe6054511d	kernel/src/signal.rs	signal_wake_up_state	3314		INV:INV-TASKREF-1
+5264bf70bd2a	kernel/src/signal_edges.rs	abort_reason_dump	49		INV:INV-TASKREF-1
+51dc58685112	kernel/src/signal_edges.rs	abort_reason_dump	82		INV:INV-TASKREF-1
 c79328b60e86	kernel/src/sync/edges.rs	read_bytes_via_task	49		INV:INV-SY-1
 4c578fcad135	kernel/src/sync/edges.rs	read_bytes_via_task	63	volatile,ptr-ops	INV:INV-SY-1
 d701c1527edc	kernel/src/sync/edges.rs	read_u32_via_task	96		INV:INV-SY-1
@@ -2047,7 +2047,6 @@ bc4b9ec58446	kernel/src/tests/safety_primitives.rs	test_safety_primitives	53		IN
 4867ce6b6a4d	kernel/src/tests/safety_primitives.rs	test_safety_primitives_frame_run	345	volatile	GAP
 6129a9005500	kernel/src/tests/scheduler.rs	test_scheduler	50		INV:INV-TESTHARNESS-1
 51fd2f996967	kernel/src/tests/scheduler.rs	test_scheduler	58		INV:INV-TESTHARNESS-1
-640d5429f129	kernel/src/tests/signal.rs	test_signal	54	ffi	INV:INV-TESTHARNESS-1
 1f8c8d913625	kernel/src/tests/small_alloc.rs	test_small_alloc	62	volatile,ptr-ops	INV:INV-TESTHARNESS-1
 6c621e727c68	kernel/src/tests/small_alloc.rs	test_small_alloc	80	volatile,ptr-ops	INV:INV-TESTHARNESS-1
 157268bf1c0a	kernel/src/tests/small_alloc.rs	test_small_alloc	110	volatile,ptr-ops	INV:INV-TESTHARNESS-1

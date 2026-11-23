@@ -140,7 +140,7 @@ kernel/src/tests/percpu.rs
 kernel/src/tests/pid_test.rs
 kernel/src/tests/semaphore.rs
 kernel/src/tests/sgid_mode.rs
-kernel/src/tests/signal_procmask.rs
+kernel/src/tests/services/signal_procmask_test.rs
 kernel/src/tests/sleep_wakeup.rs
 kernel/src/tests/smp.rs
 kernel/src/tests/smp_schedule.rs
