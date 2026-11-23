@@ -39,7 +39,7 @@ pub fn ensure_dump_thread() {
 }
 
 extern "C" fn mmprof_dump_fn(_arg: *mut core::ffi::c_void) -> i32 {
-    use crate::process::task::{Task, TaskState};
+    use crate::process::task::TaskState;
     loop {
         if crate::process::kthread::kthread_should_stop() {
             break;
