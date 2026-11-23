@@ -50,7 +50,9 @@ pub mod ipc {
 
     // the guest-test modules that followed the files (the framework's
     // tests/mod.rs rows are gated with the move note).
+    // Service-internal test lives CENTRALLY in kernel/src/tests/services/.
     #[cfg(feature = "unit-test")]
+    #[path = "../../../src/tests/services/ipc_sysv.rs"]
     pub mod ipc_sysv;
 
     // The framework's test counters + assert macros, re-exported at the
