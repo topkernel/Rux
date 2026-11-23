@@ -103,7 +103,7 @@ kernel/rux-sched/src/sched_policy/wakewatch.rs
 kernel/src/security/capability.rs
 kernel/src/sync/condvar.rs
 kernel/src/sync/semaphore.rs
-kernel/src/tests/boundary.rs
+kernel/src/tests/services/boundary.rs
 kernel/src/tests/buffer_state.rs
 kernel/src/tests/checksum.rs
 kernel/src/tests/config_test.rs
@@ -117,7 +117,7 @@ kernel/src/tests/fcntl.rs
 kernel/src/tests/file_buffer.rs
 kernel/src/tests/file_flags.rs
 kernel/src/tests/fileops_caps.rs
-kernel/src/tests/fork.rs
+kernel/src/tests/services/fork.rs
 kernel/src/tests/fstat.rs
 kernel/src/tests/futex_test.rs
 kernel/src/tests/getdents_cache.rs
@@ -137,13 +137,13 @@ kernel/src/tests/mount_flags.rs
 kernel/src/tests/page_allocator.rs
 kernel/src/tests/path.rs
 kernel/src/tests/percpu.rs
-kernel/src/tests/pid_test.rs
+kernel/src/tests/services/pid_test.rs
 kernel/src/tests/semaphore.rs
 kernel/src/tests/sgid_mode.rs
 kernel/src/tests/signal_procmask.rs
 kernel/src/tests/sleep_wakeup.rs
 kernel/src/tests/smp.rs
-kernel/src/tests/smp_schedule.rs
+kernel/src/tests/services/smp_schedule.rs
 kernel/src/tests/sync_locks.rs
 kernel/src/tests/syscall_misc.rs
 kernel/src/tests/syscall_network.rs
@@ -163,3 +163,9 @@ kernel/rux-sched/src/sched_policy/fair.rs
 kernel/rux-sched/src/sched_policy/rt.rs
 kernel/src/sched/cgroup.rs
 kernel/rux-sched/src/sched_policy/sched_policy.rs
+kernel/rux-process/src/lib.rs
+kernel/src/process/exit_teardown.rs
+kernel/src/process/exit_wait.rs
+kernel/src/process/task_helpers.rs
+kernel/src/process/ptrace_core.rs
+kernel/src/process/exec_ring.rs

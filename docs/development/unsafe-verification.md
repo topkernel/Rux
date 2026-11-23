@@ -27,18 +27,18 @@ FILE` owns one), and the gate fails on a drop that
 
 ## Totals
 
-- unsafe regions: **2099**
-- with artifact (non-GAP): **2053** (97.8%)
-- GAP: **46**
-- by kind: block=1853, unsafe-extern=7, unsafe-fn=98, unsafe-impl=141
-- by category (regions carry 0..n tags): ptr-ops=500, asm=267, volatile=154, raw-construct=30, addr-arith=28, no-preempt=14, ffi=11, static-mut=5, transmute=5, layout-meta=2
+- unsafe regions: **2097**
+- with artifact (non-GAP): **2050** (97.8%)
+- GAP: **47**
+- by kind: block=1851, unsafe-extern=7, unsafe-fn=98, unsafe-impl=141
+- by category (regions carry 0..n tags): ptr-ops=499, asm=267, volatile=154, raw-construct=30, addr-arith=28, no-preempt=14, ffi=11, static-mut=5, transmute=5, layout-meta=2
 
 ## Re-bank provenance
 
-- artifacts kept by id: **2053**
-- recovered from reference versions: **0**
-- references consulted: HEAD
-- annotated regions, baseline -> this bank: **2053 -> 2053**
+- artifacts kept by id: **2042**
+- recovered from reference versions: **8** (same-file 3, edited-site 5, file-move 0, moved-item 0)
+- references consulted: HEAD, HEAD^1, HEAD^2, history:96f2848b1, history:c01487587, history:0c8feb835, history:2a071cdf2, history:ccb0cabf6, history:78d73d4f6, history:938f1b41d, history:1d70a7c7d, history:e00a6cc4e, history:e78a5858b, history:33aa88454, history:67293fdcb, history:0db1981fd, history:7008a1cb1, history:d754f9e12, history:ff2d5ddb5, history:4741d627f, history:3f3f85760, history:05fb38075, history:2deea9ed7, history:f1900270e, history:d84fee492, history:82575b3b0, history:3e276af08, history:9b50aaff4, history:76ebff8e0, history:1e20375ab, history:25890277e, history:f035c2899, history:74d365f3f, history:9655f809c, history:82a7a7d0f, history:e255599d1, history:59a3f909a, history:07f730e64, history:de0a6071a, history:a09e7ab08, history:b8389cc06, history:2ed1470aa, history:c55875dfe, history:c187e1c35, history:e64dcfd36, history:1e687d251, history:10c8dc368, history:015823366, history:d878cd32c, history:3208bc9bb, history:65960c4e0, history:d5f2a4b29, history:b9d69b73c, history:db2da4975, history:a557edd1b, history:ca1005987, history:368a855ed, history:1e1bd0494, history:8832e06c2, history:418a7238e, history:dfe6bab32, history:64620c9c7, history:70794b235, history:46eadfea4, history:1c36a7a3c, history:d8ece4b39, history:2fe07a5a3, history:045a9f3a2, history:8f82e1326, history:1d518a966, history:d969cb7e9, history:dbdafa0a8, history:00bafaf99, history:6709b12cb, history:361701a15, history:5727de2f9, history:98658ba3e
+- annotated regions, baseline -> this bank: **2053 -> 2050**
 
 ## Per-subsystem
 
@@ -52,8 +52,8 @@ FILE` owns one), and the gate fails on a drop that
 | sync | 106 | 106 | 0 |
 | mm | 98 | 98 | 0 |
 | tests | 82 | 81 | 1 |
-| process | 80 | 80 | 0 |
-| <top> | 65 | 64 | 1 |
+| process | 78 | 78 | 0 |
+| <top> | 65 | 63 | 2 |
 | ipc | 58 | 55 | 3 |
 | safety | 55 | 51 | 4 |
 | perf | 40 | 40 | 0 |
@@ -603,8 +603,8 @@ FILE` owns one), and the gate fails on a drop that
 | 1160 | sigill_mapping_forensics | block | volatile,ptr-ops,addr-arith | INV:F19 | `a7b2dfe0808a` |
 | 1173 | sigill_mapping_forensics | block | volatile,ptr-ops,addr-arith | INV:F19 | `612ed05cbcc7` |
 | 1215 | sigill_mapping_forensics | block | volatile,ptr-ops | INV:F19 | `0e1d7d3a2cf6` |
-| 1286 | handle_breakpoint | block | - | INV:F19 | `6ff21bf71a34` |
-| 1323 | handle_breakpoint | block | - | INV:F19 | `8b31ee7bd680` |
+| 1286 | handle_breakpoint | block | - | INV:F19 | `ccd204f1ae76` |
+| 1323 | handle_breakpoint | block | - | INV:F19 | `d794afe08d5a` |
 | 1362 | sigsegv_has_handler | block | - | INV:F19 | `20c877e34d95` |
 | 1382 | sigbus_has_handler | block | - | INV:F19 | `b9c608b770a6` |
 | 1394 | riscv_bad_user_frame | block | - | INV:F19 | `e9c6257a4208` |
@@ -1003,9 +1003,9 @@ FILE` owns one), and the gate fails on a drop that
 | 2421 | handle_device_not_available | block | - | INV:F19 | `d7c0d367a1c3` |
 | 2441 | handle_debug | block | - | INV:F19 | `66468611dc9f` |
 | 2445 | handle_debug | block | - | INV:F19 | `0b94902df44e` |
-| 2466 | handle_debug | block | - | INV:F19 | `fb6c5eb50a63` |
-| 2545 | handle_breakpoint | block | - | INV:F19 | `897b0fac74bb` |
-| 2567 | handle_breakpoint | block | - | INV:F19 | `b2ba9b45a596` |
+| 2466 | handle_debug | block | - | INV:F19 | `963a1bf50c28` |
+| 2545 | handle_breakpoint | block | - | INV:F19 | `1295f6d1e988` |
+| 2567 | handle_breakpoint | block | - | INV:F19 | `0a19a190b64f` |
 | 2672 | gp_regmem_dump | block | - | INV:F19 | `5b89002c68f4` |
 | 2681 | gp_regmem_dump | block | - | INV:F19 | `82fa14aa1dd9` |
 | 2694 | gp_regmem_dump | block | - | INV:F19 | `53101da2662a` |
@@ -2487,7 +2487,7 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 505 | setup_boot_task_fdtable | block | - | INV:INV-TESTHARNESS-1 | `b36caf829cd1` |
+| 506 | setup_boot_task_fdtable | block | - | INV:INV-TESTHARNESS-1 | `ef093b4bbe1b` |
 
 ### kernel/src/tests/net_pins.rs (2)
 
@@ -2629,19 +2629,12 @@ FILE` owns one), and the gate fails on a drop that
 
 ## process
 
-### kernel/src/process/mod.rs (3)
+### kernel/src/process/mod.rs (2)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 82 | set_user_tls | block | - | INV:INV-PROC-BORROW-1 | `f58c14ff6fd8` |
-| 112 | current_pgid | block | - | INV:INV-PROC-BORROW-1 | `960935ebc3fe` |
-| 133 | find_task_by_pid | block | - | INV:INV-PROC-BORROW-1 | `4e7c258628b9` |
-
-### kernel/src/process/ptrace.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 368 | sys_ptrace | block | ptr-ops | INV:INV-PROC-BORROW-1 | `933975afa1e8` |
+| 87 | current_pgid | block | - | INV:INV-PROC-BORROW-1 | `9d94c11daed7` |
+| 108 | find_task_by_pid | block | - | INV:INV-PROC-BORROW-1 | `27b4f2a4362e` |
 
 ### kernel/src/process/task_ref.rs (5)
 
@@ -2835,7 +2828,7 @@ FILE` owns one), and the gate fails on a drop that
 | 250 | <module> | unsafe-impl | - | INV:INV-TASKREF-1 | `bb61c3274310` |
 | 251 | <module> | unsafe-impl | - | INV:INV-TASKREF-1 | `319c85df582f` |
 | 1346 | do_signal | block | - | INV:INV-TASKREF-1 | `a2fb3416789f` |
-| 1468 | do_signal | block | - | INV:INV-TASKREF-1 | `805706d02651` |
+| 1468 | do_signal | block | - | GAP | `12f9158353e4` |
 | 1634 | restart_syscall_no_handler | block | - | INV:INV-TASKREF-1 | `6fd35f232873` |
 | 2222 | restore_sigcontext_aarch64 | block | - | INV:INV-PROC-FRAME-1 | `bb36993612a3` |
 | 2333 | restore_sigcontext_riscv64 | block | - | INV:INV-PROC-FRAME-1 | `0668989f79c4` |

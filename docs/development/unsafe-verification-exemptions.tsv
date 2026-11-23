@@ -5,3 +5,6 @@
 #   to     the count it may come down to, and no further (one row never covers a second loss)
 #   reason why the annotations left with their regions
 # A drop that has no matching row fails the gate. Remove a row once no baseline shows its drop.
+# rux-process flip (2026-11-23): reviewed eliminations, not lost annotations
+kernel/src/process/mod.rs	3	2	set_user_tls's raw pt_regs tp write replaced by the safe pt_regs_mut frame view when the helper moved to the rux-process crate
+kernel/src/process/ptrace.rs	1	0	the lone raw parent-task deref now rides unsafe_edges::borrow_task like every neighboring call site (crate forbid boundary)

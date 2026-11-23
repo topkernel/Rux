@@ -355,8 +355,8 @@ d89ad04bf893	kernel/src/arch/riscv64/trap.rs	handle_illegal_instruction	1028		IN
 a7b2dfe0808a	kernel/src/arch/riscv64/trap.rs	sigill_mapping_forensics	1160	volatile,ptr-ops,addr-arith	INV:F19
 612ed05cbcc7	kernel/src/arch/riscv64/trap.rs	sigill_mapping_forensics	1173	volatile,ptr-ops,addr-arith	INV:F19
 0e1d7d3a2cf6	kernel/src/arch/riscv64/trap.rs	sigill_mapping_forensics	1215	volatile,ptr-ops	INV:F19
-6ff21bf71a34	kernel/src/arch/riscv64/trap.rs	handle_breakpoint	1286		INV:F19
-8b31ee7bd680	kernel/src/arch/riscv64/trap.rs	handle_breakpoint	1323		INV:F19
+ccd204f1ae76	kernel/src/arch/riscv64/trap.rs	handle_breakpoint	1286		INV:F19
+d794afe08d5a	kernel/src/arch/riscv64/trap.rs	handle_breakpoint	1323		INV:F19
 20c877e34d95	kernel/src/arch/riscv64/trap.rs	sigsegv_has_handler	1362		INV:F19
 b9c608b770a6	kernel/src/arch/riscv64/trap.rs	sigbus_has_handler	1382		INV:F19
 e9c6257a4208	kernel/src/arch/riscv64/trap.rs	riscv_bad_user_frame	1394		INV:F19
@@ -650,9 +650,9 @@ e1d2d8124283	kernel/src/arch/x86_64/trap.rs	handle_timer_tick	1905	volatile	INV:
 d7c0d367a1c3	kernel/src/arch/x86_64/trap.rs	handle_device_not_available	2421		INV:F19
 66468611dc9f	kernel/src/arch/x86_64/trap.rs	handle_debug	2441		INV:F19
 0b94902df44e	kernel/src/arch/x86_64/trap.rs	handle_debug	2445		INV:F19
-fb6c5eb50a63	kernel/src/arch/x86_64/trap.rs	handle_debug	2466		INV:F19
-897b0fac74bb	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2545		INV:F19
-b2ba9b45a596	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2567		INV:F19
+963a1bf50c28	kernel/src/arch/x86_64/trap.rs	handle_debug	2466		INV:F19
+1295f6d1e988	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2545		INV:F19
+0a19a190b64f	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2567		INV:F19
 5b89002c68f4	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2672		INV:F19
 82fa14aa1dd9	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2681		INV:F19
 53101da2662a	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2694		INV:F19
@@ -1610,10 +1610,8 @@ f7371cf5593f	kernel/src/perf/mod.rs	sys_perf_event_open	2103		INV:INV-PERF-EV-1
 49d3b72c6b32	kernel/src/printk.rs	ring_rec	130		INV:INV-STATIC-CELL-1
 7065f11b4033	kernel/src/printk.rs	ring_rec_mut	142		INV:INV-STATIC-CELL-1
 0f71f7e1f40d	kernel/src/printk.rs	init_logger	2134		INV:INV-FS-GLOBALSB-1
-f58c14ff6fd8	kernel/src/process/mod.rs	set_user_tls	82		INV:INV-PROC-BORROW-1
-960935ebc3fe	kernel/src/process/mod.rs	current_pgid	112		INV:INV-PROC-BORROW-1
-4e7c258628b9	kernel/src/process/mod.rs	find_task_by_pid	133		INV:INV-PROC-BORROW-1
-933975afa1e8	kernel/src/process/ptrace.rs	sys_ptrace	368	ptr-ops	INV:INV-PROC-BORROW-1
+9d94c11daed7	kernel/src/process/mod.rs	current_pgid	87		INV:INV-PROC-BORROW-1
+27b4f2a4362e	kernel/src/process/mod.rs	find_task_by_pid	108		INV:INV-PROC-BORROW-1
 b4a45dfecc65	kernel/src/process/task_ref.rs	<module>	78		INV:INV-TASKREF-1
 66f9b55e364b	kernel/src/process/task_ref.rs	deref	91		INV:INV-TASKREF-1
 d205ba0b4367	kernel/src/process/task_ref.rs	deref_mut	101		INV:INV-TASKREF-1
@@ -1866,7 +1864,7 @@ c6cf5be8265c	kernel/src/security/lsm.rs	security_hook_call	154		INV:INV-STATIC-C
 bb61c3274310	kernel/src/signal.rs	<module>	250		INV:INV-TASKREF-1
 319c85df582f	kernel/src/signal.rs	<module>	251		INV:INV-TASKREF-1
 a2fb3416789f	kernel/src/signal.rs	do_signal	1346		INV:INV-TASKREF-1
-805706d02651	kernel/src/signal.rs	do_signal	1468		INV:INV-TASKREF-1
+12f9158353e4	kernel/src/signal.rs	do_signal	1468		INV:INV-TASKREF-1
 6fd35f232873	kernel/src/signal.rs	restart_syscall_no_handler	1634		INV:INV-TASKREF-1
 bb36993612a3	kernel/src/signal.rs	restore_sigcontext_aarch64	2222		INV:INV-PROC-FRAME-1
 0668989f79c4	kernel/src/signal.rs	restore_sigcontext_riscv64	2333		INV:INV-PROC-FRAME-1
@@ -2032,7 +2030,7 @@ c20584d48b87	kernel/src/tests/mkdir_unlink.rs	test_rmdir	95		INV:INV-TESTHARNESS
 98693563d5c8	kernel/src/tests/mkdir_unlink.rs	test_rmdir	97		INV:INV-TESTHARNESS-1
 8971a83c7789	kernel/src/tests/mkdir_unlink.rs	test_unlink	163		INV:INV-TESTHARNESS-1
 faa3b2f6a714	kernel/src/tests/mkdir_unlink.rs	test_unlink	165		INV:INV-TESTHARNESS-1
-b36caf829cd1	kernel/src/tests/mod.rs	setup_boot_task_fdtable	505		INV:INV-TESTHARNESS-1
+ef093b4bbe1b	kernel/src/tests/mod.rs	setup_boot_task_fdtable	506		INV:INV-TESTHARNESS-1
 2bf1d1271dec	kernel/src/tests/net_pins.rs	test_net_pins	59	ptr-ops	INV:INV-TESTHARNESS-1
 0a4e76b160d1	kernel/src/tests/net_pins.rs	test_net_pins	166		INV:INV-TESTHARNESS-1
 cfce9e7aeebe	kernel/src/tests/network.rs	test_skb_push_pull	111	ptr-ops	INV:INV-TESTHARNESS-1
