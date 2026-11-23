@@ -51,23 +51,29 @@ pub mod fs {
     pub mod tmpfs;
     pub mod devfs;
     pub mod procfs;
-    #[cfg(feature = "unit-test")]
-    pub mod initrd_test;
-    #[cfg(feature = "unit-test")]
-    pub mod rootfs_test;
-    #[cfg(feature = "unit-test")]
-    pub mod tmpfs_test;
-    #[cfg(feature = "unit-test")]
-    pub mod tmpfs_mknod_test;
-    #[cfg(feature = "unit-test")]
-    pub mod procfs_test;
     pub use rux::fs::*;
 }
 
-// Service-internal test lives CENTRALLY in kernel/src/tests/services/.
+// Service-internal tests live CENTRALLY in kernel/src/tests/services/
+// (the project test-location rule); compiled here for crate visibility.
 #[cfg(feature = "unit-test")]
 #[path = "../../src/tests/services/pipe2_test.rs"]
 pub mod pipe2_test;
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/initrd_test.rs"]
+pub mod initrd_test;
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/rootfs_test.rs"]
+pub mod rootfs_test;
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/tmpfs_test.rs"]
+pub mod tmpfs_test;
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/tmpfs_mknod_test.rs"]
+pub mod tmpfs_mknod_test;
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/procfs_test.rs"]
+pub mod procfs_test;
 
 /// The guest-test entry (make test): the framework's run_all_tests
 /// invokes this through the SERVICE-TEST SEAM (rux-bin registers it at
@@ -78,13 +84,13 @@ pub fn run_unit_tests() {
     rux::tests::test_group_start("pipe2");
     crate::pipe2_test::test_pipe2();
     rux::tests::test_group_start("initrd");
-    crate::fs::initrd_test::test_initrd();
+    crate::initrd_test::test_initrd();
     rux::tests::test_group_start("fs_pins/rootfs");
-    crate::fs::rootfs_test::test_rootfs_pins();
+    crate::rootfs_test::test_rootfs_pins();
     rux::tests::test_group_start("tmpfs-mknod");
-    crate::fs::tmpfs_mknod_test::test_tmpfs_mknod();
+    crate::tmpfs_mknod_test::test_tmpfs_mknod();
     rux::tests::test_group_start("procfs");
-    crate::fs::procfs_test::test_procfs();
+    crate::procfs_test::test_procfs();
 }
 
 /// The boot-time registration (rux-bin calls this before kmain):

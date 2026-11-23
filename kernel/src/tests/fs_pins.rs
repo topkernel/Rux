@@ -7,11 +7,6 @@
 //! kernel/src/fs/ext4/{csum,indirect}.rs per the test-layout policy
 //! (those host-side blocks never compiled in this no_std crate).
 
-use crate::fs::ext4::csum::{
-    crc32c, group_desc_csum_ok, group_desc_csum_set, inode_csum_ok, inode_csum_set,
-    superblock_csum_ok, superblock_csum_set, CRC32C_TABLE,
-};
-use crate::fs::ext4::indirect::{get_indirect_level, max_file_size, Ext4BlockIterator};
 use crate::fs::stat::Stat;
 use crate::fs::superblock::{
     get_fs_type, register_filesystem, unregister_filesystem, FileSystemType, SuperBlock,
