@@ -55,8 +55,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from unsafe_census import (  # noqa: E402
-    ARTIFACTS_TSV, KERNEL_SRC, ROOT, Snapshot, full_census, ledger_baselines,
-    load_artifacts, scan_texts, git_tree_texts)
+    ARTIFACTS_TSV, KERNEL_SRC, ROOT, Snapshot, fold_moves, full_census,
+    ledger_baselines, load_artifacts, scan_texts, git_tree_texts)
 
 ARCH_DOCS = [
     ROOT / "docs" / "architecture" / "lock-ordering.md",
@@ -247,9 +247,13 @@ def annotated_count_check(regions, artifacts, base_args, failures):
                   f"{rev[:9]} (shallow clone?) — skipped")
             continue
         base = snap.annotated_by_file()
+        # A file git reports as renamed since the baseline keeps its
+        # annotations at the new path; credit them to the baseline's
+        # path so a move with the counts carried is not a drop.
+        folded = fold_moves(dict(now), rev)
         drops = exempted = 0
         for fname in sorted(base):
-            n = now.get(fname, 0)
+            n = folded.get(fname, 0)
             if n >= base[fname]:
                 continue
             hit = next((i for i, (f, frm, to, _) in enumerate(exemptions)

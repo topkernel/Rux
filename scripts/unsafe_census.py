@@ -830,6 +830,11 @@ def sidecar_history(start):
 # Edited-site tier of the pairing: same owner and ordinal, text changed.
 EDIT_SHINGLE = 4            # tokens per shingle
 EDIT_SIMILARITY = 0.8       # Jaccard overlap of the two shingle sets
+# Short regions have too few shingles for that ratio to survive even a
+# one-identifier rewrite (the dfx->debug sweep), so a same-length text
+# differing in at most this many token positions also counts as edited.
+EDIT_SHORT_TOKENS = 16
+EDIT_MAX_SUBSTITUTIONS = 2
 # A top-level item (unsafe fn / impl / extern) is its own context. One
 # this short — `unsafe impl Send for Handle {}` — collides across types,
 # so it is not evidence that an item moved between files.
@@ -865,6 +870,18 @@ def text_similarity(o, n):
     return sim
 
 
+def _token_rewrite(o, n):
+    """True when a short region text changed only by a few substituted
+    tokens — the shape of a mechanical identifier sweep (dfx -> debug),
+    which destroys shingle similarity on texts this short."""
+    a = _TOKEN_RE.findall(_region_text(o))
+    b = _TOKEN_RE.findall(_region_text(n))
+    if len(a) != len(b) or len(a) >= EDIT_SHORT_TOKENS:
+        return False
+    removed = Counter(a) - Counter(b)
+    return sum(removed.values()) <= EDIT_MAX_SUBSTITUTIONS
+
+
 # How much a paired region counts for; the alignment maximizes the sum.
 _WEIGHT = {"exact": 4, "shift": 3, "edited": 2}
 
@@ -874,7 +891,8 @@ def _pair_class(o, n, edited):
         return None
     if o["text_hash"] == n["text_hash"]:
         return "exact" if o["ordinal"] == n["ordinal"] else "shift"
-    if edited and o["ordinal"] == n["ordinal"] and text_similarity(o, n) >= EDIT_SIMILARITY:
+    if edited and o["ordinal"] == n["ordinal"] and (
+            text_similarity(o, n) >= EDIT_SIMILARITY or _token_rewrite(o, n)):
         return "edited"
     return None
 
@@ -948,6 +966,23 @@ def moved_paths(rev):
         if len(old) == 1 and sum(os.path.basename(a) == base for a in added) == 1:
             pairs.setdefault(new, old[0])
     return pairs
+
+
+def fold_moves(counts, rev):
+    """{old_path: count} — counts credited to the paths a baseline knows.
+
+    A file git reports as renamed since <rev> (moved_paths) keeps its
+    regions at the NEW path; a per-file drop check keyed on the baseline
+    path must see them there. What stays a drop: annotations lost in the
+    move (the sum falls short), or a file that vanished without a rename
+    record. What this could hide: a baseline file whose name was reused
+    by an unrelated new file — the same basename fallback moved_paths
+    uses, bounded by the exact-count matching everywhere else."""
+    out = dict(counts)
+    for new, old in moved_paths(rev).items():
+        if old in out or new in out:
+            out[old] = out.get(old, 0) + out.get(new, 0)
+    return out
 
 
 def how_group(how):
@@ -1283,7 +1318,18 @@ def rebank_ledger(args, regions):
         if artifacts.get(r["id"], "GAP") != "GAP":
             after[r["file"]] += 1
     files = sorted(set(before) | set(after))
-    drops = [f for f in files if after.get(f, 0) < before.get(f, 0)]
+    # A drop is decided per baseline, with renamed-in counts folded back
+    # onto the baseline's path (a file that moved keeps its annotations
+    # at the new path; only a real loss stays a drop).
+    drops = []
+    for label, rev in baselines:
+        snap = snaps[(rev, SIDE_CAR_REL)]
+        if not snap.rows or not snap.regions:
+            continue
+        folded = fold_moves(dict(after), rev)
+        drops.extend(f for f, n in snap.annotated_by_file().items()
+                     if folded.get(f, 0) < n)
+    drops = sorted(set(drops))
     blocked = [f for f in drops if f not in set(args.allow_drop or [])]
 
     # ---- report ----
@@ -1334,8 +1380,10 @@ def rebank_ledger(args, regions):
         print("\nannotated-count drops:")
         base_rev = dict(baselines)
         for fname in drops:
-            snap = snaps[(base_rev[before_src[fname]], SIDE_CAR_REL)]
-            print(f"  {fname}: {before[fname]} -> {after.get(fname, 0)}"
+            rev = base_rev[before_src[fname]]
+            snap = snaps[(rev, SIDE_CAR_REL)]
+            folded = fold_moves(dict(after), rev)
+            print(f"  {fname}: {before[fname]} -> {folded.get(fname, 0)}"
                   + ("  --allow-drop given" if fname not in blocked else "  needs --allow-drop"))
             for reason, n in sorted(explain_drop(cur, dest, snap, fname, artifacts).items(),
                                     key=lambda x: -x[1]):
@@ -1408,7 +1456,8 @@ def rebank_ledger(args, regions):
         print("\nallowed drops (the gate needs a row for each in "
               f"{ROOT / 'docs' / 'development' / 'unsafe-verification-exemptions.tsv'}):")
         for fname in drops:
-            print(f"  - {fname}: {before[fname]} -> {after.get(fname, 0)}")
+            folded = fold_moves(dict(after), base_rev[before_src[fname]])
+            print(f"  - {fname}: {before[fname]} -> {folded.get(fname, 0)}")
 
     provenance = {
         "by_id": len(by_id_carried),
