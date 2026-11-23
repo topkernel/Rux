@@ -44,24 +44,45 @@ of it": kernel/src held 286,139 lines with only 1,838 unsafe blocks and
 
 Two measured facts define the method.
 
-**Fact 1 — what actually has to stay is small.** A function must stay
-in the core when a hot-path site calls it directly: the trap entry and
-return, the context switch, the page-fault path, the VFS walk, bio and
-the page cache, the allocator entry points, the lock primitives, the
-timer tick, IRQ dispatch. Measured on the 2026-11-23 tree by scanning
-those files for direct name references (a deliberately conservative
-test — any name a hot-path file mentions counts as hot):
+**Fact 1 — what actually has to stay is small, and the direction of
+the call is what decides it.** Two things force code to stay in the
+core:
 
-| | lines |
-|---|---|
-| function bodies in kernel/src (tests excluded) | 228,305 |
-| of which called directly from a hot-path file | 106,431 (47%) |
-| of which reachable from no hot-path file | 121,874 |
+1. a function that a hot-path site calls directly by name. After the
+   move that call would have to go through the hook table (an indirect
+   call the compiler cannot inline), so the function stays where the
+   hot caller can reach it directly;
+2. a type whose fields or methods a hot path touches (`Task`, `Vma`,
+   `Dentry`, the wait-queue and lock types), with its inherent impls —
+   Cargo forbids core -> service, so a type the switch or fault path
+   needs cannot live in a service crate.
 
-So the core can lose roughly 122k lines of function bodies without a
-single hot call becoming indirect — before counting what else leaves
-(types, constants, whole cold files). The target core size is about
-100k lines: the hot functions plus the types they operate on.
+Everything else leaves. A function that hot paths do not call is
+reached only from cold sites, and cold upward calls through the table
+are fine; the moved code's own calls INTO the core are direct
+cross-crate calls that inline (crate-plan §3a). The service -> core
+direction costs nothing. Only core -> service costs, and only on hot
+paths.
+
+Measured on the 2026-11-23 tree (scripts/core_size_map.py; hot-path
+files are the trap/switch/fault/walk/lock/alloc/tick files; a call in
+a hot file that names a function defined elsewhere is an upward hot
+call):
+
+| | conservative scan | path-resolved scan |
+|---|---|---|
+| function bodies in kernel/src (tests excluded) | 228,305 | 237,908 |
+| must stay in the core (in a hot file, or called upward from one) | ~97,000 (42%) | 76,194 (32%) |
+| leaves the core | ~131,000 (58%) | 159,714 (68%) |
+
+Both scans over-keep: any call a hot file writes to a name defined
+elsewhere counts as upward. The path-resolved scan is stricter about
+which calls actually reach the callee and so keeps less. The true
+figure lies at or below the lower one and is settled per subsystem as
+each lane moves it — a function the scans call cold but that turns out
+to sit on a hot path stays, and the lane records why. The working
+target is therefore: **the core shrinks from 286k lines to under
+100k**, the rest organized into per-subsystem service crates.
 
 **Fact 2 — files are mixed, so the unit of the move is the function,
 not the file.** Only 34 files (7,122 lines) have no hot-called function
@@ -89,23 +110,25 @@ freely — a direct cross-crate call, inlinable. The S1 case study (§4)
 is the record of what happens when this rule is broken and how it is
 fixed; every lane measures its hot rows before and after.
 
-Per subsystem, the cold remainder measured on 2026-11-23 (lines of
-function bodies not called from any hot-path file):
+Per subsystem, the cold remainder measured on 2026-11-23 with the
+path-resolved scan (lines of function bodies not called upward from
+any hot-path file and not defined inside one):
 
-| subsystem | hot | cold (leaves the core) |
+| subsystem | stays | leaves |
 |---|---|---|
-| drivers | 3,387 | 14,743 |
-| sync | 5,711 | 14,396 |
-| process | 8,348 | 9,435 |
-| debug | 6,642 | 8,239 |
-| fs (incl. procfs, devfs) | 24,134 | 21,726 |
-| ipc | 1,758 | 7,888 |
-| arch (three architectures) | 21,349 | 13,566 |
-| mm (incl. policy) | 12,779 | 9,537 |
-| root files (signal.rs, console.rs, cmdline.rs, …) | 4,333 | 10,323 |
-| sched | 12,731 | 2,232 |
-| interrupt | 2,727 | 0 |
-| others (trace, perf, timer, syscall table, io_uring, safety, net) | 1,981 | 10,967 |
+| fs | 22,977 | 24,609 |
+| mm | 9,509 | 13,682 |
+| sync | 3,098 | 17,434 |
+| drivers | 409 | 18,100 |
+| process | 3,056 | 15,263 |
+| debug | 254 | 15,064 |
+| arch (three architectures) | 17,235 | 18,848 |
+| root files (signal.rs, console.rs, cmdline.rs, …) | 2,738 | 12,292 |
+| sched | 12,542 | 2,960 |
+| ipc | 0 | 9,857 |
+| syscall table, timer, io_uring, net, module | 0 | 6,607 |
+| trace, perf, security | 429 | 4,528 |
+| safety, interrupt | 3,947 | 0 |
 
 The numbers are a map, not a promise: a "cold" function that turns out
 to be on a path the measurement missed stays, and the lane that finds

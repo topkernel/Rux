@@ -4,18 +4,20 @@
 Regenerates docs/development/core-size/<subsystem>.md (design of record:
 docs/architecture/seed-core-design.md §1a).
 
-A function is HOT when a hot-path file mentions its name followed by
-`(`. Hot-path files are the ones on the trap/switch/fault/walk/lock/
-alloc/tick paths (HOT_FILES below). Hot functions stay in the core
-because a hot site calls them directly; every other function leaves
-for its subsystem's service crate.
+A function STAYS in the core when one of two things holds: it is
+defined inside a hot-path file (the trap/switch/fault/walk/lock/alloc/
+tick files, HOT_FILES below), or a hot-path file calls it by name and
+it is defined elsewhere — an UPWARD call from a hot site, which would
+become an indirect call through the hook table after a move. Every
+other function LEAVES for its subsystem's service crate: its callers
+are cold, and its own calls into the core are direct cross-crate calls
+that inline.
 
-The test is deliberately conservative (name-level, not resolved): a
-cold function that a hot file calls through a pointer, macro or
-re-export is missed, and the lane that finds it records why it stays.
-A function whose name a hot file mentions for any reason (a comment
-is stripped, but a same-named function in another module is not)
-counts as hot — that over-keeps, which is the safe direction.
+The call resolution is name-level with a path check, not a resolved
+call graph: a cold function that a hot file reaches through a pointer,
+a macro or a re-export is missed, and the lane that finds it records
+why it stays. A same-named function in a module the written path can
+reach counts as upward-called — that over-keeps, the safe direction.
 
 Usage:  python3 scripts/core_size_map.py            # write + summary
         python3 scripts/core_size_map.py --summary  # summary only
@@ -44,7 +46,9 @@ HOT_FILES = re.compile(
 FN = re.compile(
     r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?(?:const[ \t]+)?(?:unsafe[ \t]+)?"
     r'(?:extern[ \t]+"C"[ \t]+)?fn[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)', re.M)
-CALL = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
+CALL = re.compile(
+    r"((?:crate|super|self|rux)::(?:[a-zA-Z_][a-zA-Z0-9_]*::)*)?"
+    r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
 NESTED = {"fs", "drivers", "mm", "arch", "process", "ipc", "sched", "debug",
           "sync", "interrupt", "timer", "trace", "perf", "syscall", "safety",
           "net", "io_uring", "module"}
@@ -81,20 +85,58 @@ def main():
     files = [f for f in glob.glob(os.path.join(src, "**", "*.rs"), recursive=True)
              if "ksyms_generated" not in f and os.sep + "tests" + os.sep not in f]
     texts = {p: strip(open(p, errors="replace").read()) for p in files}
-    hot_used = set()
-    for p in files:
-        if HOT_FILES.search(os.path.relpath(p, ROOT)):
-            hot_used.update(m.group(1) for m in CALL.finditer(texts[p]))
-
-    rows = collections.defaultdict(list)
+    # fns: (file, name, start, end, text)
+    fns = []
+    fn_at = {}
     for p in files:
         s = texts[p]
         ms = list(FN.finditer(s))
-        rel = os.path.relpath(p, src)
         for i, m in enumerate(ms):
             start = s.count("\n", 0, m.start()) + 1
-            end = s.count("\n", 0, ms[i + 1].start()) if i + 1 < len(ms) else s.count("\n")
-            rows[subsystem(rel)].append((rel, m.group(1), start, end, m.group(1) in hot_used))
+            end = s.count("\n", 0, ms[i + 1].start()) + 1 if i + 1 < len(ms) else s.count("\n") + 1
+            fns.append((p, m.group(1), start, end))
+            fn_at.setdefault(m.group(1), []).append((p, start))
+    by_name = collections.defaultdict(list)
+    for f in fns:
+        by_name[f[1]].append(f)
+
+    def modpath(p):
+        return "crate::" + os.path.relpath(p, src)[:-3].replace("/", "::")
+
+    # STAY = defined in a hot-path file, OR called upward by name from one.
+    # A site in a hot file is an upward call when the callee is defined in
+    # ANOTHER file and the written path reaches that file's module. This
+    # is the direction that would cost an indirect call after a move;
+    # a moved function's own calls into the core are direct and free.
+    stay = {}
+    for f in fns:
+        stay[(f[0], f[1], f[2])] = HOT_FILES.search(os.path.relpath(f[0], ROOT)) is not None
+    for p in files:
+        if not HOT_FILES.search(os.path.relpath(p, ROOT)):
+            continue
+        for m in CALL.finditer(texts[p]):
+            name = m.group(2)
+            if name not in by_name:
+                continue
+            path = m.group(1) or ""
+            for (dp, dn, st, en) in by_name[name]:
+                if dp == p:
+                    continue
+                mp = modpath(dp)
+                if path == "":
+                    reach = os.path.dirname(dp) == os.path.dirname(p)
+                elif path.startswith("crate::"):
+                    reach = mp.startswith(path)
+                else:
+                    last = path.rstrip(":").split("::")[-1]
+                    reach = last in mp.split("::")
+                if reach:
+                    stay[(dp, dn, st)] = True
+
+    rows = collections.defaultdict(list)
+    for p, name, start, end in fns:
+        rel = os.path.relpath(p, src)
+        rows[subsystem(rel)].append((rel, name, start, end, stay.get((p, name, start), False)))
 
     summary_only = "--summary" in sys.argv
     if not summary_only:
