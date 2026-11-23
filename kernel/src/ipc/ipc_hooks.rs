@@ -35,9 +35,9 @@ pub enum KeyQuota {
 #[derive(Clone, Copy)]
 pub struct IpcHooks {
     // ---- process exit (do_exit's cleanup pass) ----
-    /// Reverse the exiting task's SEM_UNDO adjustments (sysv_sem).
-    pub sem_undo_exit: fn(&Task),
     /// Release the exiting task's POSIX MQ fd entries (posix_mq).
+    /// (sysv_sem's sem_undo_exit stays a DIRECT framework call — the
+    /// file's own shelving verdict.)
     pub mq_fds_cleanup: fn(&Task),
 
     // ---- exec ----
@@ -67,7 +67,6 @@ pub struct IpcHooks {
     pub set_key_quota: fn(KeyQuota, i32),
 
     // ---- /proc/sysvipc rows (procfs) ----
-    pub sem_proc_show: fn() -> Vec<u8>,
     pub msg_proc_show: fn() -> Vec<u8>,
     pub shm_proc_show: fn() -> Vec<u8>,
 
@@ -96,7 +95,6 @@ pub struct IpcHooks {
 
 impl IpcHooks {
     pub const EMPTY: IpcHooks = IpcHooks {
-        sem_undo_exit: |_| {},
         mq_fds_cleanup: |_| {},
         exec_clear_thread_keyring: || {},
         at_registered_token_of: |_| None,
@@ -114,7 +112,6 @@ impl IpcHooks {
         set_queues_max: |_| false,
         key_quota: |_| 0,
         set_key_quota: |_, _| {},
-        sem_proc_show: || Vec::new(),
         msg_proc_show: || Vec::new(),
         shm_proc_show: || Vec::new(),
         shm_attach_vma: |_| {},
@@ -141,10 +138,6 @@ fn hooks() -> IpcHooks {
 // The lib-side call surface (one wrapper per row; the framework call
 // sites name these, never the table).
 
-#[inline]
-pub fn sem_undo_exit(task: &Task) {
-    (hooks().sem_undo_exit)(task)
-}
 #[inline]
 pub fn mq_fds_cleanup(task: &Task) {
     (hooks().mq_fds_cleanup)(task)
@@ -212,10 +205,6 @@ pub fn key_quota(q: KeyQuota) -> i32 {
 #[inline]
 pub fn set_key_quota(q: KeyQuota, v: i32) {
     (hooks().set_key_quota)(q, v)
-}
-#[inline]
-pub fn sem_proc_show() -> Vec<u8> {
-    (hooks().sem_proc_show)()
 }
 #[inline]
 pub fn msg_proc_show() -> Vec<u8> {

@@ -2239,7 +2239,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         }
 
         // ===== Reverse SEM_UNDO adjustments =====
-        crate::ipc::ipc_hooks::sem_undo_exit(cur);
+        crate::ipc::sysv_sem::sem_undo_exit(cur);
 
         // ===== Orphan reparenting (review PROC-P03) =====
         // Children of a dying task must be re-attached (a surviving

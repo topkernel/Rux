@@ -13,42 +13,40 @@
 //!   markers on raw-pointer object types, and the trap-regs/page-table
 //!   diagnostic walkers are mechanism-floor material; flipping it
 //!   needs a binder_substrate extraction campaign of its own).
-//! - `ipc_hooks` — the 26-row seam table (every lib consumer of the
+//! - `sysv_sem` — SHELVED framework-side with evidence (the rung's
+//!   second verdict): with the file compiled in the rux-ipc crate,
+//!   the sysv_sem_block guest test's cross-task handoff deadlocks —
+//!   the helper kthread is enqueued (linked=1, on_rq=1, vruntime=0)
+//!   but never scheduled, while the boot task's park loop cycles
+//!   register→schedule→instant-return forever. Identical source
+//!   in-tree (seam state) passes 809/809 with the same breadcrumbs;
+//!   fork-point base passes 801/801. The delta is the crate packaging
+//!   alone; root cause not run down in this rung (taskdump evidence
+//!   in the lane log). The file keeps its zero-unsafe conversions.
+//! - `util` — the shared ipc substrate (IpcIds registry, perms, the
+//!   SemUndoEntry type of Task's sem_undo field). Consumed by BOTH
+//!   the framework sysv_sem and the crate's service files — the crate
+//!   re-exports it (the binder pattern).
+//! - `ipc_hooks` — the 24-row seam table (every lib consumer of the
 //!   movable policy resolves through it; rux-ipc::register_all fills
 //!   it from the composition bin).
 //! - `edges` — the audited page-refcount zone (INV-IPC-PAGEOP-1).
-//! - `SemUndoEntry` — the type substrate of Task's sem_undo field
-//!   (inherent data types stay with their framework consumers; the
-//!   service re-exports).
 //!
-//! The movable policy (util, sysv_sem, sysv_msg, sysv_shm, posix_mq,
-//! keys, access_token) lives in kernel/rux-ipc under
+//! The movable policy (sysv_msg, sysv_shm, posix_mq, keys,
+//! access_token) lives in kernel/rux-ipc under
 //! #![forbid(unsafe_code)] — the sole copy.
 
 pub mod binder;
 pub mod ipc_hooks;
 pub mod edges;
+pub mod sysv_sem;
+pub mod util;
 
-// pub mod util; — MOVED to the rux-ipc service crate (this rung)
-// pub mod sysv_sem; — MOVED to the rux-ipc service crate (this rung)
+// Re-export IPC constants for use by dispatch and other modules
+pub use util::*;
+
 // pub mod sysv_msg; — MOVED to the rux-ipc service crate (this rung)
 // pub mod sysv_shm; — MOVED to the rux-ipc service crate (this rung)
 // pub mod posix_mq; — MOVED to the rux-ipc service crate (this rung)
 // pub mod keys; — MOVED to the rux-ipc service crate (this rung)
 // pub mod access_token; — MOVED to the rux-ipc service crate (this rung)
-
-/// Per-process semaphore undo entry.
-/// Records an adjustment made to a semaphore so it can be reversed on process exit.
-/// Framework-side type substrate: Task's `sem_undo` field names this
-/// type, so the definition must stay in the framework crate (the
-/// vma/mm_struct shelving lesson: inherent data stays with its
-/// framework consumer; the service re-exports it).
-#[derive(Clone, Copy)]
-pub struct SemUndoEntry {
-    /// Semaphore set ID.
-    pub semid: i32,
-    /// Semaphore number within the set.
-    pub sem_num: u16,
-    /// Adjustment value (the sem_op that was applied).
-    pub adjustment: i32,
-}

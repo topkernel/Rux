@@ -35,7 +35,9 @@ pub extern "C" fn rust_main() -> ! {
     // pass/fail counters as the in-framework suite.
     #[cfg(feature = "unit-test")]
     rux::tests::register_service_tests(rux_fs::run_unit_tests);
+    // rux-ipc's entries run at the LATE seam point (post-fs_io, the
+    // sysv_sem family's historical position).
     #[cfg(feature = "unit-test")]
-    rux::tests::register_service_tests(rux_ipc::run_unit_tests);
+    rux::tests::register_service_tests_late(rux_ipc::run_unit_tests);
     rust_main_impl()
 }

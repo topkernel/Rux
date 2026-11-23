@@ -1083,7 +1083,7 @@ self.create_dynamic_file("cgroups", || {
         )));
         dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"sem".to_vec(),
-            crate::ipc::ipc_hooks::sem_proc_show,
+            crate::ipc::sysv_sem::proc_show,
             self.alloc_ino(),
         )));
         dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(

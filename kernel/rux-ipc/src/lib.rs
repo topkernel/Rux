@@ -37,8 +37,6 @@ extern crate alloc;
 /// the framework-side seam zones (ipc_hooks, edges).
 pub mod ipc {
     // the service files (THIS crate's own — the sole copies)
-    pub mod util;
-    pub mod sysv_sem;
     pub mod sysv_msg;
     pub mod sysv_shm;
     pub mod posix_mq;
@@ -54,13 +52,24 @@ pub mod ipc {
     // tests/mod.rs rows are gated with the move note).
     #[cfg(feature = "unit-test")]
     pub mod ipc_sysv;
-    #[cfg(feature = "unit-test")]
-    pub mod sysv_sem_block;
 
-    // binder stays FRAMEWORK-side (the rung's verdict); re-exported so
-    // `crate::ipc::binder` keeps resolving (rux-syscall's ioctl/mmap/
-    // poll rows, devfs, futex, the dfx audits).
+    // The framework's test counters + assert macros, re-exported at the
+    // historical `super::` path the test modules' imports expect (the
+    // service-test seam contract: same pass/fail counters as the
+    // in-framework suite).
+    #[cfg(feature = "unit-test")]
+    pub use rux::tests::{test_pass, test_fail, test_skip, test_group_start};
+    #[cfg(feature = "unit-test")]
+    pub use rux::test_assert_eq;
+
+    // binder, sysv_sem and util stay FRAMEWORK-side (the rung's
+    // verdicts — see the shelving records); re-exported so
+    // `crate::ipc::X` paths keep resolving (rux-syscall's dispatch
+    // rows, devfs, futex, the dfx audits, the sibling service files'
+    // `super::util` uses).
     pub use rux::ipc::binder;
+    pub use rux::ipc::sysv_sem;
+    pub use rux::ipc::util;
     // the seam zones the service files consume (the hook table's
     // KeyQuota type; the audited page-refcount edges).
     pub use rux::ipc::ipc_hooks;
@@ -95,7 +104,6 @@ pub mod ipc {
 /// IpcHooks table's rows. THE composition contract.
 pub fn register_all() {
     rux::ipc::ipc_hooks::ipc_register_hooks(rux::ipc::ipc_hooks::IpcHooks {
-        sem_undo_exit: ipc::sysv_sem::sem_undo_exit,
         mq_fds_cleanup: ipc::posix_mq::mq_fds_cleanup,
         exec_clear_thread_keyring: ipc::keys::exec_clear_thread_keyring,
         at_registered_token_of: ipc::access_token::registered_token_of,
@@ -113,7 +121,6 @@ pub fn register_all() {
         set_queues_max: ipc::posix_mq::set_queues_max,
         key_quota: ipc::keys::key_quota,
         set_key_quota: ipc::keys::set_key_quota,
-        sem_proc_show: ipc::sysv_sem::proc_show,
         msg_proc_show: ipc::sysv_msg::proc_show,
         shm_proc_show: ipc::sysv_shm::proc_show,
         shm_attach_vma: ipc::sysv_shm::shm_attach_vma,
@@ -132,6 +139,4 @@ pub fn register_all() {
 pub fn run_unit_tests() {
     rux::tests::test_group_start("ipc_sysv");
     ipc::ipc_sysv::test_ipc_sysv();
-    rux::tests::test_group_start("sysv_sem_block");
-    ipc::sysv_sem_block::test_sysv_sem_block();
 }

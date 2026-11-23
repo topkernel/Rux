@@ -10,6 +10,9 @@ use crate::ipc::sysv_msg::MsqidDsUapi;
 use crate::ipc::sysv_shm::ShmidDsUapi;
 use crate::ipc::posix_mq::MqAttr;
 use super::{test_pass, test_fail, test_group_start};
+// The framework's exported assert macro (cross-crate macros need the
+// path import; same-crate textual scoping ended with the move).
+use rux::test_assert_eq;
 
 pub fn test_ipc_sysv() {
     test_group_start("ipc_sysv");
@@ -67,18 +70,22 @@ fn test_ipc_perm_uapi_layout() {
         __unused2: 0xBBBBBBBBBBBBBBBB,
     };
 
-    let bytes: [u8; 48] = unsafe { core::mem::transmute_copy(&perm) };
-
+    // Layout pins via offset_of! (the in-tree idiom, safe — the old
+    // transmute_copy byte-peek moved to this with the crate flip; the
+    // sentinel values above stay as the field-pattern documentation).
+    let _ = perm;
     // key at offset 0 (i32 = 4 bytes)
-    test_assert_eq!(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]), 0x11111111, "perm.key offset 0");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, key), 0, "perm.key offset 0");
     // uid at offset 4 (u32)
-    test_assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 0x22222222, "perm.uid offset 4");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, uid), 4, "perm.uid offset 4");
     // gid at offset 8
-    test_assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0x33333333, "perm.gid offset 8");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, gid), 8, "perm.gid offset 8");
     // mode at offset 20 (after key:i32 + uid:u32 + gid:u32 + cuid:u32 + cgid:u32 = 20)
-    test_assert_eq!(u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]), 0x66666666, "perm.mode offset 20");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, mode), 20, "perm.mode offset 20");
     // seq at offset 24 (after mode:u32)
-    test_assert_eq!(u16::from_le_bytes([bytes[24], bytes[25]]), 0x7777, "perm.seq offset 24");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, seq), 24, "perm.seq offset 24");
+    // the UAPI struct is exactly the 48-byte ipc64_perm
+    test_assert_eq!(core::mem::size_of::<IpcPermUapi>(), 48, "perm size 48");
 }
 
 fn test_ipc_perm_operations() {
