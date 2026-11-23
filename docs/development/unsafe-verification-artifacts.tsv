@@ -273,7 +273,7 @@ e8f24188cd1e	kernel/src/arch/riscv64/mm/mmu_init.rs	forensics_scan_trees	2428		I
 38fdc17ddfbf	kernel/src/arch/riscv64/mm/mmu_init.rs	forensics_scan_trees	2435		INV:F20
 e3fb5bbc5fd2	kernel/src/arch/riscv64/mm/page_fault.rs	filemap_pin_cache_page	67		INV:F20
 13ec3bf86b9e	kernel/src/arch/riscv64/mm/page_fault.rs	filemap_pin_cache_page	93		INV:F20
-f20a7c1abecb	kernel/src/arch/riscv64/mm/page_fault.rs	write_pte_raw	170		GAP
+f20a7c1abecb	kernel/src/arch/riscv64/mm/page_fault.rs	write_pte_raw	170		INV:F20
 e0d0c4d1d844	kernel/src/arch/riscv64/mm/pagetable.rs	get_satp	289	asm	INV:F20
 1da88b98495a	kernel/src/arch/riscv64/mm/unsafe_edges.rs	<module>	45	ptr-ops,addr-arith	INV:INV-RE-PT-4
 4adb46207d48	kernel/src/arch/riscv64/mm/unsafe_edges.rs	get_page_table_virt	51		INV:INV-RE-PT-1
@@ -406,13 +406,13 @@ d4c4967fa6f9	kernel/src/arch/uaccess_safe.rs	futex_cmpxchg_u32	127	ptr-ops	INV:I
 f3f144b9060f	kernel/src/arch/uaccess_safe.rs	copy_in_t	144	ptr-ops	INV:INV-UACCESS-SAFE-1
 c48fa26adb3a	kernel/src/arch/uaccess_safe.rs	copy_in_t_slice	167	ptr-ops	GAP
 c45a844a1653	kernel/src/arch/uaccess_safe.rs	copy_out_t	179	ptr-ops	INV:INV-UACCESS-SAFE-1
-46f549f66405	kernel/src/arch/uaccess_safe.rs	read	234	ptr-ops	GAP
-d6611420cc15	kernel/src/arch/uaccess_safe.rs	write	242	ptr-ops	GAP
-6b445127b3e7	kernel/src/arch/uaccess_safe.rs	copy_in	315	ptr-ops	GAP
-e287a284299d	kernel/src/arch/uaccess_safe.rs	copy_out	326	ptr-ops	GAP
-7f341950f096	kernel/src/arch/uaccess_safe.rs	clear	333	ptr-ops	GAP
-dd1dacd0f5c7	kernel/src/arch/uaccess_safe.rs	read_at	346	ptr-ops	GAP
-7b6f0c118a75	kernel/src/arch/uaccess_safe.rs	write_at	359	ptr-ops	GAP
+46f549f66405	kernel/src/arch/uaccess_safe.rs	read	234	ptr-ops	INV:INV-UACCESS-SAFE-1
+d6611420cc15	kernel/src/arch/uaccess_safe.rs	write	242	ptr-ops	INV:INV-UACCESS-SAFE-1
+6b445127b3e7	kernel/src/arch/uaccess_safe.rs	copy_in	315	ptr-ops	INV:INV-UACCESS-SAFE-1
+e287a284299d	kernel/src/arch/uaccess_safe.rs	copy_out	326	ptr-ops	INV:INV-UACCESS-SAFE-1
+7f341950f096	kernel/src/arch/uaccess_safe.rs	clear	333	ptr-ops	INV:INV-UACCESS-SAFE-1
+dd1dacd0f5c7	kernel/src/arch/uaccess_safe.rs	read_at	346	ptr-ops	INV:INV-UACCESS-SAFE-1
+7b6f0c118a75	kernel/src/arch/uaccess_safe.rs	write_at	359	ptr-ops	INV:INV-UACCESS-SAFE-1
 e90b31d2e7d1	kernel/src/arch/x86_64/boot.rs	get_boot_magic	83	volatile	INV:F5
 1dfa2611f64f	kernel/src/arch/x86_64/boot.rs	early_boot_init	104	volatile,ptr-ops	INV:F5
 9ce5d9dac027	kernel/src/arch/x86_64/boot.rs	early_boot_init	117		INV:F5
@@ -555,8 +555,8 @@ c7eddb67c93a	kernel/src/arch/x86_64/mm/page_fault.rs	fill_file_page	66	ptr-ops	I
 a6887b37b851	kernel/src/arch/x86_64/mm/page_fault.rs	fill_file_page	74		INV:INV-XE-ZP
 a7af370760e7	kernel/src/arch/x86_64/mm/page_fault.rs	fill_file_page	82	ptr-ops	INV:INV-XE-ZP
 8918ace2c929	kernel/src/arch/x86_64/mm/page_fault.rs	filemap_pin_cache_page	106		INV:INV-XE-ZP
-b8ac57388518	kernel/src/arch/x86_64/mm/page_fault.rs	filemap_pin_cache_page	139		GAP
-787aa608fec9	kernel/src/arch/x86_64/mm/page_fault.rs	_root_table_ref	353		GAP
+b8ac57388518	kernel/src/arch/x86_64/mm/page_fault.rs	filemap_pin_cache_page	139		INV:F20
+787aa608fec9	kernel/src/arch/x86_64/mm/page_fault.rs	_root_table_ref	353		INV:F20
 74069e593c81	kernel/src/arch/x86_64/mm/unsafe_edges.rs	<module>	45	ptr-ops,addr-arith	INV:INV-XE-PT-4
 3ce69bd67f80	kernel/src/arch/x86_64/mm/unsafe_edges.rs	from_phys	95		INV:INV-XE-PT-1
 0991eee38bf1	kernel/src/arch/x86_64/mm/unsafe_edges.rs	get_raw	123		INV:INV-XE-PT-3
@@ -980,10 +980,10 @@ a9c248f7221e	kernel/src/fs/bio.rs	move_to_lru_head	447		INV:F11
 32dc9d97e9a4	kernel/src/fs/bio.rs	drop_block	775		INV:F11
 fc14b0fa091f	kernel/src/fs/bio.rs	get	901		INV:F11
 b12b75fa37c7	kernel/src/fs/bio.rs	get	989		INV:F11
-2f6c85bcc3a5	kernel/src/fs/bio.rs	get	998		GAP
+2f6c85bcc3a5	kernel/src/fs/bio.rs	get	998		INV:F11
 0bd4f03b2db8	kernel/src/fs/bio.rs	get	1010		INV:F11
 1cdbfd2efb97	kernel/src/fs/bio.rs	get_zero_impl	1137		INV:F11
-8681a2430b90	kernel/src/fs/bio.rs	get_zero_impl	1144		GAP
+8681a2430b90	kernel/src/fs/bio.rs	get_zero_impl	1144		INV:F11
 cbab1fff2567	kernel/src/fs/bio.rs	get_zero_impl	1154		INV:F11
 4fd43103abff	kernel/src/fs/bio.rs	put	1162		INV:F11
 58b95c142c55	kernel/src/fs/bio.rs	invalidate	1287		INV:F11
@@ -1043,8 +1043,8 @@ c1336f3c8efe	kernel/src/fs/dentry.rs	refill_memo_locked	989		INV:INV-DENTRY-MEMO
 b43ca18cb0f5	kernel/src/fs/dentry.rs	big_memo_ensure_locked	1059		INV:INV-DENTRY-MEMO-1
 90dabfb680a1	kernel/src/fs/dentry.rs	<module>	1403		INV:INV-DENTRY-MEMO-1
 1d6b1c3c26a7	kernel/src/fs/dentry.rs	<module>	1404		INV:INV-DENTRY-MEMO-1
-7579b2fdd7c2	kernel/src/fs/devfs/mod.rs	devfs_destroy_inode	1573	ptr-ops	GAP
-84922d1a082f	kernel/src/fs/devfs/mod.rs	devfs_link	1763	ptr-ops	GAP
+7579b2fdd7c2	kernel/src/fs/devfs/mod.rs	devfs_destroy_inode	1573	ptr-ops	INV:INV-FS-PRIVDATA-1
+84922d1a082f	kernel/src/fs/devfs/mod.rs	devfs_link	1763	ptr-ops	INV:INV-FS-PRIVDATA-1
 df2a5309d2bf	kernel/src/fs/devfs/mod.rs	copy_in	1903	ptr-ops	GAP
 aff5b3d9d70f	kernel/src/fs/devfs/mod.rs	copy_out	1911	ptr-ops	GAP
 2705df56bca8	kernel/src/fs/devfs/mod.rs	zero	1924	ptr-ops	GAP
@@ -1085,14 +1085,14 @@ d2d82aba7bcd	kernel/src/fs/file.rs	set_ops	553		INV:INV-FILE-CELL-1
 1d4d52b25c82	kernel/src/fs/file.rs	get_ops	560		INV:INV-FILE-CELL-1
 fb231eb6f459	kernel/src/fs/file.rs	get_inode	571		INV:INV-FILE-CELL-1
 abc582329a9b	kernel/src/fs/file.rs	set_private_data	576		INV:INV-FILE-CELL-1
-335b694236a2	kernel/src/fs/file.rs	private_data_ptr	590		GAP
-2974cd5c18c8	kernel/src/fs/file.rs	clear_private_data	604		GAP
-5cb27f78e05e	kernel/src/fs/file.rs	take_private_data	613		GAP
-484f38fecd7d	kernel/src/fs/file.rs	<module>	689		GAP
-b35cc55150f4	kernel/src/fs/file.rs	<module>	717	raw-construct	GAP
-501794c35d0a	kernel/src/fs/file.rs	<module>	744		GAP
-56c78c6e0af2	kernel/src/fs/file.rs	<module>	766		GAP
-88dea9afb6ff	kernel/src/fs/file.rs	positional_capable	846		GAP
+335b694236a2	kernel/src/fs/file.rs	private_data_ptr	590		INV:INV-FS-FILEPRIV-1
+2974cd5c18c8	kernel/src/fs/file.rs	clear_private_data	604		INV:INV-FS-FILEPRIV-1
+5cb27f78e05e	kernel/src/fs/file.rs	take_private_data	613		INV:INV-FS-FILEPRIV-1
+484f38fecd7d	kernel/src/fs/file.rs	<module>	689		INV:INV-FILE-CELL-1
+b35cc55150f4	kernel/src/fs/file.rs	<module>	717	raw-construct	INV:INV-FILE-CELL-1
+501794c35d0a	kernel/src/fs/file.rs	<module>	744		INV:INV-FILE-CELL-1
+56c78c6e0af2	kernel/src/fs/file.rs	<module>	766		INV:INV-FILE-CELL-1
+88dea9afb6ff	kernel/src/fs/file.rs	positional_capable	846		INV:INV-FILE-CELL-1
 ce6b0797ce9c	kernel/src/fs/file.rs	<module>	859	raw-construct	INV:INV-FILE-CELL-1
 4902d6d0a9a6	kernel/src/fs/file.rs	read_slice	952		INV:INV-FILE-CELL-1
 ce2ad8369924	kernel/src/fs/file.rs	write_slice	959		INV:INV-FILE-CELL-1
@@ -1247,10 +1247,10 @@ a3721b42e5fe	kernel/src/fs/tmpfs.rs	new	185		INV:INV-TMPFS-SB-1
 a5f4aa2c8216	kernel/src/fs/tmpfs.rs	<module>	802		INV:INV-TMPFS-SB-1
 4febd8e48cb1	kernel/src/fs/tmpfs.rs	create_mount_instance	817		INV:INV-TMPFS-SB-1
 5db4212cc748	kernel/src/fs/tmpfs.rs	create_mount_instance	821		INV:INV-TMPFS-SB-1
-7c253db7e910	kernel/src/fs/tmpfs.rs	tmpfs_symlink	997	ptr-ops	GAP
-cf7e6e8bbf4e	kernel/src/fs/tmpfs.rs	tmpfs_link	1084		GAP
-1d7e711dec90	kernel/src/fs/tmpfs.rs	tmpfs_getattr	1223		GAP
-c89c242af3dd	kernel/src/fs/tmpfs.rs	tmpfs_destroy_inode	1376	ptr-ops	GAP
+7c253db7e910	kernel/src/fs/tmpfs.rs	tmpfs_symlink	997	ptr-ops	INV:INV-TMPFS-SB-1
+cf7e6e8bbf4e	kernel/src/fs/tmpfs.rs	tmpfs_link	1084		INV:INV-TMPFS-SB-1
+1d7e711dec90	kernel/src/fs/tmpfs.rs	tmpfs_getattr	1223		INV:INV-TMPFS-SB-1
+c89c242af3dd	kernel/src/fs/tmpfs.rs	tmpfs_destroy_inode	1376	ptr-ops	INV:INV-FS-PRIVDATA-1
 bedad79093c0	kernel/src/fs/unsafe_edges.rs	privdata_ref	39	ptr-ops	INV:INV-FS-FILEPRIV-1
 d88525dea5d6	kernel/src/fs/unsafe_edges.rs	file_privdata_ref	55		INV:INV-FS-FILEPRIV-1
 81b4ce1129f9	kernel/src/fs/unsafe_edges.rs	file_privdata_ref	57	ptr-ops	INV:INV-FS-FILEPRIV-1
@@ -1290,23 +1290,23 @@ b1db7fab8954	kernel/src/fs/vfs.rs	path_lookup	2996		INV:INV-VFS-WALK-1
 c3badf856f75	kernel/src/fs/vfs.rs	path_lookup	3029		INV:INV-VFS-WALK-1
 7fd9fe7768ba	kernel/src/fs/vfs.rs	path_lookup	3037		INV:INV-VFS-WALK-1
 3d3a77ec87f2	kernel/src/fs/vfs.rs	path_lookup	3063		INV:INV-VFS-WALK-1
-b86735c69009	kernel/src/fs/vfs.rs	path_lookup	3221		GAP
-18e16565dff4	kernel/src/fs/vfs.rs	path_lookup	3282		GAP
-20df09342a65	kernel/src/fs/vfs.rs	path_lookup	3311		GAP
-dc4c850ab930	kernel/src/fs/vfs.rs	path_lookup	3328		GAP
-4690f842f918	kernel/src/fs/vfs.rs	path_lookup	3338		GAP
+b86735c69009	kernel/src/fs/vfs.rs	path_lookup	3221		INV:INV-VFS-WALK-1
+18e16565dff4	kernel/src/fs/vfs.rs	path_lookup	3282		INV:INV-VFS-WALK-1
+20df09342a65	kernel/src/fs/vfs.rs	path_lookup	3311		INV:INV-VFS-WALK-1
+dc4c850ab930	kernel/src/fs/vfs.rs	path_lookup	3328		INV:INV-VFS-WALK-1
+4690f842f918	kernel/src/fs/vfs.rs	path_lookup	3338		INV:INV-VFS-WALK-1
 e2c5f12b9065	kernel/src/fs/vfs.rs	path_lookup	3344		INV:INV-VFS-WALK-1
 42b6ee8526fb	kernel/src/fs/vfs.rs	path_lookup	3349		INV:INV-VFS-WALK-1
 90291df9f563	kernel/src/fs/vfs.rs	path_lookup	3378		INV:INV-VFS-WALK-1
 761a0f382f58	kernel/src/fs/vfs.rs	path_lookup	3402		INV:INV-VFS-WALK-1
 8c186263f3ad	kernel/src/fs/vfs.rs	path_lookup	3407		INV:INV-VFS-WALK-1
 5637bd94786f	kernel/src/fs/vfs.rs	file_open_tmpfile	5428		GAP
-628f70a0de29	kernel/src/fs/vfs.rs	mem_file_content	7132		GAP
-8e7a6437414b	kernel/src/fs/vfs.rs	mem_file_content	7133	ptr-ops	GAP
-e188f6593745	kernel/src/fs/vfs.rs	mem_file_content_mut	7139		GAP
-f8659df27f81	kernel/src/fs/vfs.rs	mem_file_content_mut	7140	ptr-ops	GAP
-9f85d055ed36	kernel/src/fs/vfs.rs	mem_file_take_owned	7146		GAP
-2efa8416b426	kernel/src/fs/vfs.rs	mem_file_take_owned	7147	ptr-ops	GAP
+628f70a0de29	kernel/src/fs/vfs.rs	mem_file_content	7132		INV:INV-MEMFILE-1
+8e7a6437414b	kernel/src/fs/vfs.rs	mem_file_content	7133	ptr-ops	INV:INV-MEMFILE-1
+e188f6593745	kernel/src/fs/vfs.rs	mem_file_content_mut	7139		INV:INV-MEMFILE-1
+f8659df27f81	kernel/src/fs/vfs.rs	mem_file_content_mut	7140	ptr-ops	INV:INV-MEMFILE-1
+9f85d055ed36	kernel/src/fs/vfs.rs	mem_file_take_owned	7146		INV:INV-MEMFILE-1
+2efa8416b426	kernel/src/fs/vfs.rs	mem_file_take_owned	7147	ptr-ops	INV:INV-MEMFILE-1
 6eb20adeedd1	kernel/src/fs/vfs.rs	vfs_fallocate	7325	ptr-ops	GAP
 f4aa7a1c1905	kernel/src/fs/vt.rs	vtdev_close	193		INV:INV-VT-PRIV-1
 7d3da78ba638	kernel/src/fs/vt.rs	vtdev_close	197	ptr-ops	INV:INV-VT-PRIV-1
@@ -1834,7 +1834,7 @@ a714815ece39	kernel/src/sched/edges.rs	per_cpu_mut	1173		INV:INV-SCE-10
 c5751524fa3a	kernel/src/sched/edges.rs	secondary_idle_table_base	1197		INV:INV-SCE-4
 13f514d88119	kernel/src/sched/edges.rs	secondary_idle_task	1203		INV:INV-SCE-4
 637962259bf2	kernel/src/sched/reapdrain.rs	task	152		INV:INV-SCE-2
-cdb61cb35f70	kernel/src/sched/reapdrain.rs	<module>	211		GAP
+cdb61cb35f70	kernel/src/sched/reapdrain.rs	<module>	211		INV:INV-RD-CLAIM
 2a9330e84855	kernel/src/sched/sched.rs	<module>	2135		INV:INV-SENDSYNC-1
 ff7c375c15be	kernel/src/sched/sched.rs	grq_current_fp	2647	asm	INV:INV-SCE-3
 baf3dacc63d6	kernel/src/sched/sched.rs	grq_current_fp	2652	asm	INV:INV-SCE-3
@@ -1912,15 +1912,15 @@ a538830d65c4	kernel/src/sync/percpu.rs	with_preempt	231		INV:INV-PERCPU-1
 eed493e29388	kernel/src/sync/percpu.rs	with_preempt	233		INV:INV-PERCPU-1
 e864e5fd9306	kernel/src/sync/percpu.rs	drop	289		INV:INV-PERCPU-1
 d9cdd6f4f1dc	kernel/src/sync/rcu.rs	call_rcu	137		INV:INV-RCU-1
-1a903e83c586	kernel/src/sync/rcu.rs	wait_qs_sleepy	580		GAP
-426bebdf06d2	kernel/src/sync/rcu.rs	wait_qs_sleepy	609	volatile	GAP
-94c56bb5089f	kernel/src/sync/rcu.rs	wait_qs_sleepy	695		GAP
-56a8818e4f41	kernel/src/sync/rcu.rs	wait_qs_sleepy	748		GAP
-4542d3ade064	kernel/src/sync/rcu.rs	wait_qs_sleepy	763		GAP
-22c5c159d316	kernel/src/sync/rcu.rs	wait_qs_sleepy	776		GAP
-c700093efd7b	kernel/src/sync/rcu.rs	rcu_softirq_handler	901		GAP
-dd386f519795	kernel/src/sync/rcu.rs	rcu_softirq_handler	918	ptr-ops	GAP
-719c1e23d633	kernel/src/sync/rcu.rs	init	943		GAP
+1a903e83c586	kernel/src/sync/rcu.rs	wait_qs_sleepy	580		INV:INV-RCU-1
+426bebdf06d2	kernel/src/sync/rcu.rs	wait_qs_sleepy	609	volatile	INV:INV-RCU-1
+94c56bb5089f	kernel/src/sync/rcu.rs	wait_qs_sleepy	695		INV:INV-RCU-1
+56a8818e4f41	kernel/src/sync/rcu.rs	wait_qs_sleepy	748		INV:INV-RCU-1
+4542d3ade064	kernel/src/sync/rcu.rs	wait_qs_sleepy	763		INV:INV-RCU-1
+22c5c159d316	kernel/src/sync/rcu.rs	wait_qs_sleepy	776		INV:INV-RCU-1
+c700093efd7b	kernel/src/sync/rcu.rs	rcu_softirq_handler	901		INV:INV-RCU-1
+dd386f519795	kernel/src/sync/rcu.rs	rcu_softirq_handler	918	ptr-ops	INV:INV-RCU-1
+719c1e23d633	kernel/src/sync/rcu.rs	init	943		INV:INV-RCU-1
 1007f16f5c91	kernel/src/sync/rwlock.rs	<module>	214		INV:INV-RWLOCK-1
 e82123a1ae51	kernel/src/sync/rwlock.rs	<module>	215		INV:INV-RWLOCK-1
 40e14b985a46	kernel/src/sync/rwlock.rs	<module>	343		INV:INV-RWLOCK-1
