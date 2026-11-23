@@ -23,8 +23,8 @@ crates**. The criterion for every line of code is a single question:
 > Can this code live under `#![forbid(unsafe_code)]`?
 
 - YES → it belongs in a service crate (compiler-guaranteed safe).
-- NO  → it belongs in `rux-core`, carries an INV contract or F-row, and is
-  covered by the verification stack (Kani/Miri/Verus).
+- NO → it belongs in `rux-core`, carries an INV contract or F-row, and is
+ covered by the verification stack (Kani/Miri/Verus).
 
 There is no third bucket. "Framework" as a catch-all for leftovers is
 abolished; what remains in the core is there because it *cannot* be safe,
@@ -53,7 +53,7 @@ arch/*.S. Rux's floor, with the campaign's registered rows as evidence:
 
 Additions that stay core-ADJACENT (TCB by dependency, not by unsafe):
 the lock protocol implementations already audited, the printk ring, the
-scheduler's switch/tp seams. The core's audit surface = the INV/F-row
+scheduler's switch/tp interfaces. The core's audit surface = the INV/F-row
 registry — already 97%+ ledgered.
 
 ## 2a. Why not address-space isolation (the microkernel comparison)
@@ -95,12 +95,12 @@ GRQ (~160k/s) is phase-2 candidate by measured frequency.
 
 The end-state defense stack, each layer at its measured cost:
 1. TYPE layer (0 cycles): forbid crates — service columns structurally
-   immune to memory unsafety.
+ immune to memory unsafety.
 2. HARDWARE layer (~50 cycles/window, <1%): MPK-protected core
-   metadata — even a type-system soundness hole or smuggled unsafe
-   meets a hardware fault, not silent corruption.
+ metadata — even a type-system soundness hole or smuggled unsafe
+ meets a hardware fault, not silent corruption.
 3. VERIFICATION layer (0 runtime): Kani/Miri/Verus over the ~3,000
-   core lines — the remaining hand-written unsafe is machine-checked.
+ core lines — the remaining hand-written unsafe is machine-checked.
 
 A microkernel spends ~1,000 cycles per boundary to buy (1); this design
 buys (1)+(2)+(3) for 0+~50+0.
@@ -147,7 +147,7 @@ reference value for us is not architecture but ABSTRACTION CRAFT:
 deliberately minimal traits (FileSystem, Operations, INodeOperations
 kept separate rather than one 50-method mega-trait), static dispatch
 preferred over trait objects, thin mechanical error mapping. We use
-exactly these techniques to keep our seam costs low.
+exactly these techniques to keep our indirection costs low.
 
 **Family 4 — single-address-space cells: Theseus.** One address space,
 one privilege level; the thesis is "intralingual design" — hand as
@@ -173,7 +173,7 @@ microkernels: the discipline of a minimal trusted core — our floor is
 itemized line by line with a reference counterpart and an F-row id per
 entry, not a zone. From the framekernel: the single address space and
 the zero-IPC boundary — cross-crate calls are plain function calls,
-LTO-inlined, a full protocol layer thinner than RPC; where a seam's
+LTO-inlined, a full protocol layer thinner than RPC; where a interface's
 indirect-call cost surfaced, we engineered it away (context-switch
 +25.1% recovered to +1.7% by devirtualization) rather than accepting
 it. From Theseus: the crate as THE isolation unit, and the
@@ -207,81 +207,81 @@ toolchain rather than the process.
 ## 3. The end-state topology
 
 ```
-rux-core          (≈3,000-3,500 dual lines; the entire TCB)
-  arch/{x86_64,riscv64,aarch64} entry/switch/uaccess/pt/asm zones
-  safety/  sync-primitives  task-lifecycle  timer-core  printk-ring
-  ← verification stack: Kani 12/12, Miri 0-UB, Verus narrow-adopt
+rux-core (≈3,000-3,500 dual lines; the entire TCB)
+ arch/{x86_64,riscv64,aarch64} entry/switch/uaccess/pt/asm zones
+ safety/ sync-primitives task-lifecycle timer-core printk-ring
+ ← verification stack: Kani 12/12, Miri 0-UB, Verus narrow-adopt
 
-rux-sched         forbid-safe  (S1 DONE 2026-11-23: sched_policy 5,488
-                  lines sole-copied into the crate — fair/rt/deadline/
-                  wakewatch/census policy; SchedHooks 78 rows after the
-                  observability devirtualization (was 111: statics moved
-                  to framework entities.rs with direct fns, three rows
-                  arm-gated); p2_ctxsw +1.7% vs same-window main after
-                  the fix (was +25.1%)
-rux-mm            forbid-safe  (M1a DONE 2026-11-23, origin c0e46ed73: the
-                  per-arch mm policy — mmap/munmap placement, brk, stack
-                  alloc, permission changes, VMA fork decisions, fault
-                  routing, swap fault, fault-around — 6,876 lines with ZERO
-                  unsafe blocks; 6-row mm_hooks seam over ~40 framework
-                  call sites; p3b_fault_cow 1.994 within the same-day
-                  control band 1.974-2.024. M1b DONE 2026-11-23: seven of
-                  the nine §4 policy files (hugepage, kswapd, oom_kill,
-                  vmscan, lru, compact, swap — 3,706 lines) sole-copied
-                  under the crate forbid via the 31-row MmPolicyHooks
-                  seam + seam-vocabulary codec/types; swap's static-mut
-                  device table converted to full interior mutability
-                  (framework unsafe -2 blocks). SHELVED with numbers
-                  (mm-split-rung.md): vma + mm_struct — the TYPE
-                  substrate (88/50 framework-side type refs, zero fn
-                  refs; inherent impls must live with their types; the
-                  seam itself names MmStruct/VmaFlags/VmaType and Cargo
-                  forbids the rux->rux-mm cycle). Unblocks only via a
-                  types-in-shared-crate redesign, not a file move)
-rux-syscall       forbid-safe  (DONE at M3; the pattern-proven first rung)
-rux-fs        forbid-safe  (DONE 2026-11-23, origin 50f0cc97a: pipe/fifo/
-                  inotify/memfd/selinuxfs sole-copied under crate forbid;
-                  FsHooks 26 rows + the service-test seam. Two boot
-                  regressions caught by the x86_64 battery and fixed
-                  in-merge: early selinuxfs mount_register caused the 'R'
-                  beacon reboot loop; the pipe_file_close clear/take
-                  inversion panicked on every pipe close)
-rux-ext4          forbid-safe  (deepest fs consumer)
-rux-net           forbid-safe  (DONE at R2)
-rux-drivers       forbid-safe  (DONE 2026-11-23, origin 8672a0ebf:
-                  watchdog/access_tokenid/loopback/fb_simple/fbdev
-                  sole-copied, 1,156 lines with zero unsafe of their own;
-                  virtio/intc/timer/pci/drm stay on the floor with
-                  per-family reasons; 12 DriverHooks rows + the leveled
-                  initcall table)
-rux-ipc           forbid-safe  (DONE 2026-11-23, ipc-flip lane: the
-                  movable policy — sysv_msg/sysv_shm/posix_mq/keys/
-                  access_token, 5,406 lines — sole-copied under crate
-                  forbid; the unsafe blocks converted via the
-                  uaccess_safe typed twins (+copy_in_t_slice), live
-                  &Task exit signatures, and framework ipc/edges.rs
-                  (INV-IPC-PAGEOP-1); IpcHooks 24 rows, all COLD paths.
-                  SHELVED with numbers: binder.rs — 46 blocks + 10
-                  unsafe impls in 7 floor-shaped clusters (TxnBlock
-                  block-view windows INV-BINDER-BLOCKVIEW ~14 sites,
-                  UnsafeCell interiors 4, Send/Sync markers on the
-                  raw-pointer object model 10, intrusive
-                  key/container_of 2, file->Arc adoption 4, trap-regs/
-                  page-table diagnostic walkers 15, task raw derefs 5);
-                  needs a binder_substrate extraction + object-model
-                  Send/Sync restructure, a lane of its own.
-                  sysv_sem + util — SHELVED on a BEHAVIORAL finding:
-                  sysv_sem compiled in the crate deadlocks the
-                  sysv_sem_block cross-task test (helper kthread
-                  linked/on_rq/vruntime=0, never scheduled; boot task
-                  park-loops with instant schedule() returns; 4/4
-                  repro, position- and load-independent) while the
-                  byte-identical source in-tree (seam state) passes
-                  809/809 and fork-point base 801/801 — the delta is
-                  the crate packaging alone; root cause open, taskdump
-                  evidence in the lane record. util stays framework as
-                  the shared substrate both sides consume)
-rux-dfx-svc       forbid-safe  (subject to §7 retirement review)
+rux-sched forbid-safe (S1 DONE 2026-11-23: sched_policy 5,488
+ lines sole-copied into the crate — fair/rt/deadline/
+ wakewatch/census policy; SchedHooks 78 rows after the
+ observability devirtualization (was 111: statics moved
+ to framework entities.rs with direct fns, three rows
+ arm-gated); p2_ctxsw +1.7% vs same-window main after
+ the fix (was +25.1%)
+rux-mm forbid-safe (M1a DONE 2026-11-23, origin c0e46ed73: the
+ per-arch mm policy — mmap/munmap placement, brk, stack
+ alloc, permission changes, VMA fork decisions, fault
+ routing, swap fault, fault-around — 6,876 lines with ZERO
+ unsafe blocks; 6-row mm_hooks interface over ~40 framework
+ call sites; p3b_fault_cow 1.994 within the same-day
+ control band 1.974-2.024. M1b DONE 2026-11-23: seven of
+ the nine §4 policy files (hugepage, kswapd, oom_kill,
+ vmscan, lru, compact, swap — 3,706 lines) sole-copied
+ under the crate forbid via the 31-row MmPolicyHooks
+ interface + interface-vocabulary codec/types; swap's static-mut
+ device table converted to full interior mutability
+ (framework unsafe -2 blocks). SHELVED with numbers
+ (mm-split-rung.md): vma + mm_struct — the TYPE
+ substrate (88/50 framework-side type refs, zero fn
+ refs; inherent impls must live with their types; the
+ interface itself names MmStruct/VmaFlags/VmaType and Cargo
+ forbids the rux->rux-mm cycle). Unblocks only via a
+ types-in-shared-crate redesign, not a file move)
+rux-syscall forbid-safe (DONE at M3; the pattern-proven first rung)
+rux-fs forbid-safe (DONE 2026-11-23, origin 50f0cc97a: pipe/fifo/
+ inotify/memfd/selinuxfs sole-copied under crate forbid;
+ FsHooks 26 rows + the service-test registration. Two boot
+ regressions caught by the x86_64 battery and fixed
+ in-merge: early selinuxfs mount_register caused the 'R'
+ beacon reboot loop; the pipe_file_close clear/take
+ inversion panicked on every pipe close)
+rux-ext4 forbid-safe (deepest fs consumer)
+rux-net forbid-safe (DONE at R2)
+rux-drivers forbid-safe (DONE 2026-11-23, origin 8672a0ebf:
+ watchdog/access_tokenid/loopback/fb_simple/fbdev
+ sole-copied, 1,156 lines with zero unsafe of their own;
+ virtio/intc/timer/pci/drm stay on the floor with
+ per-family reasons; 12 DriverHooks rows + the leveled
+ initcall table)
+rux-ipc forbid-safe (DONE 2026-11-23, ipc-flip lane: the
+ movable policy — sysv_msg/sysv_shm/posix_mq/keys/
+ access_token, 5,406 lines — sole-copied under crate
+ forbid; the unsafe blocks converted via the
+ uaccess_safe typed twins (+copy_in_t_slice), live
+ &Task exit signatures, and framework ipc/edges.rs
+ (INV-IPC-PAGEOP-1); IpcHooks 24 rows, all COLD paths.
+ SHELVED with numbers: binder.rs — 46 blocks + 10
+ unsafe impls in 7 floor-shaped clusters (TxnBlock
+ block-view windows INV-BINDER-BLOCKVIEW ~14 sites,
+ UnsafeCell interiors 4, Send/Sync markers on the
+ raw-pointer object model 10, intrusive
+ key/container_of 2, file->Arc adoption 4, trap-regs/
+ page-table diagnostic walkers 15, task raw derefs 5);
+ needs a binder_substrate extraction + object-model
+ Send/Sync restructure, a lane of its own.
+ sysv_sem + util — SHELVED on a BEHAVIORAL finding:
+ sysv_sem compiled in the crate deadlocks the
+ sysv_sem_block cross-task test (helper kthread
+ linked/on_rq/vruntime=0, never scheduled; boot task
+ park-loops with instant schedule() returns; 4/4
+ repro, position- and load-independent) while the
+ byte-identical source in-tree (interface state) passes
+ 809/809 and fork-point base 801/801 — the delta is
+ the crate packaging alone; root cause open, taskdump
+ evidence in the lane record. util stays framework as
+ the shared substrate both sides consume)
+rux-dfx-svc forbid-safe (subject to §7 retirement review)
 ```
 
 Cargo refuses cycles: services → core (and → lower services) only; the
@@ -320,21 +320,21 @@ calling contract published to the policy. M1 applies the same
 separation to mm.
 
 - MOVES to `rux-sched` (forbid): CFS/RT/deadline decision logic,
-  fairness math, wakeup placement policy, load-balancing decisions,
-  cgroup scheduling policy, idle balancing, the census/diagnostic walks.
+ fairness math, wakeup placement policy, load-balancing decisions,
+ cgroup scheduling policy, idle balancing, the census/diagnostic walks.
 - STAYS in core: `__switch_to` + tp derivation + stack switch (F-CS/F-TP),
-  the GRQ lock primitive (owner-in-word), the terminal-switch protocol
-  (reapdrain's R85/pacing machinery — page-identity TCB), NEED_RESCHED
-  atomics, the runqueue's intrusive links under the lock discipline.
-- THE SEAM: policy calls core via safe APIs — `switch_to(next)`,
-  `current()`, `grq_lock()/unlock()`, `enqueue/dequeue(task_ref)` — the
-  typed handles (TaskBorrow/TaskRef) already exist for exactly this.
+ the GRQ lock primitive (owner-in-word), the terminal-switch protocol
+ (reapdrain's R85/pacing machinery — page-identity TCB), NEED_RESCHED
+ atomics, the runqueue's intrusive links under the lock discipline.
+- THE INTERFACE: policy calls core via safe APIs — `switch_to(next)`,
+ `current()`, `grq_lock()/unlock()`, `enqueue/dequeue(task_ref)` — the
+ typed handles (TaskBorrow/TaskRef) already exist for exactly this.
 - MEASURE FIRST (the standing rule): count policy→core and core→policy
-  edges on the current tree before any move. Abort criterion: if the
-  policy's decision logic reads raw task pointers in more than a handful
-  of sites that cannot ride `task_shared`, the rung shelves with numbers.
+ edges on the current tree before any move. Abort criterion: if the
+ policy's decision logic reads raw task pointers in more than a handful
+ of sites that cannot ride `task_shared`, the rung shelves with numbers.
 
-#### S1 case study: the seam-cost regression and its fix (BOTH guarantees held)
+#### S1 case study: the interface-cost regression and its fix (BOTH guarantees held)
 
 S1 landed with a performance regression that the merge gate refused to
 wave through, and its resolution is the standing proof that this design
@@ -342,72 +342,72 @@ guarantees safety AND performance together — neither is traded for the
 other. The record, with numbers:
 
 1. **The regression.** After the flip, pbench p2_ctxsw read 2.149 µs
-   against 1.718 µs on same-window main (+25.1%) — outside the ±20%
-   sched guarded-domain band. The merge was held until fixed (gate
-   policy: functionally correct but performance-regressing does not
-   merge).
+ against 1.718 µs on same-window main (+25.1%) — outside the ±20%
+ sched guarded-domain band. The merge was held until fixed (gate
+ policy: functionally correct but performance-regressing does not
+ merge).
 2. **Root cause — NOT "cross-crate calls are slow".** Direct
-   cross-crate calls inline fine (rlib metadata carries MIR; LTO
-   completes it). The cost was the SEAM SHAPE: upward calls
-   (core→policy) ride a registered function-pointer table, and a call
-   through a function pointer is indirect — the callee is a runtime
-   value loaded from the table, invisible to the compiler, NOT
-   inlinable by LTO or anything else. The first SchedHooks table
-   exposed 111 rows, and observability dominated: per context switch
-   ~40 rows fired (sched_cs_stamp ×4/schedule, pick_trace ×2-3/switch,
-   pick_gen publish/retire, ww_record, wake census, vr_canary, class
-   counters), each paying shim → wrapper → slot load → indirect call.
-   At ~10 ns each in the debug class that is ~400 ns — the measured
-   delta (431 ns) to within noise.
+ cross-crate calls inline fine (rlib metadata carries MIR; LTO
+ completes it). The cost was the DISPATCH MECHANISM: upward calls
+ (core→policy) ride a registered function-pointer table, and a call
+ through a function pointer is indirect — the callee is a runtime
+ value loaded from the table, invisible to the compiler, NOT
+ inlinable by LTO or anything else. The first SchedHooks table
+ exposed 111 rows, and observability dominated: per context switch
+ ~40 rows fired (sched_cs_stamp ×4/schedule, pick_trace ×2-3/switch,
+ pick_gen publish/retire, ww_record, wake census, vr_canary, class
+ counters), each paying shim → wrapper → slot load → indirect call.
+ At ~10 ns each in the debug class that is ~400 ns — the measured
+ delta (431 ns) to within noise.
 3. **The fix — make the hot calls direct again.** Three moves, no
-   behavior change: (a) the 33 observability rows LEFT the table —
-   their statics now live framework-side (entities.rs) and the
-   framework calls them as direct static calls, which inline; counters
-   record identically. (b) The genuinely dynamic dispatch collapsed to
-   ONE fat entry: pick_next_task — the whole pick walk runs policy-side
-   inside a single crossing, not one crossing per step. (c) The three
-   conditional diagnostic rows became arm-gated wrappers (the wrapper
-   checks the same framework-side flag the body checks; disarmed boots
-   never touch the seam). Armed-mode output verified byte-identical
-   (the exact 40-line WWTICK budget).
+ behavior change: (a) the 33 observability rows LEFT the table —
+ their statics now live framework-side (entities.rs) and the
+ framework calls them as direct static calls, which inline; counters
+ record identically. (b) The genuinely dynamic dispatch collapsed to
+ ONE fat entry: pick_next_task — the whole pick walk runs policy-side
+ inside a single crossing, not one crossing per step. (c) The three
+ conditional diagnostic rows became arm-gated wrappers (the wrapper
+ checks the same framework-side flag the body checks; disarmed boots
+ never touch the interface). Armed-mode output verified byte-identical
+ (the exact 40-line WWTICK budget).
 4. **Result.** p2_ctxsw 1.758 vs same-window main 1.728 = **+1.7%,
-   in band**; P4 storm rows +2.6%; zero panics across 10 measurement
-   boots + the armed boot; rux-sched's forbid untouched — the fix cost
-   ZERO unsafe: it moved plain-safe state and reshaped call sites.
+ in band**; P4 storm rows +2.6%; zero panics across 10 measurement
+ boots + the armed boot; rux-sched's forbid untouched — the fix cost
+ ZERO unsafe: it moved plain-safe state and reshaped call sites.
 5. **The rule extracted** (crate-plan §3a, binding for every future
-   seam): fn-pointer table rows are for COLD paths only; a hot path
-   takes (a) the whole loop behind one fat entry so the boundary is
-   crossed once, (b) an existing vtable FIELD (FileOps.fault/write_at —
-   field dispatch, R5's read/write paths at zero new indirection), or
-   (c) direct static calls over framework-side statics. Observability
-   statics live framework-side by default.
+ interface): fn-pointer table rows are for COLD paths only; a hot path
+ takes (a) the whole loop behind one fat entry so the boundary is
+ crossed once, (b) an existing vtable FIELD (FileOps.fault/write_at —
+ field dispatch, R5's read/write paths at zero new indirection), or
+ (c) direct static calls over framework-side statics. Observability
+ statics live framework-side by default.
 
 The lesson stated once, plainly: the crate boundary's safety is free;
-the SEAM's shape is what costs. Design the seam, measure it, and if it
-regresses, fix the seam — never the safety property.
+the DISPATCH MECHANISM is what costs. Design the interface, measure it, and if it
+regresses, fix the interface — never the safety property.
 
 ### Rung M1 — mm policy / core split
 
 - MOVES to `rux-mm` (forbid): the VMA tree and its lock protocol's
-  policy side, mmap/munmap/mprotect DECISIONS, COW/fork mapping policy,
-  fault ROUTING (which arm), brk policy, oom/kill policy, compaction
-  decisions, kswapd policy.
+ policy side, mmap/munmap/mprotect DECISIONS, COW/fork mapping policy,
+ fault ROUTING (which arm), brk policy, oom/kill policy, compaction
+ decisions, kswapd policy.
 - STAYS in core: page-table walks + PTE atomics (PtTable primitives),
-  the uaccess bottoms, the fill/copy frame primitives (FrameWindow,
-  INV-PC-WIN), the VMA-find lock rule's primitive side (find under
-  read-guard as a core primitive — the defect-C lesson makes this seam
-  explicit), buddy allocator (already Framework floor), vmemmap/page_desc.
-- THE SEAM: policy consumes `PtTable`, `FrameWindow`, `vma_find_guarded`,
-  `map/unmap_page` safe APIs. The fault path becomes: core traps →
-  policy decides → core executes the primitive.
+ the uaccess bottoms, the fill/copy frame primitives (FrameWindow,
+ INV-PC-WIN), the VMA-find lock rule's primitive side (find under
+ read-guard as a core primitive — the defect-C lesson makes this interface
+ explicit), buddy allocator (already Framework floor), vmemmap/page_desc.
+- THE INTERFACE: policy consumes `PtTable`, `FrameWindow`, `vma_find_guarded`,
+ `map/unmap_page` safe APIs. The fault path becomes: core traps →
+ policy decides → core executes the primitive.
 
 ### The existing rungs (unchanged, per crate-plan.md)
 
 - Rung 1 syscall: M1-M3 (in flight; State B = file deletion closes it).
-- Rung 2 net: measured at ~35 reverse sites (~2 lane-days post-seam).
+- Rung 2 net: measured at ~35 reverse sites (~2 lane-days post-interface).
 - Rung 3 fs-svc, Rung 4 drivers, Rung 5 ext4: measured first, per the
-  standing method; a rung whose reverse surface will not decompose is
-  SHELVED with the numbers recorded in this document's §8.
+ standing method; a rung whose reverse surface will not decompose is
+ SHELVED with the numbers recorded in this document's §8.
 
 ## 5. What happens to the edges files
 
@@ -456,23 +456,23 @@ directory rename is deferred on crate-lane coordination (it rewrites
 `crate::dfx::` tokens inside the six service crates), recipe current
 in the review doc §8.
 
-## 8. The execution ladder (order is binding; each rung = measure → design seam → flip → forbid → battery)
+## 8. The execution ladder (order is binding; each rung = measure → design interface → flip → forbid → battery)
 
 1. **R1 close** (in flight): syscall State B — delete in-lib files, full
-   battery, negative probe. Gate: triple-arch, make test, fio 3-case,
-   smoke; census columns begin.
+ battery, negative probe. Gate: triple-arch, make test, fio 3-case,
+ smoke; census columns begin.
 2. **S1 measure** (next): sched policy/core edge count (one day, no code).
-   Then seam design → policy crate flip → forbid → battery incl. P4
-   storm + ctxsw pbench (guarded domain!).
+ Then interface design → policy crate flip → forbid → battery incl. P4
+ storm + ctxsw pbench (guarded domain!).
 3. **M1 measure**: mm policy/core edges. Then as S1 (battery incl. the
-   defect-C pair + mmap LTP rows).
+ defect-C pair + mmap LTP rows).
 4. **R2 net**: the measured 35-site relocation + flip.
 5. **R3 fs-svc + R5 ext4**: the biggest mass; measured per crate-plan.
 6. **R4 drivers**: last service rung.
 7. **dfx review**: per §7.
 8. **Core audit freeze**: the final INV/F-row registry pass — every core
-   line under a row; the per-block irreducibility proof (the D-round
-   deliverable) then covers exactly rux-core.
+ line under a row; the per-block irreducibility proof (the D-round
+ deliverable) then covers exactly rux-core.
 
 Every rung's gates: the standing set (triple-arch build, make test,
 unsafe_gate, print ratchet, smoke) + the rung's domain battery + the
@@ -482,22 +482,22 @@ twice halts the ladder (no piling changes on an unstable base).
 ## 9. Risks and honest limits
 
 - **The core is still ~3,000 lines of hand-written unsafe.** The design
-  minimizes it to the reference kernel's own floor class; it does not
-  eliminate it. The verification stack is the compensating control.
-- **Policy/core seams can be wrong** (the defect-C lesson: seams between
-  lock domains are where races live). Each split's seam gets the fault
-  battery, not just the suite.
+ minimizes it to the reference kernel's own floor class; it does not
+ eliminate it. The verification stack is the compensating control.
+- **Policy/core interfaces can be wrong** (the defect-C lesson: interfaces between
+ lock domains are where races live). Each split's interface gets the fault
+ battery, not just the suite.
 - **Hot-path cost**: policy-in-crate means cross-crate calls on scheduler
-  and fault paths. Mitigation: LTO + inlining across the workspace is
-  already the build shape; the ctxsw/fault pbench rows gate each split.
+ and fault paths. Mitigation: LTO + inlining across the workspace is
+ already the build shape; the ctxsw/fault pbench rows gate each split.
 - **Rung shelving is success, not failure**: a measured non-decomposable
-  surface keeps that subsystem core-side with its numbers recorded here.
+ surface keeps that subsystem core-side with its numbers recorded here.
 
 ## 10. Relationship to existing documents
 
 - crate-plan.md: extraction mechanics remain binding; its end-state
-  section is superseded by §3 here.
+ section is superseded by §3 here.
 - unsafe-5000-plan.md Part I: the ladder's D-round proof now targets
-  rux-core (§8 step 8). Part II status board unchanged.
+ rux-core (§8 step 8). Part II status board unchanged.
 - safety-and-performance.md: the INV/F-row registry becomes the core's
-  audit surface; no format change.
+ audit surface; no format change.

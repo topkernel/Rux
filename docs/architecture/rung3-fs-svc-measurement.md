@@ -24,12 +24,12 @@ that must sever/relocate). NO code changed.
 | fifo open/forget/peer (vfs) | 3 | special open path | 1 move: fifo_open_file DOWN (it is an inode-shape helper) or FIFO-ops registration on inode type |
 | procfs pid-dir + NS/FD offsets (vfs) | 19 | /proc self-links | 2 moves: offset constants DOWN; pid-dir lookup via INodeOps on the procfs root (already table-shaped) |
 | tmpfs tables + aliases (mount) | 22 | mount init dispatch by fs name | 0 relocations: THE ENTRY SEAM — mount.rs's per-name dispatch becomes a registration table (name → mount fn + INodeOps), each leaf registers at init (same shape as FileSystemType::new already is) |
-| other-leaf mount inits (mount) | 17 | same | 0 (same seam) |
+| other-leaf mount inits (mount) | 17 | same | 0 (same interface) |
 | memfd seals, char_dev stat, cgroup/misc | 9 | scattered single calls | 3 moves: seals fns DOWN to file.rs core (memfd-generic), char_dev stat via FileOps hook, cgroup trivial |
 
 **Predicted relocation total: ~8 moves + 2 hook tables (notify, mount
 registration) + 1 ops-hook extension (pipe).** The 128 references
-decompose into 3 seam mechanisms — nothing un-decomposable found.
+decompose into 3 interface mechanisms — nothing un-decomposable found.
 Rung 3 is PRICED and proceeds.
 
 ## Consumption side (leaf→framework, for the crate API surface)
@@ -43,7 +43,7 @@ devfs→char_dev=1+char_dev→console — these need either a shared
 "devfs-svc" sub-crate or moving the shared item down (pty's devfs calls
 are registration-shape; procfs→ext4 is readlink through generic file ops).
 
-## Entry seams (framework→service, decided not by fiat)
+## Entry interfaces (framework→service, decided not by fiat)
 1. MOUNT: the name→(mount_fn, INodeOps) registration table (replaces
    mount.rs's hardcoded dispatch) — same shape as FileSystemType today.
 2. LIFECYCLE NOTIFY: inotify hook table registered at inotify init.

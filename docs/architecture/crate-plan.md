@@ -7,19 +7,19 @@ Status: EXTRACTION MECHANICS (2026-11-21; the five-step flip recipe below is bin
 The workspace becomes a framework hub plus service-leaf crates:
 
 ```
-rux/                      (the framework crate — "kernel/src" minus services)
-  ├── arch/{x86_64,riscv64,aarch64}/   entry, pt-tables, uaccess, traps
-  ├── sched/  mm/  sync/  timer/  interrupt/     the machine core
-  ├── fs/  (framework side: VFS core, bio, page cache, journal)
-  ├── process/  ipc/  dfx/  net/ (core)  drivers/ (framework side)
-  ├── safety/              the typed primitives (KPtr, MmioRegion, ...)
-  └── */edges.rs, */unsafe_edges.rs    the audited unsafe zones (INV contracts)
+rux/ (the framework crate — "kernel/src" minus services)
+ ├── arch/{x86_64,riscv64,aarch64}/ entry, pt-tables, uaccess, traps
+ ├── sched/ mm/ sync/ timer/ interrupt/ the machine core
+ ├── fs/ (framework side: VFS core, bio, page cache, journal)
+ ├── process/ ipc/ dfx/ net/ (core) drivers/ (framework side)
+ ├── safety/ the typed primitives (KPtr, MmioRegion, ...)
+ └── */edges.rs, */unsafe_edges.rs the audited unsafe zones (INV contracts)
 
-rux-syscall/              service crate — #![forbid(unsafe_code)] at crate level
-rux-net-svc/              service crate — same
-rux-fs/               service crate — same
-rux-drivers-svc/          service crate — same
-rux-ext4/                 service crate — same (last rung; the largest)
+rux-syscall/ service crate — #![forbid(unsafe_code)] at crate level
+rux-net-svc/ service crate — same
+rux-fs/ service crate — same
+rux-drivers-svc/ service crate — same
+rux-ext4/ service crate — same (last rung; the largest)
 ```
 
 Every service crate carries a crate-level `#![forbid(unsafe_code)]`: the
@@ -43,51 +43,51 @@ exec helpers — the pilot's relocations were exactly this rule applied).
 ## 3. The flip recipe (per crate, five steps — proven in the pilot)
 
 1. **Measure first** — count the reverse surface (framework → candidate),
-   decompose by class; a rung only proceeds priced.
+ decompose by class; a rung only proceeds priced.
 2. **Sever/relocate** — framework-shaped utilities move DOWN into the
-   framework crate (one family per commit, mechanically verifiable by
-   grep + build).
-3. **The entry seam** — the one place framework calls INTO the service
-   (syscall's dispatch, net's rx from drivers): resolved as a
-   kernel-owned registration table or a kernel-side shim; decided with
-   the owning lane present, never by fiat.
+ framework crate (one family per commit, mechanically verifiable by
+ grep + build).
+3. **The entry interface** — the one place framework calls INTO the service
+ (syscall's dispatch, net's rx from drivers): resolved as a
+ kernel-owned registration table or a kernel-side shim; decided with
+ the owning lane present, never by fiat.
 4. **The flip** — new workspace member; `#[path]`-include the existing
-   files initially (ZERO file moves, zero behavior change); crate-level
-   forbid; the crate's edges.rs STAYS in the framework crate as the
-   audited zone.
+ files initially (ZERO file moves, zero behavior change); crate-level
+ forbid; the crate's edges.rs STAYS in the framework crate as the
+ audited zone.
 5. **Physical moves later** (optional, cosmetic) once the crate has
-   proven stable through a full merge cycle.
+ proven stable through a full merge cycle.
 
 Every step is independently mergeable and gate-green; no step changes
 behavior — relocations and attributes only.
 
-### 3a. Seam-craft rules (the leaf-style lessons, adopted 2026-11-23)
+### 3a. Cross-crate interface design rules (the leaf-style lessons, adopted 2026-11-23)
 
-Three rules for designing any callback table or trait seam — the same
+Three rules for designing any callback table or trait interface — the same
 principles the in-tree Rust leaf work in the reference monolithic
 kernel uses to keep its FFI-adjacent abstractions cheap. We derived
 them independently (paid for with measured regressions), and they are
 binding for every future flip:
 
 1. **Split by concern, never a mega-table.** One table per lifecycle/
-   consumer (the fs side has MountFn / notify / ops / relocation / FsHooks
-   as five separate tables; mm has MmHooks vs MmPolicyHooks). A table
-   whose rows exceed ~20 must either split or justify its width in the
-   seam's doc comment.
-2. **Static dispatch first on hot paths.** A seam on a data path takes
-   an existing vtable FIELD (e.g. FileOps.fault / FileOps.write_at —
-   field dispatch the caller already performs) or a direct `#[inline]`
-   wrapper over a static, NOT a new fn-pointer row. Receipts: S1's
-   ~40 indirect calls per switch cost p2_ctxsw +25.1% until
-   devirtualized to +1.7%; R5's read/write paths ride FileOps slots at
-   zero new indirection. Fn-pointer table rows are for COLD paths
-   (mount rows, procfs show, sysctl, exit/exec hooks) and may be
-   arm-gated at the call site when their body is diagnostic.
-3. **Thin mechanical adapters.** Seam signatures carry the native error
-   type (`Result<_, i32>` errno or the domain enum) and the adapter
-   layer contains ZERO logic — bodies move verbatim; conversions are
-   one line and mechanical. If a seam body needs logic, that logic
-   belongs on one side of the boundary, not in the seam.
+ consumer (the fs side has MountFn / notify / ops / relocation / FsHooks
+ as five separate tables; mm has MmHooks vs MmPolicyHooks). A table
+ whose rows exceed ~20 must either split or justify its width in the
+ interface's doc comment.
+2. **Static dispatch first on hot paths.** A interface on a data path takes
+ an existing vtable FIELD (e.g. FileOps.fault / FileOps.write_at —
+ field dispatch the caller already performs) or a direct `#[inline]`
+ wrapper over a static, NOT a new fn-pointer row. Receipts: S1's
+ ~40 indirect calls per switch cost p2_ctxsw +25.1% until
+ devirtualized to +1.7%; R5's read/write paths ride FileOps slots at
+ zero new indirection. Fn-pointer table rows are for COLD paths
+ (mount rows, procfs show, sysctl, exit/exec hooks) and may be
+ arm-gated at the call site when their body is diagnostic.
+3. **Thin mechanical adapters.** Interface signatures carry the native error
+ type (`Result<_, i32>` errno or the domain enum) and the adapter
+ layer contains ZERO logic — bodies move verbatim; conversions are
+ one line and mechanical. If a interface body needs logic, that logic
+ belongs on one side of the boundary, not in the interface.
 
 ## 4. The ladder (order = least-coupled first, each rung measured)
 
@@ -100,7 +100,7 @@ binding for every future flip:
 | 5 | rux-ext4 | deepest fs consumer; moves last with the most measurement |
 
 A rung whose measurement shows an un-decomposable reverse surface is
-SHELVED with the numbers — the ladder does not force a bad seam.
+SHELVED with the numbers — the ladder does not force a bad interface.
 
 ## 5. What stays in the framework crate forever
 
@@ -114,20 +114,20 @@ outside.
 ## 6. The payoff (metrics)
 
 - The census splits into framework vs service-CRATE columns; the service
-  columns are structurally zero (compiler-guaranteed, not grep-argued).
+ columns are structurally zero (compiler-guaranteed, not grep-argued).
 - The human-audited surface = the framework crate alone.
 - Layer 1's "every service crate forbidden" becomes a workspace fact,
-  completing the plan's Part II Layer-1 row.
+ completing the plan's Part II Layer-1 row.
 
 ## 7. Gates per rung
 
 Triple-arch build, full suite, unsafe_gate (forbid ratchet + ledger paths
 if files move), print ratchet, smoke — plus the rung's own reverse-surface
-grep coming back empty at the seam only. No behavior change anywhere in
+grep coming back empty at the interface only. No behavior change anywhere in
 the ladder: a rung that needs one is redesigned, not argued.
 
 
-## Step 4 — THE SEAM DECISION (recorded 2026-11-21, steps 2-3 complete)
+## Step 4 — THE INTERFACE DECISION (recorded 2026-11-21, steps 2-3 complete)
 
 **Decision: the dispatch table + syscall_handler stay KERNEL-SIDE as
 the shim; the per-call implementation fns are the service surface.**
@@ -147,12 +147,12 @@ may depend on both). Cost: dispatch.rs + syscall_handler remain
 kernel files (they contain no unsafe beyond edges delegation — the
 tree forbid covers them today; at flip time they stay outside the
 service crate's forbid scope by construction, which is CORRECT: they
-are the seam, the one place the two worlds meet).
+are the interface, the one place the two worlds meet).
 
-Seam inventory (the post-flip reverse surface, measured after steps
-2-3): syscall_handler + dispatch (10 sites, the seam proper);
+Interface inventory (the post-flip reverse surface, measured after steps
+2-3): syscall_handler + dispatch (10 sites, the interface proper);
 seccomp_syscall_gate (3 arch-trap sites — the syscall FILTER is
-entry-seam by nature, stays with it); syscall/edges re-exports (8
+entry-interface by nature, stays with it); syscall/edges re-exports (8
 sites — edges stays framework-side per this plan, so these vanish at
 flip); errno re-export imports (5 alias sites — mechanically
 severable to crate::errno::constants); misc residue (param_stall_dump
@@ -163,19 +163,19 @@ Everything else from the pilot's 130-site surface is severed.
 ## Flip readiness (the checklist for the flip commit)
 
 1. lib/bin split: kernel crate grows src/lib.rs (the framework lib:
-   every current main.rs `mod` becomes `pub mod`; rust_main becomes a
-   pub fn); main.rs becomes the thin composition bin depending on the
-   lib. No behavior change; the binary crate is the composition point.
+ every current main.rs `mod` becomes `pub mod`; rust_main becomes a
+ pub fn); main.rs becomes the thin composition bin depending on the
+ lib. No behavior change; the binary crate is the composition point.
 2. rux-syscall workspace member: lib.rs with `#![forbid(unsafe_code)]`
-   + `pub use rux::{arch, fs, ...}` root re-exports (so the service
-   files' crate::X paths resolve) + `#[path]`-includes of the 12
-   service files (zero moves). edges.rs STAYS in the framework crate.
-3. dispatch/syscall_handler stay in the binary crate (the seam, per
-   the decision above); the seccomp gate moves WITH the service crate
-   and the traps call through the binary's seam shim.
+ + `pub use rux::{arch, fs, ...}` root re-exports (so the service
+ files' crate::X paths resolve) + `#[path]`-includes of the 12
+ service files (zero moves). edges.rs STAYS in the framework crate.
+3. dispatch/syscall_handler stay in the binary crate (the interface, per
+ the decision above); the seccomp gate moves WITH the service crate
+ and the traps call through the binary's interface shim.
 4. The battery: triple-arch, make test, KVM smoke, unsafe_gate, and
-   the NEGATIVE PROBE (an unsafe block anywhere in the service crate
-   must fail the build).
+ the NEGATIVE PROBE (an unsafe block anywhere in the service crate
+ must fail the build).
 
 
 ## Flip milestone ledger
@@ -185,7 +185,7 @@ kernel/src/lib.rs = the rux framework LIB (34 pub mods, entry fns,
 crate attrs); kernel/src/main.rs = the composition BIN. rust_main
 stays no_mangle IN THE LIB (all three arches' entry asm resolves it
 there — x86 boot.S's compile-time `sym crate::rust_main` REQUIRES the
-symbol in the lib crate); its body calls seam_register_default() (the
+symbol in the lib crate); its body calls interface_register_default() (the
 stable no-op hook) then rust_main_impl. Triple-arch rc=0, make test
 1,598 PASS. Zero behavior change.
 
@@ -198,16 +198,16 @@ crates is the BIN — but the entry symbol lives in the LIB (boot.S's
 `sym` reference). Two resolutions, decided:
 
 A) ENTRY-TO-BIN (chosen): move the three arch entry pairs
-   (boot.rs/boot.S, entry.S) into the BIN. The sym reference then
-   resolves in the bin where rust_main + service registration both
-   live; the LIB keeps everything else. Cost: three file moves +
-   build.rs link-arg verification per arch (the .incbin DTB and -T
-   scripts must follow).
+ (boot.rs/boot.S, entry.S) into the BIN. The sym reference then
+ resolves in the bin where rust_main + service registration both
+ live; the LIB keeps everything else. Cost: three file moves +
+ build.rs link-arg verification per arch (the .incbin DTB and -T
+ scripts must follow).
 
 B) Table-with-lib-default (rejected): the lib's dispatch table
-   defaults to the current match, replaced at registration — this
-   compiles the service files in BOTH crates until registration
-   lands, defeating the forbid guarantee.
+ defaults to the current match, replaced at registration — this
+ compiles the service files in BOTH crates until registration
+ lands, defeating the forbid guarantee.
 
 ### The dispatch conversion inventory (measured, mechanical)
 The generic match is 381 single-call arms — 322 `NR => mod::fn(args)`
@@ -234,8 +234,8 @@ on rux-syscall(lib) which depends on kernel(lib) — Cargo refuses.
 - kernel -> lib-only package (name rux)
 - kernel/rux-syscall -> service (exists)
 - kernel/rux-bin -> the composition bin (rust_main + register_all;
-  inherits the link-arg machinery via its own build.rs or the
-  workspace's)
+ inherits the link-arg machinery via its own build.rs or the
+ workspace's)
 The Makefile's cargo invocations gain -p rux-bin (or --workspace).
 The boot entry already binds rust_main via linker symbols (x86's
 extern-decl sym), so the bin package's rust_main is found with NO
@@ -258,12 +258,12 @@ as required at full-flip scope: an unsafe block in a service file
 fails the crate's own build).
 
 ### The flip's final shape
-- kernel/src/syscall/: dispatch.rs (the seam: tables + ENOSYS tail +
-  x86 translation), edges.rs (audited zone), seccomp.rs (entry-seam
-  filter), support.rs (hooks + pure items) — 5 files, the seam.
+- kernel/src/syscall/: dispatch.rs (the interface: tables + ENOSYS tail +
+ x86 translation), edges.rs (audited zone), seccomp.rs (entry-interface
+ filter), support.rs (hooks + pure items) — 5 files, the interface.
 - kernel/rux-syscall/src/syscall/: the 10 service files, sole copy.
 - kernel/rux-bin/: the composition bin (rust_main -> register_all ->
-  rust_main_impl).
+ rust_main_impl).
 
 ### The regression that wasn't (recorded for the pattern)
 The sgid_mode 8-failure blocker resolved as TEST PRECONDITIONS: the
@@ -279,26 +279,26 @@ the leaking test moves.
 
 The net service crate (kernel/rux-net, workspace member 3):
 - SOLE COPY lives in the crate (src/net/: arp ethernet icmp netlink raw
-  socket tcp tcp_timer udp unix ipv4/ ipv6/); `#![forbid(unsafe_code)]`
-  is the compiler-enforced boundary, negative-probe verified through
-  the workspace.
+ socket tcp tcp_timer udp unix ipv4/ ipv6/); `#![forbid(unsafe_code)]`
+ is the compiler-enforced boundary, negative-probe verified through
+ the workspace.
 - The framework zone (kernel/src/net/): buffer (the skb substrate, 22
-  audited constructs), net_hooks (26-row hook table), file_arc +
-  net_edges (INV-NETARC-1 / INV-NET-SOCKTAB-1 / INV-NET-ARCREF-1 /
-  INV-NET-HDRVIEW-1 / INV-NET-CONTAINEROF-1), mod.rs's Arc wrappers.
+ audited constructs), net_hooks (26-row hook table), file_arc +
+ net_edges (INV-NETARC-1 / INV-NET-SOCKTAB-1 / INV-NET-ARCREF-1 /
+ INV-NET-HDRVIEW-1 / INV-NET-CONTAINEROF-1), mod.rs's Arc wrappers.
 - Zero unsafe was left behind: the 24 substrate constructs extracted
-  BEFORE the move (commit 7008a1cb1); the four `unsafe impl Sync`
-  markers were vestigial (auto-Sync structs — deletion-verified).
+ BEFORE the move (commit 7008a1cb1); the four `unsafe impl Sync`
+ markers were vestigial (auto-Sync structs — deletion-verified).
 - The reverse surface rides NetHooks (26 rows; register_all fills the
-  full table from the crate; the composition bin calls it before
-  rust_main_impl). posix_mq's notify target became Arc<File> + a push
-  hook — the last framework TYPE reference into net.
+ full table from the crate; the composition bin calls it before
+ rust_main_impl). posix_mq's notify target became Arc<File> + a push
+ hook — the last framework TYPE reference into net.
 - rux-syscall -> rux-net: the sibling service dep (crate::net
-  re-pointed; zero source edits in its 10 files).
+ re-pointed; zero source edits in its 10 files).
 - Battery: triple-arch rc=0; riscv boot to shell + guest /proc/net
-  readback (dev lo + route lo rows through the hooks); make test
-  886/886 (6 net-internals test modules gated — they follow the files,
-  the rung-1 recipe); fio 3-case verify battery + e2fsck PASS on the
-  same rig as the pre-flip baseline (x86_64 KVM, fioboot.py).
+ readback (dev lo + route lo rows through the hooks); make test
+ 886/886 (6 net-internals test modules gated — they follow the files,
+ the rung-1 recipe); fio 3-case verify battery + e2fsck PASS on the
+ same rig as the pre-flip baseline (x86_64 KVM, fioboot.py).
 - Fixes the step-1 gap: procfs's /proc/net consumed hook getters that
-  nobody registered since d754f9e12 — the tip restores real rows.
+ nobody registered since d754f9e12 — the tip restores real rows.
