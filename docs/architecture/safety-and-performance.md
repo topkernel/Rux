@@ -2073,6 +2073,19 @@ ledger's contract) are what speak to whether an annotation is right,
 and the artifact count alone was never proof of that. [lane worktree
 ledger-recover]
 
+Outcome of the 2026-11-23 recovery on that incident, same lane: 2099
+regions, 1591 -> 2053 with artifact (97.8%), 46 GAP, in three reviewed
+steps — 415 recovered by reference consensus, 47 contested sites
+decided by hand (docs/development/unsafe-verification-decisions.tsv;
+two left GAP because both historical tags contradict the code), and 153
+by-id rows repaired. The evidence contradicted 349 annotated regions in
+total: 40 decided with the contested batch, 153 repaired, 119 read and
+adjudicated as already correct, 37 kept as undetermined (both tags
+imperfect — arch/x86_64/boot.rs x21, safety/mmio.rs x8, dma/frame x3,
+ashmem, mm/edges, smp:597, context.rs publish x2; the list is in the
+lane report). Before those commits the "75.8% with artifact" this file
+reported included those 349: the count was never the verification.
+
 ## Primitive INV index (literal ids — machine-greppable)
 
 Every id below is spelled literally for the unsafe_gate artifact
