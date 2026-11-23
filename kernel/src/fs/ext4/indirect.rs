@@ -167,23 +167,18 @@ pub fn read_indirect_block(
     indirect_block: u64,
     index: usize,
 ) -> Result<u64, i32> {
-    unsafe {
-        let bh = bio::bread(fs.device, indirect_block)
-            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-        let data = &(*bh).b_data;
-        let block_numbers = reinterpret_slice::<u32>(data);
-
+    // The read window rides bio's typed pin edge; the u32 decode rides
+    // the framework's alignment-checked view (empty on a misaligned
+    // buffer — the corrupt-disk class, never UB).
+    bio::with_block_ro(fs.device, indirect_block, |data| {
+        let block_numbers =
+            crate::fs::ext4_edges::typed_slice::<u32>(data, 0, data.len() / 4);
         if index >= block_numbers.len() {
-            bio::brelse(bh);
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
-
-        let block_num = block_numbers[index] as u64;
-
-        bio::brelse(bh);
-        Ok(block_num)
-    }
+        Ok(block_numbers[index] as u64)
+    })
+    .unwrap_or(Err(errno::Errno::IOError.as_neg_i32()))
 }
 
 /// Clear the indirect-mapping slot for `block_index` (write 0 into the
@@ -246,31 +241,21 @@ pub fn write_indirect_block(
     index: usize,
     block_num: u32,
 ) -> Result<(), i32> {
-    unsafe {
-        let bh = bio::bread(fs.device, indirect_block)
-            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-        let data = &mut (*bh).b_data;
-        let block_numbers = reinterpret_slice_mut::<u32>(data);
-
+    // The write window rides the block-update edge (bread -> &mut view
+    // -> dirty -> journal tag -> sync -> brelse); the u32 decode rides
+    // the framework's alignment-checked view.
+    bio::with_block_mut(fs.device, indirect_block, |data, _bh| {
+        let block_numbers =
+            crate::fs::ext4_edges::typed_slice_mut::<u32>(data, 0, data.len() / 4);
         if index >= block_numbers.len() {
-            bio::brelse(bh);
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
-
+        // Family b (ext4-corrupt lane): indirect blocks are metadata
+        // (see extent.rs write_node's note) — with_block_mut applies
+        // the dirty bit + journal tag + sync on every path.
         block_numbers[index] = block_num;
-
-        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-        // Family b (ext4-corrupt lane): journal registration — indirect
-        // blocks are metadata (see extent.rs write_node's note).
-        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-        }
-        let sync_res = bio::sync_dirty_buffer(bh);
-        bio::brelse(bh);
-        sync_res?;
         Ok(())
-    }
+    })
 }
 
 pub fn max_file_size(block_size: u64) -> u64 {
@@ -313,17 +298,4 @@ pub fn get_indirect_level(size: u64, block_size: u64) -> u32 {
     3
 }
 
-unsafe fn reinterpret_slice<T>(data: &[u8]) -> &[T] {
-    core::slice::from_raw_parts(
-        data.as_ptr() as *const T,
-        data.len() / core::mem::size_of::<T>(),
-    )
-}
-
-unsafe fn reinterpret_slice_mut<T>(data: &mut [u8]) -> &mut [T] {
-    core::slice::from_raw_parts_mut(
-        data.as_ptr() as *mut T,
-        data.len() / core::mem::size_of::<T>(),
-    )
-}
 

@@ -166,8 +166,9 @@ pub struct Ext4FileSystem {
     pub total_inodes: u32,
     /// Journal inode number (typically 8)
     pub journal_ino: u32,
-    /// JBD2 journal (initialized during mount)
-    pub journal: Option<alloc::sync::Arc<crate::fs::jbd2::Journal>>,
+    /// JBD2 journal (initialized during mount). The asserting wrapper
+    /// keeps the Sync derivation framework-side (INV-JSEAM-4).
+    pub journal: crate::fs::journal_seam::JournalSlot,
     /// Block preallocation state (for mballoc)
     pub prealloc: Spinlock<Option<crate::fs::ext4::allocator::PreallocState>>,
     /// metadata_csum (ro_compat 0x400): crc32c seed + verify on the read
@@ -193,12 +194,9 @@ pub struct Ext4FileSystem {
     pub read_only: bool,
 }
 
-// SAFETY: Ext4FileSystem is only accessed via &self methods that use bio layer
-// locking; device is a raw pointer but only used for I/O through the bio cache.
-unsafe impl Send for Ext4FileSystem {}
-// SAFETY: all mutable access goes through bio::bread/brelse which uses internal
-// locking; device pointer is read-only after initialization.
-unsafe impl Sync for Ext4FileSystem {}
+// (Send/Sync are AUTO-derived since the fields became &'static GenDisk +
+// Spinlock/Option<Arc> — the old unsafe impls were vestigial, deletion-
+// verified at rung 5 like rux-net's markers.)
 
 impl Ext4FileSystem {
     /// Create new ext4 filesystem instance
@@ -217,7 +215,7 @@ impl Ext4FileSystem {
             total_blocks: 0,
             total_inodes: 0,
             journal_ino: 0,
-            journal: None,
+            journal: crate::fs::journal_seam::JournalSlot::empty(),
             prealloc: Spinlock::new(None),
             metadata_csum: false,
             csum_seed: 0,
@@ -3124,8 +3122,11 @@ fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 /// EXT4_BIG_LOCK or issuing block I/O directly could invert lock order;
 /// destroying only QUEUES the reap, and the wrappers below drain the
 /// queue at their start under their own lock discipline.
+// Raw-pointer rows (Send-only container): the typed deref at use
+// rides the framework's boxed_ref edge (the registry's liveness
+// authority, as the comment below documents).
 static PENDING_REAPS: crate::sync::spinlock::Spinlock<
-    alloc::vec::Vec<(&'static Ext4FileSystem, u32)>,
+    alloc::vec::Vec<(usize, u32)>,
 > = crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new());
 
 /// Drain the deferred-delete queue. Called from ext4 entry points that
@@ -3141,7 +3142,8 @@ fn flush_pending_reaps() {
             }
         };
         let _guard = EXT4_BIG_LOCK.lock();
-        let _ = namei::ext4_reap_unlinked(item.0, item.1);
+        let fs: &Ext4FileSystem = crate::syscall::edges::boxed_ref(item.0 as *const Ext4FileSystem);
+        let _ = namei::ext4_reap_unlinked(fs, item.1);
     }
 }
 
@@ -3167,7 +3169,10 @@ fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
             if let Ok(disk) = inode::read_inode(fs, inode.ino as u32) {
                 if disk.i_links_count == 0 && disk.i_dtime == 0 {
                     let mut q = PENDING_REAPS.lock();
-                    q.push((fs, inode.ino as u32));
+                    // Address-as-integer row (Send-only container);
+                    // the typed deref at reap rides boxed_ref
+                    // (registry-liveness authority).
+                    q.push((fs as *const Ext4FileSystem as usize, inode.ino as u32));
                 }
             }
         }
@@ -3477,20 +3482,18 @@ fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_na
 /// 'static mount lifetime. Every global-fs wrapper rides this.
 pub fn mounted_ext4_fs() -> Option<&'static Ext4FileSystem> {
     let p = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
-    if p.is_null() {
-        return None;
-    }
-    // SAFETY: INV-EXT4-GLOBALFS above.
-    Some(unsafe { &*p })
+    // The typed view rides the framework's static_ref edge
+    // (INV-EXT4-GLOBALFS above).
+    crate::fs::unsafe_edges::static_ref(p)
 }
 
 /// Get Ext4FileSystem pointer from inode's private_data
 fn get_ext4_fs_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32> {
-    let fs_ptr = inode.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
-    // SAFETY: fs_ptr was stored as a raw pointer to the global
-    // Ext4FileSystem during create_vfs_inode; valid for the mount's
-    // lifetime (the ONE audited inode->fs resolver).
-    Ok(unsafe { &*(fs_ptr as *const Ext4FileSystem) })
+    // fs_ptr was stored as a raw pointer to the global Ext4FileSystem
+    // during create_vfs_inode; valid for the mount's lifetime (the
+    // inode->fs resolver rides the framework's privdata_ref edge).
+    crate::fs::unsafe_edges::privdata_ref_leaked::<Ext4FileSystem>(inode)
+        .ok_or(errno::Errno::IOError.as_neg_i32())
 }
 
 /// Mutating-op variant of get_ext4_fs_from_inode: a read-only-mounted ext4
@@ -3520,8 +3523,8 @@ fn get_ext4_fs_rw_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i
 /// resolution per direction.
 pub(super) fn sb_inode_of(inode: &Inode) -> Result<&inode::Ext4Inode, i32> {
     let p = inode.sb.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
-    // SAFETY: INV-EXT4-SBRES-1 above.
-    Ok(unsafe { &*(p as *const inode::Ext4Inode) })
+    // INV-EXT4-SBRES-1 above; the box view rides boxed_ref.
+    Ok(crate::syscall::edges::boxed_ref(p as *const inode::Ext4Inode))
 }
 
 /// The mutating twin of `sb_inode_of` (INV-EXT4-SBRES-1): for
@@ -3529,9 +3532,10 @@ pub(super) fn sb_inode_of(inode: &Inode) -> Result<&inode::Ext4Inode, i32> {
 /// lock (EXT4_BIG_LOCK) or run in single-threaded creation contexts.
 pub(super) fn sb_inode_of_mut(inode: &Inode) -> Result<&mut inode::Ext4Inode, i32> {
     let p = inode.sb.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
-    // SAFETY: INV-EXT4-SBRES-1 above; no aliasing shared borrow is live
-    // at the store sites that use this (see each caller's lock note).
-    Ok(unsafe { &mut *(p as *mut inode::Ext4Inode) })
+    // INV-EXT4-SBRES-1 above; no aliasing shared borrow is live at the
+    // store sites that use this (see each caller's lock note) — the
+    // exclusive box view rides boxed_mut.
+    Ok(crate::syscall::edges::boxed_mut(p as *mut inode::Ext4Inode))
 }
 
 /// Get file operations for ext4 regular files and directories
@@ -4039,7 +4043,7 @@ pub fn mount_loop_instance(
         if let Err(e) = fs.init_journal() {
             crate::pr_debug!("ext4: loop-instance journal init failed: {}", e);
         }
-        fs.journal = None;
+        fs.journal.clear();
     }
     let fs_ptr = alloc::boxed::Box::into_raw(fs) as *mut Ext4FileSystem;
     // The writeback path resolves (fs_id, ino) through this registry

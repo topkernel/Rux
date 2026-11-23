@@ -119,27 +119,29 @@ fn fallocate_row(inode: &Inode, mode: i32, offset: u64, len: u64) -> Result<(), 
     // next flush (the same data-loss family, size-regression face).
     {
         let keep_size = mode & FALLOC_FL_KEEP_SIZE != 0;
-        let fs_ptr2 = fs_ptr as *const super::Ext4FileSystem;
-        // SAFETY: fs_ptr2 is the ext4 instance from inode.private_data.
-        if let Ok(fresh) = unsafe { (*fs_ptr2).read_inode(inode.ino as u32) } {
+        // fs_ptr2 is the ext4 instance from inode.private_data (the
+        // typed view rides boxed_ref); inode.sb is the Box<Ext4Inode>
+        // cached at open (the exclusive view rides boxed_mut).
+        let fs2 = crate::syscall::edges::boxed_ref(
+            fs_ptr as *const super::Ext4FileSystem,
+        );
+        if let Ok(fresh) = fs2.read_inode(inode.ino as u32) {
             if !keep_size {
                 let live = inode.size.load(core::sync::atomic::Ordering::Acquire);
                 if fresh.size > live {
                     inode.size.store(fresh.size, core::sync::atomic::Ordering::Release);
                 }
             }
-            // SAFETY: inode.sb is the Box<Ext4Inode> cached at open.
             if let Some(ptr) = inode.sb {
-                unsafe {
-                    let cached = &mut *(ptr as *mut super::inode::Ext4Inode);
-                    cached.block = fresh.block;
-                    if !keep_size && fresh.size > cached.size {
-                        cached.size = fresh.size;
-                    }
-                    cached.blocks = fresh.blocks;
-                    cached.mtime = fresh.mtime;
-                    cached.ctime = fresh.ctime;
+                let cached: &mut super::inode::Ext4Inode =
+                    crate::syscall::edges::boxed_mut(ptr as *mut super::inode::Ext4Inode);
+                cached.block = fresh.block;
+                if !keep_size && fresh.size > cached.size {
+                    cached.size = fresh.size;
                 }
+                cached.blocks = fresh.blocks;
+                cached.mtime = fresh.mtime;
+                cached.ctime = fresh.ctime;
             }
         }
     }
@@ -220,19 +222,19 @@ fn kmsg_write_at_row(ino: u32, offset: u64, data: &[u8]) -> isize {
 }
 
 fn journal_dirty_row(handle: *mut (), bh: *mut bio::BufferHead) {
-    // SAFETY: the slot is set/cleared by this task around the
-    // enclosing ext4 operation; the handle pins its transaction.
+    // The slot is set/cleared by this task around the enclosing ext4
+    // operation; the typed view rides boxed_mut.
     if !handle.is_null() {
         let h = handle as *mut jbd2::journal::Handle;
-        let _ = jbd2::jbd2_journal_dirty_metadata(unsafe { &mut *h }, bh);
+        let _ = jbd2::jbd2_journal_dirty_metadata(crate::syscall::edges::boxed_mut(h), bh);
     }
 }
 
 fn journal_forget_row(handle: *mut (), bh: *mut bio::BufferHead) {
-    // SAFETY: as journal_dirty_row.
+    // As journal_dirty_row.
     if !handle.is_null() {
         let h = handle as *mut jbd2::journal::Handle;
-        let _ = jbd2::jbd2_journal_forget(unsafe { &mut *h }, bh);
+        let _ = jbd2::jbd2_journal_forget(crate::syscall::edges::boxed_mut(h), bh);
     }
 }
 
@@ -406,13 +408,13 @@ pub fn register_all() {
             // regardless (mount-time downgrade policy: the write path
             // does not maintain checksums).
             if let Some(p) = super::get_ext4_fs() {
-                // SAFETY: the fs instance lives for the mount;
-                // read_only is a plain bool whose only writers are
-                // mount setup and this remount path.
-                unsafe {
-                    let forced_ro = (*(p as *const super::Ext4FileSystem)).metadata_csum;
-                    (*(p as *mut super::Ext4FileSystem)).read_only = ro || forced_ro;
-                }
+                // The fs instance lives for the mount; read_only is a
+                // plain bool whose only writers are mount setup and
+                // this remount path (views ride the framework edges).
+                let fs: &mut super::Ext4FileSystem =
+                    crate::syscall::edges::boxed_mut(p);
+                let forced_ro = fs.metadata_csum;
+                fs.read_only = ro || forced_ro;
             }
         },
         fallocate: fallocate_row,

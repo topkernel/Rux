@@ -76,9 +76,9 @@ pub struct Ext4InodeOnDisk {
 impl Default for Ext4InodeOnDisk {
     fn default() -> Self {
         // INV-EXT4-INODE-ZP: #[repr(C)] all-integer on-disk struct —
-        // the zero bit pattern is a valid value for every field.
-        // SAFETY: as documented (the one audited zeroed of this type).
-        unsafe { mem::zeroed() }
+        // the zero bit pattern is a valid value for every field (the
+        // audited zeroed lives at the framework edge, INV-EXT-EDGE-3).
+        crate::fs::ext4_edges::zeroed_on_disk()
     }
 }
 
@@ -617,12 +617,13 @@ pub fn write_inode(
     // the buffer state flags through an internal spinlock.
     bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
 
-    // Journal the inode table block if a transaction is active
-    // SAFETY: bh is a valid buffer head from bio::bread
-    unsafe {
-        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-        }
+    // Journal the inode table block if a transaction is active (the
+    // typed handle view rides the framework's boxed_mut edge).
+    if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(
+            crate::syscall::edges::boxed_mut(handle),
+            bh,
+        );
     }
 
     // With an active handle the commit persists this block (write-through
@@ -830,13 +831,13 @@ pub fn write_inode_disk(
     // the buffer state flags through an internal spinlock.
     bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
 
-    // Journal the inode table block if a transaction is active
-    // SAFETY: bh is a valid buffer head from bio::bread
-    unsafe {
-        let handle_ptr = crate::fs::ext4::namei::get_current_handle();
-        if let Some(handle) = handle_ptr {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-        }
+    // Journal the inode table block if a transaction is active (the
+    // typed handle view rides the framework's boxed_mut edge).
+    if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(
+            crate::syscall::edges::boxed_mut(handle),
+            bh,
+        );
     }
 
     let sync_res = bio::sync_dirty_buffer(bh);
@@ -908,22 +909,23 @@ pub fn persist_ioc_flags(vfs_inode: &crate::fs::inode::Inode, merged: u32) {
     }
     let _guard = EXT4_BIG_LOCK.lock();
     if let Some(fs_ptr) = vfs_inode.private_data {
-        let fs = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
-        // SAFETY: private_data holds the Ext4FileSystem for
-        // EXT4_INODE_OPS inodes (installed at mount/iget time).
-        unsafe {
-            if let Ok(mut on_disk) = read_inode(&*fs, vfs_inode.ino as u32) {
-                on_disk.i_flags =
-                    (on_disk.i_flags & !FS_FL_USER_MODIFIABLE) | (merged & FS_FL_USER_MODIFIABLE);
-                if write_inode_disk(&*fs, vfs_inode.ino as u32, &on_disk).is_ok() {
-                    // Keep the VFS-cached Ext4Inode copy in sync.
-                    if let Some(sb) = vfs_inode.sb {
-                        // SAFETY: sb points at the Ext4Inode cache entry
-                        // for this inode (set at iget), exclusively
-                        // reachable under EXT4_BIG_LOCK here.
-                        let cached = &mut *(sb as *mut Ext4Inode);
-                        cached.flags = on_disk.i_flags;
-                    }
+        // private_data holds the Ext4FileSystem for EXT4_INODE_OPS
+        // inodes (installed at mount/iget time) — the typed view rides
+        // the framework's boxed_ref edge.
+        let fs = crate::syscall::edges::boxed_ref(
+            fs_ptr as *const crate::fs::ext4::Ext4FileSystem,
+        );
+        if let Ok(mut on_disk) = read_inode(fs, vfs_inode.ino as u32) {
+            on_disk.i_flags =
+                (on_disk.i_flags & !FS_FL_USER_MODIFIABLE) | (merged & FS_FL_USER_MODIFIABLE);
+            if write_inode_disk(fs, vfs_inode.ino as u32, &on_disk).is_ok() {
+                // Keep the VFS-cached Ext4Inode copy in sync (the sb
+                // box view rides boxed_mut; exclusively reachable
+                // under EXT4_BIG_LOCK here, INV-EXT4-SBRES-1).
+                if let Some(sb) = vfs_inode.sb {
+                    let cached: &mut Ext4Inode =
+                        crate::syscall::edges::boxed_mut(sb as *mut Ext4Inode);
+                    cached.flags = on_disk.i_flags;
                 }
             }
         }

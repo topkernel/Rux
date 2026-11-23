@@ -848,11 +848,11 @@ impl ReadDst {
         let bytes = src.len();
         match self {
             ReadDst::Kernel(dst, _) => {
-                // SAFETY: INV-EXT4-DIO-1 — dst+off+bytes is in bounds
-                // (the staging buffer's caller-checked span).
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src.as_ptr(), dst.add(off), bytes)
-                };
+                // INV-EXT4-DIO-1 — dst+off+bytes is in bounds (the
+                // staging buffer's caller-checked span); the copy rides
+                // the framework's audited kernel-slice edge.
+                crate::fs::unsafe_edges::kernel_slice_mut(dst.wrapping_add(off), bytes)
+                    .copy_from_slice(src);
                 Ok(bytes)
             }
             ReadDst::Discard(_) => Ok(bytes), // warm-up read: data lands in the page cache
@@ -929,8 +929,11 @@ impl WriteSrc {
     fn kernel_bytes(&self, off: usize, n: usize) -> Option<&[u8]> {
         debug_assert!(off.checked_add(n).is_some_and(|end| end <= self.len()));
         match self {
-            // SAFETY: INV-EXT4-WRITESRC-K — a real slice backs the span.
-            WriteSrc::Kernel(p, _) => Some(unsafe { core::slice::from_raw_parts(p.add(off), n) }),
+            // INV-EXT4-WRITESRC-K — a real slice backs the span; the
+            // view rides the framework's audited kernel-slice edge.
+            WriteSrc::Kernel(p, _) => {
+                Some(crate::fs::unsafe_edges::kernel_slice(p.wrapping_add(off), n))
+            }
             WriteSrc::User(..) => None,
         }
     }
@@ -3455,7 +3458,7 @@ fn ext4_sync_file_inner(
     // journal superblock's s_start then advances past this update, so a
     // crash cannot replay older metadata over it. Without a journal the
     // per-block sync above already wrote everything through.
-    if let Some(journal) = fs.journal.clone() {
+    if let Some(journal) = fs.journal.get() {
         let mut handle = super::journal::ext4_journal_start(fs, 0)?;
         // h_sync: fsync must force the lazy-batched transaction to commit
         // now (jbd2_journal_stop otherwise leaves it open for batching) —

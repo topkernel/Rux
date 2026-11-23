@@ -2609,7 +2609,7 @@ pub(crate) fn free_indirect_block(
 /// write-through property that makes our commits immediately checkpointed
 /// also means an unjournaled free has no log record to suppress.
 fn revoke_freed_block(fs: &Ext4FileSystem, block: u64) {
-    if fs.journal.is_none() {
+    if !fs.journal.is_some() {
         return;
     }
     // SAFETY: reading the current task's journal handle slot is task-local;

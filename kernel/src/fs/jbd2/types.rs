@@ -222,6 +222,7 @@ impl Default for journal_revoke_header_t {
 
 /// Journal superblock - all fields in big-endian
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct journal_superblock_t {
     // 0x0000 - Header
     pub s_header: journal_header_t,

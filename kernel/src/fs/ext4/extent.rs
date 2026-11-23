@@ -1382,22 +1382,19 @@ fn external_node_cap(fs: &crate::fs::ext4::Ext4FileSystem) -> usize {
 // an i_block (60 B) or a full block, and a too-small buffer was UB
 // before, not a value path.
 
+// The typed views ride the framework's audited ext4_edges (rung 5):
+// bounds + ALIGNMENT checked at the edge (the old casts assumed the
+// block allocator's de-facto alignment; the edge is sound on its own).
+use crate::fs::ext4_edges as views;
+
 fn node_header(data: &[u8]) -> &Ext4ExtentHeader {
-    assert!(
-        data.len() >= core::mem::size_of::<Ext4ExtentHeader>(),
-        "extent node buffer smaller than its header"
-    );
-    // SAFETY: repr(C) on-disk layout; size asserted above.
-    unsafe { &*(data.as_ptr() as *const Ext4ExtentHeader) }
+    views::typed_ref(data)
+        .expect("extent node buffer smaller than its header")
 }
 
 fn node_header_mut(data: &mut [u8]) -> &mut Ext4ExtentHeader {
-    assert!(
-        data.len() >= core::mem::size_of::<Ext4ExtentHeader>(),
-        "extent node buffer smaller than its header"
-    );
-    // SAFETY: repr(C) on-disk layout; size asserted above.
-    unsafe { &mut *(data.as_mut_ptr() as *mut Ext4ExtentHeader) }
+    views::typed_ref_mut(data)
+        .expect("extent node buffer smaller than its header")
 }
 
 /// INV-EXT4-IBLOCK-HDR (unsafe-slim r3c): typed header views of an
@@ -1407,15 +1404,12 @@ fn node_header_mut(data: &mut [u8]) -> &mut Ext4ExtentHeader {
 /// alignment. Replaces the per-site `as_mut_ptr() as *mut Ext4ExtentHeader`
 /// casts (3 in file.rs, 2 in namei.rs).
 pub fn iblock_header(i_block: &[u32; 15]) -> &Ext4ExtentHeader {
-    // SAFETY: INV-EXT4-IBLOCK-HDR above (size and alignment hold by
-    // layout; the byte view of a [u32; 15] is its own representation).
-    unsafe { &*(core::ptr::from_ref(i_block) as *const Ext4ExtentHeader) }
+    views::u32_array_ref(i_block)
 }
 
 /// Exclusive twin of [`iblock_header`].
 pub fn iblock_header_mut(i_block: &mut [u32; 15]) -> &mut Ext4ExtentHeader {
-    // SAFETY: INV-EXT4-IBLOCK-HDR above.
-    unsafe { &mut *(core::ptr::from_mut(i_block) as *mut Ext4ExtentHeader) }
+    views::u32_array_ref_mut(i_block)
 }
 
 /// Exclusive view of extent entry `index` following the header in an
@@ -1435,63 +1429,19 @@ pub fn iblock_extent_mut(i_block: &mut [u32; 15], index: usize) -> Option<&mut E
 }
 
 fn node_extents(data: &[u8], count: usize) -> &[Ext4Extent] {
-    let need =
-        core::mem::size_of::<Ext4ExtentHeader>() + count * core::mem::size_of::<Ext4Extent>();
-    if count == 0 || data.len() < need {
-        return &[];
-    }
-    // SAFETY: repr(C) layout; bounds checked above.
-    unsafe {
-        core::slice::from_raw_parts(
-            data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
-            count,
-        )
-    }
+    views::typed_slice(data, core::mem::size_of::<Ext4ExtentHeader>(), count)
 }
 
 fn node_extents_mut(data: &mut [u8], count: usize) -> &mut [Ext4Extent] {
-    let need =
-        core::mem::size_of::<Ext4ExtentHeader>() + count * core::mem::size_of::<Ext4Extent>();
-    if count == 0 || data.len() < need {
-        return &mut [];
-    }
-    // SAFETY: repr(C) layout; bounds checked above.
-    unsafe {
-        core::slice::from_raw_parts_mut(
-            data.as_mut_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4Extent,
-            count,
-        )
-    }
+    views::typed_slice_mut(data, core::mem::size_of::<Ext4ExtentHeader>(), count)
 }
 
 fn node_indices(data: &[u8], count: usize) -> &[Ext4ExtentIdx] {
-    let need =
-        core::mem::size_of::<Ext4ExtentHeader>() + count * core::mem::size_of::<Ext4ExtentIdx>();
-    if count == 0 || data.len() < need {
-        return &[];
-    }
-    // SAFETY: repr(C) layout; bounds checked above.
-    unsafe {
-        core::slice::from_raw_parts(
-            data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
-            count,
-        )
-    }
+    views::typed_slice(data, core::mem::size_of::<Ext4ExtentHeader>(), count)
 }
 
 fn node_indices_mut(data: &mut [u8], count: usize) -> &mut [Ext4ExtentIdx] {
-    let need =
-        core::mem::size_of::<Ext4ExtentHeader>() + count * core::mem::size_of::<Ext4ExtentIdx>();
-    if count == 0 || data.len() < need {
-        return &mut [];
-    }
-    // SAFETY: repr(C) layout; bounds checked above.
-    unsafe {
-        core::slice::from_raw_parts_mut(
-            data.as_mut_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4ExtentIdx,
-            count,
-        )
-    }
+    views::typed_slice_mut(data, core::mem::size_of::<Ext4ExtentHeader>(), count)
 }
 
 /// Allocate one metadata (index/leaf) block, zero it, and account the

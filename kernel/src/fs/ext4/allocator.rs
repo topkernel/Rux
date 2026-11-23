@@ -379,14 +379,11 @@ impl<'a> BlockAllocator<'a> {
     }
 
     fn read_block_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {
-        // SAFETY: self.fs.device is a valid GenDisk pointer; bitmap_block comes from group descriptors.
-        unsafe {
-            let bh = bio::bread(self.fs.device, bitmap_block)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let bitmap = (*bh).b_data.to_vec();
-            bio::brelse(bh);
-            Ok(bitmap)
-        }
+        let bh = bio::bread(self.fs.device, bitmap_block)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+        let bitmap = bio::bh_data(&bh).to_vec();
+        bio::brelse(bh);
+        Ok(bitmap)
     }
 
     /// JOURNAL DISCIPLINE (family b fix, ext4-corrupt lane): bitmap
@@ -854,18 +851,11 @@ impl<'a> InodeAllocator<'a> {
 
     /// Read inode bitmap
     fn read_inode_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {
-        // SAFETY: self.fs.device is valid; bitmap_block from group descriptors.
-        unsafe {
-            let bh = bio::bread(self.fs.device, bitmap_block)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-            let data = &(*bh).b_data;
-            let bitmap = data.to_vec();
-
-            bio::brelse(bh);
-
-            Ok(bitmap)
-        }
+        let bh = bio::bread(self.fs.device, bitmap_block)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+        let bitmap = bio::bh_data(&bh).to_vec();
+        bio::brelse(bh);
+        Ok(bitmap)
     }
 
     /// Write back inode bitmap. JOURNAL DISCIPLINE: registered with the
@@ -964,19 +954,15 @@ impl<'a> InodeAllocator<'a> {
         let nbits = inodes_per_group as usize;
         let nbytes = nbits.div_ceil(8);
         let used = {
-            // SAFETY: bread returns a valid BufferHead; the read range is
-            // the bitmap block's first nbytes bytes.
-            unsafe {
-                let bh = bio::bread(self.fs.device, bitmap_block)
-                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
-                let data = &(*bh).b_data;
-                let used: u32 = data[..nbytes.min(data.len())]
-                    .iter()
-                    .map(|b| b.count_ones())
-                    .sum();
-                bio::brelse(bh);
-                used
-            }
+            let bh = bio::bread(self.fs.device, bitmap_block)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+            let data = bio::bh_data(&bh);
+            let used: u32 = data[..nbytes.min(data.len())]
+                .iter()
+                .map(|b| b.count_ones())
+                .sum();
+            bio::brelse(bh);
+            used
         };
         let unused = (inodes_per_group - used as u64) as u16;
 

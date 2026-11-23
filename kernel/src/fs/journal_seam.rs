@@ -138,3 +138,38 @@ pub fn current_handle_raw() -> *mut () {
         None => core::ptr::null_mut(),
     }
 }
+
+/// Ext4FileSystem's journal slot — an ASSERTING WRAPPER (the type's
+/// raw-pointer protocol state stays crate-side; the Send/Sync
+/// assertion is journal-protocol-level and lives HERE, framework-side,
+/// like the lock above).
+///
+/// INV-JSEAM-4: the wrapped `Arc<Journal>` is shared across threads
+/// exactly as before (task contexts + the commit kthread); every raw
+/// pointer inside Journal is dereferenced only under the journal's own
+/// spinlocks (the jbd2 protocol), so sharing the Arc is sound. The
+/// wrapper exists because the crate cannot carry the `unsafe impl`.
+pub struct JournalSlot(pub Option<alloc::sync::Arc<crate::fs::jbd2::journal::Journal>>);
+// SAFETY: INV-JSEAM-4 above.
+unsafe impl Send for JournalSlot {}
+// SAFETY: INV-JSEAM-4 above.
+unsafe impl Sync for JournalSlot {}
+
+impl JournalSlot {
+    pub const fn empty() -> Self {
+        JournalSlot(None)
+    }
+    /// Clone the inner Arc (None when no journal is loaded).
+    pub fn get(&self) -> Option<alloc::sync::Arc<crate::fs::jbd2::journal::Journal>> {
+        self.0.clone()
+    }
+    pub fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+    pub fn set(&mut self, j: alloc::sync::Arc<crate::fs::jbd2::journal::Journal>) {
+        self.0 = Some(j);
+    }
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+}
