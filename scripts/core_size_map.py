@@ -126,7 +126,15 @@ def main():
                 if path == "":
                     reach = os.path.dirname(dp) == os.path.dirname(p)
                 elif path.startswith("crate::"):
-                    reach = mp.startswith(path)
+                    # Normalize the trailing :: so a module-qualified call
+                    # (crate::debug::syscost::tick_user) reaches its own
+                    # module's top-level fns: mp has no trailing separator,
+                    # so the raw startswith(path) missed every such call
+                    # (found by the rux-obs lane's audit, 2026-11-23: the
+                    # debug worklist marked 254 lines hot where the
+                    # corrected rule finds 4,512).
+                    pref = path.rstrip(":")
+                    reach = mp == pref or mp.startswith(pref + "::")
                 else:
                     last = path.rstrip(":").split("::")[-1]
                     reach = last in mp.split("::")
