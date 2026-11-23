@@ -1440,7 +1440,7 @@ pub fn ensure_defer_thread() {
     if THREAD_ON.swap(true, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    crate::process::kthread::kthread_run(
+    crate::process::process_hooks::kthread_run(
         defer_emit_fn,
         core::ptr::null_mut(),
         "censusd",
@@ -1450,7 +1450,7 @@ pub fn ensure_defer_thread() {
 extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
     use crate::process::task::{Task, TaskState};
     loop {
-        if crate::process::kthread::kthread_should_stop() {
+        if crate::process::process_hooks::kthread_should_stop() {
             break;
         }
         // 56th: BEFORE draining, dump any latched-but-mapless tgid's

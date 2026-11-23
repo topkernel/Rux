@@ -21,8 +21,12 @@
 // from rux-syscall and rux-net).
 pub use rux::{
     arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, list, mm,
-    process, safety, sched, sync, timer, trace,
+     safety, sched, sync, timer, trace,
 };
+// The process service tree (crate-flip rung: process): the merged
+// view (moved policy + the framework-staying process modules) —
+// crate::process::X paths keep resolving, one-way dependency.
+pub use rux_process::process;
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;
 

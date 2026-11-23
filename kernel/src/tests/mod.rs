@@ -356,7 +356,8 @@ pub mod scheduler;
 pub mod process_tree;
 pub mod reparent_safety;
 #[cfg(feature = "unit-test")]
-pub mod fork;
+// pub mod fork; — MOVED to the rux-process crate (process rung); runs
+// in-guest via the SERVICE-TEST SEAM (registered by rux-bin)
 #[cfg(feature = "unit-test")]
 // pub mod execve; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
@@ -366,7 +367,7 @@ pub mod getpid;
 #[cfg(feature = "unit-test")]
 pub mod sleep_wakeup;
 #[cfg(feature = "unit-test")]
-pub mod pid_test;
+// pub mod pid_test; — MOVED to the rux-process crate (process rung)
 
 // ===== Synchronization =====
 #[cfg(feature = "unit-test")]
@@ -378,7 +379,7 @@ pub mod semaphore;
 #[cfg(feature = "unit-test")]
 pub mod smp;
 #[cfg(feature = "unit-test")]
-pub mod smp_schedule;
+// pub mod smp_schedule; — MOVED to the rux-process crate (process rung)
 #[cfg(feature = "unit-test")]
 pub mod preemptive_scheduler;
 // pub mod fair_timeline; — MOVED to the rux-sched crate (S1b flip); runs
@@ -448,7 +449,7 @@ pub mod framebuffer;
 
 // ===== Boundary (destructive) =====
 #[cfg(feature = "unit-test")]
-pub mod boundary;
+// pub mod boundary; — MOVED to the rux-process crate (process rung)
 
 // ===== VFS create-mode rules (creat09 / CVE-2018-13405) =====
 #[cfg(feature = "unit-test")]
@@ -656,7 +657,7 @@ pub fn run_all_tests() {
     reparent_safety::test_reparent_safety();
 
     test_group_start("fork");
-    fork::test_fork();
+// (gated with the module: fork — runs via the SERVICE-TEST SEAM, rux-process)
 
     test_group_start("execve");
 // (gated with the module: execve)
@@ -671,7 +672,7 @@ pub fn run_all_tests() {
     sleep_wakeup::test_sleep_and_wakeup();
 
     test_group_start("pid");
-    pid_test::test_pid();
+// (gated with the module: pid — runs via the SERVICE-TEST SEAM, rux-process)
 
     // ===== 5. Synchronization =====
     test_group_start("semaphore");
@@ -686,7 +687,7 @@ pub fn run_all_tests() {
     smp::test_smp();
 
     test_group_start("smp_schedule");
-    smp_schedule::test_smp_schedule();
+// (gated with the module: smp_schedule — runs via the SERVICE-TEST SEAM, rux-process)
 
     test_group_start("preemptive_scheduler");
     preemptive_scheduler::test_preemptive_scheduler();
@@ -855,7 +856,7 @@ pub fn run_all_tests() {
 
     // ===== 13. Boundary (destructive, MUST be last) =====
     test_group_start("boundary");
-    boundary::test_boundary();
+// (gated with the module: boundary — runs via the SERVICE-TEST SEAM, rux-process)
 
     // Print test summary
     print_test_summary();

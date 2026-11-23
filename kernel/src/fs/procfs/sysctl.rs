@@ -37,7 +37,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 /// /proc/sys/kernel/pid_max — Linux default 32768 (riscv64 max 4194304).
 /// P2: stored in the PID allocator (process::pid) and consulted by
 /// alloc_pid — the sysctl file is the read/write face of the live value.
-pub use crate::process::pid::{pid_max_live as read_pid_max, set_pid_max_live};
+pub use crate::process::process_hooks::{pid_max_live as read_pid_max, set_pid_max_live};
 pub const PID_MAX_MIN: u32 = 2;
 pub const PID_MAX_MAX: u32 = 4 * 1024 * 1024;
 
@@ -97,7 +97,7 @@ impl CorePattern {
     }
 }
 
-/// The live core_pattern (read by process::coredump::do_coredump).
+/// The live core_pattern (read by the coredump policy, rux-process).
 pub static CORE_PATTERN: crate::sync::Spinlock<CorePattern> =
     crate::sync::Spinlock::new(CorePattern::new());
 
@@ -661,7 +661,7 @@ pub fn write_inotify_max_user_watches(input: &[u8]) -> i32 {
 /// contract CRIU and LTP pidfd_send_signal03 use to force pid reuse).
 /// Root-only write (the reference handler is 0600-root).
 pub fn generate_ns_last_pid() -> Vec<u8> {
-    alloc::format!("{}\n", crate::process::pid::last_pid()).into_bytes()
+    alloc::format!("{}\n", crate::process::process_hooks::last_pid()).into_bytes()
 }
 
 pub fn write_ns_last_pid(input: &[u8]) -> i32 {
@@ -672,7 +672,7 @@ pub fn write_ns_last_pid(input: &[u8]) -> i32 {
     }
     match parse_u64(input) {
         Ok(v) => {
-            if v > u32::MAX as u64 || !crate::process::pid::set_last_pid(v as u32) {
+            if v > u32::MAX as u64 || !crate::process::process_hooks::set_last_pid(v as u32) {
                 return -(crate::errno::constants::EINVAL as i32);
             }
             0

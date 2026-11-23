@@ -365,7 +365,7 @@ pub fn sys_ptrace(args: SyscallArgs) -> i64 {
         }
         // Future stops of THIS task are reported to its real parent.
         // SAFETY: parent_ptr returns the real parent or None.
-        let ppid = crate::process::unsafe_edges::borrow_task(current as *mut Task).parent_ptr().map(|p| unsafe { (*p).pid() }).unwrap_or(0);
+        let ppid = crate::process::unsafe_edges::borrow_task(current as *mut Task).parent_ptr().map(|p| crate::process::unsafe_edges::borrow_task(p as *mut Task).pid()).unwrap_or(0);
         if ppid == 0 {
             return -ESRCH;
         }

@@ -113,7 +113,7 @@ fn task_comm(task: &crate::process::Task) -> alloc::borrow::Cow<'_, str> {
     }
     let path = task.get_exe_path();
     if path.is_empty() {
-        if let Some(name) = crate::process::kthread::kthread_name(task.pid()) {
+        if let Some(name) = crate::process::process_hooks::kthread_name(task.pid()) {
             let mut len = name.len().min(15);
             while len > 0 && !name.is_char_boundary(len) {
                 len -= 1;

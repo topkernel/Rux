@@ -16,24 +16,6 @@ const INTERP_BASE: usize = 0x3FBF000000;
 // at exec completion for crash/watchpoint correlation.
 pub static LAST_GOT_PPN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-// FORENSIC: initial-stack zeroing ledger (see the zeroing site below).
-pub struct ZeroEntry {
-    pub pid: core::sync::atomic::AtomicU32,
-    pub base: core::sync::atomic::AtomicU64,
-    pub len: core::sync::atomic::AtomicU64,
-}
-impl ZeroEntry {
-    const fn new() -> Self {
-        Self {
-            pid: core::sync::atomic::AtomicU32::new(0),
-            base: core::sync::atomic::AtomicU64::new(0),
-            len: core::sync::atomic::AtomicU64::new(0),
-        }
-    }
-}
-const ZERO_NEW: ZeroEntry = ZeroEntry::new();
-pub static STACKZERO_RING: [ZeroEntry; 128] = [ZERO_NEW; 128];
-pub static STACKZERO_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Execute ELF loading (execve internal function)
 ///
@@ -329,10 +311,10 @@ pub fn do_execve_elf(
     // act of zeroing).
     {
         use core::sync::atomic::Ordering::Relaxed;
-        let i = STACKZERO_CURSOR.fetch_add(1, Relaxed) % STACKZERO_RING.len();
-        STACKZERO_RING[i].pid.store(crate::process::current_pid(), Relaxed);
-        STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
-        STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
+        let i = crate::process::exec_ring::STACKZERO_CURSOR.fetch_add(1, Relaxed) % crate::process::exec_ring::STACKZERO_RING.len();
+        crate::process::exec_ring::STACKZERO_RING[i].pid.store(crate::process::current_pid(), Relaxed);
+        crate::process::exec_ring::STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
+        crate::process::exec_ring::STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
     }
 
     // Signal-return trampoline (R+X page): RISC-V glibc installs handlers

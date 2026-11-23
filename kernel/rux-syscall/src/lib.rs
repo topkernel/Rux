@@ -20,7 +20,7 @@
 // root so the service files' crate::X paths resolve unchanged.
 pub use rux::{
     arch, config, console, debug, drivers, errno, io_uring, list,
-    mm, module, perf, printk, process, safety, sched, security,
+    mm, module, perf, printk, safety, sched, security,
     signal, sync, timer, trace,
 };
 // The ipc service tree (crate-flip rung: rux-ipc): the SERVICE crate's
@@ -33,6 +33,11 @@ pub use rux_ipc::ipc;
 // the sibling-service dependency (syscall -> fs-svc) is one-way, the
 // net precedent.
 pub use rux_fs::fs;
+// The process service tree (crate-flip rung: process): the merged view
+// (moved policy + the framework-staying process modules) re-exported
+// at this root — the sibling-service dependency (syscall -> process)
+// is one-way, the net precedent.
+pub use rux_process::process;
 // The print macros (macro_rules exported at the framework root).
 pub use rux::{pr_debug, pr_err, pr_info, pr_warn, println};
 // The net service tree (crate-flip rung 2): re-exported at the crate

@@ -202,7 +202,7 @@ pub fn init() {
     // (fails loudly at boot if a toolchain change moves the refcount
     // word the lock-free fd lookup CASes).
     crate::fs::file::verify_arc_inner_layout();
-    let ok = crate::process::kthread::kthread_run(
+    let ok = crate::process::process_hooks::kthread_run(
         fdreapd_fn,
         core::ptr::null_mut(),
         "fdreapd",
@@ -221,7 +221,7 @@ pub fn init() {
 /// grace period, then release the parked Weaks.
 extern "C" fn fdreapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
     loop {
-        if crate::process::kthread::kthread_should_stop() {
+        if crate::process::process_hooks::kthread_should_stop() {
             break;
         }
         // INTERRUPTIBLE park (reference discipline for a perpetually-idle

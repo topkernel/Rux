@@ -2256,7 +2256,7 @@ mod persistent_log {
         // Resolve or create the file before the first flush so the
         // flush path never creates.
         resolve_file();
-        if crate::process::kthread::kthread_run(
+        if crate::process::process_hooks::kthread_run(
             klogd_fn,
             core::ptr::null_mut(),
             "klogd",
@@ -2298,7 +2298,7 @@ mod persistent_log {
         let interval_jiffies =
             (FLUSH_PERIOD_SECS * crate::config::KERNEL_HZ as u64).max(1);
         loop {
-            if crate::process::kthread::kthread_should_stop() {
+            if crate::process::process_hooks::kthread_should_stop() {
                 break;
             }
             let my_pid = match crate::sched::current() {
@@ -2343,7 +2343,7 @@ mod persistent_log {
                 // round and retry the arm.
                 crate::sched::schedule();
             }
-            if crate::process::kthread::kthread_should_stop() {
+            if crate::process::process_hooks::kthread_should_stop() {
                 break;
             }
             flush_once();

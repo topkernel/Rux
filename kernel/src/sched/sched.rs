@@ -2074,7 +2074,7 @@ use crate::arch;
 use crate::println;
 use crate::config::MAX_CPUS;
 use alloc::boxed::Box;
-use crate::process::pid::alloc_pid;
+use crate::process::process_hooks::alloc_pid;
 use core::arch::asm;
 use crate::sync::spinlock::RawSpinlock;
 
@@ -4172,7 +4172,7 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
     unsafe {
         if !Task::new_task_at(task_ptr, pid, SchedPolicy::Normal) {
             // R10-9: stack allocation failed — discard the slot cleanly.
-            crate::process::pid::free_pid(pid);
+            crate::process::process_hooks::free_pid(pid);
             // R48: new_task_at already wrote state=TASK_NEW (R52; was
             // RUNNING) and pid=<pid> over any poison left by the page's
             // previous life BEFORE it failed — a raw dealloc here would

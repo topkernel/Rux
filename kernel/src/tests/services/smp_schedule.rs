@@ -9,6 +9,7 @@
 
 //! SMP scheduling verification test
 use crate::println;
+use rux::test_println;
 use crate::sched;
 use alloc::format;
 use super::{test_pass, test_fail, test_skip, test_group_start};

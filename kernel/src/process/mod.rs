@@ -13,21 +13,26 @@
 pub mod reboot;
 pub mod task;
 pub mod task_ref;
-pub mod fork;
-pub mod pid;
+// pub mod fork; — moved to the rux-process service crate (crate-flip
+// rung: process); the crate's process module re-exports it.
+// pub mod pid; — moved to the rux-process service crate.
 pub mod pid_hash;
 pub mod wait;
 pub mod exit;
-pub mod exec;
-pub mod kthread;
-pub mod ptrace;
-pub mod coredump;
+// pub mod exec; — moved to the rux-process service crate; the
+// STACKZERO ring statics the riscv64 fault path walks stay
+// framework-side here (hot read, no hook row).
+pub mod exec_ring;
+// pub mod kthread; — moved to the rux-process service crate.
+// pub mod ptrace; — moved to the rux-process service crate.
+// pub mod coredump; — moved to the rux-process service crate.
 pub mod ns;
 pub mod unsafe_edges;
+// The flip seam: the framework's cold door into the process service
+// crate (three tables — lifecycle, kthread, pid; see the file header).
+pub mod process_hooks;
 
 pub use task::Task;
-pub use fork::do_fork;
-pub use pid::{alloc_pid, free_pid, PID_INIT, PID_SWAPPER, PID_MAX_LIMIT, PID_MAX_DEFAULT, RESERVED_PIDS};
 
 // ==================== Arch ThreadStruct bridges ====================
 // Small cfg helpers so generic process code never touches arch-specific

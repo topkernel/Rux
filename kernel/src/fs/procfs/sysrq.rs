@@ -30,7 +30,7 @@ use crate::errno;
 fn run_command(cmd: u8) {
     match cmd {
         // Restart the machine immediately.
-        b'b' => crate::process::reboot::force_reboot(),
+        b'b' => crate::process::process_hooks::force_reboot(),
         // Force a crash (a dump is created if crash dumping is configured).
         b'c' => {
             crate::println!("sysrq: crashing the kernel on request");
@@ -78,7 +78,7 @@ fn run_command(cmd: u8) {
             crate::println!("sysrq: making RT tasks nice-able is not supported");
         }
         // Power the system off.
-        b'o' => crate::process::reboot::force_power_off(),
+        b'o' => crate::process::process_hooks::force_power_off(),
         // Write the current registers and flags to the console.
         b'p' => crate::debug::backtrace::dump_regs_inline(),
         // Display the armed per-CPU high-resolution timer lists.

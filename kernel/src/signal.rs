@@ -1465,7 +1465,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
             current.pending.remove(sig);
             // SAFETY (one cross-module edge): current is the running task; ptrace_stop
             // stays an unsafe fn of the ptrace lane until that lane converts it.
-            unsafe { crate::process::ptrace::ptrace_stop(current, sig, info) };
+            unsafe { crate::process::process_hooks::ptrace_stop(current, sig, info) };
             // ptrace_stop parked the task; on resume re-select — the
             // tracer may have re-injected a signal or sent SIGKILL.
             delivered = true;
@@ -3815,7 +3815,7 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
     // Ctrl-Alt-Del path: same task-context delivery rule. The input
     // detectors (UART RX IRQ, evdev) only latch an atomic; the SIGINT to
     // init (or the immediate-reboot cascade) runs here.
-    crate::process::reboot::cad_deliver_pending();
+    crate::process::process_hooks::cad_deliver_pending();
 
     // regs is the trap handler's frame pointer (the one frame edge
     // lives inside do_signal); sched::current() returns a typed &mut.

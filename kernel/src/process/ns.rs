@@ -265,7 +265,7 @@ impl PidNamespace {
     pub fn alloc_local_pid(&self) -> u32 {
         loop {
             let cur = self.last_pid.load(Ordering::Relaxed);
-            let next = if cur >= crate::process::pid::pid_max_live() - 1 {
+            let next = if cur >= crate::process::process_hooks::pid_max_live() - 1 {
                 1
             } else {
                 cur + 1

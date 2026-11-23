@@ -559,7 +559,7 @@ crate::pr_err!(
                             // currently-walked stack ppn.
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
-                                use crate::process::exec::STACKZERO_RING;
+                                use crate::process::exec_ring::STACKZERO_RING;
                                 let me = crate::sched::get_current_pid();
                                 for i in 0..STACKZERO_RING.len() {
                                     let zp = STACKZERO_RING[i].pid.load(Relaxed);
@@ -577,7 +577,7 @@ crate::pr_err!(
                             // Correlate with the exec stack-zeroing ledger.
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
-                                use crate::process::exec::STACKZERO_RING;
+                                use crate::process::exec_ring::STACKZERO_RING;
                                 let me = crate::sched::get_current_pid();
                                 let pa = ppn as u64 * 4096;
                                 for i in 0..STACKZERO_RING.len() {

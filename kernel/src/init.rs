@@ -391,7 +391,7 @@ fn load_and_setup_elf(
     // task is not runnable yet and nothing else holds a borrow of it.
     // do_execve_elf only needs it to carry a valid kernel stack + pt_regs,
     // both allocated by Task::new_task_at.
-    let result = crate::process::exec::do_execve_elf(
+    let result = crate::process::process_hooks::do_execve_elf(
         unsafe { &mut *task_ptr },
         program_data,
         &argv,

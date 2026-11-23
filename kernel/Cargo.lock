@@ -365,6 +365,7 @@ dependencies = [
  "rux-ipc",
  "rux-mm",
  "rux-net",
+ "rux-process",
  "rux-sched",
  "rux-syscall",
 ]
@@ -375,6 +376,7 @@ version = "0.1.0"
 dependencies = [
  "rux",
  "rux-ipc",
+ "rux-process",
 ]
 
 [[package]]
@@ -404,6 +406,7 @@ name = "rux-mm"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-process",
 ]
 
 [[package]]
@@ -414,10 +417,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rux-process"
+version = "0.1.0"
+dependencies = [
+ "rux",
+]
+
+[[package]]
 name = "rux-sched"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-process",
 ]
 
 [[package]]
@@ -428,6 +439,7 @@ dependencies = [
  "rux-fs",
  "rux-ipc",
  "rux-net",
+ "rux-process",
 ]
 
 [[package]]
