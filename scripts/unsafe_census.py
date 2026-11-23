@@ -1128,17 +1128,23 @@ def apply_decisions(paths, cur, artifacts):
 
     A decisions file is a TSV, one row per group of regions:
 
-        file <TAB> owner <TAB> expect <TAB> artifact <TAB> count <TAB> reason
+        file <TAB> owner <TAB> expect <TAB> artifact <TAB> count <TAB> reason [<TAB> lines]
 
-    `file` is one path or a comma-separated list. The row covers the
-    regions of those files whose owner is `owner` (any owner with `*`)
-    and whose artifact at this point equals `expect`. `count` (0 =
-    unchecked) must equal the number of regions the row changed plus
-    those already carrying `artifact`, so a row written against one tree
-    cannot silently land on another or on sites nobody read. `expect` is
-    the value the decision was reviewed against — the GAP of a contested
-    site, or the artifact a corrupted re-bank left behind. `reason` names
-    the contract's definition and the code the regions are."""
+    `file` is one path or a comma-separated list. The row selects the
+    regions of those files whose owner is `owner` (any owner with `*`),
+    whose artifact at this point equals `expect`, and — when the
+    optional `lines` column is given (a comma list of region start
+    lines) — whose start line is listed. The lines column pins a row to
+    the exact sites that were read: an owner often has several regions,
+    some already annotated by the reference consensus, and the row must
+    not reach those. `count` (0 = unchecked) must equal the number of
+    selected regions on first application, and the number of selected
+    regions already carrying `artifact` on a re-run — so a row written
+    against one tree cannot silently land on another or on sites nobody
+    read, and applying it twice changes nothing. `expect` is the value
+    the decision was reviewed against — the GAP of a contested site, or
+    the artifact a corrupted re-bank left behind. `reason` names the
+    contract's definition and the code the regions are."""
     applied = []
     for path in paths or []:
         p = Path(path)
@@ -1150,8 +1156,10 @@ def apply_decisions(paths, cur, artifacts):
             f = line.split("\t")
             if len(f) < 6:
                 sys.exit(f"unsafe census: {path}:{n}: need 6 tab-separated columns "
-                         "(file, owner, expect, artifact, count, reason)")
+                         "(file, owner, expect, artifact, count, reason [lines])")
             fname, owner, expect, artifact, count, reason = f[:6]
+            want_lines = ({int(x) for x in f[6].split(",") if x.strip()}
+                          if len(f) > 6 and f[6].strip() else None)
             fnames = [x.strip() for x in fname.split(",")]
             regions = [r for name in fnames for r in cur.by_file.get(name, [])]
             missing = [name for name in fnames if name not in cur.by_file]
@@ -1159,15 +1167,16 @@ def apply_decisions(paths, cur, artifacts):
                 sys.exit(f"unsafe census: {path}:{n}: no unsafe region in {', '.join(missing)}")
             if owner != "*" and not any(r["owner"] == owner for r in regions):
                 sys.exit(f"unsafe census: {path}:{n}: no region owned by {owner!r} in {fname}")
+            sel = [r for r in regions if (owner == "*" or r["owner"] == owner)
+                   and (want_lines is None or r["line"] in want_lines)]
             have = artifacts.get
-            todo = [r for r in regions if (owner == "*" or r["owner"] == owner)
-                    and have(r["id"], "GAP") == expect]
-            done = [r for r in regions if (owner == "*" or r["owner"] == owner)
-                    and have(r["id"], "GAP") == artifact] if artifact != expect else []
+            todo = [r for r in sel if have(r["id"], "GAP") == expect]
+            done = [r for r in sel if have(r["id"], "GAP") == artifact]
             want = int(count or 0)
-            if want and len(todo) + len(done) != want:
-                sys.exit(f"unsafe census: {path}:{n}: decision covers {len(todo) + len(done)} "
-                         f"region(s) in {fname}, the row says {want} — the tree moved under it")
+            if want and len(todo) != want and len(done) != want:
+                sys.exit(f"unsafe census: {path}:{n}: decision selects {len(todo)} "
+                         f"region(s) ({len(done)} already carry the artifact) in {fname}, "
+                         f"the row says {want} — the tree moved under it")
             for r in todo:
                 artifacts[r["id"]] = artifact
             applied.append((p.name, n, fname, owner, expect, artifact, len(todo), reason,
