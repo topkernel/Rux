@@ -366,6 +366,7 @@ dependencies = [
  "rux-mm",
  "rux-net",
  "rux-sched",
+ "rux-signal",
  "rux-syscall",
 ]
 
@@ -415,6 +416,13 @@ dependencies = [
 
 [[package]]
 name = "rux-sched"
+version = "0.1.0"
+dependencies = [
+ "rux",
+]
+
+[[package]]
+name = "rux-signal"
 version = "0.1.0"
 dependencies = [
  "rux",

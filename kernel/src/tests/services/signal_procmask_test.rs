@@ -8,7 +8,10 @@
 #![forbid(unsafe_code)]
 
 use crate::signal::{Signal, SigSet, SigAction, SigActionKind, SigFlags, sigprocmask_how, SIGRTMIN, SIGRTMAX};
-use super::{test_pass, test_fail, test_group_start};
+// The framework's exported assert macros (cross-crate macros need the
+// path import; same-crate textual scoping ended with the move).
+use rux::{test_assert, test_assert_eq};
+use rux::tests::{test_pass, test_fail, test_group_start};
 
 pub fn test_sigprocmask() {
     test_group_start("rt_sigprocmask");

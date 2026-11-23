@@ -325,8 +325,8 @@ pub mod file_flags;
 // pub mod fileops_caps; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
 pub mod fdtable;
-#[cfg(feature = "unit-test")]
-pub mod signal;
+// pub mod signal; — MOVED to the rux-signal service crate; runs in-guest
+// via the SERVICE-TEST SEAM below (registered by rux-bin)
 
 // ===== Memory management =====
 #[cfg(feature = "unit-test")]
@@ -408,8 +408,8 @@ pub mod link;
 // pub mod ext4_file_write; — MOVED to the rux-ext4 service crate (rung 5)
 
 // ===== IPC =====
-#[cfg(feature = "unit-test")]
-pub mod signal_procmask;
+// pub mod signal_procmask; — MOVED to the rux-signal service crate; runs
+// via the SERVICE-TEST SEAM below (registered by rux-bin)
 #[cfg(feature = "unit-test")]
 // pub mod ipc_poll; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
@@ -598,8 +598,8 @@ pub fn run_all_tests() {
     test_group_start("fdtable");
     fdtable::test_fdtable();
 
-    test_group_start("signal");
-    signal::test_signal();
+    // (signal: MOVED to the rux-signal crate — runs via the
+    // SERVICE-TEST SEAM below, same group name/counters)
 
     // perf events: ABI record encoding + ring arithmetic + freq floor
     // (moved from the in-module perf::tests block into tests/perf.rs).
@@ -728,8 +728,8 @@ pub fn run_all_tests() {
 
 
     // ===== 8. IPC =====
-    test_group_start("signal_procmask");
-    signal_procmask::test_sigprocmask();
+    // (signal_procmask: MOVED to the rux-signal crate — runs via the
+    // SERVICE-TEST SEAM below, same group name/counters)
 
     test_group_start("ipc_poll");
 // (gated with the module: ipc_poll)

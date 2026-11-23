@@ -3,11 +3,13 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// Test: Signal handling
-use crate::println;
+// Test: Signal handling — moved to tests/services with the rux-signal
+// crate flip; runs in-guest through the SERVICE-TEST SEAM with the
+// same group name and pass/fail counters.
 use crate::signal::{Signal, SigFlags, SigAction, SigActionKind, SignalStruct};
 use core::sync::atomic::Ordering;
-use super::{test_pass, test_fail, test_group_start};
+use rux::tests::{test_pass, test_fail, test_group_start};
+use rux::test_println;
 
 pub fn test_signal() {
     test_group_start("signal handling");
@@ -50,9 +52,17 @@ pub fn test_signal() {
         test_fail("SigAction::ignore()", "ignore mismatch");
     }
 
-    // Test 5: SigAction::handler()
-    unsafe extern "C" fn custom_handler(_sig: i32) {}
-    let handler_action = SigAction::handler(custom_handler, SigFlags::new(0));
+    // Test 5: SigAction::handler() — under the crate's forbid the test
+    // cannot DEFINE an `unsafe extern "C" fn` to point at, so construct
+    // the same Handler-class disposition literally (any nonzero,
+    // non-sentinel sa_handler value classifies as Handler — exactly
+    // what the old fn pointer asserted).
+    let handler_action = SigAction {
+        sa_handler: 0x1000,
+        sa_flags: SigFlags::new(0),
+        sa_mask: 0,
+        sa_restorer: 0,
+    };
     if handler_action.action() == SigActionKind::Handler && handler_action.has_handler() {
         test_pass("SigAction::handler()");
     } else {

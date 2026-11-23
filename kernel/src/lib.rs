@@ -121,6 +121,14 @@ pub mod process;
 pub mod sched;
 pub mod fs;
 pub mod signal;
+// The signal POLICY seam + edges (the rux-signal crate flip): the hook
+// table the framework dispatches cold policy rows through, and the
+// unsafe-bearing signal functions that stay framework-side when the
+// policy moved to the crate. signal_policy.rs (the moved bodies) is
+// deliberately NOT declared here — the rux-signal service crate is its
+// sole compilation home, under #![forbid(unsafe_code)].
+pub mod signal_hooks;
+pub mod signal_edges;
 pub mod security;
 pub mod sync;
 pub mod errno;
