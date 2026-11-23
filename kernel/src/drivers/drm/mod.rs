@@ -2504,7 +2504,7 @@ pub fn init_drm() -> Result<(), ()> {
     // /sys/dev/char/226:{0,128} + the PCI device dir libdrm's
     // drmGetDevice(fd) walk needs (see register_drm_device).
     let slot_name = gpu_pci_slot_name();
-    crate::fs::sysfs::register_drm_device(&slot_name);
+    crate::fs::leaf_glue::sysfs::register_drm_device(&slot_name);
 
     crate::pr_info!(
         "drm: /dev/dri/card0 + renderD128 registered (crtc={} conn={} enc={} plane={})",

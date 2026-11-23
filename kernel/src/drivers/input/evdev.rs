@@ -1362,7 +1362,7 @@ fn sysfs_registration(
     event_name: &str,
     devno: DevNo,
     device: &EvdevDevice,
-) -> crate::fs::sysfs::InputEventReg {
+) -> crate::fs::leaf_glue::InputEventReg {
     let name_len = device.name.iter().position(|&c| c == 0).unwrap_or(31);
     let dev_name = String::from(core::str::from_utf8(&device.name[..name_len]).unwrap_or("virtio input"));
 
@@ -1389,7 +1389,7 @@ fn sysfs_registration(
         String::new()
     };
 
-    crate::fs::sysfs::InputEventReg {
+    crate::fs::leaf_glue::InputEventReg {
         input_name: String::from(input_name),
         event_name: String::from(event_name),
         major: devno.major,
@@ -1488,10 +1488,10 @@ pub fn init_evdev() {
         .get()
         .map(|d| sysfs_registration("input1", "event1", DEV_EVDEV_POINTER, d));
     if let Some(reg) = kbd_reg {
-        crate::fs::sysfs::register_input_event(&reg);
+        crate::fs::leaf_glue::sysfs::register_input_event(&reg);
     }
     if let Some(reg) = ptr_reg {
-        crate::fs::sysfs::register_input_event(&reg);
+        crate::fs::leaf_glue::sysfs::register_input_event(&reg);
     }
     // The touchscreen needs the same sysfs presence: OH's input stack
     // enumerates devices through /sys/class/input (ID_INPUT_TOUCHSCREEN +
@@ -1501,7 +1501,7 @@ pub fn init_evdev() {
         .get()
         .map(|d| sysfs_registration("input2", "event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, d));
     if let Some(reg) = ts_reg {
-        crate::fs::sysfs::register_input_event(&reg);
+        crate::fs::leaf_glue::sysfs::register_input_event(&reg);
     }
 }
 

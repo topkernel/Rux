@@ -93,6 +93,8 @@ pub struct FsHooks {
     pub sysfs_netdev_uevent: fn(&str, &str) -> u64,
     pub sysfs_register_block_disk_at: fn(&str, u32, u32, u64, &[(&str, &str)]) -> u64,
     pub sysfs_register_input_event: fn(&super::leaf_glue::InputEventReg) -> u64,
+    /// devfs's uevent broadcast (framework-side until devfs itself moves).
+    pub sysfs_uevent_send_full: fn(&str, &str, &str, &[(&str, &str)]) -> u64,
 }
 
 impl FsHooks {
@@ -146,6 +148,7 @@ impl FsHooks {
         sysfs_netdev_uevent: |_, _| 0,
         sysfs_register_block_disk_at: |_, _, _, _, _| 0,
         sysfs_register_input_event: |_| 0,
+        sysfs_uevent_send_full: |_, _, _, _| 0,
     };
 }
 

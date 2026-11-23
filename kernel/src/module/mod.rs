@@ -229,38 +229,12 @@ fn module_name_from_blob(buf: &[u8]) -> Result<String, i32> {
 /// `initstate` ("live") and `refcnt` ("0"). Uses only the public sysfs
 /// KObject API; idempotent.
 fn sysfs_publish(name: &str) {
-    use crate::fs::sysfs::{sysfs_root, KObject, KType, NodeKind};
-
-    let root = match sysfs_root() {
-        Some(r) => r,
-        None => return,
-    };
-    let module_dir = match root.find_child(b"module") {
-        Some(d) => d,
-        None => return,
-    };
-    if module_dir.find_child(name.as_bytes()).is_some() {
-        return; // already published
-    }
-
-    let dir = KObject::new(name, KType::Module, NodeKind::Directory);
-    let initstate = String::from("live\n");
-    dir.set_attr("initstate", 0o444, Some(alloc::boxed::Box::new(move || {
-        initstate.as_bytes().to_vec()
-    })), None);
-    dir.set_attr("refcnt", 0o444, Some(alloc::boxed::Box::new(|| b"0\n".to_vec())), None);
-    module_dir.add_child(dir);
+    crate::fs::leaf_glue::sysfs::publish_module(name);
 }
 
 /// Remove /sys/module/<name> (delete_module path).
 fn sysfs_unpublish(name: &str) {
-    let root = match crate::fs::sysfs::sysfs_root() {
-        Some(r) => r,
-        None => return,
-    };
-    if let Some(module_dir) = root.find_child(b"module") {
-        module_dir.remove_child(name);
-    }
+    crate::fs::leaf_glue::sysfs::unpublish_module(name);
 }
 
 // ============================================================================

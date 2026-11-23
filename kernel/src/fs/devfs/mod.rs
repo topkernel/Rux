@@ -770,7 +770,7 @@ pub fn devtmpfs_register_device(path: &str, devno: DevNo, is_block: bool) -> Res
     } else {
         format!("/class/tty/{}", name)
     };
-    crate::fs::sysfs::uevent_send_full(&devpath, "add", subsystem, &extra);
+    crate::fs::leaf_glue::sysfs::uevent_send_full(&devpath, "add", subsystem, &extra);
     Ok(())
 }
 
@@ -794,7 +794,7 @@ pub fn devtmpfs_unregister_device(path: &str, devno: DevNo, is_block: bool) -> R
     } else {
         format!("/class/tty/{}", name)
     };
-    crate::fs::sysfs::uevent_send_full(&devpath, "remove", subsystem, &extra);
+    crate::fs::leaf_glue::sysfs::uevent_send_full(&devpath, "remove", subsystem, &extra);
     Ok(())
 }
 

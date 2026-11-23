@@ -10,6 +10,8 @@ edition = "2021"
 
 [dependencies]
 rux = { path = "..", default-features = false }
+# sibling service dep (netlink's uevent surface lives in the fs crate's sysfs)
+rux-fs = { path = "../rux-fs", default-features = false }
 
 [features]
 default = ["riscv64"]

@@ -342,9 +342,9 @@ pub fn create_fs_root(
             Ok((crate::fs::procfs::create_root_inode(), false))
         }
         "sysfs" => {
-            crate::fs::sysfs::init_sysfs().map_err(|e| e as i32)?;
-            crate::fs::sysfs::mount_sysfs().map_err(|e| e as i32)?;
-            Ok((crate::fs::sysfs::create_root_inode(), false))
+            crate::fs::leaf_glue::sysfs::init_sysfs().map_err(|e| e as i32)?;
+            crate::fs::leaf_glue::sysfs::mount_sysfs().map_err(|e| e as i32)?;
+            Ok((crate::fs::leaf_glue::sysfs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "devfs" | "devtmpfs" => {
             crate::fs::devfs::init();

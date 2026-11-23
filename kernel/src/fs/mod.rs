@@ -33,7 +33,7 @@ pub mod tmpfs;
 // pub mod ext4; — MOVED to the rux-ext4 service crate (rung 5)
 pub mod stat;
 pub mod procfs;
-pub mod sysfs;
+// pub mod sysfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 // pub mod debugfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 // pub mod tracefs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 pub mod dev_t;

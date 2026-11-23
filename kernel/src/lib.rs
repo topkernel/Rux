@@ -731,13 +731,17 @@ pub fn rust_main_tail() -> ! {
                 // sysfs directly below; user mounts go through do_mount
                 // -> mount_table::lookup).
                 fs::mount_table::register_builtin_handlers();
-                let sysfs_init = fs::sysfs::init_sysfs();
-                let sysfs_mount = sysfs_init.and_then(|_| fs::sysfs::mount_sysfs());
+                let sysfs_init = fs::leaf_glue::sysfs::init_sysfs();
+                let sysfs_mount = sysfs_init.and_then(|_| fs::leaf_glue::sysfs::mount_sysfs());
                 let ok = sysfs_mount
-                    .map(|_| {
+                    .and_then(|_| match fs::leaf_glue::sysfs::create_root_inode() {
+                        Some(root) => Ok(root),
+                        None => Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+                    })
+                    .map(|sysfs_root| {
                         fs::vfs::vfs_mount(
                             "/sys",
-                            fs::sysfs::create_root_inode(),
+                            sysfs_root,
                             fs::mount::MntFlags::new(0),
                         );
                         fs::mount::register_mount("sysfs", "/sys", "sysfs", "rw");

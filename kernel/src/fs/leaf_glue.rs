@@ -129,6 +129,18 @@ pub mod cgroup {
 pub mod sysfs {
     use super::*;
 
+    pub fn init_sysfs() -> Result<(), i32> {
+        (hooks().sysfs_init_sysfs)()
+    }
+
+    pub fn mount_sysfs() -> Result<(), i32> {
+        (hooks().sysfs_mount_sysfs)()
+    }
+
+    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
+        (hooks().sysfs_create_root_inode)()
+    }
+
     pub fn publish_module(name: &str) {
         (hooks().sysfs_publish_module)(name)
     }
@@ -157,6 +169,11 @@ pub mod sysfs {
 
     pub fn register_input_event(reg: &super::InputEventReg) -> u64 {
         (hooks().sysfs_register_input_event)(reg)
+    }
+
+    /// devfs's uevent broadcast (interim: until devfs joins the crate).
+    pub fn uevent_send_full(devpath: &str, action: &str, subsystem: &str, env: &[(&str, &str)]) -> u64 {
+        (hooks().sysfs_uevent_send_full)(devpath, action, subsystem, env)
     }
 }
 

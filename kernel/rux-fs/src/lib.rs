@@ -13,7 +13,7 @@
 // the service files' crate::X paths resolve unchanged (the net recipe).
 pub use rux::{
     arch, cmdline, config, console, dfx, drivers, errno, interrupt, mm,
-    process, safety, sched, security, signal, sync, timer, trace,
+    net, process, safety, sched, security, signal, sync, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println, print, print_status};
 pub use rux::syscall;
@@ -35,6 +35,7 @@ pub mod fs {
     pub mod debugfs;
     pub mod tracefs;
     pub mod cgroup;
+    pub mod sysfs;)
     pub use rux::fs::*;
 }
 
@@ -96,6 +97,7 @@ pub fn register_all() {
             crate::fs::debugfs::mount_register,
             crate::fs::tracefs::mount_register,
             crate::fs::cgroup::mount_register,
+            crate::fs::sysfs::mount_register,
         ],
         // ---- debugfs rows ----
         debugfs_create_dir: crate::fs::debugfs::create_dir,
@@ -133,16 +135,17 @@ pub fn register_all() {
         cgroup_init_cgroupfs: crate::fs::cgroup::init_cgroupfs,
         cgroup_create_root_inode: || Some(crate::fs::cgroup::create_root_inode()),
         cgroup_mount_cgroupfs: crate::fs::cgroup::mount_cgroupfs,
-        // ---- sysfs rows (filled when sysfs moves) ----
-        sysfs_init_sysfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
-        sysfs_mount_sysfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
-        sysfs_create_root_inode: || None,
-        sysfs_publish_module: |_| {},
-        sysfs_unpublish_module: |_| {},
-        sysfs_register_drm_device: |_| {},
-        sysfs_netdev_uevent: |_, _| 0,
-        sysfs_register_block_disk_at: |_, _, _, _, _| 0,
-        sysfs_register_input_event: |_| 0,
+        // ---- sysfs rows ----
+        sysfs_init_sysfs: crate::fs::sysfs::init_sysfs,
+        sysfs_mount_sysfs: crate::fs::sysfs::mount_sysfs,
+        sysfs_create_root_inode: || Some(crate::fs::sysfs::create_root_inode()),
+        sysfs_publish_module: crate::fs::sysfs::publish_module,
+        sysfs_unpublish_module: crate::fs::sysfs::unpublish_module,
+        sysfs_register_drm_device: crate::fs::sysfs::register_drm_device,
+        sysfs_netdev_uevent: crate::fs::sysfs::netdev_uevent,
+        sysfs_register_block_disk_at: crate::fs::sysfs::register_block_disk_at,
+        sysfs_register_input_event: crate::fs::sysfs::register_input_event,
+        sysfs_uevent_send_full: crate::fs::sysfs::uevent_send_full,
     });
 }
 
