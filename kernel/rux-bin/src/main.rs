@@ -27,9 +27,10 @@ pub extern "C" fn rust_main() -> ! {
     // rust_main_impl; OnceSlot first-wins keeps whichever ran first).
     rux_mm::register_all();
     // Guest tests that flipped out with a service crate (pipe2 with
-    // rux-fs, net_hdrs with rux-net, the fair pins with rux-sched) run
-    // via the framework's SERVICE-TEST SEAM, in registration order, in
-    // the same pass/fail counters as the in-framework suite.
+    // rux-fs, net_hdrs with rux-net, the fair pins + timeline with
+    // rux-sched) run via the framework's SERVICE-TEST SEAM, in
+    // registration order, in the same pass/fail counters as the
+    // in-framework suite.
     #[cfg(feature = "unit-test")]
     {
         rux::tests::register_service_tests(rux_fs::run_unit_tests);

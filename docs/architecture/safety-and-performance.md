@@ -1281,7 +1281,7 @@ their job on the checker infrastructure itself):
 | INV-SMALLALLOC-1 | `mm/small_alloc.rs` | (INV-SMALLALLOC-1: the small allocator family — the magazine |
 | INV-SPIN-1 | `sync/spinlock.rs` | (INV-SPIN-1: the spinlock family — guards deref through the |
 | INV-TASKLET-1 | `interrupt/tasklet.rs` | (INV-TASKLET-1: the tasklet family — the intrusive list protocol is |
-| INV-TESTHARNESS-1 | `tests/fair_timeline.rs` | (INV-TESTHARNESS-1: the in-kernel test-harness family — fair_timeline/ |
+| INV-TESTHARNESS-1 | `rux-sched/src/sched_tests/fair_timeline.rs` + `sched/edges.rs` debug_* helpers | (INV-TESTHARNESS-1: the in-kernel test-harness family — the timeline driver moved to the forbid-unsafe rux-sched crate (S1b flip, test-migrate lane); its 21 raw-node unsafe blocks dissolved into the edges.rs audited zone as pub safe debug_* fns; fair_timeline/ |
 | INV-UACCESS-SAFE-1 | `arch/uaccess_safe.rs` | (INV-UACCESS-SAFE-1: the capsule's own edges — each safe wrapper |
 | INV-VDSO-DATA-1 | `mm/vdso.rs` | (INV-VDSO-DATA-1: the vDSO data page family — the page is a fixed |
 

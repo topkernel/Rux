@@ -179,6 +179,7 @@ pub fn register_all() {
 #[cfg(feature = "unit-test")]
 pub mod sched_tests {
     pub mod fair_pins;
+    pub mod fair_timeline;
 }
 
 /// The guest-test entry (make test): the framework's run_all_tests
@@ -188,4 +189,5 @@ pub mod sched_tests {
 #[cfg(feature = "unit-test")]
 pub fn run_unit_tests() {
     crate::sched_tests::fair_pins::test_fair_pins();
+    crate::sched_tests::fair_timeline::test_fair_timeline();
 }

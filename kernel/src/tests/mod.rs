@@ -321,7 +321,8 @@ pub mod smp;
 pub mod smp_schedule;
 #[cfg(feature = "unit-test")]
 pub mod preemptive_scheduler;
-// pub mod fair_timeline; — service-internals test (S1b); follows the files to the crate
+// pub mod fair_timeline; — MOVED to the rux-sched crate (S1b flip); runs
+// in-guest via the SERVICE-TEST SEAM below (registered by rux-bin)
 
 // ===== Filesystem =====
 #[cfg(feature = "unit-test")]
@@ -630,9 +631,8 @@ pub fn run_all_tests() {
     preemptive_scheduler::test_preemptive_scheduler();
 
     // grq-10ns: entity-embedded intrusive CFS timeline (sorted order,
-    // shuffled erase, leftmost cache, tie keys, pick/requeue cycles).
-    test_group_start("fair_timeline");
-    // (gated with the module: fair_timeline)
+    // shuffled erase, leftmost cache, tie keys, pick/requeue cycles) —
+    // MOVED to the rux-sched crate (S1b); runs via the SERVICE-TEST SEAM.
 
     // ===== 7. Filesystem =====
     test_group_start("file_open");
@@ -656,9 +656,9 @@ pub fn run_all_tests() {
     test_group_start("link");
     link::test_link();
 
-    // SERVICE-TEST SEAM: the crate-flipped leaves' guest tests (pipe2
-    // with rux-fs, net_hdrs with rux-net, the fair pins with rux-sched)
-    // run in registration order with the same counters — rux-bin
+    // SERVICE-TEST SEAM: the crate-flipped leaves' guest tests run in
+    // registration order with the same counters: pipe2 (rux-fs), net_hdrs
+    // (rux-net), fair_pins + fair_timeline (rux-sched) — rux-bin
     // registered the entries at boot.
     run_registered_service_tests();
 
