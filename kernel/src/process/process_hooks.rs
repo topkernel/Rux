@@ -32,7 +32,6 @@
 use crate::fs::elf::Elf64Ehdr;
 use crate::fs::file::File;
 use crate::process::task::Task;
-use crate::signal::SigInfo;
 
 // ==================== ProcessHooks (lifecycle) ====================
 
@@ -58,8 +57,6 @@ pub struct ProcessHooks {
     pub wait4_park_audit: fn(),
     pub signal_makes_core: fn(i32) -> bool,
     pub do_coredump: fn(&Task, i32) -> bool,
-    pub ptrace_stop: fn(*mut Task, i32, SigInfo),
-    pub ptrace_write_target_word: fn(*mut Task, u64, u64) -> bool,
     pub panic_reboot: fn() -> !,
     pub force_reboot: fn() -> !,
     pub force_power_off: fn() -> !,
@@ -76,8 +73,6 @@ impl ProcessHooks {
         wait4_park_audit: no_policy_wait4_park_audit,
         signal_makes_core: no_policy_signal_makes_core,
         do_coredump: no_policy_do_coredump,
-        ptrace_stop: no_policy_ptrace_stop,
-        ptrace_write_target_word: no_policy_ptrace_write_target_word,
         panic_reboot: no_policy_panic_reboot,
         force_reboot: no_policy_force_reboot,
         force_power_off: no_policy_force_power_off,
@@ -111,12 +106,6 @@ fn no_policy_signal_makes_core(_: i32) -> bool {
 }
 fn no_policy_do_coredump(_: &Task, _: i32) -> bool {
     panic!("process seam: coredump policy not registered (do_coredump)")
-}
-fn no_policy_ptrace_stop(_: *mut Task, _: i32, _: SigInfo) {
-    panic!("process seam: ptrace policy not registered (ptrace_stop)")
-}
-fn no_policy_ptrace_write_target_word(_: *mut Task, _: u64, _: u64) -> bool {
-    panic!("process seam: ptrace policy not registered (write_target_word)")
 }
 fn no_policy_panic_reboot() -> ! {
     panic!("process seam: reboot policy not registered (panic_reboot)")
@@ -198,16 +187,6 @@ pub fn signal_makes_core(sig: i32) -> bool {
 #[inline]
 pub fn do_coredump(task: &Task, sig: i32) -> bool {
     (hooks().do_coredump)(task, sig)
-}
-
-#[inline]
-pub fn ptrace_stop(task: *mut Task, sig: i32, info: SigInfo) {
-    (hooks().ptrace_stop)(task, sig, info)
-}
-
-#[inline]
-pub fn ptrace_write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
-    (hooks().ptrace_write_target_word)(task, addr, value)
 }
 
 #[inline]
@@ -431,4 +410,87 @@ pub fn last_pid() -> u32 {
 #[inline]
 pub fn set_last_pid(v: u32) -> bool {
     (phooks().set_last_pid)(v)
+}
+
+// ==================== ExitHooks ====================
+
+/// The exit TEARDOWN rows: the functions do_exit / do_exit_group
+/// (core-side, hot-name-called) reach in the rux-process crate's
+/// exit_teardown family. Each runs ONCE per task death — cold by the
+/// call-direction scan; an indirect call here is off every hot path.
+#[derive(Clone, Copy)]
+pub struct ExitHooks {
+    pub exit_robust_list: fn(&Task),
+    pub exit_clear_child_tid: fn(&mut Task),
+    pub kill_other_threads: fn(&Task),
+    pub wait_for_thread_group_death: fn(&Task, bool) -> bool,
+    pub sweep_dead_threads: fn(*mut Task),
+    pub reparent_children_to_init: fn(&Task),
+}
+
+impl ExitHooks {
+    pub const EMPTY: ExitHooks = ExitHooks {
+        exit_robust_list: no_policy_exit_robust_list,
+        exit_clear_child_tid: no_policy_exit_clear_child_tid,
+        kill_other_threads: no_policy_kill_other_threads,
+        wait_for_thread_group_death: no_policy_wait_for_thread_group_death,
+        sweep_dead_threads: no_policy_sweep_dead_threads,
+        reparent_children_to_init: no_policy_reparent_children_to_init,
+    };
+}
+
+fn no_policy_exit_robust_list(_: &Task) {
+    panic!("process seam: exit teardown not registered (exit_robust_list)")
+}
+fn no_policy_exit_clear_child_tid(_: &mut Task) {
+    panic!("process seam: exit teardown not registered (exit_clear_child_tid)")
+}
+fn no_policy_kill_other_threads(_: &Task) {
+    panic!("process seam: exit teardown not registered (kill_other_threads)")
+}
+fn no_policy_wait_for_thread_group_death(_: &Task, _: bool) -> bool {
+    panic!("process seam: exit teardown not registered (wait_for_thread_group_death)")
+}
+fn no_policy_sweep_dead_threads(_: *mut Task) {
+    panic!("process seam: exit teardown not registered (sweep_dead_threads)")
+}
+fn no_policy_reparent_children_to_init(_: &Task) {
+    panic!("process seam: exit teardown not registered (reparent_children_to_init)")
+}
+
+pub static EXIT_HOOKS: crate::safety::slot::OnceSlot<ExitHooks> =
+    crate::safety::slot::OnceSlot::new();
+
+pub fn exit_register_hooks(hooks: ExitHooks) {
+    let _ = EXIT_HOOKS.publish(hooks);
+}
+
+#[inline]
+fn ehooks() -> &'static ExitHooks {
+    EXIT_HOOKS.get().unwrap_or(&ExitHooks::EMPTY)
+}
+
+#[inline]
+pub fn exit_robust_list(t: &Task) {
+    (ehooks().exit_robust_list)(t)
+}
+#[inline]
+pub fn exit_clear_child_tid(t: &mut Task) {
+    (ehooks().exit_clear_child_tid)(t)
+}
+#[inline]
+pub fn kill_other_threads(t: &Task) {
+    (ehooks().kill_other_threads)(t)
+}
+#[inline]
+pub fn wait_for_thread_group_death(t: &Task, killable: bool) -> bool {
+    (ehooks().wait_for_thread_group_death)(t, killable)
+}
+#[inline]
+pub fn sweep_dead_threads(t: *mut Task) {
+    (ehooks().sweep_dead_threads)(t)
+}
+#[inline]
+pub fn reparent_children_to_init(t: &Task) {
+    (ehooks().reparent_children_to_init)(t)
 }

@@ -68,6 +68,8 @@ pub mod process {
     pub mod coredump;
     #[path = "../../../src/process/reboot.rs"]
     pub mod reboot;
+    #[path = "../../../src/process/task_helpers.rs"]
+    pub mod task_helpers;
 
     // exec: the ELF policy (this crate) merged with the
     // framework-side stack-zero ring at the historical path — so
@@ -79,18 +81,25 @@ pub mod process {
         pub use rux::process::exec_ring::*;
     }
 
-    // exit: the wait4/waitid family (this crate) merged with the
-    // framework-side exit/reap mechanism (hot-path callers).
+    // exit: the wait4/waitid family + the TEARDOWN family (this crate)
+    // merged with the framework-side exit mechanism (do_exit /
+    // do_exit_group / wake_group_chldexit — hot-name-called by the
+    // traps, signal delivery and the scheduler reap path; they reach
+    // the teardown through the ExitHooks rows).
     #[path = "../../../src/process/exit_wait.rs"]
     pub mod exit_wait;
+    #[path = "../../../src/process/exit_teardown.rs"]
+    pub mod exit_teardown;
     pub mod exit {
         pub use crate::process::exit_wait::*;
+        pub use crate::process::exit_teardown::*;
         pub use rux::process::exit::*;
     }
 
     // The old framework mod.rs's re-exports at their historical paths
     // (crate::process::do_fork, the pid knobs/consts).
     pub use crate::process::fork::do_fork;
+    pub use crate::process::task_helpers::{thread_clear_callee_saved, set_user_tls};
     pub use crate::process::pid::{
         alloc_pid, free_pid, PID_INIT, PID_SWAPPER, PID_MAX_LIMIT, PID_MAX_DEFAULT,
         RESERVED_PIDS,
@@ -98,11 +107,11 @@ pub mod process {
 
     // The framework-staying modules at the historical paths.
     pub use rux::process::{
-        task, task_ref, unsafe_edges, pid_hash, wait, ns, exec_ring,
+        task, task_ref, unsafe_edges, pid_hash, wait, ns, exec_ring, ptrace_core,
     };
     pub use rux::process::{
         Task, current_pid, current_ppid, current_pgid, current_task,
-        find_task_by_pid, thread_clear_callee_saved, thread_set_entry, set_user_tls,
+        find_task_by_pid, thread_set_entry,
     };
 
     // The framework's test counters at the `super::` path the moved
@@ -144,8 +153,6 @@ pub fn register_all() {
         wait4_park_audit: process::exit_wait::wait4_park_audit,
         signal_makes_core: process::coredump::signal_makes_core,
         do_coredump: process::coredump::do_coredump,
-        ptrace_stop: process::ptrace::ptrace_stop,
-        ptrace_write_target_word: process::ptrace::write_target_word,
         panic_reboot: process::reboot::panic_reboot,
         force_reboot: process::reboot::force_reboot,
         force_power_off: process::reboot::force_power_off,
@@ -159,6 +166,14 @@ pub fn register_all() {
         kthread_should_stop: process::kthread::kthread_should_stop,
         kthread_stop: process::kthread::kthread_stop,
         kthread_name: process::kthread::kthread_name,
+    });
+    process_hooks::exit_register_hooks(process_hooks::ExitHooks {
+        exit_robust_list: process::exit_teardown::exit_robust_list,
+        exit_clear_child_tid: process::exit_teardown::exit_clear_child_tid,
+        kill_other_threads: process::exit_teardown::kill_other_threads,
+        wait_for_thread_group_death: process::exit_teardown::wait_for_thread_group_death,
+        sweep_dead_threads: process::exit_teardown::sweep_dead_threads,
+        reparent_children_to_init: process::exit_teardown::reparent_children_to_init,
     });
     process_hooks::pid_register_hooks(process_hooks::PidHooks {
         alloc_pid: process::pid::alloc_pid,

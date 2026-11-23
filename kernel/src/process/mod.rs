@@ -24,7 +24,9 @@ pub mod exit;
 // framework-side here (hot read, no hook row).
 pub mod exec_ring;
 // pub mod kthread; — moved to the rux-process service crate.
-// pub mod ptrace; — moved to the rux-process service crate.
+// pub mod ptrace; — moved to the rux-process service crate; the two
+// entry points the trap files call by name stay core-side:
+pub mod ptrace_core;
 // pub mod coredump; — moved to the rux-process service crate.
 pub mod ns;
 pub mod unsafe_edges;
@@ -39,17 +41,6 @@ pub use task::Task;
 // ThreadStruct field layouts directly.
 
 /// Zero the kernel-side callee-saved registers of a fresh task (the
-/// user-side copies live in its pt_regs).
-pub fn thread_clear_callee_saved(thread: &mut crate::arch::thread::ThreadStruct) {
-    #[cfg(feature = "riscv64")]
-    {
-        thread.s.fill(0);
-    }
-    #[cfg(feature = "x86_64")]
-    {
-        thread.callee = Default::default();
-    }
-}
 
 /// Seed a fresh task's context-switch state: the first switch-in
 /// "returns" into `entry` with `sp` as the kernel stack pointer.
@@ -79,27 +70,6 @@ pub fn thread_set_entry(
 
 /// Set the task's user TLS pointer (riscv64: tp register in pt_regs;
 /// x86_64: FS base restored on switch-in; aarch64: TPIDR_EL0 saved in
-/// thread.tp_value and re-installed at switch-in).
-pub fn set_user_tls(task: &mut Task, tls: u64) {
-    #[cfg(feature = "riscv64")]
-    {
-        // SAFETY: pt_regs() returns the task's outermost trap frame.
-        unsafe {
-            let regs = task.pt_regs();
-            if !regs.is_null() {
-                (*regs).tp = tls;
-            }
-        }
-    }
-    #[cfg(feature = "x86_64")]
-    {
-        task.thread_mut().fs_base = tls;
-    }
-    #[cfg(feature = "aarch64")]
-    {
-        task.thread_mut().tp_value = tls;
-    }
-}
 
 /// Get current process ID
 pub fn current_pid() -> u32 {
