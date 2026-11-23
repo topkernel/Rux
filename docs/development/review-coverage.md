@@ -714,7 +714,7 @@ when the tree gains a file the map does not know about.
 | `mem_mmap.rs` | 160 | ⬜ |  |
 | `mkdir_unlink.rs` | 250 | ⬜ |  |
 | `mm_pcp.rs` | 175 | ⬜ |  |
-| `mm_sched_pins.rs` | 169 | ⬜ |  |
+| `mm_pins.rs` (sched half moved to rux-sched, S1b flip) | 148 | ⬜ |  |
 | `mod.rs` | 820 | ⬜ |  |
 | `mount_flags.rs` | 58 | ⬜ |  |
 | `rux-net/src/net/net_hdrs_test.rs` (moved from tests/, rung-2 flip) | 45 | ⬜ |  |

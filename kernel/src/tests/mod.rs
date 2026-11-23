@@ -228,7 +228,7 @@ pub mod fs_io;
 #[cfg(feature = "unit-test")]
 pub mod fs_pins;
 #[cfg(feature = "unit-test")]
-// pub mod mm_sched_pins; — service-internals test (S1b); follows the files to the crate
+pub mod mm_pins;
 // pub mod net_hdrs; — MOVED to the rux-net crate (rung-2 flip); runs in-guest
 // via the SERVICE-TEST SEAM below (registered by rux-bin, same counters)
 #[cfg(feature = "unit-test")]
@@ -657,8 +657,9 @@ pub fn run_all_tests() {
     link::test_link();
 
     // SERVICE-TEST SEAM: the crate-flipped leaves' guest tests (pipe2
-    // with rux-fs, net_hdrs with rux-net) run in registration order
-    // with the same counters — rux-bin registered the entries at boot.
+    // with rux-fs, net_hdrs with rux-net, the fair pins with rux-sched)
+    // run in registration order with the same counters — rux-bin
+    // registered the entries at boot.
     run_registered_service_tests();
 
     test_group_start("ext4_allocator");
@@ -688,11 +689,15 @@ pub fn run_all_tests() {
     // read-back/fsync-shape/stat/append/getdents/unlink + errno pins).
     fs_io::test_fs_io();
 
-    // FS + MM/sched pins (kernel/src/tests/{fs_pins,mm_sched_pins}.rs):
-    // stat/superblock/vt/rootfs/ext4 csum+indirect, slab classes, VMA,
-    // page flags/refcount/mapcount, fair weights, cmdline parsers.
+    // FS pins (kernel/src/tests/fs_pins.rs): stat/superblock/vt/rootfs/
+    // ext4 csum+indirect.
     fs_pins::test_fs_pins();
-    // (gated with the module: mm_sched_pins)
+
+    // MM + cmdline pins (kernel/src/tests/mm_pins.rs): slab classes,
+    // VMA, page flags/refcount/mapcount, cmdline parsers. The sched half
+    // of the old mm_sched_pins moved to the rux-sched crate with the S1b
+    // flip and runs via the SERVICE-TEST SEAM.
+    mm_pins::test_mm_pins();
 
     // Network pins (kernel/src/tests/net_pins.rs): skb core, header
     // sizes, UDP/TCP state machines, checksums, ARP, routes, IPv6,
