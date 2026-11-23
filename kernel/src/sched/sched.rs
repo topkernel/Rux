@@ -1676,7 +1676,7 @@ pub fn pick_trace(task: *mut Task, code: u32) {
         if cur == t {
             super::entities::PT_CODE[s].store(code, core::sync::atomic::Ordering::Relaxed);
             super::entities::PT_JIF[s].store(
-                crate::drivers::timer::get_jiffies(),
+                crate::timer::get_jiffies(),
                 core::sync::atomic::Ordering::Relaxed,
             );
             return;
@@ -1695,7 +1695,7 @@ pub fn pick_trace(task: *mut Task, code: u32) {
         {
             super::entities::PT_CODE[s].store(code, core::sync::atomic::Ordering::Relaxed);
             super::entities::PT_JIF[s].store(
-                crate::drivers::timer::get_jiffies(),
+                crate::timer::get_jiffies(),
                 core::sync::atomic::Ordering::Relaxed,
             );
             return;
@@ -1735,7 +1735,7 @@ pub fn pick_trace_peek(task: *mut Task) -> Option<(u32, u64)> {
         if super::entities::PT_TASK[s].load(core::sync::atomic::Ordering::Relaxed) == t {
             return Some((
                 super::entities::PT_CODE[s].load(core::sync::atomic::Ordering::Relaxed),
-                crate::drivers::timer::get_jiffies().saturating_sub(
+                crate::timer::get_jiffies().saturating_sub(
                     super::entities::PT_JIF[s].load(core::sync::atomic::Ordering::Relaxed),
                 ),
             ));
@@ -2024,7 +2024,7 @@ pub(crate) fn pick_gen_publish(cpu: usize, task: *mut Task) {
         core::sync::atomic::Ordering::Relaxed,
     );
     PICK_GEN_JIF[cpu].store(
-        crate::drivers::timer::get_jiffies(),
+        crate::timer::get_jiffies(),
         core::sync::atomic::Ordering::Relaxed,
     );
     // PICK_GEN_DONE stays below `g`: this generation is in flight.

@@ -82,7 +82,7 @@ fn arm_dl_replenish_timer(task: *mut Task) {
         let now = crate::sched::entities::sched_clock();
         let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
         let delta_ns = deadline.saturating_sub(now);
-        let expires = crate::drivers::timer::get_jiffies() + dl_ns_to_jiffies(delta_ns);
+        let expires = crate::timer::get_jiffies() + dl_ns_to_jiffies(delta_ns);
         let id = crate::timer::add_timer_wakeup(expires, task.pid());
         if id != 0 {
             dl.replenish_timer.store(id, core::sync::atomic::Ordering::Release);
@@ -154,7 +154,7 @@ pub(crate) fn rt_wedge_dump_tick(cpu: usize) {
         }
     }
     static LASTJ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LASTJ.load(core::sync::atomic::Ordering::Acquire);
     if now.wrapping_sub(last) < 32
         && LASTJ
@@ -236,7 +236,7 @@ pub(crate) fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
     if cpu >= MAX_CPUS {
         return;
     }
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let period_start = RT_PERIOD_START[cpu].load(core::sync::atomic::Ordering::Acquire);
     if period_start == 0 {
         RT_PERIOD_START[cpu].store(now, core::sync::atomic::Ordering::Release);
@@ -332,7 +332,7 @@ pub fn emit_grq_reports(reports: &[GrqPendingReport]) {
 /// no-lock console discipline applies.
 pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST.load(core::sync::atomic::Ordering::Acquire);
     if now.wrapping_sub(last) < 100 {
         return;
@@ -632,7 +632,7 @@ pub fn preempt_check_wake(task: *mut Task) {
 /// `aux` (22 bits) is kind-specific context (cpu id, packed marks).
 /// Entry layout: kind:4 | why:8 | jiffies:30 | aux:22.
 pub fn sched_hist_ring(task: &Task, kind: u64, why: u64, aux: u64) {
-    let jif = crate::drivers::timer::get_jiffies() & 0x3FFF_FFFF;
+    let jif = crate::timer::get_jiffies() & 0x3FFF_FFFF;
     let v = (kind << 60) | ((why & 0xFF) << 52) | (jif << 22) | (aux & 0x3F_FFFF);
     let i = task.pick_ring_seq.fetch_add(1, core::sync::atomic::Ordering::Relaxed) as usize & 15;
     task.pick_ring[i].store(v, core::sync::atomic::Ordering::Relaxed);
@@ -650,7 +650,7 @@ pub fn sched_hist_refuse(task: *mut Task, skip_reason: u32, cpu: usize) {
     }
     if t.pick_first_refuse_jif.load(core::sync::atomic::Ordering::Relaxed) == 0 {
         t.pick_first_refuse_jif
-            .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
+            .store(crate::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
     }
     let claim = t.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
     let aux = (cpu as u64 & 0xF) | ((t.on_cpu() as u64) << 4) | (((claim as u64) & 0xF) << 5);
@@ -664,7 +664,7 @@ pub fn sched_hist_link(task: *mut Task) {
     let t = crate::sched::edges::task_shared(task);
     t.wake_n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     t.wake_last_jif
-        .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
+        .store(crate::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
     t.wait_open_ns
         .store(crate::sched::entities::sched_clock(), core::sync::atomic::Ordering::Relaxed);
     sched_hist_ring(t, 1, 0, crate::arch::cpu_id() as u64 & 0xF);
@@ -677,7 +677,7 @@ pub fn sched_hist_pick(task: *mut Task, cpu: usize) {
     let t = crate::sched::edges::task_shared(task);
     t.pick_n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     t.pick_last_jif
-        .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
+        .store(crate::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
     let open = t.wait_open_ns.swap(0, core::sync::atomic::Ordering::Relaxed);
     if open != 0 {
         let d = crate::sched::entities::sched_clock().saturating_sub(open);
@@ -971,7 +971,7 @@ pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut
                 cpu_id as u32,
                 (RT_TIME_USED[cpu_id].load(core::sync::atomic::Ordering::Relaxed) << 32)
                     | RT_PERIOD_START[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
-                (crate::drivers::timer::get_jiffies() << 32)
+                (crate::timer::get_jiffies() << 32)
                     | grq.rt_rq.nr_running() as u64,
             );
         }
@@ -1132,7 +1132,7 @@ pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) {
     PSLEDGER_CPU[s].store(cpu as u32, core::sync::atomic::Ordering::Release);
     PSLEDGER_PK[s].store(pk, core::sync::atomic::Ordering::Release);
     PSLEDGER_JIF[s]
-        .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
+        .store(crate::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
 }
 
 /// Consume the ledger at a pick termination (affirm or abort). Returns
@@ -1317,7 +1317,7 @@ fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
                 task.ti_preempt_count_zero();
                 static PICKZERO_LAST: core::sync::atomic::AtomicU64 =
                     core::sync::atomic::AtomicU64::new(0);
-                let now = crate::drivers::timer::get_jiffies();
+                let now = crate::timer::get_jiffies();
                 let last = PICKZERO_LAST.load(core::sync::atomic::Ordering::Relaxed);
                 if now.wrapping_sub(last) >= 20
                     && PICKZERO_LAST
@@ -1949,7 +1949,7 @@ pub fn ww_record(task: *mut Task, code: u32) {
         None => return,
     };
     let loc = core::panic::Location::caller();
-    let j = crate::drivers::timer::get_jiffies();
+    let j = crate::timer::get_jiffies();
     // Global ring (context; rolls fast under churn).
     let ix = WW_IX.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % WW_RING;
     WW_TASK[ix].store(t, core::sync::atomic::Ordering::Relaxed);
@@ -2121,7 +2121,7 @@ pub fn w2_refusal_census(task: *mut Task) -> W2RefusalCensus {
         busy_slot: -1,
         idle_slot: -1,
         exec_ns: 0,
-        jiffies: crate::drivers::timer::get_jiffies(),
+        jiffies: crate::timer::get_jiffies(),
         quantum_ms: 0,
     };
     if task.is_null() {
@@ -3729,7 +3729,7 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
 pub fn r56_report_switch_abort(cpu: usize, pid: u32) {
     static LAST_ABORT_JIFFY: core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let last = LAST_ABORT_JIFFY.load(core::sync::atomic::Ordering::Relaxed);
     if now.wrapping_sub(last) < 1 {
         return;
@@ -3758,7 +3758,7 @@ pub(crate) fn lp_idle_lie_report(cpu: usize) {
     if LP_N.load(core::sync::atomic::Ordering::Relaxed) >= 128 {
         return;
     }
-    let jif = crate::drivers::timer::get_jiffies();
+    let jif = crate::timer::get_jiffies();
     let last = LP_LAST[cpu.min(MAX_CPUS - 1)].load(core::sync::atomic::Ordering::Relaxed);
     if jif.wrapping_sub(last) < 10 {
         return;

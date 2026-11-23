@@ -87,7 +87,7 @@ pub fn note_pick_skip(task: *mut Task, reason: u8) {
             w.store(0, Ordering::Relaxed);
         }
         s.n.store(0, Ordering::Relaxed);
-        s.first_jif.store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+        s.first_jif.store(crate::timer::get_jiffies(), Ordering::Release);
     }
     if let Some(w) = s.why.get(reason as usize) {
         w.fetch_add(1, Ordering::Relaxed);
@@ -118,7 +118,7 @@ pub fn print_skip_history(task: *mut Task) {
     // previously an inference from no-line-at-all (ambiguous against
     // probe-off and slot-reuse); an explicit skips=0 on every strand
     // line makes the never-refused verdict census-readable.
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::timer::get_jiffies();
     let first = s.first_jif.swap(0, Ordering::AcqRel);
     let mut whys = [0u64; 5];
     for (i, w) in s.why.iter().enumerate() {
@@ -706,7 +706,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                     .is_some_and(|(_, ago)| ago > 30);
                                 if crate::trace::EVENT_SCHEDTRACE.armed()
                                     && stale_task
-                                    && crate::drivers::timer::get_jiffies() > 300
+                                    && crate::timer::get_jiffies() > 300
                                     && WHY1_N.fetch_add(
                                         1,
                                         core::sync::atomic::Ordering::Relaxed,
@@ -808,7 +808,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                             putchar(b);
                                         }
                                         let mut j =
-                                            crate::drivers::timer::get_jiffies().saturating_sub(pj);
+                                            crate::timer::get_jiffies().saturating_sub(pj);
                                         let mut buf = [0u8; 12];
                                         let mut n = 0;
                                         while j > 0 && n < 12 {
@@ -959,7 +959,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
             }
             static LAST_REPORT: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
             // serial-clean: this canary fires on benign mid-switch-out
             // transients too — print only behind rux:schedtrace (retired dfx=schedtrace).
@@ -1236,7 +1236,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
             for &b in M2 {
                 putchar(b);
             }
-            pdec5(crate::drivers::timer::get_jiffies());
+            pdec5(crate::timer::get_jiffies());
             // pick→switch ledger: an intact publication record for this
             // victim = the claim came from a pick that was never
             // affirmed (switched to) NOR aborted — the switchless pick,
@@ -1258,7 +1258,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
                 for &b in C {
                     putchar(b);
                 }
-                pdec5(crate::drivers::timer::get_jiffies().wrapping_sub(pjif));
+                pdec5(crate::timer::get_jiffies().wrapping_sub(pjif));
             }
         }
         crate::dfx::taskdump::putc_brief(b'\n');
@@ -1286,7 +1286,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
             return;
         }
         let trip = VR_TRIPS.fetch_add(1, Ordering::Relaxed) + 1;
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::timer::get_jiffies();
         // First 8 trips always print (the seed hunt needs the first-bad
         // write); afterwards one per 300 jiffies so a corruption storm
         // cannot flood the serial console.

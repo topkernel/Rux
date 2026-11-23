@@ -1777,7 +1777,7 @@ impl CfsRunQueue {
             // caller site via #[track_caller].
             static LAST: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let last = LAST.load(Ordering::Acquire);
             if now.wrapping_sub(last) >= 10
                 && LAST.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
@@ -1825,7 +1825,7 @@ impl CfsRunQueue {
             self.load_weight.store(old, Ordering::SeqCst);
             static LASTW: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::timer::get_jiffies();
             let last = LASTW.load(Ordering::Acquire);
             if now.wrapping_sub(last) >= 10
                 && LASTW.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
@@ -2339,7 +2339,7 @@ impl CfsRunQueue {
                             }
                         }
                         let last = tr.pick_last_jif.load(Ordering::Relaxed);
-                        let now = crate::drivers::timer::get_jiffies();
+                        let now = crate::timer::get_jiffies();
                         let lp = if last == 0 {
                             u32::MAX
                         } else {
@@ -2384,7 +2384,7 @@ impl CfsRunQueue {
     pub fn heal_report_budget_ok() -> bool {
         static LAST_REPORT: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::timer::get_jiffies();
         let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
         if now.wrapping_sub(last) < 2 {
             return false;
@@ -2478,7 +2478,7 @@ impl CfsRunQueue {
             for &b in M2 {
                 putchar(b);
             }
-            pdec5(crate::drivers::timer::get_jiffies());
+            pdec5(crate::timer::get_jiffies());
             // pick→switch ledger: an intact publication record for this
             // victim = the claim came from a pick that was never
             // affirmed (switched to) NOR aborted — the switchless pick,
@@ -2500,7 +2500,7 @@ impl CfsRunQueue {
                 for &b in C {
                     putchar(b);
                 }
-                pdec5(crate::drivers::timer::get_jiffies().wrapping_sub(pjif));
+                pdec5(crate::timer::get_jiffies().wrapping_sub(pjif));
             }
         }
         crate::dfx::taskdump::putc_brief(b'\n');
