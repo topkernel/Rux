@@ -25,6 +25,7 @@ pub mod mount_table;
 pub mod notify_hooks;
 pub mod file_hooks;
 pub mod leaf_glue;
+pub mod perf_ctr;
 pub mod lock_hooks;
 pub mod fs_hooks;
 pub mod notify_events;
@@ -32,7 +33,7 @@ pub mod notify_events;
 // pub mod tmpfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 // pub mod ext4; — MOVED to the rux-ext4 service crate (rung 5)
 pub mod stat;
-pub mod procfs;
+// pub mod procfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 // pub mod sysfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 // pub mod debugfs; — MOVED to the rux-fs service crate (fs-substrate tranche)
 // pub mod tracefs; — MOVED to the rux-fs service crate (fs-substrate tranche)

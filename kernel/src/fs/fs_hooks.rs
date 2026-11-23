@@ -160,7 +160,23 @@ pub struct FsHooks {
     pub devfs_loop_file_ops: fn() -> &'static crate::fs::FileOps,
     /// CONDEV_OPS for the test-suite console fd.
     pub devfs_condev_ops: fn() -> &'static crate::fs::FileOps,
-    /// procfs's mounts view (interim until procfs joins the crate).
+    // ---- procfs rows ----
+    pub procfs_mount_procfs: fn() -> Result<(), i32>,
+    pub procfs_init: fn() -> Result<(), i32>,
+    pub procfs_create_root_inode: fn() -> Option<alloc::sync::Arc<Inode>>,
+    /// pid-shape probe (vfs's dentry revalidation + magic-link gates;
+    /// gated on fs_id == FS_ID_PROCFS, non-procfs walks pay one compare).
+    pub procfs_is_valid_pid: fn(u64) -> bool,
+    /// /proc/[pid]/fd/N magic-link resolution target.
+    pub procfs_get_fd_file: fn(u64, u32) -> Option<alloc::sync::Arc<File>>,
+    /// PROC_PIDDIR_OPS identity probe (the pidfd attach at dir open).
+    pub procfs_is_piddir_ops: fn(&'static crate::fs::FileOps) -> bool,
+    /// The synthetic fd-directory ops table (open_procfs_dir).
+    pub procfs_fd_dir_ops: fn() -> &'static crate::fs::inode::INodeOps,
+    /// coredump's core_pattern snapshot (the sysctl cell lives crate-side).
+    pub procfs_core_pattern: fn() -> alloc::vec::Vec<u8>,
+    /// The tests' typed sb view (framework tests seed/verify the RAM
+    /// root through the trait).
     pub rootfs_sb_ref_interim: fn() -> Option<&'static dyn super::leaf_glue::InitrdRamfs>,
 }
 
@@ -254,12 +270,50 @@ impl FsHooks {
         devfs_is_loop_ops: |_| false,
         devfs_loop_file_ops: || &crate::fs::file::DIR_FILE_OPS,
         devfs_condev_ops: || &crate::fs::file::DIR_FILE_OPS,
+        procfs_mount_procfs: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        procfs_init: || Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        procfs_create_root_inode: || None,
+        procfs_is_valid_pid: |_| false,
+        procfs_get_fd_file: |_, _| None,
+        procfs_is_piddir_ops: |_| false,
+        procfs_fd_dir_ops: || &EMPTY_INODE_OPS,
+        procfs_core_pattern: || alloc::vec::Vec::new(),
         rootfs_sb_ref_interim: || None,
     };
 }
 
 pub static FS_HOOKS: crate::safety::slot::OnceSlot<FsHooks> =
     crate::safety::slot::OnceSlot::new();
+
+/// The /proc ino-space layout consts (vfs's magic-link dispatch; the
+/// procfs leaf re-exports them crate-side).
+pub const PROCFS_FD_LINK_INO_OFF: u64 = 300;
+pub const PROCFS_NS_LINK_INO_OFF: u64 = 410;
+
+/// The EMPTY-hooks fallback for the procfs fd-dir table (unit-test
+/// builds without the crate registered): a do-nothing directory.
+static EMPTY_INODE_OPS: crate::fs::inode::INodeOps = crate::fs::inode::INodeOps {
+    lookup: None,
+    create: None,
+    link: None,
+    unlink: None,
+    symlink: None,
+    mkdir: None,
+    rmdir: None,
+    mknod: None,
+    rename: None,
+    readlink: None,
+    get_file_ops: None,
+    readdir: None,
+    readdir_fill: None,
+    readdir_cacheable: false,
+    open: None,
+    permission: None,
+    getattr: None,
+    setattr: None,
+    iget: None,
+    destroy_inode: None,
+};
 
 /// The service crate's registration entry (idempotent: first wins).
 pub fn fs_register_hooks(hooks: FsHooks) {

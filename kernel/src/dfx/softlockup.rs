@@ -96,7 +96,7 @@ static IRQ_COUNT_SEEN_AT_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) 
 /// is frozen accumulates real staleness visible to any observer.
 fn note_irq_counts(now: u64) {
     for cpu in 0..MAX_CPUS {
-        let cnt = crate::fs::procfs::interrupts::timer_count(cpu);
+        let cnt = crate::fs::perf_ctr::timer_count(cpu);
         if cnt == 0 {
             // Hart has never taken a timer IRQ (early boot / not started):
             // leave seen-at at 0 — cpu_irq_frozen_ms reports 0 ("alive")
@@ -152,7 +152,7 @@ pub fn check() {
         // Skip CPUs that haven't received any timer interrupt yet.
         // During boot, secondary CPUs may not have started their timers,
         // so TOUCH_TS remains at the init() value — not a real lockup.
-        let timer_cnt = crate::fs::procfs::interrupts::timer_count(cpu);
+        let timer_cnt = crate::fs::perf_ctr::timer_count(cpu);
         if timer_cnt == 0 {
             continue;
         }

@@ -329,8 +329,8 @@ pub fn create_fs_root(
             false,
         )),
         "proc" | "procfs" => {
-            crate::fs::procfs::mount_procfs().map_err(|e| e as i32)?;
-            Ok((crate::fs::procfs::create_root_inode(), false))
+            crate::fs::leaf_glue::procfs::mount_procfs().map_err(|e| e as i32)?;
+            Ok((crate::fs::leaf_glue::procfs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
         }
         "sysfs" => {
             crate::fs::leaf_glue::sysfs::init_sysfs().map_err(|e| e as i32)?;

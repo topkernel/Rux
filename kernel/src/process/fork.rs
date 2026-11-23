@@ -1186,7 +1186,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         }
 
         // /proc/stat "processes": the number of forks since boot.
-        crate::fs::procfs::stat::note_fork();
+        crate::fs::perf_ctr::note_fork();
         // perf FORK sideband (hiperf process tracking; no-op unless a
         // perf event is armed).
         if let Some(cur) = crate::sched::current() {

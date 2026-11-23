@@ -44,101 +44,13 @@ use crate::process::task::TaskState;
 /// no nice levels, no iowait accounting and no IRQ-time accounting
 /// (CONFIG_IRQ_TIME_ACCOUNTING is off on many Linux boxes too), so
 /// they report zero rather than a fabricated number.
-pub struct CpuTime {
-    pub user: AtomicU64,
-    pub nice: AtomicU64,
-    pub system: AtomicU64,
-    pub idle: AtomicU64,
-    pub iowait: AtomicU64,
-    pub irq: AtomicU64,
-    pub softirq: AtomicU64,
-    pub steal: AtomicU64,
-    pub guest: AtomicU64,
-    pub guest_nice: AtomicU64,
-}
+// The CPU-time cells, tick charging and the context-switch/fork notes
+// moved framework-side (fs::perf_ctr — the fs-substrate devirtualization:
+// arch traps and the scheduler call them directly, zero indirection);
+// the readers below delegate to the framework cells.
+pub use crate::fs::perf_ctr::{CpuTime, CPU_TIME, CTXT_SWITCHES, FORKS};
+pub use crate::fs::perf_ctr::{charge_tick, note_switch, note_fork};
 
-impl CpuTime {
-    const fn new() -> Self {
-        Self {
-            user: AtomicU64::new(0),
-            nice: AtomicU64::new(0),
-            system: AtomicU64::new(0),
-            idle: AtomicU64::new(0),
-            iowait: AtomicU64::new(0),
-            irq: AtomicU64::new(0),
-            softirq: AtomicU64::new(0),
-            steal: AtomicU64::new(0),
-            guest: AtomicU64::new(0),
-            guest_nice: AtomicU64::new(0),
-        }
-    }
-}
-
-static CPU_TIME: [CpuTime; crate::config::MAX_CPUS] =
-    [const { CpuTime::new() }; crate::config::MAX_CPUS];
-
-/// Total context switches since boot (Linux /proc/stat "ctxt").
-static CTXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
-
-/// Total forks since boot (Linux /proc/stat "processes").
-static FORKS: AtomicU64 = AtomicU64::new(0);
-
-/// Charge one tick to the calling CPU's time accounting.
-///
-/// `user_mode` is the privilege mode the timer hit. The idle task
-/// (pid 0) means the CPU had nothing to run — that is idle time, not
-/// system time.
-pub fn charge_tick(user_mode: bool) {
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu >= crate::config::MAX_CPUS {
-        return;
-    }
-    let idle = match crate::sched::current() {
-        Some(task) => task.pid() == 0,
-        None => true,
-    };
-    if idle {
-        CPU_TIME[cpu].idle.fetch_add(1, Ordering::Relaxed);
-    } else if user_mode {
-        CPU_TIME[cpu].user.fetch_add(1, Ordering::Relaxed);
-    } else {
-        CPU_TIME[cpu].system.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-/// Count one context switch and split it into the per-task voluntary /
-/// involuntary buckets (Linux's `__schedule` accounting).
-///
-/// A task that was still runnable when it was switched out was
-/// PREEMPTED — involuntary. A task that had gone to sleep had BLOCKED
-/// — voluntary.
-pub fn note_switch(prev: &crate::process::task::Task) {
-    CTXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
-    // perf per-CPU context-switch accounting (PERF_COUNT_SW_CONTEXT_
-    // SWITCHES; one relaxed load when no perf event wants it).
-    crate::perf::note_ctxsw();
-    if prev.pid() == 0 {
-        return; // the idle task is not a process
-    }
-    let state = prev.state().bits();
-    let blocked = state & (TaskState::INTERRUPTIBLE | TaskState::UNINTERRUPTIBLE) != 0;
-    if blocked {
-        prev.nvcsw.fetch_add(1, Ordering::Relaxed);
-        // NOTE: this is a voluntary context switch (nvcsw), NOT a
-        // schedstat yld_count — Linux counts yld_count only in the
-        // sched_yield paths (kernel/sched/syscalls.c), so the schedstat
-        // counter is bumped from sys_sched_yield, not here.
-    } else {
-        prev.nivcsw.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-/// Count one fork (Linux /proc/stat "processes").
-pub fn note_fork() {
-    FORKS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Total context switches since boot.
 pub fn total_context_switches() -> u64 {
     CTXT_SWITCHES.load(Ordering::Relaxed)
 }
@@ -160,7 +72,7 @@ fn procs_blocked() -> u64 {
     // for, so reading /proc/stat never blocks the caller.
     crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
         // SAFETY: the pid-hash walk hands out live task pointers.
-        let t = unsafe { &*task };
+        let t = task;
         if t.pid() != 0 && t.state().bits() & TaskState::UNINTERRUPTIBLE != 0 {
             blocked += 1;
         }

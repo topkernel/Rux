@@ -715,15 +715,16 @@ pub fn rust_main_tail() -> ! {
 
             // Initialize ProcFS and mount to /proc (if configured to enable)
             if crate::config::AUTO_MOUNT_PROCFS {
-                let procfs_result = fs::procfs::init_procfs();
+                let procfs_result = fs::leaf_glue::procfs::init_procfs();
                 print_status("fs", "procfs initialized", procfs_result.is_ok());
                 if procfs_result.is_ok() {
-                    let mount_result = fs::procfs::mount_procfs();
+                    let mount_result = fs::leaf_glue::procfs::mount_procfs();
                     print_status("fs", "procfs mounted /proc", mount_result.is_ok());
                     if mount_result.is_ok() {
-                        if let Some(sb) = fs::procfs::get_procfs_sb() {
-                            // Build dentry tree for procfs
-                            fs::vfs::vfs_mount("/proc", fs::procfs::create_root_inode(),
+                        // Build dentry tree for procfs (the sb presence
+                        // check rides the row's Option).
+                        if let Some(proc_root) = fs::leaf_glue::procfs::create_root_inode() {
+                            fs::vfs::vfs_mount("/proc", proc_root,
                                 fs::mount::MntFlags::new(0));
                         }
                     }
@@ -1933,14 +1934,16 @@ fn mount_ext4_root_from(disk: &'static drivers::blkdev::GenDisk) {
 
     // Remount procfs after ext4 mount (ext4 overwrites the root directory).
     if crate::config::AUTO_MOUNT_PROCFS {
-        let procfs_mount_result = fs::procfs::mount_procfs();
+        let procfs_mount_result = fs::leaf_glue::procfs::mount_procfs();
         print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
         if procfs_mount_result.is_ok() {
-            fs::vfs::vfs_mount(
-                "/proc",
-                fs::procfs::create_root_inode(),
-                fs::mount::MntFlags::new(0),
-            );
+            if let Some(proc_root) = fs::leaf_glue::procfs::create_root_inode() {
+                fs::vfs::vfs_mount(
+                    "/proc",
+                    proc_root,
+                    fs::mount::MntFlags::new(0),
+                );
+            }
         }
     }
 

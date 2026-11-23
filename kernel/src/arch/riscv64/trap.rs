@@ -11,7 +11,6 @@ use core::arch::asm;
 use super::unsafe_edges::SavedFrame;
 use crate::process::task::TaskState;
 use riscv::register::sie;
-use crate::fs::procfs::interrupts;
 
 // Include trap.S assembly code.
 //
@@ -670,7 +669,7 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
 /// Handle timer interrupt
 fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     // Increment interrupt counter for /proc/interrupts
-    interrupts::timer_inc(cpu);
+    crate::fs::perf_ctr::timer_inc(cpu);
 
     // Re-arm timer: set stimecmp to a future deadline.
     crate::drivers::timer::set_next_trigger();
@@ -687,7 +686,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     // account_process_tick): the idle task means the CPU had nothing to
     // run, otherwise the tick is user time (the timer hit the task in
     // user mode) or system time (it hit it in kernel mode).
-    crate::fs::procfs::stat::charge_tick(regs.user_mode());
+    crate::fs::perf_ctr::charge_tick(regs.user_mode());
 
     // 0b. CPU-time accounting (Linux account_process_tick): charge this
     // tick to the interrupted task as user or system time depending on
@@ -738,7 +737,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
 /// Handle software interrupt (IPI)
 fn handle_software_interrupt(_regs: &mut PtRegs, cpu: usize) {
     // Increment software interrupt counter for /proc/interrupts
-    interrupts::soft_inc(cpu);
+    crate::fs::perf_ctr::soft_inc(cpu);
 
     // Clear software interrupt
     // SAFETY: csrc atomically clears bit 1 (SSIP) in the sip CSR; safe at interrupt handler level.

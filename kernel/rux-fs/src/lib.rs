@@ -13,8 +13,8 @@
 // the service files' crate::X paths resolve unchanged (the net recipe).
 pub use rux::{
     arch, cmdline, config, console, dfx, drivers, errno, initrd, interrupt,
-    ipc, mm, net, printk, process, safety, sched, security, signal, sync,
-    timer, trace,
+    ipc, mm, module, net, printk, process, safety, sched, security, signal,
+    sync, timer, trace,
 };
 // The guest-test counters (unit-test builds only — the framework gates
 // the module behind its own feature).
@@ -50,12 +50,15 @@ pub mod fs {
     pub mod rootfs;
     pub mod tmpfs;
     pub mod devfs;
+    pub mod procfs;
     #[cfg(feature = "unit-test")]
     pub mod initrd_test;
     #[cfg(feature = "unit-test")]
     pub mod rootfs_test;
     #[cfg(feature = "unit-test")]
     pub mod tmpfs_test;
+    #[cfg(feature = "unit-test")]
+    pub mod procfs_test;
     pub use rux::fs::*;
 }
 
@@ -78,6 +81,8 @@ pub fn run_unit_tests() {
     crate::fs::rootfs_test::test_rootfs_pins();
     rux::tests::test_group_start("tmpfs-mknod");
     crate::fs::tmpfs_test::test_tmpfs_mknod();
+    rux::tests::test_group_start("procfs");
+    crate::fs::procfs_test::test_procfs();
 }
 
 /// The boot-time registration (rux-bin calls this before kmain):
@@ -126,6 +131,7 @@ pub fn register_all() {
             crate::fs::sysfs::mount_register,
             crate::fs::tmpfs::mount_register,
             crate::fs::devfs::mount_register,
+            crate::fs::procfs::mount_register,
         ],
         // ---- debugfs rows ----
         debugfs_create_dir: crate::fs::debugfs::create_dir,
@@ -180,7 +186,6 @@ pub fn register_all() {
         rootfs_create_root_inode: || Some(crate::fs::rootfs::create_root_inode()),
         rootfs_initrd_sb: || crate::fs::rootfs::initrd_sb_view(),
         rootfs_read_file: crate::fs::rootfs::read_file,
-        rootfs_sb_ref_interim: crate::fs::rootfs::initrd_sb_view,
         tmpfs_create_mount_instance: |data, tag| {
             use crate::fs::leaf_glue::TmpfsTagKind;
             let mut root = crate::fs::tmpfs::create_mount_instance(data);
@@ -216,6 +221,15 @@ pub fn register_all() {
         devfs_is_loop_ops: |ops| core::ptr::eq(ops as *const _, &crate::fs::devfs::LOOP_FILE_OPS as *const _),
         devfs_loop_file_ops: || &crate::fs::devfs::LOOP_FILE_OPS,
         devfs_condev_ops: || &crate::fs::devfs::CONDEV_OPS,
+        procfs_mount_procfs: crate::fs::procfs::mount_procfs,
+        procfs_init: crate::fs::procfs::init_procfs,
+        procfs_create_root_inode: || Some(crate::fs::procfs::create_root_inode()),
+        procfs_is_valid_pid: crate::fs::procfs::pid::is_valid_pid,
+        procfs_get_fd_file: crate::fs::procfs::pid::get_fd_file,
+        procfs_is_piddir_ops: |ops| core::ptr::eq(ops as *const _, &crate::fs::procfs::PROC_PIDDIR_OPS as *const _),
+        procfs_fd_dir_ops: || &crate::fs::procfs::PROCFS_DIR_OPS,
+        procfs_core_pattern: || crate::fs::procfs::sysctl::CORE_PATTERN.lock().as_bytes().to_vec(),
+        rootfs_sb_ref_interim: crate::fs::rootfs::initrd_sb_view,
         char_dev_uart_write: crate::fs::char_dev::uart_write,
         tty_console_lflag: || crate::fs::tty::console().lflag(),
         tty_console_echo_enabled: || crate::fs::tty::console().echo_enabled(),

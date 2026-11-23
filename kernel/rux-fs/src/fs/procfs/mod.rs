@@ -559,12 +559,9 @@ impl ProcFSNode {
     }
 }
 
-// SAFETY: ProcFSNode's mutable fields (children, data) are protected by Spinlocks;
-// name is a &'static str and other fields are atomic or read-only after creation.
-unsafe impl Send for ProcFSNode {}
-// SAFETY: all shared mutable state is protected by internal Spinlocks;
-// no data races are possible across threads/CPUs.
-unsafe impl Sync for ProcFSNode {}
+// (The pre-move `unsafe impl Send/Sync` markers were vestigial — every
+// field is lock-protected, atomic, or plain data; deletion-verified by
+// the crate-level forbid build.)
 
 /// ProcFS superblock
 pub struct ProcFSSuperBlock {
@@ -1237,7 +1234,9 @@ fn procfs_mount(_fs_context: &crate::fs::superblock::FsContext<'_>) -> Result<*m
 fn procfs_kill_sb(sb: *mut SuperBlock) {
     if !sb.is_null() {
         // SAFETY: the Box the mount callback stored (unmount path).
-        let _ = unsafe { alloc::boxed::Box::from_raw(sb as *mut ProcFSSuperBlock) };
+        // The superblock reclaim rides the framework edge (the mount
+        // callback stored a Box via into_raw).
+        crate::fs::unsafe_edges::kill_sb_reclaim_box::<ProcFSSuperBlock>(sb);
     }
 }
 
@@ -1471,13 +1470,13 @@ pub fn init_procfs() -> Result<(), i32> {
 pub fn mount_procfs() -> Result<(), i32> {
     // RootFS must be up (the trait view through the row — the interim
     // seam until procfs joins the crate).
-    let rootfs_sb = match crate::fs::leaf_glue::rootfs::get_sb_ref_interim() {
+    let rootfs_sb = match crate::fs::rootfs::get_rootfs_sb_ref() {
         Some(sb) => sb,
         None => return Err(-1),
     };
 
     // Try to create /proc directory in RootFS (ignore error if already exists)
-    let _ = rootfs_sb.rfs_create_dir("/proc", 0o755);
+    let _ = rootfs_sb.create_dir("/proc", 0o755);
 
     // Create mount point
     let procfs_sb_ptr = GLOBAL_PROCFS_SB.load(Ordering::Acquire);
@@ -1912,7 +1911,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
                 if name == b"fd" && ino == pid_val * 10000 + FD_DIR_INO_OFF {
                     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
                     inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
-                    inode.ops = Some(&crate::fs::vfs::PROCFS_DIR_OPS);
+                    inode.ops = Some(&PROCFS_DIR_OPS);
                     inode.private_data = Some(pid_val as usize as *mut u8);
                     return Ok(Arc::new(inode));
                 }
@@ -2940,4 +2939,50 @@ pub fn mount_proc(source: &str, target: &str, fs_type: &str, data: Option<&str>,
 
 pub fn mount_register() {
     crate::fs::mount_table::register(&["proc", "procfs"], mount_proc);
+}
+
+// ============================================================================
+// The synthetic fd-directory ops table (moved from vfs.rs at the
+// fs-substrate flip — the VFS core reaches it through the hook row).
+// ============================================================================
+
+/// Synthetic INodeOps for procfs directory shortcuts (e.g., /proc/[pid]/fd/).
+pub static PROCFS_DIR_OPS: crate::fs::inode::INodeOps = crate::fs::inode::INodeOps {
+    lookup: Some(procfs_fd_dir_lookup),
+    create: None,
+    link: None,
+    unlink: None,
+    symlink: None,
+    mkdir: None,
+    rmdir: None,
+    mknod: None,
+    rename: None,
+    readlink: None,
+    get_file_ops: None,
+    readdir: Some(procfs_dir_readdir),
+    readdir_fill: None,
+    readdir_cacheable: false,
+    open: None,
+    permission: None,
+    getattr: None,
+    setattr: None,
+    iget: Some(procfs_fd_dir_iget),
+    destroy_inode: None,
+};
+
+/// Readdir callback for synthetic procfs directories.
+/// Reads PID from inode.private_data, calls pid::list_fds().
+fn procfs_dir_readdir(inode: &crate::fs::inode::Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
+    let pid = inode.private_data? as u64;
+    let fds = pid::list_fds(pid);
+
+    let entries: alloc::vec::Vec<crate::fs::inode::VfsDirEntry> = fds.iter().map(|(fd, _path)| {
+        crate::fs::inode::VfsDirEntry {
+            ino: *fd as u64,
+            name: alloc::format!("{}", fd).into_bytes(),
+            file_type: crate::fs::inode::file_type::DT_LNK,
+        }
+    }).collect();
+
+    Some(entries)
 }

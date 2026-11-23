@@ -3039,7 +3039,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                         && inode.private_data.is_none()
                         && inode.ino < 10000
                         && inode.ino != 1 // procfs sb root (ino 1) is not a pid dir
-                        && !crate::fs::procfs::pid::is_valid_pid(inode.ino)
+                        && !crate::fs::leaf_glue::procfs::is_valid_pid(inode.ino)
                     {
                         cur_d.remove_child(component);
                         found = None;
@@ -3486,9 +3486,9 @@ fn follow_symlink_hinted(
     if inode.fs_id == crate::fs::inode::FS_ID_PROCFS && inode.private_data.is_none() {
         let pid_val = inode.ino / 10000;
         let rem = inode.ino % 10000;
-        if crate::fs::procfs::pid::is_valid_pid(pid_val)
-            && rem >= crate::fs::procfs::NS_LINK_INO_OFF
-            && rem < crate::fs::procfs::NS_LINK_INO_OFF + 6
+        if crate::fs::leaf_glue::procfs::is_valid_pid(pid_val)
+            && rem >= crate::fs::leaf_glue::procfs::PROCFS_NS_LINK_INO_OFF
+            && rem < crate::fs::leaf_glue::procfs::PROCFS_NS_LINK_INO_OFF + 6
         {
             return Ok(dentry);
         }
@@ -3502,13 +3502,13 @@ fn follow_symlink_hinted(
     if inode.fs_id == crate::fs::inode::FS_ID_PROCFS && inode.private_data.is_none() {
         let pid_val = inode.ino / 10000;
         let rem = inode.ino % 10000;
-        if crate::fs::procfs::pid::is_valid_pid(pid_val)
-            && rem >= crate::fs::procfs::FD_LINK_INO_OFF
-            && rem < crate::fs::procfs::FD_LINK_INO_OFF + 1024
+        if crate::fs::leaf_glue::procfs::is_valid_pid(pid_val)
+            && rem >= crate::fs::leaf_glue::procfs::PROCFS_FD_LINK_INO_OFF
+            && rem < crate::fs::leaf_glue::procfs::PROCFS_FD_LINK_INO_OFF + 1024
         {
-            if let Some(file) = crate::fs::procfs::pid::get_fd_file(
+            if let Some(file) = crate::fs::leaf_glue::procfs::get_fd_file(
                 pid_val,
-                (rem - crate::fs::procfs::FD_LINK_INO_OFF) as u32,
+                (rem - crate::fs::leaf_glue::procfs::PROCFS_FD_LINK_INO_OFF) as u32,
             ) {
                 // dentry written once at open; accessor handles it.
                 let target = file.get_dentry().cloned();
@@ -5544,12 +5544,12 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 {
                     let pid_val = inode.ino / 10000;
                     let rem = inode.ino % 10000;
-                    if crate::fs::procfs::pid::is_valid_pid(pid_val)
-                        && rem >= crate::fs::procfs::NS_LINK_INO_OFF
-                        && rem < crate::fs::procfs::NS_LINK_INO_OFF + 6
+                    if crate::fs::leaf_glue::procfs::is_valid_pid(pid_val)
+                        && rem >= crate::fs::leaf_glue::procfs::PROCFS_NS_LINK_INO_OFF
+                        && rem < crate::fs::leaf_glue::procfs::PROCFS_NS_LINK_INO_OFF + 6
                     {
                         if let Some(kind) =
-                            crate::process::ns::NsKind::from_index(rem - crate::fs::procfs::NS_LINK_INO_OFF)
+                            crate::process::ns::NsKind::from_index(rem - crate::fs::leaf_glue::procfs::PROCFS_NS_LINK_INO_OFF)
                         {
                             let file = crate::process::ns::build_ns_file(
                                 pid_val as u32,
@@ -6864,10 +6864,7 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
                 // pidfd_send_signal / pidfd_getfd / poll-exit, the
                 // reference's pre-pidfd_open mechanism). file_opendir
                 // has no inode open hook, so the attach lives here.
-                if core::ptr::eq(
-                    dir_ops as *const _,
-                    &crate::fs::procfs::PROC_PIDDIR_OPS as *const _,
-                ) {
+                if crate::fs::leaf_glue::procfs::is_piddir_ops(dir_ops) {
                     if let Some(data) =
                         crate::fs::pidfd::make_pidfd_data(inode.ino as u32)
                     {
@@ -7381,60 +7378,15 @@ pub fn vfs_utimensat_ex(
 // ProcFS Directory (for /proc/[pid]/fd/ shortcut)
 // ============================================================================
 
-/// Synthetic INodeOps for procfs directory shortcuts (e.g., /proc/[pid]/fd/)
-/// Synthetic INodeOps for procfs directory shortcuts (e.g. /proc/[pid]/fd/).
-/// pub(crate): procfs reuses it for the /proc/[pid]/fd lookup-layer inode.
-pub(crate) static PROCFS_DIR_OPS: INodeOps = INodeOps {
-    lookup: Some(crate::fs::procfs::procfs_fd_dir_lookup),
-    create: None,
-    link: None,
-    unlink: None,
-    symlink: None,
-    mkdir: None,
-    rmdir: None,
-    mknod: None,
-    rename: None,
-    readlink: None,
-    get_file_ops: None,
-    readdir: Some(procfs_dir_readdir),
-    readdir_fill: None,
-    readdir_cacheable: false,
-    open: None,
-    permission: None,
-    getattr: None,
-    setattr: None,
-    iget: Some(crate::fs::procfs::procfs_fd_dir_iget),
-    destroy_inode: None,
-};
-
-/// Readdir callback for synthetic procfs directories.
-/// Reads PID from inode.private_data, calls procfs::pid::list_fds().
-// SAFETY: private_data stores a valid PID value; list_fds is a safe fallible function
-fn procfs_dir_readdir(inode: &Inode) -> Option<alloc::vec::Vec<VfsDirEntry>> {
-    let pid = inode.private_data? as u64;
-    let fds = crate::fs::procfs::pid::list_fds(pid);
-
-    let entries: alloc::vec::Vec<VfsDirEntry> = fds.iter().map(|(fd, _path)| {
-        VfsDirEntry {
-            ino: *fd as u64,
-            name: alloc::format!("{}", fd).into_bytes(),
-            file_type: crate::fs::inode::file_type::DT_LNK,
-        }
-    }).collect();
-
-    Some(entries)
-}
-
 /// Open a synthetic procfs directory (e.g., /proc/[pid]/fd/), return fd.
 ///
 /// Creates a File backed by a synthetic Inode with readdir support.
 pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
-    // PROCFS_DIR_OPS is a static INodeOps with well-defined callbacks.
     let mut inode = Inode::new(
         pid,
         InodeMode::new(InodeMode::S_IFDIR | 0o555),
     );
-    inode.ops = Some(&PROCFS_DIR_OPS);
+    inode.ops = Some((crate::fs::fs_hooks::hooks().procfs_fd_dir_ops)());
     inode.private_data = Some(pid as *mut u8);
 
     let file = alloc::sync::Arc::new(File::new(FileFlags::new(flags)));

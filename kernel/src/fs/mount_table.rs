@@ -63,7 +63,6 @@ pub fn lookup(fs_type: &str) -> Option<MountFn> {
 pub fn register_builtin_handlers() {
     // Still-framework leaves (they move in their own commits; each move
     // deletes its line here and appends its row crate-side):
-    super::procfs::mount_register();
     // The moved substrate/boot leaves register from the rux-fs crate side
     // (FsHooks.leaf_mount_registers — one row per moved leaf, filled by
     // the crate's register_all; selinuxfs pioneered the shape).

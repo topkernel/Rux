@@ -270,7 +270,7 @@ pub mod mm_pins;
 #[cfg(feature = "unit-test")]
 // pub mod net_pins; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
-pub mod procfs;
+// pub mod procfs; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 #[cfg(all(feature = "unit-test", feature = "x86_64"))]
 pub mod pt_regs;
 #[cfg(feature = "unit-test")]
@@ -538,7 +538,7 @@ pub fn run_all_tests() {
     // procfs renderer pins (kernel/src/tests/procfs.rs): /proc/cpuinfo
     // per-arch key table + /proc/[pid]/status shape and order. Formerly
     // in-module cpuinfo_file_tests/status_file_tests blocks.
-    procfs::test_procfs();
+    // procfs: MOVED to the rux-fs crate (fs-substrate) — SERVICE-TEST SEAM
 
     // tmpfs group (kernel/src/tests/tmpfs.rs): page store, truncate
     // tails, dir ops, and the mount-option page budget. Formerly an

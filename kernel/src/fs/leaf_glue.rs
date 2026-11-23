@@ -270,15 +270,15 @@ pub mod rootfs {
         (hooks().rootfs_create_root_inode)()
     }
 
-    /// procfs/cgroup/sysfs's typed sb view (interim until they join the
-    /// crate).
-    pub fn get_sb_ref_interim() -> Option<&'static dyn InitrdRamfs> {
-        (hooks().rootfs_sb_ref_interim)()
-    }
-
     /// Presence + kind probe (tests' verify step).
     pub fn lookup_kind(path: &str) -> Option<bool> {
         get_sb_ref_interim().and_then(|sb| sb.rfs_lookup_kind(path))
+    }
+
+    /// The tests' typed sb view (framework tests seed/verify the RAM
+    /// root through the trait).
+    pub fn get_sb_ref_interim() -> Option<&'static dyn InitrdRamfs> {
+        (hooks().rootfs_sb_ref_interim)()
     }
 
     /// Seed a file into the RAM root (tests' setup step).
@@ -347,6 +347,41 @@ pub mod devfs {
 
     pub fn condev_ops() -> &'static super::super::file::FileOps {
         (hooks().devfs_condev_ops)()
+    }
+}
+
+// ---- procfs (magic links, mount rows) ----
+
+pub mod procfs {
+    use super::*;
+    pub use super::super::fs_hooks::{PROCFS_FD_LINK_INO_OFF, PROCFS_NS_LINK_INO_OFF};
+
+    pub fn mount_procfs() -> Result<(), i32> {
+        (hooks().procfs_mount_procfs)()
+    }
+
+    pub fn init_procfs() -> Result<(), i32> {
+        (hooks().procfs_init)()
+    }
+
+    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
+        (hooks().procfs_create_root_inode)()
+    }
+
+    pub fn is_valid_pid(pid: u64) -> bool {
+        (hooks().procfs_is_valid_pid)(pid)
+    }
+
+    pub fn get_fd_file(pid: u64, fd: u32) -> Option<alloc::sync::Arc<super::super::file::File>> {
+        (hooks().procfs_get_fd_file)(pid, fd)
+    }
+
+    pub fn is_piddir_ops(ops: &'static super::super::file::FileOps) -> bool {
+        (hooks().procfs_is_piddir_ops)(ops)
+    }
+
+    pub fn fd_dir_ops() -> &'static super::super::inode::INodeOps {
+        (hooks().procfs_fd_dir_ops)()
     }
 }
 
