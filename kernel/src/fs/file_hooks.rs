@@ -34,9 +34,9 @@ pub(crate) fn oasync_unregister(file_id: u64) {
 }
 
 /// stat fallback for a char-device File (the char_dev leaf lives in the
-/// rux-fs crate; dispatch through the registered row).
+/// rux-fs crate; dispatch through the path table).
 pub(crate) fn char_dev_stat(file: &crate::fs::file::File, stat: &mut crate::fs::Stat) -> Option<i32> {
-    (crate::fs::fs_hooks::hooks().char_dev_file_stat)(file, stat)
+    crate::fs::leaf_glue::char_dev::char_dev_file_stat(file, stat)
 }
 
 // ===== fifo + memfd (slot dispatch) =====

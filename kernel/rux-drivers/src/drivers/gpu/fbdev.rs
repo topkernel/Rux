@@ -349,7 +349,7 @@ pub fn init_fbdev() -> Result<(), ()> {
         crate::fs::dev_t::DEV_FB0,
         &FB_OPS,
     )?;
-    crate::fs::leaf_glue::devfs::mknod("/fb0", crate::fs::dev_t::DEV_FB0, 0o666).map_err(|_| ())?;
+    crate::fs::leaf_glue::devfs::mknod("/fb0", crate::fs::dev_t::DEV_FB0, 0o666)?;
 
     // Auto-flush presenter for flush-less renderers (stock Xorg).
     let started = crate::process::kthread::kthread_run(

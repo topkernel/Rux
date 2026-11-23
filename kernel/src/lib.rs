@@ -678,18 +678,8 @@ pub fn rust_main_tail() -> ! {
             let rootfs_result = fs::leaf_glue::rootfs::init_rootfs();
             print_status("fs", "ramfs mounted /", rootfs_result.is_ok());
             if rootfs_result.is_ok() {
-                // Build dentry tree for rootfs (fallback: a minimal root
-                // node — the pre-flip create_root_inode's own fallback
-                // arm, for the not-yet-initialized corner).
-                let rootfs_root = fs::leaf_glue::rootfs::create_root_inode()
-                    .unwrap_or_else(|| {
-                        use crate::fs::inode::{Inode, InodeMode};
-                        alloc::sync::Arc::new(Inode::new(
-                            1,
-                            InodeMode::new(InodeMode::S_IFDIR | 0o755),
-                        ))
-                    });
-                fs::vfs::vfs_mount("/", rootfs_root,
+                // Build dentry tree for rootfs
+                fs::vfs::vfs_mount("/", fs::leaf_glue::rootfs::create_root_inode(),
                     fs::mount::MntFlags::new(0));
 
                 // OH Phase 1 prereq: unpack the boot initrd (gzip cpio
@@ -721,10 +711,9 @@ pub fn rust_main_tail() -> ! {
                     let mount_result = fs::leaf_glue::procfs::mount_procfs();
                     print_status("fs", "procfs mounted /proc", mount_result.is_ok());
                     if mount_result.is_ok() {
-                        // Build dentry tree for procfs (the sb presence
-                        // check rides the row's Option).
-                        if let Some(proc_root) = fs::leaf_glue::procfs::create_root_inode() {
-                            fs::vfs::vfs_mount("/proc", proc_root,
+                        if fs::leaf_glue::procfs::sb_present() {
+                            // Build dentry tree for procfs
+                            fs::vfs::vfs_mount("/proc", fs::leaf_glue::procfs::create_root_inode(),
                                 fs::mount::MntFlags::new(0));
                         }
                     }
@@ -745,14 +734,10 @@ pub fn rust_main_tail() -> ! {
                 let sysfs_init = fs::leaf_glue::sysfs::init_sysfs();
                 let sysfs_mount = sysfs_init.and_then(|_| fs::leaf_glue::sysfs::mount_sysfs());
                 let ok = sysfs_mount
-                    .and_then(|_| match fs::leaf_glue::sysfs::create_root_inode() {
-                        Some(root) => Ok(root),
-                        None => Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
-                    })
-                    .map(|sysfs_root| {
+                    .map(|_| {
                         fs::vfs::vfs_mount(
                             "/sys",
-                            sysfs_root,
+                            fs::leaf_glue::sysfs::create_root_inode(),
                             fs::mount::MntFlags::new(0),
                         );
                         fs::mount::register_mount("sysfs", "/sys", "sysfs", "rw");
@@ -769,9 +754,7 @@ pub fn rust_main_tail() -> ! {
                 let debugfs_init = fs::leaf_glue::debugfs::init_debugfs();
                 let debugfs_mount = debugfs_init.and_then(|_| fs::leaf_glue::debugfs::mount_debugfs());
                 let ok = debugfs_mount
-                    .and_then(|_| fs::leaf_glue::debugfs::create_root_inode()
-                        .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()))
-                    .map(|debugfs_root| {
+                    .map(|_| {
                         // The mount point must already exist in the dentry
                         // tree WITH an inode: vfs_mount walks the path and
                         // creates missing components as bare dentries,
@@ -781,7 +764,7 @@ pub fn rust_main_tail() -> ! {
                         let _ = fs::vfs::path_lookup("/sys/kernel/debug", 0);
                         fs::vfs::vfs_mount(
                             "/sys/kernel/debug",
-                            debugfs_root,
+                            fs::leaf_glue::debugfs::create_root_inode(),
                             fs::mount::MntFlags::new(0),
                         );
                         fs::mount::register_mount(
@@ -1937,13 +1920,11 @@ fn mount_ext4_root_from(disk: &'static drivers::blkdev::GenDisk) {
         let procfs_mount_result = fs::leaf_glue::procfs::mount_procfs();
         print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
         if procfs_mount_result.is_ok() {
-            if let Some(proc_root) = fs::leaf_glue::procfs::create_root_inode() {
-                fs::vfs::vfs_mount(
-                    "/proc",
-                    proc_root,
-                    fs::mount::MntFlags::new(0),
-                );
-            }
+            fs::vfs::vfs_mount(
+                "/proc",
+                fs::leaf_glue::procfs::create_root_inode(),
+                fs::mount::MntFlags::new(0),
+            );
         }
     }
 

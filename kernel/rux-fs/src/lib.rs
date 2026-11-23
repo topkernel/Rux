@@ -97,8 +97,29 @@ pub fn run_unit_tests() {
     crate::procfs_test::test_procfs();
 }
 
-/// The boot-time registration (rux-bin calls this before kmain):
-/// the mount names + the FsHooks slots. THE composition contract.
+/// Every leaf's mount-table registration, in the order the framework's
+/// own built-in list used before the tranche (tmpfs, procfs, devfs,
+/// sysfs, cgroup, debugfs, tracefs) with selinuxfs last (it registered
+/// through the hook row). The framework invokes this ONCE, from
+/// mount_table::register_builtin_handlers at its boot point — never at
+/// rust_main time (the mount table and the allocator are not up yet
+/// that early; an early call wedges x86_64 before the console exists,
+/// the boot.S 'R'-beacon reboot loop).
+fn leaf_mount_rows_register() {
+    crate::fs::tmpfs::mount_register();
+    crate::fs::procfs::mount_register();
+    crate::fs::devfs::mount_register();
+    crate::fs::sysfs::mount_register();
+    crate::fs::cgroup::mount_register();
+    crate::fs::debugfs::mount_register();
+    crate::fs::tracefs::mount_register();
+    crate::fs::selinuxfs::mount_register();
+}
+
+/// The boot-time registration (rux-bin calls this before kmain): the
+/// rung-3 FsHooks plus the three leaf interface tables
+/// (rux::fs::leaf_hooks). THE composition contract. Publishing only
+/// stores plain values — no row body runs here.
 pub fn register_all() {
     rux::fs::fs_hooks::fs_register_hooks(rux::fs::fs_hooks::FsHooks {
         notify: crate::fs::inotify::notify,
@@ -131,132 +152,84 @@ pub fn register_all() {
             crate::fs::inotify::MAX_QUEUED_EVENTS_SYSCTL.store(v, core::sync::atomic::Ordering::Release)
         },
         inotify_fdinfo_watches: crate::fs::inotify::fdinfo_watches,
-        // Registered as hook rows so the FRAMEWORK invokes them at the
-        // register_builtin_handlers boot point (mount table ready); a
-        // direct call here would run before any init (x86_64 wedges in
-        // a 'R'-beacon reboot loop — convicted 2026-11-23).
-        leaf_mount_registers: &[
-            crate::fs::selinuxfs::mount_register,
-            crate::fs::debugfs::mount_register,
-            crate::fs::tracefs::mount_register,
-            crate::fs::cgroup::mount_register,
-            crate::fs::sysfs::mount_register,
-            crate::fs::tmpfs::mount_register,
-            crate::fs::devfs::mount_register,
-            crate::fs::procfs::mount_register,
-        ],
-        // ---- debugfs rows ----
-        debugfs_create_dir: crate::fs::debugfs::create_dir,
-        debugfs_create_file: |path, mode, show, store| {
-            match (show, store) {
-                (Some(show), Some(store)) => crate::fs::debugfs::create_file(path, mode, show, Some(store)),
-                (Some(show), None) => crate::fs::debugfs::create_file(path, mode, show, None::<fn(&[u8]) -> i32>),
-                _ => false,
-            }
-        },
+    });
+
+    use rux::fs::leaf_hooks::{LeafBootHooks, LeafPathHooks, LeafPopulateHooks};
+
+    // 1. Boot + mount lifecycle. Every row is a plain leaf fn.
+    rux::fs::leaf_hooks::register_boot_hooks(LeafBootHooks {
+        mount_rows_register: leaf_mount_rows_register,
         debugfs_init: crate::fs::debugfs::init_debugfs,
-        debugfs_root_present: || crate::fs::debugfs::debugfs_root().is_some(),
-        debugfs_create_root_inode: || Some(crate::fs::debugfs::create_root_inode()),
-        debugfs_mount_boot: crate::fs::debugfs::mount_debugfs,
-        // ---- tracefs rows ----
-        tracefs_create_dir: crate::fs::tracefs::create_dir,
-        tracefs_create_file: |path, mode, show, store| {
-            match (show, store) {
-                (Some(show), Some(store)) => crate::fs::tracefs::create_file(path, mode, show, Some(store)),
-                (Some(show), None) => crate::fs::tracefs::create_file(path, mode, show, None::<fn(&[u8]) -> i32>),
-                _ => false,
-            }
-        },
-        tracefs_create_stream_file: |path, mode, show| {
-            match show {
-                Some(show) => crate::fs::tracefs::create_stream_file(path, mode, show),
-                None => false,
-            }
-        },
-        tracefs_root_present: || crate::fs::tracefs::tracefs_root().is_some(),
+        debugfs_root_present: crate::fs::debugfs::root_present,
+        debugfs_create_root_inode: crate::fs::debugfs::create_root_inode,
+        debugfs_mount: crate::fs::debugfs::mount_debugfs,
         tracefs_init: crate::fs::tracefs::init_tracefs,
-        tracefs_create_root_inode: || Some(crate::fs::tracefs::create_root_inode()),
+        tracefs_root_present: crate::fs::tracefs::root_present,
+        tracefs_create_root_inode: crate::fs::tracefs::create_root_inode,
         tracefs_mount_at: crate::fs::tracefs::mount_at,
-        // ---- cgroup rows ----
-        cgroup_init_cgroupfs: crate::fs::cgroup::init_cgroupfs,
-        cgroup_create_root_inode: || Some(crate::fs::cgroup::create_root_inode()),
-        cgroup_mount_cgroupfs: crate::fs::cgroup::mount_cgroupfs,
-        // ---- sysfs rows ----
-        sysfs_init_sysfs: crate::fs::sysfs::init_sysfs,
-        sysfs_mount_sysfs: crate::fs::sysfs::mount_sysfs,
-        sysfs_create_root_inode: || Some(crate::fs::sysfs::create_root_inode()),
+        cgroup_init: crate::fs::cgroup::init_cgroupfs,
+        cgroup_create_root_inode: crate::fs::cgroup::create_root_inode,
+        cgroup_mount: crate::fs::cgroup::mount_cgroupfs,
+        sysfs_init: crate::fs::sysfs::init_sysfs,
+        sysfs_mount: crate::fs::sysfs::mount_sysfs,
+        sysfs_create_root_inode: crate::fs::sysfs::create_root_inode,
+        procfs_init: crate::fs::procfs::init_procfs,
+        procfs_mount: crate::fs::procfs::mount_procfs,
+        procfs_sb_present: crate::fs::procfs::sb_present,
+        procfs_create_root_inode: crate::fs::procfs::create_root_inode,
+        devfs_init: crate::fs::devfs::init,
+        devfs_create_root_inode: crate::fs::devfs::mounted_root_inode,
+        tmpfs_ensure_registered: crate::fs::tmpfs::ensure_registered,
+        tmpfs_create_mount_instance: crate::fs::tmpfs::create_tagged_mount_instance,
+        rootfs_init: crate::fs::rootfs::init_rootfs,
+        rootfs_create_root_inode: crate::fs::rootfs::create_root_inode,
+        rootfs_view: crate::fs::rootfs::ramfs_view,
+        rootfs_read_file: crate::fs::rootfs::read_file,
+        char_dev_init_std_fds: crate::fs::char_dev::init_std_fds_for_task,
+    });
+
+    // 2. Kernel-side population.
+    rux::fs::leaf_hooks::register_populate_hooks(LeafPopulateHooks {
+        debugfs_create_dir: crate::fs::debugfs::create_dir,
+        debugfs_create_file: crate::fs::debugfs::create_file_boxed,
+        tracefs_create_dir: crate::fs::tracefs::create_dir,
+        tracefs_create_file: crate::fs::tracefs::create_file_boxed,
+        tracefs_create_stream_file: crate::fs::tracefs::create_stream_file_boxed,
         sysfs_publish_module: crate::fs::sysfs::publish_module,
         sysfs_unpublish_module: crate::fs::sysfs::unpublish_module,
         sysfs_register_drm_device: crate::fs::sysfs::register_drm_device,
         sysfs_netdev_uevent: crate::fs::sysfs::netdev_uevent,
         sysfs_register_block_disk_at: crate::fs::sysfs::register_block_disk_at,
         sysfs_register_input_event: crate::fs::sysfs::register_input_event,
-        sysfs_uevent_send_full: crate::fs::sysfs::uevent_send_full,
-        char_dev_init_std_fds: crate::fs::char_dev::init_std_fds_for_task,
-        char_dev_file_stat: crate::fs::char_dev::char_dev_file_stat,
-        rootfs_init: crate::fs::rootfs::init_rootfs,
-        rootfs_create_root_inode: || Some(crate::fs::rootfs::create_root_inode()),
-        rootfs_initrd_sb: || crate::fs::rootfs::initrd_sb_view(),
-        rootfs_read_file: crate::fs::rootfs::read_file,
-        tmpfs_create_mount_instance: |data, tag| {
-            use crate::fs::leaf_glue::TmpfsTagKind;
-            let mut root = crate::fs::tmpfs::create_mount_instance(data);
-            match tag {
-                Some(TmpfsTagKind::Devpts) => crate::fs::tmpfs::tag_mount_instance_type(&mut root, &crate::fs::tmpfs::DEVPTS_INODE_OPS),
-                Some(TmpfsTagKind::Securityfs) => crate::fs::tmpfs::tag_mount_instance_type(&mut root, &crate::fs::tmpfs::SECURITYFS_INODE_OPS),
-                Some(TmpfsTagKind::Mqueue) => crate::fs::tmpfs::tag_mount_instance_type(&mut root, &crate::fs::tmpfs::MQUEUE_INODE_OPS),
-                None => {}
-            }
-            Some(root)
-        },
-        tmpfs_ensure_registered: crate::fs::tmpfs::ensure_registered,
-        tmpfs_is_file: crate::fs::tmpfs::is_tmpfs_file,
-        tmpfs_fallocate: crate::fs::tmpfs::fallocate,
-        devfs_init: crate::fs::devfs::init,
-        devfs_create_root_inode: || crate::fs::devfs::get_root_entry().map(|e| crate::fs::devfs::create_root_inode(&e)),
-        devfs_mkdir: |path| crate::fs::devfs::mkdir(path).map_err(|_| crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
-        devfs_mknod: |path, devno, mode| crate::fs::devfs::mknod(path, devno, mode).map_err(|_| crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        devfs_mkdir: crate::fs::devfs::mkdir,
+        devfs_mknod: crate::fs::devfs::mknod,
         devfs_register_char_device: crate::fs::devfs::registry::register_char_device,
-        devfs_reg_current_size: crate::fs::devfs::devfs_reg_current_size,
-        devfs_shared_fault_file_page: |file, off| {
-            // The ops-identity gate (folded from mm/policy's inline
-            // ptr::eq at the flip).
-            let ops = file.get_ops()?;
-            if !core::ptr::eq(ops as *const _, &crate::fs::devfs::DEVFS_REG_FILE_OPS as *const _) {
-                return None;
-            }
-            crate::fs::devfs::shared_fault_file_page(file, off)
-        },
+    });
+
+    // 3. Path dispatch. The identities are the leaves' real ops tables;
+    // the framework compares them INLINE at the call sites, so the three
+    // identity probes that used to be rows are gone.
+    rux::fs::leaf_hooks::register_path_hooks(LeafPathHooks {
+        tmpfs_file_ops: &crate::fs::tmpfs::TMPFS_FILE_OPS,
+        devfs_reg_file_ops: &crate::fs::devfs::DEVFS_REG_FILE_OPS,
+        loop_file_ops: &crate::fs::devfs::LOOP_FILE_OPS,
+        devfs_condev_ops: &crate::fs::devfs::CONDEV_OPS,
+        proc_piddir_ops: &crate::fs::procfs::PROC_PIDDIR_OPS,
+        proc_fd_dir_ops: &crate::fs::procfs::PROCFS_DIR_OPS,
+        tty_console_lflag: crate::fs::tty::console_lflag,
+        tty_console_echo_enabled: crate::fs::tty::console_echo_enabled,
+        tty_console_receive_byte: crate::fs::tty::console_receive_byte,
+        tty_console_fg_pgid: crate::fs::tty::console_fg_pgid,
+        tty_set_console_sink_quiet: crate::fs::tty::set_console_sink_quiet,
+        char_dev_file_stat: crate::fs::char_dev::char_dev_file_stat,
         devfs_condev_read: crate::fs::devfs::condev_read,
         devfs_condev_write: crate::fs::devfs::condev_write,
         devfs_condev_poll: crate::fs::devfs::condev_poll,
-        devfs_is_loop_ops: |ops| core::ptr::eq(ops as *const _, &crate::fs::devfs::LOOP_FILE_OPS as *const _),
-        devfs_loop_file_ops: || &crate::fs::devfs::LOOP_FILE_OPS,
-        devfs_condev_ops: || &crate::fs::devfs::CONDEV_OPS,
-        procfs_mount_procfs: crate::fs::procfs::mount_procfs,
-        procfs_init: crate::fs::procfs::init_procfs,
-        procfs_create_root_inode: || Some(crate::fs::procfs::create_root_inode()),
+        tmpfs_fallocate: crate::fs::tmpfs::fallocate,
         procfs_is_valid_pid: crate::fs::procfs::pid::is_valid_pid,
         procfs_get_fd_file: crate::fs::procfs::pid::get_fd_file,
-        procfs_is_piddir_ops: |ops| core::ptr::eq(ops as *const _, &crate::fs::procfs::PROC_PIDDIR_OPS as *const _),
-        procfs_fd_dir_ops: || &crate::fs::procfs::PROCFS_DIR_OPS,
-        procfs_core_pattern: || crate::fs::procfs::sysctl::CORE_PATTERN.lock().as_bytes().to_vec(),
-        rootfs_sb_ref_interim: crate::fs::rootfs::initrd_sb_view,
-        char_dev_uart_write: crate::fs::char_dev::uart_write,
-        tty_console_lflag: || crate::fs::tty::console().lflag(),
-        tty_console_echo_enabled: || crate::fs::tty::console().echo_enabled(),
-        tty_console_receive_byte: |c| crate::fs::tty::console().receive_byte(c),
-        tty_console_fg_pgid: || crate::fs::tty::console().fg_pgrp.load(core::sync::atomic::Ordering::Acquire),
-        tty_set_console_sink_quiet: crate::fs::tty::set_console_sink_quiet,
-        tty_console_read_input: |buf, nonblock| crate::fs::tty::console().read_input(buf, nonblock),
-        tty_console_output_translates_nl: || crate::fs::tty::console().output_translates_nl(),
-        tty_console_input_poll_ready: || crate::fs::tty::console().input_poll_ready(),
-        pty_devfs_register: crate::fs::pty::devfs_register,
-        pty_ptmx_open: crate::fs::pty::ptmx_open,
-        pty_slave_open: crate::fs::pty::slave_open,
-        pty_devno_is_ptmx: |devno| devno == crate::fs::pty::DEV_PTMX,
-        pty_dev_ptmx_devno: || crate::fs::pty::DEV_PTMX,
-        pty_slave_major: || crate::fs::pty::PTY_SLAVE_MAJOR,
+        procfs_core_pattern: crate::fs::procfs::core_pattern,
+        devfs_reg_current_size: crate::fs::devfs::devfs_reg_current_size,
+        devfs_shared_fault_file_page: crate::fs::devfs::shared_fault_file_page,
     });
 }
-

@@ -96,6 +96,11 @@ pub fn debugfs_root() -> Option<Arc<DebugFsNode>> {
     ROOT.lock().clone()
 }
 
+/// `debugfs_root().is_some()` — fsctx's lazy-init probe row.
+pub fn root_present() -> bool {
+    debugfs_root().is_some()
+}
+
 // ============================================================================
 // Population API (kernel side)
 // ============================================================================
@@ -138,6 +143,18 @@ pub fn create_dir(path: &str) -> bool {
         current = node;
     }
     true
+}
+
+/// The boxed-closure form of [`create_file`] — the interface row's
+/// shape (the framework's adapter boxes the kernel's generic closures);
+/// a plain forward, no logic.
+pub fn create_file_boxed(
+    path: &str,
+    mode: u32,
+    show: Box<dyn Fn() -> Vec<u8> + Send + Sync>,
+    store: Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>,
+) -> bool {
+    create_file(path, mode, show, store)
 }
 
 /// Create a regular file with a read generator and an optional write

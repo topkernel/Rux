@@ -7386,7 +7386,7 @@ pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
         pid,
         InodeMode::new(InodeMode::S_IFDIR | 0o555),
     );
-    inode.ops = Some((crate::fs::fs_hooks::hooks().procfs_fd_dir_ops)());
+    inode.ops = Some(crate::fs::leaf_glue::procfs::fd_dir_ops());
     inode.private_data = Some(pid as *mut u8);
 
     let file = alloc::sync::Arc::new(File::new(FileFlags::new(flags)));

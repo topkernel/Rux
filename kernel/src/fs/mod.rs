@@ -25,6 +25,7 @@ pub mod mount_table;
 pub mod notify_hooks;
 pub mod file_hooks;
 pub mod leaf_glue;
+pub mod leaf_hooks;
 pub mod perf_ctr;
 pub mod lock_hooks;
 pub mod fs_hooks;
@@ -72,9 +73,9 @@ pub use stat::{copy_stat_to_user, user_stat_size, Stat};
 pub use vfs::{file_open, file_close, file_stat, file_fcntl, fcntl, file_mkdir, file_rmdir, file_unlink, file_link, stat_file_by_path};
 
 /// Read a file's bytes from the ramfs root (init.rs's config probe).
-/// The body lives in the rux-fs crate now (rootfs leaf); forwards
-/// through the registered row.
+/// The body lives in the rux-fs crate (rootfs leaf); forwards through
+/// the leaf interface.
 pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
-    (fs_hooks::hooks().rootfs_read_file)(filename)
+    leaf_glue::rootfs::read_file(filename)
 }
 

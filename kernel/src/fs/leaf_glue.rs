@@ -2,32 +2,56 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Framework-side glue for the substrate/boot leaf filesystems that
-//! moved into the rux-fs service crate (the fs-substrate tranche):
-//! generic-closure shims over the FsHooks fn-pointer rows (the boxing
-//! happens here so the kernel's population call sites keep their
-//! ergonomic generic shape) plus the DTOs both sides must name
-//! (InputEventReg — a plain-data record, framework-owned so the
-//! drivers stay framework-typed).
+//! Framework-side adapters for the substrate/boot leaf interface tables
+//! (`fs::leaf_hooks` — the fs-substrate tranche). Each adapter forwards
+//! to its row; the generic-closure population fns box their closures
+//! here so the kernel's call sites keep their pre-trace shape
+//! (`debugfs::create_file(path, mode, show, store)`). A call site differs
+//! from the pre-trace code only in its `use` path (`crate::fs::debugfs`
+//! -> `crate::fs::leaf_glue::debugfs`).
 //!
-//! Zero behavior change: each shim forwards to the registered row;
-//! before the crate flips these were direct calls into the leaf.
-//! Call sites keep their `debugfs::create_dir(...)` / `sysfs::...`
-//! shape — only the `use` line changes (`crate::fs::debugfs` ->
-//! `crate::fs::leaf_glue::debugfs`).
+//! crate-plan §3a rule 2 (static dispatch first on data paths) is
+//! implemented in two places here:
+//!   * the identity probes — `tmpfs::is_tmpfs_file`, `devfs::is_loop_ops`,
+//!     `procfs::is_piddir_ops` and the devfs-registry gate — compare the
+//!     ops table against the identity published in the path table,
+//!     INLINE: no file kind pays an indirect call;
+//!   * the two devfs logic rows reached from the file-fault path
+//!     (`reg_current_size`, `shared_fault_file_page`) are called only
+//!     after an inline gate, so a fault on any other filesystem crosses
+//!     zero times.
+//! Each gate restates the first check of its row body (or the exact
+//! identity check the pre-trace framework code performed at that site) —
+//! zero behavior change by construction.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::fs_hooks::hooks;
+use super::file::File;
+use super::file::FileOps;
+use super::inode::Inode;
+use super::leaf_hooks::{boot_hooks, path_hooks, populate_hooks};
 
-// ---- debugfs population (dfx instruments, lib.rs tracing dir) ----
+/// Identity compare: `ops` is the exact table published for this slot.
+#[inline]
+fn is_ops(ops: Option<&'static FileOps>, identity: &'static FileOps) -> bool {
+    ops.is_some_and(|o| core::ptr::eq(o as *const FileOps, identity as *const FileOps))
+}
+
+/// The description's inode carries `fs_id` (inode-less descriptions do
+/// not).
+#[inline]
+fn inode_fs_id_is(file: &File, fs_id: u64) -> bool {
+    file.get_inode().is_some_and(|i| i.fs_id == fs_id)
+}
+
+// ---- debugfs population (dfx instruments, lib.rs's tracing dir) ----
 
 pub mod debugfs {
     use super::*;
 
     pub fn create_dir(path: &str) -> bool {
-        (hooks().debugfs_create_dir)(path)
+        (populate_hooks().debugfs_create_dir)(path)
     }
 
     pub fn create_file<F, S>(path: &str, mode: u32, show: F, store: Option<S>) -> bool
@@ -35,28 +59,30 @@ pub mod debugfs {
         F: Fn() -> Vec<u8> + Send + Sync + 'static,
         S: Fn(&[u8]) -> i32 + Send + Sync + 'static,
     {
-        (hooks().debugfs_create_file)(
+        (populate_hooks().debugfs_create_file)(
             path,
             mode,
-            Some(alloc::boxed::Box::new(show)),
-            store.map(|s| alloc::boxed::Box::new(s) as alloc::boxed::Box<dyn Fn(&[u8]) -> i32 + Send + Sync>),
+            alloc::boxed::Box::new(show),
+            store.map(|s| {
+                alloc::boxed::Box::new(s) as alloc::boxed::Box<dyn Fn(&[u8]) -> i32 + Send + Sync>
+            }),
         )
     }
 
     pub fn init_debugfs() -> Result<(), i32> {
-        (hooks().debugfs_init)()
+        (boot_hooks().debugfs_init)()
     }
 
     pub fn debugfs_root_present() -> bool {
-        (hooks().debugfs_root_present)()
+        (boot_hooks().debugfs_root_present)()
     }
 
-    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
-        (hooks().debugfs_create_root_inode)()
+    pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
+        (boot_hooks().debugfs_create_root_inode)()
     }
 
     pub fn mount_debugfs() -> Result<(), i32> {
-        (hooks().debugfs_mount_boot)()
+        (boot_hooks().debugfs_mount)()
     }
 }
 
@@ -66,7 +92,7 @@ pub mod tracefs {
     use super::*;
 
     pub fn create_dir(path: &str) -> bool {
-        (hooks().tracefs_create_dir)(path)
+        (populate_hooks().tracefs_create_dir)(path)
     }
 
     pub fn create_file<F, S>(path: &str, mode: u32, show: F, store: Option<S>) -> bool
@@ -74,11 +100,13 @@ pub mod tracefs {
         F: Fn() -> Vec<u8> + Send + Sync + 'static,
         S: Fn(&[u8]) -> i32 + Send + Sync + 'static,
     {
-        (hooks().tracefs_create_file)(
+        (populate_hooks().tracefs_create_file)(
             path,
             mode,
-            Some(alloc::boxed::Box::new(show)),
-            store.map(|s| alloc::boxed::Box::new(s) as alloc::boxed::Box<dyn Fn(&[u8]) -> i32 + Send + Sync>),
+            alloc::boxed::Box::new(show),
+            store.map(|s| {
+                alloc::boxed::Box::new(s) as alloc::boxed::Box<dyn Fn(&[u8]) -> i32 + Send + Sync>
+            }),
         )
     }
 
@@ -86,23 +114,23 @@ pub mod tracefs {
     where
         F: Fn() -> Vec<u8> + Send + Sync + 'static,
     {
-        (hooks().tracefs_create_stream_file)(path, mode, Some(alloc::boxed::Box::new(show)))
+        (populate_hooks().tracefs_create_stream_file)(path, mode, alloc::boxed::Box::new(show))
     }
 
     pub fn tracefs_root_present() -> bool {
-        (hooks().tracefs_root_present)()
+        (boot_hooks().tracefs_root_present)()
     }
 
     pub fn init_tracefs() -> Result<(), i32> {
-        (hooks().tracefs_init)()
+        (boot_hooks().tracefs_init)()
     }
 
-    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
-        (hooks().tracefs_create_root_inode)()
+    pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
+        (boot_hooks().tracefs_create_root_inode)()
     }
 
     pub fn mount_at(mountpoint: &str) -> Result<(), i32> {
-        (hooks().tracefs_mount_at)(mountpoint)
+        (boot_hooks().tracefs_mount_at)(mountpoint)
     }
 }
 
@@ -112,49 +140,49 @@ pub mod cgroup {
     use super::*;
 
     pub fn init_cgroupfs() -> Result<(), i32> {
-        (hooks().cgroup_init_cgroupfs)()
+        (boot_hooks().cgroup_init)()
     }
 
-    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
-        (hooks().cgroup_create_root_inode)()
+    pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
+        (boot_hooks().cgroup_create_root_inode)()
     }
 
     pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
-        (hooks().cgroup_mount_cgroupfs)(target)
+        (boot_hooks().cgroup_mount)(target)
     }
 }
 
-// ---- sysfs registration (drivers + module loader) ----
+// ---- sysfs (boot mount + driver/module registration) ----
 
 pub mod sysfs {
     use super::*;
 
     pub fn init_sysfs() -> Result<(), i32> {
-        (hooks().sysfs_init_sysfs)()
+        (boot_hooks().sysfs_init)()
     }
 
     pub fn mount_sysfs() -> Result<(), i32> {
-        (hooks().sysfs_mount_sysfs)()
+        (boot_hooks().sysfs_mount)()
     }
 
-    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
-        (hooks().sysfs_create_root_inode)()
+    pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
+        (boot_hooks().sysfs_create_root_inode)()
     }
 
     pub fn publish_module(name: &str) {
-        (hooks().sysfs_publish_module)(name)
+        (populate_hooks().sysfs_publish_module)(name)
     }
 
     pub fn unpublish_module(name: &str) {
-        (hooks().sysfs_unpublish_module)(name)
+        (populate_hooks().sysfs_unpublish_module)(name)
     }
 
     pub fn register_drm_device(slot_name: &str) {
-        (hooks().sysfs_register_drm_device)(slot_name)
+        (populate_hooks().sysfs_register_drm_device)(slot_name)
     }
 
     pub fn netdev_uevent(name: &str, action: &str) -> u64 {
-        (hooks().sysfs_netdev_uevent)(name, action)
+        (populate_hooks().sysfs_netdev_uevent)(name, action)
     }
 
     pub fn register_block_disk_at(
@@ -164,126 +192,91 @@ pub mod sysfs {
         capacity_sectors: u64,
         chain: &[(&str, &str)],
     ) -> u64 {
-        (hooks().sysfs_register_block_disk_at)(name, major, minor, capacity_sectors, chain)
+        (populate_hooks().sysfs_register_block_disk_at)(name, major, minor, capacity_sectors, chain)
     }
 
     pub fn register_input_event(reg: &super::InputEventReg) -> u64 {
-        (hooks().sysfs_register_input_event)(reg)
-    }
-
-    /// devfs's uevent broadcast (interim: until devfs joins the crate).
-    pub fn uevent_send_full(devpath: &str, action: &str, subsystem: &str, env: &[(&str, &str)]) -> u64 {
-        (hooks().sysfs_uevent_send_full)(devpath, action, subsystem, env)
+        (populate_hooks().sysfs_register_input_event)(reg)
     }
 }
 
-// ---- char_dev / tty / pty (the console cluster) ----
+// ---- char_dev (the boot task's stdio) ----
 
 pub mod char_dev {
     use super::*;
 
     pub fn init_std_fds_for_task(fdtable: &super::super::FdTable) {
-        (hooks().char_dev_init_std_fds)(fdtable)
+        (boot_hooks().char_dev_init_std_fds)(fdtable)
     }
 
-    /// devfs's console write bottom (interim).
-    pub fn uart_write(buf: &[u8]) -> isize {
-        (hooks().char_dev_uart_write)(buf)
+    /// fstat on an INODE-LESS description only (after the pipe and
+    /// socket probes) — regular files never reach it.
+    pub fn char_dev_file_stat(
+        file: &File,
+        stat: &mut super::super::Stat,
+    ) -> Option<i32> {
+        (path_hooks().char_dev_file_stat)(file, stat)
     }
 }
+
+// ---- tty (the console line discipline — console.rs's input path) ----
 
 pub mod tty {
     use super::*;
 
     pub fn console_lflag() -> u32 {
-        (hooks().tty_console_lflag)()
+        (path_hooks().tty_console_lflag)()
     }
 
     pub fn console_echo_enabled() -> bool {
-        (hooks().tty_console_echo_enabled)()
+        (path_hooks().tty_console_echo_enabled)()
     }
 
     pub fn console_receive_byte(c: u8) {
-        (hooks().tty_console_receive_byte)(c)
+        (path_hooks().tty_console_receive_byte)(c)
     }
 
     pub fn console_fg_pgid() -> u32 {
-        (hooks().tty_console_fg_pgid)()
+        (path_hooks().tty_console_fg_pgid)()
     }
 
     pub fn set_console_sink_quiet(q: bool) {
-        (hooks().tty_set_console_sink_quiet)(q)
-    }
-
-    // devfs-interim rows
-    pub fn console_read_input(buf: &mut [u8], nonblock: bool) -> isize {
-        (hooks().tty_console_read_input)(buf, nonblock)
-    }
-
-    pub fn console_output_translates_nl() -> bool {
-        (hooks().tty_console_output_translates_nl)()
-    }
-
-    pub fn console_input_poll_ready() -> bool {
-        (hooks().tty_console_input_poll_ready)()
+        (path_hooks().tty_set_console_sink_quiet)(q)
     }
 }
 
-pub mod pty {
-    use super::*;
-
-    pub fn devfs_register() {
-        (hooks().pty_devfs_register)()
-    }
-
-    pub fn ptmx_open(file: &super::super::file::File) -> i32 {
-        (hooks().pty_ptmx_open)(file)
-    }
-
-    pub fn slave_open(file: &super::super::file::File, minor: u32) -> i32 {
-        (hooks().pty_slave_open)(file, minor)
-    }
-
-    pub fn devno_is_ptmx(devno: super::super::dev_t::DevNo) -> bool {
-        (hooks().pty_devno_is_ptmx)(devno)
-    }
-
-    pub fn dev_ptmx_devno() -> super::super::dev_t::DevNo {
-        (hooks().pty_dev_ptmx_devno)()
-    }
-
-    pub fn slave_major() -> u32 {
-        (hooks().pty_slave_major)()
-    }
-}
-
-// ---- rootfs (boot ramfs root) ----
+// ---- rootfs (the boot RAM root) ----
 
 pub mod rootfs {
     use super::*;
 
     pub fn init_rootfs() -> Result<(), i32> {
-        (hooks().rootfs_init)()
+        (boot_hooks().rootfs_init)()
     }
 
-    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
-        (hooks().rootfs_create_root_inode)()
+    pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
+        (boot_hooks().rootfs_create_root_inode)()
     }
 
-    /// Presence + kind probe (tests' verify step).
+    /// The RAM root as the framework's path-shaped view (initrd's
+    /// unpack target; the tests' seed/verify handle).
+    pub fn sb_view() -> Option<&'static dyn RamfsView> {
+        (boot_hooks().rootfs_view)()
+    }
+
+    /// init.rs's config-file probe (fs::read_file_from_rootfs).
+    pub fn read_file(filename: &str) -> Option<Vec<u8>> {
+        (boot_hooks().rootfs_read_file)(filename)
+    }
+
+    /// Presence + kind probe (the tests' verify step).
     pub fn lookup_kind(path: &str) -> Option<bool> {
-        get_sb_ref_interim().and_then(|sb| sb.rfs_lookup_kind(path))
+        sb_view().and_then(|sb| sb.rfs_lookup_kind(path))
     }
 
-    /// The tests' typed sb view (framework tests seed/verify the RAM
-    /// root through the trait).
-    pub fn get_sb_ref_interim() -> Option<&'static dyn InitrdRamfs> {
-        (hooks().rootfs_sb_ref_interim)()
-    }
-
-    /// Seed a file into the RAM root (tests' setup step).
+    /// Seed a file into the RAM root (the tests' setup step).
     pub fn seed_file(path: &str, data: Vec<u8>) -> Option<()> {
-        get_sb_ref_interim().map(|sb| {
+        sb_view().map(|sb| {
             let _ = sb.rfs_seed_file(path, data);
         })
     }
@@ -295,58 +288,73 @@ pub mod devfs {
     use super::*;
 
     pub fn init() {
-        (hooks().devfs_init)()
+        (boot_hooks().devfs_init)()
     }
 
-    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
-        (hooks().devfs_create_root_inode)()
+    /// The mounted /dev root (None before init).
+    pub fn create_root_inode() -> Option<alloc::sync::Arc<Inode>> {
+        (boot_hooks().devfs_create_root_inode)()
     }
 
-    pub fn mkdir(path: &str) -> Result<(), i32> {
-        (hooks().devfs_mkdir)(path)
+    pub fn mkdir(path: &str) -> Result<(), ()> {
+        (populate_hooks().devfs_mkdir)(path)
     }
 
-    pub fn mknod(path: &str, devno: super::super::dev_t::DevNo, mode: u32) -> Result<(), i32> {
-        (hooks().devfs_mknod)(path, devno, mode)
+    pub fn mknod(path: &str, devno: super::super::dev_t::DevNo, mode: u32) -> Result<(), ()> {
+        (populate_hooks().devfs_mknod)(path, devno, mode)
     }
 
     pub fn register_char_device(
         devno: super::super::dev_t::DevNo,
-        ops: &'static super::super::file::FileOps,
+        ops: &'static FileOps,
     ) -> Result<(), ()> {
-        (hooks().devfs_register_char_device)(devno, ops)
+        (populate_hooks().devfs_register_char_device)(devno, ops)
     }
 
-    pub fn reg_current_size(file: &super::super::file::File) -> Option<u64> {
-        (hooks().devfs_reg_current_size)(file)
+    /// The live size of a regular-registry devfs file (None for every
+    /// other file). File-fault path: the inline fs_id gate is the row
+    /// body's own first check, so non-devfs files never cross.
+    #[inline]
+    pub fn reg_current_size(file: &File) -> Option<u64> {
+        if !inode_fs_id_is(file, super::super::inode::FS_ID_DEVFS) {
+            return None;
+        }
+        (path_hooks().devfs_reg_current_size)(file)
     }
 
-    pub fn shared_fault_file_page(file: &super::super::file::File, file_off: usize) -> Option<u64> {
-        (hooks().devfs_shared_fault_file_page)(file, file_off)
+    /// The shared backing page of a regular-registry devfs file (None
+    /// for every other file). File-fault path: the inline identity check
+    /// is the one the pre-trace framework code performed at this site.
+    #[inline]
+    pub fn shared_fault_file_page(file: &File, file_off: usize) -> Option<u64> {
+        if !is_ops(file.get_ops(), path_hooks().devfs_reg_file_ops) {
+            return None;
+        }
+        (path_hooks().devfs_shared_fault_file_page)(file, file_off)
     }
 
-    pub fn condev_read(file: &super::super::file::File, buf: &mut [u8]) -> isize {
-        (hooks().devfs_condev_read)(file, buf)
+    /// vt's console-device backing for /dev/ttyN (read/write/poll).
+    pub fn condev_read(file: &File, buf: &mut [u8]) -> isize {
+        (path_hooks().devfs_condev_read)(file, buf)
     }
 
-    pub fn condev_write(file: &super::super::file::File, buf: &[u8]) -> isize {
-        (hooks().devfs_condev_write)(file, buf)
+    pub fn condev_write(file: &File, buf: &[u8]) -> isize {
+        (path_hooks().devfs_condev_write)(file, buf)
     }
 
-    pub fn condev_poll(file: &super::super::file::File, events: u16) -> u16 {
-        (hooks().devfs_condev_poll)(file, events)
+    pub fn condev_poll(file: &File, events: u16) -> u16 {
+        (path_hooks().devfs_condev_poll)(file, events)
     }
 
-    pub fn is_loop_ops(ops: &'static super::super::file::FileOps) -> bool {
-        (hooks().devfs_is_loop_ops)(ops)
+    /// sys_ioctl's loop dispatch gate: INLINE identity compare.
+    #[inline]
+    pub fn is_loop_ops(ops: &'static FileOps) -> bool {
+        is_ops(Some(ops), path_hooks().loop_file_ops)
     }
 
-    pub fn loop_file_ops() -> &'static super::super::file::FileOps {
-        (hooks().devfs_loop_file_ops)()
-    }
-
-    pub fn condev_ops() -> &'static super::super::file::FileOps {
-        (hooks().devfs_condev_ops)()
+    /// The /dev/console-class ops table (the test suite's console fd).
+    pub fn condev_ops() -> &'static FileOps {
+        path_hooks().devfs_condev_ops
     }
 }
 
@@ -354,34 +362,52 @@ pub mod devfs {
 
 pub mod procfs {
     use super::*;
-    pub use super::super::fs_hooks::{PROCFS_FD_LINK_INO_OFF, PROCFS_NS_LINK_INO_OFF};
-
-    pub fn mount_procfs() -> Result<(), i32> {
-        (hooks().procfs_mount_procfs)()
-    }
+    // The /proc ino-space layout consts (vfs's magic-link dispatch).
+    pub use super::super::leaf_hooks::{PROCFS_FD_LINK_INO_OFF, PROCFS_NS_LINK_INO_OFF};
 
     pub fn init_procfs() -> Result<(), i32> {
-        (hooks().procfs_init)()
+        (boot_hooks().procfs_init)()
     }
 
-    pub fn create_root_inode() -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
-        (hooks().procfs_create_root_inode)()
+    pub fn mount_procfs() -> Result<(), i32> {
+        (boot_hooks().procfs_mount)()
     }
 
+    /// The boot site's superblock presence check.
+    pub fn sb_present() -> bool {
+        (boot_hooks().procfs_sb_present)()
+    }
+
+    pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
+        (boot_hooks().procfs_create_root_inode)()
+    }
+
+    /// pid-shape probe. Both callers gate inline on
+    /// fs_id == FS_ID_PROCFS before calling.
     pub fn is_valid_pid(pid: u64) -> bool {
-        (hooks().procfs_is_valid_pid)(pid)
+        (path_hooks().procfs_is_valid_pid)(pid)
     }
 
-    pub fn get_fd_file(pid: u64, fd: u32) -> Option<alloc::sync::Arc<super::super::file::File>> {
-        (hooks().procfs_get_fd_file)(pid, fd)
+    /// /proc/[pid]/fd/N magic-link resolution target (same fs_id gate).
+    pub fn get_fd_file(pid: u64, fd: u32) -> Option<alloc::sync::Arc<File>> {
+        (path_hooks().procfs_get_fd_file)(pid, fd)
     }
 
-    pub fn is_piddir_ops(ops: &'static super::super::file::FileOps) -> bool {
-        (hooks().procfs_is_piddir_ops)(ops)
+    /// The pidfd-attach probe at directory open: INLINE identity compare
+    /// (every opendir reaches this; no indirect call for other dirs).
+    #[inline]
+    pub fn is_piddir_ops(ops: &'static FileOps) -> bool {
+        is_ops(Some(ops), path_hooks().proc_piddir_ops)
     }
 
+    /// The synthetic /proc/[pid]/fd directory table (open_procfs_dir).
     pub fn fd_dir_ops() -> &'static super::super::inode::INodeOps {
-        (hooks().procfs_fd_dir_ops)()
+        path_hooks().proc_fd_dir_ops
+    }
+
+    /// coredump's core_pattern snapshot.
+    pub fn core_pattern() -> Vec<u8> {
+        (path_hooks().procfs_core_pattern)()
     }
 }
 
@@ -391,46 +417,54 @@ pub mod tmpfs {
     use super::*;
 
     pub fn ensure_registered() {
-        (hooks().tmpfs_ensure_registered)()
+        (boot_hooks().tmpfs_ensure_registered)()
     }
 
     pub fn create_mount_instance(
         data: Option<&str>,
         tag: Option<TmpfsTagKind>,
-    ) -> Option<alloc::sync::Arc<super::super::inode::Inode>> {
-        (hooks().tmpfs_create_mount_instance)(data, tag)
+    ) -> alloc::sync::Arc<Inode> {
+        (boot_hooks().tmpfs_create_mount_instance)(data, tag.unwrap_or(TmpfsTagKind::None))
     }
 
-    pub fn is_tmpfs_file(file: &super::super::file::File) -> bool {
-        (hooks().tmpfs_is_file)(file)
+    /// mm/policy's file-identity probe (SHARED-fault routing). File-fault
+    /// path: INLINE identity compare against the published table — the
+    /// pre-trace check, verbatim, with no crossing for any file kind.
+    #[inline]
+    pub fn is_tmpfs_file(file: &File) -> bool {
+        is_ops(file.get_ops(), path_hooks().tmpfs_file_ops)
     }
 
+    /// vfs_fallocate's tmpfs arm (None = not a tmpfs inode).
     pub fn fallocate(
-        inode: &super::super::inode::Inode,
+        inode: &Inode,
         mode: i32,
         offset: u64,
         len: u64,
     ) -> Option<Result<(), i32>> {
-        (hooks().tmpfs_fallocate)(inode, mode, offset, len)
+        (path_hooks().tmpfs_fallocate)(inode, mode, offset, len)
     }
 }
 
-/// The fsctx mount-instance tag (devpts/securityfs/mqueue create tmpfs
-/// instances retagged with a type-ops twin).
+/// The fsctx mount-instance tag: devpts/securityfs/mqueue are tmpfs
+/// instances whose fresh root is retagged with a filesystem-type ops
+/// twin (the statfs magic dispatch); `None` tags nothing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TmpfsTagKind {
+    None,
     Devpts,
     Securityfs,
     Mqueue,
 }
 
-/// The initrd unpack target: the rootfs superblock's path-shaped API
-/// as a framework-owned trait (the cpio unpacker stays framework-side;
-/// the rootfs leaf lives in the rux-fs crate and implements this).
-/// Flattened to path strings — no node handles cross the seam.
-pub trait InitrdRamfs {
+/// The RAM root as the framework sees it: the rootfs superblock's
+/// path-shaped API as a framework-owned trait. The cpio unpacker stays
+/// framework-side (initrd.rs) and the tests seed/verify through it; the
+/// rootfs leaf (rux-fs crate) implements it. Paths are plain strings —
+/// no node handles cross the boundary.
+pub trait RamfsView {
     fn rfs_mkdir(&self, path: &str) -> Result<(), i32>;
-    /// procfs/cgroup/sysfs's mount-point creation (with mode).
+    /// A mount-point directory (with mode).
     fn rfs_create_dir(&self, path: &str, mode: u32) -> Result<(), i32>;
     fn rfs_symlink(&self, target: &str, path: &str) -> Result<(), i32>;
     fn rfs_link(&self, first: &str, path: &str) -> Result<(), i32>;
@@ -441,14 +475,14 @@ pub trait InitrdRamfs {
     fn rfs_set_node_meta(&self, path: &str, mode: u32, mtime: u64);
     /// Presence + kind probe (None = absent; Some(true) = directory).
     fn rfs_lookup_kind(&self, path: &str) -> Option<bool>;
-    /// Seed a file (tests' create_file path).
+    /// Seed a file (the tests' create_file path).
     fn rfs_seed_file(&self, path: &str, data: Vec<u8>) -> Result<(), i32>;
 }
 
 /// The input-device registration record (evdev -> sysfs uevent + tree).
 /// Framework-owned DTO: the drivers fill it, the rux-fs sysfs leaf
-/// consumes it through the hook row (plain data — no leaf types cross
-/// the seam). The uevent environment block builder lives with it.
+/// consumes it through the populate row (plain data — no leaf types cross
+/// the boundary). The uevent environment block builder lives with it.
 #[derive(Debug, Clone)]
 pub struct InputEventReg {
     /// input_dev kobject name ("input0")

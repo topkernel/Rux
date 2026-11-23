@@ -56,21 +56,16 @@ pub fn lookup(fs_type: &str) -> Option<MountFn> {
 }
 
 /// The boot-time registration call (the crate-flip seam point). Each
-/// leaf's `mount_instance` is the verbatim old match-arm body. The
-/// service crate's rows (selinuxfs, via FsHooks.leaf_mount_register)
-/// run at THIS point — the same seam the built-ins use — never at
-/// rust_main time (the mount table/allocator are not up yet there).
+/// leaf's `mount_instance` is the verbatim old match-arm body. EVERY
+/// leaf's rows come from the service crates (rux-fs via
+/// LeafBootHooks.mount_rows_register, rux-ext4 via its own row) and run
+/// at THIS point — never at rust_main time (the mount table/allocator
+/// are not up yet there).
 pub fn register_builtin_handlers() {
-    // Still-framework leaves (they move in their own commits; each move
-    // deletes its line here and appends its row crate-side):
-    // The moved substrate/boot leaves register from the rux-fs crate side
-    // (FsHooks.leaf_mount_registers — one row per moved leaf, filled by
-    // the crate's register_all; selinuxfs pioneered the shape).
-    if let Some(hooks) = super::fs_hooks::FS_HOOKS.get() {
-        for f in hooks.leaf_mount_registers {
-            f();
-        }
-    }
+    // The substrate/boot leaves' mount rows (tmpfs, procfs, devfs, sysfs,
+    // cgroup, debugfs, tracefs, selinuxfs — fs-substrate tranche): ONE
+    // entry from the rux-fs crate, run at THIS boot point.
+    (super::leaf_hooks::boot_hooks().mount_rows_register)();
     // The ext4 service crate's mount rows (rung 5): the SAME boot
     // point as the leaves above — NOT at rust_main registration time
     // (the rux-fs 'R'-loop conviction; the row body self-guards).

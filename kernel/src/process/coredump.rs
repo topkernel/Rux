@@ -223,7 +223,7 @@ fn expand_core_pattern(task: &Task, sig: i32) -> Vec<u8> {
 
     // The sysctl cell lives in the rux-fs procfs leaf since the
     // fs-substrate flip; the row hands the snapshot.
-    let pattern = (crate::fs::fs_hooks::hooks().procfs_core_pattern)();
+    let pattern = crate::fs::leaf_glue::procfs::core_pattern();
     // comm is a NUL-terminated 16-byte field of the valid task.
     let c = task.comm();
     let comm: &[u8] = &c[..c.iter().position(|&b| b == 0).unwrap_or(c.len())];

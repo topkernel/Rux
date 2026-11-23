@@ -297,7 +297,7 @@ pub(crate) static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileO
 /// read goes through the shared console TtyDevice (canonical-mode line
 /// discipline, termios settings shared with the pty layer); write does
 /// OPOST/ONLCR translation then hits the UART atomically per chunk.
-pub(crate) fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+pub fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
     let nonblock = (file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
     // Feed the tty queue from the UART RX ring first (see
     // console::uart_rx_bridge_to_tty): the IRQ only fills the ring that
@@ -306,7 +306,7 @@ pub(crate) fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize
     crate::fs::tty::console().read_input(buf, nonblock)
 }
 
-pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
+pub fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
     let onlcr = crate::fs::tty::console().output_translates_nl();
     // Translate \n -> \r\n (OPOST|ONLCR) in 256-byte chunks so a single
     // console write stays atomic per chunk (R20-4 discipline).
@@ -349,7 +349,7 @@ pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
     buf.len() as isize
 }
 
-pub(crate) fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
+pub fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
     use crate::fs::event_notify::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 && crate::fs::tty::console().input_poll_ready() {
@@ -1181,6 +1181,13 @@ pub fn is_mounted() -> bool {
 }
 
 /// Get the devfs root entry (for dentry tree mount).
+/// The interface row's boot form: the mounted /dev root (None before
+/// init — the pre-trace `get_root_entry` presence check at the boot
+/// site).
+pub fn mounted_root_inode() -> Option<alloc::sync::Arc<Inode>> {
+    get_root_entry().map(|e| create_root_inode(&e))
+}
+
 pub fn get_root_entry() -> Option<Arc<DevfsEntry>> {
     DEVFS_ROOT.lock_irqsave().clone()
 }

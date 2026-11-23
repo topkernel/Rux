@@ -2489,15 +2489,15 @@ pub fn init_drm() -> Result<(), ()> {
     crate::fs::leaf_glue::devfs::register_char_device(DEV_DRM_CARD0, &DRM_OPS)?;
     crate::fs::leaf_glue::devfs::register_char_device(DEV_DRM_RENDER, &DRM_OPS)?;
 
-    crate::fs::leaf_glue::devfs::mkdir("dri").map_err(|_| ())?;
-    crate::fs::leaf_glue::devfs::mknod("dri/card0", DEV_DRM_CARD0, 0o666).map_err(|_| ())?;
-    crate::fs::leaf_glue::devfs::mknod("dri/renderD128", DEV_DRM_RENDER, 0o666).map_err(|_| ())?;
+    crate::fs::leaf_glue::devfs::mkdir("dri")?;
+    crate::fs::leaf_glue::devfs::mknod("dri/card0", DEV_DRM_CARD0, 0o666)?;
+    crate::fs::leaf_glue::devfs::mknod("dri/renderD128", DEV_DRM_RENDER, 0o666)?;
 
     // DrmDisplay::SetDisplayPowerStatus opens /dev/graphics/fb0 and
     // FBIOBLANKs it; alias the existing fb0 node (the OH power-state
     // path reports NOT_SUPPORT when it is missing).
-    crate::fs::leaf_glue::devfs::mkdir("graphics").map_err(|_| ())?;
-    crate::fs::leaf_glue::devfs::mknod("graphics/fb0", crate::fs::dev_t::DEV_FB0, 0o666).map_err(|_| ())?;
+    crate::fs::leaf_glue::devfs::mkdir("graphics")?;
+    crate::fs::leaf_glue::devfs::mknod("graphics/fb0", crate::fs::dev_t::DEV_FB0, 0o666)?;
 
     // sysfs class entries for the DRM nodes, rooted at the virtio-gpu
     // PCI function: /sys/class/drm/{card0,renderD128} +

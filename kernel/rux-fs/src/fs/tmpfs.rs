@@ -840,6 +840,24 @@ pub fn create_mount_instance(data: Option<&str>) -> Arc<Inode> {
     tmpfs_make_inode(&root_node)
 }
 
+/// The interface row's tagged-instance form: create a mount instance
+/// and retag it with the requested filesystem-type ops twin (the tag
+/// logic lives crate-side; the framework passes a plain enum).
+pub fn create_tagged_mount_instance(
+    data: Option<&str>,
+    tag: crate::fs::leaf_glue::TmpfsTagKind,
+) -> Arc<Inode> {
+    let mut root = create_mount_instance(data);
+    let ops: &'static INodeOps = match tag {
+        crate::fs::leaf_glue::TmpfsTagKind::None => return root,
+        crate::fs::leaf_glue::TmpfsTagKind::Devpts => &DEVPTS_INODE_OPS,
+        crate::fs::leaf_glue::TmpfsTagKind::Securityfs => &SECURITYFS_INODE_OPS,
+        crate::fs::leaf_glue::TmpfsTagKind::Mqueue => &MQUEUE_INODE_OPS,
+    };
+    tag_mount_instance_type(&mut root, ops);
+    root
+}
+
 /// Retag a FRESH tmpfs mount root with a filesystem-type ops twin
 /// (identity tag for statfs magic dispatch — see MQUEUE_INODE_OPS).
 /// Valid only immediately after create_mount_instance, while the Arc

@@ -19,7 +19,7 @@ pub fn test_file_open() {
 
     // RootFS up? (the trait view through the row — rootfs lives in the
     // rux-fs crate now)
-    if crate::fs::leaf_glue::rootfs::get_sb_ref_interim().is_none() {
+    if crate::fs::leaf_glue::rootfs::sb_view().is_none() {
         test_fail("RootFS initialization", "superblock is null");
         return;
     }

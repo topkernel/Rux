@@ -832,3 +832,24 @@ pub fn file_is_tty(file: &crate::fs::file::File) -> bool {
         None => false,
     }
 }
+
+// ============================================================================
+// The console interface rows (console.rs's input path): plain fns over
+// the console() singleton.
+// ============================================================================
+
+pub fn console_lflag() -> u32 {
+    console().lflag()
+}
+
+pub fn console_echo_enabled() -> bool {
+    console().echo_enabled()
+}
+
+pub fn console_receive_byte(c: u8) {
+    console().receive_byte(c)
+}
+
+pub fn console_fg_pgid() -> u32 {
+    console().fg_pgrp.load(core::sync::atomic::Ordering::Acquire)
+}

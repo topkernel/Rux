@@ -1979,7 +1979,7 @@ fn rootfs_node_size(node: &RootFSNode) -> usize {
 // read_file row body, and the trait-object view of the global sb.
 // ============================================================================
 
-impl crate::fs::leaf_glue::InitrdRamfs for RootFSSuperBlock {
+impl crate::fs::leaf_glue::RamfsView for RootFSSuperBlock {
     fn rfs_mkdir(&self, path: &str) -> Result<(), i32> {
         self.mkdir(path)
     }
@@ -2020,8 +2020,8 @@ impl crate::fs::leaf_glue::InitrdRamfs for RootFSSuperBlock {
 
 /// The initrd unpack target as the framework trait object (the global
 /// sb's 'static view — INV-FS-GLOBALSB-1 through the edge).
-pub fn initrd_sb_view() -> Option<&'static dyn crate::fs::leaf_glue::InitrdRamfs> {
-    get_rootfs_sb_ref().map(|sb| sb as &'static dyn crate::fs::leaf_glue::InitrdRamfs)
+pub fn ramfs_view() -> Option<&'static dyn crate::fs::leaf_glue::RamfsView> {
+    get_rootfs_sb_ref().map(|sb| sb as &'static dyn crate::fs::leaf_glue::RamfsView)
 }
 
 /// The legacy read_file_from_rootfs row body (the pre-flip fs::mod

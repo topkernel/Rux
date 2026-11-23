@@ -45,6 +45,7 @@
 use crate::fs::dentry::{Dentry, VfsMountInternal};
 use crate::fs::file::{FileFlags, FileOps};
 use crate::fs::inode::Inode;
+use crate::fs::leaf_glue::TmpfsTagKind;
 use crate::fs::mount::MntFlags;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -295,33 +296,45 @@ pub fn create_fs_root(
     data: Option<&str>,
     ro: bool,
 ) -> Result<(Arc<Inode>, bool), i32> {
-    use crate::fs::leaf_glue::TmpfsTagKind;
     let src = source.unwrap_or("");
     match fs_type {
         "tmpfs" | "shm" => {
             crate::fs::leaf_glue::tmpfs::ensure_registered();
-            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, None)
-                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, None), false))
         }
         "ramfs" | "rootfs" => {
             crate::fs::leaf_glue::tmpfs::ensure_registered();
-            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, None)
-                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, None), false))
         }
         "devpts" => {
             crate::fs::leaf_glue::tmpfs::ensure_registered();
-            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, Some(TmpfsTagKind::Devpts))
-                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((
+                crate::fs::leaf_glue::tmpfs::create_mount_instance(
+                    data,
+                    Some(TmpfsTagKind::Devpts),
+                ),
+                false,
+            ))
         }
         "securityfs" => {
             crate::fs::leaf_glue::tmpfs::ensure_registered();
-            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, Some(TmpfsTagKind::Securityfs))
-                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((
+                crate::fs::leaf_glue::tmpfs::create_mount_instance(
+                    data,
+                    Some(TmpfsTagKind::Securityfs),
+                ),
+                false,
+            ))
         }
         "mqueue" => {
             crate::fs::leaf_glue::tmpfs::ensure_registered();
-            Ok((crate::fs::leaf_glue::tmpfs::create_mount_instance(data, Some(TmpfsTagKind::Mqueue))
-                .ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((
+                crate::fs::leaf_glue::tmpfs::create_mount_instance(
+                    data,
+                    Some(TmpfsTagKind::Mqueue),
+                ),
+                false,
+            ))
         }
         "selinuxfs" => Ok((
             (crate::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&crate::fs::fs_hooks::FsHooks::EMPTY).selinuxfs_root_inode)()
@@ -330,12 +343,12 @@ pub fn create_fs_root(
         )),
         "proc" | "procfs" => {
             crate::fs::leaf_glue::procfs::mount_procfs().map_err(|e| e as i32)?;
-            Ok((crate::fs::leaf_glue::procfs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((crate::fs::leaf_glue::procfs::create_root_inode(), false))
         }
         "sysfs" => {
             crate::fs::leaf_glue::sysfs::init_sysfs().map_err(|e| e as i32)?;
             crate::fs::leaf_glue::sysfs::mount_sysfs().map_err(|e| e as i32)?;
-            Ok((crate::fs::leaf_glue::sysfs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((crate::fs::leaf_glue::sysfs::create_root_inode(), false))
         }
         "devfs" | "devtmpfs" => {
             crate::fs::leaf_glue::devfs::init();
@@ -348,17 +361,17 @@ pub fn create_fs_root(
             if !crate::fs::leaf_glue::debugfs::debugfs_root_present() {
                 crate::fs::leaf_glue::debugfs::init_debugfs()?;
             }
-            Ok((crate::fs::leaf_glue::debugfs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((crate::fs::leaf_glue::debugfs::create_root_inode(), false))
         }
         "tracefs" => {
             if !crate::fs::leaf_glue::tracefs::tracefs_root_present() {
                 crate::fs::leaf_glue::tracefs::init_tracefs()?;
             }
-            Ok((crate::fs::leaf_glue::tracefs::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((crate::fs::leaf_glue::tracefs::create_root_inode(), false))
         }
         "cgroup2" | "cgroup" => {
             crate::fs::leaf_glue::cgroup::init_cgroupfs().map_err(|e| e as i32)?;
-            Ok((crate::fs::leaf_glue::cgroup::create_root_inode().ok_or(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?, false))
+            Ok((crate::fs::leaf_glue::cgroup::create_root_inode(), false))
         }
         // ext2/ext3/ext4 from a loop device or a named vdX disk: the
         // separate-instance discipline (mount_loop_instance — no journal

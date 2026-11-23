@@ -1245,6 +1245,16 @@ pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
     crate::fs::unsafe_edges::static_ref(GLOBAL_PROCFS_SB.load(Ordering::Acquire))
 }
 
+/// `get_procfs_sb().is_some()` — the boot site's presence-check row.
+pub fn sb_present() -> bool {
+    get_procfs_sb().is_some()
+}
+
+/// coredump's core_pattern snapshot (the sysctl cell lives crate-side).
+pub fn core_pattern() -> alloc::vec::Vec<u8> {
+    sysctl::CORE_PATTERN.lock().as_bytes().to_vec()
+}
+
 /// Rewind-regeneration hook for the procfs MOUNT TABLES served through
 /// the openat read-only shortcut: /proc/{self,<pid>}/mounts and
 /// /proc/{self,<pid>}/mountinfo must re-run their generator on
