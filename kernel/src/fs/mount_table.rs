@@ -71,6 +71,10 @@ pub fn register_builtin_handlers() {
     if let Some(hooks) = super::fs_hooks::FS_HOOKS.get() {
         (hooks.leaf_mount_register)();
     }
+    // The ext4 service crate's mount rows (rung 5): the SAME boot
+    // point as the leaves above — NOT at rust_main registration time
+    // (the rux-fs 'R'-loop conviction; the row body self-guards).
+    super::ext4_hooks::mount_rows_register();
 }
 
 // Re-export for the leaf mount_instance bodies (register_mount row).

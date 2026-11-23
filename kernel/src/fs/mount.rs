@@ -222,141 +222,16 @@ pub fn do_mount(
 ) -> Result<(), i32> {
     let mnt_flags = translate_mnt_flags(flags);
 
-    // ext2/ext4 from a LOOP device: a second ext4 instance on the loop's
-    // GenDisk (LTP mount/umount tests: losetup an mkfs.ext2 image, mount,
-    // verify, umount). The boot root keeps its own instance.
-    // "ext3" is the ext4 driver's alias (reference >= 4.3: ext3 mounts
-    // through ext4). LTP's device tests pick their scratch fstype from a
-    // probe that lands on ext3 whenever mkfs.ext3 exists — rejecting it
-    // broke every loop-mounted LTP mount test that chose that name.
-    // (Transplanted from 6a4d6733, lost in a later force-push.)
-    if (fs_type == "ext2" || fs_type == "ext3" || fs_type == "ext4")
-        && source.starts_with("/dev/loop")
-    {
-        let minor: Option<u32> = source["/dev/loop".len()..]
-            .parse()
-            .ok();
-        if let Some(idx) = minor {
-            let disk = crate::drivers::loop_dev::loop_disk(idx as usize)
-                .ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
-            let (root, effective_ro) =
-                crate::fs::ext4::mount_loop_instance(disk, mnt_flags.is_readonly())?;
-            // Bring-up policy: the ext4 layer downgraded an rw request
-            // (metadata_csum) — mirror it in the VFS mount flags so all
-            // write paths fail EROFS at the VFS, not inside ext4.
-            let mnt_flags = if effective_ro && !mnt_flags.is_readonly() {
-                MntFlags::new(mnt_flags.bits() | MntFlags::MNT_READONLY)
-            } else {
-                mnt_flags
-            };
-            crate::fs::vfs::vfs_mount(target, root, mnt_flags);
-            register_mount(
-                source,
-                target,
-                fs_type,
-                if mnt_flags.is_readonly() { "ro" } else { "rw" },
-            );
-            return Ok(());
-        }
-        return Err(errno::Errno::InvalidArgument.as_neg_i32());
-    }
-
     // Rung-3 MOUNT SEAM: consult the registration table first; the
-    // leaf's mount_instance holds the old arm's body verbatim. ext4
-    // (the rung-5 family) keeps its arm below for now.
-    if fs_type != "ext4" && fs_type != "ext3" {
-        if let Some(mount_fn) = crate::fs::mount_table::lookup(fs_type) {
-            return mount_fn(source, target, fs_type, data, mnt_flags);
-        }
+    // leaf's mount_instance holds the old arm's body verbatim. The
+    // ext family joined at rung 5 (its row carries the loop-device
+    // special case, the named-disk resolution and the legacy boot-disk
+    // path — the old arms below, crate-side).
+    if let Some(mount_fn) = crate::fs::mount_table::lookup(fs_type) {
+        return mount_fn(source, target, fs_type, data, mnt_flags);
     }
 
     match fs_type {
-        "ext4" | "ext3" => {
-            // ext3: ext4-driver alias (reference >= 4.3). (6a4d6733.)
-            // SOURCE RESOLUTION (OH Phase 1b): the source names the disk —
-            // "/dev/vdb", "/dev/block/vdc" (ueventd's node dir), or bare
-            // "vdb" all resolve through the vdX letter. The named disk is
-            // mounted as a SEPARATE instance (the loop-device discipline)
-            // when a root ext4 is already live, so `mount /dev/block/vdb
-            // /usr` on an initrd root gives /usr the SECOND disk, not a
-            // second view of the first (the old code ignored the source
-            // and always mounted the boot disk — silently wrong for every
-            // multi-disk layout).
-            let disk_of_source = |src: &str| -> Option<&'static crate::drivers::blkdev::GenDisk> {
-                let trimmed = src
-                    .trim_start_matches("/dev/block/")
-                    .trim_start_matches("/dev/")
-                    .trim_matches('/');
-                crate::drivers::virtio::get_pci_gen_disk_by_name(trimmed)
-            };
-
-            if let Some(disk) = disk_of_source(source) {
-                if !crate::fs::ext4::is_mounted() {
-                    // First ext4 becomes THE root instance (full mount
-                    // path, journal replay — the OH init mounting
-                    // /dev/block/vdb before any other ext4).
-                    crate::fs::ext4::mount_ext4_flags(disk, mnt_flags.is_readonly())
-                        .map_err(|e| e as i32)?;
-                    crate::fs::vfs::vfs_mount(
-                        target,
-                        crate::fs::ext4::create_root_inode(),
-                        mnt_flags,
-                    );
-                } else {
-                    // Additional disks: separate instance (mount_loop_
-                    // instance discipline — no journal replay, like a
-                    // fresh scratch mount; the OH images are clean).
-                    let (root, effective_ro) = crate::fs::ext4::mount_loop_instance(
-                        disk,
-                        mnt_flags.is_readonly(),
-                    )
-                    .map_err(|e| e as i32)?;
-                    let mnt_flags = if effective_ro && !mnt_flags.is_readonly() {
-                        MntFlags::new(mnt_flags.bits() | MntFlags::MNT_READONLY)
-                    } else {
-                        mnt_flags
-                    };
-                    crate::fs::vfs::vfs_mount(target, root, mnt_flags);
-                }
-                register_mount(
-                    source,
-                    target,
-                    fs_type,
-                    if mnt_flags.is_readonly() { "ro" } else { "rw" },
-                );
-                return Ok(());
-            }
-
-            // No source disk identity (anonymous "ext4" mount, LTP-style
-            // mount /dev/vda on the boot disk): the legacy boot-disk path.
-            // R14-12 (F22): refuse to re-run mount_ext4 on a live
-            // filesystem — a second `mount -t ext4` rebuilt the Ext4,
-            // re-ran journal recovery on a live journal, swapped
-            // GLOBAL_EXT4_FS under open files and leaked the old instance.
-            if crate::fs::ext4::is_mounted() {
-                return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
-            }
-            let fs = crate::fs::ext4::get_ext4_fs()
-                .ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
-            // Mount ext4 if not already mounted
-            if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
-                crate::fs::ext4::mount_ext4(disk)
-                    .map_err(|e| e as i32)?;
-            } else if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
-                // get_device() hands out a &'static VirtIOBlkDevice
-                // (VIRTIO_BLK static), so its disk field borrows for the
-                // machine's lifetime.
-                let disk: &'static crate::drivers::blkdev::GenDisk =
-                    &virtio_dev.disk;
-                crate::fs::ext4::mount_ext4(disk)
-                    .map_err(|e| e as i32)?;
-            } else {
-                return Err(errno::Errno::NoSuchDevice.as_neg_i32());
-            }
-            let _ = fs; // already mounted
-            crate::fs::vfs::vfs_mount(target, crate::fs::ext4::create_root_inode(), mnt_flags);
-            register_mount("/dev/vda", target, fs_type, if mnt_flags.is_readonly() { "ro" } else { "rw" });
-        }
         // POSIX mqueue: no queue semantics in Rux yet (mq_* syscalls
         // answer ENOSYS on their own); an empty tmpfs instance satisfies
         // dev-mqueue.mount so sysinit does not fail. mqueue(7) users that

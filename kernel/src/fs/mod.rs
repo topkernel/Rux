@@ -29,7 +29,7 @@ pub mod fs_hooks;
 pub mod notify_events;
 pub mod rootfs;
 pub mod tmpfs;
-pub mod ext4;
+// pub mod ext4; — MOVED to the rux-ext4 service crate (rung 5)
 pub mod stat;
 pub mod procfs;
 pub mod sysfs;
@@ -38,7 +38,7 @@ pub mod tracefs;
 pub mod dev_t;
 pub mod devfs;
 pub mod fs_struct;
-pub mod jbd2;
+// pub mod jbd2; — MOVED to the rux-ext4 service crate (rung 5)
 pub mod page_cache;
 pub mod readahead;
 pub mod io_completion;
@@ -54,6 +54,12 @@ pub mod pidfd;
 // pub mod fifo; — MOVED to the rux-fs service crate (rung 3)
 pub mod cgroup;
 pub mod fsctx;
+// The rung-5 ext4 seam: the framework's ext4/jbd2 hook table (the
+// service crate registers at boot; the ext4/jbd2 module lines above
+// stay until the rux-ext4 flip deletes them).
+pub mod ext4_hooks;
+pub mod ext4_edges;
+pub mod journal_seam;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, close_file_fd_report, set_cloexec_fd};
 pub use fs_struct::FsStruct;

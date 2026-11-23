@@ -72,24 +72,18 @@ impl Ext4FileSystem {
         }
 
         // Read journal superblock (first block of the journal)
-        // SAFETY: bio::bread returns a valid raw BufferHead pointer or None;
-        // the None case returns early above.
-        let j_sb_bh = unsafe {
-            match bio::bread(self.device, journal_start_block) {
-                Some(b) => b,
-                None => {
-                    crate::print_status("ext4", "journal superblock read failed", false);
-                    return Err(EIO);
-                }
+        let j_sb_bh = match bio::bread(self.device, journal_start_block) {
+            Some(b) => b,
+            None => {
+                crate::print_status("ext4", "journal superblock read failed", false);
+                return Err(EIO);
             }
         };
 
-        // SAFETY: j_sb_bh is a valid BufferHead from bread(); b_data is a full
-        // block-sized byte array, large enough to hold journal_superblock_t;
-        // the pointer is valid for the lifetime of j_sb_bh.
-        let j_sb = unsafe {
-            &*((*j_sb_bh).b_data.as_ptr() as *const jbd2::journal_superblock_t)
-        };
+        // b_data is a full block-sized byte array; the typed view rides
+        // the framework's alignment-checked edge (INV-EXT-EDGE-1).
+        let j_sb: &jbd2::journal_superblock_t = crate::fs::ext4_edges::typed_ref(bio::bh_data(&j_sb_bh))
+            .expect("journal superblock view");
 
         // Validate magic number
         if u32::from_be(j_sb.s_header.h_magic) != JBD2_MAGIC_NUMBER {
@@ -131,12 +125,9 @@ impl Ext4FileSystem {
         if has_csum_v2or3 {
             csum_seed = crate::fs::ext4::csum::crc32c(0xFFFF_FFFF, &j_sb.s_uuid);
             let old = j_sb.s_checksum;
-            let bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(
-                    (*j_sb_bh).b_data.as_ptr() as *const u8,
-                    core::mem::size_of::<jbd2::types::journal_superblock_t>(),
-                )
-            };
+            let data = bio::bh_data(&j_sb_bh);
+            let bytes: &[u8] =
+                &data[..core::mem::size_of::<jbd2::types::journal_superblock_t>()];
             // SAFETY: j_sb is a & reference into the buffer; the checksum
             // field must be zeroed in the checksum input — clone-free
             // verify via a temporary copy of the 1024-byte region.
@@ -277,7 +268,7 @@ impl Ext4FileSystem {
             }
         }
 
-        self.journal = Some(journal_arc);
+        self.journal.set(journal_arc);
 
         bio::brelse(j_sb_bh);
         Ok(())
@@ -310,8 +301,8 @@ impl Ext4FileSystem {
 /// the same degree a write-back mount of the reference kernel does;
 /// recovery is e2fsck (documented F4-R2 stance).
 pub fn ext4_journal_start(fs: &Ext4FileSystem, nblocks: i32) -> Result<jbd2::Handle, i32> {
-    let journal_arc = match &fs.journal {
-        Some(j) => j.clone(),
+    let journal_arc = match fs.journal.get() {
+        Some(j) => j,
         // Route-1 null-journal handle (see comment above). new_handle()
         // leaves h_transaction/h_journal None; stop() takes its early
         // return for that shape.

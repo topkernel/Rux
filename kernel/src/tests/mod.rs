@@ -343,9 +343,9 @@ pub mod link;
 // pub mod pipe2; — MOVED to the rux-fs crate (rung 3 flip); runs in-guest
 // via the SERVICE-TEST SEAM below (registered by rux-bin, same counters)
 #[cfg(feature = "unit-test")]
-pub mod ext4_allocator;
+// pub mod ext4_allocator; — MOVED to the rux-ext4 service crate (rung 5)
 #[cfg(feature = "unit-test")]
-pub mod ext4_file_write;
+// pub mod ext4_file_write; — MOVED to the rux-ext4 service crate (rung 5)
 
 // ===== IPC =====
 #[cfg(feature = "unit-test")]
@@ -662,11 +662,9 @@ pub fn run_all_tests() {
     // registered the entries at boot.
     run_registered_service_tests();
 
-    test_group_start("ext4_allocator");
-    ext4_allocator::test_ext4_allocator();
 
-    test_group_start("ext4_file_write");
-    ext4_file_write::test_ext4_file_write();
+
+
 
     // ===== 8. IPC =====
     test_group_start("signal_procmask");

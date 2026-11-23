@@ -1,5 +1,7 @@
 //! The Deadline class (S1b sole copy): the DL policy over the
 //! framework's DlRunQueue storage.
+
+#![forbid(unsafe_code)]
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, AtomicI64, Ordering};
 use crate::process::task::Task;

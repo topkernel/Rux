@@ -57,7 +57,10 @@ pub fn filemap_pin_cache_page(
     if file_offset >= effective_size {
         return None;
     }
-    if !crate::fs::ext4::file::is_ext4_file(file) {
+    // The demand-populate capability IS the ext4 probe (rung-5 fault
+    // seam: FileOps.fault — a data-field check, no fs named).
+    let fault_op = file.get_ops().and_then(|ops| ops.fault);
+    if fault_op.is_none() {
         return None;
     }
     // SAFETY: inode cell written at open time, read-only afterwards.
@@ -77,8 +80,7 @@ pub fn filemap_pin_cache_page(
     // insert an explicit ZERO page into the cache and alias THAT (x86_64
     // twin). The flush path allocates the on-disk block at msync/fsync
     // time. Private arms keep the private-copy fill.
-    let populated =
-        crate::fs::ext4::file::ext4_fault_populate_cache(file, file_offset as u64);
+    let populated = fault_op.unwrap()(file, file_offset as u64);
     if populated {
         if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
             return Some(phys);

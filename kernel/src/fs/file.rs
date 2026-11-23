@@ -128,6 +128,18 @@ pub struct FileOps {
     /// pread at scale (ext4, tmpfs) provide a native entry; the generic
     /// fallback in File::read_at covers the rest.
     pub read_at: Option<fn(&File, u64, &mut [u8]) -> isize>,
+    /// Positional write at an explicit offset, never touching the shared
+    /// file position — the write twin of `read_at` (the R71 race's write
+    /// side: ext4's set_pos/write/restore fallback raced concurrent plain
+    /// writes on the same description). Files without the slot keep the
+    /// generic position-dance fallback below.
+    pub write_at: Option<fn(&File, u64, &[u8]) -> isize>,
+    /// Demand-populate the page cache for one page-shaped file offset and
+    /// report success (the arch page-fault fill op for file mappings).
+    /// Presence is ALSO the mm policy's "page-cache-backed demand-paged
+    /// file" probe — a data-field check, no fn-pointer call, no filesystem
+    /// named (the rung-5 fault seam).
+    pub fault: Option<fn(&File, u64) -> bool>,
 }
 
 /// Capability-checked FileOps construction (rust-design-headroom §1,
@@ -152,6 +164,8 @@ impl FileOps {
                 poll: None,
                 flush: None,
                 read_at: None,
+                write_at: None,
+                fault: None,
             },
         }
     }
@@ -197,6 +211,18 @@ impl FileOpsBuilder {
     pub const fn read_at(mut self, f: fn(&File, u64, &mut [u8]) -> isize) -> Self {
         assert!(self.ops.read_at.is_none(), "FileOps: duplicate read_at capability");
         self.ops.read_at = Some(f);
+        self
+    }
+    /// Install the positional-write capability (pwrite(2) fast path).
+    pub const fn write_at(mut self, f: fn(&File, u64, &[u8]) -> isize) -> Self {
+        assert!(self.ops.write_at.is_none(), "FileOps: duplicate write_at capability");
+        self.ops.write_at = Some(f);
+        self
+    }
+    /// Install the demand-fault populate capability (file mmap fill).
+    pub const fn fault(mut self, f: fn(&File, u64) -> bool) -> Self {
+        assert!(self.ops.fault.is_none(), "FileOps: duplicate fault capability");
+        self.ops.fault = Some(f);
         self
     }
     pub const fn build(self) -> FileOps {
@@ -862,16 +888,15 @@ impl File {
         // inode.write_data targets the in-memory FileBuffer and would
         // desynchronize disk-backed files (pwrite silently lost).
         if let Some(ops) = *self.ops.get() {
-            // ext4 (session 25): native position-invariant write — the
-            // set_pos/write/restore dance below raced concurrent plain
-            // write()/read() on the same open file description (the write
-            // twin of the R71 read_at race), and its trailing whole-inode
-            // page-cache invalidate broke shared-mapping coherence.
-            if core::ptr::eq(
-                ops as *const _,
-                &crate::fs::ext4::file::EXT4_FILE_OPS as *const _,
-            ) {
-                let n = crate::fs::ext4::file::ext4_file_write_at_vfs(self, offset, buf, count);
+            // Native position-invariant write (session 25's ext4 lesson,
+            // now a generic capability): the set_pos/write/restore dance
+            // below raced concurrent plain write()/read() on the same
+            // open file description (the write twin of the R71 read_at
+            // race), and ext4's trailing whole-inode page-cache
+            // invalidate broke shared-mapping coherence.
+            if let Some(write_at) = ops.write_at {
+                let slice = core::slice::from_raw_parts(buf, count);
+                let n = write_at(self, offset, slice);
                 if n > 0 {
                     // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
                     // sqlite's journal/WAL writes all go through pwrite.

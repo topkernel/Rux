@@ -150,9 +150,7 @@ impl Iterator for Ext4DirIterator {
             // SAFETY: from_bytes handles short slices internally by returning
             // an empty entry with rec_len=0; we advance past the remaining
             // data to avoid an infinite loop.
-            let entry = unsafe {
-                Ext4DirEntry::from_bytes(&self.data[self.offset..], self.block_size)
-            };
+            let entry = Ext4DirEntry::from_bytes(&self.data[self.offset..], self.block_size);
 
             if entry.rec_len == 0 {
                 // Truncated or corrupt entry at end of block — stop iterating

@@ -639,9 +639,9 @@ impl BlockCache {
         let v_dirty = ve.bh().is_some_and(|bh| bh.is_dirty());
         drop(ve);
         if crate::trace::EVENT_EXTHUNT.armed()
-            && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
+            && crate::fs::ext4_hooks::exthunt_phys_watched(vkey.2)
         {
-            crate::fs::ext4::extent::exthunt_evict_unhash(vkey.2, v_dirty);
+            crate::fs::ext4_hooks::exthunt_evict_unhash(vkey.2, v_dirty);
         }
 
         {
@@ -673,9 +673,9 @@ impl BlockCache {
                     None => -5,
                 };
                 if crate::trace::EVENT_EXTHUNT.armed()
-                    && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
+                    && crate::fs::ext4_hooks::exthunt_phys_watched(vkey.2)
                 {
-                    crate::fs::ext4::extent::exthunt_evict_done(vkey.2, sync_rc);
+                    crate::fs::ext4_hooks::exthunt_evict_done(vkey.2, sync_rc);
                 }
                 crate::dfx::fsw::note_evict(true);
             } else {
@@ -936,7 +936,9 @@ impl BlockCache {
 
             // Phase 2: Read from disk (no locks held)
             // rux:exthunt (retired dfx=exthunt): fresh-entry fabrication, sync path.
-            crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, true);
+            if crate::trace::EVENT_EXTHUNT.armed() {
+                crate::fs::ext4_hooks::exthunt_fab(blocknr, skipped_evicting, true);
+            }
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
             if let Err(_) = blkdev::blkdev_read(
@@ -1517,10 +1519,12 @@ pub fn drop_freed_block_forgotten(
     // Forget under NO bio locks (peek pins, jbd2 locks only its own
     // transaction lists — no bucket->t_dirty nesting exists).
     if let Some(bh) = get_block_cache().peek_buffer((mj, mi), blocknr) {
-        // SAFETY: get_current_handle is task-local and null-safe; the
-        // handle outlives this call (the freeing op's bracket).
-        if let Some(h) = unsafe { crate::fs::ext4::namei::get_current_handle() } {
-            let _ = unsafe { crate::fs::jbd2::jbd2_journal_forget(&mut *h, bh) };
+        // The journal-forget seam row (rung-5): the crate resolves the
+        // handle; the handle outlives this call (the freeing op's
+        // bracket).
+        let h = crate::fs::journal_seam::current_handle_raw();
+        if !h.is_null() {
+            crate::fs::ext4_hooks::journal_forget(h, bh);
         }
         get_block_cache().put(bh);
     }
@@ -1696,7 +1700,7 @@ pub fn bread_async(
                     // SAFETY: hit_bh passed the b_data length guard above.
                     unsafe {
                         let d = &(*hit_bh).b_data;
-                        crate::fs::ext4::extent::exthunt_rxbhit(
+                        crate::fs::ext4_hooks::exthunt_rxbhit(
                             blocknr,
                             d.as_ptr(),
                             d[0],
@@ -1726,7 +1730,9 @@ pub fn bread_async(
         // per block was measurable waste on the batch read-ahead path.
         // rux:exthunt (retired dfx=exthunt): fresh-entry fabrication (adjudicates the unhashed
         // evicting-victim race — see the tracers in ext4/extent.rs).
-        crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, false);
+        if crate::trace::EVENT_EXTHUNT.armed() {
+            crate::fs::ext4_hooks::exthunt_fab(blocknr, skipped_evicting, false);
+        }
         let block_size = cache.block_size;
         let mut bh = Box::new(BufferHead::new_uninit(blocknr, block_size));
         bh.set_device(device);
@@ -1938,8 +1944,8 @@ pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
             current = entry.hash_next;
         }
         drop(bucket);
-        if evicting_match {
-            crate::fs::ext4::extent::exthunt_bc_blind(blocknr);
+        if evicting_match && crate::trace::EVENT_EXTHUNT.armed() {
+            crate::fs::ext4_hooks::exthunt_bc_blind(blocknr);
         }
         false
     }
@@ -2852,11 +2858,9 @@ pub fn sync_dirty_blocks_batched(
 /// transaction to commit; sync(2) writes the whole cache), and
 /// buffer-cache eviction (dirty victims are synced before reuse).
 pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
-    // get_current_handle reads the current task's handle slot (an
-    // ext4/namei unsafe fn — L4 territory; null-safe outside task ctx).
-    let journal_active = unsafe {
-        crate::fs::ext4::namei::get_current_handle().is_some()
-    };
+    // The current task's journal-handle slot (type-erased, rung-5;
+    // null-safe outside task ctx).
+    let journal_active = !crate::fs::journal_seam::current_handle_raw().is_null();
     if journal_active {
         crate::dfx::fsw::note_sync_dirty_skip();
         return Ok(());
@@ -3235,7 +3239,7 @@ fn publication_capture_note_dirty(
     device: Option<&'static blkdev::GenDisk>,
     blocknr: u64,
 ) {
-    use crate::fs::jbd2::journal::{CAPTURE_POST, CAPTURE_PRE};
+    use crate::fs::journal_seam::{CAPTURE_POST, CAPTURE_PRE, JournalCaptureState};
     let dev = match device {
         Some(d) => d,
         None => return,
@@ -3244,27 +3248,28 @@ fn publication_capture_note_dirty(
         Some(t) => t,
         None => return,
     };
-    // SAFETY: journal_handle is set/cleared by this task around the
-    // enclosing ext4 operation; it is null outside one.
-    let hptr = { (*task).journal_handle.get() };
+    // The task slot is type-erased (rung-5): the jbd2 Handle type is
+    // crate-owned. The unarmed fast path stays TWO loads (task, slot).
+    let hptr: *mut () = { (*task).journal_handle.get() };
     if hptr.is_null() {
         return;
     }
-    // SAFETY: the handle lives on the owner task's stack for the whole
-    // syscall (see namei::set_current_handle).
-    let (mode, capture_id, capture_dev) = unsafe {
-        let h = &*hptr;
-        (h.capture_mode(), h.capture_post_id(), h.capture_dev_key())
-    };
+    // SAFETY: INV-JSEAM-1 (fs/journal_seam.rs) — the pointer is a
+    // jbd2 Handle whose FIRST field (repr(C)) is the capture header;
+    // the handle lives on the owner task's stack for the whole syscall
+    // (see namei::set_current_handle).
+    let hc: &JournalCaptureState = unsafe { &*(hptr as *const JournalCaptureState) };
+    let (mode, capture_id, capture_dev) =
+        (hc.mode.get(), hc.post_id.get(), hc.dev_key.get());
     if capture_dev != dev_key(dev) {
         return;
     }
     match mode {
         CAPTURE_PRE => {
-            // SAFETY: same-task access (the hook runs in the owner's
-            // syscall context); the Spinlock also covers any stray
-            // cross-CPU marker (harmless superset — see the design note).
-            unsafe { (*hptr).h_pre_list.lock().push(blocknr) };
+            // Same-task access (the hook runs in the owner's syscall
+            // context); the Spinlock also covers any stray cross-CPU
+            // marker (harmless superset — see the design note).
+            hc.pre_push(blocknr);
         }
         CAPTURE_POST => {
             let mut pend = PENDING_PUBLICATIONS.lock();
@@ -3790,7 +3795,7 @@ impl BlockCache {
 /// handle is active) → sync → brelse. INV-BIO-BLOCKUPD: `f` receives the
 /// block's data (exactly b_size bytes) and the raw handle for the
 /// journal tag; the protocol completes (sync+brelse) on every path.
-pub(crate) fn with_block_mut<T>(
+pub fn with_block_mut<T>(
     device: &'static crate::drivers::blkdev::GenDisk,
     blocknr: u64,
     f: impl FnOnce(&mut [u8], *mut BufferHead) -> Result<T, i32>,
@@ -3802,11 +3807,12 @@ pub(crate) fn with_block_mut<T>(
     let out = f(data, bh);
     // SAFETY: as bh_set_state_bit (INV-BIO-PIN).
     unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
-    // SAFETY: get_current_handle is the task-local journal resolver
-    // (null-safe); the handle pins its transaction.
-    if let Some(handle) = unsafe { crate::fs::ext4::namei::get_current_handle() } {
-        // SAFETY: as above.
-        unsafe { let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh); }
+    // The journal tag (rung-5 seam row): the crate resolves the handle
+    // and tags the buffer; one indirect call per journaled metadata
+    // write, replacing the two direct calls.
+    let handle = crate::fs::journal_seam::current_handle_raw();
+    if !handle.is_null() {
+        crate::fs::ext4_hooks::journal_dirty(handle, bh);
     }
     let sync_res = sync_dirty_buffer(bh);
     brelse(bh);
@@ -3818,7 +3824,7 @@ pub(crate) fn with_block_mut<T>(
 /// inline sync — the F4-R2 durability-deferred class (order-unconstrained
 /// counters: group-desc and superblock free counts; the next barrier
 /// flushes them). INV-BIO-BLOCKUPD as above.
-pub(crate) fn with_block_deferred_mut<T>(
+pub fn with_block_deferred_mut<T>(
     device: &'static crate::drivers::blkdev::GenDisk,
     blocknr: u64,
     f: impl FnOnce(&mut [u8], *mut BufferHead) -> Result<T, i32>,
@@ -3829,10 +3835,10 @@ pub(crate) fn with_block_deferred_mut<T>(
     let out = f(data, bh);
     // SAFETY: as bh_set_state_bit (INV-BIO-PIN).
     unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
-    // SAFETY: the task-local journal resolver (null-safe).
-    if let Some(handle) = unsafe { crate::fs::ext4::namei::get_current_handle() } {
-        // SAFETY: the handle pins its transaction.
-        unsafe { let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh); }
+    // The journal tag (rung-5 seam row; deferred-write twin).
+    let handle = crate::fs::journal_seam::current_handle_raw();
+    if !handle.is_null() {
+        crate::fs::ext4_hooks::journal_dirty(handle, bh);
     }
     brelse(bh);
     out
@@ -3841,7 +3847,7 @@ pub(crate) fn with_block_deferred_mut<T>(
 /// The SHARED twin of the block-update edges: bread -> typed &[u8] view
 /// -> caller reads -> brelse. No mutation, no BH_Dirty, no journal —
 /// INV-BIO-BLOCKUPD's read contract (the pin is this scope's refcount).
-pub(crate) fn with_block<T>(
+pub fn with_block<T>(
     device: &'static crate::drivers::blkdev::GenDisk,
     blocknr: u64,
     f: impl FnOnce(&[u8]) -> T,
@@ -3864,7 +3870,7 @@ pub(crate) fn with_block<T>(
 /// buffer for the closure's scope and `brelse` releases exactly that
 /// pin on every path (the closure cannot early-return past the
 /// release — the release runs after `f` returns).
-pub(crate) fn with_block_ro<T>(
+pub fn with_block_ro<T>(
     device: &'static crate::drivers::blkdev::GenDisk,
     blocknr: u64,
     f: impl FnOnce(&[u8]) -> T,

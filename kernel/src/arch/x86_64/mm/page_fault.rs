@@ -120,7 +120,13 @@ pub fn filemap_pin_cache_page(
     // explicit ZERO page into the cache and alias THAT: one shared frame
     // for every mapper, and the flush path allocates the on-disk block at
     // msync/fsync time. Private arms keep the private-copy fill.
-    let populated = crate::fs::ext4::file::ext4_fault_populate_cache(file, file_offset as u64);
+    // The demand-populate capability dispatch (rung-5 fault seam:
+    // FileOps.fault). Absent slot behaves as the old internal
+    // non-ext4 guard (populate = false).
+    let populated = file
+        .get_ops()
+        .and_then(|ops| ops.fault)
+        .is_some_and(|f| f(file, file_offset as u64));
     if populated {
         if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
             return Some(phys);

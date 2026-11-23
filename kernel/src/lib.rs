@@ -669,8 +669,9 @@ pub fn rust_main_tail() -> ! {
             fs::bio::init();
             print_status("bio", "buffer cache layer", true);
 
-            // Initialize ext4 file system
-            fs::ext4::init();
+            // Initialize ext4 file system (the crate's init row —
+            // rux-ext4's register_all filled the table before kmain)
+            fs::ext4_hooks::init();
             print_status("fs", "ext4 driver loaded", true);
 
             // Initialize RootFS
@@ -1899,17 +1900,17 @@ fn mount_boot_disk_ext4() {
 /// Mount `disk`'s ext4 as THE root (full mount path with journal replay),
 /// then rebuild the /proc and cgroup2 mounts the ext4 overlay shadowed.
 fn mount_ext4_root_from(disk: &'static drivers::blkdev::GenDisk) {
-    let mount_result = fs::ext4::mount_ext4(disk);
+    let mount_result = fs::ext4_hooks::mount_root(disk);
     let mount_point = crate::config::EXT4_MOUNT_POINT;
     print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
     if mount_result.is_err() {
         return;
     }
-    if fs::ext4::get_ext4_fs().is_some() {
+    if fs::ext4_hooks::mounted() {
         // Build dentry tree for ext4 (overlays root)
         fs::vfs::vfs_mount(
             "/",
-            fs::ext4::create_root_inode(),
+            fs::ext4_hooks::root_inode(),
             fs::mount::MntFlags::new(0),
         );
     }

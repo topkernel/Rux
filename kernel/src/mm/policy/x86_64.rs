@@ -766,7 +766,7 @@ pub fn handle_mm_fault(
                 .clone()
                 .or_else(|| crate::fs::get_file_fd(vma_file_fd as usize));
             if let Some(file) = file.filter(|f| {
-                crate::fs::ext4::file::is_ext4_file(f.as_ref())
+                f.get_ops().is_some_and(|ops| ops.fault.is_some())
                     || crate::fs::tmpfs::is_tmpfs_file(f.as_ref())
             }) {
                 // Fault-around for SHARED read faults (perf-gap-hunt
@@ -1158,7 +1158,7 @@ pub fn handle_mm_fault(
                         }
                         if mapped_total > 0 {
                             if want_w
-                                && (crate::fs::ext4::file::is_ext4_file(file.as_ref())
+                                && (file.get_ops().is_some_and(|ops| ops.fault.is_some())
                                     || crate::fs::tmpfs::is_tmpfs_file(file.as_ref()))
                             {
                                 // Conservative v1 dirty mark (the
@@ -1246,7 +1246,7 @@ pub fn handle_mm_fault(
                         filemap_bookkeep_mapped_cache_page(cache_phys);
                     }
                     if want_w
-                        && (crate::fs::ext4::file::is_ext4_file(file.as_ref())
+                        && (file.get_ops().is_some_and(|ops| ops.fault.is_some())
                             || crate::fs::tmpfs::is_tmpfs_file(file.as_ref()))
                     {
                         // Conservative v1 dirty mark, AFTER the mapping
@@ -1327,7 +1327,10 @@ pub fn handle_mm_fault(
             let mut phys: [u64; FAULT_AROUND_PAGES] = [0; FAULT_AROUND_PAGES];
             let mut from_cache = [false; FAULT_AROUND_PAGES];
             let mut filled = 0usize;
-            let cacheable = crate::fs::ext4::file::is_ext4_file(file.as_ref());
+            // The demand-populate capability is the ext4 probe (only
+            // ext4 fills the page cache through the read machinery on a
+            // fault; tmpfs pages are always resident).
+            let cacheable = file.get_ops().is_some_and(|ops| ops.fault.is_some());
             for i in 0..n_pages {
                 let off_i = vma_offset + (fault_page - vma_start) + i * PAGE_SIZE_USIZE;
                 if cacheable {

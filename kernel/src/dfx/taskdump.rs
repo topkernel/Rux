@@ -844,7 +844,7 @@ pub fn dump_all_tasks(reason: &str) {
         // R85 (b148 crawl hunt): the ext4 biglock's own state beside the
         // task snapshot — the b148 shape (whole OH cohort D-parked, lock
         // apparently free, zero STALL prints) was invisible without it.
-        crate::fs::ext4::EXT4_BIG_LOCK.dfx_census_line();
+        crate::fs::journal_seam::EXT4_BIG_LOCK.dfx_census_line();
         crate::dfx::memwatch::dump_mem();
         // pa16 (magazine): the packing layer's per-class op counts and
         // class-lock acquisitions on the same cadence — locks vs

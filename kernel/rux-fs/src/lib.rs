@@ -24,6 +24,9 @@ use rux::fs::file::File;
 /// framework fs item (glob re-export — the framework no longer
 /// declares the moved leaves, so no name conflicts).
 pub mod fs {
+    // The ext4 service trees (rung 5): re-exported so downstream
+    // service crates (rux-syscall's crate::fs::ext4 paths) resolve.
+    pub use rux_ext4::fs::{ext4, jbd2};
     pub mod pipe;
     pub mod fifo;
     pub mod inotify;

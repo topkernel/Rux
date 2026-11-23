@@ -73,17 +73,16 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
     let journal_last = journal.j_last;
 
     // Read journal superblock to get s_start and s_sequence
-    // SAFETY: bio::bread returns a valid BufferHead or None (handled).
-    let sb_bh = unsafe {
-        match bio::bread(device, journal.jmap(0)) {
-            Some(b) => b,
-            None => return Err(EIO),
-        }
+    let sb_bh = match bio::bread(device, journal.jmap(0)) {
+        Some(b) => b,
+        None => return Err(EIO),
     };
 
-    // SAFETY: sb_bh is a valid BufferHead; the superblock is at the start of the block.
-    let (start_block, start_seq) = unsafe {
-        let sb = &*((*sb_bh).b_data.as_ptr() as *const journal_superblock_t);
+    // The superblock is at the start of the block (the typed view
+    // rides the framework's ext4_edges).
+    let (start_block, start_seq) = {
+        let sb = crate::fs::ext4_edges::typed_ref::<journal_superblock_t>(bio::bh_data(&sb_bh))
+            .expect("journal superblock view");
         let start = u32::from_be(sb.s_start);
         let seq = u32::from_be(sb.s_sequence);
         bio::brelse(sb_bh);
@@ -124,18 +123,17 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         if abs_block == 0 {
             break; // unmapped hole between journal extents
         }
-        // SAFETY: bio::bread returns a valid BufferHead or None (break on None).
-        let bh = unsafe {
-            match bio::bread(device, abs_block) {
-                Some(b) => b,
-                None => break,
-            }
+        let bh = match bio::bread(device, abs_block) {
+            Some(b) => b,
+            None => break,
         };
 
-        // SAFETY: bh is a valid BufferHead; b_data starts with a journal_header_t;
-        // magic check below validates the contents before use.
-        let (magic, blocktype, sequence) = unsafe {
-            let hdr = &*((*bh).b_data.as_ptr() as *const journal_header_t);
+        // b_data starts with a journal_header_t (the typed view rides
+        // the framework's ext4_edges); the magic check below validates
+        // the contents before use.
+        let (magic, blocktype, sequence) = {
+            let hdr = crate::fs::ext4_edges::typed_ref::<journal_header_t>(bio::bh_data(&bh))
+                .expect("journal header view");
             (u32::from_be(hdr.h_magic), u32::from_be(hdr.h_blocktype), u32::from_be(hdr.h_sequence))
         };
 
@@ -146,13 +144,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                 // CSUM_V2/V3: a descriptor whose tail checksum fails ends
                 // the trustworthy log region (reference recovery.c PASS_SCAN
                 // treats it as stale/unverifiable and stops extending).
-                let desc_ok = unsafe {
-                    let data = core::slice::from_raw_parts(
-                        (*bh).b_data.as_ptr(),
-                        (*bh).b_data.len(),
-                    );
-                    descriptor_block_csum_verify(journal, data)
-                };
+                let desc_ok = descriptor_block_csum_verify(journal, bio::bh_data(&bh));
                 if !desc_ok {
                     bio::brelse(bh);
                     break;
@@ -167,13 +159,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                 // CSUM_V2/V3: only a commit block with a valid checksum
                 // completes a transaction (reference
                 // jbd2_commit_block_csum_verify).
-                let commit_ok = unsafe {
-                    let data = core::slice::from_raw_parts(
-                        (*bh).b_data.as_ptr(),
-                        (*bh).b_data.len(),
-                    );
-                    commit_block_csum_verify(journal, data)
-                };
+                let commit_ok = commit_block_csum_verify(journal, bio::bh_data(&bh));
                 if commit_ok {
                     last_found_seq = sequence;
                 }
@@ -185,14 +171,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                 // Collect revoke records for the replay filter (review 5.6:
                 // recovery must not replay old metadata over blocks that
                 // were freed then reallocated).
-                // SAFETY: bh is a valid bio::BufferHead; b_data spans the block.
-                unsafe {
-                    let data = core::slice::from_raw_parts(
-                        (*bh).b_data.as_ptr(),
-                        (*bh).b_data.len(),
-                    );
-                    super::revoke::scan_revoke_block(journal, data, sequence);
-                }
+                super::revoke::scan_revoke_block(journal, bio::bh_data(&bh), sequence);
                 bio::brelse(bh);
                 next_block = wrap_block(next_block, journal_first, journal_last);
                 continue;
@@ -221,17 +200,16 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         if abs_block == 0 {
             break; // unmapped hole between journal extents
         }
-        // SAFETY: bio::bread returns a valid BufferHead or None (break on None).
-        let bh = unsafe {
-            match bio::bread(device, abs_block) {
-                Some(b) => b,
-                None => break,
-            }
+        let bh = match bio::bread(device, abs_block) {
+            Some(b) => b,
+            None => break,
         };
 
-        // SAFETY: bh is valid; b_data starts with journal_header_t; magic check validates.
-        let (magic, blocktype, sequence) = unsafe {
-            let hdr = &*((*bh).b_data.as_ptr() as *const journal_header_t);
+        // b_data starts with journal_header_t (typed view via the
+        // framework's ext4_edges); magic check validates.
+        let (magic, blocktype, sequence) = {
+            let hdr = crate::fs::ext4_edges::typed_ref::<journal_header_t>(bio::bh_data(&bh))
+                .expect("journal header view");
             (u32::from_be(hdr.h_magic), u32::from_be(hdr.h_blocktype), u32::from_be(hdr.h_sequence))
         };
 
@@ -243,18 +221,12 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                     // CSUM_V2/V3: an unverifiable descriptor ends replay
                     // (reference recovery.c: "Invalid checksum recovering
                     // block" -> -EFSBADCRC).
-                    let desc_ok = unsafe {
-                        let data = core::slice::from_raw_parts(
-                            (*bh).b_data.as_ptr(),
-                            (*bh).b_data.len(),
-                        );
-                        descriptor_block_csum_verify(journal, data)
-                    };
+                    let desc_ok = descriptor_block_csum_verify(journal, bio::bh_data(&bh));
                     if !desc_ok {
                         bio::brelse(bh);
                         break;
                     }
-                    let tags = unsafe { parse_tag_entries(bh, tag_size, header_size, tail_size, block_size) };
+                    let tags = parse_tag_entries(bh, tag_size, header_size, tail_size, block_size);
                     bio::brelse(bh);
                     for tag in tags {
                         cur = wrap_block(cur, journal_first, journal_last);
@@ -275,13 +247,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                 continue;
             }
             JBD2_COMMIT_BLOCK => {
-                let commit_ok = unsafe {
-                    let data = core::slice::from_raw_parts(
-                        (*bh).b_data.as_ptr(),
-                        (*bh).b_data.len(),
-                    );
-                    commit_block_csum_verify(journal, data)
-                };
+                let commit_ok = commit_block_csum_verify(journal, bio::bh_data(&bh));
                 bio::brelse(bh);
                 if commit_ok && sequence >= info.start_transaction && sequence <= info.end_transaction {
                     info.nr_replays += 1;
@@ -306,31 +272,28 @@ fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
     let device = journal
         .j_bio_device
         .expect("jbd2: bio device used before ext4 install");
-    // SAFETY: bio::bread returns a valid BufferHead or None (handled).
-    let sb_bh = unsafe {
-        match bio::bread(device, journal.jmap(0)) {
-            Some(b) => b,
-            None => return Err(EIO),
-        }
+    let sb_bh = match bio::bread(device, journal.jmap(0)) {
+        Some(b) => b,
+        None => return Err(EIO),
     };
-    // SAFETY: sb_bh is a valid BufferHead; the superblock is at the start of the block.
-    unsafe {
-        let r = &mut *sb_bh;
-        let sb = &mut *(r.b_data.as_mut_ptr() as *mut journal_superblock_t);
+    // The superblock is at the start of the block (typed view via the
+    // framework's ext4_edges).
+    {
+        let block = bio::bh_data_mut(&sb_bh);
+        let sb = crate::fs::ext4_edges::typed_ref_mut::<journal_superblock_t>(block)
+            .expect("journal superblock view");
         sb.s_start = 0u32.to_be();
         sb.s_sequence = next_seq.to_be();
         // CSUM_V2/V3: keep the superblock checksum consistent with the
         // rewritten s_start/s_sequence (reference jbd2_superblock_csum).
         if journal.has_csum_v2or3() {
             sb.s_checksum = 0;
-            let bytes: &[u8] = core::slice::from_raw_parts(
-                r.b_data.as_ptr(),
-                size_of::<journal_superblock_t>(),
-            );
+            let block = bio::bh_data(&sb_bh);
+            let bytes: &[u8] = &block[..size_of::<journal_superblock_t>()];
             let csum = crate::fs::ext4::csum::crc32c(0xFFFF_FFFF, bytes);
             sb.s_checksum = csum.to_be();
         }
-        r.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        bio::bh_set_state_bit(&sb_bh, crate::fs::bio::BufferState::BH_Dirty);
     }
     let sync_res = bio::sync_dirty_buffer(sb_bh);
     bio::brelse(sb_bh);
@@ -343,9 +306,9 @@ fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
 fn count_tags(bh: *mut bio::BufferHead, tag_size: usize, hdr_size: usize, tail_size: usize, blk_size: usize) -> usize {
     let mut c = 0usize;
     let mut off = hdr_size;
+    let data = bio::bh_data(&bh);
     while off + tag_size <= blk_size - tail_size {
-        // SAFETY: off is bounds-checked against blk_size; b_data contains valid tag data.
-        let flags = unsafe { tag_flags((*bh).b_data.as_ptr().add(off), tag_size) };
+        let flags = tag_flags(&data[off..off + tag_size], tag_size);
         c += 1;
         if flags & JBD2_FLAG_LAST_TAG != 0 { break; }
         off += tag_size;
@@ -356,13 +319,13 @@ fn count_tags(bh: *mut bio::BufferHead, tag_size: usize, hdr_size: usize, tail_s
 /// Read a tag's flag word from its on-disk bytes. V3 tags carry a 32-bit
 /// flag word at +4; V1/V2 tags carry a 16-bit flag word at +6 (after the
 /// truncated checksum).
-/// SAFETY: `p` must point at `tag_size` readable bytes (bounds-checked by
-/// the callers against the block tail).
-unsafe fn tag_flags(p: *const u8, tag_size: usize) -> u32 {
+/// Read a tag's flag word from its on-disk bytes (slice-based; the
+/// caller bounds-checks `tag` against the block tail).
+fn tag_flags(tag: &[u8], tag_size: usize) -> u32 {
     if tag_size == size_of::<journal_block_tag3_t>() {
-        u32::from_be(core::ptr::read_unaligned(p.add(4) as *const u32))
+        u32::from_be_bytes([tag[4], tag[5], tag[6], tag[7]])
     } else {
-        u16::from_be(core::ptr::read_unaligned(p.add(6) as *const u16)) as u32
+        u16::from_be_bytes([tag[6], tag[7]]) as u32
     }
 }
 
@@ -374,39 +337,37 @@ struct TagEntry {
     csum: Option<u32>,
 }
 
-/// SAFETY: `p` must point at `tag_size` readable bytes.
-unsafe fn parse_tag(p: *const u8, tag_size: usize) -> TagEntry {
-    let blocknr =
-        u32::from_be(core::ptr::read_unaligned(p as *const u32)) as u64;
+/// Parse one tag (slice-based, bounds-checked by the caller).
+fn parse_tag(tag: &[u8], tag_size: usize) -> TagEntry {
+    let rd32 = |o: usize| -> u32 {
+        u32::from_be_bytes([tag[o], tag[o + 1], tag[o + 2], tag[o + 3]])
+    };
+    let rd16 = |o: usize| -> u16 { u16::from_be_bytes([tag[o], tag[o + 1]]) };
+    let blocknr = rd32(0) as u64;
     let (blocknr, csum) = if tag_size == size_of::<journal_block_tag3_t>() {
-        let high =
-            u32::from_be(core::ptr::read_unaligned(p.add(8) as *const u32));
-        let csum =
-            u32::from_be(core::ptr::read_unaligned(p.add(12) as *const u32));
+        let high = rd32(8);
+        let csum = rd32(12);
         (blocknr | ((high as u64) << 32), Some(csum))
     } else if tag_size == size_of::<journal_block_tag_t>() {
-        let high =
-            u32::from_be(core::ptr::read_unaligned(p.add(8) as *const u32));
-        let trunc =
-            u16::from_be(core::ptr::read_unaligned(p.add(4) as *const u16)) as u32;
+        let high = rd32(8);
+        let trunc = rd16(4) as u32;
         (blocknr | ((high as u64) << 32), Some(trunc))
     } else {
-        let trunc =
-            u16::from_be(core::ptr::read_unaligned(p.add(4) as *const u16)) as u32;
+        let trunc = rd16(4) as u32;
         (blocknr, Some(trunc))
     };
     TagEntry { blocknr, csum }
 }
 
 /// Parse all tags of a descriptor block into replay entries.
-/// SAFETY: bh is a valid BufferHead spanning blk_size bytes.
-unsafe fn parse_tag_entries(bh: *mut bio::BufferHead, tag_size: usize, hdr_size: usize, tail_size: usize, blk_size: usize) -> Vec<TagEntry> {
+fn parse_tag_entries(bh: *mut bio::BufferHead, tag_size: usize, hdr_size: usize, tail_size: usize, blk_size: usize) -> Vec<TagEntry> {
     let mut tags = Vec::new();
     let mut off = hdr_size;
+    let data = bio::bh_data(&bh);
     while off + tag_size <= blk_size - tail_size {
-        let p = (*bh).b_data.as_ptr().add(off);
-        let e = parse_tag(p, tag_size);
-        let flags = tag_flags(p, tag_size);
+        let tag = &data[off..off + tag_size];
+        let e = parse_tag(tag, tag_size);
+        let flags = tag_flags(tag, tag_size);
         tags.push(e);
         if flags & JBD2_FLAG_LAST_TAG != 0 { break; }
         off += tag_size;
@@ -418,9 +379,9 @@ unsafe fn parse_tag_entries(bh: *mut bio::BufferHead, tag_size: usize, hdr_size:
 // CSUM_V2/V3 verification (reference fs/jbd2/recovery.c)
 // ============================================================================
 
-/// Verify a descriptor/revoke block's tail checksum.
-/// SAFETY: `data` must span the whole journal block.
-unsafe fn descriptor_block_csum_verify(journal: &Arc<Journal>, data: &[u8]) -> bool {
+/// Verify a descriptor/revoke block's tail checksum (data spans the
+/// whole journal block).
+fn descriptor_block_csum_verify(journal: &Arc<Journal>, data: &[u8]) -> bool {
     if !journal.has_csum_v2or3() {
         return true;
     }
@@ -436,17 +397,18 @@ unsafe fn descriptor_block_csum_verify(journal: &Arc<Journal>, data: &[u8]) -> b
 }
 
 /// Verify a commit block's checksum (h_chksum[0]; type/size/chksum zeroed
-/// in the input).
-/// SAFETY: `data` must span the whole journal block.
-unsafe fn commit_block_csum_verify(journal: &Arc<Journal>, data: &[u8]) -> bool {
+/// in the input; data spans the whole journal block).
+fn commit_block_csum_verify(journal: &Arc<Journal>, data: &[u8]) -> bool {
     if !journal.has_csum_v2or3() {
         return true;
     }
-    let h = &*(data.as_ptr() as *const commit_header);
+    let h = crate::fs::ext4_edges::typed_ref::<commit_header>(data)
+        .expect("commit header view");
     let provided = u32::from_be(h.h_chksum[0]);
     let mut tmp = alloc::vec![0u8; data.len()];
     tmp.copy_from_slice(data);
-    let th = &mut *(tmp.as_mut_ptr() as *mut commit_header);
+    let th = crate::fs::ext4_edges::typed_ref_mut::<commit_header>(tmp.as_mut_slice())
+        .expect("commit header view");
     th.h_chksum_type = 0;
     th.h_chksum_size = 0;
     th.h_chksum[0] = 0;
@@ -495,15 +457,10 @@ fn replay_data(
     if data_abs == 0 {
         return; // unmapped hole — nothing to replay from
     }
-    // SAFETY: bio::bread returns a valid BufferHead or None (handled by returning).
-    let data_bh = unsafe { match bio::bread(device, data_abs) { Some(b) => b, None => return } };
+    let data_bh = match bio::bread(device, data_abs) { Some(b) => b, None => return };
     if let Some(csum) = tag_csum {
-        // SAFETY: data_bh spans the journal block; the slice covers exactly it.
-        let ok = unsafe {
-            let data = core::slice::from_raw_parts(
-                (*data_bh).b_data.as_ptr(),
-                (*data_bh).b_data.len(),
-            );
+        let ok = {
+            let data = bio::bh_data(&data_bh);
             block_tag_csum_verify(journal, csum, sequence, data, tag_csum_truncated(journal))
         };
         if !ok {
@@ -512,17 +469,15 @@ fn replay_data(
             return;
         }
     }
-    // SAFETY: bio::bread returns a valid BufferHead or None; data_bh released on None.
-    let fs_bh = unsafe { match bio::bread(device, fs_block) { Some(b) => b, None => { bio::brelse(data_bh); return } } };
-    // SAFETY: both bh pointers are valid BufferHeads from bio::bread above.
-    let len = unsafe { core::cmp::min((*data_bh).b_data.len(), (*fs_bh).b_data.len()) };
-    // SAFETY: both bh pointers are valid; len is the minimum of both buffer sizes;
-    // copy_nonoverlapping copies exactly len bytes.
-    unsafe {
-        let f = &mut *fs_bh;
-        let d = &*data_bh;
-        core::ptr::copy_nonoverlapping(d.b_data.as_ptr(), f.b_data.as_mut_ptr(), len);
-        f.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+    let fs_bh = match bio::bread(device, fs_block) { Some(b) => b, None => { bio::brelse(data_bh); return } };
+    // Views ride the audited bio edges; len is the minimum of both
+    // buffer sizes.
+    {
+        let src = bio::bh_data(&data_bh);
+        let dst = bio::bh_data_mut(&fs_bh);
+        let len = core::cmp::min(src.len(), dst.len());
+        dst[..len].copy_from_slice(&src[..len]);
+        bio::bh_set_state_bit(&fs_bh, crate::fs::bio::BufferState::BH_Dirty);
     }
     bio::sync_dirty_buffer(fs_bh).ok();
     bio::brelse(fs_bh);

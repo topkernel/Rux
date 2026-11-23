@@ -26,6 +26,11 @@ pub extern "C" fn rust_main() -> ! {
     // riscv64/aarch64 (their register_in_tree fills the table inside
     // rust_main_impl; OnceSlot first-wins keeps whichever ran first).
     rux_mm::register_all();
+    // The ext4 rows (rung 5): the ROOT filesystem driver — the hook
+    // table backs the boot mount and every fs op from bio::init on;
+    // the mount-table rows land at register_builtin_handlers (the
+    // row body self-guards that boot point).
+    rux_ext4::register_all();
     // Guest tests that flipped out with a service crate (pipe2 with
     // rux-fs, net_hdrs with rux-net, the fair pins + timeline with
     // rux-sched) run via the framework's SERVICE-TEST SEAM, in
@@ -36,6 +41,7 @@ pub extern "C" fn rust_main() -> ! {
         rux::tests::register_service_tests(rux_fs::run_unit_tests);
         rux::tests::register_service_tests(rux_net::run_unit_tests);
         rux::tests::register_service_tests(rux_sched::run_unit_tests);
+        rux::tests::register_service_tests(rux_ext4::run_unit_tests);
     }
     rust_main_impl()
 }

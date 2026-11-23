@@ -216,7 +216,7 @@ pub fn file_inode_arc(file: &File) -> Option<alloc::sync::Arc<crate::fs::inode::
 /// (the read paths' serialization), which excludes any other mutable or
 /// shared borrow of the state for the returned reference's scope. The
 /// cell is a File field, so the borrow cannot outlive the `&File`.
-pub(crate) fn file_ra_state_mut(
+pub fn file_ra_state_mut(
     file: &File,
 ) -> &mut Option<crate::fs::readahead::ReadAheadState> {
     // SAFETY: INV-FS-RASTATE-1 — the io_lock the caller holds is the

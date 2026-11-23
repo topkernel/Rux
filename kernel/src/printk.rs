@@ -2272,40 +2272,22 @@ mod persistent_log {
         }
     }
 
-    /// Resolve or create the log file; returns the inode or None.
+    /// Resolve or create the log file; returns the inode or None. The
+    /// whole body is the crate's (rung-5 kmsg seam row — resolution,
+    /// the cached-ino validity check and creation live ext4-side; the
+    /// crate's row resets OUR write offset when it (re)creates).
     fn resolve_file() -> Option<u32> {
-        let fs_ptr = match crate::fs::ext4::get_ext4_fs() {
-            Some(ptr) if !ptr.is_null() => ptr,
-            _ => return None,
-        };
-        // fs_ptr is the mount's instance word (get_ext4_fs's non-null
-        // GLOBAL) — resolved through the framework edge (INV-FS-GLOBALSB-1
-        // provenance).
-        let fs = crate::fs::unsafe_edges::static_ref_unchecked(fs_ptr as *mut crate::fs::ext4::Ext4FileSystem);
-        let cached = FILE_INO.load(Ordering::Relaxed);
-        if cached != 0 {
-            // Still alive? A deleted file's inode read fails; reset and
-            // fall through to re-create next time.
-            match fs.read_inode(cached as u32) {
-                Ok(_) => return Some(cached as u32),
-                Err(_) => {
-                    FILE_INO.store(0, Ordering::Relaxed);
-                    return None;
-                }
-            }
-        }
-        if let Ok((ino, _inode)) = fs.lookup_path(LOG_PATH) {
-            FILE_INO.store(ino as u64, Ordering::Relaxed);
-            return Some(ino);
-        }
-        match crate::fs::ext4::create_file(LOG_PATH, 0o644) {
-            Ok(vfs_inode) => {
-                FILE_INO.store(vfs_inode.ino, Ordering::Relaxed);
+        let fresh = crate::fs::ext4_hooks::kmsg_resolve();
+        if let Some(ino) = fresh {
+            if ino as u64 != FILE_INO.swap(ino as u64, Ordering::Relaxed) {
+                // A newly-created (or first-resolved) file: the archive
+                // restarts at offset 0 (the old create arm's behavior).
                 WRITE_OFFSET.store(0, Ordering::Relaxed);
-                Some(vfs_inode.ino as u32)
             }
-            Err(_) => None,
+        } else {
+            FILE_INO.store(0, Ordering::Relaxed);
         }
+        fresh
     }
 
     /// klogd main loop: sleep one period, flush, repeat (the khungtaskd
@@ -2378,12 +2360,6 @@ mod persistent_log {
         let Some(ino) = resolve_file() else {
             return;
         };
-        let fs_ptr = match crate::fs::ext4::get_ext4_fs() {
-            Some(ptr) if !ptr.is_null() => ptr,
-            _ => return,
-        };
-        // Same provenance as resolve_file (INV-FS-GLOBALSB-1 edge).
-        let fs = crate::fs::unsafe_edges::static_ref_unchecked(fs_ptr as *mut crate::fs::ext4::Ext4FileSystem);
 
         // Stage the delta: records with seq > LAST_SEQ, oldest-first,
         // at most MAX_RECORDS_PER_FLUSH of the newest ones.
@@ -2450,7 +2426,7 @@ mod persistent_log {
         let mut written = 0usize;
         for (seq, line) in &lines {
             let data = &line.buf[..line.len];
-            let n = crate::fs::ext4::file::ext4_kernel_write_at(fs, ino, offset, data);
+            let n = crate::fs::ext4_hooks::kmsg_write_at(ino, offset, data);
             if n > 0 {
                 offset += n as u64;
                 if offset >= MAX_LOG_SIZE {

@@ -372,32 +372,9 @@ pub fn create_fs_root(
         // ext2/ext3/ext4 from a loop device or a named vdX disk: the
         // separate-instance discipline (mount_loop_instance — no journal
         // replay, like a fresh scratch mount).
-        "ext2" | "ext3" | "ext4" => {
-            // "/dev/loopN"
-            if src.starts_with("/dev/loop") {
-                let idx: Option<u32> = src["/dev/loop".len()..].parse().ok();
-                if let Some(idx) = idx {
-                    let disk = crate::drivers::loop_dev::loop_disk(idx as usize)
-                        .ok_or(crate::errno::Errno::NoSuchDevice.as_neg_i32())?;
-                    let (root, effective_ro) =
-                        crate::fs::ext4::mount_loop_instance(disk, ro)?;
-                    return Ok((root, effective_ro));
-                }
-                return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
-            }
-            // Named disk ("/dev/vdb", "/dev/block/vdc", bare "vdb").
-            let trimmed = src
-                .trim_start_matches("/dev/block/")
-                .trim_start_matches("/dev/")
-                .trim_matches('/');
-            let disk = crate::drivers::virtio::get_pci_gen_disk_by_name(trimmed);
-            if let Some(disk) = disk {
-                let (root, effective_ro) =
-                    crate::fs::ext4::mount_loop_instance(disk, ro)?;
-                return Ok((root, effective_ro));
-            }
-            Err(crate::errno::Errno::NoSuchDevice.as_neg_i32())
-        }
+        // The whole ext-family arm is the crate's (rung-5 seam row):
+        // loop-idx/named-disk resolution + second-instance mount.
+        "ext2" | "ext3" | "ext4" => crate::fs::ext4_hooks::fsctx_mount_instance(src, ro),
         _ => Err(crate::errno::Errno::InvalidArgument.as_neg_i32()),
     }
 }

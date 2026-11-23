@@ -360,6 +360,7 @@ version = "0.1.0"
 dependencies = [
  "rux",
  "rux-drivers",
+ "rux-ext4",
  "rux-fs",
  "rux-mm",
  "rux-net",
@@ -375,10 +376,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rux-ext4"
+version = "0.1.0"
+dependencies = [
+ "rux",
+]
+
+[[package]]
 name = "rux-fs"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-ext4",
 ]
 
 [[package]]

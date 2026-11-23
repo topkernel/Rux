@@ -162,47 +162,9 @@ impl ListHead {
         self.next == self as *const _ as *mut _
     }
 
-    /// Add entry to list
-    pub fn add(&mut self, new: *mut ListHead) {
-        // SAFETY: Caller must ensure `new` is a valid, live pointer to a
-        // ListHead and that `self.next` (if non-null) is also valid. We are
-        // inserting `new` between `self` and `self.next` in the list.
-        unsafe {
-            (*new).next = self.next;
-            (*new).prev = self as *mut _;
-            if !self.next.is_null() {
-                (*self.next).prev = new;
-            }
-            self.next = new;
-        }
-    }
-
-    /// Add entry to tail of list
-    pub fn add_tail(&mut self, new: *mut ListHead) {
-        // SAFETY: Caller must ensure `new` is a valid, live pointer to a
-        // ListHead and that `self.prev` (if non-null) is also valid. We are
-        // inserting `new` between `self.prev` and `self` in the list.
-        unsafe {
-            (*new).next = self as *mut _;
-            (*new).prev = self.prev;
-            if !self.prev.is_null() {
-                (*self.prev).next = new;
-            }
-            self.prev = new;
-        }
-    }
-
-    /// Remove entry from list
-    pub fn remove(entry: *mut ListHead) {
-        // SAFETY: Caller must ensure `entry` is currently linked in a list,
-        // so `entry.next` and `entry.prev` are valid pointers (or null sentinel).
-        unsafe {
-            if !(*entry).next.is_null() && !(*entry).prev.is_null() {
-                (*(*entry).next).prev = (*entry).prev;
-                (*(*entry).prev).next = (*entry).next;
-            }
-        }
-    }
+    // (The add/add_tail/remove link-surgery methods were DEAD — the
+    // journal's lists are Vec/Spinlock-shaped in this implementation;
+    // deleted at rung 5 rather than converted, compiler-verified.)
 }
 
 // ============================================================================
@@ -268,8 +230,17 @@ pub struct Jbd2BufferTriggerType {
 // Handle
 // ============================================================================
 
-/// Handle structure - represents a single atomic update
+/// Handle structure - represents a single atomic update.
+///
+/// `#[repr(C)]` with `capture` FIRST: the framework's journal seam
+/// dereferences the type-erased task slot as a pointer to the
+/// `JournalCaptureState` header (INV-JSEAM-1, fs/journal_seam.rs) —
+/// field order is load-bearing, do not reorder.
+#[repr(C)]
 pub struct Handle {
+    /// The deferred-publication capture header (the framework's
+    /// fixed-offset view; see INV-JSEAM-1).
+    pub capture: crate::fs::journal_seam::JournalCaptureState,
     /// Which compound transaction is this update a part of?
     pub h_transaction: Option<Arc<Transaction>>,
     /// Which journal handle belongs to
@@ -300,89 +271,52 @@ pub struct Handle {
     pub h_start_jiffies: u64,
     /// Requested credits
     pub h_requested_credits: u32,
-    /// Deferred-publication capture window (see bio::PENDING_PUBLICATIONS).
-    /// While armed in PRE mode (create-side operations: mkdir/create/
-    /// symlink/link/rename-add), every buffer marked dirty on the capture
-    /// device is recorded on `h_pre_list`; the list becomes the `pre` set
-    /// of the publication created at the directory-entry write (an exact
-    /// snapshot of THIS operation's own metadata — the earlier device-wide
-    /// dirty snapshot cost O(cache) per op and O(N^2+) across a
-    /// create-heavy loop such as LTP creat05/fork09, which create 1021
-    /// files in setup). While armed in POST mode (unlink/rmdir/
-    /// rename-replace) buffers marked dirty are appended to the `post`
-    /// set of publication `capture_pub_id` instead. One mode at a time.
-    pub(crate) h_capture_mode: core::cell::Cell<u8>, // 0=off 1=pre 2=post
-    pub(crate) capture_pub_id: core::cell::Cell<u64>,
-    pub(crate) capture_dev: core::cell::Cell<(u32, u32)>,
-    /// PRE-mode capture accumulator (task-local: only the owning task's
-    /// syscalls append, via BufferHead::set_state_bit's hook).
-    pub(crate) h_pre_list: crate::sync::spinlock::Spinlock<alloc::vec::Vec<u64>>,
 }
 
-/// Capture window modes for `h_capture_mode`.
-pub(crate) const CAPTURE_OFF: u8 = 0;
-pub(crate) const CAPTURE_PRE: u8 = 1;
-pub(crate) const CAPTURE_POST: u8 = 2;
-
+// The capture-window state and protocol moved FRAMEWORK-side
+// (fs/journal_seam.rs, rung-5): the buffer cache's dirty-marking hot
+// path reads it through the type-erased task slot without naming this
+// crate (INV-JSEAM-1: this struct is #[repr(C)] and `capture` is the
+// FIRST field — the framework's fixed-offset view). The capture
+// methods delegate to the embedded header.
 impl Handle {
-    /// Arm the PRE-capture window (create side): buffers marked dirty on
-    /// `device` from now on belong BEFORE the entry publication this
-    /// operation will make. Disarmed by take_pre_capture at the entry
-    /// write (publish_captured_entry).
+    /// Arm the PRE-capture window (see journal_seam for the protocol).
     pub fn begin_pre_capture(&mut self, device: (u32, u32)) {
-        self.h_pre_list.lock().clear();
-        self.capture_dev.set(device);
-        self.h_capture_mode.set(CAPTURE_PRE);
+        self.capture.begin_pre_capture(device);
     }
 
-    /// Disarm the PRE-capture window and return the captured block list.
-    /// Never disturbs an armed POST window (rename-replace publishes its
-    /// new-name entry between the target removal and the tail of the
-    /// frees): the PRE accumulator is drained and only the PRE mode bit
-    /// is cleared.
+    /// Disarm the PRE-capture window and return the captured block list
+    /// (see journal_seam for the rename-replace freezing rule).
     pub fn take_pre_capture(&mut self) -> alloc::vec::Vec<u64> {
-        let out = core::mem::take(&mut *self.h_pre_list.lock());
-        if self.h_capture_mode.get() == CAPTURE_PRE {
-            self.h_capture_mode.set(CAPTURE_OFF);
-        }
-        out
+        self.capture.take_pre_capture()
     }
 
-    /// Arm the POST-capture window: buffers marked dirty from now on (on
-    /// `device`) belong after publication `pub_id`. Caller must call
-    /// end_post_capture before dropping the handle. Arming POST while a
-    /// PRE window is open freezes the PRE accumulator (it is taken later
-    /// by take_pre_capture) and routes new dirty-marks to the POST
-    /// record — the rename-replace shape.
+    /// Arm the POST-capture window (see journal_seam).
     pub fn begin_post_capture(&mut self, device: (u32, u32), pub_id: u64) {
-        self.capture_dev.set(device);
-        self.capture_pub_id.set(pub_id);
-        self.h_capture_mode.set(CAPTURE_POST);
+        self.capture.begin_post_capture(device, pub_id);
     }
 
-    /// Disarm the POST-capture window (a PRE window may have been frozen
-    /// by it; this never touches PRE state other than leaving mode OFF).
+    /// Disarm the POST-capture window (see journal_seam).
     pub fn end_post_capture(&mut self) {
-        if self.h_capture_mode.get() == CAPTURE_POST {
-            self.h_capture_mode.set(CAPTURE_OFF);
-        }
+        self.capture.end_post_capture();
     }
 
     /// Capture state readers (bio::publication_capture_note_dirty).
     pub fn capture_mode(&self) -> u8 {
-        self.h_capture_mode.get()
+        self.capture.mode.get()
     }
     pub fn capture_post_id(&self) -> u64 {
-        self.capture_pub_id.get()
+        self.capture.post_id.get()
     }
     pub fn capture_dev_key(&self) -> (u32, u32) {
-        self.capture_dev.get()
+        self.capture.dev_key.get()
     }
 }
 
 impl Default for Handle {
     fn default() -> Self {
         Self {
+            capture: crate::fs::journal_seam::JournalCaptureState::new(),
             h_transaction: None,
             h_journal: None,
             h_rsv_handle: None,
@@ -398,10 +332,6 @@ impl Default for Handle {
             h_line_no: 0,
             h_start_jiffies: 0,
             h_requested_credits: 0,
-            h_capture_mode: core::cell::Cell::new(0),
-            capture_pub_id: core::cell::Cell::new(0),
-            capture_dev: core::cell::Cell::new((0, 0)),
-            h_pre_list: crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 }

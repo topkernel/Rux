@@ -12,7 +12,7 @@
 //! The fns are thin trampolines today (inotify linked in); the crate
 //! flip swaps the trampoline body for a registration slot.
 
-pub(crate) mod ino_events {
+pub mod ino_events {
     //! The inotify event constants (IN_*) — re-exported so vfs.rs/file.rs
     /// keep their `ino::IN_*` spelling unchanged (zero-diff rename).
     pub use crate::fs::notify_events::inotify_events::*;
@@ -30,12 +30,12 @@ pub(crate) fn notify(
 }
 
 /// File access/modify event (read/write paths).
-pub(crate) fn notify_file(file: &crate::fs::file::File, mask: u32) {
+pub fn notify_file(file: &crate::fs::file::File, mask: u32) {
     crate::fs::fs_hooks::notify_file(file, mask);
 }
 
 /// File close event.
-pub(crate) fn notify_file_close(file: &crate::fs::file::File) {
+pub fn notify_file_close(file: &crate::fs::file::File) {
     crate::fs::fs_hooks::notify_file_close(file);
 }
 
