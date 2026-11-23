@@ -236,6 +236,15 @@ main() {
         fi
         QRC="${PIPESTATUS[0]}"
         if grep -q 'ALL TESTS PASSED' "$LOG"; then
+            # The verdict line alone is blind to tests that stopped
+            # running (a group whose file moved and nothing calls any
+            # more still prints "ALL TESTS PASSED"). Compare the run
+            # against the committed size baseline before calling it a
+            # pass; on a drop keep the log and fail.
+            if ! python3 "$SCRIPT_DIR/suite_size_gate.py" --quiet --arch "$PLATFORM" --log "$LOG"; then
+                echo "test: suite verdict green but the suite is smaller than its baseline (wrapper rc=$QRC); log kept: $LOG" >&2
+                exit 1
+            fi
             if [ "$QRC" -ne 0 ]; then
                 echo "test: suite verdict green; QEMU wrapper rc=$QRC (killed after kernel halt)"
             fi
