@@ -148,6 +148,64 @@ are not symmetric:
 | core -> service, cold site | one indirect call through the table | negligible on a cold path |
 | core -> service, hot site | one indirect call per site, not inlinable | the S1 regression: +25.1% on context switch |
 
+#### 1a.2a How a call crosses the boundary: direct, indirect, inlined
+
+Every question about whether moving code costs performance reduces to
+how the call crosses the crate boundary. Three forms exist in this
+kernel; the campaign's placement rules follow from them.
+
+**A direct call names its callee.** `mm_edges::zero_range(...)` —
+the compiler sees the target, checks the signature, emits a `call`
+with a fixed address. Between crates nothing changes: the callee's
+MIR travels in the rlib metadata, so the optimizer can inline across
+the boundary exactly as within one crate, and LTO makes it certain.
+A direct call is therefore free wherever the DEPENDENCY points the
+right way — a service crate calling into the core pays nothing, no
+matter how hot the site.
+
+**An indirect call reads its target at run time.** A function pointer
+loaded from the callback table:
+
+```rust
+// the core's dispatch site
+let next = (hooks.pick_next_task)(&rq);
+```
+
+The compiler cannot know which function the slot holds — it is a value
+published at boot — so it cannot inline, cannot constant-fold the
+arguments, and must keep the call clobbering the full caller-saved
+register set. Each indirect call costs a few nanoseconds by itself.
+The real cost is what it disables: everything the callee would have
+done under the caller's knowledge (argument specialization, dead-code
+elimination across the pair) is lost for every site. The S1
+measurement is the record: ~40 diagnostic rows fired per context
+switch, each one indirect, and the switch median moved +25.1%
+(1.718 -> 2.149 µs); moving the statics framework-side so the same
+sites called directly brought it back to +1.7%.
+
+**An interface method (vtable field) is an indirect call the caller
+already pays.** `ops.fault(file, off)` on a `FileOps` reads one field
+and calls it. This is not a new cost — the call was virtual before
+the move and virtual after — so moving a leaf behind its existing
+`FileOps` slot adds nothing. That is why the ext4 flip put the
+read/write paths on `FileOps.fault` / `FileOps.write_at` instead of
+adding table rows.
+
+The placement rule follows directly:
+
+| the call site | the callee moves | cost | rule |
+|---|---|---|---|
+| hot path (trap, switch, fault, walk, alloc, tick) | behind a table row | one indirect call per site, not inlinable | the callee stays in the core |
+| hot path | behind an existing vtable field | zero new cost | allowed; preferred for data paths |
+| cold path (mount, sysctl, procfs show, exit hooks) | behind a table row | a few ns on a path already doing µs–ms of work | allowed |
+| any service-crate site | into the core | direct, inlinable | always allowed |
+
+Two properties of indirect calls decide the layout, not taste:
+(1) inlining requires the callee to be a compile-time constant, which
+a table slot never is; (2) the cost multiplies by call frequency, so
+it is negligible on cold paths and measurable on hot ones — the same
+row can be free in one subsystem and a 25% regression in another.
+
 #### 1a.3 Interface design: what makes the closed argument true
 
 The closed argument in 1a.1 holds only if the published interfaces
