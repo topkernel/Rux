@@ -26,9 +26,92 @@ crates**. The criterion for every line of code is a single question:
 - NO → it belongs in `rux-core`, carries an INV contract or F-row, and is
  covered by the verification stack (Kani/Miri/Verus).
 
-There is no third bucket. "Framework" as a catch-all for leftovers is
-abolished; what remains in the core is there because it *cannot* be safe,
-not because it was not yet converted.
+There is no third bucket for UNSAFE. "Framework" as a catch-all for
+leftovers is abolished; what remains in the core is there because it
+*cannot* be safe, not because it was not yet converted.
+
+### 1a. The size criterion (user directive 2026-11-23): the core is as
+small as possible, performance unchanged
+
+The criterion above settles where UNSAFE lives. It does not settle how
+much SAFE code stays in the core, and by 2026-11-23 the answer was "most
+of it": kernel/src held 286,139 lines with only 1,838 unsafe blocks and
+238 unsafe fn/impl bodies. The directive for the rest of the campaign:
+
+> The core's code should be as small as possible, as long as
+> performance is unaffected. Code that leaves the core is organized by
+> subsystem.
+
+Two measured facts define the method.
+
+**Fact 1 — what actually has to stay is small.** A function must stay
+in the core when a hot-path site calls it directly: the trap entry and
+return, the context switch, the page-fault path, the VFS walk, bio and
+the page cache, the allocator entry points, the lock primitives, the
+timer tick, IRQ dispatch. Measured on the 2026-11-23 tree by scanning
+those files for direct name references (a deliberately conservative
+test — any name a hot-path file mentions counts as hot):
+
+| | lines |
+|---|---|
+| function bodies in kernel/src (tests excluded) | 228,305 |
+| of which called directly from a hot-path file | 106,431 (47%) |
+| of which reachable from no hot-path file | 121,874 |
+
+So the core can lose roughly 122k lines of function bodies without a
+single hot call becoming indirect — before counting what else leaves
+(types, constants, whole cold files). The target core size is about
+100k lines: the hot functions plus the types they operate on.
+
+**Fact 2 — files are mixed, so the unit of the move is the function,
+not the file.** Only 34 files (7,122 lines) have no hot-called function
+at all. 93 more files are under 25% hot: a few hot functions and a
+large cold remainder in the same file. Moving whole files therefore
+caps out far below the target. Every subsystem is split at the
+function boundary:
+
+- hot functions stay in the core, in the subsystem's core-side file
+  (the existing `*_edges.rs` pattern, or `<subsystem>_hot.rs`), where
+  hot callers reach them by direct call and the compiler can inline;
+- every other function of that subsystem moves to the subsystem's
+  service crate: `rux-sync`, `rux-process`, `rux-signal`, `rux-debug`,
+  `rux-ipc`, `rux-drivers`, `rux-fs`, `rux-mm`, `rux-sched`, … one crate
+  per subsystem, so a reader finds the scheduler's policy in
+  `rux-sched` and the futex protocol logic in `rux-sync`, not in a
+  bin of miscellaneous leftovers.
+
+**The performance rule that makes this free.** The boundary is placed
+so that hot callers never cross it upward. A function that a hot path
+calls directly is, by definition, in the core. What moves is what hot
+paths do not call: cold upward calls may go through the hook table
+(crate-plan §3a rule 2), and the crate calls DOWN into the core
+freely — a direct cross-crate call, inlinable. The S1 case study (§4)
+is the record of what happens when this rule is broken and how it is
+fixed; every lane measures its hot rows before and after.
+
+Per subsystem, the cold remainder measured on 2026-11-23 (lines of
+function bodies not called from any hot-path file):
+
+| subsystem | hot | cold (leaves the core) |
+|---|---|---|
+| drivers | 3,387 | 14,743 |
+| sync | 5,711 | 14,396 |
+| process | 8,348 | 9,435 |
+| debug | 6,642 | 8,239 |
+| fs (incl. procfs, devfs) | 24,134 | 21,726 |
+| ipc | 1,758 | 7,888 |
+| arch (three architectures) | 21,349 | 13,566 |
+| mm (incl. policy) | 12,779 | 9,537 |
+| root files (signal.rs, console.rs, cmdline.rs, …) | 4,333 | 10,323 |
+| sched | 12,731 | 2,232 |
+| interrupt | 2,727 | 0 |
+| others (trace, perf, timer, syscall table, io_uring, safety, net) | 1,981 | 10,967 |
+
+The numbers are a map, not a promise: a "cold" function that turns out
+to be on a path the measurement missed stays, and the lane that finds
+it records why. What is binding is the direction — every subsystem's
+cold majority leaves the core, organized by subsystem, with no hot
+call made indirect.
 
 ## 2. The irreducible floor (what stays in rux-core, and why)
 

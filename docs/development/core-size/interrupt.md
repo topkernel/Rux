@@ -1,0 +1,110 @@
+# Core-size worklist (generated — do not edit by hand)
+
+`hot` = called by name from a hot-path file (see scripts/core_size_map.py).
+Hot functions STAY in the core: a hot site calls them directly and the
+compiler can inline them. Every other row LEAVES the core for the
+subsystem's service crate. The test over-keeps on purpose; a cold row
+that turns out to be on a path the scan misses stays, and its lane
+records why.
+
+# interrupt — hot 2727 lines (stay) / cold 0 lines (leave)
+
+| file | fn | line | lines | hot |
+|---|---|---|---|---|
+| interrupt/domain.rs | `new` | 49 | 30 | yes |
+| interrupt/domain.rs | `irq_domain_create_linear` | 79 | 15 | yes |
+| interrupt/domain.rs | `get_default_domain` | 94 | 7 | yes |
+| interrupt/domain.rs | `irq_create_mapping` | 101 | 34 | yes |
+| interrupt/domain.rs | `generic_handle_domain_irq` | 135 | 14 | yes |
+| interrupt/irqdesc.rs | `new` | 64 | 51 | yes |
+| interrupt/irqdesc.rs | `new` | 115 | 22 | yes |
+| interrupt/irqdesc.rs | `init` | 137 | 11 | yes |
+| interrupt/irqdesc.rs | `irq_to_desc` | 148 | 12 | yes |
+| interrupt/irqdesc.rs | `irq_inc_count` | 160 | 8 | yes |
+| interrupt/irqdesc.rs | `irq_get_count` | 168 | 11 | yes |
+| interrupt/irqdesc.rs | `irq_get_name` | 179 | 16 | yes |
+| interrupt/irqdesc.rs | `remask_registered_irqs` | 195 | 29 | yes |
+| interrupt/irqdesc.rs | `request_irq` | 224 | 102 | yes |
+| interrupt/irqdesc.rs | `free_irq` | 326 | 118 | yes |
+| interrupt/irqdesc.rs | `handle_irq_event` | 444 | 25 | yes |
+| interrupt/irqdesc.rs | `handle_fasteoi_irq` | 469 | 73 | yes |
+| interrupt/irqdesc.rs | `force_threaded` | 542 | 24 | yes |
+| interrupt/irqdesc.rs | `force_thread_even_optouts` | 566 | 52 | yes |
+| interrupt/irqdesc.rs | `irq_thread_wake` | 618 | 18 | yes |
+| interrupt/irqdesc.rs | `irq_thread_spawn` | 636 | 60 | yes |
+| interrupt/irqdesc.rs | `irq_threads_boot_spawn` | 696 | 47 | yes |
+| interrupt/irqdesc.rs | `request_nmi` | 743 | 12 | yes |
+| interrupt/irqdesc.rs | `free_nmi` | 755 | 12 | yes |
+| interrupt/irqdesc.rs | `handle_fasteoi_nmi` | 767 | 22 | yes |
+| interrupt/irqdesc.rs | `arch_trigger_cpumask_backtrace` | 789 | 5 | yes |
+| interrupt/irqthread.rs | `spawns_allowed` | 35 | 7 | yes |
+| interrupt/irqthread.rs | `boot_init` | 42 | 27 | yes |
+| interrupt/irqthread.rs | `new` | 69 | 8 | yes |
+| interrupt/irqthread.rs | `spawned` | 77 | 9 | yes |
+| interrupt/irqthread.rs | `wake` | 86 | 19 | yes |
+| interrupt/irqthread.rs | `spawn` | 105 | 27 | yes |
+| interrupt/irqthread.rs | `thread_loop` | 132 | 27 | yes |
+| interrupt/ksoftirqd.rs | `wakeup_ksoftirqd` | 109 | 36 | yes |
+| interrupt/ksoftirqd.rs | `init` | 145 | 40 | yes |
+| interrupt/mod.rs | `init` | 64 | 7 | yes |
+| interrupt/preempt.rs | `preempt_count` | 114 | 9 | yes |
+| interrupt/preempt.rs | `in_interrupt` | 123 | 6 | yes |
+| interrupt/preempt.rs | `in_irq` | 129 | 6 | yes |
+| interrupt/preempt.rs | `in_softirq` | 135 | 6 | yes |
+| interrupt/preempt.rs | `in_task` | 141 | 13 | yes |
+| interrupt/preempt.rs | `might_sleep_check` | 154 | 26 | yes |
+| interrupt/preempt.rs | `preemptible` | 180 | 20 | yes |
+| interrupt/preempt.rs | `preempt_count_add` | 200 | 41 | yes |
+| interrupt/preempt.rs | `preempt_count_add_at` | 241 | 30 | yes |
+| interrupt/preempt.rs | `preempt_count_sub` | 271 | 11 | yes |
+| interrupt/preempt.rs | `preempt_count_sub_at` | 282 | 12 | yes |
+| interrupt/preempt.rs | `preempt_count_sub2_at` | 294 | 15 | yes |
+| interrupt/preempt.rs | `preempt_count_reset` | 309 | 33 | yes |
+| interrupt/preempt.rs | `irq_enter` | 342 | 66 | yes |
+| interrupt/preempt.rs | `hardirq_depth_live` | 408 | 22 | yes |
+| interrupt/preempt.rs | `irq_exit` | 430 | 67 | yes |
+| interrupt/preempt.rs | `pd` | 497 | 128 | yes |
+| interrupt/preempt.rs | `nmi_enter` | 625 | 9 | yes |
+| interrupt/preempt.rs | `nmi_exit` | 634 | 6 | yes |
+| interrupt/preempt.rs | `in_nmi` | 640 | 6 | yes |
+| interrupt/preempt.rs | `irqentry_nmi_enter` | 646 | 6 | yes |
+| interrupt/preempt.rs | `irqentry_nmi_exit` | 652 | 23 | yes |
+| interrupt/preempt.rs | `tick_orphan_scan` | 675 | 32 | yes |
+| interrupt/preempt.rs | `ph` | 707 | 7 | yes |
+| interrupt/preempt.rs | `pd` | 714 | 87 | yes |
+| interrupt/preempt.rs | `irq_pair_report` | 801 | 11 | yes |
+| interrupt/preempt.rs | `phex` | 812 | 43 | yes |
+| interrupt/softirq.rs | `raised_count` | 43 | 94 | yes |
+| interrupt/softirq.rs | `stuck_window` | 137 | 26 | yes |
+| interrupt/softirq.rs | `win_note` | 163 | 84 | yes |
+| interrupt/softirq.rs | `note_carrier_evidence` | 247 | 20 | yes |
+| interrupt/softirq.rs | `clear_carrier_evidence` | 267 | 21 | yes |
+| interrupt/softirq.rs | `carrier_evidence_fresh` | 288 | 14 | yes |
+| interrupt/softirq.rs | `carrier_evidence_age` | 302 | 15 | yes |
+| interrupt/softirq.rs | `open_softirq` | 317 | 16 | yes |
+| interrupt/softirq.rs | `raise_softirq_irqoff` | 333 | 16 | yes |
+| interrupt/softirq.rs | `raise_softirq` | 349 | 23 | yes |
+| interrupt/softirq.rs | `__do_softirq` | 372 | 215 | yes |
+| interrupt/softirq.rs | `invoke_softirq` | 587 | 25 | yes |
+| interrupt/softirq.rs | `softirq_pending_raw` | 612 | 13 | yes |
+| interrupt/softirq.rs | `in_progress_cpu` | 625 | 18 | yes |
+| interrupt/softirq.rs | `do_softirq_own_stack` | 643 | 11 | yes |
+| interrupt/softirq.rs | `has_pending_softirqs` | 654 | 13 | yes |
+| interrupt/softirq.rs | `wakeup_ksoftirqd` | 667 | 10 | yes |
+| interrupt/softirq.rs | `init` | 677 | 23 | yes |
+| interrupt/tasklet.rs | `new` | 51 | 10 | yes |
+| interrupt/tasklet.rs | `with_func` | 61 | 10 | yes |
+| interrupt/tasklet.rs | `init` | 71 | 9 | yes |
+| interrupt/tasklet.rs | `is_scheduled` | 80 | 6 | yes |
+| interrupt/tasklet.rs | `is_running` | 86 | 6 | yes |
+| interrupt/tasklet.rs | `is_disabled` | 92 | 6 | yes |
+| interrupt/tasklet.rs | `enable` | 98 | 10 | yes |
+| interrupt/tasklet.rs | `disable` | 108 | 26 | yes |
+| interrupt/tasklet.rs | `tasklet_schedule` | 134 | 25 | yes |
+| interrupt/tasklet.rs | `tasklet_hi_schedule` | 159 | 26 | yes |
+| interrupt/tasklet.rs | `tasklet_kill` | 185 | 25 | yes |
+| interrupt/tasklet.rs | `splice_all` | 210 | 20 | yes |
+| interrupt/tasklet.rs | `drain_tasklet_list` | 230 | 53 | yes |
+| interrupt/tasklet.rs | `tasklet_action` | 283 | 18 | yes |
+| interrupt/tasklet.rs | `tasklet_hi_action` | 301 | 21 | yes |
+| interrupt/tasklet.rs | `init` | 322 | 21 | yes |
