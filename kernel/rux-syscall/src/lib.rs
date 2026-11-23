@@ -82,6 +82,10 @@ pub mod syscall {
     #[cfg(feature = "x86_64")]
     #[path = "x86_compat.rs"] pub mod x86_compat;
 
+    // the moved diagnostic halves (cold-four lane)
+    #[path = "diag/strace1.rs"] pub mod diag_strace1;
+    #[path = "diag/seccomp_run.rs"] pub mod diag_seccomp_run;
+
     // The shared UAPI types the old mod.rs carried at the syscall
     // root (TimeVal, FdSet, ... — the service files' `use super::*`
     // found them there).
@@ -597,6 +601,8 @@ fn register_hooks() {
         is_eventfd_ops: |ops: &'static rux::fs::FileOps| core::ptr::eq(ops, &syscall::misc::EVENTFD_OPS),
         syscall_eio_line: |nr, args| syscall::io::syscall_eio_line(nr as usize, *args),
         epoll_dump_for_file: |fid| syscall::misc::epoll_dump_for_file(fid),
+        seccomp_run: syscall::diag_seccomp_run::seccomp_run,
+        strace1_line: syscall::diag_strace1::strace1_line,
     };
     syscall_register_hooks(hooks);
 }
