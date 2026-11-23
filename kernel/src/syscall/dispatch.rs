@@ -426,10 +426,19 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             return;
         }
         131 => {
-            // sigaltstack(ss, old_ss) — x86_64 native number. Unhandled,
-            // it fell through to the generic table where 131 is tgkill
-            // and the (ptr, ptr) arguments were parsed as a kill triple.
-            let r = native_table_call(131, args, regs); syscall_set_return_value(regs, r);
+            // sigaltstack(ss, old_ss) — x86_64 native number. The args
+            // table is GENERIC-numbered, where 131 is tgkill: passing
+            // the native number through answered every sigaltstack(2)
+            // with sys_tgkill(ESRCH) while the sigaltstack state was
+            // never touched (verified in-guest: the handler ran 0 times
+            // system-wide across full boots). musl's pthread_exit
+            // proceeds after the failed sigaltstack(NULL,&old) and
+            // munmaps the old stack using the caller's UNINITIALIZED
+            // stack slots as (ss_sp, ss_size) — on the OH image that
+            // carved the interpreter's image at 0x3fbf000000 and
+            // produced the NOVMA-EXEC storm. Route to the generic
+            // sigaltstack slot (132).
+            let r = native_table_call(132, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         132 => {
