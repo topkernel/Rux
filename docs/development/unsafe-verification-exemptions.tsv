@@ -37,3 +37,4 @@ kernel/src/io_uring/mod.rs	19	11	cold-four lane: 8 regions left kernel/src with 
 kernel/src/ipc/binder.rs	55	41	cold-four lane: 11 walker regions moved to kernel/src/ipc/binder_edges.rs with annotations carried; 3 raw-task/comm reads converted to the diag_task_comm/diag_task edges in the moved forbid-crate diagnostics
 kernel/src/timer.rs	3	2	cold-four lane: the WW heartbeat's ti_on_cpu volatile read moved into the ww_task_on_cpu framework edge (the report body flipped to the rux-timer forbid crate)
 kernel/src/lib.rs	1	0	cold-four lane: region shifted out by the timer_hooks module insertion renumbering; annotation carried by id to the new position
+kernel/src/cmdline.rs	5	4	region ELIMINATED by the root-cold move: parse_memory_regions walker moved to kernel/rux-drivers/src/of_fdt.rs under forbid, its core::mem::zeroed() replaced by a plain all-zero repeat expression; the 4 surviving regions kept their INV:INV-FDT-1 artifacts
