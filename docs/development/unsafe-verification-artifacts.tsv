@@ -1823,8 +1823,8 @@ f907cd9932e3	kernel/src/sync/edges.rs	pt_walk	135		INV:INV-SY-1
 3485ca29d839	kernel/src/sync/edges.rs	read_volatile_u32	152	volatile,ptr-ops	INV:INV-SY-1
 bece1bbf3315	kernel/src/sync/edges.rs	copy_from_user_bytes	161	ptr-ops	INV:INV-SY-3
 8473a937c0a6	kernel/src/sync/edges.rs	word_write	168	ptr-ops	INV:INV-SY-3
-99d70416781b	kernel/src/sync/futex.rs	<module>	650		INV:INV-SCE-2
-78d463ab537d	kernel/src/sync/futex.rs	<module>	651		INV:INV-SCE-2
+e6454c63bf35	kernel/src/sync/futex.rs	<module>	607		INV:INV-SCE-2
+341b415474fe	kernel/src/sync/futex.rs	<module>	608		INV:INV-SCE-2
 8227750a892e	kernel/src/sync/futex_pi.rs	<module>	184		INV:INV-SENDSYNC-1
 c0fe2ea3ac83	kernel/src/sync/futex_pi.rs	<module>	185		INV:INV-SENDSYNC-1
 ea23d00f7ead	kernel/src/sync/lockkey.rs	<module>	132		INV:INV-LOCK-6

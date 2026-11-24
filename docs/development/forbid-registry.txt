@@ -106,7 +106,7 @@ kernel/rux-sched/src/sched_policy/stats.rs
 kernel/rux-sched/src/sched_policy/stop_task.rs
 kernel/rux-sched/src/sched_policy/wakewatch.rs
 kernel/src/security/capability.rs
-kernel/src/sync/condvar.rs
+kernel/rux-sync/src/sync/condvar.rs
 kernel/src/sync/semaphore.rs
 kernel/src/tests/services/boundary.rs
 kernel/src/tests/buffer_state.rs
@@ -124,7 +124,7 @@ kernel/src/tests/file_flags.rs
 kernel/src/tests/fileops_caps.rs
 kernel/src/tests/services/fork.rs
 kernel/src/tests/fstat.rs
-kernel/src/tests/futex_test.rs
+kernel/src/tests/services/futex_test.rs
 kernel/src/tests/getdents_cache.rs
 kernel/src/tests/getpid.rs
 kernel/src/tests/heap_allocator.rs
