@@ -394,13 +394,13 @@ pub fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         use core::fmt::Write;
         use core::sync::atomic::Ordering::Relaxed;
         let mut s = alloc::string::String::from("USEGV-FOR: fails:");
-        let cur = tk.last_fails_cur.load(Relaxed);
+        let cur = tk.ext.last_fails_cur.load(Relaxed);
         for k in 0..8 {
             let i = (cur + 8 - 1 - k) % 8;
-            let v = tk.last_fails[i].load(Relaxed);
+            let v = tk.ext.last_fails[i].load(Relaxed);
             if v != 0 {
-                let a0 = tk.last_fails_a0[i].load(Relaxed);
-                let a1 = tk.last_fails_a1[i].load(Relaxed);
+                let a0 = tk.ext.last_fails_a0[i].load(Relaxed);
+                let a1 = tk.ext.last_fails_a1[i].load(Relaxed);
                 let _ = write!(
                     s,
                     " nr{}=-{} a0={:#x} a1={:#x}",
@@ -417,9 +417,9 @@ pub fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         let _ = write!(
             s,
             " | insys nr={} a0={:#x} a1={:#x}",
-            tk.last_syscall_nr.load(Relaxed),
-            tk.last_syscall_a0.load(Relaxed),
-            tk.last_syscall_a1.load(Relaxed)
+            tk.ext.last_syscall_nr.load(Relaxed),
+            tk.ext.last_syscall_a0.load(Relaxed),
+            tk.ext.last_syscall_a1.load(Relaxed)
         );
         // HOTPATH-PRINT: fatal-path forensics — once per user SIGSEGV death
         crate::pr_err!("{}", s);
