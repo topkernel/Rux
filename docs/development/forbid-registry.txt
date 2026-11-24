@@ -67,7 +67,7 @@ kernel/rux-fs/src/fs/procfs/version.rs
 kernel/rux-fs/src/fs/procfs/vmstat.rs
 kernel/src/fs/readahead.rs
 kernel/rux-fs/src/fs/selinuxfs.rs
-kernel/src/fs/xattr.rs
+kernel/rux-fs/src/fs/xattr.rs
 kernel/src/interrupt/domain.rs
 kernel/src/interrupt/irqchip.rs
 kernel/src/interrupt/irqthread.rs

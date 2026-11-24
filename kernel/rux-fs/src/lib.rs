@@ -51,6 +51,13 @@ pub mod fs {
     pub mod tmpfs;
     pub mod devfs;
     pub mod procfs;
+    pub mod xattr;
+    // The fs-rest split of the locks family: this module shadows the
+    // framework's (smaller) locks remainder for every crate::fs::locks
+    // path — the moved logic plus re-exports of the framework half's
+    // directly-called legs (execve's ETXTBSY gate and the exec-commit
+    // text hold, which rux-syscall names crate-side).
+    pub mod locks;
     pub use rux::fs::*;
 }
 
@@ -152,6 +159,21 @@ pub fn register_all() {
             crate::fs::inotify::MAX_QUEUED_EVENTS_SYSCTL.store(v, core::sync::atomic::Ordering::Release)
         },
         inotify_fdinfo_watches: crate::fs::inotify::fdinfo_watches,
+    });
+
+    // The locks family's cold rows (fs-rest split): the fcntl lock arms
+    // and the slow release bodies behind the framework half's count
+    // gates. Same contract — publishing stores plain values only.
+    rux::fs::lock_hooks::register_locks_hooks(rux::fs::lock_hooks::LocksHooks {
+        flock_release_slow: crate::fs::locks::flock_release_file_slow,
+        ofd_release_slow: crate::fs::locks::ofd_release_file_slow,
+        posix_release_slow: crate::fs::locks::posix_release_key_slow,
+        lease_release_slow: crate::fs::locks::lease_release_file_slow,
+        break_lease_slow: crate::fs::locks::break_lease_full,
+        posix_test_lock: crate::fs::locks::posix_test_lock,
+        posix_set_lock: crate::fs::locks::posix_set_lock,
+        set_lease: crate::fs::locks::set_lease,
+        get_lease: crate::fs::locks::get_lease,
     });
 
     use rux::fs::leaf_hooks::{LeafBootHooks, LeafPathHooks, LeafPopulateHooks};
