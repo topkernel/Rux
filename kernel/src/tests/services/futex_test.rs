@@ -13,6 +13,9 @@ use crate::sync::futex::{FUTEX_WAIT, FUTEX_WAKE, FUTEX_REQUEUE, FUTEX_FD,
     FUTEX_PRIVATE_FLAG, FUTEX_CLOCK_REALTIME, FUTEX_BITSET_MATCH_ANY,
     FutexKey, futex_to_flags};
 use super::{test_pass, test_fail, test_group_start};
+// The framework's exported assert macro (cross-crate macros need the
+// path import; same-crate textual scoping ended with the move).
+use rux::{test_assert, test_assert_eq};
 
 pub fn test_futex() {
     test_group_start("futex");

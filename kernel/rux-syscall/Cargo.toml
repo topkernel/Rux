@@ -12,6 +12,9 @@ edition = "2021"
 rux = { path = "..", default-features = false }
 rux-debug = { path = "../rux-debug", default-features = false }
 rux-ipc = { path = "../rux-ipc", default-features = false }
+# The sync union re-export (sync-upper lane): the exec path's fxrs_latch
+# and the wedge-dump rwfz_dump_tgid live in rux-sync now.
+rux-sync = { path = "../rux-sync", default-features = false }
 rux-fs = { path = "../rux-fs", default-features = false }
 rux-net = { path = "../rux-net", default-features = false }
 rux-process = { path = "../rux-process", default-features = false }
@@ -20,6 +23,6 @@ rux-io-uring = { path = "../rux-io-uring", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64", "rux-net/riscv64", "rux-fs/riscv64", "rux-debug/riscv64", "rux-process/riscv64"]
-x86_64 = ["rux/x86_64", "rux-net/x86_64", "rux-fs/x86_64", "rux-debug/x86_64", "rux-process/x86_64"]
-aarch64 = ["rux/aarch64", "rux-net/aarch64", "rux-fs/aarch64", "rux-debug/aarch64", "rux-process/aarch64"]
+riscv64 = ["rux/riscv64", "rux-net/riscv64", "rux-fs/riscv64", "rux-debug/riscv64", "rux-process/riscv64", "rux-sync/riscv64"]
+x86_64 = ["rux/x86_64", "rux-net/x86_64", "rux-fs/x86_64", "rux-debug/x86_64", "rux-process/x86_64", "rux-sync/x86_64"]
+aarch64 = ["rux/aarch64", "rux-net/aarch64", "rux-fs/aarch64", "rux-debug/aarch64", "rux-process/aarch64", "rux-sync/aarch64"]

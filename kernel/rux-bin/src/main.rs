@@ -50,6 +50,10 @@ pub extern "C" fn rust_main() -> ! {
     // heartbeat's formatting half — OnceSlot-published, consumed only
     // behind the EVENT_WWCENSUS arm gate.
     rux_timer::register_all();
+    // The sync diagnostic rows (sync-upper lane): the futex cold
+    // forensic family's rows — OnceSlot-published, consumed only from
+    // cold sites (the do_futex/census latch sections are arm-gated).
+    rux_sync::register_all();
     // Guest tests that flipped out with a service crate (pipe2 with
     // rux-fs, net_hdrs with rux-net, the fair pins + timeline with
     // rux-sched) run via the framework's SERVICE-TEST SEAM, in
@@ -72,6 +76,9 @@ pub extern "C" fn rust_main() -> ! {
         // the early seam point (their historical positions were early;
         // boundary was last in-framework but is destructive-safe there).
         rux::tests::register_service_tests(rux_process::run_unit_tests);
+        // rux-sync's futex group (constants/flags decode) at the early
+        // seam point (its historical in-suite position).
+        rux::tests::register_service_tests(rux_sync::run_unit_tests);
     }
     // The arch cold diagnostic rows (arch-cold lane): the fatal-fault
     // forensic walkers, the segv-history and ripsample report halves,

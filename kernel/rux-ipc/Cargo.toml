@@ -15,10 +15,14 @@ edition = "2021"
 
 [dependencies]
 rux = { path = "..", default-features = false }
+# The sync union re-export (sync-upper lane): binder_diag reaches the
+# moved futex diagnostics at their historical crate::sync::futex::X
+# paths through rux-sync's union module (the allowed downward edge).
+rux-sync = { path = "../rux-sync", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64"]
-x86_64 = ["rux/x86_64"]
-aarch64 = ["rux/aarch64"]
+riscv64 = ["rux/riscv64", "rux-sync/riscv64"]
+x86_64 = ["rux/x86_64", "rux-sync/x86_64"]
+aarch64 = ["rux/aarch64", "rux-sync/aarch64"]
 unit-test = []

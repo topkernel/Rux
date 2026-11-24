@@ -35,10 +35,10 @@ FILE` owns one), and the gate fails on a drop that
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1852**
-- recovered from reference versions: **87** (same-file 87, edited-site 0, file-move 0, moved-item 0)
-- references consulted: HEAD, MERGE_HEAD, history:888c3af9a, history:c8f5aeb6b, history:392745012, history:fe4fda2d6, history:68ce91851, history:a396bfe9f, history:53ffadd8c, history:99c35ac30, history:679f2f6d9, history:b306738d4, history:234ba9d54, history:e1d3f7876, history:d453d070a, history:e497c5b5a, history:b0fbfcc2e, history:5ad692052, history:3613721eb, history:96f2848b1, history:c01487587, history:0c8feb835, history:2a071cdf2, history:ccb0cabf6, history:78d73d4f6, history:938f1b41d, history:1d70a7c7d, history:e00a6cc4e, history:e78a5858b, history:33aa88454, history:67293fdcb, history:0db1981fd, history:7008a1cb1, history:d754f9e12, history:ff2d5ddb5, history:4741d627f, history:3f3f85760, history:05fb38075, history:2deea9ed7, history:f1900270e, history:d84fee492, history:82575b3b0, history:3e276af08, history:9b50aaff4, history:76ebff8e0, history:1e20375ab, history:25890277e, history:f035c2899, history:74d365f3f, history:9655f809c, history:82a7a7d0f, history:e255599d1, history:59a3f909a, history:07f730e64, history:de0a6071a, history:a09e7ab08, history:b8389cc06, history:2ed1470aa, history:c55875dfe, history:c187e1c35, history:e64dcfd36, history:1e687d251, history:10c8dc368, history:015823366, history:d878cd32c, history:3208bc9bb, history:65960c4e0, history:d5f2a4b29, history:b9d69b73c, history:db2da4975, history:a557edd1b, history:ca1005987, history:368a855ed, history:1e1bd0494, history:8832e06c2, history:418a7238e, history:dfe6bab32, history:64620c9c7, history:70794b235, history:46eadfea4, history:1c36a7a3c, history:d8ece4b39, history:2fe07a5a3, history:045a9f3a2, history:8f82e1326, history:1d518a966, history:d969cb7e9, history:dbdafa0a8, history:00bafaf99, history:6709b12cb, history:361701a15, history:5727de2f9, history:98658ba3e
-- annotated regions, baseline -> this bank: **1967 -> 1939**
+- artifacts kept by id: **1939**
+- recovered from reference versions: **0**
+- references consulted: HEAD, MERGE_HEAD, history:94d08d07c, history:888c3af9a, history:c8f5aeb6b, history:e2c554cc3, history:392745012, history:fe4fda2d6, history:68ce91851, history:a396bfe9f, history:53ffadd8c, history:99c35ac30, history:679f2f6d9, history:b306738d4, history:234ba9d54, history:e1d3f7876, history:d453d070a, history:e497c5b5a, history:b0fbfcc2e, history:5ad692052, history:3613721eb, history:96f2848b1, history:c01487587, history:0c8feb835, history:2a071cdf2, history:ccb0cabf6, history:78d73d4f6, history:938f1b41d, history:1d70a7c7d, history:e00a6cc4e, history:e78a5858b, history:33aa88454, history:67293fdcb, history:0db1981fd, history:7008a1cb1, history:d754f9e12, history:ff2d5ddb5, history:4741d627f, history:3f3f85760, history:05fb38075, history:2deea9ed7, history:f1900270e, history:d84fee492, history:82575b3b0, history:3e276af08, history:9b50aaff4, history:76ebff8e0, history:1e20375ab, history:25890277e, history:f035c2899, history:74d365f3f, history:9655f809c, history:82a7a7d0f, history:e255599d1, history:59a3f909a, history:07f730e64, history:de0a6071a, history:a09e7ab08, history:b8389cc06, history:2ed1470aa, history:c55875dfe, history:c187e1c35, history:e64dcfd36, history:1e687d251, history:10c8dc368, history:015823366, history:d878cd32c, history:3208bc9bb, history:65960c4e0, history:d5f2a4b29, history:b9d69b73c, history:db2da4975, history:a557edd1b, history:ca1005987, history:368a855ed, history:1e1bd0494, history:8832e06c2, history:418a7238e, history:dfe6bab32, history:64620c9c7, history:70794b235, history:46eadfea4, history:1c36a7a3c, history:d8ece4b39, history:2fe07a5a3, history:045a9f3a2, history:8f82e1326, history:1d518a966, history:d969cb7e9, history:dbdafa0a8, history:00bafaf99, history:6709b12cb, history:361701a15, history:5727de2f9, history:98658ba3e
+- annotated regions, baseline -> this bank: **1973 -> 1939**
 
 ## Per-subsystem
 
@@ -2019,8 +2019,8 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 650 | <module> | unsafe-impl | - | INV:INV-SCE-2 | `99d70416781b` |
-| 651 | <module> | unsafe-impl | - | INV:INV-SCE-2 | `78d463ab537d` |
+| 607 | <module> | unsafe-impl | - | INV:INV-SCE-2 | `e6454c63bf35` |
+| 608 | <module> | unsafe-impl | - | INV:INV-SCE-2 | `341b415474fe` |
 
 ### kernel/src/sync/futex_pi.rs (2)
 

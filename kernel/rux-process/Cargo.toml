@@ -21,13 +21,17 @@ edition = "2021"
 
 [dependencies]
 rux-timer = { path = "../rux-timer", default-features = false }
+# The sync union re-export (sync-upper lane): exit_teardown reaches
+# the moved rwfz_dump_tgid at its historical path through rux-sync's
+# union module (the allowed downward edge).
+rux-sync = { path = "../rux-sync", default-features = false }
 rux = { path = "..", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64"]
-x86_64 = ["rux/x86_64"]
-aarch64 = ["rux/aarch64"]
+riscv64 = ["rux/riscv64", "rux-sync/riscv64"]
+x86_64 = ["rux/x86_64", "rux-sync/x86_64"]
+aarch64 = ["rux/aarch64", "rux-sync/aarch64"]
 # Gates the guest test modules + their run entry (make test forwards
 # this from rux-bin's unit-test through the SERVICE-TEST SEAM).
 unit-test = ["rux/unit-test"]

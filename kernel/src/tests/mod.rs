@@ -372,8 +372,8 @@ pub mod sleep_wakeup;
 // ===== Synchronization =====
 #[cfg(feature = "unit-test")]
 pub mod semaphore;
-#[cfg(feature = "unit-test")]
-// pub mod futex_test; — service-internals test (State B final; follows the files to the crate)
+// pub mod futex_test; — moved to tests/services/ (sync-upper lane);
+// runs via the SERVICE-TEST SEAM (rux_sync::run_unit_tests)
 
 // ===== Scheduler =====
 #[cfg(feature = "unit-test")]
@@ -679,9 +679,8 @@ pub fn run_all_tests() {
     test_group_start("semaphore");
     semaphore::test_semaphore();
 
-    test_group_start("futex");
-// (gated with the module: futex_test)
-// (gated with the module: futex_test)
+// (gated with the module: futex_test — group runs via the
+// SERVICE-TEST SEAM, rux_sync::run_unit_tests)
 
     // ===== 6. Scheduler =====
     test_group_start("smp");

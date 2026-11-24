@@ -8103,7 +8103,7 @@ fn binder_transaction(
                     && sb[60] == 0xec
                     && sb[61] == 0x13
                 {
-                    crate::sync::futex::fxdv_latch_devmgr(proc.pid);
+                    crate::sync::sync_diag_hooks::fxdv_latch_devmgr(proc.pid);
                 }
             }
         }

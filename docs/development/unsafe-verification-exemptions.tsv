@@ -44,3 +44,4 @@ kernel/src/arch/x86_64/trap.rs	86	80	F1 family-(a): the mm_ops printers consolid
 kernel/src/arch/x86_64/ipi.rs	15	12	regions sole-copied to the forbid crate (its own count is zero by construction); remainder recoverable from history
 kernel/src/arch/x86_64/trap.rs	63	59	vs the arch-cold merge parent (63): four regions shifted by the F1 port edits; recoverable from history
 kernel/src/arch/x86_64/trap.rs	80	59	forensic walker regions moved to rux-arch/trap_diag.rs (forbid, zero by construction); the mm_ops printer consolidated per F1 hoists; remainder recoverable
+kernel/src/arch/x86_64/trap.rs	86	59	vs the sync-upper parent (which predates the arch-cold extraction): 27 regions moved to rux-arch/trap_diag.rs (forbid, zero by construction); the merged-tree count (59) is already exempted at its own baselines

@@ -287,7 +287,7 @@ pub fn send_signal_core(
         let t_len = t_comm.iter().position(|&b| b == 0).unwrap_or(t_comm.len());
         if let Ok(t_str) = core::str::from_utf8(&t_comm[..t_len]) {
             if t_str.contains("launcher") {
-                crate::sync::futex::kill_dump_tgid(task.tgid() as u32);
+                crate::sync::sync_diag_hooks::kill_dump_tgid(task.tgid() as u32);
             }
         }
     }
