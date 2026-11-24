@@ -289,14 +289,20 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     match syscall_no {
         7 => {
             fixbl_note(0);
-            // poll(fds, nfds, timeout_ms) — handler exists, no generic slot.
-            let r = native_table_call(7, args, regs); syscall_set_return_value(regs, r);
+            // poll(fds, nfds, timeout_ms) — handler exists, no generic
+            // slot. The State-B-final sweep wired this arm to slot 7 =
+            // fsetxattr; OH's ueventd issues native poll(2) and was
+            // answered by it (counter evidence, fix-backlog lane).
+            // Route to the dedicated free-slot registration (1183).
+            let r = native_table_call(1183, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         23 => {
             fixbl_note(1);
             // select(nfds, r, w, e, timeval*) — timeval timeout variant.
-            let r = native_table_call(23, args, regs); syscall_set_return_value(regs, r);
+            // Slot 23 in the generic table is dup; route to the
+            // dedicated free-slot registration (1184).
+            let r = native_table_call(1184, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         33 => {
@@ -307,7 +313,10 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // if it is open, else EBADF; dup3() itself would EINVAL.
             let result = if args[0] == args[1] {
                 fixbl_note(9);
-                let probe = native_table_call(72, [args[0], 1 /* F_GETFD */, 0, 0, 0, 0], regs);
+                // F_GETFD probe: slot 25 is the generic fcntl (the
+                // sweep had wired this to slot 72 = pselect6, whose
+                // EFAULT shadowed the real EBADF/newfd answer).
+                let probe = native_table_call(25, [args[0], 1 /* F_GETFD */, 0, 0, 0, 0], regs);
                 if probe < 0 {
                     probe // -EBADF from the lookup itself
                 } else {
@@ -325,8 +334,9 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // remaining seconds (rounded up). No asm-generic number;
             // untranslated, 37 fell through to generic 37 = linkat and
             // every glibc alarm() caller parsed a linkat errno as the
-            // return value (LTP alarm02/03/05/06/07 family).
-            let r = native_table_call(37, args, regs); syscall_set_return_value(regs, r);
+            // return value (LTP alarm02/03/05/06/07 family). Route to
+            // the dedicated free-slot registration (1186).
+            let r = native_table_call(1186, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         78 => {
@@ -334,14 +344,18 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // getdents(fd, buf, count) — legacy record layout (name at
             // 18, d_type at 18+nlen+1). No asm-generic number (generic
             // libcs use getdents64); untranslated, 78 fell through to
-            // generic 78 = readlinkat.
-            let r = native_table_call(141, args, regs); syscall_set_return_value(regs, r);
+            // generic 78 = readlinkat. Slot 141 in the generic table
+            // is getpriority; route to the dedicated free-slot
+            // registration (1187).
+            let r = native_table_call(1187, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         34 => {
             fixbl_note(2);
-            // pause(): sleep until a signal; always -EINTR.
-            let r = native_table_call(34, args, regs); syscall_set_return_value(regs, r);
+            // pause(): sleep until a signal; always -EINTR. Slot 34 in
+            // the generic table is mkdirat; route to the dedicated
+            // free-slot registration (1185).
+            let r = native_table_call(1185, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         131 => {
@@ -388,10 +402,12 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         213 => {
             fixbl_note(5);
             // epoll_create(size): Linux rejects size <= 0 with EINVAL.
+            // Slot 0 in the generic table is io_setup; route to the
+            // dedicated free-slot registration (1188).
             let result = if (args[0] as i64) <= 0 {
                 -(errno::EINVAL as i64)
             } else {
-                native_table_call(0, args, regs) /* misc::sys_epoll_create */
+                native_table_call(1188, args, regs) /* misc::sys_epoll_create */
             };
             syscall_set_return_value(regs, result);
             return;
@@ -401,8 +417,10 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // utimes(path, timeval[2]) — microsecond utime(2), no
             // asm-generic number. Untranslated, 235 fell through to
             // generic 235 = mbind; glibc's utimes() on x86_64 issues
-            // the native number (LTP utimes01 on x86).
-            let r = native_table_call(0, args, regs); /* file::sys_utimes */ syscall_set_return_value(regs, r);
+            // the native number (LTP utimes01 on x86). Slot 0 in the
+            // generic table is io_setup; route to the dedicated
+            // free-slot registration (1190).
+            let r = native_table_call(1190, args, regs); /* file::sys_utimes */ syscall_set_return_value(regs, r);
             return;
         }
         261 => {
@@ -410,15 +428,19 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // futimesat(dirfd, path, timeval[2]) — no asm-generic
             // number. Untranslated, 261 fell through to generic 261 =
             // prlimit64, whose EINVAL was read as the test outcome by
-            // LTP futimesat01 on every x86 run.
-            let r = native_table_call(0, args, regs); /* file::sys_futimesat_native */ syscall_set_return_value(regs, r);
+            // LTP futimesat01 on every x86 run. Slot 0 in the generic
+            // table is io_setup; route to the dedicated free-slot
+            // registration (1191).
+            let r = native_table_call(1191, args, regs); /* file::sys_futimesat_native */ syscall_set_return_value(regs, r);
             return;
         }
         232 => {
             fixbl_note(8);
             // epoll_wait(epfd, events, maxevents, timeout_ms) — handler
-            // exists, no generic slot (generic uses epoll_pwait).
-            let r = native_table_call(0, args, regs); /* misc::sys_epoll_wait */ syscall_set_return_value(regs, r);
+            // exists, no generic slot (generic uses epoll_pwait). Slot 0
+            // in the generic table is io_setup; route to the dedicated
+            // free-slot registration (1189).
+            let r = native_table_call(1189, args, regs); /* misc::sys_epoll_wait */ syscall_set_return_value(regs, r);
             return;
         }
         172 => {
