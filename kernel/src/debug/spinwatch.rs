@@ -41,7 +41,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 pub fn on() -> bool {
     crate::trace::EVENT_SPINWATCH.armed()
 }
-/// Compatibility arm (moved to the rux-debug crate): same-named wrapper
+/// Compatibility arm (moved to the debug crate): same-named wrapper
 /// for the boot arming site; dispatches the hook row.
 pub fn compat_arm() {
     crate::debug::debug_hooks::spinwatch_compat_arm();

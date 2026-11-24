@@ -122,11 +122,11 @@ pub mod process;
 pub mod sched;
 pub mod fs;
 pub mod signal;
-// The signal POLICY seam + edges (the rux-signal crate flip): the hook
+// The signal POLICY seam + edges (the signal crate flip): the hook
 // table the framework dispatches cold policy rows through, and the
 // unsafe-bearing signal functions that stay framework-side when the
 // policy moved to the crate. signal_policy.rs (the moved bodies) is
-// deliberately NOT declared here — the rux-signal service crate is its
+// deliberately NOT declared here — the signal service crate is its
 // sole compilation home, under #![forbid(unsafe_code)].
 pub mod signal_hooks;
 pub mod signal_edges;
@@ -680,7 +680,7 @@ pub fn rust_main_tail() -> ! {
             print_status("bio", "buffer cache layer", true);
 
             // Initialize ext4 file system (the crate's init row —
-            // rux-ext4's register_all filled the table before kmain)
+            // ext4's register_all filled the table before kmain)
             fs::ext4_hooks::init();
             print_status("fs", "ext4 driver loaded", true);
 
@@ -853,7 +853,7 @@ pub fn rust_main_tail() -> ! {
         // the named-call era.
         {
             // The probe family's rows register through the DriverHooks
-            // seam (rux-drivers owns probe.rs since the rung-4 tranche
+            // seam (drivers owns probe.rs since the rung-4 tranche
             // 2); the row body performs the historical three
             // register_initcall calls verbatim at this exact point.
             drivers::hooks::register_probe_initcalls();
@@ -995,7 +995,7 @@ pub fn rust_main_tail() -> ! {
         // The reference's trace_event= boot parameter: comma-separated
         // set_event tokens applied before the first userspace
         // instruction (kernel/trace/trace_events.c __setup). The file
-        // set lives in the rux-debug crate now; the row applies it.
+        // set lives in the debug crate now; the row applies it.
         {
             debug::debug_hooks::trace_files_init_from_cmdline();
         }
@@ -1408,7 +1408,7 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
 // guard tripped when the M3-B merge's dual-compilation image reached
 // 0x81edb000 over the stale 0x81e0_0000 base; the linker window
 // already allows _end <= 0x82000000). TRANSITION NOTE: the
-// dual-compilation bloat (in-lib service copies + the rux-syscall
+// dual-compilation bloat (in-lib service copies + the syscall
 // rlib) is the documented migration state; State B (the in-lib file
 // deletion) removes it — if the image then fits comfortably, a follow
 // -up may walk this back, with the layout gate re-verified either way.

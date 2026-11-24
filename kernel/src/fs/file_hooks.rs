@@ -4,7 +4,7 @@
 //!
 //! Rung-3 OPS-HOOK SEAM: the framework-side per-File operation hooks.
 //! pipe/fifo/memfd dispatch through the FsHooks registration table
-//! (the rux-fs crate registers at boot — the trampolines became
+//! (the fs crate registers at boot — the trampolines became
 //! slots at the flip); char_dev stays framework-side (direct).
 
 /// FIONREAD/stat fallback for a pipe File (None = not a pipe).
@@ -34,7 +34,7 @@ pub(crate) fn oasync_unregister(file_id: u64) {
 }
 
 /// stat fallback for a char-device File (the char_dev leaf lives in the
-/// rux-fs crate; dispatch through the path table).
+/// fs crate; dispatch through the path table).
 pub(crate) fn char_dev_stat(file: &crate::fs::file::File, stat: &mut crate::fs::Stat) -> Option<i32> {
     crate::fs::leaf_glue::char_dev::char_dev_file_stat(file, stat)
 }

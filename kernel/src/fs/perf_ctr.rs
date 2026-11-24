@@ -8,7 +8,7 @@
 //! (arch trap tick charging, scheduler context-switch/fork notes, the
 //! loadavg sampler, idle accounting) stay DIRECT framework calls with
 //! zero indirection (the S1 devirtualization rule: no fn-pointer rows on
-//! the trap/sched hot paths). The procfs leaf (rux-fs crate) formats
+//! the trap/sched hot paths). The procfs leaf (fs crate) formats
 //! these cells in its generate() paths. Linux alignment: the reference
 //! keeps these in kernel/sched + per-cpu irq counters, not in procfs.
 //!

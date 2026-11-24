@@ -25,7 +25,7 @@ pub mod initcalls;
 pub mod hooks;
 pub mod drm;
 
-// The VirtIO probe orchestrator moved to the rux-drivers service crate
+// The VirtIO probe orchestrator moved to the drivers service crate
 // (rung-4 tranche 2, sole copy); the boot core reaches it through
 // hooks::register_probe_initcalls and sysfs through
 // hooks::pci_rescan_block_hotplug.

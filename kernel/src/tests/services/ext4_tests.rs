@@ -7,7 +7,7 @@
 //! tests/ext4_file_write.rs) plus the ext4 halves of tests/fs_pins.rs
 //! (csum + indirect pins) — flipped WITH the crate at rung 5. The
 //! framework's run_all_tests invokes run_all through
-//! rux::tests::register_service_tests (rux-bin wires it); pass/fail
+//! rux::tests::register_service_tests (bin wires it); pass/fail
 //! lands in the framework's counters.
 
 pub mod ext4_allocator;

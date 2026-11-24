@@ -43,7 +43,7 @@
 //! do so under a fixed-offset contract (the journal_seam
 //! INV-JSEAM-1 precedent); today no framework reader needs one — all
 //! access is through the typed handle. The type is framework-defined
-//! for now; it flips into the rux-process service crate together
+//! for now; it flips into the process service crate together
 //! with the namespace family (the last family), whose ns.rs types
 //! move in the same step per the F1 design.
 

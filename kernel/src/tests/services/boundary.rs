@@ -9,7 +9,7 @@
 
 //! Boundary condition test
 use crate::println;
-// Cross-crate macro (the rux-ipc test-move precedent).
+// Cross-crate macro (the ipc test-move precedent).
 use rux::test_println;
 use crate::process::do_fork;
 use alloc::format;

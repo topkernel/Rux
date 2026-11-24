@@ -3066,13 +3066,13 @@ pub static TL_POISON: TlPoisonCounters = TlPoisonCounters {
 // ==================== Shared sched observability state ====================
 // (sched-seam devirt lane, 2026-11-23): the per-switch diagnostic counters
 // below are PLAIN STATE, not policy — no decision reads them; the census
-// walks and /proc readers do. They originally moved into the rux-sched
+// walks and /proc readers do. They originally moved into the sched
 // service crate with the S1b flip, which put every per-switch access
 // through a SchedHooks fn-pointer row (wrapper -> OnceSlot read ->
 // indirect call) — p2_ctxsw measured the layer at ~0.4 us per switch
 // round (2.12-2.19 vs 1.708 same-window main, outside the +-20% sched
 // band). The storage and its trivial accessors live HERE (framework)
-// now; the rux-sched census code reads them through the normal
+// now; the sched census code reads them through the normal
 // crate::sched re-exports (the same visibility PICK_GEN always had).
 // Same single instance, same stores at the same call sites — only the
 // dispatch layer is gone.

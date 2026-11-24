@@ -23,18 +23,18 @@ pub mod sched_hooks;
 pub mod entities;
 pub mod reapdrain;
 pub mod sched;
-// pub mod sched_policy; — MOVED to the rux-sched-policy service crate (S1b)
-// pub mod sched_ev; — MOVED to the rux-sched-policy service crate (S1b)
+// pub mod sched_policy; — MOVED to the sched service crate (S1b)
+// pub mod sched_ev; — MOVED to the sched service crate (S1b)
 pub mod class;
-// pub mod rt; — MOVED to the rux-sched-policy service crate (S1b)
-// pub mod deadline; — MOVED to the rux-sched-policy service crate (S1b)
-// pub mod stop_task; — MOVED to the rux-sched-policy service crate (S1b)
-// pub mod idle; — MOVED to the rux-sched-policy service crate (S1b)
-// pub mod fair; — MOVED to the rux-sched-policy service crate (S1b)
+// pub mod rt; — MOVED to the sched service crate (S1b)
+// pub mod deadline; — MOVED to the sched service crate (S1b)
+// pub mod stop_task; — MOVED to the sched service crate (S1b)
+// pub mod idle; — MOVED to the sched service crate (S1b)
+// pub mod fair; — MOVED to the sched service crate (S1b)
 pub mod cgroup;
-// pub mod wakewatch; — MOVED to the rux-sched-policy service crate (S1b)
+// pub mod wakewatch; — MOVED to the sched service crate (S1b)
 pub mod side_edges;
-// pub mod stats; — MOVED to the rux-sched-policy service crate (S1b)
+// pub mod stats; — MOVED to the sched service crate (S1b)
 
 pub use sched::{
     current,
@@ -121,7 +121,7 @@ pub use sched::{
 // Re-export of process::exit::{do_exit, do_wait, do_wait_nonblock} REMOVED
 // (process rung): zero callers at the flip; do_exit/do_exit_group stay
 // reachable at crate::process::exit::, the wait family moved to the
-// rux-process crate.
+// process crate.
 
 // Re-export send_signal from signal module for backward compatibility
 pub use crate::signal::send_signal;
@@ -167,7 +167,7 @@ pub use class::{
 pub use entities::{RtRunQueue, MAX_RT_PRIO};
 
 // Shared sched observability state (sched-seam devirt lane): plain
-// counters/phase stamps the rux-sched census code reads — framework
+// counters/phase stamps the sched census code reads — framework
 // storage, policy-visible through this re-export (the PICK_GEN shape).
 pub use entities::{
     PT_TASK,

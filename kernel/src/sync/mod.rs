@@ -24,7 +24,7 @@ pub mod percpu;
 pub mod lockkey;
 
 /// The futex cold diagnostic seam (sync-upper lane): the rows the
-/// framework's cold sites use to reach rux-sync's futex_diag.
+/// framework's cold sites use to reach sync's futex_diag.
 pub mod sync_diag_hooks;
 
 pub use mutex::SleepMutex;

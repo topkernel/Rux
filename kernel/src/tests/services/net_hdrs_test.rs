@@ -7,8 +7,8 @@
 //! host-side blocks never compiled in this no_std crate; these assertions
 //! never actually ran until now). Originally kernel/src/tests/net_hdrs.rs;
 //! moved with the rung-2 crate flip (the test follows the files it pins)
-//! and runs in-guest through the SERVICE-TEST SEAM (rux-bin registers
-//! rux_net::run_unit_tests; the framework's pass/fail counters are shared,
+//! and runs in-guest through the SERVICE-TEST SEAM (bin registers
+//! net::run_unit_tests; the framework's pass/fail counters are shared,
 //! so the pins land in the same suite totals).
 
 use crate::net::ethernet::{

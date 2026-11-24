@@ -219,7 +219,7 @@ pub struct IpcObjectEntry<T> {
 pub struct IpcIds<T> {
     pub slots: Spinlock<[Option<alloc::boxed::Box<IpcObjectEntry<T>>>; IPC_IDS_MAX]>,
     next_seq: AtomicU32,
-    // pub (visibility tax of the rux-ipc flip): sysv_shm's destroy
+    // pub (visibility tax of the ipc flip): sysv_shm's destroy
     // paths decrement the live-object count under the slots lock.
     pub count: AtomicUsize,
 }

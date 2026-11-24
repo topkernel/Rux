@@ -82,7 +82,7 @@ impl<'a> core::ops::DerefMut for SavedFrame<'a> {
 
 // ===========================================================================
 // INV-ARCHDIAG-* — the arch-cold lane's audited diagnostic read edges
-// (rux-arch service crate). Every row is a READ-ONLY, best-effort
+// (arch service crate). Every row is a READ-ONLY, best-effort
 // bottom for a forensic walker that runs on an already-broken machine
 // or a dying task; no row mutates kernel state, no row is for
 // healthy-path use, and every consumer prints then parks/exits.

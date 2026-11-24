@@ -77,8 +77,8 @@ pub fn fdt_u32(p: *const u8) -> u32 {
 }
 
 // ============================================================================
-// The FDT walkers — MOVED to the rux-drivers service crate
-// (kernel/rux-drivers/src/of_fdt.rs; root-cold lane 2026-11-24)
+// The FDT walkers — MOVED to the drivers service crate
+// (kernel/drivers/src/of_fdt.rs; root-cold lane 2026-11-24)
 // ============================================================================
 
 /// Maximum number of memory regions we track (stack-allocated, no heap
@@ -89,7 +89,7 @@ pub const MAX_MEMORY_REGIONS: usize = 8;
 // The four dispatchers below keep the historical names and signatures,
 // so every caller (cmdline::init, lib.rs's memblock/paging phases,
 // vext's ISA prime) is unchanged; the bodies now dispatch through the
-// BootScanHooks rows the rux-drivers registrar publishes before the
+// BootScanHooks rows the drivers registrar publishes before the
 // framework impl boots. All call sites are boot-time cold.
 
 /// Parse the kernel command line from the bootloader DTB (`/chosen`).

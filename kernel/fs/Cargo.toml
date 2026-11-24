@@ -1,0 +1,33 @@
+[package]
+name = "fs"
+version = "0.1.0"
+edition = "2021"
+
+# The FS SERVICE CRATE (crate-flip rung 3): the movable filesystem
+# leaves — pipe, fifo, inotify, memfd, eventpoll, selinuxfs, plus the
+# fs-substrate tranche (debugfs, tracefs, cgroup, sysfs, char_dev,
+# tty, pty, rootfs, tmpfs, devfs, procfs) and the fs-rest tranche
+# (xattr whole; the locks flock/POSIX/lease logic — the tables and the
+# syscall bodies — while the open/close fast-path gates, the count
+# mirrors and the exec text-hold family stay framework-side in
+# fs/locks.rs) — compiled under crate-level #![forbid(unsafe_code)]
+# (the third service column). The kernel-wide accounting cells live
+# framework-side (fs/perf_ctr.rs — arch traps and the scheduler call
+# them directly, zero indirection).
+
+[dependencies]
+rux = { path = "..", default-features = false }
+debug = { path = "../debug", default-features = false }
+# The deeper fs leaf (rung 5): the merged fs view re-exports ext4+jbd2
+# so the syscall crate's crate::fs::ext4 paths stay valid (the
+# one-way sibling-service dep, the net precedent).
+ext4 = { path = "../ext4", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64", "ext4/riscv64", "debug/riscv64"]
+x86_64 = ["rux/x86_64", "ext4/x86_64", "debug/x86_64"]
+aarch64 = ["rux/aarch64", "ext4/aarch64", "debug/aarch64"]
+# Gates the guest test module + its run entry (make test forwards this
+# from bin's unit-test through the SERVICE-TEST SEAM).
+unit-test = ["rux/unit-test"]

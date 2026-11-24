@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! PROCESS FLIP SEAM (crate-flip rung: rux-process): the three hook
+//! PROCESS FLIP SEAM (crate-flip rung: process): the three hook
 //! tables the FRAMEWORK uses to reach the process service crate's
 //! cold-path rows. The hot framework callers (arch traps' do_exit /
 //! do_exit_group, signal delivery's exit paths, the scheduler reap
@@ -25,7 +25,7 @@
 //! Row bodies are the crate's real functions; framework call sites go
 //! through these accessors only.
 //!
-//! Registration runs from rust_main via rux_process::register_all —
+//! Registration runs from rust_main via process::register_all —
 //! publication is OnceSlot-only (no Spinlock, no per-CPU state; the
 //! x86_64 unit-test kernel lesson, INV-SVCTEST-1's sibling).
 
@@ -130,7 +130,7 @@ pub static PROCESS_HOOKS: crate::safety::slot::OnceSlot<ProcessHooks> =
     crate::safety::slot::OnceSlot::new();
 
 /// The service crate's registration entry (idempotent: first wins —
-/// the composition bin's `rux_process::register_all` runs before any
+/// the composition bin's `process::register_all` runs before any
 /// consumer).
 pub fn process_register_hooks(hooks: ProcessHooks) {
     let _ = PROCESS_HOOKS.publish(hooks);
@@ -415,7 +415,7 @@ pub fn set_last_pid(v: u32) -> bool {
 // ==================== ExitHooks ====================
 
 /// The exit TEARDOWN rows: the functions do_exit / do_exit_group
-/// (core-side, hot-name-called) reach in the rux-process crate's
+/// (core-side, hot-name-called) reach in the process crate's
 /// exit_teardown family. Each runs ONCE per task death — cold by the
 /// call-direction scan; an indirect call here is off every hot path.
 #[derive(Clone, Copy)]

@@ -8,27 +8,27 @@ pub mod net_hooks;
 pub mod file_arc;
 pub mod net_edges;
 pub mod buffer;
-// pub mod ethernet; — MOVED to the rux-net service crate (rung 2)
-// pub mod arp; — MOVED to the rux-net service crate (rung 2)
-// pub mod icmp; — MOVED to the rux-net service crate (rung 2)
-// pub mod ipv4; — MOVED to the rux-net service crate (rung 2)
-// pub mod ipv6; — MOVED to the rux-net service crate (rung 2)
-// pub mod udp; — MOVED to the rux-net service crate (rung 2)
-// pub mod tcp; — MOVED to the rux-net service crate (rung 2)
-// pub mod tcp_timer; — MOVED to the rux-net service crate (rung 2)
-// pub mod socket; — MOVED to the rux-net service crate (rung 2)
-// pub mod unix; — MOVED to the rux-net service crate (rung 2)
-// pub mod netlink; — MOVED to the rux-net service crate (rung 2)
-// pub mod raw; — MOVED to the rux-net service crate (rung 2)
+// pub mod ethernet; — MOVED to the net service crate (rung 2)
+// pub mod arp; — MOVED to the net service crate (rung 2)
+// pub mod icmp; — MOVED to the net service crate (rung 2)
+// pub mod ipv4; — MOVED to the net service crate (rung 2)
+// pub mod ipv6; — MOVED to the net service crate (rung 2)
+// pub mod udp; — MOVED to the net service crate (rung 2)
+// pub mod tcp; — MOVED to the net service crate (rung 2)
+// pub mod tcp_timer; — MOVED to the net service crate (rung 2)
+// pub mod socket; — MOVED to the net service crate (rung 2)
+// pub mod unix; — MOVED to the net service crate (rung 2)
+// pub mod netlink; — MOVED to the net service crate (rung 2)
+// pub mod raw; — MOVED to the net service crate (rung 2)
 
 pub use buffer::{
     SkBuff, PacketType, EthProtocol, IpProtocol,
     alloc_skb, kfree_skb,
 };
 
-// pub use socket::{...}; — MOVED to the rux-net service crate (rung 2)
+// pub use socket::{...}; — MOVED to the net service crate (rung 2)
 
-// pub use ipv6::{AF_INET6, IpAddr}; — MOVED to the rux-net service crate (rung 2)
+// pub use ipv6::{AF_INET6, IpAddr}; — MOVED to the net service crate (rung 2)
 
 // ==================== Socket-file Arc edges (round-5) ====================
 

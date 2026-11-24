@@ -22,7 +22,7 @@ pub fn test_fs_pins() {
     test_stat_pins();
     test_superblock_pins();
     test_vt_pins();
-    // The ext4 csum/indirect pins flipped WITH the rux-ext4 crate
+    // The ext4 csum/indirect pins flipped WITH the ext4 crate
     // (rung 5; they run via the service-test seam now); the rootfs pins
     // moved WITH the rootfs leaf (fs-substrate tranche — SERVICE-TEST
     // SEAM).
@@ -118,5 +118,5 @@ fn test_vt_pins() {
 // ---- fs/rootfs.rs + fs/ext4/{csum,indirect}.rs -------------------------
 
 // The rootfs pins moved WITH the rootfs leaf (fs-substrate tranche) and
-// the ext4 pins flipped WITH the rux-ext4 crate (rung 5) — both run
+// the ext4 pins flipped WITH the ext4 crate (rung 5) — both run
 // in-guest via the SERVICE-TEST SEAM.

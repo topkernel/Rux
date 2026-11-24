@@ -419,7 +419,7 @@ pub fn rt_list_linked(task: *mut Task) -> bool {
 pub struct VruntimeKey {
     pub vruntime: u64,
     /// Tie-breaker distinguishing tasks with the same vruntime. pub:
-    /// the rux-sched guest test (fair_timeline, moved with the S1b
+    /// the sched guest test (fair_timeline, moved with the S1b
     /// flip) reads it through the crate boundary.
     pub task_id: u64,
 }
@@ -430,7 +430,7 @@ impl VruntimeKey {
     }
 }
 
-/// grq-10ns: unit-test key constructor (the rux-sched fair_timeline
+/// grq-10ns: unit-test key constructor (the sched fair_timeline
 /// guest test drives a local RbTimeline through the debug_* helpers).
 
 // ============================================================================
@@ -574,7 +574,7 @@ pub fn node_key(node: *mut RbNode) -> VruntimeKey {
 // ---- the tree itself -------------------------------------------------------
 
 /// Intrusive red-black timeline root with the cached leftmost pointer
-/// (the reference's `struct rb_root_cached`). pub: the rux-sched guest
+/// (the reference's `struct rb_root_cached`). pub: the sched guest
 /// test (sched_tests/fair_timeline.rs, moved with the S1b flip) drives a
 /// LOCAL instance through the debug_* helpers below.
 #[derive(Debug)]
@@ -1030,7 +1030,7 @@ impl RbTimeline {
 // grq-10ns unit-test introspection (SERVICE-TEST SEAM, test-migrate
 // lane): SAFE test-only drivers for a LOCAL RbTimeline over heap
 // SchedEntity arrays. The fair_timeline guest test moved into the
-// rux-sched crate (S1b flip) — a #![forbid(unsafe_code)] crate — so
+// sched crate (S1b flip) — a #![forbid(unsafe_code)] crate — so
 // it drives the engine exclusively through these pub safe helpers;
 // the audited unsafe stays inside this file (one block per pointer
 // family, the same discipline as the engine ops above). Production

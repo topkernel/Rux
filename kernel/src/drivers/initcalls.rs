@@ -13,7 +13,7 @@
 //! ENODEV discipline). Rux's boot previously named every driver family
 //! directly (`drivers::probe::init_block_devices()` et al. from
 //! lib.rs); this module replaces the named call-graph with the same
-//! table shape so the upcoming rux-drivers service crate can register
+//! table shape so the upcoming drivers service crate can register
 //! its probes through one seam instead of being named by the framework.
 //!
 //! Registration happens before the drain (the framework's own probe

@@ -194,8 +194,8 @@ pub fn check() {
             }
 
             let elapsed_secs = elapsed / 1_000_000_000;
-            // The lockup report body lives in the rux-debug crate
-            // (crate-flip rung rux-debug): holder line, leakorigin
+            // The lockup report body lives in the debug crate
+            // (crate-flip rung debug): holder line, leakorigin
             // origins, stack trace, remote backtrace, taint — one row
             // call per CPU per occurrence (the REPORTED CAS above is
             // the once-gate).
@@ -204,7 +204,7 @@ pub fn check() {
     }
 }
 
-/// The one-shot lockup report (moved to the rux-debug crate): same-named
+/// The one-shot lockup report (moved to the debug crate): same-named
 /// wrapper dispatched from check() after the REPORTED gate wins.
 pub fn report(cpu: usize, elapsed_secs: u64, timer_cnt: u64) {
     crate::debug::debug_hooks::softlockup_report(cpu, elapsed_secs, timer_cnt);

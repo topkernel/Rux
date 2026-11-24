@@ -463,7 +463,7 @@ fn load_and_setup_elf(
 ///
 /// This function is public and can be reused by fork and other operations
 pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
-    // The body lives in the rux-fs crate now (char_dev leaf); this
+    // The body lives in the fs crate now (char_dev leaf); this
     // forwarding call keeps the historical name for the fork/exec paths.
     crate::fs::leaf_glue::char_dev::init_std_fds_for_task(fdtable);
 }

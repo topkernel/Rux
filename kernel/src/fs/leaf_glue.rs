@@ -460,7 +460,7 @@ pub enum TmpfsTagKind {
 /// The RAM root as the framework sees it: the rootfs superblock's
 /// path-shaped API as a framework-owned trait. The cpio unpacker stays
 /// framework-side (initrd.rs) and the tests seed/verify through it; the
-/// rootfs leaf (rux-fs crate) implements it. Paths are plain strings —
+/// rootfs leaf (fs crate) implements it. Paths are plain strings —
 /// no node handles cross the boundary.
 pub trait RamfsView {
     fn rfs_mkdir(&self, path: &str) -> Result<(), i32>;
@@ -480,7 +480,7 @@ pub trait RamfsView {
 }
 
 /// The input-device registration record (evdev -> sysfs uevent + tree).
-/// Framework-owned DTO: the drivers fill it, the rux-fs sysfs leaf
+/// Framework-owned DTO: the drivers fill it, the fs sysfs leaf
 /// consumes it through the populate row (plain data — no leaf types cross
 /// the boundary). The uevent environment block builder lives with it.
 #[derive(Debug, Clone)]

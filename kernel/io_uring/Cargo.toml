@@ -1,0 +1,27 @@
+[package]
+name = "io_uring"
+version = "0.1.0"
+edition = "2021"
+
+# The IO_URING SERVICE CRATE (cold-four lane): the syscall-context
+# POLICY half of io_uring — the submit loop, the per-op handlers
+# (READ/WRITE/FSYNC/CLOSE/FADVISE over the FileOps vtable), CQ wait,
+# and the three sys_io_uring_* entry points — compiled under
+# crate-level #![forbid(unsafe_code)]. The MECHANISM stays framework-
+# side in kernel/src/io_uring/: the ring regions and their
+# INV-IOURING-RING-1 window views, the lifecycle lock discipline
+# (pin_verified_ring / PinnedRing, INV-IOURING-PIN), the completion
+# path (post_cqe + eventfd signal — the wakeup path), mmap, and the
+# ring assembly (io_uring_create). This crate reaches the mechanism
+# through published accessors and one audited edge
+# (ring_release_on_install_error, INV-IOURING-RING-2).
+
+[dependencies]
+rux = { path = "..", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64"]
+x86_64 = ["rux/x86_64"]
+aarch64 = ["rux/aarch64"]
+unit-test = []

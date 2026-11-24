@@ -1065,7 +1065,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     // Do NOT advance epc — the task is now ZOMBIE and will not resume
 }
 /// (arch-cold lane) the fatal-SIGILL mapping dump (the VMA table +
-/// attribution) moved to the rux-arch service crate under forbid; this
+/// attribution) moved to the arch service crate under forbid; this
 /// historical-name wrapper dispatches the cold ArchDiagHooks row (the
 /// report fires once per SIGILL death).
 fn sigill_mapping_forensics(pid: usize, epc: usize) {

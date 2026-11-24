@@ -2,13 +2,13 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! SIGNAL POLICY SEAM (crate-flip, the rux-signal rung): the framework's
+//! SIGNAL POLICY SEAM (crate-flip, the signal rung): the framework's
 //! signal entry points that are POLICY — the send-path queueing core
 //! (coalescing, sig_ignored ordering, RLIMIT_SIGPENDING, wake decisions),
 //! the default-action table, the pid-namespace init delivery filter, the
 //! exec/fork handler-reset rules, the /proc SigIgn/SigCgt pair, and the
 //! user-originated sender-stamping entries — dispatch through THIS
-//! nullable table. Until the carve lands in the `rux-signal` crate, the
+//! nullable table. Until the carve lands in the `signal` crate, the
 //! framework registers its own in-tree policy (fn pointers, behavior
 //! identical); the crate's rows replace them (OnceSlot first-wins).
 //!
@@ -140,7 +140,7 @@ pub static SIGNAL_HOOKS: crate::safety::slot::OnceSlot<SignalHooks> =
     crate::safety::slot::OnceSlot::new();
 
 /// The service crate's registration entry (idempotent: first wins —
-/// the composition bin's `rux_signal::register_all` runs before any
+/// the composition bin's `signal::register_all` runs before any
 /// framework use, so the crate's rows prevail over any later in-tree
 /// registration attempt). Publication is a OnceSlot store (plain
 /// atomics, no lock): registration runs from rust_main, before

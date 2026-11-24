@@ -1,7 +1,7 @@
 //! The SCHED HOOK TABLE (crate-flip S1b): every lib-side consumer of
 //! scheduling-policy internals resolves through this table (the
 //! NetHooks pattern) — nullable fn rows, EMPTY defaults no-op until
-//! the rux-sched crate's register_all runs (the composition bin,
+//! the sched crate's register_all runs (the composition bin,
 //! before the framework impl). The row list is the measured reverse
 //! surface (run/s1b-hook-rows.json + the counter getters); the entity
 //! TYPES live framework-side in sched/entities.rs.
@@ -11,7 +11,7 @@
 //! pick-generation ledger, the schedstat/wake-census counters, the
 //! walk-census counters) left the table — their storage lives in
 //! sched/entities.rs and framework callers reach it with direct calls
-//! (see sched/sched.rs; the rux-sched census code reads the same
+//! (see sched/sched.rs; the sched census code reads the same
 //! statics through the crate::sched re-exports). Measured reason: the
 //! debug-profile kernel does not inline the wrapper layer, and the
 //! per-switch diagnostic traffic (pick_trace/pick_gen/ww_record/phase

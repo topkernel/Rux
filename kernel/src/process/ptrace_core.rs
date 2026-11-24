@@ -2,7 +2,7 @@
 //! trap files call BY NAME (the 1a criterion — a hot site's direct
 //! call must stay direct; no hook row sits in front of them). The
 //! rest of ptrace (the request dispatcher, PEEK/POKE readers,
-//! process_vm_copy) is rux-process service policy reached through the
+//! process_vm_copy) is process service policy reached through the
 //! syscall layer; it calls DOWN into these two for the stop/write
 //! primitives.
 

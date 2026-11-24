@@ -98,7 +98,7 @@ ensure_kernel() {
 
     if [ "$FORCE_REBUILD" = "true" ] || [ ! -f "$KERNEL_ELF" ] || [ "$FEATURES_CHANGED" = "true" ]; then
         echo "Building kernel (platform=$PLATFORM, features: $FEATURES)..."
-        CARGO_TARGET_DIR="$PROJECT_ROOT/target" cargo build --manifest-path "$PROJECT_ROOT/kernel/Cargo.toml" -p rux-bin --no-default-features --target "$CARGO_TARGET" --features "$FEATURES"
+        CARGO_TARGET_DIR="$PROJECT_ROOT/target" cargo build --manifest-path "$PROJECT_ROOT/kernel/Cargo.toml" -p bin --no-default-features --target "$CARGO_TARGET" --features "$FEATURES"
         if [ "$PLATFORM" = "x86_64" ]; then
             # x86_64 boots the multiboot1 bzImage, not the raw ELF
             # (same extra step as build/Makefile's build target).

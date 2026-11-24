@@ -36,7 +36,7 @@ pub fn test_virtio_net() {
 /// Test loopback device initialization
 fn test_loopback_init() {
     // Through the driver service seam (rung 4): the leaf lives in the
-    // rux-drivers crate; this test now pins the seam rows themselves.
+    // drivers crate; this test now pins the seam rows themselves.
     let device = if hooks::loopback_init() { hooks::get_loopback_device() } else { None };
 
     match device {

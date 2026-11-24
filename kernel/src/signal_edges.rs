@@ -2,9 +2,9 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! SIGNAL EDGES (the rux-signal crate-flip): the signal-family functions
+//! SIGNAL EDGES (the signal crate-flip): the signal-family functions
 //! whose bodies contain audited unsafe and therefore stay framework-side
-//! when the POLICY moved to the rux-signal service crate. Bodies are
+//! when the POLICY moved to the signal service crate. Bodies are
 //! verbatim relocations from kernel/src/signal.rs (the unsafe-edges
 //! convention: unsafe moves with its function, policy moves without).
 //!

@@ -36,7 +36,7 @@ fn test_mkdir() {
     match file_mkdir(dirname1, 0o755) {
         Ok(()) => {
             // Verify directory exists (rootfs-row view — the leaf lives
-            // in the rux-fs crate now)
+            // in the fs crate now)
             {
                 match crate::fs::leaf_glue::rootfs::lookup_kind(dirname1) {
                     Some(true) => test_pass("mkdir single level"),

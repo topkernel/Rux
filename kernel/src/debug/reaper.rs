@@ -44,8 +44,8 @@
 //! timer-softirq scan uses the try-variant of the pid-hash walk (a
 //! partial snapshot is fine — the next second retries).
 //!
-//! CRATE-FLIP RUNG rux-debug: the SPAWN/ZEXIT/REAP4/REAPW/POLL print
-//! arms moved to the rux-debug service crate (kernel/rux-debug/src/
+//! CRATE-FLIP RUNG debug: the SPAWN/ZEXIT/REAP4/REAPW/POLL print
+//! arms moved to the debug service crate (kernel/debug/src/
 //! reaper.rs) — every arm fires only through these same-named wrappers,
 //! whose call sites (do_exit, exec, the wait4/waitid syscall bodies)
 //! pre-gate on reaper::on(), so the row dispatch is armed-boot-only.
@@ -58,13 +58,13 @@ use core::sync::atomic::Ordering;
 
 /// Name-set (SPAWN) tracking capacity. Small: only com.*-prefixed names
 /// are recorded (OH bundle names — appspawn children + a handful of
-/// services), dozens per boot. PUB: the rux-debug arms index it.
+/// services), dozens per boot. PUB: the debug arms index it.
 pub const NAME_MAP_LEN: usize = 32;
 
 /// Zombie exit-time map capacity (pid → exit jiffies + code), for
 /// ZLINGER age. Rotating overwrite: the ZEXIT prints carry the same
 /// data durably; the map only has to survive the 10 s linger window.
-/// PUB: the rux-debug arms index it.
+/// PUB: the debug arms index it.
 pub const EXIT_MAP_LEN: usize = 96;
 
 /// A zombie un-reaped longer than this is reported as lingering.
@@ -77,7 +77,7 @@ const ZLINGER_REPEAT_SECS: u64 = 30;
 /// the serial).
 const MAX_ZLINGER_PRINTS: u32 = 96;
 
-/// PUB write/peek surface (crate-flip rung rux-debug): the rux-debug crate's
+/// PUB write/peek surface (crate-flip rung debug): the debug crate's
 /// SPAWN/ZEXIT arms lock and write these maps; the ZLINGER scan below
 /// reads EXIT_MAP under the same lock.
 #[derive(Clone, Copy)]
@@ -106,7 +106,7 @@ pub fn on() -> bool {
     crate::trace::EVENT_SCHEDTRACE.armed()
 }
 
-/// jiffies → "123.4s" seconds string (one decimal). PUB: the rux-debug
+/// jiffies → "123.4s" seconds string (one decimal). PUB: the debug
 /// arms print with it.
 pub fn secs(j: u64) -> alloc::string::String {
     let hz = crate::config::KERNEL_HZ as u64;
@@ -116,7 +116,7 @@ pub fn secs(j: u64) -> alloc::string::String {
 }
 
 /// Decode this kernel's internal exit_code: `>= 0` = `(status<<8)`,
-/// `< 0` = death by signal `-code`. PUB (rux-debug arms).
+/// `< 0` = death by signal `-code`. PUB (debug arms).
 pub fn decode_kernel_code(code: i32) -> (&'static str, i32) {
     if code < 0 {
         ("SIG", -code)
@@ -125,7 +125,7 @@ pub fn decode_kernel_code(code: i32) -> (&'static str, i32) {
     }
 }
 
-/// Decode a wait4 wstatus (Linux wait-status layout). PUB (rux-debug arms).
+/// Decode a wait4 wstatus (Linux wait-status layout). PUB (debug arms).
 pub fn decode_wstatus(st: i32) -> (&'static str, i32) {
     let sig = st & 0x7f;
     if sig == 0 && st & 0xff00 != 0 {
@@ -139,7 +139,7 @@ pub fn decode_wstatus(st: i32) -> (&'static str, i32) {
     }
 }
 
-/// Decode a waitid si_code (CLD_*). PUB (rux-debug arms).
+/// Decode a waitid si_code (CLD_*). PUB (debug arms).
 pub fn decode_si_code(c: i32) -> &'static str {
     match c {
         1 => "CLD_EXITED",
@@ -151,33 +151,33 @@ pub fn decode_si_code(c: i32) -> &'static str {
     }
 }
 
-/// comm bytes → printable &str (NUL-trimmed, lossy). PUB (rux-debug arms).
+/// comm bytes → printable &str (NUL-trimmed, lossy). PUB (debug arms).
 pub fn comm_str(raw: &[u8]) -> &str {
     let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
     core::str::from_utf8(&raw[..len]).unwrap_or("?")
 }
 
-/// SPAWN arm (moved to the rux-debug crate): same-named wrapper; the call
+/// SPAWN arm (moved to the debug crate): same-named wrapper; the call
 /// sites (exec basename / PR_SET_NAME) pre-gate on on().
 pub fn note_nameset(pid: u32, comm: &[u8]) {
     crate::debug::debug_hooks::reaper_note_nameset(pid, comm)
 }
 
-/// ZEXIT arm (moved to the rux-debug crate): same-named wrapper; called
+/// ZEXIT arm (moved to the debug crate): same-named wrapper; called
 /// from do_exit right after the ZOMBIE store + notify resolution (the
 /// call site pre-gates on on()).
 pub fn on_zombie(pid: u32, code: i32, parent_pid: u32, comm: &[u8; 16], last_nr: u32, last_a0: u64) {
     crate::debug::debug_hooks::reaper_on_zombie(pid, code, parent_pid, comm, last_nr, last_a0)
 }
 
-/// REAP arm: successful wait4 reap (moved to the rux-debug crate):
+/// REAP arm: successful wait4 reap (moved to the debug crate):
 /// same-named wrapper; `nohang` distinguishes the blocking do_wait path
 /// (REAP4) from the WNOHANG do_wait_nonblock path (REAP4N).
 pub fn on_reap_wait4(reaper: u32, child: u32, wstatus: i32, nohang: bool) {
     crate::debug::debug_hooks::reaper_on_reap_wait4(reaper, child, wstatus, nohang)
 }
 
-/// REAP arm: successful waitid event (moved to the rux-debug crate):
+/// REAP arm: successful waitid event (moved to the debug crate):
 /// same-named wrapper; `wnowait` marks a peek that left the child
 /// reapable; `via_pidfd` marks the pidfd idtype arm.
 pub fn on_reap_waitid(
@@ -204,7 +204,7 @@ pub fn on_reap_waitid(
     )
 }
 
-/// Sampled no-event waitid print (moved to the rux-debug crate):
+/// Sampled no-event waitid print (moved to the debug crate):
 /// same-named wrapper; proves the poll shape without flooding.
 pub fn poll_note(reaper: u32, idtype: i32, id: i32, options: i32) {
     crate::debug::debug_hooks::reaper_poll_note(reaper, idtype, id, options)

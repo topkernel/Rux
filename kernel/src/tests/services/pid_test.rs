@@ -11,7 +11,7 @@ use crate::process::pid::{
     PID_SWAPPER, PID_INIT, PID_MAX_LIMIT, PID_MAX_DEFAULT, RESERVED_PIDS,
     alloc_pid, free_pid,
 };
-// Cross-crate macro (the rux-ipc test-move precedent).
+// Cross-crate macro (the ipc test-move precedent).
 use rux::{test_assert, test_assert_eq};
 use super::{test_pass, test_fail, test_group_start};
 

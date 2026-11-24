@@ -1,8 +1,8 @@
-//! Framework-side IPC hook table (crate-flip rung: rux-ipc): every
+//! Framework-side IPC hook table (crate-flip rung: ipc): every
 //! lib-side consumer of the MOVABLE ipc policy (sysv sem/msg/shm,
 //! posix_mq, keys, access_token) resolves through these rows (the
 //! NetHooks pattern: nullable-default fns, no-op until the service
-//! crate registers; the composition bin calls rux_ipc::register_all
+//! crate registers; the composition bin calls ipc::register_all
 //! before the framework impl).
 //!
 //! binder.rs is NOT behind this table — it stays in the framework tree

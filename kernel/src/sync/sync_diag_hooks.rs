@@ -5,7 +5,7 @@
 
 //! SYNC DIAGNOSTIC SEAM (sync-upper lane): the hook rows the FRAMEWORK
 //! uses to reach the futex cold diagnostic family that moved to the
-//! rux-sync crate (src/sync/futex_diag.rs). Every framework call site
+//! sync crate (src/sync/futex_diag.rs). Every framework call site
 //! routed here is measured cold:
 //! - the do_futex / futex_stuck_census latch sections — inside
 //!   trace-event armed() gates and the census's own 5 s rate cap
@@ -17,15 +17,15 @@
 //! - taskdump / schb / debug switches (sqwalk, ffrt heap map,
 //!   freeze_scan, fuxwatch cmdline parse) — demand-driven dumps;
 //! - binder.rs's hdf_devmgr latch (fxdv_latch_devmgr).
-//! Sibling service crates (rux-ipc binder_diag, rux-process) reach the
+//! Sibling service crates (ipc binder_diag, process) reach the
 //! moved functions DIRECTLY at their historical crate::sync::futex::X
-//! paths (the union module in rux-sync's lib.rs — the allowed downward
+//! paths (the union module in sync's lib.rs — the allowed downward
 //! service edge; no row needed).
 //! The futex MECHANISM, futex_stuck_census itself, and the fuxwatch
 //! watchpoint machinery the x86 trap paths call by name stay
 //! framework-side in futex.rs (the lane's stay verdicts).
 //!
-//! Registration runs from rust_main via rux_sync::register_all —
+//! Registration runs from rust_main via sync::register_all —
 //! OnceSlot-only (no Spinlock, no per-CPU state; the x86_64 unit-test
 //! kernel lesson).
 

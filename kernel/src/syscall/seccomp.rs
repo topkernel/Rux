@@ -151,7 +151,7 @@ pub fn seccomp_syscall_gate(nr: u64, regs: &crate::arch::pt_regs::PtRegs) -> Opt
     }
 }
 
-/// The classic-BPF filter interpreter MOVED to the rux-syscall service
+/// The classic-BPF filter interpreter MOVED to the syscall service
 /// crate (cold-four lane): it is a pure function over &[SockFilter]
 /// that only runs when the current task has a filter installed (the
 /// gate below reaches it through the SyscallHooks row — tasks without

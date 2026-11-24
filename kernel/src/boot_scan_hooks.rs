@@ -4,7 +4,7 @@
 //!
 //! The BOOT SCAN seam (root-cold lane, 2026-11-24): the four rows the
 //! framework's boot core uses to reach the FDT walkers now living in
-//! the rux-drivers service crate (kernel/rux-drivers/src/of_fdt.rs —
+//! the drivers service crate (kernel/drivers/src/of_fdt.rs —
 //! the drivers/of/fdt.c shape). Split from DriverHooks on purpose
 //! (crate-plan §3a rule 1: split by concern — machine-description
 //! scanning is not device lifecycle); four rows, one consumer set.
@@ -17,7 +17,7 @@
 //! of calls per boot; the row indirection is a few ns on paths doing
 //! µs–ms of work.
 //!
-//! Registration: rux-drivers' registrar publishes before the framework
+//! Registration: drivers' registrar publishes before the framework
 //! impl boots (OnceSlot first-wins). Publication is a plain store —
 //! the framework-side dispatchers below may be read from rust_main
 //! before the per-CPU area exists (no Spinlock here, by rule).

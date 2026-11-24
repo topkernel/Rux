@@ -9,7 +9,7 @@
 //! fn and registers its names here. `register_builtin_handlers()` runs
 //! once at boot (lib.rs, before any mount syscall) — it is the ONE
 //! framework-side place that names the leaves, i.e. the exact seam the
-//! rux-fs crate flip later replaces with each leaf crate's
+//! fs crate flip later replaces with each leaf crate's
 //! self-registration. Behavior-identical to the old match arms.
 
 use super::mount::{self, MntFlags};
@@ -57,18 +57,18 @@ pub fn lookup(fs_type: &str) -> Option<MountFn> {
 
 /// The boot-time registration call (the crate-flip seam point). Each
 /// leaf's `mount_instance` is the verbatim old match-arm body. EVERY
-/// leaf's rows come from the service crates (rux-fs via
-/// LeafBootHooks.mount_rows_register, rux-ext4 via its own row) and run
+/// leaf's rows come from the service crates (fs via
+/// LeafBootHooks.mount_rows_register, ext4 via its own row) and run
 /// at THIS point — never at rust_main time (the mount table/allocator
 /// are not up yet there).
 pub fn register_builtin_handlers() {
     // The substrate/boot leaves' mount rows (tmpfs, procfs, devfs, sysfs,
     // cgroup, debugfs, tracefs, selinuxfs — fs-substrate tranche): ONE
-    // entry from the rux-fs crate, run at THIS boot point.
+    // entry from the fs crate, run at THIS boot point.
     (super::leaf_hooks::boot_hooks().mount_rows_register)();
     // The ext4 service crate's mount rows (rung 5): the SAME boot
     // point as the leaves above — NOT at rust_main registration time
-    // (the rux-fs 'R'-loop conviction; the row body self-guards).
+    // (the fs 'R'-loop conviction; the row body self-guards).
     super::ext4_hooks::mount_rows_register();
 }
 

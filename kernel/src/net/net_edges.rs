@@ -1,5 +1,5 @@
 //! Framework-side net UNSAFE EDGES (crate-flip rung 2): the raw-memory
-//! substrate the service files must not carry now that rux-net is
+//! substrate the service files must not carry now that net is
 //! forbid-enforced — static-mut table reference formation, the
 //! Arc-refcount forensics probe, the validated socket deref, and the
 //! POD header views. (The file→Arc adoption family lives in

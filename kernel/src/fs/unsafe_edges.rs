@@ -153,7 +153,7 @@ pub fn file_privdata_ref_mut<T>(file: &File) -> Option<&mut T> {
 /// only through rename-with-replace, which installs a NEW cell value at
 /// a different path's description). 30 call sites read it through
 /// `(&*file.inode.get()).as_ref()` — this edge owns that one audit.
-// M1a note: `pub` (was pub(crate)) — the mm policy crate (rux-mm) reads
+// M1a note: `pub` (was pub(crate)) — the mm policy crate (mm) reads
 // the inode through this edge in its fault routing; the audit row is
 // unchanged (INV-FS-FILEINODE-1).
 pub fn file_inode(file: &File) -> Option<&crate::fs::inode::Inode> {

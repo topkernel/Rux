@@ -48,11 +48,11 @@ pub use asid::{
 
 /// M1a seam: register this arch's IN-TREE mm policy rows (the
 /// pre-carve provider). When the arch's policy carve lands in the
-/// rux-mm crate, the crate's `register_all` (called earlier by the
+/// mm crate, the crate's `register_all` (called earlier by the
 /// composition bin) wins the OnceSlot and these rows compile out —
 /// flipped arches delete their rows here in the carve commit.
 pub fn register_in_tree_mm_policy() {
-    // M1a carve (aarch64): every policy row flipped to the rux-mm crate
+    // M1a carve (aarch64): every policy row flipped to the mm crate
     // (the x86_64/riscv64 twins); the composition bin's registration
     // wins the OnceSlot before this runs.
 }

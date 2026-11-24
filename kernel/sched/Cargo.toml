@@ -1,0 +1,26 @@
+[package]
+name = "sched"
+version = "0.1.0"
+edition = "2021"
+
+# The SCHED SERVICE CRATE (crate-flip S1b; user naming directive
+# 2026-11-22: no -policy suffix; the future mm crate is mm): the scheduling
+# classes and decision logic (pick/enqueue policy, wake placement,
+# balance, tick policy, throttling, cgroup policy, the diagnostic
+# walks), compiled under crate-level #![forbid(unsafe_code)] — the
+# third service column (after syscall and net). Depends on the
+# rux framework lib; the core half (sched.rs: GRQ/switch/current/
+# NEED_RESCHED/task-slot lifecycle) stays framework-side.
+
+[dependencies]
+rux = { path = "..", default-features = false }
+process = { path = "../process", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64", "process/riscv64"]
+x86_64 = ["rux/x86_64", "process/x86_64"]
+aarch64 = ["rux/aarch64", "process/aarch64"]
+# Gates the guest test modules + their run entry (make test forwards
+# this from bin's unit-test through the SERVICE-TEST SEAM).
+unit-test = ["rux/unit-test"]

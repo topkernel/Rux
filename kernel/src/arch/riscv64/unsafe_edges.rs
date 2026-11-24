@@ -82,7 +82,7 @@ impl<'a> core::ops::DerefMut for SavedFrame<'a> {
 
 // ===========================================================================
 // INV-ARCHDIAG-R1 — the arch-cold lane's audited diagnostic read edge
-// (rux-arch service crate, riscv64 half): a read-only volatile u64
+// (arch service crate, riscv64 half): a read-only volatile u64
 // load for the fatal-SIGILL forensic walker. The addresses it is
 // given are kernel-half page-table / resident-page addresses computed
 // by the crate's walk (the walk itself is safe arithmetic over

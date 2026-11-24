@@ -1,4 +1,4 @@
-//! Framework-side observability hook table (crate-flip rung: rux-debug):
+//! Framework-side observability hook table (crate-flip rung: debug):
 //! every framework-side consumer of the MOVABLE observation tools — the
 //! syscost/fsw/mmprof report halves, the schbd heartbeat kthread, the
 //! reaper print arms, the driftwatch/filerd report readers, the
@@ -6,7 +6,7 @@
 //! compat arm, and the tracefs file publisher — resolves through these
 //! rows (the IpcHooks/NetHooks pattern: nullable-default fns, no-op
 //! until the service crate registers; the composition bin calls
-//! rux_debug::register_all before rust_main_impl).
+//! debug::register_all before rust_main_impl).
 //!
 //! Row discipline (crate-plan §3a): every row here is COLD — boot-time
 //! arming, shutdown/procfs readers, cadence dumps (>= 1 Hz), or an
@@ -33,7 +33,7 @@
 use alloc::vec::Vec;
 
 /// The observability hook set (one row per cold framework entry point
-/// into the rux-debug crate's report/init/publish surface).
+/// into the debug crate's report/init/publish surface).
 #[derive(Clone, Copy)]
 pub struct DebugHooks {
     // ---- periodic / shutdown reports ----
@@ -113,7 +113,7 @@ impl DebugHooks {
 pub static DEBUG_HOOKS: crate::safety::slot::OnceSlot<DebugHooks> =
     crate::safety::slot::OnceSlot::new();
 
-/// Registration entry (called by the rux-debug service crate at boot,
+/// Registration entry (called by the debug service crate at boot,
 /// from rust_main — OnceSlot publication only, no locks, no per-CPU
 /// state; INV-SVCTEST-1's pre-SMP discipline).
 pub fn debug_register_hooks(hooks: DebugHooks) {

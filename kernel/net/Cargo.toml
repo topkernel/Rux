@@ -1,0 +1,23 @@
+[package]
+name = "net"
+version = "0.1.0"
+edition = "2021"
+
+# The NET SERVICE CRATE (crate-flip rung 2): the network stack
+# compiled under crate-level #![forbid(unsafe_code)] — the second
+# service column. Depends on the rux framework lib (re-exports +
+# hook table + socket-call surface from syscall's sibling).
+
+[dependencies]
+rux = { path = "..", default-features = false }
+debug = { path = "../debug", default-features = false }
+fs = { path = "../fs", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64", "debug/riscv64", "fs/riscv64"]
+x86_64 = ["rux/x86_64", "debug/x86_64", "fs/x86_64"]
+aarch64 = ["rux/aarch64", "debug/aarch64", "fs/aarch64"]
+# Gates the guest test module + its run entry (make test forwards this
+# from bin's unit-test through the SERVICE-TEST SEAM).
+unit-test = ["rux/unit-test"]

@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! TIMER FLIP SEAM (cold-four lane: rux-timer): the hook table the
+//! TIMER FLIP SEAM (cold-four lane: timer): the hook table the
 //! FRAMEWORK uses to reach the timer service crate's cold REPORT
 //! halves. The timekeeping core, the tick, the wheel, nohz and the
 //! oneshot guards stay framework-side (kernel/src/timer.rs is a
@@ -14,7 +14,7 @@
 //! disarmed boots never touch the table (the S1 conditional-row
 //! precedent: the wrapper's gate fires before the slot is loaded).
 //!
-//! Registration runs from rust_main via rux_timer::register_all —
+//! Registration runs from rust_main via timer::register_all —
 //! OnceSlot-only publication (no Spinlock, no per-CPU state; the
 //! x86_64 unit-test kernel lesson).
 

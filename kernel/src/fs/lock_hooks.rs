@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Rung-3 RELOCATION SEAM (locks family), converted at the fs-rest
-//! split: the lock/lease LOGIC and its tables live in the rux-fs crate
+//! split: the lock/lease LOGIC and its tables live in the fs crate
 //! (`crate::fs::locks` there), while the framework's fs/locks.rs keeps
 //! the open/close fast-path gates, the count mirrors and the exec
 //! text-hold family. The LockOwner enum and lock-kind constants are

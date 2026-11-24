@@ -116,7 +116,7 @@ static FAILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // SERVICE-TEST REGISTRATION (crate-flip rung 3): guest tests that moved
 // out with their service leaves register here at boot — the composition
-// bin (rux-bin) forwards them from rust_main, before any init — and
+// bin (bin) forwards them from rust_main, before any init — and
 // run_all_tests executes them in registration order at the position the
 // family used to occupy. Same shape as the FsHooks table: the framework
 // owns the mechanism (registry + reporting counters), the service owns
@@ -168,12 +168,12 @@ fn service_test_get(table: &ServiceTestTable, len: &AtomicUsize) -> Vec<ServiceT
     table[..n].iter().filter_map(|slot| slot.get().copied()).collect()
 }
 
-/// Register a service crate's guest-test entry (called from rux-bin's
-/// rust_main). `late`: run at the POST-fs_io point instead — the rux-ipc flip's
+/// Register a service crate's guest-test entry (called from bin's
+/// rust_main). `late`: run at the POST-fs_io point instead — the ipc flip's
 /// finding: the sysv_sem BLOCKING test's cross-task handoff depends on
 /// the post-fs_io machine state (the family's historical position was
 /// after fs_io/fs_pins); running it early parks the boot task forever.
-/// rux-fs (pipe2) stays early (its family's original position).
+/// fs (pipe2) stays early (its family's original position).
 #[cfg(feature = "unit-test")]
 pub fn register_service_tests(f: ServiceTestFn) {
     let _ = service_test_push(&SERVICE_TESTS, &SERVICE_TEST_LEN, f);
@@ -204,7 +204,7 @@ fn run_registered_service_tests() {
     }
 }
 
-/// Run the LATE service tests (the post-fs_io point — the rux-ipc
+/// Run the LATE service tests (the post-fs_io point — the ipc
 /// family's historical position). Same read-then-run shape.
 #[cfg(feature = "unit-test")]
 fn run_registered_service_tests_late() {
@@ -289,18 +289,18 @@ pub mod fs_io;
 pub mod fs_pins;
 #[cfg(feature = "unit-test")]
 pub mod mm_pins;
-// pub mod net_hdrs; — MOVED to the rux-net crate (rung-2 flip); runs in-guest
-// via the SERVICE-TEST SEAM below (registered by rux-bin, same counters)
+// pub mod net_hdrs; — MOVED to the net crate (rung-2 flip); runs in-guest
+// via the SERVICE-TEST SEAM below (registered by bin, same counters)
 #[cfg(feature = "unit-test")]
 // pub mod net_pins; — service-internals test (rung 2); follows the files to the crate
 #[cfg(feature = "unit-test")]
-// pub mod procfs; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
+// pub mod procfs; — MOVED to the fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 #[cfg(all(feature = "unit-test", feature = "x86_64"))]
 pub mod pt_regs;
 #[cfg(feature = "unit-test")]
 pub mod perf;
 #[cfg(feature = "unit-test")]
-// pub mod tmpfs; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
+// pub mod tmpfs; — MOVED to the fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 #[cfg(feature = "unit-test")]
 pub mod dev_t;
 #[cfg(feature = "unit-test")]
@@ -325,8 +325,8 @@ pub mod file_flags;
 // pub mod fileops_caps; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
 pub mod fdtable;
-// pub mod signal; — MOVED to the rux-signal service crate; runs in-guest
-// via the SERVICE-TEST SEAM below (registered by rux-bin)
+// pub mod signal; — MOVED to the signal service crate; runs in-guest
+// via the SERVICE-TEST SEAM below (registered by bin)
 
 // ===== Memory management =====
 #[cfg(feature = "unit-test")]
@@ -356,8 +356,8 @@ pub mod scheduler;
 pub mod process_tree;
 pub mod reparent_safety;
 #[cfg(feature = "unit-test")]
-// pub mod fork; — MOVED to the rux-process crate (process rung); runs
-// in-guest via the SERVICE-TEST SEAM (registered by rux-bin)
+// pub mod fork; — MOVED to the process crate (process rung); runs
+// in-guest via the SERVICE-TEST SEAM (registered by bin)
 #[cfg(feature = "unit-test")]
 // pub mod execve; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
@@ -367,23 +367,23 @@ pub mod getpid;
 #[cfg(feature = "unit-test")]
 pub mod sleep_wakeup;
 #[cfg(feature = "unit-test")]
-// pub mod pid_test; — MOVED to the rux-process crate (process rung)
+// pub mod pid_test; — MOVED to the process crate (process rung)
 
 // ===== Synchronization =====
 #[cfg(feature = "unit-test")]
 pub mod semaphore;
 // pub mod futex_test; — moved to tests/services/ (sync-upper lane);
-// runs via the SERVICE-TEST SEAM (rux_sync::run_unit_tests)
+// runs via the SERVICE-TEST SEAM (sync::run_unit_tests)
 
 // ===== Scheduler =====
 #[cfg(feature = "unit-test")]
 pub mod smp;
 #[cfg(feature = "unit-test")]
-// pub mod smp_schedule; — MOVED to the rux-process crate (process rung)
+// pub mod smp_schedule; — MOVED to the process crate (process rung)
 #[cfg(feature = "unit-test")]
 pub mod preemptive_scheduler;
-// pub mod fair_timeline; — MOVED to the rux-sched crate (S1b flip); runs
-// in-guest via the SERVICE-TEST SEAM below (registered by rux-bin)
+// pub mod fair_timeline; — MOVED to the sched crate (S1b flip); runs
+// in-guest via the SERVICE-TEST SEAM below (registered by bin)
 
 // ===== Filesystem =====
 #[cfg(feature = "unit-test")]
@@ -401,16 +401,16 @@ pub mod mkdir_unlink;
 #[cfg(feature = "unit-test")]
 pub mod link;
 #[cfg(feature = "unit-test")]
-// pub mod pipe2; — MOVED to the rux-fs crate (rung 3 flip); runs in-guest
-// via the SERVICE-TEST SEAM below (registered by rux-bin, same counters)
+// pub mod pipe2; — MOVED to the fs crate (rung 3 flip); runs in-guest
+// via the SERVICE-TEST SEAM below (registered by bin, same counters)
 #[cfg(feature = "unit-test")]
-// pub mod ext4_allocator; — MOVED to the rux-ext4 service crate (rung 5)
+// pub mod ext4_allocator; — MOVED to the ext4 service crate (rung 5)
 #[cfg(feature = "unit-test")]
-// pub mod ext4_file_write; — MOVED to the rux-ext4 service crate (rung 5)
+// pub mod ext4_file_write; — MOVED to the ext4 service crate (rung 5)
 
 // ===== IPC =====
-// pub mod signal_procmask; — MOVED to the rux-signal service crate; runs
-// via the SERVICE-TEST SEAM below (registered by rux-bin)
+// pub mod signal_procmask; — MOVED to the signal service crate; runs
+// via the SERVICE-TEST SEAM below (registered by bin)
 #[cfg(feature = "unit-test")]
 // pub mod ipc_poll; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
@@ -420,7 +420,7 @@ pub mod link;
 
 // ===== IPC System V =====
 #[cfg(feature = "unit-test")]
-// pub mod ipc_sysv; — MOVED to the rux-ipc service crate (this rung;
+// pub mod ipc_sysv; — MOVED to the ipc service crate (this rung;
 // runs through the SERVICE-TEST SEAM, same pass/fail counters)
 #[cfg(feature = "unit-test")]
 pub mod sysv_sem_block;
@@ -449,7 +449,7 @@ pub mod framebuffer;
 
 // ===== Boundary (destructive) =====
 #[cfg(feature = "unit-test")]
-// pub mod boundary; — MOVED to the rux-process crate (process rung)
+// pub mod boundary; — MOVED to the process crate (process rung)
 
 // ===== VFS create-mode rules (creat09 / CVE-2018-13405) =====
 #[cfg(feature = "unit-test")]
@@ -457,11 +457,11 @@ pub mod sgid_mode;
 
 // ===== initrd (gzip inflate + cpio newc unpack) =====
 #[cfg(feature = "unit-test")]
-// pub mod initrd; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
+// pub mod initrd; — MOVED to the fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 
 // ===== tmpfs mknod (OH Phase 1b: device nodes on a tmpfs /dev) =====
 #[cfg(feature = "unit-test")]
-// pub mod tmpfs_mknod; — MOVED to the rux-fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
+// pub mod tmpfs_mknod; — MOVED to the fs crate (fs-substrate); runs in-guest via the SERVICE-TEST SEAM
 
 // ===== getdents64 listing cache (F4 route-4) =====
 #[cfg(feature = "unit-test")]
@@ -471,24 +471,24 @@ pub mod getdents_cache;
 #[cfg(feature = "unit-test")]
 // pub mod syscall_file; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
-// // pub mod syscall_io; — service-internals test (State B final; follows the files to the crate) — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
+// // pub mod syscall_io; — service-internals test (State B final; follows the files to the crate) — moved to the syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 // pub mod loop_flags; — service-internals test (State B final; follows the files to the crate)
 #[cfg(feature = "unit-test")]
-// pub mod syscall_process; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
+// pub mod syscall_process; — moved to the syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-// pub mod syscall_memory; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
+// pub mod syscall_memory; — moved to the syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-// pub mod syscall_time; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
+// pub mod syscall_time; — moved to the syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
 pub mod timer_wheel;
 #[cfg(feature = "unit-test")]
-// pub mod syscall_network; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
+// pub mod syscall_network; — moved to the syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-// pub mod syscall_sched; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
+// pub mod syscall_sched; — moved to the syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-// pub mod syscall_signal; — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
+// pub mod syscall_signal; — moved to the syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 #[cfg(feature = "unit-test")]
-// // pub mod syscall_misc; — service-internals test (State B final; follows the files to the crate) — moved to the rux-syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
+// // pub mod syscall_misc; — service-internals test (State B final; follows the files to the crate) — moved to the syscall service crate (State B final); the in-kernel unit tests that poked service internals follow the files
 
 /// Install a fresh fdtable (with the UART console as fd 0) on the current
 /// boot task so fd-allocating syscall tests exercise the real fd path.
@@ -547,11 +547,11 @@ pub fn run_all_tests() {
     test_group_start("config");
     config_test::test_config();
 
-    // initrd: MOVED to the rux-fs crate (fs-substrate) — runs through
-    // the SERVICE-TEST SEAM (rux_fs::run_unit_tests).
+    // initrd: MOVED to the fs crate (fs-substrate) — runs through
+    // the SERVICE-TEST SEAM (fs::run_unit_tests).
 
-    // tmpfs(-mknod): MOVED to the rux-fs crate (fs-substrate) — runs
-    // through the SERVICE-TEST SEAM (rux_fs::run_unit_tests).
+    // tmpfs(-mknod): MOVED to the fs crate (fs-substrate) — runs
+    // through the SERVICE-TEST SEAM (fs::run_unit_tests).
 
     // getdents64 listing cache (F4 route-4): stability + invalidation.
     getdents_cache::test_getdents_cache();
@@ -563,14 +563,14 @@ pub fn run_all_tests() {
     // procfs renderer pins (kernel/src/tests/procfs.rs): /proc/cpuinfo
     // per-arch key table + /proc/[pid]/status shape and order. Formerly
     // in-module cpuinfo_file_tests/status_file_tests blocks.
-    // procfs: MOVED to the rux-fs crate (fs-substrate) — SERVICE-TEST SEAM
+    // procfs: MOVED to the fs crate (fs-substrate) — SERVICE-TEST SEAM
 
     // tmpfs group (kernel/src/tests/tmpfs.rs): page store, truncate
     // tails, dir ops, and the mount-option page budget. Formerly an
     // in-module unit-test fn plus a dead #[cfg(test)] block in
     // fs/tmpfs.rs — all tmpfs unit tests live under kernel/src/tests/.
     // tmpfs::test_tmpfs(): the tmpfs budget tests moved with the leaf
-    // into the rux-fs crate (tmpfs_test, SERVICE-TEST SEAM).
+    // into the fs crate (tmpfs_test, SERVICE-TEST SEAM).
 
     test_group_start("vma_flags");
     vma_flags::test_vma_flags();
@@ -600,7 +600,7 @@ pub fn run_all_tests() {
     test_group_start("fdtable");
     fdtable::test_fdtable();
 
-    // (signal: MOVED to the rux-signal crate — runs via the
+    // (signal: MOVED to the signal crate — runs via the
     // SERVICE-TEST SEAM below, same group name/counters)
 
     // perf events: ABI record encoding + ring arithmetic + freq floor
@@ -658,7 +658,7 @@ pub fn run_all_tests() {
     reparent_safety::test_reparent_safety();
 
     test_group_start("fork");
-// (gated with the module: fork — runs via the SERVICE-TEST SEAM, rux-process)
+// (gated with the module: fork — runs via the SERVICE-TEST SEAM, process)
 
     test_group_start("execve");
 // (gated with the module: execve)
@@ -673,28 +673,28 @@ pub fn run_all_tests() {
     sleep_wakeup::test_sleep_and_wakeup();
 
     test_group_start("pid");
-// (gated with the module: pid — runs via the SERVICE-TEST SEAM, rux-process)
+// (gated with the module: pid — runs via the SERVICE-TEST SEAM, process)
 
     // ===== 5. Synchronization =====
     test_group_start("semaphore");
     semaphore::test_semaphore();
 
 // (gated with the module: futex_test — group runs via the
-// SERVICE-TEST SEAM, rux_sync::run_unit_tests)
+// SERVICE-TEST SEAM, sync::run_unit_tests)
 
     // ===== 6. Scheduler =====
     test_group_start("smp");
     smp::test_smp();
 
     test_group_start("smp_schedule");
-// (gated with the module: smp_schedule — runs via the SERVICE-TEST SEAM, rux-process)
+// (gated with the module: smp_schedule — runs via the SERVICE-TEST SEAM, process)
 
     test_group_start("preemptive_scheduler");
     preemptive_scheduler::test_preemptive_scheduler();
 
     // grq-10ns: entity-embedded intrusive CFS timeline (sorted order,
     // shuffled erase, leftmost cache, tie keys, pick/requeue cycles) —
-    // MOVED to the rux-sched crate (S1b); runs via the SERVICE-TEST SEAM.
+    // MOVED to the sched crate (S1b); runs via the SERVICE-TEST SEAM.
 
     // ===== 7. Filesystem =====
     test_group_start("file_open");
@@ -719,8 +719,8 @@ pub fn run_all_tests() {
     link::test_link();
 
     // SERVICE-TEST SEAM: the crate-flipped leaves' guest tests run in
-    // registration order with the same counters: pipe2 (rux-fs), net_hdrs
-    // (rux-net), fair_pins + fair_timeline (rux-sched) — rux-bin
+    // registration order with the same counters: pipe2 (fs), net_hdrs
+    // (net), fair_pins + fair_timeline (sched) — bin
     // registered the entries at boot.
     run_registered_service_tests();
 
@@ -729,7 +729,7 @@ pub fn run_all_tests() {
 
 
     // ===== 8. IPC =====
-    // (signal_procmask: MOVED to the rux-signal crate — runs via the
+    // (signal_procmask: MOVED to the signal crate — runs via the
     // SERVICE-TEST SEAM below, same group name/counters)
 
     test_group_start("ipc_poll");
@@ -741,7 +741,7 @@ pub fn run_all_tests() {
     test_group_start("ipc_eventfd");
 // (gated with the module: ipc_eventfd)
 
-    // (gated with the module: ipc_sysv — moved to rux-ipc, runs via
+    // (gated with the module: ipc_sysv — moved to ipc, runs via
     // the SERVICE-TEST SEAM with the same group name/counters)
 
     // Real-filesystem test suite (kernel/src/tests/fs_io.rs): the ext4
@@ -755,11 +755,11 @@ pub fn run_all_tests() {
 
     // MM + cmdline pins (kernel/src/tests/mm_pins.rs): slab classes,
     // VMA, page flags/refcount/mapcount, cmdline parsers. The sched half
-    // of the old mm_sched_pins moved to the rux-sched crate with the S1b
+    // of the old mm_sched_pins moved to the sched crate with the S1b
     // flip and runs via the SERVICE-TEST SEAM.
     mm_pins::test_mm_pins();
 
-    // LATE SERVICE-TEST SEAM: the rux-ipc family's entries run here —
+    // LATE SERVICE-TEST SEAM: the ipc family's entries run here —
     // the historical ipc_sysv/sysv_sem_block position (AFTER fs_io/
     // fs_pins; the sysv sem blocking contract's cross-task handoff
     // depends on the post-fs_io machine state).
@@ -788,7 +788,7 @@ pub fn run_all_tests() {
 // (gated with the module: mem_cow)
 
     // ===== 10. Network =====
-    // net_hdrs: MOVED to the rux-net crate (rung 2) — runs via the
+    // net_hdrs: MOVED to the net crate (rung 2) — runs via the
     // SERVICE-TEST SEAM (registration order, same counters).
 
     test_group_start("tcp_handshake");
@@ -856,7 +856,7 @@ pub fn run_all_tests() {
 
     // ===== 13. Boundary (destructive, MUST be last) =====
     test_group_start("boundary");
-// (gated with the module: boundary — runs via the SERVICE-TEST SEAM, rux-process)
+// (gated with the module: boundary — runs via the SERVICE-TEST SEAM, process)
 
     // Print test summary
     print_test_summary();

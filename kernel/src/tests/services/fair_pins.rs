@@ -6,8 +6,8 @@
 //! mm_sched_pins.rs, moved with the S1b crate flip (the test follows the
 //! policy files). The pinned types are the framework's storage-side
 //! entities (sched/entities.rs, reached through the re-export chain);
-//! runs in-guest through the SERVICE-TEST SEAM (rux-bin registers
-//! rux_sched::run_unit_tests; the framework's pass/fail counters are
+//! runs in-guest through the SERVICE-TEST SEAM (bin registers
+//! sched::run_unit_tests; the framework's pass/fail counters are
 //! shared, so the pins land in the same suite totals).
 
 use rux::sched::{CfsRunQueue, LoadWeight, SchedEntity};

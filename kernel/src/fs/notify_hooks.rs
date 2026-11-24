@@ -6,7 +6,7 @@
 //! (seed-core-design §4). The VFS framework calls inode/file
 //! lifecycle notifications through THIS table; inotify registers its
 //! implementations at boot (via mount_table::register_builtin_handlers,
-//! the same seam point). When rux-fs flips, inotify's registration
+//! the same seam point). When fs flips, inotify's registration
 //! moves into the inotify crate — the framework never names it.
 //!
 //! The fns are thin trampolines today (inotify linked in); the crate

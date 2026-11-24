@@ -1,5 +1,5 @@
 //! The exec stack-zero ring, kept FRAMEWORK-side when process/exec.rs
-//! flipped to the rux-process service crate: the riscv64 page-fault
+//! flipped to the process service crate: the riscv64 page-fault
 //! path (arch/riscv64/mm/exception.rs) walks STACKZERO_RING on the
 //! fault path — a hot framework read that cannot ride a hook row.
 //! The crate's exec policy WRITES it through this module (downward,

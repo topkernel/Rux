@@ -57,8 +57,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// The tracefs files (the filesystem side of the tracing subsystem) —
-/// MOVED WHOLE to the rux-debug service crate (crate-flip rung rux-debug:
-/// `rux_debug::trace_files`); published at boot through the
+/// MOVED WHOLE to the debug service crate (crate-flip rung debug:
+/// `debug::trace_files`); published at boot through the
 /// debug::debug_hooks::trace_files_register row, the trace_event= boot
 /// parameter applied through trace_files_init_from_cmdline.
 

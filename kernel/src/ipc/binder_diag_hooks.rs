@@ -5,7 +5,7 @@
 
 //! BINDER DIAGNOSTIC SEAM (cold-four lane): the hook rows the FRAMEWORK
 //! uses to reach the binder cold diagnostic halves that moved to the
-//! rux-ipc crate (src/ipc/binder_diag.rs). Every framework call site
+//! ipc crate (src/ipc/binder_diag.rs). Every framework call site
 //! routed here is measured cold:
 //! - the timer softirq's ~1 Hz heartbeat slot (txn_hang_audit /
 //!   bwr_park_audit / ams46_audit — self-gated + rate-capped inside,
@@ -13,12 +13,12 @@
 //! - taskdump / hung_task / schb (sleep_snapshot, stall_report,
 //!   schb_beat, schb_waiter_census, dump_latched_maps_taskctx) —
 //!   demand-driven dumps;
-//! - rux-obs and rux-syscall reach the moved functions DIRECTLY (the
+//! - rux-obs and syscall reach the moved functions DIRECTLY (the
 //!   allowed downward service edge; no row needed).
 //! The unsafe walkers the moved halves consume stay framework-side in
 //! binder_edges.rs (the audited zone).
 //!
-//! Registration runs from rust_main via rux_ipc::register_all —
+//! Registration runs from rust_main via ipc::register_all —
 //! OnceSlot-only (no Spinlock, no per-CPU state; the x86_64 unit-test
 //! kernel lesson).
 

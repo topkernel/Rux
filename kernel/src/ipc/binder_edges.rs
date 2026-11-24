@@ -7,7 +7,7 @@
 //! consume (cold-four lane): the trap-regs readers, the user page-table
 //! probe walkers and the kernel-stack word reader moved here verbatim
 //! from binder.rs when the cold diagnostic halves flipped to the
-//! rux-ipc crate, plus the two typed task edges those halves' raw
+//! ipc crate, plus the two typed task edges those halves' raw
 //! derefs converted to. Everything here is diagnostic-path only — no
 //! txn-path site calls into this file.
 //!

@@ -7293,7 +7293,7 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
     }
 
     // tmpfs: fallocate(2) with shmem semantics — the arm's body moved
-    // into the tmpfs leaf (rux-fs crate) at the fs-substrate flip; the
+    // into the tmpfs leaf (fs crate) at the fs-substrate flip; the
     // row answers None for non-tmpfs inodes (the ops identity uses the
     // ext4_hooks None-ops default — rung 5's legacy shape) and this
     // falls through to the filesystem-specific arm below.

@@ -513,7 +513,7 @@ impl SignalStruct {
     }
 
     /// CLONE_CLEAR_SIGHAND (kernel flush_signal_handlers(t, 0)):
-    /// policy moved to the rux-signal crate (signal_policy.rs); this
+    /// policy moved to the signal crate (signal_policy.rs); this
     /// method is the framework-side seam call. Semantics unchanged —
     /// see the crate body for the POSIX/clone3 notes.
     pub fn reset_all_handlers_default(&self) {
@@ -530,7 +530,7 @@ impl SignalStruct {
     }
 
     /// Compute the /proc/[pid]/status SigIgn and SigCgt mask pair —
-    /// policy moved to the rux-signal crate; seam call. SigIgn has a
+    /// policy moved to the signal crate; seam call. SigIgn has a
     /// bit per signal disposed to SIG_IGN, SigCgt a bit per signal
     /// with a user handler installed.
     pub fn ign_cgt_masks(&self) -> (u64, u64) {
@@ -572,13 +572,13 @@ impl SignalStruct {
     /// shall be set to SIG_IGN."
     ///
     /// If `force_default` is true, even SIG_IGN handlers are reset (used by
-    /// some privileged exec paths). Policy body moved to the rux-signal
+    /// some privileged exec paths). Policy body moved to the signal
     /// crate (signal_policy.rs); this method is the seam call.
     pub fn flush_handlers(&self, force_default: bool) {
         crate::signal_hooks::flush_handlers(self, force_default)
     }
 
-    /// The ONE accessor added for the rux-signal carve: run `f` over the
+    /// The ONE accessor added for the signal carve: run `f` over the
     /// disposition table under its write lock. The crate's policy fns
     /// (flush/reset/ign_cgt) consume the disposition table through this;
     /// nothing else in the crate reaches the lock.
@@ -1478,7 +1478,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
             .as_ref()
             .map(|a| a.action() == SigActionKind::Handler)
             .unwrap_or(false);
-        // The discard decision is POLICY (rux-signal crate,
+        // The discard decision is POLICY (signal crate,
         // signal_policy.rs::init_delivery_filter — the from_ancestor_ns,
         // forced-kill and group-stop exemptions with their LTP pins).
         // Row fires only for pid-1/ns-1 tasks, once per delivered
@@ -2717,7 +2717,7 @@ pub mod frame_offsets {
 
 /// Handle default signal action — the EXECUTOR. The per-number table
 /// (which class of default behavior) is POLICY and lives in the
-/// rux-signal crate (signal_policy.rs::default_action_class, reached
+/// signal crate (signal_policy.rs::default_action_class, reached
 /// through the seam row); this half holds the mechanism: state changes,
 /// CLD_STOPPED/CLD_CONTINUED parent notification, do_exit_group, and
 /// the audited TaskBorrow edges.
@@ -2886,13 +2886,13 @@ fn handle_default_signal(sig: i32) {
 /// sigwaitinfo/sigtimedwait readers and SA_SIGINFO handlers see si_pid.
 /// Kernel-internal senders (timers, OOM, tty) keep using send_signal —
 /// their siginfo is SI_KERNEL with no sender.
-/// POLICY moved to the rux-signal crate (signal_policy.rs); seam call.
+/// POLICY moved to the signal crate (signal_policy.rs); seam call.
 pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
     crate::signal_hooks::send_from_user(pid, sig)
 }
 
 // abort_reason_dump MOVED to kernel/src/signal_edges.rs (the
-// rux-signal crate flip: unsafe moves with its function, policy
+// signal crate flip: unsafe moves with its function, policy
 // moves without; this diagnostics fn holds two audited edges).
 
 /// Thread-directed user signal (tkill/tgkill — glibc raise() is tgkill):
@@ -3001,7 +3001,7 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
 }
 
 // send_signal_locked / send_signal_locked_info MOVED to the
-// rux-signal crate as signal_policy.rs::send_signal_core (the
+// signal crate as signal_policy.rs::send_signal_core (the
 // queueing/ordering/sig_ignored/RLIMIT_SIGPENDING/wake policy,
 // zero unsafe). The framework's pinned-lookup wrappers below call
 // it through the seam row.

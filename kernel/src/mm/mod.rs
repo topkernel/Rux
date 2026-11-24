@@ -236,6 +236,6 @@ pub use rmap::{
     page_mapped, page_get_mappings, page_referenced, page_clear_referenced,
     try_to_unmap, try_to_unmap_with_swap, rmap_stats, RmapStats,
 };
-// hugepage: flipped to the rux-mm crate (M1b) — its items no longer
+// hugepage: flipped to the mm crate (M1b) — its items no longer
 // re-export at the mm root; framework consumers reach them through
 // the crate's crate::mm::hugepage (zero such consumers exist today).

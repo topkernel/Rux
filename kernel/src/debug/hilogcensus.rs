@@ -14,9 +14,9 @@
 //! this image. This census answers "WHO emits, WHAT tag, at what rate"
 //! from the kernel side:
 //!
-//! - `unix_send_pre/post` + the periodic dump — MOVED to the rux-debug
-//!   service crate (kernel/rux-debug/src/hilogcensus.rs; root-cold lane
-//!   2026-11-24): rux-syscall's writev path calls them there directly
+//! - `unix_send_pre/post` + the periodic dump — MOVED to the debug
+//!   service crate (kernel/debug/src/hilogcensus.rs; root-cold lane
+//!   2026-11-24): syscall's writev path calls them there directly
 //!   (sibling service dep, zero indirection), and the dump fires
 //!   through the DebugHooks `hilog_dump` row below.
 //! - `kmsg_write(buf)` — stays HERE: called by name from printk.rs's
@@ -133,8 +133,8 @@ pub fn kmsg_write(buf: &[u8]) {
 }
 
 /// Periodic dump (syscost cadence + shutdown cascade) — the body lives
-/// in the rux-debug crate; this wrapper dispatches the DebugHooks
-/// `hilog_dump` row (rux-process's reboot cascade and any framework
+/// in the debug crate; this wrapper dispatches the DebugHooks
+/// `hilog_dump` row (process's reboot cascade and any framework
 /// site keep the historical name).
 pub fn dump() {
     crate::debug::debug_hooks::hilog_dump();

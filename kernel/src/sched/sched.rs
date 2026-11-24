@@ -1636,7 +1636,7 @@ pub fn ww_tail_fill(ix: usize) -> u64 { crate::sched::sched_hooks::ww_tail_fill(
 pub fn ww_append_dump(out: &mut dyn core::fmt::Write, task: *mut Task, now: u64) { crate::sched::sched_hooks::ww_append_dump(out, task, now) }
 
 // These were re-exports of the policy half; they now route through the
-// SchedHooks table (registered by the rux-sched-policy crate at boot —
+// SchedHooks table (registered by the sched crate at boot —
 // the NetHooks pattern). Callers' paths are unchanged.
 
 /// Is per-task scheduler statistics accounting on? (the

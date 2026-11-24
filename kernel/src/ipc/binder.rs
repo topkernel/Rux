@@ -54,7 +54,7 @@ use alloc::collections::VecDeque;
 use crate::ipc::binder_edges::{probe_leaf, probe_u32, probe_u64, entry_frame};
 
 // PUBLISHED DIAGNOSTIC SURFACE (cold-four lane): the items marked `pub`
-// that the MOVED cold diagnostics consume (rux-ipc's binder_diag.rs)
+// that the MOVED cold diagnostics consume (ipc's binder_diag.rs)
 // form the audits' READ view of the object model — the world machinery
 // (world_lock/world_lock_try/World/WorldGuard/pm), the proc/thread/txn/
 // node/work types with the fields the census walks read, the AMS46 /
@@ -1842,8 +1842,8 @@ fn ams46_token_match(head: &[u8]) -> bool {
 }
 
 
-// register_app_child_pid — MOVED to rux-ipc's binder_diag (cold-four
-// lane): its only caller is rux-syscall's clone census; the
+// register_app_child_pid — MOVED to ipc's binder_diag (cold-four
+// lane): its only caller is syscall's clone census; the
 // APP_CHILD_PIDS static stays here (pub) with the txn-path
 // reader app_child_pids_contains.
 
@@ -4508,13 +4508,13 @@ pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Op
     Some(binder_ioctl(file, request, arg))
 }
 
-// == MOVED TO rux-ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
+// == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
 // == binder_diag_hooks.rs and the file's header for the split record) ==
 
 // == MOVED TO kernel/src/ipc/binder_edges.rs (the audited trap-regs /
 // == page-table walker zone the moved diagnostics consume) ==
 
-// == MOVED TO rux-ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
+// == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
 // == binder_diag_hooks.rs and the file's header for the split record) ==
 
 /// huks-wedge Edge B (114th): the audit's LIVE OWING set — the lock-free
@@ -4576,10 +4576,10 @@ pub fn txn_owing_of(tgid: u32, tid: u32) -> (usize, u64, u32) {
 /// This audit walks every thread's txn stack under WORLD, collects
 /// (only) server-side entries (to_tid == owning thread) picked up but
 /// unreplied for >= 1 s, then — with the guard released (sc89/sc207
-// == MOVED TO rux-ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
+// == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
 // == binder_diag_hooks.rs and the file's header for the split record) ==
 
-// == MOVED TO rux-ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
+// == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
 // == binder_diag_hooks.rs and the file's header for the split record) ==
 
 /// One line of the transition ring (sc74 forensics). sc89: the ring is

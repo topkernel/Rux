@@ -1,0 +1,44 @@
+[package]
+name = "bin"
+version = "0.1.0"
+edition = "2021"
+
+# The kernel BINARY package (crate-flip M3-B): owns the rust_main
+# entry symbol and the final link (linker scripts + boot.S via its
+# build.rs, moved from kernel/build.rs verbatim). Depends on the
+# framework lib (rux) AND the service crate (syscall) — the
+# composition point, no cycles: syscall -> rux <- bin.
+
+[[bin]]
+name = "rux"
+path = "src/main.rs"
+
+[dependencies]
+rux = { path = "..", default-features = false }
+drivers = { path = "../drivers", default-features = false }
+ext4 = { path = "../ext4", default-features = false }
+fs = { path = "../fs", default-features = false }
+ipc = { path = "../ipc", default-features = false }
+mm = { path = "../mm", default-features = false }
+net = { path = "../net", default-features = false }
+debug = { path = "../debug", default-features = false }
+timer = { path = "../timer", default-features = false }
+sync = { path = "../sync", default-features = false }
+io_uring = { path = "../io_uring", default-features = false }
+process = { path = "../process", default-features = false }
+sched = { path = "../sched", default-features = false }
+signal = { path = "../signal", default-features = false }
+syscall = { path = "../syscall", default-features = false }
+arch = { path = "../arch", default-features = false }
+
+[build-dependencies]
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64", "syscall/riscv64", "arch/riscv64", "net/riscv64", "fs/riscv64", "drivers/riscv64", "mm/riscv64", "sched/riscv64", "ext4/riscv64", "ipc/riscv64", "signal/riscv64", "process/riscv64", "debug/riscv64", "timer/riscv64", "io_uring/riscv64", "sync/riscv64"]
+x86_64 = ["rux/x86_64", "syscall/x86_64", "arch/x86_64", "net/x86_64", "fs/x86_64", "drivers/x86_64", "mm/x86_64", "sched/x86_64", "ext4/x86_64", "ipc/x86_64", "signal/x86_64", "process/x86_64", "debug/x86_64", "timer/x86_64", "io_uring/x86_64", "sync/x86_64"]
+aarch64 = ["rux/aarch64", "syscall/aarch64", "arch/aarch64", "net/aarch64", "fs/aarch64", "drivers/aarch64", "mm/aarch64", "sched/aarch64", "ext4/aarch64", "ipc/aarch64", "signal/aarch64", "process/aarch64", "debug/aarch64", "timer/aarch64", "io_uring/aarch64", "sync/aarch64"]
+# kernel lib features the bin/tests toggle: forwarded.
+unit-test = ["rux/unit-test", "net/unit-test", "fs/unit-test", "mm/unit-test", "sched/unit-test", "ext4/unit-test", "ipc/unit-test", "signal/unit-test", "process/unit-test", "timer/unit-test", "sync/unit-test", "io_uring/unit-test"]
+cov-dump = ["rux/cov-dump"]
+debug-lock-owner = ["rux/debug-lock-owner"]

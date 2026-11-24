@@ -1,4 +1,4 @@
-//! Framework-side IPC audited-edge zone (crate-flip rung: rux-ipc).
+//! Framework-side IPC audited-edge zone (crate-flip rung: ipc).
 //! The raw-page refcount touches the sysv shared-memory policy needs
 //! against the vmemmap descriptors stay HERE (the net_edges pattern):
 //! the service crate's shm policy calls these as SAFE functions; each

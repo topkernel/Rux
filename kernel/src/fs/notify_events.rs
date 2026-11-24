@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! The inotify event constants (IN_*) — FRAMEWORK-side ABI constants
-//! (rung-3 flip: the inotify leaf moved to rux-fs; the constants
+//! (rung-3 flip: the inotify leaf moved to fs; the constants
 //! stay with the framework's notify_hooks so vfs.rs/file.rs keep their
 //! `ino::IN_*` spellings and the crate re-imports them).
 

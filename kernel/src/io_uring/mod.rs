@@ -24,7 +24,7 @@ use crate::sync::spinlock::Spinlock;
 
 // ==================== UAPI Constants ====================
 
-// Opcodes (pub since the policy flip: the rux-io-uring crate's op
+// Opcodes (pub since the policy flip: the io_uring crate's op
 // dispatch and register paths match on them)
 pub const IORING_OP_NOP:     u8 = 0;
 pub const IORING_OP_FSYNC:   u8 = 3;
@@ -193,7 +193,7 @@ pub struct IoUring {
 
 impl IoUring {
     /// Try to acquire a reference; fails if the ring is being destroyed.
-    /// `pub` since the io_uring POLICY flip: the rux-io-uring service
+    /// `pub` since the io_uring POLICY flip: the io_uring service
     /// crate's sys_enter/sys_register call it under the lifecycle lock
     /// (direct cross-crate call — service -> core, inlinable).
     pub fn try_ref(&self) -> bool {
@@ -331,7 +331,7 @@ fn free_ring_region(region: &RingRegion) {
 // ==================== Ring Creation ====================
 
 /// Create a new io_uring instance. `pub` since the policy flip: the
-/// rux-io-uring crate's sys_io_uring_setup calls it (the ring layout
+/// io_uring crate's sys_io_uring_setup calls it (the ring layout
 /// and region assembly stay mechanism-side — this fn constructs the
 /// private-field IoUring and calls the unsafe region allocator).
 pub fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUring>, i32> {
@@ -451,7 +451,7 @@ pub fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<I
 // ==================== FileOps ====================
 
 /// A pinned, refcounted ring reference for POLICY-side callers (the
-/// rux-io-uring crate's sys_enter/sys_register). Owns the RingRef, so
+/// io_uring crate's sys_enter/sys_register). Owns the RingRef, so
 /// the shared `&IoUring` it hands out stays valid for the struct's
 /// whole life (the final unref — which may free the ring — runs in
 /// RingRef's Drop, i.e. only when this struct is gone).
@@ -492,7 +492,7 @@ pub fn pin_verified_ring(file: &File) -> Option<PinnedRing> {
 /// Audited edge (INV-IOURING-RING-2): release a ring whose
 /// Box::into_raw pointer could not be installed into the fd table
 /// (alloc_fd / install_fd failure in sys_io_uring_setup). Called by the
-/// rux-io-uring crate, which cannot write unsafe.
+/// io_uring crate, which cannot write unsafe.
 pub fn ring_release_on_install_error(ring_ptr: *mut u8) {
     // SAFETY: paired with the Box::into_raw in sys_io_uring_setup; the
     // install failed, so no pin_ring reader can exist and no mapping
@@ -665,10 +665,10 @@ pub fn io_uring_mmap_handler(
 }
 
 // ==================== Submission Processing ====================
-// MOVED to the rux-io-uring service crate (the cold-four lane): the
+// MOVED to the io_uring service crate (the cold-four lane): the
 // submit loop, the op dispatch and the READ/WRITE/FSYNC/CLOSE/FADVISE
 // handlers are syscall-context policy over the FileOps vtable — safe
-// code, reached only from sys_io_uring_enter (rux-syscall's wrapper
+// code, reached only from sys_io_uring_enter (syscall's wrapper
 // re-exports the crate). The ring views they consume stay here (the
 // INV-IOURING-RING-1 window protocol) and are reached through the pub
 // accessor surface above; the completion path (post_cqe +
@@ -688,7 +688,7 @@ pub fn io_uring_mmap_handler(
 /// never an OOB on user-controlled data).
 impl IoUring {
     /// The SQ-ring header view. `pub` since the policy flip: the
-    /// rux-io-uring crate's submit path reads head/tail/array through
+    /// io_uring crate's submit path reads head/tail/array through
     /// it (INV-IOURING-RING-1 — the window bounds every access).
     pub fn sq_hdr(&self) -> crate::safety::mmio::MmioRegion {
         crate::safety::mmio::MmioRegion::new(self.sq_ring.kvirt as usize, self.sq_ring.size)
@@ -755,7 +755,7 @@ impl IoUring {
 // ==================== CQE Posting ====================
 
 /// Post a completion queue entry. `pub` since the policy flip: the
-/// rux-io-uring crate's submit loop calls it (completion-queue
+/// io_uring crate's submit loop calls it (completion-queue
 /// machinery — stays mechanism-side with the wakeup path).
 pub fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
     let _lock = ring.cq_lock.lock();
@@ -801,11 +801,11 @@ fn signal_eventfd_file(file: &alloc::sync::Arc<File>) {
 }
 
 // ==================== CQ Wait / Public Syscall API ====================
-// MOVED to the rux-io-uring service crate (the cold-four lane):
+// MOVED to the io_uring service crate (the cold-four lane):
 // wait_for_cqes, sys_io_uring_setup, sys_io_uring_enter and
 // sys_io_uring_register are syscall-context policy — their only callers
-// are rux-syscall's NR 425/426/427 wrappers, which now reach them
-// through THIS crate's re-export chain (rux-syscall -> rux-io-uring ->
+// are syscall's NR 425/426/427 wrappers, which now reach them
+// through THIS crate's re-export chain (syscall -> io_uring ->
 // rux, the allowed downward edge; the worklist marked them hot only
 // because the scanner cannot model the caller's import switch). The
 // unsafe the moved functions carried was converted at the flip:

@@ -6,7 +6,7 @@
 //! kernel/src/mm/{slab,vma,page_desc}.rs and kernel/src/cmdline.rs per
 //! the test-layout policy (host-side test blocks never compile in this
 //! no_std crate). Formerly mm_sched_pins.rs: the sched half (the fair
-//! LoadWeight/SchedEntity/CfsRunQueue pins) moved to the rux-sched
+//! LoadWeight/SchedEntity/CfsRunQueue pins) moved to the sched
 //! crate with the S1b flip and runs via the SERVICE-TEST SEAM.
 
 use crate::cmdline::{get_all_params, get_init_program, get_root_device, has_param, is_root_readonly, CMDLINE_LEN, CMDLINE_PTR};

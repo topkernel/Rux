@@ -7,7 +7,7 @@
 //! entry points that are POLICY — mmap/munmap placement, the free-area
 //! search, the zap range, fork's VMA-decision half, and the fault
 //! ROUTING (`handle_mm_fault`) — dispatch through THIS nullable table.
-//! Until the per-arch carve lands in the `rux-mm` crate, the framework
+//! Until the per-arch carve lands in the `mm` crate, the framework
 //! registers its own in-tree policy (method/fn pointers, behavior
 //! identical); each arch's carve replaces its rows with the crate's.
 //!
@@ -145,7 +145,7 @@ pub static MM_HOOKS: crate::safety::slot::OnceSlot<MmHooks> =
     crate::safety::slot::OnceSlot::new();
 
 /// The service crate's registration entry (idempotent: first wins —
-/// the composition bin's `rux_mm::register_all` runs before the
+/// the composition bin's `mm::register_all` runs before the
 /// framework's in-tree registration, so a carved arch's crate rows
 /// prevail).
 pub fn mm_register_hooks(hooks: MmHooks) {
@@ -485,8 +485,8 @@ fn policy_hooks() -> &'static MmPolicyHooks {
 /// flipped file's crate rows prevail over these).
 pub fn register_in_tree_mm_policy() {
     // ALL families flipped (M1b complete): every row serves from the
-    // rux-mm crate, whose registration ran earlier in the composition bin
-    // (OnceSlot first-wins) — these defaults never execute from the rux-mm crate, whose
+    // mm crate, whose registration ran earlier in the composition bin
+    // (OnceSlot first-wins) — these defaults never execute from the mm crate, whose
     // registration ran earlier in the composition bin (OnceSlot
     // first-wins) — their rows here stay at the EMPTY defaults and
     // never execute.

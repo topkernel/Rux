@@ -2,7 +2,7 @@
 //! lib-consumed plumbing that historically lived in the service files.
 //! The epoll/timerfd/eventfd internals STAY in the service crate (their
 //! types live there); the lib reaches them through this HOOK TABLE,
-//! registered by rux-syscall::register_all — the same data-seam shape
+//! registered by syscall::register_all — the same data-seam shape
 //! as the dispatch tables (nullable fns no-op until boot registration;
 //! the diagnostics are trace-gated anyway). The small PURE items
 //! (RW_CHUNK, clamp_rw_count, the mmap ring) moved here bodily.
@@ -26,7 +26,7 @@ pub fn clamp_rw_count(count: usize) -> usize {
 // ==================== the debug/event hook table ====================
 
 /// The lib-consumed service hooks. Every entry defaults to a no-op (or
-/// false/None); rux-syscall::register_all publishes the real
+/// false/None); syscall::register_all publishes the real
 /// implementations at boot — before the framework impl runs.
 #[derive(Clone, Copy)]
 pub struct SyscallHooks {
@@ -53,10 +53,10 @@ pub struct SyscallHooks {
     pub syscall_eio_line: fn(u64, &[u64; 6]),
     /// net/unix's epoll binding dump (the AF_UNIX wedge hunt).
     pub epoll_dump_for_file: fn(u64),
-    /// The classic-BPF seccomp filter interpreter (rux-syscall crate):
+    /// The classic-BPF seccomp filter interpreter (syscall crate):
     /// only reached when the current task has a filter installed.
     pub seccomp_run: fn(&[crate::process::task::SockFilter], u64, &crate::arch::pt_regs::PtRegs) -> u32,
-    /// The strace1 loader-hunt line formatter (rux-syscall crate):
+    /// The strace1 loader-hunt line formatter (syscall crate):
     /// only reached behind the EVENT_STRACE1 arm gate + pid 1.
     pub strace1_line: fn(u32, &[u64; 6], i64),
 }
@@ -83,7 +83,7 @@ impl SyscallHooks {
 pub static SYSCALL_HOOKS: crate::safety::slot::OnceSlot<SyscallHooks> =
     crate::safety::slot::OnceSlot::new();
 
-/// Registration entry (called by rux-syscall::register_all).
+/// Registration entry (called by syscall::register_all).
 pub fn syscall_register_hooks(hooks: SyscallHooks) {
     let _ = SYSCALL_HOOKS.publish(hooks);
 }

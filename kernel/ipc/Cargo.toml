@@ -1,0 +1,28 @@
+[package]
+name = "ipc"
+version = "0.1.0"
+edition = "2021"
+
+# The IPC SERVICE CRATE (crate-flip rung: ipc): the movable ipc
+# policy — System V sem/msg/shm, POSIX message queues, keys, the
+# access_token registry — compiled under crate-level
+# #![forbid(unsafe_code)]. Depends on the rux framework lib (root
+# re-exports + the IpcHooks seam). binder.rs STAYS in the framework
+# (its block-view windows, Arc adoption and diagnostic walkers are
+# floor-shaped — the rung's verdict); this crate's ipc module re-exports
+# it so `crate::ipc::binder` paths keep resolving for the sibling
+# services (syscall, drivers).
+
+[dependencies]
+rux = { path = "..", default-features = false }
+# The sync union re-export (sync-upper lane): binder_diag reaches the
+# moved futex diagnostics at their historical crate::sync::futex::X
+# paths through sync's union module (the allowed downward edge).
+sync = { path = "../sync", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64", "sync/riscv64"]
+x86_64 = ["rux/x86_64", "sync/x86_64"]
+aarch64 = ["rux/aarch64", "sync/aarch64"]
+unit-test = []

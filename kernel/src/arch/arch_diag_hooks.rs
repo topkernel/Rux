@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! ARCH COLD SEAM (arch-cold lane): the cold diagnostic rows the
-//! FRAMEWORK's arch trap paths use to reach the rux-arch service
+//! FRAMEWORK's arch trap paths use to reach the arch service
 //! crate's forensic/report halves. The hot callers (trap bodies, the
 //! tick accounting, the panic printers) keep their mechanism
 //! framework-side — no fn pointer sits between a hot site and its
@@ -30,7 +30,7 @@
 //! hooks' panic-on-empty shape is wrong for pure diagnostics): the
 //! no-op default means "no report", the kill/exit path itself is
 //! framework mechanism and never rides a row. Registration runs from
-//! rust_main via rux_arch::register_all — OnceSlot-only publication
+//! rust_main via arch::register_all — OnceSlot-only publication
 //! (no Spinlock, no per-CPU state; the INV-SVCTEST-1 lesson).
 //!
 //! THE SELF-RECURSION RULE (the S1 lesson, binding): a registered row

@@ -12,7 +12,7 @@ A function STAYS in the core when any of three things holds:
    UPWARD call from a hot site, which would become an indirect call
    through the hook table after a move;
 3. an existing service crate calls its name (rule added after the
-   rux-signal lane: restore_sigcontext is called from rux-syscall, so
+   signal lane: restore_sigcontext is called from syscall, so
    it cannot leave the core without a service -> service edge).
 
 A fifth rule exists but is NOT applied by this scan: a function a
@@ -76,6 +76,15 @@ NESTED = {"fs", "drivers", "mm", "arch", "process", "ipc", "sched", "debug",
           "sync", "interrupt", "timer", "trace", "perf", "syscall", "safety",
           "net", "io_uring", "module"}
 
+# Directories under kernel/ that hold the service crates plus the
+# composition bin — every crate that calls into the core from outside
+# kernel/src. Named one by one on purpose: a `kernel/rux-*` glob used to
+# stand here, and a renamed crate would have dropped out of the scan
+# without a word.
+SERVICE_DIRS = ("arch", "bin", "debug", "drivers", "ext4", "fs", "io_uring",
+                "ipc", "mm", "net", "process", "sched", "signal", "sync",
+                "syscall", "timer")
+
 
 def strip(s):
     s = re.sub(r'"(?:\\.|[^"\\])*"', '""', s)
@@ -130,8 +139,9 @@ def main():
     # core, not another service crate, so a function a service crate
     # uses must stay in the core.
     svc_used = set()
-    for p in glob.glob(os.path.join(ROOT, "kernel", "rux-*", "src", "**", "*.rs"), recursive=True):
-        svc_used.update(m.group(2) for m in CALL.finditer(strip(open(p, errors="replace").read())))
+    for d in SERVICE_DIRS:
+        for p in glob.glob(os.path.join(ROOT, "kernel", d, "src", "**", "*.rs"), recursive=True):
+            svc_used.update(m.group(2) for m in CALL.finditer(strip(open(p, errors="replace").read())))
 
     # STAY = defined in a hot-path file, OR called upward by name from one,
     # OR called by name from a service crate.

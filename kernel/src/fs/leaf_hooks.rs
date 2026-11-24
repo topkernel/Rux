@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! The substrate/boot leaf interface tables (fs-substrate tranche): the
-//! framework -> rux-fs crossing for the eleven leaves that left the
+//! framework -> fs crossing for the eleven leaves that left the
 //! framework (debugfs, tracefs, cgroup, sysfs, char_dev, tty, pty,
 //! rootfs, tmpfs, devfs, procfs). THREE tables, one per lifecycle
 //! (crate-plan §3a rule 1 — split by concern, never a mega-table; FsHooks
@@ -123,7 +123,7 @@ pub struct LeafBootHooks {
 
 impl LeafBootHooks {
     /// The pre-registration table: every row is the harmless no-op. The
-    /// rux-fs crate publishes the real one before kmain, so this is only
+    /// fs crate publishes the real one before kmain, so this is only
     /// ever read by builds that link the framework without the crate.
     pub const EMPTY: LeafBootHooks = LeafBootHooks {
         mount_rows_register: || {},

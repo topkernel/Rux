@@ -5,8 +5,8 @@
 //! Rung-3 FLIP SEAM: the fs-service hook table (the NetHooks pattern).
 //! The framework's per-File op hooks (pipe/fifo/memfd), the lifecycle
 //! notify fanout, and the ops-identity probes dispatch through THIS
-//! nullable table — no-op until the rux-fs crate registers at boot
-//! (rux-bin calls its register_all before kmain, the composition
+//! nullable table — no-op until the fs crate registers at boot
+//! (bin calls its register_all before kmain, the composition
 //! contract). The framework never names a service leaf.
 //!
 //! This is the rung-3 table only (pipe/fifo/inotify/memfd/selinuxfs).

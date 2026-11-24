@@ -9,7 +9,7 @@
 
 //! fork() system call test
 use alloc::format;
-// Cross-crate macro (the rux-ipc test-move precedent).
+// Cross-crate macro (the ipc test-move precedent).
 use rux::test_println;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 

@@ -282,7 +282,7 @@ impl Tss {
 static mut TSS_PER_CPU: [Tss; crate::config::MAX_CPUS] =
     [const { Tss::zeroed() }; crate::config::MAX_CPUS];
 
-/// INV-ARCHDIAG-TSS: read-only diagnostic bottom for the rux-arch
+/// INV-ARCHDIAG-TSS: read-only diagnostic bottom for the arch
 /// service crate's foreign-entry report — reads the per-CPU TSS
 /// mirror's rsp0 slot (a broken-machine read; the report that consumes
 /// it is the point, the CPU parks right after). Safe-typed wrapper over
@@ -1036,7 +1036,7 @@ fn frame_in_task_stack(task: *mut crate::process::task::Task, frame: usize) -> b
     }
 }
 /// (arch-cold lane) the cross-stack foreign-entry report moved to the
-/// rux-arch service crate under forbid (one raw serial dump on a
+/// arch service crate under forbid (one raw serial dump on a
 /// detected corruption; the CPU parks right after — the park stays at
 /// this call site). Historical-name wrapper dispatching the cold
 /// ArchDiagHooks row.
@@ -2576,7 +2576,7 @@ fn sigfpe_has_handler() -> bool {
 /// (arch-cold lane) the #GP register-set memory/PTE dump, the tgid
 /// mm-syscall history dump, the fatal user SIGSEGV death report (with
 /// its nested mm-ring and page-walk readers) and the SEGV-history ring
-/// moved to the rux-arch service crate under forbid; these
+/// moved to the arch service crate under forbid; these
 /// historical-name wrappers dispatch the cold ArchDiagHooks rows (the
 /// death report is one bounded dump per user-fault death — the process
 /// exits immediately after).
@@ -2590,7 +2590,7 @@ fn gp_mmhistory_dump(regs: &PtRegs) {
 
 /// Age (in jiffies) of this tid's most recent delivered SIGSEGV, plus
 /// that fault's cr2, if the tid ever took one. (arch-cold lane: the
-/// ring + this reader live in rux-arch; the wrapper keeps the
+/// ring + this reader live in arch; the wrapper keeps the
 /// historical path for do_exit's holder-exit print.)
 pub fn segv_hist_age(tid: u32) -> Option<(u64, u64)> {
     (crate::arch::arch_diag_hooks::arch_diag().segv_hist_age)(tid)
@@ -3559,7 +3559,7 @@ fn utime_sample_rip(rip: u64, comm: &[u8; 16]) {
 /// + utime/stime split + the kernel-mode focus table. Self-throttled
 /// to one print every 60 s.
 ///
-/// (arch-cold lane) the report body lives in the rux-arch service
+/// (arch-cold lane) the report body lives in the arch service
 /// crate now; this historical-name wrapper dispatches the cold
 /// ArchDiagHooks row.
 pub fn utime_ripsample_report() {
@@ -3666,7 +3666,7 @@ fn stime_sample_rip(rip: u64, comm: &[u8; 16]) {
 /// highest count first, empty slots omitted. `focus=true` returns the
 /// launcher-gated table instead of the global one.
 ///
-/// (arch-cold lane) the formatter body lives in the rux-arch service
+/// (arch-cold lane) the formatter body lives in the arch service
 /// crate now; this historical-name wrapper dispatches the cold
 /// ArchDiagHooks row (the sampler statics and their tick-path writers
 /// stay here, published for the crate's readers).

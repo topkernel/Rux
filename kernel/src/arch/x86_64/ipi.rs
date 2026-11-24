@@ -445,7 +445,7 @@ fn remote_bt_self(regs: &crate::arch::pt_regs::PtRegs) {
 /// the bounded wait is a pure spin over relaxed loads. Returns true
 /// when the target answered, false on timeout / not-inflight.
 ///
-/// (arch-cold lane) the requester body lives in the rux-arch service
+/// (arch-cold lane) the requester body lives in the arch service
 /// crate now; this historical-name wrapper dispatches the cold
 /// ArchDiagHooks row (the IRQ-work capture halves and the BT_*/SNAP_*
 /// statics stay here, published for the crate's readers).

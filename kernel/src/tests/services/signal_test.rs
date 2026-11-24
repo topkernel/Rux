@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// Test: Signal handling — moved to tests/services with the rux-signal
+// Test: Signal handling — moved to tests/services with the signal
 // crate flip; runs in-guest through the SERVICE-TEST SEAM with the
 // same group name and pass/fail counters.
 use crate::signal::{Signal, SigFlags, SigAction, SigActionKind, SignalStruct};

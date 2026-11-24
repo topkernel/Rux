@@ -310,11 +310,11 @@ fn hres_horizon_for(precise: u64) -> u64 {
 static TIMER_TABLE: Spinlock<wheel::TimerWheel> =
     Spinlock::new(wheel::TimerWheel::new());
 
-/// Wheel census snapshot for the WW heartbeat report (the rux-timer
+/// Wheel census snapshot for the WW heartbeat report (the timer
 /// crate's report half): (live entries, overdue hres backlog). One
 /// short lock taken at 1 Hz on the armed heartbeat only.
 
-/// Typed twin for the WW report's on-CPU census read (the rux-timer
+/// Typed twin for the WW report's on-CPU census read (the timer
 /// crate's heartbeat): the historical volatile qword read at the
 /// walked task's ti_on_cpu offset (AtomicBool + the 7 bytes the old
 /// instrument deliberately observed with it). Read-only, under the
@@ -610,8 +610,8 @@ pub static DELDM_RA: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
 pub static DELDM_JIF: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
 
 /// Was `id` deleted (and from which source line, how long ago)?
-// del_lookup — MOVED to the rux-timer service crate (cold-four lane):
-// the DEL_DM diagnostic ring's reader; its only caller is rux-process's
+// del_lookup — MOVED to the timer service crate (cold-four lane):
+// the DEL_DM diagnostic ring's reader; its only caller is process's
 // exit teardown. The DEL_* statics stay here (pub) with the marker side.
 
 pub fn timer_pending(id: u64) -> bool {
@@ -1727,8 +1727,8 @@ fn fw_record(pid: u32, ok: bool, on_rq: bool, key: bool, st: u32) {
 pub static NSL_TASK: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
 pub static NSL_ITER: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 
-// nsleep_iter_bump — MOVED to the rux-timer service crate (cold-four
-// lane): its only caller is rux-syscall's nanosleep_impl; the NSL_*
+// nsleep_iter_bump — MOVED to the timer service crate (cold-four
+// lane): its only caller is syscall's nanosleep_impl; the NSL_*
 // marker statics stay here (pub) with the reader side (pdec).
 
 /// Reader: the task's timed-sleep loop-iteration count (0 = unseen).
@@ -1796,7 +1796,7 @@ pub fn ww_hres_age_ms(cpu: usize) -> u64 {
     age * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ
 }
 
-// ww_heartbeat — MOVED to the rux-timer service crate (cold-four lane):
+// ww_heartbeat — MOVED to the timer service crate (cold-four lane):
 // the WW census REPORT half (formatting). Its markers and statics stay
 // framework-side (ww_note_*, WW_FIRE_*, WW_TICK_IRQ — written on the fire/
 // tick paths); the crate reads them and the wheel_census() accessor, and

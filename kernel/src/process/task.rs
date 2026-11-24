@@ -1466,7 +1466,7 @@ pub struct Task {
 
     /// Per-process semaphore undo table.
     /// Records SEM_UNDO adjustments to be reversed on process exit.
-    // pub (visibility tax of the rux-ipc flip): the sysv_sem policy's
+    // pub (visibility tax of the ipc flip): the sysv_sem policy's
     // exit cleanup reads/takes this table through the IpcHooks row.
     pub sem_undo: Spinlock<alloc::vec::Vec<crate::ipc::SemUndoEntry>>,
 

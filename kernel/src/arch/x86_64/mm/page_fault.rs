@@ -27,7 +27,7 @@ use crate::mm::AddressSpace;
 // ==================== Fault Result ====================
 // FaultFlags + MmFaultResult moved to the SEAM (mm/mm_hooks.rs) with the
 // M1a carve: the trap layer, uaccess, ptrace/futex/gup and the hook table
-// all name them; the routing logic itself now lives in the rux-mm crate
+// all name them; the routing logic itself now lives in the mm crate
 // (kernel/src/mm/policy/x86_64.rs). Re-export keeps every historical
 // path (arch::mm::X, page_fault::X) resolving.
 pub use crate::mm::mm_hooks::{FaultFlags, MmFaultResult};

@@ -6,7 +6,7 @@
 //! call surface as one registration table, the NetHooks shape applied
 //! to the driver tree. Every place the framework (or a sibling service
 //! crate) calls INTO a driver leaf resolves through a row here; the
-//! rux-drivers service crate fills the table at composition time
+//! drivers service crate fills the table at composition time
 //! (register_all, before rust_main_impl), and pre-registration builds
 //! see the no-op EMPTY defaults — the same contract NetHooks gives the
 //! net stack.
@@ -39,7 +39,7 @@ pub struct CharDeviceRow {
 }
 
 /// The framework→driver-leaf call surface. Every field is a row the
-/// rux-drivers crate implements; EMPTY is the pre-registration no-op
+/// drivers crate implements; EMPTY is the pre-registration no-op
 /// table (crate absent or not yet composed).
 #[derive(Clone, Copy)]
 pub struct DriverHooks {

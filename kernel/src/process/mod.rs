@@ -10,30 +10,30 @@
 //! - `fork`: Process creation
 //! - `wait`: Wait queues
 
-// pub mod reboot; — moved to the rux-process service crate (the file
-// now physically lives in kernel/rux-process/src/process/).
+// pub mod reboot; — moved to the process service crate (the file
+// now physically lives in kernel/process/src/process/).
 pub mod task;
 pub mod task_ext;
 pub mod task_ref;
-// pub mod fork; — moved to the rux-process service crate (crate-flip
+// pub mod fork; — moved to the process service crate (crate-flip
 // rung: process); the crate's process module re-exports it.
-// pub mod pid; — moved to the rux-process service crate.
+// pub mod pid; — moved to the process service crate.
 pub mod pid_hash;
 pub mod wait;
 pub mod exit;
-// pub mod exec; — moved to the rux-process service crate; the
+// pub mod exec; — moved to the process service crate; the
 // STACKZERO ring statics the riscv64 fault path walks stay
 // framework-side here (hot read, no hook row).
 pub mod exec_ring;
-// pub mod kthread; — moved to the rux-process service crate.
+// pub mod kthread; — moved to the process service crate.
 // The wrapper surface for sibling crates and framework callers
 // (the hook-table indirection lives in process_hooks; these are the
 // #[inline] entry points).
 pub use process_hooks::{kthread_run, kthread_run_on_cpu, kthread_should_stop};
-// pub mod ptrace; — moved to the rux-process service crate; the two
+// pub mod ptrace; — moved to the process service crate; the two
 // entry points the trap files call by name stay core-side:
 pub mod ptrace_core;
-// pub mod coredump; — moved to the rux-process service crate.
+// pub mod coredump; — moved to the process service crate.
 pub mod ns;
 pub mod unsafe_edges;
 // The flip seam: the framework's cold door into the process service

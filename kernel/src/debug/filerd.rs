@@ -89,7 +89,7 @@ pub fn charge(ctr: &AtomicU64, since: u64) {
 pub fn note_miss() {
     MISS_N.fetch_add(1, Relaxed);
 }
-/// Render /proc/filerd (moved to the rux-debug crate): same-named
+/// Render /proc/filerd (moved to the debug crate): same-named
 /// wrapper for the procfs registration site; dispatches the hook row.
 pub fn generate() -> alloc::vec::Vec<u8> {
     crate::debug::debug_hooks::filerd_generate()

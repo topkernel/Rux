@@ -4,9 +4,9 @@
 //!
 //! Rung-5 FLIP SEAM: the ext4/jbd2 service hook table (the FsHooks
 //! pattern, second table — the OnceSlot is single-writer so the ext4
-//! crate owns its own table; rux-fs keeps FsHooks). Every framework
+//! crate owns its own table; fs keeps FsHooks). Every framework
 //! call INTO ext4 or jbd2 dispatches through THIS nullable table —
-//! inert until the rux-ext4 crate registers at boot (rux-bin calls its
+//! inert until the ext4 crate registers at boot (bin calls its
 //! register_all before kmain; the in-tree interim registers from
 //! ext4::init). The framework never names the ext4/jbd2 modules.
 //!
@@ -55,7 +55,7 @@ pub struct Ext4Hooks {
     pub fsctx_mount_instance: fn(&str, bool) -> Result<(Arc<Inode>, bool), i32>,
     /// The mount-table row registration for ext4/ext3/ext2 — MUST run
     /// at the register_builtin_handlers boot point (mount table ready),
-    /// never at rust_main time (the rux-fs 'R'-loop conviction).
+    /// never at rust_main time (the fs 'R'-loop conviction).
     pub mount_rows_register: fn(),
 
     // ---- super-op set (cold: sync/shutdown/remount) ----

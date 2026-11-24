@@ -13,7 +13,7 @@ use super::*;
 pub type SyscallArgs = [u64; 6];
 
 /// FLIP M3-A: the two dispatch tables. Filled by the service crate's
-/// register_all (rux-syscall) at boot through the BIN composition; when
+/// register_all (syscall) at boot through the BIN composition; when
 /// filled, the generic match below is bypassed for table hits (the
 /// fallback match stays as the in-lib migration default until the M3-B
 /// package wiring removes the in-lib service files).
@@ -42,7 +42,7 @@ pub static SYSCALL_REGS_TABLE: crate::safety::slot::OnceSlot<
     [Option<SyscallRegsFn>; 4],
 > = crate::safety::slot::OnceSlot::new();
 
-/// Registration entry (called by rux-syscall::register_all through the
+/// Registration entry (called by syscall::register_all through the
 /// bin): args-table slice indexed by nr, plus the regs-variant entries
 /// (nr 139 rt_sigreturn today).
 pub fn syscall_register_tables(
@@ -150,7 +150,7 @@ fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
     regs.set_return_value(value);
 }
 
-// strace1_line — MOVED to the rux-syscall service crate (cold-four
+// strace1_line — MOVED to the syscall service crate (cold-four
 // lane): the STRACE1 loader-hunt formatter, reached through the
 // SyscallHooks row behind the EVENT_STRACE1 + pid-1 gate below
 // (disarmed boots never touch the table).

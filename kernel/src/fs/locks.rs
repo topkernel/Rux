@@ -7,8 +7,8 @@
 //!
 //! ## The fs-rest split: THIS file is the framework half
 //!
-//! The flock/POSIX/lease LOGIC and its tables live in the rux-fs crate
-//! (`kernel/rux-fs/src/fs/locks.rs`, under crate-level forbid); THIS
+//! The flock/POSIX/lease LOGIC and its tables live in the fs crate
+//! (`kernel/fs/src/fs/locks.rs`, under crate-level forbid); THIS
 //! module keeps everything the kernel's open/close/exec paths touch
 //! directly, so the hot legs pay zero indirection (crate-plan §3a
 //! rule 2 — no fn-pointer rows on data paths):
@@ -76,7 +76,7 @@ use crate::fs::inode::Inode;
 use crate::sync::spinlock::Spinlock;
 
 /// Record-lock ownership token mirror (the tables storing it live in
-/// the rux-fs crate's locks module).
+/// the fs crate's locks module).
 ///
 /// `owner` mirrors Linux's `fl_owner` token: `Pid` for classic POSIX
 /// locks (all threads of one process share them), `Ofd(file_id)` for

@@ -7,8 +7,8 @@
 //! `region` / `loaded`), the `CpioStats` DTO (the row's return type)
 //! and `load()` with its ONE audited unsafe slice build over the
 //! reserved range. The DECOMPRESSOR (RFC 1951/1952) and the cpio
-//! (newc) unpacker moved to the rux-fs service crate
-//! (kernel/rux-fs/src/fs/initrd.rs) — boot-only cold code reached
+//! (newc) unpacker moved to the fs service crate
+//! (kernel/fs/src/fs/initrd.rs) — boot-only cold code reached
 //! through the two LeafBootHooks rows (`initrd_gunzip`,
 //! `initrd_unpack_newc`), filled by the crate's registrar before the
 //! framework boots.
@@ -123,7 +123,7 @@ pub fn load() -> Result<CpioStats, &'static str> {
     };
 
     // The global-sb typed view through the hook row (the rootfs leaf
-    // lives in the rux-fs crate; the trait is the seam).
+    // lives in the fs crate; the trait is the seam).
     let sb = crate::fs::leaf_glue::rootfs::sb_view().ok_or("rootfs not initialized")?;
 
     let stats = (crate::fs::leaf_hooks::boot_hooks().initrd_unpack_newc)(
