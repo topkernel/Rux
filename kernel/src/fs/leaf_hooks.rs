@@ -108,6 +108,14 @@ pub struct LeafBootHooks {
     pub rootfs_view: fn() -> Option<&'static dyn RamfsView>,
     /// init.rs's config-file probe (fs::read_file_from_rootfs).
     pub rootfs_read_file: fn(&str) -> Option<Vec<u8>>,
+    // ---- initrd (the boot unpack, crate-side since the root-cold lane;
+    // both rows fire once per boot from initrd::load — cold sites) ----
+    /// The gzip (RFC 1952) decompressor: Err carries the historical
+    /// `&'static str` reason verbatim.
+    pub initrd_gunzip: fn(&[u8]) -> Result<Vec<u8>, &'static str>,
+    /// The cpio (newc) unpacker over the RAM-root view.
+    pub initrd_unpack_newc:
+        fn(&[u8], &'static dyn RamfsView) -> Result<crate::initrd::CpioStats, &'static str>,
     // ---- char_dev ----
     /// The boot task's stdio (init.rs's init_std_fds_for_task body).
     pub char_dev_init_std_fds: fn(&crate::fs::FdTable),
@@ -145,6 +153,8 @@ impl LeafBootHooks {
         rootfs_create_root_inode: empty_root,
         rootfs_view: || None,
         rootfs_read_file: |_| None,
+        initrd_gunzip: initrd_gunzip_absent,
+        initrd_unpack_newc: initrd_unpack_absent,
         char_dev_init_std_fds: |_| {},
     };
 }
@@ -163,6 +173,20 @@ fn empty_root_2(_: Option<&str>, _: TmpfsTagKind) -> Arc<Inode> {
 
 fn absent() -> Result<(), i32> {
     Err(ABSENT)
+}
+
+/// The EMPTY initrd rows: an unregistered crate means no image can be
+/// unpacked — the historical string-error shape (`load()` propagates it
+/// to the boot print verbatim).
+fn initrd_gunzip_absent(_: &[u8]) -> Result<Vec<u8>, &'static str> {
+    Err("initrd: rux-fs not registered")
+}
+
+fn initrd_unpack_absent(
+    _: &[u8],
+    _: &'static dyn RamfsView,
+) -> Result<crate::initrd::CpioStats, &'static str> {
+    Err("initrd: rux-fs not registered")
 }
 
 // ============================================================================

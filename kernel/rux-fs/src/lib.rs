@@ -48,6 +48,7 @@ pub mod fs {
     pub mod pty;
     pub mod char_dev;
     pub mod rootfs;
+    pub mod initrd;
     pub mod tmpfs;
     pub mod devfs;
     pub mod procfs;
@@ -207,6 +208,8 @@ pub fn register_all() {
         rootfs_create_root_inode: crate::fs::rootfs::create_root_inode,
         rootfs_view: crate::fs::rootfs::ramfs_view,
         rootfs_read_file: crate::fs::rootfs::read_file,
+        initrd_gunzip: crate::fs::initrd::gunzip,
+        initrd_unpack_newc: crate::fs::initrd::unpack_newc,
         char_dev_init_std_fds: crate::fs::char_dev::init_std_fds_for_task,
     });
 

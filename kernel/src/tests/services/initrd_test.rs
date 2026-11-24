@@ -140,7 +140,7 @@ pub fn test_initrd() {
     test_group_start("initrd");
 
     // ---- Test 1: plain gzip (no optional header fields) ----
-    match crate::initrd::gunzip(&GZ_PLAIN) {
+    match crate::fs::initrd::gunzip(&GZ_PLAIN) {
         Ok(out) => {
             if out.len() == 3085 {
                 test_pass("gunzip plain: size 3085");
@@ -179,7 +179,7 @@ pub fn test_initrd() {
     }
 
     // ---- Test 2: gzip with FNAME (header-skip path) ----
-    match crate::initrd::gunzip(&GZ_FNAME) {
+    match crate::fs::initrd::gunzip(&GZ_FNAME) {
         Ok(out) => {
             if out.len() == 3085 && out.ends_with(b"END-MARKER-42") {
                 test_pass("gunzip FNAME: skipped name, content ok");
@@ -194,19 +194,19 @@ pub fn test_initrd() {
     let mut corrupt = GZ_PLAIN;
     let mid = corrupt.len() / 2;
     corrupt[mid] ^= 0x55; // flip bits in the deflate body
-    match crate::initrd::gunzip(&corrupt) {
+    match crate::fs::initrd::gunzip(&corrupt) {
         Ok(_) => test_fail("gunzip corrupt", "accepted corrupt stream"),
         Err(_) => test_pass("gunzip corrupt: rejected"),
     }
     // Truncated stream.
-    match crate::initrd::gunzip(&GZ_PLAIN[..60]) {
+    match crate::fs::initrd::gunzip(&GZ_PLAIN[..60]) {
         Ok(_) => test_fail("gunzip truncated", "accepted short stream"),
         Err(_) => test_pass("gunzip truncated: rejected"),
     }
 
     // ---- Test 4: cpio newc unpack into a fresh rootfs ----
     let sb = RootFSSuperBlock::new();
-    match crate::initrd::unpack_newc(&CPIO_NEWC, &sb) {
+    match crate::fs::initrd::unpack_newc(&CPIO_NEWC, &sb) {
         Ok(stats) => {
             let ok_counts = stats.files == 2
                 && stats.dirs == 1
@@ -279,7 +279,7 @@ pub fn test_initrd() {
 
     // ---- Test 5: bad archive rejected ----
     let sb2 = RootFSSuperBlock::new();
-    match crate::initrd::unpack_newc(b"garbage!", &sb2) {
+    match crate::fs::initrd::unpack_newc(b"garbage!", &sb2) {
         Ok(_) => test_fail("cpio: garbage rejected", "accepted"),
         Err(_) => test_pass("cpio: garbage rejected"),
     }
