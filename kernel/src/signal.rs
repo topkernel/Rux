@@ -1353,16 +1353,16 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
     let sig = match current.pending.first_unmasked(blocked) {
         Some(s) => s,
         None => {
-            if current.sigmask_restore_valid {
-                current.sigmask = current.sigmask_restore;
-                current.sigmask_restore_valid = false;
+            if current.ext.sigmask_restore_valid {
+                current.sigmask = current.ext.sigmask_restore;
+                current.ext.sigmask_restore_valid = false;
             }
             return delivered;
         }
     };
-    if current.sigmask_restore_valid {
-        current.sigmask = current.sigmask_restore;
-        current.sigmask_restore_valid = false;
+    if current.ext.sigmask_restore_valid {
+        current.sigmask = current.ext.sigmask_restore;
+        current.ext.sigmask_restore_valid = false;
     }
 
     // gdm bring-up r16: name the dequeued fatal signal's queued info
@@ -3191,9 +3191,9 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
                 // blocked forever — `wait` wedged, whole system hung).
                 // Mirrors Linux's restore_saved_sigmask() tail in
                 // arch_do_signal_or_restart, which runs unconditionally.
-                if (*current).sigmask_restore_valid {
-                    (*current).sigmask = (*current).sigmask_restore;
-                    (*current).sigmask_restore_valid = false;
+                if (*current).ext.sigmask_restore_valid {
+                    (*current).sigmask = (*current).ext.sigmask_restore;
+                    (*current).ext.sigmask_restore_valid = false;
                 }
             }
         }

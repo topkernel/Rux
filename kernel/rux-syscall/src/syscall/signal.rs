@@ -636,8 +636,8 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
                 // SUSPEND mask so the signal is actually delivered; the old
                 // mask is reinstated just before the handler runs (see
                 // check_and_deliver_signals) and again by sigreturn.
-                current.sigmask_restore = old_mask;
-                current.sigmask_restore_valid = true;
+                current.ext.sigmask_restore = old_mask;
+                current.ext.sigmask_restore_valid = true;
                 return -(errno::EINTR as i64);
             }
             // Set state BEFORE re-checking to close the race window.
@@ -656,8 +656,8 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
                 ));
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
                 crate::sched::dequeue_task(current);
-                current.sigmask_restore = old_mask;
-                current.sigmask_restore_valid = true;
+                current.ext.sigmask_restore = old_mask;
+                current.ext.sigmask_restore_valid = true;
                 return -(errno::EINTR as i64);
             }
             crate::sched::schedule();

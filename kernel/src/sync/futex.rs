@@ -5539,7 +5539,7 @@ pub fn futex_stuck_census() {
         let run = st_bits == crate::process::task::TaskState::RUNNING
             || tk.on_cpu()
             || tk.sched_entity().is_on_rq();
-        let fux = tk.futex_wait_enqueued.load(Relaxed);
+        let fux = tk.ext.futex_wait_enqueued.load(Relaxed);
         let slot = match histos.iter_mut().find(|h| h.tgid == tgid) {
             Some(h) => h,
             None => {
@@ -6318,7 +6318,7 @@ pub fn futex_stuck_census() {
                             .unwrap_or("")
                             .trim_end_matches('\0');
                         let _ = write!(run_s, " {}({})", tk.pid(), comm);
-                    } else if tk.futex_wait_enqueued.load(Relaxed) {
+                    } else if tk.ext.futex_wait_enqueued.load(Relaxed) {
                         nf += 1;
                     } else if st_bits & 0x1 != 0 {
                         ni += 1;
@@ -7067,7 +7067,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // futex_cleanup gates its 512-bucket scan on it. We still hold the
         // bucket lock; the flag is only read by this task's own exit path,
         // so a plain store suffices.
-        crate::sched::edges::task_shared(current).futex_wait_enqueued.store(true, core::sync::atomic::Ordering::Release);
+        crate::sched::edges::task_shared(current).ext.futex_wait_enqueued.store(true, core::sync::atomic::Ordering::Release);
 
         // oh67: name WHO parks on the watched lock words (the frozen-mutex
         // wedge: a waiter parked on M2.l that tid343-class unlocks keep
@@ -7253,7 +7253,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                     FUX_POOL_USED.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
                     // Residency flag (see Task::futex_wait_enqueued): the
                     // waker's unlink left the flag set for us to clear here.
-                    crate::sched::edges::task_shared(current).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
+                    crate::sched::edges::task_shared(current).ext.futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
                 }
             }
         }
@@ -7313,7 +7313,7 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                 // chain (see Task::futex_wait_enqueued).
                 if let Some(w) = slot.as_ref() {
                     if !w.task.is_null() {
-                        crate::sched::edges::task_shared(w.task).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
+                        crate::sched::edges::task_shared(w.task).ext.futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
                     }
                 }
                 n
@@ -7341,7 +7341,7 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                     let n = target_slot.as_ref().and_then(|w| w.next);
                     if let Some(w) = target_slot.as_ref() {
                         if !w.task.is_null() {
-                            crate::sched::edges::task_shared(w.task).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
+                            crate::sched::edges::task_shared(w.task).ext.futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
                         }
                     }
                     n
@@ -7397,7 +7397,7 @@ pub fn futex_cleanup(task: *mut Task) {
     // ~90us block under TCG).
     // SAFETY: do_exit calls this in the task's own context; no other CPU
     // stores the flag for this task concurrently.
-    if !crate::sched::edges::task_shared(task).futex_wait_enqueued.load(core::sync::atomic::Ordering::Acquire) {
+    if !crate::sched::edges::task_shared(task).ext.futex_wait_enqueued.load(core::sync::atomic::Ordering::Acquire) {
         return;
     }
 
@@ -7457,7 +7457,7 @@ pub fn futex_cleanup(task: *mut Task) {
     // task — the flag is now false for good (this is the task's own exit
     // context; no new wait can start).
     // SAFETY: same context argument as the load above.
-    crate::sched::edges::task_shared(task).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
+    crate::sched::edges::task_shared(task).ext.futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
     Task::wake_up(task);
 }
 

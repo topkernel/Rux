@@ -155,6 +155,31 @@ pub struct TaskExt {
     /// A core dump was already attempted for this task (the reap-side
     /// check keeps signal death from re-dumping).
     pub core_dumped: AtomicBool,
+
+    // ---- family (c): robust_list / futex / sigmask-restore state ----
+    // All framework touchpoints are cold: exit runs them through the
+    // ProcessHooks rows (exit_robust_list / exit_clear_child_tid),
+    // the futex residency flag is set/cleared at futex-wait syscall
+    // boundaries and read by exit cleanup plus the heartbeat
+    // histogram, and the sigmask-restore pair is written by the
+    // sigsuspend/ppoll-class syscalls and consumed inside do_signal's
+    // delivery loop (signal frequency, not per-context-switch).
+
+    /// set_tid_address() pointer: futex-woken at exit (CLONE_CHILD_CLEARTID).
+    pub clear_child_tid: *mut i32,
+
+    /// set_robust_list() head/len: walked by exit_teardown only.
+    pub robust_list_head: *const u8,
+    pub robust_list_len: usize,
+
+    /// Residency flag: this task is linked into a futex wait bucket
+    /// (futex_cleanup gates its 512-bucket scan on it).
+    pub futex_wait_enqueued: AtomicBool,
+
+    /// restore_saved_sigmask pair (rt_sigsuspend / pselect-class):
+    /// restored on every trip back to userspace from do_signal.
+    pub sigmask_restore: u64,
+    pub sigmask_restore_valid: bool,
 }
 
 impl TaskExt {
@@ -194,6 +219,12 @@ impl TaskExt {
             ss_active: AtomicBool::new(false),
             ss_saved_insn: AtomicU64::new(0),
             core_dumped: AtomicBool::new(false),
+            clear_child_tid: core::ptr::null_mut(),
+            robust_list_head: core::ptr::null(),
+            robust_list_len: 0,
+            futex_wait_enqueued: AtomicBool::new(false),
+            sigmask_restore: 0,
+            sigmask_restore_valid: false,
         }
     }
 }

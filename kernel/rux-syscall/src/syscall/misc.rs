@@ -1478,8 +1478,8 @@ impl WaitScopedMask {
             self.live = false;
             if let Some(current) = crate::sched::current() {
                 // See install().
-                current.sigmask_restore = self.saved;
-                current.sigmask_restore_valid = true;
+                current.ext.sigmask_restore = self.saved;
+                current.ext.sigmask_restore_valid = true;
             }
         }
     }

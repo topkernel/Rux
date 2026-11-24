@@ -1381,35 +1381,6 @@ pub struct Task {
     /// sweep_dead_threads. False on every normal task.
     pub release_deferred: core::sync::atomic::AtomicBool,
 
-    /// sigsuspend contract: the pre-suspend mask to reinstate when the
-    /// waited-for signal is delivered (Linux TIF_RESTORE_SIGMASK
-    /// equivalent — restoring it at EINTR return made the delivery filter
-    /// by the old mask, so the handler never ran; review syscallb-H-06).
-    pub sigmask_restore: u64,
-
-    pub sigmask_restore_valid: bool,
-
-    /// Futex waiter residency flag (perf-mm lane, 2026-10-31): set while
-    /// this task's waiter entry is linked into a futex bucket chain,
-    /// cleared by every unlink/free path. do_exit's futex_cleanup scans
-    /// the 512-bucket hash ONLY when this is set — the common task (never
-    /// parked on a futex at its last schedule, or one whose sleeper-side
-    /// return already unlinked it) skips 512 irqsave lock pairs per exit.
-    pub futex_wait_enqueued: AtomicBool,
-
-    /// User space address to clear child TID (set_tid_address)
-    ///
-    /// When process exits, kernel clears value at this address
-    /// Used for pthread thread synchronization
-    clear_child_tid: *mut i32,
-
-    /// Robust futex list head (set_robust_list)
-    ///
-    /// Used for robust mutex implementation
-    robust_list_head: *const u8,
-
-    robust_list_len: usize,
-
     /// Wait queue for child process exit events
     ///
     /// Parent processes wait on this queue when calling wait4/waitpid
@@ -1822,9 +1793,6 @@ impl Task {
             // task_struct fields
             state,
             pid,
-            sigmask_restore: 0,
-            sigmask_restore_valid: false,
-            futex_wait_enqueued: AtomicBool::new(false),
             pid_hash_next: ptr::null_mut(),
             tgid: pid, // Single-threaded process tgid == pid
             group_leader: ptr::null_mut(), // fixed up by group_leader_ptr() / new_task_at
@@ -1879,9 +1847,6 @@ impl Task {
             children: ListHead::new(),
             sibling: ListHead::new(),
             parent_children_head: ptr::null_mut(),
-            clear_child_tid: ptr::null_mut(),
-            robust_list_head: ptr::null(),
-            robust_list_len: 0,
             wait_chldexit: crate::process::wait::WaitQueueHead::new(),
             vfork_parent: core::sync::atomic::AtomicU64::new(0),
             brk: core::sync::atomic::AtomicU64::new(0),
@@ -5354,13 +5319,13 @@ impl Task {
     /// When process exits, kernel clears value at this address
     #[inline]
     pub fn set_clear_child_tid(&mut self, tidptr: *mut i32) {
-        self.clear_child_tid = tidptr;
+        self.ext.clear_child_tid = tidptr;
     }
 
     /// Get clear_child_tid address
     #[inline]
     pub fn clear_child_tid(&self) -> *mut i32 {
-        self.clear_child_tid
+        self.ext.clear_child_tid
     }
 
     /// Set robust list
@@ -5368,20 +5333,20 @@ impl Task {
     /// Used for robust mutex implementation
     #[inline]
     pub fn set_robust_list(&mut self, head: *const u8, len: usize) {
-        self.robust_list_head = head;
-        self.robust_list_len = len;
+        self.ext.robust_list_head = head;
+        self.ext.robust_list_len = len;
     }
 
     /// Get robust list head pointer
     #[inline]
     pub fn robust_list_head(&self) -> *const u8 {
-        self.robust_list_head
+        self.ext.robust_list_head
     }
 
     /// Get robust list length
     #[inline]
     pub fn robust_list_len(&self) -> usize {
-        self.robust_list_len
+        self.ext.robust_list_len
     }
 
     /// Get current brk value
