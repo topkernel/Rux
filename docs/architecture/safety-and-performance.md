@@ -1055,6 +1055,14 @@ ids; the full text lives at the owner line.
 | INV-REF-4 | `mm/page_desc.rs` | ! - **INV-REF-4**: `_mapcount == -1` (PAGE_MAPCOUNT_BIAS) ⟺ page is not mapped |
 | INV-REF-5 | `mm/page_desc.rs` | ! - **INV-REF-5**: `_mapcount > -1` ⟺ page is mapped in `(_mapcount + 1)` page tables. |
 | INV-REF-6 | `mm/page_desc.rs` | ! - **INV-REF-6**: If `Cow` flag is set ⟹ `_refcount >= 2` AND the PTE `W` bit is clear. |
+| INV-ARCHDIAG-1 | `arch/x86_64/unsafe_edges.rs` | INV-ARCHDIAG-1 (arch-cold lane): diag_task_fields adopts the task the per-CPU slot named one event ago (the switch path's adoption proof) for the foreign-entry report; read-only, the CPU parks after. |
+| INV-ARCHDIAG-2 | `arch/x86_64/unsafe_edges.rs` | INV-ARCHDIAG-2: diag_task_pid_comm reads pid/comm of the CPU-slot-named task for the remote-BT requester's one-line attribution. |
+| INV-ARCHDIAG-3 | `arch/x86_64/unsafe_edges.rs` | INV-ARCHDIAG-3: diag_volatile_read_u64 is a best-effort read of a (possibly torn) kernel-half stack word — the forensic report is the point. |
+| INV-ARCHDIAG-4 | `arch/x86_64/unsafe_edges.rs` | INV-ARCHDIAG-4: diag_fore_read_u64 walks the page table (the walk is total for any input) and reads the u64 through the linear map; None on holes. |
+| INV-ARCHDIAG-5 | `arch/x86_64/unsafe_edges.rs` | INV-ARCHDIAG-5: diag_frame_desc is a read-only frame-descriptor snapshot (refcount/mapcount/flags/rmap index) for the forensic PTE dump. |
+| INV-ARCHDIAG-6 | `arch/x86_64/unsafe_edges.rs` | INV-ARCHDIAG-6: diag_halt_forever is the crashed-forensic-context permanent park (hlt, IF=0). |
+| INV-ARCHDIAG-R1 | `arch/riscv64/unsafe_edges.rs` | INV-ARCHDIAG-R1 (arch-cold lane): diag_volatile_read_u64 — best-effort read-only u64 load for the fatal-SIGILL walker (kernel-half page-table/code addresses). |
+| INV-ARCHDIAG-TSS | `arch/x86_64/trap.rs` | INV-ARCHDIAG-TSS (arch-cold lane): diag_tss_rsp0 reads the per-CPU TSS mirror's rsp0 slot for the foreign-entry report (broken-machine read). |
 | INV-RE-FRAME-1 | `arch/riscv64/unsafe_edges.rs` | ! - **INV-RE-FRAME-1 (origin)** — [`SavedFrame`] is constructed only |
 | INV-RE-FRAME-2 | `arch/riscv64/unsafe_edges.rs` | ! - **INV-RE-FRAME-2 (liveness)** — the frame lives on the interrupted |
 | INV-RE-FRAME-3 | `arch/riscv64/unsafe_edges.rs` | ! - **INV-RE-FRAME-3 (aliasing)** — exactly one &mut frame handle |

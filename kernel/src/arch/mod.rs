@@ -43,6 +43,12 @@ pub mod aarch64;
 /// `#![forbid(unsafe_code)]` service files are allowed to call.
 pub mod uaccess_safe;
 
+/// The arch cold seam (arch-cold lane): the cold diagnostic rows the
+/// arch trap paths dispatch to reach the rux-arch service crate's
+/// forensic/report halves. Registration from rust_main via
+/// rux_arch::register_all.
+pub mod arch_diag_hooks;
+
 #[cfg(feature = "riscv64")]
 pub use riscv64::{
     arch_init, cpu_id, enable_interrupts, init, boot, context, cpu, ipi, mm, process, pt_regs,

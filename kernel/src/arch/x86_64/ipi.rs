@@ -367,18 +367,18 @@ fn snapshot_self() {
 // host-side with gen-ksyms output, same as the DEADLOCK ra= field.
 
 /// Request sequence (requester bumps; handler echoes into BT_DONE).
-static BT_REQ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static BT_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub static BT_REQ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub static BT_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// Interrupted context at capture time. rbp = 0 when the target was
 /// interrupted in USER mode (kernel frame walk is meaningless there).
-static BT_RIP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static BT_RSP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static BT_RBP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub static BT_RIP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub static BT_RSP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub static BT_RBP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// Captured kernel return addresses (frame-pointer walk), [cpu][i].
-static BT_FRAMES: [AtomicU64; REMOTE_BT_MAX_FRAMES * MAX_CPUS] =
+pub static BT_FRAMES: [AtomicU64; REMOTE_BT_MAX_FRAMES * MAX_CPUS] =
     [const { AtomicU64::new(0) }; REMOTE_BT_MAX_FRAMES * MAX_CPUS];
 /// Number of valid frames in BT_FRAMES[cpu] (0 = none / user mode).
-static BT_NFRAMES: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub static BT_NFRAMES: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 /// Frames captured per remote request.
 pub const REMOTE_BT_MAX_FRAMES: usize = 24;
@@ -386,7 +386,7 @@ pub const REMOTE_BT_MAX_FRAMES: usize = 24;
 /// One in-flight remote-BT per machine (any hunter): a second requester
 /// racing the same target would bump the request sequence under the
 /// first's poll and force a bogus timeout. CAS gate, never blocks.
-static BT_INFLIGHT: AtomicBool = AtomicBool::new(false);
+pub static BT_INFLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// IRQ_WORK handler body: capture THIS CPU's interrupted context and
 /// frame-pointer chain (REMOTE-BT, see the block comment above).
@@ -440,90 +440,17 @@ fn remote_bt_self(regs: &crate::arch::pt_regs::PtRegs) {
 }
 
 /// Request a remote backtrace of `target` and print it (raw addresses;
-// see the block comment). Callers run in fragile contexts (deadlock
+/// see the block comment). Callers run in fragile contexts (deadlock
 /// spinner, softlockup detector): no locks, no jiffies, no allocation —
 /// the bounded wait is a pure spin over relaxed loads. Returns true
 /// when the target answered, false on timeout / not-inflight.
+///
+/// (arch-cold lane) the requester body lives in the rux-arch service
+/// crate now; this historical-name wrapper dispatches the cold
+/// ArchDiagHooks row (the IRQ-work capture halves and the BT_*/SNAP_*
+/// statics stay here, published for the crate's readers).
 pub fn remote_backtrace(target: usize, why: &str) -> bool {
-    if target >= MAX_CPUS || !crate::arch::smp::cpu_started(target) {
-        return false;
-    }
-    let me = crate::arch::cpu_id() as usize;
-    if target == me {
-        return false;
-    }
-    // One hunter at a time (see BT_INFLIGHT comment).
-    if BT_INFLIGHT
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return false;
-    }
-    let req = BT_REQ[target].fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-    send_ipi_type(target, IpiType::IrqWork);
-    // Bounded poll (~200M relaxed loads ≈ the DEADLOCK_WARN spin-budget
-    // class — well under a second on KVM).
-    let mut spins: u32 = 0;
-    while BT_DONE[target].load(Ordering::Acquire) != req {
-        spins = spins.wrapping_add(1);
-        if spins > 200_000_000 {
-            let mut w = crate::debug::backtrace::ConsoleWriter::new();
-            let _ = core::fmt::Write::write_fmt(
-                &mut w,
-                format_args!("REMOTE-BT[{}]: cpu={} TIMEOUT (not servicing IPIs)\n", why, target),
-            );
-            BT_INFLIGHT.store(false, Ordering::Release);
-            return false;
-        }
-        core::hint::spin_loop();
-    }
-    let rip = BT_RIP[target].load(Ordering::Relaxed);
-    let rsp = BT_RSP[target].load(Ordering::Relaxed);
-    let rbp = BT_RBP[target].load(Ordering::Relaxed);
-    let n = BT_NFRAMES[target].load(Ordering::Relaxed) as usize;
-    let mut w = crate::debug::backtrace::ConsoleWriter::new();
-    // Target's current task pid/comm (best-effort; comm is fixed-size
-    // bytes, no allocation).
-    let cur = unsafe { crate::sched::sched::cpu_state(target).current };
-    if cur.is_null() {
-        let _ = core::fmt::Write::write_fmt(
-            &mut w,
-            format_args!("REMOTE-BT[{}] cpu={}: (no current task) rip={:#x} rsp={:#x}\n", why, target, rip, rsp),
-        );
-    } else {
-        let pid = unsafe { (*cur).pid() };
-        let comm = unsafe { (*cur).comm() };
-        let mut cbuf = [0u8; 17];
-        let mut cl = 0;
-        for &b in comm.iter() {
-            if b == 0 || cl == 16 {
-                break;
-            }
-            if (0x20..0x7f).contains(&b) {
-                cbuf[cl] = b;
-                cl += 1;
-            }
-        }
-        let cname = core::str::from_utf8(&cbuf[..cl]).unwrap_or("?");
-        let _ = core::fmt::Write::write_fmt(
-            &mut w,
-            format_args!("REMOTE-BT[{}] cpu={} task={}({}) rip={:#x} rsp={:#x} rbp={:#x}\n",
-                why, target, pid, cname, rip, rsp, rbp),
-        );
-    }
-    if rbp == 0 {
-        let _ = core::fmt::Write::write_str(&mut w, "REMOTE-BT: target was in USER mode\n");
-    }
-    let base = target * REMOTE_BT_MAX_FRAMES;
-    for i in 0..n.min(REMOTE_BT_MAX_FRAMES) {
-        let a = BT_FRAMES[base + i].load(Ordering::Relaxed);
-        let _ = core::fmt::Write::write_fmt(
-            &mut w,
-            format_args!("REMOTE-BT  #{:02} {:#x}\n", i, a),
-        );
-    }
-    BT_INFLIGHT.store(false, Ordering::Release);
-    true
+    (crate::arch::arch_diag_hooks::arch_diag().remote_backtrace)(target, why)
 }
 
 // ============================================================================

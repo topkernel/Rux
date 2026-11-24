@@ -1,0 +1,44 @@
+[package]
+name = "rux-arch"
+version = "0.1.0"
+edition = "2021"
+
+# The ARCH COLD SERVICE CRATE (arch-cold lane): the three architectures'
+# cold diagnostic halves — the fatal-fault forensic walkers (the
+# user-#GP/#PF death reports, the SIGILL mapping dump), the segv-history
+# report, the ripsample/stime report formatters, and the remote-BT
+# requester — compiled under crate-level #![forbid(unsafe_code)].
+#
+# What stayed in the framework (the lane's measured cut — the arch floor
+# per seed-core-design.md §2 plus the stay rules of §1a.2):
+# - boot.S/boot.rs entries, multiboot/e820/DTB parsing (F-BOOT; runs
+#   before any table could be published — rust_main registration is the
+#   earliest seam, and the boot handoff precedes it).
+# - context.rs switch, trap.rs handler bodies, uaccess bottoms, pt
+# - mm/mmu_init page-table atomics/lifetimes, mm_ops/asid/fixmap
+#   page-table mechanism (called by name from framework mm's fault,
+#   fork and exit paths), exception.rs fault entry.
+# - cpu.rs register ops, thread.rs FPU save, smp.rs per-CPU setup and
+#   bringup, mpk.rs, vext.rs (F-rows).
+# - the tick-path samplers (utime/stime_sample_rip, comm_has_launcher)
+#   and the KERNPANIC/panic printers (putb/phex/pdec, oops_show_regs):
+#   hot-site callees and pre-registration panic contexts.
+# - process.rs (start_thread/flush_thread are the exec mechanism the
+#   process service calls by name; sys_arch_prctl's body is wrmsr floor;
+#   sys_ioperm/sys_iopl are 27 lines fused into framework dispatch —
+#   rows would cost more than they move).
+#
+# The seam: kernel/src/arch/arch_diag_hooks.rs — cold ArchDiagHooks rows
+# published from rust_main via rux_arch::register_all (OnceSlot only;
+# every row fires only post-boot: user-fault deaths, armed reports,
+# hunter pokes). Raw reads the walkers need cross through audited
+# framework edges (arch/x86_64/unsafe_edges.rs diag_* family).
+
+[dependencies]
+rux = { path = "..", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["rux/riscv64"]
+x86_64 = ["rux/x86_64"]
+aarch64 = ["rux/aarch64"]
