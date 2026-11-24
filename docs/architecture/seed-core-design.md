@@ -595,19 +595,24 @@ it and with what:
 | file | why the code is in the core | audited by |
 |---|---|---|
 | `unsafe.rs` | it performs unsafe operations | the INV contracts, Kani, Miri |
-| `hot.rs` | a hot path calls it by name; moving it would make that call indirect | the pbench gate |
+| `hotpath.rs` | a hot path calls it by name; moving it would make that call indirect | the pbench gate |
 | `types.rs` | a hot path reads its fields directly | the hot-field table (§4, Rung F1) |
+
+The file is `hotpath.rs`, not `hot.rs`: `hot` alone is an adjective
+and does not say what the file is, and `hotpath` is the term this
+codebase already uses (`scripts/hotpath_print_check.py`, the hot-path
+print rule).
 
 A reader looking for every place memory safety can be broken opens the
 `unsafe.rs` files and nothing else. A reader optimizing the switch
-path opens `hot.rs` and knows no unsafe is hidden in it.
+path opens `hotpath.rs` and knows no unsafe is hidden in it.
 
 ```
 kernel/core/src/
-  sched/   unsafe.rs  hot.rs  types.rs
-  mm/      unsafe.rs  hot.rs  types.rs
-  sync/    unsafe.rs  hot.rs  types.rs
-  fs/      unsafe.rs  hot.rs  types.rs
+  sched/   unsafe.rs  hotpath.rs  types.rs
+  mm/      unsafe.rs  hotpath.rs  types.rs
+  sync/    unsafe.rs  hotpath.rs  types.rs
+  fs/      unsafe.rs  hotpath.rs  types.rs
   …        (one directory per subsystem with code in the core)
   api/     sched.rs  mm.rs  fs.rs  …     (§2c.4)
   printk.rs  console.rs  boot.rs  …       (cross-cutting: used by every subsystem)
@@ -652,9 +657,9 @@ number, mixed into logic. They are the ones the ledger audit found
 mis-annotated. After collection every unsafe construct in the core is
 in an `unsafe.rs`:
 
-- `hot.rs` and `types.rs` contain no `unsafe` at all;
+- `hotpath.rs` and `types.rs` contain no `unsafe` at all;
 - a script in the build gate asserts it (`grep -L` for `unsafe` over
-  every `hot.rs`/`types.rs`), so the property cannot regress;
+  every `hotpath.rs`/`types.rs`), so the property cannot regress;
 - the core's unsafe count becomes `wc` over the `unsafe.rs` files,
   which is the number the ≤5,000-line target (§6) is measured against.
 
@@ -662,7 +667,7 @@ The collection is a rewrite, not a rename: each inline block becomes a
 function in `unsafe.rs` with an INV contract stating its precondition,
 and the call site uses the function. It is done subsystem by
 subsystem, each one its own lane with its own gates, and it does not
-move code out of the core — `hot.rs` code that used an inline
+move code out of the core — `hotpath.rs` code that used an inline
 `unsafe { *p }` now calls an `unsafe.rs` function instead. What leaves
 the core is decided separately, by the rules in §1a.2.
 
@@ -678,7 +683,7 @@ source file.
    `api/`. No function body changes. Reference counts on main
    8d7de77e8: 318 `rux::`, 84 `rux_xxx::`, 5,933 `crate::<subsystem>::`
    inside the crates.
-2. **Split each core subsystem into `unsafe.rs` / `hot.rs` /
+2. **Split each core subsystem into `unsafe.rs` / `hotpath.rs` /
    `types.rs`** (file moves within a subsystem; the functions are
    already where the previous pass left them). Per subsystem, its own
    lane.
