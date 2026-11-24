@@ -754,6 +754,71 @@ regresses, fix the interface — never the safety property.
  standing method; a rung whose reverse surface will not decompose is
  SHELVED with the numbers recorded in this document's §8.
 
+### Rung F1 — the hot/cold field split of the core types
+
+The rule-3 constraint (fields a hot path touches stay in the core) pins
+not just fields but, through Rust's coherence rule, every METHOD on the
+type: inherent impls live in the type's crate. Measured on `Task`
+(2026-11-24, the process lane): 826 lines of struct + 4,004 lines of
+inherent impls + ~950 of free items. The methods are pinned by the
+~20 hot fields. The same wall shelves `ns.rs` (1,329 — its types are
+Task fields) and `mm`'s `vma`/`mm_struct`.
+
+The split: one type becomes two blocks.
+
+- **Core block** (`Task`): the ~20 hot fields, reordered into the first
+  cache lines, plus ONE bridge field `ext: TaskExtHandle` — a typed
+  handle (the journal_handle precedent: an opaque `*mut ()-style`
+  pointer with an INV contract) to the service block. `#[repr(C)]`
+  with the hot fields first; the switch path's reads then land in 1-2
+  lines and never cross the bridge.
+- **Service block** (`TaskExt`): the other ~85 fields (ptrace state,
+  robust list, syscall/exit/reap bookkeeping, rlimits, statistics,
+  namespaces). Allocated at task creation, freed at slot release —
+  the slot lifecycle owns both, which is the INV-F1 contract. Its
+  inherent impls live in the owning service crate.
+
+Measured hot fields (union ~20; the split's starting set):
+
+| path | fields |
+|---|---|
+| context switch | thread, kernel_stack_bottom, address_space, state, pid, on_cpu, pick_state |
+| trap | pt_regs, address_space, kernel_stack_bottom, preempt_count, sigmask, pid, tgid, utime_ticks, stime_ticks, comm |
+| scheduler | ti_cpu, ti_flags, state, sched_entity, rt_entity, pid |
+| VFS walk | cred, fs_arc, pgid, rlimit, try_fdtable, ns_pid, umask |
+
+Placement discipline: a field goes to the service block only when NO
+hot path reads or writes it directly — verified per field, not
+assumed from this table (a hot path may have gained an access since;
+the scan is the starting hypothesis, the code is the truth). A method
+moves with its fields; a method that reads a core field from the
+service crate does so through the handle's published accessors.
+
+Migration order: field-family by field-family, each independently
+mergeable, least-coupled first (statistics and the hunt counters;
+ptrace; robust_list/futex state; reap bookkeeping; rlimits; namespaces
+last — ns.rs's types move into the service block's crate the moment
+their fields do, which dissolves that shelving wall). After each
+family: ctxsw/fork/exit pbench rows compared (the reorder itself must
+show nothing; any movement is a cache-line regression to fix before
+the next family).
+
+Abort criteria: a family whose methods are name-called from a hot-path
+file stays in the core block (the four stay rules apply unchanged to
+methods); if the bridge shows up in a hot-path profile (the switch
+path following `ext`), the field that pulled it back moves into the
+core block — the split narrows, never widens the hot surface.
+
+Performance claim to beat: none required — the split must be NEUTRAL
+on p2_ctxsw/p4 (the hot fields keep direct access; the cold 85 move
+behind a pointer the hot paths never follow). Neutrality is measured
+per family, not asserted.
+
+`Vma` and `Dentry` follow the same rung once Task proves the pattern.
+This rung is the prerequisite recorded by the process lane for
+task.rs's 4,004 lines; it is scheduled after the sync/root batches so
+that the cold-method mass that can move WITHOUT it is already out.
+
 ## 5. What happens to the edges files
 
 The per-subsystem `edges.rs`/`unsafe_edges.rs` files dissolve by rung:
