@@ -2405,16 +2405,24 @@ fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             // ftruncate before mmap). Device nodes keep size 0 — accept.
             if let Some(entry) = crate::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode) {
                 if entry.is_regular_file() {
-                    // b72/b73 SIGBUS hunt: name every size change on the
+                    // b72/b73 SIGBUS hunt: name size changes on the
                     // param workspace files (a size-0 window between
                     // open(O_TRUNC) and ftruncate SIGBUSes every mapper).
-                    crate::pr_info!(
-                        "devfs TRUNC '{}' {} -> {} (pid {})",
-                        entry.name,
-                        inode.get_size(),
-                        arg1,
-                        crate::process::current_pid()
-                    );
+                    // HOTPATH-PRINT: budget-gated (16/boot) — the OH
+                    // param service ftruncate-sizes every workspace
+                    // file, so the hunt shape stays identifiable without
+                    // an ungated line per ftruncate.
+                    static TRUNC_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if TRUNC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                        crate::pr_info!(
+                            "devfs TRUNC '{}' {} -> {} (pid {})",
+                            entry.name,
+                            inode.get_size(),
+                            arg1,
+                            crate::process::current_pid()
+                        );
+                    }
                     // Shared backing active: keep it canonical. Grow
                     // extends the page array (zero-filled); shrink just
                     // drops the logical size (read_at/fault bounds use the

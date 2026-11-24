@@ -560,6 +560,11 @@ pub fn register_all() {
         (469, syscall::file::sys_file_setattr),
         (470, syscall::file::sys_listns),
         (1180, syscall::time::sys_time),
+        // Legacy x86_64-native numbers with no asm-generic slot: the
+        // dispatch preamble arms route to these via free-table entries
+        // (never issued as syscall numbers themselves).
+        (1181, syscall::file::sys_utime),
+        (1182, syscall::file::sys_sysfs),
     ];
     static REGS: &[(usize, rux::syscall::dispatch::SyscallRegsFn)] = &[
         (0, syscall::signal::sys_rt_sigreturn),
