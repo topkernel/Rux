@@ -76,6 +76,9 @@ pub extern "C" fn rust_main() -> ! {
         // the early seam point (their historical positions were early;
         // boundary was last in-framework but is destructive-safe there).
         rux::tests::register_service_tests(rux_process::run_unit_tests);
+        // rux-sync's futex group (constants/flags decode) at the early
+        // seam point (its historical in-suite position).
+        rux::tests::register_service_tests(rux_sync::run_unit_tests);
     }
     rust_main_impl()
 }
