@@ -36,17 +36,20 @@ extern crate alloc;
 /// The mm tree (see src/mm.rs — the rux-fs nesting recipe).
 pub mod mm;
 
-// The carved policy tree. The file is NOT declared by the framework's
-// module tree (kernel/src/mm/mod.rs never names policy/) — this crate
-// is its sole compilation home, under forbid.
+// The carved policy tree. The files were PHYSICALLY MOVED from
+// kernel/src/mm/policy/ (the crate-plan recipe's step 5, done by the
+// root-cold lane 2026-11-24): the framework's module tree never named
+// policy/, so this crate remains their sole compilation home, under
+// forbid — the #[path] indirection is gone and the crate owns the
+// bytes.
 #[cfg(feature = "x86_64")]
-#[path = "../../src/mm/policy/x86_64.rs"]
+#[path = "mm_policy_x86_64.rs"]
 pub mod mm_policy;
 #[cfg(feature = "riscv64")]
-#[path = "../../src/mm/policy/riscv64.rs"]
+#[path = "mm_policy_riscv64.rs"]
 pub mod mm_policy;
 #[cfg(feature = "aarch64")]
-#[path = "../../src/mm/policy/aarch64.rs"]
+#[path = "mm_policy_aarch64.rs"]
 pub mod mm_policy;
 
 /// Registration: fills the framework's MmHooks table (the M1a data

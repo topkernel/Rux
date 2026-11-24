@@ -39,10 +39,12 @@ pub mod signal {
     pub use rux::signal::*;
 }
 
-// The carved policy tree. The file is NOT declared by the framework's
-// module tree (kernel/src/lib.rs never names signal_policy) — this
-// crate is its sole compilation home, under forbid.
-#[path = "../../src/signal_policy.rs"]
+// The carved policy tree. The file was PHYSICALLY MOVED from
+// kernel/src/signal_policy.rs (the crate-plan recipe's step 5, done by
+// the root-cold lane 2026-11-24): the framework's module tree never
+// named it, so this crate remains its sole compilation home, under
+// forbid — the #[path] indirection is gone and the crate owns the
+// bytes.
 pub mod signal_policy;
 
 /// Registration: fills the framework's SignalHooks table (the signal
