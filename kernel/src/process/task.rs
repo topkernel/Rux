@@ -1535,34 +1535,6 @@ pub struct Task {
     /// scheduler_tick (IRQ context).
     cpu_time_last_sigxcpu: AtomicU64,
 
-    /// PID of the tracing process (0 = not traced). Deliberately a pid,
-    /// NOT a Task pointer: a tracer that exits must never leave a
-    /// dangling reference in the tracee — every use re-validates the pid.
-    pub tracer_pid: AtomicU32,
-
-    /// PTRACE_SETOPTIONS word (recorded; no option changes behavior yet).
-    pub ptrace_options: AtomicU64,
-
-    /// Signal number re-injected by PTRACE_CONT: do_signal() delivers it
-    /// WITHOUT re-intercepting it into another trace stop (0 = none).
-    ptrace_sigdeliver: AtomicU32,
-
-    /// siginfo of the signal that caused the last trace stop
-    /// (PTRACE_GETSIGINFO / SETSIGINFO). Cleared on CONT/DETACH.
-    pub ptrace_siginfo: Spinlock<Option<crate::signal::SigInfo>>,
-
-    /// Single-step state (PTRACE_SINGLESTEP): the instruction at ss_addr
-    /// is displaced by an EBREAK; ss_saved_insn holds the original word.
-    pub ss_addr: AtomicU64,
-
-    pub ss_active: core::sync::atomic::AtomicBool,
-
-    pub ss_saved_insn: AtomicU64,
-
-    /// WCOREDUMP bookkeeping: a core file was written for this task's
-    /// death (wait4 sets the 0x80 status bit when this is set).
-    pub core_dumped: core::sync::atomic::AtomicBool,
-
     /// Mount namespace (None == initial namespace).
     pub ns_mount: Option<alloc::sync::Arc<crate::process::ns::MountNamespace>>,
 
@@ -1959,14 +1931,6 @@ impl Task {
             wait_last_ns: AtomicU64::new(0),
             wait_sum_ns: AtomicU64::new(0),
             wait_max_ns: AtomicU64::new(0),
-            tracer_pid: AtomicU32::new(0),
-            ptrace_options: AtomicU64::new(0),
-            ptrace_sigdeliver: AtomicU32::new(0),
-            ptrace_siginfo: Spinlock::new(None),
-            ss_addr: AtomicU64::new(0),
-            ss_active: core::sync::atomic::AtomicBool::new(false),
-            ss_saved_insn: AtomicU64::new(0),
-            core_dumped: core::sync::atomic::AtomicBool::new(false),
             ns_mount: None,
             ns_uts: None,
             ns_ipc: None,
@@ -4806,86 +4770,86 @@ impl Task {
     /// PID of the tracing process (0 = not traced).
     #[inline]
     pub fn tracer_pid(&self) -> u32 {
-        self.tracer_pid.load(Ordering::Acquire)
+        self.ext.tracer_pid.load(Ordering::Acquire)
     }
 
     /// Set the tracing process PID.
     #[inline]
     pub fn set_tracer_pid(&self, pid: u32) {
-        self.tracer_pid.store(pid, Ordering::Release);
+        self.ext.tracer_pid.store(pid, Ordering::Release);
     }
 
     /// Set PTRACE_SETOPTIONS word.
     #[inline]
     pub fn set_ptrace_options(&self, opts: u64) {
-        self.ptrace_options.store(opts, Ordering::Release);
+        self.ext.ptrace_options.store(opts, Ordering::Release);
     }
 
     /// Mark a signal as re-injected by PTRACE_CONT (deliver without
     /// another trace stop).
     #[inline]
     pub fn set_ptrace_sigdeliver(&self, sig: u32) {
-        self.ptrace_sigdeliver.store(sig, Ordering::Release);
+        self.ext.ptrace_sigdeliver.store(sig, Ordering::Release);
     }
 
     /// Consume the re-inject mark; returns the signal number (0 = none).
     #[inline]
     pub fn take_ptrace_sigdeliver(&self) -> u32 {
-        self.ptrace_sigdeliver.swap(0, Ordering::AcqRel)
+        self.ext.ptrace_sigdeliver.swap(0, Ordering::AcqRel)
     }
 
     /// Peek the re-inject mark without consuming it.
     #[inline]
     pub fn ptrace_sigdeliver_peek(&self) -> u32 {
-        self.ptrace_sigdeliver.load(Ordering::Acquire)
+        self.ext.ptrace_sigdeliver.load(Ordering::Acquire)
     }
 
     /// Stash the siginfo of the signal that caused the current trace stop.
     pub fn set_ptrace_siginfo(&self, info: crate::signal::SigInfo) {
-        *self.ptrace_siginfo.lock() = Some(info);
+        *self.ext.ptrace_siginfo.lock() = Some(info);
     }
 
     /// Read the stashed trace-stop siginfo (PTRACE_GETSIGINFO).
     pub fn ptrace_siginfo(&self) -> Option<crate::signal::SigInfo> {
-        *self.ptrace_siginfo.lock()
+        *self.ext.ptrace_siginfo.lock()
     }
 
     /// Clear the stashed trace-stop siginfo (CONT/DETACH).
     pub fn clear_ptrace_siginfo(&self) {
-        *self.ptrace_siginfo.lock() = None;
+        *self.ext.ptrace_siginfo.lock() = None;
     }
 
     /// Arm a software single step: the instruction at `addr` is displaced
     /// by EBREAK; `insn` is the original word to restore on the trap.
     #[inline]
     pub fn arm_single_step(&self, addr: u64, insn: u64) {
-        self.ss_addr.store(addr, Ordering::Release);
-        self.ss_saved_insn.store(insn, Ordering::Release);
-        self.ss_active.store(true, Ordering::Release);
+        self.ext.ss_addr.store(addr, Ordering::Release);
+        self.ext.ss_saved_insn.store(insn, Ordering::Release);
+        self.ext.ss_active.store(true, Ordering::Release);
     }
 
     /// Disarm the software single step (restore already happened).
     #[inline]
     pub fn clear_single_step(&self) {
-        self.ss_active.store(false, Ordering::Release);
+        self.ext.ss_active.store(false, Ordering::Release);
     }
 
     /// Is a software single step pending?
     #[inline]
     pub fn single_step_active(&self) -> bool {
-        self.ss_active.load(Ordering::Acquire)
+        self.ext.ss_active.load(Ordering::Acquire)
     }
 
     /// Address of the displaced (EBREAK) instruction.
     #[inline]
     pub fn single_step_addr(&self) -> u64 {
-        self.ss_addr.load(Ordering::Acquire)
+        self.ext.ss_addr.load(Ordering::Acquire)
     }
 
     /// Original word of the displaced instruction.
     #[inline]
     pub fn single_step_saved_insn(&self) -> u64 {
-        self.ss_saved_insn.load(Ordering::Acquire)
+        self.ext.ss_saved_insn.load(Ordering::Acquire)
     }
 
     /// Accessor for the stop-reported flag (ptrace stop notification).
@@ -4897,13 +4861,13 @@ impl Task {
     /// Mark that a core file was written for this task's death.
     #[inline]
     pub fn set_core_dumped(&self) {
-        self.core_dumped.store(true, Ordering::Release);
+        self.ext.core_dumped.store(true, Ordering::Release);
     }
 
     /// Was a core file written for this task's death? (WCOREDUMP bit)
     #[inline]
     pub fn core_dumped(&self) -> bool {
-        self.core_dumped.load(Ordering::Acquire)
+        self.ext.core_dumped.load(Ordering::Acquire)
     }
 
     /// Get process name (comm)

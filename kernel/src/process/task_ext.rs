@@ -120,6 +120,41 @@ pub struct TaskExt {
     pub cmaxrss_kb: AtomicU64,
     /// The dying task's own final maxrss (set at exit).
     pub exit_maxrss_kb: AtomicU64,
+
+    // ---- family (b): ptrace state ----
+    // Framework touchpoints are all cold and accessor-routed: the
+    // trap files' int3/single-step arms (debugger-driven only),
+    // signal delivery's traced-task interception (runs only when
+    // tracer_pid != 0), the exit printer, and the reap-side
+    // core_dumped check. Task keeps forwarding accessors.
+
+    /// PTRACE tracer pid (0 = untraced). Read by signal delivery's
+    /// interception check and the trap files' int3 handling.
+    pub tracer_pid: AtomicU32,
+
+    /// PTRACE_SETOPTIONS bits (crate-side writer via the Task
+    /// accessor).
+    pub ptrace_options: AtomicU64,
+
+    /// The signal re-injected by PTRACE_CONT(sig) — delivered for
+    /// real instead of intercepted (the peek/consume pair).
+    pub ptrace_sigdeliver: AtomicU32,
+
+    /// The dequeued signal held for the tracer (PTRACE_GETSIGINFO /
+    /// CONT(0) swallows it).
+    pub ptrace_siginfo: crate::sync::spinlock::Spinlock<
+        Option<crate::signal::SigInfo>,
+    >,
+
+    /// Software single-step state (the x86 int3/stepping arm and the
+    /// riscv64 epc-match arm; armed/cleared by ptrace).
+    pub ss_addr: AtomicU64,
+    pub ss_active: AtomicBool,
+    pub ss_saved_insn: AtomicU64,
+
+    /// A core dump was already attempted for this task (the reap-side
+    /// check keeps signal death from re-dumping).
+    pub core_dumped: AtomicBool,
 }
 
 impl TaskExt {
@@ -151,6 +186,14 @@ impl TaskExt {
             start_jiffies: AtomicU64::new(crate::timer::get_jiffies()),
             cmaxrss_kb: AtomicU64::new(0),
             exit_maxrss_kb: AtomicU64::new(0),
+            tracer_pid: AtomicU32::new(0),
+            ptrace_options: AtomicU64::new(0),
+            ptrace_sigdeliver: AtomicU32::new(0),
+            ptrace_siginfo: crate::sync::spinlock::Spinlock::new(None),
+            ss_addr: AtomicU64::new(0),
+            ss_active: AtomicBool::new(false),
+            ss_saved_insn: AtomicU64::new(0),
+            core_dumped: AtomicBool::new(false),
         }
     }
 }
