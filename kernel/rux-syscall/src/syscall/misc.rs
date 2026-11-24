@@ -2909,9 +2909,9 @@ pub fn param_stall_dump() {
             if tk.tgid() != 1 {
                 return;
             }
-            let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
-            let a0 = tk.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
-            let a1 = tk.last_syscall_a1.load(core::sync::atomic::Ordering::Relaxed);
+            let nr = tk.ext.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+            let a0 = tk.ext.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
+            let a1 = tk.ext.last_syscall_a1.load(core::sync::atomic::Ordering::Relaxed);
             let cb: &[u8; 16] = tk.comm();
             let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
             let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
@@ -3020,8 +3020,8 @@ pub fn param_sender_dump() {
                 SchedPolicy::Deadline => tk.dl_entity().is_on_rq(),
                 _ => tk.sched_entity().is_on_rq(),
             };
-            let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
-            let a0 = tk.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
+            let nr = tk.ext.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+            let a0 = tk.ext.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
             crate::pr_warn!(
                 "PARAM-SENDER pid={} ({}) st={:#x} preempt={} pk={} claim={} on_cpu={} linked={} on_rq={} conn={} lastsys={}(a0={:#x})",
                 pid,

@@ -984,18 +984,18 @@ pub fn release_task(task: *mut Task) {
         use core::sync::atomic::Ordering::Relaxed;
         let u = t.utime_ticks.load(Relaxed);
         let s = t.stime_ticks.load(Relaxed);
-        let cu = t.cutime_ticks.load(Relaxed);
-        let cs = t.cstime_ticks.load(Relaxed);
-        let rss = t.exit_maxrss_kb.load(Relaxed);
-        let crss = t.cmaxrss_kb.load(Relaxed);
+        let cu = t.ext.cutime_ticks.load(Relaxed);
+        let cs = t.ext.cstime_ticks.load(Relaxed);
+        let rss = t.ext.exit_maxrss_kb.load(Relaxed);
+        let crss = t.ext.cmaxrss_kb.load(Relaxed);
         // release_task only ever runs in the REAPING parent's wait
         // context (do_wait/do_waitid, including init reaping orphans);
         // the child's own parent pointer is already None here (the
         // E8-REPAR claim), so the fold targets the caller.
         if let Some(parent) = crate::sched::current() {
-            (*parent).cutime_ticks.fetch_add(u + cu, Relaxed);
-            (*parent).cstime_ticks.fetch_add(s + cs, Relaxed);
-            let _ = (*parent).cmaxrss_kb.fetch_max(rss.max(crss), Relaxed);
+            (*parent).ext.cutime_ticks.fetch_add(u + cu, Relaxed);
+            (*parent).ext.cstime_ticks.fetch_add(s + cs, Relaxed);
+            let _ = (*parent).ext.cmaxrss_kb.fetch_max(rss.max(crss), Relaxed);
         }
     }
 

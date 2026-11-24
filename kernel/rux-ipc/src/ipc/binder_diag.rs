@@ -2977,12 +2977,12 @@ pub fn ams46_audit() {
                     use core::fmt::Write;
                     let mut s = alloc::string::String::new();
                     const RL: usize = crate::process::task::LAST_CALLS_LEN;
-                    let cur = t.last_calls_cur.load(Relaxed);
+                    let cur = t.ext.last_calls_cur.load(Relaxed);
                     let mut shown = 0usize;
                     for k in 0..RL {
                         // newest first
                         let i = (cur + RL - k) % RL;
-                        let v = t.last_calls[i].load(Relaxed);
+                        let v = t.ext.last_calls[i].load(Relaxed);
                         if v != 0 {
                             let _ = write!(s, " {}", v & 0xffff);
                             shown += 1;

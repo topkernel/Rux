@@ -185,7 +185,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                     let nc = core::str::from_utf8(tk.comm())
                         .unwrap_or("")
                         .trim_end_matches('\0');
-                    let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+                    let nr = tk.ext.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
                     let running = tk.state().is_running();
                     crate::pr_debug!(
                 "forkgate:  sib tid {} comm='{}' lastsys={} {}",
@@ -281,7 +281,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                     {
                                         const RL: usize =
                                             crate::process::task::INIT_CALLS_LEN;
-                                        let cur = t.init_calls_cur.load(Relaxed);
+                                        let cur = t.ext.init_calls_cur.load(Relaxed);
                                         let mut s2 = alloc::string::String::new();
                                         let _ = write!(
                                             s2,
@@ -293,7 +293,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                         );
                                         for k in 0..RL {
                                             let i = (cur + RL - k) % RL;
-                                            let v = t.init_calls[i].load(Relaxed);
+                                            let v = t.ext.init_calls[i].load(Relaxed);
                                             if v != 0 {
                                                 let _ = write!(s2, " {}", v);
                                             }
@@ -303,9 +303,9 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                         let _ = write!(s3, "APP-PAR: initA:");
                                         for k in 0..RL {
                                             let i = (cur + RL - k) % RL;
-                                            let v = t.init_calls[i].load(Relaxed);
+                                            let v = t.ext.init_calls[i].load(Relaxed);
                                             if v != 0 {
-                                                let a0 = t.init_a0[i].load(Relaxed);
+                                                let a0 = t.ext.init_a0[i].load(Relaxed);
                                                 let _ = write!(s3, " {}@{:#x}", v, a0);
                                             }
                                         }
@@ -344,7 +344,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                             const RL: usize =
                                                 crate::process::task::LAST_CALLS_LEN;
                                             let cur = t
-                                                .last_calls_cur
+                                                .ext.last_calls_cur
                                                 .load(core::sync::atomic::Ordering::Relaxed);
                                             let mut s2 = alloc::string::String::new();
                                             let _ = write!(
@@ -368,7 +368,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                             );
                                             for k in 0..RL {
                                                 let i = (cur + RL - k) % RL; // newest first
-                                                let v = t.last_calls[i]
+                                                let v = t.ext.last_calls[i]
                                                     .load(core::sync::atomic::Ordering::Relaxed);
                                                 if v != 0 {
                                                     let _ = write!(s2, " {}", v);
@@ -376,18 +376,18 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                             }
                                             crate::pr_warn!("{}", s2);
                                             let cur8 = t
-                                                .last_fails_cur
+                                                .ext.last_fails_cur
                                                 .load(core::sync::atomic::Ordering::Relaxed);
                                             let mut s = alloc::string::String::new();
                                             let _ = write!(s, "APP-THR: tgid {} fails:", t.tgid());
                                             for k in 0..8 {
                                                 let i = (cur8 + 8 - 1 - k) % 8;
-                                                let v = t.last_fails[i]
+                                                let v = t.ext.last_fails[i]
                                                     .load(core::sync::atomic::Ordering::Relaxed);
                                                 if v != 0 {
-                                                    let a0 = t.last_fails_a0[i]
+                                                    let a0 = t.ext.last_fails_a0[i]
                                                         .load(core::sync::atomic::Ordering::Relaxed);
-                                                    let a1 = t.last_fails_a1[i]
+                                                    let a1 = t.ext.last_fails_a1[i]
                                                         .load(core::sync::atomic::Ordering::Relaxed);
                                                     let _ = write!(
                                                         s,
@@ -412,7 +412,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                                 const RL: usize =
                                                     crate::process::task::INIT_CALLS_LEN;
                                                 let icur = t
-                                                    .init_calls_cur
+                                                    .ext.init_calls_cur
                                                     .load(Relaxed);
                                                 let mut s4 = alloc::string::String::new();
                                                 let _ = write!(
@@ -422,7 +422,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                                 );
                                                 for k in 0..RL {
                                                     let i = (icur + RL - k) % RL;
-                                                    let v = t.init_calls[i]
+                                                    let v = t.ext.init_calls[i]
                                                         .load(Relaxed);
                                                     if v != 0 {
                                                         let _ = write!(s4, " {}", v);
@@ -437,10 +437,10 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                                 );
                                                 for k in 0..32.min(RL) {
                                                     let i = (icur + RL - k) % RL;
-                                                    let v = t.init_calls[i]
+                                                    let v = t.ext.init_calls[i]
                                                         .load(Relaxed);
                                                     if v != 0 {
-                                                        let a0 = t.init_a0[i]
+                                                        let a0 = t.ext.init_a0[i]
                                                             .load(Relaxed);
                                                         let _ =
                                                             write!(s5, " {}@{:#x}", v, a0);
@@ -4110,8 +4110,8 @@ pub fn sys_times(args: SyscallArgs) -> i64 {
                 (
                     t.utime_ticks.load(Relaxed) as i64,
                     t.stime_ticks.load(Relaxed) as i64,
-                    t.cutime_ticks.load(Relaxed) as i64,
-                    t.cstime_ticks.load(Relaxed) as i64,
+                    t.ext.cutime_ticks.load(Relaxed) as i64,
+                    t.ext.cstime_ticks.load(Relaxed) as i64,
                 )
             },
             None => (0, 0, 0, 0),
@@ -5646,8 +5646,8 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
             use core::sync::atomic::Ordering::Relaxed;
             if who == RUSAGE_CHILDREN {
                 (
-                    t.cutime_ticks.load(Relaxed),
-                    t.cstime_ticks.load(Relaxed),
+                    t.ext.cutime_ticks.load(Relaxed),
+                    t.ext.cstime_ticks.load(Relaxed),
                 )
             } else {
                 // SELF and THREAD both report the calling task's own time
@@ -5674,7 +5674,7 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     let maxrss_kb: u64 = if who == RUSAGE_CHILDREN {
         crate::sched::current()
             .map(|t| {
-                (*t).cmaxrss_kb
+                (*t).ext.cmaxrss_kb
                     .load(core::sync::atomic::Ordering::Relaxed)
             })
             .unwrap_or(0)

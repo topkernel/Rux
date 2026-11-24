@@ -6,6 +6,7 @@
 //! Task Control Block
 
 #![forbid(unsafe_code)]
+use super::task_ext::TaskExtHandle;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::ptr;
 use crate::sync::spinlock::Spinlock;
@@ -1282,6 +1283,12 @@ pub struct Task {
 
     pub schedstat_exec_start: AtomicU64,
 
+    /// F1 service-block bridge (INV-F1, see process/task_ext.rs):
+    /// allocated at task creation, freed at slot release — the slot
+    /// lifecycle owns both blocks. Followed only by cold paths;
+    /// hot fields live above, in the first cache lines.
+    pub ext: TaskExtHandle,
+
     /// Thread group leader (task_struct::group_leader).
     ///
     /// Self-pointer for a leader / single-threaded process; points at the
@@ -1528,24 +1535,6 @@ pub struct Task {
     /// scheduler_tick (IRQ context).
     cpu_time_last_sigxcpu: AtomicU64,
 
-    pub cutime_ticks: AtomicU64,
-
-    pub cstime_ticks: AtomicU64,
-
-    /// The task's start time in jiffies since boot (Linux's starttime,
-    /// field 22 of /proc/[pid]/stat).
-    pub start_jiffies: AtomicU64,
-
-    /// RUSAGE_CHILDREN ru_maxrss (KB): max of reaped children's resident
-    /// set at exit (Linux signal->cmaxrss). LTP getrusage03 requires the
-    /// propagation (initial.children ~= 100MB after a 100MB consumer
-    /// grandchild is reaped).
-    pub cmaxrss_kb: AtomicU64,
-
-    /// Resident set (KB) captured at THIS task's exit, before its mm is
-    /// dropped — the value the parent folds into cmaxrss_kb.
-    pub exit_maxrss_kb: AtomicU64,
-
     /// PID of the tracing process (0 = not traced). Deliberately a pid,
     /// NOT a Task pointer: a tracer that exits must never leave a
     /// dangling reference in the tracee — every use re-validates the pid.
@@ -1640,96 +1629,6 @@ pub struct Task {
     /// internal ELF mappings and brk never charge, so they never
     /// uncharge either (documented RSS-approximation simplification).
     cgroup_mem_charged: AtomicU64,
-
-    /// LASTSYS (stall hunts): the syscall this task most recently
-    /// ENTERED (nr + first two args). For a task parked inside a
-    /// blocking syscall (epoll_wait, binder ioctl, futex, slow fd read)
-    /// this names the call it is sleeping in — the global 2048-entry
-    /// forensic ring overwrites a parked waiter's record within
-    /// milliseconds under system-wide traffic, so per-task storage is
-    /// the only form that survives. Written at dispatch entry (Relaxed
-    /// stores); read by the DEBUG taskdump.
-    pub last_syscall_nr: core::sync::atomic::AtomicU32,
-
-    pub last_syscall_a0: AtomicU64,
-
-    pub last_syscall_a1: AtomicU64,
-
-    /// sc125 (Session P): ring of the last 8 FAILING syscalls (nr packed
-    /// low-16, errno high-16) for this task. The park decode needs the
-    /// pre-park failure tail — musl pthread_create maps the thread stack
-    /// BEFORE clone, so a failed mmap (ENOMEM/EAGAIN) means NO clone ever
-    /// reaches the kernel census; this latch is the only per-task record
-    /// that survives the system-wide ring's millisecond overwrite window.
-    /// Stored at dispatch EXIT when 0 > ret > -4096.
-    pub last_fails: [AtomicU32; 8],
-
-    pub last_fails_cur: core::sync::atomic::AtomicUsize,
-
-    /// sc135 (Session Q): a0/a1 companions for the fail ring, same index.
-    /// The park decode named the pre-park tail as nr167=-22 (prctl EINVAL)
-    /// x1-2 per child, but nr+errno alone cannot say WHICH option — and
-    /// OH may exercise a prctl option this kernel rejects but Linux
-    /// accepts. a0 = the option, a1 = the sub-op/arg.
-    pub last_fails_a0: [AtomicU64; 8],
-
-    pub last_fails_a1: [AtomicU64; 8],
-
-    /// 50th (crash-storm hunt): ring of the last 16 address-space edits
-    /// (mmap/mprotect/munmap/brk/mremap) issued by THIS task. Two words
-    /// per event:
-    ///   w0 = op(bits 0..8: 1 mmap, 2 mprotect, 3 munmap, 4 brk,
-    ///         5 mremap) | rc(bits 8..16, 0 = ok else errno)
-    ///         | addr(bits 16..64)
-    ///   w1 = len(bits 0..48) | prot/arg2(bits 48..56)
-    /// The mallocng crash family stamps a freshly-allocated group
-    /// through a pointer whose page sits in a VMA HOLE with no covering
-    /// mapping. Printed at USEGV time, this ring answers — in one boot —
-    /// whether the kernel itself returned that address (mmap placement/
-    /// insertion bug), removed its covering VMA (munmap overreach), or
-    /// never saw the address at all (userspace stale chain from
-    /// corrupted allocator state). Same storage discipline as
-    /// last_fails: Relaxed stores at dispatch exit, read only by the
-    /// fault printer.
-    pub mm_ops: [AtomicU64; 32],
-
-    pub mm_ops_cur: core::sync::atomic::AtomicUsize,
-
-    /// 50th (crash-storm hunt): set the first time this task issues
-    /// execve/execveat. A process LEADER that exits without it is a
-    /// failed spawn (the OH 337->588->589 chain forked, never execve'd,
-    /// and exited 512/0); do_exit prints its birth syscall window so the
-    /// killing call names itself. Threads never exec by design and are
-    /// excluded at the print site.
-    pub did_exec: core::sync::atomic::AtomicBool,
-
-    /// sc128 (Session P): ring of the last syscalls (nr only) for this
-    /// task — the park decode needs the final SUCCESS sequence too (what
-    /// the child does between the failed dlopen cascade and the cond
-    /// park: more mmaps? clone attempts? closes?). Stored at every
-    /// dispatch exit. sc135 (Session Q): deepened 12 -> 96 — sc129's
-    /// 12-deep ring showed only the clock_gettime retry loop, masking
-    /// everything the child did between the dlopen cascade and the park;
-    /// 96 covers the full pre-park tail unless the retry loop spins
-    /// >96 calls before the eternal WAIT entry.
-    pub last_calls: [AtomicU32; LAST_CALLS_LEN],
-
-    pub last_calls_cur: core::sync::atomic::AtomicUsize,
-
-    /// sc138 (Session Q): FILTERED ring (see INIT_CALLS_LEN) — the retry
-    /// loop noise skipped so the init sequence survives to the dump.
-    pub init_calls: [AtomicU32; INIT_CALLS_LEN],
-
-    pub init_a0: [AtomicU64; INIT_CALLS_LEN],
-
-    pub init_calls_cur: core::sync::atomic::AtomicUsize,
-
-    /// sc143: birth-window latch (see BIRTH_CALLS_LEN).
-    pub birth_calls: [AtomicU32; BIRTH_CALLS_LEN],
-
-    pub birth_a0: [AtomicU64; BIRTH_CALLS_LEN],
-
-    pub birth_done: core::sync::atomic::AtomicBool,
 
     /// 63rd session (strand-wall hunt): persistent per-task pick/wake
     /// evidence, kept ON the task so no address-keyed side table can
@@ -1940,7 +1839,6 @@ impl Task {
             ti_a0: core::sync::atomic::AtomicU64::new(0),
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
-            last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
             // Stack-depth fix (leg-16 KSTACK-HW: check_module_up 65.8KB,
             // hiview 76KB — both the Task-construction frame): from_fn
             // materialises these arrays through try_from_fn's wrapper
@@ -1948,23 +1846,6 @@ impl Task {
             // repeat writes each element in place — same values, and the
             // per-fork stack depth drops by the copy multiplier (the
             // measured gate for any KERNEL_STACK_SIZE reduction).
-            last_fails: [const { AtomicU32::new(0) }; 8],
-            last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
-            last_fails_a0: [const { AtomicU64::new(0) }; 8],
-            last_fails_a1: [const { AtomicU64::new(0) }; 8],
-            mm_ops: [const { AtomicU64::new(0) }; 32],
-            mm_ops_cur: core::sync::atomic::AtomicUsize::new(0),
-            did_exec: core::sync::atomic::AtomicBool::new(false),
-            last_calls: [const { AtomicU32::new(0) }; crate::process::task::LAST_CALLS_LEN],
-            last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
-            init_calls: [const { AtomicU32::new(0) }; crate::process::task::INIT_CALLS_LEN],
-            init_a0: [const { AtomicU64::new(0) }; crate::process::task::INIT_CALLS_LEN],
-            init_calls_cur: core::sync::atomic::AtomicUsize::new(0),
-            birth_calls: [const { AtomicU32::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
-            birth_a0: [const { AtomicU64::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
-            birth_done: core::sync::atomic::AtomicBool::new(false),
-            last_syscall_a0: AtomicU64::new(0),
-            last_syscall_a1: AtomicU64::new(0),
 
             // task_struct fields
             state,
@@ -2050,8 +1931,6 @@ impl Task {
             cpu_time_last_sigxcpu: AtomicU64::new(0),
             utime_ticks: AtomicU64::new(0),
             stime_ticks: AtomicU64::new(0),
-            cutime_ticks: AtomicU64::new(0),
-            cstime_ticks: AtomicU64::new(0),
             nvcsw: AtomicU64::new(0),
             nivcsw: AtomicU64::new(0),
             min_flt: AtomicU64::new(0),
@@ -2066,6 +1945,7 @@ impl Task {
             schedstat_timeslices: AtomicU64::new(0),
             schedstat_wait_start: AtomicU64::new(0),
             schedstat_exec_start: AtomicU64::new(0),
+            ext: TaskExtHandle::new(),
             pick_ring: [const { AtomicU64::new(0) }; 16],
             pick_ring_seq: AtomicU64::new(0),
             pick_visit_n: AtomicU64::new(0),
@@ -2079,9 +1959,6 @@ impl Task {
             wait_last_ns: AtomicU64::new(0),
             wait_sum_ns: AtomicU64::new(0),
             wait_max_ns: AtomicU64::new(0),
-            start_jiffies: AtomicU64::new(crate::timer::get_jiffies()),
-            cmaxrss_kb: AtomicU64::new(0),
-            exit_maxrss_kb: AtomicU64::new(0),
             tracer_pid: AtomicU32::new(0),
             ptrace_options: AtomicU64::new(0),
             ptrace_sigdeliver: AtomicU32::new(0),

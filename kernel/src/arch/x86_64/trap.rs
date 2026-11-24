@@ -2756,13 +2756,17 @@ fn gp_mmhistory_dump(regs: &PtRegs) {
     let Some(tk) = crate::sched::current() else { return };
     let dump = |tag: &str, t: *const crate::process::task::Task| {
         const N: usize = 16;
-        let cur = unsafe { (*t).mm_ops_cur.load(Relaxed) };
+        // F1: the rings live behind the ext bridge; take ONE shared
+        // reference up front (array loads through a raw-pointer place
+        // would implicit-autoref).
+        let tref = unsafe { &*t };
+        let cur = tref.ext.mm_ops_cur.load(Relaxed);
         let pid = unsafe { (*t).pid() };
         let mut shown = 0usize;
         for k in 0..N {
             let i = (cur + N - 1 - k) % N;
-            let w0 = unsafe { (*t).mm_ops[i * 2].load(Relaxed) };
-            let w1 = unsafe { (*t).mm_ops[i * 2 + 1].load(Relaxed) };
+            let w0 = tref.ext.mm_ops[i * 2].load(Relaxed);
+            let w1 = tref.ext.mm_ops[i * 2 + 1].load(Relaxed);
             let op = w0 & 0xff;
             if op == 0 {
                 continue;
@@ -3043,13 +3047,13 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         use core::fmt::Write;
         use core::sync::atomic::Ordering::Relaxed;
         let mut s = alloc::string::String::from("USEGV-FOR: fails:");
-        let cur = tk.last_fails_cur.load(Relaxed);
+        let cur = tk.ext.last_fails_cur.load(Relaxed);
         for k in 0..8 {
             let i = (cur + 8 - 1 - k) % 8;
-            let v = tk.last_fails[i].load(Relaxed);
+            let v = tk.ext.last_fails[i].load(Relaxed);
             if v != 0 {
-                let a0 = tk.last_fails_a0[i].load(Relaxed);
-                let a1 = tk.last_fails_a1[i].load(Relaxed);
+                let a0 = tk.ext.last_fails_a0[i].load(Relaxed);
+                let a1 = tk.ext.last_fails_a1[i].load(Relaxed);
                 let _ = write!(
                     s,
                     " nr{}=-{} a0={:#x} a1={:#x}",
@@ -3066,9 +3070,9 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         let _ = write!(
             s,
             " | insys nr={} a0={:#x} a1={:#x}",
-            tk.last_syscall_nr.load(Relaxed),
-            tk.last_syscall_a0.load(Relaxed),
-            tk.last_syscall_a1.load(Relaxed)
+            tk.ext.last_syscall_nr.load(Relaxed),
+            tk.ext.last_syscall_a0.load(Relaxed),
+            tk.ext.last_syscall_a1.load(Relaxed)
         );
         // HOTPATH-PRINT: fatal-path forensics — once per user SIGSEGV death
         crate::pr_err!("{}", s);
@@ -3087,12 +3091,13 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
 fn dump_mm_ops(tag: &str, t: *const crate::process::task::Task) {
             use core::sync::atomic::Ordering::Relaxed;
             const N: usize = 16;
-            let cur = unsafe { (*t).mm_ops_cur.load(Relaxed) };
+            let tref = unsafe { &*t };
+            let cur = tref.ext.mm_ops_cur.load(Relaxed);
             let mut shown = 0usize;
             for k in 0..N {
                 let i = (cur + N - 1 - k) % N;
-                let w0 = unsafe { (*t).mm_ops[i * 2].load(Relaxed) };
-                let w1 = unsafe { (*t).mm_ops[i * 2 + 1].load(Relaxed) };
+                let w0 = tref.ext.mm_ops[i * 2].load(Relaxed);
+                let w1 = tref.ext.mm_ops[i * 2 + 1].load(Relaxed);
                 let op = w0 & 0xff;
                 if op == 0 {
                     continue; // slot never written

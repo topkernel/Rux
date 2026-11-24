@@ -8892,13 +8892,13 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         {
                             use core::sync::atomic::Ordering::Relaxed;
                             const RL: usize = crate::process::task::LAST_CALLS_LEN;
-                            let cur = tk.last_calls_cur.load(Relaxed);
+                            let cur = tk.ext.last_calls_cur.load(Relaxed);
                             let mut s2 = alloc::string::String::new();
                             use core::fmt::Write;
                             let _ = write!(s2, "APP-PARK calls:");
                             for k in 0..RL {
                                 let i = (cur + RL - k) % RL; // newest first
-                                let v = tk.last_calls[i].load(Relaxed);
+                                let v = tk.ext.last_calls[i].load(Relaxed);
                                 if v != 0 {
                                     let _ = write!(s2, " {}", v);
                                 }
@@ -8919,14 +8919,14 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             use core::sync::atomic::Ordering::Relaxed;
                             const RL: usize = crate::process::task::INIT_CALLS_LEN;
                             const BL: usize = crate::process::task::BIRTH_CALLS_LEN;
-                            let cur = tk.init_calls_cur.load(Relaxed);
+                            let cur = tk.ext.init_calls_cur.load(Relaxed);
                             // sc143: 512 entries in chunks of 128 so a
                             // single UART flush cannot gut the whole line.
                             let mut chunk = alloc::string::String::new();
                             let mut shown = 0usize;
                             for k in 0..RL {
                                 let i = (cur + RL - k) % RL; // newest first
-                                let v = tk.init_calls[i].load(Relaxed);
+                                let v = tk.ext.init_calls[i].load(Relaxed);
                                 if v != 0 {
                                     if shown % 128 == 0 {
                                         if !chunk.is_empty() {
@@ -8949,9 +8949,9 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             let _ = write!(s3, "APP-PARK initA:");
                             for k in 0..96.min(RL) {
                                 let i = (cur + RL - k) % RL;
-                                let v = tk.init_calls[i].load(Relaxed);
+                                let v = tk.ext.init_calls[i].load(Relaxed);
                                 if v != 0 {
-                                    let a0 = tk.init_a0[i].load(Relaxed);
+                                    let a0 = tk.ext.init_a0[i].load(Relaxed);
                                     let _ = write!(s3, " {}@{:#x}", v, a0);
                                 }
                             }
@@ -8962,9 +8962,9 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             let mut s4 = alloc::string::String::new();
                             let _ = write!(s4, "APP-PARK birth:");
                             for k in 0..BL {
-                                let v = tk.birth_calls[k].load(Relaxed);
+                                let v = tk.ext.birth_calls[k].load(Relaxed);
                                 if v != 0 {
-                                    let a0 = tk.birth_a0[k].load(Relaxed);
+                                    let a0 = tk.ext.birth_a0[k].load(Relaxed);
                                     let _ = write!(s4, " {}@{:#x}", v, a0);
                                 }
                             }
@@ -8977,18 +8977,18 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         // ever reaches the census. Latched per task.
                         {
                             use core::sync::atomic::Ordering::Relaxed;
-                            let cur = tk.last_fails_cur.load(Relaxed);
+                            let cur = tk.ext.last_fails_cur.load(Relaxed);
                             let mut s = alloc::string::String::new();
                             use core::fmt::Write;
                             let _ = write!(s, "APP-PARK fails:");
                             for k in 0..8 {
                                 let i = (cur + 8 - 1 - k) % 8; // newest first
-                                let v = tk.last_fails[i].load(Relaxed);
+                                let v = tk.ext.last_fails[i].load(Relaxed);
                                 if v != 0 {
                                     // sc135 (Session Q): a0/a1 name the
                                     // prctl option (nr167) and friends.
-                                    let a0 = tk.last_fails_a0[i].load(Relaxed);
-                                    let a1 = tk.last_fails_a1[i].load(Relaxed);
+                                    let a0 = tk.ext.last_fails_a0[i].load(Relaxed);
+                                    let a1 = tk.ext.last_fails_a1[i].load(Relaxed);
                                     let _ = write!(
                                         s,
                                         " nr{}=-{} a0={:#x} a1={:#x}",
@@ -9460,26 +9460,26 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         use core::fmt::Write;
                         use core::sync::atomic::Ordering::Relaxed;
                         const RL: usize = crate::process::task::LAST_CALLS_LEN;
-                        let cur = tk.last_calls_cur.load(Relaxed);
+                        let cur = tk.ext.last_calls_cur.load(Relaxed);
                         let mut s2 = alloc::string::String::new();
                         let _ = write!(s2, "FTWAIT calls:");
                         for k in 0..RL {
                             let i = (cur + RL - k) % RL; // newest first
-                            let v = tk.last_calls[i].load(Relaxed);
+                            let v = tk.ext.last_calls[i].load(Relaxed);
                             if v != 0 {
                                 let _ = write!(s2, " {}", v);
                             }
                         }
                         // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                         crate::pr_warn!("{}", s2);
-                        let fcur = tk.last_fails_cur.load(Relaxed);
+                        let fcur = tk.ext.last_fails_cur.load(Relaxed);
                         let mut s3 = alloc::string::String::new();
                         let _ = write!(s3, "FTWAIT fails:");
                         for k in 0..8 {
                             let i = (fcur + 8 - 1 - k) % 8;
-                            let v = tk.last_fails[i].load(Relaxed);
+                            let v = tk.ext.last_fails[i].load(Relaxed);
                             if v != 0 {
-                                let a0 = tk.last_fails_a0[i].load(Relaxed);
+                                let a0 = tk.ext.last_fails_a0[i].load(Relaxed);
                                 let _ = write!(s3, " nr{}=-{} a0={:#x}", v & 0xffff, v >> 16, a0);
                             }
                         }

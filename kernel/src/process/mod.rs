@@ -13,6 +13,7 @@
 // pub mod reboot; — moved to the rux-process service crate (the file
 // now physically lives in kernel/rux-process/src/process/).
 pub mod task;
+pub mod task_ext;
 pub mod task_ref;
 // pub mod fork; — moved to the rux-process service crate (crate-flip
 // rung: process); the crate's process module re-exports it.

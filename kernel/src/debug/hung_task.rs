@@ -232,8 +232,8 @@ fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
             t.ti_cpu(),
             t.sched_entity().is_on_rq() as u8,
             vfork_ppid,
-            t.last_syscall_nr.load(Ordering::Relaxed),
-            t.last_syscall_a0.load(Ordering::Relaxed),
+            t.ext.last_syscall_nr.load(Ordering::Relaxed),
+            t.ext.last_syscall_a0.load(Ordering::Relaxed),
         );
         // rwlock-livelock: the parked task's user entry frame — syscall
         // nr + user rip decide "kernel thread" (no user frame) vs
