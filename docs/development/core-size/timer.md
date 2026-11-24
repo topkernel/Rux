@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# timer — hot 481 lines (stay) / cold 1156 lines (leave)
+# timer — hot 503 lines (stay) / cold 1134 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -67,7 +67,7 @@ records why.
 | timer/wheel.rs | `new` | 475 | 17 | yes |
 | timer/wheel.rs | `route_for` | 491 | 23 |  |
 | timer/wheel.rs | `link_tail` | 513 | 20 |  |
-| timer/wheel.rs | `unlink` | 532 | 22 |  |
+| timer/wheel.rs | `unlink` | 532 | 22 | yes |
 | timer/wheel.rs | `unlink_from` | 553 | 28 |  |
 | timer/wheel.rs | `splice_to_due` | 580 | 30 |  |
 | timer/wheel.rs | `pop_bucket` | 609 | 11 |  |

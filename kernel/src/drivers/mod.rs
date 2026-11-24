@@ -25,5 +25,7 @@ pub mod initcalls;
 pub mod hooks;
 pub mod drm;
 
-// Re-export VirtIO probe module for backward compatibility
-pub use virtio::probe;
+// The VirtIO probe orchestrator moved to the rux-drivers service crate
+// (rung-4 tranche 2, sole copy); the boot core reaches it through
+// hooks::register_probe_initcalls and sysfs through
+// hooks::pci_rescan_block_hotplug.

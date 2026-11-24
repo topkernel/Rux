@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# (root) — hot 4546 lines (stay) / cold 10783 lines (leave)
+# (root) — hot 5455 lines (stay) / cold 9850 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -17,9 +17,9 @@ records why.
 | boot_edges.rs | `regions_from_arch_boot` | 72 | 29 |  |
 | boot_edges.rs | `panic_hex` | 100 | 22 |  |
 | boot_edges.rs | `rawframes_line` | 121 | 48 |  |
-| boot_edges.rs | `x86_panic_reset` | 168 | 32 |  |
-| boot_edges.rs | `x86_reboot_pulse` | 199 | 14 |  |
-| boot_edges.rs | `sbi_shutdown_ecall` | 212 | 14 |  |
+| boot_edges.rs | `x86_panic_reset` | 168 | 32 | yes |
+| boot_edges.rs | `x86_reboot_pulse` | 199 | 14 | yes |
+| boot_edges.rs | `sbi_shutdown_ecall` | 212 | 14 | yes |
 | cmdline.rs | `fdt_u8` | 85 | 9 |  |
 | cmdline.rs | `fdt_add` | 93 | 9 |  |
 | cmdline.rs | `fdt_u32` | 101 | 7 |  |
@@ -51,7 +51,7 @@ records why.
 | console.rs | `get_uart_base` | 197 | 12 |  |
 | console.rs | `new` | 208 | 7 | yes |
 | console.rs | `putc` | 214 | 129 |  |
-| console.rs | `puts_batch` | 342 | 131 |  |
+| console.rs | `puts_batch` | 342 | 131 | yes |
 | console.rs | `early_init` | 472 | 35 |  |
 | console.rs | `early_init` | 506 | 18 |  |
 | console.rs | `early_init` | 523 | 4 |  |
@@ -71,7 +71,7 @@ records why.
 | console.rs | `tty_isig_deliver` | 811 | 28 |  |
 | console.rs | `putchar` | 838 | 10 | yes |
 | console.rs | `puts` | 847 | 14 |  |
-| console.rs | `puts_bytes` | 860 | 7 |  |
+| console.rs | `puts_bytes` | 860 | 7 | yes |
 | console.rs | `lock` | 866 | 13 | yes |
 | console.rs | `putchar_no_lock` | 878 | 7 | yes |
 | console.rs | `putchar_no_lock` | 884 | 8 | yes |
@@ -80,10 +80,10 @@ records why.
 | console.rs | `puts_no_lock` | 904 | 6 |  |
 | console.rs | `puts_bytes_no_lock` | 909 | 7 |  |
 | console.rs | `puts_bytes_no_lock` | 915 | 10 |  |
-| console.rs | `uart_data_ready` | 924 | 7 |  |
-| console.rs | `uart_data_ready` | 930 | 25 |  |
-| console.rs | `uart_rx_bridge_to_tty` | 954 | 14 |  |
-| console.rs | `getchar` | 967 | 84 |  |
+| console.rs | `uart_data_ready` | 924 | 7 | yes |
+| console.rs | `uart_data_ready` | 930 | 25 | yes |
+| console.rs | `uart_rx_bridge_to_tty` | 954 | 14 | yes |
+| console.rs | `getchar` | 967 | 84 | yes |
 | console.rs | `read_waitq` | 1050 | 8 | yes |
 | console.rs | `uart_has_data` | 1057 | 22 | yes |
 | console.rs | `uart_has_data` | 1078 | 14 | yes |
@@ -97,8 +97,8 @@ records why.
 | console.rs | `set_framebuffer_info` | 1320 | 6 |  |
 | console.rs | `get_framebuffer_info` | 1325 | 4 | yes |
 | cov.rs | `cov_line` | 36 | 15 |  |
-| cov.rs | `trigger_write` | 50 | 9 |  |
-| cov.rs | `trigger_generate` | 58 | 13 |  |
+| cov.rs | `trigger_write` | 50 | 9 | yes |
+| cov.rs | `trigger_generate` | 58 | 13 | yes |
 | cov.rs | `capture_profile` | 70 | 16 |  |
 | cov.rs | `dump_to_console` | 85 | 21 |  |
 | cov.rs | `console_dump_active` | 105 | 5 |  |
@@ -108,53 +108,53 @@ records why.
 | errno.rs | `from_neg_i32` | 170 | 49 | yes |
 | errno.rs | `as_neg_u64` | 218 | 155 |  |
 | errno.rs | `from` | 372 | 5 | yes |
-| init.rs | `init_task_storage_addr` | 33 | 29 | yes |
-| init.rs | `init` | 61 | 41 | yes |
-| init.rs | `init_candidates` | 101 | 46 |  |
-| init.rs | `load_init_program` | 146 | 38 |  |
-| init.rs | `create_and_start_init_process` | 183 | 106 |  |
-| init.rs | `load_and_setup_elf` | 288 | 150 |  |
-| init.rs | `ret_from_exception` | 437 | 3 |  |
-| init.rs | `ret_from_fork` | 439 | 5 |  |
-| init.rs | `ret_from_fork` | 443 | 24 |  |
-| init.rs | `init_std_fds_for_task` | 466 | 31 |  |
-| init.rs | `halt` | 496 | 6 |  |
+| init.rs | `init_task_storage_addr` | 32 | 29 | yes |
+| init.rs | `init` | 60 | 41 | yes |
+| init.rs | `init_candidates` | 100 | 46 |  |
+| init.rs | `load_init_program` | 145 | 38 |  |
+| init.rs | `create_and_start_init_process` | 182 | 106 |  |
+| init.rs | `load_and_setup_elf` | 287 | 150 |  |
+| init.rs | `ret_from_exception` | 436 | 3 |  |
+| init.rs | `ret_from_fork` | 438 | 5 | yes |
+| init.rs | `ret_from_fork` | 442 | 24 | yes |
+| init.rs | `init_std_fds_for_task` | 465 | 8 | yes |
+| init.rs | `halt` | 472 | 6 |  |
 | initrd.rs | `set_region` | 50 | 7 |  |
 | initrd.rs | `region` | 56 | 12 |  |
 | initrd.rs | `loaded` | 67 | 23 |  |
-| initrd.rs | `load` | 89 | 39 | yes |
-| initrd.rs | `as_slice` | 127 | 22 | yes |
-| initrd.rs | `new` | 148 | 13 | yes |
-| initrd.rs | `bits` | 160 | 17 | yes |
-| initrd.rs | `align_byte` | 176 | 18 |  |
-| initrd.rs | `new` | 193 | 30 | yes |
-| initrd.rs | `decode` | 222 | 47 |  |
-| initrd.rs | `inflate_raw` | 268 | 51 |  |
-| initrd.rs | `fixed_litlen_table` | 318 | 15 |  |
-| initrd.rs | `fixed_dist_table` | 332 | 7 |  |
-| initrd.rs | `read_dynamic_tables` | 338 | 67 |  |
-| initrd.rs | `inflate_block` | 404 | 48 |  |
-| initrd.rs | `crc32` | 451 | 20 |  |
-| initrd.rs | `gunzip` | 470 | 86 |  |
-| initrd.rs | `parse_hex8` | 555 | 19 |  |
-| initrd.rs | `align4` | 573 | 14 |  |
-| initrd.rs | `unpack_newc` | 586 | 145 |  |
-| initrd.rs | `mkdir_p` | 730 | 11 |  |
-| initrd.rs | `mkdir_p_parents` | 740 | 17 |  |
-| initrd.rs | `create_file` | 756 | 15 | yes |
-| initrd.rs | `set_node_meta` | 770 | 10 |  |
+| initrd.rs | `load` | 89 | 40 | yes |
+| initrd.rs | `as_slice` | 128 | 22 | yes |
+| initrd.rs | `new` | 149 | 13 | yes |
+| initrd.rs | `bits` | 161 | 17 | yes |
+| initrd.rs | `align_byte` | 177 | 18 |  |
+| initrd.rs | `new` | 194 | 30 | yes |
+| initrd.rs | `decode` | 223 | 47 |  |
+| initrd.rs | `inflate_raw` | 269 | 51 |  |
+| initrd.rs | `fixed_litlen_table` | 319 | 15 |  |
+| initrd.rs | `fixed_dist_table` | 333 | 7 |  |
+| initrd.rs | `read_dynamic_tables` | 339 | 67 |  |
+| initrd.rs | `inflate_block` | 405 | 48 |  |
+| initrd.rs | `crc32` | 452 | 20 |  |
+| initrd.rs | `gunzip` | 471 | 86 |  |
+| initrd.rs | `parse_hex8` | 556 | 19 |  |
+| initrd.rs | `align4` | 574 | 14 |  |
+| initrd.rs | `unpack_newc` | 587 | 145 |  |
+| initrd.rs | `mkdir_p` | 731 | 11 |  |
+| initrd.rs | `mkdir_p_parents` | 741 | 17 |  |
+| initrd.rs | `create_file` | 757 | 13 | yes |
+| initrd.rs | `set_node_meta` | 769 | 6 |  |
 | lib.rs | `print_status` | 35 | 11 | yes |
 | lib.rs | `print_status_ex` | 45 | 14 | yes |
 | lib.rs | `push` | 58 | 131 | yes |
 | lib.rs | `alloc_error_handler` | 188 | 85 |  |
 | lib.rs | `format_hex` | 272 | 9 |  |
-| lib.rs | `rust_main_tail` | 280 | 1155 |  |
-| lib.rs | `x86_boot_memory_regions` | 1434 | 9 |  |
-| lib.rs | `x86_dump_regions` | 1442 | 398 |  |
-| lib.rs | `mount_root_filesystem` | 1839 | 54 |  |
-| lib.rs | `mount_boot_disk_ext4` | 1892 | 17 |  |
-| lib.rs | `mount_ext4_root_from` | 1908 | 44 |  |
-| lib.rs | `panic` | 1951 | 71 |  |
+| lib.rs | `rust_main_tail` | 280 | 1160 |  |
+| lib.rs | `x86_boot_memory_regions` | 1439 | 9 |  |
+| lib.rs | `x86_dump_regions` | 1447 | 398 |  |
+| lib.rs | `mount_root_filesystem` | 1844 | 54 |  |
+| lib.rs | `mount_boot_disk_ext4` | 1897 | 17 |  |
+| lib.rs | `mount_ext4_root_from` | 1913 | 44 |  |
+| lib.rs | `panic` | 1956 | 71 |  |
 | list.rs | `new` | 38 | 13 | yes |
 | list.rs | `init` | 50 | 9 | yes |
 | list.rs | `is_empty` | 58 | 14 | yes |
@@ -168,7 +168,7 @@ records why.
 | list.rs | `offset` | 210 | 18 | yes |
 | panic_policy.rs | `parse` | 50 | 17 | yes |
 | panic_policy.rs | `current` | 66 | 10 | yes |
-| panic_policy.rs | `apply` | 75 | 25 |  |
+| panic_policy.rs | `apply` | 75 | 25 | yes |
 | print.rs | `write_str` | 22 | 75 |  |
 | printk.rs | `empty` | 86 | 40 | yes |
 | printk.rs | `ring_rec` | 125 | 14 |  |
@@ -176,15 +176,15 @@ records why.
 | printk.rs | `rec_text_len` | 148 | 50 |  |
 | printk.rs | `try_new` | 197 | 15 |  |
 | printk.rs | `drop` | 211 | 10 | yes |
-| printk.rs | `set_console_loglevel` | 220 | 6 |  |
-| printk.rs | `get_console_loglevel` | 225 | 7 |  |
+| printk.rs | `set_console_loglevel` | 220 | 6 | yes |
+| printk.rs | `get_console_loglevel` | 225 | 7 | yes |
 | printk.rs | `init` | 231 | 14 | yes |
 | printk.rs | `write_str` | 244 | 23 |  |
 | printk.rs | `printk` | 266 | 17 |  |
 | printk.rs | `printk_ring_always` | 282 | 15 |  |
 | printk.rs | `printk_ring_always_ex` | 296 | 48 |  |
-| printk.rs | `ring_stash_console` | 343 | 54 |  |
-| printk.rs | `console_emit_skipped` | 396 | 21 |  |
+| printk.rs | `ring_stash_console` | 343 | 54 | yes |
+| printk.rs | `console_emit_skipped` | 396 | 21 | yes |
 | printk.rs | `acquire_emit_lock` | 416 | 41 |  |
 | printk.rs | `emit_to_console` | 456 | 38 |  |
 | printk.rs | `try_console_emit_lock` | 493 | 24 |  |
@@ -202,39 +202,39 @@ records why.
 | printk.rs | `syslog_read_sequential` | 1085 | 80 |  |
 | printk.rs | `syslog_read_all` | 1164 | 87 |  |
 | printk.rs | `syslog_clear` | 1250 | 19 |  |
-| printk.rs | `ring_tail` | 1268 | 91 |  |
+| printk.rs | `ring_tail` | 1268 | 91 | yes |
 | printk.rs | `ring_tail_into` | 1358 | 2 |  |
 | printk.rs | `push` | 1359 | 78 | yes |
 | printk.rs | `generate_kmsg` | 1436 | 68 |  |
 | printk.rs | `service_deferred_kmsg_wake` | 1503 | 31 | yes |
 | printk.rs | `kmsg_file_read` | 1533 | 150 |  |
-| printk.rs | `set_kmsg_console_mode` | 1682 | 10 |  |
-| printk.rs | `kmsg_console_mode` | 1691 | 6 |  |
-| printk.rs | `kmsg_console_mode_from_str` | 1696 | 13 |  |
+| printk.rs | `set_kmsg_console_mode` | 1682 | 10 | yes |
+| printk.rs | `kmsg_console_mode` | 1691 | 6 | yes |
+| printk.rs | `kmsg_console_mode_from_str` | 1696 | 13 | yes |
 | printk.rs | `kmsg_console_allows_echo` | 1708 | 38 |  |
 | printk.rs | `kmsg_file_write` | 1745 | 20 |  |
 | printk.rs | `kmsg_file_poll` | 1764 | 17 |  |
 | printk.rs | `kmsg_file_lseek` | 1780 | 37 |  |
-| printk.rs | `init_kmsg_device` | 1816 | 26 |  |
-| printk.rs | `proc_kmsg_open` | 1841 | 9 |  |
-| printk.rs | `proc_kmsg_close` | 1849 | 26 |  |
-| printk.rs | `proc_kmsg_read` | 1874 | 68 |  |
-| printk.rs | `kmsg_poll_sleep` | 1941 | 49 |  |
-| printk.rs | `proc_kmsg_poll` | 1989 | 17 |  |
-| printk.rs | `proc_kmsg_lseek` | 2005 | 97 |  |
-| printk.rs | `enabled` | 2101 | 11 | yes |
-| printk.rs | `log` | 2111 | 14 |  |
-| printk.rs | `flush` | 2124 | 8 | yes |
-| printk.rs | `init_logger` | 2131 | 87 |  |
-| printk.rs | `push` | 2217 | 6 | yes |
-| printk.rs | `push_dec` | 2222 | 21 |  |
-| printk.rs | `is_running` | 2242 | 10 | yes |
-| printk.rs | `init` | 2251 | 28 | yes |
-| printk.rs | `resolve_file` | 2278 | 81 |  |
-| printk.rs | `flush_once` | 2358 | 105 |  |
-| printk.rs | `persistent_log_init` | 2462 | 6 |  |
-| printk.rs | `persistent_log_running` | 2467 | 4 |  |
-| sbi.rs | `sbi_system_reset` | 61 | 37 |  |
+| printk.rs | `init_kmsg_device` | 1816 | 25 |  |
+| printk.rs | `proc_kmsg_open` | 1840 | 9 | yes |
+| printk.rs | `proc_kmsg_close` | 1848 | 26 |  |
+| printk.rs | `proc_kmsg_read` | 1873 | 68 |  |
+| printk.rs | `kmsg_poll_sleep` | 1940 | 49 |  |
+| printk.rs | `proc_kmsg_poll` | 1988 | 17 |  |
+| printk.rs | `proc_kmsg_lseek` | 2004 | 97 |  |
+| printk.rs | `enabled` | 2100 | 11 | yes |
+| printk.rs | `log` | 2110 | 14 |  |
+| printk.rs | `flush` | 2123 | 8 | yes |
+| printk.rs | `init_logger` | 2130 | 87 |  |
+| printk.rs | `push` | 2216 | 6 | yes |
+| printk.rs | `push_dec` | 2221 | 21 |  |
+| printk.rs | `is_running` | 2241 | 10 | yes |
+| printk.rs | `init` | 2250 | 28 | yes |
+| printk.rs | `resolve_file` | 2277 | 81 |  |
+| printk.rs | `flush_once` | 2357 | 105 |  |
+| printk.rs | `persistent_log_init` | 2461 | 6 |  |
+| printk.rs | `persistent_log_running` | 2466 | 4 |  |
+| sbi.rs | `sbi_system_reset` | 61 | 37 | yes |
 | sbi.rs | `send_ipi` | 97 | 39 | yes |
 | signal.rs | `new` | 129 | 5 | yes |
 | signal.rs | `bits` | 133 | 45 | yes |
@@ -265,20 +265,20 @@ records why.
 | signal.rs | `remove_one` | 431 | 48 | yes |
 | signal.rs | `new` | 478 | 23 | yes |
 | signal.rs | `set_action` | 500 | 20 | yes |
-| signal.rs | `reset_all_handlers_default` | 519 | 6 |  |
+| signal.rs | `reset_all_handlers_default` | 519 | 6 | yes |
 | signal.rs | `get_action` | 524 | 13 | yes |
-| signal.rs | `ign_cgt_masks` | 536 | 6 |  |
+| signal.rs | `ign_cgt_masks` | 536 | 6 | yes |
 | signal.rs | `add_mask` | 541 | 10 |  |
 | signal.rs | `remove_mask` | 550 | 10 |  |
 | signal.rs | `is_masked` | 559 | 16 |  |
-| signal.rs | `flush_handlers` | 574 | 9 |  |
+| signal.rs | `flush_handlers` | 574 | 9 | yes |
 | signal.rs | `with_actions_mut` | 582 | 8 |  |
 | signal.rs | `clone` | 589 | 62 | yes |
 | signal.rs | `new` | 650 | 16 | yes |
 | signal.rs | `set_value_bytes` | 665 | 18 | yes |
 | signal.rs | `fault` | 682 | 9 | yes |
 | signal.rs | `child` | 690 | 19 |  |
-| signal.rs | `child_exit` | 708 | 98 |  |
+| signal.rs | `child_exit` | 708 | 98 | yes |
 | signal.rs | `default` | 805 | 8 | yes |
 | signal.rs | `new` | 812 | 35 | yes |
 | signal.rs | `default` | 846 | 50 | yes |
@@ -320,10 +320,10 @@ records why.
 | signal.rs | `send_signal_with_info` | 3042 | 27 | yes |
 | signal.rs | `send_signal_with_info_directed` | 3068 | 5 | yes |
 | signal.rs | `send_signal_with_info_g` | 3072 | 23 |  |
-| signal.rs | `send_signal_to_pgid` | 3094 | 5 |  |
+| signal.rs | `send_signal_to_pgid` | 3094 | 5 | yes |
 | signal.rs | `park_stopped_task` | 3098 | 36 |  |
 | signal.rs | `is_unkillable_init` | 3133 | 95 |  |
-| signal.rs | `fatal_signal_pending` | 3227 | 28 |  |
+| signal.rs | `fatal_signal_pending` | 3227 | 28 | yes |
 | signal.rs | `signal_pending` | 3254 | 46 | yes |
 | signal.rs | `signal_wake_up_state` | 3299 | 61 |  |
 | signal.rs | `signal_wake_up` | 3359 | 5 | yes |
@@ -349,20 +349,20 @@ records why.
 | signal_hooks.rs | `force_unblock_current` | 194 | 8 |  |
 | signal_hooks.rs | `default_action_class` | 201 | 8 |  |
 | signal_hooks.rs | `init_delivery_filter` | 208 | 6 |  |
-| signal_hooks.rs | `flush_handlers` | 213 | 6 |  |
-| signal_hooks.rs | `reset_all_handlers_default` | 218 | 6 |  |
-| signal_hooks.rs | `ign_cgt_masks` | 223 | 4 |  |
+| signal_hooks.rs | `flush_handlers` | 213 | 6 | yes |
+| signal_hooks.rs | `reset_all_handlers_default` | 218 | 6 | yes |
+| signal_hooks.rs | `ign_cgt_masks` | 223 | 4 | yes |
 | signal_policy.rs | `send_signal_from_user` | 31 | 42 | yes |
 | signal_policy.rs | `send_signal_from_user_tkill` | 72 | 112 | yes |
 | signal_policy.rs | `force_unblock_current` | 183 | 26 |  |
 | signal_policy.rs | `send_signal_core` | 208 | 350 |  |
 | signal_policy.rs | `send_signal_info` | 557 | 18 |  |
-| signal_policy.rs | `send_signal_to_pgid` | 574 | 23 |  |
+| signal_policy.rs | `send_signal_to_pgid` | 574 | 23 | yes |
 | signal_policy.rs | `default_action_class` | 596 | 34 |  |
 | signal_policy.rs | `init_delivery_filter` | 629 | 35 |  |
-| signal_policy.rs | `flush_handlers` | 663 | 25 |  |
-| signal_policy.rs | `reset_all_handlers_default` | 687 | 13 |  |
-| signal_policy.rs | `ign_cgt_masks` | 699 | 15 |  |
+| signal_policy.rs | `flush_handlers` | 663 | 25 | yes |
+| signal_policy.rs | `reset_all_handlers_default` | 687 | 13 | yes |
+| signal_policy.rs | `ign_cgt_masks` | 699 | 15 | yes |
 | timer.rs | `get_jiffies` | 67 | 10 | yes |
 | timer.rs | `test_advance_jiffies` | 76 | 7 | yes |
 | timer.rs | `jiffies_to_msecs` | 82 | 7 | yes |

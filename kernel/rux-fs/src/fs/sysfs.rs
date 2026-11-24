@@ -1596,7 +1596,7 @@ fn build_tree() -> Arc<KObject> {
         "rescan",
         || b"\n".to_vec(),
         |_buf| {
-            crate::drivers::probe::pci_rescan_block_hotplug();
+            crate::drivers::hooks::pci_rescan_block_hotplug();
             0
         },
     );

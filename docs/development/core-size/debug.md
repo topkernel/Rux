@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# debug — hot 7421 lines (stay) / cold 7897 lines (leave)
+# debug — hot 8411 lines (stay) / cold 5857 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -35,7 +35,7 @@ records why.
 | debug/backtrace.rs | `save_regs` | 279 | 48 |  |
 | debug/backtrace.rs | `save_regs` | 326 | 46 |  |
 | debug/backtrace.rs | `save_regs` | 371 | 30 |  |
-| debug/backtrace.rs | `dump_regs_inline` | 400 | 7 |  |
+| debug/backtrace.rs | `dump_regs_inline` | 400 | 7 | yes |
 | debug/backtrace.rs | `dump_regs` | 406 | 18 |  |
 | debug/backtrace.rs | `dump_csrs` | 423 | 24 |  |
 | debug/backtrace.rs | `dump_csrs` | 446 | 9 |  |
@@ -47,28 +47,27 @@ records why.
 | debug/cctx.rs | `add` | 144 | 12 | yes |
 | debug/cctx.rs | `bump` | 155 | 12 | yes |
 | debug/cctx.rs | `on` | 166 | 21 | yes |
-| debug/cctx.rs | `v` | 186 | 5 |  |
+| debug/cctx.rs | `v` | 186 | 5 | yes |
 | debug/cctx.rs | `avg` | 190 | 12 |  |
-| debug/cctx.rs | `dump` | 201 | 82 |  |
-| debug/driftwatch.rs | `note_zero_put` | 111 | 6 | yes |
-| debug/driftwatch.rs | `report` | 116 | 57 |  |
+| debug/cctx.rs | `dump` | 201 | 82 | yes |
+| debug/driftwatch.rs | `note_zero_put` | 111 | 7 | yes |
+| debug/driftwatch.rs | `report` | 117 | 4 | yes |
 | debug/filerd.rs | `on` | 70 | 7 | yes |
 | debug/filerd.rs | `now` | 76 | 7 | yes |
 | debug/filerd.rs | `charge` | 82 | 8 | yes |
-| debug/filerd.rs | `note_miss` | 89 | 7 | yes |
-| debug/filerd.rs | `measure_tsc_hz` | 95 | 20 |  |
-| debug/filerd.rs | `generate` | 114 | 44 |  |
+| debug/filerd.rs | `note_miss` | 89 | 6 | yes |
+| debug/filerd.rs | `generate` | 94 | 4 | yes |
 | debug/forensics_edges.rs | `adopt_task` | 47 | 11 |  |
 | debug/forensics_edges.rs | `t_pid` | 57 | 8 | yes |
 | debug/forensics_edges.rs | `t_comm` | 64 | 8 |  |
 | debug/forensics_edges.rs | `t_preempt_count` | 71 | 13 | yes |
 | debug/forensics_edges.rs | `raw_qword` | 83 | 16 |  |
 | debug/forensics_edges.rs | `raw_u32` | 98 | 12 |  |
-| debug/forensics_edges.rs | `location` | 109 | 9 |  |
+| debug/forensics_edges.rs | `location` | 109 | 9 | yes |
 | debug/forensics_edges.rs | `location_ref` | 117 | 11 |  |
 | debug/forensics_edges.rs | `mark_first_refusal` | 127 | 13 | yes |
 | debug/forkprof.rs | `stamp_wake` | 91 | 8 |  |
-| debug/forkprof.rs | `stamp_child` | 98 | 8 |  |
+| debug/forkprof.rs | `stamp_child` | 98 | 8 | yes |
 | debug/forkprof.rs | `consume_wake` | 105 | 70 | yes |
 | debug/forkprof.rs | `trace_on` | 174 | 11 | yes |
 | debug/forkprof.rs | `trace_on_armed` | 184 | 7 |  |
@@ -79,7 +78,7 @@ records why.
 | debug/forkprof.rs | `add` | 295 | 11 | yes |
 | debug/forkprof.rs | `bump` | 305 | 6 | yes |
 | debug/forkprof.rs | `peek` | 310 | 11 | yes |
-| debug/forkprof.rs | `report` | 320 | 70 |  |
+| debug/forkprof.rs | `report` | 320 | 70 | yes |
 | debug/fsw.rs | `max_update` | 208 | 17 |  |
 | debug/fsw.rs | `open_exec_stamp` | 224 | 18 | yes |
 | debug/fsw.rs | `open_close` | 241 | 18 | yes |
@@ -128,11 +127,10 @@ records why.
 | debug/fsw.rs | `note_walk` | 628 | 5 | yes |
 | debug/fsw.rs | `note_walk_hit` | 632 | 5 | yes |
 | debug/fsw.rs | `note_walk_miss` | 636 | 12 | yes |
-| debug/fsw.rs | `tick` | 647 | 18 | yes |
-| debug/fsw.rs | `v` | 664 | 6 |  |
-| debug/fsw.rs | `dump` | 669 | 87 |  |
+| debug/fsw.rs | `tick` | 647 | 23 | yes |
+| debug/fsw.rs | `dump` | 669 | 4 | yes |
 | debug/hilogcensus.rs | `on` | 60 | 9 | yes |
-| debug/hilogcensus.rs | `compat_arm` | 68 | 27 |  |
+| debug/hilogcensus.rs | `compat_arm` | 68 | 27 | yes |
 | debug/hilogcensus.rs | `new` | 94 | 9 | yes |
 | debug/hilogcensus.rs | `bytes` | 102 | 8 | yes |
 | debug/hilogcensus.rs | `set` | 109 | 7 | yes |
@@ -148,14 +146,14 @@ records why.
 | debug/hilogcensus.rs | `kmsg_write` | 349 | 26 |  |
 | debug/hilogcensus.rs | `comm_str` | 374 | 16 | yes |
 | debug/hilogcensus.rs | `tag_str` | 389 | 11 |  |
-| debug/hilogcensus.rs | `dump` | 399 | 161 |  |
+| debug/hilogcensus.rs | `dump` | 399 | 161 | yes |
 | debug/hung_task.rs | `now_ns` | 28 | 11 |  |
 | debug/hung_task.rs | `init` | 38 | 109 | yes |
 | debug/hung_task.rs | `check_tasks` | 146 | 45 |  |
 | debug/hung_task.rs | `report_hung_task` | 190 | 133 |  |
-| debug/ksyms.rs | `table_valid` | 55 | 15 |  |
+| debug/ksyms.rs | `table_valid` | 55 | 15 | yes |
 | debug/ksyms.rs | `name_at` | 69 | 15 |  |
-| debug/ksyms.rs | `symbol_name` | 83 | 9 |  |
+| debug/ksyms.rs | `symbol_name` | 83 | 9 | yes |
 | debug/ksyms.rs | `lookup` | 91 | 35 | yes |
 | debug/ksyms.rs | `format_symbol` | 125 | 14 | yes |
 | debug/leakorigin.rs | `slot_of` | 147 | 14 | yes |
@@ -186,14 +184,14 @@ records why.
 | debug/ledger.rs | `dec` | 88 | 5 |  |
 | debug/ledger.rs | `emit` | 92 | 11 | yes |
 | debug/ledger.rs | `compact_line` | 102 | 32 |  |
-| debug/ledger.rs | `census_line` | 133 | 25 |  |
+| debug/ledger.rs | `census_line` | 133 | 25 | yes |
 | debug/ledger.rs | `oomfx_line` | 157 | 52 | yes |
 | debug/ledger.rs | `dump` | 208 | 254 | yes |
 | debug/ledger.rs | `run_pending` | 461 | 19 | yes |
 | debug/ledger.rs | `series_tick` | 479 | 14 |  |
-| debug/lostpark.rs | `armed` | 37 | 7 | yes |
-| debug/lostpark.rs | `record` | 43 | 17 | yes |
-| debug/lostpark.rs | `dump_once` | 59 | 38 | yes |
+| debug/lostpark.rs | `armed` | 39 | 7 | yes |
+| debug/lostpark.rs | `record` | 45 | 16 | yes |
+| debug/lostpark.rs | `dump_once` | 60 | 4 | yes |
 | debug/memwatch.rs | `bucket` | 76 | 12 |  |
 | debug/memwatch.rs | `armed` | 87 | 49 | yes |
 | debug/memwatch.rs | `kernel_va_readable` | 135 | 35 |  |
@@ -219,13 +217,13 @@ records why.
 | debug/memwatch.rs | `put_dec` | 768 | 8 | yes |
 | debug/memwatch.rs | `kroot_pollution` | 775 | 65 |  |
 | debug/memwatch.rs | `put_hex` | 839 | 18 |  |
-| debug/memwatch.rs | `dump_mem` | 856 | 108 |  |
+| debug/memwatch.rs | `dump_mem` | 856 | 108 | yes |
 | debug/memwatch.rs | `dump_heap_ledger` | 963 | 192 |  |
 | debug/memwatch.rs | `dump_page_ledger` | 1154 | 60 |  |
 | debug/metawatch.rs | `tick` | 58 | 38 | yes |
 | debug/metawatch.rs | `scan` | 95 | 20 |  |
 | debug/metawatch.rs | `kind_str` | 114 | 16 |  |
-| debug/metawatch.rs | `report` | 129 | 40 |  |
+| debug/metawatch.rs | `report` | 129 | 40 | yes |
 | debug/mmforensics.rs | `note_ref` | 97 | 36 | yes |
 | debug/mmforensics.rs | `current_root_ppn` | 132 | 15 |  |
 | debug/mmforensics.rs | `ring_history` | 146 | 165 |  |
@@ -237,19 +235,39 @@ records why.
 | debug/mmprof.rs | `bucket_len` | 151 | 23 | yes |
 | debug/mmprof.rs | `bump_comm` | 173 | 60 | yes |
 | debug/mmprof.rs | `tick` | 232 | 23 | yes |
-| debug/mmprof.rs | `ensure_dump_thread` | 254 | 43 |  |
-| debug/mmprof.rs | `fmt_cell` | 296 | 13 |  |
-| debug/mmprof.rs | `stat` | 308 | 15 |  |
-| debug/mmprof.rs | `report_line` | 322 | 84 |  |
-| debug/mod.rs | `init` | 162 | 48 | yes |
-| debug/mod.rs | `register_debugfs_knobs` | 209 | 171 |  |
-| debug/mod.rs | `walk_read` | 379 | 13 |  |
+| debug/mmprof.rs | `ensure_dump_thread` | 254 | 43 | yes |
+| debug/mmprof.rs | `fmt_cell` | 296 | 13 | yes |
+| debug/mmprof.rs | `stat` | 308 | 15 | yes |
+| debug/mmprof.rs | `report_line` | 322 | 84 | yes |
+| debug/mod.rs | `init` | 169 | 50 | yes |
+| debug/mod.rs | `register_debugfs_knobs` | 218 | 171 |  |
+| debug/mod.rs | `walk_read` | 388 | 13 |  |
 | debug/monowatch.rs | `clocksource_name` | 63 | 23 |  |
 | debug/monowatch.rs | `tick` | 85 | 46 | yes |
-| debug/monowatch.rs | `report` | 130 | 20 |  |
-| debug/oops.rs | `init_from_cmdline` | 84 | 10 |  |
-| debug/oops.rs | `panic_on_oops` | 93 | 6 |  |
-| debug/oops.rs | `set_panic_on_oops` | 98 | 13 |  |
+| debug/monowatch.rs | `report` | 130 | 20 | yes |
+| debug/obs_hooks.rs | `obs_register_hooks` | 115 | 6 | yes |
+| debug/obs_hooks.rs | `hooks` | 120 | 10 |  |
+| debug/obs_hooks.rs | `syscost_dump` | 129 | 5 |  |
+| debug/obs_hooks.rs | `fsw_dump` | 133 | 5 |  |
+| debug/obs_hooks.rs | `mmprof_report_line` | 137 | 5 |  |
+| debug/obs_hooks.rs | `schb_init` | 141 | 5 |  |
+| debug/obs_hooks.rs | `mmprof_ensure_dump_thread` | 145 | 5 |  |
+| debug/obs_hooks.rs | `spinwatch_compat_arm` | 149 | 5 |  |
+| debug/obs_hooks.rs | `trace_files_register` | 153 | 5 |  |
+| debug/obs_hooks.rs | `trace_files_init_from_cmdline` | 157 | 5 |  |
+| debug/obs_hooks.rs | `driftwatch_report` | 161 | 5 |  |
+| debug/obs_hooks.rs | `filerd_generate` | 165 | 5 |  |
+| debug/obs_hooks.rs | `softlockup_report` | 169 | 5 |  |
+| debug/obs_hooks.rs | `lostpark_dump_once` | 173 | 5 |  |
+| debug/obs_hooks.rs | `schb_oom_anat_dump` | 177 | 5 |  |
+| debug/obs_hooks.rs | `reaper_note_nameset` | 181 | 5 |  |
+| debug/obs_hooks.rs | `reaper_on_zombie` | 185 | 12 |  |
+| debug/obs_hooks.rs | `reaper_on_reap_wait4` | 196 | 5 |  |
+| debug/obs_hooks.rs | `reaper_on_reap_waitid` | 200 | 25 |  |
+| debug/obs_hooks.rs | `reaper_poll_note` | 224 | 4 |  |
+| debug/oops.rs | `init_from_cmdline` | 84 | 10 | yes |
+| debug/oops.rs | `panic_on_oops` | 93 | 6 | yes |
+| debug/oops.rs | `set_panic_on_oops` | 98 | 13 | yes |
 | debug/oops.rs | `oops` | 110 | 151 | yes |
 | debug/oops.rs | `comm_str` | 260 | 10 | yes |
 | debug/pathstash.rs | `stash_open` | 57 | 10 |  |
@@ -262,8 +280,8 @@ records why.
 | debug/pstore.rs | `reserve_at` | 144 | 11 |  |
 | debug/pstore.rs | `region_virt` | 154 | 15 |  |
 | debug/pstore.rs | `early_scan` | 168 | 36 |  |
-| debug/pstore.rs | `record_name` | 203 | 10 |  |
-| debug/pstore.rs | `has_record` | 212 | 6 |  |
+| debug/pstore.rs | `record_name` | 203 | 10 | yes |
+| debug/pstore.rs | `has_record` | 212 | 6 | yes |
 | debug/pstore.rs | `read_record` | 217 | 25 |  |
 | debug/pstore.rs | `arm_sink` | 241 | 7 |  |
 | debug/pstore.rs | `sink` | 247 | 18 |  |
@@ -271,37 +289,27 @@ records why.
 | debug/pstore.rs | `oops_capture` | 279 | 10 |  |
 | debug/pstore.rs | `write_record` | 288 | 74 |  |
 | debug/pstore.rs | `write_str` | 361 | 9 |  |
-| debug/reaper.rs | `on` | 97 | 6 | yes |
-| debug/reaper.rs | `secs` | 102 | 10 |  |
-| debug/reaper.rs | `decode_kernel_code` | 111 | 10 |  |
-| debug/reaper.rs | `decode_wstatus` | 120 | 15 |  |
-| debug/reaper.rs | `decode_si_code` | 134 | 13 |  |
-| debug/reaper.rs | `comm_str` | 146 | 12 | yes |
-| debug/reaper.rs | `note_nameset` | 157 | 50 | yes |
-| debug/reaper.rs | `nameset_of` | 206 | 11 |  |
-| debug/reaper.rs | `on_zombie` | 216 | 55 |  |
-| debug/reaper.rs | `comm_of` | 270 | 10 |  |
-| debug/reaper.rs | `on_reap_wait4` | 279 | 24 | yes |
-| debug/reaper.rs | `on_reap_waitid` | 302 | 36 | yes |
-| debug/reaper.rs | `poll_note` | 337 | 34 | yes |
-| debug/reaper.rs | `zombie_scan` | 370 | 113 | yes |
+| debug/reaper.rs | `on` | 105 | 7 | yes |
+| debug/reaper.rs | `secs` | 111 | 10 | yes |
+| debug/reaper.rs | `decode_kernel_code` | 120 | 10 | yes |
+| debug/reaper.rs | `decode_wstatus` | 129 | 15 | yes |
+| debug/reaper.rs | `decode_si_code` | 143 | 13 | yes |
+| debug/reaper.rs | `comm_str` | 155 | 8 | yes |
+| debug/reaper.rs | `note_nameset` | 162 | 8 | yes |
+| debug/reaper.rs | `on_zombie` | 169 | 8 | yes |
+| debug/reaper.rs | `on_reap_wait4` | 176 | 8 | yes |
+| debug/reaper.rs | `on_reap_waitid` | 183 | 27 | yes |
+| debug/reaper.rs | `poll_note` | 209 | 8 | yes |
+| debug/reaper.rs | `zombie_scan` | 216 | 113 | yes |
 | debug/schb.rs | `note_proc_open` | 107 | 34 |  |
 | debug/schb.rs | `note_cow` | 140 | 11 | yes |
 | debug/schb.rs | `note_drct` | 150 | 12 | yes |
 | debug/schb.rs | `note_slow` | 161 | 9 | yes |
-| debug/schb.rs | `pace_snapshot` | 169 | 17 |  |
+| debug/schb.rs | `pace_snapshot` | 169 | 17 | yes |
 | debug/schb.rs | `oom_anat_dump` | 185 | 76 | yes |
 | debug/schb.rs | `init` | 260 | 31 | yes |
 | debug/schb.rs | `comm_str` | 290 | 230 | yes |
-| debug/schb.rs | `wedge_census` | 519 | 126 |  |
-| debug/scmtap.rs | `enabled` | 45 | 7 | yes |
-| debug/scmtap.rs | `who` | 51 | 15 |  |
-| debug/scmtap.rs | `tap_tx` | 65 | 7 | yes |
-| debug/scmtap.rs | `tap_tx_err` | 71 | 7 | yes |
-| debug/scmtap.rs | `tap_rx` | 77 | 7 | yes |
-| debug/scmtap.rs | `tap_rx_drop` | 83 | 13 | yes |
-| debug/scmtap.rs | `tap_orphan` | 95 | 13 | yes |
-| debug/scmtap.rs | `tap_fifo_last_writer` | 107 | 11 | yes |
+| debug/schb.rs | `wedge_census` | 519 | 126 | yes |
 | debug/scribble.rs | `ring_log` | 139 | 15 | yes |
 | debug/scribble.rs | `ring_dump` | 153 | 68 | yes |
 | debug/scribble.rs | `audit_frames` | 220 | 28 | yes |
@@ -333,31 +341,32 @@ records why.
 | debug/scribble.rs | `slot_divergence` | 1314 | 50 | yes |
 | debug/scribble.rs | `double_run` | 1363 | 102 | yes |
 | debug/scribble.rs | `crash_report` | 1464 | 99 | yes |
-| debug/scribble.rs | `report` | 1562 | 97 |  |
+| debug/scribble.rs | `report` | 1562 | 97 | yes |
 | debug/slowtask.rs | `fs_family` | 101 | 6 |  |
 | debug/slowtask.rs | `tick` | 106 | 18 | yes |
 | debug/slowtask.rs | `audit` | 123 | 271 |  |
 | debug/slowtask.rs | `print_parked_chain` | 393 | 73 |  |
-| debug/softlockup.rs | `now_ns` | 34 | 13 |  |
-| debug/softlockup.rs | `init` | 46 | 13 | yes |
-| debug/softlockup.rs | `touch` | 58 | 15 | yes |
-| debug/softlockup.rs | `last_touch_ns` | 72 | 26 | yes |
-| debug/softlockup.rs | `note_irq_counts` | 97 | 24 |  |
-| debug/softlockup.rs | `cpu_irq_frozen_ms` | 120 | 20 | yes |
-| debug/softlockup.rs | `check` | 139 | 120 | yes |
-| debug/spinwatch.rs | `on` | 41 | 9 | yes |
-| debug/spinwatch.rs | `compat_arm` | 49 | 16 |  |
-| debug/spinwatch.rs | `last_report_n` | 64 | 20 | yes |
-| debug/spinwatch.rs | `new` | 83 | 26 | yes |
-| debug/spinwatch.rs | `record` | 108 | 42 | yes |
+| debug/softlockup.rs | `now_ns` | 30 | 13 |  |
+| debug/softlockup.rs | `init` | 42 | 13 | yes |
+| debug/softlockup.rs | `touch` | 54 | 15 | yes |
+| debug/softlockup.rs | `last_touch_ns` | 68 | 26 | yes |
+| debug/softlockup.rs | `note_irq_counts` | 93 | 24 |  |
+| debug/softlockup.rs | `cpu_irq_frozen_ms` | 116 | 20 | yes |
+| debug/softlockup.rs | `check` | 135 | 75 | yes |
+| debug/softlockup.rs | `report` | 209 | 4 | yes |
+| debug/spinwatch.rs | `on` | 41 | 6 | yes |
+| debug/spinwatch.rs | `compat_arm` | 46 | 7 | yes |
+| debug/spinwatch.rs | `last_report_n` | 52 | 20 | yes |
+| debug/spinwatch.rs | `new` | 71 | 26 | yes |
+| debug/spinwatch.rs | `record` | 96 | 42 | yes |
 | debug/switches.rs | `name` | 172 | 10 | yes |
 | debug/switches.rs | `index` | 181 | 22 | yes |
 | debug/switches.rs | `from_name` | 202 | 7 | yes |
 | debug/switches.rs | `enabled` | 208 | 16 | yes |
 | debug/switches.rs | `oh_hunt_prints_on` | 223 | 38 | yes |
 | debug/switches.rs | `set` | 260 | 42 | yes |
-| debug/switches.rs | `init_from_cmdline` | 301 | 29 |  |
-| debug/syscost.rs | `zone_cur` | 346 | 14 |  |
+| debug/switches.rs | `init_from_cmdline` | 301 | 29 | yes |
+| debug/syscost.rs | `zone_cur` | 346 | 14 | yes |
 | debug/syscost.rs | `seg_close` | 359 | 39 |  |
 | debug/syscost.rs | `rest_site_open` | 397 | 48 |  |
 | debug/syscost.rs | `irq_note_off` | 444 | 12 | yes |
@@ -394,9 +403,8 @@ records why.
 | debug/syscost.rs | `tick_idle` | 1565 | 14 | yes |
 | debug/syscost.rs | `rip_sample` | 1578 | 45 |  |
 | debug/syscost.rs | `tick` | 1622 | 15 | yes |
-| debug/syscost.rs | `dump` | 1636 | 655 |  |
 | debug/taint.rs | `add_taint` | 64 | 6 | yes |
-| debug/taint.rs | `get_taints` | 69 | 6 |  |
+| debug/taint.rs | `get_taints` | 69 | 6 | yes |
 | debug/taint.rs | `tainted` | 74 | 28 |  |
 | debug/taint.rs | `taint_string` | 101 | 22 |  |
 | debug/taint.rs | `taint_string_arr` | 122 | 6 |  |
@@ -409,7 +417,7 @@ records why.
 | debug/taskdump.rs | `put_hex` | 172 | 11 |  |
 | debug/taskdump.rs | `put_dec` | 182 | 20 | yes |
 | debug/taskdump.rs | `taskdump_raw_line` | 201 | 8 | yes |
-| debug/taskdump.rs | `taskdump_dec` | 208 | 6 |  |
+| debug/taskdump.rs | `taskdump_dec` | 208 | 6 | yes |
 | debug/taskdump.rs | `dump_syscall_ring_for` | 213 | 41 | yes |
 | debug/taskdump.rs | `debug_task_read_u32` | 253 | 8 |  |
 | debug/taskdump.rs | `debug_track_word` | 260 | 17 |  |
@@ -433,9 +441,9 @@ records why.
 | debug/unixrd.rs | `bump` | 134 | 9 | yes |
 | debug/unixrd.rs | `addb` | 142 | 12 | yes |
 | debug/unixrd.rs | `on` | 153 | 22 | yes |
-| debug/unixrd.rs | `v` | 174 | 6 |  |
+| debug/unixrd.rs | `v` | 174 | 6 | yes |
 | debug/unixrd.rs | `avg` | 179 | 11 |  |
-| debug/unixrd.rs | `dump` | 189 | 55 |  |
+| debug/unixrd.rs | `dump` | 189 | 55 | yes |
 | debug/wildwatch.rs | `arm` | 43 | 2 |  |
 | debug/wildwatch.rs | `verify` | 44 | 2 | yes |
 | debug/wildwatch.rs | `is_armed` | 45 | 26 | yes |

@@ -850,7 +850,11 @@ pub fn rust_main_tail() -> ! {
         // lines below fire only for bound devices, byte-identical to
         // the named-call era.
         {
-            drivers::virtio::probe::register_probe_initcalls();
+            // The probe family's rows register through the DriverHooks
+            // seam (rux-drivers owns probe.rs since the rung-4 tranche
+            // 2); the row body performs the historical three
+            // register_initcall calls verbatim at this exact point.
+            drivers::hooks::register_probe_initcalls();
             // First scan MMIO devices (virtio-blk-device)
             let mmio_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Early);
             if mmio_count > 0 {

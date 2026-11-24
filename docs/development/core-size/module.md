@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# module — hot 0 lines (stay) / cold 423 lines (leave)
+# module — hot 0 lines (stay) / cold 397 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -17,12 +17,12 @@ records why.
 | module/mod.rs | `parse_ehdr` | 102 | 37 |  |
 | module/mod.rs | `shdr` | 138 | 20 |  |
 | module/mod.rs | `module_name_from_blob` | 157 | 75 |  |
-| module/mod.rs | `sysfs_publish` | 231 | 26 |  |
-| module/mod.rs | `sysfs_unpublish` | 256 | 18 |  |
-| module/mod.rs | `load_module_blob` | 273 | 34 |  |
-| module/mod.rs | `delete_module_by_name` | 306 | 26 |  |
-| module/mod.rs | `generate_proc_modules` | 331 | 18 |  |
-| module/mod.rs | `check_cap_sys_module` | 348 | 6 |  |
-| module/mod.rs | `sys_init_module_impl` | 353 | 35 |  |
-| module/mod.rs | `sys_finit_module_impl` | 387 | 49 |  |
-| module/mod.rs | `sys_delete_module_impl` | 435 | 53 |  |
+| module/mod.rs | `sysfs_publish` | 231 | 6 |  |
+| module/mod.rs | `sysfs_unpublish` | 236 | 12 |  |
+| module/mod.rs | `load_module_blob` | 247 | 34 |  |
+| module/mod.rs | `delete_module_by_name` | 280 | 26 |  |
+| module/mod.rs | `generate_proc_modules` | 305 | 18 |  |
+| module/mod.rs | `check_cap_sys_module` | 322 | 6 |  |
+| module/mod.rs | `sys_init_module_impl` | 327 | 35 |  |
+| module/mod.rs | `sys_finit_module_impl` | 361 | 49 |  |
+| module/mod.rs | `sys_delete_module_impl` | 409 | 53 |  |

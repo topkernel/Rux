@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# ipc — hot 2569 lines (stay) / cold 7288 lines (leave)
+# ipc — hot 3413 lines (stay) / cold 6444 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -16,7 +16,7 @@ records why.
 | ipc/binder.rs | `ior` | 72 | 4 |  |
 | ipc/binder.rs | `io` | 75 | 217 |  |
 | ipc/binder.rs | `binder_object_size` | 291 | 41 |  |
-| ipc/binder.rs | `devno_ctx` | 331 | 16 |  |
+| ipc/binder.rs | `devno_ctx` | 331 | 16 | yes |
 | ipc/binder.rs | `align8` | 346 | 60 |  |
 | ipc/binder.rs | `new` | 405 | 30 | yes |
 | ipc/binder.rs | `span_ok` | 434 | 9 | yes |
@@ -52,7 +52,7 @@ records why.
 | ipc/binder.rs | `new` | 1371 | 9 | yes |
 | ipc/binder.rs | `add` | 1379 | 15 | yes |
 | ipc/binder.rs | `n` | 1393 | 16 |  |
-| ipc/binder.rs | `snapshot` | 1408 | 103 |  |
+| ipc/binder.rs | `snapshot` | 1408 | 103 | yes |
 | ipc/binder.rs | `ams46_on` | 1510 | 27 |  |
 | ipc/binder.rs | `is_inst` | 1536 | 22 |  |
 | ipc/binder.rs | `txnhunt_on` | 1557 | 7 |  |
@@ -96,7 +96,7 @@ records why.
 | ipc/binder.rs | `deref_mut` | 2517 | 12 |  |
 | ipc/binder.rs | `world` | 2528 | 7 |  |
 | ipc/binder.rs | `drop` | 2534 | 66 | yes |
-| ipc/binder.rs | `world_section_report` | 2599 | 50 |  |
+| ipc/binder.rs | `world_section_report` | 2599 | 50 | yes |
 | ipc/binder.rs | `world_lock` | 2648 | 26 |  |
 | ipc/binder.rs | `world_lock_try` | 2673 | 24 |  |
 | ipc/binder.rs | `pm` | 2696 | 23 |  |
@@ -113,7 +113,7 @@ records why.
 | ipc/binder.rs | `node_is_dead` | 3112 | 15 |  |
 | ipc/binder.rs | `proc_of_file` | 3126 | 12 |  |
 | ipc/binder.rs | `proc_ref` | 3137 | 11 |  |
-| ipc/binder.rs | `binder_open` | 3147 | 52 |  |
+| ipc/binder.rs | `binder_open` | 3147 | 52 | yes |
 | ipc/binder.rs | `binder_flush` | 3198 | 27 |  |
 | ipc/binder.rs | `binder_close` | 3224 | 233 |  |
 | ipc/binder.rs | `work_involves` | 3456 | 13 |  |
@@ -143,7 +143,7 @@ records why.
 | ipc/binder.rs | `dump_latched_maps_taskctx` | 4919 | 122 |  |
 | ipc/binder.rs | `latch_park_walk_tgid_sticky` | 5040 | 28 |  |
 | ipc/binder.rs | `latch_park_walk_tgid` | 5067 | 32 |  |
-| ipc/binder.rs | `sleep_snapshot` | 5098 | 608 |  |
+| ipc/binder.rs | `sleep_snapshot` | 5098 | 608 | yes |
 | ipc/binder.rs | `txn_owing_publish` | 5705 | 11 |  |
 | ipc/binder.rs | `txn_owing_pass_reset` | 5715 | 13 |  |
 | ipc/binder.rs | `txn_owing_of` | 5727 | 47 |  |
@@ -158,8 +158,8 @@ records why.
 | ipc/ipc_hooks.rs | `hooks` | 134 | 9 |  |
 | ipc/ipc_hooks.rs | `mq_fds_cleanup` | 142 | 5 | yes |
 | ipc/ipc_hooks.rs | `exec_clear_thread_keyring` | 146 | 5 | yes |
-| ipc/ipc_hooks.rs | `at_registered_token_of` | 150 | 5 |  |
-| ipc/ipc_hooks.rs | `at_mirror_set` | 154 | 5 |  |
+| ipc/ipc_hooks.rs | `at_registered_token_of` | 150 | 5 | yes |
+| ipc/ipc_hooks.rs | `at_mirror_set` | 154 | 5 | yes |
 | ipc/ipc_hooks.rs | `msgmni` | 158 | 5 | yes |
 | ipc/ipc_hooks.rs | `set_msgmni` | 162 | 5 | yes |
 | ipc/ipc_hooks.rs | `shm_ctlmax` | 166 | 5 | yes |
@@ -177,7 +177,7 @@ records why.
 | ipc/ipc_hooks.rs | `shm_proc_show` | 214 | 5 |  |
 | ipc/ipc_hooks.rs | `shm_attach_vma` | 218 | 5 | yes |
 | ipc/ipc_hooks.rs | `shm_detach_vma` | 222 | 5 | yes |
-| ipc/ipc_hooks.rs | `at_char_device` | 226 | 5 |  |
+| ipc/ipc_hooks.rs | `at_char_device` | 226 | 5 | yes |
 | ipc/ipc_hooks.rs | `at_token_of` | 230 | 5 |  |
 | ipc/ipc_hooks.rs | `init` | 234 | 4 | yes |
 | ipc/sysv_sem.rs | `zeroed` | 85 | 73 |  |
