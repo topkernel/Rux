@@ -40,3 +40,4 @@ kernel/src/lib.rs	1	0	cold-four lane: region shifted out by the timer_hooks modu
 kernel/src/cmdline.rs	5	4	region ELIMINATED by the root-cold move: parse_memory_regions walker moved to kernel/rux-drivers/src/of_fdt.rs under forbid, its core::mem::zeroed() replaced by a plain all-zero repeat expression; the 4 surviving regions kept their INV:INV-FDT-1 artifacts
 kernel/src/timer.rs	2	0	regions shifted by the hilogcensus/tick edits; carried by id, remainder recoverable from history
 kernel/src/cmdline.rs	5	4	mem::zeroed region eliminated under forbid (root-cold lane, reasoned)
+kernel/src/arch/x86_64/trap.rs	86	80	F1 family-(a): the mm_ops printers consolidated six per-load unsafe blocks into two hoisted derefs; no behavior change (lane-reported, reviewed)

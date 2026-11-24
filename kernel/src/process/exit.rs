@@ -161,7 +161,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                 let comm = core::str::from_utf8(comm_b.as_slice())
                     .unwrap_or("")
                     .trim_end_matches('\0');
-                let lastsys = cur.last_syscall_nr.load(Relaxed2);
+                let lastsys = cur.ext.last_syscall_nr.load(Relaxed2);
                 let pending = cur.pending.signal.load(Relaxed2);
                 // Group-exit state: distinguishes exit_group/fatal-group
                 // (do_exit_group publishes it) from a single thread exit.
@@ -332,9 +332,9 @@ pub fn do_exit(exit_code: i32) -> ! {
                         },
                         _ => (0, alloc::string::String::from("?")),
                     };
-                    let lastsys = cur.last_syscall_nr.load(Rel) as i64;
-                    let la0 = cur.last_syscall_a0.load(Rel);
-                    let la1 = cur.last_syscall_a1.load(Rel);
+                    let lastsys = cur.ext.last_syscall_nr.load(Rel) as i64;
+                    let la0 = cur.ext.last_syscall_a0.load(Rel);
+                    let la1 = cur.ext.last_syscall_a1.load(Rel);
                     let (group_exiting, _group_code) = cur.signal_arc()
                         .map(|ss| {
                             (ss.group_exiting.load(Rel), ss.group_exit_code.load(Rel))
@@ -463,7 +463,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                 let comm = core::str::from_utf8(comm_b.as_slice())
                     .unwrap_or("")
                     .trim_end_matches('\0');
-                let lastsys = cur.last_syscall_nr.load(Relaxed);
+                let lastsys = cur.ext.last_syscall_nr.load(Relaxed);
                 let urip = match cur.pt_regs_ref() {
                     Some(pr) => crate::process::unsafe_edges::pt_user_pc(pr),
                     None => 0u64,
@@ -505,7 +505,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         static NOSPWN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         let is_leader = cur.pid() == cur.tgid();
-        let execd = cur.did_exec.load(Relaxed);
+        let execd = cur.ext.did_exec.load(Relaxed);
         if is_leader && !execd && NOSPWN_N.fetch_add(1, Relaxed) < 8 {
             let comm = core::str::from_utf8(cur.comm())
                 .unwrap_or("")
@@ -518,11 +518,11 @@ pub fn do_exit(exit_code: i32) -> ! {
                 dying_pid, comm, exit_code
             );
             for i in 0..crate::process::task::BIRTH_CALLS_LEN {
-                let nr = cur.birth_calls[i].load(Relaxed);
+                let nr = cur.ext.birth_calls[i].load(Relaxed);
                 if nr == 0 {
                     break; // ring not filled past here
                 }
-                let a0 = cur.birth_a0[i].load(Relaxed);
+                let a0 = cur.ext.birth_a0[i].load(Relaxed);
                 let _ = write!(line, " {}:{:#x}", nr & 0xffff, a0);
             }
             crate::pr_debug!("{}", line);
@@ -591,16 +591,16 @@ pub fn do_exit(exit_code: i32) -> ! {
             let mut s = alloc::string::String::new();
             {
                 let cur8 =
-                    cur.last_fails_cur.load(core::sync::atomic::Ordering::Relaxed);
+                    cur.ext.last_fails_cur.load(core::sync::atomic::Ordering::Relaxed);
                 for k in 0..8 {
                     let i = (cur8 + 8 - 1 - k) % 8; // newest first
-                    let v = cur.last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
+                    let v = cur.ext.last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
                     if v != 0 {
                         // sc135 (Session Q): a0/a1 name the failing call's
                         // leading args (prctl option et al).
-                        let a0 = cur.last_fails_a0[i]
+                        let a0 = cur.ext.last_fails_a0[i]
                             .load(core::sync::atomic::Ordering::Relaxed);
-                        let a1 = cur.last_fails_a1[i]
+                        let a1 = cur.ext.last_fails_a1[i]
                             .load(core::sync::atomic::Ordering::Relaxed);
                         let _ = write!(
                             s,
@@ -622,10 +622,10 @@ pub fn do_exit(exit_code: i32) -> ! {
             {
                 const RL: usize = crate::process::task::LAST_CALLS_LEN;
                 let cur12 =
-                    cur.last_calls_cur.load(core::sync::atomic::Ordering::Relaxed);
+                    cur.ext.last_calls_cur.load(core::sync::atomic::Ordering::Relaxed);
                 for k in 0..RL {
                     let i = (cur12 + RL - 1 - k) % RL; // newest first
-                    let v = cur.last_calls[i].load(core::sync::atomic::Ordering::Relaxed);
+                    let v = cur.ext.last_calls[i].load(core::sync::atomic::Ordering::Relaxed);
                     if v != 0 {
                         let _ = write!(c, " {}", v);
                     }
@@ -840,7 +840,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     .unwrap_or(0);
                 mm_rss * (crate::mm::page::PAGE_SIZE / 1024) as u64
             };
-            cur.exit_maxrss_kb.store(rss_kb, Relaxed);
+            cur.ext.exit_maxrss_kb.store(rss_kb, Relaxed);
             if is_leader {
                 // RUSAGE_CHILDREN folds at REAP time, not exit time
                 // (reference wait_task_zombie accumulates into the
@@ -1209,8 +1209,8 @@ pub fn do_exit(exit_code: i32) -> ! {
                 exit_code,
                 notify_parent,
                 cur.comm(),
-                cur.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed),
-                cur.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed),
+                cur.ext.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed),
+                cur.ext.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed),
             );
         }
         if fp {

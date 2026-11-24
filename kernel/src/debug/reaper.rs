@@ -236,7 +236,7 @@ pub fn zombie_scan(now: u64) {
                 task.exit_code(),
                 *task.comm(),
                 task.ppid(),
-                task.last_syscall_nr.load(Ordering::Relaxed),
+                task.ext.last_syscall_nr.load(Ordering::Relaxed),
             );
             nfound += 1;
         }
@@ -303,8 +303,8 @@ pub fn zombie_scan(now: u64) {
                     ppid,
                     comm_str(p.comm()),
                     p.state().bits(),
-                    p.last_syscall_nr.load(Ordering::Relaxed),
-                    p.last_syscall_a0.load(Ordering::Relaxed)
+                    p.ext.last_syscall_nr.load(Ordering::Relaxed),
+                    p.ext.last_syscall_a0.load(Ordering::Relaxed)
                 )
             })
             .unwrap_or_else(|| alloc::format!("{}(gone)", ppid));

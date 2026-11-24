@@ -1157,14 +1157,14 @@ pub fn wake_up_enqueue_opt(
                                 putchar2(b);
                             }
                             let cur = crate::sched::edges::task_shared(task)
-                                .last_calls_cur
+                                .ext.last_calls_cur
                                 .load(core::sync::atomic::Ordering::Relaxed);
                             for k in 0..12usize {
                                 let idx = (cur + crate::process::task::LAST_CALLS_LEN
                                     - 1
                                     - k)
                                     % crate::process::task::LAST_CALLS_LEN;
-                                let nr = crate::sched::edges::task_shared(task).last_calls[idx]
+                                let nr = crate::sched::edges::task_shared(task).ext.last_calls[idx]
                                     .load(core::sync::atomic::Ordering::Relaxed);
                                 if k > 0 {
                                     putchar2(b',');

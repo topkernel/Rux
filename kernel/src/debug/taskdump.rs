@@ -696,10 +696,10 @@ pub fn dump_all_tasks(reason: &str) {
             // on" hunts (account-activation stall: epoll? futex? binder
             // ioctl? signalfd?).
             {
-                let nr = t.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+                let nr = t.ext.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
                 if nr != 0 {
-                    let a0 = t.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
-                    let a1 = t.last_syscall_a1.load(core::sync::atomic::Ordering::Relaxed);
+                    let a0 = t.ext.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
+                    let a1 = t.ext.last_syscall_a1.load(core::sync::atomic::Ordering::Relaxed);
                     puts(" lastsys=");
                     put_dec(nr as u64);
                     puts("(");

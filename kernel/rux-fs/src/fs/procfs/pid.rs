@@ -614,8 +614,8 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
             let ticks = (
                 t.utime_ticks.load(Relaxed),
                 t.stime_ticks.load(Relaxed),
-                t.cutime_ticks.load(Relaxed),
-                t.cstime_ticks.load(Relaxed),
+                t.ext.cutime_ticks.load(Relaxed),
+                t.ext.cstime_ticks.load(Relaxed),
             );
             // Linux's prio field is the static priority of a normal task
             // (120 - nice); a real-time task carries its RT priority in
@@ -635,7 +635,7 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
             let faults = (
                 t.min_flt.load(Relaxed),
                 t.maj_flt.load(Relaxed),
-                t.start_jiffies.load(Relaxed),
+                t.ext.start_jiffies.load(Relaxed),
             );
             (task_comm(&t).into_owned(), t.ppid(), ch, vsize, rss, sigmask, ec,
              ticks.0, ticks.1, ticks.2, ticks.3, prio, nice, threads, processor, policy,

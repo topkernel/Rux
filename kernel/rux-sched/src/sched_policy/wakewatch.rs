@@ -687,23 +687,23 @@ pub fn stallwatch_tick() {
             comm
         );
         const RL: usize = crate::process::task::LAST_CALLS_LEN;
-        let cur = tk.last_calls_cur.load(Ordering::Relaxed);
+        let cur = tk.ext.last_calls_cur.load(Ordering::Relaxed);
         for k in 0..RL {
             let i = (cur + RL - k) % RL;
-            let v = tk.last_calls[i].load(Ordering::Relaxed);
+            let v = tk.ext.last_calls[i].load(Ordering::Relaxed);
             if v != 0 {
                 let _ = write!(s, " {}", v);
             }
         }
         reports.push(s);
-        let fcur = tk.last_fails_cur.load(Ordering::Relaxed);
+        let fcur = tk.ext.last_fails_cur.load(Ordering::Relaxed);
         let mut s2 = alloc::string::String::new();
         let _ = write!(s2, "STALLWATCH tid {} fails:", tk.pid());
         for k in 0..8 {
             let i = (fcur + 8 - 1 - k) % 8;
-            let v = tk.last_fails[i].load(Ordering::Relaxed);
+            let v = tk.ext.last_fails[i].load(Ordering::Relaxed);
             if v != 0 {
-                let a0 = tk.last_fails_a0[i].load(Ordering::Relaxed);
+                let a0 = tk.ext.last_fails_a0[i].load(Ordering::Relaxed);
                 let _ = write!(s2, " nr{}=-{} a0={:#x}", v & 0xffff, v >> 16, a0);
             }
         }

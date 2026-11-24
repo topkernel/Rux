@@ -259,9 +259,9 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         let cur = crate::sched::current();
         if let Some(cur) = cur {
             use core::sync::atomic::Ordering::Relaxed;
-            cur.last_syscall_nr.store(syscall_no as u32, Relaxed);
-            cur.last_syscall_a0.store(args[0], Relaxed);
-            cur.last_syscall_a1.store(args[1], Relaxed);
+            cur.ext.last_syscall_nr.store(syscall_no as u32, Relaxed);
+            cur.ext.last_syscall_a0.store(args[0], Relaxed);
+            cur.ext.last_syscall_a1.store(args[1], Relaxed);
         }
     }
 
@@ -507,9 +507,9 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
         if let Some(cur) = crate::sched::current() {
             use core::sync::atomic::Ordering::Relaxed;
-            cur.last_syscall_nr.store(syscall_no as u32, Relaxed);
-            cur.last_syscall_a0.store(args[0], Relaxed);
-            cur.last_syscall_a1.store(args[1], Relaxed);
+            cur.ext.last_syscall_nr.store(syscall_no as u32, Relaxed);
+            cur.ext.last_syscall_a0.store(args[0], Relaxed);
+            cur.ext.last_syscall_a1.store(args[1], Relaxed);
         }
     }
 
@@ -661,7 +661,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // integer compare on the exec numbers only.
     if syscall_no == 59 || syscall_no == 322 {
         if let Some(cur) = crate::sched::current() {
-            cur.did_exec.store(true, core::sync::atomic::Ordering::Relaxed);
+            cur.ext.did_exec.store(true, core::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -705,9 +705,9 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                     0
                 };
                 let w1 = (args[1] & 0x0000_ffff_ffff_ffff) | (prot << 48);
-                let idx = (*cur).mm_ops_cur.fetch_add(1, Relaxed) % 16;
-                (*cur).mm_ops[idx * 2].store(w0, Relaxed);
-                (*cur).mm_ops[idx * 2 + 1].store(w1, Relaxed);
+                let idx = (*cur).ext.mm_ops_cur.fetch_add(1, Relaxed) % 16;
+                (*cur).ext.mm_ops[idx * 2].store(w0, Relaxed);
+                (*cur).ext.mm_ops[idx * 2 + 1].store(w1, Relaxed);
             }
         }
         _ => {}
@@ -738,9 +738,9 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // the clock_gettime retry loop masking the real pre-park sequence.
     if let Some(cur) = crate::sched::current() {
         use core::sync::atomic::Ordering::Relaxed;
-        let idx = cur.last_calls_cur.fetch_add(1, Relaxed)
+        let idx = cur.ext.last_calls_cur.fetch_add(1, Relaxed)
             % crate::process::task::LAST_CALLS_LEN;
-        cur.last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
+        cur.ext.last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
     }
 
     // sc138 (Session Q): FILTERED init ring — skips the parked child's
@@ -771,16 +771,16 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         if !skip {
             if let Some(cur) = crate::sched::current() {
                 use core::sync::atomic::Ordering::Relaxed;
-                let n = cur.init_calls_cur.fetch_add(1, Relaxed);
+                let n = cur.ext.init_calls_cur.fetch_add(1, Relaxed);
                 let idx = n % crate::process::task::INIT_CALLS_LEN;
-                cur.init_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
-                cur.init_a0[idx].store(args[0], Relaxed);
+                cur.ext.init_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
+                cur.ext.init_a0[idx].store(args[0], Relaxed);
                 // sc143: latch the birth window once (first 64 filtered
                 // calls of this task's life) — the deep ring's tail gets
                 // churned by retry loops, the birth window cannot.
                 if n < crate::process::task::BIRTH_CALLS_LEN as usize {
-                    cur.birth_calls[n].store((syscall_no as u32) & 0xffff, Relaxed);
-                    cur.birth_a0[n].store(args[0], Relaxed);
+                    cur.ext.birth_calls[n].store((syscall_no as u32) & 0xffff, Relaxed);
+                    cur.ext.birth_a0[n].store(args[0], Relaxed);
                 }
             }
         }
@@ -795,10 +795,10 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     if result < 0 && result > -4096 {
         if let Some(cur) = crate::sched::current() {
             let packed = ((-(result) as u32) << 16) | ((syscall_no as u32) & 0xffff);
-            let idx = cur.last_fails_cur.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 8;
-            cur.last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed);
-            cur.last_fails_a0[idx].store(args[0], core::sync::atomic::Ordering::Relaxed);
-            cur.last_fails_a1[idx].store(args[1], core::sync::atomic::Ordering::Relaxed);
+            let idx = cur.ext.last_fails_cur.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 8;
+            cur.ext.last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed);
+            cur.ext.last_fails_a0[idx].store(args[0], core::sync::atomic::Ordering::Relaxed);
+            cur.ext.last_fails_a1[idx].store(args[1], core::sync::atomic::Ordering::Relaxed);
         }
     }
 
