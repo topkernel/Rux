@@ -1286,6 +1286,11 @@ fn softirq_diagnostics(current: u64) {
     // this softirq. Own cmdline key — no rux:switches (retired debug=switches).rs bit consumed.
     crate::debug::syscost::tick(current);
 
+    // fix-backlog lane instrumentation (BRANCH-ONLY): the dispatch
+    // preamble arm-firing census, same 60 s cadence.
+    #[cfg(feature = "x86_64")]
+    crate::syscall::dispatch::fixbl::tick_dump(current);
+
     // vm-op stage profiler (cmdline `mmprof=1`, oh-launcher perf
     // handoff): mmap/munmap/mprotect stage table, same 60s cadence.
     crate::debug::mmprof::tick(current);
