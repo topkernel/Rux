@@ -1,4 +1,4 @@
-//! The OBSERVABILITY SERVICE CRATE (crate-flip rung: rux-obs): the
+//! The OBSERVABILITY SERVICE CRATE (crate-flip rung: rux-debug): the
 //! movable report/decode/publish layer of the kernel's diagnostic
 //! tools, under a crate-level unsafe-deny boundary.
 //!
@@ -13,9 +13,9 @@
 //! PUBLISHES those counters: the report generators, the dump kthreads,
 //! the wedge census, the print arms, and the tracefs file set. It calls
 //! DOWN into the framework for the statics (pub peek surfaces) and is
-//! called UP only through kernel/src/debug/obs_hooks.rs — 18 cold rows
+//! called UP only through kernel/src/debug/debug_hooks.rs — 18 cold rows
 //! (boot init, shutdown/cadence dumps, procfs readers, arm-gated event
-//! prints) — plus the direct sibling-dep surface rux_obs::scmtap.
+//! prints) — plus the direct sibling-dep surface rux_debug::scmtap.
 //!
 //! Sole-copy state: the moved code lives in this crate; the framework
 //! files keep only the hot halves and the historical-name wrappers
@@ -58,11 +58,11 @@ pub mod scmtap;
 pub mod trace_files;
 
 /// The boot-time registration (rux-bin calls this before
-/// rust_main_impl): the ObsHooks table's rows. OnceSlot publication
+/// rust_main_impl): the DebugHooks table's rows. OnceSlot publication
 /// only — no locks, no per-CPU state (registration runs from
 /// rust_main, before arch::smp::init()). THE composition contract.
 pub fn register_all() {
-    debug::obs_hooks::obs_register_hooks(debug::obs_hooks::ObsHooks {
+    debug::debug_hooks::debug_register_hooks(debug::debug_hooks::DebugHooks {
         syscost_dump: syscost::dump,
         fsw_dump: fsw::dump,
         mmprof_report_line: mmprof::report_line,

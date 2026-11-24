@@ -28,7 +28,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// Ring entries (keep modest: dumped on one serial line each).
 pub const RING_LEN: usize = 64;
 
-/// PUB peek surface (crate-flip rung rux-obs): the rux-obs report
+/// PUB peek surface (crate-flip rung rux-debug): the rux-debug report
 /// half reads the ring.
 pub static SEQ: AtomicU64 = AtomicU64::new(0);
 static DUMPED: AtomicBool = AtomicBool::new(false);
@@ -54,9 +54,9 @@ pub fn record(event: u64, pid: u64, a: u64, b: u64, jiffies: u64) {
     RING[i + 3].store(a, Ordering::Relaxed);
     RING[i + 4].store(b | (jiffies << 32), Ordering::Relaxed);
 }
-/// Dump the ring once (moved to the rux-obs crate): same-named wrapper
+/// Dump the ring once (moved to the rux-debug crate): same-named wrapper
 /// for the wakewatch heartbeat's frozen-state branch; dispatches the
 /// hook row.
 pub fn dump_once(tag: &[u8]) {
-    crate::debug::obs_hooks::lostpark_dump_once(tag);
+    crate::debug::debug_hooks::lostpark_dump_once(tag);
 }

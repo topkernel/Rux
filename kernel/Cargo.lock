@@ -359,17 +359,24 @@ name = "rux-bin"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-debug",
  "rux-drivers",
  "rux-ext4",
  "rux-fs",
  "rux-ipc",
  "rux-mm",
  "rux-net",
- "rux-obs",
  "rux-process",
  "rux-sched",
  "rux-signal",
  "rux-syscall",
+]
+
+[[package]]
+name = "rux-debug"
+version = "0.1.0"
+dependencies = [
+ "rux",
 ]
 
 [[package]]
@@ -393,8 +400,8 @@ name = "rux-fs"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-debug",
  "rux-ext4",
- "rux-obs",
 ]
 
 [[package]]
@@ -417,15 +424,8 @@ name = "rux-net"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-debug",
  "rux-fs",
- "rux-obs",
-]
-
-[[package]]
-name = "rux-obs"
-version = "0.1.0"
-dependencies = [
- "rux",
 ]
 
 [[package]]
@@ -455,10 +455,10 @@ name = "rux-syscall"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-debug",
  "rux-fs",
  "rux-ipc",
  "rux-net",
- "rux-obs",
  "rux-process",
 ]
 

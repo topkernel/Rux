@@ -131,8 +131,8 @@ pub mod pathstash;
 pub mod slowtask;
 /// SCM_RIGHTS relay tap (rux:scmtap (retired debug=scmtap), gdm session-fifo hunt): one line
 /// per unix-fd hop/drop plus the fifo last-writer-close line — MOVED
-/// WHOLE to the rux-obs service crate (crate-flip rung rux-obs,
-/// rux_obs::scmtap); rux-syscall (syscall/network.rs) and rux-fs
+/// WHOLE to the rux-debug service crate (crate-flip rung rux-debug,
+/// rux_debug::scmtap); rux-syscall (syscall/network.rs) and rux-fs
 /// (fs/fifo.rs) call it directly through the sibling service dep (no
 /// hook rows on the armed-gated tap paths).
 /// fork/exec/exit phase profiler (cmdline forkprof=1, process-lifecycle
@@ -156,11 +156,11 @@ pub mod cctx;
 /// app-cycle children, and whether they linger un-reaped; see
 /// debug/reaper.rs.
 pub mod reaper;
-/// The observability hook table (crate-flip rung rux-obs): the cold
-/// framework entry points into the rux-obs service crate's
+/// The observability hook table (crate-flip rung rux-debug): the cold
+/// framework entry points into the rux-debug service crate's
 /// report/init/publish surface (the IpcHooks pattern). The per-event
 /// record markers stay direct framework calls.
-pub mod obs_hooks;
+pub mod debug_hooks;
 
 /// Initialize the DEBUG subsystem.
 ///
@@ -184,9 +184,9 @@ pub fn init() {
     // and disarmed while the system runs.
     register_debugfs_knobs();
     // Publish the tracepoint control surface (tracefs) — the file set
-    // moved to the rux-obs crate (rux_obs::trace_files); the row is
+    // moved to the rux-debug crate (rux_debug::trace_files); the row is
     // registered by the composition bin before this runs.
-    crate::debug::obs_hooks::trace_files_register();
+    crate::debug::debug_hooks::trace_files_register();
 
     // aarch64 bring-up probe (debug-aa64-uaccess-selftest): exercise the
     // uaccess exception-table fault containment with a poisoned user

@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! The syscost REPORT half (moved from kernel/src/debug/syscost.rs,
-//! crate-flip rung rux-obs): the 60 s cadence dump — tick modes, errno
+//! crate-flip rung rux-debug): the 60 s cadence dump — tick modes, errno
 //! census, flood attribution, IF=0 zone decomposition, REST call-site
 //! table, UART cost, printk volume, recv census, the syscall table and
 //! the kernel-rip histogram. The record markers, their statics and the

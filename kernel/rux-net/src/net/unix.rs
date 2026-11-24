@@ -3143,7 +3143,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // scmtap (gdm session-fifo hunt): fds still parked in OUR receive
     // queue at close time are about to be released — the receiver died
     // (or stopped reading) before the ancillary segment was touched.
-    if rux_obs::scmtap::enabled() {
+    if rux_debug::scmtap::enabled() {
         let q = sock.recv_queue.lock();
         let mut nfds = 0usize;
         let mut segs = 0usize;
@@ -3155,7 +3155,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
         }
         drop(q);
         if nfds > 0 {
-            rux_obs::scmtap::tap_orphan(nfds, segs);
+            rux_debug::scmtap::tap_orphan(nfds, segs);
         }
     }
     // unix_release_sock: wake_up_interruptible_all(&u->peer_wait) —
@@ -3421,8 +3421,8 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 if r.len == 0 {
                     return 0; // EOF
                 }
-                if rux_obs::scmtap::enabled() && !r.files.is_empty() {
-                    rux_obs::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                if rux_debug::scmtap::enabled() && !r.files.is_empty() {
+                    rux_debug::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
                 // dst was access_ok-validated by the caller;
                 // r.len <= stage <= count.
@@ -3467,8 +3467,8 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 // read is the dbus "message refers to more unix fds
                 // than were sent" corruption shape, so make the loss
                 // visible when hunting (rux:scmtap (retired debug=scmtap)).
-                if rux_obs::scmtap::enabled() && !r.files.is_empty() {
-                    rux_obs::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                if rux_debug::scmtap::enabled() && !r.files.is_empty() {
+                    rux_debug::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
                 // user_ptr stays within the access_ok-validated
                 // [dst, dst+count) window; only the n bytes unix_recv
@@ -3605,8 +3605,8 @@ fn unix_recv_stream_user(
                 }
             }
             if !files.is_empty() {
-                if rux_obs::scmtap::enabled() {
-                    rux_obs::scmtap::tap_rx_drop("PLAINREAD", files.len());
+                if rux_debug::scmtap::enabled() {
+                    rux_debug::scmtap::tap_rx_drop("PLAINREAD", files.len());
                 }
                 let _ = cred;
             }

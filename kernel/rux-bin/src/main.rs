@@ -26,7 +26,7 @@ pub extern "C" fn rust_main() -> ! {
     // ride the IpcHooks table from their first use.
     rux_ipc::register_all();
     rux_syscall::register_all();
-    rux_obs::register_all();
+    rux_debug::register_all();
     // The signal policy rows (the rux-signal carve) before
     // rust_main_impl: the send path (kill/tgkill/sigqueue, SIGCHLD from
     // exit, tty ISIG) and the delivery-time default-action table ride

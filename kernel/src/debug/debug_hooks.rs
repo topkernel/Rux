@@ -1,4 +1,4 @@
-//! Framework-side observability hook table (crate-flip rung: rux-obs):
+//! Framework-side observability hook table (crate-flip rung: rux-debug):
 //! every framework-side consumer of the MOVABLE observation tools — the
 //! syscost/fsw/mmprof report halves, the schbd heartbeat kthread, the
 //! reaper print arms, the driftwatch/filerd report readers, the
@@ -6,7 +6,7 @@
 //! compat arm, and the tracefs file publisher — resolves through these
 //! rows (the IpcHooks/NetHooks pattern: nullable-default fns, no-op
 //! until the service crate registers; the composition bin calls
-//! rux_obs::register_all before rust_main_impl).
+//! rux_debug::register_all before rust_main_impl).
 //!
 //! Row discipline (crate-plan §3a): every row here is COLD — boot-time
 //! arming, shutdown/procfs readers, cadence dumps (>= 1 Hz), or an
@@ -33,9 +33,9 @@
 use alloc::vec::Vec;
 
 /// The observability hook set (one row per cold framework entry point
-/// into the rux-obs crate's report/init/publish surface).
+/// into the rux-debug crate's report/init/publish surface).
 #[derive(Clone, Copy)]
-pub struct ObsHooks {
+pub struct DebugHooks {
     // ---- periodic / shutdown reports ----
     /// syscost's 60 s cadence dump (called from framework syscost::tick
     /// once per dump window — the tick body itself stays direct).
@@ -81,10 +81,10 @@ pub struct ObsHooks {
     pub reaper_poll_note: fn(u32, i32, i32, i32),
 }
 
-impl ObsHooks {
+impl DebugHooks {
     /// Unregistered rows are silent no-ops (an uncomposed kernel prints
     /// nothing; the composed bin always registers the real bodies).
-    pub const EMPTY: ObsHooks = ObsHooks {
+    pub const EMPTY: DebugHooks = DebugHooks {
         syscost_dump: || {},
         fsw_dump: || {},
         mmprof_report_line: |_| {},
@@ -106,19 +106,19 @@ impl ObsHooks {
     };
 }
 
-pub static OBS_HOOKS: crate::safety::slot::OnceSlot<ObsHooks> =
+pub static DEBUG_HOOKS: crate::safety::slot::OnceSlot<DebugHooks> =
     crate::safety::slot::OnceSlot::new();
 
-/// Registration entry (called by the rux-obs service crate at boot,
+/// Registration entry (called by the rux-debug service crate at boot,
 /// from rust_main — OnceSlot publication only, no locks, no per-CPU
 /// state; INV-SVCTEST-1's pre-SMP discipline).
-pub fn obs_register_hooks(hooks: ObsHooks) {
-    let _ = OBS_HOOKS.publish(hooks);
+pub fn debug_register_hooks(hooks: DebugHooks) {
+    let _ = DEBUG_HOOKS.publish(hooks);
 }
 
 #[inline]
-fn hooks() -> ObsHooks {
-    *OBS_HOOKS.get().unwrap_or(&ObsHooks::EMPTY)
+fn hooks() -> DebugHooks {
+    *DEBUG_HOOKS.get().unwrap_or(&DebugHooks::EMPTY)
 }
 
 // The lib-side call surface (one wrapper per row; the framework call

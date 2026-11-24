@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! The softlockup REPORT half (moved from kernel/src/debug/softlockup.rs,
-//! crate-flip rung rux-obs): the one-shot "BUG: soft lockup" report —
+//! crate-flip rung rux-debug): the one-shot "BUG: soft lockup" report —
 //! holder line, leakorigin origins, stack trace, remote backtrace,
 //! taint. check()/touch() and the per-CPU timestamp table stay
 //! framework-side (timer-interrupt paths). Fires at most once per CPU

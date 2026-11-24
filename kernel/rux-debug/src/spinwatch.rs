@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! The spinwatch COMPAT ARM (moved from kernel/src/debug/spinwatch.rs,
-//! crate-flip rung rux-obs): the retired `spinwatch=1` cmdline alias
+//! crate-flip rung rux-debug): the retired `spinwatch=1` cmdline alias
 //! that arms the unified trace events. on()/record()/last_report_n()
 //! and the WATCH table stay framework-side (the per-zero-event-return
 //! record path in the epoll syscall). Body moved verbatim.

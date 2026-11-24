@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! The reaper PRINT arms (moved from kernel/src/debug/reaper.rs,
-//! crate-flip rung rux-obs): SPAWN/ZEXIT/REAP4/REAPW/POLL lines. The
+//! crate-flip rung rux-debug): SPAWN/ZEXIT/REAP4/REAPW/POLL lines. The
 //! on() gate, the ZLINGER 1 Hz scan and the EXIT_MAP/NAME_MAP statics
 //! stay framework-side (timer + do_exit/wait paths); every arm here is
 //! called through the framework's same-named wrappers, whose call sites

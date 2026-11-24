@@ -1630,7 +1630,7 @@ pub fn tick(now_jiffies: u64) {
         return;
     }
     LAST_DUMP.store(now_jiffies, Ordering::Relaxed);
-    // The report body lives in the rux-obs crate (crate-flip rung
-    // rux-obs); the row fires only on the dump cadence.
-    crate::debug::obs_hooks::syscost_dump();
+    // The report body lives in the rux-debug crate (crate-flip rung
+    // rux-debug); the row fires only on the dump cadence.
+    crate::debug::debug_hooks::syscost_dump();
 }

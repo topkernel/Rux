@@ -16,7 +16,7 @@ kernel/src/debug/mmprof.rs
 kernel/src/debug/monowatch.rs
 kernel/src/debug/reaper.rs
 kernel/src/debug/schb.rs
-kernel/rux-obs/src/scmtap.rs
+kernel/rux-debug/src/scmtap.rs
 kernel/src/debug/softlockup.rs
 kernel/src/debug/spinwatch.rs
 kernel/src/debug/switches.rs
@@ -160,7 +160,7 @@ kernel/src/tests/timer_wheel.rs
 kernel/src/tests/virtio_queue.rs
 kernel/src/tests/vma_flags.rs
 kernel/src/timer/oneshot.rs
-kernel/rux-obs/src/trace_files.rs
+kernel/rux-debug/src/trace_files.rs
 kernel/src/syscall/mod.rs
 kernel/rux-net/src/lib.rs
 kernel/rux-drivers/src/lib.rs

@@ -1,9 +1,9 @@
 [package]
-name = "rux-obs"
+name = "rux-debug"
 version = "0.1.0"
 edition = "2021"
 
-# The OBSERVABILITY SERVICE CRATE (crate-flip rung: rux-obs): the
+# The OBSERVABILITY SERVICE CRATE (crate-flip rung: rux-debug): the
 # movable report/decode/publish half of the kernel's diagnostic tools —
 # the syscost/fsw/mmprof/driftwatch/filerd report generators, the schbd
 # heartbeat kthread and its wedge census, the reaper print arms, the
@@ -14,7 +14,7 @@ edition = "2021"
 # (kernel/src/debug/) as direct calls (the hot/cold split of the flip's
 # measurement); this crate READS those statics through their pub
 # surfaces and prints. Framework-side cold entry points dispatch
-# through kernel/src/debug/obs_hooks.rs (the 18-row seam); rux-syscall
+# through kernel/src/debug/debug_hooks.rs (the 18-row seam); rux-syscall
 # and rux-fs call the scmtap module here DIRECTLY (sibling service dep,
 # zero indirection on the armed-gated tap paths).
 

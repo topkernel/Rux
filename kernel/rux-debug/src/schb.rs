@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! The schb COLD half (moved from kernel/src/debug/schb.rs, crate-flip
-//! rung rux-obs): the schbd heartbeat kthread, the wedge census, the
+//! rung rux-debug): the schbd heartbeat kthread, the wedge census, the
 //! OOM allocator anatomy and the boot init. The note_* record fns
 //! (note_proc_open/note_cow/note_drct/note_slow) and their PACE_*/PROC_*
 //! statics stay framework-side (fault/reclaim/alloc hot paths); this

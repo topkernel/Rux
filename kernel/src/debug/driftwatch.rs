@@ -111,9 +111,9 @@ pub static MM_POISON_FREES: AtomicUsize = AtomicUsize::new(0);
 pub fn note_zero_put(site: usize) {
     ZERO_PUT[site.min(SITES - 1)].fetch_add(1, Ordering::Relaxed);
 }
-/// One line per nonzero counter (moved to the rux-obs crate):
+/// One line per nonzero counter (moved to the rux-debug crate):
 /// same-named wrapper for the ledger's historical call site; dispatches
 /// the hook row.
 pub fn report() {
-    crate::debug::obs_hooks::driftwatch_report();
+    crate::debug::debug_hooks::driftwatch_report();
 }
