@@ -505,6 +505,191 @@ toolchain rather than the process.
 | Unique here | — | — | The census/INV/F-row ledger (97%+ artifact coverage: the audit surface is a ledger, not a code read); the policy/core splits S1/M1 (decision logic exits the core, mechanism stays); the binding measure-first flip ladder with shelving-as-success |
 | Where they lead | Full syscall surface shipped earlier | Complete zero-copy-RPC formalism | — (honest) |
 
+## 2c. Names and layout (binding, user decisions 2026-11-25)
+
+The crate flips left three kinds of disorder: scaffold from the
+zero-move step (a crate named `rux-fs` containing a directory `fs/`,
+so the path was `rux-fs/src/fs/pipe.rs`), role-less names (`rux-` on
+every crate, so nothing said which one was the core; `edges` spelled
+four ways; nineteen `*hooks.rs` files of which several held no hook
+table at all), and unsafe scattered through the mechanism files
+instead of collected. This section fixes all three. Measured on
+main 8d7de77e8: 1,984 unsafe constructs in the core, of which 361 sit
+in the edge files and 1,623 are scattered across 179 other files.
+
+### 2c.1 Crate names: the subsystem's own name
+
+No `rux-` prefix. A crate is named for what it implements, the way
+crates in the Rust ecosystem are (`alloc`, `serde`): `sched` is the
+scheduler, `ext4` is ext4. No role suffix either — not `-policy`,
+`-srv`, `-mgr`: these crates are not decision policies (the virtio
+probe code and a filesystem are implementations, not policies), and
+they are not processes (this is a single-address-space kernel, not a
+microkernel). What distinguishes them from the core is stated by the
+core's name and by the build: every one of them carries
+`#![forbid(unsafe_code)]`.
+
+| now | becomes | referenced in code as |
+|---|---|---|
+| `rux` in `kernel/src/` | `kernel/core/`, package `rux-core` | `rux::` (unchanged) |
+| `rux-bin` | `kernel/bin/` | — (the composition point; nothing imports it) |
+| `rux-sched` | `kernel/sched/` | `sched::` |
+| `rux-mm` | `kernel/mm/` | `mm::` |
+| `rux-fs` | `kernel/fs/` | `fs::` |
+| `rux-ext4` | `kernel/ext4/` | `ext4::` |
+| `rux-io-uring` | `kernel/io_uring/` | `io_uring::` |
+| `rux-drivers` | `kernel/drivers/` | `drivers::` |
+| `rux-ipc` | `kernel/ipc/` | `ipc::` |
+| `rux-syscall` | `kernel/syscall/` | `syscall::` |
+| `rux-net` | `kernel/net/` | `net::` |
+| `rux-process` | `kernel/process/` | `process::` |
+| `rux-signal` | `kernel/signal/` | `signal::` |
+| `rux-sync` | `kernel/sync/` | `sync::` |
+| `rux-debug` | `kernel/debug/` | `debug::` |
+| `rux-timer` | `kernel/timer/` | `timer::` |
+| `rux-arch` | `kernel/arch/` | `arch::` |
+
+`ls kernel/` then reads: `core/ bin/ sched/ mm/ fs/ ext4/ io_uring/
+drivers/ ipc/ syscall/ net/ process/ signal/ sync/ debug/ timer/
+arch/` — one core, one composition point, one directory per
+subsystem.
+
+Why the core keeps the short name `rux` in code while its package is
+`rux-core`: the package name `core` would collide with the standard
+library's `core` (and `arch` with `core::arch`, source of `asm!`), so
+code would have to tell `core::sched` from `core::sync` at every
+site. With the prefix gone from every other crate, `rux::` names
+exactly one thing.
+
+This supersedes the 2026-11-22 decision to keep `rux-sched` and
+`rux-mm` unsuffixed: that rule removed `-policy`; this one removes
+`rux-` as well.
+
+The binary the composition point produces keeps its name `rux` — the
+Makefile, linker scripts and boot drivers use it.
+
+### 2c.2 Inside a crate: flat, no repeated directory
+
+A crate's source files sit directly under its `src/`. The repeated
+directory (`rux-fs/src/fs/`, `rux-mm/src/mm/`, eleven crates) was
+scaffold: it existed so that a file included by `#[path]` from the
+framework tree could keep resolving `crate::fs::pipe` unedited. The
+files have since moved; the scaffold stays behind for nothing.
+
+Within a crate, modules are referenced without the subsystem prefix:
+in `sched`, `crate::fair::pick`, not `crate::sched::fair::pick`. The
+crate name already says the subsystem. Where a file needs something
+from the core it writes the core's path with the subsystem in it
+(`rux::sched::current`), so the two are never confused.
+
+Residual names that contradicted their crate are corrected in the same
+pass: `rux-sched/src/sched_policy/` (the crate dropped `-policy`; the
+directory did not), `rux-mm/src/mm_policy_*.rs`.
+
+### 2c.3 Inside the core: three files per subsystem, named for why the code is there
+
+Code stays in the core for exactly one of three reasons, and the file
+it lives in is named for that reason. The reason decides who audits
+it and with what:
+
+| file | why the code is in the core | audited by |
+|---|---|---|
+| `unsafe.rs` | it performs unsafe operations | the INV contracts, Kani, Miri |
+| `hot.rs` | a hot path calls it by name; moving it would make that call indirect | the pbench gate |
+| `types.rs` | a hot path reads its fields directly | the hot-field table (§4, Rung F1) |
+
+A reader looking for every place memory safety can be broken opens the
+`unsafe.rs` files and nothing else. A reader optimizing the switch
+path opens `hot.rs` and knows no unsafe is hidden in it.
+
+```
+kernel/core/src/
+  sched/   unsafe.rs  hot.rs  types.rs
+  mm/      unsafe.rs  hot.rs  types.rs
+  sync/    unsafe.rs  hot.rs  types.rs
+  fs/      unsafe.rs  hot.rs  types.rs
+  …        (one directory per subsystem with code in the core)
+  api/     sched.rs  mm.rs  fs.rs  …     (§2c.4)
+  printk.rs  console.rs  boot.rs  …       (cross-cutting: used by every subsystem)
+```
+
+The subsystem directory keeps the subsystem's name, so the core and
+the crate pair up by name: `sched/` (the crate) holds the scheduler's
+safe code, `core/src/sched/` holds what has to stay in the core for
+it. Same subsystem, two halves, one boundary.
+
+`unsafe.rs` replaces the edge files. `edges.rs`, `unsafe_edges.rs`,
+`side_edges.rs`, `net_edges.rs`, `binder_edges.rs`, `boot_edges.rs`
+were six spellings of one idea — the audited functions through which
+safe code performs an unsafe operation. Each subsystem gets one
+`unsafe.rs`; where a subsystem had several edge files they merge.
+An earlier draft called this file `safe.rs`, from the caller's side;
+the name is `unsafe.rs` because the person who must find it is the
+auditor, and what it holds is unsafe.
+
+### 2c.4 The interface tables: `core/src/api/`
+
+The core reaches a service crate only through a function-pointer
+table whose signature the core defines (§1a.1). Those tables are the
+service's entire view of the core, so they are collected in one place:
+`core/src/api/<subsystem>.rs`, one file per subsystem, instead of
+nineteen `*hooks.rs` files in eleven directories.
+
+The audit that matters most — what can a service crate do to the core —
+is then one directory listing. Three of the old files (`file_hooks`,
+`notify_hooks`, `lock_hooks`) held no table, only forwarding wrappers
+to an existing row; those wrappers move next to the row they forward
+to. Where one subsystem had two tables that are filled at different
+boot points (`fs_hooks` in `rust_main`, `leaf_hooks` once the mount
+table exists — filling the second too early is the reboot loop of
+2026-11-23), the file holds two structs; they are not merged into one.
+
+### 2c.5 Collecting the scattered unsafe
+
+Today 1,623 of the core's 1,984 unsafe constructs are not in an edge
+file: they sit inline in the mechanism code, without a contract
+number, mixed into logic. They are the ones the ledger audit found
+mis-annotated. After collection every unsafe construct in the core is
+in an `unsafe.rs`:
+
+- `hot.rs` and `types.rs` contain no `unsafe` at all;
+- a script in the build gate asserts it (`grep -L` for `unsafe` over
+  every `hot.rs`/`types.rs`), so the property cannot regress;
+- the core's unsafe count becomes `wc` over the `unsafe.rs` files,
+  which is the number the ≤5,000-line target (§6) is measured against.
+
+The collection is a rewrite, not a rename: each inline block becomes a
+function in `unsafe.rs` with an INV contract stating its precondition,
+and the call site uses the function. It is done subsystem by
+subsystem, each one its own lane with its own gates, and it does not
+move code out of the core — `hot.rs` code that used an inline
+`unsafe { *p }` now calls an `unsafe.rs` function instead. What leaves
+the core is decided separately, by the rules in §1a.2.
+
+### 2c.6 Order of work
+
+Three passes, in this order; each lands before the next starts, and
+all lanes are stopped while the first two run because they touch every
+source file.
+
+1. **Rename and move** (mechanical): the crate names and directories
+   of §2c.1, the flattened layouts of §2c.2, `kernel/src/` →
+   `kernel/core/src/`, edge files → `unsafe.rs`, hook tables →
+   `api/`. No function body changes. Reference counts on main
+   8d7de77e8: 318 `rux::`, 84 `rux_xxx::`, 5,933 `crate::<subsystem>::`
+   inside the crates.
+2. **Split each core subsystem into `unsafe.rs` / `hot.rs` /
+   `types.rs`** (file moves within a subsystem; the functions are
+   already where the previous pass left them). Per subsystem, its own
+   lane.
+3. **Collect the scattered unsafe** (§2c.5), per subsystem, its own
+   lane, with the gate assertion added as soon as the first subsystem
+   is clean.
+
+Pass 1 and 2 are verifiable by one criterion: the compiled kernel is
+unchanged apart from symbol names. Pass 3 changes the code and takes
+the full gate chain per subsystem.
+
 ## 3. The end-state topology
 
 ```
