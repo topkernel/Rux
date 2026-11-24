@@ -49,6 +49,7 @@ extern crate alloc;
 pub mod sync {
     // the service files (THIS crate's own — the sole copies)
     pub mod futex_diag;
+    pub mod condvar;
 
     // The framework's whole sync module at the historical path (the
     // union the sibling services consumed) — the explicit `pub mod
@@ -62,6 +63,17 @@ pub mod sync {
         pub use crate::sync::futex_diag::*;
     }
 
+    // the guest-test module that followed the files (the framework's
+    // tests/mod.rs row is gated with the move note); the framework's
+    // test counters + assert macro re-exported at the historical
+    // `super::` path (the service-test seam contract).
+    #[cfg(feature = "unit-test")]
+    #[path = "../../../src/tests/services/futex_test.rs"]
+    pub mod futex_test;
+    #[cfg(feature = "unit-test")]
+    pub use rux::tests::{test_pass, test_fail, test_group_start};
+    #[cfg(feature = "unit-test")]
+    pub use rux::test_assert_eq;
 }
 
 /// The boot-time registration (rux-bin calls this before
@@ -87,4 +99,13 @@ pub fn register_all() {
             rwfrz_reader_scan: sync::futex_diag::rwfrz_reader_scan,
         },
     );
+}
+
+/// The guest-test entry (make test): the framework's run_all_tests
+/// invokes this through the SERVICE-TEST SEAM (rux-bin registers it at
+/// boot). Reporting goes through the framework's counters, so pass/fail
+/// lands in the same totals as the in-framework tests.
+#[cfg(feature = "unit-test")]
+pub fn run_unit_tests() {
+    sync::futex_test::test_futex();
 }
