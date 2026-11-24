@@ -148,3 +148,5 @@ userspace/toybox/toybox/toybox
 # will have compiled files and executables
 /work/
 .x11work/
+kernel/src/dfx/ksyms_generated.rs
+kernel/src/dfx/ksyms.bin
