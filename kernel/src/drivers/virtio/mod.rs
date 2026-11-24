@@ -9,7 +9,6 @@ use crate::sync::spinlock::{Spinlock, SpinlockIrqGuard};
 use crate::drivers::blkdev::{GenDisk, Request, BlockDeviceOps};
 
 pub mod queue;
-pub mod probe;
 pub mod offset;
 pub mod virtio_pci;
 

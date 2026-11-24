@@ -72,6 +72,20 @@ pub struct DriverHooks {
     pub tokenid_ioctl: fn(&File, u32, usize) -> Option<i64>,
     /// Mark the framebuffer user-mapped (kick the auto-flush presenter).
     pub mark_fb_user_mapped: fn(),
+    /// Register the virtio probe family's initcall rows (the three
+    /// DeviceInit entries: virtio-blk MMIO @Early, virtio-blk PCI
+    /// @Device, virtio-net @Late). Dispatched from the boot core at
+    /// the family's historical registration point — inside
+    /// rust_main_tail, right before the Early level drains, i.e.
+    /// AFTER arch::smp::init() (the initcall table takes a Spinlock,
+    /// so this row must NOT be filled from the composition bin's
+    /// pre-rust_main register_all, which runs before the per-CPU area
+    /// exists on x86_64).
+    pub register_probe_initcalls: fn(),
+    /// PCI hotplug rescan (`echo 1 > /sys/bus/pci/rescan`): re-enumerate
+    /// the ECAM space for virtio-blk functions not yet claimed. Returns
+    /// the number of disks bound. Cold, user-triggered.
+    pub pci_rescan_block_hotplug: fn() -> usize,
 }
 
 // The no-op defaults. Named fns (not closure coercions) so each row's
@@ -104,6 +118,10 @@ fn no_fbdev_ioctl(_cmd: u32, _arg: usize) -> i64 {
     -(crate::errno::constants::ENOTTY as i64)
 }
 fn no_mark_fb_user_mapped() {}
+fn no_register_probe_initcalls() {}
+fn no_pci_rescan_block_hotplug() -> usize {
+    0
+}
 fn no_watchdog_ioctl(_file: &File, _cmd: u32, _arg: usize) -> Option<i64> {
     None
 }
@@ -129,6 +147,8 @@ impl DriverHooks {
         watchdog_ioctl: no_watchdog_ioctl,
         tokenid_ioctl: no_tokenid_ioctl,
         mark_fb_user_mapped: no_mark_fb_user_mapped,
+        register_probe_initcalls: no_register_probe_initcalls,
+        pci_rescan_block_hotplug: no_pci_rescan_block_hotplug,
     };
 }
 
@@ -208,4 +228,15 @@ pub fn watchdog_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
 #[inline]
 pub fn tokenid_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
     (hooks().tokenid_ioctl)(file, cmd, arg)
+}
+/// Register the virtio probe family's initcall rows (boot core's
+/// historical registration point, before the Early drain).
+#[inline]
+pub fn register_probe_initcalls() {
+    (hooks().register_probe_initcalls)()
+}
+/// PCI hotplug rescan (`echo 1 > /sys/bus/pci/rescan`).
+#[inline]
+pub fn pci_rescan_block_hotplug() -> usize {
+    (hooks().pci_rescan_block_hotplug)()
 }

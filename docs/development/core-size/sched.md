@@ -7,17 +7,17 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# sched — hot 14386 lines (stay) / cold 1116 lines (leave)
+# sched — hot 14466 lines (stay) / cold 1036 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
 | sched/cgroup.rs | `new` | 112 | 73 | yes |
-| sched/cgroup.rs | `new_root` | 184 | 21 |  |
+| sched/cgroup.rs | `new_root` | 184 | 21 | yes |
 | sched/cgroup.rs | `new_child` | 204 | 24 |  |
 | sched/cgroup.rs | `path` | 227 | 30 | yes |
 | sched/cgroup.rs | `for_each_ancestor` | 256 | 32 |  |
 | sched/cgroup.rs | `chain_throttled` | 287 | 13 |  |
-| sched/cgroup.rs | `populated` | 299 | 6 |  |
+| sched/cgroup.rs | `populated` | 299 | 6 | yes |
 | sched/cgroup.rs | `subtree_task_count` | 304 | 28 |  |
 | sched/cgroup.rs | `init_cgroup` | 331 | 10 |  |
 | sched/cgroup.rs | `cgroup_root` | 340 | 6 |  |
@@ -219,12 +219,12 @@ records why.
 | sched/entities.rs | `set_curr` | 3000 | 7 | yes |
 | sched/entities.rs | `get_curr` | 3006 | 6 | yes |
 | sched/entities.rs | `clear` | 3011 | 120 | yes |
-| sched/reapdrain.rs | `mint` | 131 | 9 |  |
+| sched/reapdrain.rs | `mint` | 131 | 9 | yes |
 | sched/reapdrain.rs | `as_ptr` | 139 | 9 | yes |
 | sched/reapdrain.rs | `task` | 147 | 15 |  |
-| sched/reapdrain.rs | `into_parked` | 161 | 10 |  |
+| sched/reapdrain.rs | `into_parked` | 161 | 10 | yes |
 | sched/reapdrain.rs | `into_free` | 170 | 89 |  |
-| sched/reapdrain.rs | `defer_reap_storage` | 258 | 34 |  |
+| sched/reapdrain.rs | `defer_reap_storage` | 258 | 34 | yes |
 | sched/reapdrain.rs | `switch_stage_done` | 291 | 46 |  |
 | sched/reapdrain.rs | `reap_drain_tick` | 336 | 215 | yes |
 | sched/reapdrain.rs | `notify_parent_if_any` | 550 | 10 |  |

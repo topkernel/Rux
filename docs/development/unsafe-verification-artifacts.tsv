@@ -924,30 +924,30 @@ ed0de4fe0c0f	kernel/src/drivers/rtc.rs	read_reg	63	volatile,ptr-ops	INV:INV-MMIO
 0f5365aacead	kernel/src/drivers/timer/aarch64.rs	set_timer	128	asm	INV:F5
 3ebfa4bda3dc	kernel/src/drivers/timer/riscv64.rs	set_timer_stimecmp	139	asm	INV:F5
 b827fb18ce3b	kernel/src/drivers/timer/x86_64.rs	init	422		INV:F5
-540ed6a77ac0	kernel/src/drivers/virtio/mod.rs	<module>	87		INV:F7
-545dbafa5e2e	kernel/src/drivers/virtio/mod.rs	<module>	90		INV:F7
-8e75132c018a	kernel/src/drivers/virtio/mod.rs	<module>	1070		INV:INV-BLKDEV-2
-6b4e89c6c77b	kernel/src/drivers/virtio/mod.rs	io_buf_alloc	1106	ptr-ops	INV:INV-BLKDEV-2
-d1a03565b17e	kernel/src/drivers/virtio/mod.rs	io_buf_alloc	1112		INV:INV-BLKDEV-2
-3e9f81eade39	kernel/src/drivers/virtio/mod.rs	io_buf_free	1127	ptr-ops	INV:INV-BLKDEV-2
-2287b53988e3	kernel/src/drivers/virtio/mod.rs	io_buf_free	1134		INV:INV-BLKDEV-2
-91843a9e585c	kernel/src/drivers/virtio/mod.rs	io_buf_init	1149	ptr-ops	INV:INV-SAFECALL-1
-173563d74dfd	kernel/src/drivers/virtio/mod.rs	io_buf_release	1175		INV:INV-SAFECALL-1
-6afdd03edf4d	kernel/src/drivers/virtio/mod.rs	begin_delivery	1188		INV:INV-SAFECALL-1
-111cb417dcd1	kernel/src/drivers/virtio/mod.rs	deliver_completion	1197		INV:INV-SAFECALL-1
-ad9672f76daf	kernel/src/drivers/virtio/mod.rs	pci_blk_acquire_site	1279	asm	INV:INV-SAFECALL-1
-eed7912c9179	kernel/src/drivers/virtio/mod.rs	pci_blk_acquire_site	1285	asm	INV:INV-SAFECALL-1
-0c9df75268a2	kernel/src/drivers/virtio/mod.rs	wedge_put	1301		INV:INV-SAFECALL-1
-ba7a72e1d8f7	kernel/src/drivers/virtio/mod.rs	<module>	1654		INV:INV-SLOT-3
-afb25e53226e	kernel/src/drivers/virtio/mod.rs	pci_pending_slot_reservable_len	2014		INV:F7
-136025e43b59	kernel/src/drivers/virtio/mod.rs	pci_publish_sync_chain	2054		INV:F7
-43a8cc74095a	kernel/src/drivers/virtio/mod.rs	pci_flag_sync_tombstone_timed_out	2101		INV:F7
-0f23b68bd885	kernel/src/drivers/virtio/mod.rs	abandon_pending_completion	2163		INV:F7
-4418b131338c	kernel/src/drivers/virtio/mod.rs	abandon_pending_completion	2255		INV:F7
-e4d8d3881fd6	kernel/src/drivers/virtio/mod.rs	pci_submit_data_async_sg	2505		INV:INV-BLKDEV-2
-60af8f775722	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3118		INV:F7
-ec5d7a8ed9a7	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3153		INV:F7
-dadbdc2002a4	kernel/src/drivers/virtio/mod.rs	get_pci_gen_disk_at	3727		INV:INV-BLKDEV-2
+36dfc22b5e45	kernel/src/drivers/virtio/mod.rs	<module>	86		INV:F7
+6f6dd6fcedd1	kernel/src/drivers/virtio/mod.rs	<module>	89		INV:F7
+0e30de65a217	kernel/src/drivers/virtio/mod.rs	<module>	1069		INV:INV-BLKDEV-2
+9bb81ae9f6c5	kernel/src/drivers/virtio/mod.rs	io_buf_alloc	1105	ptr-ops	INV:INV-BLKDEV-2
+3b5a51cdbecf	kernel/src/drivers/virtio/mod.rs	io_buf_alloc	1111		INV:INV-BLKDEV-2
+f694a00ff86b	kernel/src/drivers/virtio/mod.rs	io_buf_free	1126	ptr-ops	INV:INV-BLKDEV-2
+d7f623389fad	kernel/src/drivers/virtio/mod.rs	io_buf_free	1133		INV:INV-BLKDEV-2
+42f2233e97ed	kernel/src/drivers/virtio/mod.rs	io_buf_init	1148	ptr-ops	INV:INV-SAFECALL-1
+95d2b504f5fb	kernel/src/drivers/virtio/mod.rs	io_buf_release	1174		INV:INV-SAFECALL-1
+1dee20d0d579	kernel/src/drivers/virtio/mod.rs	begin_delivery	1187		INV:INV-SAFECALL-1
+68d2eb92a770	kernel/src/drivers/virtio/mod.rs	deliver_completion	1196		INV:INV-SAFECALL-1
+03721f4105d7	kernel/src/drivers/virtio/mod.rs	pci_blk_acquire_site	1278	asm	INV:INV-SAFECALL-1
+d84be224f886	kernel/src/drivers/virtio/mod.rs	pci_blk_acquire_site	1284	asm	INV:INV-SAFECALL-1
+325578dd1c0c	kernel/src/drivers/virtio/mod.rs	wedge_put	1300		INV:INV-SAFECALL-1
+794a796826de	kernel/src/drivers/virtio/mod.rs	<module>	1653		INV:INV-SLOT-3
+d945dd570bb4	kernel/src/drivers/virtio/mod.rs	pci_pending_slot_reservable_len	2013		INV:F7
+3663e1e2c7dc	kernel/src/drivers/virtio/mod.rs	pci_publish_sync_chain	2053		INV:F7
+872ed3a08317	kernel/src/drivers/virtio/mod.rs	pci_flag_sync_tombstone_timed_out	2100		INV:F7
+ec99ee396db3	kernel/src/drivers/virtio/mod.rs	abandon_pending_completion	2162		INV:F7
+4ea09e637320	kernel/src/drivers/virtio/mod.rs	abandon_pending_completion	2254		INV:F7
+7fcf7f71c0d1	kernel/src/drivers/virtio/mod.rs	pci_submit_data_async_sg	2504		INV:INV-BLKDEV-2
+92f01ec23f21	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3117		INV:F7
+fca50e8ccb0a	kernel/src/drivers/virtio/mod.rs	pci_process_async_completions_slot	3152		INV:F7
+e62bf8efddaa	kernel/src/drivers/virtio/mod.rs	get_pci_gen_disk_at	3726		INV:INV-BLKDEV-2
 a4ea6ae6fa18	kernel/src/drivers/virtio/queue.rs	<module>	144		INV:INV-DMA-1
 16a3424a6e97	kernel/src/drivers/virtio/queue.rs	<module>	145		INV:INV-SAFECALL-1
 9566bd6c378f	kernel/src/drivers/virtio/queue.rs	used_ring_idx	163	volatile,ptr-ops	INV:INV-DMA-3
@@ -1338,7 +1338,7 @@ af29be756d9d	kernel/src/ipc/binder.rs	proc_ref	3151	ptr-ops	INV:INV-BINDER-PRIV
 5f7bc6537061	kernel/src/ipc/binder.rs	binder_mmap_handler	3940	ptr-ops	INV:INV-BINDER-HELD
 1f126ddbaaba	kernel/src/ipc/binder.rs	binder_mmap_handler	4089		INV:INV-BINDER-HELD
 b4c164a1dd7e	kernel/src/ipc/binder.rs	binder_mmap_handler	4106		INV:INV-FRAME-1
-0791e9af525b	kernel/src/ipc/binder.rs	binder_poll_wait	4432		GAP
+0791e9af525b	kernel/src/ipc/binder.rs	binder_poll_wait	4432		INV:INV-KTASK-1
 d15b45a36223	kernel/src/ipc/binder.rs	binder_poll_unwait	4472		INV:INV-KTASK-1
 4375646a884e	kernel/src/ipc/binder.rs	bc_corruption_snapshot	5347	raw-construct	INV:INV-BINDER-PROBE
 4a48566f1827	kernel/src/ipc/binder.rs	get	8962		INV:INV-BINDER-PINTASK
@@ -1357,7 +1357,7 @@ fcfa42a04b42	kernel/src/ipc/binder_edges.rs	diag_task_comm	169		GAP
 ce44f0985853	kernel/src/ipc/binder_edges.rs	diag_task	181		GAP
 81cb048abc4a	kernel/src/ipc/edges.rs	shm_page_get	24		GAP
 dde5b3003b47	kernel/src/ipc/edges.rs	shm_page_put	39		GAP
-5c613300107d	kernel/src/lib.rs	rust_main_impl	1813	asm	INV:INV-BOOT-ZEROPAGE-1
+67607dc29ba8	kernel/src/lib.rs	rust_main_impl	1817	asm	INV:INV-BOOT-ZEROPAGE-1
 0953597665ba	kernel/src/list.rs	<module>	73		INV:INV-LIST-1
 d018f0b94a39	kernel/src/list.rs	<module>	92		INV:INV-LIST-1
 c48b7421a0d8	kernel/src/list.rs	<module>	108	ptr-ops	INV:INV-LIST-1

@@ -28,17 +28,17 @@ FILE` owns one), and the gate fails on a drop that
 ## Totals
 
 - unsafe regions: **2019**
-- with artifact (non-GAP): **1965** (97.3%)
-- GAP: **54**
+- with artifact (non-GAP): **1966** (97.4%)
+- GAP: **53**
 - by kind: block=1787, unsafe-extern=6, unsafe-fn=97, unsafe-impl=129
 - by category (regions carry 0..n tags): ptr-ops=482, asm=267, volatile=152, raw-construct=31, addr-arith=28, no-preempt=14, ffi=10, static-mut=5, transmute=5, layout-meta=2
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1900**
-- recovered from reference versions: **65** (same-file 54, edited-site 0, file-move 0, moved-item 11)
-- references consulted: HEAD, history:99c35ac30, history:679f2f6d9, history:b306738d4, history:234ba9d54, history:e1d3f7876, history:d453d070a, history:e497c5b5a, history:b0fbfcc2e, history:5ad692052, history:3613721eb, history:96f2848b1, history:c01487587, history:0c8feb835, history:2a071cdf2, history:ccb0cabf6, history:78d73d4f6, history:938f1b41d, history:1d70a7c7d, history:e00a6cc4e, history:e78a5858b, history:33aa88454, history:67293fdcb, history:0db1981fd, history:7008a1cb1, history:d754f9e12, history:ff2d5ddb5, history:4741d627f, history:3f3f85760, history:05fb38075, history:2deea9ed7, history:f1900270e, history:d84fee492, history:82575b3b0, history:3e276af08, history:9b50aaff4, history:76ebff8e0, history:1e20375ab, history:25890277e, history:f035c2899, history:74d365f3f, history:9655f809c, history:82a7a7d0f, history:e255599d1, history:59a3f909a, history:07f730e64, history:de0a6071a, history:a09e7ab08, history:b8389cc06, history:2ed1470aa, history:c55875dfe, history:c187e1c35, history:e64dcfd36, history:1e687d251, history:10c8dc368, history:015823366, history:d878cd32c, history:3208bc9bb, history:65960c4e0, history:d5f2a4b29, history:b9d69b73c, history:db2da4975, history:a557edd1b, history:ca1005987, history:368a855ed, history:1e1bd0494, history:8832e06c2, history:418a7238e, history:dfe6bab32, history:64620c9c7, history:70794b235, history:46eadfea4, history:1c36a7a3c, history:d8ece4b39, history:2fe07a5a3, history:045a9f3a2, history:8f82e1326, history:1d518a966, history:d969cb7e9, history:dbdafa0a8, history:00bafaf99, history:6709b12cb, history:361701a15, history:5727de2f9, history:98658ba3e
-- annotated regions, baseline -> this bank: **1900 -> 1965**
+- artifacts kept by id: **1940**
+- recovered from reference versions: **26** (same-file 26, edited-site 0, file-move 0, moved-item 0)
+- references consulted: HEAD, MERGE_HEAD
+- annotated regions, baseline -> this bank: **1989 -> 1966**
 
 ## Per-subsystem
 
@@ -54,7 +54,7 @@ FILE` owns one), and the gate fails on a drop that
 | process | 78 | 78 | 0 |
 | tests | 67 | 66 | 1 |
 | <top> | 65 | 63 | 2 |
-| ipc | 57 | 51 | 6 |
+| ipc | 57 | 52 | 5 |
 | safety | 55 | 51 | 4 |
 | perf | 40 | 40 | 0 |
 | net | 36 | 36 | 0 |
@@ -1661,30 +1661,30 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 87 | <module> | unsafe-impl | - | INV:F7 | `540ed6a77ac0` |
-| 90 | <module> | unsafe-impl | - | INV:F7 | `545dbafa5e2e` |
-| 1070 | <module> | block | - | INV:INV-BLKDEV-2 | `8e75132c018a` |
-| 1106 | io_buf_alloc | block | ptr-ops | INV:INV-BLKDEV-2 | `6b4e89c6c77b` |
-| 1112 | io_buf_alloc | block | - | INV:INV-BLKDEV-2 | `d1a03565b17e` |
-| 1127 | io_buf_free | block | ptr-ops | INV:INV-BLKDEV-2 | `3e9f81eade39` |
-| 1134 | io_buf_free | block | - | INV:INV-BLKDEV-2 | `2287b53988e3` |
-| 1149 | io_buf_init | block | ptr-ops | INV:INV-SAFECALL-1 | `91843a9e585c` |
-| 1175 | io_buf_release | block | - | INV:INV-SAFECALL-1 | `173563d74dfd` |
-| 1188 | begin_delivery | block | - | INV:INV-SAFECALL-1 | `6afdd03edf4d` |
-| 1197 | deliver_completion | block | - | INV:INV-SAFECALL-1 | `111cb417dcd1` |
-| 1279 | pci_blk_acquire_site | block | asm | INV:INV-SAFECALL-1 | `ad9672f76daf` |
-| 1285 | pci_blk_acquire_site | block | asm | INV:INV-SAFECALL-1 | `eed7912c9179` |
-| 1301 | wedge_put | block | - | INV:INV-SAFECALL-1 | `0c9df75268a2` |
-| 1654 | <module> | unsafe-impl | - | INV:INV-SLOT-3 | `ba7a72e1d8f7` |
-| 2014 | pci_pending_slot_reservable_len | block | - | INV:F7 | `afb25e53226e` |
-| 2054 | pci_publish_sync_chain | block | - | INV:F7 | `136025e43b59` |
-| 2101 | pci_flag_sync_tombstone_timed_out | block | - | INV:F7 | `43a8cc74095a` |
-| 2163 | abandon_pending_completion | block | - | INV:F7 | `0f23b68bd885` |
-| 2255 | abandon_pending_completion | block | - | INV:F7 | `4418b131338c` |
-| 2505 | pci_submit_data_async_sg | block | - | INV:INV-BLKDEV-2 | `e4d8d3881fd6` |
-| 3118 | pci_process_async_completions_slot | block | - | INV:F7 | `60af8f775722` |
-| 3153 | pci_process_async_completions_slot | block | - | INV:F7 | `ec5d7a8ed9a7` |
-| 3727 | get_pci_gen_disk_at | block | - | INV:INV-BLKDEV-2 | `dadbdc2002a4` |
+| 86 | <module> | unsafe-impl | - | INV:F7 | `36dfc22b5e45` |
+| 89 | <module> | unsafe-impl | - | INV:F7 | `6f6dd6fcedd1` |
+| 1069 | <module> | block | - | INV:INV-BLKDEV-2 | `0e30de65a217` |
+| 1105 | io_buf_alloc | block | ptr-ops | INV:INV-BLKDEV-2 | `9bb81ae9f6c5` |
+| 1111 | io_buf_alloc | block | - | INV:INV-BLKDEV-2 | `3b5a51cdbecf` |
+| 1126 | io_buf_free | block | ptr-ops | INV:INV-BLKDEV-2 | `f694a00ff86b` |
+| 1133 | io_buf_free | block | - | INV:INV-BLKDEV-2 | `d7f623389fad` |
+| 1148 | io_buf_init | block | ptr-ops | INV:INV-SAFECALL-1 | `42f2233e97ed` |
+| 1174 | io_buf_release | block | - | INV:INV-SAFECALL-1 | `95d2b504f5fb` |
+| 1187 | begin_delivery | block | - | INV:INV-SAFECALL-1 | `1dee20d0d579` |
+| 1196 | deliver_completion | block | - | INV:INV-SAFECALL-1 | `68d2eb92a770` |
+| 1278 | pci_blk_acquire_site | block | asm | INV:INV-SAFECALL-1 | `03721f4105d7` |
+| 1284 | pci_blk_acquire_site | block | asm | INV:INV-SAFECALL-1 | `d84be224f886` |
+| 1300 | wedge_put | block | - | INV:INV-SAFECALL-1 | `325578dd1c0c` |
+| 1653 | <module> | unsafe-impl | - | INV:INV-SLOT-3 | `794a796826de` |
+| 2013 | pci_pending_slot_reservable_len | block | - | INV:F7 | `d945dd570bb4` |
+| 2053 | pci_publish_sync_chain | block | - | INV:F7 | `3663e1e2c7dc` |
+| 2100 | pci_flag_sync_tombstone_timed_out | block | - | INV:F7 | `872ed3a08317` |
+| 2162 | abandon_pending_completion | block | - | INV:F7 | `ec99ee396db3` |
+| 2254 | abandon_pending_completion | block | - | INV:F7 | `4ea09e637320` |
+| 2504 | pci_submit_data_async_sg | block | - | INV:INV-BLKDEV-2 | `7fcf7f71c0d1` |
+| 3117 | pci_process_async_completions_slot | block | - | INV:F7 | `92f01ec23f21` |
+| 3152 | pci_process_async_completions_slot | block | - | INV:F7 | `fca50e8ccb0a` |
+| 3726 | get_pci_gen_disk_at | block | - | INV:INV-BLKDEV-2 | `e62bf8efddaa` |
 
 ### kernel/src/drivers/virtio/queue.rs (12)
 
@@ -2639,7 +2639,7 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1813 | rust_main_impl | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `5c613300107d` |
+| 1817 | rust_main_impl | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `67607dc29ba8` |
 
 ### kernel/src/list.rs (7)
 
@@ -2747,7 +2747,7 @@ FILE` owns one), and the gate fails on a drop that
 | 3940 | binder_mmap_handler | block | ptr-ops | INV:INV-BINDER-HELD | `5f7bc6537061` |
 | 4089 | binder_mmap_handler | block | - | INV:INV-BINDER-HELD | `1f126ddbaaba` |
 | 4106 | binder_mmap_handler | block | - | INV:INV-FRAME-1 | `b4c164a1dd7e` |
-| 4432 | binder_poll_wait | block | - | GAP | `0791e9af525b` |
+| 4432 | binder_poll_wait | block | - | INV:INV-KTASK-1 | `0791e9af525b` |
 | 4472 | binder_poll_unwait | block | - | INV:INV-KTASK-1 | `d15b45a36223` |
 | 5347 | bc_corruption_snapshot | block | raw-construct | INV:INV-BINDER-PROBE | `4375646a884e` |
 | 8962 | get | block | - | INV:INV-BINDER-PINTASK | `4a48566f1827` |

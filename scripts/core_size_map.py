@@ -15,6 +15,14 @@ A function STAYS in the core when any of three things holds:
    rux-signal lane: restore_sigcontext is called from rux-syscall, so
    it cannot leave the core without a service -> service edge).
 
+A fifth rule exists but is NOT applied by this scan: a function a
+STAYING framework file names cannot move either (sole-copy; the
+drivers lane found 15 of 16 zero-unsafe files blocked this way,
+2026-11-24). Name-level closure over-approximates catastrophically
+(common names defined in many files), so this rule is applied by the
+lanes with path-resolved call reads. The scan's cold column is
+therefore an optimistic bound, not a promise.
+
 Every other function LEAVES for its subsystem's service crate: its
 callers are cold, and its own calls into the core are direct
 cross-crate calls that inline.

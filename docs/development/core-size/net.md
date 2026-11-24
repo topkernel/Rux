@@ -7,7 +7,7 @@ subsystem's service crate. The test over-keeps on purpose; a cold row
 that turns out to be on a path the scan misses stays, and its lane
 records why.
 
-# net — hot 400 lines (stay) / cold 491 lines (leave)
+# net — hot 415 lines (stay) / cold 476 lines (leave)
 
 | file | fn | line | lines | hot |
 |---|---|---|---|---|
@@ -64,15 +64,15 @@ records why.
 | net/net_hooks.rs | `net_register_hooks` | 181 | 6 | yes |
 | net/net_hooks.rs | `hooks` | 186 | 8 |  |
 | net/net_hooks.rs | `tcp_rows` | 193 | 4 | yes |
-| net/net_hooks.rs | `tcp_rows_dump` | 196 | 3 |  |
+| net/net_hooks.rs | `tcp_rows_dump` | 196 | 3 | yes |
 | net/net_hooks.rs | `udp_rows` | 198 | 3 | yes |
-| net/net_hooks.rs | `udp_rows_dump` | 200 | 3 |  |
+| net/net_hooks.rs | `udp_rows_dump` | 200 | 3 | yes |
 | net/net_hooks.rs | `unix_registry_snapshot` | 202 | 5 | yes |
-| net/net_hooks.rs | `unix_net_snapshot` | 206 | 3 |  |
+| net/net_hooks.rs | `unix_net_snapshot` | 206 | 3 | yes |
 | net/net_hooks.rs | `arp_rows` | 208 | 3 | yes |
-| net/net_hooks.rs | `arp_rows_dump` | 210 | 3 |  |
+| net/net_hooks.rs | `arp_rows_dump` | 210 | 3 | yes |
 | net/net_hooks.rs | `route_rows` | 212 | 3 | yes |
-| net/net_hooks.rs | `route_rows_dump` | 214 | 3 |  |
+| net/net_hooks.rs | `route_rows_dump` | 214 | 3 | yes |
 | net/net_hooks.rs | `dev_rows` | 216 | 3 | yes |
 | net/net_hooks.rs | `is_unix_socket_ops` | 218 | 3 | yes |
 | net/net_hooks.rs | `is_inet_socket_ops` | 220 | 3 | yes |

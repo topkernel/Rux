@@ -30,7 +30,6 @@ kernel/src/drivers/input/ps2.rs
 kernel/src/drivers/intc/plic.rs
 kernel/src/drivers/pci/mod.rs
 kernel/src/drivers/virtio/offset.rs
-kernel/src/drivers/virtio/probe.rs
 kernel/src/drivers/virtio/virtio_pci.rs
 kernel/src/errno.rs
 kernel/src/fs/dev_t.rs

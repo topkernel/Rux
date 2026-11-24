@@ -33,3 +33,7 @@ kernel/src/signal.rs	13	12	regions shifted/deleted by the carve; carried by id, 
 kernel/src/arch/riscv64/trap.rs	54	49	regions shifted by the process carve edits; carried by id, remainder recoverable from history
 kernel/src/signal.rs	15	12	regions shifted by the carve edits; carried by id, remainder recoverable from history
 kernel/src/process/mod.rs	2	0	lines shifted by the kthread re-export edit; carried by id
+kernel/src/io_uring/mod.rs	19	11	cold-four lane: 8 regions left kernel/src with the policy flip to the rux-io-uring forbid crate (error-path Box::from_raw pairs converted to the ring_release_on_install_error edge; private_data reads to pin_verified_ring; read_volatile pair to cq_completed)
+kernel/src/ipc/binder.rs	55	41	cold-four lane: 11 walker regions moved to kernel/src/ipc/binder_edges.rs with annotations carried; 3 raw-task/comm reads converted to the diag_task_comm/diag_task edges in the moved forbid-crate diagnostics
+kernel/src/timer.rs	3	2	cold-four lane: the WW heartbeat's ti_on_cpu volatile read moved into the ww_task_on_cpu framework edge (the report body flipped to the rux-timer forbid crate)
+kernel/src/lib.rs	1	0	cold-four lane: region shifted out by the timer_hooks module insertion renumbering; annotation carried by id to the new position
