@@ -28,17 +28,17 @@ FILE` owns one), and the gate fails on a drop that
 ## Totals
 
 - unsafe regions: **2019**
-- with artifact (non-GAP): **1966** (97.4%)
-- GAP: **53**
+- with artifact (non-GAP): **1962** (97.2%)
+- GAP: **57**
 - by kind: block=1787, unsafe-extern=6, unsafe-fn=97, unsafe-impl=129
 - by category (regions carry 0..n tags): ptr-ops=482, asm=267, volatile=152, raw-construct=31, addr-arith=28, no-preempt=14, ffi=10, static-mut=5, transmute=5, layout-meta=2
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1940**
-- recovered from reference versions: **26** (same-file 26, edited-site 0, file-move 0, moved-item 0)
-- references consulted: HEAD, MERGE_HEAD
-- annotated regions, baseline -> this bank: **1989 -> 1966**
+- artifacts kept by id: **1962**
+- recovered from reference versions: **0**
+- references consulted: HEAD
+- annotated regions, baseline -> this bank: **1962 -> 1962**
 
 ## Per-subsystem
 
@@ -53,7 +53,7 @@ FILE` owns one), and the gate fails on a drop that
 | mm | 98 | 98 | 0 |
 | process | 78 | 78 | 0 |
 | tests | 67 | 66 | 1 |
-| <top> | 65 | 63 | 2 |
+| <top> | 65 | 59 | 6 |
 | ipc | 57 | 52 | 5 |
 | safety | 55 | 51 | 4 |
 | perf | 40 | 40 | 0 |
@@ -2610,7 +2610,7 @@ FILE` owns one), and the gate fails on a drop that
 | 436 | puts_batch | block | asm | INV:F14 | `b895ccab4e45` |
 | 633 | write_reg | block | - | INV:INV-MMIO-1 | `3893094c43f8` |
 | 639 | read_reg | block | - | INV:INV-MMIO-1 | `0365181130ff` |
-| 933 | uart_data_ready | block | asm | INV:F14 | `b6ebbce546dc` |
+| 958 | uart_data_ready | block | asm | INV:F14 | `a70c8d217875` |
 
 ### kernel/src/cov.rs (1)
 
@@ -2660,7 +2660,7 @@ FILE` owns one), and the gate fails on a drop that
 | 111 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `7d9e01d58276` |
 | 130 | ring_rec | block | - | INV:INV-STATIC-CELL-1 | `49d3b72c6b32` |
 | 142 | ring_rec_mut | block | - | INV:INV-STATIC-CELL-1 | `7065f11b4033` |
-| 2133 | init_logger | block | - | INV:INV-FS-GLOBALSB-1 | `5e6b013d89f9` |
+| 2175 | init_logger | block | - | INV:INV-FS-GLOBALSB-1 | `45e572517639` |
 
 ### kernel/src/sbi.rs (2)
 
@@ -2700,8 +2700,8 @@ FILE` owns one), and the gate fails on a drop that
 |------|----|------|------------|----------|----|
 | 189 | input_debug_tick | block | transmute | GAP | `846d14318c63` |
 | 326 | ww_task_on_cpu | block | volatile,ptr-ops | GAP | `1fb5a3762f8e` |
-| 1523 | deliver_fired | block | - | INV:INV-KTASK-1 | `cbf09bed703a` |
-| 1548 | deliver_fired | block | - | INV:INV-KTASK-1 | `78219ec23ee1` |
+| 1528 | deliver_fired | block | - | GAP | `d2e6f4b5d9e9` |
+| 1553 | deliver_fired | block | - | GAP | `c9270c59c071` |
 
 ## ipc
 

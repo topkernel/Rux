@@ -734,7 +734,7 @@ eb3427228d3b	kernel/src/cmdline.rs	fdt_add	96		INV:INV-FDT-1
 b895ccab4e45	kernel/src/console.rs	puts_batch	436	asm	INV:F14
 3893094c43f8	kernel/src/console.rs	write_reg	633		INV:INV-MMIO-1
 0365181130ff	kernel/src/console.rs	read_reg	639		INV:INV-MMIO-1
-b6ebbce546dc	kernel/src/console.rs	uart_data_ready	933	asm	INV:F14
+a70c8d217875	kernel/src/console.rs	uart_data_ready	958	asm	INV:F14
 9ec0f2614cfb	kernel/src/cov.rs	capture_profile	77		INV:INV-COV-1
 f7b75555a229	kernel/src/debug/backtrace.rs	current_frame_pointer	106	asm	INV:F2
 95ad46ca338c	kernel/src/debug/backtrace.rs	current_frame_pointer	111	asm	INV:F2
@@ -1546,7 +1546,7 @@ f7371cf5593f	kernel/src/perf/mod.rs	sys_perf_event_open	2103		INV:INV-PERF-EV-1
 7d9e01d58276	kernel/src/printk.rs	<module>	111		INV:INV-SENDSYNC-1
 49d3b72c6b32	kernel/src/printk.rs	ring_rec	130		INV:INV-STATIC-CELL-1
 7065f11b4033	kernel/src/printk.rs	ring_rec_mut	142		INV:INV-STATIC-CELL-1
-5e6b013d89f9	kernel/src/printk.rs	init_logger	2133		INV:INV-FS-GLOBALSB-1
+45e572517639	kernel/src/printk.rs	init_logger	2175		INV:INV-FS-GLOBALSB-1
 0bdbd51b7a3c	kernel/src/process/mod.rs	current_pgid	92		INV:INV-PROC-BORROW-1
 cc737ead1640	kernel/src/process/mod.rs	find_task_by_pid	113		INV:INV-PROC-BORROW-1
 b4a45dfecc65	kernel/src/process/task_ref.rs	<module>	78		INV:INV-TASKREF-1
@@ -2008,8 +2008,8 @@ fb9c85803dff	kernel/src/tests/wait4.rs	test_wait4_no_child	56	ptr-ops	INV:INV-TE
 2973f32af239	kernel/src/tests/wait4.rs	test_wait4_wnohang_after_fork	81	ptr-ops	INV:INV-TESTHARNESS-1
 846d14318c63	kernel/src/timer.rs	input_debug_tick	189	transmute	GAP
 1fb5a3762f8e	kernel/src/timer.rs	ww_task_on_cpu	326	volatile,ptr-ops	GAP
-cbf09bed703a	kernel/src/timer.rs	deliver_fired	1523		INV:INV-KTASK-1
-78219ec23ee1	kernel/src/timer.rs	deliver_fired	1548		INV:INV-KTASK-1
+d2e6f4b5d9e9	kernel/src/timer.rs	deliver_fired	1528		GAP
+c9270c59c071	kernel/src/timer.rs	deliver_fired	1553		GAP
 f60564a41229	kernel/src/timer/nohz.rs	can_stop_full_tick	208		INV:INV-KTASK-1
 c993112e1141	kernel/src/timer/wheel.rs	test_shared	1096		INV:INV-SCHED-EVRING-1
 08fefb18cda0	kernel/src/trace/mod.rs	<module>	99		INV:INV-SENDSYNC-1
