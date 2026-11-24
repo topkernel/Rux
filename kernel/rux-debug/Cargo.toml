@@ -19,13 +19,14 @@ edition = "2021"
 # zero indirection on the armed-gated tap paths).
 
 [dependencies]
+rux-ipc = { path = "../rux-ipc", default-features = false }
 rux = { path = "..", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64"]
-x86_64 = ["rux/x86_64"]
-aarch64 = ["rux/aarch64"]
+riscv64 = ["rux/riscv64", "rux-ipc/riscv64"]
+x86_64 = ["rux/x86_64", "rux-ipc/x86_64"]
+aarch64 = ["rux/aarch64", "rux-ipc/aarch64"]
 # Forwarded from rux-bin's unit-test (kept for shape parity with the
 # sibling service crates; no guest tests moved with this rung yet).
 unit-test = ["rux/unit-test"]

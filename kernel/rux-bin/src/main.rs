@@ -46,6 +46,10 @@ pub extern "C" fn rust_main() -> ! {
     // kthread/pid/lifecycle rows are consumed from devfs populate, the
     // boot exec and every kthread spawn onward.
     rux_process::register_all();
+    // The timer report rows (cold-four lane: rux-timer): the WW
+    // heartbeat's formatting half — OnceSlot-published, consumed only
+    // behind the EVENT_WWCENSUS arm gate.
+    rux_timer::register_all();
     // Guest tests that flipped out with a service crate (pipe2 with
     // rux-fs, net_hdrs with rux-net, the fair pins + timeline with
     // rux-sched) run via the framework's SERVICE-TEST SEAM, in

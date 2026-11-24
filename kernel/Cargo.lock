@@ -363,6 +363,7 @@ dependencies = [
  "rux-drivers",
  "rux-ext4",
  "rux-fs",
+ "rux-io-uring",
  "rux-ipc",
  "rux-mm",
  "rux-net",
@@ -370,6 +371,7 @@ dependencies = [
  "rux-sched",
  "rux-signal",
  "rux-syscall",
+ "rux-timer",
 ]
 
 [[package]]
@@ -377,6 +379,7 @@ name = "rux-debug"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-ipc",
 ]
 
 [[package]]
@@ -402,6 +405,13 @@ dependencies = [
  "rux",
  "rux-debug",
  "rux-ext4",
+]
+
+[[package]]
+name = "rux-io-uring"
+version = "0.1.0"
+dependencies = [
+ "rux",
 ]
 
 [[package]]
@@ -433,6 +443,7 @@ name = "rux-process"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-timer",
 ]
 
 [[package]]
@@ -457,9 +468,18 @@ dependencies = [
  "rux",
  "rux-debug",
  "rux-fs",
+ "rux-io-uring",
  "rux-ipc",
  "rux-net",
  "rux-process",
+ "rux-timer",
+]
+
+[[package]]
+name = "rux-timer"
+version = "0.1.0"
+dependencies = [
+ "rux",
 ]
 
 [[package]]

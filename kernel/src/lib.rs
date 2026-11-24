@@ -149,6 +149,7 @@ pub mod debug;
 pub mod ipc;
 pub mod io_uring;
 pub mod timer;
+pub mod timer_hooks;
 pub mod panic_policy;
 pub mod trace;
 pub mod perf;

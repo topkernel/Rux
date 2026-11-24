@@ -386,7 +386,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 }
             }
         });
-        let (bprocs, bwait, bwait15) = crate::ipc::binder::schb_beat();
+        let (bprocs, bwait, bwait15) = crate::ipc::binder_diag_hooks::schb_beat();
         let flow = max_pid.saturating_sub(last_pidmax);
         let t_secs = crate::timer::get_jiffies().saturating_sub(boot_jiffies) / hz;
 
@@ -532,7 +532,7 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
     // waiters are younger than that.
     {
         let mut s = alloc::string::String::new();
-        crate::ipc::binder::schb_waiter_census(&mut s);
+        crate::ipc::binder_diag_hooks::schb_waiter_census(&mut s);
         let mut w = ConsoleWriter::new();
         let _ = write!(w, "{}", s);
     }
@@ -617,7 +617,7 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
     if saved < 4 {
         crate::printk::set_console_loglevel(4);
     }
-    crate::ipc::binder::stall_report();
+    crate::ipc::binder_diag_hooks::stall_report();
     // rux:sleepsnap (retired debug=sleepsnap) names the syscall every S-state task is parked in —
     // the wedge census's blind spot is a server parked OUTSIDE binder
     // (samgr in sc201: not runnable, not binder-waiting, clients owed
@@ -625,7 +625,7 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
     // that arm rux:schb (retired debug=schb),sleepsnap get its census inside this lifted
     // window (its khungtaskd-driven prints at loglevel 3 are dropped
     // pre-ring, so the 60s cadence costs no UART burn).
-    crate::ipc::binder::sleep_snapshot();
+    crate::ipc::binder_diag_hooks::sleep_snapshot();
     if saved < 4 {
         crate::printk::set_console_loglevel(saved);
     }

@@ -53,6 +53,12 @@ pub struct SyscallHooks {
     pub syscall_eio_line: fn(u64, &[u64; 6]),
     /// net/unix's epoll binding dump (the AF_UNIX wedge hunt).
     pub epoll_dump_for_file: fn(u64),
+    /// The classic-BPF seccomp filter interpreter (rux-syscall crate):
+    /// only reached when the current task has a filter installed.
+    pub seccomp_run: fn(&[crate::process::task::SockFilter], u64, &crate::arch::pt_regs::PtRegs) -> u32,
+    /// The strace1 loader-hunt line formatter (rux-syscall crate):
+    /// only reached behind the EVENT_STRACE1 arm gate + pid 1.
+    pub strace1_line: fn(u32, &[u64; 6], i64),
 }
 
 impl SyscallHooks {
@@ -69,6 +75,8 @@ impl SyscallHooks {
         is_eventfd_ops: |_| false,
         syscall_eio_line: |_, _| {},
         epoll_dump_for_file: |_| {},
+        seccomp_run: |_, _, _| 0,
+        strace1_line: |_, _, _| {},
     };
 }
 
@@ -109,6 +117,18 @@ pub fn is_eventfd_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_ev
 pub fn syscall_eio_line(nr: u64, args: &[u64; 6]) { (hooks().syscall_eio_line)(nr, args) }
 #[inline]
 pub fn epoll_dump_for_file(fid: u64) { (hooks().epoll_dump_for_file)(fid) }
+#[inline]
+pub fn seccomp_run(
+    prog: &[crate::process::task::SockFilter],
+    nr: u64,
+    regs: &crate::arch::pt_regs::PtRegs,
+) -> u32 {
+    (hooks().seccomp_run)(prog, nr, regs)
+}
+#[inline]
+pub fn strace1_line(nr: u32, args: &[u64; 6], result: i64) {
+    (hooks().strace1_line)(nr, args, result)
+}
 
 // ==================== the mmap ring (moved bodily) ====================
 

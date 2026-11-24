@@ -38,8 +38,13 @@
 pub use rux::{
     arch, boot_edges, cmdline, config, console, debug, drivers, errno, fs,
     interrupt, ipc, list, mm, net, perf, safety, sched, security, signal, sync,
-    syscall, timer, trace,
+    syscall, trace,
 };
+// The timer service tree (cold-four lane: rux-timer): the merged view
+// (framework timekeeping core + the moved report halves) re-exported at
+// this root — the sibling-service dependency (process -> timer) is
+// one-way, the rux-ipc/rux-fs precedent.
+pub use rux_timer::timer;
 #[cfg(feature = "riscv64")]
 pub use rux::sbi;
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};

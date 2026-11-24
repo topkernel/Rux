@@ -29,10 +29,14 @@
 // Root re-exports: the framework modules appear at THIS crate's root so
 // the moved files' crate::X paths resolve unchanged (the net recipe).
 pub use rux::{
-    arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, ipc, mm,
+    arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, mm,
     net, printk, process, safety, sched, security, signal, sync, syscall, timer, trace,
 };
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
+// The ipc service tree (cold-four lane): the merged view (the moved
+// binder diagnostics + the framework's binder re-export) re-exported at
+// this root — the sibling-service dependency (obs -> ipc) is one-way.
+pub use rux_ipc::ipc;
 extern crate alloc;
 
 // The moved cold halves (sibling names — the framework keeps each

@@ -123,11 +123,11 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // Binder stall scan: threads parked in a blocking binder read are
         // S-state (invisible above); they mark an IPC chain that stopped
         // answering — the common OH bring-up stall shape.
-        crate::ipc::binder::stall_report();
+        crate::ipc::binder_diag_hooks::stall_report();
 
         // rux:sleepsnap (retired debug=sleepsnap): name the syscall every other S-state thread is
         // parked in (appspawn-server wedge hunt, b11) — self-gated.
-        crate::ipc::binder::sleep_snapshot();
+        crate::ipc::binder_diag_hooks::sleep_snapshot();
 
         // rux:socksnap (retired debug=socksnap): AF_UNIX listener queue depths + every epoll
         // interest set (appspawn-server wedge hunt, b15) — self-gated.

@@ -1287,84 +1287,77 @@ d19583b4555b	kernel/src/interrupt/tasklet.rs	tasklet_action	297		INV:INV-TASKLET
 0e161b714e09	kernel/src/interrupt/tasklet.rs	tasklet_hi_action	309		INV:INV-TASKLET-1
 8537859f7d67	kernel/src/interrupt/tasklet.rs	tasklet_hi_action	313		INV:INV-TASKLET-1
 032865502fcb	kernel/src/interrupt/tasklet.rs	init	327		INV:INV-TASKLET-1
-523085018aed	kernel/src/io_uring/mod.rs	unref	218	ptr-ops	INV:INV-IOURING-REGION-1
-3334bf7f7e2d	kernel/src/io_uring/mod.rs	drop	236		INV:INV-IOURING-REGION-1
-77e3ca609776	kernel/src/io_uring/mod.rs	alloc_ring_region	287	ptr-ops,addr-arith	INV:INV-IOURING-REGION-1
-650a906bbaa4	kernel/src/io_uring/mod.rs	alloc_ring_region	294	ptr-ops	INV:INV-IOURING-REGION-1
-96a9e78c36e5	kernel/src/io_uring/mod.rs	free_ring_region	316		INV:INV-IOURING-REGION-1
-f6e8e80872d9	kernel/src/io_uring/mod.rs	pin_ring	459		INV:INV-IOURING-RING-1
-068ff7327abc	kernel/src/io_uring/mod.rs	io_uring_close	475	ptr-ops	INV:INV-FS-FILEPRIV-1
-f171eaed5f0f	kernel/src/io_uring/mod.rs	io_uring_mmap_handler	514	ptr-ops	INV:INV-FS-FILEPRIV-1
-30b893e074d7	kernel/src/io_uring/mod.rs	io_uring_mmap_handler	583		INV:INV-FS-FILEPRIV-1
-3269e217adfa	kernel/src/io_uring/mod.rs	sqe_at	894	volatile,ptr-ops	INV:INV-IOURING-RING-1
-435543bbd378	kernel/src/io_uring/mod.rs	cqe_write	902	volatile,ptr-ops	INV:INV-IOURING-RING-1
-650f21c3b87d	kernel/src/io_uring/mod.rs	sys_io_uring_setup	1024	ptr-ops	INV:INV-IOURING-RING-1
-720415bd1c6f	kernel/src/io_uring/mod.rs	sys_io_uring_setup	1032	ptr-ops	INV:INV-IOURING-RING-1
-42b9da28afd0	kernel/src/io_uring/mod.rs	sys_io_uring_enter	1073		INV:INV-IOURING-RING-1
-3fd09b4f3ef7	kernel/src/io_uring/mod.rs	sys_io_uring_enter	1079		INV:INV-IOURING-RING-1
-7c37b17652b2	kernel/src/io_uring/mod.rs	sys_io_uring_enter	1104	volatile,ptr-ops	INV:INV-IOURING-RING-1
-5c0f465a62bf	kernel/src/io_uring/mod.rs	sys_io_uring_enter	1107	volatile,ptr-ops	INV:INV-IOURING-RING-1
-754e3c8e4281	kernel/src/io_uring/mod.rs	sys_io_uring_register	1140		INV:INV-IOURING-RING-1
-215fc6899e61	kernel/src/io_uring/mod.rs	sys_io_uring_register	1146		INV:INV-IOURING-RING-1
-52da7be1fcf0	kernel/src/ipc/binder.rs	block_window	460		INV:INV-BINDER-BLOCKVIEW
-0e24c85797c9	kernel/src/ipc/binder.rs	data_u32	470	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-e11e16f12831	kernel/src/ipc/binder.rs	write_data_u32	480	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-b2fb9afc3f36	kernel/src/ipc/binder.rs	data_obj	497	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-e25062e5b571	kernel/src/ipc/binder.rs	write_data_obj	510	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-668344c2b9eb	kernel/src/ipc/binder.rs	data_obj_mut	527	ptr-ops	INV:INV-BINDER-BLOCKVIEW
-eef4264f4e7f	kernel/src/ipc/binder.rs	offsets_entry	538	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-5c57ae8e3b0b	kernel/src/ipc/binder.rs	extra_write_bytes	553	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-ae1d31fe431a	kernel/src/ipc/binder.rs	extra_window	568		INV:INV-BINDER-BLOCKVIEW
-473977ff0b3a	kernel/src/ipc/binder.rs	pod_bytes	650	raw-construct,ptr-ops	INV:INV-BINDER-STAGE-POD
-64a18d93516c	kernel/src/ipc/binder.rs	u32_at	662	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-e7771c555e52	kernel/src/ipc/binder.rs	set_u32	672	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-4864c2560710	kernel/src/ipc/binder.rs	write_u64_at	684	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-d22b44068926	kernel/src/ipc/binder.rs	st	764		INV:INV-BINDER-HELD
-3c182e19d6e7	kernel/src/ipc/binder.rs	st	2261		INV:INV-BINDER-HELD
-75852233fe9e	kernel/src/ipc/binder.rs	im	2323		INV:INV-BINDER-HELD
-485ad1fc20bb	kernel/src/ipc/binder.rs	<module>	2453		INV:INV-FRAME-1
-01d6cadf32d4	kernel/src/ipc/binder.rs	<module>	2454		INV:INV-FRAME-1
-c71901fcc7d6	kernel/src/ipc/binder.rs	<module>	2455		INV:INV-FRAME-1
-fdc59b24d99c	kernel/src/ipc/binder.rs	<module>	2456		INV:INV-FRAME-1
-287b8a41bf3f	kernel/src/ipc/binder.rs	<module>	2457		INV:INV-FRAME-1
-25203be5983d	kernel/src/ipc/binder.rs	<module>	2458		INV:INV-FRAME-1
-68ff703e5f31	kernel/src/ipc/binder.rs	<module>	2459		INV:INV-FRAME-1
-49d8cad64f6c	kernel/src/ipc/binder.rs	<module>	2460		INV:INV-FRAME-1
-5799759f7959	kernel/src/ipc/binder.rs	<module>	2461		INV:INV-FRAME-1
-88a97810b508	kernel/src/ipc/binder.rs	<module>	2462		INV:INV-FRAME-1
-f19b4fcd3cf3	kernel/src/ipc/binder.rs	world_section_report	2621	ptr-ops	INV:INV-BINDER-WORLDSEC
-ac77339dd390	kernel/src/ipc/binder.rs	pm	2723	ptr-ops	GAP
-1cd207a53e49	kernel/src/ipc/binder.rs	proc_of_file	3136	ptr-ops	INV:INV-BINDER-PRIV
-8daab8f1bd04	kernel/src/ipc/binder.rs	proc_of_file	3140		INV:INV-BINDER-PRIV
-cee3fcceada2	kernel/src/ipc/binder.rs	proc_ref	3149	ptr-ops	INV:INV-BINDER-PRIV
-9cb3f1d1f11f	kernel/src/ipc/binder.rs	proc_ref	3150		INV:INV-BINDER-PRIV
-282b2535a751	kernel/src/ipc/binder.rs	binder_close	3239		INV:INV-BINDER-PRIV
-bb958a012cc9	kernel/src/ipc/binder.rs	binder_close	3243		INV:INV-BINDER-PRIV
-345e64ed1eb0	kernel/src/ipc/binder.rs	binder_close	3244		INV:INV-BINDER-PRIV
-afe0028e165a	kernel/src/ipc/binder.rs	binder_mmap_handler	3938	ptr-ops	INV:INV-BINDER-HELD
-21376096784b	kernel/src/ipc/binder.rs	binder_mmap_handler	4087		INV:INV-BINDER-HELD
-f5f6fb6161a1	kernel/src/ipc/binder.rs	binder_mmap_handler	4104		INV:INV-FRAME-1
-974ce843ca38	kernel/src/ipc/binder.rs	binder_poll_wait	4430		INV:INV-KTASK-1
-6330ddc899de	kernel/src/ipc/binder.rs	binder_poll_unwait	4470		INV:INV-KTASK-1
-5ecd467f140c	kernel/src/ipc/binder.rs	entry_frame	4617		INV:INV-SAFECALL-1
-0b90c99f4ec0	kernel/src/ipc/binder.rs	entry_frame	4624		INV:INV-SAFECALL-1
-4dc840d30963	kernel/src/ipc/binder.rs	entry_frame	4631		INV:INV-SAFECALL-1
-2b6c3eb33daf	kernel/src/ipc/binder.rs	entry_frame_sp	4649		INV:INV-SAFECALL-1
-622e031557cf	kernel/src/ipc/binder.rs	entry_frame_sp	4656		INV:INV-SAFECALL-1
-a3c7df5a6f14	kernel/src/ipc/binder.rs	entry_frame_sp	4663		INV:INV-SAFECALL-1
-761b742f2070	kernel/src/ipc/binder.rs	probe_leaf	4675		INV:INV-SAFECALL-1
-7a50104ab085	kernel/src/ipc/binder.rs	probe_u32	4691	volatile,ptr-ops	INV:INV-SAFECALL-1
-001c4ce585aa	kernel/src/ipc/binder.rs	probe_u64	4704	volatile,ptr-ops	INV:INV-SAFECALL-1
-affbdbbbdadc	kernel/src/ipc/binder.rs	entry_frame_futex_x86	4720		INV:INV-SAFECALL-1
-3f67e4f21922	kernel/src/ipc/binder.rs	stack_word	4737	volatile,ptr-ops	INV:INV-SAFECALL-1
-dd4b8a17a0c7	kernel/src/ipc/binder.rs	txn_hang_audit	6218		INV:INV-BINDER-DIAG-COMM
-949e937468eb	kernel/src/ipc/binder.rs	bwr_park_audit	6891		INV:INV-BINDER-ENTRYFRAME
-a20bf887b77c	kernel/src/ipc/binder.rs	user_task_park_stack_w	8064		INV:INV-BINDER-HELD
-c0f33176cc5d	kernel/src/ipc/binder.rs	bc_corruption_snapshot	9463	raw-construct	INV:INV-BINDER-PROBE
-22f581c6362a	kernel/src/ipc/binder.rs	get	13078		INV:INV-BINDER-PINTASK
+866891d5e150	kernel/src/io_uring/mod.rs	unref	222	ptr-ops	INV:INV-IOURING-REGION-1
+ed8de4f1b29b	kernel/src/io_uring/mod.rs	drop	240		INV:INV-IOURING-REGION-1
+b1d2cfd9e1c8	kernel/src/io_uring/mod.rs	alloc_ring_region	291	ptr-ops,addr-arith	INV:INV-IOURING-REGION-1
+c2dad66b291d	kernel/src/io_uring/mod.rs	alloc_ring_region	298	ptr-ops	INV:INV-IOURING-REGION-1
+67e399a7b53c	kernel/src/io_uring/mod.rs	free_ring_region	320		INV:INV-IOURING-REGION-1
+ba2d0f893256	kernel/src/io_uring/mod.rs	pin_verified_ring	482		GAP
+61e41eaaf437	kernel/src/io_uring/mod.rs	ring_release_on_install_error	500	ptr-ops	GAP
+7dd920a9f791	kernel/src/io_uring/mod.rs	pin_ring	516		INV:INV-IOURING-RING-1
+22f55fc659a1	kernel/src/io_uring/mod.rs	io_uring_close	532	ptr-ops	INV:INV-FS-FILEPRIV-1
+528ab4eb5f69	kernel/src/io_uring/mod.rs	io_uring_mmap_handler	571	ptr-ops	INV:INV-FS-FILEPRIV-1
+8c7a4871e705	kernel/src/io_uring/mod.rs	io_uring_mmap_handler	640		INV:INV-FS-FILEPRIV-1
+76b7b00bec4e	kernel/src/io_uring/mod.rs	sqe_at	741	volatile,ptr-ops	INV:INV-IOURING-RING-1
+832a868f0385	kernel/src/io_uring/mod.rs	cqe_write	749	volatile,ptr-ops	INV:INV-IOURING-RING-1
+7a92472b7fb1	kernel/src/ipc/binder.rs	block_window	475		INV:INV-BINDER-BLOCKVIEW
+11d16545f127	kernel/src/ipc/binder.rs	data_u32	485	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+d91a1ef3020e	kernel/src/ipc/binder.rs	write_data_u32	495	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+9685dd1ad837	kernel/src/ipc/binder.rs	data_obj	512	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+3cbbc2e39487	kernel/src/ipc/binder.rs	write_data_obj	525	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+12ce5473aa2e	kernel/src/ipc/binder.rs	data_obj_mut	542	ptr-ops	INV:INV-BINDER-BLOCKVIEW
+cfd96a373cdb	kernel/src/ipc/binder.rs	offsets_entry	553	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+7ab9abaaf5ac	kernel/src/ipc/binder.rs	extra_write_bytes	568	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+5597a79939e5	kernel/src/ipc/binder.rs	extra_window	583		INV:INV-BINDER-BLOCKVIEW
+175caffea4b4	kernel/src/ipc/binder.rs	pod_bytes	665	raw-construct,ptr-ops	INV:INV-BINDER-STAGE-POD
+24a1872a9816	kernel/src/ipc/binder.rs	u32_at	677	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+67f6f7f4830e	kernel/src/ipc/binder.rs	set_u32	687	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+5cd2331de276	kernel/src/ipc/binder.rs	write_u64_at	699	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+94c7145c2eac	kernel/src/ipc/binder.rs	st	779		INV:INV-BINDER-HELD
+26abda0fb43a	kernel/src/ipc/binder.rs	st	2263		INV:INV-BINDER-HELD
+3c28710a8a3e	kernel/src/ipc/binder.rs	im	2325		INV:INV-BINDER-HELD
+caba2190d034	kernel/src/ipc/binder.rs	<module>	2455		INV:INV-FRAME-1
+25c923aa4569	kernel/src/ipc/binder.rs	<module>	2456		INV:INV-FRAME-1
+1ead8a60c199	kernel/src/ipc/binder.rs	<module>	2457		INV:INV-FRAME-1
+d79d9fca8e0b	kernel/src/ipc/binder.rs	<module>	2458		INV:INV-FRAME-1
+76c16aeca324	kernel/src/ipc/binder.rs	<module>	2459		INV:INV-FRAME-1
+cef1844c4ff5	kernel/src/ipc/binder.rs	<module>	2460		INV:INV-FRAME-1
+0c9a9ee747ec	kernel/src/ipc/binder.rs	<module>	2461		INV:INV-FRAME-1
+9a4decd19c81	kernel/src/ipc/binder.rs	<module>	2462		INV:INV-FRAME-1
+2144b21aefb3	kernel/src/ipc/binder.rs	<module>	2463		INV:INV-FRAME-1
+66fa33d31c8e	kernel/src/ipc/binder.rs	<module>	2464		INV:INV-FRAME-1
+de85e6504504	kernel/src/ipc/binder.rs	world_section_report	2623	ptr-ops	INV:INV-BINDER-WORLDSEC
+32e25072d764	kernel/src/ipc/binder.rs	pm	2725	ptr-ops	GAP
+59ebb012c626	kernel/src/ipc/binder.rs	proc_of_file	3138	ptr-ops	INV:INV-BINDER-PRIV
+c8124b8d0d4c	kernel/src/ipc/binder.rs	proc_of_file	3142		INV:INV-BINDER-PRIV
+af29be756d9d	kernel/src/ipc/binder.rs	proc_ref	3151	ptr-ops	INV:INV-BINDER-PRIV
+461135b1d2de	kernel/src/ipc/binder.rs	proc_ref	3152		INV:INV-BINDER-PRIV
+9f17f2bfefdf	kernel/src/ipc/binder.rs	binder_close	3241		INV:INV-BINDER-PRIV
+44a9c91d776b	kernel/src/ipc/binder.rs	binder_close	3245		INV:INV-BINDER-PRIV
+5b7619bf3a30	kernel/src/ipc/binder.rs	binder_close	3246		INV:INV-BINDER-PRIV
+5f7bc6537061	kernel/src/ipc/binder.rs	binder_mmap_handler	3940	ptr-ops	INV:INV-BINDER-HELD
+1f126ddbaaba	kernel/src/ipc/binder.rs	binder_mmap_handler	4089		INV:INV-BINDER-HELD
+b4c164a1dd7e	kernel/src/ipc/binder.rs	binder_mmap_handler	4106		INV:INV-FRAME-1
+0791e9af525b	kernel/src/ipc/binder.rs	binder_poll_wait	4432		INV:INV-KTASK-1
+d15b45a36223	kernel/src/ipc/binder.rs	binder_poll_unwait	4472		INV:INV-KTASK-1
+4375646a884e	kernel/src/ipc/binder.rs	bc_corruption_snapshot	5347	raw-construct	INV:INV-BINDER-PROBE
+4a48566f1827	kernel/src/ipc/binder.rs	get	8962		INV:INV-BINDER-PINTASK
+ce72ad8d4f6b	kernel/src/ipc/binder_edges.rs	entry_frame	37		INV:INV-SAFECALL-1
+30158b681a00	kernel/src/ipc/binder_edges.rs	entry_frame	44		INV:INV-SAFECALL-1
+13d9a0445e33	kernel/src/ipc/binder_edges.rs	entry_frame	51		INV:INV-SAFECALL-1
+07b09f2ed0b7	kernel/src/ipc/binder_edges.rs	entry_frame_sp	69		INV:INV-SAFECALL-1
+38cd3f420b05	kernel/src/ipc/binder_edges.rs	entry_frame_sp	76		INV:INV-SAFECALL-1
+832eea6f34db	kernel/src/ipc/binder_edges.rs	entry_frame_sp	83		INV:INV-SAFECALL-1
+998202633086	kernel/src/ipc/binder_edges.rs	probe_leaf	95		INV:INV-SAFECALL-1
+fbe314d2d40b	kernel/src/ipc/binder_edges.rs	probe_u32	111	volatile,ptr-ops	INV:INV-SAFECALL-1
+37a7b6c5e8bc	kernel/src/ipc/binder_edges.rs	probe_u64	124	volatile,ptr-ops	INV:INV-SAFECALL-1
+124caac487dd	kernel/src/ipc/binder_edges.rs	entry_frame_futex_x86	140		INV:INV-SAFECALL-1
+aa57c416ed99	kernel/src/ipc/binder_edges.rs	stack_word	157	volatile,ptr-ops	INV:INV-SAFECALL-1
+fcfa42a04b42	kernel/src/ipc/binder_edges.rs	diag_task_comm	169		GAP
+ce44f0985853	kernel/src/ipc/binder_edges.rs	diag_task	181		GAP
 81cb048abc4a	kernel/src/ipc/edges.rs	shm_page_get	24		GAP
 dde5b3003b47	kernel/src/ipc/edges.rs	shm_page_put	39		GAP
-75310137ee6e	kernel/src/lib.rs	rust_main_impl	1816	asm	INV:INV-BOOT-ZEROPAGE-1
+67607dc29ba8	kernel/src/lib.rs	rust_main_impl	1817	asm	INV:INV-BOOT-ZEROPAGE-1
 0953597665ba	kernel/src/list.rs	<module>	73		INV:INV-LIST-1
 d018f0b94a39	kernel/src/list.rs	<module>	92		INV:INV-LIST-1
 c48b7421a0d8	kernel/src/list.rs	<module>	108	ptr-ops	INV:INV-LIST-1
@@ -2014,9 +2007,9 @@ fb9c85803dff	kernel/src/tests/wait4.rs	test_wait4_no_child	56	ptr-ops	INV:INV-TE
 2c4f27fc545a	kernel/src/tests/wait4.rs	test_wait4_wnohang_no_child	66	ptr-ops	INV:INV-TESTHARNESS-1
 2973f32af239	kernel/src/tests/wait4.rs	test_wait4_wnohang_after_fork	81	ptr-ops	INV:INV-TESTHARNESS-1
 846d14318c63	kernel/src/timer.rs	input_debug_tick	189	transmute	GAP
-a2965e5560e3	kernel/src/timer.rs	deliver_fired	1508		INV:INV-KTASK-1
-235f102253c1	kernel/src/timer.rs	deliver_fired	1533		INV:INV-KTASK-1
-1e7b05297c28	kernel/src/timer.rs	ww_heartbeat	1924	volatile,ptr-ops	INV:INV-KTASK-1
+1fb5a3762f8e	kernel/src/timer.rs	ww_task_on_cpu	326	volatile,ptr-ops	GAP
+cbf09bed703a	kernel/src/timer.rs	deliver_fired	1523		INV:INV-KTASK-1
+78219ec23ee1	kernel/src/timer.rs	deliver_fired	1548		INV:INV-KTASK-1
 f60564a41229	kernel/src/timer/nohz.rs	can_stop_full_tick	208		INV:INV-KTASK-1
 c993112e1141	kernel/src/timer/wheel.rs	test_shared	1096		INV:INV-SCHED-EVRING-1
 08fefb18cda0	kernel/src/trace/mod.rs	<module>	99		INV:INV-SENDSYNC-1

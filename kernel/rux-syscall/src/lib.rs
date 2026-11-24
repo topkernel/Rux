@@ -19,10 +19,21 @@
 // Root re-exports: the framework crate's modules appear at THIS crate's
 // root so the service files' crate::X paths resolve unchanged.
 pub use rux::{
-    arch, config, console, debug, drivers, errno, io_uring, list,
+    arch, config, console, debug, drivers, errno, list,
     mm, module, perf, printk, safety, sched, security,
-    signal, sync, timer, trace,
+    signal, sync, trace,
 };
+// The timer service tree (cold-four lane: rux-timer): the merged view
+// (framework timekeeping core + the moved report halves) re-exported at
+// this root — the sibling-service dependency (syscall -> timer) is
+// one-way, the rux-ipc precedent.
+pub use rux_timer::timer;
+// The io_uring service tree (cold-four lane: rux-io-uring): the merged
+// view (framework ring mechanism + the moved policy half) re-exported
+// at this root — the sibling-service dependency (syscall -> io_uring)
+// is one-way; the NR 425/426/427 wrappers below keep their
+// crate::io_uring::X paths unchanged.
+pub use rux_io_uring::io_uring;
 // The ipc service tree (crate-flip rung: rux-ipc): the SERVICE crate's
 // merged ipc view (the movable policy + the framework's binder
 // re-export) re-exported at this root — the sibling-service
@@ -70,6 +81,10 @@ pub mod syscall {
     #[path = "misc.rs"] pub mod misc;
     #[cfg(feature = "x86_64")]
     #[path = "x86_compat.rs"] pub mod x86_compat;
+
+    // the moved diagnostic halves (cold-four lane)
+    #[path = "diag/strace1.rs"] pub mod diag_strace1;
+    #[path = "diag/seccomp_run.rs"] pub mod diag_seccomp_run;
 
     // The shared UAPI types the old mod.rs carried at the syscall
     // root (TimeVal, FdSet, ... — the service files' `use super::*`
@@ -591,6 +606,8 @@ fn register_hooks() {
         is_eventfd_ops: |ops: &'static rux::fs::FileOps| core::ptr::eq(ops, &syscall::misc::EVENTFD_OPS),
         syscall_eio_line: |nr, args| syscall::io::syscall_eio_line(nr as usize, *args),
         epoll_dump_for_file: |fid| syscall::misc::epoll_dump_for_file(fid),
+        seccomp_run: syscall::diag_seccomp_run::seccomp_run,
+        strace1_line: syscall::diag_strace1::strace1_line,
     };
     syscall_register_hooks(hooks);
 }
