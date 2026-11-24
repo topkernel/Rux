@@ -370,6 +370,7 @@ dependencies = [
  "rux-process",
  "rux-sched",
  "rux-signal",
+ "rux-sync",
  "rux-syscall",
  "rux-timer",
 ]
@@ -419,6 +420,7 @@ name = "rux-ipc"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-sync",
 ]
 
 [[package]]
@@ -443,6 +445,7 @@ name = "rux-process"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-sync",
  "rux-timer",
 ]
 
@@ -462,6 +465,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rux-sync"
+version = "0.1.0"
+dependencies = [
+ "rux",
+]
+
+[[package]]
 name = "rux-syscall"
 version = "0.1.0"
 dependencies = [
@@ -472,6 +482,7 @@ dependencies = [
  "rux-ipc",
  "rux-net",
  "rux-process",
+ "rux-sync",
  "rux-timer",
 ]
 

@@ -25,8 +25,12 @@
 // the service files' crate::X paths resolve unchanged (the net recipe).
 pub use rux::{
     arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, mm,
-    process, safety, sched, security, signal, sync, syscall, timer, trace,
+    process, safety, sched, security, signal, syscall, timer, trace,
 };
+// The sync module comes from rux-sync's UNION module (sync-upper
+// lane): the framework's sync plus the moved futex diagnostics at
+// their historical crate::sync::futex::X paths.
+pub use rux_sync::sync;
 pub use rux::net;
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;

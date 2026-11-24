@@ -147,7 +147,7 @@ pub fn pid_hash_remove(pid: u32) {
                 // sc82 forensics: record the unlink (thread OR leader) in
                 // the global exit ring — the rwlock-freeze dump replays a
                 // frozen tgid's deaths. No behavior change.
-                crate::sync::futex::note_task_unlink(
+                crate::sync::sync_diag_hooks::note_task_unlink(
                     pid,
                     crate::process::unsafe_edges::borrow_task(curr).tgid() as u32,
                 );

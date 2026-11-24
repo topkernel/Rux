@@ -21,8 +21,12 @@
 pub use rux::{
     arch, config, console, debug, drivers, errno, list,
     mm, module, perf, printk, safety, sched, security,
-    signal, sync, trace,
+    signal, trace,
 };
+// The sync module comes from rux-sync's UNION module (sync-upper
+// lane): the framework's sync plus the moved futex diagnostics at
+// their historical crate::sync::futex::X paths.
+pub use rux_sync::sync;
 // The timer service tree (cold-four lane: rux-timer): the merged view
 // (framework timekeeping core + the moved report halves) re-exported at
 // this root — the sibling-service dependency (syscall -> timer) is

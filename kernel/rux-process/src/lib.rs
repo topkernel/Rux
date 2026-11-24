@@ -37,9 +37,14 @@
 // module below owns that path. `sbi` is riscv64-only in the framework.
 pub use rux::{
     arch, boot_edges, cmdline, config, console, debug, drivers, errno, fs,
-    interrupt, ipc, list, mm, net, perf, safety, sched, security, signal, sync,
+    interrupt, ipc, list, mm, net, perf, safety, sched, security, signal,
     syscall, trace,
 };
+// The sync module comes from rux-sync's UNION module (sync-upper
+// lane): the framework's sync plus the moved futex diagnostics at
+// their historical crate::sync::futex::X paths (exit_teardown's
+// rwfz_dump_tgid calls).
+pub use rux_sync::sync;
 // The timer service tree (cold-four lane: rux-timer): the merged view
 // (framework timekeeping core + the moved report halves) re-exported at
 // this root — the sibling-service dependency (process -> timer) is

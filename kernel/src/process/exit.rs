@@ -138,7 +138,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             let park_tgid = crate::sync::futex::FUXPARK_TGID.load(Relaxed2);
             let my_tgid = cur.tgid() as u32;
             let is_leader = dying_pid == my_tgid;
-            let frozen = crate::sync::futex::rwfrz_tgid_frozen(my_tgid);
+            let frozen = crate::sync::sync_diag_hooks::rwfrz_tgid_frozen(my_tgid);
             #[cfg(feature = "x86_64")]
             let segv = crate::arch::x86_64::trap::segv_hist_age(dying_pid);
             #[cfg(not(feature = "x86_64"))]
@@ -452,7 +452,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             use core::sync::atomic::Ordering::Relaxed;
             static UDEXIT_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            let watch_tgid = crate::sync::futex::rwfz_exit_watch_tgid();
+            let watch_tgid = crate::sync::sync_diag_hooks::rwfz_exit_watch_tgid();
             let is_leader = dying_pid == tgid;
             if !is_leader
                 && watch_tgid != 0
