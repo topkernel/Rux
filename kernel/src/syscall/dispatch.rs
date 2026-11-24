@@ -443,11 +443,14 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
         132 => {
             // utime(path, utimbuf*) — legacy x86_64 ABI (no asm-generic
-            // number). Unhandled, 132 fell through to the generic table
-            // where 132 is SIGALTSTACK, so every utime(2) caller silently
-            // no-op'd (LTP utime01: stamps read back 0, not the set
-            // values).
-            let r = native_table_call(132, args, regs); syscall_set_return_value(regs, r);
+            // number). Slot 132 in the GENERIC table is sigaltstack:
+            // passing the native number through ran sys_sigaltstack with
+            // utime's (path, times) as (ss, old_ss) — the SET arm parsed
+            // path-string bytes as a SignalStack and installed garbage
+            // into the task's sigaltstack state, which a later real
+            // sigaltstack(GET) by pthread_exit would munmap. Route to
+            // the dedicated free-slot registration (1181).
+            let r = native_table_call(1181, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         139 => {
@@ -455,8 +458,12 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             // asm-generic number (riscv64/aarch64 never issue it);
             // untranslated, 139 would hit the generic table's
             // rt_sigreturn and pop a garbage signal frame (LTP
-            // sysfs01..05 "Test killed by SIGSEGV").
-            let r = native_table_call(135, args, regs); syscall_set_return_value(regs, r);
+            // sysfs01..05 "Test killed by SIGSEGV"). Slot 135 is
+            // rt_sigprocmask: the arm used to pass sysfs's
+            // (option, idx, buf) into it — how=option is a valid SIG_*
+            // value, so callers could corrupt their signal mask.
+            // Route to the dedicated free-slot registration (1182).
+            let r = native_table_call(1182, args, regs); syscall_set_return_value(regs, r);
             return;
         }
         213 => {
