@@ -722,11 +722,10 @@ f2cfd22a9d3c	kernel/src/boot_edges.rs	rawframes_line	125	volatile,ptr-ops	INV:IN
 2c1ec67bfcb6	kernel/src/boot_edges.rs	x86_panic_reset	171	asm	INV:INV-SYSC-4
 277248b062e2	kernel/src/boot_edges.rs	x86_reboot_pulse	202		INV:INV-SYSC-4
 f5c61d6c4e1d	kernel/src/boot_edges.rs	sbi_shutdown_ecall	215	asm	INV:INV-SYSC-4
-a3b13050e04a	kernel/src/cmdline.rs	fdt_u8	87		INV:INV-FDT-1
-eb3427228d3b	kernel/src/cmdline.rs	fdt_add	96		INV:INV-FDT-1
-3ca06198a012	kernel/src/cmdline.rs	fdt_u32	103	ptr-ops	INV:INV-FDT-1
-072d12760f3e	kernel/src/cmdline.rs	parse_memory_regions	254		INV:INV-FDT-1
-4b4dca768f8d	kernel/src/cmdline.rs	get_cmdline	723	raw-construct	INV:INV-FDT-1
+c8c82897b04a	kernel/src/cmdline.rs	fdt_u8	60		INV:INV-FDT-1
+5d1145a0b740	kernel/src/cmdline.rs	fdt_add	69		INV:INV-FDT-1
+781c8b36490d	kernel/src/cmdline.rs	fdt_u32	76	ptr-ops	INV:INV-FDT-1
+d8260330a2b8	kernel/src/cmdline.rs	get_cmdline	234	raw-construct	INV:INV-FDT-1
 18dfc212f7cd	kernel/src/console.rs	putc	226	asm	INV:F14
 5487b050e09a	kernel/src/console.rs	putc	238	asm	INV:F14
 35d6cd515c44	kernel/src/console.rs	puts_batch	354	asm	INV:F14
@@ -1270,7 +1269,7 @@ f716e0754263	kernel/src/init.rs	load_and_setup_elf	378		INV:F12
 30e80c9f82fb	kernel/src/init.rs	load_and_setup_elf	394		INV:F12
 4b6d74e4ac95	kernel/src/init.rs	load_and_setup_elf	419		INV:F12
 a999bb1950fd	kernel/src/init.rs	load_and_setup_elf	427	ffi	INV:F12
-f7211708faa1	kernel/src/initrd.rs	load	102	raw-construct,ptr-ops	INV:INV-FDT-1
+d8cb6dd811bf	kernel/src/initrd.rs	load	113	raw-construct,ptr-ops	INV:INV-FDT-1
 ba379cc191ef	kernel/src/interrupt/irqdesc.rs	handle_fasteoi_nmi	776	transmute	INV:F19
 b066da552489	kernel/src/interrupt/softirq.rs	__do_softirq	563	no-preempt	INV:INV-KTASK-1
 85a923cb4a39	kernel/src/interrupt/softirq.rs	__do_softirq	571		INV:INV-KTASK-1
@@ -1357,7 +1356,7 @@ fcfa42a04b42	kernel/src/ipc/binder_edges.rs	diag_task_comm	169		GAP
 ce44f0985853	kernel/src/ipc/binder_edges.rs	diag_task	181		GAP
 81cb048abc4a	kernel/src/ipc/edges.rs	shm_page_get	24		GAP
 dde5b3003b47	kernel/src/ipc/edges.rs	shm_page_put	39		GAP
-67607dc29ba8	kernel/src/lib.rs	rust_main_impl	1817	asm	INV:INV-BOOT-ZEROPAGE-1
+47b4809fbc48	kernel/src/lib.rs	rust_main_impl	1818	asm	GAP
 0953597665ba	kernel/src/list.rs	<module>	73		INV:INV-LIST-1
 d018f0b94a39	kernel/src/list.rs	<module>	92		INV:INV-LIST-1
 c48b7421a0d8	kernel/src/list.rs	<module>	108	ptr-ops	INV:INV-LIST-1
