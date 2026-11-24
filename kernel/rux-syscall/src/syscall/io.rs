@@ -1129,9 +1129,9 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             let ur_t_send = crate::debug::unixrd::now();
             // hilogcensus (cmdline hilogcensus=1): parse/claim before the
             // owned send consumes the buffer, record the outcome after.
-            crate::debug::hilogcensus::unix_send_pre(&gathered);
+            rux_debug::hilogcensus::unix_send_pre(&gathered);
             let sent = crate::net::unix::unix_write_slice_owned(&file, gathered) as i64;
-            crate::debug::hilogcensus::unix_send_post(sent as isize);
+            rux_debug::hilogcensus::unix_send_post(sent as isize);
             crate::debug::unixrd::add(&crate::debug::unixrd::WV_SEND_NS, ur_t_send);
             if sent < 0 {
                 if sent == -11 {

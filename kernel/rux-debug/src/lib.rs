@@ -52,6 +52,10 @@ mod filerd;
 mod softlockup;
 mod lostpark;
 mod spinwatch;
+/// The hilog census crate half (root-cold lane): the unix send markers,
+/// sender tables, and the periodic dump; the kmsg marker + the census
+/// gate stay framework-side (kernel/src/debug/hilogcensus.rs).
+pub mod hilogcensus;
 /// The SCM_RIGHTS relay tap — moved WHOLE (every fn is an arm-gated
 /// print; rux-syscall and rux-fs call it directly through the sibling
 /// service dep, no hook rows on the socket paths).
@@ -68,6 +72,7 @@ pub mod trace_files;
 pub fn register_all() {
     debug::debug_hooks::debug_register_hooks(debug::debug_hooks::DebugHooks {
         syscost_dump: syscost::dump,
+        hilog_dump: hilogcensus::dump,
         fsw_dump: fsw::dump,
         mmprof_report_line: mmprof::report_line,
         schb_init: schb::init,

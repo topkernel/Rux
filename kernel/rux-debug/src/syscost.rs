@@ -30,7 +30,7 @@ pub fn dump() {
     crate::debug::unixrd::dump();
     // hilog-flood lane: OH log-fabric per-caller census (no-op unless
     // the hilogcensus=1 cmdline param is armed).
-    crate::debug::hilogcensus::dump();
+    crate::hilogcensus::dump();
     // rt-r4: per-caller binder WORLD section maxima (all WORLD sections
     // share one REST_SITES row — this splits the 6-8 ms class by caller).
     {

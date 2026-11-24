@@ -18,7 +18,7 @@
 //! check/touch, cctx/forkprof/unixrd markers) stay framework-side as
 //! direct calls — they are NOT behind this table (the S1 lesson: an
 //! indirect call per event cost p2_ctxsw +25.1% until devirtualized).
-//! The 18-row width is justified by that split: this table is exactly
+//! The 19-row width is justified by that split: this table is exactly
 //! the cold report surface measured for the flip (one row per
 //! framework entry point into the moved code), not a convenience
 //! mega-table.
@@ -42,6 +42,9 @@ pub struct DebugHooks {
     pub syscost_dump: fn(),
     /// fsw's offset-cadence dump + the shutdown cascade hook.
     pub fsw_dump: fn(),
+    /// hilogcensus's periodic dump (syscost cadence + shutdown cascade;
+    /// the unix-marker/tables/report half lives in the crate).
+    pub hilog_dump: fn(),
     /// mmprof's rotating report line (shutdown calls variant 0).
     pub mmprof_report_line: fn(u64),
 
@@ -87,6 +90,7 @@ impl DebugHooks {
     pub const EMPTY: DebugHooks = DebugHooks {
         syscost_dump: || {},
         fsw_dump: || {},
+        hilog_dump: || {},
         mmprof_report_line: |_| {},
         schb_init: || {},
         mmprof_ensure_dump_thread: || {},
@@ -132,6 +136,10 @@ pub fn syscost_dump() {
 #[inline]
 pub fn fsw_dump() {
     (hooks().fsw_dump)()
+}
+#[inline]
+pub fn hilog_dump() {
+    (hooks().hilog_dump)()
 }
 #[inline]
 pub fn mmprof_report_line(k: u64) {
