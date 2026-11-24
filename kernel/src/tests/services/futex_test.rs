@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::sync::futex::{FUTEX_WAIT, FUTEX_WAKE, FUTEX_REQUEUE, FUTEX_FD,
+use crate::futex::{FUTEX_WAIT, FUTEX_WAKE, FUTEX_REQUEUE, FUTEX_FD,
     FUTEX_CMP_REQUEUE, FUTEX_WAKE_OP, FUTEX_LOCK_PI, FUTEX_UNLOCK_PI, FUTEX_TRYLOCK_PI,
     FUTEX_WAIT_BITSET, FUTEX_WAKE_BITSET, FUTEX_WAIT_REQUEUE_PI, FUTEX_CMP_REQUEUE_PI,
     FUTEX_PRIVATE_FLAG, FUTEX_CLOCK_REALTIME, FUTEX_BITSET_MATCH_ANY,
@@ -118,11 +118,11 @@ pub fn test_futex() {
     // Test 16 (FWK): futex_hash stability under COW — equal anon keys
     // hash equal regardless of the phys field (bucket identity is
     // (mm, uaddr) for object=false keys), and object keys hash by phys.
-    let h1 = crate::sync::futex::futex_hash(&anon_wait);
-    let h2 = crate::sync::futex::futex_hash(&anon_wake);
+    let h1 = crate::futex::futex_hash(&anon_wait);
+    let h2 = crate::futex::futex_hash(&anon_wake);
     test_assert_eq!(h1, h2, "anon keys with different phys hash equal");
-    let h3 = crate::sync::futex::futex_hash(&obj1);
-    let h4 = crate::sync::futex::futex_hash(&obj2);
+    let h3 = crate::futex::futex_hash(&obj1);
+    let h4 = crate::futex::futex_hash(&obj2);
     test_assert_eq!(h3, h4, "object keys with same phys hash equal");
     test_assert!(h3 < crate::config::FUTEX_HASH_SIZE, "hash within bucket count");
 }
@@ -134,7 +134,7 @@ pub fn test_futex() {
 /// - an invalid op (5-7) or cmp (6-15) is -ENOSYS, not -EINVAL.
 pub fn test_futex_wake_op_decode() {
     test_group_start("futex_wake_op_decode");
-    use crate::sync::futex::{
+    use crate::futex::{
         futex_wake_op_decode, FUTEX_OP_SET, FUTEX_OP_ADD, FUTEX_OP_CMP_LT, FUTEX_OP_CMP_EQ,
     };
 

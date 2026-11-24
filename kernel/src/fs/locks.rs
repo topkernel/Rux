@@ -8,7 +8,7 @@
 //! ## The fs-rest split: THIS file is the framework half
 //!
 //! The flock/POSIX/lease LOGIC and its tables live in the fs crate
-//! (`kernel/fs/src/fs/locks.rs`, under crate-level forbid); THIS
+//! (`kernel/fs/src/locks.rs`, under crate-level forbid); THIS
 //! module keeps everything the kernel's open/close/exec paths touch
 //! directly, so the hot legs pay zero indirection (crate-plan §3a
 //! rule 2 — no fn-pointer rows on data paths):

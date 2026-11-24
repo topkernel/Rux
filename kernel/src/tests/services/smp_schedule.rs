@@ -34,7 +34,7 @@ pub fn test_smp_schedule() {
     // Create tasks
     let mut created_tasks = 0;
     for _ in 0..5 {
-        if crate::process::do_fork().is_some() {
+        if crate::do_fork().is_some() {
             created_tasks += 1;
         }
     }

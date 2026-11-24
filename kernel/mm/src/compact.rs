@@ -1,0 +1,529 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Memory compaction — reduce external fragmentation by relocating movable
+//! pages to consolidate free blocks at low addresses.
+//!
+//! Algorithm: two-pointer scan (migrate scanner UP, free scanner DOWN).
+//! Movable pages (anonymous, mapped, refcount==1) are copied to free
+//! destination pages and their PTEs are updated to the new PFN.
+//!
+//! Triggered by `alloc_pages()` when a high-order allocation fails.
+//! Reference: `refer/linux/mm/compaction.c`
+
+
+// (INV-MM-COMPACT-1: the compactor family — page migration walks
+// hold the zone lock + page pins; the descriptor writes ride the
+// migration's exclusive ownership window.)
+
+#![forbid(unsafe_code)]
+
+use rux::mm::page_desc::{
+    Page, PageFlag, pfn_to_page, pfn_to_page_mut, page_to_pfn, copy_page_contents,
+};
+use rux::mm::zone::{Zone, pfn_to_phys};
+use rux::mm::rmap::try_to_unmap_migration;
+use rux::mm::PAGE_SIZE;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+// ============================================================================
+// Types
+// ============================================================================
+
+// CompactResult is seam vocabulary (the framework allocator matches on
+// it, this module produces it); re-exported so compact::CompactResult
+// keeps resolving.
+pub use rux::mm::mm_hooks::CompactResult;
+
+/// Controls a single compaction pass over a zone.
+struct CompactControl {
+    /// Zone being compacted.
+    zone: *mut Zone,
+    /// Migrate scanner: scans upward from zone start.
+    migrate_pfn: usize,
+    /// Free scanner: scans downward from zone end.
+    free_pfn: usize,
+    /// Target allocation order.
+    order: usize,
+    /// Pages successfully migrated.
+    nr_migrated: usize,
+    /// Total pages scanned (for limiting scan depth).
+    nr_scanned: usize,
+}
+
+/// Maximum pages to scan in a single compaction pass.
+const MAX_SCAN_PAGES: usize = 4096;
+
+/// Number of migrations currently in flight (review 4.16).
+///
+/// The page-fault path consults this when it hits a migration-entry PTE:
+/// it waits while a migration is active; a marker left behind by a failed
+/// migration (migration count dropped to zero) falls through to normal
+/// fault handling instead of hanging forever.
+static ACTIVE_MIGRATIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// True while at least one compaction migration holds migration entries
+/// in user PTEs.
+pub fn migration_in_progress() -> bool {
+    ACTIVE_MIGRATIONS.load(Ordering::Acquire) > 0
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+/// Attempt to compact a zone to free a contiguous block of the given order.
+///
+/// Scans the zone with two pointers (migrate UP, free DOWN), relocating
+/// movable anonymous pages to create contiguous free space.
+///
+/// Contract: `zone` is a valid pointer to an initialized zone (the
+/// compaction caller's zone-table reference).
+pub fn compact_zone(zone: *mut Zone, order: usize) -> CompactResult {
+    let zone_ref: &mut Zone = crate::syscall::edges::boxed_mut(zone);
+    let start = zone_ref.start_pfn();
+    let end = zone_ref.end_pfn();
+
+    if start >= end {
+        return CompactResult::Skipped;
+    }
+
+    let mut cc = CompactControl {
+        zone,
+        migrate_pfn: start,
+        free_pfn: end,
+        order,
+        nr_migrated: 0,
+        nr_scanned: 0,
+    };
+
+    crate::pr_debug!(
+        "compact: start zone=[{}, {}) order={}",
+        start, end, order
+    );
+
+    let result = compact_zone_inner(&mut cc);
+
+    crate::pr_debug!(
+        "compact: done migrated={} scanned={:?}",
+        cc.nr_migrated, result
+    );
+
+    result
+}
+
+// ============================================================================
+// Core algorithm
+// ============================================================================
+
+/// Core compaction loop: alternate between free and migrate scanners.
+///
+/// Contract: cc.zone is a valid initialized-zone pointer (as above).
+fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
+    loop {
+        // Termination: scanners met or exceeded scan limit
+        if cc.migrate_pfn >= cc.free_pfn || cc.nr_scanned >= MAX_SCAN_PAGES {
+            return if cc.nr_migrated > 0 {
+                CompactResult::Complete
+            } else {
+                CompactResult::Skipped
+            };
+        }
+
+        // Phase 1: Find a free destination page
+        let dst_pfn = match find_free_page(cc) {
+            Some(pfn) => pfn,
+            None => return CompactResult::Complete,
+        };
+
+        // Phase 2: Find a movable source page
+        let src_pfn = match find_migrate_page(cc) {
+            Some(pfn) => pfn,
+            None => return CompactResult::Complete,
+        };
+
+        if src_pfn == dst_pfn {
+            continue;
+        }
+
+        // Phase 3: Migrate the page
+        if migrate_page(src_pfn, dst_pfn) {
+            cc.nr_migrated += 1;
+        }
+
+        // Phase 4: Check if we already have a suitable free block
+        if crate::syscall::edges::boxed_ref(cc.zone).has_free_block(cc.order) {
+            return CompactResult::Success;
+        }
+    }
+}
+
+// ============================================================================
+// Free page scanner (scans downward)
+// ============================================================================
+
+/// Find a free page to use as migration destination.
+///
+/// First tries the buddy free list. If empty, walks downward from
+/// `free_pfn` looking for an unmapped, free page descriptor.
+///
+/// Contract: cc.zone is a valid zone pointer; the scanner PFNs stay
+/// within the zone's range by the loop bounds.
+fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
+    let zone = crate::syscall::edges::boxed_ref(cc.zone);
+
+    // Fast path: try buddy allocator
+    if let Some(pfn) = zone.alloc_single_page() {
+        return Some(pfn);
+    }
+
+    // Slow path: walk downward from free_pfn
+    let start = zone.start_pfn();
+    while cc.free_pfn > cc.migrate_pfn && cc.free_pfn > start {
+        cc.free_pfn -= 1;
+        cc.nr_scanned += 1;
+
+        // INV-MM-2 chain arm (descriptor probe inside the zone range).
+        let p = match rux::mm::edges::page_ref_of(cc.free_pfn) {
+            Some(p) => p,
+            None => continue,
+        };
+        if p.is_free() && !p.test_flag(PageFlag::Reserved) && !p.test_flag(PageFlag::OnFreelist) {
+            return Some(cc.free_pfn);
+        }
+    }
+
+    None
+}
+
+// ============================================================================
+// Migrate page scanner (scans upward)
+// ============================================================================
+
+/// Find a movable anonymous page to relocate.
+///
+/// A page is movable if:
+/// - It is anonymous and mapped
+/// - Reference count == 1 (only page-table references)
+/// - Not reserved, not locked
+/// - Not dirty (avoids writeback complexity)
+///
+/// Contract: cc.zone is a valid zone pointer; the scanner stays in
+/// range by the loop bound.
+fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
+    let zone = crate::syscall::edges::boxed_ref(cc.zone);
+    let end = zone.end_pfn();
+
+    while cc.migrate_pfn < cc.free_pfn && cc.migrate_pfn < end {
+        let pfn = cc.migrate_pfn;
+        cc.migrate_pfn += 1;
+        cc.nr_scanned += 1;
+
+        // INV-MM-2 chain arm.
+        let p = match rux::mm::edges::page_ref_of(pfn) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Skip free pages
+        if p.is_free() && !p.test_flag(PageFlag::OnFreelist) { // R26-1: linked-free members are NOT stealable
+            continue;
+        }
+
+        // Skip reserved pages
+        if p.test_flag(PageFlag::Reserved) {
+            continue;
+        }
+
+        // Skip non-anonymous pages (page cache, slab, etc.)
+        if !p.is_anonymous() {
+            continue;
+        }
+
+        // Skip unmapped pages
+        if !rux::mm::rmap::page_mapped(p) {
+            continue;
+        }
+
+        // Skip pages with extra references (pinned, etc.)
+        if p.refcount() != 1 {
+            continue;
+        }
+
+        // Skip dirty pages (writeback not supported in compaction)
+        if p.is_dirty() {
+            continue;
+        }
+
+        // Skip pages already mid-migration (defensive: concurrent compact)
+        if p.test_flag(PageFlag::Migrating) {
+            continue;
+        }
+
+        return Some(pfn);
+    }
+
+    None
+}
+
+// ============================================================================
+// Page migration
+// ============================================================================
+
+/// Migrate a page from `src_pfn` to `dst_pfn`.
+///
+/// Steps:
+/// 1. Save the virtual address from `src_page.index`
+/// 2. `try_to_unmap_migration(src_page)` — replace PTEs with migration
+///    markers (review 4.16: plain zero-PTEs let a concurrent fault install
+///    a zero page that the remap then overwrote — silent user-write loss)
+/// 3. `copy_page_contents(src, dst)` — memcpy 4KB
+/// 4. `remap_page(dst_page, vaddr)` — install new PTEs pointing to dst
+/// 5. Transfer metadata (anon flags, mapping, index) from src to dst
+/// 6. `free_pages(src_pfn, 0)` — release source to buddy
+///
+/// The migration window (steps 2-4) is bracketed by the src page's
+/// `Migrating` flag and the global ACTIVE_MIGRATIONS counter; the fault
+/// path waits on markers while a migration is in flight.
+///
+/// # Safety
+/// Both PFNs must be valid, mapped page descriptors. The source page must
+/// be exclusively owned (refcount == 1). The destination must be free.
+///
+/// Returns true on success.
+/// Contract: both PFNs are valid descriptors; the source is
+/// exclusively owned (refcount == 1), the destination free.
+fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
+    let src = match rux::mm::edges::page_ref_of(src_pfn) {
+        Some(p) => p,
+        None => return false,
+    };
+    let dst = match rux::mm::edges::page_of(dst_pfn) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Step 1: Recover the virtual address. page.index stores the PAGE NUMBER
+    // (address / PAGE_SIZE, see page_add_anon_rmap / the fault path), not the
+    // raw address — convert before using it as a virtual address.
+    let old_vaddr = src.index() * (rux::mm::PAGE_SIZE as usize);
+    if src.index() == 0 {
+        return false;
+    }
+
+    // Claim the destination up front: refcount 1 keeps it out of
+    // find_free_page's "stealable" set during the window. On failure it
+    // leaks (refcount 1, unlinked) — safer than a second owner.
+    dst.set_refcount(1);
+
+    // Save original mapcount — transfer exactly to dst (matches Linux behavior)
+    let saved_mapcount = src.mapcount();
+
+    // Save the PTE permission bits BEFORE unmapping: try_to_unmap zeroes the
+    // PTE, so remap_page cannot recover the R/W/X/U flags afterwards, and a
+    // walk of the cleared PTE returns None (which used to silently skip the
+    // remap entirely — see review MM-C2).
+    // FD-1: the flag mask is the arch's pte_flag_bits (riscv64 keeps the
+    // historical & 0x3FF; x86_64 also carries NX so a migrated NX mapping
+    // does not widen back to executable; aarch64 carries the descriptor
+    // attribute bits) — the Sv39-only & 0x3FF that used to live here
+    // stripped x86_64's NX on migration.
+    let saved_flags_cell = core::cell::Cell::new(
+        crate::arch::mm::mm_ops::PTE_FLAGS_ANON_DEFAULT,
+    );
+    // mm-teardown vs spinlocks: collect the pinned mm Arcs under the
+    // pid-hash bucket locks (never dropped there — a last-reference drop
+    // runs the schedulable teardown), walk them after. Cell::take: the
+    // walker takes F: Fn.
+    let flag_mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<rux::mm::mm_struct::MmStruct>>::new());
+    crate::sched::for_each_task(|task| {
+        if let Some(mm_arc) = task.address_space_arc() {
+            let mut pins = flag_mm_pins.take();
+            pins.push(mm_arc);
+            flag_mm_pins.set(pins);
+        }
+    });
+    for mm_arc in flag_mm_pins.take() {
+        if saved_flags_cell.get() != crate::arch::mm::mm_ops::PTE_FLAGS_ANON_DEFAULT {
+            break;
+        }
+        // R25-2: the Arc pins the address space (see rmap.rs note) — this
+        // loop had NO lock at all.
+        if let Some((_ppn, bits)) = crate::arch::mm::mm_ops::PageTableWalker::walk(
+            mm_arc.pgd(), old_vaddr as u64,
+        ) {
+            saved_flags_cell.set(crate::arch::mm::mm_ops::pte_flag_bits(bits));
+        }
+    }
+    let saved_pte_flags = saved_flags_cell.get();
+
+    // Open the migration window: markers go into the PTEs, fault path waits.
+    src.set_flag(PageFlag::Migrating);
+    ACTIVE_MIGRATIONS.fetch_add(1, Ordering::AcqRel);
+
+    let ok = migrate_page_window(src, dst, src_pfn, old_vaddr, saved_mapcount, saved_pte_flags);
+
+    // Close the window (on both success and failure — a stale marker with
+    // no active migration is handled by the fault path falling through to
+    // normal demand-fill).
+    ACTIVE_MIGRATIONS.fetch_sub(1, Ordering::AcqRel);
+    src.clear_flag(PageFlag::Migrating);
+
+    ok
+}
+
+/// Migration window body — runs between the ACTIVE_MIGRATIONS inc/dec.
+///
+/// # Safety
+/// Same contract as migrate_page; window is open (markers allowed in PTEs).
+fn migrate_page_window(
+    src: &Page,
+    dst: &Page,
+    src_pfn: usize,
+    old_vaddr: usize,
+    saved_mapcount: i32,
+    saved_pte_flags: u64,
+) -> bool {
+    // Step 2: Unmap from all processes — PTEs get migration markers, so a
+    // fault in the window waits instead of materializing a zero page.
+    let unmapped = try_to_unmap_migration(src);
+    if unmapped == 0 {
+        return false;
+    }
+
+    // Step 3: Copy page contents
+    rux::mm::edges::compact_copy_page(src_pfn, page_to_pfn(dst as *const Page));
+
+    // Step 4: Install new PTEs pointing to dst_pfn
+    remap_page(dst, old_vaddr, saved_pte_flags);
+
+    // Step 5: Transfer mapcount from src to dst (exact copy, not per-PTE counting)
+    dst.reset_mapcount();
+    if saved_mapcount > rux::mm::page_desc::PAGE_MAPCOUNT_BIAS {
+        let delta = saved_mapcount - rux::mm::page_desc::PAGE_MAPCOUNT_BIAS;
+        for _ in 0..delta {
+            dst.add_mapcount();
+        }
+    }
+
+    // Step 5: Transfer rmap metadata from src to dst
+    let mapping = src.mapping();
+    let index = src.index();
+
+    dst.set_mapping(mapping);
+    dst.set_index(index);
+    dst.set_flag(PageFlag::Anonymous);
+    dst.set_flag(PageFlag::SwapBacked);
+    // SP-7 (stress-port r7): PRESERVE the source's Referenced state
+    // (the reference's folio_migrate_flags copies PG_referenced only
+    // when set) — dst is a freshly allocated, flag-clear frame, and the
+    // old unconditional set re-planted the stale-hot flag on every
+    // compacted page (the allocator-side plants were removed the same
+    // round; see the zone.rs alloc-path note).
+    if src.test_flag(PageFlag::Referenced) {
+        dst.set_flag(PageFlag::Referenced);
+    }
+    dst.set_refcount(1);
+
+    // LRU handover (mm-lane review): try_to_unmap_migration only
+    // decrements _mapcount — it does NOT run page_remove_rmap, so src
+    // still carries its Lru flag and lru links from the fault path that
+    // first mapped it. Freeing it to the buddy in that state leaves the
+    // LRU chain running THROUGH a free-list page; when the frame is
+    // re-allocated (clear_all_flags drops the Lru bit but not the
+    // links) and later re-enters an LRU, the stale predecessor link
+    // splices the two chains and the list double-counts the pfn.
+    // Unlink src here, and link dst in its place — the migrated page
+    // keeps its reclaim visibility (same shape as the vmscan swap-out
+    // cleanup).
+    rux::mm::mm_hooks::page_remove_lru(src);
+    rux::mm::mm_hooks::page_add_anon_lru(dst);
+
+    // Clear src metadata
+    // Note: try_to_unmap() only decrements _mapcount, not _refcount.
+    // free_pages() will reset refcount to 0 before releasing to buddy.
+
+    // Step 6: Release source page back to buddy
+    rux::mm::page_alloc::free_pages(pfn_to_phys(src_pfn), 0);
+
+    true
+}
+
+// ============================================================================
+// PTE remap
+// ============================================================================
+
+/// Install PTEs mapping `old_vaddr` to the new page (`dst`).
+///
+/// Walks all tasks' page tables looking for anonymous VMAs that contain
+/// `old_vaddr`, and updates the PTE's PPN to point to the new page.
+/// This is the reverse of `try_to_unmap()`.
+///
+/// # Safety
+/// `dst` must be a valid, initialized page descriptor. `old_vaddr` must
+/// be a virtual address that was previously mapped to the source page.
+fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
+    let new_pfn = page_to_pfn(dst as *const Page);
+    let new_ppn = new_pfn as u64;
+
+    // mm-teardown vs spinlocks: collect the pinned mm Arcs under the
+    // pid-hash bucket locks (an Arc dropped there could run the
+    // schedulable mm teardown under the spinlock), then remap after.
+    // Cell::take: the walker takes F: Fn.
+    let mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<rux::mm::mm_struct::MmStruct>>::new());
+    crate::sched::for_each_task(|task| {
+        if let Some(mm_arc) = task.address_space_arc() {
+            let mut pins = mm_pins.take();
+            pins.push(mm_arc);
+            mm_pins.set(pins);
+        }
+    });
+
+    for mm_arc in mm_pins.take() {
+        // Skip tasks without an address space
+        // R25-2: the Arc pins the address space (see rmap.rs note).
+        let mm = mm_arc.as_ref();
+
+        // Hold VMA write lock across both the VMA check and page table walk
+        // to prevent concurrent mmap/munmap from invalidating the page table
+        // structure. Write lock needed because we modify PTEs (fixes F03-06).
+        let vma_mgr = mm.vma_write();
+        let vma_matches = vma_mgr.iter().any(|vma| {
+            vma.vma_type() == rux::mm::vma::VmaType::Anonymous
+                && vma.contains(rux::mm::page::VirtAddr::new(old_vaddr))
+        });
+
+        if !vma_matches {
+            continue;
+        }
+        // vma_mgr still held — protects page table walk below
+
+        // Do NOT gate this on PageTableWalker::walk: the PTE was just
+        // cleared by try_to_unmap, so a walk returns None and the remap
+        // would be silently skipped (review MM-C2). leaf_pte_install only
+        // requires the page-table LEVELS to exist; the leaf entry is
+        // rebuilt from the saved permission bits.
+        // FD-1: the install (lock, arch leaf encoding, unlock) is the
+        // arch's leaf_pte_install — the manual Sv39 descent that used to
+        // live here indexed the root with the wrong bits on the 4-level
+        // arches and never installed the new mapping (migration always
+        // aborted after freeing the source). TLB flush stays local here;
+        // rmap's try_to_unmap pass already broadcast the shootdown.
+        let root_ppn = mm.pgd();
+        // leaf_pte_install is a safe fn — the old wrapper was vestigial
+        // (same class as leaf_pte_replace).
+        if crate::arch::mm::mm_ops::leaf_pte_install(
+            mm,
+            root_ppn,
+            old_vaddr as u64,
+            new_ppn,
+            saved_flags,
+        ) {
+            // Flush TLB for this address
+            rux::mm::flush_tlb_page_local(old_vaddr as u64);
+        }
+        // vma_mgr dropped here — lock released after PTE update
+    }
+}

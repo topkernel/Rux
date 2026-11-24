@@ -336,7 +336,7 @@ MAPPINGS = [
     {
         "name": "net/route_entry",
         "verify": "kernel/verify/src/net/route_test.rs",
-        "kernel": "kernel/net/src/net/ipv4/route.rs",  # crate-flip rung 2: net service files moved
+        "kernel": "kernel/net/src/ipv4/route.rs",  # crate-flip rung 2: net service files moved
         "type": "RouteEntry",
         "compare": ["new", "is_gateway", "is_host", "is_network", "matches"],
         "skip": [],
@@ -345,7 +345,7 @@ MAPPINGS = [
     {
         "name": "net/route_flags",
         "verify": "kernel/verify/src/net/route_test.rs",
-        "kernel": "kernel/net/src/net/ipv4/route.rs",  # crate-flip rung 2: net service files moved
+        "kernel": "kernel/net/src/ipv4/route.rs",  # crate-flip rung 2: net service files moved
         "type": "RouteFlags",
         "compare": [],
         "skip": [],
@@ -354,7 +354,7 @@ MAPPINGS = [
     {
         "name": "net/arp_entry",
         "verify": "kernel/verify/src/net/arp_test.rs",
-        "kernel": "kernel/net/src/net/arp.rs",  # crate-flip rung 2
+        "kernel": "kernel/net/src/arp.rs",  # crate-flip rung 2
         "type": "ArpEntry",
         "compare": ["new", "is_expired"],
         "skip": [],
@@ -364,7 +364,7 @@ MAPPINGS = [
     {
         "name": "net/arp_packet",
         "verify": "kernel/verify/src/net/arp_test.rs",
-        "kernel": "kernel/net/src/net/arp.rs",  # crate-flip rung 2
+        "kernel": "kernel/net/src/arp.rs",  # crate-flip rung 2
         "type": "ArpPacket",
         "compare": ["is_request", "is_reply", "sender_mac", "sender_ip", "target_mac", "target_ip"],
         "skip": ["from_bytes"],  # kernel uses &'static, verify uses &
@@ -373,7 +373,7 @@ MAPPINGS = [
     {
         "name": "net/checksum",
         "verify": "kernel/verify/src/net/checksum_test.rs",
-        "kernel": "kernel/net/src/net/ipv4/checksum.rs",
+        "kernel": "kernel/net/src/ipv4/checksum.rs",
         "type": None,  # free functions, not impl methods
         "compare": [
             "ip_checksum", "verify_ip_checksum", "pseudo_header_checksum",
@@ -524,7 +524,7 @@ MAPPINGS = [
     {
         "name": "net/tcp_rtt",
         "verify": "kernel/verify/src/net/tcp_test.rs",
-        "kernel": "kernel/net/src/net/tcp.rs",
+        "kernel": "kernel/net/src/tcp.rs",
         "type": "TcpRttEstimator",
         "compare": ["new", "update", "backoff", "reset"],
         "skip": [],
@@ -533,7 +533,7 @@ MAPPINGS = [
     {
         "name": "net/tcp_congestion",
         "verify": "kernel/verify/src/net/tcp_test.rs",
-        "kernel": "kernel/net/src/net/tcp.rs",
+        "kernel": "kernel/net/src/tcp.rs",
         "type": "TcpCongestion",
         "compare": ["new", "on_ack", "on_dup_ack", "on_timeout", "reset", "seq_before"],
         "skip": [],
@@ -542,7 +542,7 @@ MAPPINGS = [
     {
         "name": "net/tcp_hdr",
         "verify": "kernel/verify/src/net/tcp_test.rs",
-        "kernel": "kernel/net/src/net/tcp.rs",
+        "kernel": "kernel/net/src/tcp.rs",
         "type": "TcpHdr",
         "compare": [
             "dof", "header_len", "syn", "ack", "fin", "rst", "psh", "window",
@@ -558,7 +558,7 @@ MAPPINGS = [
     {
         "name": "net/ethernet",
         "verify": "kernel/verify/src/net/ethernet_test.rs",
-        "kernel": "kernel/net/src/net/ethernet.rs",
+        "kernel": "kernel/net/src/ethernet.rs",
         "type": None,  # free functions
         "compare": [
             "eth_is_valid_unicast_addr", "eth_is_multicast_addr",
@@ -597,7 +597,7 @@ MAPPINGS = [
     {
         "name": "fs/ext4/indirect",
         "verify": "kernel/verify/src/fs/ext4/indirect_test.rs",
-        "kernel": "kernel/src/fs/ext4/indirect.rs",
+        "kernel": "kernel/ext4/src/ext4/indirect.rs",
         "type": "Ext4BlockIterator",
         "compare": ["new", "next_mapping"],
         "skip": [],
@@ -607,7 +607,7 @@ MAPPINGS = [
     {
         "name": "fs/ext4/indirect_funcs",
         "verify": "kernel/verify/src/fs/ext4/indirect_test.rs",
-        "kernel": "kernel/src/fs/ext4/indirect.rs",
+        "kernel": "kernel/ext4/src/ext4/indirect.rs",
         "type": None,  # free functions
         "compare": ["max_file_size", "get_indirect_level"],
         "skip": [],
@@ -615,7 +615,7 @@ MAPPINGS = [
     {
         "name": "net/ipv4_hdr",
         "verify": "kernel/verify/src/net/ipv4_udp_test.rs",
-        "kernel": "kernel/net/src/net/ipv4/mod.rs",
+        "kernel": "kernel/net/src/ipv4/mod.rs",
         "type": "IpHdr",
         "compare": [],  # verify defines its own accessor methods; kernel IpHdr only has from_bytes/compute_checksum/is_valid_checksum
         "skip": ["from_bytes", "compute_checksum", "is_valid_checksum"],  # use &'static and kernel types
@@ -624,7 +624,7 @@ MAPPINGS = [
     {
         "name": "net/udp_hdr",
         "verify": "kernel/verify/src/net/ipv4_udp_test.rs",
-        "kernel": "kernel/net/src/net/udp.rs",
+        "kernel": "kernel/net/src/udp.rs",
         "type": "UdpHdr",
         "compare": ["source", "dest", "len", "check"],
         "skip": ["from_bytes"],  # kernel uses &'static Self
@@ -634,7 +634,7 @@ MAPPINGS = [
     {
         "name": "process/pid_allocator",
         "verify": "kernel/verify/src/process/pid_test.rs",
-        "kernel": "kernel/src/process/pid.rs",
+        "kernel": "kernel/process/src/pid.rs",
         "type": "PidAllocator",
         "compare": [
             "scan_range", "find_next_zero",
@@ -648,7 +648,7 @@ MAPPINGS = [
     {
         "name": "process/pid_funcs",
         "verify": "kernel/verify/src/process/pid_test.rs",
-        "kernel": "kernel/src/process/pid.rs",
+        "kernel": "kernel/process/src/pid.rs",
         "type": None,  # standalone functions in kernel; methods on PidAllocator in verify
         "compare": [],  # alloc_pid/free_pid are methods in verify but standalone fns in kernel
         "skip": [],
@@ -657,7 +657,7 @@ MAPPINGS = [
     {
         "name": "sched/load_weight",
         "verify": "kernel/verify/src/sched/fair_test.rs",
-        "kernel": "kernel/src/sched/fair.rs",
+        "kernel": "kernel/sched/src/fair.rs",
         "type": "LoadWeight",
         "compare": ["new", "from_nice", "update_inv_weight"],
         "skip": [],
@@ -667,7 +667,7 @@ MAPPINGS = [
     {
         "name": "sched/dl_entity",
         "verify": "kernel/verify/src/sched/deadline_test.rs",
-        "kernel": "kernel/src/sched/deadline.rs",
+        "kernel": "kernel/sched/src/deadline.rs",
         "type": "SchedDlEntity",
         "compare": ["new", "get_bw", "update_deadline", "replenish_runtime", "consume_runtime"],
         "skip": ["is_on_rq"],  # uses AtomicBool
@@ -697,7 +697,7 @@ MAPPINGS = [
     {
         "name": "fs/jbd2/header",
         "verify": "kernel/verify/src/fs/jbd2/types_test.rs",
-        "kernel": "kernel/src/fs/jbd2/types.rs",
+        "kernel": "kernel/ext4/src/jbd2/types.rs",
         "type": "journal_header_t",
         "compare": ["new", "is_valid", "block_type", "sequence"],
         "skip": [],
@@ -706,7 +706,7 @@ MAPPINGS = [
     {
         "name": "fs/jbd2/tag_size",
         "verify": "kernel/verify/src/fs/jbd2/types_test.rs",
-        "kernel": "kernel/src/fs/jbd2/types.rs",
+        "kernel": "kernel/ext4/src/jbd2/types.rs",
         "type": None,  # const fn
         "compare": [],
         "skip": [],  # journal_tag_size and journal_tags_per_block are const fns
@@ -714,7 +714,7 @@ MAPPINGS = [
     {
         "name": "fs/ext4/allocator",
         "verify": "kernel/verify/src/fs/ext4/allocator_test.rs",
-        "kernel": "kernel/src/fs/ext4/allocator.rs",
+        "kernel": "kernel/ext4/src/ext4/allocator.rs",
         "type": None,  # free function
         "compare": ["find_free_bit"],
         "skip": [],
@@ -723,7 +723,7 @@ MAPPINGS = [
     {
         "name": "mm/vmscan",
         "verify": "kernel/verify/src/mm/vmscan_test.rs",
-        "kernel": "kernel/src/mm/vmscan.rs",
+        "kernel": "kernel/mm/src/vmscan.rs",
         "type": None,  # free function
         "compare": [],
         "skip": [],  # nr_to_scan is private in kernel; verify copies the pure arithmetic
@@ -731,7 +731,7 @@ MAPPINGS = [
     {
         "name": "mm/compact",
         "verify": "kernel/verify/src/mm/compact_test.rs",
-        "kernel": "kernel/src/mm/compact.rs",
+        "kernel": "kernel/mm/src/compact.rs",
         "type": None,  # struct + enum
         "compare": [],
         "skip": [],  # CompactControl is private; verify extracts the termination logic
@@ -789,7 +789,7 @@ MAPPINGS = [
     {
         "name": "sched/rt_entity",
         "verify": "kernel/verify/src/sched/rt_test.rs",
-        "kernel": "kernel/src/sched/rt.rs",
+        "kernel": "kernel/sched/src/rt.rs",
         "type": "SchedRtEntity",
         "compare": ["new", "is_on_rq", "set_on_rq", "get_time_slice", "set_time_slice", "dec_time_slice", "reset_time_slice"],
         "skip": [],
@@ -800,7 +800,7 @@ MAPPINGS = [
     {
         "name": "sched/rt_bitmap",
         "verify": "kernel/verify/src/sched/rt_test.rs",
-        "kernel": "kernel/src/sched/rt.rs",
+        "kernel": "kernel/sched/src/rt.rs",
         "type": "RtRunQueue",
         "compare": [],
         "skip": [],  # find_highest_prio is private in kernel; verify extracts pure bitmap logic
@@ -809,7 +809,7 @@ MAPPINGS = [
     {
         "name": "fs/ext4/namei",
         "verify": "kernel/verify/src/fs/ext4/namei_test.rs",
-        "kernel": "kernel/src/fs/ext4/namei.rs",
+        "kernel": "kernel/ext4/src/ext4/namei.rs",
         "type": None,  # free functions
         "compare": ["find_entry_space", "add_entry_to_block", "create_initial_entry", "create_dot_entry", "create_dotdot_entry", "find_prev_entry"],
         "skip": [],
@@ -847,7 +847,7 @@ MAPPINGS = [
     {
         "name": "mm/swap_entry",
         "verify": "kernel/verify/src/mm/swap_test.rs",
-        "kernel": "kernel/src/mm/swap.rs",
+        "kernel": "kernel/mm/src/swap.rs",
         "type": None,  # free functions
         "compare": ["make_swap_entry", "is_swap_entry", "swap_entry_type", "swap_entry_offset"],
         "skip": [],
@@ -918,7 +918,7 @@ MAPPINGS = [
     {
         "name": "fs/ext4/superblock",
         "verify": "kernel/verify/src/fs/ext4/superblock_test.rs",
-        "kernel": "kernel/src/fs/ext4/superblock.rs",
+        "kernel": "kernel/ext4/src/ext4/superblock.rs",
         "type": "Ext4FsState",
         "compare": ["new", "has_64bit", "has_extents", "has_flex_bg"],
         "skip": [],
@@ -1035,7 +1035,7 @@ MAPPINGS = [
     {
         "name": "net/icmp_hdr",
         "verify": "kernel/verify/src/net/icmp_test.rs",
-        "kernel": "kernel/net/src/net/icmp.rs",
+        "kernel": "kernel/net/src/icmp.rs",
         "type": "IcmpHdr",
         "compare": [],
         "skip": [],  # struct-only, methods not copied
@@ -1054,7 +1054,7 @@ MAPPINGS = [
     {
         "name": "mm/hugepage_align",
         "verify": "kernel/verify/src/mm/hugepage_test.rs",
-        "kernel": "kernel/src/mm/hugepage.rs",
+        "kernel": "kernel/mm/src/hugepage.rs",
         "type": None,  # alignment helper free functions
         "compare": [
             "is_pmd_aligned", "is_pgd_aligned",
@@ -1129,7 +1129,7 @@ MAPPINGS = [
     {
         "name": "mm/hugepage_constants",
         "verify": "kernel/verify/src/mm/hugepage_test.rs",
-        "kernel": "kernel/src/mm/hugepage.rs",
+        "kernel": "kernel/mm/src/hugepage.rs",
         "type": None,  # constants-only for size/shift/mask
         "compare": [],
         "skip": [],
@@ -1184,7 +1184,7 @@ MAPPINGS = [
     {
         "name": "net/tcp_state",
         "verify": "kernel/verify/src/net/tcp_state_test.rs",
-        "kernel": "kernel/net/src/net/tcp.rs",
+        "kernel": "kernel/net/src/tcp.rs",
         "type": None,  # enum constants + free functions
         # tcp_dof / tcp_header_len / tcp_syn / tcp_ack / tcp_fin /
         # tcp_rst / tcp_psh helpers were removed from the kernel's
@@ -1198,7 +1198,7 @@ MAPPINGS = [
     {
         "name": "net/socket",
         "verify": "kernel/verify/src/net/socket_test.rs",
-        "kernel": "kernel/net/src/net/socket.rs",
+        "kernel": "kernel/net/src/socket.rs",
         "type": "SockAddrIn",
         "compare": ["port", "addr"],
         "skip": [],
@@ -1232,7 +1232,7 @@ MAPPINGS = [
     {
         "name": "fs/pipe_buffer",
         "verify": "kernel/verify/src/fs/pipe_test.rs",
-        "kernel": "kernel/src/fs/pipe.rs",
+        "kernel": "kernel/fs/src/pipe.rs",
         "type": "PipeBuffer",
         "compare": ["new", "read", "write", "available_read", "available_write"],
         "skip": [],
@@ -1263,7 +1263,7 @@ MAPPINGS = [
     {
         "name": "fs/ext4/extent",
         "verify": "kernel/verify/src/fs/ext4/extent_test.rs",
-        "kernel": "kernel/src/fs/ext4/extent.rs",
+        "kernel": "kernel/ext4/src/ext4/extent.rs",
         "type": "Ext4Extent",
         "compare": ["start_block", "length"],
         "skip": [],
@@ -1274,7 +1274,7 @@ MAPPINGS = [
     {
         "name": "fs/ext4/extent_idx",
         "verify": "kernel/verify/src/fs/ext4/extent_test.rs",
-        "kernel": "kernel/src/fs/ext4/extent.rs",
+        "kernel": "kernel/ext4/src/ext4/extent.rs",
         "type": "Ext4ExtentIdx",
         "compare": ["leaf_block"],
         "skip": [],
@@ -1293,7 +1293,7 @@ MAPPINGS = [
     {
         "name": "fs/jbd2/wrap",
         "verify": "kernel/verify/src/fs/jbd2/wrap_test.rs",
-        "kernel": "kernel/src/fs/jbd2/recovery.rs",
+        "kernel": "kernel/ext4/src/jbd2/recovery.rs",
         "type": None,  # private fn wrap_block extracted as standalone
         "compare": [],
         "skip": [],
@@ -1302,7 +1302,7 @@ MAPPINGS = [
     {
         "name": "fs/jbd2/journal_space",
         "verify": "kernel/verify/src/fs/jbd2/wrap_test.rs",
-        "kernel": "kernel/src/fs/jbd2/checkpoint.rs",
+        "kernel": "kernel/ext4/src/jbd2/checkpoint.rs",
         "type": None,  # free functions extracted
         "compare": [],
         "skip": [],
@@ -1321,7 +1321,7 @@ MAPPINGS = [
     {
         "name": "mm/oom_kill",
         "verify": "kernel/verify/src/mm/oom_kill_test.rs",
-        "kernel": "kernel/src/mm/oom_kill.rs",
+        "kernel": "kernel/mm/src/oom_kill.rs",
         "type": None,  # scoring formula extracted as standalone fn
         "compare": [],
         "skip": [],
@@ -1449,7 +1449,7 @@ MAPPINGS = [
     {
         "name": "fs/ext4/dir",
         "verify": "kernel/verify/src/fs/ext4/dir_test.rs",
-        "kernel": "kernel/src/fs/ext4/dir.rs",
+        "kernel": "kernel/ext4/src/ext4/dir.rs",
         "type": None,  # Ext4DirEntry + iterator + find_entry extracted
         "compare": [],
         "skip": [],
@@ -1458,7 +1458,7 @@ MAPPINGS = [
     {
         "name": "fs/ext4/inode",
         "verify": "kernel/verify/src/fs/ext4/inode_test.rs",
-        "kernel": "kernel/src/fs/ext4/inode.rs",
+        "kernel": "kernel/ext4/src/ext4/inode.rs",
         "type": None,  # Ext4InodeOnDisk/Ext4Inode + get_block_nr extracted
         "compare": [],
         "skip": [],
@@ -1467,7 +1467,7 @@ MAPPINGS = [
     {
         "name": "net/transport_checksum",
         "verify": "kernel/verify/src/net/transport_checksum_test.rs",
-        "kernel": "kernel/net/src/net/udp.rs",
+        "kernel": "kernel/net/src/udp.rs",
         "type": None,  # UDP/ICMP/TCP checksum functions extracted (uses ip_checksum for ICMP)
         "compare": [],
         "skip": [],
@@ -1476,7 +1476,7 @@ MAPPINGS = [
     {
         "name": "net/checksum_verify",
         "verify": "kernel/verify/src/net/checksum_verify_test.rs",
-        "kernel": "kernel/net/src/net/ipv4/checksum.rs",
+        "kernel": "kernel/net/src/ipv4/checksum.rs",
         "type": None,  # ip_checksum extracted
         "compare": [],
         "skip": [],
@@ -1504,7 +1504,7 @@ MAPPINGS = [
     {
         "name": "sched/rt_bitmap",
         "verify": "kernel/verify/src/sched/rt_bitmap_test.rs",
-        "kernel": "kernel/src/sched/rt.rs",
+        "kernel": "kernel/sched/src/rt.rs",
         "type": "RtRunQueue",
         "compare": [],
         "skip": [],  # find_highest_prio is private; verify extracts pure bitmap logic
@@ -1513,7 +1513,7 @@ MAPPINGS = [
     {
         "name": "ipc/sysv_msg",
         "verify": "kernel/verify/src/ipc/sysv_msg_test.rs",
-        "kernel": "kernel/src/ipc/sysv_msg.rs",
+        "kernel": "kernel/ipc/src/sysv_msg.rs",
         "type": None,  # find_msg_match extracted (Msg simplified to mtype-only)
         "compare": [],
         "skip": [],
@@ -1560,7 +1560,7 @@ MAPPINGS = [
     {
         "name": "syscall/clamp_rw_count",
         "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",
-        "kernel": "kernel/syscall/src/syscall/io.rs",
+        "kernel": "kernel/syscall/src/io.rs",
         "type": None,
         "compare": ["clamp_rw_count"],
         "skip": [],

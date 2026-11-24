@@ -18,7 +18,7 @@ pub fn test_fork() {
 
     // Test 1: Basic fork functionality
     // Note: do_fork() returns None when called from idle task context
-    match crate::process::do_fork() {
+    match crate::do_fork() {
         Some(child_pid) => {
             if child_pid > 0 {
                 test_pass(&format!("basic fork (child PID={})", child_pid));
@@ -35,7 +35,7 @@ pub fn test_fork() {
     let mut success_count = 0;
     let mut fork_unavailable = false;
     for i in 0..3 {
-        match crate::process::do_fork() {
+        match crate::do_fork() {
             Some(child_pid) => {
                 if child_pid > 0 {
                     success_count += 1;

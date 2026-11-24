@@ -238,4 +238,4 @@ pub use rmap::{
 };
 // hugepage: flipped to the mm crate (M1b) — its items no longer
 // re-export at the mm root; framework consumers reach them through
-// the crate's crate::mm::hugepage (zero such consumers exist today).
+// the crate's crate::hugepage (zero such consumers exist today).

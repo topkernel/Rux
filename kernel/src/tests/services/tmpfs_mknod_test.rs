@@ -17,29 +17,29 @@
 //! Runs on the boot task (root), so the CAP_MKNOD gate passes.
 
 use rux::tests::{test_fail, test_group_start, test_pass};
-use crate::fs::inode::InodeMode;
-use crate::fs::vfs::{file_read, file_write};
+use rux::fs::inode::InodeMode;
+use rux::fs::vfs::{file_read, file_write};
 
 pub fn test_tmpfs_mknod() {
     test_group_start("tmpfs-mknod");
 
     // ---- 1. dev_t encode/decode parity (new_encode_dev/new_decode_dev) --
     // makedev(1,3) == 0x103; the round trip must preserve major/minor.
-    let dn = crate::fs::dev_t::DevNo::new(1, 3);
+    let dn = rux::fs::dev_t::DevNo::new(1, 3);
     if dn.to_user_dev() == 0x103 {
         test_pass("to_user_dev(1:3) == 0x103");
     } else {
         test_fail("to_user_dev(1:3)", &alloc::format!("{:#x}", dn.to_user_dev()));
     }
-    let back = crate::fs::dev_t::DevNo::from_user_dev(0x103);
+    let back = rux::fs::dev_t::DevNo::from_user_dev(0x103);
     if back.major == 1 && back.minor == 3 {
         test_pass("from_user_dev(0x103) == 1:3");
     } else {
         test_fail("from_user_dev(0x103)", &alloc::format!("{}:{}", back.major, back.minor));
     }
     // Large minors split across the two fields: minor 511 (0x1FF).
-    let dn2 = crate::fs::dev_t::DevNo::new(254, 511);
-    let rt = crate::fs::dev_t::DevNo::from_user_dev(dn2.to_user_dev());
+    let dn2 = rux::fs::dev_t::DevNo::new(254, 511);
+    let rt = rux::fs::dev_t::DevNo::from_user_dev(dn2.to_user_dev());
     if rt.major == 254 && rt.minor == 511 {
         test_pass("from_user_dev(to_user_dev(254:511)) round trip");
     } else {
@@ -48,19 +48,19 @@ pub fn test_tmpfs_mknod() {
 
     // ---- 2. mknod a char node on a fresh tmpfs mounted at /tmp/mknodtest -
     let mp = "/tmp/mknodtest";
-    match crate::fs::mount::do_mount("none", mp, "tmpfs", 0, None) {
+    match rux::fs::mount::do_mount("none", mp, "tmpfs", 0, None) {
         Ok(()) => test_pass("tmpfs mount /tmp/mknodtest"),
         Err(_) => test_fail("tmpfs mount /tmp/mknodtest", "do_mount failed"),
     }
     let null_path = alloc::format!("{}/null", mp);
     // mknod(2) userspace args: mode S_IFCHR|0666, dev makedev(1,3)=0x103.
-    match crate::fs::vfs::vfs_mknod(&null_path, InodeMode::S_IFCHR | 0o666, 0x103) {
+    match rux::fs::vfs::vfs_mknod(&null_path, InodeMode::S_IFCHR | 0o666, 0x103) {
         Ok(()) => test_pass("vfs_mknod tmpfs char node"),
         Err(e) => test_fail("vfs_mknod tmpfs char node", &alloc::format!("errno {}", -e)),
     }
 
     // EEXIST on the taken name (do_mknodat user_path_create parity).
-    match crate::fs::vfs::vfs_mknod(&null_path, InodeMode::S_IFCHR | 0o666, 0x103) {
+    match rux::fs::vfs::vfs_mknod(&null_path, InodeMode::S_IFCHR | 0o666, 0x103) {
         Err(e) if e == -(crate::errno::constants::EEXIST) => {
             test_pass("mknod EEXIST on taken name")
         }
@@ -69,7 +69,7 @@ pub fn test_tmpfs_mknod() {
 
     // EPERM on S_IFDIR (may_mknod).
     let dir_path = alloc::format!("{}/adir", mp);
-    match crate::fs::vfs::vfs_mknod(&dir_path, InodeMode::S_IFDIR | 0o755, 0) {
+    match rux::fs::vfs::vfs_mknod(&dir_path, InodeMode::S_IFDIR | 0o755, 0) {
         Err(e) if e == -(crate::errno::constants::EPERM) => {
             test_pass("mknod S_IFDIR -> EPERM")
         }
@@ -77,8 +77,8 @@ pub fn test_tmpfs_mknod() {
     }
 
     // ---- 3. stat: S_IFCHR + st_rdev userspace encoding -------------------
-    let mut st = crate::fs::Stat::default();
-    let st_ok = crate::fs::vfs::path_lookup(&null_path, 0)
+    let mut st = rux::fs::Stat::default();
+    let st_ok = rux::fs::vfs::path_lookup(&null_path, 0)
         .ok()
         .and_then(|vp| vp.inode)
         .map(|inode| inode.op_getattr(&mut st));
@@ -107,11 +107,11 @@ pub fn test_tmpfs_mknod() {
     // Walk the directory via file_opendir + getdents64 (the same stream
     // userspace sees) and parse linux_dirent64 records:
     // u64 d_ino | i64 d_off | u16 d_reclen | u8 d_type | char d_name[].
-    let dtype_found = crate::fs::vfs::file_opendir(mp, 0 /*O_RDONLY*/).ok().and_then(|fd| {
+    let dtype_found = rux::fs::vfs::file_opendir(mp, 0 /*O_RDONLY*/).ok().and_then(|fd| {
         let mut buf = [0u8; 512];
         let mut found = false;
         loop {
-            match crate::fs::vfs::file_getdents64(fd, &mut buf, 512) {
+            match rux::fs::vfs::file_getdents64(fd, &mut buf, 512) {
                 Ok(0) | Err(_) => break,
                 Ok(total) => {
                     let mut off = 0usize;
@@ -125,7 +125,7 @@ pub fn test_tmpfs_mknod() {
                         let name = &buf[off + 19..off + reclen];
                         let name = name.split(|&b| b == 0).next().unwrap_or(&[]);
                         if name == b"null".as_slice()
-                            && dtype == crate::fs::inode::file_type::DT_CHR
+                            && dtype == rux::fs::inode::file_type::DT_CHR
                         {
                             found = true;
                         }
@@ -139,7 +139,7 @@ pub fn test_tmpfs_mknod() {
         }
         // fd is a valid directory descriptor from file_opendir (the
         // safe close since the syscall-crate era).
-        let _ = crate::fs::close_file_fd(fd);
+        let _ = rux::fs::close_file_fd(fd);
         Some(found)
     });
     if dtype_found == Some(true) {
@@ -150,7 +150,7 @@ pub fn test_tmpfs_mknod() {
 
     // ---- 5. open binds through the CharDev registry by rdev --------------
     // /dev/null ops: write discards (full length), read returns EOF (0).
-    match crate::fs::file_open(&null_path, 0o2 /*O_RDWR*/, 0) {
+    match rux::fs::file_open(&null_path, 0o2 /*O_RDWR*/, 0) {
         Ok(fd) => {
             test_pass("open tmpfs /dev/null (registry bind)");
             let wbuf = b"discard-me";
@@ -164,19 +164,19 @@ pub fn test_tmpfs_mknod() {
                 r => test_fail("read via null ops", &alloc::format!("{:?}", r)),
             }
             // SAFETY: fd is a valid descriptor from file_open above.
-            let _ = crate::fs::close_file_fd(fd);
+            let _ = rux::fs::close_file_fd(fd);
         }
         Err(_) => test_fail("open tmpfs /dev/null (registry bind)", "file_open failed"),
     }
 
     // ---- 6. hard link preserves the device identity ----------------------
     let link_path = alloc::format!("{}/null-link", mp);
-    match crate::fs::vfs::vfs_link(&null_path, &link_path) {
+    match rux::fs::vfs::vfs_link(&null_path, &link_path) {
         Ok(()) => test_pass("hard link a device node"),
         Err(_) => test_fail("hard link a device node", "vfs_link failed"),
     }
-    let mut st2 = crate::fs::Stat::default();
-    let st2_ok = crate::fs::vfs::path_lookup(&link_path, 0)
+    let mut st2 = rux::fs::Stat::default();
+    let st2_ok = rux::fs::vfs::path_lookup(&link_path, 0)
         .ok()
         .and_then(|vp| vp.inode)
         .map(|inode| inode.op_getattr(&mut st2));

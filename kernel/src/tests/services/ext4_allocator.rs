@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::fs::ext4::allocator::find_free_bit;
+use crate::ext4::allocator::find_free_bit;
 use rux::tests::{test_pass, test_fail, test_group_start};
 
 pub fn test_ext4_allocator() {

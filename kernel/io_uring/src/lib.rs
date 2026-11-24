@@ -19,7 +19,7 @@
 //! and the raw read_volatile head/tail pair rides cq_completed().
 //! No hook table is needed: every moved function's callers are either
 //! in this crate or in syscall (whose crate::io_uring path now
-//! resolves to THIS crate's merged module — the allowed downward edge).
+//! resolves to THIS crate's root — the allowed downward edge).
 
 #![forbid(unsafe_code)]
 #![no_std]
@@ -32,32 +32,28 @@ pub use rux::{arch, config, console, debug, drivers, errno, fs, interrupt,
 pub use rux::{pr_debug, pr_err, pr_info, pr_warn, println};
 extern crate alloc;
 
-/// The merged io_uring tree at the historical crate::io_uring path:
-/// THIS crate's policy files plus the framework's mechanism module
-/// re-exported (the ipc binder pattern — syscall's
-/// crate::io_uring::X paths keep resolving unchanged).
-pub mod io_uring {
-    // the policy files (THIS crate's own — the sole copies)
-    pub mod submit;
-    pub mod ops;
-    pub mod syscall_api;
+// The policy files (THIS crate's own — the sole copies), flat at the
+// crate root (seed-core-design 2c.2).
+pub mod submit;
+pub mod ops;
+pub mod syscall_api;
 
-    // The names the moved policy files' `use super::*` expects (the
-    // old framework mod.rs's own imports — the ipc recipe's
-    // glob-surface contract).
-    #[allow(unused_imports)]
-    use crate::fs::{File, FileOps, FileFlags};
-    #[allow(unused_imports)]
-    use crate::alloc::sync::Arc;
+// The names the moved policy files' `use super::*` expects (the old
+// framework mod.rs's own imports — the ipc recipe's glob-surface
+// contract).
+#[allow(unused_imports)]
+use crate::fs::{File, FileOps, FileFlags};
+#[allow(unused_imports)]
+use crate::alloc::sync::Arc;
 
-    // The moved syscall entries at their historical
-    // crate::io_uring::sys_io_uring_* paths (syscall's NR 425/426/427
-    // wrappers keep resolving unchanged).
-    pub use syscall_api::{sys_io_uring_setup, sys_io_uring_enter, sys_io_uring_register};
-    pub use submit::{submit_sqes, wait_for_cqes};
-    pub use ops::io_uring_dispatch_op;
+// The moved syscall entries at their historical
+// crate::io_uring::sys_io_uring_* paths (syscall's NR 425/426/427
+// wrappers keep resolving unchanged).
+pub use syscall_api::{sys_io_uring_setup, sys_io_uring_enter, sys_io_uring_register};
+pub use submit::{submit_sqes, wait_for_cqes};
+pub use ops::io_uring_dispatch_op;
 
-    // the framework's mechanism at the historical path (types, ring
-    // views, lifecycle, mmap, create, post_cqe, ops table).
-    pub use rux::io_uring::*;
-}
+// the framework's mechanism at the historical path (types, ring
+// views, lifecycle, mmap, create, post_cqe, ops table) — the merged
+// view (`pub use io_uring;`) in the syscall crate resolves through it.
+pub use rux::io_uring::*;

@@ -1,0 +1,1208 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+//! Process creation (fork/clone) implementation
+//!
+//! Fork implementation:
+//! - pt_regs is stored at the TOP of kernel stack (not heap allocated)
+//! - child's thread.sp points to pt_regs
+//! - child's thread.ra points to ret_from_fork
+
+#![forbid(unsafe_code)]
+use crate::task::{Task, TaskState, Pid};
+use crate::fs::FdTable;
+use crate::arch::pt_regs::PtRegs;
+
+// ============================================================================
+// Clone flags
+// ============================================================================
+
+/// Share address space (threads)
+pub const CLONE_VM: u64 = 0x00000100;
+/// Share filesystem info
+pub const CLONE_FS: u64 = 0x00000200;
+/// Share file descriptor table
+pub const CLONE_FILES: u64 = 0x00000400;
+/// Share signal handlers
+pub const CLONE_SIGHAND: u64 = 0x00000800;
+/// Set TLS
+pub const CLONE_SETTLS: u64 = 0x00080000;
+/// Set child TID in parent
+pub const CLONE_PARENT_SETTID: u64 = 0x00100000;
+/// Clear TID on child exit
+pub const CLONE_CHILD_CLEARTID: u64 = 0x00200000;
+/// Set TID in child
+pub const CLONE_CHILD_SETTID: u64 = 0x01000000;
+/// Same thread group
+pub const CLONE_THREAD: u64 = 0x00010000;
+/// vfork semantics
+pub const CLONE_VFORK: u64 = 0x00004000;
+/// New mount namespace group (accepted, not implemented)
+pub const CLONE_NEWNS: u64 = 0x00020000;
+/// Share System V semaphore undo state (accepted; undo table copied anyway)
+pub const CLONE_SYSVSEM: u64 = 0x00040000;
+
+/// Clone arguments structure
+pub struct CloneArgs {
+    /// Clone flags
+    pub flags: u64,
+    /// New stack pointer (0 means use parent stack)
+    pub stack: u64,
+    /// TID pointer in parent (CLONE_PARENT_SETTID)
+    pub parent_tid: *mut i32,
+    /// TID pointer in child (CLONE_CHILD_SETTID, CLONE_CHILD_CLEARTID)
+    pub child_tid: *mut i32,
+    /// TLS pointer (CLONE_SETTLS)
+    pub tls: u64,
+    /// Signal the parent gets at child exit (low CSIGNAL byte of the
+    /// legacy clone flags, or clone3's own field). 0 = none.
+    pub exit_signal: u8,
+}
+
+/// Create child process
+///
+/// # Returns
+/// - Some(pid): PID of child process (returned in parent)
+/// - None: Creation failed
+pub fn do_fork() -> Option<Pid> {
+    do_clone(CloneArgs {
+        flags: 0,
+        stack: 0,
+        parent_tid: core::ptr::null_mut(),
+        child_tid: core::ptr::null_mut(),
+        tls: 0,
+        exit_signal: 17, // SIGCHLD
+    })
+    .ok()
+}
+
+/// copy_thread - thread context copy
+///
+/// Sets up child's context so it will return to user mode via ret_from_fork.
+///
+/// Key points:
+/// 1. pt_regs is stored at kernel stack top (not heap allocated)
+/// 2. child->thread.sp = pt_regs (stack pointer points to saved registers)
+/// 3. child->thread.ra = ret_from_fork (return address for context switch)
+/// 4. child pt_regs.a0 = 0 (fork returns 0 in child)
+///
+/// # Arguments
+/// - task: Child task to set up
+/// - args: Clone arguments
+/// - parent_regs: Parent's current pt_regs
+///
+/// # Returns
+/// - Some(()) on success
+/// - None on failure
+fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Option<()> {
+    // Typed trap-frame view (Task::pt_regs_mut): the PtRegs-sized window
+    // at the top of the child's own kernel stack. parent_regs is the
+    // current task's valid trap frame; the child has not run yet, so the
+    // frame is exclusively ours to write.
+    let regs = task.pt_regs_mut()?;
+
+    // Copy parent's pt_regs to child (PtRegs is Copy on every arch).
+    *regs = *parent_regs;
+
+    {
+        // ===== Clear callee-saved registers =====
+        // CRITICAL: Clear kernel-side callee-saved registers for the child
+        // (its user-side values live in the copied pt_regs)
+        {
+            let thread = task.thread_mut();
+            crate::thread_clear_callee_saved(thread);
+        }
+
+        // ===== Inherit the parent's floating-point state (POSIX) =====
+        // Save the parent's LIVE registers into its thread struct first,
+        // then copy the saved image and mark the child CLEAN — the child
+        // must observe the same FP values the parent would have.
+        // (sched::current() is the typed &mut Task handle; parent_task
+        // is the currently running task, distinct from the child.)
+        if let Some(parent_task) = crate::sched::current() {
+            #[cfg(feature = "riscv64")]
+            {
+                // save_fpu reads+stores the currently running task's live
+                // register image (INV-PROC-FORK-FPU-1: current task,
+                // syscall context). The child-side copies are plain
+                // struct operations.
+                crate::unsafe_edges::fork_save_parent_fpu(parent_task);
+                let pfpu = parent_task.thread().fpu;
+                let ct = task.thread_mut();
+                ct.fpu.copy_from_slice(&pfpu);
+                ct.mark_fpu_clean();
+                // Vector state inherits the same way (POSIX: the
+                // child observes the parent's vector values).
+                crate::unsafe_edges::fork_save_parent_vstate(parent_task);
+                let pvs = parent_task.thread().vstate_valid;
+                let pvcsrs = parent_task.thread().vcsrs;
+                let pvregs = parent_task.thread().vregs;
+                let ct = task.thread_mut();
+                ct.vstate_valid = pvs;
+                ct.vcsrs.copy_from_slice(&pvcsrs);
+                ct.vregs.copy_from_slice(&pvregs);
+                ct.mark_vstate_clean();
+            }
+            #[cfg(feature = "x86_64")]
+            {
+                // LAZY FPU: only save when the parent's live
+                // registers can be dirty (CR0.TS clear = parent used
+                // FP since its switch-in). With TS set the saved
+                // image in thread.fpu is already the parent's
+                // current state (never dirtied) — and xsave under TS
+                // would trap anyway. The child still receives the
+                // clean initial image (mark_fpu_clean), unchanged.
+                if !crate::arch::cpu::ts_set() {
+                    // fpu_save_for_switch xsave's into this task's own
+                    // image; TS is clear (INV-PROC-FORK-FPU-1).
+                    crate::unsafe_edges::fork_save_parent_fpu(parent_task);
+                }
+                let pfpu = parent_task.thread().fpu;
+                let ct = task.thread_mut();
+                ct.fpu.bytes.copy_from_slice(&pfpu.bytes);
+                ct.mark_fpu_clean();
+            }
+        }
+
+        // ===== pt_regs is COPIED from parent =====
+        // Copy parent's pt_regs (including s0-s11) to child.
+        // The child inherits parent's callee-saved register values.
+        // This is CORRECT because:
+        // 1. s0-s11 are callee-saved, so they're preserved across function calls
+        // 2. The fork wrapper's caller expects s0-s11 to be unchanged
+        // 3. Only a0 (return value) is different in child (a0=0)
+        // DO NOT clear pt_regs.s0-s11 - child should inherit parent's values!
+
+        // Child process return value is 0
+        regs.set_return_value(0);
+        #[cfg(feature = "riscv64")]
+        {
+            regs.orig_a0 = 0;
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            regs.orig_rax = 0;
+        }
+
+        // Mark the frame user-mode so the child returns to user mode
+        regs.mark_user_frame();
+
+        // Use new stack if specified (CLONE_VM | CLONE_SETTLS uses this)
+        if args.stack != 0 {
+            regs.set_user_stack_pointer(args.stack);
+        }
+
+        // ===== Inherit FS/GS bases (x86_64 TLS) =====
+        // Linux copy_thread copies current->thread.{fsbase,gsbase} into
+        // the child: a plain fork() child (no CLONE_SETTLS) starts with
+        // the parent's TLS layout, and glibc touches TLS (errno et al.)
+        // on its very first instructions in the child — with the base
+        // left 0 the first access faults at ~(0 + slot offset).
+        #[cfg(feature = "x86_64")]
+        if let Some(parent_task) = crate::sched::current() {
+            // parent_task is the currently running task; we only read
+            // its thread state before the child ever runs.
+            let pfs = parent_task.thread().fs_base;
+            let pgs = parent_task.thread().gs_base;
+            let ct = task.thread_mut();
+            ct.fs_base = pfs;
+            ct.gs_base = pgs;
+        }
+
+        // ===== Inherit TPIDR_EL0 (aarch64 TLS) — same contract =====
+        // The child of a plain fork() must observe the parent's TLS
+        // base: glibc's pthread_atfork child handlers touch TLS (errno,
+        // locks) before any user code could re-install it. The saved
+        // tp_value and the live register are equal for the current task
+        // at every kernel point (the kernel never writes TPIDR_EL0
+        // outside __switch_to), so the live read IS the current value.
+        #[cfg(feature = "aarch64")]
+        {
+            let live_tp: u64 =
+                crate::unsafe_edges::read_user_tp_register();
+            task.thread_mut().tp_value = live_tp;
+        }
+
+        // Set TLS if requested
+        if args.flags & CLONE_SETTLS != 0 {
+            crate::set_user_tls(task, args.tls);
+        }
+
+        // Set up thread struct for context switch
+        extern "C" {
+            fn ret_from_fork();
+        }
+
+        let thread = task.thread_mut();
+        // First switch-in "returns" into ret_from_fork on the pt_regs stack
+        crate::thread_set_entry(thread, ret_from_fork as u64, regs as *mut PtRegs as u64);
+
+        // Callee-saved registers (s0-s11) are cleared to 0 above.
+        // This is correct because:
+        // 1. Child's user-space callee-saved registers are in pt_regs (inherited from parent)
+        // 2. Child's kernel-space callee-saved registers start at 0 (clean slate)
+        // 3. When child is scheduled in, __switch_to restores zeros to s0-s11
+        // 4. When child returns to user mode, s0-s11 are restored from pt_regs
+    }
+
+    Some(())
+}
+
+/// Clone flags we understand (accepted; namespace/io flags are accepted
+/// and ignored — no namespace support yet). Unknown bits are rejected
+/// with EINVAL: silently mis-executing a future flag is worse.
+const CLONE_KNOWN_FLAGS: u64 = CLONE_VM
+    | CLONE_FS
+    | CLONE_FILES
+    | CLONE_SIGHAND
+    | CLONE_PIDFD       // 0x00001000 (accepted, no pidfd yet)
+    | CLONE_PTRACE      // 0x00002000
+    | CLONE_VFORK
+    | CLONE_PARENT      // 0x00008000 (accepted; grandparent reparenting
+                        //  not done — harmless for musl)
+    | CLONE_THREAD
+    | CLONE_NEWNS       // 0x00020000
+    | CLONE_SYSVSEM     // 0x00040000 (undo table is copied anyway)
+    | CLONE_SETTLS
+    | CLONE_PARENT_SETTID
+    | CLONE_CHILD_CLEARTID
+    | CLONE_CHILD_SETTID
+    | CLONE_DETACHED    // 0x00400000 legacy, harmless
+    | CLONE_UNTRACED    // 0x00800000
+    | CLONE_NEWCGROUP   // 0x02000000
+    | CLONE_NEWUTS      // 0x04000000
+    | CLONE_NEWIPC      // 0x08000000
+    | CLONE_NEWUSER     // 0x10000000
+    | CLONE_NEWPID      // 0x20000000
+    | CLONE_NEWNET      // 0x40000000
+    | CLONE_IO          // 0x80000000
+    | CLONE_CLEAR_SIGHAND; // 0x100000000 (clone3-only; glibc posix_spawn)
+/// CLONE_CLEAR_SIGHAND (uapi, 1<<32): reset every signal handler of the
+/// child to SIG_DFL (kernel flush_signal_handlers). glibc's posix_spawn
+/// requests it with CLONE_VM|CLONE_VFORK so the spawn helper starts with
+/// clean dispositions without running sigaction code in the shared
+/// address space (ub2404: every v255 executor spawn uses this shape).
+const CLONE_CLEAR_SIGHAND: u64 = 0x1_0000_0000;
+const CLONE_PIDFD: u64 = 0x00001000;
+const CLONE_PTRACE: u64 = 0x00002000;
+const CLONE_PARENT: u64 = 0x00008000;
+const CLONE_DETACHED: u64 = 0x00400000;
+const CLONE_UNTRACED: u64 = 0x00800000;
+const CLONE_NEWCGROUP: u64 = 0x02000000;
+const CLONE_NEWUTS: u64 = 0x04000000;
+const CLONE_NEWIPC: u64 = 0x08000000;
+const CLONE_NEWUSER: u64 = 0x10000000;
+const CLONE_NEWPID: u64 = 0x20000000;
+const CLONE_NEWNET: u64 = 0x40000000;
+const CLONE_IO: u64 = 0x80000000;
+
+/// errno helpers (negative i32, syscall convention)
+fn einval() -> i32 { crate::errno::Errno::InvalidArgument.as_neg_i32() }
+fn eagain() -> i32 { crate::errno::Errno::TryAgain.as_neg_i32() }
+fn enomem() -> i32 { crate::errno::Errno::OutOfMemory.as_neg_i32() }
+fn efault() -> i32 { crate::errno::Errno::BadAddress.as_neg_i32() }
+
+/// Clone-flag validation diagnostics: ONE budgeted line per family.
+///
+/// The clone(2) flag checks are genuine error paths (the caller gets
+/// EINVAL), but a guest that retries a rejected combination prints one
+/// line per attempt. The family keeps the first 8 lines and stays quiet
+/// afterwards (RETIRED by the probe-retire lane).
+fn clone_warn_budgeted(msg: &str) {
+    static CLONE_WARN_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    if CLONE_WARN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+        crate::pr_warn!("{}", msg);
+    }
+}
+
+/// Create child process/thread
+///
+/// # Arguments
+/// - args: Clone arguments
+///
+/// # Returns
+/// - Ok(pid): PID of child process/thread (returned in parent)
+/// - Err(errno): negative errno — EINVAL for illegal flag combinations,
+///   EAGAIN when the PID space is exhausted, ENOMEM for allocation
+///   failures, EFAULT when a CLONE_*SETTID pointer is unwritable.
+pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
+    use crate::arch::trap::current_pt_regs;
+
+    // Validate clone flag constraints (matches Linux kernel checks):
+    // CLONE_THREAD requires CLONE_SIGHAND (kernel/fork.c clone3_args_check)
+    // CLONE_SIGHAND requires CLONE_VM (kernel/fork.c copy_process)
+    //
+    // RETIRED (probe-retire): every arm of this validation printed
+    // unconditionally — a guest that retries a bad flag combination
+    // ("clone: unknown flags 0x100004100") could print one line per
+    // attempt. The family keeps ONE budgeted line (first 8) — the errno
+    // the caller gets is unchanged.
+    if args.flags & CLONE_THREAD != 0 && args.flags & CLONE_SIGHAND == 0 {
+        clone_warn_budgeted("clone: CLONE_THREAD requires CLONE_SIGHAND");
+        return Err(einval());
+    }
+    if args.flags & CLONE_SIGHAND != 0 && args.flags & CLONE_VM == 0 {
+        clone_warn_budgeted("clone: CLONE_SIGHAND requires CLONE_VM");
+        return Err(einval());
+    }
+    // CLONE_FS|CLONE_NEWNS is mutually exclusive (kernel/fork.c copy_fs):
+    // the child cannot both SHARE the parent's fs info and get a private
+    // copy of its mount namespace (LTP clone302 "fs-newns").
+    if args.flags & CLONE_NEWNS != 0 && args.flags & CLONE_FS != 0 {
+        clone_warn_budgeted("clone: CLONE_NEWNS is incompatible with CLONE_FS");
+        return Err(einval());
+    }
+    // CLONE_CLEAR_SIGHAND|CLONE_SIGHAND is mutually exclusive (kernel
+    // copy_process: one shares the handlers, the other wipes them).
+    if args.flags & CLONE_CLEAR_SIGHAND != 0 && args.flags & CLONE_SIGHAND != 0 {
+        clone_warn_budgeted("clone: CLONE_CLEAR_SIGHAND is incompatible with CLONE_SIGHAND");
+        return Err(einval());
+    }
+    // Unknown flag bits (excluding the low CSIGNAL byte) → EINVAL.
+    // (The legacy-clone sign-extension garbage is already discarded by
+    // sys_clone's lower_32_bits mask — Linux parity — so this check only
+    // ever sees real flag bits.)
+    if args.flags & !CLONE_KNOWN_FLAGS & !0xff != 0 {
+        clone_warn_budgeted(&alloc::format!("clone: unknown flags {:#x}", args.flags));
+        return Err(einval());
+    }
+
+    // current is the parent task's typed handle (sched::current()), valid
+    // throughout clone; task_ptr is freshly allocated by alloc_task_slot().
+    // All modifications to child task fields are done before it is
+    // enqueued, so no concurrent access.
+    #[cfg(feature = "debug-futex-trace")]
+    {
+        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+        let pid = crate::sched::current().map(|c| c.pid() as u64).unwrap_or(0);
+        taskdump_raw_line(b"FTX CLONE pid=");
+        taskdump_dec(pid);
+        taskdump_raw_line(b" flags=");
+        let f = args.flags;
+        let mut sh: i32 = 64;
+        while sh > 0 {
+            sh -= 4;
+            let nb = ((f >> sh) & 0xF) as u8;
+            taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+        }
+        taskdump_raw_line(b" stack=");
+        taskdump_dec(args.stack);
+        taskdump_raw_line(b"\n");
+    }
+    {
+        // Get current task (parent process) — the typed &'static mut
+        // handle; pointer-taking APIs receive `current as *mut Task` at
+        // their call sites, and no whole-body unsafe wrapper remains.
+        let current = match crate::sched::current() {
+            Some(c) => c,
+            None => return Err(enomem()),
+        };
+
+        // forkprof (cmdline-gated): phase timings for the plain-fork arm
+        // only (CLONE_VM clones exercise the share path, not the mm copy
+        // this probe decomposes). One relaxed load when off.
+        let fp = crate::debug::forkprof::on() && args.flags & CLONE_VM == 0 && args.flags & CLONE_VFORK == 0;
+        let fp_t0 = if fp { crate::debug::forkprof::now() } else { 0 };
+        if fp {
+            crate::debug::forkprof::trace(
+                crate::debug::forkprof::T_FORK_ENTRY,
+                current.pid() as u32,
+            );
+        }
+
+        // RLIMIT_NPROC (process-forking clones only — threads are not
+        // process products). Simplification per the P1 rlimits plan: the
+        // count is GLOBAL user processes (tasks with an address space —
+        // kernel threads and idle are excluded) rather than a per-uid
+        // aggregate; there is no uid hash yet. Linux fails fork with
+        // EAGAIN here.
+        // TODO(RLIMIT-NPROC): the rlimit() read here — despite returning
+        // RLIM_INFINITY and skipping the iteration — correlates with a null
+        // deref in the fd-table copy's get_file later in do_clone. Root
+        // cause not yet isolated; the check is disabled until then. The
+        // rlimits copy below and all other enforcement points are active.
+        if false && args.flags & CLONE_THREAD == 0 {
+            let (nproc_cur, _) = current
+                .rlimit(crate::task::rlimit_res::NPROC);
+            if nproc_cur != u64::MAX {
+                let mut user_procs: u64 = 0;
+                crate::pid_hash::pid_hash_for_each_task(|t| {
+                    if t.address_space().is_some() {
+                        user_procs += 1;
+                    }
+                });
+                if user_procs >= nproc_cur {
+                    return Err(eagain());
+                }
+            }
+        }
+
+        // Get parent's current PtRegs.
+        //
+        // SMP fix (same family as the exec trap-frame fix): derive the frame
+        // from THE TASK, never from the per-CPU current_pt_regs() slot. That
+        // slot is indexed by tp->ti_cpu and is only valid for the exact trap
+        // that last stored it; a fork racing a nested interrupt (or a task
+        // whose ti_cpu was steered) read ANOTHER task's / a stale frame —
+        // the child then resumed userspace with foreign registers (observed:
+        // pipeline children issuing wait4/sigsuspend they never called, dash
+        // passing a garbage sigsuspend mask pointer 0x26, and the resulting
+        // permanent sigsuspend wedge). task.pt_regs() is the canonical
+        // outermost user frame on THIS task's kernel stack; for a
+        // syscall-context fork it is exactly the clone syscall's frame.
+        let parent_pt_regs = match current.pt_regs_mut() {
+            Some(r) => r,
+            None => return Err(enomem()),
+        };
+
+        // Allocate task slot from scheduler
+        // Note: alloc_task_slot calls new_task_at which already allocates kernel stack
+        let fp_t_alloc = if fp { crate::debug::forkprof::now() } else { 0 };
+        let task_ptr = match crate::sched::alloc_task_slot() {
+            Some(p) => p,
+            None => {
+                // Distinguish PID exhaustion (EAGAIN, Linux semantics) from
+                // task/stack allocation failure (ENOMEM): probe the PID
+                // allocator — if it is exhausted the failure was the PID.
+                return Err(match crate::pid::alloc_pid() {
+                    None => {
+                        // OH bring-up: the "thread constructor failed:
+                        // Resource temporarily unavailable" storm that kills
+                        // render_service (and with it SA:10) lands here when
+                        // the pid space is drained. Name the state once.
+                        static EAGAIN_DUMPED: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !EAGAIN_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                            crate::pr_warn!(
+                                "fork: EAGAIN by pid {} flags={:#x}: pid space exhausted ({}/{} live)",
+                                current.pid(),
+                                args.flags,
+                                crate::pid::allocated_count(),
+                                crate::pid::PID_MAX_DEFAULT
+                            );
+                        }
+                        eagain()
+                    }
+                    Some(p) => {
+                        crate::pid::free_pid(p);
+                        // Same visibility for the ENOMEM arm (Task/kernel
+                        // stack allocation failed — heap pressure).
+                        static ENOMEM_DUMPED: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !ENOMEM_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                            let st = crate::mm::buddy_allocator::buddy_stats();
+                            crate::pr_warn!(
+                                "fork: ENOMEM by pid {} flags={:#x}: task/stack alloc failed (kernel heap {}K/{}K)",
+                                current.pid(),
+                                args.flags,
+                                st.used_bytes / 1024,
+                                st.heap_size / 1024
+                            );
+                        }
+                        enomem()
+                    }
+                });
+            }
+        };
+        // ONE slot-ownership edge: alloc_task_slot hands out a fresh,
+        // exclusively-owned slot (boxed once at construction, freed only
+        // via free_task_slot). The build phase below runs before enqueue —
+        // no other CPU can observe the child — so the raw handle becomes a
+        // typed exclusive reference here; pointer-taking APIs receive
+        // `child as *mut Task`, and enqueue_task takes the exclusive
+        // borrow back (after it, reads go through one shared re-borrow).
+        let child: &'static mut Task = crate::unsafe_edges::borrow_task_mut(task_ptr);
+        let pid = child.pid();
+        if fp {
+            crate::debug::forkprof::add(crate::debug::forkprof::P_FK_ALLOC, fp_t_alloc);
+        }
+
+        crate::pr_debug!("fork: parent={}, child={}, flags={:#x}",
+            (*current).pid(), pid, args.flags);
+
+        // Full-unwind helper for every failure path past allocation: the
+        // child is hash-visible from alloc_task_slot, so unlink BEFORE
+        // freeing the stack (R33-pre: a concurrent kill on a hashed slot
+        // with a freed stack is the context-switch-onto-heap wedge).
+        // The raw slot handle is the one audited teardown edge. The parent
+        // handle is captured as a COPY (raw pointer), so the closure holds
+        // no borrow of `current` — the parent is mutated later (vfork park).
+        let parent_handle = current as *mut Task;
+        let unwind = |slot: *mut Task, err: i32| -> Result<Pid, i32> {
+            // slot is the exclusively-owned child slot (no other CPU can
+            // observe it before enqueue) and parent_handle is the live
+            // parent task; the five ops run in the R33-pre order on live
+            // slots (INV-PROC-BORROW-1).
+            {
+                crate::unsafe_edges::borrow_task(parent_handle).remove_child(slot);
+                let slot_pid = crate::unsafe_edges::borrow_task(slot).pid();
+                crate::pid_hash::pid_hash_remove(slot_pid);
+                crate::unsafe_edges::borrow_task_mut(slot).free_kernel_stack();
+                crate::pid::free_pid(slot_pid);
+                crate::sched::free_task_slot(slot);
+            }
+            Err(err)
+        };
+
+        // Threads (CLONE_THREAD) are NOT children: they never join the
+        // parent's children list — wait4 only ever reaps process products.
+        let is_thread = args.flags & CLONE_THREAD != 0;
+        if !is_thread {
+            if args.flags & CLONE_PARENT != 0 {
+                // CLONE_PARENT: the child's parent is the CALLER'S parent
+                // (Linux: real_parent of the caller). The child's getppid()
+                // equals the caller's getppid(), and the CALLER cannot
+                // wait for it — the grandparent reaps it (LTP clone08's
+                // CLONE_PARENT case).
+                let grandparent = current.parent_ptr().unwrap_or(current as *const Task);
+                // The parent link is fixed at construction time and the
+                // grandparent slot is live (R33-pre: children are
+                // unlinked before their slot is freed).
+                crate::unsafe_edges::borrow_task(grandparent as *mut Task)
+                    .add_child(child as *mut Task);
+            } else {
+                current.add_child(child as *mut Task);
+            }
+        }
+
+        // === copy_thread: Set up child's context ===
+        let parent_regs = &*parent_pt_regs;
+        let fp_t_ct = if fp { crate::debug::forkprof::now() } else { 0 };
+        if copy_thread(child, &args, parent_regs).is_none() {
+            return unwind(task_ptr, enomem());
+        }
+        if fp {
+            crate::debug::forkprof::add(crate::debug::forkprof::P_FK_COPYTHREAD, fp_t_ct);
+        }
+
+        // Copy signal mask
+        child.sigmask = current.sigmask;
+
+        // personality(2) inherits across fork (Linux clone semantics;
+        // LTP personality01 sets it in a forked child and reads it back).
+        child.personality = current.personality;
+
+        // Exit signal for the parent (clone CSIGNAL byte / clone3 field).
+        // Threads never notify a parent this way, but record it anyway —
+        // the notify path reads the field uniformly (LTP clone301:
+        // clone3 exit_signal=SIGUSR2 must SIGUSR2 the parent, not SIGCHLD).
+        child.set_exit_signal(args.exit_signal);
+
+        // Inherit the executable path: a fork WITHOUT exec (daemon style)
+        // keeps reporting the parent's program in /proc/[pid]/comm,
+        // "Name:" of status and /proc/[pid]/exe — like Linux, where the
+        // child's mm->exe_file ref is duplicated at fork.
+        child.set_exe_path(current.get_exe_path());
+
+        // Inherit process group and session from parent
+        child.set_pgid(current.pgid());
+        child.set_sid(current.sid());
+
+        // cgroup v2 (U1b): the child joins the parent's cgroup. The pids
+        // controller limit is checked here (every ancestor with a limit
+        // must have headroom — Linux fails fork with EAGAIN).
+        if let Err(e) =
+            crate::sched::cgroup::cgroup_on_fork(current as *mut Task, child as *mut Task)
+        {
+            return unwind(task_ptr, e);
+        }
+
+        // === CLONE_PARENT_SETTID / CLONE_CHILD_SETTID ===
+        // CLONE_PARENT_SETTID is a PARENT-memory store (Linux put_user in
+        // the parent) — done here, before the mm copy.
+        // CLONE_CHILD_SETTID must land in the CHILD's memory only. With
+        // CLONE_VM the two share one mm, so a parent-side store is the
+        // child store; WITHOUT CLONE_VM (fork) the write is deferred to
+        // after the COW mm copy below, where it goes through the child's
+        // own page tables (see child_settid_pending). Writing it here in
+        // the parent — as this code did before — mutated the PARENT's
+        // copy of the word: glibc's fork() passes child_tidptr =
+        // &THREAD_SELF->tid, so the parent's TCB tid field was overwritten
+        // with the CHILD's pid. Every later recursive-mutex owner check in
+        // the parent (glibc compares __owner against that TCB field)
+        // mismatched, and any recursive re-lock of a mutex still held
+        // across the fork took the contended slow path and slept forever
+        // (Xorg's input_mutex around the xkbcomp System() call — the
+        // permanent futex_wait(2) wedge).
+        if args.flags & CLONE_PARENT_SETTID != 0 && !args.parent_tid.is_null() {
+            // The stored TID is the child's pid in the PARENT's pid
+            // namespace — the same value clone(2) returns (a container
+            // task's fork() must hand back the ns-local pid, not the
+            // global one).
+            let tid_val = crate::ns::translate_sender_pid_ns(
+                pid,
+                current.ns_pid.as_ref(),
+            ) as i32;
+            // uaccess_safe::copy_out_t is the exception-table copy path.
+            if crate::arch::uaccess_safe::copy_out_t(args.parent_tid as usize, &tid_val) != 0
+            {
+                return unwind(task_ptr, efault());
+            }
+        }
+        let mut child_settid_pending = false;
+        if args.flags & CLONE_CHILD_SETTID != 0 && !args.child_tid.is_null() {
+            if args.flags & CLONE_VM != 0 {
+                // Shared address space: the child's memory IS this memory.
+                let tid_val = pid as i32;
+                if crate::arch::uaccess_safe::copy_out_t(args.child_tid as usize, &tid_val)
+                    != 0
+                {
+                    return unwind(task_ptr, efault());
+                }
+            } else {
+                // Separate mm (fork): write after the COW copy, through
+                // the child's page tables.
+                child_settid_pending = true;
+            }
+        }
+
+        /// Store the child's TID at `child_tid` in the CHILD's address
+        /// space (Linux CLONE_CHILD_SETTID semantics). The child just got
+        /// a COW copy of the parent's mm, so a parent-side copy_to_user
+        /// would hit the PARENT's mapping.
+        ///
+        /// Architecture-independent: the leaf walk and any COW break go
+        /// through the arch backend (`PageTableWalker` + `handle_cow_fault`).
+        /// The previous implementation hand-rolled the SV39 3-level walk,
+        /// which read the wrong table levels under the x86_64 4-level
+        /// layout and failed every glibc fork() with EFAULT
+        /// (clone(CLONE_CHILD_SETTID|CLONE_CHILD_CLEARTID|SIGCHLD, 0) —
+        /// the "udesk st=32767" respawn loop on Ubuntu amd64).
+        ///
+        /// Accounting nuance: `handle_cow_fault` books the private copy
+        /// against sched::current() (the parent), one page of RSS drift;
+        /// accepted for now (TODO: charge the child's mm).
+        ///
+        /// # Safety (arguments)
+        /// `child_root` must be the root ppn of the new child's page
+        /// tables; the child task has not run yet (no TLB entries).
+        /// The function body is safe: the two genuinely unsafe edges (the
+        /// arch page-table walk/COW break and the linear-map volatile
+        /// store) are marked at their sites.
+        fn write_child_settid(
+            child_root: u64,
+            child_tid: *mut i32,
+            tid: i32,
+            child_task: &Task,
+        ) -> bool {
+            use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
+            use crate::arch::mm::mm_ops::PageTableWalker;
+            use crate::arch::mm::memory_layout::VirtAddr as ArchVirtAddr;
+
+            let va = child_tid as u64;
+
+            // The child mm for the COW walk's PTE section (INV-LOCK-7).
+            // set_address_space already ran, and the child has not been
+            // scheduled — this Arc clone is the only other reference.
+            let child_mm = match child_task.address_space_arc() {
+                Some(mm) => mm,
+                None => return false,
+            };
+
+            // Break COW (if the leaf is still RO+COW) through the arch's
+            // own walker. Retry is fine: a sibling already resolved it.
+            // The arch walk/COW backend's guarantees hold here:
+            // child_root is the child's fresh root ppn and va is a
+            // validated user pointer (INV-PROC-FORK-COW-1).
+            let cow = crate::unsafe_edges::fork_handle_cow_fault(
+                &child_mm,
+                child_root,
+                va,
+            );
+            match cow {
+                crate::arch::mm::mm_ops::CowFaultResult::Resolved
+                | crate::arch::mm::mm_ops::CowFaultResult::Retry => {}
+                crate::arch::mm::mm_ops::CowFaultResult::OutOfMemory => return false,
+            }
+
+            // Re-walk and write through the linear map
+            // (INV-PROC-FORK-WALK-1).
+            let walk = crate::unsafe_edges::fork_pt_walk(child_root, va);
+            match walk {
+                Some((ppn, _bits)) => {
+                    let base = phys_to_virt(PhysAddr((ppn << 12) as u64));
+                    // The linear-map byte at (ppn, va offset) is the
+                    // child's page holding child_tid
+                    // (INV-PROC-FORK-TIDWRITE-1).
+                    crate::unsafe_edges::fork_write_child_tid(
+                        base.as_usize() + (va & 0xfff) as usize,
+                        tid,
+                    );
+                    // The child has never run, so no TLB can hold a stale
+                    // entry; fence for ordering only.
+                    crate::arch::cpu::dsb();
+                    true
+                }
+                None => false,
+            }
+        }
+
+        // === CLONE_CHILD_CLEARTID: Clear TID when child exits ===
+        if args.flags & CLONE_CHILD_CLEARTID != 0 && !args.child_tid.is_null() {
+            child.set_clear_child_tid(args.child_tid);
+        }
+
+        // === copy_files: Copy/share file descriptor table ===
+        if args.flags & CLONE_FILES != 0 {
+            // CLONE_FILES: Share file descriptor table (threads). A parent
+            // with NO table shares exactly that — the child also gets None
+            // ("share the absence"), matching Linux's Arc-clone semantics.
+            if let Some(parent_fdtable) = current.fdtable_arc() {
+                child.set_fdtable(Some(parent_fdtable));
+            }
+        } else {
+            // Copy file descriptor table (fork semantics) — single-lock
+            // deep copy (see FdTable::fork_from; FD_CLOEXEC bits are part
+            // of the snapshot, regression round 5's leak stays fixed).
+            let fp_t_fd = if fp { crate::debug::forkprof::now() } else { 0 };
+            let child_fdtable = match current.try_fdtable() {
+                Some(parent_fdtable) => {
+                    alloc::sync::Arc::new(FdTable::fork_from(&*parent_fdtable))
+                }
+                None => alloc::sync::Arc::new(FdTable::new()),
+            };
+            if fp {
+                crate::debug::forkprof::add(crate::debug::forkprof::P_FK_FDTABLE, fp_t_fd);
+            }
+
+            child.set_fdtable(Some(child_fdtable));
+        }
+
+        // === copy_mm: Copy/share address space ===
+        if args.flags & CLONE_VM != 0 {
+            // CLONE_VM: Share address space (threads)
+            // Clone the Arc to share the same AddressSpace
+            if let Some(parent_as) = current.address_space_arc() {
+                // Increment mm_users reference count
+                parent_as.mm_users_inc();
+                child.set_address_space(Some(parent_as));
+            } else {
+                return unwind(task_ptr, enomem());
+            }
+        } else {
+            // Copy address space (COW)
+            let parent_addr_space = current.address_space();
+            if let Some(parent_as) = parent_addr_space {
+                let fp_t_mm = if fp { crate::debug::forkprof::now() } else { 0 };
+                // (fork-frag lane) drain defer-freed leaf tables before
+                // the COW walk — fork is the biggest page-table alloc
+                // churn point, so pending frames return to the allocator
+                // exactly where child tables are about to be allocated
+                // (no-op on arches without the protocol).
+                crate::arch::mm::pt_pending_drain();
+                match crate::mm::mm_hooks::fork(parent_as) {
+                    Ok(child_as) => {
+                        #[cfg(feature = "debug-futex-trace")]
+                        {
+                            use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+                            let child_arc = alloc::sync::Arc::new(child_as);
+                            let p_root = parent_as.root_ppn();
+                            let c_root = child_arc.root_ppn();                            for va in [0x1c8000u64, 0x1c9000, 0x100000] {
+                                {
+                                    let p = crate::unsafe_edges::fork_pt_walk(p_root, va);
+                                    let c = crate::unsafe_edges::fork_pt_walk(c_root, va);
+                                    taskdump_raw_line(b"FTX-COWCHK parent=");
+                                    taskdump_dec(current.pid() as u64);
+                                    taskdump_raw_line(b" child=");
+                                    taskdump_dec(child.pid() as u64);
+                                    taskdump_raw_line(b" va=");
+                                    taskdump_dec(va);
+                                    taskdump_raw_line(b" p=");
+                                    taskdump_dec(p.map(|x| x.0).unwrap_or(0));
+                                    taskdump_raw_line(b"/pte:");
+                                    taskdump_dec(p.map(|x| x.1).unwrap_or(0));
+                                    taskdump_raw_line(b" c=");
+                                    taskdump_dec(c.map(|x| x.0).unwrap_or(0));
+                                    taskdump_raw_line(b"/pte:");
+                                    taskdump_dec(c.map(|x| x.1).unwrap_or(0));
+                                    taskdump_raw_line(b" refcnt=");
+                                    let rf = p.and_then(|x| {
+                                        let pg = crate::mm::page_desc::pfn_to_page(x.0 as usize);
+                                        crate::unsafe_edges::page_refcount(pg)
+                                    });
+                                    taskdump_dec(rf.unwrap_or(-1i32) as i64 as u64);
+                                    taskdump_raw_line(b"\n");
+                                }
+                            }
+                            child.set_address_space(Some(child_arc));
+                            // CLONE_CHILD_SETTID (fork path): store the
+                            // child's TID through the child's OWN page
+                            // tables — see the comment at the flag check.
+                            if child_settid_pending
+                                && !write_child_settid(c_root, args.child_tid, pid as i32, child)
+                            {
+                                return unwind(task_ptr, efault());
+                            }
+                        }
+                        #[cfg(not(feature = "debug-futex-trace"))]
+                        {
+                            let child_arc = alloc::sync::Arc::new(child_as);
+                            let c_root = child_arc.root_ppn();
+                            // FORENSIC (fake-OOM family): record the fresh
+                            // fork root against its OWNING child pid. The
+                            // teardown witness in PtLedger::take then flags
+                            // any free of this root from a context that is
+                            // NOT the owner while the owner is still alive —
+                            // the early-teardown seed.
+                            crate::arch::mm::mmu_init::register_fork_root(
+                                c_root as u64,
+                                pid as u32,
+                            );
+                            child.set_address_space(Some(child_arc));
+                            if child_settid_pending
+                                && !write_child_settid(c_root, args.child_tid, pid as i32, child)
+                            {
+                                return unwind(task_ptr, efault());
+                            }
+                        }
+                    }
+                    Err(_e) => {
+                        return unwind(task_ptr, enomem());
+                    }
+                }
+                if fp {
+                    crate::debug::forkprof::add(crate::debug::forkprof::P_FK_MMFORK, fp_t_mm);
+                }
+            } else {
+                return unwind(task_ptr, enomem());
+            }
+        }
+
+        // Exec text hold (copy_mm leg): the child's fresh mm duplicates
+        // the parent's exe-file text reference (reference dup_mm's
+        // get_file(mm->exe_file)) so the exec'd image stays write-denied
+        // (ETXTBSY on write-mode opens) until the last fork descendant's
+        // mm dies. CLONE_VM shares the parent's mm Arc — nothing to
+        // duplicate.
+        if args.flags & CLONE_VM == 0 {
+            if let (Some(parent_as), Some(child_as)) = (
+                current.address_space_arc(),
+                child.address_space_arc(),
+            ) {
+                if !alloc::sync::Arc::ptr_eq(&parent_as, &child_as) {
+                    child_as.inherit_exe_text(&parent_as);
+                }
+            }
+        }
+
+        // Copy brk value — from the SHARED address space, not the
+        // parent's per-task copy (GNOME trim face, 2026-11-07/c127e4bc1:
+        // the break is per-mm; a thread's task-side copy can be stale,
+        // and seeding the child from it made the child shrink "the
+        // heap" below the real break, releasing live pages). CLONE_VM
+        // children share the mm and its authoritative value anyway;
+        // fork children get the same value through their copied mm.
+        let parent_brk = if let Some(parent_as) = current.address_space() {
+            let v = parent_as.brk().as_usize() as u64;
+            if v != 0 { v } else { current.get_brk() }
+        } else {
+            current.get_brk()
+        };
+        child.set_brk(parent_brk);
+
+        // === CLONE_FS: Share filesystem info ===
+        if args.flags & CLONE_FS != 0 {
+            // CLONE_FS: Share filesystem info (cwd, root, umask)
+            // Clone the Arc to share the same FsStruct
+            if let Some(parent_fs) = current.fs_arc() {
+                child.set_fs(Some(parent_fs));
+            }
+        } else {
+            // Copy filesystem info: the child gets its own FsStruct with
+            // the same cwd AND root — including the cwd/root DENTRIES
+            // (fork duplicates fs_struct wholesale in Linux; the old
+            // string-only cwd copy let a forked child of a chrooted task
+            // escape the jail and lose the mount-aware cwd).
+            if let (Some(parent_fs), Some(child_fs)) =
+                (current.fs_arc(), child.fs_arc())
+            {
+                child_fs.copy_fs_from(&parent_fs);
+            }
+        }
+
+        // === CLONE_THREAD: join the parent's thread group ===
+        if is_thread {
+            let leader = current.group_leader_ptr();
+            // Leader's ring is well-formed (the join/leave invariant); the
+            // child slot is fully constructed and not yet runnable.
+            crate::unsafe_edges::borrow_task_mut(leader)
+                .thread_group_join(child as *mut Task);
+        }
+        // else: tgid = pid, single-member self-ring (already set at construction)
+
+        // === CLONE_SIGHAND: Share signal handlers ===
+        if args.flags & CLONE_SIGHAND != 0 {
+            // CLONE_SIGHAND: Share signal handlers (threads)
+            // Clone the Arc to share the same SignalStruct
+            if let Some(parent_signal) = current.signal_arc() {
+                child.set_signal(Some(parent_signal));
+            }
+        } else {
+            // For normal fork: copy parent's signal handlers
+            // Clone the Arc - child gets a copy of the signal struct
+            if let Some(parent_signal) = current.signal.as_ref() {
+                // Clone the inner SignalStruct and wrap in new Arc
+                let child_signal = alloc::sync::Arc::new((**parent_signal).clone());
+                child.signal = Some(child_signal);
+            }
+            // CLONE_CLEAR_SIGHAND: wipe the copied dispositions to SIG_DFL
+            // (kernel flush_signal_handlers) — glibc posix_spawn's clean
+            // signal state for the CLONE_VM spawn helper.
+            if args.flags & CLONE_CLEAR_SIGHAND != 0 {
+                if let Some(child_signal) = child.signal.as_ref() {
+                    child_signal.reset_all_handlers_default();
+                }
+            }
+        }
+
+        // === Scheduling attributes and identity inheritance (Linux
+        // copy_process: sched_fork copies nice/policy/rt_priority/cpus_allowed;
+        // comm and sigaltstack are also inherited by clone) ===
+        {
+            let parent = &*current;
+            child.set_comm(parent.comm());
+            // SCHED_RESET_ON_FORK (Linux __sched_fork): a child of a task
+            // that requested reset-on-fork does NOT inherit the privileged
+            // policy/priority — it lands on SCHED_OTHER with nice 0, and
+            // the reset request itself is cleared (LTP sched_setscheduler04).
+            if parent.sched_reset_on_fork() {
+                child.set_policy(crate::task::SchedPolicy::Normal);
+                child.set_nice(0);
+                child.set_rt_priority(0);
+                child.set_sched_reset_on_fork(false);
+            } else {
+                child.set_policy(parent.policy());
+                // set_nice derives static_prio/normal_prio/prio AND updates the
+                // CFS entity weight — must go through it, not raw field writes.
+                child.set_nice(parent.nice());
+                child.set_rt_priority(parent.rt_priority());
+                child.set_sched_reset_on_fork(false);
+            }
+            child.set_cpus_allowed(parent.cpus_allowed());
+            child.set_oom_score_adj(parent.oom_score_adj());
+            // ioprio is per-task and inherited across fork (the reference
+            // kernel's copy_process memcpy).
+            child.set_ioprio(parent.ioprio());
+            child.sigstack = parent.sigstack;
+            child.dumpable = parent.dumpable;
+        }
+
+        // Copy SEM_UNDO table (child inherits parent's adjustments)
+        {
+            let parent_undo = current.sem_undo.lock();
+            if !parent_undo.is_empty() {
+                child.sem_undo.lock().extend_from_slice(&parent_undo);
+            }
+        }
+
+        // Inherit resource limits (Linux copy_process: memcpy of
+        // signal->rlim). Enforcement points (alloc_fd/mmap/brk/fork
+        // NPROC/tick CPU) read the child's copy; threads (CLONE_THREAD)
+        // get their own table too — limits are per-task here, matching
+        // the per-task storage rather than Linux's shared signal struct.
+                {
+            let parent_rlimits = *current.rlimits.lock_irqsave();
+            *child.rlimits.lock_irqsave() = parent_rlimits;
+        }
+
+        // Copy credentials from parent
+        *child.cred_mut() = current.cred().clone();
+
+        // OpenHarmony access-token inheritance (upstream accesstokenid
+        // patch: child inherits the normal token, ftoken is cleared).
+        // Both stores: the per-task field (legacy accessor) and the ipc
+        // registry keyed by tgid (what BINDER_GET_SENDER_INFO reads) —
+        // a forked child (e.g. devmgr -> devhost) must keep the
+        // parent's registered token or permission checks in samgr/ATM
+        // would see it fall back to the synthetic native id.
+        child.set_access_token(current.access_token());
+        child.set_access_ftoken(0);
+        {
+            if let Some((ptok, _)) = crate::ipc::ipc_hooks::at_registered_token_of(current.tgid() as u32) {
+                if ptok != 0 {
+                    crate::ipc::ipc_hooks::at_mirror_set(child.tgid() as u32, false, ptok);
+                }
+            }
+        }
+
+        // === U1c namespaces: default share the parent's namespace objects
+        // (Arc clone); CLONE_NEW* bits give the child fresh ones. Fails the
+        // clone with EPERM when a non-user ns was requested without
+        // CAP_SYS_ADMIN. ===
+        if let Err(e) =
+            crate::ns::copy_namespaces(current, child, args.flags)
+        {
+            return unwind(task_ptr, e);
+        }
+
+        // === U1c seccomp: mode and filter are inherited across fork
+        // (Linux copy_process → seccomp_dup). ===
+        child.set_seccomp_mode(current.seccomp_mode());
+        if current.seccomp_mode() == 2 {
+            let parent_filter = current.seccomp_filter.lock();
+            *child.seccomp_filter.lock() = parent_filter.clone();
+        }
+        // no_new_privs is inherited across fork and exec alike (prctl(2)
+        // PR_SET_NO_NEW_PRIVS semantics).
+        child.set_no_new_privs(current.no_new_privs());
+
+        // Handle CLONE_VFORK: block parent until child execs/exits.
+        // The child shares parent's address space (CLONE_VM is expected
+        // to be set alongside CLONE_VFORK).  The parent sleeps in
+        // UNINTERRUPTIBLE state and is woken by the child's execve or
+        // _exit via vfork_wake_parent().
+        //
+        // Register the vfork linkage BEFORE enqueueing the child: once the
+        // child is runnable another CPU can run it immediately and have it
+        // exec/exit before we finish — vfork_wake_parent must find the
+        // parent pointer already set (review PROC-P02 race 1).
+        let is_vfork = args.flags & CLONE_VFORK != 0;
+        if is_vfork {
+            child.set_vfork_parent(current as *mut Task);
+        }
+
+        // Add new task to run queue
+        //
+        // R52 (fork enqueue gap — form A): the enqueue result is now
+        // CHECKED, not assumed. The child has been hash-visible with a
+        // valid pid since alloc_task_slot; until this point it is
+        // TASK_NEW (unwakeable — no racing signal/OOM kill can link it
+        // early). If the GRQ-locked insert refuses (a guard divergence:
+        // poison, dead-state, or a stale class on_rq flag on a
+        // never-enqueued task), the child is on NO queue and NO cpu
+        // while the parent believes fork() succeeded — it waits on a
+        // PID that never runs (the ti_cpu=-1 / on_rq=0 / linked=0 /
+        // RUNNING-looking phantom). Unwind the child completely and
+        // fail the fork instead; the page leaves poisoned, so the
+        // invariant "constructed ⇒ enqueued or fully unwound" holds by
+        // construction. (The parent has not slept yet — the vfork block
+        // below never runs on this path.)
+        let fp_t_enq = if fp { crate::debug::forkprof::now() } else { 0 };
+        // enqueue_task takes the exclusive borrow: from here the scheduler
+        // owns the child (another CPU may run it immediately).
+        if !crate::sched::enqueue_task(child) {
+            crate::pr_warn!(
+                "fork: enqueue refused for child pid={} — unwinding (R52 tripwire)",
+                pid
+            );
+            if is_thread {
+                // Not a children-list member; undo the ring join instead.
+                // The slot was refused at enqueue — ownership is back with
+                // this fork path; it never left the hash, the ring join
+                // above is the only linkage to undo, and no other CPU can
+                // observe it (INV-PROC-BORROW-1).
+                {
+                    Task::thread_group_leave(task_ptr);
+                    crate::unsafe_edges::borrow_task_mut(task_ptr).free_kernel_stack();
+                    crate::pid::free_pid(pid);
+                    crate::sched::free_task_slot(task_ptr);
+                }
+            } else {
+                return unwind(task_ptr, enomem());
+            }
+            return Err(enomem());
+        }
+
+        // Post-enqueue: the scheduler holds the exclusive borrow; the
+        // remaining reads (trace rows, vfork bookkeeping) go through ONE
+        // shared re-borrow of the live slot.
+        let child_ref: &Task = crate::unsafe_edges::borrow_task(task_ptr);
+
+        // The sched:sched_process_fork and sched:sched_wakeup_new
+        // tracepoints: the child is fully built and linked, exactly the
+        // reference's record points (fork at creation, wakeup_new at
+        // the first enqueue — the wake_up_new_task record). Gated
+        // behind armed(); the comm copies happen only when an event is
+        // on.
+        if crate::trace::EVENT_SCHED_PROCESS_FORK.armed() {
+            let parent_words = crate::trace::comm_to_words(&*current.comm());
+            let child_words = crate::trace::comm_to_words(&*child_ref.comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SCHED_PROCESS_FORK,
+                [
+                    parent_words[0],
+                    parent_words[1],
+                    current.pid() as u64,
+                    child_words[0],
+                    child_words[1],
+                    pid as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+        if crate::trace::EVENT_SCHED_WAKEUP_NEW.armed() {
+            let words = crate::trace::comm_to_words(&*child_ref.comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SCHED_WAKEUP_NEW,
+                [
+                    words[0],
+                    words[1],
+                    pid as u64,
+                    child_ref.prio() as u64,
+                    child_ref.ti_cpu() as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+
+        if is_vfork {
+            crate::pr_debug!("vfork: parent={} blocked, child={}",
+                current.pid(), pid);
+            current.set_state(TaskState::new(TaskState::UNINTERRUPTIBLE));
+
+            // Re-check AFTER marking ourselves sleeping: if the child already
+            // exec'd/exited above, its wake_up saw us RUNNING and was a
+            // no-op — detect the cleared vfork_parent and skip the sleep
+            // (prepare-to-wait pattern, review PROC-P02 race 2).
+            if child_ref.vfork_parent_ptr().is_none() {
+                current.set_state(TaskState::new(TaskState::RUNNING));
+                // A wake_up() racing the window above may have enqueued us
+                // on the run queue while we are in fact still executing —
+                // take ourselves back off before continuing, or a second
+                // CPU could pick and run this very task (review NEW-C2).
+                crate::sched::dequeue_if_enqueued(&*current);
+            } else {
+                crate::sched::schedule();
+            }
+            // Parent resumes here after child exec'd or exited
+        }
+
+        #[cfg(feature = "debug-futex-trace")]
+        {
+            use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+            taskdump_raw_line(b"FTX CLONE-OK child=");
+            taskdump_dec(pid as u64);
+            taskdump_raw_line(b"\n");
+        }
+
+        // /proc/stat "processes": the number of forks since boot.
+        crate::fs::perf_ctr::note_fork();
+        // perf FORK sideband (hiperf process tracking; no-op unless a
+        // perf event is armed).
+        if let Some(cur) = crate::sched::current() {
+            // cur is live here (parent side of the fork); sched::current()
+            // is the typed handle.
+            crate::perf::hook_fork(cur.tgid(), cur.pid(), pid as u32, pid as u32);
+        }
+        if fp {
+            crate::debug::forkprof::add(crate::debug::forkprof::P_FK_ENQUEUE, fp_t_enq);
+            crate::debug::forkprof::add(crate::debug::forkprof::P_FK_TOTAL, fp_t0);
+            crate::debug::forkprof::trace(crate::debug::forkprof::T_FORK_DONE, pid as u32);
+            // enqueue->first-switch-in latency of the child (consumed at
+            // context_switch) — the fork-child queue delay.
+            crate::debug::forkprof::stamp_child(pid as u32);
+        }
+
+        Ok(pid)
+    }
+}

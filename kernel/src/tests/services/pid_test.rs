@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::process::pid::{
+use crate::pid::{
     PID_SWAPPER, PID_INIT, PID_MAX_LIMIT, PID_MAX_DEFAULT, RESERVED_PIDS,
     alloc_pid, free_pid,
 };

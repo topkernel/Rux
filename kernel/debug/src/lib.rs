@@ -36,7 +36,7 @@ pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 // The ipc service tree (cold-four lane): the merged view (the moved
 // binder diagnostics + the framework's binder re-export) re-exported at
 // this root — the sibling-service dependency (obs -> ipc) is one-way.
-pub use ::ipc::ipc;
+pub use ::ipc;
 extern crate alloc;
 
 // The moved cold halves (sibling names — the framework keeps each

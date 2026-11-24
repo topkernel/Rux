@@ -27,14 +27,11 @@ pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println, print, print_status, 
 pub use rux::syscall;
 extern crate alloc;
 
-/// The merged fs tree, nested under crate::fs: the service trees plus
-/// every framework fs item (glob re-export — the framework no longer
-/// declares ext4/jbd2, so no name conflicts).
-pub mod fs {
-    pub mod ext4;
-    pub mod jbd2;
-    pub use rux::fs::*;
-}
+/// The ext4 and jbd2 trees, flat at the crate root (seed-core-design
+/// 2c.2). This crate's files reach the framework's fs items by their
+/// full path (`rux::fs::...`).
+pub mod ext4;
+pub mod jbd2;
 
 /// The boot-time registration (bin calls this before kmain): fills
 /// the framework's Ext4Hooks table. THE composition contract. The
@@ -43,7 +40,7 @@ pub mod fs {
 /// (mounting anything this early wedged x86_64 in the 'R' beacon
 /// reboot loop — the fs conviction).
 pub fn register_all() {
-    crate::fs::ext4::seam::register_all();
+    crate::ext4::seam::register_all();
 }
 
 /// The guest-test entry (make test): the framework's run_all_tests

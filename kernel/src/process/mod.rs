@@ -11,7 +11,7 @@
 //! - `wait`: Wait queues
 
 // pub mod reboot; — moved to the process service crate (the file
-// now physically lives in kernel/process/src/process/).
+// now physically lives in kernel/process/src/).
 pub mod task;
 pub mod task_ext;
 pub mod task_ref;

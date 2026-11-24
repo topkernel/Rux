@@ -1,6 +1,6 @@
 //! The SYNC SERVICE CRATE (sync-upper lane): the sync subsystem's cold
 //! majority under a crate-level unsafe-deny boundary — the futex
-//! diagnostic/forensic family (src/sync/futex_diag.rs) and the condvar
+//! diagnostic/forensic family (src/futex_diag.rs) and the condvar
 //! (zero framework users, zero unsafe).
 //!
 //! What stays framework-side (kernel/src/sync/ — the lane's stay
@@ -21,7 +21,7 @@
 //! (kernel/src/sync/sync_diag_hooks.rs — 16 cold rows; the do_futex /
 //! census latch sites are arm-gated, the S1 pattern). Sibling service
 //! crates (ipc binder_diag, process exit_teardown) reach the
-//! moved functions DIRECTLY at their historical crate::sync::futex::X
+//! moved functions DIRECTLY at their historical crate::futex::X
 //! paths through the union module below (the allowed downward service
 //! edge — the binder_diag precedent, syscall -> ipc).
 
@@ -29,7 +29,7 @@
 // carried zero unsafe blocks of their own (futex.rs's only unsafe is
 // the Waiter Send/Sync pair, which stayed with the waiter pool); the
 // raw task/page-table reads ride the framework's audited
-// crate::sync::edges walkers.
+// rux::sync::edges walkers.
 #![forbid(unsafe_code)]
 #![no_std]
 #![feature(alloc_error_handler, linkage)]
@@ -42,39 +42,36 @@ pub use rux::{arch, cmdline, config, console, debug, drivers, errno, fs, interru
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;
 
-/// The sync tree, nested under crate::sync (the historical path): this
-/// crate's own files plus the framework's whole sync module re-exported
-/// (the timer/ipc pattern — sibling services' crate::sync::X
-/// paths keep resolving unchanged).
-pub mod sync {
-    // the service files (THIS crate's own — the sole copies)
-    pub mod futex_diag;
-    pub mod condvar;
+// The service files (THIS crate's own — the sole copies), flat at the
+// crate root (seed-core-design 2c.2).
+pub mod futex_diag;
+pub mod condvar;
 
-    // The framework's whole sync module at the historical path (the
-    // union the sibling services consumed) — the explicit `pub mod
-    // futex` below shadows the glob's futex module and re-exports BOTH
-    // halves: the staying mechanism from the framework and the moved
-    // diagnostic family from this crate's futex_diag.
-    pub use rux::sync::*;
+// The framework's whole sync module at the historical path (the union
+// the sibling services consumed — the merged view `pub use sync;` in the
+// ipc/process/syscall crates resolves through it) — the explicit `pub mod
+// futex` below shadows the glob's futex module and re-exports BOTH
+// halves: the staying mechanism from the framework and the moved
+// diagnostic family from this crate's futex_diag.
+pub use rux::sync::*;
 
-    pub mod futex {
-        pub use rux::sync::futex::*;
-        pub use crate::sync::futex_diag::*;
-    }
-
-    // the guest-test module that followed the files (the framework's
-    // tests/mod.rs row is gated with the move note); the framework's
-    // test counters + assert macro re-exported at the historical
-    // `super::` path (the service-test seam contract).
-    #[cfg(feature = "unit-test")]
-    #[path = "../../../src/tests/services/futex_test.rs"]
-    pub mod futex_test;
-    #[cfg(feature = "unit-test")]
-    pub use rux::tests::{test_pass, test_fail, test_group_start};
-    #[cfg(feature = "unit-test")]
-    pub use rux::test_assert_eq;
+pub mod futex {
+    pub use rux::sync::futex::*;
+    pub use crate::futex_diag::*;
 }
+
+// the guest-test module that followed the files (the framework's
+// tests/mod.rs row is gated with the move note); the framework's
+// test counters + assert macro re-exported at the crate root, where
+// the test module's `super::` imports expect them (the service-test
+// seam contract).
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/futex_test.rs"]
+pub mod futex_test;
+#[cfg(feature = "unit-test")]
+pub use rux::tests::{test_pass, test_fail, test_group_start};
+#[cfg(feature = "unit-test")]
+pub use rux::test_assert_eq;
 
 /// The boot-time registration (bin calls this before
 /// rust_main_impl): the SyncDiagHooks table's rows. OnceSlot-only — no
@@ -82,21 +79,21 @@ pub mod sync {
 pub fn register_all() {
     rux::sync::sync_diag_hooks::sync_diag_register_hooks(
         rux::sync::sync_diag_hooks::SyncDiagHooks {
-            fxdv_latch_devmgr: sync::futex_diag::fxdv_latch_devmgr,
-            rwfz_exit_watch_tgid: sync::futex_diag::rwfz_exit_watch_tgid,
-            rwfrz_tgid_frozen: sync::futex_diag::rwfrz_tgid_frozen,
-            note_task_unlink: sync::futex_diag::note_task_unlink,
-            kill_dump_tgid: sync::futex_diag::kill_dump_tgid,
-            sqwalk_resume: sync::futex_diag::sqwalk_resume,
-            ffrt_mutex_heap_map_done: sync::futex_diag::ffrt_mutex_heap_map_done,
-            ffrt_mutex_heap_map_rearm: sync::futex_diag::ffrt_mutex_heap_map_rearm,
-            ffrt_mutex_heap_map: sync::futex_diag::ffrt_mutex_heap_map,
-            fuxwatch_parse: sync::futex_diag::fuxwatch_parse,
-            fuxwatch2_parse: sync::futex_diag::fuxwatch2_parse,
-            malloc_holder_scan: sync::futex_diag::malloc_holder_scan,
-            ctd_decode: sync::futex_diag::ctd_decode,
-            fuxpark_latch: sync::futex_diag::fuxpark_latch,
-            rwfrz_reader_scan: sync::futex_diag::rwfrz_reader_scan,
+            fxdv_latch_devmgr: futex_diag::fxdv_latch_devmgr,
+            rwfz_exit_watch_tgid: futex_diag::rwfz_exit_watch_tgid,
+            rwfrz_tgid_frozen: futex_diag::rwfrz_tgid_frozen,
+            note_task_unlink: futex_diag::note_task_unlink,
+            kill_dump_tgid: futex_diag::kill_dump_tgid,
+            sqwalk_resume: futex_diag::sqwalk_resume,
+            ffrt_mutex_heap_map_done: futex_diag::ffrt_mutex_heap_map_done,
+            ffrt_mutex_heap_map_rearm: futex_diag::ffrt_mutex_heap_map_rearm,
+            ffrt_mutex_heap_map: futex_diag::ffrt_mutex_heap_map,
+            fuxwatch_parse: futex_diag::fuxwatch_parse,
+            fuxwatch2_parse: futex_diag::fuxwatch2_parse,
+            malloc_holder_scan: futex_diag::malloc_holder_scan,
+            ctd_decode: futex_diag::ctd_decode,
+            fuxpark_latch: futex_diag::fuxpark_latch,
+            rwfrz_reader_scan: futex_diag::rwfrz_reader_scan,
         },
     );
 }
@@ -107,5 +104,5 @@ pub fn register_all() {
 /// lands in the same totals as the in-framework tests.
 #[cfg(feature = "unit-test")]
 pub fn run_unit_tests() {
-    sync::futex_test::test_futex();
+    futex_test::test_futex();
 }

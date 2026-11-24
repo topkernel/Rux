@@ -1,0 +1,933 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+//! ext4 inode operations
+
+// (INV-EXT4-INODEIO-1: the on-disk inode IO family — read/write/
+// write_disk operate on bread-pinned table blocks (INV-BIO-BH's pin)
+// with fixed-offset field writes bounds-checked against the block;
+// callers hold EXT4_BIG_LOCK.)
+use core::mem;
+use alloc::vec::Vec;
+
+use crate::errno;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Ext4InodeOnDisk {
+    /// File mode (type and permissions)
+    pub i_mode: u16,
+    /// User ID
+    pub i_uid: u16,
+    /// File size
+    pub i_size: u32,
+    /// Last access time
+    pub i_atime: u32,
+    /// Last inode modification time
+    pub i_ctime: u32,
+    /// Last data modification time
+    pub i_mtime: u32,
+    /// Deletion time
+    pub i_dtime: u32,
+    /// Group ID
+    pub i_gid: u16,
+    /// Link count
+    pub i_links_count: u16,
+    /// Block count
+    pub i_blocks: u32,
+    /// Flags
+    pub i_flags: u32,
+    /// OS specific value 1
+    pub osd1: u32,
+    /// Direct block pointers
+    pub i_block: [u32; 15],
+    /// Generation number
+    pub i_generation: u32,
+    /// File ACL (low 32 bits)
+    pub i_file_acl_lo: u32,
+    /// Upper 32 bits of file size (regular files only)
+    pub i_size_high: u32,
+    /// Obsoleted fragment address
+    pub i_obso_faddr: u32,
+    /// OS specific value 2 (Linux: l_i_blocks_high, l_i_file_acl_high, l_i_uid_high, l_i_gid_high, l_i_checksum_lo, l_i_reserved)
+    pub osd2: [u8; 12],
+    /// Extra inode size
+    pub i_extra_isize: u16,
+    /// Checksum
+    pub i_checksum: u16,
+    /// ctime extension
+    pub i_ctime_extra: u32,
+    /// mtime extension
+    pub i_mtime_extra: u32,
+    /// atime extension
+    pub i_atime_extra: u32,
+    /// crtime (creation time)
+    pub i_crtime: u32,
+    /// crtime extension
+    pub i_crtime_extra: u32,
+    /// Project ID
+    pub i_projid: u32,
+    /// Reserved
+    pub i_reserved: [u32; 4],
+}
+
+impl Default for Ext4InodeOnDisk {
+    fn default() -> Self {
+        // INV-EXT4-INODE-ZP: #[repr(C)] all-integer on-disk struct —
+        // the zero bit pattern is a valid value for every field (the
+        // audited zeroed lives at the framework edge, INV-EXT-EDGE-3).
+        rux::fs::ext4_edges::zeroed_on_disk()
+    }
+}
+
+impl Ext4InodeOnDisk {
+    /// Check if directory
+    pub fn is_dir(&self) -> bool {
+        (self.i_mode & 0xF000) == 0x4000
+    }
+
+    /// Check if regular file
+    pub fn is_reg(&self) -> bool {
+        (self.i_mode & 0xF000) == 0x8000
+    }
+
+    /// Check if symbolic link
+    pub fn is_symlink(&self) -> bool {
+        (self.i_mode & 0xF000) == 0xA000
+    }
+
+    /// Check if using extent
+    pub fn has_extent(&self) -> bool {
+        (self.i_flags & 0x80000) != 0
+    }
+
+    /// Read l_i_blocks_high from osd2 (first 2 bytes, Linux layout)
+    pub fn blocks_high(&self) -> u16 {
+        u16::from_le_bytes([self.osd2[0], self.osd2[1]])
+    }
+
+    /// Write l_i_blocks_high to osd2
+    pub fn set_blocks_high(&mut self, val: u16) {
+        let bytes = val.to_le_bytes();
+        self.osd2[0] = bytes[0];
+        self.osd2[1] = bytes[1];
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct Ext4Inode {
+    /// Inode number
+    pub ino: u32,
+    /// File mode
+    pub mode: u16,
+    /// User ID
+    pub uid: u16,
+    /// Group ID
+    pub gid: u16,
+    /// File size
+    pub size: u64,
+    /// Block count
+    pub blocks: u64,
+    /// Link count
+    pub links_count: u16,
+    /// Flags
+    pub flags: u32,
+    /// Direct block pointers
+    pub block: [u32; 15],
+    /// Last access time
+    pub atime: u32,
+    /// Last modification time
+    pub mtime: u32,
+    /// Creation time
+    pub ctime: u32,
+    /// Inode generation (metadata_csum seed chain + NFS handle
+    /// generation; preserved through read-modify-write even for callers
+    /// that never touch it).
+    pub generation: u32,
+}
+
+impl Ext4Inode {
+    /// Convert the in-memory inode back to the on-disk layout (tracked
+    /// fields only; untracked bytes are re-merged by write_inode_disk's
+    /// read-modify-write).
+    pub fn to_on_disk(&self) -> Ext4InodeOnDisk {
+        let mut d = Ext4InodeOnDisk::default();
+        d.i_mode = self.mode;
+        d.i_uid = self.uid;
+        d.i_gid = self.gid;
+        d.i_size = self.size as u32;
+        d.i_size_high = (self.size >> 32) as u32;
+        d.i_atime = self.atime;
+        d.i_ctime = self.ctime;
+        d.i_mtime = self.mtime;
+        d.i_links_count = self.links_count;
+        d.i_blocks = self.blocks as u32;
+        d.set_blocks_high((self.blocks >> 32) as u16);
+        d.i_flags = self.flags;
+        d.i_block = self.block;
+        d.i_generation = self.generation;
+        d
+    }
+
+    /// Create from disk format
+    pub fn from_disk(disk: &Ext4InodeOnDisk, ino: u32) -> Self {
+        Self {
+            ino,
+            mode: disk.i_mode,
+            uid: disk.i_uid,
+            gid: disk.i_gid,
+            size: (disk.i_size as u64) | ((disk.i_size_high as u64) << 32),
+            blocks: (disk.i_blocks as u64) | ((disk.blocks_high() as u64) << 32),
+            links_count: disk.i_links_count,
+            flags: disk.i_flags,
+            block: disk.i_block,
+            atime: disk.i_atime,
+            mtime: disk.i_mtime,
+            ctime: disk.i_ctime,
+            generation: disk.i_generation,
+        }
+    }
+
+    /// Check if directory
+    pub fn is_dir(&self) -> bool {
+        (self.mode & 0xF000) == 0x4000
+    }
+
+    /// Check if regular file
+    pub fn is_reg(&self) -> bool {
+        (self.mode & 0xF000) == 0x8000
+    }
+
+    /// Check if symbolic link
+    pub fn is_symlink(&self) -> bool {
+        (self.mode & 0xF000) == 0xA000
+    }
+
+    /// Check if using extent
+    pub fn has_extent(&self) -> bool {
+        (self.flags & 0x80000) != 0
+    }
+
+    /// Get file size
+    pub fn get_size(&self) -> u64 {
+        self.size
+    }
+
+    /// Set file size
+    pub fn set_size(&mut self, size: u64) {
+        self.size = size;
+    }
+
+    /// Get data block list
+    ///
+    /// Supports both extent and indirect block modes
+    pub fn get_data_blocks(&self, fs: &crate::ext4::Ext4FileSystem) -> Result<Vec<u64>, i32> {
+        let mut blocks = Vec::new();
+
+        let remaining_blocks = (self.size + fs.block_size as u64 - 1) / (fs.block_size as u64);
+
+        // Check if using extent
+        if self.has_extent() {
+            // Search using extent tree
+            for i in 0..remaining_blocks {
+                match super::extent::ext4_ext_get_block_ex(fs, self.ino, &self.block, i) {
+                    Ok((block_num, unwritten)) => {
+                        // Unwritten (fallocate-preallocated) blocks read as
+                        // zeros — the disk contents were never materialized.
+                        if block_num != 0 && !unwritten {
+                            blocks.push(block_num);
+                        } else {
+                            // Sparse file or unwritten: not read from disk
+                            blocks.push(0);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        } else {
+            // Use indirect block module to get all data blocks
+            for i in 0..remaining_blocks {
+                match super::indirect::ext4_get_block(fs, &self.block, i) {
+                    Ok(block_num) => {
+                        if block_num != 0 {
+                            blocks.push(block_num);
+                        } else {
+                            // Sparse file, block not allocated
+                            blocks.push(0);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        Ok(blocks)
+    }
+
+    /// Get data block number at specified block index
+    ///
+    /// Supports both extent and indirect block modes. For extent files an
+    /// UNWRITTEN (fallocate-preallocated, never-materialized) block maps
+    /// to 0: every read path must zero-fill it instead of touching disk.
+    /// Writers use ext4_ext_materialize_block for the real mapping.
+    pub fn get_data_block(&self, fs: &crate::ext4::Ext4FileSystem, block_index: u64) -> Result<u64, i32> {
+        if self.has_extent() {
+            match super::extent::ext4_ext_get_block_ex(fs, self.ino, &self.block, block_index)? {
+                (b, false) => Ok(b),
+                (.., true) => Ok(0),
+            }
+        } else {
+            super::indirect::ext4_get_block(fs, &self.block, block_index)
+        }
+    }
+
+    /// Read file data
+    ///
+    /// Read data from specified offset
+    pub fn read_data(
+        &self,
+        fs: &crate::ext4::Ext4FileSystem,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, i32> {
+        use rux::fs::bio;
+
+        let file_size = self.get_size();
+        if offset >= file_size {
+            return Ok(0);
+        }
+
+        let available = file_size - offset;
+        let to_read = core::cmp::min(buf.len() as u64, available) as usize;
+
+        // Per-block lazy resolution: get_data_blocks materializes the
+        // WHOLE file mapping (O(file blocks) per read() — a 300MB
+        // fallocate-preallocated file meant 76800 tree lookups PER read
+        // call, minutes under TCG). Resolve only the blocks actually
+        // touched by this read.
+        let block_size = fs.block_size as usize;
+
+        let mut total_read = 0;
+        let mut current_offset = offset as usize;
+        let mut buf_offset = 0;
+
+        while total_read < to_read {
+            let block_index = current_offset / block_size;
+            let block_offset = current_offset % block_size;
+
+            if block_index * block_size >= file_size as usize {
+                break;
+            }
+
+            // Sparse hole / unwritten block (block number 0): reads must
+            // return ZEROES, never the content of physical block 0
+            // (superblock backup garbage) — review 5.5 (稀疏洞读盘块 0).
+            let this_block = self.get_data_block(fs, block_index as u64)?;
+            if this_block == 0 {
+                let remaining = to_read - total_read;
+                let available_in_block = block_size - block_offset;
+                let zero_len = core::cmp::min(remaining, available_in_block);
+                for i in 0..zero_len {
+                    buf[buf_offset + i] = 0;
+                }
+                total_read += zero_len;
+                buf_offset += zero_len;
+                current_offset += zero_len;
+                continue;
+            }
+
+            // SAFETY: fs.device is a valid GenDisk pointer for the mounted filesystem;
+            // this_block is a resolved data block; bio::bread returns a valid BufferHead.
+            {
+                let bh = bio::bread(fs.device, this_block)
+                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                // SAFETY: bh is a valid buffer head from bio::bread; b_data is block_size bytes
+                let data = bio::bh_data(&bh);
+                let remaining = to_read - total_read;
+                let available_in_block = block_size - block_offset;
+                let read_in_block = core::cmp::min(remaining, available_in_block);
+
+                buf[buf_offset..buf_offset + read_in_block]
+                    .copy_from_slice(&data[block_offset..block_offset + read_in_block]);
+
+                total_read += read_in_block;
+                buf_offset += read_in_block;
+                current_offset += read_in_block;
+
+                bio::brelse(bh);
+            }
+        }
+
+        Ok(total_read)
+    }
+}
+
+/// Read ext4 inode from disk
+///
+/// # Arguments
+/// - `fs`: ext4 filesystem reference
+/// - `ino`: inode number
+///
+/// # Returns
+/// - `Ok(Ext4InodeOnDisk)` on success
+/// - `Err(errno)` on failure
+pub fn read_inode(
+    fs: &crate::ext4::Ext4FileSystem,
+    ino: u32,
+) -> Result<Ext4InodeOnDisk, i32> {
+    use rux::fs::bio;
+
+    // ino == 0 is invalid (would underflow in group/index calculation)
+    if ino == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    if ino > fs.total_inodes {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Degenerate-geometry short-circuit (msync panic backstop twin of
+    // inode_table_block_of): an instance whose init() never ran has
+    // inodes_per_group == 0 and would panic on the divide below. EIO,
+    // not a panic — init() rejects such superblocks, so this never
+    // fires on a real filesystem.
+    if fs.inodes_per_group == 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Calculate block group and inode table index
+    let group = (ino - 1) / fs.inodes_per_group;
+    let index = (ino - 1) % fs.inodes_per_group;
+
+    let inode_table_start = {
+        let group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+        let gd = &group_descs[group as usize];
+        (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
+    };
+
+    // Degenerate-geometry backstop (msync panic class): inode_size 0
+    // or > block_size — impossible on a validated mount (init bounds
+    // it to [128, block_size]) — would divide by zero below.
+    if fs.inode_size == 0 || fs.inode_size as u32 > fs.block_size {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    let inodes_per_block = fs.block_size / (fs.inode_size as u32);
+    let block_offset = index / inodes_per_block;
+    let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
+
+    // Read block containing inode
+    let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
+        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+    // SAFETY: bh is a valid BufferHead from bio::bread.
+    let data = bio::bh_data(&bh);
+
+    // Bounds check (read-side twin of the write paths' R20-FS2 clamp):
+    // the copy is clamped to the ON-DISK slot size (s_inode_size). With
+    // s_inode_size < 172 a full-struct copy would (a) fail the bounds
+    // check for the last slot(s) of every inode-table block — a spurious
+    // EIO on a perfectly valid 128-byte-inode filesystem — and (b) read
+    // the next slot's bytes into the unused tail fields. All fields
+    // from_disk consumes live below offset 128, so a clamped copy is
+    // complete for every consumer; the tail stays zeroed.
+    let inode_size = core::mem::size_of::<Ext4InodeOnDisk>();
+    let copy_len = core::cmp::min(inode_size, fs.inode_size as usize);
+    if in_block_offset + copy_len > data.len() {
+        bio::brelse(bh);
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Read inode from block buffer
+    let mut inode_on_disk = Ext4InodeOnDisk::default();
+    // Byte image of the on-disk struct head (INV-CBYTES-1); the tail
+    // stays zeroed (read_inode's clamp discipline).
+    let inode_bytes = &mut crate::safety::bytes::bytes_of_mut(&mut inode_on_disk)[..copy_len];
+
+    // metadata_csum: verify the inode's crc32c over the FULL inode_size
+    // bytes from the buffer (the 128..inode_size extra bytes are part of
+    // the checksum but not of the copied struct) — mismatched inodes read
+    // as EIO, like Linux.
+    if fs.metadata_csum {
+        let full = (in_block_offset + fs.inode_size as usize).min(data.len());
+        if !crate::ext4::csum::inode_csum_ok(fs.csum_seed, ino, &data[in_block_offset..full]) {
+            bio::brelse(bh);
+            return Err(errno::Errno::IOError.as_neg_i32()); // EIO
+        }
+    }
+
+    inode_bytes.copy_from_slice(&data[in_block_offset..in_block_offset + copy_len]);
+
+    bio::brelse(bh);
+
+    Ok(inode_on_disk)
+}
+
+/// Get block number from inode at given index
+///
+/// # Arguments
+/// - `inode`: inode reference (on-disk format)
+/// - `block_idx`: block index (0-11 for direct blocks)
+///
+/// # Returns
+/// - `Ok(block_number)` on success
+/// - `Err(errno)` on failure
+pub fn get_block_nr(inode: &Ext4InodeOnDisk, block_idx: usize) -> Result<u64, i32> {
+    // For now, only handle direct blocks (0-11)
+    if block_idx < 12 {
+        Ok(inode.i_block[block_idx] as u64)
+    } else {
+        // TODO: Handle indirect blocks (12-14)
+        Err(errno::Errno::InvalidArgument.as_neg_i32())
+    }
+}
+
+/// Write ext4 inode (Ext4Inode format) back to disk
+///
+/// # Arguments
+/// - `fs`: ext4 filesystem reference
+/// - `ino`: inode number
+/// - `inode`: ext4 inode data to write
+///
+/// # Returns
+/// - `Ok(())` on success
+/// - `Err(errno)` on failure
+pub fn write_inode(
+    fs: &crate::ext4::Ext4FileSystem,
+    ino: u32,
+    inode: &Ext4Inode,
+) -> Result<(), i32> {
+    use rux::fs::bio;
+    crate::debug::fsw::note_write_inode();
+
+    if ino == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    if ino > fs.total_inodes {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Degenerate-geometry short-circuit (msync panic backstop twin of
+    // inode_table_block_of): an instance whose init() never ran has
+    // inodes_per_group == 0 and would panic on the divide below. EIO,
+    // not a panic — init() rejects such superblocks, so this never
+    // fires on a real filesystem.
+    if fs.inodes_per_group == 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Calculate block group and inode table index
+    let group = (ino - 1) / fs.inodes_per_group;
+    let index = (ino - 1) % fs.inodes_per_group;
+
+    let inode_table_start = {
+        let group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+        let gd = &group_descs[group as usize];
+        (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
+    };
+
+    // Degenerate-geometry backstop (msync panic class): inode_size 0
+    // or > block_size — impossible on a validated mount (init bounds
+    // it to [128, block_size]) — would divide by zero below.
+    if fs.inode_size == 0 || fs.inode_size as u32 > fs.block_size {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    let inodes_per_block = fs.block_size / (fs.inode_size as u32);
+    let block_offset = index / inodes_per_block;
+    let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
+
+    // Read block containing inode
+    let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
+        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+    // SAFETY: bh is a valid BufferHead from bio::bread; b_data is block_size bytes.
+    let data = bio::bh_data_mut(&bh);
+
+    // Bounds check: copy length clamped to the on-disk slot size so the
+    // 172-byte in-memory struct never spills into the next inode's slot
+    // (review 5.5: write_inode 的 172B 布局按实际 inode_size 拷贝).
+    let copy_len = core::cmp::min(
+        core::mem::size_of::<Ext4InodeOnDisk>(),
+        fs.inode_size as usize,
+    );
+    if in_block_offset + copy_len > data.len() {
+        bio::brelse(bh);
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Convert Ext4Inode to on-disk format
+    // Read existing on-disk inode first to preserve untracked fields.
+    // copy_len bytes only (the clamp above): a full-struct pointer copy
+    // would read copy_len..172 bytes from PAST the slot — with
+    // s_inode_size=128 the last slot of every inode-table block reads
+    // up to 44 bytes past the end of the block buffer (out of bounds).
+    // The struct tail stays zeroed, matching read_inode's clamp.
+    let mut inode_on_disk = Ext4InodeOnDisk::default();
+    // Bounds checked above; in_block_offset + copy_len <= data.len().
+    {
+        let src = &data[in_block_offset..in_block_offset + copy_len];
+        let dst = &mut crate::safety::bytes::bytes_of_mut(&mut inode_on_disk)[..copy_len];
+        dst.copy_from_slice(src);
+    }
+
+    // Update tracked fields
+    inode_on_disk.i_mode = inode.mode;
+    inode_on_disk.i_uid = inode.uid;
+    inode_on_disk.i_size = inode.size as u32;
+    inode_on_disk.i_atime = inode.atime;
+    inode_on_disk.i_ctime = inode.ctime;
+    inode_on_disk.i_mtime = inode.mtime;
+    inode_on_disk.i_gid = inode.gid;
+    inode_on_disk.i_links_count = inode.links_count;
+    inode_on_disk.i_blocks = inode.blocks as u32;
+    inode_on_disk.set_blocks_high((inode.blocks >> 32) as u16);
+    inode_on_disk.i_flags = inode.flags;
+    inode_on_disk.i_block = inode.block;
+    inode_on_disk.i_size_high = (inode.size >> 32) as u32;
+
+    // Write inode to block buffer: bounds checked above;
+    // in_block_offset + copy_len <= data.len() (INV-CBYTES-1).
+    let inode_bytes = &crate::safety::bytes::bytes_of(&inode_on_disk)[..copy_len];
+    data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
+
+    // metadata_csum write path: recompute the slot's crc32c over the
+    // FULL inode_size bytes (the read path verifies exactly that span —
+    // read_inode EIOs on mismatch, so every write must re-seal it).
+    if fs.metadata_csum {
+        let full_end = (in_block_offset + fs.inode_size as usize).min(data.len());
+        crate::ext4::csum::inode_csum_set(
+            fs.csum_seed,
+            ino,
+            &mut data[in_block_offset..full_end],
+        );
+    }
+
+    // Mark buffer dirty and sync
+    // SAFETY: bh is a valid buffer head from bio::bread; set_state_bit modifies
+    // the buffer state flags through an internal spinlock.
+    bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
+
+    // Journal the inode table block if a transaction is active (the
+    // typed handle view rides the framework's boxed_mut edge).
+    if let Some(handle) = crate::ext4::namei::get_current_handle() {
+        let _ = crate::jbd2::jbd2_journal_dirty_metadata(
+            crate::syscall::edges::boxed_mut(handle),
+            bh,
+        );
+    }
+
+    // With an active handle the commit persists this block (write-through
+    // fast path syncs the registered buffers); syncing here too would
+    // restore the one-synchronous-I/O-per-write(2) cost this path just
+    // lost. Without a handle (standalone inode updates outside a
+    // transaction — e.g. the O_TRUNC setattr of every open(O_CREAT|..))
+    // the buffer is now left DIRTY instead of synced inline: the write
+    // rides the buffer cache write-back (eviction sync, sync(2), and the
+    // fsync path — ext4_sync_file syncs the file's inode-table block
+    // directly via inode_table_block_of). The inline sync cost one
+    // synchronous virtio round trip per open(O_TRUNC)/creat, which alone
+    // consumed >5s of the 30s budget of create-heavy LTP tests
+    // (creat05/fork09: 1021 files in setup). Ordering safety is
+    // unchanged: an inode-table block never carries entry-publication
+    // obligations in the "after" direction (it is a `pre`-role block at
+    // most), and the publication guards keep entry blocks from jumping
+    // their prereqs.
+    // SAFETY: bh valid; release the reference taken by bread above.
+    bio::brelse(bh);
+
+    Ok(())
+}
+
+/// R108 (fi-fix-verify, P0 crash-window data integrity): durably publish
+/// the inode-table block holding `ino`.
+///
+/// The crash-ordering rule for any metadata operation that CLEARS bitmap
+/// bits an inode's map used to claim: the shrunk/emptied map must be
+/// DURABLE before the freed bits are durable. The other order — bitmap
+/// free persisted, map shrink still sitting dirty in the buffer cache —
+/// leaves a stale on-disk map claiming FREE blocks; the next boot's
+/// allocator hands those blocks to a new owner and the stale map's next
+/// truncate/unlink RE-FREES them (two file pages, one disk block; the
+/// fvpop→fvset→fv1/2/3 poison chain, measured 2026-11-12). The block
+/// bitmap is synced synchronously by the allocator (write_block_bitmap);
+/// the inode-table block is NOT (write_inode leaves it dirty without a
+/// journal handle). This helper closes that window: bread (cache hit on
+/// the just-dirtied buffer) + sync if dirty. Idempotent when the block
+/// is already clean or the journal already committed it — the same
+/// bread+sync pattern ext4_sync_file_inner applies at fsync.
+pub fn sync_inode_table_block(
+    fs: &crate::ext4::Ext4FileSystem,
+    ino: u32,
+) -> Result<(), i32> {
+    use rux::fs::bio;
+    if let Some(tbl_blk) = inode_table_block_of(fs, ino) {
+        // SAFETY: bio::bread returns a valid BufferHead on success; the
+        // inode-table block is a plain metadata block.
+        {
+            if let Some(bh) = bio::bread(fs.device, tbl_blk) {
+                let sync_res = if bio::bh_is_dirty(&bh) {
+                    bio::sync_dirty_buffer(bh)
+                } else {
+                    Ok(())
+                };
+                bio::brelse(bh);
+                sync_res?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Block number of the on-disk inode-table block holding `ino` (the
+/// write_inode_disk target block). Used by ext4_sync_file to persist the
+/// inode slot directly — fsync's own metadata obligation — without a
+/// whole-cache flush (leg-30A: the sync_buffers tail is gone).
+pub fn inode_table_block_of(
+    fs: &crate::ext4::Ext4FileSystem,
+    ino: u32,
+) -> Option<u64> {
+    if ino == 0 || ino > fs.total_inodes {
+        return None;
+    }
+    // Degenerate-geometry short-circuit (the msync panic's backstop,
+    // 2026-11-18): a constructed-but-never-init() instance — or memory
+    // confused into one — carries inodes_per_group == 0 and would
+    // panic on the divide below (inode.rs:679, the rt-r1 LTP gate
+    // panic). A validated mount always has inodes_per_group != 0
+    // (init() rejects the superblock otherwise), so this never fires
+    // on a real filesystem.
+    if fs.inodes_per_group == 0 {
+        return None;
+    }
+    let group = (ino - 1) / fs.inodes_per_group;
+    let index = (ino - 1) % fs.inodes_per_group;
+    let inode_table_start = {
+        let group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return None;
+        }
+        let gd = &group_descs[group as usize];
+        (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
+    };
+    // Same backstop for the slot arithmetic: init() bounds inode_size
+    // to [128, block_size], so inodes_per_block >= 1 on every mounted
+    // filesystem (read_inode's twin check, mod.rs).
+    let inodes_per_block = fs.block_size / (fs.inode_size as u32);
+    if inodes_per_block == 0 {
+        return None;
+    }
+    let block_offset = index / inodes_per_block;
+    Some(inode_table_start + block_offset as u64)
+}
+
+/// Write ext4 inode (on-disk format) back to disk
+///
+/// # Arguments
+/// - `fs`: ext4 filesystem reference
+/// - `ino`: inode number
+/// - `inode`: ext4 inode data to write (on-disk format)
+///
+/// # Returns
+/// - `Ok(())` on success
+/// - `Err(errno)` on failure
+pub fn write_inode_disk(
+    fs: &crate::ext4::Ext4FileSystem,
+    ino: u32,
+    inode: &Ext4InodeOnDisk,
+) -> Result<(), i32> {
+    use rux::fs::bio;
+    crate::debug::fsw::note_write_inode();
+
+    if ino == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    if ino > fs.total_inodes {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Degenerate-geometry short-circuit (msync panic backstop twin of
+    // inode_table_block_of): an instance whose init() never ran has
+    // inodes_per_group == 0 and would panic on the divide below. EIO,
+    // not a panic — init() rejects such superblocks, so this never
+    // fires on a real filesystem.
+    if fs.inodes_per_group == 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Calculate block group and inode table index
+    let group = (ino - 1) / fs.inodes_per_group;
+    let index = (ino - 1) % fs.inodes_per_group;
+
+    let inode_table_start = {
+        let group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+        let gd = &group_descs[group as usize];
+        (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
+    };
+
+    // Degenerate-geometry backstop (msync panic class): inode_size 0
+    // or > block_size — impossible on a validated mount (init bounds
+    // it to [128, block_size]) — would divide by zero below.
+    if fs.inode_size == 0 || fs.inode_size as u32 > fs.block_size {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    let inodes_per_block = fs.block_size / (fs.inode_size as u32);
+    let block_offset = index / inodes_per_block;
+    let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
+
+    // Read block containing inode
+    let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
+        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+    // SAFETY: bh is a valid BufferHead from bio::bread; b_data is a valid
+    // mutable slice of block_size bytes containing the inode table block.
+    let data = bio::bh_data_mut(&bh);
+
+    // Bounds check (R20-FS2): the copy is clamped to the ON-DISK inode slot
+    // size (s_inode_size) AND to the block: with s_inode_size < 172 the full
+    // in-memory struct would spill into the NEXT inode's slot; with the last
+    // slot of the block it would overrun the buffer outright (review 5.5:
+    // 172B 布局按实际 inode_size 拷贝).
+    let copy_len = core::cmp::min(
+        core::mem::size_of::<Ext4InodeOnDisk>(),
+        fs.inode_size as usize,
+    );
+    if in_block_offset + copy_len > data.len() {
+        bio::brelse(bh);
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Write inode to block buffer: copy_len bytes fit within the block
+    // starting at in_block_offset (bounds-checked above; INV-CBYTES-1).
+    let inode_bytes = &crate::safety::bytes::bytes_of(inode)[..copy_len];
+    data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
+
+    // metadata_csum write path: re-seal the full inode slot (see
+    // write_inode — the read path verifies the full inode_size span).
+    if fs.metadata_csum {
+        let full_end = (in_block_offset + fs.inode_size as usize).min(data.len());
+        crate::ext4::csum::inode_csum_set(
+            fs.csum_seed,
+            ino,
+            &mut data[in_block_offset..full_end],
+        );
+    }
+
+    // Mark buffer dirty and sync
+    // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies
+    // the buffer state flags through an internal spinlock.
+    bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
+
+    // Journal the inode table block if a transaction is active (the
+    // typed handle view rides the framework's boxed_mut edge).
+    if let Some(handle) = crate::ext4::namei::get_current_handle() {
+        let _ = crate::jbd2::jbd2_journal_dirty_metadata(
+            crate::syscall::edges::boxed_mut(handle),
+            bh,
+        );
+    }
+
+    let sync_res = bio::sync_dirty_buffer(bh);
+    bio::brelse(bh);
+    sync_res?;
+
+    Ok(())
+}
+
+pub mod file_type {
+    /// FIFO
+    pub const S_IFIFO: u16 = 0o010000;
+    /// Character device
+    pub const S_IFCHR: u16 = 0o020000;
+    /// Directory
+    pub const S_IFDIR: u16 = 0o040000;
+    /// Block device
+    pub const S_IFBLK: u16 = 0o060000;
+    /// Regular file
+    pub const S_IFREG: u16 = 0o100000;
+    /// Symbolic link
+    pub const S_IFLNK: u16 = 0o120000;
+    /// Socket
+    pub const S_IFSOCK: u16 = 0o140000;
+
+    /// File type mask
+    pub const S_IFMT: u16 = 0o170000;
+}
+
+pub mod perm {
+    /// Owner read
+    pub const S_IRUSR: u16 = 0o400;
+    /// Owner write
+    pub const S_IWUSR: u16 = 0o200;
+    /// Owner execute
+    pub const S_IXUSR: u16 = 0o100;
+    /// Group read
+    pub const S_IRGRP: u16 = 0o040;
+    /// Group write
+    pub const S_IWGRP: u16 = 0o020;
+    /// Group execute
+    pub const S_IXGRP: u16 = 0o010;
+    /// Others read
+    pub const S_IROTH: u16 = 0o004;
+    /// Others write
+    pub const S_IWOTH: u16 = 0o002;
+    /// Others execute
+    pub const S_IXOTH: u16 = 0o001;
+}
+
+// ============================================================================
+// Kernel typed entries
+// ============================================================================
+
+/// FS_IOC_SETFLAGS backing (safe entry for the syscall capsule layer):
+/// persist the merged chattr flags into the on-disk inode so they survive
+/// an icache eviction (the VFS copy is reseeded from disk at iget), and
+/// keep the VFS-cached Ext4Inode copy in sync. No-op for non-ext4 inodes
+/// (the ops-identity gate lives here, not at the ioctl call site).
+pub fn persist_ioc_flags(vfs_inode: &rux::fs::inode::Inode, merged: u32) {
+    use super::{EXT4_BIG_LOCK, EXT4_INODE_OPS};
+    use rux::fs::inode::FS_FL_USER_MODIFIABLE;
+
+    if !core::ptr::eq(
+        vfs_inode.ops.unwrap_or(&EXT4_INODE_OPS) as *const _,
+        &EXT4_INODE_OPS as *const _,
+    ) {
+        return; // not an ext4 inode — nothing to persist
+    }
+    let _guard = EXT4_BIG_LOCK.lock();
+    if let Some(fs_ptr) = vfs_inode.private_data {
+        // private_data holds the Ext4FileSystem for EXT4_INODE_OPS
+        // inodes (installed at mount/iget time) — the typed view rides
+        // the framework's boxed_ref edge.
+        let fs = crate::syscall::edges::boxed_ref(
+            fs_ptr as *const crate::ext4::Ext4FileSystem,
+        );
+        if let Ok(mut on_disk) = read_inode(fs, vfs_inode.ino as u32) {
+            on_disk.i_flags =
+                (on_disk.i_flags & !FS_FL_USER_MODIFIABLE) | (merged & FS_FL_USER_MODIFIABLE);
+            if write_inode_disk(fs, vfs_inode.ino as u32, &on_disk).is_ok() {
+                // Keep the VFS-cached Ext4Inode copy in sync (the sb
+                // box view rides boxed_mut; exclusively reachable
+                // under EXT4_BIG_LOCK here, INV-EXT4-SBRES-1).
+                if let Some(sb) = vfs_inode.sb {
+                    let cached: &mut Ext4Inode =
+                        crate::syscall::edges::boxed_mut(sb as *mut Ext4Inode);
+                    cached.flags = on_disk.i_flags;
+                }
+            }
+        }
+    }
+}

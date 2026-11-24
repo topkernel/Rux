@@ -6,7 +6,7 @@
 //! the fs-substrate flip — the section follows its leaf into the crate;
 //! runs in-guest through the SERVICE-TEST SEAM).
 
-use crate::fs::rootfs::{RootFSNode, RootFSSuperBlock};
+use crate::rootfs::{RootFSNode, RootFSSuperBlock};
 use alloc::vec::Vec;
 
 pub fn test_rootfs_pins() {

@@ -15,7 +15,7 @@
 #![forbid(unsafe_code)]
 
 use rux::tests::{test_fail, test_group_start, test_pass};
-use crate::fs::rootfs::RootFSSuperBlock;
+use crate::rootfs::RootFSSuperBlock;
 
 const GZ_PLAIN: [u8; 345] = [
     0x1f, 0x8b, 0x08, 0x00, 0xbd, 0x3c, 0xc6, 0x6a, 0x02, 0xff, 0x0b, 0x0a, 0x8d, 0xd0, 0xf5, 0xf4,
@@ -140,7 +140,7 @@ pub fn test_initrd() {
     test_group_start("initrd");
 
     // ---- Test 1: plain gzip (no optional header fields) ----
-    match crate::fs::initrd::gunzip(&GZ_PLAIN) {
+    match crate::initrd::gunzip(&GZ_PLAIN) {
         Ok(out) => {
             if out.len() == 3085 {
                 test_pass("gunzip plain: size 3085");
@@ -179,7 +179,7 @@ pub fn test_initrd() {
     }
 
     // ---- Test 2: gzip with FNAME (header-skip path) ----
-    match crate::fs::initrd::gunzip(&GZ_FNAME) {
+    match crate::initrd::gunzip(&GZ_FNAME) {
         Ok(out) => {
             if out.len() == 3085 && out.ends_with(b"END-MARKER-42") {
                 test_pass("gunzip FNAME: skipped name, content ok");
@@ -194,19 +194,19 @@ pub fn test_initrd() {
     let mut corrupt = GZ_PLAIN;
     let mid = corrupt.len() / 2;
     corrupt[mid] ^= 0x55; // flip bits in the deflate body
-    match crate::fs::initrd::gunzip(&corrupt) {
+    match crate::initrd::gunzip(&corrupt) {
         Ok(_) => test_fail("gunzip corrupt", "accepted corrupt stream"),
         Err(_) => test_pass("gunzip corrupt: rejected"),
     }
     // Truncated stream.
-    match crate::fs::initrd::gunzip(&GZ_PLAIN[..60]) {
+    match crate::initrd::gunzip(&GZ_PLAIN[..60]) {
         Ok(_) => test_fail("gunzip truncated", "accepted short stream"),
         Err(_) => test_pass("gunzip truncated: rejected"),
     }
 
     // ---- Test 4: cpio newc unpack into a fresh rootfs ----
     let sb = RootFSSuperBlock::new();
-    match crate::fs::initrd::unpack_newc(&CPIO_NEWC, &sb) {
+    match crate::initrd::unpack_newc(&CPIO_NEWC, &sb) {
         Ok(stats) => {
             let ok_counts = stats.files == 2
                 && stats.dirs == 1
@@ -279,7 +279,7 @@ pub fn test_initrd() {
 
     // ---- Test 5: bad archive rejected ----
     let sb2 = RootFSSuperBlock::new();
-    match crate::fs::initrd::unpack_newc(b"garbage!", &sb2) {
+    match crate::initrd::unpack_newc(b"garbage!", &sb2) {
         Ok(_) => test_fail("cpio: garbage rejected", "accepted"),
         Err(_) => test_pass("cpio: garbage rejected"),
     }

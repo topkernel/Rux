@@ -8,7 +8,7 @@
 //! (INV-IPC-PAGEOP-1) and the SemUndoEntry type substrate.
 //!
 //! Sole-copy state (the rung-1 recipe's final step): the service files
-//! LIVE in this crate (src/ipc/); the two ipc guest-test modules
+//! LIVE in this crate (src/), flat under its root; the ipc guest-test
 //! followed the files.
 
 // FORBID since the flip: the eleven unsafe blocks the files carried
@@ -27,117 +27,89 @@ pub use rux::{
     arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, mm,
     process, safety, sched, security, signal, syscall, timer, trace,
 };
-// The sync module comes from sync's UNION module (sync-upper
-// lane): the framework's sync plus the moved futex diagnostics at
-// their historical crate::sync::futex::X paths.
-pub use ::sync::sync;
+// The framework's sync module plus the moved futex diagnostics, merged
+// at the sync crate's root (crate::sync::futex::X paths).
+pub use ::sync;
 pub use rux::net;
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;
 
-/// The ipc tree, nested under crate::ipc (the historical paths): the
-/// service files plus the framework's binder re-export (the union the
-/// sibling services consumed when ipc was one framework module) and
-/// the framework-side seam zones (ipc_hooks, edges).
-pub mod ipc {
-    // the service files (THIS crate's own — the sole copies)
-    pub mod sysv_msg;
-    pub mod sysv_shm;
-    pub mod posix_mq;
-    pub mod keys;
-    pub mod access_token;
-    // the binder COLD DIAGNOSTIC halves (cold-four lane; the txn
-    // mechanism stays framework-side in rux::ipc::binder — the rung's
-    // shelving verdict stands).
-    pub mod binder_diag;
+// The service files (THIS crate's own — the sole copies), flat at the
+// crate root (seed-core-design 2c.2).
+pub mod sysv_msg;
+pub mod sysv_shm;
+pub mod posix_mq;
+pub mod keys;
+pub mod access_token;
+// the binder COLD DIAGNOSTIC halves (cold-four lane; the txn
+// mechanism stays framework-side in rux::ipc::binder — the rung's
+// shelving verdict stands).
+pub mod binder_diag;
 
-    // The old framework mod.rs's `pub use util::*` — the IPC constants
-    // (IPC_NOWAIT, SHM_REMAP, ...) re-exported at the ipc root so the
-    // service files' `super::X` paths resolve (the historical shape).
-    pub use util::*;
+// The old framework mod.rs's `pub use util::*` — the IPC constants
+// (IPC_NOWAIT, SHM_REMAP, ...) re-exported at the ipc root so the
+// service files' `super::X` paths resolve (the historical shape).
+pub use rux::ipc::util::*;
 
-    // the guest-test modules that followed the files (the framework's
-    // tests/mod.rs rows are gated with the move note).
-    // Service-internal test lives CENTRALLY in kernel/src/tests/services/.
-    #[cfg(feature = "unit-test")]
-    #[path = "../../../src/tests/services/ipc_sysv.rs"]
-    pub mod ipc_sysv;
+// binder, sysv_sem and util stay FRAMEWORK-side (the rung's
+// verdicts — see the shelving records); re-exported so
+// `crate::ipc::X` paths keep resolving (syscall's dispatch
+// rows, devfs, futex, the debug audits, the sibling service files'
+// `super::util` uses).
+pub use rux::ipc::binder;
+pub use rux::ipc::binder_edges;
+pub use rux::ipc::sysv_sem;
+pub use rux::ipc::util;
+// the seam zones the service files consume (the hook table's
+// KeyQuota type; the audited page-refcount edges).
+pub use rux::ipc::ipc_hooks;
+pub use rux::ipc::edges;
+// the type substrate that stayed with Task's sem_undo field.
+pub use rux::ipc::SemUndoEntry;
 
-    // The framework's test counters + assert macros, re-exported at the
-    // historical `super::` path the test modules' imports expect (the
-    // service-test seam contract: same pass/fail counters as the
-    // in-framework suite).
-    #[cfg(feature = "unit-test")]
-    pub use rux::tests::{test_pass, test_fail, test_skip, test_group_start};
-    #[cfg(feature = "unit-test")]
-    pub use rux::test_assert_eq;
+// the guest-test module that followed the files (the framework's
+// tests/mod.rs rows are gated with the move note).
+// Service-internal test lives CENTRALLY in kernel/src/tests/services/.
 
-    // binder, sysv_sem and util stay FRAMEWORK-side (the rung's
-    // verdicts — see the shelving records); re-exported so
-    // `crate::ipc::X` paths keep resolving (syscall's dispatch
-    // rows, devfs, futex, the debug audits, the sibling service files'
-    // `super::util` uses).
-    pub use rux::ipc::binder;
-    pub use rux::ipc::binder_edges;
-    pub use rux::ipc::sysv_sem;
-    pub use rux::ipc::util;
-    // the seam zones the service files consume (the hook table's
-    // KeyQuota type; the audited page-refcount edges).
-    pub use rux::ipc::ipc_hooks;
-    pub use rux::ipc::edges;
-    // the type substrate that stayed with Task's sem_undo field.
-    pub use rux::ipc::SemUndoEntry;
-
-    // The framework's whole-module globs (the service files'
-    // crate::arch / crate::mm / ... paths resolve through the crate
-    // root re-exports; this glob mirrors the old mod.rs's pub-use).
-    pub use crate::arch::*;
-    pub use crate::config;
-    pub use crate::console;
-    pub use crate::debug::*;
-    pub use crate::drivers::*;
-    pub use crate::errno;
-    pub use crate::fs::*;
-    pub use crate::mm::*;
-    pub use crate::net;
-    pub use crate::process::*;
-    pub use crate::safety::*;
-    pub use crate::sched::*;
-    pub use crate::security::*;
-    pub use crate::signal::*;
-    pub use crate::sync::*;
-    pub use crate::syscall;
-    pub use crate::timer::*;
-    pub use crate::trace;
-}
+// The framework's test counters + assert macros, re-exported at the
+// crate root where the test module's imports expect them (the
+// service-test seam contract: same pass/fail counters as the
+// in-framework suite).
+#[cfg(feature = "unit-test")]
+pub use rux::tests::{test_pass, test_fail, test_skip, test_group_start};
+#[cfg(feature = "unit-test")]
+pub use rux::test_assert_eq;
+#[cfg(feature = "unit-test")]
+#[path = "../../src/tests/services/ipc_sysv.rs"]
+pub mod ipc_sysv;
 
 /// The boot-time registration (bin calls this before kmain): the
 /// IpcHooks table's rows. THE composition contract.
 pub fn register_all() {
     rux::ipc::ipc_hooks::ipc_register_hooks(rux::ipc::ipc_hooks::IpcHooks {
-        mq_fds_cleanup: ipc::posix_mq::mq_fds_cleanup,
-        exec_clear_thread_keyring: ipc::keys::exec_clear_thread_keyring,
-        at_registered_token_of: ipc::access_token::registered_token_of,
-        at_mirror_set: ipc::access_token::mirror_set,
-        msgmni: ipc::sysv_msg::msgmni,
-        set_msgmni: ipc::sysv_msg::set_msgmni,
-        shm_ctlmax: ipc::sysv_shm::shm_ctlmax,
-        set_shm_ctlmax: ipc::sysv_shm::set_shm_ctlmax,
-        shm_ctlni: ipc::sysv_shm::shm_ctlni,
-        set_shm_ctlni: ipc::sysv_shm::set_shm_ctlni,
-        shm_ctlall: ipc::sysv_shm::shm_ctlall,
-        set_shm_ctlall: ipc::sysv_shm::set_shm_ctlall,
-        ipc_ids_max: ipc::util::ipc_ids_max,
-        queues_max: ipc::posix_mq::queues_max,
-        set_queues_max: ipc::posix_mq::set_queues_max,
-        key_quota: ipc::keys::key_quota,
-        set_key_quota: ipc::keys::set_key_quota,
-        msg_proc_show: ipc::sysv_msg::proc_show,
-        shm_proc_show: ipc::sysv_shm::proc_show,
-        shm_attach_vma: ipc::sysv_shm::shm_attach_vma,
-        shm_detach_vma: ipc::sysv_shm::shm_detach_vma,
-        at_char_device: ipc::access_token::char_device,
-        at_token_of: ipc::access_token::token_of,
+        mq_fds_cleanup: posix_mq::mq_fds_cleanup,
+        exec_clear_thread_keyring: keys::exec_clear_thread_keyring,
+        at_registered_token_of: access_token::registered_token_of,
+        at_mirror_set: access_token::mirror_set,
+        msgmni: sysv_msg::msgmni,
+        set_msgmni: sysv_msg::set_msgmni,
+        shm_ctlmax: sysv_shm::shm_ctlmax,
+        set_shm_ctlmax: sysv_shm::set_shm_ctlmax,
+        shm_ctlni: sysv_shm::shm_ctlni,
+        set_shm_ctlni: sysv_shm::set_shm_ctlni,
+        shm_ctlall: sysv_shm::shm_ctlall,
+        set_shm_ctlall: sysv_shm::set_shm_ctlall,
+        ipc_ids_max: util::ipc_ids_max,
+        queues_max: posix_mq::queues_max,
+        set_queues_max: posix_mq::set_queues_max,
+        key_quota: keys::key_quota,
+        set_key_quota: keys::set_key_quota,
+        msg_proc_show: sysv_msg::proc_show,
+        shm_proc_show: sysv_shm::proc_show,
+        shm_attach_vma: sysv_shm::shm_attach_vma,
+        shm_detach_vma: sysv_shm::shm_detach_vma,
+        at_char_device: access_token::char_device,
+        at_token_of: access_token::token_of,
         init: || {},
     });
     // The binder diagnostic rows (cold-four lane): the moved audits and
@@ -145,14 +117,14 @@ pub fn register_all() {
     // reach through the seam (OnceSlot-only publication).
     rux::ipc::binder_diag_hooks::binder_diag_register_hooks(
         rux::ipc::binder_diag_hooks::BinderDiagHooks {
-            txn_hang_audit: ipc::binder_diag::txn_hang_audit,
-            bwr_park_audit: ipc::binder_diag::bwr_park_audit,
-            ams46_audit: ipc::binder_diag::ams46_audit,
-            sleep_snapshot: ipc::binder_diag::sleep_snapshot,
-            stall_report: ipc::binder_diag::stall_report,
-            schb_beat: ipc::binder_diag::schb_beat,
-            schb_waiter_census: ipc::binder_diag::schb_waiter_census,
-            dump_latched_maps_taskctx: ipc::binder_diag::dump_latched_maps_taskctx,
+            txn_hang_audit: binder_diag::txn_hang_audit,
+            bwr_park_audit: binder_diag::bwr_park_audit,
+            ams46_audit: binder_diag::ams46_audit,
+            sleep_snapshot: binder_diag::sleep_snapshot,
+            stall_report: binder_diag::stall_report,
+            schb_beat: binder_diag::schb_beat,
+            schb_waiter_census: binder_diag::schb_waiter_census,
+            dump_latched_maps_taskctx: binder_diag::dump_latched_maps_taskctx,
         },
     );
 }
@@ -164,5 +136,5 @@ pub fn register_all() {
 #[cfg(feature = "unit-test")]
 pub fn run_unit_tests() {
     rux::tests::test_group_start("ipc_sysv");
-    ipc::ipc_sysv::test_ipc_sysv();
+    ipc_sysv::test_ipc_sysv();
 }

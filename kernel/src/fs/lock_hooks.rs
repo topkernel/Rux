@@ -4,7 +4,7 @@
 //!
 //! Rung-3 RELOCATION SEAM (locks family), converted at the fs-rest
 //! split: the lock/lease LOGIC and its tables live in the fs crate
-//! (`crate::fs::locks` there), while the framework's fs/locks.rs keeps
+//! (`crate::locks` there), while the framework's fs/locks.rs keeps
 //! the open/close fast-path gates, the count mirrors and the exec
 //! text-hold family. The LockOwner enum and lock-kind constants are
 //! re-exported so vfs.rs/file.rs keep their spellings; the per-open/

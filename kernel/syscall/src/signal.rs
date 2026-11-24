@@ -1,0 +1,766 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Signal-related system calls
+//!
+//! Includes: rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack, sigpending
+
+
+use super::*;
+
+/// sys_rt_sigprocmask - Examine and change blocked signals
+///
+/// # Arguments
+/// - args[0]: how - operation mode
+///   - SIG_BLOCK (0): Add signals in set to blocked mask
+///   - SIG_UNBLOCK (1): Remove signals in set from blocked mask
+///   - SIG_SETMASK (2): Set blocked mask to set
+/// - args[1]: set - new signal mask pointer
+/// - args[2]: oldset - pointer to return old signal mask
+/// - args[3]: sigsetsize - signal set size (must be 8)
+///
+/// # Returns
+/// Returns 0 on success, negative error code on failure
+pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
+    let how = args[0] as i32;
+    let set_ptr = args[1] as *const u64;  // SigSet is u64
+    let oldset_ptr = args[2] as *mut u64;
+    let sigsetsize = args[3] as usize;
+
+    // Validate sigsetsize
+    if sigsetsize != 8 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Validate how parameter
+    use rux::signal::sigprocmask_how;
+    if how != sigprocmask_how::SIG_BLOCK
+        && how != sigprocmask_how::SIG_UNBLOCK
+        && how != sigprocmask_how::SIG_SETMASK
+    {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Note: no alignment check — Linux performs none (get_user/put_user
+    // handle unaligned sigset pointers; musl passes stack pointers).
+
+    // Read new signal mask
+    let new_mask = if !set_ptr.is_null() {
+        // Validate user pointer
+        if !crate::arch::uaccess::access_ok(set_ptr as usize, 8) {
+            return -(errno::EFAULT as i64);
+        }
+        // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+        match crate::arch::uaccess_safe::UserPtr::<u64>::new(set_ptr as usize).read() {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        }
+    } else {
+        0
+    };
+
+    // Get current process (typed: sched::current() returns &mut Task)
+    let mut current = match rux::sched::current() {
+        Some(c) => c,
+        None => return -(errno::EPERM as i64),
+    };
+
+    // Get current signal mask
+    let old_mask = current.sigmask;
+
+    // Set new signal mask.
+    //
+    // POSIX/Linux: a NULL `set` is a pure QUERY — the mask is only reported
+    // through `oldset`, never changed. The old code ran the how-match with
+    // new_mask=0 unconditionally, so every glibc read
+    // (sigprocmask(SIG_SETMASK, NULL, &old) — exactly what libc's
+    // sigsuspend diagnostics, dash's wait loop, and every mask CHECK use)
+    // stored SIG_SETMASK(0) and CLEARED the mask. The b795fda sigsuspend
+    // mask discipline was silently undone by the very calls observing it:
+    // after one query the task ran with everything unblocked (and the
+    // outer check read the mask AFTER the store — old_mask was still
+    // reported correctly, so userspace saw a plausible value and the
+    // corruption stayed invisible).
+    let result_mask = if set_ptr.is_null() {
+        old_mask
+    } else {
+        match how {
+            sigprocmask_how::SIG_BLOCK => {
+                // Add signals to blocked mask
+                old_mask | new_mask
+            }
+            sigprocmask_how::SIG_UNBLOCK => {
+                // Remove signals from blocked mask
+                old_mask & !new_mask
+            }
+            sigprocmask_how::SIG_SETMASK => {
+                // Set new blocked mask
+                new_mask
+            }
+            _ => old_mask, // Should not reach here
+        }
+    };
+
+    // SIGKILL (9) and SIGSTOP (19) can never be blocked (POSIX/Linux):
+    // strip their bits so the process stays killable/stoppable.
+    let result_mask = result_mask & !((1u64 << 8) | (1u64 << 18));
+
+    // Update current process signal mask
+    current.sigmask = result_mask;
+
+    // Return old signal mask
+    if !oldset_ptr.is_null() {
+        // Validate user pointer
+        if !crate::arch::uaccess::access_ok(oldset_ptr as usize, 8) {
+            return -(errno::EFAULT as i64);
+        }
+        // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+        if !crate::arch::uaccess_safe::UserPtr::<u64>::new(oldset_ptr as usize)
+            .write(old_mask)
+        {
+            return -(errno::EFAULT as i64);
+        }
+    }
+
+    0  // Success
+}
+
+/// sys_rt_sigaction - Set/get signal handling action
+///
+/// # Arguments
+/// - signum: signal number
+/// - act: new signal handling action (can be null)
+/// - oldact: save old signal handling action (can be null)
+/// - sigsetsize: size of sigset_t
+///
+/// # Returns
+/// Returns 0 on success, negative error code on failure
+/// User-space `struct sigaction` of the rt_sigaction ABI on RISC-V 64:
+/// 24 bytes — {sa_handler +0, sa_flags +8, sa_mask +16}. There is NO
+/// sa_restorer field (RISC-V has no SA_RESTORER; the kernel always returns
+/// from handlers through its own trampoline). Verified against jammy
+/// glibc's __libc_sigaction: it stores handler at kact+0, flags (lw/sd)
+/// at kact+8, then memcpy's the sigset to kact+16 and never writes a
+/// restorer. A 32-byte parse with restorer at +16 misread libc's sa_mask
+/// (e.g. dash's sigfillset mask 0xfffffffe_7fffffff) as a return address
+/// and jumped execution into it on handler return.
+#[cfg(feature = "riscv64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SigActionUser {
+    sa_handler: usize,
+    sa_flags: u64,
+    sa_mask: u64,
+}
+
+/// x86_64 user ABI: {sa_handler +0, sa_flags +8, sa_restorer +16,
+/// sa_mask +24} — 32 bytes. glibc ALWAYS sets SA_RESTORER here.
+#[cfg(feature = "x86_64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SigActionUser {
+    sa_handler: usize,
+    sa_flags: u64,
+    sa_restorer: usize,
+    sa_mask: u64,
+}
+
+/// aarch64 user ABI: same shape as x86_64 (Linux arm64 sigaction carries
+/// sa_restorer; glibc always sets SA_RESTORER) — 32 bytes.
+#[cfg(feature = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SigActionUser {
+    sa_handler: usize,
+    sa_flags: u64,
+    sa_restorer: usize,
+    sa_mask: u64,
+}
+
+pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
+    use rux::signal::{SigAction, Signal};
+
+    let signum = args[0] as i32;
+    let act_ptr = args[1] as *const SigActionUser;
+    let oldact_ptr = args[2] as *mut SigActionUser;
+    let sigsetsize = args[3] as usize;
+
+    // Validate sigsetsize
+    if sigsetsize != 8 {
+        // OH bring-up: devhost services die right after an rt_sigaction
+        // EINVAL — name the rejected call so the offending signum is
+        // visible on the console. Gated behind rux:schedtrace (retired debug=schedtrace): musl's
+        // spawn path probes rt_sigaction(SIGKILL/SIGSTOP) on every child,
+        // so ungated this printed thousands of lines per soak.
+        if crate::trace::EVENT_SCHEDTRACE.armed() {
+            crate::pr_info!(
+                "rt_sigaction EINVAL: signum={} sigsetsize={} pid={}",
+                signum,
+                sigsetsize,
+                ::process::current_pid()
+            );
+        }
+        return -(errno::EINVAL as i64);
+    }
+
+    // Validate signal number
+    if signum < 1 || signum > 64 {
+        if crate::trace::EVENT_SCHEDTRACE.armed() {
+            crate::pr_info!(
+                "rt_sigaction EINVAL: signum={} pid={}",
+                signum,
+                ::process::current_pid()
+            );
+        }
+        return -(errno::EINVAL as i64);
+    }
+
+    // SIGKILL and SIGSTOP cannot be caught or ignored
+    if signum == Signal::SIGKILL as i32 || signum == Signal::SIGSTOP as i32 {
+        if crate::trace::EVENT_SCHEDTRACE.armed() {
+            crate::pr_info!(
+                "rt_sigaction EINVAL: signum={} is SIGKILL/SIGSTOP, pid={}",
+                signum,
+                ::process::current_pid()
+            );
+        }
+        return -(errno::EINVAL as i64);
+    }
+
+    // Get current process (typed: sched::current() returns &mut Task)
+    let current = match rux::sched::current() {
+        Some(c) => c,
+        None => return -(errno::EPERM as i64),
+    };
+
+    // oldact_ptr/act_ptr validated with access_ok where non-null.
+    let signal_struct = current.signal.as_mut();
+        if signal_struct.is_none() {
+            crate::pr_info!(
+                "rt_sigaction EINVAL: no signal_struct, signum={} pid={}",
+                signum,
+                ::process::current_pid()
+            );
+            return -(errno::EINVAL as i64);
+        }
+        let sig_struct = signal_struct.unwrap();
+
+        // Save old signal handling action (converted to the user ABI layout)
+        if !oldact_ptr.is_null() {
+            // Validate user pointer
+            if !crate::arch::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigActionUser>()) {
+                return -(errno::EFAULT as i64);
+            }
+            // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+            let old_action = sig_struct.get_action(signum).unwrap_or_else(SigAction::new);
+            let user_action = SigActionUser {
+                sa_handler: old_action.sa_handler,
+                sa_flags: old_action.sa_flags.bits(),
+                #[cfg(any(feature = "x86_64", feature = "aarch64"))]
+                sa_restorer: old_action.sa_restorer,
+                sa_mask: old_action.sa_mask,
+            };
+            // A byte view of a fully-initialized local struct
+            // (INV-CBYTES-1).
+            let src = crate::safety::bytes::bytes_of(&user_action);
+            let uncopied = crate::arch::uaccess_safe::UserSlice::new(
+                oldact_ptr as usize,
+                core::mem::size_of::<SigActionUser>(),
+            )
+            .copy_out(src);
+            if uncopied > 0 {
+                return -(errno::EFAULT as i64);
+            }
+        }
+
+        // Set new signal handling action (parsed from the user ABI layout)
+        if !act_ptr.is_null() {
+            // Validate user pointer
+            if !crate::arch::uaccess::access_ok(act_ptr as usize, core::mem::size_of::<SigActionUser>()) {
+                return -(errno::EFAULT as i64);
+            }
+            // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+            let mut user_action = SigActionUser {
+                sa_handler: 0,
+                sa_flags: 0,
+                #[cfg(any(feature = "x86_64", feature = "aarch64"))]
+                sa_restorer: 0,
+                sa_mask: 0,
+            };
+            let uncopied = crate::arch::uaccess_safe::copy_in_t(
+                &mut user_action,
+                act_ptr as usize,
+            );
+            if uncopied > 0 {
+                return -(errno::EFAULT as i64);
+            }
+            // sa_mask is stored verbatim: masking SIGKILL/SIGSTOP in a
+            // handler's sa_mask is LEGAL (POSIX) — the bits simply have no
+            // effect at delivery time (setup_frame re-strips the two
+            // unblockable bits when composing the runtime mask). Stripping
+            // here corrupted oldact round-trips (review batch-1).
+let new_action = SigAction {
+                sa_handler: user_action.sa_handler,
+                sa_flags: rux::signal::SigFlags::new(user_action.sa_flags),
+                sa_mask: user_action.sa_mask,
+                sa_restorer: {
+                    #[cfg(any(feature = "x86_64", feature = "aarch64"))]
+                    { user_action.sa_restorer }
+                    #[cfg(feature = "riscv64")]
+                    { 0 }
+                },
+            };
+            match sig_struct.set_action(signum, new_action) {
+                Ok(_) => 0,  // Success
+                Err(_) => {
+                    crate::pr_info!(
+                        "rt_sigaction EINVAL: set_action rejected signum={} pid={}",
+                        signum,
+                        ::process::current_pid()
+                    );
+                    -(errno::EINVAL as i64)
+                }
+            }
+        } else {
+            0  // Success (just query)
+        }
+}
+
+/// sys_rt_sigreturn - Return from signal handler
+///
+/// Restore context before signal handling, called when signal handler returns
+///
+/// # Arguments
+/// * `regs` - PtRegs pointer for restoring complete user context
+///
+/// # Returns
+/// Returns system call return value before signal interruption
+pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
+    // Get current process
+    let current = match rux::sched::current() {
+        Some(c) => c,
+        None => return -(errno::EPERM as i64),
+    };
+
+    // current is the running task's reference; sigframe_addr was set by
+    // signal delivery and restore_sigcontext expects a valid Task pointer.
+    {
+        // Frame location follows the Linux/RISC-V contract: setup_frame
+        // enters the handler with user sp == frame_addr, and the
+        // 2-instruction kernel trampoline (li a7,139; ecall) never moves
+        // sp, so the frame being returned through is AT the current user
+        // sp. Deriving it from sp (not the single kernel-side
+        // sigframe_addr record) is what makes NESTED signal delivery
+        // work: after an inner handler returns and clears the record, an
+        // outer handler's rt_sigreturn still finds ITS own frame — with
+        // only the record, the outer return saw 0 and was treated as a
+        // forged ecall (SIGSEGV). The record stays as a fallback for a
+        // frame whose page turned unreadable (restore_sigcontext then
+        // uses the kernel backup copy).
+        // Frame location: on riscv64 the handler is entered with
+        // sp == frame_addr and the 2-instruction trampoline never moves
+        // sp, so the frame is AT the user sp. On x86_64 the handler `ret`
+        // first pops the pretcode slot (rsp = frame + 8) before the
+        // restorer calls rt_sigreturn, so the frame is at sp - 8.
+        #[cfg(feature = "riscv64")]
+        let frame_addr = {
+            let sp = regs.user_stack_pointer() as usize;
+            let sp_ok = sp != 0
+                && sp % 16 == 0 // setup_frame aligns frames to 16
+                && crate::arch::uaccess::access_ok(
+                    sp,
+                    core::mem::size_of::<rux::signal::SignalFrame>(),
+                );
+            if sp_ok { sp as u64 } else { current.sigframe_addr }
+        };
+        // aarch64: the handler is entered with sp == frame (arm64
+        // frames carry no pretcode slot glibc pops first); same
+        // sp-derived recovery as the riscv64 arm.
+        #[cfg(feature = "aarch64")]
+        let frame_addr = {
+            let sp = regs.user_stack_pointer() as usize;
+            let sp_ok = sp != 0
+                && sp % 16 == 0
+                && crate::arch::uaccess::access_ok(
+                    sp,
+                    core::mem::size_of::<rux::signal::SignalFrame>(),
+                );
+            if sp_ok { sp as u64 } else { current.sigframe_addr }
+        };
+        #[cfg(feature = "x86_64")]
+        let frame_addr = {
+            let sp = regs.user_stack_pointer() as usize;
+            let base = sp.saturating_sub(8);
+            // setup_frame_x86_64 places frames at ≡ 8 (mod 16) (the SysV
+            // as-if-called rule, Linux align_sigframe parity), so the
+            // forged-frame residue check must expect 8, not 0.
+            let sp_ok = base != 0
+                && base % 16 == 8
+                && crate::arch::uaccess::access_ok(
+                    base,
+                    core::mem::size_of::<rux::signal::SignalFrame>(),
+                );
+            if sp_ok { base as u64 } else { current.sigframe_addr }
+        };
+
+        // A zero frame address means rt_sigreturn was invoked without an
+        // active signal frame (forged/direct ecall). Treat it exactly like
+        // a corrupt frame (review IPC-L): force SIGSEGV instead of falling
+        // through to ecall+4 with whatever registers the caller passed.
+        let ok = if frame_addr != 0 {
+            rux::signal::restore_sigcontext(current, frame_addr, regs)
+        } else {
+            false
+        };
+        if !ok {
+            // X3 hunt: name the rejected frame so sigreturn-path kills are
+            // attributable (sp alignment, record fallback, restore failure).
+            crate::pr_err!(
+                "rt_sigreturn: frame rejected sp={:#x} rec={:#x} pid={}",
+                regs.user_stack_pointer(),
+                current.sigframe_addr,
+                current.pid()
+            );
+            let pid = ::process::current_pid();
+            let _ = rux::signal::send_signal(pid, rux::signal::Signal::SIGSEGV as i32);
+        }
+
+        // Return original return value saved in signal frame
+        // Usually the value returned from interrupted system call.
+        // Note: restore_sigcontext has already restored regs, so just
+        // return the ABI return register (a0 on riscv64, rax on x86_64).
+        #[cfg(feature = "riscv64")]
+        { regs.a0 as i64 }
+        #[cfg(feature = "x86_64")]
+        { regs.rax as i64 }
+        #[cfg(feature = "aarch64")]
+        { regs.regs[0] as i64 }
+    }
+}
+
+/// sys_sigpending - Get pending signals
+///
+/// # Arguments
+/// - set: pointer to signal set for storing pending signals
+/// - sigsetsize: size of sigset_t
+///
+/// # Returns
+/// Returns 0 on success, negative error code on failure
+pub fn sys_sigpending(args: SyscallArgs) -> i64 {
+    let set_ptr = args[0] as *mut u64;
+    let sigsetsize = args[1] as usize;
+
+    // Validate sigsetsize
+    if sigsetsize != 8 {
+        return -(errno::EINVAL as i64);
+    }
+
+    if set_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Validate user pointer
+    if !crate::arch::uaccess::access_ok(set_ptr as usize, 8) {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Get current process
+    let current = match rux::sched::current() {
+        Some(c) => c,
+        None => return -(errno::EPERM as i64),
+    };
+
+    // current is the running task's reference; set_ptr validated with access_ok(8).
+    {
+        let pending = current.pending.get_all();
+        let blocked = current.sigmask;
+        // R7-D6: POSIX/Linux sigpending returns pending AND blocked (the
+        // complement was written before — a blocked-and-pending signal
+        // read as not-pending, breaking sigwait-style polling).
+        let pending_and_blocked = pending & blocked;
+
+        // Exception-table write (the old naked store could not produce
+        // EFAULT on a bad page — it took a kernel fault instead).
+        if !crate::arch::uaccess_safe::write_user(set_ptr as usize, pending_and_blocked) {
+            return -(errno::EFAULT as i64);
+        }
+    }
+
+    0  // Success
+}
+
+/// sys_sigaltstack - Set/get alternate signal stack
+///
+/// # Arguments
+/// - ss: new signal stack configuration (can be null)
+/// - old_ss: save old signal stack configuration (can be null)
+///
+/// # Returns
+/// Returns 0 on success, negative error code on failure
+pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
+    use rux::signal::{SignalStack, ss_flags};
+
+    let ss_ptr = args[0] as *const SignalStack;
+    let old_ss_ptr = args[1] as *mut SignalStack;
+
+    // Get current process (reference from sched::current()).
+    let current = match rux::sched::current() {
+        Some(c) => c,
+        None => return -(errno::EPERM as i64),
+    };
+
+    // current is the running task's reference; ss_ptr/old_ss_ptr
+    // validated with access_ok where non-null; all user copies go
+    // through the exception-table helpers.
+    {
+        // Save old signal stack configuration
+        if !old_ss_ptr.is_null() {
+            // Validate user pointer
+            if !crate::arch::uaccess::access_ok(old_ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
+                return -(errno::EFAULT as i64);
+            }
+            let old_ss = current.sigstack;
+            if crate::arch::uaccess_safe::copy_out(
+                old_ss_ptr as usize,
+                crate::safety::bytes::bytes_of(&old_ss),
+            ) != 0 {
+                return -(errno::EFAULT as i64);
+            }
+        }
+
+        // Set new signal stack configuration
+        if !ss_ptr.is_null() {
+            // Validate user pointer
+            if !crate::arch::uaccess::access_ok(ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
+                return -(errno::EFAULT as i64);
+            }
+            // copy_in_t copies over a zero-initialized value and
+            // zero-fills the uncopied tail on fault — the MaybeUninit
+            // dance the raw copy_from_user needed is gone.
+            let mut new_ss = SignalStack { ss_sp: 0, ss_flags: 0, ss_size: 0 };
+            if crate::arch::uaccess_safe::copy_in_t(&mut new_ss, ss_ptr as usize) != 0 {
+                return -(errno::EFAULT as i64);
+            }
+
+            // Check if currently executing on signal stack
+            if current.sigstack.is_on_stack() {
+                return -(errno::EBUSY as i64);  // Signal stack in use
+            }
+
+            // Validate new stack size
+            if (new_ss.ss_flags as u32 & ss_flags::SS_DISABLE) == 0 {
+                if new_ss.ss_size < rux::signal::MINSIGSTKSZ as u64 {
+                    return -(errno::EINVAL as i64);  // Stack too small
+                }
+            }
+
+            current.sigstack = new_ss;
+        }
+    }
+
+    0  // Success
+}
+
+/// sys_signalfd4 - Create file descriptor for signal notifications
+///
+/// # Arguments
+/// - args[0]: fd - existing signalfd (or -1 to create new)
+/// - args[1]: mask - pointer to signal mask
+/// - args[2]: sizemask - size of signal mask (must be 8)
+/// - args[3]: flags - SFD_CLOEXEC, SFD_NONBLOCK
+pub fn sys_signalfd4(args: SyscallArgs) -> i64 {
+    // P1: implemented in syscall::misc (SignalFd file ops + wake registry);
+    // this wrapper keeps the dispatch table entry stable.
+    crate::misc::sys_signalfd4_impl(args)
+}
+
+/// sys_restart_syscall - Restart a system call after interruption
+///
+/// This syscall is used internally by the kernel to restart
+/// interrupted system calls. Userspace should not call it directly.
+pub fn sys_restart_syscall(_args: SyscallArgs) -> i64 {
+    0
+}
+
+/// sys_rt_sigsuspend - Wait for a signal
+///
+/// # Arguments
+/// - args[0]: mask - pointer to signal mask (u64)
+/// - args[1]: sigsetsize - size of signal set (must be 8)
+pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
+    let mask_ptr = args[0] as *const u64;
+    let sigsetsize = args[1] as usize;
+
+    if sigsetsize != 8 {
+        return -(errno::EINVAL as i64);
+    }
+    if mask_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::uaccess::access_ok(mask_ptr as usize, 8) {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+    let new_mask = match crate::arch::uaccess_safe::read_user::<u64>(mask_ptr as usize) {
+        Some(v) => v,
+        None => return -(errno::EFAULT as i64),
+    };
+    // SIGKILL/SIGSTOP can never be blocked, not even via sigsuspend.
+    let new_mask = new_mask & !((1u64 << 8) | (1u64 << 18));
+
+    let current = match rux::sched::current() {
+        Some(c) => c,
+        None => return -(errno::EPERM as i64),
+    };
+
+    // current is the running task's reference from sched::current().
+    {
+        // Atomically set new mask and wait
+        let old_mask = current.sigmask;
+        current.sigmask = new_mask;
+
+        // Sleep until a signal is delivered.
+        // The race between checking pending and sleeping is resolved by
+        // checking pending AFTER setting state to INTERRUPTIBLE but BEFORE
+        // calling schedule(). If a signal arrives between the check and
+        // schedule(), the wakeup will find us in INTERRUPTIBLE and skip us,
+        // but the next iteration will see the pending signal.
+        loop {
+            let pending = current.pending.get_all();
+            let blocked = current.sigmask;
+            if pending & !blocked != 0 {
+                // Signal pending. Do NOT restore the old mask here: the
+                // delivery filter on the way back to userspace must see the
+                // SUSPEND mask so the signal is actually delivered; the old
+                // mask is reinstated just before the handler runs (see
+                // check_and_deliver_signals) and again by sigreturn.
+                current.ext.sigmask_restore = old_mask;
+                current.ext.sigmask_restore_valid = true;
+                return -(errno::EINTR as i64);
+            }
+            // Set state BEFORE re-checking to close the race window.
+            // If a signal arrives here, the signal delivery path will see
+            // INTERRUPTIBLE and call wake_up_process(), which sets us back
+            // to RUNNING before schedule() yields the CPU.
+            current.set_state(::process::task::TaskState::new(
+                ::process::task::TaskState::INTERRUPTIBLE
+            ));
+            // Re-check after setting state (signal may have arrived)
+            let pending2 = current.pending.get_all();
+            if pending2 & !blocked != 0 {
+                // Signal arrived while we were preparing to sleep
+                current.set_state(::process::task::TaskState::new(
+                    ::process::task::TaskState::RUNNING
+                ));
+                // R8-5 (NEW-C2): undo a concurrent wake enqueue.
+                rux::sched::dequeue_task(current);
+                current.ext.sigmask_restore = old_mask;
+                current.ext.sigmask_restore_valid = true;
+                return -(errno::EINTR as i64);
+            }
+            rux::sched::schedule();
+        }
+    }
+}
+
+/// sys_pause - Wait for a signal (x86_64 legacy syscall)
+///
+/// pause(2) suspends the calling thread until a signal that is delivered
+/// (i.e. not blocked) arrives; its only return value is -1/EINTR — a
+/// terminating signal simply never returns. asm-generic has no pause
+/// number (libc emulates with ppoll there), so x86_64 binaries issuing
+/// the native NR 34 land here.
+///
+/// Same sleep-until-signal discipline as sys_rt_sigsuspend, minus the
+/// mask swap: pause never touches the blocked mask.
+pub fn sys_pause(_args: SyscallArgs) -> i64 {
+    let current = match rux::sched::current() {
+        Some(c) => c,
+        None => return -(errno::EINTR as i64),
+    };
+
+    // current is the running task's reference from sched::current().
+    {
+        loop {
+            let pending = current.pending.get_all();
+            let blocked = current.sigmask;
+            if pending & !blocked != 0 {
+                return -(errno::EINTR as i64);
+            }
+            // Set state BEFORE re-checking to close the race window (same
+            // as sigsuspend): a wake-up between the check and schedule()
+            // finds us INTERRUPTIBLE and leaves us RUNNING.
+            current.set_state(::process::task::TaskState::new(
+                ::process::task::TaskState::INTERRUPTIBLE,
+            ));
+            // Re-check after setting state (signal may have arrived)
+            let pending2 = current.pending.get_all();
+            if pending2 & !blocked != 0 {
+                current.set_state(::process::task::TaskState::new(
+                    ::process::task::TaskState::RUNNING,
+                ));
+                // R8-5 (NEW-C2): undo a concurrent wake enqueue.
+                rux::sched::dequeue_task(current);
+                return -(errno::EINTR as i64);
+            }
+            rux::sched::schedule();
+        }
+    }
+}
+
+/// sys_tkill - Send signal to a thread
+///
+/// # Arguments
+/// - args[0]: tid - Thread ID (same as PID for single-threaded processes)
+/// - args[1]: sig - Signal number
+///
+/// # Returns
+/// Returns 0 on success, negative error code on failure
+pub fn sys_tkill(args: SyscallArgs) -> i64 {
+    // Linux do_tkill() rejects a negative tid with EINVAL before any
+    // table lookup — the cast below would otherwise fold -1 into
+    // u32::MAX and trip find_task_by_pid into ESRCH. LTP tkill02
+    // exercises tkill(-1, SIGUSR1) and expects EINVAL.
+    let tid_raw = args[0] as i32;
+    if tid_raw < 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let tid = tid_raw as u32;
+    let sig = args[1] as i32;
+
+    // Validate signal number
+    if sig < 0 || sig > 64 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Find target task (also needed for the sig==0 permission probe)
+    // find_task_by_pid returns null if tid not found; result checked below.
+    let task = rux::sched::find_task_by_pid(tid);
+    if task.is_null() {
+        return -(errno::ESRCH as i64);
+    }
+
+    // Permission check for every signal, including the sig==0 probe
+    // (Linux do_tkill → check_kill_permission). Task is non-null and
+    // stable while referenced (syscall-context short read).
+    // SAFETY: non-null checked above; short read contract.
+    if !crate::security::can_send_signal(::process::unsafe_edges::borrow_task(task).cred()) {
+        return -(errno::EPERM as i64);
+    }
+
+    // Signal 0 is for permission/existence checking only
+    if sig == 0 {
+        return 0;
+    }
+
+    // Send signal with SI_TKILL sender attribution (Linux do_send_specific:
+    // tkill/tgkill — and glibc raise(), which is tgkill — must queue the
+    // sender's pid so fatal self-raises are attributable at delivery time).
+    // Err values are already negative errnos.
+    match rux::signal::send_signal_from_user_tkill(tid, sig) {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
+}

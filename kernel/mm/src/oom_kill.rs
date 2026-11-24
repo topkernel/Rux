@@ -1,0 +1,586 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! OOM Killer
+//!
+//! Following mm/oom_kill.c: when the system runs out of memory and
+//! reclaim fails, the OOM killer selects the "worst" process (highest
+//! memory usage) and sends it SIGKILL to free its pages.
+//!
+//! Scoring follows Linux's oom_badness():
+//!   points = mm->total_vm + oom_score_adj * totalpages / 1000
+//!
+//! The process with the highest score is killed.
+
+#![forbid(unsafe_code)]
+
+use core::sync::atomic::Ordering;
+
+use crate::process::task::{Task, TaskState, TIF_MEMDIE};
+use rux::mm::mm_struct::MmFlags;
+use crate::sync::spinlock::Spinlock;
+
+// ==================== Constants ====================
+
+/// OOM score adjustment: immune from OOM kill.
+/// Following Linux's OOM_SCORE_ADJ_MIN in include/uapi/linux/oom.h.
+pub const OOM_SCORE_ADJ_MIN: i32 = -1000;
+
+/// OOM score adjustment: maximum priority to be killed.
+/// Following Linux's OOM_SCORE_ADJ_MAX in include/uapi/linux/oom.h.
+pub const OOM_SCORE_ADJ_MAX: i32 = 1000;
+
+/// Serializes out_of_memory() (review 4.13: no oom_lock — concurrent OOM
+/// triggers from kswapd/direct reclaim each selected and SIGKILLed their
+/// own victim, killing several processes for one shortage and racing
+/// OomControl state).
+static OOM_LOCK: Spinlock<()> = Spinlock::new(());
+
+// ==================== OOM Control ====================
+
+/// OOM control structure, following struct oom_control in Linux.
+///
+/// Passed through the OOM kill decision chain:
+/// out_of_memory() -> select_bad_process() -> oom_kill_process().
+pub struct OomControl {
+    /// Selected victim task pointer
+    pub chosen: Option<*mut Task>,
+    /// PID of the selected victim (used to re-pin it at kill time)
+    pub chosen_pid: u32,
+    /// OOM badness score of the selected victim
+    pub chosen_points: u64,
+    /// Total managed pages in the system (for score scaling)
+    pub totalpages: u64,
+    /// GFP mask of the allocation that triggered OOM
+    pub gfp_mask: u32,
+    /// Order of the allocation that triggered OOM
+    pub order: u32,
+}
+
+impl OomControl {
+    /// Create a new OomControl for the given system parameters.
+    pub fn new(totalpages: u64, gfp_mask: u32, order: u32) -> Self {
+        Self {
+            chosen: None,
+            chosen_pid: 0,
+            chosen_points: 0,
+            totalpages,
+            gfp_mask,
+            order,
+        }
+    }
+}
+
+// ==================== oom_badness ====================
+
+/// Compute the OOM badness score for a task.
+///
+/// Following Linux's oom_badness() in mm/oom_kill.c:
+/// - Skip kernel threads (no address space)
+/// - Skip init (PID 1)
+/// - Skip tasks with MMF_OOM_DISABLE
+/// - Skip tasks with oom_score_adj == OOM_SCORE_ADJ_MIN
+/// - Baseline: mm.total_vm (virtual pages, upper bound for RSS)
+/// - Adjustment: oom_score_adj * totalpages / 1000
+///
+/// Higher score = more likely to be killed.
+pub fn oom_badness(task: &Task, totalpages: u64) -> u64 {
+    // Skip kernel threads (no address space)
+    // R25-2 pattern: PIN the mm — a concurrent do_exit → exit_mm on
+    // another CPU can drop the last mm reference (Drop frees the page
+    // tables). The clone is mm-slot-lock serialized, so it cannot
+    // resurrect a freed Arc.
+    // NOTE: this Arc's DROP must stay OUTSIDE pid-hash bucket locks (a
+    // last-reference drop runs the mm teardown, which may schedule).
+    let mm_arc = match task.address_space_arc() {
+        Some(a) => a,
+        None => return 0,
+    };
+    oom_badness_mm(task, mm_arc.as_ref(), totalpages)
+}
+
+/// Score with a pre-pinned mm (caller holds the Arc reference).
+fn oom_badness_mm(task: &Task, mm: &rux::mm::mm_struct::MmStruct, totalpages: u64) -> u64 {
+    // Skip if MMF_OOM_DISABLE is set
+    if mm.has_flag(MmFlags::MMF_OOM_DISABLE) {
+        return 0;
+    }
+
+    // Get oom_score_adj (defaults to 0)
+    let oom_score_adj = task.oom_score_adj();
+
+    // If oom_score_adj == OOM_SCORE_ADJ_MIN, immune from OOM kill
+    if oom_score_adj <= OOM_SCORE_ADJ_MIN {
+        return 0;
+    }
+
+    // Baseline score: resident pages (review 4.14).
+    // Linux scores rss + pgtables_bytes + swap; Rux counts resident pages
+    // in mm.rss (fault-in inc / unmap dec). total_vm is only the fallback
+    // for mms that predate the counters (or before any fault) — with the
+    // old pure-total_vm baseline, a process that mmap()ed a huge region
+    // but never touched it outranked (and preempted the killing of) real
+    // memory hogs.
+    let rss = mm.rss();
+    let mut points = if rss > 0 { rss } else { mm.total_vm() };
+
+    // Scale adjustment: oom_score_adj * totalpages / 1000
+    // This matches Linux's scaling to make adjustment proportional to system memory.
+    if totalpages >= 1000 {
+        let adj = (oom_score_adj as i64) * (totalpages as i64) / 1000;
+        if adj >= 0 {
+            points = points.saturating_add(adj as u64);
+        } else {
+            points = points.saturating_sub((-adj) as u64);
+        }
+    }
+
+    points
+}
+
+// ==================== select_bad_process ====================
+
+/// Select the worst process to kill under OOM conditions.
+///
+/// Following Linux's select_bad_process() in mm/oom_kill.c.
+/// Iterates all tasks via PID hash table and picks the one with
+/// the highest oom_badness() score.
+///
+/// Two phases (mm teardown vs spinlocks): the pid-hash bucket lock is
+/// held across the walk, but a last-reference mm Arc drop now runs the
+/// full page-table teardown (which may schedule an RCU grace-period
+/// wait) — illegal under a spinlock. Phase 1 collects (pid, mm Arc)
+/// pairs under the bucket locks (the Arc is MOVED into the vector, never
+/// dropped there); phase 2 scores each candidate with no locks held.
+fn select_bad_process(oc: &mut OomControl) {
+    use crate::process::pid_hash::{pid_hash_for_each_task, pid_hash_lookup_pinned};
+
+    // Phase 1: bucket-locked collection with the cheap per-task filters.
+    let mut candidates: alloc::vec::Vec<(u32, alloc::sync::Arc<rux::mm::mm_struct::MmStruct>)> =
+        alloc::vec::Vec::new();
+    pid_hash_for_each_task(|task| {
+
+        // Skip kernel threads (no address space)
+        if !task.has_address_space() {
+            return;
+        }
+
+        // Skip PID 0 (idle)
+        let pid = task.pid();
+        if pid == 0 {
+            return;
+        }
+
+        // Skip PID 1 (init) — never kill init
+        if pid == 1 {
+            return;
+        }
+
+        // Skip dead/zombie tasks
+        let state = task.state();
+        if state == TaskState::new(TaskState::ZOMBIE) || state == TaskState::new(TaskState::DEAD) {
+            return;
+        }
+
+        // Skip tasks already marked as OOM victims
+        if task.test_ti_flag(TIF_MEMDIE) {
+            return;
+        }
+
+        // Pin the mm (R25-2): moved into the vector — NOT dropped under
+        // the bucket lock.
+        match task.address_space_arc() {
+            Some(mm) => candidates.push((pid, mm)),
+            None => return,
+        }
+    });
+
+    // Phase 2: score outside every lock. The Task may have exited between
+    // the phases — re-resolve by pid (pinned) and skip stale entries;
+    // task-side fields (oom_score_adj, state) are read through the pin.
+    for (pid, mm_arc) in candidates {
+        // Pinned handle (TaskRef owns the pin; Drop releases it).
+        let Some(tp) = crate::process::task_ref::TaskRef::lookup(pid) else {
+            continue;
+        };
+        let points = {
+            let task = &*tp;
+            // Exited while we were collecting: not a kill candidate.
+            let state = task.state();
+            if state == TaskState::new(TaskState::ZOMBIE) || state == TaskState::new(TaskState::DEAD) {
+                0
+            } else {
+                oom_badness_mm(task, mm_arc.as_ref(), oc.totalpages)
+            }
+        };
+        drop(tp);
+
+        if points > oc.chosen_points {
+            // Re-resolve the winner as a raw pointer for the (existing)
+            // pin-verify in oom_kill_process — same discipline as before:
+            // the pointer crosses an unlocked window and is re-validated
+            // there by (pid, pointer) identity.
+            let winner = pid_hash_lookup_pinned(pid);
+            if !winner.is_null() {
+                oc.chosen = Some(winner);
+                oc.chosen_pid = pid;
+                oc.chosen_points = points;
+                crate::process::task::Task::task_put(winner);
+            }
+        }
+    }
+}
+
+// ==================== oom_kill_process ====================
+
+/// Kill the selected OOM victim.
+///
+/// Following Linux's __oom_kill_process() in mm/oom_kill.c:
+/// 1. Send SIGKILL to victim
+/// 2. Kill all processes sharing victim's mm (different thread groups)
+/// 3. Set TIF_MEMDIE on victim (grants memory reserve access)
+fn oom_kill_process(oc: &mut OomControl) {
+
+
+    let chosen = match oc.chosen {
+        Some(t) => t,
+        None => return,
+    };
+
+    // R25-5/R32-F8: pin-verify the victim BEFORE dereferencing `chosen`.
+    // The raw pointer crossed an unlocked window since select_bad_process
+    // dropped the bucket locks — the victim may already have been reaped
+    // and freed (synchronize_rcu() is a no-op). The identity check also
+    // rejects PID reuse: if the pinned lookup returns a different Task,
+    // the original victim is gone and killing the PID's new owner would
+    // be wrong.
+    let victim = crate::process::pid_hash::pid_hash_lookup_pinned(oc.chosen_pid);
+    if victim.is_null() || victim != chosen {
+        if !victim.is_null() {
+            crate::process::task::Task::task_put(victim);
+        }
+        return;
+    }
+    // TaskRef adopts the verified pin (Drop's task_put replaces the
+    // manual put at every exit below).
+    let Some(victim) = crate::process::task_ref::TaskRef::from_pinned(victim) else {
+        return;
+    };
+
+    {
+        let victim_pid = victim.pid();
+        let victim_name = victim.comm();
+        let name_str = core::str::from_utf8(
+            victim_name.split(|&b| b == 0).next().unwrap_or(b"?"),
+        ).unwrap_or("?");
+
+        crate::pr_err!(
+            "oom-killer: Killed process {} ({}) score {}",
+            victim_pid, name_str, oc.chosen_points
+        );
+
+        // The oom:mark_victim tracepoint — the reference records it when
+        // the kill decision is final (mm/oom_kill.c's trace_mark_victim).
+        // Field honesty: Rux's mm keeps ONE resident-page counter; it
+        // lands in anon_rss. file/shmem/pgtables have no per-mm
+        // counterpart and report 0. Marshals only behind armed().
+        if crate::trace::EVENT_MARK_VICTIM.armed() {
+            let words = crate::trace::comm_to_words(&*victim_name);
+            let (total_vm, anon_rss) = victim
+                .address_space_arc()
+                .map(|mm| (mm.total_vm(), mm.rss()))
+                .unwrap_or((0, 0));
+            crate::trace::record(
+                &crate::trace::EVENT_MARK_VICTIM,
+                [
+                    victim_pid as u64,
+                    words[0],
+                    words[1],
+                    total_vm,
+                    anon_rss,
+                    0,
+                    0,
+                    victim.cred().uid as u64,
+                    0,
+                    victim.oom_score_adj() as i16 as u64,
+                ],
+            );
+        }
+
+        // Step 1: Send SIGKILL to victim
+        let _ = crate::signal::send_signal(
+            victim_pid,
+            crate::signal::Signal::SIGKILL as i32,
+        );
+
+        // Step 2: Kill all processes sharing victim's mm (different thread groups).
+        // Compare AddressSpace raw pointers to detect mm sharing.
+        // R25-2 pattern: the victim's mm Arc is cloned OUTSIDE the bucket
+        // lock (its drop may be a last-reference teardown — schedulable,
+        // never under a spinlock). The scan side only needs identity
+        // comparison, so it PEEKS the slot under the mm-slot lock without
+        // a reference: no Arc is cloned or dropped inside the bucket
+        // lock, and the pinned victim Arc makes the comparison ABA-free.
+        let victim_mm_ptr = victim.address_space_arc()
+            .map(|mm| mm.as_ref() as *const _ as usize);
+        if let Some(mm_ptr) = victim_mm_ptr {
+            crate::process::pid_hash::pid_hash_for_each_task(|task_ptr| {
+                let t = &*task_ptr;
+                if t.pid() == victim_pid {
+                    return; // Skip the victim itself
+                }
+                let their_mm_ptr = t.mm_ptr_peek()
+                    .map(|mm| mm as usize);
+                if let Some(their_ptr) = their_mm_ptr {
+                    if their_ptr == mm_ptr {
+                        // Same mm, different task — kill it too
+                        let _ = crate::signal::send_signal(
+                            t.pid(),
+                            crate::signal::Signal::SIGKILL as i32,
+                        );
+                    }
+                }
+            });
+        }
+
+        // Step 3: Set TIF_MEMDIE on victim
+        // This grants the victim access to memory reserves so it can exit cleanly.
+        victim.set_ti_flag(TIF_MEMDIE);
+    }
+    // TaskRef::drop releases the pin (the old code never put it — the
+    // leaked task_refcnt pinned the victim's Task slot forever).
+}
+
+// ==================== out_of_memory ====================
+
+/// Main OOM killer entry point.
+///
+/// Following Linux's out_of_memory() in mm/oom_kill.c:
+/// 1. Log OOM event
+/// 2. Select worst process via select_bad_process()
+/// 3. Kill the selected victim via oom_kill_process()
+///
+/// Returns true if a victim was killed, false otherwise.
+pub fn out_of_memory(oc: &mut OomControl) -> bool {
+    // Serialize the whole select+kill decision (review 4.13 oom_lock).
+    let _oom_guard = OOM_LOCK.lock();
+
+    crate::pr_err!(
+        "oom: out of memory (order={}, gfp={:#x})",
+        oc.order, oc.gfp_mask
+    );
+
+    // Select the process with the highest badness score
+    select_bad_process(oc);
+
+    if oc.chosen.is_some() {
+        oom_kill_process(oc);
+        true
+    } else {
+        crate::pr_err!("oom: no killable processes found");
+        // Leg-16: at the fake-OOM floor the interesting question is WHAT
+        // holds the ~900MB kernel heap. One-shot, raw UART, allocation-
+        // free (internally rate-limited to the first firing per boot).
+        crate::debug::schb::oom_anat_dump();
+        false
+    }
+}
+
+// ==================== pagefault OOM policy ====================
+
+/// Per-task OOM-fault strike table (fake-OOM family). A strike is burned
+/// only when the task CONSUMES a global kill attempt (a kill window it
+/// won) and the zone still drains its faults afterwards; 3 strikes = the
+/// task itself dies (the global killer had its chances). Retries inside
+/// another kill's 1 s window are free — that window exists exactly so a
+/// killed victim's asynchronous exit can free pages while the faulting
+/// task re-executes. Fixed table keyed by pid — pid reuse can inherit
+/// stale strikes; bounded by the episode reset (a quiet stretch of
+/// EPISODE_RESET_JIFFIES clears them, so grace is per-OOM-episode, not
+/// per-process-lifetime).
+static STRIKES: Spinlock<[(u32, u32); 16]> = Spinlock::new([(0, 0); 16]);
+
+/// Strike-out threshold: kills consumed on the task's behalf without the
+/// zone recovering.
+const MAX_FAULT_STRIKES: u32 = 3;
+
+/// One global kill per this many jiffies (1 s at 100 Hz) — a fault storm
+/// must not kill every hog at once while the first victim's memory has
+/// not even freed yet.
+const KILL_WINDOW_JIFFIES: u64 = 100;
+
+/// Quiet stretch that ends an OOM episode: strikes from a previous
+/// episode no longer count (10 s at 100 Hz).
+const EPISODE_RESET_JIFFIES: u64 = 1000;
+
+static LAST_FAULT_KILL: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Pagefault-OOM policy (Linux pagefault_out_of_memory parity) for the
+/// trap layer's MmFaultResult::OutOfMemory arm.
+///
+/// Instead of unconditionally SIGKILLing the faulting task, consult the
+/// global OOM killer (rate-limited): the highest-badness process dies and
+/// the FAULTING task returns to userspace to retry its instruction — the
+/// victim's memory frees asynchronously and the retry usually succeeds.
+///
+/// Returns FALSE when the faulting task itself must die:
+/// - it struck out (3 consumed kills without recovery), or
+/// - no victim was killable (nothing to wait for).
+/// Returns TRUE when the task should retry (it consumed a kill, a recent
+/// global kill is still in flight, or another CPU just won a kill window).
+pub fn fault_oom_kill_or_retry(pid: u32) -> bool {
+    let now = crate::timer::get_jiffies();
+    let last = LAST_FAULT_KILL.load(core::sync::atomic::Ordering::Relaxed);
+
+    // Retry window: a recent kill's victim is still exiting — retry for
+    // free (no strike: the whole point of the window is to let its pages
+    // come back while this task re-executes).
+    if now.saturating_sub(last) < KILL_WINDOW_JIFFIES {
+        return true;
+    }
+
+    // Claim the next kill window (one global kill per window across all
+    // CPUs). Losing the race means somebody else's kill is now in flight
+    // — retry for free.
+    if LAST_FAULT_KILL
+        .compare_exchange(
+            last,
+            now,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return true;
+    }
+
+    // We own a kill attempt — THIS is what burns a strike (short critical
+    // section; OOM_LOCK is NOT held — out_of_memory below takes it after
+    // this releases). A quiet stretch since the last kill marks a new
+    // episode: stale strikes from an earlier one no longer count.
+    let fresh_episode = now.saturating_sub(last) > EPISODE_RESET_JIFFIES;
+    let struck_out = {
+        let mut table = STRIKES.lock();
+        let mut slot = table.iter_mut().find(|(p, _)| *p == pid);
+        if slot.is_none() {
+            slot = table.iter_mut().find(|(p, _)| *p == 0);
+        }
+        match slot {
+            Some(entry) => {
+                if fresh_episode {
+                    *entry = (pid, 0);
+                }
+                entry.0 = pid;
+                entry.1 += 1;
+                if entry.1 >= MAX_FAULT_STRIKES {
+                    // Strike out. Clear so a recycled pid starts fresh.
+                    *entry = (0, 0);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => true, // table full: no more grace
+        }
+    };
+    if struck_out {
+        return false;
+    }
+
+    let mut totalpages = 0u64;
+    // SAFETY: diagnostic read-only node access.
+    if let Some(node) = rux::mm::pglist::first_online_node() {
+        for zt in [
+            rux::mm::zone::ZoneType::ZoneNormal,
+            rux::mm::zone::ZoneType::ZoneDma32,
+            rux::mm::zone::ZoneType::ZoneDma,
+        ] {
+            if let Some(zone) = node.zone(zt) {
+                if zone.is_initialized() {
+                    totalpages += zone.managed_pages() as u64;
+                }
+            }
+        }
+    }
+    if totalpages == 0 {
+        return false;
+    }
+    let mut oc = OomControl::new(totalpages, 0, 0);
+    out_of_memory(&mut oc)
+}
+
+/// Kernel-mode pagefault OOM (riscv64 twin of the x86_64 panic arm): the
+/// faulting context cannot do_exit, and silently re-executing would
+/// livelock. Rate-limited global kill attempt so the retry loop has a
+/// memory source; returns false when NOTHING is killable (the caller
+/// panics loudly — matching the x86_64 kernel-mode policy).
+pub fn kernel_fault_oom_kill() -> bool {
+    let now = crate::timer::get_jiffies();
+    let last = LAST_FAULT_KILL.load(core::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(last) < KILL_WINDOW_JIFFIES {
+        return true; // a kill is in flight; its pages may serve the retry
+    }
+    if LAST_FAULT_KILL
+        .compare_exchange(
+            last,
+            now,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return true;
+    }
+    let mut totalpages = 0u64;
+    // SAFETY: diagnostic read-only node access.
+    if let Some(node) = rux::mm::pglist::first_online_node() {
+        for zt in [
+            rux::mm::zone::ZoneType::ZoneNormal,
+            rux::mm::zone::ZoneType::ZoneDma32,
+            rux::mm::zone::ZoneType::ZoneDma,
+        ] {
+            if let Some(zone) = node.zone(zt) {
+                if zone.is_initialized() {
+                    totalpages += zone.managed_pages() as u64;
+                }
+            }
+        }
+    }
+    if totalpages == 0 {
+        return false;
+    }
+    let mut oc = OomControl::new(totalpages, 0, 0);
+    out_of_memory(&mut oc)
+}
+
+/// Run the OOM killer on demand (Linux sysrq 'f': "invokes the OOM
+/// killer to terminate a memory-consuming process, without panicking if
+/// no process can be killed").
+///
+/// Returns true when a process was killed, false when nothing was
+/// killable — the caller must not panic in that case (Linux's sysrq 'f'
+/// deliberately avoids the panic path).
+pub fn sysrq_oom_kill() -> bool {
+    let mut totalpages = 0u64;
+    // SAFETY: diagnostic read-only node access.
+    if let Some(node) = rux::mm::pglist::first_online_node() {
+        for zt in [
+            rux::mm::zone::ZoneType::ZoneNormal,
+            rux::mm::zone::ZoneType::ZoneDma32,
+            rux::mm::zone::ZoneType::ZoneDma,
+        ] {
+            if let Some(zone) = node.zone(zt) {
+                if zone.is_initialized() {
+                    totalpages += zone.managed_pages() as u64;
+                }
+            }
+        }
+    }
+    if totalpages == 0 {
+        return false;
+    }
+    let mut oc = OomControl::new(totalpages, 0, 0);
+    out_of_memory(&mut oc)
+}

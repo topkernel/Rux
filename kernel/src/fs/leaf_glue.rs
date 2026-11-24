@@ -7,8 +7,8 @@
 //! to its row; the generic-closure population fns box their closures
 //! here so the kernel's call sites keep their pre-trace shape
 //! (`debugfs::create_file(path, mode, show, store)`). A call site differs
-//! from the pre-trace code only in its `use` path (`crate::fs::debugfs`
-//! -> `crate::fs::leaf_glue::debugfs`).
+//! from the pre-trace code only in its `use` path (`crate::debugfs`
+//! -> `rux::fs::leaf_glue::debugfs`).
 //!
 //! crate-plan §3a rule 2 (static dispatch first on data paths) is
 //! implemented in two places here:

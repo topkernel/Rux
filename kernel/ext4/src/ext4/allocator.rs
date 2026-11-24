@@ -1,0 +1,1042 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+//! ext4 block and inode allocator
+
+// (INV-EXT4-ALLOC-1: the bitmap family — block/inode bitmaps are
+// bread-pinned RMW blocks (INV-BIO-BH's pin) under EXT4_BIG_LOCK;
+// the bg descriptor refreshes ride the same pin.)
+use alloc::vec::Vec;
+use crate::sync::spinlock::Spinlock;
+
+/// Byte offset of `bg_free_blocks_count_lo` within ext4 group descriptor (32-bit desc):
+/// bg_block_bitmap_lo(u32) + bg_inode_bitmap_lo(u32) + bg_inode_table_lo(u32) = 12
+const BG_FREE_BLOCKS_OFF: usize = 12;
+
+/// Byte offset of `s_free_blocks_count` within ext4 superblock:
+/// s_inodes_count(u32) + s_blocks_count(u32) + s_r_blocks_count(u32) = 12
+const SB_FREE_BLOCKS_OFF: usize = 12;
+
+use crate::errno;
+use rux::fs::bio;
+use crate::ext4::superblock::Ext4GroupDesc;
+
+// ============================================================================
+// Preallocation State
+// ============================================================================
+
+/// Preallocation window for a single inode.
+///
+/// When `alloc_block_with_prealloc` finds a cache miss, it allocates one
+/// block for immediate use and then pre-allocates extra blocks in the same
+/// group. Subsequent calls for the same inode consume from this cache.
+pub struct PreallocState {
+    /// Starting physical block number of the preallocated window
+    pub start: u64,
+    /// Number of blocks already consumed from the window
+    pub len: u32,
+    /// Total number of preallocated blocks
+    pub total: u32,
+    /// Target inode number
+    pub ino: u32,
+}
+
+/// Number of extra blocks to preallocate beyond the requested one.
+const PREALLOC_SIZE: u32 = 8;
+
+pub struct BlockAllocator<'a> {
+    fs: &'a super::Ext4FileSystem,
+}
+
+impl<'a> BlockAllocator<'a> {
+    /// Create new block allocator
+    pub fn new(fs: &'a super::Ext4FileSystem) -> Self {
+        Self { fs }
+    }
+
+    /// Allocate a block, preferring `goal_group`.
+    ///
+    /// Search order:
+    /// 1. `goal_group` (locality hint)
+    /// 2. `goal_group ± 1, ± 2, ...` (spiral outward)
+    /// 3. All groups from 0 (fallback)
+    pub fn alloc_block(&self, goal_group: u32) -> Result<u64, i32> {
+        // Serialize every bitmap mutation (why-slow): the bitmap update
+        // is bread -> scan -> set -> dirty -> sync, and two concurrent
+        // creators (mkdir/create paths run WITHOUT the ext4 big lock)
+        // both bread the same bitmap block, each sets its own bit and
+        // syncs — the second sync overwrites the first bit: DOUBLE
+        // ALLOCATION. The loser's later alloc_meta_block memset ZEROES
+        // the winner's freshly written extent-tree node, leaving index
+        // entries that point at zeroed blocks (e2fsck: "invalid extent
+        // node", i_blocks mismatch; Linux mounts reject the fs). The
+        // lock is recursive per task, so paths that already hold it
+        // (buffered write, fallocate) re-enter harmlessly.
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock();
+        let block_groups = self.fs.group_count;
+        crate::debug::fsw::note_alloc_run();
+
+        // Phase 1: Try goal_group first
+        if goal_group < block_groups {
+            if let Some(block) = self.try_alloc_from_group(goal_group)? {
+                return Ok(block);
+            }
+        }
+
+        // Phase 2: Spiral outward from goal_group
+        for dist in 1..block_groups {
+            let forward = goal_group as i32 + dist as i32;
+            let backward = goal_group as i32 - dist as i32;
+
+            if forward >= 0 && (forward as u32) < block_groups {
+                if let Some(block) = self.try_alloc_from_group(forward as u32)? {
+                    return Ok(block);
+                }
+            }
+            if backward >= 0 && (backward as u32) < block_groups && backward != forward as i32 {
+                if let Some(block) = self.try_alloc_from_group(backward as u32)? {
+                    return Ok(block);
+                }
+            }
+        }
+
+        Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
+    }
+
+    /// Allocate a CONTIGUOUS run of up to `want` blocks.
+    ///
+    /// Returns `Some((start_block, got))` with `got >= 1` (the first free
+    /// run found, possibly shorter than `want`). One bitmap read + one
+    /// bitmap write + one descriptor/superblock update per run — this is
+    /// what makes large fallocate(2) preallocations feasible: the old
+    /// one-block-at-a-time path cost a full bitmap read/write plus a
+    /// synchronous data-block zero per 4KB, so LTP's tst_acquire_device
+    /// (posix_fallocate of a 128MB scratch device) ground the kernel for
+    /// minutes under TCG while holding EXT4_BIG_LOCK — every LTP test
+    /// with .needs_device wedged the whole sweep.
+    pub fn alloc_block_run(&self, goal_group: u32, want: u32) -> Result<Option<(u64, u32)>, i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // see alloc_block: bitmap RMW race
+        let block_groups = self.fs.group_count;
+        crate::debug::fsw::note_alloc_run();
+
+        if let Some(run) = self.try_alloc_run_from_group(goal_group, want)? {
+            return Ok(Some(run));
+        }
+        for dist in 1..block_groups {
+            let forward = goal_group as i32 + dist as i32;
+            let backward = goal_group as i32 - dist as i32;
+            if forward >= 0 && (forward as u32) < block_groups {
+                if let Some(run) = self.try_alloc_run_from_group(forward as u32, want)? {
+                    return Ok(Some(run));
+                }
+            }
+            if backward >= 0 && (backward as u32) < block_groups && backward != forward as i32 {
+                if let Some(run) = self.try_alloc_run_from_group(backward as u32, want)? {
+                    return Ok(Some(run));
+                }
+            }
+        }
+        Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
+    }
+
+    /// Run-allocation counterpart of try_alloc_from_group: finds the first
+    /// free bit, extends the run while bits stay free, marks them all used,
+    /// writes the bitmap back ONCE.
+    fn try_alloc_run_from_group(
+        &self,
+        group_idx: u32,
+        want: u32,
+    ) -> Result<Option<(u64, u32)>, i32> {
+        let blocks_per_group = self.fs.blocks_per_group as u64;
+        let first_data_block = self.fs.sb_info.as_ref()
+            .map(|sb| sb.s_first_data_block as u64)
+            .unwrap_or(0);
+
+        let (free_blocks, block_bitmap_block) = {
+            let group_descs = self.fs.group_descs.lock();
+            let group_desc = &group_descs[group_idx as usize];
+            // lo|hi<<32 at every geometry site (review EXT4-64BIT, same
+            // class as the inode.rs/mod.rs inode-table twins): bitmap
+            // block numbers are 64-bit on a 64BIT fs.
+            (group_desc.bg_free_blocks_count_lo,
+                (group_desc.bg_block_bitmap_lo as u64)
+                    | ((group_desc.bg_block_bitmap_hi as u64) << 32))
+        };
+        if free_blocks == 0 || block_bitmap_block == 0 {
+            return Ok(None);
+        }
+
+        let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
+        let start = if group_idx == 0 {
+            core::cmp::max(first_data_block, 1)
+        } else {
+            0
+        };
+
+        let Some(first) = find_free_bit(&bitmap, start, blocks_per_group) else {
+            return Ok(None);
+        };
+        let max_run = core::cmp::min(want as u64, free_blocks as u64);
+        let mut len: u64 = 1;
+        while len < max_run {
+            let bit = first + len;
+            if bit >= blocks_per_group {
+                break;
+            }
+            if bitmap[(bit / 8) as usize] & (1 << (bit % 8)) != 0 {
+                break;
+            }
+            len += 1;
+        }
+
+        // Mark the whole run used in one pass, one writeback.
+        for bit in first..first + len {
+            bitmap[(bit / 8) as usize] |= 1 << (bit % 8);
+        }
+        self.write_block_bitmap(block_bitmap_block, &bitmap)?;
+
+        {
+            let mut group_descs = self.fs.group_descs.lock();
+            group_descs[group_idx as usize].bg_free_blocks_count_lo =
+                group_descs[group_idx as usize].bg_free_blocks_count_lo
+                    .saturating_sub(len as u16);
+        }
+        // Saturating: the on-disk descriptor count is known to drift from
+        // the bitmap truth (see the matching note in free_block_run; the
+        // journal checkpoint can restore a stale descriptor block over the
+        // allocator's direct write). A debug-build subtraction underflow
+        // here panicked the kernel long before the drift itself mattered.
+        self.update_group_desc_free_blocks(group_idx as u64, free_blocks.saturating_sub(len as u16))?;
+        self.update_superblock_free_blocks(-(len as i32))?;
+
+        let block_number = (group_idx as u64) * blocks_per_group + first;
+        Ok(Some((block_number, len as u32)))
+    }
+
+    /// Try to allocate a single block from a specific group.
+    ///
+    /// Reads bitmap once, finds free bit, marks it used, writes back once.
+    /// Returns `Some(block_number)` on success, `None` if group has no free blocks.
+    fn try_alloc_from_group(&self, group_idx: u32) -> Result<Option<u64>, i32> {
+        let blocks_per_group = self.fs.blocks_per_group as u64;
+        let first_data_block = self.fs.sb_info.as_ref()
+            .map(|sb| sb.s_first_data_block as u64)
+            .unwrap_or(0);
+
+        let (free_blocks, block_bitmap_block) = {
+            let group_descs = self.fs.group_descs.lock();
+            let group_desc = &group_descs[group_idx as usize];
+            (group_desc.bg_free_blocks_count_lo,
+                (group_desc.bg_block_bitmap_lo as u64)
+                    | ((group_desc.bg_block_bitmap_hi as u64) << 32))
+        };
+
+        if free_blocks == 0 || block_bitmap_block == 0 {
+            return Ok(None);
+        }
+
+        // Read bitmap ONCE
+        let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
+
+        // For group 0, skip block 0 (superblock)
+        let start = if group_idx == 0 {
+            core::cmp::max(first_data_block, 1)
+        } else {
+            0
+        };
+
+        // Find free bit using buddy-aligned scan (order=0 = single block)
+        if let Some(block_offset) = find_free_bit(&bitmap, start, blocks_per_group) {
+            let block_number = (group_idx as u64) * blocks_per_group + block_offset;
+
+            // Mark block as used IN PLACE (no second read)
+            let byte_idx = block_offset as usize / 8;
+            let bit_idx = block_offset as usize % 8;
+            bitmap[byte_idx] |= 1 << bit_idx;
+
+            // Write back modified bitmap
+            self.write_block_bitmap(block_bitmap_block, &bitmap)?;
+
+            // Update in-memory group descriptor
+            {
+                let mut group_descs = self.fs.group_descs.lock();
+                group_descs[group_idx as usize].bg_free_blocks_count_lo =
+                    group_descs[group_idx as usize].bg_free_blocks_count_lo.saturating_sub(1);
+            }
+
+            // Update on-disk group descriptor and superblock
+            self.update_group_desc_free_blocks(group_idx as u64, free_blocks - 1)?;
+            self.update_superblock_free_blocks(-1)?;
+
+            return Ok(Some(block_number));
+        }
+
+        Ok(None)
+    }
+
+    /// Free a block
+    pub fn free_block(&self, block: u64) -> Result<(), i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // see alloc_block: bitmap RMW race
+        self.free_block_run(block, 1)
+    }
+
+    /// Free a CONTIGUOUS run of blocks: one bitmap read, one bitmap write,
+    /// one descriptor/superblock update per GROUP-SEGMENT of the run.
+    /// Truncating/deleting a file with multi-block extents must not pay
+    /// four synchronous I/Os per 4KB block (LTP device-scratch files reach
+    /// 300MB — 76800 per-block frees wedged the whole system through the
+    /// block-I/O wait path).
+    pub fn free_block_run(&self, start: u64, len: u64) -> Result<(), i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // see alloc_block: bitmap RMW race
+        if len == 0 {
+            return Ok(());
+        }
+        let blocks_per_group = self.fs.blocks_per_group as u64;
+        crate::debug::fsw::note_free_run();
+
+        // A run may cross group boundaries — free it group-segment by
+        // group-segment (each segment: one bitmap round trip).
+        let mut cursor = start;
+        let mut remain = len;
+        while remain > 0 {
+            let group_idx = cursor / blocks_per_group;
+            let offset_in_group = cursor % blocks_per_group;
+            let seg = core::cmp::min(remain, blocks_per_group - offset_in_group);
+            self.free_block_run_single_group(group_idx, offset_in_group, cursor, seg)?;
+            cursor += seg;
+            remain -= seg;
+        }
+        Ok(())
+    }
+
+    fn free_block_run_single_group(
+        &self,
+        group_idx: u64,
+        block_offset: u64,
+        start: u64,
+        len: u64,
+    ) -> Result<(), i32> {
+        let blocks_per_group = self.fs.blocks_per_group as u64;
+        let block_groups = self.fs.group_count as u64;
+        if group_idx >= block_groups {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+        if block_offset + len > blocks_per_group {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+
+        let (free_blocks, block_bitmap_block) = {
+            let group_descs = self.fs.group_descs.lock();
+            let group_desc = &group_descs[group_idx as usize];
+            (group_desc.bg_free_blocks_count_lo,
+                (group_desc.bg_block_bitmap_lo as u64)
+                    | ((group_desc.bg_block_bitmap_hi as u64) << 32))
+        };
+
+        let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
+
+        let end_bit = (block_offset + len) as usize;
+        if end_bit.div_ceil(8) > bitmap.len() {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+        for bit in block_offset as usize..end_bit {
+            bitmap[bit / 8] &= !(1 << (bit % 8));
+        }
+        // Forget the freed blocks' dirty buffers AND jbd2 registrations
+        // BEFORE the bitmap write: the freed content is dead — a dirty
+        // buffer left behind is dead data that the next publication drain
+        // / eviction / commit writes to disk synchronously (the P6
+        // mkdrmdir floor: one fresh dir block per mkdir, freed by the
+        // paired rmdir, then written out by the ordered drain anyway),
+        // and a leftover registration makes a later commit re-READ the
+        // dead block from disk and write the stale bytes back (the
+        // revoke-threshold slow commits). Pinned or clean buffers are
+        // skipped inside (bio::drop_freed_block_forgotten). Crash
+        // ordering is carried by the bitmap/GD/SB deferred writes and
+        // the revoke records, not by the dead content.
+        for i in 0..len as u64 {
+            rux::fs::bio::drop_freed_block_forgotten(self.fs.device, start + i);
+        }
+        self.write_block_bitmap(block_bitmap_block, &bitmap)?;
+
+        {
+            let mut group_descs = self.fs.group_descs.lock();
+            group_descs[group_idx as usize].bg_free_blocks_count_lo =
+                group_descs[group_idx as usize].bg_free_blocks_count_lo
+                    .saturating_add(len as u16);
+        }
+
+        // Saturating: with a drifted (inflated) on-disk count, a large free
+        // run overflowed u16 here in debug builds and panicked the kernel
+        // ("attempt to add with overflow") — turning a bookkeeping anomaly
+        // into a filesystem-level DoS.
+        self.update_group_desc_free_blocks(group_idx, free_blocks.saturating_add(len as u16))?;
+        self.update_superblock_free_blocks(len as i32)?;
+
+        Ok(())
+    }
+
+    fn read_block_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {
+        let bh = bio::bread(self.fs.device, bitmap_block)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+        let bitmap = bio::bh_data(&bh).to_vec();
+        bio::brelse(bh);
+        Ok(bitmap)
+    }
+
+    /// JOURNAL DISCIPLINE (family b fix, ext4-corrupt lane): bitmap
+    /// blocks are now REGISTERED with the current jbd2 handle (when one
+    /// is active) so the op's commit syncs them together with the inode
+    /// table / extent-tree buffers of the SAME allocation. The old
+    /// deliberate bypass left the bitmap dirty-in-cache until an
+    /// out-of-band drain (eviction, global sync): the tree root
+    /// persisted at the op's own commit while the bitmap lingered — a
+    /// hard kill in between produced "block bitmap differences" (bits
+    /// set, tree never claimed — the c8/cook leak family, 23 blocks per
+    /// kill) and the reverse split produced double-allocations.
+    /// Registration costs no handle credits (dirty_metadata charges
+    /// nothing; the commit fast path sizes descriptors from the live
+    /// buffer count). Mutual exclusion stays with EXT4_BIG_LOCK; stale
+    /// replay is still suppressed by the deletion paths' revoke records.
+    /// Outside a handle the inline sync path is unchanged.
+    fn write_block_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
+        bio::with_block_mut(self.fs.device, bitmap_block, |data, _| {
+            data.copy_from_slice(bitmap);
+            Ok(())
+        })?;
+        // metadata_csum: the block bitmap's checksum rides in the
+        // group descriptor — refresh it (and bg_checksum) after the
+        // bitmap bytes are out, or the cook lineage's next e2fsck
+        // flags the mismatch.
+        if self.fs.metadata_csum {
+            let size = (self.fs.blocks_per_group as usize) / 8;
+            let c = super::csum::bitmap_csum(self.fs.csum_seed, bitmap, size);
+            if let Some(g) = group_of_bitmap(self.fs, bitmap_block, false) {
+                let _ = set_bitmap_csum_in_gd(self.fs, g, false, c);
+            }
+        }
+        Ok(())
+    }
+
+    /// JOURNAL DISCIPLINE: registered with the current handle like
+    /// write_block_bitmap (family b fix — see its comment); without a
+    /// handle the deferred-dirty behavior is unchanged.
+    fn update_group_desc_free_blocks(&self, group_idx: u64, free_blocks: u16) -> Result<(), i32> {
+        let group_desc_size = self.fs.desc_size as usize;
+        let group_desc_start_block = if self.fs.block_size == 1024 { 2 } else { 1 };
+
+        let desc_per_block = self.fs.block_size as u64 / group_desc_size as u64;
+        let desc_block = group_desc_start_block + (group_idx / desc_per_block);
+        let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
+
+        // BG_FREE_BLOCKS_OFF is within the block (descriptor layout);
+        // the deferred edge owns dirty+journal (F4-R2: durability-deferred).
+        bio::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
+            crate::safety::bytes::write_at::<u16>(data, desc_offset + BG_FREE_BLOCKS_OFF, free_blocks);
+            // metadata_csum write path: the read path verifies each group
+            // descriptor's bg_checksum at MOUNT (a stale checksum refuses
+            // the next mount), so the counter change re-seals the slot.
+            if self.fs.metadata_csum {
+                let end = (desc_offset + group_desc_size).min(data.len());
+                if desc_offset < end {
+                    crate::ext4::csum::group_desc_csum_set(
+                        self.fs.csum_seed,
+                        group_idx as u32,
+                        &mut data[desc_offset..end],
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn update_superblock_free_blocks(&self, delta: i32) -> Result<(), i32> {
+        let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
+        let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
+        // SB_FREE_BLOCKS_OFF is within the superblock; the deferred edge
+        // owns dirty+journal (F4-R2: durability-deferred like the GD twin).
+        bio::with_block_deferred_mut(self.fs.device, sb_block as u64, |data, _| {
+            let current = crate::safety::bytes::read_at::<u32>(data, sb_start + SB_FREE_BLOCKS_OFF).unwrap_or(0);
+            let new_count = (current as i64 + delta as i64) as u32;
+            crate::safety::bytes::write_at::<u32>(data, sb_start + SB_FREE_BLOCKS_OFF, new_count);
+            // metadata_csum write path: the read path verifies s_checksum
+            // at mount — re-seal it over the full 1024-byte superblock
+            // after any counter mutation (see also the free_inodes twin).
+            if self.fs.metadata_csum {
+                let sb_end = (sb_start + 1024).min(data.len());
+                if sb_start < sb_end {
+                    crate::ext4::csum::superblock_csum_set(&mut data[sb_start..sb_end]);
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// metadata_csum: locate the group whose bitmap block is `bitmap_block`
+/// (bitmaps sit at descriptor-declared blocks — flex_bg placement included
+/// — so a small descriptor scan is the robust mapping).
+pub(crate) fn group_of_bitmap(
+    fs: &super::Ext4FileSystem,
+    bitmap_block: u64,
+    inode_bitmap: bool,
+) -> Option<u64> {
+    let descs = fs.group_descs.lock();
+    for (i, g) in descs.iter().enumerate() {
+        let b = if inode_bitmap {
+            (g.bg_inode_bitmap_lo as u64) | ((g.bg_inode_bitmap_hi as u64) << 32)
+        } else {
+            (g.bg_block_bitmap_lo as u64) | ((g.bg_block_bitmap_hi as u64) << 32)
+        };
+        if b == bitmap_block && b != 0 {
+            return Some(i as u64);
+        }
+    }
+    None
+}
+
+/// metadata_csum: store a freshly computed bitmap checksum into the
+/// group descriptor's bg_{block,inode}_bitmap_csum_{lo,hi} fields and
+/// re-seal bg_checksum over the updated descriptor. Deferred write like
+/// the other descriptor updates (buffer cache is coherent).
+pub(crate) fn set_bitmap_csum_in_gd(
+    fs: &super::Ext4FileSystem,
+    group_idx: u64,
+    inode_bitmap: bool,
+    csum: u32,
+) -> Result<(), i32> {
+    let group_desc_size = fs.desc_size as usize;
+    if group_desc_size < super::csum::BG_INODE_BITMAP_CSUM_LO_OFF + 2 {
+        // 32-byte descriptors carry no bitmap csum fields at all.
+        return Ok(());
+    }
+    let group_desc_start_block = if fs.block_size == 1024 { 2 } else { 1 };
+    let desc_per_block = fs.block_size as u64 / group_desc_size as u64;
+    let desc_block = group_desc_start_block + (group_idx / desc_per_block);
+    let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
+
+    let (lo_off, hi_off) = if inode_bitmap {
+        (
+            super::csum::BG_INODE_BITMAP_CSUM_LO_OFF,
+            super::csum::BG_INODE_BITMAP_CSUM_HI_OFF,
+        )
+    } else {
+        (
+            super::csum::BG_BLOCK_BITMAP_CSUM_LO_OFF,
+            super::csum::BG_BLOCK_BITMAP_CSUM_HI_OFF,
+        )
+    };
+
+    // desc_offset + desc_size is within the 4K block; the fields
+    // written are within desc_size when the bounds checks passed.
+    bio::with_block_mut(fs.device, desc_block, |data, _| {
+        let d = &mut data[desc_offset..desc_offset + group_desc_size];
+        d[lo_off..lo_off + 2].copy_from_slice(&((csum & 0xFFFF) as u16).to_le_bytes());
+        if group_desc_size >= hi_off + 2 {
+            d[hi_off..hi_off + 2].copy_from_slice(&((csum >> 16) as u16).to_le_bytes());
+        }
+        super::csum::group_desc_csum_set(fs.csum_seed, group_idx as u32, d);
+        Ok(())
+    })
+}
+
+/// Find a free bit in a block bitmap (single block, order=0).
+/// Scans byte-by-byte, skipping fully-occupied bytes (0xFF).
+/// This is the buddy allocator's order-0 search — fast path for
+/// the common single-block allocation case.
+/// NOTE: Visibility is `pub(crate)` for unit testing (see tests/ext4_allocator.rs).
+/// Used internally by `alloc_block_in_group` and `alloc_inode_in_group`.
+pub(crate) fn find_free_bit(bitmap: &[u8], start: u64, max_bits: u64) -> Option<u64> {
+    let start_bit = start as usize;
+
+    for (i, &byte) in bitmap.iter().enumerate() {
+        let bit_offset = i * 8;
+
+        if bit_offset + 8 <= start_bit {
+            continue;
+        }
+
+        // Skip fully-occupied bytes (fast path)
+        if byte == 0xFF {
+            continue;
+        }
+
+        for bit in 0..8 {
+            let abs_bit = bit_offset + bit;
+            if abs_bit as u64 >= max_bits {
+                return None;
+            }
+            if abs_bit < start_bit {
+                continue;
+            }
+            if (byte & (1 << bit)) == 0 {
+                return Some(abs_bit as u64);
+            }
+        }
+    }
+
+    None
+}
+
+// ============================================================================
+// Preallocation-Aware Allocation
+// ============================================================================
+
+/// Allocate a block for a specific inode, using preallocation cache.
+///
+/// If a preallocation window exists for `ino` with remaining blocks, consumes
+/// one block from it (no bitmap I/O needed). Otherwise, delegates to
+/// `alloc_block(goal_group)` and creates a new preallocation window.
+pub fn alloc_block_with_prealloc(
+    fs: &super::Ext4FileSystem,
+    goal_group: u32,
+    ino: u32,
+) -> Result<u64, i32> {
+    // Same serialization as BlockAllocator::alloc_block (q.v.): this
+    // path runs its OWN read-scan-mark-write on the bitmap for the
+    // prealloc window (Phase 3) — unlocked it races any other allocator
+    // and loses ITS bit, after which the window's blocks get handed to
+    // a second owner (cook5 evidence: inode 265's extent metadata vs
+    // inode 335's window data on the same physical blocks).
+    let _alloc_guard = super::EXT4_BIG_LOCK.lock();
+    // Phase 1: Check prealloc cache
+    {
+        let mut prealloc = fs.prealloc.lock();
+        if let Some(ref mut pa) = *prealloc {
+            if pa.ino == ino && pa.len < pa.total {
+                let block = pa.start + pa.len as u64;
+                pa.len += 1;
+                return Ok(block);
+            }
+            // Inode mismatch or exhausted — discard old window
+            *prealloc = None;
+        }
+    }
+
+    // Phase 2: Cache miss — allocate one block
+    let allocator = BlockAllocator::new(fs);
+    let block = allocator.alloc_block(goal_group)?;
+
+    // Phase 3: Preallocate extra blocks in the same group
+    let blocks_per_group = fs.blocks_per_group as u64;
+    let group_idx = block / blocks_per_group;
+    let group_offset = block % blocks_per_group;
+
+    // Try to allocate extra blocks starting right after the just-allocated one
+    let mut prealloc_total = 1u32; // the block we already allocated
+    {
+        let (free_blocks, block_bitmap_block) = {
+            let group_descs = fs.group_descs.lock();
+            let group_desc = &group_descs[group_idx as usize];
+            (group_desc.bg_free_blocks_count_lo,
+                (group_desc.bg_block_bitmap_lo as u64)
+                    | ((group_desc.bg_block_bitmap_hi as u64) << 32))
+        };
+
+        // Don't preallocate if the group is nearly full
+        if free_blocks as u32 > PREALLOC_SIZE {
+            if let Ok(mut bitmap) = allocator.read_block_bitmap(block_bitmap_block) {
+                let first_data_block = fs.sb_info.as_ref()
+                    .map(|sb| sb.s_first_data_block as u64)
+                    .unwrap_or(0);
+                let start = if group_idx == 0 {
+                    core::cmp::max(first_data_block, 1)
+                } else {
+                    0
+                };
+
+                // Scan for contiguous free blocks after the allocated one
+                let mut scan = group_offset as usize + 1;
+                let max_scan = PREALLOC_SIZE as usize;
+
+                for _ in 0..max_scan {
+                    if scan as u64 >= blocks_per_group {
+                        break;
+                    }
+
+                    let byte_idx = scan / 8;
+                    let bit_idx = scan % 8;
+
+                    if byte_idx >= bitmap.len() {
+                        break;
+                    }
+
+                    if (bitmap[byte_idx] & (1 << bit_idx)) != 0 {
+                        break; // not free — stop preallocation window
+                    }
+
+                    // Mark as used in bitmap
+                    bitmap[byte_idx] |= 1 << bit_idx;
+                    prealloc_total += 1;
+                    scan += 1;
+                }
+
+                // Write back bitmap if we preallocated anything.
+                // If bitmap write fails, do NOT update metadata (blocks aren't
+                // actually reserved on disk), and fall back to single-block alloc.
+                if prealloc_total > 1 {
+                    if allocator.write_block_bitmap(block_bitmap_block, &bitmap).is_err() {
+                        prealloc_total = 1; // rollback: only the original block counts
+                    } else {
+                        // Update in-memory and on-disk group descriptor
+                        let extra = (prealloc_total - 1) as u16;
+                        {
+                            let mut group_descs = fs.group_descs.lock();
+                            group_descs[group_idx as usize].bg_free_blocks_count_lo =
+                                group_descs[group_idx as usize].bg_free_blocks_count_lo.saturating_sub(extra);
+                        }
+                        let new_free = free_blocks.saturating_sub(extra);
+                        let _ = allocator.update_group_desc_free_blocks(group_idx, new_free);
+                        let _ = allocator.update_superblock_free_blocks(-((prealloc_total - 1) as i32));
+                    }
+                }
+            }
+        }
+    }
+
+    // Store preallocation state
+    if prealloc_total > 1 {
+        let mut prealloc = fs.prealloc.lock();
+        *prealloc = Some(PreallocState {
+            start: block + 1, // next block to hand out
+            len: 0,
+            total: prealloc_total - 1,
+            ino,
+        });
+    }
+
+    Ok(block)
+}
+
+/// Discard any preallocation for the given inode.
+pub fn discard_prealloc(fs: &super::Ext4FileSystem, ino: u32) {
+    let mut prealloc = fs.prealloc.lock();
+    if let Some(ref pa) = *prealloc {
+        if pa.ino == ino {
+            *prealloc = None;
+        }
+    }
+}
+
+pub struct InodeAllocator<'a> {
+    fs: &'a super::Ext4FileSystem,
+}
+
+impl<'a> InodeAllocator<'a> {
+    /// Create new inode allocator
+    pub fn new(fs: &'a super::Ext4FileSystem) -> Self {
+        Self { fs }
+    }
+
+    /// Allocate an inode
+    ///
+    ///
+    /// # Returns
+    /// Inode number on success, error code on failure
+    pub fn alloc_inode(&self) -> Result<u32, i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // inode bitmap has the same RMW race
+        let block_groups = self.fs.group_count;
+        let inodes_per_group = self.fs.inodes_per_group as u64;
+
+        // Iterate all block groups to find free inodes
+        for group_idx in 0..block_groups {
+            let (free_inodes, inode_bitmap_block) = {
+                let group_descs = self.fs.group_descs.lock();
+                let group_desc = &group_descs[group_idx as usize];
+                (group_desc.bg_free_inodes_count_lo,
+                (group_desc.bg_inode_bitmap_lo as u64)
+                    | ((group_desc.bg_inode_bitmap_hi as u64) << 32))
+            };
+
+            // Check if there are free inodes
+            if free_inodes == 0 {
+                continue;
+            }
+
+            // Inode bitmap block number
+            if inode_bitmap_block == 0 {
+                continue;
+            }
+
+            // Read inode bitmap
+            let bitmap = self.read_inode_bitmap(inode_bitmap_block)?;
+
+            // Find free inode in bitmap
+            // In ext4, inodes start counting from 1 (0 is reserved)
+            if let Some(inode_offset) = find_free_bit(&bitmap, 1, inodes_per_group) {
+                // Calculate actual inode number. Bit N of group G covers
+                // inode G*inodes_per_group + N + 1 — the missing +1 handed
+                // out the number of the PREVIOUS slot, overwriting a live
+                // inode's on-disk state (review EXT4-H3; namei.rs's
+                // ext4_new_inode already had it right).
+                // R14-4 (F1): ext4 inode numbers are 1-BASED — bit N of group G is
+                // inode G*ipg + N + 1. The missing +1 made every allocation alias the
+                // PREVIOUS slot while marking bit N (self-consistent but overlapping
+                // live inodes; free_inode cleared the wrong bit too).
+                let inode_number = (group_idx as u64) * inodes_per_group + inode_offset + 1;
+
+                // Mark inode as used
+                self.mark_inode_used(group_idx as u64, inode_offset as usize, inode_bitmap_block)?;
+
+                // Update group descriptor (decrement free inode count)
+                self.update_group_desc_free_inodes(group_idx as u64, free_inodes - 1)?;
+
+                // Update superblock (decrement free inode count)
+                self.update_superblock_free_inodes(-1)?;
+
+                return Ok(inode_number as u32);
+            }
+        }
+
+        // No available free inodes
+        Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
+    }
+
+    /// Free an inode
+    ///
+    ///
+    /// # Parameters
+    /// - `ino`: Inode number to free
+    pub fn free_inode(&self, ino: u32) -> Result<(), i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // inode bitmap has the same RMW race
+        let inodes_per_group = self.fs.inodes_per_group as u64;
+        let block_groups = self.fs.group_count as u64;
+
+        // Calculate which group the inode is in
+        let group_idx = (ino as u64 - 1) / inodes_per_group;
+        if group_idx >= block_groups {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+
+        let inode_offset = ((ino as u64 - 1) % inodes_per_group) as usize;
+
+        // Read group descriptor
+        let (free_inodes, inode_bitmap_block) = {
+            let group_descs = self.fs.group_descs.lock();
+            let group_desc = &group_descs[group_idx as usize];
+            (group_desc.bg_free_inodes_count_lo,
+                (group_desc.bg_inode_bitmap_lo as u64)
+                    | ((group_desc.bg_inode_bitmap_hi as u64) << 32))
+        };
+
+        // Read inode bitmap
+        let mut bitmap = self.read_inode_bitmap(inode_bitmap_block)?;
+
+        // Clear corresponding bit in bitmap
+        let byte_idx = inode_offset / 8;
+        let bit_idx = inode_offset % 8;
+
+        if byte_idx < bitmap.len() {
+            bitmap[byte_idx] &= !(1 << bit_idx);
+
+            // Write back bitmap
+            self.write_inode_bitmap(inode_bitmap_block, &bitmap)?;
+
+            // Update group descriptor (increment free inode count)
+            self.update_group_desc_free_inodes(group_idx, free_inodes + 1)?;
+            // R109: keep bg_itable_unused consistent with the bitmap
+            // (e2fsck validates it; see refresh_bg_itable_unused).
+            let _ = self.refresh_bg_itable_unused(group_idx);
+
+            // Update superblock (increment free inode count)
+            self.update_superblock_free_inodes(1)?;
+
+            Ok(())
+        } else {
+            Err(errno::Errno::InvalidArgument.as_neg_i32())
+        }
+    }
+
+    /// Read inode bitmap
+    fn read_inode_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {
+        let bh = bio::bread(self.fs.device, bitmap_block)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+        let bitmap = bio::bh_data(&bh).to_vec();
+        bio::brelse(bh);
+        Ok(bitmap)
+    }
+
+    /// Write back inode bitmap. JOURNAL DISCIPLINE: registered with the
+    /// current handle (family b fix — see write_block_bitmap).
+    fn write_inode_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
+        bio::with_block_mut(self.fs.device, bitmap_block, |data, _| {
+            data.copy_from_slice(bitmap);
+            Ok(())
+        })?;
+        // metadata_csum: inode bitmap csum lives in the group
+        // descriptor (see write_block_bitmap).
+        if self.fs.metadata_csum {
+            let size = (self.fs.inodes_per_group as usize) / 8;
+            let c = super::csum::bitmap_csum(self.fs.csum_seed, bitmap, size);
+            if let Some(g) = group_of_bitmap(self.fs, bitmap_block, true) {
+                let _ = set_bitmap_csum_in_gd(self.fs, g, true, c);
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark inode as used
+    fn mark_inode_used(&self, _group_idx: u64, inode_offset: usize, bitmap_block: u64) -> Result<(), i32> {
+        let mut bitmap = self.read_inode_bitmap(bitmap_block)?;
+
+        let byte_idx = inode_offset / 8;
+        let bit_idx = inode_offset % 8;
+
+        if byte_idx < bitmap.len() {
+            bitmap[byte_idx] |= 1 << bit_idx;
+            self.write_inode_bitmap(bitmap_block, &bitmap)?;
+            Ok(())
+        } else {
+            Err(errno::Errno::InvalidArgument.as_neg_i32())
+        }
+    }
+
+    /// Update free inode count in group descriptor
+    fn update_group_desc_free_inodes(&self, group_idx: u64, free_inodes: u16) -> Result<(), i32> {
+        let group_desc_size = self.fs.desc_size as usize;  // Use actual size from superblock
+        let group_desc_start_block = if self.fs.block_size == 1024 {
+            2
+        } else {
+            1
+        };
+
+        let desc_per_block = self.fs.block_size as u64 / group_desc_size as u64;
+        let desc_block = group_desc_start_block + (group_idx / desc_per_block);
+        let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
+
+        // bg_free_inodes_count_lo is within the block; the deferred edge
+        // owns dirty+journal (F4-R2 durability-deferred).
+        bio::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
+            crate::safety::bytes::write_at::<u16>(data, desc_offset + 14, free_inodes);
+            // metadata_csum write path: re-seal this descriptor slot after
+            // the counter change (see update_group_desc_free_blocks).
+            if self.fs.metadata_csum {
+                let end = (desc_offset + group_desc_size).min(data.len());
+                if desc_offset < end {
+                    crate::ext4::csum::group_desc_csum_set(
+                        self.fs.csum_seed,
+                        group_idx as u32,
+                        &mut data[desc_offset..end],
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// R109 (metadata_csum interop): refresh bg_itable_unused from the
+    /// group's inode bitmap. e2fsck validates this field as
+    /// `inodes_per_group - popcount(inode bitmap)` (measured: the -fy
+    /// repair wrote exactly that; the pristine ships it consistent). Our
+    /// allocator never touched it, so a mkfs'd image kept its initial
+    /// value while the kernel allocated thousands of inodes — e2fsck's
+    /// pass 0 flags "unused inode count invalid", and the -fy cascade
+    /// then treats every kernel-allocated inode past the stale boundary
+    /// as garbage and CLEARS it (2404 inodes on the fv6 image, all live
+    /// files). Called after every inode alloc (namei ext4_new_inode)
+    /// and free (free_inode). Durability-deferred like the other GD
+    /// counters (order-unconstrained; a crash window here is the same
+    /// e2fsck class as the free counters, never a data hazard).
+    pub fn refresh_bg_itable_unused(&self, group_idx: u64) -> Result<(), i32> {
+        let inodes_per_group = self.fs.inodes_per_group as u64;
+        let bitmap_block = {
+            let group_descs = self.fs.group_descs.lock();
+            if group_idx >= group_descs.len() as u64 {
+                return Err(errno::Errno::InvalidArgument.as_neg_i32());
+            }
+            let gd = &group_descs[group_idx as usize];
+            (gd.bg_inode_bitmap_lo as u64) | ((gd.bg_inode_bitmap_hi as u64) << 32)
+        };
+        // Popcount the used range of the bitmap (ipg bits, rounded up to
+        // bytes — 8192/8 = 1024 for the OH geometry).
+        let nbits = inodes_per_group as usize;
+        let nbytes = nbits.div_ceil(8);
+        let used = {
+            let bh = bio::bread(self.fs.device, bitmap_block)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+            let data = bio::bh_data(&bh);
+            let used: u32 = data[..nbytes.min(data.len())]
+                .iter()
+                .map(|b| b.count_ones())
+                .sum();
+            bio::brelse(bh);
+            used
+        };
+        let unused = (inodes_per_group - used as u64) as u16;
+
+        // In-memory copy first (subsequent reads use it).
+        {
+            let mut group_descs = self.fs.group_descs.lock();
+            group_descs[group_idx as usize].bg_itable_unused_lo = unused;
+            group_descs[group_idx as usize].bg_itable_unused_hi = 0;
+        }
+
+        // On-disk descriptor: bg_itable_unused_lo at slot offset 0x1C,
+        // bg_itable_unused_hi at 0x32 (desc_size >= 64), csum re-sealed.
+        // Offset fix (ext4-corrupt lane, family a): the reference layout
+        // (linux-6.6 fs/ext4/ext4.h struct ext4_group_desc) puts the
+        // 64-bit tail's u32 hi pointers at 0x20/0x24/0x28, the u16 hi
+        // counters at 0x2C/0x2E/0x30/0x32 — so bg_itable_unused_hi is
+        // 0x32 and 0x3A is bg_inode_bitmap_csum_hi. This write used to
+        // zero 0x3A "as the hi half of unused", erasing the just-sealed
+        // inode-bitmap checksum hi word on EVERY inode alloc/free (the
+        // mark_inode_used/free_inode seal runs first, then this refresh
+        // undid half of it). e2fsck compares the full 32-bit csum with
+        // desc_size >= 64 and failed every cooked image with "group N
+        // inode bitmap does not match checksum" (c8 evidence: stored
+        // hi=0 vs calc hi=0x0649, lo matched — the zeroing signature).
+        let group_desc_size = self.fs.desc_size as usize;
+        let group_desc_start_block = if self.fs.block_size == 1024 { 2 } else { 1 };
+        let desc_per_block = self.fs.block_size as u64 / group_desc_size as u64;
+        let desc_block = group_desc_start_block + (group_idx / desc_per_block);
+        let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
+        // The writes below are in-bounds of the descriptor slot; the
+        // deferred edge owns dirty+journal (F4-R2 class).
+        bio::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
+            if desc_offset + 0x1E <= data.len() {
+                crate::safety::bytes::write_at::<u16>(data, desc_offset + 0x1C, unused);
+            }
+            if group_desc_size >= 64 && desc_offset + 0x34 <= data.len() {
+                crate::safety::bytes::write_at::<u16>(data, desc_offset + 0x32, 0);
+            }
+            if self.fs.metadata_csum {
+                let end = (desc_offset + group_desc_size).min(data.len());
+                if desc_offset < end {
+                    crate::ext4::csum::group_desc_csum_set(
+                        self.fs.csum_seed,
+                        group_idx as u32,
+                        &mut data[desc_offset..end],
+                    );
+                }
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Update free inode count in superblock
+    // SAFETY: sb_start + 16 is within the superblock (s_free_inodes_count field);
+    // volatile read/write ensures ordering.
+    fn update_superblock_free_inodes(&self, delta: i32) -> Result<(), i32> {
+        let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
+        let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
+        // s_free_inodes_count sits at offset 16 within the superblock; the
+        // deferred edge owns dirty+journal (F4-R2 durability-deferred).
+        bio::with_block_deferred_mut(self.fs.device, sb_block as u64, |data, _| {
+            let current = crate::safety::bytes::read_at::<u32>(data, sb_start + 16).unwrap_or(0);
+            let new_count = (current as i32 + delta) as u32;
+            crate::safety::bytes::write_at::<u32>(data, sb_start + 16, new_count);
+            // metadata_csum write path: re-seal s_checksum after the
+            // counter change (see update_superblock_free_blocks).
+            if self.fs.metadata_csum {
+                let sb_end = (sb_start + 1024).min(data.len());
+                if sb_start < sb_end {
+                    crate::ext4::csum::superblock_csum_set(&mut data[sb_start..sb_end]);
+                }
+            }
+            Ok(())
+        })
+    }
+}

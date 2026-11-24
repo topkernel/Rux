@@ -14,7 +14,7 @@
 //! (the leveled device-init table).
 //!
 //! Sole-copy state (the rung-1 recipe's final step): the service files
-//! LIVE in this crate (src/drivers/); the framework keeps every
+//! LIVE in this crate (src/), flat under its root; the framework keeps every
 //! registry, transport and substrate those files consume.
 //!
 //! Why these files are leaves (the flip's measurement): every unsafe
@@ -47,84 +47,67 @@
 
 // Root re-exports: the framework modules appear at THIS crate's root so
 // the service files' crate::X paths resolve unchanged (the net
-// shape).
+// shape). `net` is NOT in this list: this crate's own net module (the
+// loopback leaf) owns the name; the framework's network stack is
+// `rux::net`.
 pub use rux::{
     arch, cmdline, config, console, debug, errno, fs, interrupt, mm,
-    net,  safety, sched, security, signal, sync, timer, trace,
+    safety, sched, security, signal, sync, timer, trace,
 };
 // The process service tree (crate-flip rung: process): the merged
 // view (moved policy + the framework-staying process modules) —
 // crate::process::X paths keep resolving, one-way dependency.
-pub use ::process::process;
+pub use ::process;
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println, print_status};
 // The ipc service tree (crate-flip rung: ipc): the merged view
 // (service policy + framework binder) — access_tokenid consumes the
 // access_token registry through it.
-pub use ::ipc::ipc;
+pub use ::ipc;
 extern crate alloc;
 
 /// The boot FDT scanners (root-cold lane): the moved cmdline walkers,
 /// registered through the framework's BootScanHooks rows.
 pub mod of_fdt;
 
-// The driver tree, nested under crate::drivers (the historical paths).
-pub mod drivers {
-    // The framework's remaining driver tree (registries, transports,
-    // mechanism drivers) — glob so `crate::drivers::hooks`,
-    // `crate::drivers::timer`, `crate::drivers::net::space` etc.
-    // resolve for the service files.
-    pub use rux::drivers::{blkdev, drm, hooks, initcalls, input,
-        intc, loop_dev, pci, rtc, timer};
-    pub use rux::drivers::ashmem;
+// The framework's remaining driver tree (registries, transports,
+// mechanism drivers) — re-exported so the service files reach them as
+// names of this root (`hooks`, `pci`, `initcalls`, ...).
+// (rux::drivers::timer is NOT among them: the crate root's `timer` is
+// the framework's timekeeping module, which the service files use; the
+// driver one is named by its full path.)
+pub use rux::drivers::{blkdev, drm, hooks, initcalls, input,
+    intc, loop_dev, pci, rtc};
+pub use rux::drivers::ashmem;
 
-    // The service files (sole copy: src/drivers/, historical paths).
-    pub mod watchdog;
-    pub mod access_tokenid;
+// The service files (sole copy), flat at the crate root
+// (seed-core-design 2c.2).
+pub mod watchdog;
+pub mod access_tokenid;
 
-    // The virtio leaf (rung-4 tranche 2): the framework keeps the
-    // virtio mechanism tree (the mod.rs core + queues + the virtio_pci
-    // transport + the offset consts); the probe orchestrator joins
-    // here (sole copy: src/drivers/virtio/probe.rs).
-    pub mod virtio {
-        pub use rux::drivers::virtio::*;
-        pub mod probe;
-    }
+// The virtio leaf (rung-4 tranche 2): the framework keeps the
+// virtio mechanism tree (the mod.rs core + queues + the virtio_pci
+// transport + the offset consts); the probe orchestrator joins
+// here (sole copy: src/virtio/probe.rs).
+pub mod virtio {
+    pub use rux::drivers::virtio::*;
+    pub mod probe;
+}
 
-    // The net leaf: the framework keeps net/{space,virtio_net} (the
-    // netdev registry + the virtio protocol driver); loopback joins
-    // here.
-    pub mod net {
-        pub use rux::drivers::net::*;
-        pub mod loopback;
-    }
+// The net leaf: the framework keeps net/{space,virtio_net} (the
+// netdev registry + the virtio protocol driver); loopback joins
+// here. This module owns the crate root's `net` name.
+pub mod net {
+    pub use rux::drivers::net::*;
+    pub mod loopback;
+}
 
-    // The gpu leaves: the framework keeps gpu/{framebuffer (the pixel
-    // substrate), virtio_gpu, virtio_cmd, the device registry}; the
-    // simple-framebuffer probe and the fbdev chardev join here.
-    pub mod gpu {
-        pub use rux::drivers::gpu::*;
-        pub mod fb_simple;
-        pub mod fbdev;
-    }
-
-    // The framework's whole-module globs (the service files'
-    // `use super::*` / crate:: paths).
-    pub use crate::arch::*;
-    pub use crate::config;
-    pub use crate::console;
-    pub use crate::debug::*;
-    pub use crate::errno;
-    pub use crate::fs::*;
-    pub use crate::interrupt;
-    pub use crate::mm::*;
-    pub use crate::process::*;
-    pub use crate::safety::*;
-    pub use crate::sched::*;
-    pub use crate::security::*;
-    pub use crate::signal::*;
-    pub use crate::sync::*;
-    pub use crate::timer::*;
-    pub use crate::trace;
+// The gpu leaves: the framework keeps gpu/{framebuffer (the pixel
+// substrate), virtio_gpu, virtio_cmd, the device registry}; the
+// simple-framebuffer probe and the fbdev chardev join here.
+pub mod gpu {
+    pub use rux::drivers::gpu::*;
+    pub mod fb_simple;
+    pub mod fbdev;
 }
 
 /// The service-side hook rows (the DriverHooks table's data). Called by
@@ -137,30 +120,30 @@ pub fn register_all() {
         devfs_char_rows: || {
             alloc::vec![
                 CharDeviceRow {
-                    devno: drivers::access_tokenid::DEV_ACCESS_TOKENID,
-                    ops: &drivers::access_tokenid::TOKENID_OPS,
+                    devno: access_tokenid::DEV_ACCESS_TOKENID,
+                    ops: &access_tokenid::TOKENID_OPS,
                     // No /dev node: the ipc access-token registry owns
                     // the node (see devfs populate's char_nodes note).
                     node: None,
                 },
                 CharDeviceRow {
-                    devno: drivers::watchdog::DEV_WATCHDOG,
-                    ops: &drivers::watchdog::WATCHDOG_OPS,
+                    devno: watchdog::DEV_WATCHDOG,
+                    ops: &watchdog::WATCHDOG_OPS,
                     node: Some(("watchdog", 0o666)),
                 },
             ]
         },
-        loopback_init: || drivers::net::loopback::loopback_init().is_some(),
-        get_loopback_device: drivers::net::loopback::get_loopback_device,
-        loopback_send: drivers::net::loopback::loopback_send,
-        loopback_poll: drivers::net::loopback::loopback_poll,
-        loopback_stats: drivers::net::loopback::loopback_stats,
-        init_fbdev: drivers::gpu::fbdev::init_fbdev,
-        is_fb_file: drivers::gpu::fbdev::is_fb_file,
-        fbdev_ioctl: drivers::gpu::fbdev::fbdev_ioctl,
-        watchdog_ioctl: drivers::watchdog::watchdog_file_ioctl,
-        tokenid_ioctl: drivers::access_tokenid::tokenid_file_ioctl,
-        mark_fb_user_mapped: drivers::gpu::fbdev::mark_fb_user_mapped,
+        loopback_init: || net::loopback::loopback_init().is_some(),
+        get_loopback_device: net::loopback::get_loopback_device,
+        loopback_send: net::loopback::loopback_send,
+        loopback_poll: net::loopback::loopback_poll,
+        loopback_stats: net::loopback::loopback_stats,
+        init_fbdev: gpu::fbdev::init_fbdev,
+        is_fb_file: gpu::fbdev::is_fb_file,
+        fbdev_ioctl: gpu::fbdev::fbdev_ioctl,
+        watchdog_ioctl: watchdog::watchdog_file_ioctl,
+        tokenid_ioctl: access_tokenid::tokenid_file_ioctl,
+        mark_fb_user_mapped: gpu::fbdev::mark_fb_user_mapped,
         // The virtio probe family's initcall registration (rung-4
         // tranche 2). NOT called here: the row is dispatched by the
         // boot core at the family's historical registration point
@@ -169,8 +152,8 @@ pub fn register_all() {
         // call site (pre-rust_main_impl, pre-per-CPU on x86_64) would
         // fault. The rescan row is filled here and dispatched from the
         // sysfs rescan attribute (cold, user-triggered).
-        register_probe_initcalls: drivers::virtio::probe::register_probe_initcalls,
-        pci_rescan_block_hotplug: drivers::virtio::probe::pci_rescan_block_hotplug,
+        register_probe_initcalls: virtio::probe::register_probe_initcalls,
+        pci_rescan_block_hotplug: virtio::probe::pci_rescan_block_hotplug,
     });
 
     // The boot FDT scanners (root-cold lane): the moved cmdline walkers.

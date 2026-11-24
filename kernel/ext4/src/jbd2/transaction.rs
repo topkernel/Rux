@@ -1,0 +1,603 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! JBD2 Transaction management
+//!
+//! JBD2 transaction management
+
+use crate::sync::spinlock::Spinlock;
+use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use super::journal::{Journal, Handle, Transaction, TransactionState, Tid};
+use super::types::*;
+
+// ============================================================================
+// Error codes
+// ============================================================================
+
+// Error codes: NEGATIVE errno (the kernel-wide Result<i32> convention —
+// ext4 and bio return -errno; the syscall layer forwards Err(e) straight
+// out as `e as i64`). The old POSITIVE values crossed the syscall
+// boundary as garbage non-error returns (an aborted journal made
+// journal_start fail Err(30) → sys_mkdirat returned +30 → userspace
+// could not recognize it as an error while nothing persisted).
+pub const EROFS: i32 = -30;  // Read-only filesystem
+pub const ENOMEM: i32 = -12; // Out of memory
+pub const EIO: i32 = -5;     // I/O error
+pub const EINVAL: i32 = -22; // Invalid argument
+
+// ============================================================================
+// Transaction helper functions
+// ============================================================================
+
+/// Check if handle is aborted
+#[inline]
+pub fn is_handle_aborted(handle: &Handle) -> bool {
+    handle.h_aborted ||
+    handle.h_transaction.as_ref().map_or(true, |txn| {
+        txn.t_journal.as_ref().map_or(true, |j| j.is_aborted())
+    })
+}
+
+/// Get current handle from journal
+pub fn journal_current_handle(journal: &Arc<Journal>) -> Option<Arc<Handle>> {
+    // Get the handle from current task
+    // For now, return None as we don't have per-task storage
+    None
+}
+
+// ============================================================================
+// Transaction creation
+// ============================================================================
+
+/// Create a new transaction for the journal
+pub fn jbd2_get_transaction(journal: &Arc<Journal>) -> Transaction {
+    let tid = journal.j_transaction_sequence.fetch_add(1, Ordering::SeqCst);
+
+    let mut txn = Transaction {
+        t_journal: Some(journal.clone()),
+        t_tid: tid,
+        t_state: Spinlock::new(TransactionState::Running),
+        t_log_start: 0,
+        t_nr_buffers: 0,
+        t_reserved_list: core::ptr::null_mut(),
+        t_buffers: core::ptr::null_mut(),
+        t_forget: core::ptr::null_mut(),
+        t_checkpoint_list: core::ptr::null_mut(),
+        t_shadow_list: core::ptr::null_mut(),
+        t_inode_list: super::journal::ListHead::new(),
+        t_max_wait: 0,
+        t_start: 0, // get_jiffies()
+        t_requested: 0,
+        t_chp_stats: super::journal::TransactionChpStats::default(),
+        t_updates: AtomicI32::new(0),
+        t_outstanding_credits: AtomicI32::new(
+            journal.j_transaction_overhead_buffers +
+            journal.j_reserved_credits.load(Ordering::SeqCst)
+        ),
+        t_outstanding_revokes: AtomicI32::new(0),
+        t_handle_count: AtomicI32::new(0),
+        t_cpnext: None,
+        t_cpprev: None,
+        t_expires: 0, // jiffies + journal.j_commit_interval
+        t_start_time: 0,
+        t_synchronous_commit: false,
+        t_need_data_flush: 0,
+        t_dirty_buffers: Spinlock::new(alloc::collections::BTreeMap::new()),
+        t_revoke_records: Spinlock::new(alloc::vec::Vec::new()),
+    };
+
+    // Arm-2 spill inheritance (f4-ext4-route-map.md §6.2 R1): revokes
+    // that arrived while their issuing transaction was no longer Running
+    // (SMP handle joining a committing transaction, stale handle on a
+    // Finished one) wait in the journal-level vec and are claimed by the
+    // NEXT transaction here. Lock order: the caller holds
+    // j_running_transaction while creating this transaction, and no path
+    // takes the revoke vec first and then the running-transaction lock.
+    {
+        let spill = core::mem::take(&mut *journal.revoke_records.lock());
+        if !spill.is_empty() {
+            txn.t_revoke_records.lock().extend(spill);
+        }
+    }
+
+    txn
+}
+
+// ============================================================================
+// Handle allocation
+// ============================================================================
+
+/// Allocate a new handle
+pub fn new_handle(nblocks: i32) -> Handle {
+    Handle {
+        h_total_credits: nblocks,
+        h_ref: 1,
+        ..Handle::default()
+    }
+}
+
+/// Start a handle on a journal
+pub fn start_this_handle(journal: &Arc<Journal>, handle: &mut Handle) -> Result<(), i32> {
+    // Get or create running transaction
+    let mut running_txn = journal.j_running_transaction.lock();
+
+    // If no running transaction, create one
+    if running_txn.is_none() {
+        let txn = jbd2_get_transaction(journal);
+        *running_txn = Some(Arc::new(txn));
+    }
+
+    // Get the transaction
+    let txn = running_txn.as_ref().ok_or(ENOMEM)?;
+
+    // Update handle
+    handle.h_transaction = Some(txn.clone());
+    handle.h_requested_credits = handle.h_total_credits as u32;
+    handle.h_revoke_credits_requested = handle.h_revoke_credits;
+    // handle.h_start_jiffies = get_jiffies();
+
+    // Increment transaction counters
+    txn.t_updates.fetch_add(1, Ordering::SeqCst);
+    txn.t_handle_count.fetch_add(1, Ordering::SeqCst);
+
+    Ok(())
+}
+
+// ============================================================================
+// Journal start/stop operations
+// ============================================================================
+
+/// Start a new transaction handle
+///
+/// This is the main entry point for starting a journal transaction.
+/// The handle represents a single atomic update to the filesystem.
+pub fn jbd2_journal_start(journal: &Arc<Journal>, nblocks: i32) -> Result<Handle, i32> {
+    // Check if journal exists
+    if journal.is_aborted() {
+        return Err(EROFS);
+    }
+    crate::debug::fsw::note_j_start();
+
+    // Check for nested handle
+    // Check current journal info
+
+    // Create new handle
+    let mut handle = new_handle(nblocks);
+
+    // Start the handle
+    start_this_handle(journal, &mut handle)?;
+
+    Ok(handle)
+}
+
+/// Start a handle with extended options
+pub fn jbd2__journal_start(
+    journal: &Arc<Journal>,
+    nblocks: i32,
+    rsv_blocks: i32,
+    revoke_records: i32,
+) -> Result<Handle, i32> {
+    // Adjust nblocks for revoke records
+    let adjusted_nblocks = nblocks +
+        (revoke_records + journal.j_revoke_records_per_block - 1) /
+        journal.j_revoke_records_per_block;
+
+    let mut handle = new_handle(adjusted_nblocks);
+    handle.h_revoke_credits = revoke_records;
+
+    // Create reserved handle if requested
+    if rsv_blocks > 0 {
+        // For now, we skip the reserved handle implementation
+        // Create a second handle with h_reserved = 1
+    }
+
+    start_this_handle(journal, &mut handle)?;
+
+    Ok(handle)
+}
+
+/// Stop a transaction handle
+///
+/// This completes a transaction handle and returns any remaining
+/// buffer credits to the transaction. On single-core, we always
+/// commit synchronously when the last handle stops.
+pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
+    crate::debug::fsw::note_j_stop();
+    // Decrement reference count
+    if handle.h_ref > 1 {
+        handle.h_ref -= 1;
+        if is_handle_aborted(handle) {
+            return Err(EIO);
+        }
+        return Ok(());
+    }
+
+    // Get transaction and journal
+    let txn = match &handle.h_transaction {
+        Some(t) => t.clone(),
+        None => return Ok(()),
+    };
+    let journal = match &txn.t_journal {
+        Some(j) => j.clone(),
+        None => {
+            handle.h_transaction = None;
+            return Ok(());
+        }
+    };
+
+    // Check for abort
+    let mut err = 0;
+    if is_handle_aborted(handle) {
+        err = EIO;
+    }
+
+    // Decrement transaction updates
+    txn.t_updates.fetch_sub(1, Ordering::SeqCst);
+
+    // Lazy commit batching (Linux kjournald behavior): the last handle on a
+    // running transaction does NOT force a synchronous commit. Consecutive
+    // write(2) calls each start/stop one handle; committing per stop cost
+    // several synchronous I/Os per syscall and turned any small-write
+    // workload (every LTP test's setup) into a 30s timeout. The
+    // transaction stays open and later handles join it; a commit is forced
+    // only when:
+    //   - the caller asked for durability (h_sync — fsync/sync paths), or
+    //   - the batch is large (>= LAZY_COMMIT_MAX_BUFFERS registered
+    //     metadata buffers), or
+    //   - the batch carries many revokes (>= LAZY_COMMIT_MAX_REVOKES).
+    // Metadata durability between forced commits relies on the buffer
+    // cache write-back (eviction syncs dirty buffers) and sync(2).
+    //
+    // 1024 (was 64): a forced commit's write-through syncs each
+    // registered buffer (and only satisfies that block's publication
+    // ordering obligations — see bio::flush_publication_constraints, the
+    // leg-30A scoped model; commits no longer drain the world's pending
+    // publications). With the 64 threshold, a 1021-file create loop (LTP
+    // creat05/fork09 setup) forced ~16-file batches and re-wrote the
+    // shared inode-table and bitmap blocks ~64 times, spending most of
+    // the 30s per-test budget in redundant virtio round trips. Fewer,
+    // larger batches write the same unique blocks once per (wider)
+    // window; fsync/sync still force immediate commits, and credit
+    // exhaustion in start_this_handle bounds the batch at
+    // j_max_transaction_buffers anyway.
+    // Capacity-derived (journal-life): the journal-area copy of a batch
+    // needs ~1 block per registered buffer + descriptor/revoke/commit
+    // overhead, and the log area is only j_last - j_first blocks. The
+    // old flat 1024 let a pathological all-unique-blocks batch exceed a
+    // 1023-block log (the span check in the commit would then take the
+    // write-through-only fallback). Cap the batch below capacity with
+    // headroom for the overhead blocks.
+    let lazy_commit_max_buffers = (journal.j_last.saturating_sub(journal.j_first)
+        .saturating_sub(8) as usize)
+        .clamp(64, 1024);
+    // Arm-2 (f4-ext4-route-map.md §6.2 R3): revokes used to force a
+    // synchronous slow-path commit at the NEXT stop after any free
+    // (unlink/rmdir/rename-replace) — 8-12 virtio round trips per delete
+    // op, the whole journaled mkdrmdir residual. They now ride the
+    // transaction that issued them and batch like everything else. The
+    // high-water bounds the per-transaction set (memory + one revoke
+    // block's worth of log space): ext4 callers start handles with plain
+    // ext4_journal_start(nblocks) — no revoke-credit reservation — so an
+    // unlink loop's revoke-only volume has no other bounder. 510 = one
+    // revoke block at the smallest entry size, (4096 - 12) / 8.
+    const LAZY_COMMIT_MAX_REVOKES: usize = 510;
+    if err == 0 && !handle.h_sync {
+        let dirty_len = txn.t_dirty_buffers.lock().len();
+        let revoke_len = txn.t_revoke_records.lock().len();
+        if dirty_len < lazy_commit_max_buffers && revoke_len < LAZY_COMMIT_MAX_REVOKES {
+            // Leave j_running_transaction in place: the next
+            // start_this_handle joins this transaction.
+            crate::debug::fsw::note_j_lazy();
+            handle.h_transaction = None;
+            return Ok(());
+        }
+    }
+
+    // On single-core: always commit synchronously when last handle stops
+    // Spin-wait for any other handles (shouldn't happen on single-core)
+    let mut spin_count = 0u32;
+    while txn.t_updates.load(Ordering::SeqCst) > 0 {
+        core::hint::spin_loop();
+        spin_count += 1;
+        if spin_count > 1_000_000 {
+            err = EIO;
+            break;
+        }
+    }
+
+    // Commit the transaction
+    if err == 0 {
+        // jbd2:jbd2_start_commit / jbd2_end_commit — fired at Rux's
+        // single commit funnel (every commit passes through this stop
+        // site). Divergences (see the event docs): sync_commit carries
+        // the stopping handle's h_sync (no t_synchronous_commit field on
+        // Rux's Transaction), and dev is the journal's backing device.
+        let jbd2_dev = if crate::trace::EVENT_JBD2_START_COMMIT.armed()
+            || crate::trace::EVENT_JBD2_END_COMMIT.armed()
+        {
+            journal
+                .j_bio_device
+                .map(|d| (d.major << 20) | d.first_minor)
+        } else {
+            None
+        };
+        if let Some(dev) = jbd2_dev {
+            crate::trace::trace_jbd2_start_commit(dev, txn.t_tid, handle.h_sync as i8);
+        }
+        err = match super::commit::jbd2_journal_commit_transaction(&journal, &txn) {
+            Ok(()) => 0,
+            Err(e) => e,
+        };
+        if let Some(dev) = jbd2_dev {
+            crate::trace::trace_jbd2_end_commit(
+                dev,
+                txn.t_tid,
+                handle.h_sync as i8,
+                journal.j_tail_sequence.load(Ordering::SeqCst),
+            );
+        }
+    }
+
+    // Clear running transaction
+    {
+        let mut running = journal.j_running_transaction.lock();
+        // Only clear if it's our transaction
+        if let Some(ref r) = *running {
+            if r.t_tid == txn.t_tid {
+                *running = None;
+            }
+        }
+    }
+
+    // Clear transaction reference
+    handle.h_transaction = None;
+
+    if err != 0 {
+        Err(err)
+    } else {
+        Ok(())
+    }
+}
+
+/// Extend a handle's credits
+pub fn jbd2_journal_extend(handle: &mut Handle, nblocks: i32) -> Result<(), i32> {
+    let txn = handle.h_transaction.as_ref().ok_or(EROFS)?;
+
+    // Check if we can extend
+    let current = txn.t_outstanding_credits.load(Ordering::SeqCst);
+    let journal = txn.t_journal.as_ref().ok_or(EROFS)?;
+
+    // Check journal space
+    let max_bufs = journal.j_max_transaction_buffers;
+    if current + nblocks > max_bufs {
+        return Err(ENOMEM);
+    }
+
+    // Add credits
+    txn.t_outstanding_credits.fetch_add(nblocks, Ordering::SeqCst);
+    handle.h_total_credits += nblocks;
+
+    Ok(())
+}
+
+// ============================================================================
+// Buffer operations (bio::BufferHead based)
+// ============================================================================
+
+/// Get write access to a bio buffer
+///
+/// This must be called before modifying a buffer that will be journaled.
+/// It freezes a copy of the buffer's current data for the journal.
+pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut rux::fs::bio::BufferHead) -> Result<(), i32> {
+    if is_handle_aborted(handle) {
+        return Err(EROFS);
+    }
+
+    let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
+
+    {
+        let blocknr = rux::fs::bio::bh_blocknr(&bio_bh);
+
+        let mut dirty_bufs = txn.t_dirty_buffers.lock();
+        // Keyed map (perf-gaps G3): O(log n) membership instead of the
+        // linear already-tracked walk that grew with the lazy-commit
+        // batch (see the field doc on Transaction::t_dirty_buffers).
+        if dirty_bufs.contains_key(&blocknr) {
+            crate::debug::fsw::note_j_dedup(1);
+            return Ok(()); // Already tracked
+        }
+        crate::debug::fsw::note_j_dedup(1);
+        // R3FIX: no data clone — the commit paths read the live
+        // buffer-cache content through the block number (see
+        // Transaction::t_dirty_buffers).
+        dirty_bufs.insert(blocknr, super::journal::TxnBufferKind::Live);
+    }
+
+    Ok(())
+}
+
+/// Get create access for a buffer (for newly allocated blocks)
+///
+/// Similar to get_write_access but the buffer doesn't have meaningful
+/// prior content, so we don't need to preserve old data.
+pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut rux::fs::bio::BufferHead) -> Result<(), i32> {
+    if is_handle_aborted(handle) {
+        return Err(EROFS);
+    }
+
+    let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
+
+    {
+        let blocknr = rux::fs::bio::bh_blocknr(&bio_bh);
+        let mut dirty_bufs = txn.t_dirty_buffers.lock();
+        if dirty_bufs.contains_key(&blocknr) {
+            return Ok(()); // Already tracked
+        }
+        // For create access, the entry carries no data yet (the real
+        // bytes arrive via dirty_metadata, which flips the kind to Live).
+        dirty_bufs.insert(blocknr, super::journal::TxnBufferKind::Created);
+    }
+
+    Ok(())
+}
+
+/// Mark a buffer as dirty metadata
+///
+/// R3FIX: this no longer clones the block contents (see
+/// `Transaction::t_dirty_buffers`). The commit paths snapshot the LIVE
+/// buffer-cache content through the block number at commit time, which
+/// is always at least as new as any registration-time image (R20).
+pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut rux::fs::bio::BufferHead) -> Result<(), i32> {
+    if is_handle_aborted(handle) {
+        return Err(EROFS);
+    }
+
+    let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
+
+    {
+        let blocknr = rux::fs::bio::bh_blocknr(&bio_bh);
+
+        let mut dirty_bufs = txn.t_dirty_buffers.lock();
+        crate::debug::fsw::note_j_dedup(1);
+        // Flips a prior Created entry to Live, or registers fresh
+        // (keyed map — no scan; see the field doc on t_dirty_buffers).
+        dirty_bufs.insert(blocknr, super::journal::TxnBufferKind::Live);
+    }
+
+    Ok(())
+}
+
+/// Forget a buffer (release it from the transaction)
+pub fn jbd2_journal_forget(handle: &mut Handle, bio_bh: *mut rux::fs::bio::BufferHead) -> Result<(), i32> {
+    if is_handle_aborted(handle) {
+        return Err(EROFS);
+    }
+
+    let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
+
+    {
+        let blocknr = rux::fs::bio::bh_blocknr(&bio_bh);
+        let mut dirty_bufs = txn.t_dirty_buffers.lock();
+        dirty_bufs.remove(&blocknr);
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Reserved handle operations
+// ============================================================================
+
+/// Free a reserved handle
+pub fn jbd2_journal_free_reserved(handle: &mut Handle) {
+    if !handle.h_reserved {
+        return;
+    }
+
+    // Return reserved credits to journal
+    if let Some(ref journal) = handle.h_journal {
+        journal.j_reserved_credits.fetch_sub(
+            handle.h_total_credits,
+            Ordering::SeqCst
+        );
+    }
+}
+
+/// Start a previously reserved handle
+pub fn jbd2_journal_start_reserved(handle: &mut Handle) -> Result<(), i32> {
+    if !handle.h_reserved {
+        // Not a reserved handle
+        jbd2_journal_stop(handle)?;
+        return Err(EIO);
+    }
+
+    handle.h_reserved = false;
+
+    // Start the handle - clone journal first to avoid borrow issues
+    let journal_clone = handle.h_journal.clone();
+    if let Some(journal) = journal_clone {
+        start_this_handle(&journal, handle)?;
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Credit management
+// ============================================================================
+
+/// Add credits to a running transaction
+pub fn add_transaction_credits(journal: &Arc<Journal>, blocks: i32, rsv_blocks: i32) -> bool {
+    // Check if we need to wait
+    let running = journal.j_running_transaction.lock();
+    if running.is_none() {
+        return false;
+    }
+
+    let txn = running.as_ref().unwrap();
+    let current_credits = txn.t_outstanding_credits.load(Ordering::SeqCst);
+    let max_bufs = journal.j_max_transaction_buffers;
+
+    // Check if transaction is too large
+    if current_credits + blocks > max_bufs {
+        // Need to start commit
+        return true;
+    }
+
+    // Check journal space
+    let free_space = journal.j_free.load(Ordering::SeqCst) as i32;
+    if blocks + rsv_blocks > free_space {
+        // Need to wait for checkpoint
+        return true;
+    }
+
+    // Add credits
+    txn.t_outstanding_credits.fetch_add(blocks, Ordering::SeqCst);
+    journal.j_free.fetch_sub(blocks as u64, Ordering::SeqCst);
+
+    false
+}
+
+/// Subtract reserved credits
+pub fn sub_reserved_credits(journal: &Arc<Journal>, blocks: i32) {
+    journal.j_reserved_credits.fetch_sub(blocks, Ordering::SeqCst);
+}
+
+// ============================================================================
+// Transaction state management
+// ============================================================================
+
+/// Check if transaction can be closed
+pub fn jbd2_transaction_can_close(journal: &Arc<Journal>) -> bool {
+    let running = journal.j_running_transaction.lock();
+    if let Some(ref txn) = *running {
+        let updates = txn.t_updates.load(Ordering::SeqCst);
+        return updates == 0;
+    }
+    false
+}
+
+/// Close a transaction (transition to commit state)
+pub fn jbd2_close_transaction(journal: &Arc<Journal>) -> Result<(), i32> {
+    let mut running = journal.j_running_transaction.lock();
+
+    let txn = running.as_ref().ok_or(EIO)?;
+
+    // Check no updates pending
+    if txn.t_updates.load(Ordering::SeqCst) > 0 {
+        return Err(EINVAL);
+    }
+
+    // Move to committing state
+    *txn.t_state.lock() = TransactionState::Locked;
+
+    // Also:
+    // - Set up commit timer
+    // - Wake up commit thread
+
+    Ok(())
+}

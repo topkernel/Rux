@@ -5,7 +5,7 @@
 //! stack's packet-ingress surface downward.
 //!
 //! Sole-copy state (the rung-1 recipe's final step): the service files
-//! LIVE in this crate (src/net/); the framework keeps net_hooks,
+//! LIVE in this crate (src/), flat under its root; the framework keeps net_hooks,
 //! file_arc, net_edges and buffer.
 
 // FORBID since the substrate extraction: the socket-table reference
@@ -35,62 +35,34 @@ pub mod net_hdrs_test;
 
 extern crate alloc;
 
-// The net tree, nested under crate::net (the historical paths).
-pub mod net {
-    // the service files
-    #[path = "arp.rs"] pub mod arp;
-    // buffer.rs (the raw-memory substrate: allocator calls, pointer
-    // arithmetic, slice construction — 22 unsafe constructs) stays
-    // FRAMEWORK-side (the edges.rs pattern); the crate consumes it
-    // via the re-export below.
-    pub use rux::net::buffer;
-    pub use rux::syscall; // the framework's syscall seam (support/edges)
-    pub use rux::net::file_arc::file_arc;
-    pub use rux::net::file_arc::take_file_arc as reclaim_file_arc;
-    pub use rux::net::file_arc::take_file_arc;
-    pub use rux::net::net_edges;
-    #[path = "ethernet.rs"] pub mod ethernet;
-    #[path = "icmp.rs"] pub mod icmp;
-    #[path = "netlink.rs"] pub mod netlink;
-    #[path = "raw.rs"] pub mod raw;
-    #[path = "socket.rs"] pub mod socket;
-    #[path = "tcp.rs"] pub mod tcp;
-    #[path = "tcp_timer.rs"] pub mod tcp_timer;
-    #[path = "udp.rs"] pub mod udp;
-    #[path = "unix.rs"] pub mod unix;
-    #[path = "ipv4/mod.rs"] pub mod ipv4;
-    #[path = "ipv6/mod.rs"] pub mod ipv6;
+// The service files, flat at the crate root (seed-core-design 2c.2).
+pub mod arp;
+// buffer.rs (the raw-memory substrate: allocator calls, pointer
+// arithmetic, slice construction — 22 unsafe constructs) stays
+// FRAMEWORK-side (the edges.rs pattern); the crate consumes it
+// via the re-export below.
+pub use rux::net::buffer;
+pub use rux::net::file_arc::file_arc;
+pub use rux::net::file_arc::take_file_arc as reclaim_file_arc;
+pub use rux::net::file_arc::take_file_arc;
+pub use rux::net::net_edges;
+pub use rux::net::net_hooks;
+pub mod ethernet;
+pub mod icmp;
+pub mod netlink;
+pub mod raw;
+pub mod socket;
+pub mod tcp;
+pub mod tcp_timer;
+pub mod udp;
+pub mod unix;
+pub mod ipv4;
+pub mod ipv6;
 
-    // Guest tests that moved with the crate flip (SERVICE-TEST SEAM:
-    // bin registers run_unit_tests below; the framework's counters
-    // are shared, so the pins land in the same suite totals).
-    #[cfg(feature = "unit-test")]
-
-    // The framework's whole-module globs (the old shared mod.rs's shape).
-    pub use crate::arch::*;
-    pub use crate::config;
-    pub use crate::console;
-    pub use crate::debug::*;
-    pub use crate::drivers::*;
-    pub use crate::errno;
-    pub use crate::fs::*;
-    pub use crate::interrupt;
-    pub use crate::mm::*;
-    pub use crate::process::*;
-    pub use crate::safety::*;
-    pub use crate::sched::*;
-    pub use crate::security::*;
-    pub use crate::signal::*;
-    pub use crate::sync::*;
-    pub use crate::timer::*;
-    pub use crate::trace;
-    pub use rux::net::net_hooks;
-}
-
-// The framework's whole-module globs (the service files' `use super::*` /
-// crate:: paths).
+// The crate root's whole namespace under one name (the service files'
+// `use super::*` / crate:: paths).
 pub mod net_globs {
-    pub use crate::net::*;
+    pub use crate::*;
 }
 
 /// The service-side hook implementations (the NetHooks table's data).
@@ -101,7 +73,7 @@ mod hooks_impl {
     use rux::net::net_hooks::{TcpRow, UdpRow, ArpRow, RouteRow, DevRow, UnixDiag, TcpCensusRow};
 
     pub fn tcp_rows() -> alloc::vec::Vec<TcpRow> {
-        crate::net::tcp::tcp_dump()
+        crate::tcp::tcp_dump()
             .into_iter()
             .map(|s| TcpRow {
                 is_v6: s.is_v6,
@@ -117,7 +89,7 @@ mod hooks_impl {
     }
 
     pub fn udp_rows() -> alloc::vec::Vec<UdpRow> {
-        crate::net::udp::udp_dump()
+        crate::udp::udp_dump()
             .into_iter()
             .map(|s| UdpRow {
                 is_v6: s.is_v6,
@@ -132,7 +104,7 @@ mod hooks_impl {
     }
 
     pub fn arp_rows() -> alloc::vec::Vec<ArpRow> {
-        crate::net::arp::arp_dump()
+        crate::arp::arp_dump()
             .into_iter()
             .filter(|e| e.valid)
             .map(|e| ArpRow { ip: e.ip, mac: e.mac, dev: alloc::string::String::from("eth0") })
@@ -140,7 +112,7 @@ mod hooks_impl {
     }
 
     pub fn route_rows() -> alloc::vec::Vec<RouteRow> {
-        crate::net::ipv4::route::route_dump()
+        crate::ipv4::route::route_dump()
             .into_iter()
             .map(|r| RouteRow {
                 oif: r.oif,
@@ -178,23 +150,23 @@ mod hooks_impl {
     }
 
     pub fn unix_registry_snapshot() -> alloc::vec::Vec<alloc::string::String> {
-        crate::net::unix::registry_snapshot()
+        crate::unix::registry_snapshot()
     }
 
     pub fn is_unix_socket_ops(ops: &'static rux::fs::FileOps) -> bool {
-        core::ptr::eq(ops, &crate::net::unix::UNIX_SOCKET_OPS)
+        core::ptr::eq(ops, &crate::unix::UNIX_SOCKET_OPS)
     }
 
     pub fn is_inet_socket_ops(ops: &'static rux::fs::FileOps) -> bool {
-        core::ptr::eq(ops, &crate::net::socket::SOCKET_OPS)
+        core::ptr::eq(ops, &crate::socket::SOCKET_OPS)
     }
 
     pub fn is_netlink_ops(ops: &'static rux::fs::FileOps) -> bool {
-        core::ptr::eq(ops, &crate::net::netlink::NETLINK_OPS)
+        core::ptr::eq(ops, &crate::netlink::NETLINK_OPS)
     }
 
     pub fn is_raw_ops(ops: &'static rux::fs::FileOps) -> bool {
-        core::ptr::eq(ops, &crate::net::raw::RAW_OPS)
+        core::ptr::eq(ops, &crate::raw::RAW_OPS)
     }
 
     pub fn unix_socket_of(_file: &rux::fs::file::File) -> Option<(bool, alloc::string::String)> {
@@ -206,19 +178,19 @@ mod hooks_impl {
     }
 
     pub fn unix_fd_bound_peer(fd: usize) -> Option<(alloc::string::String, alloc::string::String)> {
-        let (sock, _) = crate::net::unix::unix_file_of(fd)?;
+        let (sock, _) = crate::unix::unix_file_of(fd)?;
         let bound = sock
             .bound_name
             .lock()
             .clone()
             .unwrap_or_else(|| alloc::string::String::from("unbound"));
-        let peer = crate::net::unix::unix_peer_bound_name(&sock)
+        let peer = crate::unix::unix_peer_bound_name(&sock)
             .unwrap_or_else(|| alloc::string::String::from("-"));
         Some((bound, peer))
     }
 
     pub fn unix_file_diag(file: &rux::fs::file::File) -> Option<UnixDiag> {
-        let us = crate::net::unix::unix_of_file_diag(file)?;
+        let us = crate::unix::unix_of_file_diag(file)?;
         let kind = alloc::format!("{:?}", us.kind);
         let bound = us.bound_name.lock().clone().unwrap_or_default();
         let peer = us.dgram_peer.lock().clone().unwrap_or_default();
@@ -235,9 +207,9 @@ mod hooks_impl {
     }
 
     pub fn unix_recv_describe(fd: usize) -> Option<alloc::string::String> {
-        let (usock, nonblock) = crate::net::unix::unix_file_of(fd)?;
+        let (usock, nonblock) = crate::unix::unix_file_of(fd)?;
         let kind = match usock.kind {
-            crate::net::unix::UnixKind::Stream => "stream",
+            crate::unix::UnixKind::Stream => "stream",
             _ => "dgram",
         };
         let bound = usock.bound_name.lock().clone().unwrap_or_default();
@@ -259,38 +231,38 @@ mod hooks_impl {
     }
 
     pub fn unix_listener_snapshot() {
-        crate::net::unix::unix_listener_snapshot()
+        crate::unix::unix_listener_snapshot()
     }
 
     pub fn unix_park_audit() {
-        crate::net::unix::unix_park_audit()
+        crate::unix::unix_park_audit()
     }
 
     pub fn tcp_table_nonempty() -> bool {
-        crate::net::tcp::get_tcp_socket_table().count() > 0
+        crate::tcp::get_tcp_socket_table().count() > 0
     }
 
     pub fn tcp_census_rows() -> alloc::vec::Vec<TcpCensusRow> {
-        crate::net::tcp::tcp_census_dump()
+        crate::tcp::tcp_census_dump()
     }
 
     pub fn ethernet_poll() {
-        crate::net::ethernet::ethernet_poll();
+        crate::ethernet::ethernet_poll();
     }
 
     pub fn socket_file_stat(
         file: &rux::fs::file::File,
         stat: &mut rux::fs::Stat,
     ) -> Option<i32> {
-        crate::net::socket::socket_file_stat(file, stat)
+        crate::socket::socket_file_stat(file, stat)
     }
 
     pub fn uevent_broadcast(msg: &[u8]) {
-        crate::net::netlink::uevent_broadcast(msg);
+        crate::netlink::uevent_broadcast(msg);
     }
 
     pub fn netlink_push_kernel_message(file: &rux::fs::file::File, msg: [u8; 32]) {
-        if let Some(sock) = crate::net::file_arc::<crate::net::netlink::NetlinkSocket>(file) {
+        if let Some(sock) = crate::file_arc::<crate::netlink::NetlinkSocket>(file) {
             let mut v = alloc::vec::Vec::new();
             v.extend_from_slice(&msg);
             sock.push_kernel_message(v);
@@ -324,23 +296,23 @@ pub fn register_all() {
         tcp_table_nonempty: hooks_impl::tcp_table_nonempty,
         tcp_census_rows: hooks_impl::tcp_census_rows,
         ethernet_poll: hooks_impl::ethernet_poll,
-        tcp_timer_softirq: crate::net::tcp_timer::timer_softirq_handler,
+        tcp_timer_softirq: crate::tcp_timer::timer_softirq_handler,
         uevent_broadcast: hooks_impl::uevent_broadcast,
         socket_file_stat: hooks_impl::socket_file_stat,
         netlink_push_kernel_message: hooks_impl::netlink_push_kernel_message,
-        init_tcp: crate::net::tcp::init_tcp_manager,
-        init_tcp_timer: crate::net::tcp_timer::init_tcp_timer_manager,
-        init_route: crate::net::ipv4::route::route_init,
-        set_local_ip: crate::net::arp::set_local_ip,
-        ipv6_init: crate::net::ipv6::ipv6_init,
+        init_tcp: crate::tcp::init_tcp_manager,
+        init_tcp_timer: crate::tcp_timer::init_tcp_timer_manager,
+        init_route: crate::ipv4::route::route_init,
+        set_local_ip: crate::arp::set_local_ip,
+        ipv6_init: crate::ipv6::ipv6_init,
     });
 }
 
 /// The net init sequence (moved from lib.rs's 5 direct calls).
 pub fn init_all() {
-    crate::net::tcp::init_tcp_manager();
-    crate::net::tcp_timer::init_tcp_timer_manager();
-    crate::net::ipv4::route::route_init();
+    crate::tcp::init_tcp_manager();
+    crate::tcp_timer::init_tcp_timer_manager();
+    crate::ipv4::route::route_init();
     // (arp set_local_ip + ipv6_init are config-conditional at the caller)
 }
 

@@ -8,7 +8,7 @@
 //! and `load()` with its ONE audited unsafe slice build over the
 //! reserved range. The DECOMPRESSOR (RFC 1951/1952) and the cpio
 //! (newc) unpacker moved to the fs service crate
-//! (kernel/fs/src/fs/initrd.rs) — boot-only cold code reached
+//! (kernel/fs/src/initrd.rs) — boot-only cold code reached
 //! through the two LeafBootHooks rows (`initrd_gunzip`,
 //! `initrd_unpack_newc`), filled by the crate's registrar before the
 //! framework boots.

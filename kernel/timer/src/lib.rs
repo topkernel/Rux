@@ -35,21 +35,17 @@ pub use rux::{arch, cmdline, config, console, debug, drivers, errno, fs,
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;
 
-/// The timer tree, nested under crate::timer (the historical path):
-/// this crate's report files plus the framework's whole timer module
-/// re-exported (the ipc binder pattern — syscall's
-/// crate::timer::X paths keep resolving unchanged).
-pub mod timer {
-    // the service files (THIS crate's own — the sole copies)
-    pub mod ww_report;
-    // the moved helpers at their historical crate::timer::X paths (the
-    // framework's timer.rs no longer exports them).
-    pub use ww_report::{del_lookup, nsleep_iter_bump};
+// The service file (THIS crate's own — the sole copy), flat at the
+// crate root (seed-core-design 2c.2).
+pub mod ww_report;
+// the moved helpers at their historical crate::timer::X paths (the
+// framework's timer.rs no longer exports them).
+pub use ww_report::{del_lookup, nsleep_iter_bump};
 
-    // The framework's timekeeping core + wheel/nohz/oneshot at the
-    // historical path (the union the sibling services consumed).
-    pub use rux::timer::*;
-}
+// The framework's timekeeping core + wheel/nohz/oneshot at the
+// historical path (the union the sibling services consumed) — the
+// merged view (`pub use timer;`) in the sibling crates resolves through it.
+pub use rux::timer::*;
 
 /// The boot-time registration (bin calls this before
 /// rust_main_impl): the TimerHooks table's rows. OnceSlot-only — no
@@ -58,6 +54,6 @@ pub mod timer {
 /// EVENT_WWCENSUS arm gate, long after registration.
 pub fn register_all() {
     rux::timer_hooks::timer_register_hooks(rux::timer_hooks::TimerHooks {
-        ww_heartbeat: timer::ww_report::ww_heartbeat,
+        ww_heartbeat: ww_report::ww_heartbeat,
     });
 }

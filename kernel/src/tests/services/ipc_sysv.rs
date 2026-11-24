@@ -4,11 +4,11 @@
 //!
 //! IPC core infrastructure tests
 
-use crate::ipc::util::*;
-use crate::ipc::sysv_sem::SemidDsUapi;
-use crate::ipc::sysv_msg::MsqidDsUapi;
-use crate::ipc::sysv_shm::ShmidDsUapi;
-use crate::ipc::posix_mq::MqAttr;
+use crate::util::*;
+use crate::sysv_sem::SemidDsUapi;
+use crate::sysv_msg::MsqidDsUapi;
+use crate::sysv_shm::ShmidDsUapi;
+use crate::posix_mq::MqAttr;
 use super::{test_pass, test_fail, test_group_start};
 // The framework's exported assert macro (cross-crate macros need the
 // path import; same-crate textual scoping ended with the move).
@@ -233,7 +233,7 @@ fn test_ipc_uapi_struct_sizes() {
 }
 
 fn test_sem_buf_layout() {
-    use crate::ipc::sysv_sem::SemBuf;
+    use crate::sysv_sem::SemBuf;
 
     // struct sembuf: sem_num (u16) + sem_op (i16) + sem_flg (u16) = 6 bytes, no padding
     test_assert_eq!(core::mem::size_of::<SemBuf>(), 6, "SemBuf size == 6");
@@ -254,7 +254,7 @@ fn test_msg_match_logic() {
 
     // Match function mirroring sysv_msg::find_msg_match logic
     fn match_msg(msgs: &[TestMsg], msgtyp: i64, msgflg: i32) -> Option<usize> {
-        use crate::ipc::util::MSG_EXCEPT;
+        use crate::util::MSG_EXCEPT;
         if msgs.is_empty() { return None; }
         if msgtyp == 0 { return Some(0); }
         if msgtyp > 0 {

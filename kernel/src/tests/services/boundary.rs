@@ -11,7 +11,7 @@
 use crate::println;
 // Cross-crate macro (the ipc test-move precedent).
 use rux::test_println;
-use crate::process::do_fork;
+use crate::do_fork;
 use alloc::format;
 use super::{test_pass, test_fail, test_group_start};
 
@@ -21,7 +21,7 @@ pub fn test_boundary() {
     // Test 1: Test max process count
     let mut successful_forks = 0;
     for _ in 0..20 {
-        match crate::process::do_fork() {
+        match crate::do_fork() {
             Some(_) => successful_forks += 1,
             None => break,
         }

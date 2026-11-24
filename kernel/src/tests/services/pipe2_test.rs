@@ -3,8 +3,8 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-use crate::fs::pipe::{Pipe, PipeBuffer, create_pipe, pipe_file_read, pipe_file_write};
-use crate::fs::file::File;
+use crate::pipe::{Pipe, PipeBuffer, create_pipe, pipe_file_read, pipe_file_write};
+use rux::fs::file::File;
 
 /// Borrow the Pipe backing a pipe-end File — the same raw-pointer access the
 /// data-path callbacks in fs/pipe.rs perform (the old free-function
@@ -12,7 +12,7 @@ use crate::fs::file::File;
 fn pipe_of(file: &File) -> &Pipe {
     let ptr = file.private_data_ptr()
         .expect("pipe end File must have private_data");
-    crate::fs::unsafe_edges::file_privdata_arc_ref::<Pipe>(file).unwrap()
+    rux::fs::unsafe_edges::file_privdata_arc_ref::<Pipe>(file).unwrap()
 }
 
 pub fn test_pipe2() {

@@ -13,11 +13,11 @@
 pub mod ext4_allocator;
 pub mod ext4_file_write;
 
-use crate::fs::ext4::csum::{
+use crate::ext4::csum::{
     crc32c, group_desc_csum_ok, group_desc_csum_set, inode_csum_ok, inode_csum_set,
     superblock_csum_ok, superblock_csum_set, CRC32C_TABLE,
 };
-use crate::fs::ext4::indirect::{get_indirect_level, max_file_size, Ext4BlockIterator};
+use crate::ext4::indirect::{get_indirect_level, max_file_size, Ext4BlockIterator};
 
 pub fn run_all() {
     rux::tests::test_group_start("ext4_allocator");

@@ -11,10 +11,10 @@
 //! net::run_unit_tests; the framework's pass/fail counters are shared,
 //! so the pins land in the same suite totals).
 
-use crate::net::ethernet::{
+use crate::ethernet::{
     eth_is_broadcast_addr, eth_is_multicast_addr, eth_is_valid_unicast_addr, EthHdr,
 };
-use crate::net::ipv4::IpHdr;
+use crate::ipv4::IpHdr;
 
 pub fn test_net_hdrs() {
     rux::tests::test_group_start("net_hdrs");

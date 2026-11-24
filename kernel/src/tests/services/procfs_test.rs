@@ -19,24 +19,24 @@ use alloc::vec::Vec;
 // ========================================================================
 
 #[cfg(feature = "riscv64")]
-const CPUINFO_FIELDS: &[&str] = crate::fs::procfs::cpuinfo::CPUINFO_RISCV_FIELDS;
+const CPUINFO_FIELDS: &[&str] = crate::procfs::cpuinfo::CPUINFO_RISCV_FIELDS;
 #[cfg(feature = "x86_64")]
-const CPUINFO_FIELDS: &[&str] = crate::fs::procfs::cpuinfo::CPUINFO_X86_FIELDS;
+const CPUINFO_FIELDS: &[&str] = crate::procfs::cpuinfo::CPUINFO_X86_FIELDS;
 #[cfg(feature = "aarch64")]
-const CPUINFO_FIELDS: &[&str] = crate::fs::procfs::cpuinfo::CPUINFO_AARCH64_FIELDS;
+const CPUINFO_FIELDS: &[&str] = crate::procfs::cpuinfo::CPUINFO_AARCH64_FIELDS;
 
 fn cpuinfo_shape_check() {
     for k in CPUINFO_FIELDS {
-        let got = crate::fs::procfs::procfile::render_kvtab_pad(&[(k, &0u64)]);
+        let got = crate::procfs::procfile::render_kvtab_pad(&[(k, &0u64)]);
         assert_eq!(got, alloc::format!("{}: 0\n", k), "kvtab_pad shape drifted for {:?}", k);
     }
     // Empty-value row: colon then newline, NO space (the flags row).
-    let got = crate::fs::procfs::procfile::render_kvtab_pad(&[("flags\t\t", &"")]);
+    let got = crate::procfs::procfile::render_kvtab_pad(&[("flags\t\t", &"")]);
     assert_eq!(got, "flags\t\t:\n", "kvtab_pad empty-value shape drifted");
 }
 
 fn cpuinfo_order_check() {
-    let bytes = crate::fs::procfs::cpuinfo::generate();
+    let bytes = crate::procfs::cpuinfo::generate();
     let text = String::from_utf8(bytes)
         .unwrap_or_else(|_| panic!("/proc/cpuinfo must be UTF-8"));
     // First block = the per-cpu-independent slice: the keys of the first
@@ -64,12 +64,12 @@ fn cpuinfo_order_check() {
 /// Mechanical floor: every declared key renders `Key:\t0\n`-shaped
 /// (colon, ONE tab, value, newline; empty value → trailing tab).
 fn status_shape_check() {
-    for k in crate::fs::procfs::pid::STATUS_FIELDS {
-        let got = crate::fs::procfs::procfile::render_kvtab(&[(k, &0u64)]);
+    for k in crate::procfs::pid::STATUS_FIELDS {
+        let got = crate::procfs::procfile::render_kvtab(&[(k, &0u64)]);
         assert_eq!(got, alloc::format!("{}:\t0\n", k), "kvtab shape drifted for {}", k);
     }
     // The empty-value row keeps its trailing tab (status's Groups).
-    let got = crate::fs::procfs::procfile::render_kvtab(&[("Groups", &"")]);
+    let got = crate::procfs::procfile::render_kvtab(&[("Groups", &"")]);
     assert_eq!(got, "Groups:\t\n", "kvtab empty-value shape drifted");
 }
 
@@ -77,7 +77,7 @@ fn status_shape_check() {
 /// STATUS_FIELDS, in order, one row each.
 fn status_order_check() {
     let pid = crate::process::current_pid() as u64;
-    let bytes = crate::fs::procfs::pid::generate_status(pid);
+    let bytes = crate::procfs::pid::generate_status(pid);
     let text = String::from_utf8(bytes)
         .unwrap_or_else(|_| panic!("/proc/[pid]/status must be UTF-8"));
     let keys: Vec<&str> = text
@@ -86,7 +86,7 @@ fn status_order_check() {
         .collect();
     assert_eq!(
         keys,
-        crate::fs::procfs::pid::STATUS_FIELDS,
+        crate::procfs::pid::STATUS_FIELDS,
         "/proc/[pid]/status key order drifted"
     );
     // Value-format pins: the hex masks are 16 lower-hex digits, the
@@ -114,13 +114,13 @@ fn status_order_check() {
 /// exactly `"<key> <digits>\n"`.
 fn kv_shape_check(name: &str, fields: &[&'static str]) {
     for k in fields {
-        let got = crate::fs::procfs::procfile::render_kv(&[(k, &0u64)]);
+        let got = crate::procfs::procfile::render_kv(&[(k, &0u64)]);
         assert_eq!(got, alloc::format!("{} 0\n", k), "kv shape drifted for {} in {}", k, name);
     }
     // The whole file renders one row per declared key, in order.
     let rows: Vec<(&'static str, &dyn core::fmt::Display)> =
         fields.iter().map(|k| (*k, &0u64 as &dyn core::fmt::Display)).collect();
-    let rendered = crate::fs::procfs::procfile::render_kv(&rows);
+    let rendered = crate::procfs::procfile::render_kv(&rows);
     let lines: Vec<&str> = rendered.lines().collect();
     assert_eq!(lines.len(), fields.len(), "{} row count drifted", name);
     for (line, key) in lines.iter().zip(fields.iter()) {
@@ -133,7 +133,7 @@ fn kv_shape_check(name: &str, fields: &[&'static str]) {
 fn cols_shape_check(name: &str, label: &str, columns: &[&'static str]) {
     let vals: Vec<&dyn core::fmt::Display> =
         columns.iter().map(|_| &0u64 as &dyn core::fmt::Display).collect();
-    let got = crate::fs::procfs::procfile::render_cols(label, &vals);
+    let got = crate::procfs::procfile::render_cols(label, &vals);
     let mut expect = alloc::string::String::from(label);
     for _ in columns {
         expect.push_str(" 0");
@@ -148,11 +148,11 @@ fn cols_shape_check(name: &str, label: &str, columns: &[&'static str]) {
 // ========================================================================
 
 fn vmstat_snapshot_check() {
-    use crate::fs::procfs::vmstat::VMSTAT_FIELDS;
+    use crate::procfs::vmstat::VMSTAT_FIELDS;
     let zero: u64 = 0;
     let rows: Vec<(&'static str, &dyn core::fmt::Display)> =
         VMSTAT_FIELDS.iter().map(|k| (*k, &zero as &dyn core::fmt::Display)).collect();
-    let got = crate::fs::procfs::procfile::render_kv(&rows);
+    let got = crate::procfs::procfile::render_kv(&rows);
     let lines: Vec<&str> = got.lines().collect();
     assert_eq!(lines.first(), Some(&"nr_free_pages 0"));
     assert_eq!(lines.get(1), Some(&"nr_zone_inactive_anon 0"));
@@ -169,7 +169,7 @@ fn vmstat_snapshot_check() {
 fn meminfo_keys_shape_check() {
     use alloc::format;
     use alloc::vec::Vec;
-    use crate::fs::procfs::meminfo::{meminfo, MEMINFO_FIELDS};
+    use crate::procfs::meminfo::{meminfo, MEMINFO_FIELDS};
     let out = meminfo();
     let text = core::str::from_utf8(&out).unwrap();
     let lines: Vec<&str> = text.lines().collect();
@@ -208,7 +208,7 @@ const STAT_LINE_PREFIXES: &[&str] = &[
 ];
 
 fn stat_line_order_check() {
-    use crate::fs::procfs::stat::generate;
+    use crate::procfs::stat::generate;
     let bytes = generate();
     let text = alloc::string::String::from_utf8(bytes).expect("/proc/stat must be UTF-8");
     let mut last = 0usize;
@@ -227,7 +227,7 @@ fn stat_line_order_check() {
 }
 
 fn diskstats_snapshot_check() {
-    use crate::fs::procfs::diskstats::{diskstats_row, DISKSTAT_COLUMNS};
+    use crate::procfs::diskstats::{diskstats_row, DISKSTAT_COLUMNS};
     let got = diskstats_row(
         "254 0 vda",
         14, 0, 34, 2,      // reads family
@@ -259,17 +259,17 @@ pub fn test_procfs() {
 
     // kv-form shape floors (formerly the macro-emitted vmstat_shape /
     // meminfo_shape mods).
-    kv_shape_check("vmstat", crate::fs::procfs::vmstat::VMSTAT_FIELDS);
-    kv_shape_check("meminfo", crate::fs::procfs::meminfo::MEMINFO_FIELDS);
+    kv_shape_check("vmstat", crate::procfs::vmstat::VMSTAT_FIELDS);
+    kv_shape_check("meminfo", crate::procfs::meminfo::MEMINFO_FIELDS);
     vmstat_snapshot_check();
     meminfo_keys_shape_check();
     crate::tests::test_pass("procfs-vmstat-meminfo");
 
     // cols-form shape floors (formerly stat_row_shape /
     // schedstat_row_shape / diskstats_row_shape).
-    cols_shape_check("stat", "cpu", crate::fs::procfs::stat::STAT_CPU_COLUMNS);
-    cols_shape_check("schedstat", "cpu0", crate::fs::procfs::schedstat::SCHEDSTAT_CPU_COLUMNS);
-    cols_shape_check("diskstats", "254 0 vda", crate::fs::procfs::diskstats::DISKSTAT_COLUMNS);
+    cols_shape_check("stat", "cpu", crate::procfs::stat::STAT_CPU_COLUMNS);
+    cols_shape_check("schedstat", "cpu0", crate::procfs::schedstat::SCHEDSTAT_CPU_COLUMNS);
+    cols_shape_check("diskstats", "254 0 vda", crate::procfs::diskstats::DISKSTAT_COLUMNS);
     stat_line_order_check();
     diskstats_snapshot_check();
     crate::tests::test_pass("procfs-stat-diskstats");

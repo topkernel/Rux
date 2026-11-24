@@ -8,7 +8,7 @@
 //! the `run_budget_tests` unit-test function both live under
 //! kernel/src/tests/ now.
 
-use crate::fs::tmpfs::{parse_size_pages, TmpfsSuperBlock, TmpfsType, PAGE_SIZE};
+use crate::tmpfs::{parse_size_pages, TmpfsSuperBlock, TmpfsType, PAGE_SIZE};
 use core::sync::atomic::Ordering;
 
 // ========================================================================

@@ -29,7 +29,7 @@ core::arch::global_asm!(include_str!("uaccess.S"));
 /// Linux MAX_RW_COUNT (INT_MAX & PAGE_MASK, 2 GiB minus one page): the
 /// per-syscall upper bound for single read/write style transfers, so a
 /// huge user count can never overflow internal length arithmetic.
-/// Applied at the syscall layer via `crate::syscall::support::clamp_rw_count`.
+/// Applied at the syscall layer (the syscall crate's `crate::support::clamp_rw_count`).
 pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
 
 /// User space access error type
