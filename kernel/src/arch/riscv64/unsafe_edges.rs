@@ -79,3 +79,20 @@ impl<'a> core::ops::DerefMut for SavedFrame<'a> {
         self.inner
     }
 }
+
+// ===========================================================================
+// INV-ARCHDIAG-R1 — the arch-cold lane's audited diagnostic read edge
+// (rux-arch service crate, riscv64 half): a read-only volatile u64
+// load for the fatal-SIGILL forensic walker. The addresses it is
+// given are kernel-half page-table / resident-page addresses computed
+// by the crate's walk (the walk itself is safe arithmetic over
+// phys_to_virt); a torn or faulting read is acceptable — the report is
+// the point and the task dies right after. Not for healthy-path use.
+// ===========================================================================
+
+/// INV-ARCHDIAG-R1: best-effort diagnostic read of a kernel-half u64.
+pub fn diag_volatile_read_u64(addr: usize) -> u64 {
+    // SAFETY: best-effort forensic read of a page-table/code word; the
+    // caller prints it on a dying task's report and exits.
+    unsafe { core::ptr::read_volatile(addr as *const u64) }
+}

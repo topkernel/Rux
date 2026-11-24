@@ -79,3 +79,103 @@ impl<'a> core::ops::DerefMut for SavedFrame<'a> {
         self.inner
     }
 }
+
+// ===========================================================================
+// INV-ARCHDIAG-* — the arch-cold lane's audited diagnostic read edges
+// (rux-arch service crate). Every row is a READ-ONLY, best-effort
+// bottom for a forensic walker that runs on an already-broken machine
+// or a dying task; no row mutates kernel state, no row is for
+// healthy-path use, and every consumer prints then parks/exits.
+// ===========================================================================
+
+/// INV-ARCHDIAG-1 (adoption): `tp` is a task pointer the per-CPU slot
+/// or a cpu_state named one event ago (the same adoption proof as the
+/// switch path). Returns the foreign-entry report's header fields:
+/// (task address, pid, kernel-stack bottom, kernel-stack top).
+pub fn diag_task_fields(tp: *mut crate::process::task::Task) -> (u64, u32, usize, usize) {
+    // SAFETY: broken-machine report read of the task the per-CPU slot
+    // named; short ops, read-only, the CPU parks after the report.
+    match unsafe { crate::process::task_ref::TaskBorrow::from_raw(tp) } {
+        Some(t) => (
+            t.as_ptr() as u64,
+            t.pid(),
+            t.kernel_stack_bottom(),
+            t.get_kernel_stack().map_or(0, |p| p as usize),
+        ),
+        None => (0, 0, 0, 0),
+    }
+}
+
+/// INV-ARCHDIAG-2 (adoption): `tp` is a CPU's current-task pointer read
+/// from its pub cpu_state slot. Returns (pid, comm) for the remote-BT
+/// requester's one-line attribution.
+pub fn diag_task_pid_comm(tp: *const crate::process::task::Task) -> (u32, [u8; 16]) {
+    if tp.is_null() {
+        return (0, [0; 16]);
+    }
+    // SAFETY: read-only pid/comm read of the CPU-slot-named task; the
+    // requester prints and drops the values immediately.
+    unsafe { ((*tp).pid(), *(*tp).comm()) }
+}
+
+/// INV-ARCHDIAG-3 (best-effort read): `addr` is a kernel-half address
+/// on a stack being reported (foreign frame words). A torn or
+/// faulting read is acceptable — the report is the point.
+pub fn diag_volatile_read_u64(addr: usize) -> u64 {
+    // SAFETY: best-effort forensic read of a (possibly torn) kernel
+    // stack word; the caller prints it and parks/exits.
+    unsafe { core::ptr::read_volatile(addr as *const u64) }
+}
+
+/// INV-ARCHDIAG-4 (checked user read): walks the page table rooted at
+/// `root_ppn` for `va` and reads the u64 through the linear map;
+/// returns None on an unmapped hole (the walk is the check — a bad or
+/// absent address can never take the kernel down).
+pub fn diag_fore_read_u64(root_ppn: u64, va: u64) -> Option<u64> {
+    // The walk is total for any input (the stale-frame guards inline):
+    // a garbage root or recycled intermediate returns None.
+    let phys = crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, va & !0xfff)?;
+    let kv = crate::arch::mm::memory_layout::phys_to_virt(
+        crate::arch::mm::memory_layout::PhysAddr::new((phys.0 << 12) | (va & 0xfff)),
+    );
+    // SAFETY: kv points at the mapped user page through the linear map.
+    Some(unsafe { core::ptr::read_volatile(kv.as_u64() as *const u64) })
+}
+
+/// INV-ARCHDIAG-4 (same walk, PTE form): returns (ppn, pte bits) for
+/// the covering leaf, or None on a hole. Read-only.
+pub fn diag_user_pte(root_ppn: u64, va: u64) -> Option<(u64, u64)> {
+    crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, va & !0xfff)
+}
+
+/// INV-ARCHDIAG-5 (descriptor snapshot): read-only frame-descriptor
+/// snapshot for the forensic PTE dump — (refcount, mapcount, flags_raw,
+/// rmap_index); the -999/0 sentinels mirror the no-descriptor case the
+/// report prints.
+pub fn diag_frame_desc(ppn: u64) -> (i64, i64, u64, usize) {
+    let frame = (ppn as usize) << 12;
+    let pd = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(frame));
+    if pd.is_null() {
+        return (-999, -999, 0, 0);
+    }
+    // SAFETY: read-only descriptor reads of the mapped frame.
+    unsafe {
+        (
+            (*pd).refcount() as i64,
+            (*pd).mapcount() as i64,
+            (*pd).flags().raw() as u64,
+            (*pd).index(),
+        )
+    }
+}
+
+/// INV-ARCHDIAG-6 (park): the crashed-forensic-context permanent park —
+/// hlt with IF=0 never wakes. The re-entrancy latch path in the fatal
+/// SIGSEGV report uses this; it never returns.
+pub fn diag_halt_forever() -> ! {
+    // SAFETY: the intentional permanent park of a crashed forensic
+    // context — interrupts were disabled by the caller.
+    loop {
+        unsafe { core::arch::asm!("hlt") };
+    }
+}

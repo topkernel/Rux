@@ -352,27 +352,24 @@ efa340da45a8	kernel/src/arch/riscv64/trap.rs	handle_illegal_instruction	871	ptr-
 a7e6a602bf90	kernel/src/arch/riscv64/trap.rs	handle_illegal_instruction	989	ptr-ops	INV:F19
 c44a3daec66c	kernel/src/arch/riscv64/trap.rs	handle_illegal_instruction	1002		INV:F19
 e9ff7ce936ae	kernel/src/arch/riscv64/trap.rs	handle_illegal_instruction	1027		INV:F19
-7750f9595c3a	kernel/src/arch/riscv64/trap.rs	sigill_mapping_forensics	1159	volatile,ptr-ops,addr-arith	INV:F19
-93637b0a19c6	kernel/src/arch/riscv64/trap.rs	sigill_mapping_forensics	1172	volatile,ptr-ops,addr-arith	INV:F19
-c3e19f6b1969	kernel/src/arch/riscv64/trap.rs	sigill_mapping_forensics	1214	volatile,ptr-ops	INV:F19
-619b5f0fec55	kernel/src/arch/riscv64/trap.rs	handle_breakpoint	1285		INV:F19
-cad2433f1ca0	kernel/src/arch/riscv64/trap.rs	handle_breakpoint	1322		INV:F19
-8db096cf686f	kernel/src/arch/riscv64/trap.rs	sigsegv_has_handler	1361		INV:F19
-80978aaf8639	kernel/src/arch/riscv64/trap.rs	sigbus_has_handler	1381		INV:F19
-f07fff8e3663	kernel/src/arch/riscv64/trap.rs	riscv_bad_user_frame	1393		INV:F19
-6a3fe44e150d	kernel/src/arch/riscv64/trap.rs	riscv_bad_user_frame	1420	asm	INV:F19
-5653af9d285e	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1557		INV:F19
-752109ce221f	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1566		INV:F19
-90e78779417b	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1571		INV:F19
-5dc56ea0fd08	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1799	asm	INV:F19
-847385acc552	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1831		INV:F19
-98dac8f29459	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1840	volatile,ptr-ops	INV:F19
-eef51dde8f91	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1865	ptr-ops	INV:F19
-7833fa7dad8b	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1868	no-preempt	INV:F19
-adba47010328	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1901	volatile	INV:F19
-4617c8b73e5d	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1907	volatile,ptr-ops	INV:F19
-4cd46fe0c2b1	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1908	volatile,ptr-ops	INV:F19
-4860867a3134	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1931	volatile,ptr-ops	INV:F19
+79fc5f3f0f0c	kernel/src/arch/riscv64/trap.rs	handle_breakpoint	1108		INV:F19
+908f55443b68	kernel/src/arch/riscv64/trap.rs	handle_breakpoint	1145		INV:F19
+a11a4c584e7b	kernel/src/arch/riscv64/trap.rs	sigsegv_has_handler	1184		INV:F19
+75cf737bbe11	kernel/src/arch/riscv64/trap.rs	sigbus_has_handler	1204		INV:F19
+4576079274f2	kernel/src/arch/riscv64/trap.rs	riscv_bad_user_frame	1216		INV:F19
+1e43de403e23	kernel/src/arch/riscv64/trap.rs	riscv_bad_user_frame	1243	asm	INV:F19
+5d11117e5c43	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1380		INV:F19
+5c378b731157	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1389		INV:F19
+8bf410b2ad1d	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1394		INV:F19
+1eebd00eb0f3	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1622	asm	INV:F19
+ea76e4f56581	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1654		INV:F19
+0328e097784a	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1663	volatile,ptr-ops	INV:F19
+c5e70c50b2f4	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1688	ptr-ops	INV:F19
+de943726a4b5	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1691	no-preempt	INV:F19
+811c4b694d85	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1724	volatile	INV:F19
+e7615fde4b54	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1730	volatile,ptr-ops	INV:F19
+429026c9a07c	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1731	volatile,ptr-ops	INV:F19
+101b2e918ffc	kernel/src/arch/riscv64/trap.rs	handle_page_fault	1754	volatile,ptr-ops	INV:F19
 47d695ab45fd	kernel/src/arch/riscv64/uaccess.rs	__clear_user	118	ptr-ops	INV:INV-UACCESS-1
 633670f8d518	kernel/src/arch/riscv64/uaccess.rs	copy_to_user	132		INV:INV-UACCESS-1
 29e14fa24228	kernel/src/arch/riscv64/uaccess.rs	copy_to_user	144		INV:INV-UACCESS-1
@@ -387,6 +384,7 @@ de035a1302d1	kernel/src/arch/riscv64/uaccess.rs	<module>	504		INV:INV-UACCESS-1
 9661727dbf49	kernel/src/arch/riscv64/uaccess.rs	futex_cmpxchg_u32_user	510		INV:INV-UACCESS-1
 340bcd395929	kernel/src/arch/riscv64/unsafe_edges.rs	<module>	53		INV:INV-RE-FRAME-1
 b3b02519a433	kernel/src/arch/riscv64/unsafe_edges.rs	from_trap	57		INV:INV-RE-FRAME-1
+3df53a153b02	kernel/src/arch/riscv64/unsafe_edges.rs	diag_volatile_read_u64	97	volatile,ptr-ops	INV:INV-ARCHDIAG-R1
 3bc04e71cdcb	kernel/src/arch/riscv64/vext.rs	prime_hart_has_v	110		INV:F5
 d83495a19a43	kernel/src/arch/riscv64/vext.rs	vlen_fits	123	asm	INV:F5
 e50b71a7abc6	kernel/src/arch/riscv64/vext.rs	vs_disable	135	asm	INV:F5
@@ -497,18 +495,15 @@ b607895d9bec	kernel/src/arch/x86_64/cpu.rs	get_interrupts_state	584	asm	INV:F5
 c269df5fff02	kernel/src/arch/x86_64/ipi.rs	handle_ipi_vector	256		INV:F19
 75a5b282690c	kernel/src/arch/x86_64/ipi.rs	handle_ipi_vector	265		INV:F19
 37abcffd1847	kernel/src/arch/x86_64/ipi.rs	remote_bt_self	420	ptr-ops	INV:F19
-b61edbd67f2b	kernel/src/arch/x86_64/ipi.rs	remote_backtrace	487		INV:F19
-ea724ab241da	kernel/src/arch/x86_64/ipi.rs	remote_backtrace	494		INV:F19
-d5dbbbe66799	kernel/src/arch/x86_64/ipi.rs	remote_backtrace	495		INV:F19
-524450e644c9	kernel/src/arch/x86_64/ipi.rs	csd_init	574		INV:F19
-25333d55c31b	kernel/src/arch/x86_64/ipi.rs	csd_fire	643	ptr-ops	INV:F19
-1a4391e82276	kernel/src/arch/x86_64/ipi.rs	csd_fire	656	ptr-ops	INV:F19
-0bfdf5d4ead6	kernel/src/arch/x86_64/ipi.rs	smp_call_function_timeout	701	ptr-ops	INV:F19
-6b05ea9270e3	kernel/src/arch/x86_64/ipi.rs	smp_call_function_timeout	708		INV:F19
-88b98380d604	kernel/src/arch/x86_64/ipi.rs	smp_call_function_timeout	717		INV:F19
-bd20f583a476	kernel/src/arch/x86_64/ipi.rs	csd_flush_queue	734		INV:F19
-9e3db4a3ce5b	kernel/src/arch/x86_64/ipi.rs	csd_flush_queue	747	ptr-ops	INV:F19
-328a98eb8258	kernel/src/arch/x86_64/ipi.rs	csd_flush_queue	757	ptr-ops	INV:F19
+02329e67f6ea	kernel/src/arch/x86_64/ipi.rs	csd_init	501		INV:F19
+ca6d20c3ffd1	kernel/src/arch/x86_64/ipi.rs	csd_fire	570	ptr-ops	INV:F19
+b1f13e236712	kernel/src/arch/x86_64/ipi.rs	csd_fire	583	ptr-ops	INV:F19
+eeff0d5f67f6	kernel/src/arch/x86_64/ipi.rs	smp_call_function_timeout	628	ptr-ops	INV:F19
+4f0c2eeec46e	kernel/src/arch/x86_64/ipi.rs	smp_call_function_timeout	635		INV:F19
+bba4bd2abd69	kernel/src/arch/x86_64/ipi.rs	smp_call_function_timeout	644		INV:F19
+970b14eecea9	kernel/src/arch/x86_64/ipi.rs	csd_flush_queue	661		INV:F19
+3348428d714c	kernel/src/arch/x86_64/ipi.rs	csd_flush_queue	674	ptr-ops	INV:F19
+06fac6122b68	kernel/src/arch/x86_64/ipi.rs	csd_flush_queue	684	ptr-ops	INV:F19
 708182cb9519	kernel/src/arch/x86_64/mm/asid.rs	enable_pcid	96		INV:F19
 d48d1a051e3d	kernel/src/arch/x86_64/mm/asid.rs	ipi_flush_all	183		INV:F19
 69c2e009a98c	kernel/src/arch/x86_64/mm/asid.rs	flush_tlb_all	213		INV:F19
@@ -610,82 +605,63 @@ f9b5b7e31762	kernel/src/arch/x86_64/trap.rs	<module>	77	ffi	INV:F19
 9c2bb8561001	kernel/src/arch/x86_64/trap.rs	ret_from_fork_kernel	80		INV:F19
 c5cd2e67d07b	kernel/src/arch/x86_64/trap.rs	write_u64	268	ptr-ops	INV:F19
 16abf51452cd	kernel/src/arch/x86_64/trap.rs	read_u64	275	ptr-ops	INV:F19
-0f69535a02a8	kernel/src/arch/x86_64/trap.rs	set_tss_rsp0	328		INV:F19
-b3fc6464c4c7	kernel/src/arch/x86_64/trap.rs	init_cpu_state	347		INV:F19
-8be5a31c0c35	kernel/src/arch/x86_64/trap.rs	init	474		INV:F19
-217e9b3e2f46	kernel/src/arch/x86_64/trap.rs	init	475		INV:F19
-99c2e2a505ba	kernel/src/arch/x86_64/trap.rs	init	499		INV:F19
-4f4074d3adfc	kernel/src/arch/x86_64/trap.rs	init_secondary	511		INV:F19
-67098c9c9f85	kernel/src/arch/x86_64/trap.rs	init_syscall	538		INV:F19
-d35576024a16	kernel/src/arch/x86_64/trap.rs	init_8259	570		INV:F19
-7ee07b0b7ac3	kernel/src/arch/x86_64/trap.rs	pic_send_eoi	598		INV:F19
-433f1f5b5e09	kernel/src/arch/x86_64/trap.rs	pic_claim	611		INV:F19
-bcc8c42b2e95	kernel/src/arch/x86_64/trap.rs	unmask_irq_line	632		INV:F19
-8ff7d7d71735	kernel/src/arch/x86_64/trap.rs	mask_irq_line	647		INV:F19
-2800addc45e4	kernel/src/arch/x86_64/trap.rs	run_line_action	760	transmute	INV:F19
-782ef457a7f8	kernel/src/arch/x86_64/trap.rs	spawn_intx_irq_thread	820	raw-construct	INV:F19
-3985d93460d3	kernel/src/arch/x86_64/trap.rs	enable_timer_interrupt	909	asm	INV:F19
-14bd6554dec5	kernel/src/arch/x86_64/trap.rs	pt_regs_rip_for_cpu	962		INV:F19
-072cb04fb219	kernel/src/arch/x86_64/trap.rs	current_task_pt_regs	970	ptr-ops	INV:F19
-a09e90b0f2cc	kernel/src/arch/x86_64/trap.rs	x86_bad_frame_exit	996		INV:F19
-4eb832a05a8e	kernel/src/arch/x86_64/trap.rs	frame_in_task_stack	1014		INV:F19
-9d91933886cf	kernel/src/arch/x86_64/trap.rs	scribble_foreign_entry	1060		INV:F19
-b658a1544ef9	kernel/src/arch/x86_64/trap.rs	scribble_foreign_entry	1078		INV:F19
-901e6522b4e2	kernel/src/arch/x86_64/trap.rs	scribble_foreign_entry	1087	volatile,ptr-ops	INV:F19
-3525de90e8dd	kernel/src/arch/x86_64/trap.rs	scribble_foreign_entry	1096	volatile,ptr-ops	INV:F19
-3c93b435099c	kernel/src/arch/x86_64/trap.rs	trap_handler	1166		INV:F19
-9dcfe5390d40	kernel/src/arch/x86_64/trap.rs	trap_handler	1168		INV:F19
-0ea330abc6d6	kernel/src/arch/x86_64/trap.rs	trap_handler	1173	asm	INV:F19
-b0e0cb10aa8c	kernel/src/arch/x86_64/trap.rs	trap_handler	1193		INV:F19
-d4331646a472	kernel/src/arch/x86_64/trap.rs	trap_handler	1204	asm	INV:F19
-03558ba46e85	kernel/src/arch/x86_64/trap.rs	trap_handler	1212		INV:INV-XE-FRAME-1
-cb966942045a	kernel/src/arch/x86_64/trap.rs	trap_handler	1339	no-preempt	INV:INV-XE-FRAME-1
-d0cb87356955	kernel/src/arch/x86_64/trap.rs	trap_handler	1353		INV:INV-XE-FRAME-1
-a1ba626c232c	kernel/src/arch/x86_64/trap.rs	trap_handler	1435		INV:INV-XE-FRAME-1
-e1d2d8124283	kernel/src/arch/x86_64/trap.rs	handle_timer_tick	1905	volatile	INV:F19
-17a7a4b792b1	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2210		INV:F19
-9373143409fe	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2226		INV:F19
-9ee718cbb5b9	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2238	volatile,ptr-ops	INV:F19
-8b8602d1b0fc	kernel/src/arch/x86_64/trap.rs	handle_device_not_available	2408		INV:F19
-d7c0d367a1c3	kernel/src/arch/x86_64/trap.rs	handle_device_not_available	2421		INV:F19
-66468611dc9f	kernel/src/arch/x86_64/trap.rs	handle_debug	2441		INV:F19
-0b94902df44e	kernel/src/arch/x86_64/trap.rs	handle_debug	2445		INV:F19
-963a1bf50c28	kernel/src/arch/x86_64/trap.rs	handle_debug	2466		INV:F19
-1295f6d1e988	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2545		INV:F19
-0a19a190b64f	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2567		INV:F19
-5b89002c68f4	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2672		INV:F19
-82fa14aa1dd9	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2681		INV:F19
-53101da2662a	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2694		INV:F19
-bc02632c2807	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2710		INV:F19
-8e7dedc174c8	kernel/src/arch/x86_64/trap.rs	gp_regmem_dump	2716	volatile,ptr-ops	INV:F19
-88ce3e468487	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2762		GAP
-8f47e1466510	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2764		INV:F19
-4bf7a32a4c10	kernel/src/arch/x86_64/trap.rs	gp_mmhistory_dump	2805		INV:F19
-db94c009d502	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	2930	asm	INV:F19
-34fda0af18c1	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	2938		INV:F19
-9b299176e53f	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3094		GAP
-f39e0c739940	kernel/src/arch/x86_64/trap.rs	dump_mm_ops	3117		INV:F19
-cd05cd21fa9e	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	3139		INV:F19
-e45455d50b34	kernel/src/arch/x86_64/trap.rs	user_segv_forensics	3364		INV:F19
-e3e16f0ded57	kernel/src/arch/x86_64/trap.rs	fore_read_u64	3392		INV:F19
-fd3e45c4fe6f	kernel/src/arch/x86_64/trap.rs	fore_read_u64	3399	volatile,ptr-ops	INV:F19
-d156faf2093a	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3613		INV:F19
-3f9280dd7b29	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3627		INV:F19
-a62213df3cd5	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3637		INV:F19
-de7e27b3d844	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3666		INV:F19
-67bf8fdd1775	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3983	asm	INV:F19
-c63939ad3b57	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4035		INV:F19
-ded91be1a442	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4047	volatile,ptr-ops	INV:F19
-134f40005ecd	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4066	volatile,ptr-ops	INV:F19
-2cf74682a80e	kernel/src/arch/x86_64/trap.rs	kp_read64	4133	volatile,ptr-ops	INV:F19
-1377861b9cdc	kernel/src/arch/x86_64/trap.rs	kp_read32	4137	volatile,ptr-ops	INV:F19
-b21027e3eb6b	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4163	ptr-ops	INV:F19
-592913c3ade3	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4164	ptr-ops	INV:F19
-c9c3256e21e8	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4165	ptr-ops	INV:F19
-46b9dcfad92f	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4166	ptr-ops	INV:F19
-d707142c5518	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4167	ptr-ops	INV:F19
-1dbffd739eab	kernel/src/arch/x86_64/trap.rs	handle_page_fault	4181	ptr-ops	INV:F19
-7dc42d6da484	kernel/src/arch/x86_64/trap.rs	x86_double_fault_dump	4305	asm	INV:F19
+edcb82056132	kernel/src/arch/x86_64/trap.rs	diag_tss_rsp0	295		INV:INV-ARCHDIAG-TSS
+499636e9806c	kernel/src/arch/x86_64/trap.rs	set_tss_rsp0	341		INV:F19
+2522c68f577c	kernel/src/arch/x86_64/trap.rs	init_cpu_state	360		INV:F19
+abdab75a3116	kernel/src/arch/x86_64/trap.rs	init	487		INV:F19
+e5c27c27edc7	kernel/src/arch/x86_64/trap.rs	init	488		INV:F19
+8d92ef32e327	kernel/src/arch/x86_64/trap.rs	init	512		INV:F19
+794e0802fbf7	kernel/src/arch/x86_64/trap.rs	init_secondary	524		INV:F19
+e92eac766fe9	kernel/src/arch/x86_64/trap.rs	init_syscall	551		INV:F19
+2959069140d4	kernel/src/arch/x86_64/trap.rs	init_8259	583		INV:F19
+2e67cb558fee	kernel/src/arch/x86_64/trap.rs	pic_send_eoi	611		INV:F19
+76ebb18ff200	kernel/src/arch/x86_64/trap.rs	pic_claim	624		INV:F19
+50c9b355f62c	kernel/src/arch/x86_64/trap.rs	unmask_irq_line	645		INV:F19
+b29abac40596	kernel/src/arch/x86_64/trap.rs	mask_irq_line	660		INV:F19
+cf2d90a420dc	kernel/src/arch/x86_64/trap.rs	run_line_action	773	transmute	INV:F19
+84f4f8822ee9	kernel/src/arch/x86_64/trap.rs	spawn_intx_irq_thread	833	raw-construct	INV:F19
+d26618685f34	kernel/src/arch/x86_64/trap.rs	enable_timer_interrupt	922	asm	INV:F19
+dd48bd4cf3b1	kernel/src/arch/x86_64/trap.rs	pt_regs_rip_for_cpu	975		INV:F19
+6fa30694f372	kernel/src/arch/x86_64/trap.rs	current_task_pt_regs	983	ptr-ops	INV:F19
+ab58fc89cbf9	kernel/src/arch/x86_64/trap.rs	x86_bad_frame_exit	1009		INV:F19
+8f480fcd059e	kernel/src/arch/x86_64/trap.rs	frame_in_task_stack	1027		INV:F19
+90cde041e421	kernel/src/arch/x86_64/trap.rs	trap_handler	1102		INV:F19
+69b437246f6b	kernel/src/arch/x86_64/trap.rs	trap_handler	1104		INV:F19
+675149c80972	kernel/src/arch/x86_64/trap.rs	trap_handler	1109	asm	INV:F19
+bc3d61b9c9c9	kernel/src/arch/x86_64/trap.rs	trap_handler	1129		INV:F19
+4d6f9978b4fd	kernel/src/arch/x86_64/trap.rs	trap_handler	1140	asm	INV:F19
+4ba71c96fad3	kernel/src/arch/x86_64/trap.rs	trap_handler	1148		GAP
+6e30b9ec8746	kernel/src/arch/x86_64/trap.rs	trap_handler	1275	no-preempt	GAP
+5f65294f2436	kernel/src/arch/x86_64/trap.rs	trap_handler	1289		GAP
+f8f6a8417b8a	kernel/src/arch/x86_64/trap.rs	trap_handler	1371		GAP
+b389280d997f	kernel/src/arch/x86_64/trap.rs	handle_timer_tick	1841	volatile	INV:F19
+169f2edec7c3	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2146		INV:F19
+6420517a1d41	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2162		INV:F19
+23d902771107	kernel/src/arch/x86_64/trap.rs	handle_illegal_instruction	2174	volatile,ptr-ops	INV:F19
+fd2a5aa7e30e	kernel/src/arch/x86_64/trap.rs	handle_device_not_available	2344		INV:F19
+ccc281352adc	kernel/src/arch/x86_64/trap.rs	handle_device_not_available	2357		INV:F19
+3358d01aefc0	kernel/src/arch/x86_64/trap.rs	handle_debug	2377		INV:F19
+c6f4ab761274	kernel/src/arch/x86_64/trap.rs	handle_debug	2381		INV:F19
+877b35f55270	kernel/src/arch/x86_64/trap.rs	handle_debug	2402		INV:F19
+bf09f451841f	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2481		INV:F19
+dec99bf8722a	kernel/src/arch/x86_64/trap.rs	handle_breakpoint	2503		INV:F19
+a1f2d6b90812	kernel/src/arch/x86_64/trap.rs	handle_page_fault	2705		INV:F19
+c2eabb6d2c00	kernel/src/arch/x86_64/trap.rs	handle_page_fault	2719		INV:F19
+20212210435e	kernel/src/arch/x86_64/trap.rs	handle_page_fault	2729		INV:F19
+9403106711b9	kernel/src/arch/x86_64/trap.rs	handle_page_fault	2758		INV:F19
+5997f2b8e4e8	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3075	asm	INV:F19
+897744ca2cf7	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3127		INV:F19
+cb3873c1a298	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3139	volatile,ptr-ops	INV:F19
+cb6b7421adfc	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3158	volatile,ptr-ops	INV:F19
+0bc0c40fefd7	kernel/src/arch/x86_64/trap.rs	kp_read64	3225	volatile,ptr-ops	INV:F19
+1d923eec5f9d	kernel/src/arch/x86_64/trap.rs	kp_read32	3229	volatile,ptr-ops	INV:F19
+2ff3a07317a3	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3255	ptr-ops	INV:F19
+1a28bed312f4	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3256	ptr-ops	INV:F19
+9090fcdf36ec	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3257	ptr-ops	INV:F19
+b18d7620d35e	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3258	ptr-ops	INV:F19
+810d22b4c231	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3259	ptr-ops	INV:F19
+575fb8905041	kernel/src/arch/x86_64/trap.rs	handle_page_fault	3273	ptr-ops	INV:F19
+16d81236814c	kernel/src/arch/x86_64/trap.rs	x86_double_fault_dump	3397	asm	INV:F19
 d35fa0b453ad	kernel/src/arch/x86_64/uaccess.rs	__x64_futex_cmpxchg_u32	200		INV:INV-UACCESS-1
 012a12e8e8e2	kernel/src/arch/x86_64/uaccess.rs	futex_cmpxchg_u32_user	206		INV:INV-UACCESS-1
 d7ae1e2040ea	kernel/src/arch/x86_64/uaccess.rs	<module>	233	ptr-ops	INV:INV-UACCESS-1
@@ -707,6 +683,12 @@ fe53383f0af6	kernel/src/arch/x86_64/uaccess.rs	<module>	287		INV:INV-UACCESS-1
 f5e49ed21440	kernel/src/arch/x86_64/uaccess.rs	strnlen_user	559		INV:INV-UACCESS-1
 53151eba8eae	kernel/src/arch/x86_64/unsafe_edges.rs	<module>	53		INV:INV-XE-FRAME-1
 15e34e9b6aab	kernel/src/arch/x86_64/unsafe_edges.rs	from_trap	57		INV:INV-XE-FRAME-1
+d8912b43ba1a	kernel/src/arch/x86_64/unsafe_edges.rs	diag_task_fields	98		INV:INV-ARCHDIAG-1
+fd03d7b25683	kernel/src/arch/x86_64/unsafe_edges.rs	diag_task_pid_comm	118		INV:INV-ARCHDIAG-2
+0e4f03126c0e	kernel/src/arch/x86_64/unsafe_edges.rs	diag_volatile_read_u64	127	volatile,ptr-ops	INV:INV-ARCHDIAG-3
+5ddb941a06df	kernel/src/arch/x86_64/unsafe_edges.rs	diag_fore_read_u64	142	volatile,ptr-ops	INV:INV-ARCHDIAG-4
+b53bda4ed6b1	kernel/src/arch/x86_64/unsafe_edges.rs	diag_frame_desc	162		INV:INV-ARCHDIAG-5
+cd1d0ea2be58	kernel/src/arch/x86_64/unsafe_edges.rs	diag_halt_forever	179	asm	INV:INV-ARCHDIAG-6
 cb0e190ffe6c	kernel/src/boot_edges.rs	image_end_va	26		INV:INV-BOOT-SYM-1
 282dfca48eac	kernel/src/boot_edges.rs	set_va_pa_offset	35		INV:INV-BOOT-SETUP-1
 20569c847531	kernel/src/boot_edges.rs	zeropage_initrd_hint	49	volatile,ptr-ops	INV:INV-BOOT-ZEROPAGE-1

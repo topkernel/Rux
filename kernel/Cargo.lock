@@ -355,10 +355,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rux-arch"
+version = "0.1.0"
+dependencies = [
+ "rux",
+]
+
+[[package]]
 name = "rux-bin"
 version = "0.1.0"
 dependencies = [
  "rux",
+ "rux-arch",
  "rux-debug",
  "rux-drivers",
  "rux-ext4",

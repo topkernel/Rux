@@ -73,5 +73,11 @@ pub extern "C" fn rust_main() -> ! {
         // boundary was last in-framework but is destructive-safe there).
         rux::tests::register_service_tests(rux_process::run_unit_tests);
     }
+    // The arch cold diagnostic rows (arch-cold lane): the fatal-fault
+    // forensic walkers, the segv-history and ripsample report halves,
+    // the remote-BT requester — cold ArchDiagHooks rows consumed only
+    // by user-fault deaths, armed reports and hunter pokes (all
+    // strictly post-boot).
+    rux_arch::register_all();
     rust_main_impl()
 }

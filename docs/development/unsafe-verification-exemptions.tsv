@@ -41,3 +41,6 @@ kernel/src/cmdline.rs	5	4	region ELIMINATED by the root-cold move: parse_memory_
 kernel/src/timer.rs	2	0	regions shifted by the hilogcensus/tick edits; carried by id, remainder recoverable from history
 kernel/src/cmdline.rs	5	4	mem::zeroed region eliminated under forbid (root-cold lane, reasoned)
 kernel/src/arch/x86_64/trap.rs	86	80	F1 family-(a): the mm_ops printers consolidated six per-load unsafe blocks into two hoisted derefs; no behavior change (lane-reported, reviewed)
+kernel/src/arch/x86_64/ipi.rs	15	12	regions sole-copied to the forbid crate (its own count is zero by construction); remainder recoverable from history
+kernel/src/arch/x86_64/trap.rs	63	59	vs the arch-cold merge parent (63): four regions shifted by the F1 port edits; recoverable from history
+kernel/src/arch/x86_64/trap.rs	80	59	forensic walker regions moved to rux-arch/trap_diag.rs (forbid, zero by construction); the mm_ops printer consolidated per F1 hoists; remainder recoverable
