@@ -63,6 +63,10 @@ pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println, print_status};
 pub use rux_ipc::ipc;
 extern crate alloc;
 
+/// The boot FDT scanners (root-cold lane): the moved cmdline walkers,
+/// registered through the framework's BootScanHooks rows.
+pub mod of_fdt;
+
 // The driver tree, nested under crate::drivers (the historical paths).
 pub mod drivers {
     // The framework's remaining driver tree (registries, transports,
@@ -167,5 +171,15 @@ pub fn register_all() {
         // sysfs rescan attribute (cold, user-triggered).
         register_probe_initcalls: drivers::virtio::probe::register_probe_initcalls,
         pci_rescan_block_hotplug: drivers::virtio::probe::pci_rescan_block_hotplug,
+    });
+
+    // The boot FDT scanners (root-cold lane): the moved cmdline walkers.
+    // Registered here like every other row — publication stores plain
+    // values only; the framework's boot-core dispatch sites are all cold.
+    rux::boot_scan_hooks::register_boot_scan_hooks(rux::boot_scan_hooks::BootScanHooks {
+        parse_bootargs: of_fdt::parse_bootargs,
+        parse_memory_regions: of_fdt::parse_memory_regions,
+        parse_initrd_region: of_fdt::parse_initrd_region,
+        parse_cpu_isa_has_v: of_fdt::parse_cpu_isa_has_v,
     });
 }

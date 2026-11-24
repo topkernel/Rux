@@ -116,6 +116,7 @@ pub mod print;
 pub mod printk;
 pub mod drivers;
 pub mod config;
+pub mod boot_scan_hooks;
 pub mod list;
 pub mod process;
 pub mod sched;
