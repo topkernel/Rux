@@ -912,9 +912,6 @@ const _: () = {
 /// - Kernel stack managed via kernel_sp field
 #[repr(C)]
 pub struct Task {
-    // ==================== thread_info style fields (offset 0) ====================
-    // These fields must be at struct beginning for fast access via tp
-
     /// Process flags (thread_info.flags)
     /// Bit definitions: TIF_SIGPENDING, TIF_NEED_RESCHED, etc.
     ti_flags: AtomicU32,
@@ -1025,14 +1022,18 @@ pub struct Task {
     /// sleep; entry present + not due = healthy.
     /// 0 = not in a timed wait.
     pub timed_sleep_deadline: core::sync::atomic::AtomicU64,
+
     /// 0 = none, 1 = hres (nanosleep class, deadline in time-CSR ticks),
     /// 2 = jiffy (futex/poll timeout class, deadline in jiffies).
     pub timed_sleep_kind: core::sync::atomic::AtomicU32,
+
     /// The wheel registration id of the armed wake timer (0 if arm
     /// failed — the wait site then never parks waker-less).
     pub timed_sleep_timer_id: core::sync::atomic::AtomicU64,
+
     /// Jiffies stamp of the arm (age gate for the heartbeat print).
     pub timed_sleep_armed_j: core::sync::atomic::AtomicU32,
+
     /// Requested duration (ms, capped) — the adjudicator between a
     /// garbage-huge userspace sleep and a short sleep whose wake was
     /// lost.
@@ -1109,88 +1110,10 @@ pub struct Task {
 
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
     ti_a0: core::sync::atomic::AtomicU64,
+
     ti_a1: core::sync::atomic::AtomicU64,
+
     ti_a2: core::sync::atomic::AtomicU64,
-
-    /// LASTSYS (stall hunts): the syscall this task most recently
-    /// ENTERED (nr + first two args). For a task parked inside a
-    /// blocking syscall (epoll_wait, binder ioctl, futex, slow fd read)
-    /// this names the call it is sleeping in — the global 2048-entry
-    /// forensic ring overwrites a parked waiter's record within
-    /// milliseconds under system-wide traffic, so per-task storage is
-    /// the only form that survives. Written at dispatch entry (Relaxed
-    /// stores); read by the DEBUG taskdump.
-    pub last_syscall_nr: core::sync::atomic::AtomicU32,
-    pub last_syscall_a0: AtomicU64,
-    pub last_syscall_a1: AtomicU64,
-
-    /// sc125 (Session P): ring of the last 8 FAILING syscalls (nr packed
-    /// low-16, errno high-16) for this task. The park decode needs the
-    /// pre-park failure tail — musl pthread_create maps the thread stack
-    /// BEFORE clone, so a failed mmap (ENOMEM/EAGAIN) means NO clone ever
-    /// reaches the kernel census; this latch is the only per-task record
-    /// that survives the system-wide ring's millisecond overwrite window.
-    /// Stored at dispatch EXIT when 0 > ret > -4096.
-    pub last_fails: [AtomicU32; 8],
-    pub last_fails_cur: core::sync::atomic::AtomicUsize,
-    /// sc135 (Session Q): a0/a1 companions for the fail ring, same index.
-    /// The park decode named the pre-park tail as nr167=-22 (prctl EINVAL)
-    /// x1-2 per child, but nr+errno alone cannot say WHICH option — and
-    /// OH may exercise a prctl option this kernel rejects but Linux
-    /// accepts. a0 = the option, a1 = the sub-op/arg.
-    pub last_fails_a0: [AtomicU64; 8],
-    pub last_fails_a1: [AtomicU64; 8],
-
-    /// 50th (crash-storm hunt): ring of the last 16 address-space edits
-    /// (mmap/mprotect/munmap/brk/mremap) issued by THIS task. Two words
-    /// per event:
-    ///   w0 = op(bits 0..8: 1 mmap, 2 mprotect, 3 munmap, 4 brk,
-    ///         5 mremap) | rc(bits 8..16, 0 = ok else errno)
-    ///         | addr(bits 16..64)
-    ///   w1 = len(bits 0..48) | prot/arg2(bits 48..56)
-    /// The mallocng crash family stamps a freshly-allocated group
-    /// through a pointer whose page sits in a VMA HOLE with no covering
-    /// mapping. Printed at USEGV time, this ring answers — in one boot —
-    /// whether the kernel itself returned that address (mmap placement/
-    /// insertion bug), removed its covering VMA (munmap overreach), or
-    /// never saw the address at all (userspace stale chain from
-    /// corrupted allocator state). Same storage discipline as
-    /// last_fails: Relaxed stores at dispatch exit, read only by the
-    /// fault printer.
-    pub mm_ops: [AtomicU64; 32],
-    pub mm_ops_cur: core::sync::atomic::AtomicUsize,
-
-    /// 50th (crash-storm hunt): set the first time this task issues
-    /// execve/execveat. A process LEADER that exits without it is a
-    /// failed spawn (the OH 337->588->589 chain forked, never execve'd,
-    /// and exited 512/0); do_exit prints its birth syscall window so the
-    /// killing call names itself. Threads never exec by design and are
-    /// excluded at the print site.
-    pub did_exec: core::sync::atomic::AtomicBool,
-
-    /// sc128 (Session P): ring of the last syscalls (nr only) for this
-    /// task — the park decode needs the final SUCCESS sequence too (what
-    /// the child does between the failed dlopen cascade and the cond
-    /// park: more mmaps? clone attempts? closes?). Stored at every
-    /// dispatch exit. sc135 (Session Q): deepened 12 -> 96 — sc129's
-    /// 12-deep ring showed only the clock_gettime retry loop, masking
-    /// everything the child did between the dlopen cascade and the park;
-    /// 96 covers the full pre-park tail unless the retry loop spins
-    /// >96 calls before the eternal WAIT entry.
-    pub last_calls: [AtomicU32; LAST_CALLS_LEN],
-    pub last_calls_cur: core::sync::atomic::AtomicUsize,
-
-    /// sc138 (Session Q): FILTERED ring (see INIT_CALLS_LEN) — the retry
-    /// loop noise skipped so the init sequence survives to the dump.
-    pub init_calls: [AtomicU32; INIT_CALLS_LEN],
-    pub init_a0: [AtomicU64; INIT_CALLS_LEN],
-    pub init_calls_cur: core::sync::atomic::AtomicUsize,
-    /// sc143: birth-window latch (see BIRTH_CALLS_LEN).
-    pub birth_calls: [AtomicU32; BIRTH_CALLS_LEN],
-    pub birth_a0: [AtomicU64; BIRTH_CALLS_LEN],
-    pub birth_done: core::sync::atomic::AtomicBool,
-
-    // ==================== task_struct fields ====================
 
     /// Process state (volatile, visible across cores)
     state: AtomicU32,
@@ -1198,12 +1121,166 @@ pub struct Task {
     /// Process ID
     pid: Pid,
 
-    /// PID hash table chain link (singly-linked for RCU-safe traversal).
-    pub pid_hash_next: *mut Task,
-
     /// Thread group ID (main process PID of thread)
     /// Single-threaded process: tgid == pid
     tgid: Pid,
+
+    /// Process group ID
+    pgid: u32,
+
+    /// Process name (comm), 16 bytes NUL-terminated
+    comm: [u8; 16],
+
+    /// Signal mask (blocked)
+    ///
+    /// Used for sigprocmask syscall
+    pub sigmask: u64,
+
+    /// Process credentials
+    cred: Cred,
+
+    /// Scheduling policy
+    policy: SchedPolicy,
+
+    /// Dynamic priority (0-139, higher value means lower priority)
+    /// - 0-99: Real-time processes
+    /// - 100-139: Normal processes
+    prio: i32,
+
+    /// Static priority (120 is default for normal processes)
+    static_prio: i32,
+
+    /// normal_prio: priority calculated from static_prio and scheduling policy
+    normal_prio: i32,
+
+    /// Remaining time slice
+    time_slice: u32,
+
+    /// RT scheduling priority (0-99, lower value = higher priority)
+    ///
+    /// Only valid when policy is SCHED_FIFO or SCHED_RR
+    rt_priority: u32,
+
+    /// SCHED_RESET_ON_FORK request (set via sched_setscheduler/setattr):
+    /// forked children are reset to SCHED_OTHER/nice 0 and the request is
+    /// cleared in the child (Linux sched_reset_on_fork).
+    sched_reset_on_fork: core::sync::atomic::AtomicBool,
+
+    /// CFS scheduling entity
+    ///
+    /// Contains vruntime, weight and other CFS scheduling info.
+    /// pub(crate) so fair.rs can compute the entity-embedded timeline
+    /// node's container-of offset (grq-10ns intrusive rbtree).
+    pub(crate) sched_entity: crate::sched::entities::SchedEntity,
+
+    /// RT scheduling entity
+    ///
+    /// Contains time slice and other RT-specific scheduling info
+    rt_entity: crate::sched::entities::SchedRtEntity,
+
+    /// Deadline scheduling entity
+    ///
+    /// Contains deadline, runtime, period and other DL-specific info
+    dl_entity: crate::sched::entities::SchedDlEntity,
+
+    /// RT run list node (for linking into RT priority queues)
+    ///
+    /// Used by the RT scheduler to link tasks at the same priority level
+    pub rt_run_list: crate::list::ListHead,
+
+    /// Architecture-specific thread state
+    ///
+    /// Stores FPU state, TLS pointer, etc.
+    pub thread: crate::arch::thread::ThreadStruct,
+
+    /// Address space (mm_struct)
+    /// None for kernel threads, Some for user processes
+    /// Use Arc for CLONE_VM sharing between threads
+    address_space: Option<alloc::sync::Arc<AddressSpace>>,
+
+    /// Active address space (active_mm)
+    ///
+    /// For user processes: active_mm == mm
+    /// For kernel threads: active_mm is borrowed address space (for accessing user memory)
+    active_mm: Option<*const AddressSpace>,
+
+    /// Kernel stack
+    /// TODO: Implement kernel stack allocation
+    kernel_stack: Option<*mut u8>,
+
+    /// Kernel stack bottom (for overflow detection)
+    kernel_stack_bottom: usize,
+
+    /// File descriptor table (files_struct)
+    /// Use Arc for CLONE_FILES sharing between threads
+    fdtable: Option<alloc::sync::Arc<FdTable>>,
+
+    /// Filesystem information (cwd, root, umask)
+    ///
+    /// Shared between threads when CLONE_FS is used
+    fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>,
+
+    /// Signal handling structure (signal_struct)
+    /// Use Arc for CLONE_SIGHAND sharing between threads
+    pub signal: Option<alloc::sync::Arc<SignalStruct>>,
+
+    /// Pending signals (pending)
+    pub pending: SigPending,
+
+    /// PID namespace (None == initial namespace).
+    pub ns_pid: Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+
+    /// PID hash table chain link (singly-linked for RCU-safe traversal).
+    pub pid_hash_next: *mut Task,
+
+    /// Fork child flag
+    /// If true, this is a child process created by fork, needs to restore from ret_from_fork
+    is_fork_child: core::sync::atomic::AtomicBool,
+
+    /// CPU-time accounting (kernel ticks, HZ per second). utime/stime are
+    /// this task's own user/system time, sampled in the timer IRQ from the
+    /// interrupted privilege mode (Linux account_process_tick style);
+    /// cutime/cstime accumulate the same counters of reaped children at
+    /// their exit. Read by /proc/[pid]/stat, times(2) and getrusage(2).
+    pub utime_ticks: AtomicU64,
+
+    pub stime_ticks: AtomicU64,
+
+    /// Page faults taken by this task in user mode (Linux's minflt).
+    /// Rux has no minor/major distinction — file-backed pages come
+    /// from the page cache, not from a fault-time disk read — so every
+    /// user fault is counted here and the major counter stays 0.
+    pub min_flt: AtomicU64,
+
+    /// Major page faults (Linux's majflt). Always 0 on Rux, see above.
+    pub maj_flt: AtomicU64,
+
+    /// Context-switch counters (Linux's task->nvcsw / task->nivcsw).
+    /// A voluntary switch is one where the task went to sleep; an
+    /// involuntary one is where the task was preempted while still
+    /// runnable. Counted in the scheduler's context_switch and read by
+    /// /proc/[pid]/status (voluntary_ctxt_switches /
+    /// nonvoluntary_ctxt_switches).
+    pub nvcsw: AtomicU64,
+
+    pub nivcsw: AtomicU64,
+
+    /// Per-task scheduler statistics (the /proc/[pid]/schedstat
+    /// triple — T7 perf-support slice). runtime_ns accumulates on-cpu
+    /// time at every switch-away, wait_ns the runqueue wait at every
+    /// pick, timeslices counts real picks (a same-task repick after a
+    /// tick is NOT a new timeslice — Linux counts switches-to). The
+    /// two stamps (wait_start, exec_start) are written only under the
+    /// GRQ lock; the three counters are readable lock-free.
+    pub schedstat_runtime_ns: AtomicU64,
+
+    pub schedstat_wait_ns: AtomicU64,
+
+    pub schedstat_timeslices: AtomicU64,
+
+    pub schedstat_wait_start: AtomicU64,
+
+    pub schedstat_exec_start: AtomicU64,
 
     /// Thread group leader (task_struct::group_leader).
     ///
@@ -1235,94 +1312,24 @@ pub struct Task {
     /// exec, or the leader's release_task).
     pub dead_threads: Spinlock<alloc::vec::Vec<*mut Task>>,
 
-    /// Process credentials
-    cred: Cred,
-
-    /// OpenHarmony access token id (per-process, /dev/access_token_id).
-    /// Inherited by fork children.
-    pub access_token: AtomicU64,
-    /// OpenHarmony foreground token id. NOT inherited (fork clears it).
-    pub access_ftoken: AtomicU64,
-
-    /// sigsuspend contract: the pre-suspend mask to reinstate when the
-    /// waited-for signal is delivered (Linux TIF_RESTORE_SIGMASK
-    /// equivalent — restoring it at EINTR return made the delivery filter
-    /// by the old mask, so the handler never ran; review syscallb-H-06).
-    pub sigmask_restore: u64,
-    pub sigmask_restore_valid: bool,
-
-    /// Futex waiter residency flag (perf-mm lane, 2026-10-31): set while
-    /// this task's waiter entry is linked into a futex bucket chain,
-    /// cleared by every unlink/free path. do_exit's futex_cleanup scans
-    /// the 512-bucket hash ONLY when this is set — the common task (never
-    /// parked on a futex at its last schedule, or one whose sleeper-side
-    /// return already unlinked it) skips 512 irqsave lock pairs per exit.
-    pub futex_wait_enqueued: AtomicBool,
-
-    /// Scheduling policy
-    policy: SchedPolicy,
-
-    /// Dynamic priority (0-139, higher value means lower priority)
-    /// - 0-99: Real-time processes
-    /// - 100-139: Normal processes
-    prio: i32,
-
-    /// Static priority (120 is default for normal processes)
-    static_prio: i32,
-
-    /// normal_prio: priority calculated from static_prio and scheduling policy
-    normal_prio: i32,
-
-    /// Remaining time slice
-    time_slice: u32,
-
-    /// CFS scheduling entity
+    /// Children list
     ///
-    /// Contains vruntime, weight and other CFS scheduling info.
-    /// pub(crate) so fair.rs can compute the entity-embedded timeline
-    /// node's container-of offset (grq-10ns intrusive rbtree).
-    pub(crate) sched_entity: crate::sched::entities::SchedEntity,
+    /// This is a list head, all children are linked here via their sibling field
+    pub children: ListHead,
 
-    /// RT scheduling priority (0-99, lower value = higher priority)
+    /// Sibling process list node
     ///
-    /// Only valid when policy is SCHED_FIFO or SCHED_RR
-    rt_priority: u32,
+    /// Used to link this process to parent's children list
+    pub sibling: ListHead,
 
-    /// RT run list node (for linking into RT priority queues)
+    /// Parent's children list head pointer (for next_sibling boundary check)
     ///
-    /// Used by the RT scheduler to link tasks at the same priority level
-    pub rt_run_list: crate::list::ListHead,
+    /// When process is added to parent, saves address of parent's children
+    /// Used by next_sibling() to detect list end
+    parent_children_head: *mut ListHead,
 
-    /// RT scheduling entity
-    ///
-    /// Contains time slice and other RT-specific scheduling info
-    rt_entity: crate::sched::entities::SchedRtEntity,
-
-    /// Deadline scheduling entity
-    ///
-    /// Contains deadline, runtime, period and other DL-specific info
-    dl_entity: crate::sched::entities::SchedDlEntity,
-
-    /// SCHED_RESET_ON_FORK request (set via sched_setscheduler/setattr):
-    /// forked children are reset to SCHED_OTHER/nice 0 and the request is
-    /// cleared in the child (Linux sched_reset_on_fork).
-    sched_reset_on_fork: core::sync::atomic::AtomicBool,
-
-    /// Kernel stack
-    /// TODO: Implement kernel stack allocation
-    kernel_stack: Option<*mut u8>,
-
-    /// Kernel stack bottom (for overflow detection)
-    kernel_stack_bottom: usize,
-
-    /// Fork child flag
-    /// If true, this is a child process created by fork, needs to restore from ret_from_fork
-    is_fork_child: core::sync::atomic::AtomicBool,
-
-    /// Fork child's PtRegs pointer
-    /// When is_fork_child is true, this pointer points to child's PtRegs
-    /// Scheduler will use this PtRegs to restore child state
-    fork_pt_regs: core::sync::atomic::AtomicU64,
+    /// Parent process
+    parent: Option<*const Task>,
 
     /// mm-slot lock — serializes the `address_space` Option<Arc> swap in
     /// set_address_space (exec / exit_mm / fork install) against foreign
@@ -1340,32 +1347,21 @@ pub struct Task {
     /// whole page-table teardown).
     mm_slot_lock: Spinlock<()>,
 
-    /// Address space (mm_struct)
-    /// None for kernel threads, Some for user processes
-    /// Use Arc for CLONE_VM sharing between threads
-    address_space: Option<alloc::sync::Arc<AddressSpace>>,
+    /// Exit code (valid in Zombie state)
+    exit_code: i32,
 
-    /// Active address space (active_mm)
-    ///
-    /// For user processes: active_mm == mm
-    /// For kernel threads: active_mm is borrowed address space (for accessing user memory)
-    active_mm: Option<*const AddressSpace>,
+    /// Signal delivered to the parent at this task's exit (clone/
+    /// clone3 `exit_signal`; Linux stores it on the task and uses it
+    /// in do_notify_parent — SIGCHLD unless the clone asked otherwise,
+    /// LTP clone301 expects a clone3(SIGUSR2) child to SIGUSR2 its
+    /// parent). 0 = no signal.
+    exit_signal: u8,
 
-    /// Architecture-specific thread state
-    ///
-    /// Stores FPU state, TLS pointer, etc.
-    pub thread: crate::arch::thread::ThreadStruct,
+    /// Signal that stopped the process (valid in Stopped state)
+    stop_signal: i32,
 
-    /// File descriptor table (files_struct)
-    /// Use Arc for CLONE_FILES sharing between threads
-    fdtable: Option<alloc::sync::Arc<FdTable>>,
-
-    /// Signal handling structure (signal_struct)
-    /// Use Arc for CLONE_SIGHAND sharing between threads
-    pub signal: Option<alloc::sync::Arc<SignalStruct>>,
-
-    /// Pending signals (pending)
-    pub pending: SigPending,
+    /// Whether WUNTRACED stop has already been reported to parent
+    pub stop_reported: core::sync::atomic::AtomicBool,
 
     /// Deferred-release marker (69th, the 105-family root cause): set
     /// on a reaped GROUP LEADER whose release_task could not drain its
@@ -1378,10 +1374,73 @@ pub struct Task {
     /// sweep_dead_threads. False on every normal task.
     pub release_deferred: core::sync::atomic::AtomicBool,
 
-    /// Signal mask (blocked)
+    /// sigsuspend contract: the pre-suspend mask to reinstate when the
+    /// waited-for signal is delivered (Linux TIF_RESTORE_SIGMASK
+    /// equivalent — restoring it at EINTR return made the delivery filter
+    /// by the old mask, so the handler never ran; review syscallb-H-06).
+    pub sigmask_restore: u64,
+
+    pub sigmask_restore_valid: bool,
+
+    /// Futex waiter residency flag (perf-mm lane, 2026-10-31): set while
+    /// this task's waiter entry is linked into a futex bucket chain,
+    /// cleared by every unlink/free path. do_exit's futex_cleanup scans
+    /// the 512-bucket hash ONLY when this is set — the common task (never
+    /// parked on a futex at its last schedule, or one whose sleeper-side
+    /// return already unlinked it) skips 512 irqsave lock pairs per exit.
+    pub futex_wait_enqueued: AtomicBool,
+
+    /// User space address to clear child TID (set_tid_address)
     ///
-    /// Used for sigprocmask syscall
-    pub sigmask: u64,
+    /// When process exits, kernel clears value at this address
+    /// Used for pthread thread synchronization
+    clear_child_tid: *mut i32,
+
+    /// Robust futex list head (set_robust_list)
+    ///
+    /// Used for robust mutex implementation
+    robust_list_head: *const u8,
+
+    robust_list_len: usize,
+
+    /// Wait queue for child process exit events
+    ///
+    /// Parent processes wait on this queue when calling wait4/waitpid
+    /// Child process exit wakes up parent via this queue
+    pub wait_chldexit: crate::process::wait::WaitQueueHead,
+
+    /// vfork parent task pointer
+    ///
+    /// When CLONE_VFORK is used, the child stores the parent's task pointer here.
+    /// The child wakes the parent when it calls execve() or _exit().
+    /// 0 = not a vfork child (or vfork already completed).
+    vfork_parent: core::sync::atomic::AtomicU64,
+
+    /// Fork child's PtRegs pointer
+    /// When is_fork_child is true, this pointer points to child's PtRegs
+    /// Scheduler will use this PtRegs to restore child state
+    fork_pt_regs: core::sync::atomic::AtomicU64,
+
+    /// OpenHarmony access token id (per-process, /dev/access_token_id).
+    /// Inherited by fork children.
+    pub access_token: AtomicU64,
+
+    /// OpenHarmony foreground token id. NOT inherited (fork clears it).
+    pub access_ftoken: AtomicU64,
+
+    /// Parent-death signal (0 = disabled)
+    pub pdeath_signal: u32,
+
+    /// SUID dumpable flag (0=SUID_DUMP_DISABLE, 1=SUID_DUMP_USER)
+    pub dumpable: u32,
+
+    /// Set at the first successful execve: once a process has exec'd, its
+    /// parent may no longer move it between process groups (Linux
+    /// sys_setpgid EACCES; LTP setpgid03).
+    execed: core::sync::atomic::AtomicBool,
+
+    /// Session ID
+    sid: u32,
 
     /// Process execution domain (personality(2)).
     ///
@@ -1400,85 +1459,6 @@ pub struct Task {
 
     /// Signal frame (kernel space backup)
     pub sigframe: Option<crate::signal::SignalFrame>,
-
-    /// Parent process
-    parent: Option<*const Task>,
-
-    /// Exit code (valid in Zombie state)
-    exit_code: i32,
-
-    /// Signal delivered to the parent at this task's exit (clone/
-    /// clone3 `exit_signal`; Linux stores it on the task and uses it
-    /// in do_notify_parent — SIGCHLD unless the clone asked otherwise,
-    /// LTP clone301 expects a clone3(SIGUSR2) child to SIGUSR2 its
-    /// parent). 0 = no signal.
-    exit_signal: u8,
-
-    /// Signal that stopped the process (valid in Stopped state)
-    stop_signal: i32,
-
-    /// Whether WUNTRACED stop has already been reported to parent
-    pub stop_reported: core::sync::atomic::AtomicBool,
-
-    /// Process name (comm), 16 bytes NUL-terminated
-    comm: [u8; 16],
-
-    /// Parent-death signal (0 = disabled)
-    pub pdeath_signal: u32,
-
-    /// SUID dumpable flag (0=SUID_DUMP_DISABLE, 1=SUID_DUMP_USER)
-    pub dumpable: u32,
-
-    /// Process group ID
-    pgid: u32,
-
-    /// Session ID
-    sid: u32,
-    /// Set at the first successful execve: once a process has exec'd, its
-    /// parent may no longer move it between process groups (Linux
-    /// sys_setpgid EACCES; LTP setpgid03).
-    execed: core::sync::atomic::AtomicBool,
-
-    /// Children list
-    ///
-    /// This is a list head, all children are linked here via their sibling field
-    pub children: ListHead,
-
-    /// Sibling process list node
-    ///
-    /// Used to link this process to parent's children list
-    pub sibling: ListHead,
-
-    /// Parent's children list head pointer (for next_sibling boundary check)
-    ///
-    /// When process is added to parent, saves address of parent's children
-    /// Used by next_sibling() to detect list end
-    parent_children_head: *mut ListHead,
-
-    /// User space address to clear child TID (set_tid_address)
-    ///
-    /// When process exits, kernel clears value at this address
-    /// Used for pthread thread synchronization
-    clear_child_tid: *mut i32,
-
-    /// Robust futex list head (set_robust_list)
-    ///
-    /// Used for robust mutex implementation
-    robust_list_head: *const u8,
-    robust_list_len: usize,
-
-    /// Wait queue for child process exit events
-    ///
-    /// Parent processes wait on this queue when calling wait4/waitpid
-    /// Child process exit wakes up parent via this queue
-    pub wait_chldexit: crate::process::wait::WaitQueueHead,
-
-    /// vfork parent task pointer
-    ///
-    /// When CLONE_VFORK is used, the child stores the parent's task pointer here.
-    /// The child wakes the parent when it calls execve() or _exit().
-    /// 0 = not a vfork child (or vfork already completed).
-    vfork_parent: core::sync::atomic::AtomicU64,
 
     /// Process heap boundary (brk)
     ///
@@ -1500,16 +1480,12 @@ pub struct Task {
     /// task_struct::ioprio (not yet fed into I/O scheduling decisions).
     ioprio: core::sync::atomic::AtomicI32,
 
-    /// Filesystem information (cwd, root, umask)
-    ///
-    /// Shared between threads when CLONE_FS is used
-    fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>,
-
     /// Executable file path
     ///
     /// Stores process's executable file path
     /// Used for /proc/self/exe etc.
     exe_path: alloc::boxed::Box<[u8]>,
+
     /// Per-process semaphore undo table.
     /// Records SEM_UNDO adjustments to be reversed on process exit.
     // pub (visibility tax of the rux-ipc flip): the sysv_sem policy's
@@ -1525,8 +1501,10 @@ pub struct Task {
     /// deadline==0 disarms. Atomics only — touched from scheduler_tick
     /// (IRQ context). POSIX: not inherited across fork, cleared on exec.
     pub itimer_virt: [AtomicU64; 2],
+
     /// ITIMER_PROF (SIGPROF) CPU-time state: (deadline_ns, interval_ns).
     pub itimer_prof: [AtomicU64; 2],
+
     /// ITIMER_REAL (SIGALRM) wall-clock state: (deadline_ns against the
     /// monotonic clock, interval_ns). deadline==0 disarms. Mirrored by
     /// the timer-wheel entry in itimer_ids[0]; this copy exists so
@@ -1550,100 +1528,23 @@ pub struct Task {
     /// scheduler_tick (IRQ context).
     cpu_time_last_sigxcpu: AtomicU64,
 
-    /// CPU-time accounting (kernel ticks, HZ per second). utime/stime are
-    /// this task's own user/system time, sampled in the timer IRQ from the
-    /// interrupted privilege mode (Linux account_process_tick style);
-    /// cutime/cstime accumulate the same counters of reaped children at
-    /// their exit. Read by /proc/[pid]/stat, times(2) and getrusage(2).
-    pub utime_ticks: AtomicU64,
-    pub stime_ticks: AtomicU64,
     pub cutime_ticks: AtomicU64,
+
     pub cstime_ticks: AtomicU64,
-    /// Context-switch counters (Linux's task->nvcsw / task->nivcsw).
-    /// A voluntary switch is one where the task went to sleep; an
-    /// involuntary one is where the task was preempted while still
-    /// runnable. Counted in the scheduler's context_switch and read by
-    /// /proc/[pid]/status (voluntary_ctxt_switches /
-    /// nonvoluntary_ctxt_switches).
-    pub nvcsw: AtomicU64,
-    pub nivcsw: AtomicU64,
-    /// Per-task scheduler statistics (the /proc/[pid]/schedstat
-    /// triple — T7 perf-support slice). runtime_ns accumulates on-cpu
-    /// time at every switch-away, wait_ns the runqueue wait at every
-    /// pick, timeslices counts real picks (a same-task repick after a
-    /// tick is NOT a new timeslice — Linux counts switches-to). The
-    /// two stamps (wait_start, exec_start) are written only under the
-    /// GRQ lock; the three counters are readable lock-free.
-    pub schedstat_runtime_ns: AtomicU64,
-    pub schedstat_wait_ns: AtomicU64,
-    pub schedstat_timeslices: AtomicU64,
-    pub schedstat_wait_start: AtomicU64,
-    pub schedstat_exec_start: AtomicU64,
-    /// 63rd session (strand-wall hunt): persistent per-task pick/wake
-    /// evidence, kept ON the task so no address-keyed side table can
-    /// steal it mid-strand (the 61st's 256-slot SKIP_HIST collided).
-    /// All writes are gated behind sched::sched_hist_armed()
-    /// (rux:fuxstuck (retired debug=fuxstuck)|schedtrace) and happen under the GRQ lock; the
-    /// census reads them lock-free. Ring entries pack
-    /// kind:4|why:8|jiffies:30|aux:22 (kind: 1=link 2=refuse 3=pick
-    /// 4=heal-claim 5=heal-oncpu; see sched::sched_hist_ring).
-    ///
-    /// The decisive pair is pick_n vs the exec clock: a strand victim
-    /// with pick_n == 0 and pick_visit_n == 0 was NEVER VISITED by a
-    /// pick (wall/stash class), while a growing pick_n over a frozen
-    /// exec clock is the picked-but-never-executes class (the R56d
-    /// lying-slot shape: next == prev fast-path repicks that never
-    /// restore the context).
-    pub pick_ring: [AtomicU64; 16],
-    /// Total events ever appended; the slot is (seq & 15).
-    pub pick_ring_seq: AtomicU64,
-    /// Pick-walk refusals of this task (a visit that ended in a skip).
-    pub pick_visit_n: AtomicU64,
-    /// Refusals per R76 reason code, indices 0..4 == why 1..5
-    /// (1 on_cpu, 2 foreign live claim, 3 affinity, 4 throttled,
-    /// 5 stale healed).
-    pub pick_refuse_why: [AtomicU64; 5],
-    /// Jiffies of the first refusal in the current strand episode
-    /// (0 = never refused since boot).
-    pub pick_first_refuse_jif: AtomicU64,
-    /// Times this task was picked (mark_picked_on_cpu), repicks
-    /// included.
-    pub pick_n: AtomicU64,
-    /// Jiffies of the last pick (0 = never picked).
-    pub pick_last_jif: AtomicU64,
-    /// Successful run-queue links (wake/fork/heal re-insert).
-    pub wake_n: AtomicU64,
-    /// Jiffies of the last link (0 = never linked since boot).
-    pub wake_last_jif: AtomicU64,
-    /// sched_clock() ns at the last link — the wait window opened at
-    /// enqueue and closed at pick (0 = closed/never opened).
-    pub wait_open_ns: AtomicU64,
-    /// Last link→pick wait, ns (diagnostic read).
-    pub wait_last_ns: AtomicU64,
-    /// Cumulative link→pick wait, ns (deltas between census bursts
-    /// give the per-phase wake-to-run cost the FFRT group pays).
-    pub wait_sum_ns: AtomicU64,
-    pub wait_max_ns: AtomicU64,
-    /// Page faults taken by this task in user mode (Linux's minflt).
-    /// Rux has no minor/major distinction — file-backed pages come
-    /// from the page cache, not from a fault-time disk read — so every
-    /// user fault is counted here and the major counter stays 0.
-    pub min_flt: AtomicU64,
-    /// Major page faults (Linux's majflt). Always 0 on Rux, see above.
-    pub maj_flt: AtomicU64,
+
     /// The task's start time in jiffies since boot (Linux's starttime,
     /// field 22 of /proc/[pid]/stat).
     pub start_jiffies: AtomicU64,
+
     /// RUSAGE_CHILDREN ru_maxrss (KB): max of reaped children's resident
     /// set at exit (Linux signal->cmaxrss). LTP getrusage03 requires the
     /// propagation (initial.children ~= 100MB after a 100MB consumer
     /// grandchild is reaped).
     pub cmaxrss_kb: AtomicU64,
+
     /// Resident set (KB) captured at THIS task's exit, before its mm is
     /// dropped — the value the parent folds into cmaxrss_kb.
     pub exit_maxrss_kb: AtomicU64,
-
-    // ==================== ptrace state (P1) ====================
 
     /// PID of the tracing process (0 = not traced). Deliberately a pid,
     /// NOT a Task pointer: a tracer that exits must never leave a
@@ -1664,33 +1565,38 @@ pub struct Task {
     /// Single-step state (PTRACE_SINGLESTEP): the instruction at ss_addr
     /// is displaced by an EBREAK; ss_saved_insn holds the original word.
     pub ss_addr: AtomicU64,
+
     pub ss_active: core::sync::atomic::AtomicBool,
+
     pub ss_saved_insn: AtomicU64,
 
     /// WCOREDUMP bookkeeping: a core file was written for this task's
     /// death (wait4 sets the 0x80 status bit when this is set).
     pub core_dumped: core::sync::atomic::AtomicBool,
 
-    // ==================== namespaces (U1c) ====================
-
     /// Mount namespace (None == initial namespace).
     pub ns_mount: Option<alloc::sync::Arc<crate::process::ns::MountNamespace>>,
+
     /// UTS namespace (None == initial namespace).
     pub ns_uts: Option<alloc::sync::Arc<crate::process::ns::UtsNamespace>>,
+
     /// IPC namespace (None == initial namespace; stub).
     pub ns_ipc: Option<alloc::sync::Arc<crate::process::ns::IpcNamespace>>,
-    /// PID namespace (None == initial namespace).
-    pub ns_pid: Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+
     /// PID namespace that future children are created in (unshare/setns
     /// CLONE_NEWPID target; None == same as ns_pid).
     pub ns_pid_for_children: Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+
     /// Network namespace (None == initial namespace; stub).
     pub ns_net: Option<alloc::sync::Arc<crate::process::ns::NetNamespace>>,
+
     /// User namespace (None == initial namespace; stub).
     pub ns_user: Option<alloc::sync::Arc<crate::process::ns::UserNamespace>>,
+
     /// PID of this task inside its pid namespace (== pid for the initial
     /// namespace; 1 for a CLONE_NEWPID namespace init).
     pub ns_local_pid: u32,
+
     /// Per-level pid numbers for every pid namespace STRICTLY between
     /// this task's own ns and the init ns — the reference struct pid's
     /// upid[] chain minus its two ends (own-ns pid is `ns_local_pid`;
@@ -1703,13 +1609,13 @@ pub struct Task {
         u32,
     )>,
 
-    // ==================== seccomp (U1c) ====================
-
     /// Seccomp mode: 0 = SECCOMP_MODE_DISABLED, 1 = STRICT, 2 = FILTER.
     pub seccomp_mode: AtomicU32,
+
     /// Loaded classic-BPF filter program (single program; loading a new one
     /// replaces it — Linux stacks filters, recorded divergence).
     pub seccomp_filter: Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
+
     /// no_new_privs attribute (PR_SET_NO_NEW_PRIVS, Linux task_struct::
     /// no_new_privs): when set, execve ignores setuid/setgid bits (and
     /// file capabilities) — the exec'd program runs with the same
@@ -1719,8 +1625,6 @@ pub struct Task {
     /// prctl, fork inheritance, and tests. Inherited across fork and
     /// exec (Linux semantics).
     pub no_new_privs: AtomicBool,
-
-    // ==================== cgroup v2 (U1b) ====================
 
     /// cgroup membership (Linux task_struct::cgroups analogue). NULL =
     /// implicit root — kernel threads and early-boot tasks carry no
@@ -1736,6 +1640,154 @@ pub struct Task {
     /// internal ELF mappings and brk never charge, so they never
     /// uncharge either (documented RSS-approximation simplification).
     cgroup_mem_charged: AtomicU64,
+
+    /// LASTSYS (stall hunts): the syscall this task most recently
+    /// ENTERED (nr + first two args). For a task parked inside a
+    /// blocking syscall (epoll_wait, binder ioctl, futex, slow fd read)
+    /// this names the call it is sleeping in — the global 2048-entry
+    /// forensic ring overwrites a parked waiter's record within
+    /// milliseconds under system-wide traffic, so per-task storage is
+    /// the only form that survives. Written at dispatch entry (Relaxed
+    /// stores); read by the DEBUG taskdump.
+    pub last_syscall_nr: core::sync::atomic::AtomicU32,
+
+    pub last_syscall_a0: AtomicU64,
+
+    pub last_syscall_a1: AtomicU64,
+
+    /// sc125 (Session P): ring of the last 8 FAILING syscalls (nr packed
+    /// low-16, errno high-16) for this task. The park decode needs the
+    /// pre-park failure tail — musl pthread_create maps the thread stack
+    /// BEFORE clone, so a failed mmap (ENOMEM/EAGAIN) means NO clone ever
+    /// reaches the kernel census; this latch is the only per-task record
+    /// that survives the system-wide ring's millisecond overwrite window.
+    /// Stored at dispatch EXIT when 0 > ret > -4096.
+    pub last_fails: [AtomicU32; 8],
+
+    pub last_fails_cur: core::sync::atomic::AtomicUsize,
+
+    /// sc135 (Session Q): a0/a1 companions for the fail ring, same index.
+    /// The park decode named the pre-park tail as nr167=-22 (prctl EINVAL)
+    /// x1-2 per child, but nr+errno alone cannot say WHICH option — and
+    /// OH may exercise a prctl option this kernel rejects but Linux
+    /// accepts. a0 = the option, a1 = the sub-op/arg.
+    pub last_fails_a0: [AtomicU64; 8],
+
+    pub last_fails_a1: [AtomicU64; 8],
+
+    /// 50th (crash-storm hunt): ring of the last 16 address-space edits
+    /// (mmap/mprotect/munmap/brk/mremap) issued by THIS task. Two words
+    /// per event:
+    ///   w0 = op(bits 0..8: 1 mmap, 2 mprotect, 3 munmap, 4 brk,
+    ///         5 mremap) | rc(bits 8..16, 0 = ok else errno)
+    ///         | addr(bits 16..64)
+    ///   w1 = len(bits 0..48) | prot/arg2(bits 48..56)
+    /// The mallocng crash family stamps a freshly-allocated group
+    /// through a pointer whose page sits in a VMA HOLE with no covering
+    /// mapping. Printed at USEGV time, this ring answers — in one boot —
+    /// whether the kernel itself returned that address (mmap placement/
+    /// insertion bug), removed its covering VMA (munmap overreach), or
+    /// never saw the address at all (userspace stale chain from
+    /// corrupted allocator state). Same storage discipline as
+    /// last_fails: Relaxed stores at dispatch exit, read only by the
+    /// fault printer.
+    pub mm_ops: [AtomicU64; 32],
+
+    pub mm_ops_cur: core::sync::atomic::AtomicUsize,
+
+    /// 50th (crash-storm hunt): set the first time this task issues
+    /// execve/execveat. A process LEADER that exits without it is a
+    /// failed spawn (the OH 337->588->589 chain forked, never execve'd,
+    /// and exited 512/0); do_exit prints its birth syscall window so the
+    /// killing call names itself. Threads never exec by design and are
+    /// excluded at the print site.
+    pub did_exec: core::sync::atomic::AtomicBool,
+
+    /// sc128 (Session P): ring of the last syscalls (nr only) for this
+    /// task — the park decode needs the final SUCCESS sequence too (what
+    /// the child does between the failed dlopen cascade and the cond
+    /// park: more mmaps? clone attempts? closes?). Stored at every
+    /// dispatch exit. sc135 (Session Q): deepened 12 -> 96 — sc129's
+    /// 12-deep ring showed only the clock_gettime retry loop, masking
+    /// everything the child did between the dlopen cascade and the park;
+    /// 96 covers the full pre-park tail unless the retry loop spins
+    /// >96 calls before the eternal WAIT entry.
+    pub last_calls: [AtomicU32; LAST_CALLS_LEN],
+
+    pub last_calls_cur: core::sync::atomic::AtomicUsize,
+
+    /// sc138 (Session Q): FILTERED ring (see INIT_CALLS_LEN) — the retry
+    /// loop noise skipped so the init sequence survives to the dump.
+    pub init_calls: [AtomicU32; INIT_CALLS_LEN],
+
+    pub init_a0: [AtomicU64; INIT_CALLS_LEN],
+
+    pub init_calls_cur: core::sync::atomic::AtomicUsize,
+
+    /// sc143: birth-window latch (see BIRTH_CALLS_LEN).
+    pub birth_calls: [AtomicU32; BIRTH_CALLS_LEN],
+
+    pub birth_a0: [AtomicU64; BIRTH_CALLS_LEN],
+
+    pub birth_done: core::sync::atomic::AtomicBool,
+
+    /// 63rd session (strand-wall hunt): persistent per-task pick/wake
+    /// evidence, kept ON the task so no address-keyed side table can
+    /// steal it mid-strand (the 61st's 256-slot SKIP_HIST collided).
+    /// All writes are gated behind sched::sched_hist_armed()
+    /// (rux:fuxstuck (retired debug=fuxstuck)|schedtrace) and happen under the GRQ lock; the
+    /// census reads them lock-free. Ring entries pack
+    /// kind:4|why:8|jiffies:30|aux:22 (kind: 1=link 2=refuse 3=pick
+    /// 4=heal-claim 5=heal-oncpu; see sched::sched_hist_ring).
+    ///
+    /// The decisive pair is pick_n vs the exec clock: a strand victim
+    /// with pick_n == 0 and pick_visit_n == 0 was NEVER VISITED by a
+    /// pick (wall/stash class), while a growing pick_n over a frozen
+    /// exec clock is the picked-but-never-executes class (the R56d
+    /// lying-slot shape: next == prev fast-path repicks that never
+    /// restore the context).
+    pub pick_ring: [AtomicU64; 16],
+
+    /// Total events ever appended; the slot is (seq & 15).
+    pub pick_ring_seq: AtomicU64,
+
+    /// Pick-walk refusals of this task (a visit that ended in a skip).
+    pub pick_visit_n: AtomicU64,
+
+    /// Refusals per R76 reason code, indices 0..4 == why 1..5
+    /// (1 on_cpu, 2 foreign live claim, 3 affinity, 4 throttled,
+    /// 5 stale healed).
+    pub pick_refuse_why: [AtomicU64; 5],
+
+    /// Jiffies of the first refusal in the current strand episode
+    /// (0 = never refused since boot).
+    pub pick_first_refuse_jif: AtomicU64,
+
+    /// Times this task was picked (mark_picked_on_cpu), repicks
+    /// included.
+    pub pick_n: AtomicU64,
+
+    /// Jiffies of the last pick (0 = never picked).
+    pub pick_last_jif: AtomicU64,
+
+    /// Successful run-queue links (wake/fork/heal re-insert).
+    pub wake_n: AtomicU64,
+
+    /// Jiffies of the last link (0 = never linked since boot).
+    pub wake_last_jif: AtomicU64,
+
+    /// sched_clock() ns at the last link — the wait window opened at
+    /// enqueue and closed at pick (0 = closed/never opened).
+    pub wait_open_ns: AtomicU64,
+
+    /// Last link→pick wait, ns (diagnostic read).
+    pub wait_last_ns: AtomicU64,
+
+    /// Cumulative link→pick wait, ns (deltas between census bursts
+    /// give the per-phase wake-to-run cost the FFRT group pays).
+    pub wait_sum_ns: AtomicU64,
+
+    pub wait_max_ns: AtomicU64,
 }
 
 /// One classic BPF instruction (struct sock_filter): { code, jt, jf, k }.
