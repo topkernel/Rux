@@ -450,9 +450,41 @@ fn acquire_emit_lock() -> bool {
 
 /// Console (UART) emission path for printk records.
 ///
-/// Uses the LOCK-FREE MMIO writer (putchar_no_lock), never the UART
-/// spinlock: printk can run with arbitrary locks held or in IRQ context.
-/// Re-entrancy is already excluded by the IN_PRINTK guard in the callers.
+/// CONSOLE-LOCK UNIFICATION (serial-interleave fix): the UART bytes of
+/// a printk record are pushed under the SAME `console::lock()` the
+/// direct console writers hold (the unit-test suite's `test_println`,
+/// the cov hex dump, `print::Console`) — acquired INSIDE this
+/// CONSOLE_EMIT_LOCK section, never the reverse. Before this, a printk
+/// record and a `console::lock()` holder were serialized by two
+/// DIFFERENT locks (EMIT lock vs UART spinlock) and interleaved
+/// MID-LINE on SMP boots (suite output vs the deferred-console drain:
+/// three observed garbles).
+///
+/// Why taking the UART spinlock here is safe, where the old "lock-free
+/// writer only" rule came from, and why that rule is obsolete HERE:
+///
+/// - The Rule-2 deferral (`printk_should_defer_output`) already
+///   guarantees this function's INLINE callers run in preemptible task
+///   context with IRQs on and no spinlock held; the drain callers (tick
+///   softirq, idle loop) hold nothing either. A printk from inside a
+///   `console::lock()` section is impossible to EMIT inline on the same
+///   CPU: the guard disables IRQs, so the deferral check routes it to
+///   the drain.
+/// - Same-CPU re-entry into a held UART lock is therefore excluded for
+///   every context this kernel takes: spinlock holders and IRQ/NMI/
+///   softirq contexts never reach this function's UART acquire (they
+///   deferred), and early boot (pre-`PRINTK_INITIALIZED`, always
+///   inline) has no `console::lock()` holder that calls printk.
+/// - Cross-CPU, the order is fixed: CONSOLE_EMIT_LOCK -> UART. No path
+///   acquires the emit lock while holding the UART lock (the direct
+///   writers write bytes only; the diagnostic ConsoleWriter family
+///   takes the EMIT lock with a bounded budget and writes locklessly,
+///   never under a UART guard).
+/// - The acquire is BOUNDED with the same context budgets as
+///   `acquire_emit_lock`: a holder can sit behind a KVM deschedule with
+///   IRQs off (the b140 class), so on timeout the console line is
+///   SKIPPED — the record is already in the ring buffer and the drain
+///   retries it; no context ever spins unboundedly on the UART here.
 fn emit_to_console(text: &[u8]) {
     if !acquire_emit_lock() {
         CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
@@ -475,8 +507,18 @@ fn emit_to_console(text: &[u8]) {
             n += 1;
         }
     }
-    let uart = crate::console::Uart::new();
-    uart.puts_batch(&buf[..n]);
+    let irq_ctx = crate::interrupt::preempt::in_interrupt();
+    let budget = if irq_ctx { EMIT_WAIT_IRQ } else { EMIT_WAIT_TASK };
+    match crate::console::try_lock_bounded(budget) {
+        Some(uart) => {
+            uart.puts_batch(&buf[..n]);
+        }
+        None => {
+            CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
+            CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
+            return; // record stays in the ring; the drain retries
+        }
+    }
     let emitted = n; // syscost probe
     crate::debug::syscost::note_printk_con(emitted); // syscost probe
     CONSOLE_EMIT_LOCK.store(false, Ordering::Release);

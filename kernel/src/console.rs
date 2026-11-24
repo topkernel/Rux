@@ -867,6 +867,31 @@ pub fn lock() -> SpinlockIrqGuard<'static, Uart> {
     UART.lock_irqsave()
 }
 
+/// Bounded acquire of the UART lock for printk's console-emit path
+/// (console-lock unification): a printk record's bytes and a direct
+/// `console::lock()` writer's bytes must serialize on THIS lock, so
+/// they can never interleave mid-line. printk-side discipline — the
+/// same bounded-acquire contract as printk's CONSOLE_EMIT_LOCK: a
+/// holder can sit behind a KVM deschedule with IRQs off (the b140
+/// wedge class), so the caller passes a context-derived budget in
+/// `read_time()` units and `None` on timeout means SKIP the console
+/// line (the record is in the printk ring; the drain retries), never
+/// spin unboundedly.
+pub fn try_lock_bounded(
+    budget_ticks: u64,
+) -> Option<SpinlockIrqGuard<'static, Uart>> {
+    let start = crate::arch::cpu::read_time();
+    loop {
+        if let Some(g) = UART.try_lock_irqsave() {
+            return Some(g);
+        }
+        if crate::arch::cpu::read_time().saturating_sub(start) >= budget_ticks {
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 /// Interrupt-safe character output (no lock)
 /// RAW DIAGNOSTIC OUTPUT GATE (user rule 2026-11-12): all hunt/trace
 /// instruments that write directly through putchar_no_lock / puts_no_lock

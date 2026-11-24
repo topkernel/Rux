@@ -28,17 +28,17 @@ FILE` owns one), and the gate fails on a drop that
 ## Totals
 
 - unsafe regions: **2018**
-- with artifact (non-GAP): **1959** (97.1%)
-- GAP: **59**
+- with artifact (non-GAP): **1965** (97.4%)
+- GAP: **53**
 - by kind: block=1786, unsafe-extern=6, unsafe-fn=97, unsafe-impl=129
 - by category (regions carry 0..n tags): ptr-ops=482, asm=267, volatile=152, raw-construct=31, addr-arith=28, no-preempt=14, ffi=10, static-mut=5, transmute=5, layout-meta=2
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1959**
-- recovered from reference versions: **0**
-- references consulted: HEAD
-- annotated regions, baseline -> this bank: **1959 -> 1959**
+- artifacts kept by id: **1962**
+- recovered from reference versions: **3** (same-file 3, edited-site 0, file-move 0, moved-item 0)
+- references consulted: HEAD, MERGE_HEAD, history:68ce91851, history:a396bfe9f, history:53ffadd8c, history:99c35ac30, history:679f2f6d9, history:b306738d4, history:234ba9d54, history:e1d3f7876, history:d453d070a, history:e497c5b5a, history:b0fbfcc2e, history:5ad692052, history:3613721eb, history:96f2848b1, history:c01487587, history:0c8feb835, history:2a071cdf2, history:ccb0cabf6, history:78d73d4f6, history:938f1b41d, history:1d70a7c7d, history:e00a6cc4e, history:e78a5858b, history:33aa88454, history:67293fdcb, history:0db1981fd, history:7008a1cb1, history:d754f9e12, history:ff2d5ddb5, history:4741d627f, history:3f3f85760, history:05fb38075, history:2deea9ed7, history:f1900270e, history:d84fee492, history:82575b3b0, history:3e276af08, history:9b50aaff4, history:76ebff8e0, history:1e20375ab, history:25890277e, history:f035c2899, history:74d365f3f, history:9655f809c, history:82a7a7d0f, history:e255599d1, history:59a3f909a, history:07f730e64, history:de0a6071a, history:a09e7ab08, history:b8389cc06, history:2ed1470aa, history:c55875dfe, history:c187e1c35, history:e64dcfd36, history:1e687d251, history:10c8dc368, history:015823366, history:d878cd32c, history:3208bc9bb, history:65960c4e0, history:d5f2a4b29, history:b9d69b73c, history:db2da4975, history:a557edd1b, history:ca1005987, history:368a855ed, history:1e1bd0494, history:8832e06c2, history:418a7238e, history:dfe6bab32, history:64620c9c7, history:70794b235, history:46eadfea4, history:1c36a7a3c, history:d8ece4b39, history:2fe07a5a3, history:045a9f3a2, history:8f82e1326, history:1d518a966, history:d969cb7e9, history:dbdafa0a8, history:00bafaf99, history:6709b12cb, history:361701a15, history:5727de2f9, history:98658ba3e
+- annotated regions, baseline -> this bank: **1966 -> 1965**
 
 ## Per-subsystem
 
@@ -53,7 +53,7 @@ FILE` owns one), and the gate fails on a drop that
 | mm | 98 | 98 | 0 |
 | process | 78 | 78 | 0 |
 | tests | 67 | 66 | 1 |
-| <top> | 64 | 56 | 8 |
+| <top> | 64 | 62 | 2 |
 | ipc | 57 | 52 | 5 |
 | safety | 55 | 51 | 4 |
 | perf | 40 | 40 | 0 |
@@ -2593,10 +2593,10 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 60 | fdt_u8 | block | - | GAP | `c8c82897b04a` |
-| 69 | fdt_add | block | - | GAP | `5d1145a0b740` |
-| 76 | fdt_u32 | block | ptr-ops | GAP | `781c8b36490d` |
-| 234 | get_cmdline | block | raw-construct | GAP | `d8260330a2b8` |
+| 60 | fdt_u8 | block | - | INV:INV-FDT-1 | `c8c82897b04a` |
+| 69 | fdt_add | block | - | INV:INV-FDT-1 | `5d1145a0b740` |
+| 76 | fdt_u32 | block | ptr-ops | INV:INV-FDT-1 | `781c8b36490d` |
+| 234 | get_cmdline | block | raw-construct | INV:INV-FDT-1 | `d8260330a2b8` |
 
 ### kernel/src/console.rs (8)
 
@@ -2609,7 +2609,7 @@ FILE` owns one), and the gate fails on a drop that
 | 436 | puts_batch | block | asm | INV:F14 | `b895ccab4e45` |
 | 633 | write_reg | block | - | INV:INV-MMIO-1 | `3893094c43f8` |
 | 639 | read_reg | block | - | INV:INV-MMIO-1 | `0365181130ff` |
-| 933 | uart_data_ready | block | asm | INV:F14 | `b6ebbce546dc` |
+| 958 | uart_data_ready | block | asm | INV:F14 | `a70c8d217875` |
 
 ### kernel/src/cov.rs (1)
 
@@ -2632,13 +2632,13 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 113 | load | block | raw-construct,ptr-ops | GAP | `d8cb6dd811bf` |
+| 113 | load | block | raw-construct,ptr-ops | INV:INV-FDT-1 | `d8cb6dd811bf` |
 
 ### kernel/src/lib.rs (1)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1818 | rust_main_impl | block | asm | GAP | `47b4809fbc48` |
+| 1818 | rust_main_impl | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `47b4809fbc48` |
 
 ### kernel/src/list.rs (7)
 
@@ -2659,7 +2659,7 @@ FILE` owns one), and the gate fails on a drop that
 | 111 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `7d9e01d58276` |
 | 130 | ring_rec | block | - | INV:INV-STATIC-CELL-1 | `49d3b72c6b32` |
 | 142 | ring_rec_mut | block | - | INV:INV-STATIC-CELL-1 | `7065f11b4033` |
-| 2133 | init_logger | block | - | INV:INV-FS-GLOBALSB-1 | `5e6b013d89f9` |
+| 2175 | init_logger | block | - | INV:INV-FS-GLOBALSB-1 | `45e572517639` |
 
 ### kernel/src/sbi.rs (2)
 
@@ -2699,8 +2699,8 @@ FILE` owns one), and the gate fails on a drop that
 |------|----|------|------------|----------|----|
 | 189 | input_debug_tick | block | transmute | GAP | `846d14318c63` |
 | 326 | ww_task_on_cpu | block | volatile,ptr-ops | GAP | `1fb5a3762f8e` |
-| 1523 | deliver_fired | block | - | INV:INV-KTASK-1 | `cbf09bed703a` |
-| 1548 | deliver_fired | block | - | INV:INV-KTASK-1 | `78219ec23ee1` |
+| 1528 | deliver_fired | block | - | INV:INV-KTASK-1 | `d2e6f4b5d9e9` |
+| 1553 | deliver_fired | block | - | INV:INV-KTASK-1 | `c9270c59c071` |
 
 ## ipc
 

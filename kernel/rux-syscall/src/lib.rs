@@ -580,6 +580,20 @@ pub fn register_all() {
         // (never issued as syscall numbers themselves).
         (1181, syscall::file::sys_utime),
         (1182, syscall::file::sys_sysfs),
+        // The same-pattern arms the State-B-final sweep mis-wired to
+        // occupied generic slots (poll->fsetxattr@7, select->dup@23,
+        // pause->mkdirat@34, alarm->linkat@37, getdents->getpriority@141,
+        // epoll_create/epoll_wait/utimes/futimesat->io_setup@0): their
+        // real handlers, at their own free slots.
+        (1183, syscall::misc::sys_poll),
+        (1184, syscall::misc::sys_select),
+        (1185, syscall::signal::sys_pause),
+        (1186, syscall::time::sys_alarm),
+        (1187, syscall::file::sys_getdents),
+        (1188, syscall::misc::sys_epoll_create),
+        (1189, syscall::misc::sys_epoll_wait),
+        (1190, syscall::file::sys_utimes),
+        (1191, syscall::file::sys_futimesat_native),
     ];
     static REGS: &[(usize, rux::syscall::dispatch::SyscallRegsFn)] = &[
         (0, syscall::signal::sys_rt_sigreturn),
