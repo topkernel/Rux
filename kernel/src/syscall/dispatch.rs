@@ -401,10 +401,20 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
         213 => {
             fixbl_note(5);
-            // epoll_create(size): Linux rejects size <= 0 with EINVAL.
-            // Slot 0 in the generic table is io_setup; route to the
-            // dedicated free-slot registration (1188).
-            let result = if (args[0] as i64) <= 0 {
+            // epoll_create(size): the reference reads `int size`
+            // (SYSCALL_DEFINE1(epoll_create, int, ...)) — the low 32
+            // bits, SIGNED. A libc that passes an int -1 through a
+            // variadic syscall() wrapper can leave the register
+            // ZERO-extended (0xffffffff), which an `as i64 > 0` check
+            // reads as 4294967295 and dispatches to the handler (LTP
+            // epoll_create02: "invalid retval 6" — a created fd where
+            // EINVAL was the contract; the pre-sweep code fell through
+            // to io_setup's ENOSYS instead, which LTP TCONF-skipped).
+            // Truncate to i32 first. Slot 0 in the generic table is
+            // io_setup; route to the dedicated free-slot registration
+            // (1188).
+            let size = args[0] as u32 as i32;
+            let result = if size <= 0 {
                 -(errno::EINVAL as i64)
             } else {
                 native_table_call(1188, args, regs) /* misc::sys_epoll_create */
