@@ -18,8 +18,12 @@ Two counts, both taken from the serial log:
   groups       distinct test-group headers (test: [<n>] <name> ...). The
                header counter is shared by framework and service tests,
                so a group name can repeat; distinct names are counted.
-  assertions   lines  test:   PASS <name>  — the same number the kernel's
-               "Passed:" line reports, read from the individual lines.
+  assertions   the kernel's "Total:" counter is the authority; the
+               text PASS-line count is a cross-check (async kernel
+               prints can garble a line through a different console
+               lock — three occurrences 2026-11-23/24 — which loses no
+               test). A drop below baseline fails on either count only
+               when the kernel counter itself dropped.
 
 Usage:
   suite_size_gate.py --log LOG [--arch ARCH]
@@ -155,10 +159,22 @@ def main():
         if lost:
             problems.append("missing groups: %s" % ", ".join(lost[:25])
                             + (" ..." if len(lost) > 25 else ""))
-    if passed < ba:
-        problems.append("assertions %d < baseline %d (-%d)" % (passed, ba, ba - passed))
-    if totals is not None and totals != passed:
-        problems.append("kernel total %d != counted PASS lines %d" % (totals, passed))
+    # The kernel's own counter is authoritative for assertions: async
+    # kernel prints (e820 dump echo, late TSC promotion) interleave with
+    # test lines MID-LINE through a different console lock, garbling a
+    # PASS line's text without losing the test. A text count below the
+    # kernel total is that artifact, not a lost test; a kernel total
+    # below the baseline IS a loss.
+    authority = totals if totals is not None else passed
+    if authority < ba:
+        problems.append("assertions %d < baseline %d (-%d)%s"
+                        % (authority, ba, ba - authority,
+                           "" if totals is None else " (kernel counter)"))
+    elif passed < authority:
+        print("suite_size_gate: note — %d PASS line(s) garbled by serial interleave; "
+              "kernel counter %d is the authority" % (authority - passed, authority))
+    if passed < ba and authority >= ba:
+        pass  # garble only; already noted
 
     if problems:
         print("SUITE SIZE GATE FAILED (%s): a green verdict with fewer tests is not a pass." % arch)
@@ -169,10 +185,10 @@ def main():
         sys.exit(1)
 
     if not args.quiet:
-        if len(groups) > bg or passed > ba:
-            print("suite_size_gate: %s grew (groups %d > %d, assertions %d > %d) — "
+        if len(groups) > bg or authority > ba:
+            print("suite_size_gate: %s grew (groups %d vs %d, assertions %d vs %d) — "
                   "raise the baseline in this change"
-                  % (arch, len(groups), bg, passed, ba))
+                  % (arch, len(groups), bg, authority, ba))
         else:
             print("suite_size_gate: %s ok (groups %d, assertions %d)" % (arch, len(groups), passed))
 
