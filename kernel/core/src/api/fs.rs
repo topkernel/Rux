@@ -531,3 +531,60 @@ pub fn populate_hooks() -> &'static LeafPopulateHooks {
 pub fn path_hooks() -> &'static LeafPathHooks {
     LEAF_PATH_HOOKS.get().unwrap_or(&LeafPathHooks::EMPTY)
 }
+
+// ---- LocksHooks: the locks-family cold rows (from fs/lock_hooks.rs) ----
+use crate::fs::locks::LockOwner;
+// The fcntl lock arms plus the slow release bodies the framework
+// half's count gates arm; the forwarding wrappers stay in
+// fs/lock_hooks.rs until pass 2 files them as hot-path code.
+/// The locks-family cold rows: the fcntl lock arms plus the slow
+/// release bodies the framework half's count gates arm. Signatures
+/// carry the family's native types (crate-plan §3a rule 3).
+#[derive(Clone, Copy)]
+pub struct LocksHooks {
+    // ---- slow release bodies (armed by the framework half's count
+    // gates; run only while locks/leases are actually held) ----
+    /// flock table release for a dying description (FLOCK_COUNT != 0).
+    pub flock_release_slow: fn(u64),
+    /// OFD record-lock release for a dying description.
+    pub ofd_release_slow: fn(u64),
+    /// POSIX close-event release for the closing tgid on an inode key.
+    pub posix_release_slow: fn((u64, u64)),
+    /// Lease release for a dying description (LEASE_COUNT != 0).
+    pub lease_release_slow: fn(u64),
+    /// The lease-break machinery (a conflicting lease exists).
+    pub break_lease_slow: fn(&crate::fs::inode::Inode, bool) -> Result<(), crate::errno::Errno>,
+    // ---- fcntl arms (cold: only lock-taking syscalls reach them) ----
+    /// F_GETLK conflict probe.
+    pub posix_test_lock: fn(&crate::fs::file::File, LockOwner, bool, u64, u64) -> Option<crate::fs::locks::LockConflict>,
+    /// F_SETLK/W core (kind is a F_*_KIND byte).
+    pub posix_set_lock: fn(&crate::fs::file::File, LockOwner, u8, u64, u64, bool) -> Result<(), crate::errno::Errno>,
+    /// F_SETLEASE / F_GETLEASE.
+    pub set_lease: fn(&crate::fs::file::File, i16) -> Result<(), crate::errno::Errno>,
+    pub get_lease: fn(&crate::fs::file::File) -> i16,
+}
+
+impl LocksHooks {
+    /// The pre-registration table: no locks exist without the crate, so
+    /// every slow body is a no-op and every setter reports EINVAL (the
+    /// pre-flip behavior of an unregistered family).
+    pub const EMPTY: LocksHooks = LocksHooks {
+        flock_release_slow: |_| {},
+        ofd_release_slow: |_| {},
+        posix_release_slow: |_| {},
+        lease_release_slow: |_| {},
+        break_lease_slow: |_, _| Ok(()),
+        posix_test_lock: |_, _, _, _, _| None,
+        posix_set_lock: |_, _, _, _, _, _| Err(crate::errno::Errno::InvalidArgument),
+        set_lease: |_, _| Err(crate::errno::Errno::InvalidArgument),
+        // F_UNLCK (i16): no lease is ever held.
+        get_lease: |_| 2,
+    };
+}
+
+pub static LOCKS_HOOKS: OnceSlot<LocksHooks> = OnceSlot::new();
+
+/// The service crate's registration entry (idempotent: first wins).
+pub fn register_locks_hooks(hooks: LocksHooks) {
+    let _ = LOCKS_HOOKS.publish(hooks);
+}

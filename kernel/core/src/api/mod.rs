@@ -8,10 +8,9 @@
 //! Tables that are filled at different boot points stay separate
 //! structs; nothing in this directory merges or fills a table.
 //!
-//! Not here: fs/file_hooks.rs, fs/notify_hooks.rs and fs/lock_hooks.rs
-//! stayed in fs/ when this directory was made. The first two hold no
-//! table (they forward to rows of `fs`); fs/lock_hooks.rs holds one,
-//! LocksHooks (nine rows), so this listing is one table short.
+//! Not here: fs/file_hooks.rs and fs/notify_hooks.rs hold no table (they
+//! forward to rows of `fs`). Every table is in this directory: 22 in 14
+//! files.
 
 pub mod arch;
 pub mod boot;

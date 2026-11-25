@@ -641,10 +641,20 @@ service's entire view of the core, so they are collected in one place:
 nineteen `*hooks.rs` files in eleven directories.
 
 The audit that matters most — what can a service crate do to the core —
-is then one directory listing. Three of the old files (`file_hooks`,
-`notify_hooks`, `lock_hooks`) held no table, only forwarding wrappers
-to an existing row; those wrappers move next to the row they forward
-to. Where one subsystem had two tables that are filled at different
+is then one directory listing: after the move, 22 tables in 14 files
+(`sched` 1, `mm` 2, `net` 1, `process` 4, `ipc` 2, `fs` 4, `ext4` 1,
+`drivers` 1, `debug` 1, `sync` 1, `arch` 1, `signal` 1, `timer` 1,
+`boot` 1).
+
+A file's name did not say whether it held a table. `file_hooks.rs` and
+`notify_hooks.rs` held none — only forwarding wrappers to rows of
+`FsHooks`. `lock_hooks.rs` did: `LocksHooks`, nine rows. An earlier
+draft of this section listed it with the other two; the lane that
+executed the move read the file and left it in place rather than
+follow the draft. Its table goes to `api/fs.rs` as a fifth struct; the
+forwarding wrappers beside it are called from the close and
+write-open paths, so they are hot-path code and find their file in
+pass 2. Where one subsystem had two tables that are filled at different
 boot points (`fs_hooks` in `rust_main`, `leaf_hooks` once the mount
 table exists — filling the second too early is the reboot loop of
 2026-11-23), the file holds two structs; they are not merged into one.
