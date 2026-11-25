@@ -587,45 +587,59 @@ Residual names that contradicted their crate are corrected in the same
 pass: `rux-sched/src/sched_policy/` (the crate dropped `-policy`; the
 directory did not), `rux-mm/src/mm_policy_*.rs`.
 
-### 2c.3 Inside the core: three files per subsystem, named for why the code is there
+### 2c.3 Inside the core: one unsafe.rs, one types.rs, and files the gate keeps free of unsafe
 
-Code stays in the core for exactly one of three reasons, and the file
-it lives in is named for that reason. The reason decides who audits
-it and with what:
+Code stays in the core for exactly one of three reasons. The reason
+decides who audits it and with what:
 
-| file | why the code is in the core | audited by |
+| why it is in the core | where it lives | audited by |
 |---|---|---|
-| `unsafe.rs` | it performs unsafe operations | the INV contracts, Kani, Miri |
-| `hotpath.rs` | a hot path calls it by name; moving it would make that call indirect | the pbench gate |
-| `types.rs` | a hot path reads its fields directly | the hot-field table (§4, Rung F1) |
+| it performs unsafe operations | `unsafe.rs` — one per subsystem | the INV contracts, Kani, Miri |
+| a hot path calls it by name; moving it would make that call indirect | the subsystem's topic files | the pbench gate |
+| a hot path reads its fields directly | `types.rs` | the hot-field table (§4, Rung F1) |
 
-The file is `hotpath.rs`, not `hot.rs`: `hot` alone is an adjective
-and does not say what the file is, and `hotpath` is the term this
-codebase already uses (`scripts/hotpath_print_check.py`, the hot-path
-print rule).
+An earlier draft of this section made the hot-path code one file,
+`hotpath.rs`, per subsystem. Measured on `sched`, that file would have
+held about 9,000 lines: the switch and pick paths together with the
+reclaim-drain, cgroup and scheduling-class logic, which are separate
+files today (`reapdrain.rs`, `cgroup.rs`, `class.rs`) and are found by
+those names. Merging them would have cost more in readability than the
+file name bought in clarity. So the hot-path code keeps its topic
+files, and the property that matters is checked rather than named:
+
+> **In every subsystem directory, no file other than `unsafe.rs`
+> contains `unsafe`.** A script in the build gate asserts it; a
+> violation fails the build.
 
 A reader looking for every place memory safety can be broken opens the
-`unsafe.rs` files and nothing else. A reader optimizing the switch
-path opens `hotpath.rs` and knows no unsafe is hidden in it.
+`unsafe.rs` files and nothing else. A reader of any other file in the
+directory knows, from the gate and not from its memory of the file
+list, that no unsafe is hidden in it.
 
-Three shapes, not one. A directory is filed by what it is, and the
-three-file split applies only to the first shape:
+Three shapes, not one. A directory is filed by what it is:
 
 1. **A subsystem with all three kinds of code** (`sched`, `mm`, `fs`,
-   `process`, `sync`, `ipc`, `drivers`, `net`, `debug`): the
-   three-file split below.
+   `process`, `sync`, `ipc`, `drivers`, `net`, `debug`): an
+   `unsafe.rs`, a `types.rs`, and the hot-path topic files.
 2. **A directory that is unsafe throughout** (`safety/`: eight files
-   of audited wrappers, `ptr.rs`, `dma.rs`, `bytes.rs`, …, each with
-   its INV contracts; the lock primitives inside `sync/`). It is one
-   `unsafe.rs` already, kept as several files by topic because one
-   file of 1,500 lines is harder to read than eight. Nothing in it is
-   hot-path code that a split would separate; the directory is
-   renamed `unsafe/` or its files are left as they are and the
-   gate (§2c.5) treats the directory as a unit.
+   of audited wrappers — `ptr.rs`, `dma.rs`, `bytes.rs`, … — each with
+   its INV contracts). It is one `unsafe.rs` already, kept as several
+   files by topic because one file of 1,500 lines is harder to read
+   than eight. The gate treats the directory as the subsystem's
+   `unsafe.rs`: nothing else may depend on it being a single file, and
+   no hot-path topic file is created in it.
 3. **A single small subsystem** (`interrupt`, `io_uring`, `perf`,
-   `trace`, `timer`, `module`, `security`): one file today. It is
-   not split into three for the sake of the pattern; its unsafe goes
-   to an `unsafe.rs` beside it in pass 3 and the rest keeps its name.
+   `trace`, `timer`, `module`, `security`): one or a few files, none of
+   them hot enough to be worth naming. They are not split for the sake
+   of the pattern; pass 3 gives each an `unsafe.rs` beside its file and
+   the gate then covers it like shape 1.
+
+The lock primitives (`sync/spinlock.rs`, `rwlock.rs`, `percpu.rs`,
+`seqlock.rs`) are shape 2 inside a shape-1 directory: their interiors
+are unsafe throughout and are the irreducible floor. Pass 3 files them
+as `sync/unsafe/…` or leaves them and lists them in the gate's
+allowance with the reason; which one is decided when that lane reads
+them, and the decision is recorded here.
 
 The arch directories are the irreducible floor (§2) and keep their
 per-architecture layout; their unsafe is collected per architecture
@@ -633,14 +647,14 @@ in pass 3.
 
 ```
 kernel/core/src/
-  sched/   unsafe.rs  hotpath.rs  types.rs
-  mm/      unsafe.rs  hotpath.rs  types.rs
-  sync/    unsafe.rs  hotpath.rs  types.rs
-  fs/      unsafe.rs  hotpath.rs  types.rs
+  sched/   unsafe.rs  types.rs  sched.rs  reapdrain.rs  cgroup.rs  class.rs
+  mm/      unsafe.rs  types.rs  <the allocator and VMA topic files>
+  sync/    unsafe.rs  types.rs  futex.rs  mutex.rs  …
+  fs/      unsafe.rs  types.rs  vfs.rs  bio.rs  page_cache.rs  …
   …        (shape 1: one directory per subsystem with code in the core)
-  safety/  ptr.rs  dma.rs  bytes.rs …  (shape 2: unsafe throughout)
+  safety/  ptr.rs  dma.rs  bytes.rs …   (shape 2: unsafe throughout)
   api/     sched.rs  mm.rs  fs.rs  …     (§2c.4)
-  printk.rs  console.rs  boot.rs  …       (cross-cutting: used by every subsystem)
+  printk.rs  console.rs  boot.rs  …      (cross-cutting: used by every subsystem)
 ```
 
 The subsystem directory keeps the subsystem's name, so the core and
@@ -692,9 +706,9 @@ contract number, mixed into logic. They are the ones the ledger audit found
 mis-annotated. After collection every unsafe construct in the core is
 in an `unsafe.rs`:
 
-- `hotpath.rs` and `types.rs` contain no `unsafe` at all;
-- a script in the build gate asserts it (`grep -L` for `unsafe` over
-  every `hotpath.rs`/`types.rs`), so the property cannot regress;
+- no file in a subsystem directory other than `unsafe.rs` contains
+  `unsafe` (§2c.3);
+- a script in the build gate asserts it, so the property cannot regress;
 - the core's unsafe count becomes `wc` over the `unsafe.rs` files,
   which is the number the ≤5,000-line target (§6) is measured against.
 
@@ -702,7 +716,7 @@ The collection is a rewrite, not a rename: each inline block becomes a
 function in `unsafe.rs` with an INV contract stating its precondition,
 and the call site uses the function. It is done subsystem by
 subsystem, each one its own lane with its own gates, and it does not
-move code out of the core — `hotpath.rs` code that used an inline
+move code out of the core — a topic file that used an inline
 `unsafe { *p }` now calls an `unsafe.rs` function instead. What leaves
 the core is decided separately, by the rules in §1a.2.
 
@@ -715,13 +729,15 @@ source file.
 1. **Rename and move** (mechanical): the crate names and directories
    of §2c.1, the flattened layouts of §2c.2, `kernel/src/` →
    `kernel/core/src/`, edge files → `unsafe.rs`, hook tables →
-   `api/`. No function body changes. Reference counts on main
+   `api/`. No function body changes. LANDED 2026-11-25 (passes 1a
+   and 1b; the compiled kernel identical in function symbols and
+   sizes on all three architectures). Reference counts on main
    8d7de77e8: 318 `rux::`, 84 `rux_xxx::`, 5,933 `crate::<subsystem>::`
    inside the crates.
-2. **Split each core subsystem into `unsafe.rs` / `hotpath.rs` /
-   `types.rs`** (file moves within a subsystem; the functions are
-   already where the previous pass left them). Per subsystem, its own
-   lane.
+2. **Give each shape-1 subsystem its `types.rs`** (the type
+   definitions move there from wherever they sit; `unsafe.rs` exists
+   after pass 1; the hot-path topic files keep their names). Per
+   subsystem, its own lane.
 3. **Collect the scattered unsafe** (§2c.5), per subsystem, its own
    lane, with the gate assertion added as soon as the first subsystem
    is clean.

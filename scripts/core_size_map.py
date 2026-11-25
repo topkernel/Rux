@@ -55,10 +55,11 @@ HOT_FILES = re.compile(
     # access, fault entry, thread/FPU state, per-CPU setup
     r"arch/[^/]+/(trap|context|cpu|uaccess|exception|thread|smp)\.rs"
     r"|arch/[^/]+/mm/(mmu_ops|exception)\.rs"
-    # the scheduler's mechanism
-    r"|sched/(sched|hotpath|unsafe)\.rs"
+    # the scheduler's mechanism (hot-path code keeps its topic files;
+    # the build gate, not a file name, keeps unsafe out of them)
+    r"|sched/(sched|unsafe)\.rs"
     # the VFS walk, the block layer, the page cache, the dcache
-    r"|fs/(vfs|bio|page_cache|dentry|buffer|file|hotpath|unsafe)\.rs"
+    r"|fs/(vfs|bio|page_cache|dentry|buffer|file|unsafe)\.rs"
     # the lock primitives and the per-CPU layer
     r"|sync/(spinlock|rwlock|percpu|seqlock|unsafe)\.rs"
     r"|interrupt/[^/]+\.rs"
