@@ -8,7 +8,7 @@ edition = "2021"
 # (READ/WRITE/FSYNC/CLOSE/FADVISE over the FileOps vtable), CQ wait,
 # and the three sys_io_uring_* entry points — compiled under
 # crate-level #![forbid(unsafe_code)]. The MECHANISM stays framework-
-# side in kernel/src/io_uring/: the ring regions and their
+# side in kernel/core/src/io_uring/: the ring regions and their
 # INV-IOURING-RING-1 window views, the lifecycle lock discipline
 # (pin_verified_ring / PinnedRing, INV-IOURING-PIN), the completion
 # path (post_cqe + eventfd signal — the wakeup path), mmap, and the
@@ -17,7 +17,7 @@ edition = "2021"
 # (ring_release_on_install_error, INV-IOURING-RING-2).
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 
 [features]
 default = ["riscv64"]

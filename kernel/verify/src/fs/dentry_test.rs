@@ -4,12 +4,12 @@
 //!
 //! DentryFlags and dentry_hash invariant tests.
 //!
-//! Types copied from: kernel/src/fs/dentry.rs
+//! Types copied from: kernel/core/src/fs/dentry.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/dentry.rs
+// Copied types from kernel/core/src/fs/dentry.rs
 // ============================================================================
 
 #[repr(C)]

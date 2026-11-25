@@ -5,7 +5,7 @@
 //! rux:hilogcensus — the CRATE half (root-cold lane, 2026-11-24): the
 //! unix-dgram send markers, the HilogMsg parser, the tag histogram,
 //! the sender tables and the periodic dump — physically moved from
-//! kernel/src/debug/hilogcensus.rs. The framework keeps the census
+//! kernel/core/src/debug/hilogcensus.rs. The framework keeps the census
 //! gate (on()), the boot compat arm, and the /dev/kmsg write marker
 //! (kmsg_write — called by name from printk.rs and the ext4 journal
 //! seam, both framework files); the kmsg table stays framework-side

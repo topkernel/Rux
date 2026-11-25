@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for IRQ domain identity mapping and revmap lookup.
-//! Copied from: kernel/src/interrupt/domain.rs
+//! Copied from: kernel/core/src/interrupt/domain.rs
 
 use proptest::prelude::*;
 

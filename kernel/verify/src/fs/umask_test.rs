@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for umask bit operations.
-//! Copied from: kernel/src/fs/fs_struct.rs
+//! Copied from: kernel/core/src/fs/fs_struct.rs
 
 use proptest::prelude::*;
 

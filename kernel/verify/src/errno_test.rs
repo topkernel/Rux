@@ -4,12 +4,12 @@
 //!
 //! Errno enum/constant consistency invariant tests.
 //!
-//! Types copied from: kernel/src/errno.rs
+//! Types copied from: kernel/core/src/errno.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/errno.rs
+// Copied types from kernel/core/src/errno.rs
 // ============================================================================
 
 #[repr(i32)]

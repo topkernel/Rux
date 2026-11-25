@@ -40,13 +40,13 @@ fn emit_linker_scripts() {
     // (repo-relative script path) per kernel target triple, in -T order.
     let scripts: &[&str] = if target.contains("x86_64-unknown-none") {
         &[
-            "kernel/src/arch/x86_64/linker.ld",
-            "kernel/src/arch/x86_64/linker-extra.ld",
+            "kernel/core/src/arch/x86_64/linker.ld",
+            "kernel/core/src/arch/x86_64/linker-extra.ld",
         ]
     } else if target.contains("riscv64gc-unknown-none-elf") {
-        &["kernel/src/arch/riscv64/linker.ld"]
+        &["kernel/core/src/arch/riscv64/linker.ld"]
     } else if target.contains("aarch64-unknown-none") {
-        &["kernel/src/arch/aarch64/linker.ld"]
+        &["kernel/core/src/arch/aarch64/linker.ld"]
     } else {
         return; // host/verify targets: no kernel link
     };
@@ -101,7 +101,7 @@ fn compile_boot_asm() {
         // assembler. The object must be elf64 to link into the kernel
         // image; the file itself starts in .code32 and switches to
         // .code64, so only the output format is selected here.
-        let boot_asm = PathBuf::from(&manifest_dir).join("../src/arch/x86_64/boot.S");
+        let boot_asm = PathBuf::from(&manifest_dir).join("../core/src/arch/x86_64/boot.S");
         if !boot_asm.exists() {
             return;
         }
@@ -133,7 +133,7 @@ fn compile_boot_asm() {
         // aarch64 boot: assembled with the cross toolchain like the riscv
         // branch (the object must be elf64 and land first in the link so
         // _start sits at the image head / physical load address).
-        let boot_asm = PathBuf::from(&manifest_dir).join("../src/arch/aarch64/boot/boot.S");
+        let boot_asm = PathBuf::from(&manifest_dir).join("../core/src/arch/aarch64/boot/boot.S");
         if !boot_asm.exists() {
             return;
         }
@@ -143,7 +143,7 @@ fn compile_boot_asm() {
         // boot loads no DTB and zeroes the argument registers). Runs on
         // EVERY invocation so a stale boot object can never skip it.
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-        let dtb_src = PathBuf::from(&manifest_dir).join("../src/arch/aarch64/virt.dtb");
+        let dtb_src = PathBuf::from(&manifest_dir).join("../core/src/arch/aarch64/virt.dtb");
         // Fresh-clone support: the blob is a build input git does not
         // carry (*.dtb is ignored). Regenerate from the installed QEMU —
         // the dump flags must mirror the boot driver's machine config
@@ -156,7 +156,7 @@ fn compile_boot_asm() {
                 .status().map(|s| s.success()).unwrap_or(false);
             assert!(
                 ok && dtb_src.exists(),
-                "kernel/src/arch/aarch64/virt.dtb missing and could not be dumped: \
+                "kernel/core/src/arch/aarch64/virt.dtb missing and could not be dumped: \
                  install qemu-system-aarch64 or place the blob there"
             );
             println!("cargo:warning=generated aarch64 virt.dtb from the installed QEMU");
@@ -213,7 +213,7 @@ fn compile_boot_asm() {
     }
 
     let boot_asm = PathBuf::from(&manifest_dir)
-        .join("../src/arch/riscv64/boot.S");
+        .join("../core/src/arch/riscv64/boot.S");
 
     if !boot_asm.exists() {
         return;

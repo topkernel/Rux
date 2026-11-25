@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for PCI config offsets and BAR type detection.
 //!
-//! Types copied from: kernel/src/drivers/pci/mod.rs
+//! Types copied from: kernel/core/src/drivers/pci/mod.rs
 
 #![cfg(kani)]
 

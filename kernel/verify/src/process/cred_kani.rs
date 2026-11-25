@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for Cred (process credentials) initialization.
 //!
-//! Types copied from: kernel/src/process/task.rs
+//! Types copied from: kernel/core/src/process/task.rs
 
 #![cfg(kani)]
 

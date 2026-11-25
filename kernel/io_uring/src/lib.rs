@@ -1,7 +1,7 @@
 //! The IO_URING SERVICE CRATE (cold-four lane): the syscall-context
 //! policy half of io_uring under a crate-level unsafe-deny boundary.
 //!
-//! What stayed in the framework (kernel/src/io_uring/) and why:
+//! What stayed in the framework (kernel/core/src/io_uring/) and why:
 //! - the ring regions + the INV-IOURING-RING-1 window views (sq_hdr /
 //!   cq_hdr / sqe_at / cqe_write — unsafe, user-shared memory);
 //! - the lifecycle discipline (LIFECYCLE_LOCK, pin_verified_ring /

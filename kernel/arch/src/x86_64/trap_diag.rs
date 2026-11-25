@@ -1,5 +1,5 @@
 //! The x86_64 trap-path forensic/report halves (arch-cold lane):
-//! everything here MOVED from kernel/src/arch/x86_64/trap.rs — the
+//! everything here MOVED from kernel/core/src/arch/x86_64/trap.rs — the
 //! fatal-fault death reports (fatal user #GP/#PF: the register/VMA/
 //! stack-word decode, the failing-syscall tail, the per-tgid mm-op
 //! rings), the cross-stack scribble foreign-entry report, the

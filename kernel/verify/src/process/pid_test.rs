@@ -4,12 +4,12 @@
 //!
 //! PID bitmap allocator invariant tests.
 //!
-//! Types copied from: kernel/src/process/pid.rs
+//! Types copied from: kernel/core/src/process/pid.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/process/pid.rs
+// Copied types from kernel/core/src/process/pid.rs
 // ============================================================================
 
 pub const PID_MAX_DEFAULT: u32 = 4096;

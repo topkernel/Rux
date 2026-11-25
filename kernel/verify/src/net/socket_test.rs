@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for socket address and protocol constants.
-//! Copied from: kernel/src/net/socket.rs
+//! Copied from: kernel/core/src/net/socket.rs
 
 use proptest::prelude::*;
 

@@ -7,7 +7,7 @@
 //!
 //! Logic re-copied from:
 //! - kernel/verify/src/arch/riscv64/mm/uaccess_test.rs (which mirrors
-//!   kernel/src/arch/riscv64/uaccess.rs)
+//!   kernel/core/src/arch/riscv64/uaccess.rs)
 //!
 //! The chunk-loop harness replaces the extable leaf primitive with a
 //! NONDETERMINISTIC fault pattern: Kani proves the loop stays in bounds
@@ -17,7 +17,7 @@
 #![cfg(kani)]
 
 // ============================================================================
-// Copied logic (kernel/src/arch/riscv64/uaccess.rs + memory_layout.rs)
+// Copied logic (kernel/core/src/arch/riscv64/uaccess.rs + memory_layout.rs)
 // ============================================================================
 
 const USER_START: usize = 0x0000_0000;

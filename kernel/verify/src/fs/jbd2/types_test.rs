@@ -4,13 +4,13 @@
 //!
 //! JBD2 journal on-disk header and tag arithmetic invariant tests.
 //!
-//! Types copied from: kernel/src/fs/jbd2/types.rs
+//! Types copied from: kernel/core/src/fs/jbd2/types.rs
 
 use proptest::prelude::*;
 use std::mem::size_of;
 
 // ============================================================================
-// Copied types from kernel/src/fs/jbd2/types.rs
+// Copied types from kernel/core/src/fs/jbd2/types.rs
 // ============================================================================
 
 pub const JBD2_MAGIC_NUMBER: u32 = 0xC03B3998;

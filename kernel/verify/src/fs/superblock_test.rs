@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for VFS superblock flags invariants.
-//! Copied from: kernel/src/fs/superblock.rs
+//! Copied from: kernel/core/src/fs/superblock.rs
 
 use proptest::prelude::*;
 

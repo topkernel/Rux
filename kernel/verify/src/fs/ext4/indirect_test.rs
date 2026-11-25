@@ -4,12 +4,12 @@
 //!
 //! ext4 indirect block mapping invariant tests.
 //!
-//! Types copied from: kernel/src/fs/ext4/indirect.rs
+//! Types copied from: kernel/core/src/fs/ext4/indirect.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/ext4/indirect.rs
+// Copied types from kernel/core/src/fs/ext4/indirect.rs
 // ============================================================================
 
 pub const POINTERS_PER_BLOCK: usize = 1024;

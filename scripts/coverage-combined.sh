@@ -46,7 +46,7 @@ echo "=== Combined report ==="
     -instr-profile="$OUT_DIR/combined.profdata" --summary-only \
     > "$OUT_DIR/cov.json"
 python3 scripts/coverage_summary.py "$OUT_DIR/cov.json" \
-    $(find kernel/src -name '*.rs' | sort) | tee "$OUT_DIR/report.txt"
+    $(find kernel/core/src -name '*.rs' | sort) | tee "$OUT_DIR/report.txt"
 
 if [ "${1:-}" = "--record" ]; then
     mkdir -p docs/development

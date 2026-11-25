@@ -16,7 +16,7 @@ edition = "2021"
 # them directly, zero indirection).
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 debug = { path = "../debug", default-features = false }
 # The deeper fs leaf (rung 5): the merged fs view re-exports ext4+jbd2
 # so the syscall crate's crate::fs::ext4 paths stay valid (the

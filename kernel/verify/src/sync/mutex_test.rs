@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Sleeping-mutex (SleepMutex) protocol invariant tests.
-//! Mirrors the state machine of: kernel/src/sync/mutex.rs
+//! Mirrors the state machine of: kernel/core/src/sync/mutex.rs
 //!
 //! The kernel primitive parks on a wait queue (schedule/timer machinery
 //! that cannot run under std); this mirror models the part where the

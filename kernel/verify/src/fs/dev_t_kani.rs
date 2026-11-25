@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for device number packing/unpacking.
 //!
-//! Types copied from: kernel/src/fs/dev_t.rs
+//! Types copied from: kernel/core/src/fs/dev_t.rs
 
 #![cfg(kani)]
 

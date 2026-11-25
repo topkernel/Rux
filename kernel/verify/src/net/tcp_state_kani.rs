@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for TCP state machine and header constants.
 //!
-//! Types copied from: kernel/src/net/tcp.rs
+//! Types copied from: kernel/core/src/net/tcp.rs
 
 #![cfg(kani)]
 

@@ -82,7 +82,7 @@ if [ ! -f "$BZIMAGE" ]; then
 fi
 
 echo "kernel: $BZIMAGE ($(stat -c '%s bytes, built %y' "$BZIMAGE"))"
-if [ -n "$(find "$WT/kernel/src" "$WT/kernel/build.rs" "$WT/Cargo.toml" \
+if [ -n "$(find "$WT/kernel/core/src" "$WT/kernel/core/build.rs" "$WT/kernel/core/Cargo.toml" \
             -newer "$BZIMAGE" -print -quit 2>/dev/null)" ]; then
     echo "WARNING: $BZIMAGE is OLDER than the kernel sources — this is a" >&2
     echo "         STALE kernel binary; the boot will not show the current" >&2

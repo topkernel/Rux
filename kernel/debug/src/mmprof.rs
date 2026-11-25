@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The mmprof REPORT half (moved from kernel/src/debug/mmprof.rs,
+//! The mmprof REPORT half (moved from kernel/core/src/debug/mmprof.rs,
 //! crate-flip rung debug): the mmprofd dump kthread and the rotating
 //! MMPROF-A/B/C report lines. The add/bump/now/bucket_len/bump_comm
 //! record markers, their STATS/SCALARS/BUCKETS/COMMS statics and the

@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for IP checksum (RFC 1071).
 //!
-//! Types copied from: kernel/src/net/ipv4/checksum.rs
+//! Types copied from: kernel/core/src/net/ipv4/checksum.rs
 
 #![cfg(kani)]
 

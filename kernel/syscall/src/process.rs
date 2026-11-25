@@ -4384,7 +4384,7 @@ pub fn sys_kcmp(args: SyscallArgs) -> i64 {
 /// sys_finit_module - Load kernel module from file descriptor
 ///
 /// U2 kmod support: reads the blob from the fd and registers it in the
-/// module table (no relocation/execution — see kernel/src/module/mod.rs).
+/// module table (no relocation/execution — see kernel/core/src/module/mod.rs).
 /// This is the syscall kmod's modprobe actually issues at udev coldboot.
 pub fn sys_finit_module(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
@@ -4648,7 +4648,7 @@ fn process_vm_rw_locked(
 ///
 /// PERF_TYPE_SOFTWARE cpu-clock/task-clock sampling (sample_period +
 /// PERF_SAMPLE_IP records via read(2)). The validation, event table
-/// and record layout live in `kernel/src/perf/mod.rs`.
+/// and record layout live in `kernel/core/src/perf/mod.rs`.
 pub fn sys_perf_event_open(args: SyscallArgs) -> i64 {
     crate::perf::sys_perf_event_open(args)
 }

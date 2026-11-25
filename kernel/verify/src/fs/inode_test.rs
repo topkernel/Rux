@@ -4,12 +4,12 @@
 //!
 //! InodeMode file type/permission classifier and inode_hash invariant tests.
 //!
-//! Types copied from: kernel/src/fs/inode.rs
+//! Types copied from: kernel/core/src/fs/inode.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/inode.rs
+// Copied types from kernel/core/src/fs/inode.rs
 // ============================================================================
 
 pub type Ino = u64;

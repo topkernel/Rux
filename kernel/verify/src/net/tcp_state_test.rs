@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for TCP state machine and header constants.
-//! Copied from: kernel/src/net/tcp.rs
+//! Copied from: kernel/core/src/net/tcp.rs
 
 use proptest::prelude::*;
 

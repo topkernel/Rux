@@ -12,16 +12,16 @@
 //! admit kernel-space or wrapping ranges.
 //!
 //! Logic copied from:
-//! - kernel/src/arch/riscv64/uaccess.rs (access_ok, MAX_RW_COUNT)
-//! - kernel/src/arch/riscv64/mm/memory_layout.rs (USER_START/USER_END,
+//! - kernel/core/src/arch/riscv64/uaccess.rs (access_ok, MAX_RW_COUNT)
+//! - kernel/core/src/arch/riscv64/mm/memory_layout.rs (USER_START/USER_END,
 //!   TASK_SIZE, KERNEL_LINK_ADDR)
-//! - kernel/src/syscall/io.rs (clamp_rw_count)
+//! - kernel/core/src/syscall/io.rs (clamp_rw_count)
 //! When the kernel versions change, these copies must be updated.
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied constants (kernel/src/arch/riscv64/mm/memory_layout.rs)
+// Copied constants (kernel/core/src/arch/riscv64/mm/memory_layout.rs)
 // ============================================================================
 
 /// Sv39: PGDIR_SIZE = 1 GiB, PTRS_PER_PGD = 512, user half = 256 GiB.
@@ -36,7 +36,7 @@ pub const KERNEL_LINK_ADDR: usize = 0xffff_ffff_8000_0000;
 const _: () = assert!(USER_END < KERNEL_LINK_ADDR);
 
 // ============================================================================
-// Copied logic (kernel/src/arch/riscv64/uaccess.rs)
+// Copied logic (kernel/core/src/arch/riscv64/uaccess.rs)
 // ============================================================================
 
 pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
@@ -53,7 +53,7 @@ pub fn access_ok(addr: usize, size: usize) -> bool {
 }
 
 // ============================================================================
-// Copied logic (kernel/src/syscall/io.rs)
+// Copied logic (kernel/core/src/syscall/io.rs)
 // ============================================================================
 
 pub fn clamp_rw_count(count: usize) -> usize {
@@ -196,7 +196,7 @@ proptest! {
 }
 
 // ============================================================================
-// Copied logic (kernel/src/arch/riscv64/uaccess.rs) — the typed and
+// Copied logic (kernel/core/src/arch/riscv64/uaccess.rs) — the typed and
 // string accessors. Bodies are text-faithful; the extable-backed leaf
 // primitives (__copy_from_user / copy_from_user / copy_to_user) are
 // replaced by the model below so the loop/gate logic runs on the host.
@@ -344,7 +344,7 @@ unsafe fn __copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     copy_from_user(to, from, n)
 }
 
-// --- text-faithful mirror of kernel/src/arch/riscv64/uaccess.rs ---
+// --- text-faithful mirror of kernel/core/src/arch/riscv64/uaccess.rs ---
 
 /// Mirror of kernel get_user (riscv64/uaccess.rs).
 #[inline]

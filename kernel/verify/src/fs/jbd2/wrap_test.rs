@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for JBD2 wrap_block arithmetic and journal space calculations.
-//! Copied from: kernel/src/fs/jbd2/recovery.rs, kernel/src/fs/jbd2/commit.rs, kernel/src/fs/jbd2/checkpoint.rs
+//! Copied from: kernel/core/src/fs/jbd2/recovery.rs, kernel/core/src/fs/jbd2/commit.rs, kernel/core/src/fs/jbd2/checkpoint.rs
 
 use proptest::prelude::*;
 

@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for kernel memory layout arithmetic.
-//! Copied from: kernel/src/mm/layout.rs
+//! Copied from: kernel/core/src/mm/layout.rs
 
 use proptest::prelude::*;
 

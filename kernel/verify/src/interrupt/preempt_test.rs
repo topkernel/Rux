@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for preempt counter bitfield masks and context queries.
-//! Copied from: kernel/src/interrupt/preempt.rs
+//! Copied from: kernel/core/src/interrupt/preempt.rs
 
 use proptest::prelude::*;
 

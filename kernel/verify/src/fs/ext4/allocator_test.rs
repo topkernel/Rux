@@ -4,12 +4,12 @@
 //!
 //! ext4 bitmap scanner invariant tests.
 //!
-//! Types copied from: kernel/src/fs/ext4/allocator.rs
+//! Types copied from: kernel/core/src/fs/ext4/allocator.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/ext4/allocator.rs
+// Copied types from kernel/core/src/fs/ext4/allocator.rs
 // ============================================================================
 
 /// Find a free bit in a block bitmap.

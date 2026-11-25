@@ -47,17 +47,17 @@ BASELINE = os.path.join(ROOT, "scripts", "hotpath_print_baseline.txt")
 
 # Files whose print sites sit on syscall/fault/sched/IPC/alloc hot paths.
 HOT_FILES = [
-    "kernel/src/sync/futex.rs",
-    "kernel/src/ipc/binder.rs",
-    "kernel/src/syscall/process.rs",
-    "kernel/src/syscall/file.rs",
-    "kernel/src/syscall/memory.rs",
-    "kernel/src/mm/page_alloc.rs",
-    "kernel/src/mm/pglist.rs",
-    "kernel/src/signal.rs",
-    "kernel/src/sched/sched.rs",
-    "kernel/src/arch/riscv64/trap.rs",
-    "kernel/src/arch/x86_64/trap.rs",
+    "kernel/core/src/sync/futex.rs",
+    "kernel/core/src/ipc/binder.rs",
+    "kernel/core/src/syscall/process.rs",
+    "kernel/core/src/syscall/file.rs",
+    "kernel/core/src/syscall/memory.rs",
+    "kernel/core/src/mm/page_alloc.rs",
+    "kernel/core/src/mm/pglist.rs",
+    "kernel/core/src/signal.rs",
+    "kernel/core/src/sched/sched.rs",
+    "kernel/core/src/arch/riscv64/trap.rs",
+    "kernel/core/src/arch/x86_64/trap.rs",
 ]
 
 # Printing macros that reach the UART at the default console loglevel (6).

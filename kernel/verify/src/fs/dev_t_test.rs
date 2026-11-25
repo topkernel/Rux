@@ -4,12 +4,12 @@
 //!
 //! Device number packing/unpacking invariant tests.
 //!
-//! Types copied from: kernel/src/fs/dev_t.rs
+//! Types copied from: kernel/core/src/fs/dev_t.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/dev_t.rs
+// Copied types from kernel/core/src/fs/dev_t.rs
 // ============================================================================
 
 #[repr(C)]

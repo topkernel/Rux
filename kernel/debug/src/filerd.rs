@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The filerd REPORT half (moved from kernel/src/debug/filerd.rs,
+//! The filerd REPORT half (moved from kernel/core/src/debug/filerd.rs,
 //! crate-flip rung debug): the /proc/filerd renderer and the TSC
 //! self-calibration. The counters (pub statics) and the on/now/charge/
 //! note_miss record fns stay framework-side (ext4 read path). Body

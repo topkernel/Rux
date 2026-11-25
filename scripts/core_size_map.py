@@ -50,7 +50,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "docs", "development", "core-size")
 
 HOT_FILES = re.compile(
-    r"kernel/src/("
+    r"kernel/core/src/("
     r"arch/[^/]+/(trap|context|cpu|uaccess|exception|mm/mmu_ops|mm/exception|thread|smp)\.rs"
     r"|sched/(sched|edges)\.rs"
     r"|fs/(vfs|bio|page_cache|dentry|buffer|file)\.rs"
@@ -78,7 +78,7 @@ NESTED = {"fs", "drivers", "mm", "arch", "process", "ipc", "sched", "debug",
 
 # Directories under kernel/ that hold the service crates plus the
 # composition bin — every crate that calls into the core from outside
-# kernel/src. Named one by one on purpose: a `kernel/rux-*` glob used to
+# kernel/core/src. Named one by one on purpose: a `kernel/rux-*` glob used to
 # stand here, and a renamed crate would have dropped out of the scan
 # without a word.
 SERVICE_DIRS = ("arch", "bin", "debug", "drivers", "ext4", "fs", "io_uring",
@@ -113,7 +113,7 @@ records why.
 
 
 def main():
-    src = os.path.join(ROOT, "kernel", "src")
+    src = os.path.join(ROOT, "kernel", "core", "src")
     files = [f for f in glob.glob(os.path.join(src, "**", "*.rs"), recursive=True)
              if "ksyms_generated" not in f and os.sep + "tests" + os.sep not in f]
     texts = {p: strip(open(p, errors="replace").read()) for p in files}

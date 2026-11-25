@@ -62,25 +62,25 @@ pub use ::ext4::{ext4, jbd2};
 // the syscall crate's merged view (`pub use fs;`) resolves through it.
 pub use rux::fs::*;
 
-// Service-internal tests live CENTRALLY in kernel/src/tests/services/
+// Service-internal tests live CENTRALLY in kernel/core/src/tests/services/
 // (the project test-location rule); compiled here for crate visibility.
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/pipe2_test.rs"]
+#[path = "../../core/src/tests/services/pipe2_test.rs"]
 pub mod pipe2_test;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/initrd_test.rs"]
+#[path = "../../core/src/tests/services/initrd_test.rs"]
 pub mod initrd_test;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/rootfs_test.rs"]
+#[path = "../../core/src/tests/services/rootfs_test.rs"]
 pub mod rootfs_test;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/tmpfs_test.rs"]
+#[path = "../../core/src/tests/services/tmpfs_test.rs"]
 pub mod tmpfs_test;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/tmpfs_mknod_test.rs"]
+#[path = "../../core/src/tests/services/tmpfs_mknod_test.rs"]
 pub mod tmpfs_mknod_test;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/procfs_test.rs"]
+#[path = "../../core/src/tests/services/procfs_test.rs"]
 pub mod procfs_test;
 
 /// The guest-test entry (make test): the framework's run_all_tests

@@ -3,7 +3,7 @@
 //! diagnostic/forensic family (src/futex_diag.rs) and the condvar
 //! (zero framework users, zero unsafe).
 //!
-//! What stays framework-side (kernel/src/sync/ — the lane's stay
+//! What stays framework-side (kernel/core/src/sync/ — the lane's stay
 //! verdicts, each recorded in the lane report):
 //! - the futex MECHANISM (wait/wake/requeue/do_futex/sys_futex_handler,
 //!   the waiter pool, the hash buckets) and futex_stuck_census (the
@@ -18,7 +18,7 @@
 //!   from the staying do_futex; the PI protocol on the wake path).
 //!
 //! The framework reaches THIS crate through the SyncDiagHooks table
-//! (kernel/src/sync/sync_diag_hooks.rs — 16 cold rows; the do_futex /
+//! (kernel/core/src/sync/sync_diag_hooks.rs — 16 cold rows; the do_futex /
 //! census latch sites are arm-gated, the S1 pattern). Sibling service
 //! crates (ipc binder_diag, process exit_teardown) reach the
 //! moved functions DIRECTLY at their historical crate::futex::X
@@ -66,7 +66,7 @@ pub mod futex {
 // the test module's `super::` imports expect them (the service-test
 // seam contract).
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/futex_test.rs"]
+#[path = "../../core/src/tests/services/futex_test.rs"]
 pub mod futex_test;
 #[cfg(feature = "unit-test")]
 pub use rux::tests::{test_pass, test_fail, test_group_start};

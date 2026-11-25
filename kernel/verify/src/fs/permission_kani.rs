@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for Unix DAC permission check.
 //!
-//! Types copied from: kernel/src/fs/permission.rs
+//! Types copied from: kernel/core/src/fs/permission.rs
 
 #![cfg(kani)]
 

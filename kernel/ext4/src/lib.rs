@@ -52,8 +52,8 @@ pub fn run_unit_tests() {
     crate::tests::run_all();
 }
 
-// Service-internal tests live CENTRALLY in kernel/src/tests/services/
+// Service-internal tests live CENTRALLY in kernel/core/src/tests/services/
 // (the project test-location rule); compiled here for crate visibility.
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/ext4_tests.rs"]
+#[path = "../../core/src/tests/services/ext4_tests.rs"]
 mod tests;

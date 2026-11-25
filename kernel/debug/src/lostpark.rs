@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The lostpark REPORT half (moved from kernel/src/debug/lostpark.rs,
+//! The lostpark REPORT half (moved from kernel/core/src/debug/lostpark.rs,
 //! crate-flip rung debug): the one-shot ring dump. armed()/record()
 //! and the RING/SEQ statics stay framework-side (wait/sysv_sem event
 //! paths record into them). Body moved verbatim; the framework keeps

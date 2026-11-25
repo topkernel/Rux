@@ -1,5 +1,5 @@
 //! The classic-BPF seccomp filter interpreter (moved from
-//! kernel/src/syscall/seccomp.rs at the cold-four policy flip — sole
+//! kernel/core/src/syscall/seccomp.rs at the cold-four policy flip — sole
 //! copy here; zero behavior change). A pure function over
 //! &[SockFilter]; reached through the SyscallHooks::seccomp_run row
 //! ONLY when the current task has a filter installed (the gate checks

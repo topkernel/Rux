@@ -26,7 +26,7 @@ def main():
 
     # ---- setup part: assemble the trampoline fresh ----
     here = os.path.dirname(__file__)
-    setup_src = os.path.join(here, "..", "kernel", "src", "arch", "x86_64", "setup.S")
+    setup_src = os.path.join(here, "..", "kernel", "core", "src", "arch", "x86_64", "setup.S")
     subprocess.run(["as", "--32", "-o", out + ".setup.o", setup_src], check=True)
     subprocess.run([os.environ.get("OBJCOPY", "objcopy"), "-O", "binary",
                     "--only-section=.setup", out + ".setup.o", out + ".setup.bin"], check=True)

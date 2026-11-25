@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for ext4 extent tree struct composition and interval matching.
-//! Copied from: kernel/src/fs/ext4/extent.rs
+//! Copied from: kernel/core/src/fs/ext4/extent.rs
 
 use proptest::prelude::*;
 

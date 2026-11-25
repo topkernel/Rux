@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for RT scheduler bitmap priority scan.
 //!
-//! Types copied from: kernel/src/sched/rt.rs
+//! Types copied from: kernel/core/src/sched/rt.rs
 
 #![cfg(kani)]
 

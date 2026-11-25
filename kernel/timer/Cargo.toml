@@ -10,14 +10,14 @@ edition = "2021"
 # nanosleep-iteration bump — compiled under crate-level
 # #![forbid(unsafe_code)]. The TIMEKEEPING CORE (read_time, the tick,
 # the wheel, nohz, the oneshot guards, calibration, wall-clock epoch)
-# stays framework-side in kernel/src/timer.rs + kernel/src/timer/:
+# stays framework-side in kernel/core/src/timer.rs + kernel/core/src/timer/:
 # the wheel and nohz clusters are the tick's data structures (called
 # by name from timer.rs, a hot file, through 30+ sites — the type
 # substrate rule), and the oneshot guards are types with framework
 # users (futex/signal/task).
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 
 [features]
 default = ["riscv64"]

@@ -1,5 +1,5 @@
 //! The BINDER COLD DIAGNOSTIC HALVES (moved from
-//! kernel/src/ipc/binder.rs at the cold-four policy flip — sole copies
+//! kernel/core/src/ipc/binder.rs at the cold-four policy flip — sole copies
 //! here; zero behavior change): the ~1 Hz heartbeat audits
 //! (txn_hang_audit, bwr_park_audit, ams46_audit, pool_census_audit),
 //! the sleep/stall census family (sleep_snapshot, stall_report,
@@ -11,7 +11,7 @@
 //! and rux-obs / syscall (direct — the allowed downward edge).
 //!
 //! What the moved code consumes from the framework (the published
-//! surface, all on kernel/src/ipc/binder.rs + binder_edges.rs):
+//! surface, all on kernel/core/src/ipc/binder.rs + binder_edges.rs):
 //! - the world machinery: world_lock / world_lock_try / World /
 //!   WorldGuard (the audits snapshot under WORLD exactly as before);
 //! - the object model (BinderProc / BinderThread / BinderTxn / Work /
@@ -4054,7 +4054,7 @@ pub fn stall_report() {
 
 /// Register an appspawn child pid (sc140: written by the clone census
 /// at each appspawn fork, first 128 per boot). MOVED from
-/// kernel/src/ipc/binder.rs (cold-four lane) — its only caller is
+/// kernel/core/src/ipc/binder.rs (cold-four lane) — its only caller is
 /// syscall's clone path; the APP_CHILD_PIDS static stays
 /// framework-side with the txn-path reader.
 pub fn register_app_child_pid(pid: u32) {

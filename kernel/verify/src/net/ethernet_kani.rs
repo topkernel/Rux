@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for Ethernet MAC address classification.
 //!
-//! Types copied from: kernel/src/net/ethernet.rs
+//! Types copied from: kernel/core/src/net/ethernet.rs
 
 #![cfg(kani)]
 

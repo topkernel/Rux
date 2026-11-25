@@ -4,12 +4,12 @@
 //!
 //! ARP cache and packet parsing invariant tests.
 //!
-//! Types copied from: kernel/src/net/arp.rs
+//! Types copied from: kernel/core/src/net/arp.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/net/arp.rs
+// Copied types from kernel/core/src/net/arp.rs
 // ============================================================================
 
 pub const ETH_ALEN: usize = 6;

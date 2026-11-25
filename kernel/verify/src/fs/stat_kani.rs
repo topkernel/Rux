@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for Stat file type/permission operations.
 //!
-//! Types copied from: kernel/src/fs/stat.rs
+//! Types copied from: kernel/core/src/fs/stat.rs
 
 #![cfg(kani)]
 

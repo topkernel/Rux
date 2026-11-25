@@ -4,12 +4,12 @@
 //!
 //! IPv4 routing table longest-prefix match invariant tests.
 //!
-//! Types copied from: kernel/src/net/ipv4/route.rs
+//! Types copied from: kernel/core/src/net/ipv4/route.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/net/ipv4/route.rs
+// Copied types from kernel/core/src/net/ipv4/route.rs
 // ============================================================================
 
 #[repr(C)]

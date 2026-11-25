@@ -181,7 +181,7 @@ MAPPINGS = [
     {
         "name": "mm/page_flags",
         "verify": "kernel/verify/src/mm/page_flags_test.rs",
-        "kernel": "kernel/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/page_desc.rs",
         "type": "PageFlags",
         "compare": [
             "new", "from_raw", "raw", "test", "set", "clear",
@@ -192,7 +192,7 @@ MAPPINGS = [
     {
         "name": "mm/refcount",
         "verify": "kernel/verify/src/mm/refcount_test.rs",
-        "kernel": "kernel/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/page_desc.rs",
         "type": "Page",
         "compare": ["get_page", "put_page", "try_get_page"],
         "skip": ["new"],  # struct layout intentionally simplified
@@ -202,7 +202,7 @@ MAPPINGS = [
     {
         "name": "mm/vma",
         "verify": "kernel/verify/src/mm/vma_test.rs",
-        "kernel": "kernel/src/mm/vma.rs",
+        "kernel": "kernel/core/src/mm/vma.rs",
         "type": "Vma",
         "compare": [
             "contains", "overlaps", "split", "can_merge",
@@ -213,7 +213,7 @@ MAPPINGS = [
     {
         "name": "mm/vma_manager",
         "verify": "kernel/verify/src/mm/vma_test.rs",
-        "kernel": "kernel/src/mm/vma.rs",
+        "kernel": "kernel/core/src/mm/vma.rs",
         "type": "VmaManager",
         "compare": ["add", "find", "remove"],
         "skip": ["new"],  # struct fields differ
@@ -223,7 +223,7 @@ MAPPINGS = [
     {
         "name": "sync/spinlock",
         "verify": "kernel/verify/src/sync/spinlock_test.rs",
-        "kernel": "kernel/src/sync/spinlock.rs",
+        "kernel": "kernel/core/src/sync/spinlock.rs",
         "type": "RawSpinlock",
         "compare": ["try_lock", "unlock", "is_locked"],
         "skip": ["lock", "new"],  # lock has deadlock warn stripped by design
@@ -241,7 +241,7 @@ MAPPINGS = [
         # (its guard+clears are pinned by unit tests instead).
         "name": "sync/mutex_model",
         "verify": "kernel/verify/src/sync/mutex_model.rs",
-        "kernel": "kernel/src/sync/mutex.rs",
+        "kernel": "kernel/core/src/sync/mutex.rs",
         "type": None,
         "type_verify": "MutexState",
         "type_kernel": "SleepMutex",
@@ -301,7 +301,7 @@ MAPPINGS = [
     {
         "name": "arch/riscv64/pagetable",
         "verify": "kernel/verify/src/arch/riscv64/mm/pagetable_test.rs",
-        "kernel": "kernel/src/arch/riscv64/mm/pagetable.rs",
+        "kernel": "kernel/core/src/arch/riscv64/mm/pagetable.rs",
         "type": "PageTableEntry",
         "compare": [
             "from_bits", "bits", "is_valid", "is_readable", "is_writable",
@@ -314,7 +314,7 @@ MAPPINGS = [
     {
         "name": "arch/riscv64/satp",
         "verify": "kernel/verify/src/arch/riscv64/mm/pagetable_test.rs",
-        "kernel": "kernel/src/arch/riscv64/mm/pagetable.rs",
+        "kernel": "kernel/core/src/arch/riscv64/mm/pagetable.rs",
         "type": "Satp",
         "compare": [
             "bits", "mode", "asid", "ppn", "is_bare", "is_sv39",
@@ -324,7 +324,7 @@ MAPPINGS = [
     {
         "name": "list",
         "verify": "kernel/verify/src/mm/list_test.rs",
-        "kernel": "kernel/src/list.rs",
+        "kernel": "kernel/core/src/list.rs",
         "type": "ListHead",
         "compare": [
             "new", "init", "is_empty", "add", "add_tail", "del", "for_each",
@@ -383,7 +383,7 @@ MAPPINGS = [
     {
         "name": "sync/seqlock",
         "verify": "kernel/verify/src/sync/seqlock_test.rs",
-        "kernel": "kernel/src/sync/seqlock.rs",
+        "kernel": "kernel/core/src/sync/seqlock.rs",
         "type": "RawSeqLock",
         "compare": [
             "new", "try_write_lock", "write_unlock",
@@ -395,7 +395,7 @@ MAPPINGS = [
     {
         "name": "fs/cmdline",
         "verify": "kernel/verify/src/fs/cmdline_test.rs",
-        "kernel": "kernel/src/cmdline.rs",
+        "kernel": "kernel/core/src/cmdline.rs",
         "type": None,  # free functions with modified signatures (cmdline param added)
         "compare": [],  # signatures differ (verify takes &str param, kernel uses global)
         "skip": [],
@@ -403,7 +403,7 @@ MAPPINGS = [
     {
         "name": "mm/buddy_alloc",
         "verify": "kernel/verify/src/mm/buddy_alloc_test.rs",
-        "kernel": "kernel/src/mm/buddy_allocator.rs",
+        "kernel": "kernel/core/src/mm/buddy_allocator.rs",
         "type": "BuddyAllocator",
         "compare": [
             "init", "add_to_free_list", "remove_from_free_list",
@@ -419,7 +419,7 @@ MAPPINGS = [
     {
         "name": "mm/buddy_funcs",
         "verify": "kernel/verify/src/mm/buddy_alloc_test.rs",
-        "kernel": "kernel/src/mm/buddy_allocator.rs",
+        "kernel": "kernel/core/src/mm/buddy_allocator.rs",
         "type": None,  # free functions
         "compare": [
             "heap_size_to_order", "size_to_order", "get_buddy_idx",
@@ -437,7 +437,7 @@ MAPPINGS = [
     {
         "name": "security/capability",
         "verify": "kernel/verify/src/security/capability_test.rs",
-        "kernel": "kernel/src/security/capability.rs",
+        "kernel": "kernel/core/src/security/capability.rs",
         "type": "Cap",
         "compare": [
             "new", "has", "set", "clear",
@@ -451,7 +451,7 @@ MAPPINGS = [
     {
         "name": "signal/sig_pending",
         "verify": "kernel/verify/src/signal/signal_test.rs",
-        "kernel": "kernel/src/signal.rs",
+        "kernel": "kernel/core/src/signal.rs",
         "type": "SigPending",
         "compare": [
             "add", "remove", "has", "first", "first_unmasked", "get_all",
@@ -464,7 +464,7 @@ MAPPINGS = [
     {
         "name": "signal/sig_action",
         "verify": "kernel/verify/src/signal/signal_test.rs",
-        "kernel": "kernel/src/signal.rs",
+        "kernel": "kernel/core/src/signal.rs",
         "type": "SigAction",
         "compare": ["new", "ignore", "handler", "action", "has_handler"],
         "skip": [],
@@ -475,7 +475,7 @@ MAPPINGS = [
     {
         "name": "fs/stat",
         "verify": "kernel/verify/src/fs/stat_test.rs",
-        "kernel": "kernel/src/fs/stat.rs",
+        "kernel": "kernel/core/src/fs/stat.rs",
         "type": "Stat",
         "compare": [
             "new",
@@ -492,7 +492,7 @@ MAPPINGS = [
     {
         "name": "fs/path_normalize",
         "verify": "kernel/verify/src/fs/path_test.rs",
-        "kernel": "kernel/src/fs/path.rs",
+        "kernel": "kernel/core/src/fs/path.rs",
         "type": None,  # free function
         "compare": ["path_normalize"],
         "skip": [],
@@ -501,7 +501,7 @@ MAPPINGS = [
     {
         "name": "fs/path",
         "verify": "kernel/verify/src/fs/path_test.rs",
-        "kernel": "kernel/src/fs/path.rs",
+        "kernel": "kernel/core/src/fs/path.rs",
         "type": "Path",
         "compare": [
             "new", "is_absolute", "is_empty", "as_str",
@@ -514,7 +514,7 @@ MAPPINGS = [
     {
         "name": "fs/path_component",
         "verify": "kernel/verify/src/fs/path_test.rs",
-        "kernel": "kernel/src/fs/path.rs",
+        "kernel": "kernel/core/src/fs/path.rs",
         "type": "PathComponent",
         "compare": ["new", "name", "is_current", "is_parent", "is_root", "is_empty"],
         "skip": [],
@@ -570,7 +570,7 @@ MAPPINGS = [
     {
         "name": "mm/zone_funcs",
         "verify": "kernel/verify/src/mm/zone_test.rs",
-        "kernel": "kernel/src/mm/zone.rs",
+        "kernel": "kernel/core/src/mm/zone.rs",
         "type": None,  # free functions
         "compare": ["int_sqrt", "pfn_to_phys", "phys_to_pfn"],
         "skip_diff": ["int_sqrt"],  # verify has pub fn, kernel has private fn
@@ -578,7 +578,7 @@ MAPPINGS = [
     {
         "name": "mm/zone_gfp",
         "verify": "kernel/verify/src/mm/zone_test.rs",
-        "kernel": "kernel/src/mm/zone.rs",
+        "kernel": "kernel/core/src/mm/zone.rs",
         "type": "GfpFlags",
         "compare": ["zone_type"],
         "skip": [],
@@ -587,7 +587,7 @@ MAPPINGS = [
     {
         "name": "mm/zone_watermark",
         "verify": "kernel/verify/src/mm/zone_test.rs",
-        "kernel": "kernel/src/mm/zone.rs",
+        "kernel": "kernel/core/src/mm/zone.rs",
         "type": "Zone",
         "compare": ["watermark_ok"],
         "skip": [],
@@ -678,7 +678,7 @@ MAPPINGS = [
     {
         "name": "sync/futex_key",
         "verify": "kernel/verify/src/sync/futex_test.rs",
-        "kernel": "kernel/src/sync/futex.rs",
+        "kernel": "kernel/core/src/sync/futex.rs",
         "type": "FutexKey",
         "compare": ["new", "matches"],
         "skip": [],
@@ -688,7 +688,7 @@ MAPPINGS = [
     {
         "name": "sync/futex_flags",
         "verify": "kernel/verify/src/sync/futex_test.rs",
-        "kernel": "kernel/src/sync/futex.rs",
+        "kernel": "kernel/core/src/sync/futex.rs",
         "type": None,  # free function
         "compare": ["futex_to_flags"],
         "skip": [],
@@ -739,7 +739,7 @@ MAPPINGS = [
     {
         "name": "mm/rmap",
         "verify": "kernel/verify/src/mm/rmap_test.rs",
-        "kernel": "kernel/src/mm/rmap.rs",
+        "kernel": "kernel/core/src/mm/rmap.rs",
         "type": None,  # free functions + predicates
         "compare": [],
         "skip": [],  # verify extracts pure arithmetic (addr_to_vpn, sv39_vpn_indices, page_mapped)
@@ -748,7 +748,7 @@ MAPPINGS = [
     {
         "name": "fs/inode_mode",
         "verify": "kernel/verify/src/fs/inode_test.rs",
-        "kernel": "kernel/src/fs/inode.rs",
+        "kernel": "kernel/core/src/fs/inode.rs",
         "type": "InodeMode",
         "compare": [
             "new", "is_regular_file", "is_directory", "is_char_device",
@@ -760,7 +760,7 @@ MAPPINGS = [
     {
         "name": "fs/inode_hash",
         "verify": "kernel/verify/src/fs/inode_test.rs",
-        "kernel": "kernel/src/fs/inode.rs",
+        "kernel": "kernel/core/src/fs/inode.rs",
         "type": None,  # free function
         "compare": ["inode_hash"],
         "skip": [],
@@ -769,7 +769,7 @@ MAPPINGS = [
     {
         "name": "fs/file_flags",
         "verify": "kernel/verify/src/fs/file_test.rs",
-        "kernel": "kernel/src/fs/file.rs",
+        "kernel": "kernel/core/src/fs/file.rs",
         "type": "FileFlags",
         "compare": ["new", "is_readonly", "is_writeonly", "is_rdwr", "bits", "set_bits", "add_flags"],
         "skip": [],
@@ -778,7 +778,7 @@ MAPPINGS = [
     {
         "name": "mm/page_flags_ops",
         "verify": "kernel/verify/src/mm/page_flags_ops_test.rs",
-        "kernel": "kernel/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/page_desc.rs",
         "type": "PageFlags",
         "compare": ["new", "from_raw", "raw", "test", "set", "clear", "test_and_set", "test_and_clear", "clear_all"],
         "skip": [],
@@ -819,7 +819,7 @@ MAPPINGS = [
     {
         "name": "fs/dentry_flags",
         "verify": "kernel/verify/src/fs/dentry_test.rs",
-        "kernel": "kernel/src/fs/dentry.rs",
+        "kernel": "kernel/core/src/fs/dentry.rs",
         "type": "DentryFlags",
         "compare": ["new", "is_hashed", "is_unhashed", "bits"],
         "skip": [],
@@ -828,7 +828,7 @@ MAPPINGS = [
     {
         "name": "fs/dentry_hash",
         "verify": "kernel/verify/src/fs/dentry_test.rs",
-        "kernel": "kernel/src/fs/dentry.rs",
+        "kernel": "kernel/core/src/fs/dentry.rs",
         "type": None,  # free function
         "compare": ["dentry_hash"],
         "skip": [],
@@ -836,7 +836,7 @@ MAPPINGS = [
     {
         "name": "interrupt/irq_data",
         "verify": "kernel/verify/src/interrupt/irq_test.rs",
-        "kernel": "kernel/src/interrupt/irqdesc.rs",
+        "kernel": "kernel/core/src/interrupt/irqdesc.rs",
         "type": "IrqData",
         "compare": ["new"],
         "skip": [],
@@ -858,7 +858,7 @@ MAPPINGS = [
     {
         "name": "fs/dev_no",
         "verify": "kernel/verify/src/fs/dev_t_test.rs",
-        "kernel": "kernel/src/fs/dev_t.rs",
+        "kernel": "kernel/core/src/fs/dev_t.rs",
         "type": "DevNo",
         "compare": ["new", "from_u64", "to_u64"],
         "skip": [],
@@ -868,7 +868,7 @@ MAPPINGS = [
     {
         "name": "arch/pt_regs_cause",
         "verify": "kernel/verify/src/arch/pt_regs_test.rs",
-        "kernel": "kernel/src/arch/riscv64/pt_regs.rs",
+        "kernel": "kernel/core/src/arch/riscv64/pt_regs.rs",
         "type": "Cause",
         "compare": ["from_cause", "is_interrupt", "is_exception", "is_page_fault"],
         "skip": ["code"],  # kernel has no code() method
@@ -878,7 +878,7 @@ MAPPINGS = [
     {
         "name": "mm/page_physaddr",
         "verify": "kernel/verify/src/mm/page_addr_test.rs",
-        "kernel": "kernel/src/mm/page.rs",
+        "kernel": "kernel/core/src/mm/page.rs",
         "type": "PhysAddr",
         "compare": ["new", "as_usize", "is_aligned", "floor", "ceil", "frame_number", "ppn"],
         "skip": [],
@@ -888,7 +888,7 @@ MAPPINGS = [
     {
         "name": "mm/page_virtaddr",
         "verify": "kernel/verify/src/mm/page_addr_test.rs",
-        "kernel": "kernel/src/mm/page.rs",
+        "kernel": "kernel/core/src/mm/page.rs",
         "type": "VirtAddr",
         "compare": ["new", "as_usize", "is_aligned", "floor", "ceil", "page_number"],
         "skip": [],
@@ -898,7 +898,7 @@ MAPPINGS = [
     {
         "name": "mm/phys_frame",
         "verify": "kernel/verify/src/mm/page_addr_test.rs",
-        "kernel": "kernel/src/mm/page.rs",
+        "kernel": "kernel/core/src/mm/page.rs",
         "type": "PhysFrame",
         "compare": ["new", "containing_address", "start_address", "range"],
         "skip": [],
@@ -908,7 +908,7 @@ MAPPINGS = [
     {
         "name": "mm/virt_page",
         "verify": "kernel/verify/src/mm/page_addr_test.rs",
-        "kernel": "kernel/src/mm/page.rs",
+        "kernel": "kernel/core/src/mm/page.rs",
         "type": "VirtPage",
         "compare": ["new", "containing_address", "start_address", "range"],
         "skip": [],
@@ -927,7 +927,7 @@ MAPPINGS = [
     {
         "name": "fs/elf_phdr",
         "verify": "kernel/verify/src/fs/elf_test.rs",
-        "kernel": "kernel/src/fs/elf.rs",
+        "kernel": "kernel/core/src/fs/elf.rs",
         "type": "Elf64Phdr",
         "compare": ["is_load", "is_readable", "is_writable", "is_executable"],
         "skip": [],
@@ -936,7 +936,7 @@ MAPPINGS = [
     {
         "name": "fs/permission",
         "verify": "kernel/verify/src/fs/permission_test.rs",
-        "kernel": "kernel/src/fs/permission.rs",
+        "kernel": "kernel/core/src/fs/permission.rs",
         "type": None,  # free function
         "compare": ["generic_permission"],
         "skip": [],
@@ -947,7 +947,7 @@ MAPPINGS = [
     {
         "name": "arch/riscv64/mm/memory_layout",
         "verify": "kernel/verify/src/arch/riscv64/mm/memory_layout_test.rs",
-        "kernel": "kernel/src/arch/riscv64/mm/memory_layout.rs",
+        "kernel": "kernel/core/src/arch/riscv64/mm/memory_layout.rs",
         "type": "VirtAddr",
         "compare": ["new", "bits", "is_aligned", "floor", "ceil", "page_offset", "vpn", "as_u64"],
         "skip": ["as_usize"],  # not in verify copy (u64-only)
@@ -957,7 +957,7 @@ MAPPINGS = [
     {
         "name": "mm/slab_find_cache_index",
         "verify": "kernel/verify/src/mm/slab_test.rs",
-        "kernel": "kernel/src/mm/slab.rs",
+        "kernel": "kernel/core/src/mm/slab.rs",
         "type": None,  # free function (private in kernel, extracted in verify)
         "compare": ["find_cache_index"],
         "skip": [],
@@ -967,7 +967,7 @@ MAPPINGS = [
     {
         "name": "arch/riscv64/mm/asid_satp",
         "verify": "kernel/verify/src/arch/riscv64/mm/asid_test.rs",
-        "kernel": "kernel/src/arch/riscv64/mm/asid.rs",
+        "kernel": "kernel/core/src/arch/riscv64/mm/asid.rs",
         "type": None,  # free functions
         "compare": ["build_satp", "satp_to_asid", "satp_to_ppn"],
         "skip": [],
@@ -977,7 +977,7 @@ MAPPINGS = [
     {
         "name": "net/eth_protocol",
         "verify": "kernel/verify/src/net/buffer_test.rs",
-        "kernel": "kernel/src/net/buffer.rs",
+        "kernel": "kernel/core/src/net/buffer.rs",
         "type": "EthProtocol",
         "compare": ["from_u16", "to_u16"],
         "skip": [],
@@ -987,7 +987,7 @@ MAPPINGS = [
     {
         "name": "net/ip_protocol",
         "verify": "kernel/verify/src/net/buffer_test.rs",
-        "kernel": "kernel/src/net/buffer.rs",
+        "kernel": "kernel/core/src/net/buffer.rs",
         "type": "IpProtocol",
         "compare": ["from_u8", "to_u8"],
         "skip": [],
@@ -997,7 +997,7 @@ MAPPINGS = [
     {
         "name": "signal/sig_flags",
         "verify": "kernel/verify/src/signal/sigpending_test.rs",
-        "kernel": "kernel/src/signal.rs",
+        "kernel": "kernel/core/src/signal.rs",
         "type": "SigFlags",
         "compare": ["new", "bits"],
         "skip": [],
@@ -1007,7 +1007,7 @@ MAPPINGS = [
     {
         "name": "errno/errno_enum",
         "verify": "kernel/verify/src/errno_test.rs",
-        "kernel": "kernel/src/errno.rs",
+        "kernel": "kernel/core/src/errno.rs",
         "type": "Errno",
         "compare": ["as_i32", "as_neg_i32", "as_neg_u64"],
         "skip": [],
@@ -1017,7 +1017,7 @@ MAPPINGS = [
     {
         "name": "sched/sched_class_id",
         "verify": "kernel/verify/src/sched/class_test.rs",
-        "kernel": "kernel/src/sched/class.rs",
+        "kernel": "kernel/core/src/sched/class.rs",
         "type": "SchedClassId",
         "compare": [],
         "skip": [],  # enum-only, no methods to compare
@@ -1026,7 +1026,7 @@ MAPPINGS = [
     {
         "name": "interrupt/softirq_index",
         "verify": "kernel/verify/src/interrupt/softirq_test.rs",
-        "kernel": "kernel/src/interrupt/softirq.rs",
+        "kernel": "kernel/core/src/interrupt/softirq.rs",
         "type": "SoftirqIndex",
         "compare": [],
         "skip": [],  # enum-only, no methods to compare
@@ -1044,7 +1044,7 @@ MAPPINGS = [
     {
         "name": "sync/rwlock_constants",
         "verify": "kernel/verify/src/sync/rwlock_test.rs",
-        "kernel": "kernel/src/sync/rwlock.rs",
+        "kernel": "kernel/core/src/sync/rwlock.rs",
         "type": None,  # constants only, no struct methods copied
         "compare": [],
         "skip": [],
@@ -1069,7 +1069,7 @@ MAPPINGS = [
     {
         "name": "fs/superblock_flags",
         "verify": "kernel/verify/src/fs/superblock_test.rs",
-        "kernel": "kernel/src/fs/superblock.rs",
+        "kernel": "kernel/core/src/fs/superblock.rs",
         "type": "SuperBlockFlags",
         "compare": ["new", "is_readonly", "is_active", "bits"],
         "skip": [],
@@ -1080,7 +1080,7 @@ MAPPINGS = [
     {
         "name": "fs/mount_flags",
         "verify": "kernel/verify/src/fs/mount_test.rs",
-        "kernel": "kernel/src/fs/mount.rs",
+        "kernel": "kernel/core/src/fs/mount.rs",
         "type": "MntFlags",
         "compare": ["new", "is_readonly", "is_noexec", "is_nosuid", "bits"],
         "skip": [],
@@ -1091,7 +1091,7 @@ MAPPINGS = [
     {
         "name": "fs/file_flags_ext",
         "verify": "kernel/verify/src/fs/file_flags_test.rs",
-        "kernel": "kernel/src/fs/file.rs",
+        "kernel": "kernel/core/src/fs/file.rs",
         "type": "FileFlags",
         "compare": ["new", "is_readonly", "is_writeonly", "is_rdwr", "bits"],
         "skip": [],
@@ -1102,7 +1102,7 @@ MAPPINGS = [
     {
         "name": "mm/vmemmap_constants",
         "verify": "kernel/verify/src/mm/vmemmap_test.rs",
-        "kernel": "kernel/src/mm/vmemmap.rs",
+        "kernel": "kernel/core/src/mm/vmemmap.rs",
         "type": None,  # constants-only, no fn copies
         "compare": [],
         "skip": [],
@@ -1111,7 +1111,7 @@ MAPPINGS = [
     {
         "name": "mm/config_constants",
         "verify": "kernel/verify/src/mm/config_test.rs",
-        "kernel": "kernel/src/config.rs",
+        "kernel": "kernel/core/src/config.rs",
         "type": None,  # constants-only, auto-generated from Kernel.toml
         "compare": [],
         "skip": [],
@@ -1120,7 +1120,7 @@ MAPPINGS = [
     {
         "name": "mm/page_flag_constants",
         "verify": "kernel/verify/src/mm/page_flag_test.rs",
-        "kernel": "kernel/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/page_desc.rs",
         "type": None,  # PageFlag enum constants, no methods copied
         "compare": [],
         "skip": [],
@@ -1139,7 +1139,7 @@ MAPPINGS = [
     {
         "name": "ipc/ipc_id",
         "verify": "kernel/verify/src/ipc/ipc_id_test.rs",
-        "kernel": "kernel/src/ipc/util.rs",
+        "kernel": "kernel/core/src/ipc/util.rs",
         "type": None,  # free functions
         # ipc_update_mode / owner_bits / group_bits / other_bits were
         # removed from the kernel's ipc/util.rs (mode bits now handled
@@ -1153,7 +1153,7 @@ MAPPINGS = [
     {
         "name": "drivers/virtio_offset",
         "verify": "kernel/verify/src/drivers/virtio_offset_test.rs",
-        "kernel": "kernel/src/drivers/virtio/offset.rs",
+        "kernel": "kernel/core/src/drivers/virtio/offset.rs",
         "type": None,  # constants-only, no fn copies
         "compare": [],
         "skip": [],
@@ -1162,7 +1162,7 @@ MAPPINGS = [
     {
         "name": "drivers/virtio_queue",
         "verify": "kernel/verify/src/drivers/virtio_queue_test.rs",
-        "kernel": "kernel/src/drivers/virtio/queue.rs",
+        "kernel": "kernel/core/src/drivers/virtio/queue.rs",
         "type": None,  # struct layout constants, no fn copies
         "compare": [],
         "skip": [],
@@ -1171,7 +1171,7 @@ MAPPINGS = [
     {
         "name": "drivers/pci_offset",
         "verify": "kernel/verify/src/drivers/pci_offset_test.rs",
-        "kernel": "kernel/src/drivers/pci/mod.rs",
+        "kernel": "kernel/core/src/drivers/pci/mod.rs",
         "type": None,  # constants + free functions
         # is_io_bar / is_memory_bar / is_64bit_memory_bar were removed
         # from the kernel's PCI code; nothing left to compare.
@@ -1209,7 +1209,7 @@ MAPPINGS = [
     {
         "name": "mm/memblock",
         "verify": "kernel/verify/src/mm/memblock_test.rs",
-        "kernel": "kernel/src/mm/memblock.rs",
+        "kernel": "kernel/core/src/mm/memblock.rs",
         "type": "MemBlockRegion",
         "compare": ["new", "end", "contains", "base_pfn", "end_pfn", "page_count"],
         "skip": [],
@@ -1221,7 +1221,7 @@ MAPPINGS = [
     {
         "name": "fs/readahead",
         "verify": "kernel/verify/src/fs/readahead_test.rs",
-        "kernel": "kernel/src/fs/readahead.rs",
+        "kernel": "kernel/core/src/fs/readahead.rs",
         "type": "ReadAheadState",
         "compare": ["new", "on_read"],
         "skip": [],
@@ -1243,7 +1243,7 @@ MAPPINGS = [
     {
         "name": "interrupt/preempt",
         "verify": "kernel/verify/src/interrupt/preempt_test.rs",
-        "kernel": "kernel/src/interrupt/preempt.rs",
+        "kernel": "kernel/core/src/interrupt/preempt.rs",
         "type": None,  # constants + free functions
         "compare": [],
         "skip": [],
@@ -1252,7 +1252,7 @@ MAPPINGS = [
     {
         "name": "mm/layout",
         "verify": "kernel/verify/src/mm/layout_test.rs",
-        "kernel": "kernel/src/mm/layout.rs",
+        "kernel": "kernel/core/src/mm/layout.rs",
         "type": "KernelMemoryLayout",
         "compare": ["init_from_memblock"],
         "skip": [],
@@ -1284,7 +1284,7 @@ MAPPINGS = [
     {
         "name": "fs/umask",
         "verify": "kernel/verify/src/fs/umask_test.rs",
-        "kernel": "kernel/src/fs/fs_struct.rs",
+        "kernel": "kernel/core/src/fs/fs_struct.rs",
         "type": None,  # free functions extracted from apply_umask/set_umask
         "compare": [],
         "skip": [],
@@ -1311,7 +1311,7 @@ MAPPINGS = [
     {
         "name": "drivers/netdev_flags",
         "verify": "kernel/verify/src/drivers/netdev_test.rs",
-        "kernel": "kernel/src/drivers/net/space.rs",
+        "kernel": "kernel/core/src/drivers/net/space.rs",
         "type": None,  # constants + flag operations
         "compare": [],
         "skip": [],
@@ -1330,7 +1330,7 @@ MAPPINGS = [
     {
         "name": "mm/meminfo",
         "verify": "kernel/verify/src/mm/meminfo_test.rs",
-        "kernel": "kernel/src/mm/meminfo.rs",
+        "kernel": "kernel/core/src/mm/meminfo.rs",
         "type": None,  # threshold functions extracted as standalone fns
         "compare": [],
         "skip": [],
@@ -1339,7 +1339,7 @@ MAPPINGS = [
     {
         "name": "security/lsm",
         "verify": "kernel/verify/src/security/lsm_test.rs",
-        "kernel": "kernel/src/security/lsm.rs",
+        "kernel": "kernel/core/src/security/lsm.rs",
         "type": None,  # HookId enum + sorted insertion logic
         "compare": [],
         "skip": [],
@@ -1348,7 +1348,7 @@ MAPPINGS = [
     {
         "name": "security/cap_lsm",
         "verify": "kernel/verify/src/security/cap_lsm_test.rs",
-        "kernel": "kernel/src/security/cap_lsm.rs",
+        "kernel": "kernel/core/src/security/cap_lsm.rs",
         "type": "CapLsm",
         "compare": [],
         "skip": [],
@@ -1357,7 +1357,7 @@ MAPPINGS = [
     {
         "name": "sync/semaphore",
         "verify": "kernel/verify/src/sync/semaphore_test.rs",
-        "kernel": "kernel/src/sync/semaphore.rs",
+        "kernel": "kernel/core/src/sync/semaphore.rs",
         "type": "Semaphore",
         "compare": ["down", "down_trylock", "up", "count"],
         "skip": ["new", "down_interruptible", "init"],
@@ -1368,7 +1368,7 @@ MAPPINGS = [
     {
         "name": "fs/io_completion",
         "verify": "kernel/verify/src/fs/io_completion_test.rs",
-        "kernel": "kernel/src/fs/io_completion.rs",
+        "kernel": "kernel/core/src/fs/io_completion.rs",
         "type": "IoCompletion",
         "compare": ["new", "complete", "is_done", "try_wait", "reset"],
         "skip": ["wait"],
@@ -1379,7 +1379,7 @@ MAPPINGS = [
     {
         "name": "fs/wait_for_all",
         "verify": "kernel/verify/src/fs/io_completion_test.rs",
-        "kernel": "kernel/src/fs/io_completion.rs",
+        "kernel": "kernel/core/src/fs/io_completion.rs",
         "type": None,  # free function
         "compare": [],
         "skip": [],
@@ -1388,7 +1388,7 @@ MAPPINGS = [
     {
         "name": "interrupt/domain",
         "verify": "kernel/verify/src/interrupt/domain_test.rs",
-        "kernel": "kernel/src/interrupt/domain.rs",
+        "kernel": "kernel/core/src/interrupt/domain.rs",
         "type": None,  # IrqDomain identity mapping logic
         "compare": [],
         "skip": [],
@@ -1398,7 +1398,7 @@ MAPPINGS = [
     {
         "name": "process/exit_status",
         "verify": "kernel/verify/src/process/exit_status_test.rs",
-        "kernel": "kernel/src/process/exit.rs",
+        "kernel": "kernel/core/src/process/exit.rs",
         "type": None,  # POSIX wait status encoding extracted as standalone fns
         "compare": [],
         "skip": [],
@@ -1407,7 +1407,7 @@ MAPPINGS = [
     {
         "name": "process/task_state",
         "verify": "kernel/verify/src/process/task_state_test.rs",
-        "kernel": "kernel/src/process/task.rs",
+        "kernel": "kernel/core/src/process/task.rs",
         "type": "TaskState",
         "compare": ["new", "bits", "contains", "is_running", "is_sleeping", "is_dead", "is_interruptible"],
         "skip": [],
@@ -1418,7 +1418,7 @@ MAPPINGS = [
     {
         "name": "process/cred",
         "verify": "kernel/verify/src/process/cred_test.rs",
-        "kernel": "kernel/src/process/task.rs",
+        "kernel": "kernel/core/src/process/task.rs",
         "type": "Cred",
         "compare": ["new_init", "new_user"],
         "skip": [],
@@ -1429,7 +1429,7 @@ MAPPINGS = [
     {
         "name": "drivers/input/event",
         "verify": "kernel/verify/src/drivers/input/event_test.rs",
-        "kernel": "kernel/src/drivers/input/event.rs",
+        "kernel": "kernel/core/src/drivers/input/event.rs",
         "type": None,  # constants + InputEvent struct
         "compare": [],
         "skip": [],
@@ -1438,7 +1438,7 @@ MAPPINGS = [
     {
         "name": "fs/page_offset",
         "verify": "kernel/verify/src/fs/page_offset_test.rs",
-        "kernel": "kernel/src/fs/buffer.rs",
+        "kernel": "kernel/core/src/fs/buffer.rs",
         "type": None,  # page offset/index arithmetic extracted as standalone fns
         "compare": [],
         "skip": [],
@@ -1485,7 +1485,7 @@ MAPPINGS = [
     {
         "name": "fs/bio",
         "verify": "kernel/verify/src/fs/bio_test.rs",
-        "kernel": "kernel/src/fs/bio.rs",
+        "kernel": "kernel/core/src/fs/bio.rs",
         "type": None,  # BufferState + hash_index extracted
         "compare": [],
         "skip": [],
@@ -1494,7 +1494,7 @@ MAPPINGS = [
     {
         "name": "mm/pfn_valid",
         "verify": "kernel/verify/src/mm/pfn_valid_test.rs",
-        "kernel": "kernel/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/page_desc.rs",
         "type": None,  # pfn_valid/phys_valid + constants extracted
         "compare": [],
         "skip": [],
@@ -1523,7 +1523,7 @@ MAPPINGS = [
     {
         "name": "arch/uaccess_bounds",
         "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",
-        "kernel": "kernel/src/arch/riscv64/uaccess.rs",
+        "kernel": "kernel/core/src/arch/riscv64/uaccess.rs",
         "type": None,
         "compare": ["access_ok", "get_user", "put_user", "strnlen_user", "strncpy_from_user"],
         "skip": [],
@@ -1547,7 +1547,7 @@ MAPPINGS = [
     {
         "name": "arch/x86_uaccess_bounds",
         "verify": "kernel/verify/src/arch/x86_64/mm/uaccess_test.rs",
-        "kernel": "kernel/src/arch/x86_64/uaccess.rs",
+        "kernel": "kernel/core/src/arch/x86_64/uaccess.rs",
         "type": None,
         "compare": ["access_ok"],
         "skip": [],

@@ -40,8 +40,8 @@ echo ""
 
 echo "4. View generated configuration code:"
 echo "------------------------------------------"
-echo "Kernel name constant: $(grep '^pub const KERNEL_NAME' kernel/src/config.rs | cut -d'"' -f2)"
-echo "Version constant: $(grep '^pub const KERNEL_VERSION' kernel/src/config.rs | cut -d'"' -f2)"
+echo "Kernel name constant: $(grep '^pub const KERNEL_NAME' kernel/core/src/config.rs | cut -d'"' -f2)"
+echo "Version constant: $(grep '^pub const KERNEL_VERSION' kernel/core/src/config.rs | cut -d'"' -f2)"
 echo ""
 
 echo "5. Restoring original configuration..."

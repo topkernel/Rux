@@ -69,7 +69,7 @@ pub use rux::ipc::SemUndoEntry;
 
 // the guest-test module that followed the files (the framework's
 // tests/mod.rs rows are gated with the move note).
-// Service-internal test lives CENTRALLY in kernel/src/tests/services/.
+// Service-internal test lives CENTRALLY in kernel/core/src/tests/services/.
 
 // The framework's test counters + assert macros, re-exported at the
 // crate root where the test module's imports expect them (the
@@ -80,7 +80,7 @@ pub use rux::tests::{test_pass, test_fail, test_skip, test_group_start};
 #[cfg(feature = "unit-test")]
 pub use rux::test_assert_eq;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/ipc_sysv.rs"]
+#[path = "../../core/src/tests/services/ipc_sysv.rs"]
 pub mod ipc_sysv;
 
 /// The boot-time registration (bin calls this before kmain): the

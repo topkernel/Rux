@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for wait status encoding (POSIX ABI).
-//! Copied from: kernel/src/process/exit.rs
+//! Copied from: kernel/core/src/process/exit.rs
 
 use proptest::prelude::*;
 

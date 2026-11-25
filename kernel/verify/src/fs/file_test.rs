@@ -4,12 +4,12 @@
 //!
 //! FileFlags access-mode classifier and O_* constant invariant tests.
 //!
-//! Types copied from: kernel/src/fs/file.rs
+//! Types copied from: kernel/core/src/fs/file.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/file.rs
+// Copied types from kernel/core/src/fs/file.rs
 // ============================================================================
 
 #[repr(C)]

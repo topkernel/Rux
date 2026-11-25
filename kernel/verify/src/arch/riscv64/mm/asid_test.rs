@@ -4,12 +4,12 @@
 //!
 //! SATP register encoding/decoding invariant tests.
 //!
-//! Types copied from: kernel/src/arch/riscv64/mm/asid.rs
+//! Types copied from: kernel/core/src/arch/riscv64/mm/asid.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied constants/functions from kernel/src/arch/riscv64/mm/asid.rs
+// Copied constants/functions from kernel/core/src/arch/riscv64/mm/asid.rs
 // ============================================================================
 
 pub const ASID_BITS: usize = 9;

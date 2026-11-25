@@ -4,13 +4,13 @@
 //!
 //! ELF header parsing and validation invariant tests.
 //!
-//! Types copied from: kernel/src/fs/elf.rs
+//! Types copied from: kernel/core/src/fs/elf.rs
 //! NOTE: unsafe from_bytes uses ptr::read_unaligned — test only the safe API
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/elf.rs
+// Copied types from kernel/core/src/fs/elf.rs
 // ============================================================================
 
 pub const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];

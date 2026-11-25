@@ -4,12 +4,12 @@
 //!
 //! Signal set, signal constants, and SigFlags invariant tests.
 //!
-//! Types copied from: kernel/src/signal.rs
+//! Types copied from: kernel/core/src/signal.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/signal.rs
+// Copied types from kernel/core/src/signal.rs
 // ============================================================================
 
 pub type SigSet = u64;

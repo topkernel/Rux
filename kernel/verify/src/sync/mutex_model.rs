@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Faithful extraction of the SleepMutex handoff state machine
-//! (kernel/src/sync/mutex.rs, R84/R85 fairness + orphaned-handoff
+//! (kernel/core/src/sync/mutex.rs, R84/R85 fairness + orphaned-handoff
 //! recovery) for host-side model checking (S-1 pilot).
 //!
 //! # What this file is
@@ -27,7 +27,7 @@
 //! kernel source: `scripts/verify_sync_check.py` (mapping
 //! `sync/mutex_model`) normalizes the environment hooks above plus the
 //! spinlock guard lines and compares the bodies. If you change
-//! kernel/src/sync/mutex.rs state transitions, this file must change
+//! kernel/core/src/sync/mutex.rs state transitions, this file must change
 //! in the same commit (the sync check enforces it in CI).
 //!
 //! # Invariant table (INV-M*)
@@ -62,7 +62,7 @@
 //!   arithmetic cannot underflow for every disciplined op sequence;
 //!   a debug build would panic on underflow anyway.
 
-/// Extracted `SleepMutexState` (kernel/src/sync/mutex.rs). Field names
+/// Extracted `SleepMutexState` (kernel/core/src/sync/mutex.rs). Field names
 /// and semantics are identical; `acquired_at` is kept even though the
 /// harnesses never assert on it, so the transition bodies stay
 /// textually in sync.

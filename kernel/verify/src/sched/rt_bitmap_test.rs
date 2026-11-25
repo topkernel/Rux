@@ -4,12 +4,12 @@
 //!
 //! RT scheduler bitmap invariant tests.
 //!
-//! Functions copied from: kernel/src/sched/rt.rs
+//! Functions copied from: kernel/core/src/sched/rt.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied functions from kernel/src/sched/rt.rs
+// Copied functions from kernel/core/src/sched/rt.rs
 // ============================================================================
 
 const MAX_RT_PRIO: usize = 100;

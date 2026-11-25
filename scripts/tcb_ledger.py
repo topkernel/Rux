@@ -5,7 +5,7 @@
 """TCB ledger: per-subsystem `unsafe` accounting for the Rux kernel.
 
 Funded refactor F1 (docs/development/rust-kernel-best-practices.md §3.2 /
-§9): unsafe is a budget, so measure it.  This script walks kernel/src/**.rs
+§9): unsafe is a budget, so measure it.  This script walks kernel/core/src/**.rs
 and reports, per subsystem directory:
 
   - total .rs lines
@@ -50,7 +50,7 @@ roadmap: it may only go down, or the increase must be justified.
   small hand-written scanner, not rustc: exotic corner cases (e.g. an
   unterminated literal) can still mis-attribute.  Good enough for a
   ledger; regenerate after any doubt.
-* **Exclusions.**  `kernel/src/tests/` (the in-kernel unit-test tree)
+* **Exclusions.**  `kernel/core/src/tests/` (the in-kernel unit-test tree)
   is excluded: test-only code does not ship in the kernel image.  There
   are currently no `#[cfg(test)]`-only source files outside it
   detectable by name; if such files appear (e.g. `*_test.rs` outside
@@ -71,7 +71,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-KERNEL_SRC = REPO_ROOT / "kernel" / "src"
+KERNEL_SRC = REPO_ROOT / "kernel" / "core" / "src"
 
 # Dual metric needs the comment/string-aware item scanner shared with
 # the unsafe census (masking + `unsafe fn`/`impl`/`trait`/`extern`
@@ -277,7 +277,7 @@ def count_file(path: Path):
 
 
 def subsystem_of(rel: Path) -> str:
-    """Bucket a kernel/src-relative path into a subsystem name."""
+    """Bucket a kernel/core/src-relative path into a subsystem name."""
     parts = rel.parts
     if len(parts) == 1:
         return "(top-level files)"
@@ -289,11 +289,11 @@ def subsystem_of(rel: Path) -> str:
 
 
 def tracked_sources():
-    """The set of kernel/src sources git tracks, relative to KERNEL_SRC.
+    """The set of kernel/core/src sources git tracks, relative to KERNEL_SRC.
 
     The ledger must measure the SOURCE TREE, not whatever a previous
     build left in the working directory. A stale generated file
-    (kernel/src/debug/ksyms_generated.rs — 27,625 lines, written by an
+    (kernel/core/src/debug/ksyms_generated.rs — 27,625 lines, written by an
     older build, not referenced by any module) used to be picked up by
     the rglob and silently inflated the line denominator, which diluted
     every percentage in the table. Tracking the file list removes the
@@ -304,7 +304,7 @@ def tracked_sources():
     """
     try:
         out = subprocess.run(
-            ["git", "ls-files", "-z", "--", "kernel/src"],
+            ["git", "ls-files", "-z", "--", "kernel/core/src"],
             cwd=REPO_ROOT, capture_output=True, text=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):

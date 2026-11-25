@@ -4,12 +4,12 @@
 //!
 //! Ethernet MAC address classification invariant tests.
 //!
-//! Types copied from: kernel/src/net/ethernet.rs
+//! Types copied from: kernel/core/src/net/ethernet.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/net/ethernet.rs
+// Copied types from kernel/core/src/net/ethernet.rs
 // ============================================================================
 
 pub const ETH_ALEN: usize = 6;

@@ -4,12 +4,12 @@
 //!
 //! Deadline scheduler bandwidth and runtime invariant tests.
 //!
-//! Types copied from: kernel/src/sched/deadline.rs
+//! Types copied from: kernel/core/src/sched/deadline.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/sched/deadline.rs
+// Copied types from kernel/core/src/sched/deadline.rs
 // ============================================================================
 
 pub const DL_DEFAULT_PERIOD_NS: u64 = 1_000_000_000;

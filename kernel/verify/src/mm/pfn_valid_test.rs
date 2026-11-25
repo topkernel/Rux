@@ -3,12 +3,12 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for pfn_valid / phys_valid range checks.
-//! Copied from: kernel/src/mm/page_desc.rs
+//! Copied from: kernel/core/src/mm/page_desc.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied constants and functions from kernel/src/mm/page_desc.rs
+// Copied constants and functions from kernel/core/src/mm/page_desc.rs
 // ============================================================================
 
 pub const PAGE_SIZE: usize = 4096;

@@ -6,14 +6,14 @@
 //! per-event RECORD marker — syscost enter/exit/tick_*, fsw note_*/pc_*,
 //! mmprof add/bump/now, allocwatch guard, softlockup check/touch,
 //! cctx/forkprof/unixrd markers, reaper's on() gate — STAYS in the
-//! framework crate (kernel/src/debug/) because framework hot paths
+//! framework crate (kernel/core/src/debug/) because framework hot paths
 //! (trap, scheduler tick, fork/exit, bio) call them directly and must
 //! not gain fn-pointer dispatch (the S1 lesson: +25.1% p2_ctxsw until
 //! devirtualized). THIS crate owns everything that FORMATS, DECODES or
 //! PUBLISHES those counters: the report generators, the dump kthreads,
 //! the wedge census, the print arms, and the tracefs file set. It calls
 //! DOWN into the framework for the statics (pub peek surfaces) and is
-//! called UP only through kernel/src/debug/debug_hooks.rs — 18 cold rows
+//! called UP only through kernel/core/src/debug/debug_hooks.rs — 18 cold rows
 //! (boot init, shutdown/cadence dumps, procfs readers, arm-gated event
 //! prints) — plus the direct sibling-dep surface debug::scmtap.
 //!
@@ -54,7 +54,7 @@ mod lostpark;
 mod spinwatch;
 /// The hilog census crate half (root-cold lane): the unix send markers,
 /// sender tables, and the periodic dump; the kmsg marker + the census
-/// gate stay framework-side (kernel/src/debug/hilogcensus.rs).
+/// gate stay framework-side (kernel/core/src/debug/hilogcensus.rs).
 pub mod hilogcensus;
 /// The SCM_RIGHTS relay tap — moved WHOLE (every fn is an arm-gated
 /// print; syscall and fs call it directly through the sibling

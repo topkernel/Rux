@@ -114,21 +114,21 @@ pub use rux::{test_assert_eq, test_println};
 
 // The guest-test modules that followed the files (the framework's
 // tests/mod.rs rows are gated with the move note). Service-internal
-// tests live CENTRALLY in kernel/src/tests/services/.
+// tests live CENTRALLY in kernel/core/src/tests/services/.
 // (tests/wait4.rs is NOT taken: it was already gated off in the
 // framework suite before this flip — dead since the syscall rung —
 // and resurrecting it is not this rung's change.)
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/fork.rs"]
+#[path = "../../core/src/tests/services/fork.rs"]
 pub mod test_fork;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/boundary.rs"]
+#[path = "../../core/src/tests/services/boundary.rs"]
 pub mod test_boundary;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/pid_test.rs"]
+#[path = "../../core/src/tests/services/pid_test.rs"]
 pub mod test_pid;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/smp_schedule.rs"]
+#[path = "../../core/src/tests/services/smp_schedule.rs"]
 pub mod test_smp_schedule;
 
 /// The boot-time registration (bin calls this before

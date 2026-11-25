@@ -1,4 +1,4 @@
-//! The io_uring SUBMIT loop (moved from kernel/src/io_uring/mod.rs at
+//! The io_uring SUBMIT loop (moved from kernel/core/src/io_uring/mod.rs at
 //! the cold-four policy flip — sole copy here; zero behavior change).
 //!
 //! Reads the shared SQ ring strictly through the framework's window

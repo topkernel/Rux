@@ -4,12 +4,12 @@
 //!
 //! Softirq vector index invariant tests.
 //!
-//! Types copied from: kernel/src/interrupt/softirq.rs
+//! Types copied from: kernel/core/src/interrupt/softirq.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/interrupt/softirq.rs
+// Copied types from kernel/core/src/interrupt/softirq.rs
 // ============================================================================
 
 #[repr(usize)]

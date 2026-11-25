@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The schb COLD half (moved from kernel/src/debug/schb.rs, crate-flip
+//! The schb COLD half (moved from kernel/core/src/debug/schb.rs, crate-flip
 //! rung debug): the schbd heartbeat kthread, the wedge census, the
 //! OOM allocator anatomy and the boot init. The note_* record fns
 //! (note_proc_open/note_cow/note_drct/note_slow) and their PACE_*/PROC_*

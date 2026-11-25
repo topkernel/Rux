@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for POSIX.1e Capability bitmask operations.
 //!
-//! Types copied from: kernel/src/security/capability.rs
+//! Types copied from: kernel/core/src/security/capability.rs
 
 #![cfg(kani)]
 

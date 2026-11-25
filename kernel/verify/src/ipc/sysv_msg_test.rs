@@ -4,12 +4,12 @@
 //!
 //! System V message queue invariant tests.
 //!
-//! Functions copied from: kernel/src/ipc/sysv_msg.rs
+//! Functions copied from: kernel/core/src/ipc/sysv_msg.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied constants and functions from kernel/src/ipc/sysv_msg.rs
+// Copied constants and functions from kernel/core/src/ipc/sysv_msg.rs
 // ============================================================================
 
 pub const MSG_EXCEPT: i32 = 0o20000;

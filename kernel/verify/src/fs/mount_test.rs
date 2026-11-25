@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for mount flags (MntFlags) invariants.
-//! Copied from: kernel/src/fs/mount.rs
+//! Copied from: kernel/core/src/fs/mount.rs
 
 use proptest::prelude::*;
 

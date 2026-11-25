@@ -4,13 +4,13 @@
 //!
 //! RwSpinlock bit layout invariant tests + writer-fairness protocol model.
 //!
-//! Types copied from: kernel/src/sync/rwlock.rs
+//! Types copied from: kernel/core/src/sync/rwlock.rs
 
 use proptest::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 // ============================================================================
-// Copied constants from kernel/src/sync/rwlock.rs
+// Copied constants from kernel/core/src/sync/rwlock.rs
 // ============================================================================
 
 const WRITER_BIT: u32 = 1u32 << 31;

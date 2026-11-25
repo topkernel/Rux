@@ -16,7 +16,7 @@ edition = "2021"
 # tables).
 #
 # Zero-move step: #[path]-includes of the service files living in the
-# framework tree (kernel/src/process/); the physical moves are the
+# framework tree (kernel/core/src/process/); the physical moves are the
 # later cosmetic step per the crate-plan recipe.
 
 [dependencies]
@@ -25,7 +25,7 @@ timer = { path = "../timer", default-features = false }
 # the moved rwfz_dump_tgid at its historical path through sync's
 # union module (the allowed downward edge).
 sync = { path = "../sync", default-features = false }
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 
 [features]
 default = ["riscv64"]

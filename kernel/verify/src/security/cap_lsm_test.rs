@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for capability LSM hook dispatch logic.
-//! Copied from: kernel/src/security/cap_lsm.rs
+//! Copied from: kernel/core/src/security/cap_lsm.rs
 
 use proptest::prelude::*;
 

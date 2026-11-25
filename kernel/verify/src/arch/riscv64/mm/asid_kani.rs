@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for SATP register encoding/decoding (Sv39).
 //!
-//! Types copied from: kernel/src/arch/riscv64/mm/asid.rs
+//! Types copied from: kernel/core/src/arch/riscv64/mm/asid.rs
 
 #![cfg(kani)]
 

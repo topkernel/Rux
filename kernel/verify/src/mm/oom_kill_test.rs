@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for OOM badness scoring.
-//! Copied from: kernel/src/mm/oom_kill.rs
+//! Copied from: kernel/core/src/mm/oom_kill.rs
 
 use proptest::prelude::*;
 

@@ -4,12 +4,12 @@
 //!
 //! ICMP header constant invariant tests.
 //!
-//! Types copied from: kernel/src/net/icmp.rs
+//! Types copied from: kernel/core/src/net/icmp.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/net/icmp.rs
+// Copied types from kernel/core/src/net/icmp.rs
 // ============================================================================
 
 pub const ICMP_HDR_LEN: usize = 8;

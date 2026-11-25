@@ -1,7 +1,7 @@
 //! The TIMER SERVICE CRATE (cold-four lane): the timer subsystem's
 //! cold report halves under a crate-level unsafe-deny boundary.
 //!
-//! What stays framework-side (kernel/src/timer.rs, a hot file; the
+//! What stays framework-side (kernel/core/src/timer.rs, a hot file; the
 //! worklist's cold rows there are over-keeps, each recorded in the
 //! lane report):
 //! - the timekeeping core: read_time, get_jiffies, the jiffy math, the
@@ -20,7 +20,7 @@
 //!   sit there); fw_record/pdec/phex — markers with hot callers.
 //!
 //! The framework reaches THIS crate through the TimerHooks table
-//! (kernel/src/timer_hooks.rs): one arm-gated row today (the WW
+//! (kernel/core/src/timer_hooks.rs): one arm-gated row today (the WW
 //! heartbeat report — the call site already gates on
 //! EVENT_WWCENSUS.armed(), so disarmed boots never touch the table).
 

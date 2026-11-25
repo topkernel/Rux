@@ -14,7 +14,7 @@ edition = "2021"
 # services (syscall, drivers).
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 # The sync union re-export (sync-upper lane): binder_diag reaches the
 # moved futex diagnostics at their historical crate::sync::futex::X
 # paths through sync's union module (the allowed downward edge).

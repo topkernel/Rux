@@ -658,7 +658,7 @@ self.create_dynamic_file("cgroups", || {
         self.create_dynamic_file("softirqs", softirqs::generate);
         self.create_dynamic_file("partitions", partitions_generate);
 
-        // U2 kmod: registered loadable modules (kernel/src/module).
+        // U2 kmod: registered loadable modules (kernel/core/src/module).
         self.create_dynamic_file("modules", crate::module::generate_proc_modules);
 
         // Kernel log buffer

@@ -4,13 +4,13 @@
 //!
 //! RT scheduler entity time_slice lifecycle and bitmap priority scan invariant tests.
 //!
-//! Types copied from: kernel/src/sched/rt.rs
+//! Types copied from: kernel/core/src/sched/rt.rs
 //! NOTE: AtomicU32/AtomicBool replaced with plain types for std testing.
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/sched/rt.rs
+// Copied types from kernel/core/src/sched/rt.rs
 // ============================================================================
 
 pub const MAX_RT_PRIO: usize = 100;

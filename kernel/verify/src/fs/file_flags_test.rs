@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for file open flags (O_* constants) invariants.
-//! Copied from: kernel/src/fs/file.rs
+//! Copied from: kernel/core/src/fs/file.rs
 
 use proptest::prelude::*;
 

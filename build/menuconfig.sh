@@ -357,7 +357,7 @@ platform_menu() {
     local cur=$(get_config_value "platform" "target" "riscv64")
     local choice
     choice=$(whiptail --title "Platform Selection" --menu \
-        "Build target platform. This is what plain \'make\' builds;\nthe same value feeds kernel/src/config.rs via build.rs." \
+        "Build target platform. This is what plain \'make\' builds;\nthe same value feeds kernel/core/src/config.rs via build.rs." \
         12 60 2 \
         "riscv64" "RISC-V 64-bit (QEMU virt)   [current: $([ "$cur" = riscv64 ] && echo '*' || echo ' ')]" \
         "x86_64"  "x86_64 (QEMU q35, bzImage)  [current: $([ "$cur" = x86_64 ] && echo '*' || echo ' ')]" \

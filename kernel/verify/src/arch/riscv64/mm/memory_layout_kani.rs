@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for VirtAddr operations (Sv39).
 //!
-//! Types copied from: kernel/src/arch/riscv64/mm/memory_layout.rs
+//! Types copied from: kernel/core/src/arch/riscv64/mm/memory_layout.rs
 
 #![cfg(kani)]
 

@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for VirtIO PCI register offsets and status bits.
-//! Copied from: kernel/src/drivers/virtio/offset.rs
+//! Copied from: kernel/core/src/drivers/virtio/offset.rs
 
 use proptest::prelude::*;
 

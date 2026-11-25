@@ -689,7 +689,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     }
 
     // Perf-event mmap: the sampling ring buffer (page 0 metadata +
-    // npages data; see kernel/src/perf/mod.rs for the protocol).
+    // npages data; see kernel/core/src/perf/mod.rs for the protocol).
     // Dispatch on the File's ops identity (binder/io_uring pattern).
     if fd >= 0 {
         // SAFETY: fd is valid; get_file_fd returns a valid Arc<File>.

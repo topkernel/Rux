@@ -28,14 +28,14 @@ edition = "2021"
 #   sys_ioperm/sys_iopl are 27 lines fused into framework dispatch —
 #   rows would cost more than they move).
 #
-# The seam: kernel/src/arch/arch_diag_hooks.rs — cold ArchDiagHooks rows
+# The seam: kernel/core/src/arch/arch_diag_hooks.rs — cold ArchDiagHooks rows
 # published from rust_main via arch::register_all (OnceSlot only;
 # every row fires only post-boot: user-fault deaths, armed reports,
 # hunter pokes). Raw reads the walkers need cross through audited
 # framework edges (arch/x86_64/unsafe_edges.rs diag_* family).
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 
 [features]
 default = ["riscv64"]

@@ -9,7 +9,7 @@ edition = "2021"
 #
 # A member of the kernel-dir workspace (crate-flip M3-B).
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 debug = { path = "../debug", default-features = false }
 ipc = { path = "../ipc", default-features = false }
 # The sync union re-export (sync-upper lane): the exec path's fxrs_latch

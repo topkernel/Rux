@@ -4,12 +4,12 @@
 //!
 //! File type/permission mode invariant tests.
 //!
-//! Types copied from: kernel/src/fs/stat.rs
+//! Types copied from: kernel/core/src/fs/stat.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/stat.rs
+// Copied types from kernel/core/src/fs/stat.rs
 // ============================================================================
 
 #[repr(C)]

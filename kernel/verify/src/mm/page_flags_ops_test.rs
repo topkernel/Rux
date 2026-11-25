@@ -4,14 +4,14 @@
 //!
 //! PageFlag/PageType/PageFlags operations invariant tests.
 //!
-//! Types copied from: kernel/src/mm/page_desc.rs
+//! Types copied from: kernel/core/src/mm/page_desc.rs
 //! NOTE: AtomicU32 replaced with plain u32 for std testing.
 
 use proptest::prelude::*;
 use std::sync::atomic::Ordering;
 
 // ============================================================================
-// Copied types from kernel/src/mm/page_desc.rs
+// Copied types from kernel/core/src/mm/page_desc.rs
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

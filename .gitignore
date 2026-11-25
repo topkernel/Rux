@@ -40,9 +40,9 @@ images/
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 # Kani verification generated files
 kernel.bin
-kernel/src/config.rs
-kernel/src/debug/ksyms.bin
-kernel/src/debug/ksyms_generated.rs
+kernel/core/src/config.rs
+kernel/core/src/debug/ksyms.bin
+kernel/core/src/debug/ksyms_generated.rs
 kernel/verify/kani-output.txt
 kernel/verify/spin/pan
 kernel/verify/spin/pan.*
@@ -148,5 +148,5 @@ userspace/toybox/toybox/toybox
 # will have compiled files and executables
 /work/
 .x11work/
-kernel/src/dfx/ksyms_generated.rs
-kernel/src/dfx/ksyms.bin
+kernel/core/src/dfx/ksyms_generated.rs
+kernel/core/src/dfx/ksyms.bin

@@ -13,7 +13,7 @@ edition = "2021"
 # for the movable-vs-stays census.
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 process = { path = "../process", default-features = false }
 ipc = { path = "../ipc", default-features = false }
 

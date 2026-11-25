@@ -1,5 +1,5 @@
 //! The FUTEX COLD DIAGNOSTIC FAMILY (moved from
-//! kernel/src/sync/futex.rs at the sync crate flip — sole copies here;
+//! kernel/core/src/sync/futex.rs at the sync crate flip — sole copies here;
 //! zero behavior change): the hunt-era forensic instruments accumulated
 //! across the OH stall hunts — the sqwalk single-word walk family, the
 //! ffrt mutex/lock scans (chain walk, region scan, holder scan, heap
@@ -9,7 +9,7 @@
 //! musl anchor classification, the fuxw wake-ring summaries and the
 //! boot-time fuxwatch cmdline parsers.
 //!
-//! What stayed framework-side (kernel/src/sync/futex.rs — the worklist's
+//! What stayed framework-side (kernel/core/src/sync/futex.rs — the worklist's
 //! over-keeps, each recorded in the lane report):
 //! - the futex MECHANISM: FutexKey + resolve_futex_phys, the waiter
 //!   pool + hash buckets, wait/wake/requeue/wake_op, do_futex,
@@ -39,7 +39,7 @@
 //! - framework cold sites (exit, pid_hash, signal kill dumps, taskdump,
 //!   schb, debug switches, binder devmgr latch, the do_futex/census
 //!   latch sections) ride the SyncDiagHooks rows
-//!   (kernel/src/sync/sync_diag_hooks.rs) — cold rows only.
+//!   (kernel/core/src/sync/sync_diag_hooks.rs) — cold rows only.
 
 // The published futex surface this file consumes (see the header): the
 // watch statics, the waiter pool + hash heads, and the walker helpers

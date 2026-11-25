@@ -4,12 +4,12 @@
 //!
 //! CFS scheduler weight tables and vruntime arithmetic invariant tests.
 //!
-//! Types copied from: kernel/src/sched/fair.rs
+//! Types copied from: kernel/core/src/sched/fair.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/sched/fair.rs
+// Copied types from kernel/core/src/sched/fair.rs
 // ============================================================================
 
 pub const NICE_0_LOAD: u64 = 1024;

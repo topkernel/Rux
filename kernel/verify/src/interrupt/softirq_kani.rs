@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for SoftirqIndex discriminant invariants.
 //!
-//! Types copied from: kernel/src/interrupt/softirq.rs
+//! Types copied from: kernel/core/src/interrupt/softirq.rs
 
 #![cfg(kani)]
 

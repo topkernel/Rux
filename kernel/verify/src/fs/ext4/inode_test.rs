@@ -3,12 +3,12 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for ext4 inode mode decoding and block pointer access.
-//! Copied from: kernel/src/fs/ext4/inode.rs
+//! Copied from: kernel/core/src/fs/ext4/inode.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/ext4/inode.rs
+// Copied types from kernel/core/src/fs/ext4/inode.rs
 // ============================================================================
 
 pub mod file_type {

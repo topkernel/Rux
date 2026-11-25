@@ -14,7 +14,7 @@ edition = "2021"
 # register_builtin_handlers boot point (the fs 'R'-loop lesson).
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 
 [features]
 default = ["riscv64"]

@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for UDP/ICMP/TCP transport checksums.
-//! Copied from: kernel/src/net/udp.rs, kernel/src/net/icmp.rs, kernel/src/net/tcp.rs
+//! Copied from: kernel/core/src/net/udp.rs, kernel/core/src/net/icmp.rs, kernel/core/src/net/tcp.rs
 //!
 //! Uses byte-array approach for roundtrip verification to avoid
 //! struct byte-order issues on little-endian hosts.
@@ -33,7 +33,7 @@ fn ip_checksum(data: &[u8]) -> u16 {
 }
 
 // ============================================================================
-// Copied: ICMP checksum from kernel/src/net/icmp.rs
+// Copied: ICMP checksum from kernel/core/src/net/icmp.rs
 // ============================================================================
 
 /// ICMP compute_checksum — operates on raw byte arrays (big-endian)

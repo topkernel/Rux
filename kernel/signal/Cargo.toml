@@ -17,7 +17,7 @@ edition = "2021"
 # root re-exports.
 #
 # Zero-move step: the policy file is a #[path]-include of the carved
-# kernel/src/signal_policy.rs (not declared by the framework's module
+# kernel/core/src/signal_policy.rs (not declared by the framework's module
 # tree — this crate is its sole compilation home); the physical move
 # is the later cosmetic step per the crate-plan recipe.
 #
@@ -25,10 +25,10 @@ edition = "2021"
 # SA-flag semantics, sigaltstack validation, rt_sigqueueinfo argument
 # validation and the kill permission checks were ALREADY crate-side
 # (syscall since rung 1); this crate takes the policy that
-# remained in kernel/src/signal.rs.
+# remained in kernel/core/src/signal.rs.
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 
 [features]
 default = ["riscv64"]

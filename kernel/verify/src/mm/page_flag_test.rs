@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for PageFlag bitfield invariants.
-//! Copied from: kernel/src/mm/page_desc.rs
+//! Copied from: kernel/core/src/mm/page_desc.rs
 
 use proptest::prelude::*;
 

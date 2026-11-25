@@ -15,13 +15,13 @@ edition = "2021"
 # the mm/fs unsafe_edges, page_slice_mut).
 #
 # Zero-move step: #[path]-includes of the carved files living in the
-# framework tree (kernel/src/mm/policy/); the physical moves are the
+# framework tree (kernel/core/src/mm/policy/); the physical moves are the
 # later cosmetic step per the crate-plan recipe. riscv64/aarch64 policy
 # carves follow the x86_64 one (their rows register from the framework
 # until then).
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 process = { path = "../process", default-features = false }
 
 [features]

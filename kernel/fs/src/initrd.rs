@@ -4,10 +4,10 @@
 //!
 //! The INITRD DECOMPRESS + UNPACK half (root-cold lane, 2026-11-24):
 //! the compact RFC 1951/1952 decoder and the cpio (newc) unpacker that
-//! populate the RAM rootfs — physically moved from kernel/src/initrd.rs
+//! populate the RAM rootfs — physically moved from kernel/core/src/initrd.rs
 //! (the boot-time cold half of that file). The framework keeps the
 //! region bookkeeping (set_region/region/loaded), the CpioStats DTO and
-//! `load()` with its one audited unsafe slice build (kernel/src/
+//! `load()` with its one audited unsafe slice build (kernel/core/src/
 //! initrd.rs); this module reaches the framework through the two
 //! LeafBootHooks rows (initrd_gunzip / initrd_unpack_newc) — boot-only,
 //! cold sites per the crate-plan placement table.

@@ -11,16 +11,16 @@ edition = "2021"
 # arm, the tracefs file publisher, and the SCM_RIGHTS tap — compiled
 # under crate-level #![forbid(unsafe_code)]. The per-event RECORD
 # markers and their statics stay in the framework crate
-# (kernel/src/debug/) as direct calls (the hot/cold split of the flip's
+# (kernel/core/src/debug/) as direct calls (the hot/cold split of the flip's
 # measurement); this crate READS those statics through their pub
 # surfaces and prints. Framework-side cold entry points dispatch
-# through kernel/src/debug/debug_hooks.rs (the 18-row seam); syscall
+# through kernel/core/src/debug/debug_hooks.rs (the 18-row seam); syscall
 # and fs call the scmtap module here DIRECTLY (sibling service dep,
 # zero indirection on the armed-gated tap paths).
 
 [dependencies]
 ipc = { path = "../ipc", default-features = false }
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 
 [features]
 default = ["riscv64"]

@@ -3,12 +3,12 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for BufferState bitmap and BlockCache hash_index.
-//! Copied from: kernel/src/fs/bio.rs
+//! Copied from: kernel/core/src/fs/bio.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied: BufferState from kernel/src/fs/bio.rs
+// Copied: BufferState from kernel/core/src/fs/bio.rs
 // ============================================================================
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -34,7 +34,7 @@ impl BufferState {
 }
 
 // ============================================================================
-// Copied: hash_index from kernel/src/fs/bio.rs BlockCache
+// Copied: hash_index from kernel/core/src/fs/bio.rs BlockCache
 // ============================================================================
 
 /// Hash function for block cache (hash_size must be power of 2)

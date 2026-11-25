@@ -154,9 +154,9 @@ def escape_hatch_check(failures):
         r"(as_ptr|as_raw|into_raw|from_raw|leak|phys)\b", _re.M)
     inv_re = _re.compile(r"\b(INV-[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\b")
     owners = [
-        ROOT / "kernel" / "src" / "safety",
-        ROOT / "kernel" / "src" / "process" / "task_ref.rs",
-        ROOT / "kernel" / "src" / "fs" / "unsafe_edges.rs",
+        ROOT / "kernel" / "core" / "src" / "safety",
+        ROOT / "kernel" / "core" / "src" / "process" / "task_ref.rs",
+        ROOT / "kernel" / "core" / "src" / "fs" / "unsafe_edges.rs",
     ]
     files = []
     for o in owners:

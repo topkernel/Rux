@@ -4,12 +4,12 @@
 //!
 //! ext4 filesystem feature flag invariant tests.
 //!
-//! Types copied from: kernel/src/fs/ext4/superblock.rs
+//! Types copied from: kernel/core/src/fs/ext4/superblock.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/ext4/superblock.rs
+// Copied types from kernel/core/src/fs/ext4/superblock.rs
 // ============================================================================
 
 #[repr(C)]

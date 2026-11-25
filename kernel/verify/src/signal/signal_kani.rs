@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for SigPending bitmap and SigAction.
 //!
-//! Types copied from: kernel/src/signal.rs
+//! Types copied from: kernel/core/src/signal.rs
 
 #![cfg(kani)]
 

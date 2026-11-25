@@ -6,11 +6,11 @@
 //! core, the default-action table, the pid-ns init delivery filter, the
 //! exec/fork handler-reset rules, the /proc SigIgn/SigCgt pair, and the
 //! user-originated sender-stamping entries — moved VERBATIM out of
-//! kernel/src/signal.rs. This file is NOT declared by the framework's
-//! module tree (kernel/src/lib.rs never names it): the signal
+//! kernel/core/src/signal.rs. This file is NOT declared by the framework's
+//! module tree (kernel/core/src/lib.rs never names it): the signal
 //! service crate is its sole compilation home, under
 //! #![forbid(unsafe_code)]. The framework reaches this code only
-//! through kernel/src/signal_hooks.rs (OnceSlot rows, all cold paths).
+//! through kernel/core/src/signal_hooks.rs (OnceSlot rows, all cold paths).
 //!
 //! The MECHANISM stays framework-side: the pending set and its queue,
 //! the pt_regs frame build/restore, the wake path, the pinned pid-hash

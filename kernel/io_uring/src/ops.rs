@@ -1,5 +1,5 @@
 //! The io_uring SQE OPERATION HANDLERS (moved from
-//! kernel/src/io_uring/mod.rs at the cold-four policy flip — sole copy
+//! kernel/core/src/io_uring/mod.rs at the cold-four policy flip — sole copy
 //! here; zero behavior change). Pure policy over the FileOps vtable —
 //! the read/write bottoms ride the framework's uaccess_safe typed
 //! twins and the existing vtable fields (crate-plan 3a rule 2: field

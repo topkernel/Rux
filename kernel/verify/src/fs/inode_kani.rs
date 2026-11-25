@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for InodeMode file type classifier.
 //!
-//! Types copied from: kernel/src/fs/inode.rs
+//! Types copied from: kernel/core/src/fs/inode.rs
 
 #![cfg(kani)]
 

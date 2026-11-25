@@ -3,9 +3,9 @@
 // Verifies: preempt_count stays within bounds, no underflow
 //
 // Abstracted from:
-//   kernel/src/interrupt/preempt.rs  — preempt_count bitfield layout
-//   kernel/src/arch/riscv64/trap.rs  — irq_enter/irq_exit bracketing
-//   kernel/src/interrupt/softirq.rs  — softirq context management
+//   kernel/core/src/interrupt/preempt.rs  — preempt_count bitfield layout
+//   kernel/core/src/arch/riscv64/trap.rs  — irq_enter/irq_exit bracketing
+//   kernel/core/src/interrupt/softirq.rs  — softirq context management
 //
 // Safety properties (verified by assertions):
 //   preempt_depth >= 0 always (no underflow)

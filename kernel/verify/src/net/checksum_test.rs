@@ -4,12 +4,12 @@
 //!
 //! Internet checksum (RFC 1071) invariant tests.
 //!
-//! Types copied from: kernel/src/net/ipv4/checksum.rs
+//! Types copied from: kernel/core/src/net/ipv4/checksum.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied functions from kernel/src/net/ipv4/checksum.rs
+// Copied functions from kernel/core/src/net/ipv4/checksum.rs
 // ============================================================================
 
 pub fn ip_checksum(data: &[u8]) -> u16 {

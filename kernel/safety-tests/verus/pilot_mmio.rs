@@ -7,7 +7,7 @@
 //! model, which is Kani's strength and Verus's weakness). What Verus
 //! adds is a DEDUCTIVE proof of the arithmetic invariants that the
 //! checks REST on — theorems that hold for ALL inputs, not bounded
-//! ones. The functions below mirror kernel/src/safety/mmio.rs
+//! ones. The functions below mirror kernel/core/src/safety/mmio.rs
 //! check()'s exact arithmetic (post-conviction shape: wrapping_add
 //! alignment + checked_add window); the correspondence is by
 //! line-for-line mirroring, kept in this file so the primitive's

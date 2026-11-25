@@ -4,12 +4,12 @@
 //!
 //! Signal bitmap and SigAction invariant tests.
 //!
-//! Types copied from: kernel/src/signal.rs (AtomicU64 → plain u64 for std testing)
+//! Types copied from: kernel/core/src/signal.rs (AtomicU64 → plain u64 for std testing)
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/signal.rs
+// Copied types from kernel/core/src/signal.rs
 // ============================================================================
 
 pub const SIGRTMIN: i32 = 32;

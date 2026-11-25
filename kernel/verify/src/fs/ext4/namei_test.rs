@@ -4,15 +4,15 @@
 //!
 //! ext4 directory entry helpers invariant tests.
 //!
-//! Functions copied from: kernel/src/fs/ext4/namei.rs
+//! Functions copied from: kernel/core/src/fs/ext4/namei.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied functions from kernel/src/fs/ext4/namei.rs
+// Copied functions from kernel/core/src/fs/ext4/namei.rs
 // ============================================================================
 
-/// EXT4 file type for directories (copied from kernel/src/fs/ext4/dir.rs)
+/// EXT4 file type for directories (copied from kernel/core/src/fs/ext4/dir.rs)
 pub const EXT4_FT_DIR: u8 = 2;
 
 
@@ -28,7 +28,7 @@ mod errno {
     }
 }
 
-// Mirror of kernel/src/fs/ext4/namei.rs find_entry_space (sync-checked).
+// Mirror of kernel/core/src/fs/ext4/namei.rs find_entry_space (sync-checked).
 fn find_entry_space(
     block_data: &[u8],
     name_len: usize,
@@ -92,7 +92,7 @@ fn find_entry_space(
     None
 }
 
-// Mirror of kernel/src/fs/ext4/namei.rs add_entry_to_block (sync-checked).
+// Mirror of kernel/core/src/fs/ext4/namei.rs add_entry_to_block (sync-checked).
 fn add_entry_to_block(
     block_data: &mut [u8],
     offset: usize,

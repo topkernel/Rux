@@ -4,12 +4,12 @@
 //!
 //! IPv4 header and UDP header invariant tests.
 //!
-//! Types copied from: kernel/src/net/ipv4/mod.rs, kernel/src/net/udp.rs
+//! Types copied from: kernel/core/src/net/ipv4/mod.rs, kernel/core/src/net/udp.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/net/ipv4/mod.rs
+// Copied types from kernel/core/src/net/ipv4/mod.rs
 // ============================================================================
 
 pub const IPHDR_LEN: usize = 20;
@@ -44,7 +44,7 @@ impl IpHdr {
 }
 
 // ============================================================================
-// Copied types from kernel/src/net/udp.rs
+// Copied types from kernel/core/src/net/udp.rs
 // ============================================================================
 
 pub type UdpPort = u16;

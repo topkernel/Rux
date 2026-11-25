@@ -1,47 +1,47 @@
 # A drop that has no matching row fails the gate. Remove a row once no baseline shows its drop.
-#   file   the path as the census reports it (kernel/src/...)
+#   file   the path as the census reports it (kernel/core/src/...)
 #   from   the file's annotated-region count at the baseline the gate compares against
-kernel/src/arch/riscv64/trap.rs	54	51	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
-kernel/src/drivers/loop_dev.rs	4	2	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
-kernel/src/fs/debugfs.rs	3	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/devfs/mod.rs	3	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/fsctx.rs	14	0	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
-kernel/src/fs/mod.rs	2	0	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
-kernel/src/fs/procfs/mod.rs	3	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/procfs/pid.rs	14	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/procfs/self_proc.rs	1	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/procfs/stat.rs	1	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/procfs/sysrq.rs	4	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/procfs/vmstat.rs	2	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/pty.rs	4	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/rootfs.rs	8	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/tmpfs.rs	17	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
-kernel/src/fs/vfs.rs	26	20	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
-kernel/src/signal.rs	15	13	rux-signal flip: abort_reason_dump's two regions moved to kernel/src/signal_edges.rs (moved-item provenance in the census remap; same INV:INV-TASKREF-1)
-kernel/src/tests/file_open.rs	6	0	test file moved to kernel/src/tests/services/ or rewritten for the forbid crate
-kernel/src/tests/mkdir_unlink.rs	6	0	test file moved to kernel/src/tests/services/ or rewritten for the forbid crate
-kernel/src/tests/signal.rs	1	0	rux-signal flip: the test moved to tests/services/signal_test.rs under the crate's forbid; its unsafe extern "C" fn definition region was replaced by a literal SigAction construction
-kernel/src/tests/tmpfs_mknod.rs	2	0	test file moved to kernel/src/tests/services/ or rewritten for the forbid crate
+kernel/core/src/arch/riscv64/trap.rs	54	51	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
+kernel/core/src/drivers/loop_dev.rs	4	2	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
+kernel/core/src/fs/debugfs.rs	3	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/devfs/mod.rs	3	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/fsctx.rs	14	0	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
+kernel/core/src/fs/mod.rs	2	0	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
+kernel/core/src/fs/procfs/mod.rs	3	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/procfs/pid.rs	14	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/procfs/self_proc.rs	1	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/procfs/stat.rs	1	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/procfs/sysrq.rs	4	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/procfs/vmstat.rs	2	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/pty.rs	4	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/rootfs.rs	8	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/tmpfs.rs	17	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
+kernel/core/src/fs/vfs.rs	26	20	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
+kernel/core/src/signal.rs	15	13	rux-signal flip: abort_reason_dump's two regions moved to kernel/core/src/signal_edges.rs (moved-item provenance in the census remap; same INV:INV-TASKREF-1)
+kernel/core/src/tests/file_open.rs	6	0	test file moved to kernel/core/src/tests/services/ or rewritten for the forbid crate
+kernel/core/src/tests/mkdir_unlink.rs	6	0	test file moved to kernel/core/src/tests/services/ or rewritten for the forbid crate
+kernel/core/src/tests/signal.rs	1	0	rux-signal flip: the test moved to tests/services/signal_test.rs under the crate's forbid; its unsafe extern "C" fn definition region was replaced by a literal SigAction construction
+kernel/core/src/tests/tmpfs_mknod.rs	2	0	test file moved to kernel/core/src/tests/services/ or rewritten for the forbid crate
 # One row per drop, tab-separated:
 # Per-file annotated-count drops that were reviewed and accepted. Read by scripts/unsafe_gate.py --check.
 #   reason why the annotations left with their regions
 #   to     the count it may come down to, and no further (one row never covers a second loss)
-kernel/src/arch/riscv64/trap.rs	51	49	regions shifted/deleted by the carve; carried by id, remainder GAP
-kernel/src/process/mod.rs	3	0	regions shifted/deleted by the carve; carried by id, remainder GAP
-kernel/src/process/ptrace.rs	1	0	regions moved to the rux-process crate (forbid; the regions no longer exist in kernel/src)
-kernel/src/signal.rs	13	12	regions shifted/deleted by the carve; carried by id, remainder GAP
-kernel/src/arch/riscv64/trap.rs	54	49	regions shifted by the process carve edits; carried by id, remainder recoverable from history
-kernel/src/signal.rs	15	12	regions shifted by the carve edits; carried by id, remainder recoverable from history
-kernel/src/process/mod.rs	2	0	lines shifted by the kthread re-export edit; carried by id
-kernel/src/io_uring/mod.rs	19	11	cold-four lane: 8 regions left kernel/src with the policy flip to the rux-io-uring forbid crate (error-path Box::from_raw pairs converted to the ring_release_on_install_error edge; private_data reads to pin_verified_ring; read_volatile pair to cq_completed)
-kernel/src/ipc/binder.rs	55	41	cold-four lane: 11 walker regions moved to kernel/src/ipc/binder_edges.rs with annotations carried; 3 raw-task/comm reads converted to the diag_task_comm/diag_task edges in the moved forbid-crate diagnostics
-kernel/src/timer.rs	3	2	cold-four lane: the WW heartbeat's ti_on_cpu volatile read moved into the ww_task_on_cpu framework edge (the report body flipped to the rux-timer forbid crate)
-kernel/src/lib.rs	1	0	cold-four lane: region shifted out by the timer_hooks module insertion renumbering; annotation carried by id to the new position
-kernel/src/cmdline.rs	5	4	region ELIMINATED by the root-cold move: parse_memory_regions walker moved to kernel/rux-drivers/src/of_fdt.rs under forbid, its core::mem::zeroed() replaced by a plain all-zero repeat expression; the 4 surviving regions kept their INV:INV-FDT-1 artifacts
-kernel/src/timer.rs	2	0	regions shifted by the hilogcensus/tick edits; carried by id, remainder recoverable from history
-kernel/src/cmdline.rs	5	4	mem::zeroed region eliminated under forbid (root-cold lane, reasoned)
-kernel/src/arch/x86_64/trap.rs	86	80	F1 family-(a): the mm_ops printers consolidated six per-load unsafe blocks into two hoisted derefs; no behavior change (lane-reported, reviewed)
-kernel/src/arch/x86_64/ipi.rs	15	12	regions sole-copied to the forbid crate (its own count is zero by construction); remainder recoverable from history
-kernel/src/arch/x86_64/trap.rs	63	59	vs the arch-cold merge parent (63): four regions shifted by the F1 port edits; recoverable from history
-kernel/src/arch/x86_64/trap.rs	80	59	forensic walker regions moved to rux-arch/trap_diag.rs (forbid, zero by construction); the mm_ops printer consolidated per F1 hoists; remainder recoverable
-kernel/src/arch/x86_64/trap.rs	86	59	vs the sync-upper parent (which predates the arch-cold extraction): 27 regions moved to rux-arch/trap_diag.rs (forbid, zero by construction); the merged-tree count (59) is already exempted at its own baselines
+kernel/core/src/arch/riscv64/trap.rs	51	49	regions shifted/deleted by the carve; carried by id, remainder GAP
+kernel/core/src/process/mod.rs	3	0	regions shifted/deleted by the carve; carried by id, remainder GAP
+kernel/core/src/process/ptrace.rs	1	0	regions moved to the rux-process crate (forbid; the regions no longer exist in kernel/src)
+kernel/core/src/signal.rs	13	12	regions shifted/deleted by the carve; carried by id, remainder GAP
+kernel/core/src/arch/riscv64/trap.rs	54	49	regions shifted by the process carve edits; carried by id, remainder recoverable from history
+kernel/core/src/signal.rs	15	12	regions shifted by the carve edits; carried by id, remainder recoverable from history
+kernel/core/src/process/mod.rs	2	0	lines shifted by the kthread re-export edit; carried by id
+kernel/core/src/io_uring/mod.rs	19	11	cold-four lane: 8 regions left kernel/src with the policy flip to the rux-io-uring forbid crate (error-path Box::from_raw pairs converted to the ring_release_on_install_error edge; private_data reads to pin_verified_ring; read_volatile pair to cq_completed)
+kernel/core/src/ipc/binder.rs	55	41	cold-four lane: 11 walker regions moved to kernel/core/src/ipc/binder_edges.rs with annotations carried; 3 raw-task/comm reads converted to the diag_task_comm/diag_task edges in the moved forbid-crate diagnostics
+kernel/core/src/timer.rs	3	2	cold-four lane: the WW heartbeat's ti_on_cpu volatile read moved into the ww_task_on_cpu framework edge (the report body flipped to the rux-timer forbid crate)
+kernel/core/src/lib.rs	1	0	cold-four lane: region shifted out by the timer_hooks module insertion renumbering; annotation carried by id to the new position
+kernel/core/src/cmdline.rs	5	4	region ELIMINATED by the root-cold move: parse_memory_regions walker moved to kernel/rux-drivers/src/of_fdt.rs under forbid, its core::mem::zeroed() replaced by a plain all-zero repeat expression; the 4 surviving regions kept their INV:INV-FDT-1 artifacts
+kernel/core/src/timer.rs	2	0	regions shifted by the hilogcensus/tick edits; carried by id, remainder recoverable from history
+kernel/core/src/cmdline.rs	5	4	mem::zeroed region eliminated under forbid (root-cold lane, reasoned)
+kernel/core/src/arch/x86_64/trap.rs	86	80	F1 family-(a): the mm_ops printers consolidated six per-load unsafe blocks into two hoisted derefs; no behavior change (lane-reported, reviewed)
+kernel/core/src/arch/x86_64/ipi.rs	15	12	regions sole-copied to the forbid crate (its own count is zero by construction); remainder recoverable from history
+kernel/core/src/arch/x86_64/trap.rs	63	59	vs the arch-cold merge parent (63): four regions shifted by the F1 port edits; recoverable from history
+kernel/core/src/arch/x86_64/trap.rs	80	59	forensic walker regions moved to rux-arch/trap_diag.rs (forbid, zero by construction); the mm_ops printer consolidated per F1 hoists; remainder recoverable
+kernel/core/src/arch/x86_64/trap.rs	86	59	vs the sync-upper parent (which predates the arch-cold extraction): 27 regions moved to rux-arch/trap_diag.rs (forbid, zero by construction); the merged-tree count (59) is already exempted at its own baselines

@@ -3,11 +3,11 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Extended checksum verification tests: carry chains, edge cases.
-//! Builds on kernel/src/net/ipv4/checksum.rs
+//! Builds on kernel/core/src/net/ipv4/checksum.rs
 
 use proptest::prelude::*;
 
-/// Internet checksum (RFC 1071) — copied from kernel/src/net/ipv4/checksum.rs
+/// Internet checksum (RFC 1071) — copied from kernel/core/src/net/ipv4/checksum.rs
 pub fn ip_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut i = 0;

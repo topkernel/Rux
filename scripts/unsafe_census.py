@@ -4,7 +4,7 @@
 
 """Unsafe-code census for the kernel.
 
-Extracts every unsafe region from kernel/src/**/*.rs with a
+Extracts every unsafe region from kernel/core/src/**/*.rs with a
 comment/string-aware scanner:
 
   * unsafe fn / unsafe impl / unsafe trait / unsafe extern blocks
@@ -87,7 +87,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-KERNEL_SRC = ROOT / "kernel" / "src"
+# Where the core's sources live. The current tree is read at CORE_SRC_REL
+# (kernel/core/src since seed-core-design 2c.1). A REFERENCE commit may
+# predate that move, so its tree is read under either prefix: a ledger
+# written against the old layout still pairs with the new one.
+CORE_SRC_REL = "kernel/core/src"
+CORE_SRC_PREFIXES = ("kernel/src", CORE_SRC_REL)
+KERNEL_SRC = ROOT / "kernel" / "core" / "src"
 CENSUS_JSON = ROOT / "run" / "unsafe-census.json"
 HIST_FILE = ROOT / "run" / "unsafe-census-histogram.txt"
 REMAP_TSV = ROOT / "run" / "unsafe-ledger-remap.tsv"
@@ -497,11 +503,24 @@ def scan_texts(texts):
     return regions
 
 
+def in_core(rel):
+    """True for a path under the core's src/ in either layout."""
+    return any(rel == p or rel.startswith(p + "/") for p in CORE_SRC_PREFIXES)
+
+
+def core_rel(rel):
+    """Path relative to the core's src/ root, under either layout."""
+    for p in CORE_SRC_PREFIXES:
+        if rel == p or rel.startswith(p + "/"):
+            return rel[len(p):].lstrip("/")
+    return rel
+
+
 def tracked_sources():
-    """kernel/src sources git tracks, as paths relative to ROOT.
+    """kernel/core/src sources git tracks, as paths relative to ROOT.
 
     The census must measure the source tree, not whatever a previous
-    build left behind: a stale generated file (kernel/src/debug/
+    build left behind: a stale generated file (kernel/core/src/debug/
     ksyms_generated.rs, 27,625 lines, written by an older build and
     referenced by no module) used to be picked up by the rglob. Counting
     only tracked files makes a bare checkout and a built tree produce the
@@ -510,20 +529,20 @@ def tracked_sources():
     """
     try:
         out = subprocess.run(
-            ["git", "ls-files", "-z", "--", "kernel/src"],
+            ["git", "ls-files", "-z", "--", *CORE_SRC_PREFIXES],
             cwd=ROOT, capture_output=True, text=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
     rels = set()
     for entry in out.split("\0"):
-        if entry:
+        if entry and in_core(entry):
             rels.add(entry)
     return rels
 
 
 def full_census():
-    """Read kernel/src from disk and census it."""
+    """Read kernel/core/src from disk and census it."""
     tracked = tracked_sources()
     texts = {}
     for path in sorted(KERNEL_SRC.rglob("*.rs")):
@@ -631,10 +650,16 @@ def git_show(rev, rel):
         return None
 
 
-def git_tree_blobs(rev, prefix="kernel/src"):
-    """{relpath: blob oid} for the .rs files under <prefix> at <rev>."""
+def git_tree_blobs(rev, prefix=None):
+    """{relpath: blob oid} for the core's .rs files at <rev>, under the
+    layouts of CORE_SRC_PREFIXES (a pre-move commit has kernel/src, a
+    later one kernel/core/src)."""
+    if prefix is None:
+        prefix = CORE_SRC_PREFIXES
+    elif isinstance(prefix, str):
+        prefix = (prefix,)
     try:
-        out = _git("ls-tree", "-r", "-z", rev, "--", prefix).stdout
+        out = _git("ls-tree", "-r", "-z", rev, "--", *prefix).stdout
     except (OSError, subprocess.CalledProcessError):
         return {}
     blobs = {}
@@ -643,7 +668,7 @@ def git_tree_blobs(rev, prefix="kernel/src"):
             continue
         meta, _, path = entry.partition("\t")
         fields = meta.split()
-        if path.endswith(".rs") and len(fields) >= 3 and fields[1] == "blob":
+        if path.endswith(".rs") and in_core(path) and len(fields) >= 3 and fields[1] == "blob":
             blobs[path] = fields[2]
     return blobs
 
@@ -678,8 +703,8 @@ def git_blobs(oids):
     return {o: _BLOBS.get(o) for o in oids}
 
 
-def git_tree_texts(rev, prefix="kernel/src"):
-    """{relpath: text} for the .rs files under <prefix> at <rev>."""
+def git_tree_texts(rev, prefix=None):
+    """{relpath: text} for the core's .rs files at <rev> (either layout)."""
     blobs = git_tree_blobs(rev, prefix)
     raw = git_blobs(blobs.values())
     return {rel: raw[oid] for rel, oid in blobs.items() if raw.get(oid) is not None}
@@ -786,7 +811,7 @@ def ledger_references(args, baselines):
     first. The baselines come first, then the explicit --reference
     versions, then (with --reference-history) every commit that changed
     the sidecar. Two versions with the same sidecar text and the same
-    kernel/src tree are the same evidence and appear once."""
+    core source tree are the same evidence and appear once."""
     refs = [(label, rev, SIDE_CAR_REL) for label, rev in baselines]
     for spec in args.reference or []:
         rev, _, rel = spec.partition(":")
@@ -806,7 +831,7 @@ def ledger_references(args, baselines):
     out, seen = [], set()
     for label, rev, rel in refs:
         try:
-            key = _git("ls-tree", rev, "--", rel, "kernel/src").stdout
+            key = _git("ls-tree", rev, "--", rel, *CORE_SRC_PREFIXES).stdout
         except (OSError, subprocess.CalledProcessError):
             key = ""
         if key and key not in seen:
@@ -941,14 +966,14 @@ def align_regions(old, new, edited=True):
 
 
 def moved_paths(rev):
-    """{new_path: old_path} under kernel/src for files git reports as
+    """{new_path: old_path} under the core for files git reports as
     renamed or copied between <rev> and the working tree, plus
     deleted/added pairs that share a basename (git wants 40% similarity
     for a rename; a file that moved and was heavily edited on the way
     shows up as a deletion plus an addition)."""
     try:
         out = _git("diff", "--name-status", "-M", "-C", "--find-renames=40%",
-                   "--find-copies=40%", rev, "--", "kernel/src").stdout
+                   "--find-copies=40%", rev, "--", *CORE_SRC_PREFIXES).stdout
     except (OSError, subprocess.CalledProcessError):
         return {}
     pairs, deleted, added = {}, [], []
@@ -1253,7 +1278,7 @@ def explain_drop(cur, dest, snap, fname, artifacts):
             continue
         hit = dest.get((snap.label, old["id"]))
         if hit is None:
-            gone["no counterpart in kernel/src (deleted, converted, or moved to a crate)"] += 1
+            gone["no counterpart in the core (deleted, converted, or moved to a crate)"] += 1
         elif hit[0]["file"] != fname:
             gone[f"moved to {hit[0]['file']}, annotation "
                  + ("carried" if artifacts.get(hit[0]["id"], "GAP") != "GAP" else "NOT carried")] += 1
@@ -1492,9 +1517,9 @@ def rebank_ledger(args, regions):
 def write_ledger(regions, artifacts, provenance=None):
     per_sys = defaultdict(list)
     for r in regions:
-        parts = Path(r["file"]).parts
-        # kernel/src/<subsys>/...  or kernel/src/<name>.rs
-        subsys = parts[2] if len(parts) > 3 else "<top>"
+        # kernel/core/src/<subsys>/...  or kernel/core/src/<name>.rs
+        parts = Path(core_rel(r["file"])).parts
+        subsys = parts[0] if len(parts) > 1 else "<top>"
         per_sys[subsys].append(r)
 
     total = len(regions)
@@ -1630,12 +1655,10 @@ def layer_map():
 
 
 def layer_of(relpath, layers):
-    # Census paths are repo-rooted (kernel/src/<module>/...); the layer
-    # rules are kernel-src-rooted (gen_tcb_ledger's shape). Strip the
-    # kernel/src/ prefix so both worlds line up.
-    rel = relpath
-    if rel.startswith("kernel/src/"):
-        rel = rel[len("kernel/src/"):]
+    # Census paths are repo-rooted (kernel/core/src/<module>/...); the
+    # layer rules are kernel-src-rooted (gen_tcb_ledger's shape). Strip
+    # the prefix so both worlds line up.
+    rel = core_rel(relpath)
     for prefix, layer in layers:
         if rel.startswith(prefix):
             return layer
@@ -1773,8 +1796,8 @@ def main():
 
     per_sys = defaultdict(int)
     for r in regions:
-        parts = Path(r["file"]).parts
-        per_sys[parts[2] if len(parts) > 3 else "<top>"] += 1
+        parts = Path(core_rel(r["file"])).parts
+        per_sys[parts[0] if len(parts) > 1 else "<top>"] += 1
     cat_counter = Counter(c for r in regions for c in r.get("categories", []))
 
     print(f"unsafe regions: {len(regions)} across "

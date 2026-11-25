@@ -92,4 +92,4 @@ echo "=== [4/4] Merge + per-subsystem report ==="
 "$COVTOOL" export "$KERNEL_ELF" -instr-profile="$COV_DIR/rux.profdata" --summary-only \
     > "$COV_DIR/cov.json"
 python3 scripts/coverage_summary.py "$COV_DIR/cov.json" \
-    $(find kernel/src -name '*.rs' | sort) | tee "$COV_DIR/report.txt"
+    $(find kernel/core/src -name '*.rs' | sort) | tee "$COV_DIR/report.txt"

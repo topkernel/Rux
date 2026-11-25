@@ -4,12 +4,12 @@
 //!
 //! Memory compaction control and termination invariant tests.
 //!
-//! Types copied from: kernel/src/mm/compact.rs
+//! Types copied from: kernel/core/src/mm/compact.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/mm/compact.rs
+// Copied types from kernel/core/src/mm/compact.rs
 // ============================================================================
 
 pub const MAX_SCAN_PAGES: usize = 4096;

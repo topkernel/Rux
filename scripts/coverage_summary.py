@@ -5,7 +5,7 @@
 """Coverage summarizer: per-top-module table over ALL kernel source files.
 
 Reads `llvm-cov export --summary-only` JSON and joins it against the
-complete kernel/src file list, so files that never appear in the coverage
+complete kernel/core/src file list, so files that never appear in the coverage
 mapping (never instrumented / never referenced) still show as 0% — the
 monitoring mandate is "see everything", not "see what executed".
 
@@ -24,9 +24,9 @@ from pathlib import Path
 
 def subsystem_of(path: str) -> str:
     parts = Path(path).parts
-    # kernel/src/<subsys>/... or kernel/src/<name>.rs
-    if len(parts) >= 3 and parts[0] == "kernel" and parts[1] == "src":
-        return parts[2] if len(parts) > 3 else "<top>"
+    # kernel/core/src/<subsys>/... or kernel/core/src/<name>.rs
+    if len(parts) >= 4 and parts[0] == "kernel" and parts[1] == "core" and parts[2] == "src":
+        return parts[3] if len(parts) > 4 else "<top>"
     return "<other>"
 
 
@@ -37,8 +37,8 @@ def main() -> None:
     cov_json = json.loads(Path(sys.argv[1]).read_text())
     def norm(name: str) -> str:
         # llvm-cov emits ABSOLUTE paths (worktree-dependent); the file
-        # list is relative. Normalize both to the kernel/src/... suffix.
-        i = name.find("kernel/src/")
+        # list is relative. Normalize both to the kernel/core/src/... suffix.
+        i = name.find("kernel/core/src/")
         return name[i:] if i >= 0 else name
 
     all_files = [norm(f) for f in sys.argv[2:] if f.endswith(".rs")]
@@ -70,7 +70,7 @@ def main() -> None:
 
     unmapped = sorted(mapped - set(all_files))
     if unmapped:
-        print(f"NOTE: {len(unmapped)} mapped file(s) outside kernel/src (ignored):")
+        print(f"NOTE: {len(unmapped)} mapped file(s) outside kernel/core/src (ignored):")
         for u in unmapped[:10]:
             print(f"    {u}")
         if len(unmapped) > 10:

@@ -4,12 +4,12 @@
 //!
 //! Path normalization and resolution invariant tests.
 //!
-//! Types copied from: kernel/src/fs/path.rs
+//! Types copied from: kernel/core/src/fs/path.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/path.rs
+// Copied types from kernel/core/src/fs/path.rs
 // ============================================================================
 
 #[derive(Debug, Clone, Copy)]

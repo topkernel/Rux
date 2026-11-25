@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for huge page constants and invariants.
-//! Copied from: kernel/src/mm/hugepage.rs
+//! Copied from: kernel/core/src/mm/hugepage.rs
 
 use proptest::prelude::*;
 

@@ -14,7 +14,7 @@ not from memory:
                         named row in test/suite.sh)
   * suite legs          the matrix rows of test/suite.sh (parsed) plus
                         every auto-discovered probe wrapper
-  * in-kernel units     kernel/src/tests/*.rs (count per subsystem)
+  * in-kernel units     kernel/core/src/tests/*.rs (count per subsystem)
   * host verification   kernel/verify/**.rs (count per subsystem)
   * LTP                 the newest in-tree test/ltp-results-r*.txt scan
                         (bucket totals + TCONF families). The TCONF
@@ -133,7 +133,7 @@ PROBE_SUBSYSTEM = {
 }
 
 # --------------------------------------------------------------------------
-# in-kernel unit family mapping (kernel/src/tests/<file>.rs -> subsystem)
+# in-kernel unit family mapping (kernel/core/src/tests/<file>.rs -> subsystem)
 # --------------------------------------------------------------------------
 
 UNIT_FAMILY = [
@@ -373,10 +373,10 @@ def collect_suite_legs():
 
 
 def collect_units():
-    """kernel/src/tests/*.rs grouped into families."""
+    """kernel/core/src/tests/*.rs grouped into families."""
     counts = {}
     total = 0
-    for f in glob.glob(os.path.join(ROOT, "kernel", "src", "tests", "*.rs")):
+    for f in glob.glob(os.path.join(ROOT, "kernel", "core", "src", "tests", "*.rs")):
         name = os.path.basename(f)[:-3]
         if name == "mod":
             continue

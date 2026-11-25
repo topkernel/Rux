@@ -1,5 +1,5 @@
 //! The STRACE1 loader-hunt formatter (moved from
-//! kernel/src/syscall/dispatch.rs at the cold-four policy flip — sole
+//! kernel/core/src/syscall/dispatch.rs at the cold-four policy flip — sole
 //! copy here; zero behavior change). Reached through the
 //! SyscallHooks::strace1_line row behind the EVENT_STRACE1 + pid-1
 //! gate at the dispatch call site (disarmed boots never touch the

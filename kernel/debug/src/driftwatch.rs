@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The driftwatch REPORT half (moved from kernel/src/debug/driftwatch.rs,
+//! The driftwatch REPORT half (moved from kernel/core/src/debug/driftwatch.rs,
 //! crate-flip rung debug): the per-site DRIFTWATCH lines. The
 //! counters (pub statics) and note_zero_put stay framework-side (mm
 //! free paths write them). Body moved verbatim.

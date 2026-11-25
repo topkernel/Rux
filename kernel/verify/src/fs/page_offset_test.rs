@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for page offset/index arithmetic.
-//! Copied from: kernel/src/fs/buffer.rs (AddressSpace read/write logic)
+//! Copied from: kernel/core/src/fs/buffer.rs (AddressSpace read/write logic)
 
 use proptest::prelude::*;
 

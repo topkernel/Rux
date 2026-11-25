@@ -4,13 +4,13 @@
 //!
 //! Unix DAC permission check invariant tests.
 //!
-//! Functions copied from: kernel/src/fs/permission.rs
+//! Functions copied from: kernel/core/src/fs/permission.rs
 //! NOTE: simplified Cred struct (no security::has_capability dependency)
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/fs/permission.rs
+// Copied types from kernel/core/src/fs/permission.rs
 // ============================================================================
 
 pub const MAY_EXEC: u32 = 0o001;

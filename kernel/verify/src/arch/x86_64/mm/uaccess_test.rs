@@ -11,14 +11,14 @@
 //! must be rejected by callers that need it (e.g. strncpy's is_null).
 //!
 //! Logic copied from:
-//! - kernel/src/arch/x86_64/uaccess.rs (access_ok)
-//! - kernel/src/arch/x86_64/mm/memory_layout.rs (TASK_SIZE / USER_END)
+//! - kernel/core/src/arch/x86_64/uaccess.rs (access_ok)
+//! - kernel/core/src/arch/x86_64/mm/memory_layout.rs (TASK_SIZE / USER_END)
 //! When the kernel versions change, these copies must be updated.
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied constants (kernel/src/arch/x86_64/mm/memory_layout.rs)
+// Copied constants (kernel/core/src/arch/x86_64/mm/memory_layout.rs)
 // ============================================================================
 
 /// x86_64 user space: 0 .. 0x0000_7fff_ffff_f000 (128 TiB).
@@ -27,7 +27,7 @@ pub const USER_START: usize = 0x0000_0000;
 pub const USER_END: usize = TASK_SIZE;
 
 // ============================================================================
-// Copied logic (kernel/src/arch/x86_64/uaccess.rs)
+// Copied logic (kernel/core/src/arch/x86_64/uaccess.rs)
 // ============================================================================
 
 pub fn access_ok(addr: usize, size: usize) -> bool {

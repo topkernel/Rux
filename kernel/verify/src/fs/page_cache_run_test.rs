@@ -4,7 +4,7 @@
 //!
 //! Property-based tests for the page-cache contiguous-run walk
 //! (`PageCache::get_range_into`). Copied from:
-//! kernel/src/fs/page_cache.rs
+//! kernel/core/src/fs/page_cache.rs
 //!
 //! The caller (ext4_file_read_cached_dst) consumes the run POSITIONALLY:
 //! run[i] is served as page `start + i`, the returned index is ignored.
@@ -30,7 +30,7 @@ fn run_len_prefix(pages: &BTreeMap<u64, bool>, start: u64, count: u64) -> Vec<u6
 }
 
 /// Copied walk, POST-fix (expected-index contiguity check) — must match
-/// kernel/src/fs/page_cache.rs get_range_into exactly in structure.
+/// kernel/core/src/fs/page_cache.rs get_range_into exactly in structure.
 fn run_len_fixed(pages: &BTreeMap<u64, bool>, start: u64, count: u64) -> Vec<u64> {
     let mut out = Vec::new();
     let mut expected = start;

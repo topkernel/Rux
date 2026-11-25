@@ -1,5 +1,5 @@
 //! The WW census heartbeat REPORT half (moved from
-//! kernel/src/timer.rs at the cold-four policy flip — sole copy here;
+//! kernel/core/src/timer.rs at the cold-four policy flip — sole copy here;
 //! zero behavior change). The markers and their statics stay
 //! framework-side (ww_note_tick_arrival / ww_note_rearm / the fire
 //! counters — written on the tick/fire paths); this file only READS
@@ -286,7 +286,7 @@ pub fn ww_heartbeat(now_time: u64) {
     crate::sched::sched_hooks::stallwatch_tick();
 }
 
-/// The DEL_DM diagnostic ring's reader (moved from kernel/src/timer.rs
+/// The DEL_DM diagnostic ring's reader (moved from kernel/core/src/timer.rs
 /// — sole copy; the DEL_* marker statics stay framework-side, written
 /// by the del-timer path). Caller: process's exit teardown.
 pub fn del_lookup(id: u64) -> Option<(u64, u64)> {
@@ -303,7 +303,7 @@ pub fn del_lookup(id: u64) -> Option<(u64, u64)> {
     None
 }
 
-/// The nanosleep loop-iteration marker (moved from kernel/src/timer.rs
+/// The nanosleep loop-iteration marker (moved from kernel/core/src/timer.rs
 /// — sole copy; the NSL_* statics stay framework-side with the reader
 /// the WW report uses). Caller: syscall's nanosleep_impl.
 #[inline]

@@ -1,5 +1,5 @@
 //! The riscv64 trap-path forensic half (arch-cold lane): moved from
-//! kernel/src/arch/riscv64/trap.rs — the fatal-SIGILL mapping dump
+//! kernel/core/src/arch/riscv64/trap.rs — the fatal-SIGILL mapping dump
 //! (the dying task's full VMA table with perms/type/file attribution
 //! for the wild-jump and exec-at-non-exec hunt families). Pure typed
 //! walks (vma_read + get_vma_file); no raw reads, no edges needed.

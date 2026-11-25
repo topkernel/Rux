@@ -13,7 +13,7 @@ edition = "2021"
 # NEED_RESCHED/task-slot lifecycle) stays framework-side.
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 process = { path = "../process", default-features = false }
 
 [features]

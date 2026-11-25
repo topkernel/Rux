@@ -4,12 +4,12 @@
 //!
 //! Boot command-line parameter parsing invariant tests.
 //!
-//! Types copied from: kernel/src/cmdline.rs
+//! Types copied from: kernel/core/src/cmdline.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied functions from kernel/src/cmdline.rs
+// Copied functions from kernel/core/src/cmdline.rs
 // ============================================================================
 
 pub fn get_param(cmdline: &str, key: &str) -> Option<String> {

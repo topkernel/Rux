@@ -4,12 +4,12 @@
 //!
 //! Cause parsing and CSR bit definition invariant tests.
 //!
-//! Types copied from: kernel/src/arch/riscv64/pt_regs.rs
+//! Types copied from: kernel/core/src/arch/riscv64/pt_regs.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/arch/riscv64/pt_regs.rs
+// Copied types from kernel/core/src/arch/riscv64/pt_regs.rs
 // ============================================================================
 
 pub const SR_SPP: u64 = 1 << 8;

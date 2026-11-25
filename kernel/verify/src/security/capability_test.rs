@@ -4,12 +4,12 @@
 //!
 //! POSIX.1e Capability bitmask invariant tests.
 //!
-//! Types copied from: kernel/src/security/capability.rs
+//! Types copied from: kernel/core/src/security/capability.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/security/capability.rs
+// Copied types from kernel/core/src/security/capability.rs
 // ============================================================================
 
 /// Capability bitmask — 41 capabilities fit in a single u64.

@@ -4,12 +4,12 @@
 //!
 //! RISC-V Sv39 VirtAddr and memory layout invariant tests.
 //!
-//! Types copied from: kernel/src/arch/riscv64/mm/memory_layout.rs
+//! Types copied from: kernel/core/src/arch/riscv64/mm/memory_layout.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/arch/riscv64/mm/memory_layout.rs
+// Copied types from kernel/core/src/arch/riscv64/mm/memory_layout.rs
 // ============================================================================
 
 pub const PAGE_SIZE: u64 = 4096;

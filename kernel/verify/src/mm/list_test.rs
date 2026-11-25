@@ -4,13 +4,13 @@
 //!
 //! Intrusive doubly-linked list invariant tests.
 //!
-//! Types copied from: kernel/src/list.rs
+//! Types copied from: kernel/core/src/list.rs
 
 use proptest::prelude::*;
 use std::ptr;
 
 // ============================================================================
-// Copied types from kernel/src/list.rs
+// Copied types from kernel/core/src/list.rs
 // ============================================================================
 
 #[repr(C)]

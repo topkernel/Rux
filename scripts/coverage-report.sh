@@ -83,7 +83,7 @@ echo "=== [4/5] llvm-cov export ==="
 
 echo "=== [5/5] Summary (all files, 0% included) ==="
 python3 scripts/coverage_summary.py "$COV_DIR/cov.json" \
-    $(find kernel/src -name '*.rs' | sort) | tee "$COV_DIR/report.txt"
+    $(find kernel/core/src -name '*.rs' | sort) | tee "$COV_DIR/report.txt"
 
 if [ "$RECORD" = "1" ]; then
     mkdir -p docs/development

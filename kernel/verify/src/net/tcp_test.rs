@@ -4,12 +4,12 @@
 //!
 //! TCP congestion control, RTT estimator, and header flag invariant tests.
 //!
-//! Types copied from: kernel/src/net/tcp.rs
+//! Types copied from: kernel/core/src/net/tcp.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/net/tcp.rs
+// Copied types from kernel/core/src/net/tcp.rs
 // ============================================================================
 
 pub const TCP_RTO_MIN_US: u64 = 200_000;

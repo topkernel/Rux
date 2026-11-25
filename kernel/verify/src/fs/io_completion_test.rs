@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for I/O completion state machine.
-//! Copied from: kernel/src/fs/io_completion.rs
+//! Copied from: kernel/core/src/fs/io_completion.rs
 
 use proptest::prelude::*;
 

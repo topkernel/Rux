@@ -4,7 +4,7 @@
 
 """TCB ledger generator for the kernel effort.
 
-Counts unsafe usage per module across kernel/src, classifies every file into
+Counts unsafe usage per module across kernel/core/src, classifies every file into
 kernel layers, and reports the headline metric: unsafe tokens OUTSIDE the
 Framework layer (i.e. in Service modules that must eventually carry
 #![forbid(unsafe_code)]).
@@ -18,7 +18,7 @@ Layers:
   diagnostics  debug/ debug tooling that deliberately reads raw memory.
                Permitted-unsafe like framework, but reported separately so
                tool churn does not hide in the framework bucket.
-  test         kernel/src/tests (unit-test feature only, not shipped).
+  test         kernel/core/src/tests (unit-test feature only, not shipped).
   unbuilt      cfg'd-off on both gate targets (aarch64 skeleton).
 
 Caveat (honesty rule): Rust's unsafe discipline covers accidental memory
@@ -37,7 +37,7 @@ import sys
 from collections import defaultdict
 
 SRC_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           os.pardir, "kernel", "src")
+                           os.pardir, "kernel", "core", "src")
 
 # ---------------------------------------------------------------------------
 # Layer classification. Longest matching prefix wins. Unmatched -> service.

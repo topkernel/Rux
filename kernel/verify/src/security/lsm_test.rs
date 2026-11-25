@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for LSM hook framework (sorted insertion, dispatch).
-//! Copied from: kernel/src/security/lsm.rs
+//! Copied from: kernel/core/src/security/lsm.rs
 
 use proptest::prelude::*;
 

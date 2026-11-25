@@ -14,7 +14,7 @@ name = "rux"
 path = "src/main.rs"
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 drivers = { path = "../drivers", default-features = false }
 ext4 = { path = "../ext4", default-features = false }
 fs = { path = "../fs", default-features = false }

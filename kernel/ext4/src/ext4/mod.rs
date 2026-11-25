@@ -3186,7 +3186,7 @@ fn ext4_destroy_inode(inode: &mut rux::fs::inode::Inode) {
 /// (global journal handle, bitmap RMW, group descriptor lost-update).
 /// One CPU in ext4 at a time until per-inode locking exists.
 ///
-/// The primitive is `crate::sync::SleepMutex` (kernel/src/sync/mutex.rs)
+/// The primitive is `crate::sync::SleepMutex` (kernel/core/src/sync/mutex.rs)
 /// — the reference-recipe sleeping mutex for locks held across blocking
 /// I/O. History: a semaphore-backed mutex attempt (R7-A2) lost wakeups
 /// and was reverted; the pure-spin acquire could wedge the whole machine

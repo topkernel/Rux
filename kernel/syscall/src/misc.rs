@@ -612,7 +612,7 @@ pub(crate) static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
 
 /// D-6 shape-test accessors: expose the (otherwise private) converted
 /// ops tables to the unit-test group `fileops-caps`
-/// (kernel/src/tests/fileops_caps.rs) without widening the runtime API.
+/// (kernel/core/src/tests/fileops_caps.rs) without widening the runtime API.
 /// oh67 (67th session): diagnostic readiness decode for census poll
 /// rows — the KERNEL-SIDE view of the fd an infinite-timeout poll is
 /// parked on. eventfd: the live counter (counter>0 while a POLLIN poll
@@ -5039,7 +5039,7 @@ pub fn sys_eventfd2(args: SyscallArgs) -> i64 {
 /// - args[0]: flags - IN_CLOEXEC, IN_NONBLOCK
 ///
 /// Real implementation (P0-4): the instance (event queue + watch table)
-/// lives in kernel/src/fs/inotify.rs; the fd is backed by INOTIFY_OPS.
+/// lives in kernel/core/src/fs/inotify.rs; the fd is backed by INOTIFY_OPS.
 pub fn sys_inotify_init1(args: SyscallArgs) -> i64 {
     let flags = args[0] as u32;
     match crate::fs::inotify::inotify_init1(flags) {

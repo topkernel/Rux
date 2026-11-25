@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for RISC-V Cause parsing and CSR bit definitions.
 //!
-//! Types copied from: kernel/src/arch/riscv64/pt_regs.rs
+//! Types copied from: kernel/core/src/arch/riscv64/pt_regs.rs
 
 #![cfg(kani)]
 

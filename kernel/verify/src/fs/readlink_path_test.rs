@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Tests for the readlinkat proc-path resolver join semantics. Copied from:
-//! kernel/src/syscall/file.rs (resolve_proc_readlink_path)
+//! kernel/core/src/syscall/file.rs (resolve_proc_readlink_path)
 //!
 //! The resolver walks /proc magic-link special cases and otherwise joins a
 //! possibly-relative path onto the caller's cwd. An ABSOLUTE path must pass
@@ -20,7 +20,7 @@ use proptest::sample::select;
 const AT_FDCWD: i32 = -100;
 
 /// Copied resolver, POST-fix — must match
-/// kernel/src/syscall/file.rs resolve_proc_readlink_path exactly in
+/// kernel/core/src/syscall/file.rs resolve_proc_readlink_path exactly in
 /// structure (the /proc/{self,pid} PID substitution is exercised through
 /// `pid`).
 fn resolve_proc_readlink_path(dirfd: i32, pathname: &str, cwd: &str, pid: u32) -> String {

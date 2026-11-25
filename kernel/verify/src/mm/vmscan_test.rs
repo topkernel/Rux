@@ -4,12 +4,12 @@
 //!
 //! Memory reclaim scan control arithmetic invariant tests.
 //!
-//! Types copied from: kernel/src/mm/vmscan.rs
+//! Types copied from: kernel/core/src/mm/vmscan.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/mm/vmscan.rs
+// Copied types from kernel/core/src/mm/vmscan.rs
 // ============================================================================
 
 pub const DEF_PRIORITY: i32 = 12;

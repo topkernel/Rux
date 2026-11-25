@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for wait status encoding (POSIX ABI).
 //!
-//! Types copied from: kernel/src/process/exit.rs
+//! Types copied from: kernel/core/src/process/exit.rs
 
 #![cfg(kani)]
 

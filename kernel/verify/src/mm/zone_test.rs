@@ -4,12 +4,12 @@
 //!
 //! Zone allocator arithmetic invariant tests.
 //!
-//! Types copied from: kernel/src/mm/zone.rs
+//! Types copied from: kernel/core/src/mm/zone.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied functions from kernel/src/mm/zone.rs
+// Copied functions from kernel/core/src/mm/zone.rs
 // ============================================================================
 
 pub const PAGE_SIZE: usize = 4096;

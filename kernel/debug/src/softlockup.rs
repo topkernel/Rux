@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The softlockup REPORT half (moved from kernel/src/debug/softlockup.rs,
+//! The softlockup REPORT half (moved from kernel/core/src/debug/softlockup.rs,
 //! crate-flip rung debug): the one-shot "BUG: soft lockup" report —
 //! holder line, leakorigin origins, stack trace, remote backtrace,
 //! taint. check()/touch() and the per-CPU timestamp table stay

@@ -4,12 +4,12 @@
 //!
 //! IPv4 header and fragment flag invariant tests.
 //!
-//! Types copied from: kernel/src/net/ipv4/mod.rs
+//! Types copied from: kernel/core/src/net/ipv4/mod.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied constants from kernel/src/net/ipv4/mod.rs
+// Copied constants from kernel/core/src/net/ipv4/mod.rs
 // ============================================================================
 
 pub const IP_ALEN: usize = 4;

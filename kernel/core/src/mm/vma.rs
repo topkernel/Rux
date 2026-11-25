@@ -1,0 +1,1022 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Virtual Memory Area Management - Platform-Independent Part
+//!
+//!
+//! VMA represents a contiguous virtual memory region in a process address space,
+//! with the same access permissions and mapping attributes.
+//!
+//! This module only contains platform-independent data structures:
+//! - VmaFlags: VMA flags
+//! - Vma: VMA struct
+//! - VmaManager: VMA manager
+//! - AddressSpace: Platform-independent address space abstraction
+//!
+//! Architecture-specific implementations (such as page table management,
+//! mmap/munmap/brk system calls) should be in arch/*/mm.rs
+//!
+//! # Safety Invariants — VMA Layout
+//!
+//! - **INV-VMA-1**: No two VMAs in the same address space overlap
+//!   (their `[start, end)` intervals are pairwise disjoint).
+//!
+//! - **INV-VMA-2**: VMAs are sorted by start address, enforced by the BTreeMap key.
+//!
+//! - **INV-VMA-3**: `max_end` (if maintained) equals `max(end)` across all VMAs
+//!   in the address space.
+//!
+//! - **INV-VMA-4**: Every VMA's `start` and `end` are `PAGE_SIZE`-aligned.
+
+#![forbid(unsafe_code)]
+pub use crate::mm::page::{VirtAddr, PAGE_SIZE};
+use alloc::collections::BTreeMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmaFlags(u32);
+
+impl VmaFlags {
+    /// Readable (VM_READ)
+    pub const READ: u32 = 0x00000001;
+    /// Writable (VM_WRITE)
+    pub const WRITE: u32 = 0x00000002;
+    /// Executable (VM_EXEC)
+    pub const EXEC: u32 = 0x00000004;
+    /// Shared mapping (VM_SHARED)
+    pub const SHARED: u32 = 0x00000008;
+    /// Private mapping (VM_PRIVATE)
+    pub const PRIVATE: u32 = 0x00000010;
+    /// May extend to heap (VM_GROWSDOWN)
+    pub const GROWSDOWN: u32 = 0x00000100;
+    /// May extend to stack (VM_GROWSUP)
+    pub const GROWSUP: u32 = 0x00000200;
+    /// Deny rmap (VM_DENYWRITE)
+    pub const DENYWRITE: u32 = 0x00000800;
+    /// Executable control/heap (VM_EXECUTABLE)
+    pub const EXECUTABLE: u32 = 0x00001000;
+    /// Locked memory (VM_LOCKED)
+    pub const LOCKED: u32 = 0x00002000;
+    /// I/O mapping (VM_IO)
+    pub const IO: u32 = 0x00004000;
+    /// Do not copy this VMA across fork (Linux VM_DONTCOPY,
+    /// 0x04000000). The binder driver stamps this on its mmap so a
+    /// forked child never inherits the parent's transaction buffers —
+    /// the child must open /dev/binder itself (Linux binder_mmap sets
+    /// VM_DONTCOPY unconditionally, which is what keeps forked OH
+    /// appspawn children from sharing the daemon's binder_proc).
+    pub const DONTFORK: u32 = 0x04000000;
+
+    #[inline]
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    #[inline]
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    #[inline]
+    pub fn bits(&self) -> u32 {
+        self.0
+    }
+
+    #[inline]
+    pub fn contains(&self, flags: u32) -> bool {
+        self.0 & flags == flags
+    }
+
+    #[inline]
+    pub fn insert(&mut self, flags: u32) {
+        self.0 |= flags;
+    }
+
+    #[inline]
+    pub fn remove(&mut self, flags: u32) {
+        self.0 &= !flags;
+    }
+
+    /// Check if readable
+    #[inline]
+    pub fn is_readable(&self) -> bool {
+        self.0 & Self::READ != 0
+    }
+
+    /// Check if writable
+    #[inline]
+    pub fn is_writable(&self) -> bool {
+        self.0 & Self::WRITE != 0
+    }
+
+    /// Check if executable
+    #[inline]
+    pub fn is_executable(&self) -> bool {
+        self.0 & Self::EXEC != 0
+    }
+
+    /// Check if shared
+    #[inline]
+    pub fn is_shared(&self) -> bool {
+        self.0 & Self::SHARED != 0
+    }
+
+    /// Check if private
+    #[inline]
+    pub fn is_private(&self) -> bool {
+        self.0 & Self::PRIVATE != 0
+    }
+
+    /// Convert to page permissions (Perm)
+    ///
+    /// Infer page table permissions from VMA flags
+    ///
+    /// Mapping:
+    /// - No READ/WRITE/EXEC -> Perm::None
+    /// - READ only -> Perm::Read
+    /// - READ + WRITE -> Perm::ReadWrite
+    /// - READ + WRITE + EXEC -> Perm::ReadWriteExec
+    /// - READ + EXEC -> Perm::Read (no ReadExec option, use Read)
+    /// - WRITE + EXEC -> Perm::ReadWrite (no WriteExec option, use ReadWrite)
+    ///
+    pub fn to_page_perm(&self) -> crate::mm::pagemap::Perm {
+        use crate::mm::pagemap::Perm;
+
+        let readable = self.is_readable();
+        let writable = self.is_writable();
+        let executable = self.is_executable();
+
+        match (readable, writable, executable) {
+            (false, false, false) => Perm::None,
+            (true, false, false) => Perm::Read,
+            (true, true, false) => Perm::ReadWrite,
+            (true, true, true) => Perm::ReadWriteExec,
+            (true, false, true) => Perm::ReadExec,    // Read + Execute
+            (false, true, false) => Perm::ReadWrite,   // Write-only (unusual)
+            (false, true, true) => Perm::ReadWriteExec, // Write + Execute
+            (false, false, true) => Perm::Exec,         // Execute-only (Sv39 supports X=1,R=0)
+        }
+    }
+}
+
+impl Default for VmaFlags {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Vma {
+    /// Start virtual address (inclusive)
+    start: VirtAddr,
+
+    /// End virtual address (exclusive)
+    end: VirtAddr,
+
+    /// Access permissions and attributes
+    flags: VmaFlags,
+
+    /// VMA offset (for file mapping)
+    offset: usize,
+
+    /// VMA type
+    vma_type: VmaType,
+
+    /// File descriptor for file-backed mappings (-1 for anonymous)
+    file_fd: i32,
+
+    /// File size for file-backed mappings (0 for anonymous)
+    file_size: u64,
+
+    /// Origin stamp — which kernel path created this record (see
+    /// [`VmaOrigin`). Forensic-only; fits existing struct padding.
+    origin: VmaOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmaType {
+    /// Anonymous mapping (heap, stack, private data)
+    Anonymous,
+    /// File mapping
+    FileBacked,
+    /// Device mapping (MMIO)
+    Device,
+    /// Shared memory
+    SharedMemory,
+}
+
+/// Origin stamp: which kernel path CREATED this Vma record.
+///
+/// Forensic attribute for fault-path VMA dumps (leg-31B render_service
+/// adjudication). A fault into an unexpected permission shape — e.g. a
+/// PROT_NONE piece sitting on top of a thread's RW stack — has exactly two
+/// possible owners: the image itself established the shape (its own
+/// mprotect guard, its own PROT_NONE mmap reserve) or a kernel-side
+/// split/copy produced it (fork snapshot, mprotect surgery bug). The
+/// origin names the establishing path in one line at the dump site, with
+/// no new print traffic — it rides the existing fault-only dump lines.
+///
+/// Semantics: the stamp records the path that created THIS Vma node —
+/// after mprotect splits a mapping, the covered piece carries `Mprotect`
+/// while head/tail pieces inherit the original stamp (splits never
+/// change permissions of the pieces they preserve). On fork the child's
+/// copies inherit the parent's stamp plus the `FORKED` modifier bit, so
+/// "mprotect+FORK" reads as "an mprotect established the shape, fork
+/// carried it into this process" — the stamp survives inheritance
+/// without erasing its creator. VMA merges keep the left survivor's
+/// stamp (a merge only extends `end`), so a stamp can under-report the
+/// newest contributor of a merged range — acceptable for adjudication:
+/// permission *changes* always split first, so the changed piece's stamp
+/// is exact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmaOrigin(u8);
+
+impl VmaOrigin {
+    /// Unstamped (default for paths not yet annotated).
+    pub const UNKNOWN: u8 = 0;
+    /// ELF loader: PT_LOAD / interpreter segments / fillers.
+    pub const EXEC: u8 = 1;
+    /// Main-thread stack created at exec.
+    pub const EXEC_STACK: u8 = 2;
+    /// mmap(2) install (fresh placement and MAP_FIXED replacement).
+    pub const MMAP: u8 = 3;
+    /// Covered piece of an mprotect(2) — the piece whose flags changed.
+    pub const MPROTECT: u8 = 4;
+    /// brk(2) heap growth.
+    pub const BRK: u8 = 5;
+    /// mremap(2) derived mapping.
+    pub const MREMAP: u8 = 6;
+    /// SysV shared-memory attach.
+    pub const SHM: u8 = 7;
+    /// binder(4) mmap (the transaction-buffer mapping).
+    pub const BINDER: u8 = 8;
+    /// Misc kernel-established mapping (io_uring, ...).
+    pub const OTHER: u8 = 9;
+    /// Modifier bit: this record was copied into a new mm by fork.
+    pub const FORKED: u8 = 0x80;
+
+    #[inline]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    /// Stamp a creator (clears any previous creator, keeps FORKED).
+    #[inline]
+    pub fn set_creator(&mut self, creator: u8) {
+        self.0 = (self.0 & Self::FORKED) | (creator & !Self::FORKED);
+    }
+
+    /// Mark this record as fork-copied (adds the modifier bit).
+    #[inline]
+    pub fn mark_forked(&mut self) {
+        self.0 |= Self::FORKED;
+    }
+
+    #[inline]
+    pub fn bits(&self) -> u8 {
+        self.0
+    }
+
+    /// Creator name (without the fork modifier).
+    #[inline]
+    pub fn creator_name(&self) -> &'static str {
+        match self.0 & !Self::FORKED {
+            Self::UNKNOWN => "unknown",
+            Self::EXEC => "exec",
+            Self::EXEC_STACK => "exec-stack",
+            Self::MMAP => "mmap",
+            Self::MPROTECT => "mprotect",
+            Self::BRK => "brk",
+            Self::MREMAP => "mremap",
+            Self::SHM => "shm",
+            Self::BINDER => "binder",
+            Self::OTHER => "other",
+            _ => "?",
+        }
+    }
+
+    /// True when the record was copied into this mm by fork.
+    #[inline]
+    pub fn is_forked(&self) -> bool {
+        self.0 & Self::FORKED != 0
+    }
+}
+
+impl Default for VmaOrigin {
+    fn default() -> Self {
+        Self(Self::UNKNOWN)
+    }
+}
+
+impl Vma {
+    /// Create new VMA
+    pub fn new(start: VirtAddr, end: VirtAddr, flags: VmaFlags) -> Self {
+        assert!(start.as_usize() < end.as_usize(), "Invalid VMA range");
+        assert!(start.as_usize() % PAGE_SIZE == 0, "VMA start not page aligned");
+        assert!(end.as_usize() % PAGE_SIZE == 0, "VMA end not page aligned");
+
+        Self {
+            start,
+            end,
+            flags,
+            offset: 0,
+            vma_type: VmaType::Anonymous,
+            file_fd: -1,
+            file_size: 0,
+            origin: VmaOrigin::default(),
+        }
+    }
+
+    /// Get start address
+    #[inline]
+    pub fn start(&self) -> VirtAddr {
+        self.start
+    }
+
+    /// Get end address
+    #[inline]
+    pub fn end(&self) -> VirtAddr {
+        self.end
+    }
+
+    /// Get VMA size (bytes)
+    #[inline]
+    pub fn size(&self) -> usize {
+        self.end.as_usize() - self.start.as_usize()
+    }
+
+    /// Get VMA size (page count)
+    #[inline]
+    pub fn page_count(&self) -> usize {
+        self.size() / PAGE_SIZE
+    }
+
+    /// Get flags
+    #[inline]
+    pub fn flags(&self) -> VmaFlags {
+        self.flags
+    }
+
+    /// Set flags
+    pub fn set_flags(&mut self, flags: VmaFlags) {
+        self.flags = flags;
+    }
+
+    /// Get type
+    #[inline]
+    pub fn vma_type(&self) -> VmaType {
+        self.vma_type
+    }
+
+    /// Set type
+    pub fn set_type(&mut self, vma_type: VmaType) {
+        self.vma_type = vma_type;
+    }
+
+    /// Check if address is within VMA range
+    #[inline]
+    pub fn contains(&self, addr: VirtAddr) -> bool {
+        addr.as_usize() >= self.start.as_usize() && addr.as_usize() < self.end.as_usize()
+    }
+
+    /// Check if two VMAs overlap
+    pub fn overlaps(&self, other: &Vma) -> bool {
+        self.start.as_usize() < other.end.as_usize()
+            && other.start.as_usize() < self.end.as_usize()
+    }
+
+    /// Set file offset (for file mapping)
+    pub fn set_offset(&mut self, offset: usize) {
+        self.offset = offset;
+    }
+
+    /// Get file offset
+    #[inline]
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Set file descriptor (for file-backed mapping)
+    pub fn set_file_fd(&mut self, fd: i32) {
+        self.file_fd = fd;
+    }
+
+    /// Get file descriptor
+    #[inline]
+    pub fn file_fd(&self) -> i32 {
+        self.file_fd
+    }
+
+    /// Set file size (for file-backed mapping)
+    pub fn set_file_size(&mut self, size: u64) {
+        self.file_size = size;
+    }
+
+    /// Get file size
+    #[inline]
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+
+    /// Get origin stamp (which path created this Vma record).
+    #[inline]
+    pub fn origin(&self) -> VmaOrigin {
+        self.origin
+    }
+
+    /// Set origin stamp.
+    #[inline]
+    pub fn set_origin(&mut self, origin: VmaOrigin) {
+        self.origin = origin;
+    }
+
+    /// Split VMA at specified address
+    ///
+    /// Returns (first half, second half) or None if address not in range
+    pub fn split(&self, addr: VirtAddr) -> Option<(Vma, Vma)> {
+        if !self.contains(addr) {
+            return None;
+        }
+
+        // Ensure split address is page aligned
+        let aligned_addr = VirtAddr::new(addr.as_usize() & !(PAGE_SIZE - 1));
+        if aligned_addr.as_usize() <= self.start.as_usize()
+            || aligned_addr.as_usize() >= self.end.as_usize()
+        {
+            return None;
+        }
+
+        let first = Vma {
+            start: self.start,
+            end: aligned_addr,
+            flags: self.flags,
+            offset: self.offset,
+            vma_type: self.vma_type,
+            file_fd: self.file_fd,
+            file_size: self.file_size,
+            origin: self.origin,
+        };
+
+        let second = Vma {
+            start: aligned_addr,
+            end: self.end,
+            flags: self.flags,
+            offset: self.offset + (aligned_addr.as_usize() - self.start.as_usize()),
+            vma_type: self.vma_type,
+            file_fd: self.file_fd,
+            file_size: self.file_size,
+            origin: self.origin,
+        };
+
+        Some((first, second))
+    }
+
+    /// Can merge with another VMA?
+    ///
+    /// Adjacent with identical attributes.  For anonymous VMAs the file
+    /// offset is irrelevant — Linux (can_vma_merge_before/after) merges on
+    /// offset *continuity* (`self.offset + size == other.offset` style),
+    /// which for anonymous mappings is always satisfiable; requiring exact
+    /// offset equality fragmented anonymous heaps (mmap chains after brk).
+    /// For file-backed VMAs the offset must be continuous with the
+    /// preceding mapping's extent (merging two mappings of DIFFERENT
+    //  files/offsets corrupted reads through the first fd — review MM-H1).
+    pub fn can_merge(&self, other: &Vma) -> bool {
+        if self.end.as_usize() != other.start.as_usize() {
+            return false;
+        }
+        if self.flags.bits() != other.flags.bits()
+            || self.vma_type != other.vma_type
+            || self.file_fd != other.file_fd
+            || self.file_size != other.file_size
+        {
+            return false;
+        }
+        // Backing continuity: for file-backed mappings the new VMA must
+        // start exactly where this one's file extent ends; anonymous
+        // mappings have no backing, so any (contiguous) offset is fine.
+        match self.vma_type {
+            VmaType::Anonymous | VmaType::SharedMemory => true,
+            _ => {
+                let self_pages = (self.end.as_usize() - self.start.as_usize()) / PAGE_SIZE;
+                self.offset + self_pages * PAGE_SIZE == other.offset
+            }
+        }
+    }
+
+    /// Merge with another VMA
+    pub fn merge(&mut self, other: Vma) -> bool {
+        if self.can_merge(&other) {
+            self.end = other.end;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Extend end to cover an adjacent VMA (for forward merge in VmaManager::add)
+    pub fn merge_at_end(&mut self, new_end: VirtAddr) {
+        self.end = new_end;
+    }
+}
+
+impl core::fmt::Debug for Vma {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Vma")
+            .field("range", &format_args!("0x{:x}-0x{:x}", self.start.as_usize(), self.end.as_usize()))
+            .field("size", &self.size())
+            .field("flags", &self.flags)
+            .field("type", &self.vma_type)
+            .field("origin", &self.origin.creator_name())
+            .finish()
+    }
+}
+
+/// VMA Manager
+///
+/// Uses BTreeMap to store VMAs, sorted by start address
+/// - O(log n) lookup, insert, delete
+/// - Dynamic expansion, no limit on count
+pub struct VmaManager {
+    /// VMA map (sorted by start address)
+    vmas: BTreeMap<VirtAddr, Vma>,
+
+    /// Cached maximum end address (for fast overlap detection)
+    max_end: VirtAddr,
+}
+
+impl VmaManager {
+    /// Create new VMA manager
+    pub fn new() -> Self {
+        Self {
+            vmas: BTreeMap::new(),
+            max_end: VirtAddr::new(0),
+        }
+    }
+
+    /// Add VMA
+    ///
+    /// Follows Linux `vma_merge()`: the new VMA is merged with the
+    /// PREDECESSOR and (chained) with any SUCCESSORS that are adjacent and
+    /// compatible, so [A][new][B] collapses to a single VMA when all three
+    /// are mergeable.  The old implementation merged at most one side.
+    ///
+    /// # Parameters
+    /// - `vma`: VMA to add
+    ///
+    /// # Returns
+    /// - `Ok(())`: Added successfully
+    /// - `Err(VmaError::Overlap)`: Overlaps with existing VMA
+    ///
+    /// # Performance
+    /// O(log n) overlap check + O(log n) insert + O(k log n) chain merge
+    pub fn add(&mut self, vma: Vma) -> Result<(), VmaError> {
+        // mmprof (cmdline mmprof=1): tree-add attempt counter (merges and
+        // rejects visible from the delta against the other mmprof slots).
+        if crate::debug::mmprof::on() {
+            crate::debug::mmprof::bump(crate::debug::mmprof::S_VMAADD, 1);
+        }
+        let start = vma.start();
+        let end = vma.end();
+
+        // TRIPWIRE: inserting a VMA whose start key already exists used to
+        // silently REPLACE the incumbent (BTreeMap insert) — two owners for
+        // one range. Linux never adds an existing start; every caller
+        // removes first. (heapstress/gnome-shell corruption hunt.) The add
+        // is now REJECTED with Overlap by construction: the prev-merge
+        // branch is skipped (has_vma_starting_within sees the incumbent's
+        // key) and the overlap check below catches key == start — so this
+        // line names the caller that tried, and its Err path is the
+        // evidence to chase.
+        if self.vmas.contains_key(&start) {
+            static DUP_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if DUP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::pr_err!(
+                    "VMA-ADD-DUP start={:#x} end={:#x} pid={} — add will be REJECTED with Overlap (incumbent kept)",
+                    start.as_usize(),
+                    end.as_usize(),
+                    crate::process::current_pid()
+                );
+            }
+        }
+
+        // Check if previous VMA overlaps
+        if let Some((_, prev_vma)) = self.vmas.range(..start).next_back() {
+            if prev_vma.end().as_usize() > start.as_usize() {
+                return Err(VmaError::Overlap);
+            }
+
+            // Try to merge with previous VMA (same flags, adjacent).
+            // R7-5: the merge must not swallow a VMA starting inside
+            // [start, end) — can_merge only compares prev and the new vma,
+            // so an enclosed successor (different flags/backing) would be
+            // silently overlapped (verify proptest: 0xf000-0x13000 vs
+            // 0x12000-0x13000).
+            if prev_vma.can_merge(&vma) && !self.has_vma_starting_within(start, end) {
+                let prev_start = prev_vma.start();
+
+                // Chain-merge successors of the incoming VMA (Linux
+                // vma_merge merges prev + new + next in one pass).
+                let mut merged = vma;
+                loop {
+                    let cur_end = merged.end();
+                    let next = self.vmas.range(cur_end..).next().map(|(_, nv)| *nv);
+                    match next {
+                        Some(nv) if nv.start() == cur_end && merged.can_merge(&nv) => {
+                            merged.merge_at_end(nv.end());
+                            self.vmas.remove(&nv.start());
+                        }
+                        _ => break,
+                    }
+                }
+
+                if let Some(prev) = self.vmas.get_mut(&prev_start) {
+                    prev.merge_at_end(merged.end());
+                    if prev.end().as_usize() > self.max_end.as_usize() {
+                        self.max_end = prev.end();
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        // Reject overlaps: any VMA starting inside [start, end)
+        if let Some((_, next_vma)) = self.vmas.range(start..=end).next() {
+            if next_vma.start().as_usize() < end.as_usize() {
+                return Err(VmaError::Overlap);
+            }
+        }
+
+        // Fresh insert; chain-merge adjacent successors into it.
+        let mut merged = vma;
+        let mut swallowed = 0usize;
+        loop {
+            let cur_end = merged.end();
+            let next = self.vmas.range(cur_end..).next().map(|(_, nv)| *nv);
+            match next {
+                Some(nv) if nv.start() == cur_end && merged.can_merge(&nv) => {
+                    merged.merge_at_end(nv.end());
+                    self.vmas.remove(&nv.start());
+                    swallowed += 1;
+                }
+                _ => break,
+            }
+        }
+
+        let final_end = merged.end();
+        self.vmas.insert(start, merged);
+
+        if final_end.as_usize() > self.max_end.as_usize() {
+            self.max_end = final_end;
+        }
+        Ok(())
+    }
+
+    /// Find VMA containing specified address
+    ///
+    /// # Performance
+    /// O(log n) using BTreeMap range lookup
+    pub fn find(&self, addr: VirtAddr) -> Option<&Vma> {
+        // Fast path: if address >= maximum end address, cannot find
+        if addr.as_usize() >= self.max_end.as_usize() {
+            return None;
+        }
+
+        // Use BTreeMap range lookup
+        // Find largest VMA with start address <= addr
+        // range(..=addr) returns all elements with key <= addr
+        if let Some((_, vma)) = self.vmas.range(..=addr).next_back() {
+            // Check if address is within this VMA range
+            if vma.contains(addr) {
+                return Some(vma);
+            }
+        }
+
+        None
+    }
+
+    /// Find VMA containing specified address (mutable reference)
+    pub fn find_mut(&mut self, addr: VirtAddr) -> Option<&mut Vma> {
+        // Fast path
+        if addr.as_usize() >= self.max_end.as_usize() {
+            return None;
+        }
+
+        // Find VMA that may contain this address
+        let start_addr = if let Some((&key, _)) = self.vmas.range(..=addr).next_back() {
+            key
+        } else {
+            return None;
+        };
+
+        // Get mutable reference and check
+        let vma = self.vmas.get_mut(&start_addr)?;
+        if vma.contains(addr) {
+            Some(vma)
+        } else {
+            None
+        }
+    }
+
+    /// Remove VMA
+    ///
+    /// # Parameters
+    /// - `start`: VMA start address
+    pub fn remove(&mut self, start: VirtAddr) -> Result<(), VmaError> {
+        if let Some(removed) = self.vmas.remove(&start) {
+            // If removed VMA had maximum end address, need to recalculate
+            if removed.end() == self.max_end {
+                self.max_end = self.vmas.values()
+                    .map(|v| v.end())
+                    .max()
+                    .unwrap_or(VirtAddr::new(0));
+            }
+            Ok(())
+        } else {
+            Err(VmaError::NotFound)
+        }
+    }
+
+    /// Get iterator over all VMAs
+    pub fn iter(&self) -> impl Iterator<Item = &Vma> {
+        self.vmas.values()
+    }
+
+    /// Iterate VMAs whose start is strictly greater than `after`
+    /// (leg-26 maps chunking: resume a chunked walk after dropping and
+    /// re-taking the reader lock between batches).
+    pub fn iter_after(
+        &self,
+        after: VirtAddr,
+    ) -> impl Iterator<Item = &Vma> {
+        use core::ops::Bound::{Excluded, Unbounded};
+        self.vmas.range((Excluded(after), Unbounded)).map(|(_, v)| v)
+    }
+
+    /// Last VMA whose start is at or before `addr` — the candidate for
+    /// the VMA *containing* `addr`. iter_after only yields VMAs that
+    /// start after a key, so a walk that must begin coverage at `addr`
+    /// (mprotect's range check) has to fetch the containing VMA
+    /// separately or a strict sub-range of a larger VMA looks like a
+    /// gap (geekbench's 8MB RWX arena carve died exactly there).
+    pub fn last_at_or_before(&self, addr: VirtAddr) -> Option<&Vma> {
+        use core::ops::Bound::{Included, Unbounded};
+        self.vmas
+            .range((Unbounded, Included(addr)))
+            .next_back()
+            .map(|(_, v)| v)
+    }
+
+    /// True if any VMA starts within [start, end) — used by add() to
+    /// reject forward merges that would swallow a successor VMA (R7-5).
+    fn has_vma_starting_within(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.vmas.range(start..end).next().is_some()
+    }
+
+    /// Get VMA count
+    #[inline]
+    pub fn count(&self) -> usize {
+        self.vmas.len()
+    }
+
+    /// Find VMA at specified start address
+    pub fn get(&self, start: VirtAddr) -> Option<&Vma> {
+        self.vmas.get(&start)
+    }
+
+    /// Find VMA at specified start address (mutable reference)
+    pub fn get_mut(&mut self, start: VirtAddr) -> Option<&mut Vma> {
+        self.vmas.get_mut(&start)
+    }
+
+    /// Find first VMA
+    pub fn first(&self) -> Option<&Vma> {
+        self.vmas.values().next()
+    }
+
+    /// Find last VMA
+    pub fn last(&self) -> Option<&Vma> {
+        self.vmas.values().next_back()
+    }
+
+    /// Find first VMA with start address >= addr
+    pub fn find_vma_after(&self, addr: VirtAddr) -> Option<&Vma> {
+        self.vmas.range(addr..).next().map(|(_, vma)| vma)
+    }
+
+    /// Clear all VMAs
+    pub fn clear(&mut self) {
+        self.vmas.clear();
+        self.max_end = VirtAddr::new(0);
+    }
+
+    /// Get maximum end address
+    #[inline]
+    pub fn max_end(&self) -> VirtAddr {
+        self.max_end
+    }
+
+    /// Expand VMA downward (for stack expansion)
+    ///
+    /// This is used for stack growth when accessing an address below the current VMA start.
+    /// Expand VMA downwards.
+    ///
+    /// # Arguments
+    /// - `vma_start`: Start address of the VMA to expand
+    /// - `new_start`: New start address (must be <= current start, page-aligned)
+    ///
+    /// # Returns
+    /// - `Ok(())`: Expanded successfully
+    /// - `Err(VmaError::NotFound)`: VMA not found at given start address
+    /// - `Err(VmaError::Overlap)`: Would overlap with another VMA
+    /// - `Err(VmaError::Invalid)`: Invalid new_start (not page aligned or above current start)
+    pub fn expand_downwards(&mut self, vma_start: VirtAddr, new_start: VirtAddr) -> Result<(), VmaError> {
+        // Validate new_start is page aligned
+        if new_start.as_usize() % PAGE_SIZE != 0 {
+            return Err(VmaError::Invalid);
+        }
+
+        // Get the VMA to expand
+        let cur_start = {
+            let vma = self.vmas.get(&vma_start).ok_or(VmaError::NotFound)?;
+            // new_start must be below current start
+            if new_start.as_usize() >= vma.start.as_usize() {
+                return Err(VmaError::Invalid);
+            }
+            vma.start
+        };
+
+        // Full-interval overlap check (review 4.1): the extension covers
+        // [new_start, cur_start) — the OLD code only looked at the VMA
+        // preceding new_start, so a mapping living strictly INSIDE the
+        // extension window was silently swallowed and the expanded stack
+        // overlapped it.
+        if self.has_vma_starting_within(new_start, cur_start) {
+            return Err(VmaError::Overlap);
+        }
+        // The extension must also not be covered by a predecessor that
+        // reaches into the window.
+        if let Some((_, prev_vma)) = self.vmas.range(..new_start).next_back() {
+            if prev_vma.end().as_usize() > new_start.as_usize() {
+                // Would overlap with previous VMA
+                return Err(VmaError::Overlap);
+            }
+        }
+
+        // Remove old VMA from BTreeMap (keyed by old start)
+        let mut vma = self.vmas.remove(&vma_start).ok_or(VmaError::NotFound)?;
+
+        // Expand the VMA
+        vma.start = new_start;
+
+        // Re-insert with new key (new start address)
+        self.vmas.insert(new_start, vma);
+
+        Ok(())
+    }
+
+    /// Find stack VMA (VMA with GROWSDOWN flag) containing or below the address
+    ///
+    /// Lookup is O(log n) via the BTreeMap: the candidate is either the VMA
+    /// containing `addr`, or — for a fault BELOW the stack bottom — the
+    /// first VMA starting above `addr`.  The caller (page fault path)
+    /// enforces the growth limit (`mm.stack_limit`, from RLIMIT_STACK);
+    /// unlike the old 1-page window this allows growing to any depth below
+    /// the current bottom until the limit or a collision — matching
+    /// Linux's `expand_downwards()` behavior (guard-gap omitted).
+    ///
+    /// # Arguments
+    /// - `addr`: Address to check
+    ///
+    /// # Returns
+    /// - `Some((start_addr, vma))`: Stack VMA found, returns its start address for expansion
+    /// - `None`: No stack VMA found
+    pub fn find_stack_vma(&self, addr: VirtAddr) -> Option<(VirtAddr, &Vma)> {
+        // Case 1: addr falls inside a VMA — return it if growable.
+        if addr.as_usize() < self.max_end.as_usize() {
+            if let Some((_, vma)) = self.vmas.range(..=addr).next_back() {
+                if vma.contains(addr) && vma.flags().contains(VmaFlags::GROWSDOWN) {
+                    return Some((vma.start(), vma));
+                }
+            }
+        }
+
+        // Case 2: addr is below the first VMA starting above it — that VMA
+        // is the downward-growth candidate.
+        if let Some((start, vma)) = self.vmas.range(addr..).next() {
+            if vma.flags().contains(VmaFlags::GROWSDOWN) {
+                return Some((*start, vma));
+            }
+        }
+
+        None
+    }
+}
+
+impl Default for VmaManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmaError {
+    /// VMA overlap
+    Overlap,
+    /// No space (reserved for compatibility)
+    NoSpace,
+    /// Not found
+    NotFound,
+    /// Invalid parameter
+    Invalid,
+}
+
+// Send/Sync proofs live in mm::edges (same contracts the inline impls
+// documented).
+
+
+// ============================================================================
+// Address Space Platform-Specific Parameter Interface
+// ============================================================================
+
+/// Address Space Platform-Specific Parameters
+///
+/// Different architectures need to provide their specific address space layout parameters
+///
+pub trait AddressSpaceLayout {
+    /// User address space start address
+    fn user_start() -> usize;
+
+    /// User address space end address
+    fn user_end() -> usize;
+
+    /// Default stack size
+    fn default_stack_size() -> usize;
+
+    /// Default stack top (from user space top, going down)
+    fn default_stack_top() -> usize;
+
+    /// Heap start address
+    fn heap_start() -> usize;
+
+    /// Heap end address (maximum heap value)
+    fn heap_end() -> usize;
+}
+
+// ============================================================================
+// Address Space Layout Implementation
+// ============================================================================
+
+/// Address space layout driven by the arch interface's `user_addr`
+/// constants (riscv64: Sv39 256GB user space; x86_64: 128TB 4-level user
+/// space — each backend publishes the same constant set).
+///
+/// User space layout:
+/// - 0x0 ~ 0x1000: Null page (unmapped, null pointer guard)
+/// - 0x1000+: ELF code/data segments
+/// - brk area: follows ELF segments, grows up to TASK_SIZE/3
+/// - mmap area: TASK_SIZE/3 ~ TASK_SIZE (top-down allocation)
+/// - Stack: TASK_SIZE - stack_size, grows down
+pub struct KernelAddressSpaceLayout;
+
+/// Historical name (Sv39 era) — same layout source.
+pub type RiscVAddressSpaceLayout = KernelAddressSpaceLayout;
+
+impl AddressSpaceLayout for KernelAddressSpaceLayout {
+    /// User space start address (0, but null page protected)
+    #[inline]
+    fn user_start() -> usize {
+        crate::arch::mm::user_addr::USER_START
+    }
+
+    /// User space end address = TASK_SIZE = 256GB for Sv39
+    #[inline]
+    fn user_end() -> usize {
+        crate::arch::mm::user_addr::TASK_SIZE
+    }
+
+    /// Default stack size (8MB)
+    #[inline]
+    fn default_stack_size() -> usize {
+        crate::arch::mm::user_addr::STACK_MAX_SIZE
+    }
+
+    /// Default stack top (TASK_SIZE, stack grows down)
+    #[inline]
+    fn default_stack_top() -> usize {
+        crate::arch::mm::user_addr::STACK_TOP
+    }
+
+    /// Heap start address (brk default)
+    #[inline]
+    fn heap_start() -> usize {
+        crate::arch::mm::user_addr::BRK_DEFAULT
+    }
+
+    /// Heap end address (maximum brk can grow to)
+    #[inline]
+    fn heap_end() -> usize {
+        crate::arch::mm::user_addr::BRK_MAX
+    }
+}

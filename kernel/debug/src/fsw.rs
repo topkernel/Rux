@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The fsw REPORT half (moved from kernel/src/debug/fsw.rs, crate-flip
+//! The fsw REPORT half (moved from kernel/core/src/debug/fsw.rs, crate-flip
 //! rung debug): the FSW1/FSW2/FSW3/PC1/PC2 counter snapshot lines.
 //! The counters (already pub statics) and the note_*/pc_* record fns
 //! stay framework-side; the cadence gate (tick) stays there too. Body

@@ -4,12 +4,12 @@
 //!
 //! Swap entry encoding/decoding invariant tests.
 //!
-//! Functions copied from: kernel/src/mm/swap.rs
+//! Functions copied from: kernel/core/src/mm/swap.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied functions from kernel/src/mm/swap.rs
+// Copied functions from kernel/core/src/mm/swap.rs
 // ============================================================================
 
 pub const SWAP_ENTRY_SIGNATURE: u64 = 1u64 << 62;

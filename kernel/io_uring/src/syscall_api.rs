@@ -1,5 +1,5 @@
 //! The io_uring SYSCALL ENTRY POINTS (moved from
-//! kernel/src/io_uring/mod.rs at the cold-four policy flip — sole copy
+//! kernel/core/src/io_uring/mod.rs at the cold-four policy flip — sole copy
 //! here; zero behavior change, except the unsafe conversions noted in
 //! the framework module's move note).
 

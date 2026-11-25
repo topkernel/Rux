@@ -6,7 +6,7 @@
 //! device tree walkers that mine the bootloader DTB at boot —
 //! /chosen/bootargs, the /memory nodes, the linux,initrd-start/end
 //! pair, and the first /cpus/cpu@* riscv,isa string — physically
-//! moved from kernel/src/cmdline.rs (the boot-only cold half of that
+//! moved from kernel/core/src/cmdline.rs (the boot-only cold half of that
 //! file; the Linux parallel is drivers/of/fdt.c's
 //! early_init_dt_scan family). The framework keeps the storage, the
 //! getters (read on trap/timer/sched paths by name) and the three
@@ -16,7 +16,7 @@
 //! crate forbid.
 //!
 //! The framework dispatches here through the four BootScanHooks rows
-//! (kernel/src/boot_scan_hooks.rs) — every call site is boot-time
+//! (kernel/core/src/boot_scan_hooks.rs) — every call site is boot-time
 //! cold (cmdline::init, lib.rs's memblock/paging phases, vext's ISA
 //! prime), so the row indirection is a few ns on paths doing µs–ms
 //! of work. The one behavioral edit forced by the forbid: the

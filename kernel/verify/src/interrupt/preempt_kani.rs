@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for preempt counter bitfield masks.
 //!
-//! Types copied from: kernel/src/interrupt/preempt.rs
+//! Types copied from: kernel/core/src/interrupt/preempt.rs
 
 #![cfg(kani)]
 

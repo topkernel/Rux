@@ -13,7 +13,7 @@ edition = "2021"
 # stay framework-side (the lane's stay verdicts).
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 
 [features]
 default = ["riscv64"]

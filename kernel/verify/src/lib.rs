@@ -4,7 +4,7 @@
 //!
 //! Property-based tests for Rux kernel core data structure invariants.
 //!
-//! These tests copy pure algorithmic logic from kernel/src/ and verify
+//! These tests copy pure algorithmic logic from kernel/core/src/ and verify
 //! safety invariants using proptest (randomized input generation).
 //!
 //! The types and functions tested here are copied directly from the kernel

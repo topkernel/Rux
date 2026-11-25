@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for Errno enum constants and conversions.
 //!
-//! Types copied from: kernel/src/errno.rs
+//! Types copied from: kernel/core/src/errno.rs
 
 #![cfg(kani)]
 

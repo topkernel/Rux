@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for PCI configuration space constants.
-//! Copied from: kernel/src/drivers/pci/mod.rs
+//! Copied from: kernel/core/src/drivers/pci/mod.rs
 
 use proptest::prelude::*;
 

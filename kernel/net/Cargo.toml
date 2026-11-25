@@ -9,7 +9,7 @@ edition = "2021"
 # hook table + socket-call surface from syscall's sibling).
 
 [dependencies]
-rux = { path = "..", default-features = false }
+rux = { path = "../core", package = "rux-core", default-features = false }
 debug = { path = "../debug", default-features = false }
 fs = { path = "../fs", default-features = false }
 

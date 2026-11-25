@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for SignalMask and signal set operations.
 //!
-//! Types copied from: kernel/src/signal.rs
+//! Types copied from: kernel/core/src/signal.rs
 
 #![cfg(kani)]
 

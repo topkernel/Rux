@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for PID bitmap allocator.
 //!
-//! Types copied from: kernel/src/process/pid.rs
+//! Types copied from: kernel/core/src/process/pid.rs
 
 #![cfg(kani)]
 

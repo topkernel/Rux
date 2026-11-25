@@ -4,7 +4,7 @@
 Extracts:
   1. SYSCOST dump tables (cumulative): per-syscall {n, avg, max, tot} at
      each 60 s dump; native x86_64 nrs decoded via the nrmap TSV
-     (extracted from kernel/src/syscall/x86_compat.rs).
+     (extracted from kernel/core/src/syscall/x86_compat.rs).
   2. Tick-mode accounting (u/k/i) per dump -> CPU decomposition.
   3. Kernel-rip page histogram per dump (symbolized if the ELF is given
      via PA_ELF, using nm output cached at /tmp/pa-nm-<tag>.txt).

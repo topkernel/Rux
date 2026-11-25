@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for VirtIO virtual queue struct sizes and constants.
-//! Copied from: kernel/src/drivers/virtio/queue.rs
+//! Copied from: kernel/core/src/drivers/virtio/queue.rs
 
 use proptest::prelude::*;
 

@@ -4,12 +4,12 @@
 //!
 //! RISC-V Sv39 page table entry and satp invariant tests.
 //!
-//! Types copied from: kernel/src/arch/riscv64/mm/pagetable.rs
+//! Types copied from: kernel/core/src/arch/riscv64/mm/pagetable.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/arch/riscv64/mm/pagetable.rs
+// Copied types from kernel/core/src/arch/riscv64/mm/pagetable.rs
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

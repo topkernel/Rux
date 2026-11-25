@@ -4,12 +4,12 @@
 //!
 //! Reverse mapping VPN extraction and mapcount invariant tests.
 //!
-//! Types copied from: kernel/src/mm/rmap.rs
+//! Types copied from: kernel/core/src/mm/rmap.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/mm/rmap.rs
+// Copied types from kernel/core/src/mm/rmap.rs
 // ============================================================================
 
 pub const PAGE_SIZE: usize = 4096;

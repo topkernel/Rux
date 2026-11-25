@@ -4,12 +4,12 @@
 //!
 //! Buddy allocator mathematics invariant tests.
 //!
-//! Types and functions copied from: kernel/src/mm/buddy_allocator.rs
+//! Types and functions copied from: kernel/core/src/mm/buddy_allocator.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Constants and functions copied from kernel/src/mm/buddy_allocator.rs
+// Constants and functions copied from kernel/core/src/mm/buddy_allocator.rs
 // ============================================================================
 
 const PAGE_SIZE: usize = 4096;

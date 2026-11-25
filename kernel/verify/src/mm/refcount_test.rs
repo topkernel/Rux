@@ -4,13 +4,13 @@
 //!
 //! Page refcount underflow protection invariant tests.
 //!
-//! Types copied from: kernel/src/mm/page_desc.rs
+//! Types copied from: kernel/core/src/mm/page_desc.rs
 
 use proptest::prelude::*;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 // ============================================================================
-// Copied types from kernel/src/mm/page_desc.rs (simplified for testing)
+// Copied types from kernel/core/src/mm/page_desc.rs (simplified for testing)
 // ============================================================================
 
 /// Simplified Page descriptor — only refcount/mapcount fields.

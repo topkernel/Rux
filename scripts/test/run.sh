@@ -57,14 +57,14 @@ KERNEL_ELF="target/${CARGO_TARGET}/debug/rux"
 FEATURES_FILE="target/.build_features.${PLATFORM}"
 
 # The aarch64 build embeds a QEMU 'virt' DTB blob (kernel/build.rs
-# .incbin's kernel/src/arch/aarch64/virt.dtb; the file is gitignored
+# .incbin's kernel/core/src/arch/aarch64/virt.dtb; the file is gitignored
 # because it is machine-generated). QEMU's ELF -kernel boot passes no
 # DTB, so the kernel ships its own. Bootstrap it deterministically from
 # the same qemu-system-aarch64 that boots the test kernel, with the
 # same machine flags, whenever it is missing (an existing blob is never
 # clobbered — a lane-provided one wins).
 ensure_aarch64_dtb() {
-    local DTB="kernel/src/arch/aarch64/virt.dtb"
+    local DTB="kernel/core/src/arch/aarch64/virt.dtb"
     [ -f "$DTB" ] && return 0
     echo "Generating $DTB (QEMU virt dumpdtb, gic-version=3, -cpu cortex-a72 -m 1G -smp 2)..."
     # gic-version=3 is REQUIRED: the kernel's GIC driver and build.rs's

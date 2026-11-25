@@ -556,7 +556,7 @@ fn shrink_inactive_list(
         let anon_reclaimed = reclaim_anonymous_pages(nr_to_scan, sc);
         sc.nr_reclaimed += anon_reclaimed;
         // The reference-shaped batch tracepoint (see the declaration's
-        // divergence note in kernel/src/trace/mod.rs). Argument evaluation
+        // divergence note in kernel/core/src/trace/mod.rs). Argument evaluation
         // is two census reads (relaxed atomics) — paid only on the anon
         // reclaim path, never on any standard-boot path.
         let c1 = vscan_census();

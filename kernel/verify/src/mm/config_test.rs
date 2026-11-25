@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for kernel configuration constant relationships.
-//! Copied from: kernel/src/config.rs (auto-generated from Kernel.toml)
+//! Copied from: kernel/core/src/config.rs (auto-generated from Kernel.toml)
 
 use proptest::prelude::*;
 

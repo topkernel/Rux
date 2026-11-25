@@ -8,7 +8,7 @@
 //! error; a request that wrote nothing fails outright. Size must track
 //! only what landed.
 //!
-//! Loop skeleton copied from: kernel/src/fs/ext4/file.rs ext4_file_write
+//! Loop skeleton copied from: kernel/core/src/fs/ext4/file.rs ext4_file_write
 //! (allocation arms collapsed to the decision they make: Ok(block) |
 //! Err(alloc-fail)).
 
@@ -27,7 +27,7 @@ enum Block {
 }
 
 /// Mirror of ext4_file_write's per-block loop with the partial_or_err!
-/// semantics (kernel/src/fs/ext4/file.rs): `fail_block` acts at the
+/// semantics (kernel/core/src/fs/ext4/file.rs): `fail_block` acts at the
 /// point the allocation arm errors.
 fn write_loop(
     offset: u64,

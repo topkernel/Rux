@@ -3,7 +3,7 @@
 // Verifies: nr_running consistency — every enqueue increments, every dequeue decrements
 //
 // Abstracted from:
-//   kernel/src/sched/sched.rs — GlobalRunQueue, enqueue_task, dequeue_task
+//   kernel/core/src/sched/sched.rs — GlobalRunQueue, enqueue_task, dequeue_task
 //
 // Key invariants (INV-SCHED-1 through INV-SCHED-3):
 //   INV-SCHED-1: nr_running >= 0 at all times

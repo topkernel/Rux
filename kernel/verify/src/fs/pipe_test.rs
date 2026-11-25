@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for pipe circular buffer arithmetic.
-//! Copied from: kernel/src/fs/pipe.rs
+//! Copied from: kernel/core/src/fs/pipe.rs
 
 use proptest::prelude::*;
 

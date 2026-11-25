@@ -24,7 +24,7 @@ dependencies = [
 name = "arch"
 version = "0.1.0"
 dependencies = [
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -56,7 +56,7 @@ dependencies = [
  "mm",
  "net",
  "process",
- "rux",
+ "rux-core",
  "sched",
  "signal",
  "sync",
@@ -128,7 +128,7 @@ name = "debug"
 version = "0.1.0"
 dependencies = [
  "ipc",
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -137,7 +137,7 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "process",
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -150,7 +150,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 name = "ext4"
 version = "0.1.0"
 dependencies = [
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -165,7 +165,7 @@ version = "0.1.0"
 dependencies = [
  "debug",
  "ext4",
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -236,14 +236,14 @@ dependencies = [
 name = "io_uring"
 version = "0.1.0"
 dependencies = [
- "rux",
+ "rux-core",
 ]
 
 [[package]]
 name = "ipc"
 version = "0.1.0"
 dependencies = [
- "rux",
+ "rux-core",
  "sync",
 ]
 
@@ -313,7 +313,7 @@ name = "mm"
 version = "0.1.0"
 dependencies = [
  "process",
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -322,7 +322,7 @@ version = "0.1.0"
 dependencies = [
  "debug",
  "fs",
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -353,7 +353,7 @@ dependencies = [
 name = "process"
 version = "0.1.0"
 dependencies = [
- "rux",
+ "rux-core",
  "sync",
  "timer",
 ]
@@ -443,7 +443,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
-name = "rux"
+name = "rux-core"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
@@ -489,7 +489,7 @@ name = "sched"
 version = "0.1.0"
 dependencies = [
  "process",
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -567,7 +567,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "signal"
 version = "0.1.0"
 dependencies = [
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -617,7 +617,7 @@ dependencies = [
 name = "sync"
 version = "0.1.0"
 dependencies = [
- "rux",
+ "rux-core",
 ]
 
 [[package]]
@@ -630,7 +630,7 @@ dependencies = [
  "ipc",
  "net",
  "process",
- "rux",
+ "rux-core",
  "sync",
  "timer",
 ]
@@ -639,7 +639,7 @@ dependencies = [
 name = "timer"
 version = "0.1.0"
 dependencies = [
- "rux",
+ "rux-core",
 ]
 
 [[package]]

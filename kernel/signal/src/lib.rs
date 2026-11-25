@@ -5,7 +5,7 @@
 //! unsafe-forbid boundary. The framework keeps the MECHANISM (the
 //! pending set and its queue on the task, the pt_regs frame build and
 //! sigreturn restore, the wake path, the pinned pid-hash lookups, the
-//! schedule loop) plus the hook table (kernel/src/signal_hooks.rs);
+//! schedule loop) plus the hook table (kernel/core/src/signal_hooks.rs);
 //! the composition bin registers this crate's rows before the framework
 //! boots.
 //!
@@ -40,7 +40,7 @@ pub mod signal {
 }
 
 // The carved policy tree. The file was PHYSICALLY MOVED from
-// kernel/src/signal_policy.rs (the crate-plan recipe's step 5, done by
+// kernel/core/src/signal_policy.rs (the crate-plan recipe's step 5, done by
 // the root-cold lane 2026-11-24): the framework's module tree never
 // named it, so this crate remains its sole compilation home, under
 // forbid — the #[path] indirection is gone and the crate owns the
@@ -83,10 +83,10 @@ pub fn run_unit_tests() {
     crate::signal_procmask_test::test_sigprocmask();
 }
 
-// Service-internal tests live CENTRALLY in kernel/src/tests/services/.
+// Service-internal tests live CENTRALLY in kernel/core/src/tests/services/.
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/signal_test.rs"]
+#[path = "../../core/src/tests/services/signal_test.rs"]
 pub mod signal_test;
 #[cfg(feature = "unit-test")]
-#[path = "../../src/tests/services/signal_procmask_test.rs"]
+#[path = "../../core/src/tests/services/signal_procmask_test.rs"]
 pub mod signal_procmask_test;

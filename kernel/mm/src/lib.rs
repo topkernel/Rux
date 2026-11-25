@@ -3,9 +3,9 @@
 //! (mmap/munmap/find_free_area), brk, stack allocation, mprotect range
 //! decisions, fork's VMA-decision half, stack expansion, and the fault
 //! ROUTING (which arm) — under a crate-level unsafe-forbid boundary.
-//! The framework keeps the MECHANISM (kernel/src/arch/*/mm/: walks, PTE
+//! The framework keeps the MECHANISM (kernel/core/src/arch/*/mm/: walks, PTE
 //! atomics, fill/copy frame primitives, uaccess bottoms) plus the hook
-//! table (kernel/src/mm/mm_hooks.rs); the composition bin registers
+//! table (kernel/core/src/mm/mm_hooks.rs); the composition bin registers
 //! this crate's rows before the framework impl boots.
 //!
 //! Migration state (M1a): all three arches' carves are flipped — the
@@ -46,7 +46,7 @@ pub mod compact;
 pub mod swap;
 
 // The carved policy tree. The files were PHYSICALLY MOVED from
-// kernel/src/mm/policy/ (the crate-plan recipe's step 5, done by the
+// kernel/core/src/mm/policy/ (the crate-plan recipe's step 5, done by the
 // root-cold lane 2026-11-24): the framework's module tree never named
 // policy/, so this crate remains their sole compilation home, under
 // forbid — the #[path] indirection is gone and the crate owns the

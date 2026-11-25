@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for readahead state machine.
-//! Copied from: kernel/src/fs/readahead.rs
+//! Copied from: kernel/core/src/fs/readahead.rs
 
 use proptest::prelude::*;
 

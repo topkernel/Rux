@@ -1,5 +1,5 @@
 //! The x86_64 remote-BT requester half (arch-cold lane): moved from
-//! kernel/src/arch/x86_64/ipi.rs. The IRQ-work capture halves
+//! kernel/core/src/arch/x86_64/ipi.rs. The IRQ-work capture halves
 //! (snapshot_self, remote_bt_self — the IPI handler bodies with their
 //! raw frame-pointer walks) stayed framework-side writing the pub
 //! BT_*/SNAP_* statics; this is the requester that arms the sequence,

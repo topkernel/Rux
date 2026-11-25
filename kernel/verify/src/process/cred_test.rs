@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for Cred (process credentials) initialization.
-//! Copied from: kernel/src/process/task.rs
+//! Copied from: kernel/core/src/process/task.rs
 
 use proptest::prelude::*;
 

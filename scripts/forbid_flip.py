@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # MIT License
 # Copyright (c) 2026 Fei Wang
-"""Forbid-flip scanner: find kernel/src .rs modules that carry zero
+"""Forbid-flip scanner: find kernel/core/src .rs modules that carry zero
 `unsafe` tokens (outside comments) and do not yet carry
 `#![forbid(unsafe_code)]`, then insert the attribute at the module-head
 position (after leading // and //! comments and existing inner attrs).
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "kernel" / "src"
+SRC = ROOT / "kernel" / "core" / "src"
 ATTR = "#![forbid(unsafe_code)]"
 
 # Generated / non-module files; the tests harness is cfg(test)-gated and

@@ -4,13 +4,13 @@
 //!
 //! IRQ descriptor and return value invariant tests.
 //!
-//! Types copied from: kernel/src/interrupt/irqdesc.rs
+//! Types copied from: kernel/core/src/interrupt/irqdesc.rs
 //! NOTE: Spinlock/Atomic types simplified for std testing.
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/src/interrupt/irqdesc.rs
+// Copied types from kernel/core/src/interrupt/irqdesc.rs
 // ============================================================================
 
 #[repr(C)]

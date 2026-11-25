@@ -2,7 +2,7 @@
 //! (unsafe-5000-plan Layer 2.1, the "geology check").
 //!
 //! The primitive sources are included VERBATIM (`include!` of the
-//! kernel/src/safety/*.rs files — no copies to drift). Two host
+//! kernel/core/src/safety/*.rs files — no copies to drift). Two host
 //! shims make that possible:
 //! - `arch::mm` provides an identity `virt_to_phys` for KPtr::phys()
 //!   (the kernel's real one walks the kernel page table — meaningless
@@ -35,7 +35,7 @@ pub mod arch {
     }
 
     /// Host shim: the generic no-MPK fallback, same shape as the
-    /// kernel's non-x86_64 twin (kernel/src/arch/mod.rs). dma.rs's
+    /// kernel's non-x86_64 twin (kernel/core/src/arch/mod.rs). dma.rs's
     /// guarded-window path calls these; with guard_on() == false the
     /// zone_open/zone_close pair is never taken, which is exactly the
     /// unguarded-host semantics Miri should exercise.
@@ -62,22 +62,22 @@ pub mod arch {
 // alloc::alloc (KPtr storage) - make the extern explicit.
 extern crate alloc;
 
-#[path = "../../src/safety/bytes.rs"]
+#[path = "../../core/src/safety/bytes.rs"]
 pub mod bytes;
-#[path = "../../src/safety/call.rs"]
+#[path = "../../core/src/safety/call.rs"]
 pub mod call;
-#[path = "../../src/safety/mmio.rs"]
+#[path = "../../core/src/safety/mmio.rs"]
 pub mod mmio;
-#[path = "../../src/safety/ptr.rs"]
+#[path = "../../core/src/safety/ptr.rs"]
 pub mod ptr;
-#[path = "../../src/safety/ring.rs"]
+#[path = "../../core/src/safety/ring.rs"]
 pub mod ring;
-#[path = "../../src/safety/slot.rs"]
+#[path = "../../core/src/safety/slot.rs"]
 pub mod slot;
 
-#[path = "../../src/safety/dma.rs"]
+#[path = "../../core/src/safety/dma.rs"]
 pub mod dma;
-#[path = "../../src/safety/frame.rs"]
+#[path = "../../core/src/safety/frame.rs"]
 pub mod frame;
 
 #[cfg(kani)]
