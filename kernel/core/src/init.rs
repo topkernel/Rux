@@ -417,7 +417,7 @@ fn load_and_setup_elf(
     // SAFETY: kernel_root_ppn is the boot page-table root; the switch
     // only activates it on this CPU.
     unsafe {
-        crate::mm::switch_address_space(kernel_root_ppn, 0);
+        crate::mm::hotpath::switch_address_space(kernel_root_ppn, 0);
     }
 
     // First entry into user mode happens through ret_from_exception with

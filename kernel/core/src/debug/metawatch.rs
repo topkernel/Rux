@@ -32,7 +32,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use crate::mm::buddy_allocator::{self, MetaFinding, EMPTY_FINDING};
+use crate::mm::{hotpath, types::MetaFinding, hotpath::EMPTY_FINDING};
 
 /// Scan cadence in jiffies (100 Hz clock → 10 s). One scan sweeps the
 /// 4096-word bitmap three times plus the free-list walk — low-single-
@@ -62,7 +62,7 @@ pub fn tick(current: u64) {
         // the audit to flag it, restore, expect clean. All before any
         // real scan — the boot either proves its tripwire or says so.
         if crate::cmdline::get_param("metawatch-selftest").is_some() {
-            if buddy_allocator::buddy_meta_selftest() {
+            if hotpath::buddy_meta_selftest() {
                 crate::pr_err!(
                     "METAWATCH-SELFTEST PASS: injected free_bits bit flagged (BitmapClearListed) and restored, re-audit clean"
                 );
@@ -94,7 +94,7 @@ pub fn tick(current: u64) {
 
 fn scan(current: u64) {
     let mut findings = [EMPTY_FINDING; MAX_FINDINGS];
-    match buddy_allocator::buddy_meta_shadow_scan(&mut findings) {
+    match hotpath::buddy_meta_shadow_scan(&mut findings) {
         // Another CPU's scan is in flight; corruption persists, so the
         // next cadence observes it too. Not a miss.
         None => {}
@@ -111,8 +111,8 @@ fn scan(current: u64) {
     }
 }
 
-fn kind_str(kind: crate::mm::buddy_allocator::MetaFindKind) -> &'static str {
-    use crate::mm::buddy_allocator::MetaFindKind::*;
+fn kind_str(kind: crate::mm::types::MetaFindKind) -> &'static str {
+    use crate::mm::types::MetaFindKind::*;
     match kind {
         LinkOob => "LinkOob",
         OrderMismatch => "OrderMismatch",

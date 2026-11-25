@@ -168,7 +168,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // /proc/vmstat pgfault, and the per-task counter behind
     // /proc/[pid]/stat field 10 (minflt). Linux counts only faults
     // taken in user mode.
-    crate::mm::vmstat::note_fault();
+    crate::mm::hotpath::note_fault();
     if regs.user_mode() {
         if let Some(task) = crate::sched::current() {
             // Typed handle — per-task atomic counter only.
@@ -260,7 +260,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         if kernel_data_fill {
             let covered = addr_space
                 .vma_read()
-                .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                .find(crate::mm::types::VirtAddr::new(fault_addr.as_usize()))
                 .is_some();
             // 84th (installs SIGABRT, ohw156 t=161.5): an UNCOVERED
             // kernel uaccess fault must still reach handle_mm_fault —
@@ -279,7 +279,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             // exception-table fixup below, unchanged.
             let stack_growable = addr_space
                 .vma_read()
-                .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                .find_stack_vma(crate::mm::types::VirtAddr::new(fault_addr.as_usize()))
                 .is_some();
             if covered || stack_growable {
                 let result = crate::api::mm::handle_mm_fault(
@@ -342,7 +342,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                                 result
                             );
                             let vr = addr_space.vma_read();
-                            let va = crate::mm::page::VirtAddr::new(fault_addr.as_usize());
+                            let va = crate::mm::types::VirtAddr::new(fault_addr.as_usize());
                             match vr.find(va) {
                                 Some(v) => {
                                     let _ = write!(

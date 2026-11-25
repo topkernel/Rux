@@ -17,9 +17,9 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use super::memory_layout::*;
 use super::r#unsafe::PtTable;
 use super::pagetable::*;
-use crate::mm::{MmStruct, alloc_pages, free_pages, GfpFlags};
-use crate::mm::page_desc::MAX_PAGES;
-use crate::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
+use crate::mm::{types::MmStruct, hotpath::alloc_pages, hotpath::free_pages, types::GfpFlags};
+use crate::mm::hotpath::MAX_PAGES;
+use crate::mm::types::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
 
 // ==================== Assembly Page Tables (defined in boot.S) ====================
 
@@ -169,7 +169,7 @@ pub fn alloc_page_table() -> Option<u64> {
         }
         AllocStage::Fixmap => {
             // Fixmap stage: use memblock allocation
-            let phys_addr = crate::mm::memblock::memblock_phys_alloc()?;
+            let phys_addr = crate::mm::hotpath::memblock_phys_alloc()?;
 
             // FORENSIC→FIX: boot-stage tables are shared by early mms —
             // mark permanent so teardown never frees them.
@@ -183,11 +183,11 @@ pub fn alloc_page_table() -> Option<u64> {
         }
         AllocStage::Late => {
             // Late stage: use zone allocator
-            use crate::mm::zone::ZoneType;
+            use crate::mm::types::ZoneType;
 
             // SAFETY: node-table mutation is the zone allocator's own
             // discipline (bring-up / zone-locked paths).
-            let phys_addr = if let Some(node) = unsafe { crate::mm::pglist::first_online_node_mut() } {
+            let phys_addr = if let Some(node) = unsafe { crate::mm::hotpath::first_online_node_mut() } {
                 if let Some(zone) = node.zone_mut(ZoneType::ZoneNormal) {
                     if zone.is_initialized() {
                         let mut pfn_opt = zone.alloc_pages(0);
@@ -226,19 +226,19 @@ pub fn alloc_page_table() -> Option<u64> {
                                 // (internally rate-limited): attributes
                                 // the drain (genuine exhaustion vs broken
                                 // free lists vs leak) on the serial log.
-                                crate::mm::page_alloc::oom_forensic_dump(
+                                crate::mm::hotpath::oom_forensic_dump(
                                     "alloc_page_table order-0",
                                 );
                             }
                         }
                         match pfn_opt {
                             Some(pfn) => {
-                                if let Some(page) = crate::mm::page_desc::page_desc(pfn) {
+                                if let Some(page) = crate::mm::hotpath::page_desc(pfn) {
                                     page.set_refcount(1);
                                     page.set_order(0);
-                                    page.set_flag(crate::mm::page_desc::PageFlag::Referenced);
+                                    page.set_flag(crate::mm::types::PageFlag::Referenced);
                                 }
-                                crate::mm::zone::pfn_to_phys(pfn) as u64
+                                crate::mm::hotpath::pfn_to_phys(pfn) as u64
                             }
                             None => 0,
                         }
@@ -314,7 +314,7 @@ static BOOT_TREE_STAMPED: core::sync::atomic::AtomicBool = core::sync::atomic::A
 /// table bookkeeping.
 fn stamp_kernel_tree_boot() {
     use core::sync::atomic::Ordering;
-    use crate::mm::phys_valid;
+    use crate::mm::hotpath::phys_valid;
     if BOOT_TREE_STAMPED.load(Ordering::Acquire) {
         return;
     }
@@ -391,7 +391,7 @@ fn free_page_table(phys_addr: u64) {
     }
 
     // Use zone allocator to free
-    crate::mm::page_alloc::free_pages(phys_addr as usize, 0);
+    crate::mm::hotpath::free_pages(phys_addr as usize, 0);
 }
 
 // FORENSIC: page-table frame ledger — every Late-stage alloc_page_table
@@ -447,7 +447,7 @@ impl PtLedger {
     /// Bit index for an absolute PPN; None when outside the managed range.
     #[inline]
     fn bit_index(ppn: u64) -> Option<usize> {
-        let base = crate::mm::page_desc::MIN_PFN as u64;
+        let base = crate::mm::hotpath::MIN_PFN as u64;
         let i = ppn.checked_sub(base)? as usize;
         if i < MAX_PAGES {
             Some(i)
@@ -605,11 +605,11 @@ impl PtLedger {
             // Anonymous/Lru) — both prove this tree references a frame it no
             // longer owns.
             {
-                let page = crate::mm::page_desc::pfn_to_page(ppn as usize);
+                let page = crate::mm::hotpath::pfn_to_page(ppn as usize);
                 if !page.is_null() {
                     // SAFETY: read-only descriptor access on the diagnostic path.
                     let (rc, linked, lru, anon) = unsafe {
-                        use crate::mm::page_desc::PageFlag;
+                        use crate::mm::types::PageFlag;
                         (
                             (*page).refcount(),
                             (*page).test_flag(PageFlag::OnFreelist),
@@ -787,7 +787,7 @@ impl PtLedger {
     /// page-table stamp (exact bitmap popcount, bounded by the runtime
     /// descriptor count). This is the authoritative PageTables figure.
     pub fn live_count() -> usize {
-        let bits = crate::mm::page_desc::nr_descs().min(MAX_PAGES);
+        let bits = crate::mm::hotpath::nr_descs().min(MAX_PAGES);
         let mut n = 0usize;
         for i in 0..bits.div_ceil(64) {
             n += PT_LEDGER.live[i].load(core::sync::atomic::Ordering::Relaxed)
@@ -864,7 +864,7 @@ fn is_framebuffer_frame(phys: u64) -> bool {
     // Without this, fork's COW copy refcounted the foreign frames and
     // the last teardown's put_page(0) called free_pages on kernel-heap
     // phys (sc83: 7442-line REFUSED printk flood + lock wedge).
-    crate::mm::page_alloc::is_foreign_user_frame(phys as usize)
+    crate::mm::hotpath::is_foreign_user_frame(phys as usize)
 }
 
 // FORENSIC: PTE-install ledger — every user PTE installation records
@@ -989,19 +989,19 @@ pub fn textfree_owner_maps(owner_pid: u32, pfn: usize) -> usize {
 ///     (leak) and print the frame's lifecycle from the event ring.
 /// Returns true when the frame was returned to the allocator.
 pub(crate) fn release_user_leaf(
-    page: &crate::mm::page_desc::Page,
+    page: &crate::mm::types::Page,
     pfn: usize,
     va: usize,
 ) -> bool {
-    use crate::mm::page_desc::PageFlag;
-    let stamp = crate::mm::page_desc::text_stamp_get(pfn);
+    use crate::mm::types::PageFlag;
+    let stamp = crate::mm::hotpath::text_stamp_get(pfn);
     if page.is_mapped() {
-        crate::mm::rmap::page_remove_rmap(page);
+        crate::mm::hotpath::page_remove_rmap(page);
     }
     let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_RV);
     let dying = crate::process::current_pid() as u32;
     if stamp.is_some() {
-        crate::mm::page_desc::text_stamp_note(pfn, dying, 'T', new_ref);
+        crate::mm::hotpath::text_stamp_note(pfn, dying, 'T', new_ref);
     }
     // Stamp visibility policy (gnome-sigill): do NOT clear the stamp when
     // the owner exits with sharers remaining (new_ref > 0). The frame may
@@ -1071,7 +1071,7 @@ pub(crate) fn release_user_leaf(
             }
             if owner_found && maps.0 == 0 && live_mapper == 0 {
                 // STALE stamp: this free is the legal final put.
-                crate::mm::page_desc::text_stamp_note(pfn, dying, 'S', 0);
+                crate::mm::hotpath::text_stamp_note(pfn, dying, 'S', 0);
                 static STALE_REPORTS: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if STALE_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
@@ -1080,9 +1080,9 @@ pub(crate) fn release_user_leaf(
                         pfn, dying, va, owner_pid, owner_va
                     );
                 }
-                crate::mm::page_desc::text_stamp_remove(pfn);
+                crate::mm::hotpath::text_stamp_remove(pfn);
             } else if !owner_found && live_mapper == 0 {
-                crate::mm::page_desc::text_stamp_note(pfn, dying, 'S', 0);
+                crate::mm::hotpath::text_stamp_note(pfn, dying, 'S', 0);
                 static STALE_REPORTS2: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if STALE_REPORTS2.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
@@ -1091,10 +1091,10 @@ pub(crate) fn release_user_leaf(
                         pfn, dying, va, owner_pid, owner_va
                     );
                 }
-                crate::mm::page_desc::text_stamp_remove(pfn);
+                crate::mm::hotpath::text_stamp_remove(pfn);
             } else {
                 // REAL foreign free: leak + full evidence.
-                crate::mm::page_desc::text_stamp_note(pfn, dying, 'R', 0);
+                crate::mm::hotpath::text_stamp_note(pfn, dying, 'R', 0);
                 let (rc, mc, cow, anon, lru, freelist) = (
                     page.refcount(),
                     page.mapcount(),
@@ -1111,8 +1111,8 @@ pub(crate) fn release_user_leaf(
                 );
                 // Replay this frame's recorded lifecycle (ring scan).
                 use core::sync::atomic::Ordering::Relaxed;
-                use crate::mm::page_desc::TEXT_EVT_RING;
-                let cur = crate::mm::page_desc::TEXT_EVT_CURSOR.load(Relaxed);
+                use crate::mm::hotpath::TEXT_EVT_RING;
+                let cur = crate::mm::hotpath::TEXT_EVT_CURSOR.load(Relaxed);
                 let mut shown = 0;
                 for k in 0..TEXT_EVT_RING.len() {
                     let idx = (cur + TEXT_EVT_RING.len() - 1 - k) % TEXT_EVT_RING.len();
@@ -1135,7 +1135,7 @@ pub(crate) fn release_user_leaf(
                 return false;
             }
         } else {
-            crate::mm::page_desc::text_stamp_remove(pfn);
+            crate::mm::hotpath::text_stamp_remove(pfn);
         }
     }
     // Cache-backed leaf (pcachewedge lane, 2026-11-15): the page cache
@@ -1145,8 +1145,8 @@ pub(crate) fn release_user_leaf(
     // wire a live cache frame back into the zone (the RAW-FREE double
     // hand). Leak + name it instead (x86_64 twin: the per-site
     // pcache_leaf_phantom_zero_put guards).
-    if page.page_type() == crate::mm::page_desc::PageType::PageCache {
-        crate::mm::page_alloc::pcache_leaf_phantom_zero_put(pfn << 12, "rv-release-user-leaf");
+    if page.page_type() == crate::mm::types::PageType::PageCache {
+        crate::mm::hotpath::pcache_leaf_phantom_zero_put(pfn << 12, "rv-release-user-leaf");
         return false;
     }
     crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1165,14 +1165,14 @@ pub(crate) fn release_user_leaf(
 pub fn pt_pending_drain() {}
 
 pub fn free_user_page_tables(
-    pte: &crate::mm::mm_struct::PteLock,
+    pte: &crate::mm::types::PteLock,
     root_ppn: u64,
     // (sysmm-2x lane) VMA range snapshot bounding the leaf scans —
     // implemented on the x86_64 twin first (platform priority); the
     // riscv64 walk keeps its full scans and ignores the list.
     _vma_ranges: &[(u64, u64)],
 ) {
-    use crate::mm::{page_desc, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
+    use crate::mm::{hotpath::{self, page_desc}, hotpath::phys_to_pfn, hotpath::phys_valid, types::PageFlag, hotpath::free_pages};
     crate::debug::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Double-teardown detector: the same root walked twice means two
     // MmStructs ended up owning one page-table tree — the second walk
@@ -2336,7 +2336,7 @@ pub fn forensics_scan_trees(
         tasks += 1;
     });
 
-    let ram_top = (crate::mm::page_desc::max_pfn() as u64) << 12;
+    let ram_top = (crate::mm::hotpath::max_pfn() as u64) << 12;
     let mut reads = 0usize;
     const BUDGET: usize = 400_000;
     let mut nh = 0usize;
@@ -2356,7 +2356,7 @@ pub fn forensics_scan_trees(
 
     let link_ok = |ppn: u64| -> bool {
         let phys = ppn << 12;
-        ppn != 0 && phys >= 0x8000_0000 && phys < ram_top && crate::mm::phys_valid(phys as usize)
+        ppn != 0 && phys >= 0x8000_0000 && phys < ram_top && crate::mm::hotpath::phys_valid(phys as usize)
     };
 
     for &(pid, root) in roots.iter().take(tasks) {

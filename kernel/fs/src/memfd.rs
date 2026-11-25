@@ -385,7 +385,7 @@ pub fn get_seals(file: &File) -> Result<u32, i32> {
 /// is not visible here (documented; the common seal-then-share pattern
 /// seals before any mapping exists).
 fn has_writable_shared_mapping(file: &File) -> bool {
-    use crate::mm::vma::VmaFlags;
+    use crate::mm::types::VmaFlags;
     let task = match crate::sched::current() {
         Some(t) => t,
         None => return false,

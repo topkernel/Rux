@@ -7,15 +7,15 @@
 //! Definitions only. Every `struct`, `enum` and type alias of the
 //! subsystem lives here, together with the constants those definitions
 //! name (array lengths, and the constants those derive from); every
-//! `impl` block stays with the functions that use it — an impl is code,
-//! a definition is data layout. The exceptions are definitions local to
-//! code: a type declared inside a function or inside a private inline
-//! module.
+//! `impl` block lives in `hotpath.rs` beside the functions that use it —
+//! an impl is code, a definition is data layout. The exceptions are
+//! definitions local to code: a type declared inside a function or
+//! inside a private inline module of `hotpath.rs`.
 //!
-//! This file holds no `unsafe`. A field that was private to its old file
-//! is `pub(super)` here because the code that touches it stayed in that
-//! file: the visibility boundary is the mm directory, the smallest one
-//! Rust offers for a definition that lives in a sibling module.
+//! This file holds no `unsafe`. A field that was private to its old
+//! topic file is `pub(super)` here because the code that touches it
+//! lives in the sibling module `hotpath`: the mm directory is the
+//! smallest visibility boundary Rust offers for that split.
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -28,7 +28,6 @@ use crate::sync::rwlock::RwSpinlock;
 use crate::sync::rwsem::Rwsem;
 use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
-use super::PAGE_SIZE;
 
 // ---------------------------------------------------------------------------
 // kernel-heap buddy allocator: BuddyAllocator and its metadata, the layout
@@ -225,6 +224,8 @@ pub struct EffectiveStaticRegions {
 // ---------------------------------------------------------------------------
 // page and address newtypes
 // ---------------------------------------------------------------------------
+
+pub const PAGE_SIZE: usize = 4096;
 
 pub type PhysFrameNr = usize;
 

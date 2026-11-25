@@ -10,9 +10,9 @@
 //! crate with the S1b flip and runs via the SERVICE-TEST SEAM.
 
 use crate::cmdline::{get_all_params, get_init_program, get_root_device, has_param, is_root_readonly, CMDLINE_LEN, CMDLINE_PTR};
-use crate::mm::page_desc::{Page, PageFlag, PageFlags};
-use crate::mm::slab::SlabAllocator;
-use crate::mm::vma::{VirtAddr, Vma, VmaFlags, VmaOrigin};
+use crate::mm::types::{Page, PageFlag, PageFlags};
+use crate::mm::types::SlabAllocator;
+use crate::mm::types::{VirtAddr, Vma, VmaFlags, VmaOrigin};
 use core::sync::atomic::Ordering;
 
 pub fn test_mm_pins() {

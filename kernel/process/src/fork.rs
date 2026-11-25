@@ -493,7 +493,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                         static ENOMEM_DUMPED: core::sync::atomic::AtomicBool =
                             core::sync::atomic::AtomicBool::new(false);
                         if !ENOMEM_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                            let st = crate::mm::buddy_allocator::buddy_stats();
+                            let st = crate::mm::hotpath::buddy_stats();
                             crate::pr_warn!(
                                 "fork: ENOMEM by pid {} flags={:#x}: task/stack alloc failed (kernel heap {}K/{}K)",
                                 current.pid(),
@@ -820,7 +820,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                                     taskdump_dec(c.map(|x| x.1).unwrap_or(0));
                                     taskdump_raw_line(b" refcnt=");
                                     let rf = p.and_then(|x| {
-                                        let pg = crate::mm::page_desc::pfn_to_page(x.0 as usize);
+                                        let pg = crate::mm::hotpath::pfn_to_page(x.0 as usize);
                                         crate::r#unsafe::page_refcount(pg)
                                     });
                                     taskdump_dec(rf.unwrap_or(-1i32) as i64 as u64);

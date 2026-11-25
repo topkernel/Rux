@@ -102,7 +102,7 @@ impl Line {
 /// context): zone free, PT pages, page cache, heap, slab, swap.
 pub fn compact_line() {
     let mut l = Line::new(b"MEMLEDGER-COMPACT");
-    if let Some(node) = crate::mm::pglist::first_online_node() {
+    if let Some(node) = crate::mm::hotpath::first_online_node() {
         l.push(b" memfree_pages=");
         l.dec(node.free_pages() as u64);
     }
@@ -113,12 +113,12 @@ pub fn compact_line() {
     }
     l.push(b" pagecache_pages=");
     l.dec(crate::fs::page_cache::page_cache_total_pages() as u64);
-    let heap = crate::mm::buddy_allocator::buddy_stats();
+    let heap = crate::mm::hotpath::buddy_stats();
     l.push(b" heapK=");
     l.dec((heap.used_bytes / 1024) as u64);
     l.push(b"/");
     l.dec((heap.heap_size / 1024) as u64);
-    let slab = crate::mm::slab::slab_stats();
+    let slab = crate::mm::hotpath::slab_stats();
     l.push(b" slab_pages=");
     l.dec(slab.total_pages as u64);
     l.push(b" swap_active=");
@@ -132,7 +132,7 @@ pub fn compact_line() {
 /// the fake-OOM audit needs (anon vs pinned cache vs reserved). Emitted
 /// by dump() next to compact_line(), and safe to call standalone.
 pub fn census_line() {
-    let st = crate::mm::page_desc::page_desc_stats();
+    let st = crate::mm::hotpath::page_desc_stats();
     let mut l = Line::new(b"MEMLEDGER-CENSUS");
     l.push(b" total=");
     l.dec(st.total_pages as u64);
@@ -224,12 +224,12 @@ pub fn dump(site: &str) {
     // Zone counters (what the allocator believes).
     let mut zone_free: u64 = 0;
     let mut zone_managed: u64 = 0;
-    if let Some(node) = crate::mm::pglist::first_online_node() {
+    if let Some(node) = crate::mm::hotpath::first_online_node() {
         for zt in [
-            crate::mm::zone::ZoneType::ZoneNormal,
-            crate::mm::zone::ZoneType::ZoneDma32,
-            crate::mm::zone::ZoneType::ZoneDma,
-            crate::mm::zone::ZoneType::ZoneMovable,
+            crate::mm::types::ZoneType::ZoneNormal,
+            crate::mm::types::ZoneType::ZoneDma32,
+            crate::mm::types::ZoneType::ZoneDma,
+            crate::mm::types::ZoneType::ZoneMovable,
         ] {
             if let Some(zone) = node.zone(zt) {
                 if !zone.is_initialized() {
@@ -242,14 +242,14 @@ pub fn dump(site: &str) {
                     zone.zone_type().name(),
                     zone.nr_free(),
                     zone.managed_pages(),
-                    zone.watermark(crate::mm::zone::WMARK_MIN),
-                    zone.watermark(crate::mm::zone::WMARK_LOW),
-                    zone.watermark(crate::mm::zone::WMARK_HIGH),
+                    zone.watermark(crate::mm::types::WMARK_MIN),
+                    zone.watermark(crate::mm::types::WMARK_LOW),
+                    zone.watermark(crate::mm::types::WMARK_HIGH),
                 );
             }
         }
         // LRU sizes (counter view; the census below walks the pages).
-        for lru_i in 0..crate::mm::pglist::NR_LRU_LISTS {
+        for lru_i in 0..crate::mm::types::NR_LRU_LISTS {
             let sz = node.lru_sizes[lru_i].load(Ordering::Relaxed);
             if sz > 0 {
                 crate::println!("MEMLEDGER lru[{}] size={}", lru_i, sz);
@@ -259,8 +259,8 @@ pub fn dump(site: &str) {
 
     // Full descriptor census (bounded by what vmemmap actually mapped —
     // same dereference-safety rule as page_desc_stats).
-    use crate::mm::page_desc::{nr_descs, pfn_to_page, PageFlag, MIN_PFN};
-    let scan = nr_descs().min(crate::mm::vmemmap::vmemmap_stats().nr_pages);
+    use crate::mm::{hotpath::nr_descs, hotpath::pfn_to_page, types::PageFlag, hotpath::MIN_PFN};
+    let scan = nr_descs().min(crate::mm::hotpath::vmemmap_stats().nr_pages);
     #[cfg(any(feature = "riscv64", feature = "x86_64"))]
     let pt_count = crate::arch::mm::PtLedger::live_count() as u64;
     #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]

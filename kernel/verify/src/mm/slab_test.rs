@@ -4,12 +4,12 @@
 //!
 //! Slab allocator size class lookup invariant tests.
 //!
-//! Types copied from: kernel/core/src/mm/slab.rs
+//! Types copied from: kernel/core/src/mm/types.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/core/src/mm/slab.rs
+// Copied types from kernel/core/src/mm/types.rs
 // ============================================================================
 
 const PAGE_SIZE: usize = 4096;

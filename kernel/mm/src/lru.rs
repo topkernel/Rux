@@ -22,8 +22,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use rux::mm::page_desc::{Page, PageFlag, page_to_pfn};
-use rux::mm::pglist::NR_LRU_LISTS;
+use rux::mm::{types::Page, types::PageFlag, hotpath::page_to_pfn};
+use rux::mm::types::NR_LRU_LISTS;
 
 /// Sentinel PFN value meaning "no page" (end of list).
 const LRU_NONE: usize = 0;
@@ -38,7 +38,7 @@ const LRU_NONE: usize = 0;
 /// # Safety
 /// `page` must be linked on list `lru` of `node`'s LRU arrays.
 fn unlink_locked(
-    node: &rux::mm::pglist::PglistData,
+    node: &rux::mm::types::PglistData,
     page: &Page,
     lru: usize,
 ) {
@@ -96,7 +96,7 @@ fn unlink_locked(
 /// # Safety
 /// `page` must not currently be linked on any list.
 fn link_tail_locked(
-    node: &rux::mm::pglist::PglistData,
+    node: &rux::mm::types::PglistData,
     page: &Page,
     lru: usize,
 ) {
@@ -135,7 +135,7 @@ fn link_tail_locked(
 /// # Safety
 /// `page` must not currently be linked on any list.
 fn link_head_locked(
-    node: &rux::mm::pglist::PglistData,
+    node: &rux::mm::types::PglistData,
     page: &Page,
     lru: usize,
 ) {
@@ -276,9 +276,9 @@ pub fn lru_deactivate(page: &Page) {
     let target = if page.test_flag(PageFlag::Active) {
         page.clear_flag(PageFlag::Active);
         if page.test_flag(PageFlag::Anonymous) {
-            rux::mm::pglist::LRU_INACTIVE_ANON
+            rux::mm::types::LRU_INACTIVE_ANON
         } else {
-            rux::mm::pglist::LRU_INACTIVE_FILE
+            rux::mm::types::LRU_INACTIVE_FILE
         }
     } else {
         return;
@@ -296,9 +296,9 @@ pub fn lru_activate(page: &Page) {
     let target = if !page.test_flag(PageFlag::Active) {
         page.set_flag(PageFlag::Active);
         if page.test_flag(PageFlag::Anonymous) {
-            rux::mm::pglist::LRU_ACTIVE_ANON
+            rux::mm::types::LRU_ACTIVE_ANON
         } else {
-            rux::mm::pglist::LRU_ACTIVE_FILE
+            rux::mm::types::LRU_ACTIVE_FILE
         }
     } else {
         return;
@@ -366,14 +366,14 @@ pub fn page_add_anon_lru(page: &Page) {
     let _guard = node.lru_lock.lock();
     // Page is not linked (Lru flag checked) and the lock is held.
     if !page.test_flag(PageFlag::Lru) {
-        link_head_locked(node, page, rux::mm::pglist::LRU_INACTIVE_ANON);
+        link_head_locked(node, page, rux::mm::types::LRU_INACTIVE_ANON);
         page.set_flag(PageFlag::Lru);
     }
 }
 
 /// Add a file-backed page to LRU_INACTIVE_FILE on first mapping.
 pub fn page_add_file_lru(page: &Page) {
-    lru_add_page(page, rux::mm::pglist::LRU_INACTIVE_FILE);
+    lru_add_page(page, rux::mm::types::LRU_INACTIVE_FILE);
 }
 
 /// Link a batch of pages to LRU_INACTIVE_FILE under ONE lru_lock
@@ -395,10 +395,10 @@ pub fn page_add_file_lru_batch(pages: &[*mut Page]) {
         // links impossible — same contract as lru_add_page
         // (INV-MM-2 owned-frame arm).
         if let Some(page) = rux::mm::r#unsafe::page_ref_of(
-            rux::mm::page_desc::page_to_pfn(*page_ptr)
+            rux::mm::hotpath::page_to_pfn(*page_ptr)
         ) {
             if !page.test_flag(PageFlag::Lru) {
-                link_tail_locked(node, page, rux::mm::pglist::LRU_INACTIVE_FILE);
+                link_tail_locked(node, page, rux::mm::types::LRU_INACTIVE_FILE);
                 page.set_flag(PageFlag::Lru);
             }
         }
@@ -429,7 +429,7 @@ pub fn page_add_file_lru_young(page: &Page) {
     let _guard = node.lru_lock.lock();
     // Page is not linked (Lru flag checked) and the lock is held.
     if !page.test_flag(PageFlag::Lru) {
-        link_head_locked(node, page, rux::mm::pglist::LRU_INACTIVE_FILE);
+        link_head_locked(node, page, rux::mm::types::LRU_INACTIVE_FILE);
         page.set_flag(PageFlag::Lru);
     }
 }
@@ -453,10 +453,10 @@ pub fn page_add_file_lru_young_batch(pages: &[*mut Page]) {
         // check keeps double links impossible — same contract as
         // page_add_file_lru_batch (INV-MM-2 owned-frame arm).
         if let Some(page) = rux::mm::r#unsafe::page_ref_of(
-            rux::mm::page_desc::page_to_pfn(*page_ptr)
+            rux::mm::hotpath::page_to_pfn(*page_ptr)
         ) {
             if !page.test_flag(PageFlag::Lru) {
-                link_head_locked(node, page, rux::mm::pglist::LRU_INACTIVE_FILE);
+                link_head_locked(node, page, rux::mm::types::LRU_INACTIVE_FILE);
                 page.set_flag(PageFlag::Lru);
             }
         }
@@ -475,7 +475,7 @@ pub fn lru_activate_young(page: &Page) {
     if !page.test_flag(PageFlag::Active) {
         page.set_flag(PageFlag::Active);
     }
-    lru_move_to_head(page, rux::mm::pglist::LRU_ACTIVE_FILE);
+    lru_move_to_head(page, rux::mm::types::LRU_ACTIVE_FILE);
 }
 
 /// Demote up to `nr` of the OLDEST pages on LRU_ACTIVE_FILE back onto the
@@ -496,7 +496,7 @@ pub fn lru_demote_active_file_oldest(nr: usize) -> usize {
     };
     let _guard = node.lru_lock.lock();
     let mut demoted = 0usize;
-    let mut cur = node.lru_tails[rux::mm::pglist::LRU_ACTIVE_FILE]
+    let mut cur = node.lru_tails[rux::mm::types::LRU_ACTIVE_FILE]
         .load(core::sync::atomic::Ordering::Relaxed);
     while cur != LRU_NONE && demoted < nr {
         // cur comes from the (locked) list chain (INV-MM-2 chain arm).
@@ -519,7 +519,7 @@ pub fn lru_demote_active_file_oldest(nr: usize) -> usize {
             }
             p.clear_flag(PageFlag::Referenced);
             p.clear_flag(PageFlag::Active);
-            link_head_locked(node, p, rux::mm::pglist::LRU_INACTIVE_FILE);
+            link_head_locked(node, p, rux::mm::types::LRU_INACTIVE_FILE);
             p.set_flag(PageFlag::Lru);
         }
         demoted += 1;

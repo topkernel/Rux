@@ -294,7 +294,7 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     // is the locked VMA span (LTP mmap14 mlocks a 1MB mapping and reads
     // VmLck back). The old hardcoded zeros made every Vm* report 0 kB.
     let (vm_size_kb, vm_rss_kb, vm_lck_kb) = {
-        let page_kb = (crate::mm::page::PAGE_SIZE / 1024) as u64;
+        let page_kb = (crate::mm::types::PAGE_SIZE / 1024) as u64;
         let aspace = task.address_space_arc();
         let (total, rss) = match &aspace {
             Some(a) => (a.total_vm(), a.rss()),
@@ -304,10 +304,10 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
             Some(a) => a
                 .vma_read()
                 .iter()
-                .filter(|v| v.flags().contains(crate::mm::vma::VmaFlags::LOCKED))
+                .filter(|v| v.flags().contains(crate::mm::types::VmaFlags::LOCKED))
                 .map(|v| (v.end().as_usize() - v.start().as_usize()) as u64)
                 .sum::<u64>()
-                / crate::mm::page::PAGE_SIZE as u64,
+                / crate::mm::types::PAGE_SIZE as u64,
             None => 0,
         };
         (total * page_kb, rss * page_kb, lck_pages * page_kb)
@@ -455,7 +455,7 @@ pub const STATUS_FIELDS: &[&str] = &[
 /// Returns the bytes actually readable (shorter than requested when the
 /// range runs into an unmapped page).
 fn read_target_user_mm(
-    addr_space: &crate::mm::mm_struct::AddressSpace,
+    addr_space: &crate::mm::types::AddressSpace,
     start: usize,
     len: usize,
 ) -> Vec<u8> {
@@ -827,7 +827,7 @@ pub fn generate_smaps(pid: u64) -> Vec<u8> {
         Some(a) => a,
         None => return maps,
     };
-    let page_kb = (crate::mm::page::PAGE_SIZE / 1024) as u64;
+    let page_kb = (crate::mm::types::PAGE_SIZE / 1024) as u64;
 
     // maps lines are VMA-ordered; append the counter block after each.
     let mut out = String::new();
@@ -841,7 +841,7 @@ pub fn generate_smaps(pid: u64) -> Vec<u8> {
             // Resident pages: walk the PTEs of the VMA span.
             let mut rss_pages: u64 = 0;
             let root = addr_space.root_ppn();
-            let mut p = start & !(crate::mm::page::PAGE_SIZE - 1);
+            let mut p = start & !(crate::mm::types::PAGE_SIZE - 1);
             while p < end {
                 // Read-only walk of this task's own page tables (the
                 // safe walk fn; the pre-flip unsafe wrapper was
@@ -849,14 +849,14 @@ pub fn generate_smaps(pid: u64) -> Vec<u8> {
                 if crate::arch::mm::mm_ops::PageTableWalker::walk(root, p as u64).is_some() {
                     rss_pages += 1;
                 }
-                p += crate::mm::page::PAGE_SIZE;
+                p += crate::mm::types::PAGE_SIZE;
             }
             let locked_kb = {
                 let mgr = addr_space.vma_read();
                 let mut lck = 0u64;
                 for v in mgr.iter() {
                     if v.start().as_usize() == start
-                        && v.flags().contains(crate::mm::vma::VmaFlags::LOCKED)
+                        && v.flags().contains(crate::mm::types::VmaFlags::LOCKED)
                     {
                         lck = ((v.end().as_usize() - v.start().as_usize()) / 1024) as u64;
                         break;
@@ -909,7 +909,7 @@ fn re_header() -> fn(&str) -> Option<(usize, usize)> {
 /// e.g.: 00010000-00020000 r-xp 00000000 00:00 0 [exe]
 pub fn generate_maps(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
-    use crate::mm::vma::{VmaFlags, VmaType};
+    use crate::mm::types::{VmaFlags, VmaType};
 
     let mut pinned;
     let task = if current_pid() as u64 == pid {
@@ -946,11 +946,11 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
     // re-enabled) between chunks, walk resumed from the last VMA's
     // start via a range scan.
     const MAPS_CHUNK: usize = 32;
-    let mut resume: Option<crate::mm::vma::VirtAddr> = None;
+    let mut resume: Option<crate::mm::types::VirtAddr> = None;
     'chunks: loop {
         let vma_mgr = addr_space.vma_read();
         let mut produced = 0usize;
-        let iter: alloc::boxed::Box<dyn Iterator<Item = &crate::mm::vma::Vma>> = match resume {
+        let iter: alloc::boxed::Box<dyn Iterator<Item = &crate::mm::types::Vma>> = match resume {
             None => alloc::boxed::Box::new(vma_mgr.iter()),
             Some(k) => alloc::boxed::Box::new(vma_mgr.iter_after(k)),
         };
@@ -1184,8 +1184,8 @@ pub fn generate_fd_link(pid: u64, fd: u32) -> Vec<u8> {
 /// Score is computed dynamically: total_vm + oom_score_adj * totalpages / 1000
 pub fn generate_oom_score(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
-    use crate::mm::pglist::first_online_node_mut;
-    use crate::mm::zone::ZoneType;
+    use crate::mm::hotpath::first_online_node_mut;
+    use crate::mm::types::ZoneType;
 
     let task = if current_pid() as u64 == pid {
         current_task()
@@ -1200,7 +1200,7 @@ pub fn generate_oom_score(pid: u64) -> Vec<u8> {
 
     // Get totalpages from zone (the SAFE first_online_node — read-only
     // zone statistics; the pre-flip _mut wrapper was unnecessary).
-    let totalpages = crate::mm::pglist::first_online_node()
+    let totalpages = crate::mm::hotpath::first_online_node()
         .and_then(|node| {
             for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma] {
                 if let Some(zone) = node.zone(zt) {

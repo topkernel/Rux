@@ -328,11 +328,11 @@ pub fn test_safety_primitives_r4() {
 pub fn test_safety_primitives_frame_run() {
     test_group_start("safety primitives frame run");
 
-    use crate::mm::page_alloc::{alloc_pages, free_pages};
-    use crate::mm::zone::GfpFlags;
+    use crate::mm::hotpath::{alloc_pages, free_pages};
+    use crate::mm::types::GfpFlags;
     use crate::safety::bytes as cbytes;
 
-    let ps = crate::mm::PAGE_SIZE;
+    let ps = crate::mm::types::PAGE_SIZE;
     let phys = alloc_pages(GfpFlags::GFP_KERNEL, 1);
     if phys == 0 {
         test_fail("frame run order-1 alloc", "alloc_pages returned 0");

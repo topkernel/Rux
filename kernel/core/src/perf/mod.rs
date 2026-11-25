@@ -743,7 +743,7 @@ fn ring_audit(inner: &PerfInner) {
     N.fetch_add(1, Ordering::Relaxed);
     let Some(pages) = inner.pages.as_ref() else { return };
     for (i, p) in pages.iter().enumerate() {
-        let pd = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(*p));
+        let pd = crate::mm::hotpath::pfn_to_page_mut(crate::mm::hotpath::phys_to_pfn(*p));
         if pd.is_null() {
             crate::pr_err!("PERF-RING-PAGE-BAD: pages[{}] frame {:#x} has NO descriptor", i, p);
             continue;
@@ -1386,13 +1386,13 @@ fn perf_close(file: &crate::fs::File) -> i32 {
                 // mapping reference went away with the PTEs (munmap or
                 // exit runs before the last fd release); the owner drop is
                 // the last one — free to the buddy when it hits 0.
-                let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(p));
+                let page = crate::mm::hotpath::pfn_to_page_mut(crate::mm::hotpath::phys_to_pfn(p));
                 if !page.is_null() {
                     // SAFETY: descriptor of a page we allocated.
                     unsafe {
                         let r = (*page).put_page();
                         if r == 0 {
-                            crate::mm::page_alloc::free_pages(p, 0);
+                            crate::mm::hotpath::free_pages(p, 0);
                         } else if r < 0 {
                             // Underflow refusal (refcount was already 0):
                             // the frame has been over-put — it may already
@@ -1463,9 +1463,9 @@ pub fn perf_mmap_handler(
     prot: u32,
 ) -> Result<usize, i32> {
     use crate::arch::mm::{map_page, PageTableEntry, VirtAddr};
-    use crate::mm::GfpFlags;
-    use crate::mm::page_alloc::{alloc_pages, free_pages};
-    use crate::mm::vma::{Vma, VmaFlags};
+    use crate::mm::types::GfpFlags;
+    use crate::mm::hotpath::{alloc_pages, free_pages};
+    use crate::mm::types::{Vma, VmaFlags};
 
     // hp88 hunt bisect: noring — deny the ring mapping so hiperf runs
     // long-lived with open fds but no ring mmap at all.
@@ -1514,12 +1514,12 @@ pub fn perf_mmap_handler(
         // sale of a live frame, which zeroing below would destroy.
         // Pristine mapcount is PAGE_MAPCOUNT_BIAS (-1), not 0.
         {
-            let pd = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(p));
+            let pd = crate::mm::hotpath::pfn_to_page_mut(crate::mm::hotpath::phys_to_pfn(p));
             if !pd.is_null() {
                 // SAFETY: descriptor of the frame alloc_pages just
                 // returned; read-only loads.
                 let (rc, mc) = unsafe { ((*pd).refcount(), (*pd).mapcount()) };
-                if rc != 1 || mc != crate::mm::page_desc::PAGE_MAPCOUNT_BIAS {
+                if rc != 1 || mc != crate::mm::hotpath::PAGE_MAPCOUNT_BIAS {
                     crate::pr_err!(
                         "PERF-ALLOC-DIRTY: alloc_pages returned frame {:#x} with refcount {} mapcount {} — allocator handed out a LIVE page; zeroing it would corrupt its owner pid {}",
                         p, rc, mc,
@@ -1555,8 +1555,8 @@ pub fn perf_mmap_handler(
                 return Err(22);
             }
             let probe = Vma::new(
-                crate::mm::page::VirtAddr::new(b),
-                crate::mm::page::VirtAddr::new(b + length),
+                crate::mm::types::VirtAddr::new(b),
+                crate::mm::types::VirtAddr::new(b + length),
                 vma_flags,
             );
             if vmas.iter().any(|v| v.overlaps(&probe)) { None } else { Some(b) }
@@ -1595,12 +1595,12 @@ pub fn perf_mmap_handler(
         }
         let b = base.unwrap();
         let mut vma = Vma::new(
-            crate::mm::page::VirtAddr::new(b),
-            crate::mm::page::VirtAddr::new(b + length),
+            crate::mm::types::VirtAddr::new(b),
+            crate::mm::types::VirtAddr::new(b + length),
             vma_flags,
         );
-        vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
-            crate::mm::vma::VmaOrigin::OTHER,
+        vma.set_origin(crate::mm::types::VmaOrigin::from_bits(
+            crate::mm::types::VmaOrigin::OTHER,
         ));
         let ring_pages = vma.page_count() as u64;
         if vmas.add(vma).is_err() {
@@ -1656,7 +1656,7 @@ pub fn perf_mmap_handler(
                 // Mapping reference (binder/io_uring discipline): munmap or
                 // process exit put_page's the PTE ref; perf_close drops the
                 // owner ref; the last drop frees.
-                let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(pa));
+                let page = crate::mm::hotpath::pfn_to_page_mut(crate::mm::hotpath::phys_to_pfn(pa));
                 if !page.is_null() {
                     // SAFETY: descriptor of the page we just mapped.
                     unsafe { (*page).get_page(); }

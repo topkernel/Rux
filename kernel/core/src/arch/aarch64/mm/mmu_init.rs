@@ -224,7 +224,7 @@ pub fn alloc_page_table() -> Option<u64> {
             // walk can tell Late frames (freeable) from boot-pool frames
             // (image .bss, never freed). The old static-pool fallback
             // exhausted after a handful of execs (128 frames, bump-only).
-            let phys = crate::mm::alloc_pages(crate::mm::GfpFlags::GFP_KERNEL, 0);
+            let phys = crate::mm::hotpath::alloc_pages(crate::mm::types::GfpFlags::GFP_KERNEL, 0);
             if phys == 0 {
                 return None;
             }
@@ -253,7 +253,7 @@ pub fn free_page_table(phys_addr: u64) {
     if !free_page_table_checked(phys_addr, "pt") {
         return;
     }
-    crate::mm::page_alloc::free_pages(phys_addr as usize, 0);
+    crate::mm::hotpath::free_pages(phys_addr as usize, 0);
 }
 
 /// Ledger-guarded half of the free: true when the caller may return the
@@ -312,14 +312,14 @@ pub fn register_fork_root(_root_ppn: u64, _owner_pid: u32) {}
 pub fn pt_pending_drain() {}
 
 pub fn free_user_page_tables(
-    lock: &crate::mm::mm_struct::PteLock,
+    lock: &crate::mm::types::PteLock,
     root_ppn: u64,
     // (sysmm-2x lane) VMA range snapshot bounding the leaf scans —
     // implemented on the x86_64 twin first (platform priority); the
     // aarch64 walk keeps its full scans and ignores the list.
     _vma_ranges: &[(u64, u64)],
 ) {
-    use crate::mm::phys_valid;
+    use crate::mm::hotpath::phys_valid;
 
     crate::debug::memwatch::FUT_CALLS.fetch_add(1, Ordering::Relaxed);
     // Serialize against fork's copy walk and COW/demand faults on any mm
@@ -387,20 +387,20 @@ pub fn free_user_page_tables(
                     release_user_leaf_mm(e3);
                 }
                 if free_page_table_checked(t3_phys, "l3") {
-                    crate::mm::page_alloc::free_pages(t3_phys as usize, 0);
+                    crate::mm::hotpath::free_pages(t3_phys as usize, 0);
                 }
             }
             if free_page_table_checked(t2_phys, "l2") {
-                crate::mm::page_alloc::free_pages(t2_phys as usize, 0);
+                crate::mm::hotpath::free_pages(t2_phys as usize, 0);
             }
         }
         if free_page_table_checked(t1_phys, "l1") {
-            crate::mm::page_alloc::free_pages(t1_phys as usize, 0);
+            crate::mm::hotpath::free_pages(t1_phys as usize, 0);
         }
     }
 
     if free_page_table_checked(root_phys, "root") {
-        crate::mm::page_alloc::free_pages(root_phys as usize, 0);
+        crate::mm::hotpath::free_pages(root_phys as usize, 0);
     }
 }
 
@@ -410,7 +410,7 @@ pub fn free_user_page_tables(
 /// frames (boot-reserved, kernel-heap, framebuffer) are skipped: their
 /// owner releases them through its own path.
 fn release_user_leaf_mm(entry: PageTableEntry) {
-    use crate::mm::{page_desc, phys_to_pfn, phys_valid};
+    use crate::mm::{hotpath::{self, page_desc}, hotpath::phys_to_pfn, hotpath::phys_valid};
 
     if !entry.is_user() {
         return; // not this mm's page (defensive; user trees are U-only)
@@ -418,7 +418,7 @@ fn release_user_leaf_mm(entry: PageTableEntry) {
     let phys = entry.output_addr();
     if phys == 0
         || !phys_valid(phys as usize)
-        || crate::mm::page_alloc::is_foreign_user_frame(phys as usize)
+        || crate::mm::hotpath::is_foreign_user_frame(phys as usize)
         || crate::console::get_framebuffer_info()
             .map_or(false, |i| {
                 phys >= i.addr && phys < i.addr + i.size as u64
@@ -430,7 +430,7 @@ fn release_user_leaf_mm(entry: PageTableEntry) {
     // Descriptor of a leaf frame this mm mapped until this walk.
     if let Some(page) = page_desc(pfn) {
         if page.is_mapped() {
-            crate::mm::rmap::page_remove_rmap(page);
+            crate::mm::hotpath::page_remove_rmap(page);
         }
         page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_RV);
     }

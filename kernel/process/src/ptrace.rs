@@ -187,7 +187,7 @@ pub fn process_vm_copy(
     let mut remaining = len;
     while remaining > 0 {
         // VMA gate: the covering mapping must permit this direction.
-        let vma = mm.find_vma(crate::mm::page::VirtAddr::new(r as usize));
+        let vma = mm.find_vma(crate::mm::types::VirtAddr::new(r as usize));
         let permitted = match vma.as_ref() {
             Some(v) => {
                 if to_remote {

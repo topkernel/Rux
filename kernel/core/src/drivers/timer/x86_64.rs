@@ -185,7 +185,7 @@ pub fn monotonic_ns_since_boot() -> u64 {
 pub fn read_time() -> u64 {
     if TSC_ACTIVE.load(Ordering::Acquire) != 0 {
         if let Some(mut v) =
-            crate::mm::vdso::x86_track::tsc_track_now_nominal()
+            crate::mm::hotpath::x86_track::tsc_track_now_nominal()
         {
             // Monotonic ratchet (TSC_LAST doc): never engages on a
             // healthy unified track; freezes the clock through the
@@ -252,7 +252,7 @@ pub fn read_time() -> u64 {
 /// from this instant read_time() and the vDSO fast path compute the
 /// same value from the same words.
 pub fn promote_tsc_timekeeper(mult: u64, base_tsc: u64, nominal_at_base: u64) {
-    crate::mm::vdso::x86_track::publish_tsc_anchor(mult, base_tsc, nominal_at_base);
+    crate::mm::hotpath::x86_track::publish_tsc_anchor(mult, base_tsc, nominal_at_base);
     TSC_ACTIVE.store(1, Ordering::Release);
     TSC_FROM_HPET.store(1, Ordering::Release);
 }
@@ -274,12 +274,12 @@ pub fn resync_tsc_against_hpet() {
     if TSC_FROM_HPET.load(Ordering::Acquire) == 0 {
         return;
     }
-    let Some((cl, base, mult)) = crate::mm::vdso::x86_track::tsc_anchor_peek() else {
+    let Some((cl, base, mult)) = crate::mm::hotpath::x86_track::tsc_anchor_peek() else {
         return;
     };
-    let raw = crate::mm::vdso::x86_track::read_tsc_ordered();
+    let raw = crate::mm::hotpath::x86_track::read_tsc_ordered();
     let tsc_nom = base
-        .wrapping_add(crate::mm::vdso::x86_track::tsc_delta_nominal(
+        .wrapping_add(crate::mm::hotpath::x86_track::tsc_delta_nominal(
             raw.wrapping_sub(cl),
             mult,
         ));
@@ -291,7 +291,7 @@ pub fn resync_tsc_against_hpet() {
         if behind > 100_000 {
             resync_report(b"tsc-clock: fell behind ", behind);
         }
-        crate::mm::vdso::x86_track::tsc_anchor_step_forward(step);
+        crate::mm::hotpath::x86_track::tsc_anchor_step_forward(step);
     } else if tsc_nom > hpet_nom && tsc_nom - hpet_nom > 2_500_000 {
         // 250 ms..25 s lead: REPORT ONLY. Proof-of-fix marker for the
         // shift-32 correction — at ~3 ppm residual mapping error this
@@ -316,7 +316,7 @@ pub fn resync_tsc_against_hpet() {
             base,
             mult
         );
-        crate::mm::vdso::x86_track::tsc_anchor_step_back(lead);
+        crate::mm::hotpath::x86_track::tsc_anchor_step_back(lead);
     }
 }
 
@@ -337,7 +337,7 @@ pub fn calibrate_cpu_tsc_offset(cpu: usize) {
     if cpu == 0 || cpu >= crate::config::MAX_CPUS {
         return;
     }
-    let Some((cl, base, mult)) = crate::mm::vdso::x86_track::tsc_anchor_peek() else {
+    let Some((cl, base, mult)) = crate::mm::hotpath::x86_track::tsc_anchor_peek() else {
         return;
     };
     // Three bracketed samples, take the extreme |hpet - track|: the
@@ -348,9 +348,9 @@ pub fn calibrate_cpu_tsc_offset(cpu: usize) {
     let mut best = i64::MAX;
     for _ in 0..3 {
         let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
-        let t_after = crate::mm::vdso::x86_track::read_tsc_ordered();
+        let t_after = crate::mm::hotpath::x86_track::read_tsc_ordered();
         let track_after = base.wrapping_add(
-            crate::mm::vdso::x86_track::tsc_delta_nominal(
+            crate::mm::hotpath::x86_track::tsc_delta_nominal(
                 t_after.wrapping_sub(cl),
                 mult,
             ),
@@ -407,7 +407,7 @@ pub fn lapic_time_calibrated(_lapic_freq: u64, tsc_freq: u64) {
     let mult = ((CLOCK_FREQ << TSC_MULSHIFT) + tsc_freq / 2) / tsc_freq;
     let now = crate::arch::cpu::read_counter();
     let continuity = get_jiffies() * TIME_SLICE_TICKS;
-    crate::mm::vdso::x86_track::publish_tsc_anchor(mult, now, continuity);
+    crate::mm::hotpath::x86_track::publish_tsc_anchor(mult, now, continuity);
     TSC_ACTIVE.store(1, Ordering::Release);
 }
 
@@ -558,7 +558,7 @@ pub fn timer_interrupt_handler() -> u64 {
     crate::drivers::rtc::tick_refresh_cached_secs();
 
     // vDSO time page refresh (shared with the riscv64 twin)
-    crate::mm::vdso::vdso_data_tick();
+    crate::mm::hotpath::vdso_data_tick();
 
     // Timer softirq for TCP timers (retransmission, delayed ACK).
     // sc184 (lane 2, perf-audit F1): the raise was unconditional —

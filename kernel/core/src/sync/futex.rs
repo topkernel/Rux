@@ -437,7 +437,7 @@ impl FutexKey {
             Some(m) => m,
             None => return false,
         };
-        let vma = match mm.find_vma(crate::mm::page::VirtAddr::new(uaddr)) {
+        let vma = match mm.find_vma(crate::mm::types::VirtAddr::new(uaddr)) {
             Some(v) => v,
             None => return false,
         };
@@ -1696,7 +1696,7 @@ pub fn futex_stuck_census() {
                 // against an mmap/munmap writer).
                 if let Some(aspace) = tk.address_space() {
                     if let Some(mgr) = aspace.vma_try_read() {
-                        use crate::mm::vma::{VirtAddr, VmaType};
+                        use crate::mm::types::{VirtAddr, VmaType};
                         // (a) uaddr's mapping
                         if let Some(vma) = mgr.find(VirtAddr::new(s.uaddr)) {
                             s.uvma_ok = true;
@@ -1706,7 +1706,7 @@ pub fn futex_stuck_census() {
                             s.uvma_voff = vma.offset() + s.uvma_off;
                             let flags = vma.flags();
                             s.uvma_cls = if flags.contains(
-                                crate::mm::vma::VmaFlags::GROWSDOWN,
+                                crate::mm::types::VmaFlags::GROWSDOWN,
                             ) {
                                 b'S'
                             } else if s.uvma_start == aspace.start_brk() {
@@ -1851,7 +1851,7 @@ pub fn futex_stuck_census() {
                                 s.u2v_off = s.uret[1] as usize - s.u2v_start;
                                 let fl = vma.flags();
                                 s.u2v_cls = if fl.contains(
-                                    crate::mm::vma::VmaFlags::GROWSDOWN,
+                                    crate::mm::types::VmaFlags::GROWSDOWN,
                                 ) {
                                     b'S'
                                 } else if s.u2v_start == aspace.start_brk() {
@@ -1990,7 +1990,7 @@ pub fn futex_stuck_census() {
                                 }
                             }
                             if claimed {
-                                use crate::mm::vma::VmaType;
+                                use crate::mm::types::VmaType;
                                 // Collect the VMA table (small: < 256
                                 // entries per OH process), then select.
                                 struct VRow {
@@ -2112,7 +2112,7 @@ pub fn futex_stuck_census() {
                                             && !vma
                                                 .flags()
                                                 .contains(
-                                                    crate::mm::vma::VmaFlags::GROWSDOWN,
+                                                    crate::mm::types::VmaFlags::GROWSDOWN,
                                                 )
                                     }
                                     None => false,
@@ -2981,7 +2981,7 @@ pub fn futex_stuck_census() {
                 }
                 if let Some(aspace) = tk.address_space() {
                     if let Some(mgr) = aspace.vma_try_read() {
-                        use crate::mm::vma::VmaType;
+                        use crate::mm::types::VmaType;
                         for vma in mgr.iter() {
                             if maps_n >= 72 {
                                 break;
@@ -5926,7 +5926,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                         if let Some(aspace2) = tk.address_space() {
                                             let vmas2 = aspace2.vma_read();
                                             if let Some(vm) = vmas2.find(
-                                                crate::mm::page::VirtAddr::new(
+                                                crate::mm::types::VirtAddr::new(
                                                     slot12 as usize,
                                                 ),
                                             ) {
@@ -6356,7 +6356,7 @@ pub fn apppark_rets(task: *const Task) {
         }
         // Must land in some VMA (code or JIT — anon allowed here, the
         // call-site check filters garbage).
-        let Some(vm) = vmas.find(crate::mm::page::VirtAddr::new(v as usize)) else {
+        let Some(vm) = vmas.find(crate::mm::types::VirtAddr::new(v as usize)) else {
             continue;
         };
         // 8 bytes ending at v: b[7] is the byte at v-1.
@@ -6482,7 +6482,7 @@ pub fn rwfz_stack_frames(
     // so "offset != 0 || fd >= 0" separates file-backed code frames
     // from heap/stack data pointers.
     let vma_of = |v: u64| -> Option<(usize, usize, i32, usize, usize, u64)> {
-        let vm = vmas.find(crate::mm::page::VirtAddr::new(v as usize))?;
+        let vm = vmas.find(crate::mm::types::VirtAddr::new(v as usize))?;
         let base_off = vm.offset();
         Some((
             vm.start().as_usize(),
@@ -6623,7 +6623,7 @@ pub fn rwfz_stack_frames(
                 continue;
             }
             if vmas
-                .find(crate::mm::page::VirtAddr::new(v as usize))
+                .find(crate::mm::types::VirtAddr::new(v as usize))
                 .is_none()
             {
                 continue;

@@ -61,11 +61,11 @@
 //!   `insert` dedups against the live entry.
 
 use crate::arch::mm::{phys_to_virt, PhysAddr};
-use crate::mm::page_alloc::{alloc_page, alloc_page_batch, free_page};
-use crate::mm::page_desc::{page_desc, pfn_to_page_mut, Page, PageFlag, PageType};
-use crate::mm::pglist::{first_online_node, LRU_INACTIVE_FILE};
-use crate::mm::zone::{GfpFlags, ZoneType};
-use crate::mm::{pfn_to_phys, PAGE_SIZE};
+use crate::mm::hotpath::{alloc_page, alloc_page_batch, free_page};
+use crate::mm::{hotpath::page_desc, hotpath::pfn_to_page_mut, types::Page, types::PageFlag, types::PageType};
+use crate::mm::{hotpath::first_online_node, types::LRU_INACTIVE_FILE};
+use crate::mm::types::{GfpFlags, ZoneType};
+use crate::mm::{hotpath::pfn_to_phys, types::PAGE_SIZE};
 use crate::sync::spinlock::{Spinlock, SpinlockGuard};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -1676,7 +1676,7 @@ impl PageCache {
         fs_id: u64,
         ino: u64,
         file_off: u64,
-        pins: &crate::mm::gup::PinnedUserPages,
+        pins: &crate::mm::types::PinnedUserPages,
         written: usize,
         skip_pfns: &[u64],
     ) {

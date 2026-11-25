@@ -4,13 +4,13 @@
 //!
 //! PageFlags bitmap invariant tests.
 //!
-//! Types copied from: kernel/core/src/mm/page_desc.rs
+//! Types copied from: kernel/core/src/mm/types.rs
 
 use proptest::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 // ============================================================================
-// Copied types from kernel/core/src/mm/page_desc.rs
+// Copied types from kernel/core/src/mm/types.rs
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

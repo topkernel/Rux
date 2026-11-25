@@ -20,14 +20,14 @@ use crate::arch::mm::mm_ops::{
 };
 use crate::arch::mm::mmu_init::get_page_table_virt;
 use crate::arch::mm::pagetable::*;
-use rux::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
-use rux::mm::vma::VmaType;
-use rux::mm::AddressSpace;
+use rux::mm::types::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
+use rux::mm::types::VmaType;
+use rux::mm::types::AddressSpace;
 use rux::api::mm::{FaultFlags, MmFaultResult};
-use rux::mm::mm_struct::MmStruct;
-use rux::mm::pagemap::{MapError, Perm, PageTableType};
-use rux::mm::vma::{Vma, VmaFlags, VmaOrigin};
-use rux::mm::{alloc_pages, GfpFlags};
+use rux::mm::types::MmStruct;
+use rux::mm::types::{MapError, Perm, PageTableType};
+use rux::mm::types::{Vma, VmaFlags, VmaOrigin};
+use rux::mm::{hotpath::alloc_pages, types::GfpFlags};
 use alloc::vec::Vec;
 
 /// Try to expand stack when a page fault occurs below the current stack
@@ -38,9 +38,9 @@ fn try_expand_stack(
     flags: u32,
     root_ppn: u64,
 ) -> MmFaultResult {
-    use rux::mm::page::VirtAddr as PageVirtAddr;
-    use rux::mm::page::PAGE_SIZE as MM_PAGE_SIZE;
-    use rux::mm::vma::VmaFlags;
+    use rux::mm::types::VirtAddr as PageVirtAddr;
+    use rux::mm::types::PAGE_SIZE as MM_PAGE_SIZE;
+    use rux::mm::types::VmaFlags;
 
     let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
 
@@ -142,7 +142,7 @@ fn try_expand_stack(
         // Lost the race: free our exclusively-owned page; the next entry
         // sees the winner's mapping (Handled, not AlreadyMapped — the
         // trap layer maps AlreadyMapped to SIGSEGV).
-        rux::mm::page_alloc::free_page(phys_addr.bits() as usize);
+        rux::mm::hotpath::free_page(phys_addr.bits() as usize);
         return MmFaultResult::Handled;
     }
     // SAFETY: root valid, page-aligned address, owned zeroed page.
@@ -150,14 +150,14 @@ fn try_expand_stack(
         if !map_user_page(root_ppn, fault_addr, phys_addr, pte_flags) {
             // PT allocation failure: free the data page, deliver OOM
             // (trap layer SIGKILLs the user task; twin policy).
-            rux::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            rux::mm::hotpath::free_page(phys_addr.bits() as usize);
             return MmFaultResult::OutOfMemory;
         }
     }
 
     // Reverse mapping for the stack page (VMA lock already dropped).
     {
-        use rux::mm::page_desc::{page_desc, PageFlag};
+        use rux::mm::{hotpath::page_desc, types::PageFlag};
         let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
         // Exclusively owned until the install (INV-FRAME-1); SwapBacked
         // + LRU membership give reclaim visibility.
@@ -166,7 +166,7 @@ fn try_expand_stack(
             page.set_flag(PageFlag::SwapBacked);
             page.set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
             page.inc_mapcount();
-            rux::mm::rmap::page_record_mapping(
+            rux::mm::hotpath::page_record_mapping(
                 page,
                 mm as *const _ as usize,
                 fault_addr.bits() as usize,
@@ -193,7 +193,7 @@ fn protnone_represent(
     fault_addr: VirtAddr,
     flags: u32,
 ) -> MmFaultResult {
-    use rux::mm::page::VirtAddr as PageVirtAddr;
+    use rux::mm::types::VirtAddr as PageVirtAddr;
 
     let is_write = flags & FaultFlags::WRITE != 0;
     let is_exec = flags & FaultFlags::EXEC != 0;
@@ -288,7 +288,7 @@ pub fn handle_mm_fault(
     fault_addr: VirtAddr,
     flags: u32,
 ) -> MmFaultResult {
-    use rux::mm::page::VirtAddr as PageVirtAddr;
+    use rux::mm::types::VirtAddr as PageVirtAddr;
 
     let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
     let root_ppn = mm.root_ppn();
@@ -505,21 +505,21 @@ pub fn handle_mm_fault(
         // Lost the race: free our exclusively-owned page; retry sees the
         // winner's mapping (Handled — never AlreadyMapped, which the trap
         // layer maps to SIGSEGV).
-        rux::mm::page_alloc::free_page(phys_addr.bits() as usize);
+        rux::mm::hotpath::free_page(phys_addr.bits() as usize);
         return MmFaultResult::Handled;
     }
     // SAFETY: valid root, page-aligned fault address, owned filled page.
     {
         if !map_user_page(root_ppn, fault_addr, phys_addr, pte_flags) {
             // PT allocation failure: release the data page, deliver OOM.
-            rux::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            rux::mm::hotpath::free_page(phys_addr.bits() as usize);
             return MmFaultResult::OutOfMemory;
         }
     }
 
     // Reverse mapping + LRU for the newly mapped page (twin arms).
     {
-        use rux::mm::page_desc::{page_desc, PageFlag};
+        use rux::mm::{hotpath::page_desc, types::PageFlag};
         let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
         // Frame exclusively owned until the install above (INV-FRAME-1).
         if let Some(page) = page_desc(page_pfn) {
@@ -532,7 +532,7 @@ pub fn handle_mm_fault(
                             fault_addr.bits() as usize / (PAGE_SIZE as usize),
                         );
                         page.inc_mapcount();
-                        rux::mm::rmap::page_record_mapping(
+                        rux::mm::hotpath::page_record_mapping(
                             page,
                             mm as *const _ as usize,
                             fault_addr.bits() as usize,
@@ -547,7 +547,7 @@ pub fn handle_mm_fault(
                         page.inc_mapcount();
                         // Shmem stays off the anon LRU (twin note:
                         // try_to_unmap only walks Anonymous VMAs).
-                        rux::mm::rmap::page_record_mapping(
+                        rux::mm::hotpath::page_record_mapping(
                             page,
                             mm as *const _ as usize,
                             fault_addr.bits() as usize,
@@ -565,7 +565,7 @@ pub fn handle_mm_fault(
                                 fault_addr.bits() as usize / (PAGE_SIZE as usize),
                             );
                             page.inc_mapcount();
-                            rux::mm::rmap::page_record_mapping(
+                            rux::mm::hotpath::page_record_mapping(
                                 page,
                                 mm as *const _ as usize,
                                 fault_addr.bits() as usize,
@@ -661,7 +661,7 @@ pub fn handle_mm_fault(
                     // here; mapping again would orphan the winner's page.
                     if PageTableWalker::walk(mm.pgd, addr as u64).is_some() {
                         drop(_pte_guard);
-                        rux::mm::page_alloc::free_page(phys_addr);
+                        rux::mm::hotpath::free_page(phys_addr);
                     } else {
                         // Valid root, page-aligned heap address,
                         // exclusively owned fresh page.
@@ -694,13 +694,13 @@ pub fn handle_mm_fault(
                         }
                         // Reverse mapping for the heap page
                         {
-                            use rux::mm::page_desc::{page_desc, PageFlag};
+                            use rux::mm::{hotpath::page_desc, types::PageFlag};
                             if let Some(page) = page_desc(phys_addr / (PAGE_SIZE as usize)) {
                                 page.set_flag(PageFlag::Anonymous);
                                 page.set_flag(PageFlag::SwapBacked);
                                 page.set_index(addr / (PAGE_SIZE as usize));
                                 page.inc_mapcount();
-                                rux::mm::rmap::page_record_mapping(
+                                rux::mm::hotpath::page_record_mapping(
                                     page,
                                     mm as *const _ as usize,
                                     addr,
@@ -908,7 +908,7 @@ pub fn handle_mm_fault(
     /// for the wrapper, write for mmap's atomic pick-and-insert).
     fn find_free_area_locked(
         mm: &MmStruct,
-        vma_mgr: &rux::mm::vma::VmaManager,
+        vma_mgr: &rux::mm::types::VmaManager,
         size: usize,
     ) -> Result<PageVirtAddr, MapError> {
         use user_addr::{MMAP_START, MMAP_END, USER_END};
@@ -1142,8 +1142,8 @@ pub fn handle_mm_fault(
         let cow_exempt: Vec<(u64, u64)> = parent_vma_guard
             .iter()
             .filter(|vma| {
-                vma.flags().contains(rux::mm::vma::VmaFlags::SHARED)
-                    || vma.vma_type() == rux::mm::vma::VmaType::Device
+                vma.flags().contains(rux::mm::types::VmaFlags::SHARED)
+                    || vma.vma_type() == rux::mm::types::VmaType::Device
             })
             .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
             .collect();
@@ -1214,13 +1214,13 @@ pub fn handle_mm_fault(
                     new_vma.set_offset(offset);
                     // Clone the pinned vm_file so the child's demand
                     // faults read the file after fd close (twin P1).
-                    if vma_type == rux::mm::vma::VmaType::FileBacked {
+                    if vma_type == rux::mm::types::VmaType::FileBacked {
                         if let Some(f) = mm.get_vma_file(start.as_usize()) {
                             new_space.pin_vma_file(start.as_usize(), f);
                         }
                     }
                     // Shared-memory attachments: increment nattch.
-                    if vma_type == rux::mm::vma::VmaType::SharedMemory && file_fd >= 0 {
+                    if vma_type == rux::mm::types::VmaType::SharedMemory && file_fd >= 0 {
                         rux::api::ipc::shm_attach_vma(file_fd);
                     }
                     let copied_pages = new_vma.page_count() as u64;

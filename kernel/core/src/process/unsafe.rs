@@ -130,7 +130,7 @@ pub fn place_task(ptr: *mut Task, task: Task) {
 /// The hand-rolled SV39 walk this replaces misread x86 PTEs on x86_64
 /// builds (LTP r21 kill11 KERNPANIC) — the edge stays on the arch
 /// walker, and only here.
-pub fn dump_read_page(mm: &crate::mm::mm_struct::MmStruct, va: u64, out: &mut [u8]) {
+pub fn dump_read_page(mm: &crate::mm::types::MmStruct, va: u64, out: &mut [u8]) {
     use crate::arch::mm::mm_ops::PageTableWalker;
     use crate::arch::mm::{phys_to_virt, PhysAddr};
 
@@ -311,7 +311,7 @@ pub fn switch_to_kernel_root_on_exit() {
         // SAFETY: INV-PROC-ROOTSWITCH-1 — the switch target carries the
         // full kernel linear map.
         unsafe {
-            crate::mm::switch_address_space(kernel_ppn, 0);
+            crate::mm::hotpath::switch_address_space(kernel_ppn, 0);
         }
     }
 }
@@ -436,7 +436,7 @@ pub fn read_volatile_u32(addr: *const u32) -> u32 {
 /// borrow lives only within the accessor call, matching the
 /// pre-conversion inline deref's contract.
 #[inline]
-pub fn borrow_active_mm<'a>(mm_ptr: *const crate::mm::AddressSpace) -> &'a crate::mm::AddressSpace {
+pub fn borrow_active_mm<'a>(mm_ptr: *const crate::mm::types::AddressSpace) -> &'a crate::mm::types::AddressSpace {
     debug_assert!(!mm_ptr.is_null());
     // SAFETY: INV-PROC-ACTIVEMM-1 — the owner's reference keeps the
     // AddressSpace alive for this short borrow.
@@ -628,7 +628,7 @@ pub fn exec_ehdr_from(data: &[u8]) -> Option<crate::fs::elf::Elf64Ehdr> {
 #[inline]
 pub fn exec_map_user_range(root: u64, va: u64, len: u64, flags: u64) -> Option<u64> {
     // SAFETY: INV-PROC-EXEC-MAP-1 — fresh unpublished tree, owned range.
-    unsafe { crate::mm::alloc_and_map_user_table(root, va, len, flags) }
+    unsafe { crate::mm::hotpath::alloc_and_map_user_table(root, va, len, flags) }
 }
 
 /// Map a static physical frame (vDSO data/code) into the fresh tree.
@@ -679,7 +679,7 @@ pub fn exec_free_user_page_trees(root_ppn: u64) {
     // free from the owning guard.
     unsafe {
         crate::arch::mm::mmu_init::free_user_page_tables(
-            &crate::mm::mm_struct::FRESH_TREE_PTE_LOCK,
+            &crate::mm::hotpath::FRESH_TREE_PTE_LOCK,
             root_ppn,
             &[],
         );
@@ -707,9 +707,9 @@ pub fn exec_write_sigtramp(kva: usize, w0: u32, w1: u32) {
 /// root with no prior users; ownership transfers to the returned
 /// MmStruct (its Drop tears the tree down exactly once).
 #[inline]
-pub fn exec_mm_new_user(user_ppn: u64) -> crate::mm::MmStruct {
+pub fn exec_mm_new_user(user_ppn: u64) -> crate::mm::types::MmStruct {
     // SAFETY: INV-PROC-EXEC-MMNEW-1 — fresh root, ownership transfer.
-    unsafe { crate::mm::MmStruct::new_user(user_ppn) }
+    unsafe { crate::mm::types::MmStruct::new_user(user_ppn) }
 }
 
 /// The exec tail's satp/CR3 switch onto the new image.
@@ -722,7 +722,7 @@ pub fn exec_mm_new_user(user_ppn: u64) -> crate::mm::MmStruct {
 pub fn exec_switch_address_space(user_ppn: u64, asid: u16) {
     // SAFETY: INV-PROC-EXEC-SWITCH-1 — kernel half present on the new
     // root; ASID paired.
-    unsafe { crate::mm::switch_address_space(user_ppn, asid) }
+    unsafe { crate::mm::hotpath::switch_address_space(user_ppn, asid) }
 }
 
 /// Tighten the leaf PTE permission bits of every present leaf covering
@@ -933,7 +933,7 @@ pub fn fork_pt_walk(root: u64, va: u64) -> Option<(u64, u64)> {
 /// INV-PROC-FORK-COW-1: child_root is the child's fresh root ppn; va is
 /// access_ok-validated (the child's CLONE_CHILD_SETTID argument).
 pub fn fork_handle_cow_fault(
-    mm: &crate::mm::mm_struct::MmStruct,
+    mm: &crate::mm::types::MmStruct,
     root: u64,
     va: u64,
 ) -> crate::arch::mm::mm_ops::CowFaultResult {
@@ -986,7 +986,7 @@ pub fn read_user_tp_register() -> u64 {
 /// INV-PROC-DIAG-1 (page arm): `pg` is a page-descriptor pointer from
 /// pfn_to_page of a walk-resolved frame (or null — None); read-only.
 #[inline]
-pub fn page_refcount(pg: *mut crate::mm::page_desc::Page) -> Option<i32> {
+pub fn page_refcount(pg: *mut crate::mm::types::Page) -> Option<i32> {
     if pg.is_null() {
         return None;
     }
@@ -1036,7 +1036,7 @@ pub fn pid_hash_unlink_store(prev_link: *mut *mut Task, next: *mut Task) {
 /// walk uses; the lock serializes against same-mm munmap leaf-table
 /// unlinks (INV-LOCK-7 — the walker dereferences PMD-resolved leaf
 /// tables). Returns (phys, page_len) or None when unmapped.
-pub fn ptrace_translate(mm: &crate::mm::mm_struct::MmStruct, va: u64) -> Option<(u64, u64)> {
+pub fn ptrace_translate(mm: &crate::mm::types::MmStruct, va: u64) -> Option<(u64, u64)> {
     use crate::arch::mm::mm_ops::PageTableWalker;
     let root_ppn = mm.root_ppn();
     let _pte_guard = mm.pte_lock().lock();

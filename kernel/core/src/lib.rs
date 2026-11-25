@@ -206,7 +206,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     // way?). Lock-free census — see buddy_free_census_lockfree; taking
     // the allocator lock here could wedge the very print we die on.
     {
-        let (heap_size, free_bytes, blocks) = crate::mm::buddy_free_census_lockfree();
+        let (heap_size, free_bytes, blocks) = crate::mm::hotpath::buddy_free_census_lockfree();
         taskdump_raw_line(b"\nALLOCTHROW heap: size=");
         taskdump_dec((heap_size / 1024) as u64);
         taskdump_raw_line(b"K free=");
@@ -228,7 +228,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     }
     // The packing layer's own census (object counts vs pages) — this is
     // the line that proves the 852MB of 4KB-per-object waste is packed.
-    crate::mm::small_alloc::census_line();
+    crate::mm::hotpath::census_line();
     // R75-followup: the validated walk (memwatch::walk_fp_chain) stops at the
     // first frame that fails its `next > fp` plausibility check, which in the
     // paint-agent capture yielded no usable frames. Dump the chain LENIENTLY
@@ -317,7 +317,7 @@ pub fn rust_main_tail() -> ! {
     let slab_size_eff = slab_end_eff.saturating_sub(slab_phys);
     if slab_size_eff > 0 {
         let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
-        mm::init_slab(slab_start, slab_size_eff);
+        mm::hotpath::init_slab(slab_start, slab_size_eff);
     }
 
     // ========== Heap initialized, format! can be used below ==========
@@ -517,16 +517,16 @@ pub fn rust_main_tail() -> ! {
                 .map(|r| r.base + r.size)
                 .max()
                 .unwrap_or(0);
-            let start_pfn = MEMORY_PHYS_BASE / mm::PAGE_SIZE;
-            let nr_pages = (max_phys_end / mm::PAGE_SIZE).saturating_sub(start_pfn);
+            let start_pfn = MEMORY_PHYS_BASE / mm::types::PAGE_SIZE;
+            let nr_pages = (max_phys_end / mm::types::PAGE_SIZE).saturating_sub(start_pfn);
             let span_size = max_phys_end.saturating_sub(MEMORY_PHYS_BASE);
             // Usable RAM (sum, holes excluded) — the honest MemTotal.
-            mm::page_desc::set_present_pages(total_phys_memory / mm::PAGE_SIZE);
+            mm::hotpath::set_present_pages(total_phys_memory / mm::types::PAGE_SIZE);
 
             // Initialize vmemmap mapping
             // (nr_pages now covers the full PFN span including holes)
 
-            if mm::vmemmap::init_vmemmap(start_pfn, nr_pages).is_ok() {
+            if mm::hotpath::init_vmemmap(start_pfn, nr_pages).is_ok() {
                 print_status("mm", "vmemmap mapping initialized", true);
             } else {
                 print_status("mm", "vmemmap mapping failed", false);
@@ -539,7 +539,7 @@ pub fn rust_main_tail() -> ! {
             // validation — a sum-based bound (holes excluded) rejected
             // the top-of-RAM pages the zone hands out first and every
             // exec died with ENOMEM (the r4/r5 bisect).
-            let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
+            let layout = mm::types::KernelMemoryLayout::init_from_memblock(
                 MEMORY_PHYS_BASE,
                 span_size,
                 KERNEL_PHYS_LOAD_ADDR,
@@ -547,23 +547,23 @@ pub fn rust_main_tail() -> ! {
                 // Contiguous-usable clamp for the heap+slab carve (holes
                 // are unmapped in the linear map — rs-egl r12/13/15);
                 // phys_size above stays the full PFN span on purpose.
-                mm::layout::heap_region_end(&memory_regions, KERNEL_HEAP_PHYS),
+                mm::hotpath::heap_region_end(&memory_regions, KERNEL_HEAP_PHYS),
             );
-            mm::layout::kernel_layout_init(layout);
+            mm::hotpath::kernel_layout_init(layout);
             // Boot-time cross-check: heap/slab ranges must be reserved in
             // memblock and inside physical memory (review 4.20).
-            mm::layout::assert_memblock_consistency(&layout);
+            mm::hotpath::assert_memblock_consistency(&layout);
             print_status("mm", &format!("layout: kernel={:#x}-{:#x}",
                 layout.kernel_start, layout.kernel_end), true);
             print_status("mm", &format!("layout: heap={:#x}-{:#x}",
                 layout.heap_start, layout.heap_start + layout.heap_size), true);
 
             // Initialize page descriptors
-            mm::page::init_page_descriptors(start_pfn, nr_pages);
+            mm::hotpath::init_page_descriptors(start_pfn, nr_pages);
             // Mark NON-RAM PFNs (MMIO holes, firmware gaps) Reserved so no
             // descriptor in the span can be mistaken for a free page (the
             // phantom-drift mechanism above).
-            mm::page_desc::mark_non_ram_pages(&memory_regions);
+            mm::hotpath::mark_non_ram_pages(&memory_regions);
             print_status("mm", &format!("{} page descriptors (span {} MB, present {} MB)",
                 nr_pages, span_size / (1024 * 1024), total_phys_memory / (1024 * 1024)), true);
 
@@ -572,21 +572,21 @@ pub fn rust_main_tail() -> ! {
             // allocatable; memory below the heap/slab statics is seeded
             // too — the old kernel_end-clamped span left ~980 MB
             // unmanaged on x86_64).
-            mm::init_zone_system(MEMORY_PHYS_BASE, span_size, 0);
+            mm::hotpath::init_zone_system(MEMORY_PHYS_BASE, span_size, 0);
             // Managed-RAM banner (fake-OOM family): the zone span actually
             // handed to the buddy, so a truncation (config-vs-machine size
             // mismatch) is visible on the serial log at boot.
-            let managed = mm::page_desc::nr_descs() * mm::PAGE_SIZE;
+            let managed = mm::hotpath::nr_descs() * mm::types::PAGE_SIZE;
             print_status("mm", &alloc::format!(
                 "zone allocator initialized ({} descriptors, {} MB managed)",
-                mm::page_desc::nr_descs(), managed / (1024 * 1024)), true);
+                mm::hotpath::nr_descs(), managed / (1024 * 1024)), true);
 
             // Switch to late stage (use buddy allocator for page tables)
             arch::mm::pt_ops_set_late();
 
             // Print memblock summary
-            let total_mb = mm::memblock_total_memory() / (1024 * 1024);
-            let avail_mb = mm::memblock_available_memory() / (1024 * 1024);
+            let total_mb = mm::hotpath::memblock_total_memory() / (1024 * 1024);
+            let avail_mb = mm::hotpath::memblock_available_memory() / (1024 * 1024);
             print_status("memblock", &format!("total {}MB, available {}MB", total_mb, avail_mb), true);
         }
 
@@ -882,7 +882,7 @@ pub fn rust_main_tail() -> ! {
         //    activation path reads the swap header and ext4 superblock
         //    via blkdev_read — the same sync-poll I/O the ext4 mount
         //    above already uses, proven safe with SEIE still off);
-        //  - AFTER the zone allocator (mm::init_zone_system, earlier):
+        //  - AFTER the zone allocator (mm::hotpath::init_zone_system, earlier):
         //    swap only matters once pages can be allocated/reclaimed;
         //  - BEFORE kswapd::init() below, so no reclaim path can observe
         //    the subsystem half-initialized, and before init (PID 1).
@@ -918,7 +918,7 @@ pub fn rust_main_tail() -> ! {
             crate::api::net::init_route();
             // P2 vDSO: build the vDSO ELF page and prime the time-data
             // page — must run before the first execve maps it.
-            crate::mm::vdso::vdso_init();
+            crate::mm::hotpath::vdso_init();
             // 106th: on x86_64 the mapping is LIVE (real x86-64 code
             // page + AT_SYSINFO_EHDR in every auxv — the 21.3M-calls/
             // boot clock_gettime lever). riscv64/aarch64 keep the page
@@ -1579,7 +1579,7 @@ pub extern "C" fn rust_main_impl() -> ! {
     // 3. Create linear mapping at PAGE_OFFSET
     {
         // Initialize memblock
-        mm::memblock_init();
+        mm::hotpath::memblock_init();
 
         // Acquire the boot memory map: FDT on riscv64 (DTB is mapped by
         // boot.S's early page table at its physical address), the
@@ -1606,7 +1606,7 @@ pub extern "C" fn rust_main_impl() -> ! {
 
         // Add memory regions to memblock
         for region in memory_regions.iter() {
-            mm::memblock_add(region.base, region.size).ok();
+            mm::hotpath::memblock_add(region.base, region.size).ok();
         }
 
 
@@ -1622,7 +1622,7 @@ pub extern "C" fn rust_main_impl() -> ! {
             let dtb_phys = arch::boot::get_dtb_pointer();
             if let Some((start, end)) = cmdline::parse_initrd_region(dtb_phys) {
                 let size = end - start;
-                if mm::memblock_reserve(start, size).is_ok() {
+                if mm::hotpath::memblock_reserve(start, size).is_ok() {
                     // No print here — the heap does not exist yet (the
                     // unpack status line after rootfs init reports it).
                     initrd::set_region(start, end);
@@ -1637,7 +1637,7 @@ pub extern "C" fn rust_main_impl() -> ! {
         {
             if let Some((image, size)) = boot_edges::zeropage_initrd_hint() {
                 let end = image + size;
-                if mm::memblock_reserve(image, size).is_ok() {
+                if mm::hotpath::memblock_reserve(image, size).is_ok() {
                     initrd::set_region(image, end);
                 }
             }
@@ -1659,8 +1659,8 @@ pub extern "C" fn rust_main_impl() -> ! {
         // unmapped hole DRAM; writes faulted at first-frame composition,
         // rs-egl r12/r13/r15). On hole-free machines (riscv64) the region
         // end equals the span end and this is a no-op.
-        let heap_region_end = mm::layout::heap_region_end(&memory_regions, KERNEL_HEAP_PHYS);
-        let eff = mm::layout::effective_static_regions(
+        let heap_region_end = mm::hotpath::heap_region_end(&memory_regions, KERNEL_HEAP_PHYS);
+        let eff = mm::hotpath::effective_static_regions(
             MEMORY_PHYS_BASE,
             phys_end.saturating_sub(MEMORY_PHYS_BASE),
             KERNEL_HEAP_PHYS,
@@ -1672,7 +1672,7 @@ pub extern "C" fn rust_main_impl() -> ! {
         let slab_size = eff.slab_size;
 
         #[cfg(feature = "riscv64")]
-        mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
+        mm::hotpath::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
         // x86_64 (layout-hunt 2026-11-10): the static 30MB window silently
         // fell behind the real image (31.4MB after the SMP8 const-block
         // arrays). The unreserved 368KB tail of live .bss was seeded into
@@ -1700,7 +1700,7 @@ pub extern "C" fn rust_main_impl() -> ! {
                     image_end, KERNEL_HEAP_PHYS
                 );
             }
-            mm::memblock_reserve(0, reserve_size).ok(); // low memory + kernel (real image end)
+            mm::hotpath::memblock_reserve(0, reserve_size).ok(); // low memory + kernel (real image end)
         }
         // aarch64: image window + bring-up heap + slab — without this
         // memblock_find_in_range hands out the RAM base and vmemmap's
@@ -1708,13 +1708,13 @@ pub extern "C" fn rust_main_impl() -> ! {
         #[cfg(feature = "aarch64")]
         {
             const AARCH64_STATIC_TOP: usize = 0x4280_0000 + (128 << 20) + (4 << 20);
-            mm::memblock_reserve(0x4000_0000, AARCH64_STATIC_TOP - 0x4000_0000).ok();
+            mm::hotpath::memblock_reserve(0x4000_0000, AARCH64_STATIC_TOP - 0x4000_0000).ok();
         }
         if heap_size > 0 {
-            mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
+            mm::hotpath::memblock_reserve(heap_start, heap_size).ok(); // Heap
         }
         if slab_size > 0 {
-            mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
+            mm::hotpath::memblock_reserve(slab_start, slab_size).ok(); // Slab
         }
 
         // pstore-lite (riscv64): the 128 KiB below the DTB — the FDT
@@ -1729,7 +1729,7 @@ pub extern "C" fn rust_main_impl() -> ! {
             if let Some((base, size)) =
                 debug::pstore::reserve(dtb_phys as usize, heap_start + heap_size + slab_size)
             {
-                mm::memblock_reserve(base, size).ok();
+                mm::hotpath::memblock_reserve(base, size).ok();
             }
         }
         // pstore-lite (x86_64): no firmware block sits at a fixed low
@@ -1750,7 +1750,7 @@ pub extern "C" fn rust_main_impl() -> ! {
                 .is_some_and(|(s, e)| s < base + debug::pstore::PSTORE_RAM_SIZE && e > base);
             if !overlaps_initrd {
                 if let Some((base, size)) = debug::pstore::reserve_at(base) {
-                    mm::memblock_reserve(base, size).ok();
+                    mm::hotpath::memblock_reserve(base, size).ok();
                 }
             }
         }
@@ -1779,7 +1779,7 @@ pub extern "C" fn rust_main_impl() -> ! {
         #[cfg(feature = "aarch64")]
         {
             const BRINGUP_HEAP: usize = 128 * 1024 * 1024;
-            mm::init_heap_sized(BRINGUP_HEAP);
+            mm::hotpath::init_heap_sized(BRINGUP_HEAP);
         }
 
         // Now switch to fixmap stage (linear mapping is available)
@@ -1792,7 +1792,7 @@ pub extern "C" fn rust_main_impl() -> ! {
     // Now linear mapping is available, phys_to_virt() works for all physical memory
     // Initialize heap allocator (window clamped to discovered RAM — the
     // buddy must never cover DRAM past the memory map).
-    mm::init_heap_sized(HEAP_SIZE_EFF.load(core::sync::atomic::Ordering::Acquire));
+    mm::hotpath::init_heap_sized(HEAP_SIZE_EFF.load(core::sync::atomic::Ordering::Acquire));
 
     // pstore-lite: with the linear map up, look for the previous boot's
     // record in the reserved region (a guest reset does not clear

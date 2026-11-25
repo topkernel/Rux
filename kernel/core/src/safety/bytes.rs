@@ -132,7 +132,7 @@ pub fn bytes_of_slice_mut<T: Copy>(v: &mut [T]) -> &mut [u8] {
 /// [`pinned_frame_run_bytes`] (INV-CBYTES-6) instead.
 #[inline]
 pub fn pinned_frame_bytes(frame: &*const u8, off: usize, len: usize) -> &[u8] {
-    debug_assert!(off.checked_add(len).is_some_and(|end| end <= crate::mm::PAGE_SIZE));
+    debug_assert!(off.checked_add(len).is_some_and(|end| end <= crate::mm::types::PAGE_SIZE));
     // SAFETY: INV-CBYTES-4 — off+len is inside the pinned PAGE_SIZE
     // frame; the caller's pin holds the frame for this borrow.
     unsafe { core::slice::from_raw_parts((*frame).add(off), len) }
@@ -163,7 +163,7 @@ pub fn pinned_frame_bytes(frame: &*const u8, off: usize, len: usize) -> &[u8] {
 /// sound all along (both frames pinned), the contract was too narrow.
 #[inline]
 pub fn pinned_frame_run_bytes(frame: &*const u8, off: usize, len: usize) -> &[u8] {
-    debug_assert!(off < crate::mm::PAGE_SIZE && off.checked_add(len).is_some());
+    debug_assert!(off < crate::mm::types::PAGE_SIZE && off.checked_add(len).is_some());
     // SAFETY: INV-CBYTES-6 — off starts inside the first pinned frame
     // and off+len covers only pinned direct-map-neighbor frames of the
     // caller's run.
@@ -177,7 +177,7 @@ pub fn pinned_frame_run_bytes(frame: &*const u8, off: usize, len: usize) -> &[u8
 /// span while this view lives.
 #[inline]
 pub fn pinned_frame_bytes_mut(frame: &*mut u8, off: usize, len: usize) -> &mut [u8] {
-    debug_assert!(off.checked_add(len).is_some_and(|end| end <= crate::mm::PAGE_SIZE));
+    debug_assert!(off.checked_add(len).is_some_and(|end| end <= crate::mm::types::PAGE_SIZE));
     // SAFETY: INV-CBYTES-4 exclusive arm — inside the pinned frame; the
     // io_lock-holding writer is the only accessor of the span.
     unsafe { core::slice::from_raw_parts_mut((*frame).add(off), len) }

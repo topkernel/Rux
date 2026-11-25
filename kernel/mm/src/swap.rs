@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 
-use rux::mm::PAGE_SIZE;
+use rux::mm::types::PAGE_SIZE;
 
 // ==================== Swap Entry Encoding ====================
 //

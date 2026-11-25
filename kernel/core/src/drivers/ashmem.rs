@@ -35,10 +35,10 @@ use crate::arch::mm::map_user_page;
 use crate::arch::mm::memory_layout::{PhysAddr as MmPhysAddr, VirtAddr as MmVirtAddr};
 use crate::arch::mm::PageTableEntry;
 use crate::fs::dev_t::{DevNo, MISC_MAJOR};
-use crate::mm::page::{PAGE_MASK, PAGE_SIZE};
-use crate::mm::page_alloc::{free_pages, get_zeroed_page};
-use crate::mm::vma::{Vma, VmaFlags, VmaType};
-use crate::mm::zone::GfpFlags;
+use crate::mm::{hotpath::PAGE_MASK, types::PAGE_SIZE};
+use crate::mm::hotpath::{free_pages, get_zeroed_page};
+use crate::mm::types::{Vma, VmaFlags, VmaType};
+use crate::mm::types::GfpFlags;
 use crate::sync::spinlock::Spinlock;
 
 /// ASHMEM_NAME_LEN (UAPI).
@@ -128,7 +128,7 @@ impl Drop for AshmemPages {
         // their own reference (taken at map time), so a page still mapped
         // by any process survives until its last unmap's put_page.
         for p in &self.pages {
-            let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(*p));
+            let page = crate::mm::hotpath::pfn_to_page_mut(crate::mm::hotpath::phys_to_pfn(*p));
             let freed_by_us = if page.is_null() {
                 true
             } else {
@@ -676,7 +676,7 @@ pub fn ashmem_mmap(
     // accounting keys on it and must not see ashrem VMAs.
     let placement = crate::api::mm::mmap(
         &address_space,
-        crate::mm::page::VirtAddr::new(addr),
+        crate::mm::types::VirtAddr::new(addr),
         length,
         vma_flags,
         if map_shared {
@@ -684,7 +684,7 @@ pub fn ashmem_mmap(
         } else {
             VmaType::Anonymous
         },
-        crate::mm::pagemap::Perm::ReadWrite,
+        crate::mm::types::Perm::ReadWrite,
         0,
     )
     .map_err(|_| -ENOMEM)?
@@ -725,7 +725,7 @@ pub fn ashmem_mmap(
             MmPhysAddr::new(phys as u64),
             pte_flags,
         );
-        if let Some(page) = crate::mm::page_desc::page_desc(crate::mm::phys_to_pfn(phys)) {
+        if let Some(page) = crate::mm::hotpath::page_desc(crate::mm::hotpath::phys_to_pfn(phys)) {
             page.get_page();
         }
     }
@@ -735,7 +735,7 @@ pub fn ashmem_mmap(
     // keep them for parity with shmat-built VMAs).
     {
         let mut vmas = address_space.vma_write();
-        if let Some(v) = vmas.get_mut(crate::mm::page::VirtAddr::new(placement)) {
+        if let Some(v) = vmas.get_mut(crate::mm::types::VirtAddr::new(placement)) {
             v.set_file_size(size as u64);
             v.set_offset(offset as usize);
         }

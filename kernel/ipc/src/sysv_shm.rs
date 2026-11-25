@@ -9,10 +9,10 @@
 use crate::arch::uaccess::access_ok;
 use crate::arch::mm::map_user_page;
 use crate::arch::mm::memory_layout::{VirtAddr as MmVirtAddr, PhysAddr as MmPhysAddr};
-use crate::mm::page::{PAGE_SIZE, PAGE_MASK, VirtAddr};
-use crate::mm::page_alloc::{free_pages, get_zeroed_page};
-use crate::mm::zone::GfpFlags;
-use crate::mm::vma::{Vma, VmaFlags, VmaType};
+use crate::mm::{types::PAGE_SIZE, hotpath::PAGE_MASK, types::VirtAddr};
+use crate::mm::hotpath::{free_pages, get_zeroed_page};
+use crate::mm::types::GfpFlags;
+use crate::mm::types::{Vma, VmaFlags, VmaType};
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, Ordering};
@@ -1006,8 +1006,8 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
         vma_flags,
     );
     vma.set_type(VmaType::SharedMemory);
-    vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
-        crate::mm::vma::VmaOrigin::SHM,
+    vma.set_origin(crate::mm::types::VmaOrigin::from_bits(
+        crate::mm::types::VmaOrigin::SHM,
     ));
     vma.set_file_fd(shmid);
     vma.set_file_size(segsz);

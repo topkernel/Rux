@@ -181,7 +181,7 @@ MAPPINGS = [
     {
         "name": "mm/page_flags",
         "verify": "kernel/verify/src/mm/page_flags_test.rs",
-        "kernel": "kernel/core/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "PageFlags",
         "compare": [
             "new", "from_raw", "raw", "test", "set", "clear",
@@ -192,7 +192,7 @@ MAPPINGS = [
     {
         "name": "mm/refcount",
         "verify": "kernel/verify/src/mm/refcount_test.rs",
-        "kernel": "kernel/core/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "Page",
         "compare": ["get_page", "put_page", "try_get_page"],
         "skip": ["new"],  # struct layout intentionally simplified
@@ -202,7 +202,7 @@ MAPPINGS = [
     {
         "name": "mm/vma",
         "verify": "kernel/verify/src/mm/vma_test.rs",
-        "kernel": "kernel/core/src/mm/vma.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "Vma",
         "compare": [
             "contains", "overlaps", "split", "can_merge",
@@ -213,7 +213,7 @@ MAPPINGS = [
     {
         "name": "mm/vma_manager",
         "verify": "kernel/verify/src/mm/vma_test.rs",
-        "kernel": "kernel/core/src/mm/vma.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "VmaManager",
         "compare": ["add", "find", "remove"],
         "skip": ["new"],  # struct fields differ
@@ -403,7 +403,7 @@ MAPPINGS = [
     {
         "name": "mm/buddy_alloc",
         "verify": "kernel/verify/src/mm/buddy_alloc_test.rs",
-        "kernel": "kernel/core/src/mm/buddy_allocator.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "BuddyAllocator",
         "compare": [
             "init", "add_to_free_list", "remove_from_free_list",
@@ -419,7 +419,7 @@ MAPPINGS = [
     {
         "name": "mm/buddy_funcs",
         "verify": "kernel/verify/src/mm/buddy_alloc_test.rs",
-        "kernel": "kernel/core/src/mm/buddy_allocator.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": None,  # free functions
         "compare": [
             "heap_size_to_order", "size_to_order", "get_buddy_idx",
@@ -570,7 +570,7 @@ MAPPINGS = [
     {
         "name": "mm/zone_funcs",
         "verify": "kernel/verify/src/mm/zone_test.rs",
-        "kernel": "kernel/core/src/mm/zone.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": None,  # free functions
         "compare": ["int_sqrt", "pfn_to_phys", "phys_to_pfn"],
         "skip_diff": ["int_sqrt"],  # verify has pub fn, kernel has private fn
@@ -578,7 +578,7 @@ MAPPINGS = [
     {
         "name": "mm/zone_gfp",
         "verify": "kernel/verify/src/mm/zone_test.rs",
-        "kernel": "kernel/core/src/mm/zone.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "GfpFlags",
         "compare": ["zone_type"],
         "skip": [],
@@ -587,7 +587,7 @@ MAPPINGS = [
     {
         "name": "mm/zone_watermark",
         "verify": "kernel/verify/src/mm/zone_test.rs",
-        "kernel": "kernel/core/src/mm/zone.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "Zone",
         "compare": ["watermark_ok"],
         "skip": [],
@@ -739,7 +739,7 @@ MAPPINGS = [
     {
         "name": "mm/rmap",
         "verify": "kernel/verify/src/mm/rmap_test.rs",
-        "kernel": "kernel/core/src/mm/rmap.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": None,  # free functions + predicates
         "compare": [],
         "skip": [],  # verify extracts pure arithmetic (addr_to_vpn, sv39_vpn_indices, page_mapped)
@@ -778,7 +778,7 @@ MAPPINGS = [
     {
         "name": "mm/page_flags_ops",
         "verify": "kernel/verify/src/mm/page_flags_ops_test.rs",
-        "kernel": "kernel/core/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "PageFlags",
         "compare": ["new", "from_raw", "raw", "test", "set", "clear", "test_and_set", "test_and_clear", "clear_all"],
         "skip": [],
@@ -878,7 +878,7 @@ MAPPINGS = [
     {
         "name": "mm/page_physaddr",
         "verify": "kernel/verify/src/mm/page_addr_test.rs",
-        "kernel": "kernel/core/src/mm/page.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "PhysAddr",
         "compare": ["new", "as_usize", "is_aligned", "floor", "ceil", "frame_number", "ppn"],
         "skip": [],
@@ -888,7 +888,7 @@ MAPPINGS = [
     {
         "name": "mm/page_virtaddr",
         "verify": "kernel/verify/src/mm/page_addr_test.rs",
-        "kernel": "kernel/core/src/mm/page.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "VirtAddr",
         "compare": ["new", "as_usize", "is_aligned", "floor", "ceil", "page_number"],
         "skip": [],
@@ -898,7 +898,7 @@ MAPPINGS = [
     {
         "name": "mm/phys_frame",
         "verify": "kernel/verify/src/mm/page_addr_test.rs",
-        "kernel": "kernel/core/src/mm/page.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "PhysFrame",
         "compare": ["new", "containing_address", "start_address", "range"],
         "skip": [],
@@ -908,7 +908,7 @@ MAPPINGS = [
     {
         "name": "mm/virt_page",
         "verify": "kernel/verify/src/mm/page_addr_test.rs",
-        "kernel": "kernel/core/src/mm/page.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "VirtPage",
         "compare": ["new", "containing_address", "start_address", "range"],
         "skip": [],
@@ -957,7 +957,7 @@ MAPPINGS = [
     {
         "name": "mm/slab_find_cache_index",
         "verify": "kernel/verify/src/mm/slab_test.rs",
-        "kernel": "kernel/core/src/mm/slab.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": None,  # free function (private in kernel, extracted in verify)
         "compare": ["find_cache_index"],
         "skip": [],
@@ -1102,7 +1102,7 @@ MAPPINGS = [
     {
         "name": "mm/vmemmap_constants",
         "verify": "kernel/verify/src/mm/vmemmap_test.rs",
-        "kernel": "kernel/core/src/mm/vmemmap.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": None,  # constants-only, no fn copies
         "compare": [],
         "skip": [],
@@ -1120,7 +1120,7 @@ MAPPINGS = [
     {
         "name": "mm/page_flag_constants",
         "verify": "kernel/verify/src/mm/page_flag_test.rs",
-        "kernel": "kernel/core/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": None,  # PageFlag enum constants, no methods copied
         "compare": [],
         "skip": [],
@@ -1209,7 +1209,7 @@ MAPPINGS = [
     {
         "name": "mm/memblock",
         "verify": "kernel/verify/src/mm/memblock_test.rs",
-        "kernel": "kernel/core/src/mm/memblock.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "MemBlockRegion",
         "compare": ["new", "end", "contains", "base_pfn", "end_pfn", "page_count"],
         "skip": [],
@@ -1252,7 +1252,7 @@ MAPPINGS = [
     {
         "name": "mm/layout",
         "verify": "kernel/verify/src/mm/layout_test.rs",
-        "kernel": "kernel/core/src/mm/layout.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": "KernelMemoryLayout",
         "compare": ["init_from_memblock"],
         "skip": [],
@@ -1330,7 +1330,7 @@ MAPPINGS = [
     {
         "name": "mm/meminfo",
         "verify": "kernel/verify/src/mm/meminfo_test.rs",
-        "kernel": "kernel/core/src/mm/meminfo.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": None,  # threshold functions extracted as standalone fns
         "compare": [],
         "skip": [],
@@ -1494,7 +1494,7 @@ MAPPINGS = [
     {
         "name": "mm/pfn_valid",
         "verify": "kernel/verify/src/mm/pfn_valid_test.rs",
-        "kernel": "kernel/core/src/mm/page_desc.rs",
+        "kernel": "kernel/core/src/mm/hotpath.rs",
         "type": None,  # pfn_valid/phys_valid + constants extracted
         "compare": [],
         "skip": [],

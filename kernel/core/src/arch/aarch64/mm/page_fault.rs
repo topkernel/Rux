@@ -51,9 +51,9 @@ use super::mm_ops::{
     map_user_page, pte_lock_for, PageTableWalker, PTE_MODIFY_LOCK,
 };
 use super::pagetable::*;
-use crate::mm::page::PAGE_SIZE as PAGE_SIZE_USIZE;
-use crate::mm::vma::VmaType;
-use crate::mm::AddressSpace;
+use crate::mm::types::PAGE_SIZE as PAGE_SIZE_USIZE;
+use crate::mm::types::VmaType;
+use crate::mm::types::AddressSpace;
 
 // ==================== Fault Flags ====================
 

@@ -1412,15 +1412,15 @@ fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
     let Some(raw) = file.private_data_ptr().map(|p| p as usize) else {
         return None;
     };
-    let (lo, _) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    let (lo, _) = crate::mm::hotpath::GLOBAL_ALLOCATOR.heap_bounds();
     // Valid kernel-heap pointer: at/after the buddy heap start, within
     // the slab packing window (small_alloc::is_slab_ptr answers for
     // slab objects; anything else must at least lie inside the buddy's
     // own heap_end). The buddy's heap_end alone is too tight — Socket
     // Arcs live on slab pages above it.
-    let (_, buddy_hi) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    let (_, buddy_hi) = crate::mm::hotpath::GLOBAL_ALLOCATOR.heap_bounds();
     let in_buddy = lo != 0 && raw >= lo && raw < buddy_hi;
-    let in_slab = lo != 0 && raw >= lo && crate::mm::small_alloc::is_slab_ptr(raw, lo);
+    let in_slab = lo != 0 && raw >= lo && crate::mm::hotpath::is_slab_ptr(raw, lo);
     if in_buddy || in_slab {
         return Some(raw);
     }

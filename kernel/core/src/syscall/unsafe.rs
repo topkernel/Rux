@@ -282,7 +282,7 @@ pub fn arch_map_page(
 /// demands; the other arches' fns carry the same discipline in their
 /// names.
 #[inline]
-pub fn unmap_user_leaf_locked(mm: &crate::mm::AddressSpace, va: usize) -> bool {
+pub fn unmap_user_leaf_locked(mm: &crate::mm::types::AddressSpace, va: usize) -> bool {
     #[cfg(feature = "aarch64")]
     {
         // SAFETY: INV-SYSC-8 — PTE lock held by the caller.
@@ -327,8 +327,8 @@ pub fn copy_page_linear(src_phys: u64, dst_phys: u64) {
 /// by the allocation/walk that produced it. `None` mirrors the raw
 /// null-check the call sites performed inline.
 #[inline]
-pub fn page_desc_of(pfn: usize) -> Option<&'static mut crate::mm::page_desc::Page> {
-    let p = crate::mm::page_desc::pfn_to_page_mut(pfn);
+pub fn page_desc_of(pfn: usize) -> Option<&'static mut crate::mm::types::Page> {
+    let p = crate::mm::hotpath::pfn_to_page_mut(pfn);
     if p.is_null() {
         None
     } else {

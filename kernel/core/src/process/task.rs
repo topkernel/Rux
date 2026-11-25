@@ -10,7 +10,7 @@ use super::task_ext::TaskExtHandle;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::ptr;
 use crate::sync::spinlock::Spinlock;
-use crate::mm::pagemap::AddressSpace;
+use crate::mm::types::AddressSpace;
 use crate::fs::FdTable;
 use crate::signal::{SignalStruct, SigPending};
 use crate::config::TIME_SLICE_TICKS as DEFAULT_TIME_SLICE;
@@ -1974,11 +1974,11 @@ impl Task {
     /// same 250ms hold: sizes are the ArcInner block (2 refcount
     /// words) + the struct.
     fn register_slot_deferred_sizes() {
-        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
-        crate::mm::deferred_free::register_deferred_size(
+        crate::mm::hotpath::register_deferred_size(core::mem::size_of::<Task>());
+        crate::mm::hotpath::register_deferred_size(
             2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::file::FdTable>(),
         );
-        crate::mm::deferred_free::register_deferred_size(
+        crate::mm::hotpath::register_deferred_size(
             2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::signal::SignalStruct>(),
         );
     }
@@ -4181,7 +4181,7 @@ impl Task {
             {
                 use crate::console::putchar;
                 let addr = stack_bottom as usize;
-                let (hs, he) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+                let (hs, he) = crate::mm::hotpath::GLOBAL_ALLOCATOR.heap_bounds();
                 let bogus = addr & 0xF != 0
                     || addr + KERNEL_STACK_SIZE > he
                     || addr < hs;

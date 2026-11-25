@@ -40,7 +40,7 @@ pub fn do_exit(exit_code: i32) -> ! {
     // SAFETY: current is the raw pointer to the calling task, valid
     // because we are it and do_exit never returns.
     let dying_pid = cur.pid();
-    crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
+    crate::mm::hotpath::reclaim_gate_exit_release(dying_pid);
 
     // ub-gfx (greeter-chain forensics): name the death of every gdm
     // ladder / accounts-daemon / Xorg process with its exit code, so the
@@ -838,7 +838,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                 let mm_rss = cur.address_space()
                     .map(|mm| mm.rss())
                     .unwrap_or(0);
-                mm_rss * (crate::mm::page::PAGE_SIZE / 1024) as u64
+                mm_rss * (crate::mm::types::PAGE_SIZE / 1024) as u64
             };
             cur.ext.exit_maxrss_kb.store(rss_kb, Relaxed);
             if is_leader {

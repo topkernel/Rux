@@ -655,7 +655,7 @@ impl RawSpinlock {
         // in kernel text (0xffffffff8...) symbolizes offline against
         // gen-ksyms output — that names the lock's OWNER STRUCT (ops
         // table / vtable / function pointer members).
-        if let Some((base, sz)) = crate::mm::small_alloc::object_span(lock_addr as usize) {
+        if let Some((base, sz)) = crate::mm::hotpath::object_span(lock_addr as usize) {
             let msg = b"LOCK-OBJ: small kmalloc-";
             for &b in msg {
                 crate::console::uart_putc_raw(b);
@@ -682,7 +682,7 @@ impl RawSpinlock {
             }
             crate::console::uart_putc_raw(b'\n');
         } else if let Some((base, order, free)) =
-            crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
+            crate::mm::hotpath::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
         {
             // oh-crash 98th: DIRECT BUDDY blocks (>1KB kmalloc — Task
             // structs, large fs/ipc objects). Same offline-symbolization
@@ -749,7 +749,7 @@ impl RawSpinlock {
             // The heap-object span dump is cheap and holder-independent:
             // keep it on default builds too (the meltdown hunts run
             // stock feature sets as controls).
-            if let Some((base, sz)) = crate::mm::small_alloc::object_span(lock_addr as usize) {
+            if let Some((base, sz)) = crate::mm::hotpath::object_span(lock_addr as usize) {
                 let msg = b"LOCK-OBJ: small kmalloc-";
                 for &b in msg {
                     crate::console::uart_putc_raw(b);
@@ -762,7 +762,7 @@ impl RawSpinlock {
                 Self::puthex(base as u64);
                 crate::console::uart_putc_raw(b'\n');
             } else if let Some((base, order, free)) =
-                crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
+                crate::mm::hotpath::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
             {
                 let msg = b"LOCK-OBJ: buddy order-";
                 for &b in msg {

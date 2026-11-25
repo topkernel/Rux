@@ -198,7 +198,7 @@ pub fn oom_anat_dump() {
     // Type sizes for the per-class census mapping below (bytes, the
     // small-alloc class is the next power of two >= size).
     taskdump_raw_line(b"\nOOM-ANAT sizes: vma=");
-    taskdump_dec(core::mem::size_of::<crate::mm::vma::Vma>() as u64);
+    taskdump_dec(core::mem::size_of::<crate::mm::types::Vma>() as u64);
     taskdump_raw_line(b" file=");
     taskdump_dec(core::mem::size_of::<crate::fs::file::File>() as u64);
     taskdump_raw_line(b" dentry=");
@@ -206,7 +206,7 @@ pub fn oom_anat_dump() {
     taskdump_raw_line(b" inode=");
     taskdump_dec(core::mem::size_of::<crate::fs::inode::Inode>() as u64);
     taskdump_raw_line(b" mm=");
-    taskdump_dec(core::mem::size_of::<crate::mm::mm_struct::MmStruct>() as u64);
+    taskdump_dec(core::mem::size_of::<crate::mm::types::MmStruct>() as u64);
     taskdump_raw_line(b" ptregs=");
     taskdump_dec(core::mem::size_of::<crate::arch::pt_regs::PtRegs>() as u64);
     taskdump_raw_line(b" fdte=");
@@ -229,7 +229,7 @@ pub fn oom_anat_dump() {
         taskdump_dec(mn.saturating_sub(md));
         taskdump_raw_line(b"\n");
     }
-    let np = &crate::mm::buddy_allocator::NET_PAGES;
+    let np = &crate::mm::hotpath::NET_PAGES;
     let mut o = 0usize;
     while o < np.len() {
         let v = np[o].load(Ordering::Relaxed);
@@ -242,16 +242,16 @@ pub fn oom_anat_dump() {
         }
         o += 1;
     }
-    crate::mm::small_alloc::census_line();
+    crate::mm::hotpath::census_line();
     // Leg-16: type identification for the two heaviest classes at the
     // floor (c256 ~520K live, c1024 ~84K live) — dump object headers from
     // the active slab pages; vtables/magic are symbolisable offline.
-    crate::mm::small_alloc::census_peek(5, 8);
-    crate::mm::small_alloc::census_peek(7, 8);
+    crate::mm::hotpath::census_peek(5, 8);
+    crate::mm::hotpath::census_peek(7, 8);
     // Leg-17: structural buckets (the v2 histogram alone cannot name a
     // pointer-first heterogeneous population).
-    crate::mm::small_alloc::census_peek3(5);
-    crate::mm::small_alloc::census_peek3(7);
+    crate::mm::hotpath::census_peek3(5);
+    crate::mm::hotpath::census_peek3(7);
 }
 
 /// Start the schbd kthread. Gated on the `rux:schb (retired debug=schb)` switch; called from
@@ -396,16 +396,16 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             // direct-reclaim rounds + jiffies + max round, slowpath
             // entries, zone free pages, kernel heap used KB.
             let (cow, cowj, drct, drctj, drctmax, slow) = pace_snapshot();
-            let zfree = crate::mm::pglist::first_online_node()
+            let zfree = crate::mm::hotpath::first_online_node()
                 .map(|n| n.free_pages() as u64)
                 .unwrap_or(0);
-            let heapk = crate::mm::buddy_allocator::buddy_stats().used_bytes / 1024;
+            let heapk = crate::mm::hotpath::buddy_stats().used_bytes / 1024;
             // Leg-16: fire the allocator anatomy dump when the heap is
             // ~80% full — comfortably before the floor/OOM would, so a
             // roll that never quite reaches the fake-OOM still banks the
             // census (one-shot; the OOM path reuses the same guard).
             {
-                let st = crate::mm::buddy_allocator::buddy_stats();
+                let st = crate::mm::hotpath::buddy_stats();
                 if st.used_bytes * 5 >= st.heap_size * 4 {
                     oom_anat_dump();
                 }
@@ -439,8 +439,8 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             // reads as "no slab" on arches that keep plain order-5
             // stacks — see process/task.rs).
             let (kb, ks, _fb) = crate::process::task::kstack_slab_stats();
-            let (small_k, small_pg_k) = crate::mm::small_alloc::live_stats_kib();
-            let np = &crate::mm::buddy_allocator::NET_PAGES;
+            let (small_k, small_pg_k) = crate::mm::hotpath::live_stats_kib();
+            let np = &crate::mm::hotpath::NET_PAGES;
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
                 w,

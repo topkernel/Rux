@@ -757,7 +757,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // holder's phase/wait-site when the gate has been held >=2 s
             // (self-gated: one atomic load when the gate is free; zero
             // serial on standard boots).
-            crate::mm::page_alloc::reclaim_gate_census();
+            crate::mm::hotpath::reclaim_gate_census();
             // stress-port SP-7: per-page swap skip-reason census — one
             // line per second ONLY while anon reclaim is being exercised
             // (self-gated on census deltas; zero serial otherwise).
@@ -2003,7 +2003,7 @@ pub fn set_wall_epoch_offset_ns(ns: u64) {
     WALL_EPOCH_OFFSET_NS.store(ns, core::sync::atomic::Ordering::Release);
     // P2 vDSO: refresh the shared data page immediately so REALTIME
     // readers do not wait for the next timer tick.
-    crate::mm::vdso::vdso_data_tick();
+    crate::mm::hotpath::vdso_data_tick();
 }
 
 /// Current CLOCK_REALTIME (monotonic + wall epoch offset) as (secs, nanos).
