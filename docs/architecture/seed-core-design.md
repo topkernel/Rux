@@ -649,11 +649,41 @@ the context switch, the page-fault handler, the timer interrupt, the
 block completion or a lock primitive calls by name? The answer comes
 from the call graph starting at those entries, not from a hand-written
 list of files, and it is checked against `syscost` samples under load.
-Functions that are not on any such path leave: to the subsystem's
-crate if nothing in the core needs them by name (§1a.2), else to
-another file of the core under a name that says why they stay. What
-remains is the subsystem's real hot-path line count, the number the
-core-size goal (§1a.4) is measured against.
+What remains is the subsystem's real hot-path line count, the number
+the core-size goal (§1a.4) is measured against.
+
+A function that is not on any such path does not simply move to the
+crate (user decision 2026-11-25): moving it keeps the code alive under
+another name. It is dealt with in this order:
+
+1. **Replace.** If the debug subsystem already has a feature that
+   does the same job, the function is deleted and its callers use that
+   feature. Measured on `sched` before pass 2: of the 3,732 lines of
+   diagnostic code the file-level test had counted as hot, 3,306 are
+   hand-written number-to-text printers (`pdec`, `pdec3`, `ph`) and
+   the print statements that call them. The same printers were
+   re-written in place by each hunt: `fn pdec` exists in five core
+   files, `fn ph` in eight, `fn phex` in six. A formatting routine is
+   one feature of the debug subsystem, not twenty.
+2. **Fold in.** If no existing debug feature covers it but the
+   check is worth keeping (a state dump a hunt needed), it becomes a
+   proper feature of the debug subsystem — one implementation, behind
+   the debug event that arms it, reachable from every subsystem — and
+   the per-subsystem copy is deleted.
+3. **Delete.** If neither applies — the instrument answered the
+   question it was built for and that question is closed — it is
+   removed.
+
+Only what none of the three can absorb stays in the core under a name
+that says why it stays.
+
+These prints also bear on the release rule (debug features off in
+release builds). `console::putchar_no_lock` is a no-op in release; the
+taskdump funnel the sched printers go through (`putc_brief` →
+`staged_putc`) is NOT — it was left raw on purpose so the prints stay
+visible in release. That is an exception to the raw-diagnostic gate of
+2026-11-12 and is recorded as a known gap (§9) until the replacement
+decides which of these prints survive at all.
 
 Three shapes, not one. A directory is filed by what it is:
 
@@ -1175,6 +1205,13 @@ forbid negative probe at crate scope. A rung that fails its battery
 twice halts the ladder (no piling changes on an unstable base).
 
 ## 9. Risks and honest limits
+
+- **Release output of the sched diagnostic printers.** The raw-diagnostic
+  gate (2026-11-12) compiles `putchar_no_lock` to a no-op in release;
+  the taskdump funnel (`putc_brief` → `staged_putc`) has no such gate,
+  so the hand-written printers in `sched` (3,306 lines) print in release
+  builds. Found 2026-11-25 while measuring `hotpath.rs`; open until the
+  shrink stage replaces or folds them in (§2c.3).
 
 - **The core is still ~3,000 lines of hand-written unsafe.** The design
  minimizes it to the reference kernel's own floor class; it does not
