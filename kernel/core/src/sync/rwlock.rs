@@ -24,6 +24,17 @@ use core::fmt;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+// RawRwSpinlock, RwSpinlock, RwSpinlockReadGuard, RwSpinlockWriteGuard,
+// RwSpinlockIrqReadGuard, RwSpinlockIrqWriteGuard, RwSpinlockBhReadGuard,
+// RwSpinlockBhWriteGuard — the definitions live in sync/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the existing
+// `sync::rwlock::…` paths are unchanged.
+pub use super::types::{
+    RawRwSpinlock, RwSpinlock, RwSpinlockReadGuard, RwSpinlockWriteGuard,
+    RwSpinlockIrqReadGuard, RwSpinlockIrqWriteGuard, RwSpinlockBhReadGuard,
+    RwSpinlockBhWriteGuard,
+};
+
 const WRITER_BIT: u32 = 1u32 << 31;
 /// Writer-pending bit: set by the FIRST contended writer while readers
 /// still hold the lock (the reference qrwlock's queued-writer discipline
@@ -34,22 +45,6 @@ const WRITER_BIT: u32 = 1u32 << 31;
 /// other CPUs kept re-acquiring forever).
 const WRITER_PENDING_BIT: u32 = 1u32 << 30;
 const READER_MASK: u32 = !(WRITER_BIT | WRITER_PENDING_BIT);
-
-/// Raw read-write spinlock.
-///
-/// Bit layout of the `state` word:
-/// - `[31]`    — writer held flag
-/// - `[30]`    — writer pending flag (one waiting writer owns it)
-/// - `[29:0]`  — active reader count
-///
-/// Writer fairness (reference qrwlock discipline, sync-realign followup):
-/// a contended writer first registers WRITER_PENDING_BIT — readers still
-/// holding the lock drain normally, but NEW readers block, so the writer
-/// is handed the lock after at most one reader-generation instead of
-/// competing forever against a cross-CPU reader stream.
-pub struct RawRwSpinlock {
-    state: AtomicU32,
-}
 
 impl RawRwSpinlock {
     #[inline]
@@ -202,11 +197,6 @@ impl RawRwSpinlock {
 
 // ==================== Generic RwSpinlock<T> ====================
 
-pub struct RwSpinlock<T: ?Sized> {
-    raw: RawRwSpinlock,
-    data: UnsafeCell<T>,
-}
-
 // SAFETY: RwSpinlock<T> mediates all access to the inner data: shared (&T) via
 // read-locked guards, exclusive (&mut T) via write-locked guards.  Send allows
 // moving between threads; Sync allows shared references across threads because
@@ -347,10 +337,6 @@ impl<T> RwSpinlock<T> {
 
 // ==================== Read Guard (plain — preempt) ====================
 
-pub struct RwSpinlockReadGuard<'a, T: ?Sized> {
-    lock: &'a RwSpinlock<T>,
-}
-
 // SAFETY: ReadGuard exists only while a read lock is held, preventing any
 // writer from obtaining exclusive access to the data.
 unsafe impl<T: ?Sized + Sync> Send for RwSpinlockReadGuard<'_, T> {}
@@ -373,10 +359,6 @@ impl<T: ?Sized> Drop for RwSpinlockReadGuard<'_, T> {
 }
 
 // ==================== Write Guard (plain — preempt) ====================
-
-pub struct RwSpinlockWriteGuard<'a, T: ?Sized> {
-    lock: &'a RwSpinlock<T>,
-}
 
 // SAFETY: WriteGuard exists only while the write lock is held exclusively,
 // so no other thread can access the data.
@@ -409,11 +391,6 @@ impl<T: ?Sized> Drop for RwSpinlockWriteGuard<'_, T> {
 
 // ==================== IRQ Read Guard ====================
 
-pub struct RwSpinlockIrqReadGuard<'a, T: ?Sized> {
-    lock: &'a RwSpinlock<T>,
-    flags: bool,
-}
-
 // SAFETY: IrqReadGuard exists only while a read lock + IRQ disable is held,
 // preventing any writer from accessing the data.
 unsafe impl<T: ?Sized + Sync> Send for RwSpinlockIrqReadGuard<'_, T> {}
@@ -437,11 +414,6 @@ impl<T: ?Sized> Drop for RwSpinlockIrqReadGuard<'_, T> {
 }
 
 // ==================== IRQ Write Guard ====================
-
-pub struct RwSpinlockIrqWriteGuard<'a, T: ?Sized> {
-    lock: &'a RwSpinlock<T>,
-    flags: bool,
-}
 
 // SAFETY: IrqWriteGuard exists only while the write lock + IRQ disable is
 // held exclusively, so no other thread can access the data.
@@ -475,10 +447,6 @@ impl<T: ?Sized> Drop for RwSpinlockIrqWriteGuard<'_, T> {
 
 // ==================== BH Read Guard ====================
 
-pub struct RwSpinlockBhReadGuard<'a, T: ?Sized> {
-    lock: &'a RwSpinlock<T>,
-}
-
 // SAFETY: BhReadGuard exists only while a read lock + BH disable is held,
 // preventing any writer from accessing the data.
 unsafe impl<T: ?Sized + Sync> Send for RwSpinlockBhReadGuard<'_, T> {}
@@ -501,10 +469,6 @@ impl<T: ?Sized> Drop for RwSpinlockBhReadGuard<'_, T> {
 }
 
 // ==================== BH Write Guard ====================
-
-pub struct RwSpinlockBhWriteGuard<'a, T: ?Sized> {
-    lock: &'a RwSpinlock<T>,
-}
 
 // SAFETY: BhWriteGuard exists only while the write lock + BH disable is
 // held exclusively, so no other thread can access the data.

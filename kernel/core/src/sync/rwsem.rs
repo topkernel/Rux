@@ -107,6 +107,16 @@ use core::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use crate::sync::spinlock::Spinlock;
 
+// RwsemWaiter, OwnerState, WakeType, RwSemaphore, Rwsem, RwsemReadGuard,
+// RwsemWriteGuard — the definitions live in sync/types.rs; every impl and
+// function that uses them stays in this file. The public ones are re-exported
+// so the existing `sync::rwsem::…` paths are unchanged; the others were
+// private to this file and are imported here (pub(super) in types.rs: the
+// sync directory is the smallest visibility boundary Rust offers for that
+// split).
+pub use super::types::{RwSemaphore, Rwsem, RwsemReadGuard, RwsemWriteGuard};
+use super::types::{RwsemWaiter, OwnerState, WakeType};
+
 // ==================== count word (rwsem.c:117-128) ====================
 
 /// Bit 0: the lock is owned by a writer.
@@ -165,48 +175,6 @@ fn stall_report_ok() -> bool {
         && LAST
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
-}
-
-/// One queued waiter (reference `struct rwsem_waiter`, rwsem.c:338).
-struct RwsemWaiter {
-    task: *mut crate::process::Task,
-    is_writer: bool,
-    /// Jiffies deadline after which this waiter may demand HANDOFF.
-    timeout: u64,
-    /// HANDOFF latch. Written by whichever try_write_lock sets the
-    /// count HANDOFF bit while this waiter is first (rwsem.c:654).
-    handoff_set: bool,
-}
-
-/// Owner-word classification (rwsem.c:679-684).
-#[derive(Clone, Copy, PartialEq)]
-enum OwnerState {
-    Null,
-    Writer,
-    Reader,
-    Nonspinnable,
-}
-
-/// Wake-type dispatch for mark_wake (rwsem.c:348-352).
-#[derive(Clone, Copy, PartialEq)]
-enum WakeType {
-    Any,
-    Readers,
-    ReadOwned,
-}
-
-/// Sleepable read-write semaphore. See the module doc for the full
-/// reference mapping. Context: task/syscall only for down_*; try_*
-/// are context-free.
-pub struct RwSemaphore {
-    count: AtomicI64,
-    owner: AtomicUsize,
-    /// Wait list. A genuine spinlock held for instructions at a
-    /// time, never across schedule() and never across a wake (all
-    /// three HANDOFF mutation sites hold it — rwsem.c:108-115).
-    wait_lock: Spinlock<alloc::vec::Vec<RwsemWaiter>>,
-    /// Diagnostic name (stall prints / census lines).
-    name: &'static str,
 }
 
 // SAFETY: same contract as WaitQueueHead/SleepMutex — the raw task
@@ -1131,16 +1099,6 @@ fn preempt_disable() {
 
 // ==================== generic Rwsem<T> ====================
 
-/// Data-carrying sleepable rwlock (the `RwSpinlock<T>` shape on the
-/// sleepable primitive). `read()`/`write()` return RAII guards; a
-/// held section is PREEMPTIBLE and the holder may sleep below it
-/// (never take this lock from interrupt context; never take it while
-/// holding a spinlock).
-pub struct Rwsem<T: ?Sized> {
-    raw: RwSemaphore,
-    data: UnsafeCell<T>,
-}
-
 // SAFETY: Rwsem<T> mediates all access to the inner data: shared (&T)
 // via read-locked guards, exclusive (&mut T) via write-locked guards.
 unsafe impl<T: ?Sized + Send> Send for Rwsem<T> {}
@@ -1224,10 +1182,6 @@ impl<T> Rwsem<T> {
     }
 }
 
-pub struct RwsemReadGuard<'a, T: ?Sized> {
-    lock: &'a Rwsem<T>,
-}
-
 // SAFETY: guard exists only while the read lock is held, preventing
 // any writer from obtaining exclusive access to the data.
 unsafe impl<T: ?Sized + Sync> Send for RwsemReadGuard<'_, T> {}
@@ -1246,10 +1200,6 @@ impl<T: ?Sized> Drop for RwsemReadGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.raw.up_read();
     }
-}
-
-pub struct RwsemWriteGuard<'a, T: ?Sized> {
-    lock: &'a Rwsem<T>,
 }
 
 // SAFETY: guard exists only while the write lock is held exclusively.

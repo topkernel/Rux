@@ -26,18 +26,14 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+// RawSeqLock, SeqLock, SeqLockWriteGuard — the definitions live in
+// sync/types.rs; every impl and function that uses them stays in this file.
+// Re-exported so the existing `sync::seqlock::…` paths are unchanged.
+pub use super::types::{RawSeqLock, SeqLock, SeqLockWriteGuard};
+
 // ============================================================================
 // RawSeqLock
 // ============================================================================
-
-/// Raw sequence lock backend.
-///
-/// The sequence counter uses the low bit as a "writer active" flag:
-///   - Even value  => no writer active, data is consistent
-///   - Odd value   => writer active, data may be inconsistent
-pub struct RawSeqLock {
-    sequence: AtomicUsize,
-}
 
 impl RawSeqLock {
     #[inline]
@@ -107,15 +103,6 @@ impl RawSeqLock {
 // ============================================================================
 // SeqLock<T>
 // ============================================================================
-
-/// A sequence lock protecting data of type `T`.
-///
-/// `T` must be `Copy` because readers snapshot the entire value without
-/// holding any lock.
-pub struct SeqLock<T: Copy> {
-    raw: RawSeqLock,
-    data: UnsafeCell<T>,
-}
 
 // Safety: writers have exclusive access; readers get a Copy snapshot.
 unsafe impl<T: Copy + Send> Send for SeqLock<T> {}
@@ -217,16 +204,6 @@ impl<T: Copy> SeqLock<T> {
 // ============================================================================
 // SeqLockWriteGuard
 // ============================================================================
-
-/// RAII guard for an active SeqLock writer.
-///
-/// Provides `Deref` and `DerefMut` to the inner data.
-/// On drop: releases the writer slot and re-enables preemption.
-pub struct SeqLockWriteGuard<'a, T: Copy> {
-    lock: &'a SeqLock<T>,
-    /// R21-N5: saved IRQ state for exact restore.
-    irq_state: bool,
-}
 
 unsafe impl<T: Copy + Send> Send for SeqLockWriteGuard<'_, T> {}
 

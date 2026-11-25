@@ -80,6 +80,13 @@ use crate::arch::cpu;
 use crate::process::task::{SchedPolicy, Task, TaskState};
 use crate::sync::futex::{futex_hash, task_futex_mm_id, FutexKey};
 
+// PiWaiter, SavedSched, PiState — the definitions live in sync/types.rs;
+// every impl and function that uses them stays in this file. They were
+// private to this file and are imported here (pub(super) in types.rs: the
+// sync directory is the smallest visibility boundary Rust offers for that
+// split).
+use super::types::{PiWaiter, SavedSched, PiState};
+
 /// Set while any waiter is queued on the futex (reference bit 31).
 pub const FUTEX_WAITERS: u32 = 0x8000_0000;
 /// Set by the kernel when a PI futex owner terminated holding the lock
@@ -134,36 +141,6 @@ fn task_live_rank(task: *mut Task) -> Option<(Option<u32>, i32)> {
     Some((rt, crate::sched::r#unsafe::task_shared(task).nice()))
 }
 
-/// One task queued on a PI futex. Allocated by the enqueue site (the
-/// blocker itself for LOCK_PI, or cmp_requeue_pi for a requeued
-/// waiter) and freed by whoever ends the park (the sleeper on every
-/// exit path; the handoff only marks `handed`).
-struct PiWaiter {
-    task: *mut Task,
-    /// Nice snapshot at enqueue time — the CFS ordering key (lower
-    /// wins, FIFO among equals; the plain side uses the same rule).
-    nice: i32,
-    /// RT priority snapshot at enqueue time: Some(p) for SCHED_FIFO /
-    /// SCHED_RR waiters, None for CFS-class waiters. The RT-PI key
-    /// (RT-2X item 7): RT waiters order before every CFS waiter and
-    /// the top waiter's rt_priority is what an RT owner inherits.
-    rt_prio: Option<u32>,
-    /// Ownership was transferred to this waiter (unlock_pi or the
-    /// owner-died path): the user word already holds its TID; its park
-    /// must end with success.
-    handed: bool,
-    next: Option<usize>,
-}
-
-/// The owner's pre-boost scheduling configuration, restored when the
-/// boost ends (reference: rt_mutex_setprio's saved prio/policy).
-#[derive(Clone, Copy)]
-struct SavedSched {
-    nice: i32,
-    policy: SchedPolicy,
-    rt_prio: u32,
-}
-
 /// Total order on waiters: RT waiters first (higher rt_priority wins),
 /// then CFS by nice ascending; equal keys keep arrival (FIFO) order.
 /// Returns (class, rank) — smaller wins.
@@ -183,21 +160,6 @@ fn waiter_rank(idx: usize) -> (u8, u32) {
 // a non-null check — the same contract as the plain Waiter.
 unsafe impl Send for PiWaiter {}
 unsafe impl Sync for PiWaiter {}
-
-/// Per-futex-word PI state: owner TID plus a priority-ordered waiter
-/// chain.
-struct PiState {
-    key: FutexKey,
-    owner_pid: u32,
-    /// Owner's pre-boost (nice, policy, rt_priority) while a boost is
-    /// applied; None when the owner runs at its own configuration.
-    /// RT-2X item 7: an RT boost changes policy/rt_priority too, so the
-    /// saved triple replaces the old nice-only slot.
-    owner_saved: Option<SavedSched>,
-    /// Priority-ordered waiter chain (RT first by rt_priority desc,
-    /// then CFS by nice asc; FIFO among equals).
-    waiters: Option<usize>,
-}
 
 const PI_WAITER_POOL_SIZE: usize = 128;
 const PI_STATE_POOL_SIZE: usize = 128;

@@ -41,6 +41,11 @@ use crate::process::Task;
 use crate::process::task::TaskState;
 use crate::errno::constants::{EINVAL, EFAULT, EAGAIN, ENOSYS, ETIMEDOUT};
 
+// FuxWakeOp, FutexKey, Waiter, FutexChain — the definitions live in
+// sync/types.rs; every impl and function that uses them stays in this file.
+// Re-exported so the existing `sync::futex::…` paths are unchanged.
+pub use super::types::{FuxWakeOp, FutexKey, Waiter, FutexChain};
+
 /// FUTEX opcodes
 pub const FUTEX_WAIT: i32 = 0;
 pub const FUTEX_WAKE: i32 = 1;
@@ -133,15 +138,6 @@ pub fn fxrs_word_watched(uaddr: usize) -> bool {
 //   - no WAKE near the birth at all names the never-sent branch
 //     (userspace ordering — reference-diff territory).
 // rux:fuxstuck (retired debug=fuxstuck)-gated push (one lock+copy per wake op); zero cost off.
-#[derive(Clone, Copy)]
-pub struct FuxWakeOp {
-    pub j: u64,
-    pub tid: u32,
-    pub tgid: u32,
-    pub uaddr: u64,
-    pub op: u8, // raw FUTEX cmd byte (FUTEX_WAKE=1 etc.)
-    pub ret: i32,
-}
 pub const FUXW_RING_SZ: usize = 16384; // per CPU: ~6 s of coverage at the OH boot's ~10k wake syscalls/s
 const FUXW_NRINGS: usize = 4; // cpu_id % 4 — collision-free on <= 4-CPU boots
 const FUXW_ZERO: FuxWakeOp = FuxWakeOp {
@@ -312,41 +308,6 @@ pub const FUTEX_OP_CMP_LT: u32 = 2;
 pub const FUTEX_OP_CMP_LE: u32 = 3;
 pub const FUTEX_OP_CMP_GT: u32 = 4;
 pub const FUTEX_OP_CMP_GE: u32 = 5;
-
-/// Futex key - uniquely identifies a futex
-#[derive(Clone, Copy, Debug)]
-pub struct FutexKey {
-    /// Userspace address
-    pub uaddr: usize,
-    /// Address-space identity for private futexes (Linux: mm pointer).
-    ///
-    /// This is the Arc allocation address of the task's AddressSpace —
-    /// shared by all CLONE_VM threads of one process, distinct across
-    /// processes and across fork(). 0 for kernel threads / mm-less tasks.
-    pub mm: usize,
-    /// Flags
-    pub flags: u32,
-    /// PHYSICAL word identity — (page frame << 12) | byte offset —
-    /// resolved from the caller's page tables at key construction.
-    /// 0 when unresolved (kernel threads, torn-down exit paths, unit
-    /// tests). Shared-futex equality is physical, not virtual: the
-    /// reference kernel keys shared futexes on (inode, page, offset),
-    /// so a wake from ANY mapping of the same word — including a fresh
-    /// mmap at a DIFFERENT virtual address after fork+exec (LTP's
-    /// tst_checkpoint protocol: parent waits on the MAP_SHARED results
-    /// page, the exec'd child re-opens + re-mmaps and wakes) — reaches
-    /// the waiter. Rux's MAP_SHARED file pages are single cache frames
-    /// aliased in every mapper, so the frame number IS the identity.
-    pub phys: usize,
-    /// Object identity (FWK, reference FUT_OFF_MMSHARED parity): true
-    /// only for SHARED-VMA words with a resolved phys — those key (and
-    /// bucket) on `phys`, the stable shared object. Every anon word
-    /// (PRIVATE VMA, any op flags) carries object=false and keys on
-    /// (mm, uaddr): the word's frame is a COW transient (fork re-marks
-    /// the PTE RO; the next store swaps the frame), so the frame can
-    /// never be the identity of an anon futex.
-    pub object: bool,
-}
 
 /// Resolve the physical word identity of `uaddr` in the CURRENT task's
 /// page tables: (frame << 12) | (uaddr & 0xfff). Returns 0 when the walk
@@ -578,29 +539,6 @@ fn ftx_opname(op: i32) -> &'static [u8] {
 #[cfg(not(feature = "debug-futex-trace"))]
 fn ftx_trace(_tag: &[u8], _uaddr: usize, _a: u64, _b: u64) {}
 
-/// Waiter information
-pub struct Waiter {
-    /// Futex key
-    pub key: FutexKey,
-    /// Waiting task
-    pub task: *mut Task,
-    /// bitset
-    pub bitset: u32,
-    /// Whether already woken
-    pub woken: bool,
-    /// Jiffies when this waiter was linked into its bucket chain (the
-    /// park stamp for the rux:fuxstuck (retired debug=fuxstuck) census; 0 on the alloc_waiter
-    /// placeholder, overwritten at real insertion). NOT reset on requeue —
-    /// the park episode continues, so the original stamp stays truthful.
-    pub park_j: u64,
-    /// Hash bucket this waiter is currently linked in. Tracked per-waiter
-    /// because FUTEX_REQUEUE can move it to uaddr2's bucket while it sleeps;
-    /// a stale bucket at removal time silently leaked the slot (review 6.1).
-    pub bucket: usize,
-    /// Next waiter in hash chain
-    pub next: Option<usize>,
-}
-
 // SAFETY: Waiter is only ever accessed while the per-slot Spinlock is held,
 // serialising all reads and writes.  The `task` raw pointer is only
 // dereferenced by the waker after validating it is non-null.
@@ -628,36 +566,6 @@ pub static WAITER_POOL: [crate::sync::lockkey::KeyedSpinlock<
 
 /// Hash bucket count - from config
 pub const HASH_SIZE: usize = crate::config::FUTEX_HASH_SIZE;
-
-/// Waiter list head for each bucket. D-11 keyed (FutexBucketKey): the
-/// guard's `proof()` is what the nested GRQ acquire in the wake path
-/// requires — the bucket->GRQ nesting of INV-LOCK-5 (R12-2) is a
-/// compile fact. NOTE: FUTEX_REQUEUE holds TWO buckets (lo/hi, index
-/// ordered) via plain lock_irqsave — a same-class ordered double
-/// acquire, deliberately outside the keyed-nesting API (which exists
-/// to fence ACROSS classes).
-///
-/// 62nd (ohw27/ohw28): the chain is FIFO (tail append) — reference
-/// plist parity. Linux's futex queues equal-priority waiters FIFO
-/// (lib/plist.c plist_add walks FORWARD past equal priorities and
-/// list_add_tails before the first higher-prio node), so the OLDEST
-/// waiter receives the first wake of every burst. Our head-insert made
-/// the chain LIFO: on a word with constant transient re-parkers (the
-/// samgr FFRT worker family's contended inner mutex), every FUTEX_WAKE
-/// served the newest transient and the one long-parked waiter — the
-/// thread holding samgr's listenerMapLock_ inside its IPC handler —
-/// starved for the whole contention window (ohw27: 33 ret=1 wakes by
-/// four other threads, the parked owner's record woken=false to the
-/// end). The map lock never released, the M2 waiter pandemic followed,
-/// and the boot wedged at the appfwk gate 20+ boots in a row. With
-/// FIFO, the parked holder gets the first wake and the wedge cannot
-/// form. The tail pointer keeps append O(1) (no hot-path regression;
-/// the requeue splice below becomes O(1) too).
-#[derive(Clone, Copy)]
-pub struct FutexChain {
-    pub head: Option<usize>,
-    pub tail: Option<usize>,
-}
 
 pub static HASH_HEADS: [crate::sync::lockkey::KeyedSpinlock<
     crate::sync::lockkey::FutexBucketKey,

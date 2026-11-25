@@ -18,28 +18,14 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::config::MAX_CPUS;
 use crate::list::ListHead;
 
+// RcuCallback, RcuHead — the definitions live in sync/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the existing
+// `sync::rcu::…` paths are unchanged.
+pub use super::types::{RcuCallback, RcuHead};
+
 // ============================================================================
 // Types
 // ============================================================================
-
-/// RCU callback function type.
-/// `data` points to the `RcuHead` that was passed to `call_rcu`.
-pub type RcuCallback = fn(*mut core::ffi::c_void);
-
-/// Embedded RCU callback head.
-///
-/// Place at the end of a struct to enable deferred reclamation via `call_rcu`.
-/// The callback receives the `RcuHead` pointer; use `ListHead::entry()` or
-/// `container_of!` to recover the enclosing struct.
-#[repr(C)]
-pub struct RcuHead {
-    /// Whether this head has been initialized (list.init() called).
-    initialized: bool,
-    /// Intrusive list link for per-CPU callback queue.
-    pub list: ListHead,
-    /// Callback invoked after grace period.
-    pub func: RcuCallback,
-}
 
 impl RcuHead {
     pub const fn new() -> Self {

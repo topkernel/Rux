@@ -43,6 +43,15 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+// Row, CpuLocal, CpuLocalRef — the definitions live in sync/types.rs; every
+// impl and function that uses them stays in this file. The public ones are
+// re-exported so the existing `sync::percpu::…` paths are unchanged; the
+// other was private to this file and is imported here (pub(super) in
+// types.rs: the sync directory is the smallest visibility boundary Rust
+// offers for that split).
+pub use super::types::{CpuLocal, CpuLocalRef};
+use super::types::{Row};
+
 /// Divergences refused by the re-entry tripwire (same slot, same cpu,
 /// while a guard is live). Zero on a healthy boot; every nonzero value
 /// names a call site that must be rewritten — the alias it attempted
@@ -55,20 +64,6 @@ pub fn reentry_events() -> usize {
     REENTRY_EVENTS.load(Ordering::Relaxed)
 }
 
-/// One cpu's slot, padded to a full cache line so adjacent rows never
-/// share one (the allocator rows are written under IF=0 on every
-/// fast-path op — line splitting between CPUs is measurable traffic).
-#[repr(C, align(64))]
-struct Row<T> {
-    val: T,
-    // Plain bool, not AtomicBool: the flag is only ever read/written
-    // by the cpu that owns the row, under the same IF=0 exclusivity
-    // that guards `val` (an atomic would buy nothing and forfeit the
-    // Copy bound the const row initializer needs). Stores go through
-    // the raw pointer in the guard, never through a shared reference.
-    in_use: bool,
-}
-
 // Row participates in const array-repeat initialization (`[Row { .. };
 // N]` needs Copy); the manual impl keeps the bound on T explicit.
 impl<T: Copy> Clone for Row<T> {
@@ -77,34 +72,6 @@ impl<T: Copy> Clone for Row<T> {
     }
 }
 impl<T: Copy> Copy for Row<T> {}
-
-/// A per-CPU bank of `T`: `CpuLocal<T, N>` holds one `T` per cpu for
-/// machines of at most `N` cpus. Build it as a `static` with
-/// [`CpuLocal::new`]; reach rows only through [`CpuLocal::with`].
-///
-/// `Sync` is sound because every access path runs with interrupts
-/// disabled on the acting cpu, so a given row is only ever touched by
-/// the cpu that owns it, and the re-entry tripwire refuses a second
-/// live guard on the same row.
-///
-/// D-7 incident fix (2026-10-27, run/pa68-d7-rootcause.txt): the rows
-/// sit inside [`UnsafeCell`]. The first landing used a plain
-/// `[Row<T>; N]`, and `unsafe impl Sync` does NOT confer interior
-/// mutability — so the `static MAGAZINES: CpuLocal<...>` in
-/// small_alloc was a non-mut static without interior mutability, which
-/// rustc emits as an LLVM `constant` global (.rodata). The kernel maps
-/// the image P|RW, so debug builds booted by luck; under opt>=1 LLVM
-/// deleted every store into the bank (stores to constant memory) and
-/// hoisted the loads, the magazine refill loop never terminated, and
-/// every release-profile boot died at the first c64 miss. UnsafeCell
-/// is the piece that makes the mutation LEGITIMATE to the compiler
-/// instead of invisible to it: the static now lands in writable
-/// memory and the stores survive at every opt level. The release-strong
-/// boot is the standing verification for this family (debug-only
-/// testing cannot see it).
-pub struct CpuLocal<T, const N: usize> {
-    rows: UnsafeCell<[Row<T>; N]>,
-}
 
 // SAFETY: see the struct comment — rows are cpu-private by
 // construction of `with`.
@@ -239,22 +206,6 @@ impl<T, const N: usize> CpuLocal<T, N> {
         };
         Some(f(guard))
     }
-}
-
-/// The only handle to a per-CPU row. Exists solely inside a
-/// [`CpuLocal::with`] or [`CpuLocal::with_preempt`] closure: it cannot
-/// be sent to another cpu (`!Send` via the raw-pointer marker) and
-/// cannot outlive the closure, so the exclusivity window it depends on
-/// is its own lifetime.
-pub struct CpuLocalRef<'a, T> {
-    val: &'a mut T,
-    cpu: usize,
-    /// Saved IRQ flags (plain `with` guards only).
-    flags: bool,
-    /// Preempt guards restore the count instead of the IRQ flags.
-    preempt_guard: bool,
-    in_use: *mut bool,
-    _nosend: PhantomData<*mut ()>,
 }
 
 impl<T> CpuLocalRef<'_, T> {

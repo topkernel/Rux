@@ -69,6 +69,15 @@
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
+// SleepMutexState, OptimisticProbe, SleepMutex, SleepMutexGuard — the
+// definitions live in sync/types.rs; every impl and function that uses them
+// stays in this file. The public ones are re-exported so the existing
+// `sync::mutex::…` paths are unchanged; the others were private to this file
+// and are imported here (pub(super) in types.rs: the sync directory is the
+// smallest visibility boundary Rust offers for that split).
+pub use super::types::{SleepMutex, SleepMutexGuard};
+use super::types::{SleepMutexState, OptimisticProbe};
+
 /// R77-style stall tripwire support: is the recorded owner still a live
 /// task? (pid-hash lookup; the stall tripwire only fires while the owner
 /// lives — a DEAD owner means the lock leaked with its holder unless
@@ -84,75 +93,6 @@ fn locked_owner_alive_wait(owner: &u32) -> bool {
     let alive = unsafe { !(*t).state().is_dead() };
     crate::process::task::Task::task_put(t);
     alive
-}
-
-struct SleepMutexState {
-    locked: bool,
-    owner: u32,
-    depth: u32,
-    /// Jiffies stamp of the outermost acquire — with the waiters'
-    /// tripwire below it names a holder that never releases (a leaked
-    /// lock after a synchronous kill inside the critical section parks
-    /// every later user in D-state forever).
-    acquired_at: u64,
-    /// R84 fairness: tasks parked on `wait` PLUS tasks holding an
-    /// unspent release() wake token. A task enters the count when it
-    /// first registers on the queue and leaves it in the same critical
-    /// section in which it takes the lock (token spend or sole-waiter
-    /// take). While nonzero, the fair fast path refuses fresh sleepable
-    /// acquirers.
-    waiters: u32,
-    /// R85: orphaned-handoff epoch. release() hands the lock to ONE
-    /// waiter via wake_up_one; when the queue is empty at that moment
-    /// (every counted waiter is mid-loop between finish_wait and its
-    /// next prepare_to_wait) the wake is dropped and the lock sits FREE
-    /// behind a nonzero `waiters` with nobody left to wake it. Each such
-    /// drop bumps this epoch: a waiter whose registration snapshot of the
-    /// epoch predates the bump may take the free lock at its
-    /// re-check, so an orphaned handoff is recovered by the FIRST
-    /// mid-loop waiter to re-register.
-    handoff_epoch: u64,
-    /// R6 (rt mode only): RT-class waiters currently parked with a PI
-    /// entry registered (advisory trigger for the hi-priority handoff
-    /// wake and the boost routing — the PI state's own waiter list is
-    /// the authoritative set; drift here can only ever fall back to
-    /// the plain FIFO wake, never corrupt state).
-    rt_waiters: u32,
-}
-
-/// Outcome of one optimistic_probe round (see optimistic_probe).
-enum OptimisticProbe {
-    /// Acquired (free+unwaited fast path or recursion) — guard inside.
-    Acquired(SleepMutexGuard),
-    /// Holder is on-CPU: optimistic spinning is profitable.
-    Spin,
-    /// Holder off-CPU / handoff window: queue instead of spinning.
-    Stop,
-}
-
-/// Sleeping mutex for coarse, I/O-holding serialization (see the module
-/// doc). All users are `static`s, hence the `&'static self` API.
-pub struct SleepMutex {
-    /// The lock word + bookkeeping. Held only for a few instructions at
-    /// a time (never across I/O) — a genuine spinlock per rule 1.
-    state: Spinlock<SleepMutexState>,
-    /// Tasks blocked while another task holds the mutex (the holder may
-    /// sleep in block I/O for a long time).
-    wait: WaitQueueHead,
-    /// Diagnostic name — used verbatim in the stall/census prints
-    /// (e.g. "EXT4-BIGLOCK-STALL"); keep stable, logs parse them.
-    name: &'static str,
-    /// Whether fsw (fs-write census) notes fire on acquire/contend.
-    /// True only for the ext4 big lock so its counters stay comparable
-    /// across the perf gate; other instances do not pollute them.
-    fsw_notes: bool,
-    /// R6 rt-mutex mode: RT-class waiters join the kernel PI chain
-    /// (owner boost + hi-priority handoff) through the shared PI
-    /// engine (kernel-keyed states in sync/futex_pi.rs). All-CFS
-    /// contention is byte-for-byte the R84/R85 behavior — the mode
-    /// only adds the boost and changes WHICH waiter a release wakes
-    /// when an RT-class waiter is queued.
-    rt: bool,
 }
 
 impl SleepMutex {
@@ -971,11 +911,6 @@ impl SleepMutex {
         taskdump_dec(woken as u64);
         taskdump_raw_line(b"\n");
     }
-}
-
-/// Guard: releases on drop (outermost only).
-pub struct SleepMutexGuard {
-    lock: &'static SleepMutex,
 }
 
 impl Drop for SleepMutexGuard {

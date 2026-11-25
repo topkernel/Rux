@@ -11,6 +11,10 @@
 //! - Spinlock / RwSpinlock
 
 pub mod r#unsafe;
+/// The subsystem's type definitions (seed-core-design §2c.3): every
+/// struct/enum/alias of the subsystem; the impls stay in the topic
+/// files, which re-export their types from here.
+pub mod types;
 pub mod semaphore;
 pub mod futex;
 pub mod futex_pi;

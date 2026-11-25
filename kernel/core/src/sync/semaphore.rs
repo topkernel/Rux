@@ -16,6 +16,11 @@
 use core::sync::atomic::{AtomicI32, Ordering};
 use crate::process::wait::WaitQueueHead;
 
+// Semaphore, Mutex, MutexGuard — the definitions live in sync/types.rs; every
+// impl and function that uses them stays in this file. Re-exported so the
+// existing `sync::semaphore::…` paths are unchanged.
+pub use super::types::{Semaphore, Mutex, MutexGuard};
+
 /// R77 (semaphore CAS discipline): try to take one unit from `count` —
 /// succeeds only by atomically swapping a POSITIVE value to value-1. A
 /// failed attempt leaves the count untouched (no reservation, no restore),
@@ -35,22 +40,6 @@ fn cas_take(count: &AtomicI32) -> bool {
         }
     }
     false
-}
-
-/// Semaphore
-///
-/// A semaphore is a non-negative integer used for process synchronization:
-/// - Initialized to some positive integer
-/// - P operation (down): decrement value, if 0 then block and wait
-/// - V operation (up): increment value, if processes are waiting then wake one
-#[repr(C)]
-pub struct Semaphore {
-    /// Semaphore count value
-    /// Use atomic integer to ensure thread safety
-    count: AtomicI32,
-    /// Wait queue
-    /// When semaphore is 0, waiting processes join this queue
-    wait: WaitQueueHead,
 }
 
 impl Semaphore {
@@ -334,25 +323,6 @@ impl Semaphore {
     }
 }
 
-/// Mutex Semaphore (Mutex)
-///
-/// Binary semaphore, initial value is 1, used for mutual exclusion
-///
-/// # Example
-/// ```no_run
-/// # use kernel::sync::Mutex;
-/// # fn test(mutex: &Mutex) {
-/// mutex.lock();
-/// // ... critical section ...
-/// mutex.unlock();
-/// # }
-/// ```
-#[repr(C)]
-pub struct Mutex {
-    /// Internal semaphore
-    sem: Semaphore,
-}
-
 impl Mutex {
     /// Create a new mutex
     ///
@@ -424,24 +394,6 @@ impl Mutex {
     pub fn unlock(&self) {
         self.sem.up();
     }
-}
-
-/// Mutex Guard (RAII)
-///
-/// Automatically manages lock lifetime
-///
-/// # Example
-/// ```no_run
-/// # use kernel::sync::Mutex;
-/// # fn test(mutex: &Mutex) {
-/// {
-///     let _guard = mutex.guard();
-///     // ... critical section ...
-/// } // Automatically release lock
-/// # }
-/// ```
-pub struct MutexGuard<'a> {
-    mutex: &'a Mutex,
 }
 
 impl<'a> MutexGuard<'a> {

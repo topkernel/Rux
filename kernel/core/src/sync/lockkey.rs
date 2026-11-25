@@ -47,6 +47,16 @@ use core::marker::PhantomData;
 
 use super::spinlock::RawSpinlock;
 
+// GrqKey, FutexBucketKey, NetStatsKey, NetQueueKey, WaiterSlotKey,
+// KeyedRawSpinlock, NestProof, KeyedSpinlock, KeyedIrqGuard, KeyedGuard — the
+// definitions live in sync/types.rs; every impl and function that uses them
+// stays in this file. Re-exported so the existing `sync::lockkey::…` paths
+// are unchanged.
+pub use super::types::{
+    GrqKey, FutexBucketKey, NetStatsKey, NetQueueKey, WaiterSlotKey, KeyedRawSpinlock,
+    NestProof, KeyedSpinlock, KeyedIrqGuard, KeyedGuard,
+};
+
 /// A lock-order class. One zero-sized type per named invariant in
 /// `docs/architecture/lock-ordering.md`; the class NAME is what the
 /// deadlock watchdog prints alongside the type-level story.
@@ -63,11 +73,6 @@ pub trait CanNestInside<Outer: NestKey>: NestKey {}
 
 // ---- The key classes (lock-ordering.md, INV-LOCK-5/6) -------------
 
-/// The global run queue lock (divergence D-1). INV-LOCK-5: nests INSIDE
-/// the futex bucket lock, never the reverse; same-level nesting is a
-/// self-deadlock and has no impl.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GrqKey;
 impl NestKey for GrqKey {
     const NAME: &'static str = "grq";
 }
@@ -75,38 +80,20 @@ impl NestKey for GrqKey {
 /// futex_wake -> Task::wake_up -> enqueue_task).
 impl CanNestInside<FutexBucketKey> for GrqKey {}
 
-/// A futex hash-bucket lock (`sync::futex::HASH_HEADS`). Nothing may be
-/// acquired inside it EXCEPT the classes with explicit impls above —
-/// today only `GrqKey`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FutexBucketKey;
 impl NestKey for FutexBucketKey {
     const NAME: &'static str = "futex-bucket";
 }
 
-/// Per-socket queue statistics (INV-LOCK-6): stats nest inside the
-/// virtio-net rx/tx queue locks, never the reverse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NetStatsKey;
 impl NestKey for NetStatsKey {
     const NAME: &'static str = "net-stats";
 }
 /// INV-LOCK-6 forward: stats acquired while a queue lock is held.
 impl CanNestInside<NetQueueKey> for NetStatsKey {}
 
-/// A virtio-net rx/tx queue lock (INV-LOCK-6 outer class).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NetQueueKey;
 impl NestKey for NetQueueKey {
     const NAME: &'static str = "net-queue";
 }
 
-/// A futex waiter-pool SLOT lock (`sync::futex::WAITER_POOL`). Slot
-/// locks are taken inside the bucket lock that owns the chain the slot
-/// is linked into (the wait/wake/exit/requeue paths); the allocator
-/// and the free path take them top-level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WaiterSlotKey;
 impl NestKey for WaiterSlotKey {
     const NAME: &'static str = "futex-waiter-slot";
 }
@@ -117,15 +104,6 @@ impl NestKey for WaiterSlotKey {
 impl CanNestInside<FutexBucketKey> for WaiterSlotKey {}
 
 // ---- The keyed lock ----------------------------------------------
-
-/// A [`RawSpinlock`] whose position in the lock hierarchy is part of
-/// its type. Same size as the raw lock (`PhantomData<K>` is free), the
-/// acquire paths inline to the same instructions; the ONLY new API is
-/// `lock_nested`, the compile-checked nesting acquisition.
-pub struct KeyedRawSpinlock<K: NestKey> {
-    raw: RawSpinlock,
-    _key: PhantomData<K>,
-}
 
 // SAFETY: RawSpinlock's atomic protocol is the synchronization; the
 // key is zero-sized and carries no data.
@@ -217,28 +195,6 @@ impl<Inner: NestKey> KeyedRawSpinlock<Inner> {
     }
 }
 
-/// Zero-sized PROOF that a keyed lock of class `K` is currently held
-/// by THIS thread. MINTED ONLY by a live keyed guard's `proof()`
-/// (no public constructor); consumed by `lock_nested` /
-/// `lock_irqsave_nested`, which only compile when the nesting is
-/// permitted. The lifetime ties the proof to the guard that minted
-/// it, so it cannot outlive the held section.
-pub struct NestProof<'a, K: NestKey> {
-    _key: PhantomData<K>,
-    _hold: PhantomData<&'a ()>,
-}
-
-/// A [`Spinlock<T>`](super::spinlock::Spinlock) whose position in the
-/// lock hierarchy is part of its type — the data-carrying twin of
-/// [`KeyedRawSpinlock`]. `lock_irqsave` returns the same protocol
-/// guard wrapped with the key (call sites unchanged: Deref/DerefMut to
-/// the data); the ONLY new capability is `guard.proof()`, which mints
-/// the [`NestProof`] other keyed locks require for a nested acquire.
-pub struct KeyedSpinlock<K: NestKey, T> {
-    inner: super::spinlock::Spinlock<T>,
-    _key: PhantomData<K>,
-}
-
 // SAFETY: same rule as Spinlock itself — the atomic protocol
 // synchronizes; the key is zero-sized and carries no data.
 unsafe impl<K: NestKey, T: Send> Sync for KeyedSpinlock<K, T> {}
@@ -276,14 +232,6 @@ impl<Inner: NestKey, T> KeyedSpinlock<Inner, T> {
     }
 }
 
-/// Guard for the data-carrying keyed spinlock: derefs to `T`; mints
-/// [`NestProof`] for nested acquisitions while held.
-#[must_use = "a discarded keyed-lock guard releases the lock immediately (the 2b092c49 conviction)"]
-pub struct KeyedIrqGuard<'a, K: NestKey, T: ?Sized> {
-    inner: super::spinlock::SpinlockIrqGuard<'a, T>,
-    _key: PhantomData<K>,
-}
-
 impl<K: NestKey, T: ?Sized> KeyedIrqGuard<'_, K, T> {
     /// Mint the held-section proof (see [`NestProof`]).
     #[inline]
@@ -305,27 +253,6 @@ impl<K: NestKey, T: ?Sized> core::ops::DerefMut for KeyedIrqGuard<'_, K, T> {
     fn deref_mut(&mut self) -> &mut T {
         self.inner.deref_mut()
     }
-}
-
-/// Guard for a keyed lock — unlocks on drop (raw lock only; the
-/// irqsave/preempt layers wrap it from the outside, exactly as
-/// `GrqGuard` wraps `RawSpinlock` today).
-///
-/// `#[must_use]` is LOAD-BEARING (the 2b092c49 conviction): the GRQ
-/// adoption's pre-existing `self.lock.lock();` statement — written for
-/// `RawSpinlock::lock() -> ()` — silently DISCARDED this guard under
-/// the wrapper, whose Drop released the lock at the end of the
-/// statement. Every "GRQ-locked" section then ran unexcluded
-/// (x86: 6/6 CFS-timeline BTreeMap corruption; riscv64: R74
-/// double-run). A discarded keyed guard is now a compile warning; a
-/// subsystem wrapping its own guard protocol must use
-/// `lock_claim`/`try_lock_claim`/`unlock`, never the guard-returning
-/// `lock()`.
-#[must_use = "a discarded keyed-lock guard releases the lock immediately (the 2b092c49 conviction)"]
-pub struct KeyedGuard<'a, K: NestKey> {
-    lock: *mut KeyedRawSpinlock<K>,
-    _key: PhantomData<K>,
-    _lifetime: PhantomData<&'a ()>,
 }
 
 impl<K: NestKey> Drop for KeyedGuard<'_, K> {

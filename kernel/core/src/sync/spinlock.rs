@@ -68,44 +68,15 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::sync::atomic::{AtomicU64, AtomicUsize};
 
-// ==================== Acquire evidence (HEAL-GATE, 122nd) ====================
+// AcquireEvidence, RawSpinlock, Spinlock, SpinlockGuard, SpinlockIrqGuard,
+// SpinlockBhGuard — the definitions live in sync/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the existing
+// `sync::spinlock::…` paths are unchanged.
+pub use super::types::{
+    AcquireEvidence, RawSpinlock, Spinlock, SpinlockGuard, SpinlockIrqGuard, SpinlockBhGuard,
+};
 
-/// HEAL-GATE (122nd, runq-strand follow-up): per-CPU acquire-side
-/// evidence for the tick-side PREEMPT-HEAL family.
-///
-/// The runq-strand conviction (rs2): the heal's 200-consecutive-
-/// observation bar cannot distinguish a LEAKED count from a
-/// LEGITIMATE waiter inside a slow acquire — the rs2 waits were on
-/// the stalled binder OWNER-LATCH chain (latch_age 2820ms), and the
-/// 20.5s heal storm zeroed live waiters' counts mid-acquire
-/// (was=0x10001/0x10003), manufacturing phantom counts and (pre
-/// preemptible-TTAS) permanent CPU monopolists. This stamp is the
-/// acquire-side half of the fix: a waiter inside the CONTENDED TTAS
-/// loop publishes (its Task pointer, jiffies) on its own CPU's slot
-/// once per SPIN_PREEMPT_PERIOD (64K) iterations — the same 64K
-/// boundary the preempt-exit samples need_resched at, so the stamp
-/// rides the existing heartbeat (~0.07-2ms native/KVM, well inside
-/// one tick). The tick-side heal consults the slot via
-/// [`acquire_evidence_fresh`] before zeroing anything: a count with
-/// fresh acquire evidence is a LIVE waiter, not a leak, and must
-/// never be healed.
-///
-/// Concurrency argument (all Relaxed): the only writer is the CPU's
-/// current spinner inside lock()'s contended loop, and the only
-/// reader is the tick IRQ on that SAME CPU — the tick interrupts the
-/// loop, so the pair never runs concurrently and per-word coherence
-/// is enough (same shape as the TICK_ENTRY_PC stamps). A coupled
-/// spinner (preempt_count >= 1) cannot migrate or be preempted, so
-/// the stamp's task identity is stable for the whole contended wait.
-pub struct AcquireEvidence {
-    /// Task pointer of the spinner that last stamped this CPU's slot
-    /// (0 = never stamped). Written by the spinner, read by its own
-    /// CPU's tick.
-    pub task: AtomicUsize,
-    /// Jiffies at the last 64K-boundary stamp. Age is only meaningful
-    /// together with a matching `task`.
-    pub jiffies: AtomicU64,
-}
+// ==================== Acquire evidence (HEAL-GATE, 122nd) ====================
 
 /// Freshness bound for acquire evidence, in jiffies. A live spinner
 /// refreshes the stamp every ~0.07-2ms (KVM/native; TCG ~10x slower),
@@ -191,45 +162,6 @@ fn caller_return_address() -> usize {
         ra = 0;
     }
     ra
-}
-
-pub struct RawSpinlock {
-    /// THE single authority for the lock's state: `0` = free,
-    /// `cpu + 1` = held by `cpu` (grq-source-fix, 2026-11-19).
-    ///
-    /// The reference discipline (qspinlock's locked byte + tail cpu, and
-    /// debug spinlocks' owner check) is that ONE word answers BOTH
-    /// "is it held" and "by whom": the acquire is a single cmpxchg that
-    /// publishes lock+owner together, and the release is a single
-    /// ordered Release store of 0 that clears them together. An
-    /// auxiliary "held" tracker written as a SECOND step (the round-6
-    /// GRQ_HELD per-cpu bool) made the release interruptible between
-    /// "tracker now says free" and "word still says held" — a fault in
-    /// that window strands a word no tracker claims (the gl3 orphaned-
-    /// word wedge: seven waiters, no holder, forever). With the owner
-    /// IN the word there is no second authority that can disagree:
-    /// any interruption before the release store leaves the word
-    /// self-describing (owner = the interrupted cpu), and after it
-    /// leaves nothing stranded. Ownership queries (`holder_cpu`,
-    /// `held_by`) are DERIVED from this word and can never be stale
-    /// relative to it.
-    locked: AtomicU32,
-    /// Deadlock diagnostics: holder's hart id + 1 (0 = free).  Written
-    /// AFTER acquiring / cleared BEFORE releasing, so a concurrent reader
-    /// may briefly see a stale value — fine for the watchdog print, which
-    /// only needs "who held it when everything wedged".
-    #[cfg(feature = "debug-lock-owner")]
-    owner: AtomicUsize,
-    /// oh-crash 91st (leak hunt): LAST-acquire forensics — pid + call
-    /// site + jiffies of the most recent acquire. NOT cleared on unlock
-    /// (they name the acquirer even after a leaked/dropped unlock), at
-    /// one relaxed store each on the acquire path.
-    #[cfg(feature = "debug-lock-owner")]
-    acq_pid: AtomicU32,
-    #[cfg(feature = "debug-lock-owner")]
-    acq_site: AtomicUsize,
-    #[cfg(feature = "debug-lock-owner")]
-    acq_jiffies: AtomicU64,
 }
 
 impl RawSpinlock {
@@ -908,11 +840,6 @@ impl Spinlock<i32> {
     }
 }
 
-pub struct Spinlock<T: ?Sized> {
-    raw: RawSpinlock,
-    data: UnsafeCell<T>,
-}
-
 // SAFETY: Spinlock<T> only allows &mut T access via the guard, which exists
 // only while the inner lock is held.  Send is required so the lock (and its
 // data) can be moved between threads; Sync is safe because the lock mediates
@@ -1053,10 +980,6 @@ impl<T> Spinlock<T> {
 
 // ==================== SpinlockGuard (plain) ====================
 
-pub struct SpinlockGuard<'a, T: ?Sized> {
-    lock: &'a Spinlock<T>,
-}
-
 // SAFETY: SpinlockGuard exists only while the lock is held, so the guarded
 // data cannot be accessed concurrently from another thread.
 unsafe impl<T: ?Sized + Send> Send for SpinlockGuard<'_, T> {}
@@ -1098,11 +1021,6 @@ impl<T: ?Sized> Drop for SpinlockGuard<'_, T> {
 }
 
 // ==================== SpinlockIrqGuard (irqsave) ====================
-
-pub struct SpinlockIrqGuard<'a, T: ?Sized> {
-    lock: &'a Spinlock<T>,
-    flags: bool,
-}
 
 // D-11 typed-lock-key (round-5): a live irqsave guard proves the holder
 // owns this lock's critical section — OnceSlot::get_mut_locked accepts
@@ -1172,10 +1090,6 @@ impl<T: ?Sized> SpinlockIrqGuard<'_, T> {
 }
 
 // ==================== SpinlockBhGuard (bottom-half) ====================
-
-pub struct SpinlockBhGuard<'a, T: ?Sized> {
-    lock: &'a Spinlock<T>,
-}
 
 // SAFETY: SpinlockBhGuard exists only while the lock is held, so the
 // guarded data cannot be accessed concurrently.
