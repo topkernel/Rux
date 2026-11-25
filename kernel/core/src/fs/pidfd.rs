@@ -55,14 +55,10 @@ pub fn exit_notify_all_waiters() {
     let _n = PIDFD_EXIT_WAITQ.wake_up_all();
 }
 
-/// The pinned identity carried by every pidfd-shaped file.
-pub struct PidFdData {
-    /// The process id (thread-group id) at open time.
-    pub pid: u32,
-    /// PINNED thread-group leader. Valid until `close` drops the pin;
-    /// never dereferenced beyond pid/state/cred reads.
-    pub task: *mut Task,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::pidfd::…` paths are unchanged.
+pub use super::types::PidFdData;
 
 /// Pin the thread-group leader of `pid` (pidfd identity). Returns None
 /// when the pid is absent.

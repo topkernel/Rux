@@ -21,8 +21,11 @@ use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
 
-/// Inode number type
-pub type Ino = u64;
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::inode::…` paths are unchanged.
+pub use super::types::{Ino, VfsDirEntry, InodeMode, INodeOps, InodeState, Inode, InodeCacheStats};
+use super::types::{AnonDevMap, InodeHashBucket, InodeCache};
 
 /// Setattr attribute types
 pub mod setattr_attr {
@@ -50,17 +53,6 @@ pub mod file_type {
     pub const DT_WHT: u8 = 14;
 }
 
-/// Unified directory entry returned by inode.ops.readdir.
-/// All filesystems convert their internal entry types to this.
-pub struct VfsDirEntry {
-    /// Inode number
-    pub ino: u64,
-    /// Entry name (UTF-8, no NUL terminator)
-    pub name: alloc::vec::Vec<u8>,
-    /// File type (DT_REG, DT_DIR, DT_CHR, DT_LNK, etc.)
-    pub file_type: u8,
-}
-
 /// chattr/lsattr file flags (linux/fs.h FS_*_FL). Bit values are shared
 /// with the ext4 on-disk i_flags encoding.
 #[allow(dead_code)]
@@ -85,12 +77,6 @@ pub const FS_NOCOW_FL: u32 = 0x0080_0000;
 pub const FS_FL_USER_VISIBLE: u32 = 0x0003_DFFF;
 /// Bits userland may change through FS_IOC_SETFLAGS.
 pub const FS_FL_USER_MODIFIABLE: u32 = 0x0003_80FF;
-
-/// Inode mode (file type and permissions)
-///
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct InodeMode(u32);
 
 impl InodeMode {
     /// File type mask
@@ -160,144 +146,6 @@ impl InodeMode {
     pub fn bits(&self) -> u32 {
         self.0
     }
-}
-
-/// Inode operation function pointer table
-///
-/// All operations take:
-/// - `dir`: Parent directory inode (for create/unlink/mkdir/rmdir)
-/// - `name`: Entry name
-/// - Additional parameters as needed
-///
-/// Returns:
-/// - 0 on success
-/// - Negative errno on failure
-#[repr(C)]
-pub struct INodeOps {
-    // ==================== Directory Operations ====================
-
-    /// Lookup entry in directory
-    /// Returns inode number if found, or error
-    pub lookup: Option<fn(&Inode, &[u8]) -> Result<Ino, Errno>>,
-
-    /// Create regular file
-    pub create: Option<fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, Errno>>,
-
-    /// Create hard link
-    /// Arguments: (dir, name, target_inode)
-    pub link: Option<fn(&Inode, &[u8], &Inode) -> i32>,
-
-    /// Remove directory entry (unlink file)
-    pub unlink: Option<fn(&Inode, &[u8]) -> i32>,
-
-    /// Create symbolic link
-    /// Arguments: (dir, name, target_path)
-    pub symlink: Option<fn(&Inode, &[u8], &[u8]) -> Result<Arc<Inode>, Errno>>,
-
-    /// Create directory
-    pub mkdir: Option<fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, Errno>>,
-
-    /// Remove empty directory
-    pub rmdir: Option<fn(&Inode, &[u8]) -> i32>,
-
-    /// Create device node (mknod)
-    pub mknod: Option<fn(&Inode, &[u8], InodeMode, u64) -> Result<Arc<Inode>, Errno>>,
-
-    /// Rename file/directory
-    /// Arguments: (old_dir, old_name, new_dir, new_name)
-    pub rename: Option<fn(&Inode, &[u8], &Inode, &[u8]) -> i32>,
-
-    // ==================== Symlink Operations ====================
-
-    /// Read symbolic link target
-    /// Returns number of bytes written to buffer, or negative errno
-    pub readlink: Option<fn(&Inode, &mut [u8]) -> isize>,
-
-    // ==================== File Operations (delegated) ====================
-
-    /// Get file operations for this inode
-    /// This allows inode-specific file operations
-    pub get_file_ops: Option<fn(&Inode) -> Option<&'static crate::fs::file::FileOps>>,
-
-    /// List directory entries.
-    /// Returns a vector of VfsDirEntry on success, None if not a directory / error.
-    pub readdir: Option<fn(&Inode) -> Option<alloc::vec::Vec<VfsDirEntry>>>,
-
-    /// Incremental directory read — the reference kernel's ext4_readdir
-    /// shape (getdents lane, 2026-11-17). Fills `buf` with packed
-    /// linux_dirent64 records (d_ino u64 / d_off u64 / d_reclen u16 /
-    /// d_type u8 / name / NUL / zero pad to 8) starting at directory
-    /// BYTE offset `pos`, and returns `(bytes_filled, next_pos)`.
-    ///
-    /// Contract:
-    /// - `next_pos` is the byte offset of the first entry NOT emitted
-    ///   (the resume point; getdents64 stores it as the file position,
-    ///   and each record's d_off names it — telldir/seekdir round-trip
-    ///   through lseek with no conversion).
-    /// - Zero bytes filled means EOF (pos at/after the directory size,
-    ///   or nothing emittable remains). Err(EINVAL) when the buffer is
-    ///   too small for even one entry but emittable entries remain.
-    /// - The op writes EVERY byte of [0..bytes_filled) — pad bytes
-    ///   included — so the syscall layer may copy exactly that prefix
-    ///   to userspace without a pre-zeroing pass.
-    /// - The op may sleep (block I/O); callers hold no spinlocks.
-    ///
-    /// A filesystem providing this op serves getdents64 WITHOUT
-    /// whole-directory materialization (no Vec<VfsDirEntry>, no
-    /// per-name heap allocation) and bypasses the per-open DirentCache
-    /// snapshot: each call reads only the directory blocks that cover
-    /// [pos, pos + buf.len()), exactly like the reference's
-    /// block-at-a-time filldir loop. `readdir` above stays as the
-    /// Vec-returning fallback for callers that want whole listings.
-    pub readdir_fill:
-        Option<fn(&Inode, pos: u64, buf: &mut [u8]) -> Result<(usize, u64), i32>>,
-
-    /// F4 route-4 (getdents64 cache): whether this filesystem's
-    /// directory listings may be cached across getdents64 calls on one
-    /// open file description. True is ONLY safe for filesystems whose
-    /// directory content changes exclusively through the INodeOps
-    /// mutation entry points above (create/link/unlink/symlink/mkdir/
-    /// rmdir/mknod/rename) — every successful dispatch bumps the global
-    /// VFS directory epoch (vfs::VFS_DIR_EPOCH), and the cache re-checks
-    /// that epoch, so any mutation invalidates every cached listing.
-    /// Dynamic filesystems whose content changes WITHOUT a mutation op
-    /// (procfs: process spawn/exit; devfs: device registration; sysfs/
-    /// debugfs/cgroupfs/selinuxfs: live state) MUST set false.
-    pub readdir_cacheable: bool,
-
-    /// Called when a file is opened. Allows FS to set up file.private_data.
-    /// Returns 0 on success, negative errno on failure.
-    pub open: Option<fn(&Inode, &crate::fs::File) -> i32>,
-
-    // ==================== Permission Operations ====================
-
-    /// Check permission
-    /// Returns 0 if allowed, negative errno if denied
-    pub permission: Option<fn(&Inode, u32) -> i32>,
-
-    // ==================== Attribute Operations ====================
-
-    /// Get attributes (stat)
-    /// Returns 0 on success, fills in stat structure
-    pub getattr: Option<fn(&Inode, &mut crate::fs::Stat) -> i32>,
-
-    /// Set attributes
-    /// attr: ATTR_MODE (1), ATTR_UID (2), ATTR_GID (3), ATTR_SIZE (4), ATTR_UID_GID (5)
-    /// arg1/arg2: attribute-specific values
-    pub setattr: Option<fn(&Inode, u32, u64, u64) -> i32>,
-
-    // ==================== Inode Instantiation ====================
-
-    /// Instantiate a VFS Inode from (parent_inode, name, child_ino).
-    /// Called by dentry-based path_lookup after op_lookup returns the inode number.
-    /// Each filesystem implements this to create a fully populated VFS Inode.
-    pub iget: Option<fn(&Inode, &[u8], Ino) -> Result<Arc<Inode>, Errno>>,
-
-    // ==================== Inode Lifecycle ====================
-
-    /// Called when an inode is about to be freed (refcount drops to zero).
-    /// Use this to reclaim private_data (e.g., Arc::from_raw for leaked Arcs).
-    pub destroy_inode: Option<fn(&mut Inode)>,
 }
 
 /// INV-VFSOPS-1 (unsafe-slim rounds 3-4): every dispatch through an
@@ -540,19 +388,6 @@ impl INodeOps {
     }
 }
 
-/// Inode state
-///
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum InodeState {
-    /// Newly allocated inode
-    INew = 0,
-    /// Inode exists
-    IExisting = 1,
-    /// Inode being deleted
-    IDying = 2,
-}
-
 /// Index node
 ///
 /// Each inode represents an object (file, directory, symlink, etc.) in a filesystem.
@@ -590,8 +425,6 @@ pub const FS_ID_SELINUXFS: u64 = 0x534C_4E58_0005;
 // lock. Retired snapshots leak: mounts per boot are tens, each map a
 // few hundred bytes — bounded, and freeing would race lock-free readers.
 // ============================================================================
-
-struct AnonDevMap(alloc::collections::BTreeMap<u64, crate::fs::dev_t::DevNo>);
 
 static ANON_DEV_NEXT: AtomicU32 = AtomicU32::new(1);
 static ANON_DEV_MAP: core::sync::atomic::AtomicPtr<AnonDevMap> =
@@ -638,102 +471,6 @@ pub fn stat_dev_for_fs(fs_id: u64) -> crate::fs::dev_t::DevNo {
 /// for every inode of the instance (bind/move mounts included).
 pub fn stat_dev_user(fs_id: u64) -> u64 {
     stat_dev_for_fs(fs_id).to_user_dev()
-}
-
-#[repr(C)]
-pub struct Inode {
-    // ==================== Core Fields ====================
-
-    /// Filesystem identifier (used as part of icache key to avoid cross-FS collisions)
-    pub fs_id: u64,
-    /// Inode number (unique within filesystem)
-    pub ino: Ino,
-    /// Inode mode (file type and permissions)
-    pub mode: InodeMode,
-    /// File size in bytes
-    pub size: AtomicU64,
-    /// Device number (for device inodes)
-    pub rdev: u64,
-    /// Device number (atomic mirror — settable through an Arc<Inode> for
-    /// retyped device nodes created by mknod on non-devfs filesystems)
-    pub rdev_atomic: AtomicU64,
-    /// Owner user ID
-    pub uid: AtomicU32,
-    /// Owner group ID
-    pub gid: AtomicU32,
-    /// (negative-lookup memo, 21st successor) Directory content
-    /// generation: bumped on every successful mutation dispatched with
-    /// this inode as the parent directory (create/mkdir/unlink/rmdir/
-    /// rename/link/symlink/mknod). Stamp lives on the INODE, not the
-    /// dentry, because bind-mount aliases of one directory are separate
-    /// dentries sharing this inode — a memo cached under the sandbox
-    /// view must invalidate when the file appears through the host view
-    /// (and vice versa). The path walk's memo-hit check compares a
-    /// memo child's stamp against this counter.
-    pub dir_mut_gen: AtomicU64,
-    /// Inode state
-    pub state: Spinlock<InodeState>,
-
-    // ==================== Operations ====================
-
-    /// Inode operations (filesystem-specific)
-    pub ops: Option<&'static INodeOps>,
-
-    // ==================== Filesystem Linkage ====================
-
-    /// Pointer to superblock (filesystem this inode belongs to)
-    /// This is a raw pointer to avoid circular references
-    pub sb: Option<*mut u8>,  // Points to filesystem-private data (e.g., Ext4Inode)
-
-    // ==================== Private Data ====================
-
-    /// Private data for filesystem-specific use
-    /// For RootFS: points to RootFSNode
-    /// For ext4: points to Ext4Inode
-    pub private_data: Option<*mut u8>,
-
-    // ==================== Data ====================
-
-    /// File data (used for memory-backed files like RootFS)
-    /// For block-backed filesystems, this is None and data is read from disk
-    pub data: Spinlock<Option<FileBuffer>>,
-
-    /// Extended attributes (P1 xattr minimal): name → value, allocated
-    /// lazily on the first set. In-memory only — ext4 does not persist
-    /// them and an icache eviction of the inode loses the set (documented
-    /// limitation; a real on-disk xattr block is future work).
-    pub xattrs: Spinlock<Option<alloc::collections::BTreeMap<alloc::vec::Vec<u8>, alloc::vec::Vec<u8>>>>,
-
-    /// chattr-style file flags (FS_*_FL — FS_IMMUTABLE_FL 0x10,
-    /// FS_APPEND_FL 0x20, ...), as served by FS_IOC_GETFLAGS/SETFLAGS.
-    /// ext4 seeds this from the on-disk i_flags at iget and SETFLAGS
-    /// persists it back; all other filesystems keep it in-memory only
-    /// (same lifetime caveat as `xattrs`).
-    pub ioc_flags: AtomicU32,
-
-    // ==================== Open-description counts ====================
-    // (stat-2x lane) The i_readcount/i_writecount analogue, per inode.
-    // These replaced a GLOBAL Spinlock<BTreeMap<(u64,u64), OpenCounts>>
-    // that every open() and close() locked and walked (register: lock +
-    // tree entry; unregister: lock + get_mut + maybe remove) — the
-    // readers (execve's ETXTBSY gate, the F_SETLEASE grant checks,
-    // break_lease's pending-breaker counts) all arrive with the inode
-    // in hand, so per-inode atomics answer them directly. Reference
-    // parity: Linux keeps i_readcount/i_writecount as per-inode atomic_t
-    // for exactly this reason.
-    /// Live open file descriptions on this inode (total).
-    pub open_total: AtomicU32,
-    /// Of those, the ones opened for write access (O_WRONLY/O_RDWR).
-    pub open_write: AtomicU32,
-    /// Openers currently BLOCKED in break_lease (pending total).
-    pub open_breaking: AtomicU32,
-    /// Of those, blocked WRITE-mode breakers (see locks::break_lease).
-    pub open_breaking_write: AtomicU32,
-
-    // ==================== Reference Counting ====================
-
-    /// Reference count
-    ref_count: AtomicU64,
 }
 
 unsafe impl Send for Inode {}
@@ -1143,17 +880,6 @@ pub fn make_fifo_inode(ino: Ino) -> Inode {
 /// repair agents.
 const ICACHE_SIZE: usize = 1024;
 
-/// Inode cache statistics
-#[derive(Debug)]
-pub struct InodeCacheStats {
-    /// Cache hit count
-    pub hits: AtomicU64,
-    /// Cache miss count
-    pub misses: AtomicU64,
-    /// Eviction count
-    pub evictions: AtomicU64,
-}
-
 impl InodeCacheStats {
     pub fn new() -> Self {
         Self {
@@ -1187,18 +913,6 @@ impl InodeCacheStats {
     }
 }
 
-/// Hash table bucket
-struct InodeHashBucket {
-    /// inode pointer
-    inode: Option<Arc<Inode>>,
-    /// inode number (for quick comparison)
-    ino: Ino,
-    /// filesystem identifier (for cross-FS uniqueness)
-    fs_id: u64,
-    /// LRU timestamp (for eviction)
-    access_time: AtomicU64,
-}
-
 impl Clone for InodeHashBucket {
     fn clone(&self) -> Self {
         Self {
@@ -1208,18 +922,6 @@ impl Clone for InodeHashBucket {
             access_time: AtomicU64::new(self.access_time.load(Ordering::Relaxed)),
         }
     }
-}
-
-/// Inode hash table
-struct InodeCache {
-    /// Hash table (heap-allocated to avoid large stack allocation)
-    buckets: alloc::boxed::Box<[InodeHashBucket]>,
-    /// Number of entries in cache
-    count: usize,
-    /// Global timestamp (for LRU)
-    global_time: AtomicU64,
-    /// Statistics
-    stats: InodeCacheStats,
 }
 
 unsafe impl Send for InodeCache {}

@@ -75,14 +75,10 @@ const KD_GRAPHICS: u32 = 0x01;
 /// Keyboard type answer for KDGKBTYPE: 101-key PC (Xorg's probe).
 const KB_101: u8 = 0x02;
 
-/// struct vt_mode (8 bytes): mode, waitv, relsig, acqsig, frsig.
-pub(crate) struct VtMode {
-    pub(crate) mode: u8,
-    pub(crate) waitv: u8,
-    pub(crate) relsig: u16,
-    pub(crate) acqsig: u16,
-    pub(crate) frsig: u16,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::vt::…` paths are unchanged.
+pub(crate) use super::types::VtMode;
 
 // ============================================================================
 // Global VT state

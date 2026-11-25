@@ -23,9 +23,19 @@ use crate::drivers::blkdev;
 // Buffer State
 // ============================================================================
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct BufferState(u8);
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::bio::…` paths are unchanged.
+pub use super::types::{
+    BufferState,
+    BufferHead,
+    BlockCache,
+    MAX_WRITE_BATCH,
+    WriteBatch,
+    Publication,
+    PendingPublications,
+};
+use super::types::{CacheEntry, HashBucket, LruState, WriteSlot, WriteSource, WritePlan};
 
 impl BufferState {
     pub const BH_Uptodate: u8 = 0;  // Buffer contains valid data
@@ -70,21 +80,6 @@ impl BufferState {
 // ============================================================================
 // Buffer Head
 // ============================================================================
-
-pub struct BufferHead {
-    /// Block device (typed handle; INV-BLKDEV-1 on blkdev::get_disk)
-    pub b_device: Option<&'static blkdev::GenDisk>,
-    /// Block number
-    pub b_blocknr: u64,
-    /// Block size
-    pub b_size: u32,
-    /// Buffer state
-    pub b_state: Spinlock<BufferState>,
-    /// Data
-    pub b_data: Vec<u8>,
-    /// Reference count
-    b_count: AtomicU32,
-}
 
 // SAFETY: BufferHead's mutable state (b_data) is protected by BufferState spinlock;
 // other fields are atomic or only accessed under lock.
@@ -232,27 +227,6 @@ impl BufferHead {
 // Cache Entry (for chaining and LRU)
 // ============================================================================
 
-/// Cache entry wrapper for hash chaining and LRU list
-struct CacheEntry {
-    /// The actual buffer head (raw pointer, owned by this entry)
-    bh: *mut BufferHead,
-    /// Key: (device_major, device_minor, blocknr) for fast lookup.
-    /// Minor included (review 5.3 low): two partitions of the same disk
-    /// share a major number — without the minor, block N of partition A
-    /// was served as block N of partition B.
-    key: (u32, u32, u64),
-    /// Next entry in hash chain
-    hash_next: Option<*mut CacheEntry>,
-    /// Previous entry in LRU list (more recent)
-    lru_prev: Option<*mut CacheEntry>,
-    /// Next entry in LRU list (less recent)
-    lru_next: Option<*mut CacheEntry>,
-    /// Eviction in progress (set under the bucket lock before the entry
-    /// leaves the hash chain) — get() must skip such entries so no pin can
-    /// arrive while the victim is being unlinked and freed (R7-C1).
-    evicting: bool,
-}
-
 impl CacheEntry {
     fn new(bh: Box<BufferHead>, device_major: u32, device_minor: u32, blocknr: u64) -> Self {
         Self {
@@ -328,44 +302,6 @@ impl Drop for CacheEntry {
 // ============================================================================
 // Block Cache with Per-Bucket Locking and LRU
 // ============================================================================
-
-/// A single hash bucket, protected by its own spinlock.
-struct HashBucket {
-    /// Head of the hash chain
-    head: Option<*mut CacheEntry>,
-}
-
-/// Shared LRU list state (accessed under any bucket lock — each operation
-/// touches only O(1) LRU nodes so contention is minimal).
-struct LruState {
-    head: Option<*mut CacheEntry>,
-    tail: Option<*mut CacheEntry>,
-}
-
-/// Block cache with per-bucket spinlock, global LRU, and atomic count.
-///
-/// # Lock hierarchy (MUST be followed to prevent deadlock)
-///
-/// 1. **Bucket lock** → 2. **LRU lock** (when both needed, always acquire
-///    bucket lock first). LRU lock may be acquired alone (e.g. in evict_one).
-/// 3. **BufferState lock** — per-buffer state, nested inside bucket lock.
-///
-/// No global mutex is held during I/O. Eviction syncs dirty buffers
-/// *after* releasing the bucket lock.
-pub struct BlockCache {
-    /// Per-bucket hash chains, each with its own lock
-    buckets: Vec<Spinlock<HashBucket>>,
-    /// Global LRU list (manipulated only while holding a bucket lock)
-    lru: Spinlock<LruState>,
-    /// Global entry count (atomic — no lock needed to check capacity)
-    count: AtomicU32,
-    /// Hash table size (must be power of 2)
-    hash_size: usize,
-    /// Maximum entries (cache capacity)
-    max_entries: usize,
-    /// Block size
-    block_size: u32,
-}
 
 // SAFETY: BlockCache is only accessed via &self methods that use internal locking
 // (per-bucket Spinlock and LRU Spinlock) and atomic count; raw pointers are
@@ -2127,33 +2063,6 @@ pub fn bfree_multi(bh: *mut BufferHead) {
 // failed/timed-out span reports its own status — the caller keeps that
 // span's buffers dirty for the standing durability points.
 
-/// In-flight cap of one WriteBatch window. Bounds the batch's private
-/// memory (32 x 64 KiB spans = 2 MiB) and the device's pending-table
-/// pressure (MAX_PENDING_IO_PCI = 64); the 32-submission safety-kick bound
-/// of the PCI submit path matches it.
-pub const MAX_WRITE_BATCH: usize = 32;
-
-/// One inline batch slot: DMA source plus its completion (SUBMIT-2X:
-/// the old shape Box-allocated the IoCompletion per span and pushed
-/// both the entry and the results Vec — three global-allocator round
-/// trips per 4 KiB direct write, ~half the write half's per-op delta
-/// vs the read side, which already drains a stack completion array.
-/// The inline slots cost a ~3 KiB zeroing construction, an order of
-/// magnitude cheaper, and never touch the heap in the steady state).
-struct WriteSlot {
-    /// Valid only while the slot is live (index < len): the span's DMA
-    /// source. Reset to the empty Borrowed shape by flush().
-    data: WriteSource,
-    /// Pre-armed completion; reset by flush() for reuse (the same
-    /// discipline the direct-read batch's stack array follows).
-    completion: crate::fs::io_completion::IoCompletion,
-    /// Device-side start sector of this span (512-byte units) — the
-    /// fusion key. Only meaningful on the deferred path.
-    sector: u64,
-    /// Target device of this span — groups never fuse across devices.
-    dev: Option<&'static blkdev::GenDisk>,
-}
-
 impl WriteSlot {
     const EMPTY: WriteSlot = WriteSlot {
         data: WriteSource::Borrowed {
@@ -2164,61 +2073,6 @@ impl WriteSlot {
         sector: 0,
         dev: None,
     };
-}
-
-/// A batch of asynchronously-submitted device writes (plugged writes).
-///
-/// Typical use (the run-batched flush's span path):
-/// ```ignore
-/// let mut batch = WriteBatch::new();
-/// // ... per contiguous span:
-/// if !batch.submit(dev, sector, span_bytes) {
-///     // device without async write / window lag: drain + retry once,
-///     // then fall back to blkdev_write for THIS span.
-/// }
-/// // ... after the last span:
-/// batch.flush();
-/// for i in 0..flushed { if batch.status(i) == 0 { /* clear BH_Dirty */ } }
-/// ```
-///
-/// FUSION (the blk-merge front/back-merge shape, 2026-11-18): when the
-/// device accepts SG requests, spans are NOT submitted at submit() time —
-/// they accumulate in the window (the plug list) and flush() fuses every
-/// run of device-adjacent spans (same device, sector_{i}+len_i ==
-/// sector_{i+1}) into ONE scatter-gather chain: one request header, one
-/// starting sector, N data descriptors, one completion — one device
-/// round trip per fused group instead of one per span. Nothing is lost
-/// by the deferral: chains are published QUIETLY and the device only
-/// sees work at the kick, which has always happened at drain. Devices
-/// without SG support keep the immediate per-span submission shape.
-pub struct WriteBatch {
-    /// Inline slots; entries are slots[0..len].
-    slots: [WriteSlot; MAX_WRITE_BATCH],
-    /// Live entry count.
-    len: usize,
-    /// Per-entry outcome of the LAST flush(), indexed by submission
-    /// order. Valid for i < results_n; reset by the next flush.
-    results: [i32; MAX_WRITE_BATCH],
-    results_n: usize,
-    /// Deferred (fusion) mode: decided by the FIRST submit from the
-    /// device's SG capability. False → immediate per-span submission
-    /// (the pre-fusion shape).
-    deferred: bool,
-    /// Mode decided (first submit happened).
-    mode_set: bool,
-}
-
-/// DMA source of a batch entry: the batch's private copy (submit) or the
-/// CALLER's buffer (submit_ref — paired-test item 1: the DIO write fast
-/// path DMAs straight from the syscall's staging slice, saving one full
-/// copy per span; the caller guarantees the bytes stay valid and
-/// unmodified until the drain).
-enum WriteSource {
-    Owned(alloc::boxed::Box<[u8]>),
-    Borrowed {
-        ptr: *const u8,
-        len: usize,
-    },
 }
 
 impl WriteSource {
@@ -2986,50 +2840,8 @@ pub fn init() {
 // flush path takes PENDING without any bucket lock, so the order is
 // acyclic.
 
-/// One deferred directory-entry publication (see the block comment above).
-pub struct Publication {
-    /// Monotonic id; the delete-side capture window addresses its record.
-    pub id: u64,
-    /// (major, minor) of the owning device.
-    pub device: (u32, u32),
-    /// Blocks that must persist BEFORE `entry` (create-side metadata).
-    pub pre: Vec<u64>,
-    /// The publishing directory block (None for post-only stragglers).
-    pub entry: Option<u64>,
-    /// Blocks that must persist AFTER `entry` (delete-side frees).
-    pub post: Vec<u64>,
-    /// Publishing context identity (the publishing task's address; 0 only
-    /// for the no-task early-boot case). Scoped durability points flush
-    /// only their own cookie's records — the leg-29A O(pending) fix: a
-    /// whole-queue drain inside every fsync/fdatasync/mkdir made latency
-    /// proportional to the WORLD's outstanding publications, and the
-    /// drain's racing-publisher loop could pin an fsync for minutes under
-    /// provisioning churn (sc310's 43-min hiview fdatasync).
-    pub cookie: u64,
-}
-
 static PENDING_PUBLICATIONS: Spinlock<PendingPublications> =
     Spinlock::new(PendingPublications::new());
-
-/// Leg-54 fix (the e3c1ec35 displacement, pa93j/pa95j evidence): the
-/// pending-publication queue with a CONSTRAINED-BLOCK INDEX. The old
-/// `Vec<Publication>` made `publication_constrained` — which runs at
-/// EVERY out-of-band buffer write (sync_dirty_buffer, eviction victims,
-/// journal commit write-through) — a linear scan of the whole queue and
-/// each record's post list: with the post-mkdir flush deleted the queue
-/// legitimately holds thousands of records during provisioning churn,
-/// and every unlink's buffer writes paid O(queue x post-len) — p6_unlink
-/// 10.2-10.8ms vs the 77-119us class. The index maps (device, block) ->
-/// number of pending records constraining that block (entry == block or
-/// post contains block, H1/H2's exact sets); membership checks are
-/// O(log n). Mutations maintain it; wholesale take/requeue (the drain
-/// snapshot pattern) rebuilds it once per requeue — drains are per
-/// durability point, never per write.
-#[allow(dead_code)]
-pub struct PendingPublications {
-    list: Vec<Publication>,
-    index: alloc::collections::BTreeMap<((u32, u32), u64), u32>,
-}
 
 impl PendingPublications {
     pub const fn new() -> Self {
@@ -3347,22 +3159,6 @@ pub fn publication_constrained(mj: u32, mi: u32, blocknr: u64) -> bool {
 // does I/O lock-free, then re-merges under a fresh hold. Foreign records
 // are re-merged BEFORE any records appended during the I/O (append order
 // preserved).
-
-/// Ordered write plan for a scoped flush: `pre` blocks (no obligations of
-/// their own), then `entry` blocks (each may complete pending records'
-/// publications — their pres must already be in `pre`), then `post` blocks
-/// (only the caller's own records' posts are ever scheduled). Blocks that
-/// would land in two phases are written in the EARLIEST phase EXCEPT that
-/// a block which is a pending `entry` anywhere in the plan is never
-/// written in `pre` (it must follow its pres) — see `push_*` below.
-struct WritePlan {
-    pre: Vec<u64>,
-    entry: Vec<u64>,
-    post: Vec<u64>,
-    /// All entry-role blocks of the CURRENT queue snapshot (drives the
-    /// pre/entry exclusion rule while the plan is being built).
-    entry_role: Vec<u64>,
-}
 
 impl WritePlan {
     fn new() -> Self {

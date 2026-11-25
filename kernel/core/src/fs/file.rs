@@ -20,9 +20,22 @@ use crate::sync::spinlock::Spinlock;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct FileFlags(u32);
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::file::…` paths are unchanged.
+pub use super::types::{
+    FileFlags,
+    FileOps,
+    FileOpsBuilder,
+    FileOpKind,
+    DirentCacheSnapshot,
+    File,
+    FileOwner,
+    MAX_FDS,
+    FdTable,
+    FastFd,
+};
+use super::types::{FdTableEntry, FdSlot};
 
 impl FileFlags {
     pub const O_RDONLY: u32 = 0o00000000;
@@ -99,49 +112,6 @@ impl FileFlags {
     }
 }
 
-#[repr(C)]
-pub struct FileOps {
-    /// Read file
-    pub read: Option<fn(&File, &mut [u8]) -> isize>,
-    /// Write file
-    pub write: Option<fn(&File, &[u8]) -> isize>,
-    /// Seek file position
-    pub lseek: Option<fn(&File, isize, i32) -> isize>,
-    /// Close file
-    pub close: Option<fn(&File) -> i32>,
-    /// Poll for readiness (takes requested events mask, returns ready events mask)
-    pub poll: Option<fn(&File, u16) -> u16>,
-    /// file_operations.flush: invoked when an fd is closed (and at
-    /// fork/inherit checks) — the file's chance to interrupt waiters
-    /// before the description goes away (reference binder_flush wakes
-    /// every waiting looper with looper_need_return; plain files have
-    /// no flush). Distinct from `close` (last-reference release).
-    pub flush: Option<fn(&File)>,
-    /// Positional read at an explicit offset, never touching the shared
-    /// file position (R71 demand-fault race: the generic read_at fallback
-    /// swings the file position through set_pos/read/restore — two
-    /// threads sharing this open file description (CLONE_VM peers: one
-    /// demand-faulting an mmap page, one in plain read()) interleaved the
-    /// sequence and the faulting page got filled from the OTHER thread's
-    /// offset; a libc .text page served .rodata bytes and multithreaded
-    /// loaders crashed on their own libraries). File ops used for mmap or
-    /// pread at scale (ext4, tmpfs) provide a native entry; the generic
-    /// fallback in File::read_at covers the rest.
-    pub read_at: Option<fn(&File, u64, &mut [u8]) -> isize>,
-    /// Positional write at an explicit offset, never touching the shared
-    /// file position — the write twin of `read_at` (the R71 race's write
-    /// side: ext4's set_pos/write/restore fallback raced concurrent plain
-    /// writes on the same description). Files without the slot keep the
-    /// generic position-dance fallback below.
-    pub write_at: Option<fn(&File, u64, &[u8]) -> isize>,
-    /// Demand-populate the page cache for one page-shaped file offset and
-    /// report success (the arch page-fault fill op for file mappings).
-    /// Presence is ALSO the mm policy's "page-cache-backed demand-paged
-    /// file" probe — a data-field check, no fn-pointer call, no filesystem
-    /// named (the rung-5 fault seam).
-    pub fault: Option<fn(&File, u64) -> bool>,
-}
-
 /// Capability-checked FileOps construction (rust-design-headroom §1,
 /// divergence D-6). A file TYPE declares exactly the capabilities it
 /// carries; each builder method installs one op slot and refuses a
@@ -169,10 +139,6 @@ impl FileOps {
             },
         }
     }
-}
-
-pub struct FileOpsBuilder {
-    ops: FileOps,
 }
 
 impl FileOpsBuilder {
@@ -228,29 +194,6 @@ impl FileOpsBuilder {
     pub const fn build(self) -> FileOps {
         self.ops
     }
-}
-
-/// The operation kinds the File dispatchers route. The errno a caller
-/// observes when a file type lacks the capability is decided in ONE
-/// place — `File::missing_op_errno` below — with the ABI reasoning
-/// attached; dispatch sites stop re-deriving per-callsite conventions.
-/// (The §1 paid incident: read() on a valid epoll fd once returned EBADF
-/// because the read slot was NULL — an OH event loop treated it as
-/// "fd closed" and spun 155,991 times instead of taking its EINVAL
-/// error path.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileOpKind {
-    Read,
-    Write,
-    LSeek,
-    /// Explicit-position read (pread(2)). The errno depends on WHY the
-    /// object is not positional (stream type vs op-less type), so the
-    /// decision consults the ops table, not just the one slot.
-    ReadAt,
-    /// Poll has no errno on the syscall path — the missing-poll
-    /// fallback is the always-ready mask (`File::poll_dispatch`). The
-    /// kind exists so the capability matrix is nameable per op.
-    Poll,
 }
 
 /// R36-B1: monotonically increasing open-file-description generation.
@@ -364,95 +307,6 @@ pub(crate) fn verify_arc_inner_layout() {
     drop(weak);
 }
 
-/// F4 route-4: one getdents64 listing cached per open file description.
-/// `file_getdents64` used to re-materialize the WHOLE directory on every
-/// call (ext4 list_dir: read every block + clone every entry; 27.6K full
-/// re-scans per boot, getdents avg 407 us — the f4 route map's route 4).
-/// A cacheable filesystem (INodeOps::readdir_cacheable) stores its
-/// listing here keyed by (inode identity, VFS_DIR_EPOCH); any successful
-/// directory mutation bumps the epoch, so the next call re-materializes.
-/// The entries include the synthesized "." and ".." (the synthesis runs
-/// once at materialization instead of per call). `epoch` is the epoch
-/// observed BEFORE materialization; the store additionally verifies the
-/// epoch did not move DURING materialization (a mutation racing the scan
-/// means the listing is a torn mix — serve it for this call as the old
-/// path did, but do not pin it in the cache).
-pub struct DirentCacheSnapshot {
-    /// Identity of the listed inode (Arc target address; the File's
-    /// inode slot is written once at open — if it ever changes, this
-    /// mismatch forces a re-materialization).
-    pub inode_id: usize,
-    /// VFS_DIR_EPOCH when materialization started.
-    pub epoch: u64,
-    /// Full ordered listing WITH the dot entries synthesized.
-    pub entries: alloc::vec::Vec<crate::fs::inode::VfsDirEntry>,
-}
-
-
-#[repr(C, align(16))]
-pub struct File {
-    /// R31-B3: set by close_fd when the slot was removed but an in-flight
-    /// syscall still holds a clone — the final dropper runs the close op.
-    pub close_pending: core::sync::atomic::AtomicBool,
-    /// File flags stored as AtomicU32 for lock-free concurrent access
-    /// (fcntl F_SETFL vs read/write data race fix).
-    pub flags: AtomicU32,
-    /// File position
-    pub pos: Spinlock<u64>,
-    /// Associated inode
-    pub inode: UnsafeCell<Option<Arc<Inode>>>,
-    /// Associated dentry
-    pub dentry: UnsafeCell<Option<Arc<Dentry>>>,
-    /// File operation functions
-    pub ops: UnsafeCell<Option<&'static FileOps>>,
-    /// Private data (for device-specific data)
-    pub private_data: UnsafeCell<Option<*mut u8>>,
-    /// close-on-exec flag (FD_CLOEXEC)
-    pub cloexec: Spinlock<bool>,
-    /// R36-B1: unique open-file-description id (see
-    /// FILE_ID_GENERATION_CPU). Written once in File::new before the
-    /// value is shared; readers only need a plain u64 load (the Arc
-    /// publication orders it).
-    pub file_id: u64,
-    /// Serializes the whole read/write position sequence (get_pos →
-    /// data op → set_pos) so concurrent readers/writers sharing this open
-    /// file description cannot interleave and lose offset updates
-    /// (LTP fork07: 100 forked children each read 1 byte; two CPUs both
-    /// observing pos=K and both storing K+1 left one byte unconsumed and
-    /// the parent's final read() returned 1 instead of 0). Sleeping
-    /// mutex, not a spinlock: the critical section spans inode read/write
-    /// which may sleep in block I/O (a Spinlock guard would pin
-    /// preempt_count across that window — the exact hazard b31ccab fixed
-    /// for VFS_MUTATION_LOCK). This is Linux's f_pos_lock role.
-    pub io_lock: crate::sync::semaphore::Mutex,
-    /// O_ASYNC signal destination (F_SETOWN / F_SETOWN_EX). kind 0 none,
-    /// 1 process, 2 process group, 3 thread (F_OWNER_TID).
-    pub f_owner: Spinlock<FileOwner>,
-    /// O_ASYNC signal signal number (F_SETSIG); 0 = default SIGIO.
-    pub f_signum: core::sync::atomic::AtomicI32,
-    /// F4 route-4: cached getdents64 listing (see DirentCacheSnapshot).
-    /// Arc so the hit path is one refcount bump — cloning the Vec per
-    /// call would reintroduce the per-call allocation the cache removes.
-    /// Materialization (readdir) may sleep in block I/O and runs OUTSIDE
-    /// this lock; only the slot swap is under it.
-    pub dirent_cache: Spinlock<Option<alloc::sync::Arc<DirentCacheSnapshot>>>,
-    /// Embedded readahead state (the reference's struct file carries
-    /// file_ra_state inline — oc-rc: the Box-in-private_data form paid a
-    /// slab alloc + free per open-then-read cycle, which every
-    /// read-cached workload performs per sample). Lazily initialized in
-    /// place at the first read by the filesystem that owns the
-    /// description (ext4 today); mutated only under io_lock (the same
-    /// serialization the Box form had).
-    pub ra: UnsafeCell<Option<crate::fs::readahead::ReadAheadState>>,
-}
-
-/// fasync owner set via F_SETOWN/F_SETOWN_EX (kept on the open file
-/// description, like Linux's f_owner).
-#[derive(Clone, Copy)]
-pub struct FileOwner {
-    pub kind: u8,
-    pub id: i32,
-}
 
 impl FileOwner {
     pub const fn none() -> Self {
@@ -1070,67 +924,12 @@ impl Drop for File {
 // FdTable - Using Box allocation
 // ============================================================================
 
-/// Maximum number of file descriptors per table (P1 rlimits, 2026-09).
-/// Raised 1024 → 4096 to match the default RLIMIT_NOFILE hard ceiling;
-/// per-process enforcement against task.rlimits happens in
-/// alloc_fd_from, so unprivileged tasks still get the 1024 soft default
-/// and only see more after raising it.
-pub const MAX_FDS: usize = 1024;
 // TODO(rlimits-dynamic-fds): raising this to 4096 overflows the 64KB
 // kernel stack during FdTable::new() — Box::new constructs the ~33KB
 // FdTableEntry on the STACK before moving it to the heap. A dynamic
 // Vec-backed table (or heap-then-write construction) is needed to
 // honor RLIMIT_NOFILE > 1024; until then the hard cap stays 1024
 // (the NOFILE soft default, matching the pre-rlimits behavior).
-
-/// FdTable entry stored on the heap
-struct FdTableEntry {
-    /// Per-descriptor close-on-exec bits. FD_CLOEXEC belongs to the
-    /// DESCRIPTOR in POSIX, not the underlying description: a file opened
-    /// O_CLOEXEC at fd N and dup2'd to fd M must leave M WITHOUT the flag.
-    /// The old per-File flag leaked O_CLOEXEC through dup2 — musl-based
-    /// shells open redirections O_CLOEXEC, dup2 to stdio, exec, and lost
-    /// their stdio fds (found via musl __init_libc's deliberate NULL-crash
-    /// on POLLNVAL + missing /dev/null).
-    ///
-    /// (Leg-52 lever B: the `fds` array moved OUT of the entry into
-    /// FdTable::slots — a lock-free AtomicPtr array the read path never
-    /// takes the entry lock for. This struct now holds only metadata.)
-    cloexec_bits: [u64; MAX_FDS / 64],
-    /// Occupancy bitmap (perf-gaps G2, 2026-11): one bit per slot,
-    /// maintained inside the SAME entry-lock sections that publish or
-    /// clear the slot itself (install_fd / close_fd / dup2_fd / fork_from)
-    /// — never read outside the entry lock, where it is exact by
-    /// construction. Full-table walkers (`for_each_file`, the close-time
-    /// epoll purge) iterate these 16 words instead of polling 1024
-    /// lock-free slots: epoll_purge_closed_fd's scan was measured at
-    /// ~8.9 us per close under KVM — nearly the whole p6_openclose gap —
-    /// and it runs on the last-reference close of EVERY file.
-    open_bits: [u64; MAX_FDS / 64],
-    next_fd: usize,
-    count: usize,
-}
-
-/// One lock-free fd slot: the Arc<File> as a raw pointer, null = empty.
-/// Single-word aligned stores, so a lock-free load can never observe a
-/// torn value.
-struct FdSlot(core::sync::atomic::AtomicPtr<File>);
-
-pub struct FdTable {
-    /// Lock-free slot array (leg-52 lever B, perf-report 8.10.22):
-    /// get_file ran 132-144M times/boot through entry.lock_irqsave —
-    /// an irq_save + preempt_count pair + a contended per-TABLE TTAS RMW
-    /// per lookup. Readers are now RCU readers (see get_file): an
-    /// Acquire slot load + strong-count increment inside a read-side
-    /// critical section, no lock and no bank claim. Writers mutate
-    /// slots with single-word stores under the entry lock and park any
-    /// removed occupant in the global retire queue (fs::fdreap), which
-    /// drops it after a full RCU grace period.
-    slots: alloc::boxed::Box<[FdSlot; MAX_FDS]>,
-    /// Writer serialization + descriptor metadata (cloexec bits,
-    /// allocation hint, count).
-    entry: crate::sync::spinlock::Spinlock<Box<FdTableEntry>>,
-}
 
 impl FdTable {
     /// Create new file descriptor table
@@ -1767,14 +1566,6 @@ pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: u
 pub fn get_file_fd(fd: usize) -> Option<Arc<File>> {
     use crate::sched;
     sched::get_current_fdtable()?.get_file(fd)
-}
-
-/// fdget's two outcomes (the reference's struct fd): a no-refcount
-/// borrow on an unshared table (FDPUT clear) or a full Arc reference
-/// (fget) when CLONE_FILES sharers exist.
-pub enum FastFd {
-    Borrowed(&'static File),
-    Owned(Arc<File>),
 }
 
 impl FastFd {

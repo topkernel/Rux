@@ -23,15 +23,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub const PAGE_SIZE: usize = 4096;
 
-#[repr(C)]
-pub struct Page {
-    /// Page data
-    pub data: Vec<u8>,
-    /// Page status
-    pub flags: AtomicUsize,
-    /// Reference count
-    pub ref_count: AtomicUsize,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::buffer::…` paths are unchanged.
+pub use super::types::{Page, AddressSpace, FileBuffer};
+use super::types::FileChunk;
 
 impl Page {
     /// Create new page
@@ -95,14 +91,6 @@ impl Page {
     pub fn put(&self) -> usize {
         self.ref_count.fetch_sub(1, Ordering::AcqRel) - 1
     }
-}
-
-pub struct AddressSpace {
-    /// Page tree (simplified to array)
-    /// Index is page number, value is page
-    pages: Spinlock<Vec<Option<Box<Page>>>>,
-    /// File size (bytes)
-    size: AtomicUsize,
 }
 
 impl AddressSpace {
@@ -282,14 +270,6 @@ pub const FILE_BUFFER_CHUNK: usize = 64 * 1024;
 /// log2(FILE_BUFFER_CHUNK / PAGE_SIZE) — order passed to alloc_pages.
 const CHUNK_ORDER: usize = 4;
 
-/// One fixed-size chunk: a page-allocation when the zone allocator can
-/// serve it, a heap Vec as the pre-zone-init / fallback path.
-enum FileChunk {
-    /// Physical address of an order-CHUNK_ORDER allocation.
-    Page(usize),
-    Heap(Vec<u8>),
-}
-
 impl FileChunk {
     fn new() -> Option<Self> {
         let phys = crate::mm::page_alloc::alloc_pages(
@@ -335,15 +315,6 @@ impl Drop for FileChunk {
             crate::mm::page_alloc::free_pages(phys, CHUNK_ORDER);
         }
     }
-}
-
-pub struct FileBuffer {
-    /// Logical length in bytes (chunks may hold zeros past it).
-    len: usize,
-    /// Fixed-size chunks covering [0, chunks.len()*CHUNK). All chunks
-    /// up to ceil(len/CHUNK) are allocated; a shrink keeps them until the
-    /// trailing ones are dropped.
-    chunks: Vec<FileChunk>,
 }
 
 impl FileBuffer {

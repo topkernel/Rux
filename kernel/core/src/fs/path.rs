@@ -18,15 +18,10 @@
 
 use crate::errno;
 
-#[repr(C)]
-pub struct NameiData<'a> {
-    /// Current position
-    pub path: Path<'a>,
-    /// Last component
-    pub last: Option<PathComponent<'a>>,
-    /// Lookup flags
-    pub flags: u32,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::path::…` paths are unchanged.
+pub use super::types::{NameiData, PathComponent, Path, PathComponents};
 
 pub mod namei_flags {
     pub const LOOKUP_FOLLOW: u32 = 0x0001;  // Follow symbolic links
@@ -40,14 +35,6 @@ pub mod namei_flags {
     pub const LOOKUP_NO_SYMLINKS: u32 = 0x0100;  // Don't follow symbolic links
     pub const LOOKUP_NO_RECURSE: u32 = 0x0200;  // Don't recurse
     pub const LOOKUP_PARENT: u32 = 0x2000;  // Only find parent directory
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct PathComponent<'a> {
-    /// Component name
-    pub name: &'a str,
-    /// Component length
-    pub len: usize,
 }
 
 impl<'a> PathComponent<'a> {
@@ -83,12 +70,6 @@ impl<'a> PathComponent<'a> {
     pub fn is_empty(&self) -> bool {
         self.name.is_empty()
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Path<'a> {
-    /// Path string
-    pub path: &'a str,
 }
 
 impl<'a> Path<'a> {
@@ -162,13 +143,6 @@ impl<'a> Path<'a> {
             alloc::format!("{}/{}", self.path, other)
         }
     }
-}
-
-pub struct PathComponents<'a> {
-    /// Path string
-    path: &'a str,
-    /// Current position
-    pos: usize,
 }
 
 impl<'a> Iterator for PathComponents<'a> {

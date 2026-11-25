@@ -209,15 +209,22 @@ pub fn dirty_pages() -> usize {
     DIRTY_PAGES.load(Ordering::Relaxed)
 }
 
-/// Fill source for the batch inserters: a kernel slice (read-ahead fills,
-/// staged writes) or USER memory (the buffered-write(2) fast path, BUFW-2X:
-/// bytes are copied straight into the fresh frames — ONE copy per page —
-/// and the syscall layer's staging buffer with its second copy is skipped).
-enum BatchFill<'a> {
-    Slice(&'a [u8]),
-    /// access_ok-validated user pointer + total length.
-    User { ptr: usize, len: usize },
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::page_cache::…` paths are unchanged.
+pub use super::types::{DirtyUserOutcome, InodePageCache, PageCache};
+use super::types::{
+    BatchFill,
+    CachedPage,
+    PC_READER_BANKS,
+    PcReaderBank,
+    PC_TABLE_CAP,
+    PC_TABLE_MASK,
+    PcSlot,
+    PC_PARK_BATCH,
+    PcParkBatch,
+    FrameWindow,
+};
 
 impl<'a> BatchFill<'a> {
     #[inline]
@@ -229,22 +236,6 @@ impl<'a> BatchFill<'a> {
     }
 }
 
-/// Outcome of [`PageCache::insert_dirty_user`] — the verdict the per-page
-/// buffered-write loop branches on. FAULT must be distinguishable from
-/// CONTENTION: a fault ENDS the write (short-write/EFAULT semantics), a
-/// contention just re-loops through pin-and-copy.
-pub enum DirtyUserOutcome {
-    /// Frame installed born-dirty (or a retired squatter revived with the
-    /// user page's bytes) — the caller counts the page as copied.
-    Installed,
-    /// Duplicate fresh entry / table full / OOM — the caller re-loops
-    /// through the pin-and-copy path, exactly like `insert_dirty`
-    /// returning false.
-    Contention,
-    /// The user copy faulted before any byte could be counted — the
-    /// write stops here.
-    Fault,
-}
 // evict_one skip faces (both the LRU walk and the fallback scan):
 /// Candidates skipped: cache pin (ref_count != 0).
 pub(crate) static EV_SKIP_PINNED: AtomicU64 = AtomicU64::new(0);
@@ -352,31 +343,6 @@ pub fn pcache_dirty_histogram() -> alloc::string::String {
     s
 }
 
-/// A cached page of file data, backed by a zone-allocated physical page frame.
-struct CachedPage {
-    /// Physical frame number (allocated from zone allocator).
-    pfn: usize,
-    /// Reference count counting EXTERNAL pins (get..put windows). Pages are
-    /// born at 0 — the cache's own ownership is not counted. (R7-C2: birth
-    /// ref 1 with no matching put pinned every page forever, disabling
-    /// eviction and making invalidate keep stale data.)
-    ref_count: AtomicU32,
-    /// Set when invalidate_inode found the page pinned: freed by the final
-    /// put() instead of under the reader's feet.
-    invalidated: bool,
-    /// R14-17: one-shot release latch — put() and the evict/shrink paths
-    /// can both reach the release for the same entry; the frame must be
-    /// returned to the zone exactly once (the zone dblfree stream).
-    released: core::sync::atomic::AtomicBool,
-    /// Session 25 (MAP_SHARED writeback): the frame holds stores from a
-    /// writable shared mapping that have NOT reached the file yet. Set
-    /// conservatively at W-map install time (a writable mapping MAY write;
-    /// flushing an unwritten page is harmless I/O), cleared by the
-    /// msync/fsync flush. Dirty entries skip eviction — their content
-    /// exists nowhere else but the frame.
-    dirty: core::sync::atomic::AtomicBool,
-}
-
 impl CachedPage {
     /// Leg-54 item A (perf-report 8.10.24, sampler page 80473000 = 16.2%
     /// of launcher kernel time): every ref_count / released transition
@@ -420,31 +386,6 @@ impl CachedPage {
     }
 }
 
-/// Number of per-CPU reader banks (pcache Option B stage 1). Kernel.toml's
-/// SMP ceiling is 4; 8 leaves headroom. A cpu id at or above this bound
-/// falls back to the slow-path lock (the r8final discipline — bank
-/// selection happens with interrupts off, so the id is stable). Same
-/// shape as FdTable's banks (8.10.22).
-const PC_READER_BANKS: usize = 8;
-
-/// One per-CPU reader-nesting counter, padded to its own cacheline so
-/// the CPUs' counter RMWs never share a line.
-#[repr(align(64))]
-struct PcReaderBank(core::sync::atomic::AtomicUsize);
-
-/// Fixed-capacity inode-entry slot table (2^15 slots = 256KB of .bss).
-/// Load factors in practice are far below 10% (entries live only while
-/// their inode has cached pages), so linear-probe chains stay 1-3 slots.
-const PC_TABLE_CAP: usize = 32768;
-const PC_TABLE_MASK: usize = PC_TABLE_CAP - 1;
-
-/// One open-addressed slot: the Arc<InodePageCache> as a raw pointer.
-/// null = never used (probe stop); PC_TOMBSTONE_BITS = entry removed
-/// (probe continues — tombstoning instead of nulling keeps the OTHER
-/// entries' probe chains intact). Single-word aligned stores, so a
-/// lock-free load can never observe a torn value.
-struct PcSlot(core::sync::atomic::AtomicPtr<InodePageCache>);
-
 /// Removal sentinel stored in a vacated slot: non-null (probes keep
 /// walking), never dereferenced (every deref site checks the bits first).
 const PC_TOMBSTONE_BITS: usize = 1;
@@ -456,42 +397,6 @@ const PC_TOMBSTONE_BITS: usize = 1;
 /// with no bound — correctness of the dedup depends on it.
 const PC_READER_PROBE_MAX: usize = 64;
 
-/// Parked-Arc batch carried out of a wlock section. Eviction may empty
-/// entries; their slot references are parked into this fixed array under
-/// wlock (Vec push would allocate — never under a pcache lock) and moved
-/// into `retired` + drained right after the wlock drops.
-const PC_PARK_BATCH: usize = 8;
-type PcParkBatch = [Option<Arc<InodePageCache>>; PC_PARK_BATCH];
-
-/// Per-inode page cache: the lock-free lookup unit.
-pub struct InodePageCache {
-    /// Identity for the slot-table probe compare (== cache_key). Written
-    /// once at construction, never mutated — lock-free readers compare it
-    /// inside their claim window.
-    key: u64,
-    /// Per-inode lock (Option B stage 1): the guard IS the &mut access to
-    /// the pages map (every CachedPage field is reached through it — the
-    /// leg-54 locked-plain discipline transfers verbatim). Nesting:
-    /// `wlock → this` only, never the reverse.
-    lock: Spinlock<BTreeMap<u64, CachedPage>>,
-    /// Identity of the owning (filesystem, inode) — cache_key is a
-    /// non-reversible hash, so reclaim-time writeback (shrink_reclaim)
-    /// records the raw inputs here to resolve a live VFS Inode via
-    /// icache_lookup and flush dirty entries through the normal
-    /// ext4_flush_dirty_inode machinery.
-    fs_id: u64,
-    ino: u64,
-    /// Delayed-allocation EOF watermark (2026-11): the highest byte
-    /// offset a buffered write published while its tail pages were still
-    /// dirty. The revival guard needs the EXACT EOF — a page-rounded
-    /// extent would report 4096 for a 1000-byte appended file and hand
-    /// readers three pages of phantom zeros. CAS-max at publish, never
-    /// lowered: a stale-high value is always clamped by the surviving
-    /// dirty extent at read time (`dirty_tail_eof`), and any prefix of
-    /// it that reached writeback is covered by the on-disk size.
-    dirty_eof: core::sync::atomic::AtomicU64,
-}
-
 impl InodePageCache {
     fn new(key: u64, fs_id: u64, ino: u64) -> Self {
         Self {
@@ -502,29 +407,6 @@ impl InodePageCache {
             dirty_eof: core::sync::atomic::AtomicU64::new(0),
         }
     }
-}
-
-/// Global page cache, keyed by the combined (fs_id, inode) cache key.
-///
-/// The inode map is the Option-B slot table; see the module LOCKING note.
-pub struct PageCache {
-    /// Lock-free inode-entry slot table (readers: bank claim + Acquire
-    /// loads; writers: wlock + Release stores).
-    slots: [PcSlot; PC_TABLE_CAP],
-    /// Per-CPU reader-nesting banks (see `lookup_claimed` for the protocol).
-    readers: [PcReaderBank; PC_READER_BANKS],
-    /// Writer-side table structure lock: entry publish/remove, eviction,
-    /// whole-table iteration. Ordering: wlock → per-inode lock, never
-    /// reverse. No allocation under it.
-    wlock: Spinlock<()>,
-    /// Whole entries removed from the table, parked until a drain can
-    /// drop them with no lock-free reader mid-claim (FdTable.retired).
-    retired: Spinlock<alloc::vec::Vec<Arc<InodePageCache>>>,
-    /// Slow-path exclusion for readers whose cpu id falls outside the
-    /// bank range (r8final family); drains hold it across the drop.
-    slow_read: Spinlock<()>,
-    /// Total number of cached pages (for global limit).
-    total_pages: AtomicU32,
 }
 
 /// Revive an owned `Arc<InodePageCache>` from a slot pointer loaded under
@@ -554,16 +436,6 @@ fn cache_key(fs_id: u64, ino: u64) -> u64 {
 #[inline]
 fn phys_to_virt_ptr(phys: usize) -> *mut u8 {
     phys_to_virt(PhysAddr::new(phys as u64)).0 as *mut u8
-}
-
-/// A byte window over one exclusively-owned page frame (INV-PC-WIN):
-/// `phys` names a frame the CALLER owns for this call (zone-allocated,
-/// not yet in the cache/map); the window is exactly PAGE_SIZE bytes of
-/// the linear map and lives only for the call. The one audited edge in
-/// this file for frame fills/copies — the four INV-PC-PAGECOPY sites
-/// below route through it.
-struct FrameWindow {
-    ptr: *mut u8,
 }
 
 impl FrameWindow {

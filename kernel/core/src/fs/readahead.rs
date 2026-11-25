@@ -35,19 +35,10 @@ pub const FAULT_AROUND_BLOCKS: u32 = 16;
 /// Number of consecutive sequential reads before activating read-ahead.
 const ACTIVATION_THRESHOLD: u32 = 2;
 
-/// Read-ahead state for a single open file descriptor.
-pub struct ReadAheadState {
-    /// Offset where the last read ended.
-    pub last_read_end: u64,
-    /// Number of consecutive sequential reads detected.
-    pub sequential_count: u32,
-    /// Whether read-ahead is currently active.
-    pub active: bool,
-    /// Page index up to which read-ahead has been issued.
-    pub ra_until: u64,
-    /// Filesystem block size (cached at open time).
-    pub block_size: u64,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::readahead::…` paths are unchanged.
+pub use super::types::ReadAheadState;
 
 impl ReadAheadState {
     pub fn new(block_size: u64) -> Self {

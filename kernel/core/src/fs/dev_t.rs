@@ -9,15 +9,10 @@
 
 //! Device Number Definitions
 
-/// Device number (major:minor)
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DevNo {
-    /// Major device number
-    pub major: u32,
-    /// Minor device number
-    pub minor: u32,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::dev_t::…` paths are unchanged.
+pub use super::types::DevNo;
 
 /// Number of bits used for minor device number (Linux: MINORBITS = 20)
 const DEV_MINOR_BITS: u32 = 20;

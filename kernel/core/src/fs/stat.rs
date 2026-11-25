@@ -5,86 +5,12 @@
 
 //! File Status Information (stat)
 
-/// File status information
-///
-/// ...
-///
-/// Layout matches musl libc for RISC-V 64-bit:
-/// - st_dev: u64 @ 0
-/// - st_ino: u64 @ 8
-/// - st_mode: u32 @ 16
-/// - st_nlink: u32 @ 20
-/// - st_uid: u32 @ 24
-/// - st_gid: u32 @ 28
-/// - st_rdev: u64 @ 32
-/// - __pad: u64 @ 40
-/// - st_size: i64 @ 48
-/// - st_blksize: i64 @ 56 (musl uses long, not int)
-/// - st_blocks: i64 @ 64
-/// - st_atime: i64 @ 72
-/// - st_atime_nsec: u64 @ 80
-/// - st_mtime: i64 @ 88
-/// - st_mtime_nsec: u64 @ 96
-/// - st_ctime: i64 @ 104
-/// - st_ctime_nsec: u64 @ 112
-/// - __unused: [u64; 2] @ 120 (padding to 128 bytes)
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct Stat {
-    /// Device ID (st_dev)
-    pub st_dev: u64,
-
-    /// Inode number (st_ino)
-    pub st_ino: u64,
-
-    /// File type and permissions (st_mode)
-    pub st_mode: u32,
-
-    /// Hard link count (st_nlink)
-    pub st_nlink: u32,
-
-    /// User ID (st_uid)
-    pub st_uid: u32,
-
-    /// Group ID (st_gid)
-    pub st_gid: u32,
-
-    /// Device ID (if special file) (st_rdev)
-    pub st_rdev: u64,
-
-    /// Padding (musl expects gap here)
-    __pad1: u64,
-
-    /// File size (bytes) (st_size)
-    pub st_size: i64,
-
-    /// Block size (st_blksize) - musl uses long (64-bit on riscv64)
-    pub st_blksize: i64,
-
-    /// Number of 512-byte blocks allocated (st_blocks)
-    pub st_blocks: i64,
-
-    /// Last access time (st_atime)
-    pub st_atime: i64,
-
-    /// Nanoseconds part of last access time (st_atime_nsec)
-    pub st_atime_nsec: u64,
-
-    /// Last modification time (st_mtime)
-    pub st_mtime: i64,
-
-    /// Nanoseconds part of last modification time (st_mtime_nsec)
-    pub st_mtime_nsec: u64,
-
-    /// Last status change time (st_ctime)
-    pub st_ctime: i64,
-
-    /// Nanoseconds part of last status change time (st_ctime_nsec)
-    pub st_ctime_nsec: u64,
-
-    /// Unused padding to match 128 byte struct size
-    __unused: [u32; 2],
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::stat::…` paths are unchanged.
+pub use super::types::{Stat, Statx, StatxTimestamp};
+#[cfg(feature = "x86_64")]
+pub use super::types::X86Stat;
 
 impl Stat {
     /// Create default Stat structure
@@ -201,37 +127,6 @@ impl Default for Stat {
     }
 }
 
-/// x86_64 glibc `struct stat` — the x86 ABI does NOT use the asm-generic
-/// layout above: nlink is 64-bit and precedes mode, there is a pad after
-/// gid and three trailing reserved words (144 bytes total). musl on
-/// riscv64 and glibc-on-x86 read different offsets for the same field,
-/// so copying the generic struct made every x86_64 stat() see scrambled
-/// fields (st_mode read st_uid → toybox ls listed directories as plain
-/// files).
-#[cfg(feature = "x86_64")]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct X86Stat {
-    pub st_dev: u64,
-    pub st_ino: u64,
-    pub st_nlink: u64,
-    pub st_mode: u32,
-    pub st_uid: u32,
-    pub st_gid: u32,
-    __pad0: u32,
-    pub st_rdev: u64,
-    pub st_size: i64,
-    pub st_blksize: i64,
-    pub st_blocks: i64,
-    pub st_atime: i64,
-    pub st_atime_nsec: i64,
-    pub st_mtime: i64,
-    pub st_mtime_nsec: i64,
-    pub st_ctime: i64,
-    pub st_ctime_nsec: i64,
-    __glibc_reserved: [i64; 3],
-}
-
 #[cfg(feature = "x86_64")]
 impl From<&Stat> for X86Stat {
     fn from(s: &Stat) -> Self {
@@ -293,73 +188,6 @@ pub fn copy_stat_to_user(buf: *mut u8, stat: &Stat) -> usize {
             core::mem::size_of::<Stat>(),
         )
     }
-}
-
-/// Extended file status information (statx)
-///
-/// struct statx layout for RISC-V 64-bit (256 bytes).
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct Statx {
-    /// Mask of what was filled in (STATX_*)
-    pub stx_mask: u32,
-    /// Preferred block size for I/O
-    pub stx_blksize: u32,
-    /// Mount-specific flags
-    pub stx_attributes: u64,
-    /// Number of hard links
-    pub stx_nlink: u32,
-    /// User ID
-    pub stx_uid: u32,
-    /// Group ID
-    pub stx_gid: u32,
-    /// File mode (type + permissions)
-    pub stx_mode: u16,
-    __spare0: u16,
-    /// Inode number
-    pub stx_ino: u64,
-    /// File size (bytes)
-    pub stx_size: u64,
-    /// Number of 512-byte blocks allocated
-    pub stx_blocks: u64,
-    /// Mask for stx_attributes
-    pub stx_attributes_mask: u64,
-    /// Last access time
-    pub stx_atime: StatxTimestamp,
-    /// Creation time (btime)
-    pub stx_btime: StatxTimestamp,
-    /// Last status change time
-    pub stx_ctime: StatxTimestamp,
-    /// Last modification time
-    pub stx_mtime: StatxTimestamp,
-    /// Device major for special files
-    pub stx_rdev_major: u32,
-    /// Device minor for special files
-    pub stx_rdev_minor: u32,
-    /// Device major of filesystem
-    pub stx_dev_major: u32,
-    /// Device minor of filesystem
-    pub stx_dev_minor: u32,
-    /// Mount ID of the mount the file is on (STATX_MNT_ID, Linux
-    /// offset 0x90). Same id space as /proc/self/mountinfo's first
-    /// column — systemd 255's mount detection compares a path's
-    /// stx_mnt_id with its parent's (path_is_mount_point) and matches
-    /// device nodes against mountinfo rows by mnt_id.
-    pub stx_mnt_id: u64,
-    /// Spare space to reach 256 bytes
-    __spare2: [u64; 13],
-}
-
-/// Timestamp for statx
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct StatxTimestamp {
-    /// Seconds since epoch
-    pub tv_sec: i64,
-    /// Nanoseconds
-    pub tv_nsec: u32,
-    /// Reserved
-    __reserved: i32,
 }
 
 impl Statx {

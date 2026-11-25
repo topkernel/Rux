@@ -65,25 +65,10 @@ pub fn soft_count(cpu: usize) -> u64 {
 // /proc/stat cells
 // ============================================================================
 
-/// One CPU's time accounting, in jiffies (Linux /proc/stat columns).
-///
-/// `nice`, `iowait`, `irq`, `softirq`, `steal`, `guest` and
-/// `guest_nice` exist because Linux's file has those columns; Rux has
-/// no nice levels, no iowait accounting and no IRQ-time accounting
-/// (CONFIG_IRQ_TIME_ACCOUNTING is off on many Linux boxes too), so
-/// they report zero rather than a fabricated number.
-pub struct CpuTime {
-    pub user: AtomicU64,
-    pub nice: AtomicU64,
-    pub system: AtomicU64,
-    pub idle: AtomicU64,
-    pub iowait: AtomicU64,
-    pub irq: AtomicU64,
-    pub softirq: AtomicU64,
-    pub steal: AtomicU64,
-    pub guest: AtomicU64,
-    pub guest_nice: AtomicU64,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::perf_ctr::…` paths are unchanged.
+pub use super::types::CpuTime;
 
 impl CpuTime {
     const fn new() -> Self {

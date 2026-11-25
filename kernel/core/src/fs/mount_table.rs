@@ -13,18 +13,15 @@
 //! self-registration. Behavior-identical to the old match arms.
 
 #![forbid(unsafe_code)]
-use super::mount::{self, MntFlags};
+use super::mount;
 
-/// One leaf's mount entry point: performs the instance creation and
-/// `vfs_mount`, and registers the mount row (the old match-arm body).
-pub type MountFn = fn(source: &str, target: &str, fs_type: &str, data: Option<&str>, flags: MntFlags) -> Result<(), i32>;
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::mount_table::…` paths are unchanged.
+pub use super::types::MountFn;
+use super::types::Entry;
 
 const MAX_ENTRIES: usize = 32;
-
-struct Entry {
-    names: &'static [&'static str],
-    f: MountFn,
-}
 
 static TABLE: crate::sync::spinlock::Spinlock<[Option<Entry>; MAX_ENTRIES]> =
     crate::sync::spinlock::Spinlock::new([const { None }; MAX_ENTRIES]);

@@ -447,16 +447,10 @@ pub mod tmpfs {
     }
 }
 
-/// The fsctx mount-instance tag: devpts/securityfs/mqueue are tmpfs
-/// instances whose fresh root is retagged with a filesystem-type ops
-/// twin (the statfs magic dispatch); `None` tags nothing.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum TmpfsTagKind {
-    None,
-    Devpts,
-    Securityfs,
-    Mqueue,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::leaf_glue::…` paths are unchanged.
+pub use super::types::{TmpfsTagKind, InputEventReg};
 
 /// The RAM root as the framework sees it: the rootfs superblock's
 /// path-shaped API as a framework-owned trait. The cpio unpacker stays
@@ -478,35 +472,6 @@ pub trait RamfsView {
     fn rfs_lookup_kind(&self, path: &str) -> Option<bool>;
     /// Seed a file (the tests' create_file path).
     fn rfs_seed_file(&self, path: &str, data: Vec<u8>) -> Result<(), i32>;
-}
-
-/// The input-device registration record (evdev -> sysfs uevent + tree).
-/// Framework-owned DTO: the drivers fill it, the fs sysfs leaf
-/// consumes it through the populate row (plain data — no leaf types cross
-/// the boundary). The uevent environment block builder lives with it.
-#[derive(Debug, Clone)]
-pub struct InputEventReg {
-    /// input_dev kobject name ("input0")
-    pub input_name: String,
-    /// event node name ("event0")
-    pub event_name: String,
-    pub major: u32,
-    pub minor: u32,
-    /// input device name ("VirtIO Keyboard") — NAME= env + name attr
-    pub dev_name: String,
-    pub bustype: u32,
-    pub vendor: u32,
-    pub product: u32,
-    pub version: u32,
-    /// EV= bitmap string (Linux input_print_bitmap format: space-separated
-    /// lowercase-hex 64-bit words, most-significant first)
-    pub ev: String,
-    /// KEY= bitmap string, empty -> line omitted (type not supported)
-    pub key: String,
-    /// REL= bitmap string, empty -> omitted
-    pub rel: String,
-    /// ABS= bitmap string, empty -> omitted
-    pub abs: String,
 }
 
 impl InputEventReg {

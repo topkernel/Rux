@@ -17,51 +17,10 @@ use crate::sync::rwlock::RwSpinlock;
 use crate::fs::dentry::Dentry;
 use alloc::sync::Arc;
 
-/// Filesystem information structure
-///
-/// Contains per-process filesystem context that can be shared
-/// between threads when CLONE_FS is used.
-pub struct FsStruct {
-    /// Current working directory path
-    cwd: RwSpinlock<alloc::vec::Vec<u8>>,
-
-    /// Root directory path (for chroot)
-    root: RwSpinlock<alloc::vec::Vec<u8>>,
-
-    /// The cwd as a dentry (mount-aware — the dentry reached after
-    /// follow_mount crossings). Linux keeps fs->pwd as a (vfsmount,
-    /// dentry) pair and derives every path string from it on demand;
-    /// the string above is Rux's lookup-prefix equivalent. Strings go
-    /// STALE when mounts move (MS_MOVE): a cwd string captured as
-    /// "/usr" keeps naming the empty dir after the /usr mount moved
-    /// to "/" (the OH switch_root failure). The dentry follows the
-    /// mount (its mountpoint back-edge is updated by the move), so it
-    /// stays valid — getters below REGENERATE the string from the
-    /// dentry when one is recorded.
-    cwd_dentry: RwSpinlock<Option<Arc<Dentry>>>,
-
-    /// The chroot jail root as a dentry (None = not chrooted / the
-    /// global root). Same self-healing rationale as cwd_dentry.
-    root_dentry: RwSpinlock<Option<Arc<Dentry>>>,
-
-    /// put_old recorded by this process's last pivot_root(2) (jail-style
-    /// pivot stacks no real mount — see sys_pivot_root). The post-pivot
-    /// cleanup umount2(put_old | ".", MNT_DETACH) consumes it: Linux
-    /// leaves the OLD root mounted at put_old and that umount drops it;
-    /// here it just reports success for the matching path once.
-    pivot_put_old: RwSpinlock<Option<alloc::vec::Vec<u8>>>,
-
-    /// True when the current root was installed by pivot_root(2) or by
-    /// setns(2) entering a pivoted mount namespace (NOT by plain chroot).
-    /// setns back into a non-pivoted namespace must then reset the root
-    /// to that ns's root — the pivot's whole purpose is to be undone by
-    /// the namespace jump (OH beget: pivot into the sandbox, setns back
-    /// to the default ns for the rest of the boot).
-    root_is_pivot: RwSpinlock<bool>,
-
-    /// File creation mask
-    umask: AtomicU32,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::fs_struct::…` paths are unchanged.
+pub use super::types::FsStruct;
 
 impl FsStruct {
     /// Create a new FsStruct with default values

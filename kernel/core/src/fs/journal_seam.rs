@@ -44,28 +44,10 @@ pub const CAPTURE_OFF: u8 = 0;
 pub const CAPTURE_PRE: u8 = 1;
 pub const CAPTURE_POST: u8 = 2;
 
-/// The deferred-publication capture window state (see
-/// bio::PENDING_PUBLICATIONS). While armed in PRE mode (create-side
-/// operations: mkdir/create/symlink/link/rename-add), every buffer
-/// marked dirty on the capture device is recorded on `pre_list`; the
-/// list becomes the `pre` set of the publication created at the
-/// directory-entry write (an exact snapshot of THIS operation's own
-/// metadata — the earlier device-wide dirty snapshot cost O(cache) per
-/// op and O(N^2+) across a create-heavy loop such as LTP creat05/
-/// fork09, which create 1021 files in setup). While armed in POST mode
-/// (unlink/rmdir/rename-replace) buffers marked dirty are appended to
-/// the `post` set of publication `post_id` instead. One mode at a time.
-pub struct JournalCaptureState {
-    /// 0=off 1=pre 2=post (CAPTURE_* above).
-    pub mode: Cell<u8>,
-    /// POST-mode target publication id.
-    pub post_id: Cell<u64>,
-    /// The capture device (major, minor).
-    pub dev_key: Cell<(u32, u32)>,
-    /// PRE-mode capture accumulator (task-local: only the owning
-    /// task's syscalls append, via the dirty-mark hook).
-    pub pre_list: crate::sync::spinlock::Spinlock<alloc::vec::Vec<u64>>,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::journal_seam::…` paths are unchanged.
+pub use super::types::{JournalCaptureState, AssertingSyncArc};
 
 impl JournalCaptureState {
     pub const fn new() -> Self {
@@ -139,17 +121,6 @@ pub fn current_handle_raw() -> *mut () {
     }
 }
 
-/// Ext4FileSystem's journal slot — an ASSERTING WRAPPER (the type's
-/// raw-pointer protocol state stays crate-side; the Send/Sync
-/// assertion is journal-protocol-level and lives HERE, framework-side,
-/// like the lock above).
-///
-/// INV-JSEAM-4: the wrapped `Arc<Journal>` is shared across threads
-/// exactly as before (task contexts + the commit kthread); every raw
-/// pointer inside Journal is dereferenced only under the journal's own
-/// spinlocks (the jbd2 protocol), so sharing the Arc is sound. The
-/// wrapper exists because the crate cannot carry the `unsafe impl`.
-pub struct AssertingSyncArc<T>(pub Option<alloc::sync::Arc<T>>);
 // SAFETY: INV-JSEAM-4 above — the assertion is the JOURNAL use's to
 // make (the only user is Ext4FileSystem::journal; the type stays
 // narrow-purposed and documented).

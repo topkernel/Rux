@@ -21,11 +21,21 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicPtr, AtomicUsize, Ordering
 use crate::fs::inode::Inode;
 use crate::fs::mount::MntFlags;
 
-/// Dentry state flags
-///
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct DentryFlags(u32);
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::dentry::…` paths are unchanged.
+pub use super::types::{DentryFlags, DentryState, VfsMountInternal, WalkClaim, Dentry, DentryCacheStats};
+use super::types::{
+    DentryReaderBank,
+    CHILD_MEMO_NAME_MAX,
+    CHILD_MEMO_SLOTS,
+    CHILD_MEMO_MASK,
+    BigMemoTable,
+    ChildMemoData,
+    ChildMemoSlot,
+    DentryHashBucket,
+    DentryCache,
+};
 
 impl DentryFlags {
     /// Directory entry not connected to dcache
@@ -52,36 +62,6 @@ impl DentryFlags {
     pub fn bits(&self) -> u32 {
         self.0
     }
-}
-
-/// Dentry state
-///
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum DentryState {
-    /// Dentry unused
-    DUnhashed,
-    /// Dentry used
-    DHashed,
-    /// Dentry being deleted
-    DKill,
-}
-
-/// VFS mount descriptor — attached to a dentry that is a mount point.
-///
-/// When `follow_mount()` encounters a dentry with a `VfsMountInternal`,
-/// it transparently switches to `root` (the mounted filesystem's root dentry).
-pub struct VfsMountInternal {
-    /// Root dentry of the mounted filesystem
-    pub root: Arc<Dentry>,
-    /// Mount flags (interior-mutable: mount(2) with MS_REMOUNT updates them
-    /// in place while concurrent lookups read them on other CPUs)
-    pub flags: Spinlock<MntFlags>,
-    /// sc181: global attach sequence (monotonic). The MS_REC clone scan
-    /// (fs::vfs::collect_subtree_mounts) uses it to emit the clone set in
-    /// attach order — identical to the old registry-order linear scan —
-    /// so stacked clones always attach parents before children.
-    pub seq: u64,
 }
 
 /// sc181: mount attach-sequence allocator (see VfsMountInternal::seq).
@@ -148,11 +128,6 @@ unsafe impl Sync for VfsMountInternal {}
 /// the FdTable r8final discipline).
 const DENTRY_READER_BANKS: usize = 16;
 
-/// One per-CPU reader-nesting counter, padded to its own cacheline so
-/// the CPUs' counter RMWs never share a line (FdTable discipline).
-#[repr(align(64))]
-struct DentryReaderBank(AtomicUsize);
-
 static DENTRY_BANKS: [DentryReaderBank; DENTRY_READER_BANKS] = [const {
     DentryReaderBank(AtomicUsize::new(0))
 }; DENTRY_READER_BANKS];
@@ -175,19 +150,6 @@ static DENTRY_RET_INODE: Spinlock<Vec<Arc<Inode>>> = Spinlock::new(Vec::new());
 /// drain that could not observe all banks at zero within its spin budget
 /// defers the retired drop to the next writer.
 pub static DENTRY_DRAIN_DEFERS: AtomicUsize = AtomicUsize::new(0);
-
-/// Walk-scoped reader claim. `acquire()` bumps this CPU's bank (SeqCst —
-/// the claim is globally visible before any subsequent pointer load
-/// executes); Drop decrements it (Release). The value is Copy-able
-/// evidence of holding the claim: methods taking `&WalkClaim` may load
-/// raw pointers that are only guaranteed alive while some claim is held
-/// on the calling CPU.
-pub struct WalkClaim {
-    /// Bank index claimed, or usize::MAX for the slow-path lock (whose
-    /// guard we keep alive in `slow`).
-    cpu: usize,
-    slow: Option<crate::sync::spinlock::SpinlockIrqGuard<'static, ()>>,
-}
 
 impl WalkClaim {
     /// Claim this CPU's reader bank (or the slow-path lock for an
@@ -344,13 +306,6 @@ fn child_name_hash(name: &[u8]) -> u64 {
     hash
 }
 
-/// Inline name capacity of a memo slot (24 bytes covers the hot
-/// component shapes; longer names take the locked path).
-const CHILD_MEMO_NAME_MAX: usize = 24;
-/// Memo slots per dentry (index = hash & mask).
-const CHILD_MEMO_SLOTS: usize = 4;
-const CHILD_MEMO_MASK: usize = CHILD_MEMO_SLOTS - 1;
-
 /// (stat-2x lane) Secondary lock-free memo for LARGE directories.
 /// The inline 4-slot memo collapses to a ~1-in-N hit rate once a
 /// directory holds more than a handful of children (a 1000-entry tree
@@ -375,47 +330,11 @@ const CHILD_MEMO_BIG_MIN: usize = 12;
 const CHILD_MEMO_BIG_MIN_SLOTS: usize = 128;
 const CHILD_MEMO_BIG_MAX_SLOTS: usize = 2048;
 
-/// (stat-2x lane) The big-memo allocation: SELF-DESCRIBING so a
-/// lock-free reader that Acquire-loads the published base can size its
-/// slice without a second mirror that could race a concurrent grow
-/// (old base + new count would read past the old table). `nslots` is
-/// immutable after construction — the base pointer alone identifies a
-/// consistent (slots, len) pair.
-struct BigMemoTable {
-    nslots: usize,
-    slots: alloc::vec::Vec<ChildMemoSlot>,
-}
-
 // SAFETY: the table's slots are shared-memory seqlock cells exactly like
 // the inline `memo` array inside Sync Dentry; cross-thread access goes
 // through the seqlock/children-lock protocol.
 unsafe impl Send for BigMemoTable {}
 unsafe impl Sync for BigMemoTable {}
-
-/// Plain (non-atomic) slot payload — read/written through the enclosing
-/// slot's seqlock (the sync::seqlock UnsafeCell discipline).
-struct ChildMemoData {
-    /// `children_ver` at fill time — the slot is valid only while it
-    /// equals the dentry's current version (any map mutation bumped it).
-    ver: u64,
-    /// FNV-1a of the name (fast reject before the byte compare).
-    hash: u64,
-    /// Name bytes, `name_len` valid.
-    name: [u8; CHILD_MEMO_NAME_MAX],
-    name_len: u8,
-    /// The child (raw — the child map / a pending retire keeps it alive;
-    /// see the reader-bank protocol).
-    child: *const Dentry,
-}
-
-/// One lock-free child-memo slot, exactly one cacheline. Racing readers
-/// are guarded by the per-slot seqlock (odd = a refill is writing).
-#[repr(align(64))]
-struct ChildMemoSlot {
-    /// Per-slot seqlock (writer: odd → fields → even).
-    seq: AtomicU64,
-    data: core::cell::UnsafeCell<ChildMemoData>,
-}
 
 impl ChildMemoSlot {
     const fn empty() -> Self {
@@ -464,88 +383,6 @@ fn memo_slot_read(
     } else {
         None
     }
-}
-
-/// Directory entry
-///
-#[repr(C)]
-pub struct Dentry {
-    /// dentry name (last component, e.g. "null" not "/dev/null")
-    pub name: Spinlock<String>,
-    /// parent directory entry
-    pub parent: Spinlock<Option<Arc<Dentry>>>,
-    /// child dentries (name -> dentry mapping)
-    pub children: Spinlock<BTreeMap<String, Arc<Dentry>>>,
-    /// associated inode
-    pub inode: Spinlock<Option<Arc<Inode>>>,
-    /// If this dentry is a mount point, points to the mount descriptor.
-    /// None means this dentry is not a mount point.
-    pub vfsmount: Spinlock<Option<Arc<VfsMountInternal>>>,
-    /// Only set on a MOUNTED FILESYSTEM'S ROOT dentry: the mountpoint
-    /// dentry in the parent filesystem. Weak on purpose — the mountpoint
-    /// dentry holds the mount (`vfsmount`) which holds this dentry
-    /// strongly; a strong edge back would form an Arc cycle. Lets
-    /// `build_path()` cross the mount boundary: a mounted fs root has no
-    /// `parent` pointer, so without this hop paths of entries inside a
-    /// mount lose the mountpoint prefix (chdir("/proc") stored cwd="/").
-    mountpoint: Spinlock<Option<alloc::sync::Weak<Dentry>>>,
-    /// dentry state
-    pub state: Spinlock<DentryState>,
-    /// dentry flags
-    pub flags: Spinlock<DentryFlags>,
-    /// reference count
-    ref_count: AtomicU64,
-    /// Negative dentry: lookup found no file on disk
-    pub negative: AtomicBool,
-    /// (perf-path lane) Mirror of `vfsmount.is_some()`: lets the walk's
-    /// per-component mount test run as ONE Relaxed load instead of the
-    /// vfsmount spinlock + Option<Arc> clone. Maintained by
-    /// set_mount/clear_mount, which remain the serialized writers of the
-    /// authoritative field.
-    is_mountpoint: AtomicBool,
-    /// (perf-path lane) icache identity generation at the time `inode`
-    /// was last refreshed against the icache (see inode::icache_regen).
-    /// When it equals the current generation, the cached Arc IS the
-    /// icache's current object for (ino, fs_id) and the walk skips the
-    /// global-lock re-check. Relaxed is sufficient: the load only decides
-    /// whether to take the SLOW path — a stale "current" verdict is
-    /// caught on the next walk after the generation bumps.
-    inode_gen: AtomicU64,
-    /// (21st successor, negative-lookup memo) The parent directory
-    /// INODE's content generation at insert time (meaningful only while
-    /// `negative` is set). The stamp lives on the shared inode —
-    /// bind-mount aliases are separate dentries over one inode, so a
-    /// mutation through ANY alias invalidates memos cached under every
-    /// alias. 0 = unstamped.
-    pub neg_gen: AtomicU64,
-    /// Negative memo children currently cached under this parent
-    /// (bounded — see NEG_MEMO_CAP / memo_negative).
-    neg_count: AtomicUsize,
-    /// (gap-fs lane) Child-map mutation version — bumped (under the
-    /// children lock) by every add/remove/clear/rehome. A memo slot
-    /// stamped with an older version is stale and ignored, so readers
-    /// never need to serialize with the mutators.
-    children_ver: AtomicU64,
-    /// (gap-fs lane) Lock-free child memo — see ChildMemoSlot.
-    memo: [ChildMemoSlot; CHILD_MEMO_SLOTS],
-    /// (stat-2x lane) Secondary memo for large directories — ownership
-    /// slot. Swapped (None → Some → replaced on growth) only under the
-    /// children lock; lock-free readers go through the `big_memo_ptr`
-    /// mirror and the table's self-describing length. Replaced tables
-    /// are parked in DENTRY_RET_MEMO; the final table frees with the
-    /// Dentry.
-    big_memo: core::cell::UnsafeCell<Option<alloc::boxed::Box<BigMemoTable>>>,
-    /// (stat-2x lane) Published pointer of the secondary memo table
-    /// (null = not allocated). Release-stored under the children lock;
-    /// readers Acquire-load it under a walk claim and read the table's
-    /// immutable `nslots` for the slice length.
-    big_memo_ptr: AtomicPtr<BigMemoTable>,
-    /// (gap-fs lane) Mirror of the `inode` slot's Arc pointer (null =
-    /// None), published with Release by set_inode/clear_inode. Readers
-    /// load it under a WalkClaim and may increment the strong count
-    /// directly (the claim blocks the drain; see the reader-bank
-    /// protocol comment).
-    inode_ptr: AtomicPtr<Inode>,
 }
 
 // (INV-DENTRY-SEND-1: Dentry/VfsMountInternal/BigMemoTable Sync/Send
@@ -1321,17 +1158,6 @@ pub fn make_root_dentry() -> Option<Arc<Dentry>> {
 /// Dentry cache size - from config
 const DCACHE_SIZE: usize = crate::config::DCACHE_SIZE;
 
-/// Dentry cache statistics
-#[derive(Debug)]
-pub struct DentryCacheStats {
-    /// Cache hit count
-    pub hits: AtomicU64,
-    /// Cache miss count
-    pub misses: AtomicU64,
-    /// Eviction count
-    pub evictions: AtomicU64,
-}
-
 impl DentryCacheStats {
     pub fn new() -> Self {
         Self {
@@ -1365,18 +1191,6 @@ impl DentryCacheStats {
     }
 }
 
-/// Hash table bucket
-struct DentryHashBucket {
-    /// dentry pointer
-    dentry: Option<Arc<Dentry>>,
-    /// hash key (for quick comparison)
-    key: u64,
-    /// parent inode number (for hash collision disambiguation)
-    parent_ino: u64,
-    /// LRU timestamp (for eviction)
-    access_time: AtomicU64,
-}
-
 impl Clone for DentryHashBucket {
     fn clone(&self) -> Self {
         Self {
@@ -1386,18 +1200,6 @@ impl Clone for DentryHashBucket {
             access_time: AtomicU64::new(self.access_time.load(Ordering::Relaxed)),
         }
     }
-}
-
-/// Dentry hash table
-struct DentryCache {
-    /// Hash table (heap-allocated to avoid large stack allocation)
-    buckets: alloc::boxed::Box<[DentryHashBucket]>,
-    /// Number of entries in cache
-    count: usize,
-    /// Global timestamp (for LRU)
-    global_time: AtomicU64,
-    /// Statistics
-    stats: DentryCacheStats,
 }
 
 unsafe impl Send for DentryCache {}

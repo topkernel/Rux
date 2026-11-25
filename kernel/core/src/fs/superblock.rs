@@ -15,12 +15,14 @@
 // raw-pointer extern "C" slots by the table's type; every fs-type
 // registration rides this one audited ABI edge.)
 use crate::errno;
-use alloc::sync::Arc;
+
 use crate::sync::spinlock::Spinlock;
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct SuperBlockFlags(u64);
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::superblock::…` paths are unchanged.
+pub use super::types::{SuperBlockFlags, SuperBlock, FsContext, FileSystemType};
+use super::types::FsRegistry;
 
 impl SuperBlockFlags {
     /// Read-only mount
@@ -57,28 +59,6 @@ impl SuperBlockFlags {
     pub fn bits(&self) -> u64 {
         self.0
     }
-}
-
-#[repr(C)]
-pub struct SuperBlock {
-    /// Filesystem flags
-    pub s_flags: SuperBlockFlags,
-    /// Block size
-    pub s_blocksize: usize,
-    /// Block size bits
-    pub s_blocksize_bits: u8,
-    /// Filesystem magic number
-    pub s_magic: u32,
-    /// Maximum links
-    pub s_max_links: u32,
-    /// Root inode
-    pub s_root: Option<Arc<()>>,
-    /// Filesystem type
-    pub s_type: Option<&'static FileSystemType>,
-    /// Mount options
-    pub s_options: Option<Arc<()>>,
-    /// Private data (for specific filesystem)
-    pub s_fs_info: Option<*mut u8>,
 }
 
 unsafe impl Send for SuperBlock {}
@@ -124,17 +104,6 @@ impl SuperBlock {
     }
 }
 
-pub struct FsContext<'a> {
-    /// Source device
-    pub source: Option<&'a str>,
-    /// Mount target
-    pub target: Option<&'a str>,
-    /// Mount flags
-    pub ms_flags: u64,
-    /// Data options
-    pub data: Option<&'a str>,
-}
-
 impl<'a> FsContext<'a> {
     /// Create new mount context
     pub fn new(
@@ -149,23 +118,6 @@ impl<'a> FsContext<'a> {
             data: None,
         }
     }
-}
-
-/// The mount-callback table (round-5, L5): the pointers are SAFE fns —
-/// registration is the audited edge (the same de-sign the FileOps table
-/// already carries; the `extern "C"` was cargo cult — no C caller
-/// exists). The `*mut SuperBlock` handle keeps its documented raw
-/// contract until the mount layer adopts typed handles.
-#[repr(C)]
-pub struct FileSystemType {
-    /// Filesystem name
-    pub name: &'static str,
-    /// Get superblock (called on mount)
-    pub mount: Option<fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
-    /// Kill superblock (called on unmount)
-    pub kill_sb: Option<fn(*mut SuperBlock)>,
-    /// Filesystem flags
-    pub fs_flags: u64,
 }
 
 impl FileSystemType {
@@ -209,11 +161,6 @@ impl FileSystemType {
             kill_fn(sb);
         }
     }
-}
-
-struct FsRegistry {
-    /// Filesystem type list
-    fs_types: Spinlock<[Option<&'static FileSystemType>; 32]>,
 }
 
 unsafe impl Send for FsRegistry {}

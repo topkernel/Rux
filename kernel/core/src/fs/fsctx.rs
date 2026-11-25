@@ -190,33 +190,10 @@ pub fn param_key_known(fs_type: &str, key: &str) -> bool {
     }
 }
 
-/// The fs_context state machine (fs/fs_context.c). Only the states the
-/// create pipeline needs are modelled: parameters before CREATE, a root
-/// instance after it. `reconfigure` marks an fspick() context (purpose
-/// FS_CONTEXT_FOR_RECONFIGURE): parameters are accepted until
-/// FSCONFIG_CMD_RECONFIGURE (a no-op — the live mount IS the state),
-/// CREATE/fsmount are refused like the reference's phase checks.
-pub struct FsContext {
-    pub fs_type: String,
-    /// The "source" parameter (fsconfig SET_STRING "source") — the
-    /// device/name shown in /proc/mounts.
-    pub source: Option<String>,
-    /// Recorded key[=value] parameters, in fsconfig order.
-    pub params: Vec<(String, Option<String>)>,
-    /// Monolithic option string for legacy types (joined like
-    /// legacy_parse_param's buffer).
-    pub legacy_data: String,
-    /// sb_flags spellings ("ro" flag) recorded before CREATE.
-    pub sb_readonly: bool,
-    /// Root instance after FSCONFIG_CMD_CREATE (fc->root).
-    pub root: Option<Arc<Inode>>,
-    /// Effective read-only after CREATE (ext4 metadata_csum downgrades).
-    pub effective_ro: bool,
-    /// fspick() product: reconfigure-purpose context.
-    pub reconfigure: bool,
-    /// fspick() product: the live mount CMD_RECONFIGURE commits onto.
-    pub target_mount: Option<Arc<VfsMountInternal>>,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::fsctx::…` paths are unchanged.
+pub use super::types::{FsConfigContext as FsContext, MountFd};
 
 impl FsContext {
     pub fn new(fs_type: &str) -> Self {
@@ -263,29 +240,6 @@ impl FsContext {
 // ---------------------------------------------------------------------------
 // Detached mount object (fsmount / open_tree clone)
 // ---------------------------------------------------------------------------
-
-/// A mount fd's payload: the (possibly detached) VfsMountInternal plus
-/// the bookkeeping /proc/mounts needs when it gets attached.
-pub struct MountFd {
-    pub mnt: Arc<VfsMountInternal>,
-    /// Attached into the dentry tree already (move_mount happened)?
-    pub attached: bool,
-    /// For the /proc/mounts row at attach time.
-    pub fs_type: String,
-    pub source: String,
-    /// open_tree(AT_RECURSIVE|OPEN_TREE_CLONE) submount clones, recorded
-    /// at clone time and materialized INSIDE the mount root at
-    /// move_mount-attach time (the MS_REC bind clone discipline: the
-    /// deferred roots share the source mounts' inodes, same superblock).
-    pub submounts: Vec<(Vec<String>, Arc<Dentry>, MntFlags)>,
-    /// The ORIGINAL subtree root the submount rel-paths are relative to
-    /// (open_tree's resolved source `anc`). The materialization walk's
-    /// source-side cursor starts here — kernel-created mountpoints
-    /// (/proc, /dev, /sys: dcache-only, no on-disk entries) resolve
-    /// through it when the fresh root's disk tree has no placeholders
-    /// (same fallback as the MS_REC bind clone, flip6).
-    pub submount_src_base: Option<Arc<Dentry>>,
-}
 
 /// Build the root instance for a created fs_context (the per-type
 /// constructors do_mount uses — same inodes, no attach). Returns

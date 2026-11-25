@@ -96,9 +96,10 @@ pub fn get_mount_entries() -> Vec<crate::process::ns::MountEntry> {
     crate::process::ns::ns_get_mounts()
 }
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct MntFlags(u64);
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::mount::…` paths are unchanged.
+pub use super::types::{MntFlags, VfsMount};
 
 impl MntFlags {
     pub const MNT_READONLY: u64 = 0x01;
@@ -135,18 +136,6 @@ impl MntFlags {
     pub fn bits(&self) -> u64 {
         self.0
     }
-}
-
-/// Per-mount metadata (used by individual filesystems for local state).
-#[repr(C)]
-pub struct VfsMount {
-    pub mnt_id: u64,
-    pub mnt_flags: MntFlags,
-    pub mnt_mountpoint: Option<Arc<Vec<u8>>>,
-    pub mnt_root: Option<Arc<Vec<u8>>>,
-    pub mnt_sb: Option<*mut u8>,
-    mnt_count: core::sync::atomic::AtomicU64,
-    mnt_expired: core::sync::atomic::AtomicU64,
 }
 
 unsafe impl Send for VfsMount {}

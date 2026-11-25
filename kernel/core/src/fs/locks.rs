@@ -76,19 +76,10 @@ use crate::fs::file::File;
 use crate::fs::inode::Inode;
 use crate::sync::spinlock::Spinlock;
 
-/// Record-lock ownership token mirror (the tables storing it live in
-/// the fs crate's locks module).
-///
-/// `owner` mirrors Linux's `fl_owner` token: `Pid` for classic POSIX
-/// locks (all threads of one process share them), `Ofd(file_id)` for
-/// open-file-description locks (F_OFD_SETLK — one description per
-/// `File::file_id`). Two locks never conflict when their owner tokens
-/// are EQUAL, regardless of kind — exactly Linux's `posix_locks_conflict`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum LockOwner {
-    Pid(u32),
-    Ofd(u64),
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::locks::…` paths are unchanged.
+pub use super::types::{LockOwner, LockConflict};
 
 impl LockOwner {
     /// PID reported by F_GETLK for a conflicting lock: the process for
@@ -100,15 +91,6 @@ impl LockOwner {
             LockOwner::Ofd(_) => 0,
         }
     }
-}
-
-/// A conflicting lock reported to F_GETLK (constructed crate-side from
-/// the posix_test_lock row, consumed by the VFS fcntl arm).
-pub struct LockConflict {
-    pub exclusive: bool,
-    pub start: u64,
-    pub end: u64,
-    pub pid: u32,
 }
 
 /// Lock type for requests: 0 = unlock, 1 = read (shared), 2 = write (exclusive).

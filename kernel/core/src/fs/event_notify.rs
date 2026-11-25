@@ -35,29 +35,10 @@ pub mod poll_events {
     pub const POLLRDHUP: u16 = 0x2000;
 }
 
-/// epoll_event structure
-// Linux uapi packs epoll_event ONLY on x86-64
-// (include/uapi/linux/eventpoll.h: EPOLL_PACKED under __x86_64__); every
-// other arch — riscv64 included — uses the natural C layout: events@0,
-// data@8, 16-byte records. glibc and musl mirror the uapi (verified:
-// Ubuntu 22.04 riscv64 glibc sizeof(epoll_event)=16, data@8; musl 1.2.5
-// applies __packed__ only under __x86_64__).
-//
-// R72: making the struct unconditionally packed fixed the x86_64 stride
-// (LTP epoll_wait01) but broke riscv64: the kernel wrote 12-byte records
-// with data@4 while both riscv64 libcs read 16-byte records with data@8,
-// so every `data` cookie came back as a mix of padding and neighboring
-// bytes — Xorg's InputThread dereferenced a mangled epoll cookie and
-// SIGSEGV'd at 0x4000b80 on every boot (deterministic, t=8s), which with
-// force-unblocked synchronous signals took the whole server down. Keep
-// each arch byte-identical to its uapi shape.
-#[cfg_attr(feature = "x86_64", repr(C, packed))]
-#[cfg_attr(not(feature = "x86_64"), repr(C))]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct EPollEvent {
-    pub events: u32,
-    pub data: u64,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::event_notify::…` paths are unchanged.
+pub use super::types::{EPollEvent, WakeFn, EpollWakeNode, EpollWakeShard, SignalfdWakeRegistry};
 
 /// epoll event types
 pub mod epoll_events {
@@ -159,43 +140,6 @@ fn boxed_ref<T>(p: *mut T) -> &'static T {
 
 pub(crate) const EPOLL_WAKE_SHARDS: usize = 64;
 
-/// One (file_id → epoll instance) binding. `list` is the FIRST field so a
-/// node pointer doubles as its `ListHead` pointer (the container_of cast
-/// is then a no-op) — same trick as `RcuHead`.
-/// Per-node wake trampoline: performs the pinned re-arm + wake for the
-/// target the registry stored (type-erased at registration — the
-/// register side supplies a monomorphized fn wrapping its instance
-/// type; no service type crosses into the framework).
-pub type WakeFn = fn(ep: *mut u8, file_id: u64);
-
-
-pub struct EpollWakeNode {
-    pub list: crate::list::ListHead,
-    pub file_id: u64,
-    pub ep: *mut u8,
-    pub wake: WakeFn,
-}
-
-/// ALLOCATION-FREE SHARD BODY (115th, allocator-under-shard-lock hunt):
-/// the shard is an intrusive list of `EpollWakeNode`s — linking and
-/// unlinking are two pointer writes, and the NODE is Box-allocated /
-/// freed OUTSIDE the shard's irqsave section. The previous
-/// `Vec<(u64, *mut T)>` body pushed (and on capacity growth,
-/// ALLOCATED) inside the lock: an allocation whose per-CPU magazine row
-/// was empty takes the small_alloc class lock and can walk pages / touch
-/// the buddy under it — sections measured at 300 ms of real KVM time
-/// under OH-boot churn (rux:allocwatch (retired debug=allocwatch), lb268). For that whole window
-/// every producer mapping to the shard spins IRQs-off in
-/// epoll_notify_file's lock_irqsave, no CPU on the box reports a
-/// quiescent state, and the fdreap grace round prints
-/// RCU-GP-BOUND site=fdreap-close — the exact print that fires
-/// immediately before the OH boot deadlock wedge (DEADLOCK: spinlock
-/// stuck ... EPOLL_WAKE_SHARDED + soft lockups). The sentinel cannot
-/// self-reference in a const initializer, so it is lazily `init()`ed on
-/// first acquisition (`init_once`, under the shard lock).
-pub struct EpollWakeShard {
-    pub head: crate::list::ListHead,
-}
 
 impl EpollWakeShard {
     // pub(crate) surface: the epoll diagnostics in syscall/misc walk the
@@ -564,18 +508,6 @@ pub fn epoll_wake_unregister(file_id: u64, ep: *mut u8) {
 }
 
 // ==================== signalfd wake registry ====================
-
-/// Owning-task → signalfd wait queue registry for signal-arrival wakeups.
-/// Task pointers are compared for identity only (never dereferenced), so a
-/// recycled task address causes at worst a spurious wake (readers re-check
-/// readiness); entries are removed in the fd's close op.
-///
-/// Wrapper so the raw-pointer registry is `Send` (access under the lock).
-pub struct SignalfdWakeRegistry {
-    pub bindings: alloc::vec::Vec<
-        (*mut crate::process::task::Task, *const crate::process::wait::WaitQueueHead),
-    >,
-}
 
 static SIGNALFD_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<SignalfdWakeRegistry> =
     crate::sync::spinlock::Spinlock::new(SignalfdWakeRegistry {

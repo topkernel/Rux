@@ -62,17 +62,11 @@ pub mod lookup_flags {
     pub const LOOKUP_NO_SYMLINKS: u32 = 0x0010;
 }
 
-/// VFS Path structure
-///
-/// Represents a resolved path with its mount and dentry information.
-pub struct VfsPath {
-    /// Dentry for this path
-    pub dentry: Option<Arc<Dentry>>,
-    /// Mount point (vfsmount)
-    pub mnt: Option<*const u8>,
-    /// Inode if resolved
-    pub inode: Option<Arc<Inode>>,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::vfs::…` paths are unchanged.
+pub use super::types::{VfsPath, FsType};
+use super::types::{VfsState, MountBucket, MemFileContent};
 
 /// NAME_MAX (Linux): longest single path component we will ever look up.
 pub const NAME_MAX: usize = 255;
@@ -134,38 +128,6 @@ impl Default for VfsPath {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// VFS global state
-struct VfsState {
-    /// Global VFS root dentry — the top of the dentry tree
-    root_dentry: Option<Arc<Dentry>>,
-    initialized: bool,
-    /// Every live mount descriptor (dentry-tree mounts, not the string
-    /// registry) — lets fd/dentry-based code find the mount governing a
-    /// dentry WITHOUT reconstructing a path string (build_path() cannot
-    /// cross mount boundaries: a mounted fs's root has no parent pointer).
-    mounts: Vec<Arc<VfsMountInternal>>,
-    /// sc181: chain index — for every live mount, the PURE-PARENT chain of
-    /// its mountpoint dentry ([mp, parents..., first parentless dentry])
-    /// keys the mount into this map (key = dentry address, `anchor` pins
-    /// it). The MS_REC bind clone scan used to walk the WHOLE registry,
-    /// climbing parents for every mount (O(registry x depth) per bind,
-    /// 10-25 ms and growing with the boot-mount count — ns.rs sc98; sc180
-    /// telemetry: sandbox mount phases at 1.7-1.9 s). The index turns the
-    /// query into a DFS touching only mounts actually nested under the
-    /// bind source (collect_subtree_mounts).
-    mount_chain_index: BTreeMap<usize, MountBucket>,
-}
-
-/// One chain-index bucket. `anchor` pins the key dentry: without it a
-/// freed intermediate chain dentry could have its address reused by a
-/// fresh allocation, silently fusing two buckets.
-struct MountBucket {
-    #[allow(dead_code)] // pins the key address; never dereferenced
-    anchor: Arc<Dentry>,
-    /// Attach order (push order) — matches the registry Vec's order.
-    mounts: Vec<Arc<VfsMountInternal>>,
 }
 
 static VFS_STATE: Spinlock<VfsState> = Spinlock::new(VfsState {
@@ -2210,20 +2172,6 @@ pub fn vfs_mount_registry_row(
         .into_iter()
         .find(|(_, m, _, _)| m == mp)
         .map(|(dev, _, ty, _)| (dev, ty))
-}
-
-/// Filesystem type identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FsType {    /// RootFS (memory-backed)
-    RootFS,
-    /// ext4 filesystem
-    Ext4,
-    /// procfs
-    ProcFS,
-    /// devfs
-    DevFS,
-    /// Unknown
-    Unknown,
 }
 
 impl FsType {
@@ -7104,19 +7052,6 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 // ============================================================================
 // Memory File (for procfs shortcut)
 // ============================================================================
-
-/// In-memory file content (stored in File's private_data)
-struct MemFileContent {
-    data: alloc::vec::Vec<u8>,
-    offset: usize,
-    /// Dynamic-content hook (the procfs mount tables): regenerate
-    /// `data` when the file is rewound — Linux seq_file semantics, where
-    /// lseek(0) restarts the iterator and a re-read shows CURRENT state
-    /// instead of the open-time snapshot. A plain fn pointer (no
-    /// allocation): the generator reads the CURRENT task's mount
-    /// namespace at call time, so the rewind view is the reader's own.
-    regen: Option<fn() -> alloc::vec::Vec<u8>>,
-}
 
 /// INV-MEMFILE-1 (unsafe-slim r3): open_mem_file stores an OWNED
 /// Box<MemFileContent> in File::private_data (raw via Box::into_raw);

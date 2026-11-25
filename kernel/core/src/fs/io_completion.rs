@@ -30,57 +30,10 @@ use crate::process::wait::WaitQueueHead;
 /// buffer — leak it instead.
 pub const WAIT_TIMED_OUT: i32 = -110; // -ETIMEDOUT
 
-/// I/O completion signal.
-///
-/// # Usage
-/// ```ignore
-/// let comp = IoCompletion::new();
-/// // submit async I/O with &comp ...
-/// let status = comp.wait();  // blocks until I/O finishes
-/// ```
-///
-/// Thread-safe: `complete()` is called from interrupt context,
-/// `wait()` from any kernel task.
-pub struct IoCompletion {
-    /// True when the I/O has finished.
-    done: AtomicBool,
-    /// 0 = success, negative = errno (e.g. -EIO).
-    status: AtomicI32,
-    /// In-flight delivery count (the walker-vs-abandon race fix).
-    ///
-    /// A completion walker takes a pending entry out of the device table
-    /// under the table lock but DELIVERS (calls [`Self::complete`]) after
-    /// dropping it. A waiter whose 10s deadline expires concurrently
-    /// retires its entries via `abandon_pending_completion` — which scans
-    /// the tables under the same locks and cannot see the already-taken
-    /// entry. Without a handshake the waiter would return -ETIMEDOUT, its
-    /// kernel-stack `IoCompletion` would be recycled, and the late
-    /// `complete()` would fire a wake_up_all into freed stack memory —
-    /// the wandering corruption behind ftest01's cross-file bad-verify.
-    ///
-    /// Protocol: the walker increments before dropping the table lock
-    /// ([`Self::begin_delivery`]) and decrements after `complete()`
-    /// ([`Self::end_delivery`]); `wait()` drains the count to zero before
-    /// every return (its frame — and the completion with it — often dies
-    /// at return), and abandon drains it before reporting -ETIMEDOUT.
-    delivering: AtomicUsize,
-    /// Device-truth token of the delivery that set `done` (the
-    /// zero-serve guard): the DMA data-buffer pointer the DRIVER recorded
-    /// in the pending entry, stamped by [`Self::complete_with_token`].
-    ///
-    /// 0 = the signal came from an internal path (bio cache hit,
-    /// in-flight branch, dup-path re-settle) that did not go through a
-    /// device completion walker. `wait()` drains deliveries before
-    /// returning, so a subsequent [`Self::delivered_token`] load is
-    /// stable. The waiter (bread_wait) compares the token against its own
-    /// buffer: a mismatch means the walker delivered SOME OTHER chain's
-    /// completion — the buffer's DMA may not have landed, so the waiter
-    /// must NOT treat the data as valid (the no-journal ext4 root-lookup
-    /// zero-serve family).
-    token: AtomicUsize,
-    /// Tasks sleeping for completion.
-    wait_queue: WaitQueueHead,
-}
+// The type definitions this file declared live in fs/types.rs; every impl
+// and function that uses them stays in this file. Re-exported so the
+// existing `fs::io_completion::…` paths are unchanged.
+pub use super::types::IoCompletion;
 
 impl IoCompletion {
     /// Create a new, not-done completion.
